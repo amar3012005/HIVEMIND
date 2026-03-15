@@ -53,15 +53,10 @@ COPY package.json package-lock.json ./
 RUN npm ci && \
     npm cache clean --force
 
-# Copy Prisma schema and generate client
-COPY prisma ./prisma
-RUN npx prisma generate
-
-# Copy TypeScript configuration
-COPY tsconfig.json ./
-
-# Copy source code
-COPY src ./src
+# Copy core directory contents (where prisma, tsconfig, src are located)
+COPY core/prisma ./prisma
+COPY core/tsconfig.json ./
+COPY core/src ./src
 
 # Build TypeScript to JavaScript
 RUN npm run build || echo "No build script - using source directly"
@@ -106,6 +101,7 @@ COPY --from=deps --chown=nodejs:nodejs /app/node_modules/.prisma ./node_modules/
 COPY --from=builder --chown=nodejs:nodejs /app/src ./src
 COPY --from=builder --chown=nodejs:nodejs /app/package.json ./
 COPY --from=builder --chown=nodejs:nodejs /app/prisma ./prisma
+COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
 
 # Copy dist if build was successful
 COPY --from=builder --chown=nodejs:nodejs /app/dist ./dist 2>/dev/null || true

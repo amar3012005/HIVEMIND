@@ -1,0 +1,148 @@
+{
+  "name": "hivemind-sovereign",
+  "version": "1.0.0",
+  "description": "EU-native infrastructure deployment with LUKS2 encryption, HYOK patterns, and NIS2/DORA compliance.",
+  "author": "DavinciAI",
+  "triggers": [
+    "deploy to hetzner",
+    "setup qdrant",
+    "configure postgres",
+    "enable encryption",
+    "sovereign stack",
+    "HYOK"
+  ],
+  "commands": {
+    "sovereign_deploy": {
+      "description": "Provision EU-only infrastructure components",
+      "args": {
+        "component": { "enum": ["compute", "database", "vector", "storage", "hsm"], "required": true },
+        "provider": { "enum": ["hetzner", "scaleway", "ovhcloud"], "required": true },
+        "region": { "type": "string", "default": "eu-central" },
+        "tier": { "enum": ["standard", "high-security", "secnumcloud"], "default": "standard" },
+        "instance_type": { "type": "string" },
+        "encrypted": { "type": "boolean", "default": true }
+      },
+      "returns": {
+        "instance_id": "string",
+        "ip_address": "string",
+        "private_ip": "string",
+        "datacenter": "string",
+        "jurisdiction": "string (always 'EU')",
+        "encryption_status": "string"
+      }
+    },
+    "sovereign_encrypt": {
+      "description": "Configure LUKS2 encryption at rest",
+      "args": {
+        "volume_id": { "type": "string", "required": true },
+        "type": { "enum": ["luks2"], "default": "luks2" },
+        "cipher": { "enum": ["aes-256-xts", "aes-256-gcm"], "default": "aes-256-xts" },
+        "key_size": { "type": "integer", "default": 512 },
+        "key_source": { "enum": ["hsm", "local", "hyok"], "default": "hsm" }
+      },
+      "returns": {
+        "encrypted": "boolean",
+        "cipher": "string",
+        "key_slot": "integer",
+        "hsm_key_id": "string (if applicable)"
+      }
+    },
+    "sovereign_hsm": {
+      "description": "Integrate managed Hardware Security Module",
+      "args": {
+        "provider": { "enum": ["ovhcloud", "thales", "utimaco"], "default": "ovhcloud" },
+        "key_id": { "type": "string", "required": true },
+        "key_type": { "enum": ["aes", "rsa", "ecc"], "default": "aes" },
+        "key_usage": { "enum": ["encrypt", "sign", "derive"], "default": "encrypt" }
+      },
+      "returns": {
+        "hsm_key_handle": "string",
+        "public_key": "string (if applicable)",
+        "fips_certified": "boolean"
+      }
+    },
+    "sovereign_hyok_setup": {
+      "description": "Configure Hold Your Own Key pattern for enterprise customers",
+      "args": {
+        "customer_key_server": { "type": "string", "required": true },
+        "key_rotation_days": { "type": "integer", "default": 90 },
+        "cloud_components": { "type": "array", "default": ["database", "vector", "storage"] }
+      },
+      "returns": {
+        "hyok_enabled": "boolean",
+        "key_server_endpoint": "string",
+        "key_rotation_schedule": "string",
+        "compliance_warrant_canary": "string"
+      }
+    },
+    "sovereign_compliance_check": {
+      "description": "Verify NIS2, DORA, and GDPR compliance status",
+      "args": {
+        "frameworks": { "type": "array", "default": ["NIS2", "DORA", "GDPR"] },
+        "detailed": { "type": "boolean", "default": false }
+      },
+      "returns": {
+        "compliant": "boolean",
+        "framework_status": "object",
+        "violations": "array",
+        "recommendations": "array"
+      }
+    },
+    "sovereign_network_isolate": {
+      "description": "Configure private networking between EU providers",
+      "args": {
+        "providers": { "type": "array", "required": true },
+        "topology": { "enum": ["mesh", "hub-spoke"], "default": "mesh" },
+        "encryption": { "enum": ["wireguard", "ipsec"], "default": "wireguard" }
+      },
+      "returns": {
+        "network_id": "string",
+        "endpoints": "array",
+        "latency_ms": "object"
+      }
+    },
+    "sovereign_backup": {
+      "description": "Encrypted backup to EU-only storage",
+      "args": {
+        "source": { "type": "string", "required": true },
+        "destination": { "type": "string", "required": true },
+        "encryption_key": { "type": "string", "required": true },
+        "retention_days": { "type": "integer", "default": 2555 }
+      },
+      "returns": {
+        "backup_id": "string",
+        "checksum": "string",
+        "encrypted_size": "integer",
+        "jurisdiction": "string"
+      }
+    }
+  },
+  "provider_specs": {
+    "hetzner": {
+      "datacenters": ["nbg1 (Nuremberg)", "fsn1 (Falkenstein)", "hel1 (Helsinki)"],
+      "advantages": ["price-performance", "GDPR compliant", "DDoS protection"],
+      "best_for": ["compute", "storage", "kubernetes"]
+    },
+    "scaleway": {
+      "datacenters": ["fr-par", "nl-ams", "pl-waw"],
+      "advantages": ["managed postgres", "GPU instances", "LUKS encryption"],
+      "best_for": ["database", "ai-inference", "managed-services"]
+    },
+    "ovhcloud": {
+      "datacenters": ["gra (Gravelines)", "sbg (Strasbourg)", "rbx (Roubaix)"],
+      "advantages": ["SecNumCloud", "managed HSM", "enterprise certifications"],
+      "best_for": ["high-security", "regulated-industries", "HSM"]
+    }
+  },
+  "dependencies": {
+    "cli_tools": ["hcloud", "scw", "ovh-cli", "terraform"],
+    "env_vars": [
+      "HCLOUD_TOKEN",
+      "SCW_ACCESS_KEY",
+      "SCW_SECRET_KEY",
+      "OVH_APPLICATION_KEY",
+      "OVH_APPLICATION_SECRET",
+      "OVH_CONSUMER_KEY"
+    ]
+  }
+}

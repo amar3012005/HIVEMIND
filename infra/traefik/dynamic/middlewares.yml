@@ -1,0 +1,286 @@
+# Traefik Dynamic Configuration - Middlewares
+# HIVE-MIND EU Sovereign Deployment
+# Security headers, rate limiting, CORS, compression
+
+http:
+  middlewares:
+    # ==========================================
+    # SECURITY HEADERS
+    # ==========================================
+    security-headers:
+      headers:
+        # HSTS - Force HTTPS for 1 year including subdomains
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        stsPreload: true
+        forceSTSHeader: true
+
+        # Content Type sniffing prevention
+        contentTypeNosniff: true
+
+        # Clickjacking protection
+        frameDeny: true
+        customFrameOptionsValue: "SAMEORIGIN"
+
+        # XSS Protection
+        browserXssFilter: true
+        customResponseHeaders:
+          X-Content-Type-Options: "nosniff"
+          X-Frame-Options: "DENY"
+          X-XSS-Protection: "1; mode=block"
+          Referrer-Policy: "strict-origin-when-cross-origin"
+          Permissions-Policy: "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+
+        # Cache control for sensitive data
+        customResponseHeaders:
+          Cache-Control: "no-store, no-cache, must-revalidate, proxy-revalidate"
+          Pragma: "no-cache"
+          Expires: "0"
+
+        # Content Security Policy (CSP)
+        # Note: CSP should be tuned per application needs
+        contentSecurityPolicy: >-
+          default-src 'self';
+          script-src 'self' 'unsafe-inline' 'unsafe-eval';
+          style-src 'self' 'unsafe-inline';
+          img-src 'self' data: https:;
+          font-src 'self' data:;
+          connect-src 'self' https://api.hivemind.io wss://api.hivemind.io;
+          frame-ancestors 'none';
+          base-uri 'self';
+          form-action 'self';
+          upgrade-insecure-requests;
+
+    # ==========================================
+    # RATE LIMITING - API (Standard)
+    # ==========================================
+    rate-limit-api:
+      rateLimit:
+        # Average requests per second
+        average: 100
+        # Burst allowance
+        burst: 200
+        # Time period
+        period: 1m
+        # Source identification
+        sourceCriterion:
+          requestHeaderName: X-Forwarded-For
+
+    # ==========================================
+    # RATE LIMITING - Strict (Auth endpoints)
+    # ==========================================
+    rate-limit-strict:
+      rateLimit:
+        average: 20
+        burst: 50
+        period: 1m
+        sourceCriterion:
+          requestHeaderName: X-Forwarded-For
+
+    # ==========================================
+    # RATE LIMITING - Public endpoints
+    # ==========================================
+    rate-limit-public:
+      rateLimit:
+        average: 30
+        burst: 60
+        period: 1m
+
+    # ==========================================
+    # COMPRESSION
+    # ==========================================
+    compress:
+      compress:
+        excludedContentTypes:
+          - text/event-stream
+          - application/grpc
+          - image/*
+          - video/*
+          - audio/*
+
+    # ==========================================
+    # CORS FOR API
+    # ==========================================
+    cors-api:
+      headers:
+        accessControlAllowMethods:
+          - "GET"
+          - "POST"
+          - "PUT"
+          - "PATCH"
+          - "DELETE"
+          - "OPTIONS"
+        accessControlAllowHeaders:
+          - "Authorization"
+          - "Content-Type"
+          - "X-Request-ID"
+          - "X-Correlation-ID"
+          - "X-Api-Key"
+          - "Accept"
+          - "Origin"
+        accessControlAllowOrigins:
+          - "https://hivemind.io"
+          - "https://www.hivemind.io"
+          - "https://app.hivemind.io"
+          - "https://dashboard.hivemind.io"
+        accessControlAllowOriginListRegex:
+          - "^https://.*\\.hivemind\\.io$$"
+        accessControlAllowCredentials: true
+        accessControlMaxAge: 86400
+        addVaryHeader: true
+
+    # ==========================================
+    # IP WHITELIST - Internal Services
+    # ==========================================
+    ip-whitelist-internal:
+      ipWhiteList:
+        sourceRange:
+          - "172.28.0.0/16"
+          - "10.0.0.0/8"
+          - "192.168.0.0/16"
+
+    # ==========================================
+    # IP WHITELIST - Admin Access
+    # ==========================================
+    ip-whitelist-admin:
+      ipWhiteList:
+        sourceRange:
+          - "172.28.0.0/16"
+        # Add office IPs as needed
+        # - "203.0.113.0/24"
+        ipStrategy:
+          depth: 2
+          excludedIPs: []
+
+    # ==========================================
+    # BASIC AUTH - Monitoring Dashboards
+    # ==========================================
+    auth-monitoring:
+      basicAuth:
+        usersFile: /etc/traefik/.htpasswd
+        realm: "HIVE-MIND Monitoring"
+        removeHeader: true
+        headerField: X-Forwarded-User
+
+    # ==========================================
+    # BASIC AUTH - Traefik Dashboard
+    # ==========================================
+    auth-dashboard:
+      basicAuth:
+        usersFile: /etc/traefik/.htpasswd
+        realm: "Traefik Dashboard"
+        removeHeader: true
+
+    # ==========================================
+    # RETRY MIDDLEWARE
+    # ==========================================
+    retry:
+      retry:
+        attempts: 3
+        initialInterval: 100ms
+        maxInterval: 1s
+
+    # ==========================================
+    # CIRCUIT BREAKER
+    # ==========================================
+    circuit-breaker:
+      circuitBreaker:
+        expression: "NetworkErrorRatio() > 0.5"
+        checkPeriod: 5s
+        fallbackDuration: 30s
+        recoveryDuration: 10s
+
+    # ==========================================
+    # BUFFERING
+    # ==========================================
+    buffering:
+      buffering:
+        maxRequestBodyBytes: 10485760  # 10MB
+        memRequestBodyBytes: 2097152    # 2MB
+        maxResponseBodyBytes: 10485760  # 10MB
+        memResponseBodyBytes: 2097152   # 2MB
+        retryExpression: "IsNetworkError() && Attempts() <= 2"
+
+    # ==========================================
+    # REQUEST SIZE LIMIT
+    # ==========================================
+    request-size-limit:
+      buffering:
+        maxRequestBodyBytes: 5242880  # 5MB
+
+    # ==========================================
+    # STRIP PREFIX
+    # ==========================================
+    strip-api-prefix:
+      stripPrefix:
+        prefixes:
+          - "/api/v1"
+        forceSlash: false
+
+    # ==========================================
+    # ADD PREFIX
+    # ==========================================
+    add-api-prefix:
+      addPrefix:
+        prefix: "/api/v1"
+
+    # ==========================================
+    # REQUEST HEADER
+    # ==========================================
+    add-security-headers:
+      headers:
+        customRequestHeaders:
+          X-Request-Source: "Traefik-Edge"
+          X-Forwarded-Proto: "https"
+
+    # ==========================================
+    # CHAIN - API Security
+    # ==========================================
+    chain-api-security:
+      chain:
+        middlewares:
+          - name: security-headers
+          - name: rate-limit-api
+          - name: cors-api
+
+    # ==========================================
+    # CHAIN - Public Endpoints
+    # ==========================================
+    chain-public:
+      chain:
+        middlewares:
+          - name: security-headers
+          - name: rate-limit-public
+          - name: compress
+
+    # ==========================================
+    # CHAIN - Internal Services
+    # ==========================================
+    chain-internal:
+      chain:
+        middlewares:
+          - name: security-headers
+          - name: ip-whitelist-internal
+
+# TCP Middlewares
+tcp:
+  middlewares:
+    # ==========================================
+    # TCP IP WHITELIST - Database
+    # ==========================================
+    db-ip-whitelist:
+      ipWhiteList:
+        sourceRange:
+          - "172.28.0.0/16"
+
+    # ==========================================
+    # TCP RATE LIMIT - Redis
+    # ==========================================
+    redis-ip-whitelist:
+      ipWhiteList:
+        sourceRange:
+          - "172.28.0.0/16"
+
+# UDP Middlewares (for future use)
+udp:
+  middlewares: {}

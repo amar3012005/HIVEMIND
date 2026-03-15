@@ -1,0 +1,167 @@
+{
+  "version": "1.0.0",
+  "description": "Qdrant Cloud Configuration for HIVE-MIND - EU Sovereign Vector Database",
+  "data_residency": "eu-central",
+  "region": "fr-par-1",
+  "compliance": ["GDPR", "NIS2", "DORA"],
+  "collections": {
+    "hivemind_memories": {
+      "vectors": {
+        "size": 1024,
+        "distance": "Cosine",
+        "on_disk": false
+      },
+      "hnsw_config": {
+        "m": 16,
+        "ef_construct": 100,
+        "full_scan_threshold": 10000,
+        "max_indexing_threads": 2,
+        "on_disk": false
+      },
+      "optimizers_config": {
+        "deleted_threshold": 0.2,
+        "vacuum_min_vector_number": 1000,
+        "default_segment_number": 10,
+        "max_segment_size": 100000,
+        "memmap_threshold": 10000,
+        "indexing_threshold": 10000,
+        "flush_interval_sec": 60,
+        "max_optimization_threads": 2
+      },
+      "wal_config": {
+        "wal_capacity_mb": 32,
+        "wal_segments_ahead": 0
+      },
+      "quantization_config": {
+        "scalar": {
+          "type": "int8",
+          "quantile": 0.99,
+          "always_ram": true
+        }
+      },
+      "shard_number": 2,
+      "replication_factor": 2,
+      "write_consistency_factor": 1,
+      "payload_index": {
+        "user_id": {
+          "field_schema": "keyword",
+          "is_tenant_filter": true,
+          "description": "Multi-tenant isolation - required for all queries"
+        },
+        "org_id": {
+          "field_schema": "keyword",
+          "is_tenant_filter": false,
+          "description": "Organization-level filtering"
+        },
+        "memory_type": {
+          "field_schema": "keyword",
+          "is_tenant_filter": false,
+          "description": "Memory type: fact, preference, decision, lesson, goal, event, relationship"
+        },
+        "tags": {
+          "field_schema": "keyword",
+          "is_tenant_filter": false,
+          "description": "User-defined tags for categorization"
+        },
+        "source_platform": {
+          "field_schema": "keyword",
+          "is_tenant_filter": false,
+          "description": "Source platform: chatgpt, claude, perplexity, gemini"
+        },
+        "is_latest": {
+          "field_schema": "bool",
+          "is_tenant_filter": false,
+          "description": "Latest version flag for Updates relationship"
+        },
+        "document_date": {
+          "field_schema": "datetime",
+          "is_tenant_filter": false,
+          "description": "When the interaction occurred (dual-layer timestamp)"
+        },
+        "importance_score": {
+          "field_schema": "float",
+          "is_tenant_filter": false,
+          "description": "User/model assigned importance (0-1)"
+        },
+        "visibility": {
+          "field_schema": "keyword",
+          "is_tenant_filter": false,
+          "description": "Visibility scope: private, organization, public"
+        },
+        "strength": {
+          "field_schema": "float",
+          "is_tenant_filter": false,
+          "description": "Ebbinghaus memory strength for spaced repetition"
+        },
+        "recall_count": {
+          "field_schema": "integer",
+          "is_tenant_filter": false,
+          "description": "Number of times recalled for spaced repetition"
+        },
+        "embedding_version": {
+          "field_schema": "integer",
+          "is_tenant_filter": false,
+          "description": "Version for re-embedding when model changes"
+        }
+      }
+    },
+    "hivemind_sessions": {
+      "vectors": {
+        "size": 1024,
+        "distance": "Cosine",
+        "on_disk": false
+      },
+      "hnsw_config": {
+        "m": 16,
+        "ef_construct": 100,
+        "full_scan_threshold": 10000
+      },
+      "shard_number": 1,
+      "replication_factor": 2,
+      "payload_index": {
+        "user_id": {
+          "field_schema": "keyword",
+          "is_tenant_filter": true,
+          "description": "Multi-tenant isolation for session embeddings"
+        },
+        "platform_type": {
+          "field_schema": "keyword",
+          "is_tenant_filter": false,
+          "description": "Platform type: chatgpt, claude, etc."
+        },
+        "started_at": {
+          "field_schema": "datetime",
+          "is_tenant_filter": false,
+          "description": "Session start time"
+        },
+        "ended_at": {
+          "field_schema": "datetime",
+          "is_tenant_filter": false,
+          "description": "Session end time"
+        },
+        "message_count": {
+          "field_schema": "integer",
+          "is_tenant_filter": false,
+          "description": "Number of messages in session"
+        }
+      }
+    }
+  },
+  "security": {
+    "api_key_required": true,
+    "tls_enabled": true,
+    "cors_origins": ["https://api.hivemind.io", "https://app.hivemind.io"],
+    "rate_limiting": {
+      "requests_per_minute": 1000,
+      "burst_size": 100
+    }
+  },
+  "monitoring": {
+    "metrics_endpoint": "/metrics",
+    "health_endpoint": "/health",
+    "logging": {
+      "level": "INFO",
+      "format": "json"
+    }
+  }
+}

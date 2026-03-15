@@ -1,0 +1,440 @@
+# HIVE-MIND Monitoring Stack
+# Prometheus, Grafana, Alertmanager, Node Exporter
+# EU Sovereign Deployment
+
+version: '3.9'
+
+volumes:
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+  alertmanager-data:
+    driver: local
+
+networks:
+  hivemind-monitoring:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.29.0.0/16
+          gateway: 172.29.0.1
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+    compress: "true"
+
+x-security-context: &default-security-context
+  security_opt:
+    - no-new-privileges:true
+  read_only: false
+  cap_drop:
+    - ALL
+
+services:
+  # ==========================================
+  # PROMETHEUS
+  # ==========================================
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: hivemind-prometheus
+    restart: unless-stopped
+    <<: *default-security-context
+    user: "65534:65534"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus:rw
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+      - '--storage.tsdb.retention.size=5GB'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--log.level=info'
+      - '--enable-feature=exemplar-storage'
+    ports:
+      - "127.0.0.1:9090:9090"
+    networks:
+      hivemind-monitoring:
+        ipv4_address: 172.29.0.10
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  # ==========================================
+  # ALERTMANAGER
+  # ==========================================
+  alertmanager:
+    image: prom/alertmanager:v0.26.0
+    container_name: hivemind-alertmanager
+    restart: unless-stopped
+    <<: *default-security-context
+    user: "65534:65534"
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager:rw
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+      - '--web.external-url=http://localhost:9093'
+      - '--cluster.listen-address='
+      - '--log.level=info'
+    ports:
+      - "127.0.0.1:9093:9093"
+    networks:
+      hivemind-monitoring:
+        ipv4_address: 172.29.0.11
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9093/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    depends_on:
+      - prometheus
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+
+  # ==========================================
+  # GRAFANA
+  # ==========================================
+  grafana:
+    image: grafana/grafana:10.1.0
+    container_name: hivemind-grafana
+    restart: unless-stopped
+    <<: *default-security-context
+    user: "472:472"
+    volumes:
+      - grafana-data:/var/lib/grafana:rw
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?Grafana admin password required}
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel,grafana-clock-panel
+      - GF_SERVER_ROOT_URL=http://localhost:3001
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_ALERTING_ENABLED=true
+      - GF_UNIFIED_ALERTING_ENABLED=true
+      - GF_FEATURE_TOGGLES_ENABLE=ngalert
+      - GF_SERVER_ENABLE_GZIP=true
+      - GF_LOG_MODE=console
+      - GF_LOG_LEVEL=info
+    ports:
+      - "127.0.0.1:3001:3000"
+    networks:
+      hivemind-monitoring:
+        ipv4_address: 172.29.0.12
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      - prometheus
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+  # ==========================================
+  # NODE EXPORTER
+  # ==========================================
+  node-exporter:
+    image: prom/node-exporter:v1.6.1
+    container_name: hivemind-node-exporter
+    restart: unless-stopped
+    <<: *default-security-context
+    command:
+      - '--path.rootfs=/host'
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+      - '--collector.filesystem.fs-types-exclude=^(autofs|binfmt_misc|bpf|cgroup2?|configfs|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|iso9660|mqueue|nsfs|overlay|proc|procfs|pstore|rpc_pipefs|securityfs|selinuxfs|squashfs|sysfs|tracefs)$$'
+      - '--collector.netclass.ignored-devices=^(veth.*|docker.*|br-.*)$$'
+      - '--no-collector.ipvs'
+      - '--collector.systemd'
+      - '--collector.processes'
+    pid: host
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/host:ro
+    networks:
+      hivemind-monitoring:
+        ipv4_address: 172.29.0.13
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9100/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+
+  # ==========================================
+  # CADVISOR (Container Metrics)
+  # ==========================================
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.47.0
+    container_name: hivemind-cadvisor
+    restart: unless-stopped
+    <<: *default-security-context
+    privileged: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    ports:
+      - "127.0.0.1:8080:8080"
+    networks:
+      hivemind-monitoring:
+        ipv4_address: 172.29.0.14
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+
+  # ==========================================
+  # POSTGRES EXPORTER
+  # ==========================================
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.14.0
+    container_name: hivemind-postgres-exporter
+    restart: unless-stopped
+    <<: *default-security-context
+    environment:
+      - DATA_SOURCE_NAME=postgresql://${POSTGRES_USER:-hivemind}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}?sslmode=disable
+      - PG_EXPORTER_EXCLUDE_DATABASES=template0,template1
+      - PG_EXPORTER_AUTO_DISCOVER_DATABASES=true
+      - PG_EXPORTER_EXTEND_QUERY_PATH=/etc/postgres-exporter/queries.yaml
+    volumes:
+      - ./prometheus/postgres-queries.yaml:/etc/postgres-exporter/queries.yaml:ro
+    ports:
+      - "127.0.0.1:9187:9187"
+    networks:
+      hivemind-monitoring:
+        ipv4_address: 172.29.0.15
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9187/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    depends_on:
+      - prometheus
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
+
+  # ==========================================
+  # REDIS EXPORTER
+  # ==========================================
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.54.0
+    container_name: hivemind-redis-exporter
+    restart: unless-stopped
+    <<: *default-security-context
+    command:
+      - '--redis.addr=redis'
+      - '--redis.password=${REDIS_PASSWORD}'
+      - '--web.telemetry-path=/metrics'
+      - '--log-format=json'
+    ports:
+      - "127.0.0.1:9121:9121"
+    networks:
+      hivemind-monitoring:
+        ipv4_address: 172.29.0.16
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9121/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    depends_on:
+      - prometheus
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 64M
+
+  # ==========================================
+  # QDRANT EXPORTER
+  # ==========================================
+  qdrant-exporter:
+    image: qdrant/qdrant:v1.7.0
+    container_name: hivemind-qdrant-exporter
+    restart: unless-stopped
+    <<: *default-security-context
+    command:
+      - '--web.telemetry-path=/metrics'
+      - '--qdrant.url=http://qdrant:6333'
+    ports:
+      - "127.0.0.1:9188:9188"
+    networks:
+      hivemind-monitoring:
+        ipv4_address: 172.29.0.17
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9188/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    depends_on:
+      - prometheus
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
+
+  # ==========================================
+  # TRAEFIK EXPORTER
+  # ==========================================
+  traefik-exporter:
+    image: prometheuscommunity/traefik-exporter:v1.3.0
+    container_name: hivemind-traefik-exporter
+    restart: unless-stopped
+    <<: *default-security-context
+    command:
+      - '--traefik.api-url=http://traefik:8080'
+      - '--web.telemetry-path=/metrics'
+    ports:
+      - "127.0.0.1:9122:9122"
+    networks:
+      hivemind-monitoring:
+        ipv4_address: 172.29.0.18
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9122/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    depends_on:
+      - prometheus
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 64M
+
+  # ==========================================
+  # PUSHGATEWAY (Optional - for batch jobs)
+  # ==========================================
+  pushgateway:
+    image: prom/pushgateway:v1.6.2
+    container_name: hivemind-pushgateway
+    restart: unless-stopped
+    <<: *default-security-context
+    command:
+      - '--web.enable-admin-api'
+      - '--web.enable-lifecycle'
+      - '--persistence.interval=5m'
+    volumes:
+      - pushgateway-data:/pushgateway:rw
+    ports:
+      - "127.0.0.1:9091:9091"
+    networks:
+      hivemind-monitoring:
+        ipv4_address: 172.29.0.19
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
+
+  # ==========================================
+  # LOKI (Log Aggregation - Optional)
+  # ==========================================
+  loki:
+    image: grafana/loki:2.9.0
+    container_name: hivemind-loki
+    restart: unless-stopped
+    <<: *default-security-context
+    user: "10001:10001"
+    volumes:
+      - ./loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki-data:/loki:rw
+    command: -config.file=/etc/loki/loki.yml
+    ports:
+      - "127.0.0.1:3100:3100"
+    networks:
+      hivemind-monitoring:
+        ipv4_address: 172.29.0.20
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+
+  # ==========================================
+  # PROMTAIL (Log Shipper)
+  # ==========================================
+  promtail:
+    image: grafana/promtail:2.9.0
+    container_name: hivemind-promtail
+    restart: unless-stopped
+    <<: *default-security-context
+    volumes:
+      - ./promtail/promtail.yml:/etc/promtail/promtail.yml:ro
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: -config.file=/etc/promtail/promtail.yml
+    networks:
+      hivemind-monitoring:
+        ipv4_address: 172.29.0.21
+    logging: *default-logging
+    depends_on:
+      - loki
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M

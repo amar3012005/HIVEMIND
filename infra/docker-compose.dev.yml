@@ -1,0 +1,262 @@
+# HIVE-MIND Local Development Stack
+# PostgreSQL 15 + Apache AGE + pgAdmin for inspection
+# EU Sovereign Development Environment
+# Data Residency: Local (docker volumes)
+# Groq Cloud API for embeddings and inference (ultra-low latency)
+
+version: "3.8"
+
+services:
+  # ==========================================
+  # POSTGRESQL 15 + APACHE AGE
+  # Primary database with graph extensions
+  # ==========================================
+
+  postgres:
+    image: postgres:15
+    container_name: hivemind-postgres-dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-hivemind}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hivemind_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-hivemind}
+      # PostgreSQL tuning for development
+      POSTGRES_INITDB_ARGS: "-E UTF8"
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d:ro
+      # Mount schema file for manual initialization if needed
+      # - ../core/src/db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    ports:
+      - "127.0.0.1:5900:5432"
+    command: >
+      sh -c "
+        docker-entrypoint.sh postgres
+        -c shared_preload_libraries=age
+        -c max_connections=100
+        -c shared_buffers=512MB
+        -c effective_cache_size=1536MB
+        -c maintenance_work_mem=128MB
+        -c checkpoint_completion_target=0.9
+        -c wal_buffers=16MB
+        -c default_statistics_target=100
+        -c random_page_cost=1.1
+        -c effective_io_concurrency=100
+        -c work_mem=131MB
+        -c min_wal_size=512MB
+        -c max_wal_size=2GB
+        -c max_worker_processes=2
+        -c max_parallel_workers_per_gather=1
+        -c max_parallel_workers=2
+        -c max_parallel_maintenance_workers=1
+        -c log_statement=all
+        -c log_duration=on
+        -c log_min_duration_statement=100ms
+      "
+    networks:
+      - hivemind_dev
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hivemind} -d ${POSTGRES_DB:-hivemind}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    labels:
+      - "hivemind.component=database"
+      - "hivemind.tier=core"
+      - "hivemind.environment=development"
+
+  # ==========================================
+  # PGADMIN 4
+  # Database inspection and management UI
+  # ==========================================
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: hivemind-pgadmin-dev
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: 'False'
+      PGADMIN_CONFIG_ENHANCED_COOKIE_PROTECTION: 'False'
+      PGADMIN_CONFIG_VALIDATE_PASSWORD_EMAIL: 'False'
+      # Pre-configure connection to PostgreSQL
+      PGADMIN_CONFIG_DEFAULT_SERVER: 'postgres'
+    volumes:
+      - pgadmin_dev_data:/var/lib/pgadmin
+    ports:
+      - "127.0.0.1:5051:80"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - hivemind_dev
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    labels:
+      - "hivemind.component=pgadmin"
+      - "hivemind.tier=tooling"
+      - "hivemind.environment=development"
+
+  # ==========================================
+  # QDRANT
+  # Vector database for semantic search
+  # ==========================================
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: hivemind-qdrant-dev
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9200:6333"
+      - "127.0.0.1:9201:6334"
+    volumes:
+      - qdrant_dev_data:/qdrant/storage
+    networks:
+      - hivemind_dev
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:6333/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    labels:
+      - "hivemind.component=vector-store"
+      - "hivemind.tier=core"
+      - "hivemind.environment=development"
+
+  # ==========================================
+  # REDIS
+  # Session state and pub/sub for sync
+  # ==========================================
+
+  redis:
+    image: redis:7-alpine
+    container_name: hivemind-redis-dev
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_dev_data:/data
+    ports:
+      - "127.0.0.1:6379:6379"
+    networks:
+      - hivemind_dev
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    labels:
+      - "hivemind.component=cache"
+      - "hivemind.tier=core"
+      - "hivemind.environment=development"
+
+  # ZITADEL (Local IAM) - Removed due to config complexity
+  # For production, use ZITADEL or integrate with external OIDC provider
+  # zitadel:
+  #   image: ghcr.io/zitadel/zitadel:latest
+  #   container_name: hivemind-zitadel-dev
+  #   restart: unless-stopped
+  #   environment:
+  #     ZITADEL_DATABASE_POSTGRES_HOST: postgres
+  #     ZITADEL_DATABASE_POSTGRES_PORT: 5432
+  #     ZITADEL_DATABASE_POSTGRES_DATABASE: zitadel
+  #     ZITADEL_DATABASE_POSTGRES_USER_USERNAME: zitadel
+  #     ZITADEL_DATABASE_POSTGRES_USER_PASSWORD: ${ZITADEL_DB_PASSWORD:-zitadel_dev}
+  #     ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE: disable
+  #     ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE: disable
+  #     ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME: hivemind
+  #     ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD: ${POSTGRES_PASSWORD:-hivemind_dev_password}
+  #     ZITADEL_EXTERNALSECURE: "false"
+  #     ZITADEL_EXTERNALDOMAIN: localhost
+  #     ZITADEL_EXTERNALPORT: 8080
+  #     ZITADEL_TLS_ENABLED: "false"
+  #     ZITADEL_FIRSTINSTANCE_ORG_NAME: "HIVE-MIND Development"
+  #     ZITADEL_FIRSTINSTANCE_ORG_HUMAN_USERNAME: "admin@hivemind.local"
+  #     ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORD: "DevPassword123!"
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #   ports:
+  #     - "127.0.0.1:8081:8080"
+  #   networks:
+  #     - hivemind_dev
+  #   command: start-from-init --masterkey ${ZITADEL_MASTERKEY:-MasterKeyForDevOnly123} --tlsMode external
+  #   labels:
+  #     - "hivemind.component=iam"
+  #     - "hivemind.tier=security"
+  #     - "hivemind.environment=development"
+
+  # ==========================================
+  # OLLAMA (Local Embeddings) - REMOVED - Using Groq instead
+  # ==========================================
+
+  # ==========================================
+  # MCP SERVER (Development)
+  # Core API server with Groq Cloud API
+  # Ultra-low latency embeddings and inference
+  # ==========================================
+
+  mcp-server:
+    build:
+      context: ..
+      dockerfile: core/Dockerfile.dev
+      target: development
+    container_name: hivemind-mcp-dev
+    restart: unless-stopped
+    environment:
+      NODE_ENV: development
+      DEBUG: hivemind:*
+      LOG_LEVEL: debug
+      MCP_PORT: 3000
+      MCP_TRANSPORT: sse
+      MCP_AUTH_SECRET: ${MCP_AUTH_SECRET:-dev_secret_change_in_production}
+      DATABASE_URL: postgres://${POSTGRES_USER:-hivemind}:${POSTGRES_PASSWORD:-hivemind_dev_password}@postgres:5432/${POSTGRES_DB:-hivemind}
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_API_KEY: ${QDRANT_API_KEY:-dev_api_key}
+      # Groq Cloud API Configuration (ultra-low latency)
+      GROQ_API_KEY: ${GROQ_API_KEY:-your-groq-api-key-here}
+      GROQ_EMBEDDING_MODEL: nomic-embed-text
+      GROQ_INFERENCE_MODEL: llama-3-3-70b-versatile
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3003:3000"
+    volumes:
+      - ../core:/app/core:ro
+      - /app/core/node_modules
+    networks:
+      - hivemind_dev
+    labels:
+      - "hivemind.component=mcp"
+      - "hivemind.tier=api"
+      - "hivemind.environment=development"
+      - "hivemind.ai.provider=groq"
+
+volumes:
+  postgres_dev_data:
+    driver: local
+  pgadmin_dev_data:
+    driver: local
+  qdrant_dev_data:
+    driver: local
+  redis_dev_data:
+    driver: local
+
+networks:
+  hivemind_dev:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.29.0.0/16

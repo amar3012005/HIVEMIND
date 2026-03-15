@@ -1,0 +1,564 @@
+openapi: 3.1.0
+info:
+  title: HIVE-MIND Memory API
+  description: |
+    Cross-platform context preservation API for ChatGPT integration.
+    Enables memory storage and retrieval across AI platforms.
+    
+    ## Authentication
+    All endpoints require JWT authentication via ZITADEL OIDC.
+    Include the token in the Authorization header: `Bearer <token>`
+    
+    ## Rate Limits
+    - 100 requests per minute per user
+    - 1000 requests per hour per user
+    
+    ## Error Codes
+    - 400: Invalid request parameters
+    - 401: Unauthorized (invalid/missing token)
+    - 404: Resource not found
+    - 429: Rate limit exceeded
+    - 500: Server error
+  version: 1.0.0
+  contact:
+    email: api@hivemind.io
+    url: https://hivemind.io/support
+  license:
+    name: Proprietary
+    url: https://hivemind.io/terms
+
+servers:
+  - url: https://api.hivemind.io/v1
+    description: Production (EU)
+  - url: https://api-staging.hivemind.io/v1
+    description: Staging Environment
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Memories
+    description: Memory CRUD operations
+  - name: Recall
+    description: Semantic memory search and retrieval
+  - name: Sync
+    description: Cross-platform synchronization status
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token from ZITADEL OIDC flow
+
+  schemas:
+    Memory:
+      type: object
+      required:
+        - content
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique memory identifier
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        content:
+          type: string
+          minLength: 1
+          maxLength: 10000
+          description: Memory content
+          example: "User prefers TypeScript for backend development"
+        memoryType:
+          type: string
+          enum: [fact, preference, decision, lesson, goal, event, relationship]
+          default: fact
+          description: Category of memory
+          example: "preference"
+        title:
+          type: string
+          maxLength: 500
+          description: Auto-generated or user-provided title
+          example: "Backend Language Preference"
+        tags:
+          type: array
+          items:
+            type: string
+          description: Categorization tags
+          example: ["typescript", "backend", "programming"]
+        sourcePlatform:
+          type: string
+          default: chatgpt
+          description: Platform where memory originated
+          example: "chatgpt"
+        importanceScore:
+          type: number
+          minimum: 0
+          maximum: 1
+          default: 0.5
+          description: Importance weighting for recall prioritization
+          example: 0.8
+        createdAt:
+          type: string
+          format: date-time
+          description: Memory creation timestamp
+        updatedAt:
+          type: string
+          format: date-time
+          description: Last update timestamp
+
+    MemoryCreate:
+      type: object
+      required:
+        - content
+      properties:
+        content:
+          type: string
+          minLength: 1
+          maxLength: 10000
+          description: The information to remember
+        memoryType:
+          type: string
+          enum: [fact, preference, decision, lesson, goal, event, relationship]
+          default: fact
+          description: Type of memory to create
+        title:
+          type: string
+          maxLength: 500
+          description: Optional title for the memory
+        tags:
+          type: array
+          items:
+            type: string
+          description: Tags for categorization
+        importanceScore:
+          type: number
+          minimum: 0
+          maximum: 1
+          default: 0.5
+          description: Importance score (0-1)
+
+    MemoryUpdate:
+      type: object
+      properties:
+        content:
+          type: string
+          minLength: 1
+          maxLength: 10000
+        memoryType:
+          type: string
+          enum: [fact, preference, decision, lesson, goal, event, relationship]
+        title:
+          type: string
+          maxLength: 500
+        tags:
+          type: array
+          items:
+            type: string
+        importanceScore:
+          type: number
+          minimum: 0
+          maximum: 1
+
+    RecallQuery:
+      type: object
+      required:
+        - query
+      properties:
+        query:
+          type: string
+          minLength: 1
+          maxLength: 2000
+          description: Natural language search query
+          example: "What programming languages does the user prefer?"
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 50
+          default: 10
+          description: Maximum results to return
+        memoryTypes:
+          type: string
+          description: Comma-separated memory types to filter by
+          example: "preference,decision"
+        recencyBias:
+          type: number
+          minimum: 0
+          maximum: 1
+          default: 0.5
+          description: Weight for recency in scoring (0=ignore, 1=only recency)
+
+    RecallResult:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        content:
+          type: string
+        memoryType:
+          type: string
+        title:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        sourcePlatform:
+          type: string
+        importanceScore:
+          type: number
+        score:
+          type: number
+          description: Relevance score for this result
+        scoreBreakdown:
+          type: object
+          description: Detailed scoring breakdown
+          properties:
+            similarity:
+              type: number
+            recency:
+              type: number
+            importance:
+              type: number
+        createdAt:
+          type: string
+          format: date-time
+
+    RecallResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecallResult'
+        metadata:
+          type: object
+          properties:
+            total:
+              type: integer
+              description: Total results found
+            latencyMs:
+              type: integer
+              description: Query latency in milliseconds
+            query:
+              type: string
+              description: Original query
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Error code
+        message:
+          type: string
+          description: Human-readable error message
+        requestId:
+          type: string
+          format: uuid
+          description: Request ID for tracing
+
+    SyncStatus:
+      type: object
+      properties:
+        platforms:
+          type: array
+          items:
+            type: object
+            properties:
+              platform:
+                type: string
+                enum: [chatgpt, claude, perplexity, gemini]
+              status:
+                type: string
+                enum: [connected, disconnected, syncing, error]
+              lastSyncedAt:
+                type: string
+                format: date-time
+              health:
+                type: string
+                enum: [healthy, warning, critical]
+              memoryCount:
+                type: integer
+                description: Number of memories synced from this platform
+
+paths:
+  /memories:
+    post:
+      operationId: createMemory
+      summary: Create a new memory
+      description: |
+        Store a new memory that will be available across all AI platforms.
+        The memory is automatically embedded for semantic search.
+        
+        ## Usage Examples
+        - Save user preferences: "User prefers dark mode"
+        - Store project context: "Working on healthcare startup MedTech"
+        - Remember decisions: "Chose PostgreSQL for database"
+      tags:
+        - Memories
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemoryCreate'
+      responses:
+        '201':
+          description: Memory created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Memory'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                invalidContent:
+                  summary: Invalid content
+                  value:
+                    error: "VALIDATION_ERROR"
+                    message: "Content is required and must be 1-10000 characters"
+                    requestId: "req-123"
+        '401':
+          description: Unauthorized - Invalid or missing JWT token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    get:
+      operationId: listMemories
+      summary: List memories
+      description: Retrieve memories with filtering and pagination
+      tags:
+        - Memories
+      parameters:
+        - name: limit
+          in: query
+          description: Number of memories to return
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: offset
+          in: query
+          description: Pagination offset
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: memoryType
+          in: query
+          description: Filter by memory type
+          schema:
+            type: string
+            enum: [fact, preference, decision, lesson, goal, event, relationship]
+        - name: tags
+          in: query
+          description: Filter by tags (comma-separated)
+          schema:
+            type: string
+        - name: sourcePlatform
+          in: query
+          description: Filter by source platform
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of memories
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Memory'
+                  pagination:
+                    type: object
+                    properties:
+                      limit:
+                        type: integer
+                      offset:
+                        type: integer
+                      total:
+                        type: integer
+                      hasMore:
+                        type: boolean
+        '401':
+          description: Unauthorized
+
+  /memories/{memoryId}:
+    get:
+      operationId: getMemory
+      summary: Get a specific memory
+      tags:
+        - Memories
+      parameters:
+        - name: memoryId
+          in: path
+          required: true
+          description: UUID of the memory to retrieve
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Memory details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Memory'
+        '404':
+          description: Memory not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    patch:
+      operationId: updateMemory
+      summary: Update a memory
+      description: Creates a new version with Updates relationship
+      tags:
+        - Memories
+      parameters:
+        - name: memoryId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemoryUpdate'
+      responses:
+        '200':
+          description: Memory updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Memory'
+        '404':
+          description: Memory not found
+
+    delete:
+      operationId: deleteMemory
+      summary: Delete a memory
+      description: Soft delete for GDPR compliance
+      tags:
+        - Memories
+      parameters:
+        - name: memoryId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Memory deleted successfully
+        '404':
+          description: Memory not found
+
+  /recall:
+    post:
+      operationId: recallMemories
+      summary: Semantic memory search
+      description: |
+        Search memories using natural language queries.
+        Returns results ranked by semantic similarity, recency, and importance.
+        
+        ## Scoring Algorithm
+        Results are scored using:
+        - Semantic similarity (vector search via Qdrant)
+        - Recency bias (Ebbinghaus decay weighting)
+        - Importance score (user/model assigned)
+      tags:
+        - Recall
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecallQuery'
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecallResponse'
+        '400':
+          description: Invalid query
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized
+
+  /sync/status:
+    get:
+      operationId: getSyncStatus
+      summary: Get sync status
+      description: Check sync status across all connected platforms
+      tags:
+        - Sync
+      responses:
+        '200':
+          description: Sync status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncStatus'
+        '401':
+          description: Unauthorized
+
+x-chatgpt-actions:
+  actions:
+    - actionId: save_memory
+      summary: "Save to Memory"
+      description: "Remember this information for future conversations"
+      operationId: createMemory
+      prompt: |
+        Use this action when the user wants to remember something important.
+        
+        Examples:
+        - "Remember that I prefer TypeScript"
+        - "Save this: I'm working on a healthcare project"
+        - "Don't forget that my timezone is CET"
+        - "Remember this decision: we chose PostgreSQL"
+        
+        Extract the relevant content from the user's message and categorize appropriately.
+
+    - actionId: recall_memory
+      summary: "Recall from Memory"
+      description: "Search your saved memories"
+      operationId: recallMemories
+      prompt: |
+        Use this action when you need to recall previously saved information.
+        
+        Examples:
+        - "What do I know about the user's tech stack?"
+        - "Find memories about their project preferences"
+        - "What has the user told me about their goals?"
+        - "Search for memories about TypeScript"
+        
+        Formulate a clear search query based on what you're looking for.

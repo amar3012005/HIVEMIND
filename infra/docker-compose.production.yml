@@ -1,0 +1,534 @@
+# HIVE-MIND Production Stack - EU Sovereign Deployment
+# Compatible: Hetzner (DE/FI), Scaleway (FR), OVHcloud (FR)
+# Compliance: GDPR, NIS2, DORA, EU Data Sovereignty
+# Version: 1.0.0
+
+version: '3.9'
+
+# Named volumes for persistence
+volumes:
+  postgres-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/encrypted/postgres
+  redis-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/encrypted/redis
+  qdrant-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/encrypted/qdrant
+  qdrant-snapshots:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/encrypted/qdrant-snapshots
+  prometheus-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/encrypted/prometheus
+  grafana-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/encrypted/grafana
+  traefik-acme:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/encrypted/traefik-acme
+  backup-archive:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/encrypted/backups
+
+# Isolated network with static IP range
+networks:
+  hivemind-network:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.0.0/16
+          gateway: 172.28.0.1
+    driver_opts:
+      com.docker.network.bridge.enable_icc: "false"
+      com.docker.network.bridge.enable_ip_masquerade: "true"
+
+# Common logging configuration
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+    compress: "true"
+    labels: "hivemind.component,environment"
+
+# Common health checks
+x-healthcheck: &pg-healthcheck
+  test: ["CMD-SHELL", "pg_isready -U hivemind -d hivemind -h 127.0.0.1"]
+  interval: 10s
+  timeout: 5s
+  retries: 5
+  start_period: 30s
+
+x-healthcheck: &redis-healthcheck
+  test: ["CMD", "redis-cli", "-a", "$${REDIS_PASSWORD}", "ping"]
+  interval: 10s
+  timeout: 5s
+  retries: 5
+  start_period: 10s
+
+x-healthcheck: &qdrant-healthcheck
+  test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+  interval: 10s
+  timeout: 5s
+  retries: 5
+  start_period: 20s
+
+x-healthcheck: &api-healthcheck
+  test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+  interval: 30s
+  timeout: 10s
+  retries: 3
+  start_period: 60s
+
+x-security-context: &default-security-context
+  security_opt:
+    - no-new-privileges:true
+  read_only: false
+  cap_drop:
+    - ALL
+  cap_add: []
+
+services:
+  # ==========================================
+  # API GATEWAY (Traefik v3.0)
+  # ==========================================
+  traefik:
+    image: traefik:v3.0.0
+    container_name: hivemind-traefik
+    restart: unless-stopped
+    <<: *default-security-context
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./traefik/dynamic:/etc/traefik/dynamic:ro
+      - traefik-acme:/acme:rw
+      - /var/log/traefik:/var/log/traefik:rw
+    environment:
+      - CF_DNS_API_TOKEN=${CLOUDFLARE_DNS_API_TOKEN:?Cloudflare DNS API token required}
+      - TRAEFIK_DASHBOARD_CREDENTIALS=${TRAEFIK_DASHBOARD_CREDENTIALS:?Traefik dashboard credentials required}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik-dashboard.rule=Host(`traefik.${DOMAIN_NAME:-hivemind.io}`)"
+      - "traefik.http.routers.traefik-dashboard.entrypoints=websecure"
+      - "traefik.http.routers.traefik-dashboard.tls=true"
+      - "traefik.http.routers.traefik-dashboard.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.traefik-dashboard.service=api@internal"
+      - "traefik.http.routers.traefik-dashboard.middlewares=auth-dashboard@file"
+    networks:
+      hivemind-network:
+        ipv4_address: 172.28.0.2
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+  # ==========================================
+  # CORE API SERVICE
+  # ==========================================
+  api:
+    image: hivemind/core:${VERSION:-latest}
+    container_name: hivemind-api
+    restart: unless-stopped
+    <<: *default-security-context
+    build:
+      context: ../core
+      dockerfile: ../Dockerfile.production
+      args:
+        - NODE_ENV=production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    volumes:
+      - ../logs:/app/logs:rw
+      - ../core/src:/app/src:ro
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://hivemind:${POSTGRES_PASSWORD}@postgres:5432/hivemind?schema=public
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      - ZITADEL_ISSUER_URL=https://${ZITADEL_DOMAIN:-auth.hivemind.io}
+      - ZITADEL_CLIENT_ID=${ZITADEL_CLIENT_ID}
+      - ZITADEL_CLIENT_SECRET=${ZITADEL_CLIENT_SECRET}
+      - HSM_MASTER_KEY=${HSM_MASTER_KEY}
+      - LOG_LEVEL=info
+      - LOG_FORMAT=json
+      - PORT=3000
+      - HOST=0.0.0.0
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api.rule=Host(`api.${DOMAIN_NAME:-hivemind.io}`)"
+      - "traefik.http.routers.api.entrypoints=websecure"
+      - "traefik.http.routers.api.tls=true"
+      - "traefik.http.routers.api.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.api.service=api-service"
+      - "traefik.http.routers.api.middlewares=rate-limit-api@file,security-headers@file,cors-api@file"
+      - "traefik.http.services.api-service.loadbalancer.server.port=3000"
+      - "traefik.http.services.api-service.loadbalancer.healthcheck.path=/health"
+      - "traefik.http.services.api-service.loadbalancer.healthcheck.interval=30s"
+      - "traefik.http.services.api-service.loadbalancer.healthcheck.timeout=10s"
+      - "traefik.http.services.api-service.loadbalancer.healthcheck.retries=3"
+    healthcheck: *api-healthcheck
+    networks:
+      hivemind-network:
+        ipv4_address: 172.28.0.10
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+
+  # ==========================================
+  # POSTGRESQL 15 + APACHE AGE
+  # ==========================================
+  postgres:
+    image: postgres:15.4-alpine
+    container_name: hivemind-postgres
+    restart: unless-stopped
+    <<: *default-security-context
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d:ro
+      - backup-archive:/backups:rw
+    environment:
+      - POSTGRES_USER=hivemind
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?PostgreSQL password required}
+      - POSTGRES_DB=hivemind
+      - POSTGRES_INITDB_ARGS=--encoding=UTF8 --lc-collate=en_US.UTF-8 --lc-ctype=en_US.UTF-8
+      - PGDATA=/var/lib/postgresql/data/pgdata
+      - POSTGRES_HOST_AUTH_METHOD=scram-sha-256
+    command: >
+      postgres
+      -c max_connections=200
+      -c shared_buffers=2GB
+      -c effective_cache_size=6GB
+      -c maintenance_work_mem=512MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+      -c work_mem=10MB
+      -c min_wal_size=1GB
+      -c max_wal_size=4GB
+      -c max_worker_processes=4
+      -c max_parallel_workers_per_gather=2
+      -c max_parallel_workers=4
+      -c max_parallel_maintenance_workers=2
+      -c shared_preload_libraries=pg_stat_statements
+      -c pg_stat_statements.track=all
+      -c log_min_duration_statement=1000
+      -c log_checkpoints=on
+      -c log_connections=on
+      -c log_disconnections=on
+      -c log_lock_waits=on
+      -c log_temp_files=0
+    healthcheck: *pg-healthcheck
+    networks:
+      hivemind-network:
+        ipv4_address: 172.28.0.20
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+        reservations:
+          cpus: '2'
+          memory: 4G
+
+  # ==========================================
+  # REDIS (Session & Pub/Sub)
+  # ==========================================
+  redis:
+    image: redis:7.2-alpine
+    container_name: hivemind-redis
+    restart: unless-stopped
+    <<: *default-security-context
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD:?Redis password required}
+      --appendonly yes
+      --maxmemory 1gb
+      --maxmemory-policy allkeys-lru
+      --tcp-keepalive 300
+      --timeout 0
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+    volumes:
+      - redis-data:/data
+    healthcheck: *redis-healthcheck
+    networks:
+      hivemind-network:
+        ipv4_address: 172.28.0.21
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+  # ==========================================
+  # QDRANT (Vector Database)
+  # ==========================================
+  qdrant:
+    image: qdrant/qdrant:v1.7.0
+    container_name: hivemind-qdrant
+    restart: unless-stopped
+    <<: *default-security-context
+    volumes:
+      - qdrant-data:/qdrant/storage
+      - qdrant-snapshots:/qdrant/snapshots
+      - ./qdrant/production.yaml:/qdrant/config/production.yaml:ro
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+      - QDRANT__REST__PORT=6333
+      - QDRANT__STORAGE__STORAGE_PATH=/qdrant/storage
+      - QDRANT__LOG_LEVEL=INFO
+      - QDRANT__SERVICE__API_KEY_HEADER_NAME=X-Qdrant-API-Key
+      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY}
+    command: >
+      ./qdrant
+      --config-path /qdrant/config/production.yaml
+    healthcheck: *qdrant-healthcheck
+    networks:
+      hivemind-network:
+        ipv4_address: 172.28.0.22
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 2G
+
+  # ==========================================
+  # PROMETHEUS (Metrics Collection)
+  # ==========================================
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: hivemind-prometheus
+    restart: unless-stopped
+    <<: *default-security-context
+    user: "65534:65534"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus:rw
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+      - '--storage.tsdb.retention.size=5GB'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--log.level=info'
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.prometheus.rule=Host(`prometheus.${DOMAIN_NAME:-hivemind.io}`)"
+      - "traefik.http.routers.prometheus.entrypoints=websecure"
+      - "traefik.http.routers.prometheus.tls=true"
+      - "traefik.http.routers.prometheus.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.prometheus.middlewares=auth-monitoring@file"
+    networks:
+      hivemind-network:
+        ipv4_address: 172.28.0.30
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  # ==========================================
+  # GRAFANA (Dashboards & Visualization)
+  # ==========================================
+  grafana:
+    image: grafana/grafana:10.1.0
+    container_name: hivemind-grafana
+    restart: unless-stopped
+    <<: *default-security-context
+    user: "472:472"
+    volumes:
+      - grafana-data:/var/lib/grafana:rw
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?Grafana admin password required}
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+      - GF_SERVER_ROOT_URL=https://grafana.${DOMAIN_NAME:-hivemind.io}
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_ALERTING_ENABLED=true
+      - GF_UNIFIED_ALERTING_ENABLED=true
+      - GF_FEATURE_TOGGLES_ENABLE=ngalert
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.grafana.rule=Host(`grafana.${DOMAIN_NAME:-hivemind.io}`)"
+      - "traefik.http.routers.grafana.entrypoints=websecure"
+      - "traefik.http.routers.grafana.tls=true"
+      - "traefik.http.routers.grafana.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.grafana.middlewares=auth-monitoring@file"
+    depends_on:
+      - prometheus
+    networks:
+      hivemind-network:
+        ipv4_address: 172.28.0.31
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+  # ==========================================
+  # NODE EXPORTER (System Metrics)
+  # ==========================================
+  node-exporter:
+    image: prom/node-exporter:v1.6.1
+    container_name: hivemind-node-exporter
+    restart: unless-stopped
+    <<: *default-security-context
+    command:
+      - '--path.rootfs=/host'
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+      - '--collector.netclass.ignored-devices=^(veth.*|docker.*|br-.*)$$'
+      - '--no-collector.ipvs'
+    pid: host
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/host:ro
+    networks:
+      hivemind-network:
+        ipv4_address: 172.28.0.32
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+
+  # ==========================================
+  # BACKUP SERVICE (PostgreSQL)
+  # ==========================================
+  backup:
+    image: prodrigestivill/postgres-backup-local:15
+    container_name: hivemind-backup
+    restart: unless-stopped
+    <<: *default-security-context
+    volumes:
+      - backup-archive:/backups:rw
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_DB=hivemind
+      - POSTGRES_USER=hivemind
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - SCHEDULE=@daily
+      - BACKUP_KEEP_DAYS=30
+      - BACKUP_KEEP_WEEKS=4
+      - BACKUP_KEEP_MONTHS=12
+      - BACKUP_ENCRYPTION=AES-256-CBC
+      - BACKUP_ENCRYPTION_KEY=${BACKUP_ENCRYPTION_KEY}
+      - HEALTHCHECK_PATH=/health
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      hivemind-network:
+        ipv4_address: 172.28.0.40
+    logging: *default-logging
+
+  # ==========================================
+  # S3 SYNC SERVICE (Backup to Scaleway)
+  # ==========================================
+  backup-sync:
+    image: minio/mc:latest
+    container_name: hivemind-backup-sync
+    restart: "no"
+    <<: *default-security-context
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set scaleway https://s3.fr-par.scw.cloud ${SCW_ACCESS_KEY} ${SCW_SECRET_KEY} &&
+        mc mirror --remove /backups scaleway/${BACKUP_BUCKET:-hivemind-backups}
+      "
+    volumes:
+      - backup-archive:/backups:ro
+    environment:
+      - SCW_ACCESS_KEY=${SCW_ACCESS_KEY:?Scaleway access key required}
+      - SCW_SECRET_KEY=${SCW_SECRET_KEY:?Scaleway secret key required}
+      - BACKUP_BUCKET=${BACKUP_BUCKET:-hivemind-backups}
+    depends_on:
+      - backup
+    networks:
+      hivemind-network:
+        ipv4_address: 172.28.0.41
+    logging: *default-logging

@@ -1,0 +1,43 @@
+# Environment files
+.env
+.env.*
+!.env.example
+.env.test
+.env.coolify
+
+# Database
+*.db
+hivemind.db
+
+# Logs
+logs/
+*.log
+
+# Data
+data/
+core/data/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Build
+node_modules/
+dist/
+build/
+
+# Backups and temporary files
+*.backup.*
+*.bak
+*.tmp
+*~
+
+# Rotation reports (contain redacted keys)
+key-rotation-report-*.json
+
+# Secret scanning and replacements
+replacements.txt

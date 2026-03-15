@@ -1,0 +1,485 @@
+# HIVE-MIND Prometheus Alert Rules
+# EU Sovereign Deployment
+# Compliance: GDPR, NIS2, DORA
+
+groups:
+  # ==========================================
+  # API SERVICE ALERTS
+  # ==========================================
+  - name: hivemind-api
+    interval: 15s
+    rules:
+      # High error rate
+      - alert: APIHighErrorRate
+        expr: |
+          sum(rate(http_requests_total{service="hivemind-api",status=~"5.."}[5m])) 
+          / sum(rate(http_requests_total{service="hivemind-api"}[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          team: core
+          component: api
+        annotations:
+          summary: "HIVE-MIND API high error rate"
+          description: "API error rate is {{ $value | humanizePercentage }} (threshold: 5%)"
+          runbook_url: "https://runbooks.hivemind.io/api-high-error-rate"
+
+      # High P99 latency
+      - alert: APIHighP99Latency
+        expr: |
+          histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{service="hivemind-api"}[5m])) by (le)) > 1
+        for: 5m
+        labels:
+          severity: warning
+          team: core
+          component: api
+        annotations:
+          summary: "HIVE-MIND API high P99 latency"
+          description: "API P99 latency is {{ $value | humanizeDuration }} (threshold: 1s)"
+          runbook_url: "https://runbooks.hivemind.io/api-high-latency"
+
+      # API down
+      - alert: APIDown
+        expr: up{service="hivemind-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: core
+          component: api
+        annotations:
+          summary: "HIVE-MIND API is down"
+          description: "API instance {{ $labels.instance }} is not responding"
+          runbook_url: "https://runbooks.hivemind.io/api-down"
+
+      # High memory usage
+      - alert: APIHighMemoryUsage
+        expr: |
+          container_memory_usage_bytes{container="api"} 
+          / container_spec_memory_limit_bytes{container="api"} > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          team: core
+          component: api
+        annotations:
+          summary: "HIVE-MIND API high memory usage"
+          description: "API memory usage is {{ $value | humanizePercentage }} (threshold: 90%)"
+
+      # High CPU usage
+      - alert: APIHighCPUUsage
+        expr: |
+          rate(container_cpu_usage_seconds_total{container="api"}[5m]) 
+          / container_spec_cpu_quota{container="api"} * 100000 > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          team: core
+          component: api
+        annotations:
+          summary: "HIVE-MIND API high CPU usage"
+          description: "API CPU usage is {{ $value | humanizePercentage }} (threshold: 90%)"
+
+      # Too few replicas
+      - alert: APILowReplicaCount
+        expr: count(up{service="hivemind-api"} == 1) < 2
+        for: 5m
+        labels:
+          severity: warning
+          team: core
+          component: api
+        annotations:
+          summary: "HIVE-MIND API low replica count"
+          description: "Only {{ $value }} API replicas running (minimum: 2)"
+
+  # ==========================================
+  # POSTGRESQL ALERTS
+  # ==========================================
+  - name: postgresql
+    interval: 15s
+    rules:
+      # PostgreSQL down
+      - alert: PostgreSQLDown
+        expr: up{service="postgresql"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: data
+          component: database
+        annotations:
+          summary: "PostgreSQL is down"
+          description: "PostgreSQL instance {{ $labels.instance }} is not responding"
+          runbook_url: "https://runbooks.hivemind.io/postgres-down"
+
+      # High connection usage
+      - alert: PostgreSQLHighConnectionUsage
+        expr: |
+          pg_stat_activity_count 
+          / pg_settings_max_connections * 100 > 80
+        for: 5m
+        labels:
+          severity: warning
+          team: data
+          component: database
+        annotations:
+          summary: "PostgreSQL high connection usage"
+          description: "PostgreSQL connection usage is {{ $value | humanizePercentage }} (threshold: 80%)"
+
+      # Replication lag
+      - alert: PostgreSQLReplicationLag
+        expr: |
+          pg_replication_lag_seconds > 30
+        for: 5m
+        labels:
+          severity: critical
+          team: data
+          component: database
+        annotations:
+          summary: "PostgreSQL replication lag"
+          description: "PostgreSQL replication lag is {{ $value | humanizeDuration }} (threshold: 30s)"
+
+      # Too many connections
+      - alert: PostgreSQLTooManyConnections
+        expr: |
+          pg_stat_activity_count > 150
+        for: 5m
+        labels:
+          severity: warning
+          team: data
+          component: database
+        annotations:
+          summary: "PostgreSQL too many connections"
+          description: "PostgreSQL has {{ $value }} active connections (threshold: 150)"
+
+      # Long running queries
+      - alert: PostgreSQLLongRunningQueries
+        expr: |
+          count(pg_stat_activity_max_tx_duration > 300) > 0
+        for: 5m
+        labels:
+          severity: warning
+          team: data
+          component: database
+        annotations:
+          summary: "PostgreSQL long running queries"
+          description: "{{ $value }} queries running longer than 5 minutes"
+
+      # Disk space low
+      - alert: PostgreSQLDiskSpaceLow
+        expr: |
+          pg_database_size_bytes / pg_tablespace_size_bytes * 100 > 85
+        for: 10m
+        labels:
+          severity: warning
+          team: data
+          component: database
+        annotations:
+          summary: "PostgreSQL disk space low"
+          description: "PostgreSQL disk usage is {{ $value | humanizePercentage }}"
+
+      # Checkpoint too frequent
+      - alert: PostgreSQLCheckpointTooFrequent
+        expr: |
+          rate(pg_stat_bgwriter_checkpoints_timed[5m]) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+          team: data
+          component: database
+        annotations:
+          summary: "PostgreSQL checkpoints too frequent"
+          description: "Checkpoints occurring {{ $value | humanize }} times/second"
+
+  # ==========================================
+  # REDIS ALERTS
+  # ==========================================
+  - name: redis
+    interval: 15s
+    rules:
+      # Redis down
+      - alert: RedisDown
+        expr: up{service="redis"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: core
+          component: cache
+        annotations:
+          summary: "Redis is down"
+          description: "Redis instance {{ $labels.instance }} is not responding"
+          runbook_url: "https://runbooks.hivemind.io/redis-down"
+
+      # High memory usage
+      - alert: RedisHighMemoryUsage
+        expr: |
+          redis_memory_used_bytes / redis_memory_max_bytes * 100 > 90
+        for: 5m
+        labels:
+          severity: warning
+          team: core
+          component: cache
+        annotations:
+          summary: "Redis high memory usage"
+          description: "Redis memory usage is {{ $value | humanizePercentage }} (threshold: 90%)"
+
+      # Evicted keys
+      - alert: RedisEvictedKeys
+        expr: |
+          rate(redis_evicted_keys_total[5m]) > 100
+        for: 5m
+        labels:
+          severity: warning
+          team: core
+          component: cache
+        annotations:
+          summary: "Redis evicted keys"
+          description: "Redis is evicting {{ $value | humanize }} keys/second"
+
+      # Connected clients high
+      - alert: RedisConnectedClientsHigh
+        expr: redis_connected_clients > 500
+        for: 5m
+        labels:
+          severity: warning
+          team: core
+          component: cache
+        annotations:
+          summary: "Redis high connected clients"
+          description: "Redis has {{ $value }} connected clients (threshold: 500)"
+
+  # ==========================================
+  # QDRANT ALERTS
+  # ==========================================
+  - name: qdrant
+    interval: 15s
+    rules:
+      # Qdrant down
+      - alert: QdrantDown
+        expr: up{service="qdrant"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: ai
+          component: vector-store
+        annotations:
+          summary: "Qdrant is down"
+          description: "Qdrant instance {{ $labels.instance }} is not responding"
+          runbook_url: "https://runbooks.hivemind.io/qdrant-down"
+
+      # High search latency
+      - alert: QdrantHighSearchLatency
+        expr: |
+          histogram_quantile(0.99, sum(rate(qdrant_search_duration_seconds_bucket[5m])) by (le)) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          team: ai
+          component: vector-store
+        annotations:
+          summary: "Qdrant high search latency"
+          description: "Qdrant P99 search latency is {{ $value | humanizeDuration }} (threshold: 500ms)"
+
+      # Collection disk usage high
+      - alert: QdrantDiskUsageHigh
+        expr: |
+          qdrant_storage_used_bytes / qdrant_storage_total_bytes * 100 > 85
+        for: 10m
+        labels:
+          severity: warning
+          team: ai
+          component: vector-store
+        annotations:
+          summary: "Qdrant disk usage high"
+          description: "Qdrant disk usage is {{ $value | humanizePercentage }} (threshold: 85%)"
+
+  # ==========================================
+  # TRAEFIK ALERTS
+  # ==========================================
+  - name: traefik
+    interval: 15s
+    rules:
+      # Traefik down
+      - alert: TraefikDown
+        expr: up{service="traefik"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+          component: gateway
+        annotations:
+          summary: "Traefik is down"
+          description: "Traefik instance {{ $labels.instance }} is not responding"
+          runbook_url: "https://runbooks.hivemind.io/traefik-down"
+
+      # High request rate
+      - alert: TraefikHighRequestRate
+        expr: |
+          sum(rate(traefik_entrypoint_requests_total[5m])) > 10000
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+          component: gateway
+        annotations:
+          summary: "Traefik high request rate"
+          description: "Traefik handling {{ $value | humanize }} requests/second"
+
+      # TLS certificate expiring soon
+      - alert: TraefikTLSCertExpiringSoon
+        expr: |
+          probe_ssl_earliest_cert_expiry - time() < 86400 * 7
+        for: 1h
+        labels:
+          severity: warning
+          team: platform
+          component: gateway
+        annotations:
+          summary: "TLS certificate expiring soon"
+          description: "TLS certificate expires in {{ $value | humanizeDuration }}"
+
+      # TLS certificate expired
+      - alert: TraefikTLSCertExpired
+        expr: |
+          probe_ssl_earliest_cert_expiry - time() < 0
+        for: 5m
+        labels:
+          severity: critical
+          team: platform
+          component: gateway
+        annotations:
+          summary: "TLS certificate expired"
+          description: "TLS certificate has expired"
+
+  # ==========================================
+  # NODE/INFRASTRUCTURE ALERTS
+  # ==========================================
+  - name: infrastructure
+    interval: 15s
+    rules:
+      # Node down
+      - alert: NodeDown
+        expr: up{service="node-exporter"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          team: platform
+          component: infrastructure
+        annotations:
+          summary: "Node is down"
+          description: "Node {{ $labels.instance }} is not responding"
+
+      # High memory usage
+      - alert: NodeHighMemoryUsage
+        expr: |
+          (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 90
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+          component: infrastructure
+        annotations:
+          summary: "Node high memory usage"
+          description: "Node {{ $labels.instance }} memory usage is {{ $value | humanizePercentage }} (threshold: 90%)"
+
+      # Low disk space
+      - alert: NodeLowDiskSpace
+        expr: |
+          (1 - (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"})) * 100 > 90
+        for: 10m
+        labels:
+          severity: critical
+          team: platform
+          component: infrastructure
+        annotations:
+          summary: "Node low disk space"
+          description: "Node {{ $labels.instance }} disk usage is {{ $value | humanizePercentage }} (only 10% free)"
+
+      # High CPU load
+      - alert: NodeHighCPULoad
+        expr: |
+          node_load15 > 10
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+          component: infrastructure
+        annotations:
+          summary: "Node high CPU load"
+          description: "Node {{ $labels.instance }} 15m load average is {{ $value }}"
+
+      # OOM killer invoked
+      - alert: NodeOOMKillerInvoked
+        expr: |
+          increase(node_vmstat_oom_kill[5m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+          team: platform
+          component: infrastructure
+        annotations:
+          summary: "Node OOM killer invoked"
+          description: "Node {{ $labels.instance }} OOM killer was invoked {{ $value }} times"
+
+  # ==========================================
+  # BACKUP ALERTS
+  # ==========================================
+  - name: backup
+    interval: 15s
+    rules:
+      # Backup failed
+      - alert: BackupFailed
+        expr: |
+          backup_last_status != 0
+        for: 5m
+        labels:
+          severity: critical
+          team: data
+          component: backup
+        annotations:
+          summary: "Database backup failed"
+          description: "Last database backup failed with status {{ $value }}"
+          runbook_url: "https://runbooks.hivemind.io/backup-failed"
+
+      # Backup too old
+      - alert: BackupTooOld
+        expr: |
+          time() - backup_last_timestamp > 86400 * 2
+        for: 1h
+        labels:
+          severity: critical
+          team: data
+          component: backup
+        annotations:
+          summary: "Database backup too old"
+          description: "Last backup was {{ $value | humanizeDuration }} ago (threshold: 48h)"
+
+  # ==========================================
+  # SECURITY ALERTS
+  # ==========================================
+  - name: security
+    interval: 15s
+    rules:
+      # High rate of 4xx errors (potential attack)
+      - alert: High4xxErrorRate
+        expr: |
+          sum(rate(http_requests_total{status=~"4.."}[5m])) > 100
+        for: 5m
+        labels:
+          severity: warning
+          team: security
+          component: security
+        annotations:
+          summary: "High rate of 4xx errors"
+          description: "High rate of client errors detected - possible attack or misconfiguration"
+
+      # High rate of 401/403 (auth failures)
+      - alert: HighAuthFailures
+        expr: |
+          sum(rate(http_requests_total{status=~"401|403"}[5m])) > 50
+        for: 5m
+        labels:
+          severity: warning
+          team: security
+          component: security
+        annotations:
+          summary: "High authentication failure rate"
+          description: "High rate of authentication failures detected - possible brute force attack"

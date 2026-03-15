@@ -1,0 +1,110 @@
+# HIVE-MIND MCP Server Development Dockerfile
+# Multi-stage build for optimized development image
+# EU Sovereign: GDPR, NIS2, DORA compliant
+
+FROM node:20-alpine AS base
+
+# Install system dependencies
+RUN apk add --no-cache \
+    openssl \
+    bash \
+    git \
+    python3 \
+    make \
+    g++
+
+# Set working directory
+WORKDIR /app
+
+# ==========================================
+# Dependencies Stage
+# ==========================================
+
+FROM base AS deps
+
+# Copy package files
+COPY core/package.json ./
+COPY core/prisma ./prisma
+
+# Install dependencies, generate Prisma client, then prune dev deps
+RUN npm install && \
+    npx prisma generate && \
+    npm prune --omit=dev
+
+# ==========================================
+# Development Stage
+# ==========================================
+
+FROM base AS development
+
+# Set NODE_ENV
+ENV NODE_ENV=development
+
+# Copy package files
+COPY core/package.json ./
+
+# Install all dependencies
+RUN npm install
+
+# Copy source code
+COPY core ./
+COPY src/ingestion ./ingestion
+
+# Copy static HTML assets from repo root
+COPY client.html ./
+COPY ui-testing.html ./
+COPY web ./web
+COPY scripts/tampermonkey-hivemind-web.user.js ./scripts/tampermonkey-hivemind-web.user.js
+
+# Expose API port
+EXPOSE 3000
+
+# Health check - check root endpoint
+HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=5 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:3000/ || exit 1
+
+# Start development server
+CMD ["npm", "run", "server"]
+
+# ==========================================
+# Production Stage
+# ==========================================
+
+FROM base AS production
+
+# Set NODE_ENV
+ENV NODE_ENV=production
+
+# Create non-root user for security
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nodejs -u 1001
+
+# Copy production dependencies
+COPY --from=deps --chown=nodejs:nodejs /app/node_modules ./node_modules
+
+# Copy generated Prisma Client and schema artifacts
+COPY --from=deps --chown=nodejs:nodejs /app/node_modules/.prisma ./node_modules/.prisma
+COPY --from=deps --chown=nodejs:nodejs /app/prisma ./prisma
+
+# Copy source code
+COPY --chown=nodejs:nodejs core/src ./src
+COPY --chown=nodejs:nodejs core/config ./config
+COPY --chown=nodejs:nodejs src/ingestion ./ingestion
+COPY --chown=nodejs:nodejs core/package.json ./
+COPY --chown=nodejs:nodejs client.html ./
+COPY --chown=nodejs:nodejs ui-testing.html ./
+COPY --chown=nodejs:nodejs web ./web
+COPY --chown=nodejs:nodejs scripts/tampermonkey-hivemind-web.user.js ./scripts/tampermonkey-hivemind-web.user.js
+
+# Switch to non-root user
+USER nodejs
+
+# Expose MCP port
+EXPOSE 3000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1
+
+# Start production server
+CMD ["node", "src/server.js"]

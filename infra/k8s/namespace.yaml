@@ -1,0 +1,325 @@
+# HIVE-MIND Kubernetes Namespace and RBAC
+# K3s Production Deployment - EU Sovereign
+# Compliance: GDPR, NIS2, DORA
+
+---
+# ==========================================
+# NAMESPACE
+# ==========================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hivemind
+  labels:
+    name: hivemind
+    environment: production
+    compliance: eu-sovereign
+    data-residency: eu-central
+  annotations:
+    description: "HIVE-MIND production namespace - EU data sovereignty"
+    owner: "platform-team@hivemind.io"
+
+---
+# ==========================================
+# RESOURCE QUOTA
+# ==========================================
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: hivemind-quota
+  namespace: hivemind
+spec:
+  hard:
+    # Compute resources
+    requests.cpu: "8"
+    requests.memory: 16Gi
+    limits.cpu: "16"
+    limits.memory: 32Gi
+
+    # Storage
+    requests.storage: 1Ti
+    persistentvolumeclaims: "10"
+
+    # Objects
+    secrets: "20"
+    configmaps: "20"
+    services: "15"
+    services.loadbalancers: "2"
+    services.nodeports: "5"
+
+    # Pods
+    pods: "50"
+    replicationcontrollers: "10"
+
+---
+# ==========================================
+# LIMIT RANGE
+# ==========================================
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: hivemind-limits
+  namespace: hivemind
+spec:
+  limits:
+    # Container defaults
+    - type: Container
+      default:
+        cpu: 500m
+        memory: 512Mi
+      defaultRequest:
+        cpu: 100m
+        memory: 128Mi
+      max:
+        cpu: "4"
+        memory: 8Gi
+      min:
+        cpu: 50m
+        memory: 64Mi
+
+    # PVC limits
+    - type: PersistentVolumeClaim
+      max:
+        storage: 500Gi
+      min:
+        storage: 1Gi
+
+---
+# ==========================================
+# SERVICE ACCOUNT - API
+# ==========================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hivemind-api
+  namespace: hivemind
+  labels:
+    app: hivemind-api
+  annotations:
+    description: "Service account for HIVE-MIND API pods"
+automountServiceAccountToken: false
+
+---
+# ==========================================
+# SERVICE ACCOUNT - DATABASE
+# ==========================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hivemind-db
+  namespace: hivemind
+  labels:
+    app: hivemind-db
+automountServiceAccountToken: false
+
+---
+# ==========================================
+# ROLE - API Pod Management
+# ==========================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hivemind-api-role
+  namespace: hivemind
+rules:
+  # Allow reading ConfigMaps and Secrets
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get", "list", "watch"]
+  # Allow reading own pod info
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  # Allow reading services for discovery
+  - apiGroups: [""]
+    resources: ["services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+
+---
+# ==========================================
+# ROLEBINDING - API
+# ==========================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hivemind-api-binding
+  namespace: hivemind
+subjects:
+  - kind: ServiceAccount
+    name: hivemind-api
+    namespace: hivemind
+roleRef:
+  kind: Role
+  name: hivemind-api-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ==========================================
+# NETWORK POLICY - Default Deny
+# ==========================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hivemind-default-deny
+  namespace: hivemind
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+---
+# ==========================================
+# NETWORK POLICY - API Access
+# ==========================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hivemind-api-network
+  namespace: hivemind
+spec:
+  podSelector:
+    matchLabels:
+      app: hivemind-api
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow from Traefik ingress controller
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: traefik-system
+        - podSelector:
+            matchLabels:
+              app: traefik
+      ports:
+        - protocol: TCP
+          port: 3000
+    # Allow from within hivemind namespace (for health checks)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: hivemind
+      ports:
+        - protocol: TCP
+          port: 3000
+  egress:
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+    # Allow PostgreSQL
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Allow Redis
+    - to:
+        - podSelector:
+            matchLabels:
+              app: redis
+      ports:
+        - protocol: TCP
+          port: 6379
+    # Allow Qdrant
+    - to:
+        - podSelector:
+            matchLabels:
+              app: qdrant
+      ports:
+        - protocol: TCP
+          port: 6333
+
+---
+# ==========================================
+# NETWORK POLICY - Database Access
+# ==========================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hivemind-db-network
+  namespace: hivemind
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow only from API pods
+    - from:
+        - podSelector:
+            matchLabels:
+              app: hivemind-api
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Allow from backup pods
+    - from:
+        - podSelector:
+            matchLabels:
+              app: backup
+      ports:
+        - protocol: TCP
+          port: 5432
+
+---
+# ==========================================
+# NETWORK POLICY - Redis Access
+# ==========================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hivemind-redis-network
+  namespace: hivemind
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow only from API pods
+    - from:
+        - podSelector:
+            matchLabels:
+              app: hivemind-api
+      ports:
+        - protocol: TCP
+          port: 6379
+
+---
+# ==========================================
+# NETWORK POLICY - Qdrant Access
+# ==========================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hivemind-qdrant-network
+  namespace: hivemind
+spec:
+  podSelector:
+    matchLabels:
+      app: qdrant
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow only from API pods
+    - from:
+        - podSelector:
+            matchLabels:
+              app: hivemind-api
+      ports:
+        - protocol: TCP
+          port: 6333
+        - protocol: TCP
+          port: 6334

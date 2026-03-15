@@ -1,0 +1,94 @@
+# PostgreSQL Performance Tuning for HIVE-MIND
+# Location: infra/postgres/postgresql.conf.custom
+# Apply: Copy to PostgreSQL container or use in docker-compose
+
+# ==========================================
+# Connection Settings
+# ==========================================
+# Max connections (increase if you have many clients)
+max_connections = 200
+
+# Connection timeout (seconds)
+authentication_timeout = 30s
+
+# ==========================================
+# Autovacuum Tuning
+# ==========================================
+# Enable autovacuum
+autovacuum = on
+
+# More aggressive autovacuum for better performance
+autovacuum_naptime = 30s          # Check tables more frequently
+autovacuum_vacuum_threshold = 25  # Vacuum after 25 dead tuples
+autovacuum_analyze_threshold = 25 # Analyze after 25 changes
+autovacuum_vacuum_scale_factor = 0.05  # 5% of table size
+autovacuum_analyze_scale_factor = 0.05   # 5% of table size
+
+# Limit autovacuum resource usage
+autovacuum_vacuum_cost_limit = 400
+autovacuum_vacuum_cost_delay = 5ms
+
+# ==========================================
+# Memory Settings
+# ==========================================
+# Shared buffers (25% of RAM for dedicated DB)
+shared_buffers = 256MB
+
+# Effective cache size (75% of RAM for dedicated DB)
+effective_cache_size = 768MB
+
+# Work memory for sorting/hashing
+work_mem = 16MB
+
+# Maintenance work memory (for VACUUM, CREATE INDEX)
+maintenance_work_mem = 64MB
+
+# ==========================================
+# Write Ahead Log (WAL)
+# ==========================================
+# WAL level for replication
+wal_level = replica
+
+# Max WAL size before checkpoint
+max_wal_size = 1GB
+min_wal_size = 80MB
+
+# Checkpoint timing
+checkpoint_completion_target = 0.9
+checkpoint_timeout = 10min
+
+# ==========================================
+# Logging
+# ==========================================
+# Log slow queries (>100ms)
+log_min_duration_statement = 100
+
+# Log connections and disconnections
+log_connections = on
+log_disconnections = on
+
+# Log lock waits
+log_lock_waits = on
+
+# ==========================================
+# Query Tuning
+# ==========================================
+# Enable parallel queries
+max_parallel_workers_per_gather = 2
+max_parallel_workers = 4
+
+# Random page cost (lower for SSD)
+random_page_cost = 1.1
+
+# Effective I/O concurrency (for SSD)
+effective_io_concurrency = 200
+
+# ==========================================
+# Statement Timeout (prevent runaway queries)
+# ==========================================
+statement_timeout = 60000  # 60 seconds
+
+# ==========================================
+# Idle Transaction Timeout
+# ==========================================
+idle_in_transaction_session_timeout = 300000  # 5 minutes

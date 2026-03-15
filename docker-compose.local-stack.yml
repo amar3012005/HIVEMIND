@@ -1,0 +1,162 @@
+# HIVE-MIND - Complete Local Stack
+# PostgreSQL + Apache AGE + Qdrant + Embedding Model
+# 
+# Usage:
+#   docker-compose -f docker-compose.local-stack.yml up -d
+#   node scripts/setup-qdrant.js
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: core/Dockerfile.dev
+    container_name: hivemind-api
+    env_file:
+      - ./core/.env
+    environment:
+      PORT: 3000
+      DATABASE_URL: postgres://hivemind:hivemind_dev_password@postgres:5432/hivemind_app
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_API_KEY: dev_api_key_hivemind_2026
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      HIVEMIND_ADMIN_SECRET: local-admin-secret-change-me
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./core/data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - hivemind-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  # ==========================================
+  # PostgreSQL 15 + Apache AGE
+  # Using official PostgreSQL with AGE extension
+  # ==========================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: hivemind-postgres
+    environment:
+      POSTGRES_USER: hivemind
+      POSTGRES_PASSWORD: hivemind_dev_password
+      POSTGRES_DB: hivemind
+      POSTGRES_INITDB_ARGS: "-E UTF8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init-age.sql:/docker-entrypoint-initdb.d/01-install-age.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hivemind -d hivemind"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - hivemind-network
+
+  # ==========================================
+  # Qdrant Vector Database
+  # ==========================================
+  qdrant:
+    image: qdrant/qdrant:v1.12.0
+    container_name: hivemind-qdrant
+    environment:
+      - QDRANT__STORAGE__STORAGE_PATH=/qdrant/storage
+      - QDRANT__STORAGE__PERFORMANCE__MAX_SEARCH_THREADS=4
+      - QDRANT__STORAGE__PERFORMANCE__CPU_COUNT=2
+      - QDRANT__SERVICE__GRPC_PORT=6334
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      - QDRANT__LOG_LEVEL=INFO
+      - QDRANT__SERVICE__API_KEY=dev_api_key_hivemind_2026
+    volumes:
+      - qdrant_data:/qdrant/storage
+      - ./infra/qdrant/config.yaml:/qdrant/config/production.yaml:ro
+    ports:
+      - "9200:6333"  # HTTP API (mapped to 9200 to avoid conflict)
+      - "9201:6334"  # gRPC
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q ':18BD' /proc/net/tcp"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - hivemind-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    container_name: hivemind-redis
+    ports:
+      - "6380:6379"
+    restart: unless-stopped
+    networks:
+      - hivemind-network
+
+  # ==========================================
+  # NO LOCAL EMBEDDING MODEL
+  # Use Mistral AI API or Groq API for embeddings
+  # BGE-M3 (1024-dim) via Mistral: mistral-embed
+  # ==========================================
+  # Embedding is done via API - no container needed!
+  # Configure in .env: MISTRAL_API_KEY or GROQ_API_KEY
+
+  # ==========================================
+  # pgAdmin (Optional - for database UI)
+  # ==========================================
+  pgadmin:
+    image: dpage/pgadmin4:8.0
+    container_name: hivemind-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@hivemind.example.com
+      PGADMIN_DEFAULT_PASSWORD: admin_password
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:80/misc/ping || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - hivemind-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+    name: hivemind-postgres-data
+  qdrant_data:
+    name: hivemind-qdrant-data
+  embedding_cache:
+    name: hivemind-embedding-cache
+  pgadmin_data:
+    name: hivemind-pgadmin-data
+
+networks:
+  hivemind-network:
+    name: hivemind-network
+    driver: bridge

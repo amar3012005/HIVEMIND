@@ -1,0 +1,261 @@
+{
+  "version": "1.0.0",
+  "lastUpdated": "2026-03-15T00:00:00Z",
+  "skills": [
+    {
+      "id": "memory-insights",
+      "name": "Memory Insights",
+      "version": "1.0.0",
+      "description": "Analyze memory patterns and generate insights about recall trends, memory decay, and relationship networks",
+      "author": "HIVE-MIND Team",
+      "license": "EUPL-1.2",
+      "type": "analysis",
+      "downloads": 1523,
+      "rating": 4.8,
+      "tags": ["analysis", "insights", "reporting"],
+      "capabilities": [
+        "analyzeRecallPatterns",
+        "detectDecayAnomalies",
+        "generateMemoryReport",
+        "findMemoryClusters",
+        "trackMemoryEvolution"
+      ],
+      "installUrl": "https://marketplace.hivemind.ai/skills/memory-insights/1.0.0",
+      "icon": "📊",
+      "featured": true
+    },
+    {
+      "id": "temporal-queries",
+      "name": "Temporal Queries",
+      "version": "1.0.0",
+      "description": "Advanced temporal querying for memory version history, time-based traversal, and historical state reconstruction",
+      "author": "HIVE-MIND Team",
+      "license": "EUPL-1.2",
+      "type": "query",
+      "downloads": 1245,
+      "rating": 4.9,
+      "tags": ["temporal", "versioning", "history", "time-travel"],
+      "capabilities": [
+        "getVersionHistory",
+        "queryAtTime",
+        "findTemporalChanges",
+        "reconstructState",
+        "compareVersions",
+        "getCurrentState",
+        "findExpiredRelationships"
+      ],
+      "installUrl": "https://marketplace.hivemind.ai/skills/temporal-queries/1.0.0",
+      "icon": "⏰",
+      "featured": true
+    },
+    {
+      "id": "batch-processor",
+      "name": "Batch Processor",
+      "version": "1.0.0",
+      "description": "Batch ingestion with retry, exponential backoff, and dead letter queue for production-grade memory pipelines",
+      "author": "HIVE-MIND Team",
+      "license": "EUPL-1.2",
+      "type": "ingestion",
+      "downloads": 892,
+      "rating": 4.7,
+      "tags": ["ingestion", "batch", "reliability", "pipeline"],
+      "capabilities": [
+        "processBatch",
+        "retryFailed",
+        "getQueueStatus",
+        "configureBatch",
+        "flushQueue",
+        "getDeadLetterQueue"
+      ],
+      "installUrl": "https://marketplace.hivemind.ai/skills/batch-processor/1.0.0",
+      "icon": "📦",
+      "featured": true
+    },
+    {
+      "id": "sentiment-analyzer",
+      "name": "Sentiment Analyzer",
+      "version": "1.0.0",
+      "description": "LLM-powered sentiment analysis for memories with caching and multi-language support",
+      "author": "HIVE-MIND Team",
+      "license": "EUPL-1.2",
+      "type": "analysis",
+      "downloads": 756,
+      "rating": 4.5,
+      "tags": ["sentiment", "analysis", "nlp", "ai"],
+      "capabilities": [
+        "analyzeSentiment",
+        "analyzeBatch",
+        "getSentimentTrend",
+        "configureModel"
+      ],
+      "installUrl": "https://marketplace.hivemind.ai/skills/sentiment-analyzer/1.0.0",
+      "icon": "💭"
+    },
+    {
+      "id": "graph-visualizer",
+      "name": "Graph Visualizer",
+      "version": "1.0.0",
+      "description": "Generate interactive visualizations of memory graphs and relationship networks",
+      "author": "HIVE-MIND Team",
+      "license": "EUPL-1.2",
+      "type": "visualization",
+      "downloads": 1102,
+      "rating": 4.6,
+      "tags": ["visualization", "graph", "d3", "charts"],
+      "capabilities": [
+        "renderGraph",
+        "renderTimeline",
+        "renderClusters",
+        "exportImage",
+        "exportHTML"
+      ],
+      "installUrl": "https://marketplace.hivemind.ai/skills/graph-visualizer/1.0.0",
+      "icon": "🕸️"
+    },
+    {
+      "id": "slack-integration",
+      "name": "Slack Integration",
+      "version": "1.0.0",
+      "description": "Import messages and decisions from Slack channels into HIVE-MIND",
+      "author": "HIVE-MIND Community",
+      "license": "MIT",
+      "type": "integration",
+      "downloads": 634,
+      "rating": 4.3,
+      "tags": ["integration", "slack", "import", "team"],
+      "capabilities": [
+        "connectWorkspace",
+        "importChannel",
+        "syncMessages",
+        "extractDecisions"
+      ],
+      "installUrl": "https://marketplace.hivemind.ai/skills/slack-integration/1.0.0",
+      "icon": "💬"
+    },
+    {
+      "id": "github-integration",
+      "name": "GitHub Integration",
+      "version": "1.0.0",
+      "description": "Sync code changes, PRs, and issues from GitHub into memory",
+      "author": "HIVE-MIND Community",
+      "license": "MIT",
+      "type": "integration",
+      "downloads": 821,
+      "rating": 4.4,
+      "tags": ["integration", "github", "code", "git"],
+      "capabilities": [
+        "connectRepo",
+        "syncCommits",
+        "syncPRs",
+        "syncIssues",
+        "extractCodeKnowledge"
+      ],
+      "installUrl": "https://marketplace.hivemind.ai/skills/github-integration/1.0.0",
+      "icon": "🐙"
+    },
+    {
+      "id": "ontology-extractor",
+      "name": "Ontology Extractor",
+      "version": "1.0.0",
+      "description": "Automatically extract entity types and relationships from documents using LLM",
+      "author": "HIVE-MIND Team",
+      "license": "EUPL-1.2",
+      "type": "ingestion",
+      "downloads": 445,
+      "rating": 4.7,
+      "tags": ["ingestion", "ontology", "llm", "extraction"],
+      "capabilities": [
+        "extractFromDocument",
+        "extractFromBatch",
+        "validateOntology",
+        "generateEntityTypes"
+      ],
+      "installUrl": "https://marketplace.hivemind.ai/skills/ontology-extractor/1.0.0",
+      "icon": "🧬"
+    },
+    {
+      "id": "gdpr-exporter",
+      "name": "GDPR Exporter",
+      "version": "1.0.0",
+      "description": "Export and delete user data for GDPR compliance",
+      "author": "HIVE-MIND Team",
+      "license": "EUPL-1.2",
+      "type": "utility",
+      "downloads": 389,
+      "rating": 4.9,
+      "tags": ["gdpr", "compliance", "export", "privacy"],
+      "capabilities": [
+        "exportUserData",
+        "deleteUserData",
+        "anonymizeData",
+        "generateReport"
+      ],
+      "installUrl": "https://marketplace.hivemind.ai/skills/gdpr-exporter/1.0.0",
+      "icon": "🔒",
+      "enterprise": true
+    },
+    {
+      "id": "multi-dimensional-scorer",
+      "name": "Multi-Dimensional Scorer",
+      "version": "1.0.0",
+      "description": "Advanced memory scoring with influence, sentiment, and stance weights",
+      "author": "HIVE-MIND Team",
+      "license": "EUPL-1.2",
+      "type": "analysis",
+      "downloads": 567,
+      "rating": 4.6,
+      "tags": ["scoring", "ranking", "analysis", "enterprise"],
+      "capabilities": [
+        "calculateScore",
+        "configureWeights",
+        "analyzeDistribution",
+        "getScoreBreakdown"
+      ],
+      "installUrl": "https://marketplace.hivemind.ai/skills/multi-dimensional-scorer/1.0.0",
+      "icon": "⚖️"
+    }
+  ],
+  "categories": [
+    {
+      "id": "analysis",
+      "name": "Analysis",
+      "description": "Skills for analyzing and generating insights from memories",
+      "icon": "📊"
+    },
+    {
+      "id": "ingestion",
+      "name": "Ingestion",
+      "description": "Skills for importing and processing data",
+      "icon": "📥"
+    },
+    {
+      "id": "integration",
+      "name": "Integration",
+      "description": "Skills for connecting with external services",
+      "icon": "🔌"
+    },
+    {
+      "id": "query",
+      "name": "Query",
+      "description": "Skills for advanced querying and retrieval",
+      "icon": "🔍"
+    },
+    {
+      "id": "visualization",
+      "name": "Visualization",
+      "description": "Skills for visualizing memory graphs and data",
+      "icon": "📈"
+    },
+    {
+      "id": "utility",
+      "name": "Utility",
+      "description": "General utility skills",
+      "icon": "🛠️"
+    }
+  ],
+  "stats": {
+    "totalSkills": 10,
+    "totalDownloads": 8934,
+    "averageRating": 4.65
+  }
+}

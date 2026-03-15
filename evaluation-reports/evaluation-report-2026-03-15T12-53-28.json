@@ -1,0 +1,528 @@
+{
+  "timestamp": "2026-03-15T12:53:28.567Z",
+  "evaluationId": "affad0e7-1faa-466d-bb7e-7ba1096b2de9",
+  "duration": 4,
+  "summary": {
+    "precisionAt5": {
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "median": 0
+    },
+    "precisionAt10": {
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "median": 0
+    },
+    "recallAt10": {
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "median": 0
+    },
+    "f1At10": {
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "median": 0
+    },
+    "ndcgAt10": {
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "median": 0
+    },
+    "mrr": {
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "median": 0
+    },
+    "latencyP99": 1,
+    "latencyP95": 1,
+    "latencyP50": 0,
+    "qualityScore": 10,
+    "totalQueries": 5,
+    "successfulQueries": 5,
+    "failedQueries": 5
+  },
+  "byCategory": {
+    "personal": {
+      "count": 1,
+      "metrics": {
+        "precisionAt5": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "precisionAt10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "recallAt10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "f1At10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "ndcgAt10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "mrr": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        }
+      }
+    },
+    "business": {
+      "count": 3,
+      "metrics": {
+        "precisionAt5": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "precisionAt10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "recallAt10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "f1At10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "ndcgAt10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "mrr": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        }
+      }
+    },
+    "technical": {
+      "count": 1,
+      "metrics": {
+        "precisionAt5": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "precisionAt10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "recallAt10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "f1At10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "ndcgAt10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "mrr": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        }
+      }
+    }
+  },
+  "bySearchMethod": {
+    "quick": {
+      "count": 5,
+      "metrics": {
+        "precisionAt5": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "precisionAt10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "recallAt10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "f1At10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "ndcgAt10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "mrr": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        }
+      },
+      "latencyP99": 1,
+      "latencyP95": 1
+    }
+  },
+  "failedQueries": [
+    {
+      "query": "What are the key takeaways from the workshop?",
+      "method": "quick",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "Show me the customer feedback from last month",
+      "method": "quick",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "What is the caching strategy for Redis?",
+      "method": "quick",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "What are the Q3 revenue targets?",
+      "method": "quick",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "What partnerships are we exploring this quarter?",
+      "method": "quick",
+      "reason": "Thresholds not met"
+    }
+  ],
+  "targets": {
+    "precisionAt5": 0.8,
+    "recallAt10": 0.7,
+    "f1Score": 0.75,
+    "ndcgAt10": 0.75,
+    "mrr": 0.6,
+    "latencyP99": 300
+  },
+  "methods": [
+    "quick"
+  ],
+  "rawResults": [
+    {
+      "requestId": "74cd8747-fb64-4838-aeeb-ca89d39e6763",
+      "query": "What are the key takeaways from the workshop?",
+      "category": "personal",
+      "method": "quick",
+      "latencyMs": 0,
+      "relevantCount": 2,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 2
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440064",
+        "550e8400-e29b-41d4-a716-446655440065"
+      ],
+      "timestamp": "2026-03-15T12:53:28.566Z"
+    },
+    {
+      "requestId": "0ce822d1-bbf9-4e50-8056-e014ce6c76f4",
+      "query": "Show me the customer feedback from last month",
+      "category": "business",
+      "method": "quick",
+      "latencyMs": 0,
+      "relevantCount": 4,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 4
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440027",
+        "550e8400-e29b-41d4-a716-446655440028",
+        "550e8400-e29b-41d4-a716-446655440029",
+        "550e8400-e29b-41d4-a716-446655440030"
+      ],
+      "timestamp": "2026-03-15T12:53:28.566Z"
+    },
+    {
+      "requestId": "569d274c-6b98-4dbb-b77a-f79639e11d29",
+      "query": "What is the caching strategy for Redis?",
+      "category": "technical",
+      "method": "quick",
+      "latencyMs": 0,
+      "relevantCount": 2,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 2
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440010",
+        "550e8400-e29b-41d4-a716-446655440011"
+      ],
+      "timestamp": "2026-03-15T12:53:28.566Z"
+    },
+    {
+      "requestId": "3c1c07df-58da-4495-a1d8-3476a0356e63",
+      "query": "What are the Q3 revenue targets?",
+      "category": "business",
+      "method": "quick",
+      "latencyMs": 1,
+      "relevantCount": 2,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 1,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 2
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440025",
+        "550e8400-e29b-41d4-a716-446655440026"
+      ],
+      "timestamp": "2026-03-15T12:53:28.567Z"
+    },
+    {
+      "requestId": "0daaabb7-45eb-4670-b3cd-a4b28008895f",
+      "query": "What partnerships are we exploring this quarter?",
+      "category": "business",
+      "method": "quick",
+      "latencyMs": 0,
+      "relevantCount": 3,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 3
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440040",
+        "550e8400-e29b-41d4-a716-446655440041",
+        "550e8400-e29b-41d4-a716-446655440042"
+      ],
+      "timestamp": "2026-03-15T12:53:28.567Z"
+    }
+  ]
+}

@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HIVE-MIND Webapp Wrapper</title>
+  <style>
+    :root {
+      --bg: #f1ece2;
+      --ink: #191612;
+      --muted: #756a5f;
+      --panel: rgba(255,255,255,0.72);
+      --line: rgba(25,22,18,0.12);
+      --accent: #d36b2d;
+      --accent-2: #1e6f5c;
+      --shadow: 0 18px 50px rgba(25,22,18,0.12);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
+      background:
+        radial-gradient(900px 500px at 5% 0%, rgba(211,107,45,0.16), transparent 60%),
+        radial-gradient(700px 500px at 95% 10%, rgba(30,111,92,0.16), transparent 60%),
+        linear-gradient(180deg, #f5efe6 0%, #efe7da 100%);
+      min-height: 100vh;
+    }
+    .shell {
+      max-width: 1320px;
+      margin: 0 auto;
+      padding: 28px 20px 40px;
+    }
+    .hero {
+      display: grid;
+      grid-template-columns: 1.3fr 0.7fr;
+      gap: 18px;
+      margin-bottom: 18px;
+    }
+    .panel {
+      background: var(--panel);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+    }
+    .hero-main {
+      padding: 28px;
+      min-height: 220px;
+      position: relative;
+      overflow: hidden;
+    }
+    .hero-main::after {
+      content: "";
+      position: absolute;
+      right: -40px;
+      top: -40px;
+      width: 240px;
+      height: 240px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(211,107,45,0.18), transparent 65%);
+    }
+    .eyebrow {
+      font: 700 11px/1.1 "IBM Plex Sans", "Helvetica Neue", sans-serif;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--accent-2);
+      margin-bottom: 14px;
+    }
+    h1 {
+      margin: 0 0 10px;
+      font-size: clamp(40px, 7vw, 74px);
+      line-height: 0.96;
+      letter-spacing: -0.045em;
+      max-width: 9ch;
+    }
+    .sub {
+      max-width: 58ch;
+      color: var(--muted);
+      font: 500 17px/1.5 "IBM Plex Sans", "Helvetica Neue", sans-serif;
+    }
+    .hero-side {
+      padding: 22px;
+      display: grid;
+      gap: 12px;
+      align-content: start;
+    }
+    .metric {
+      padding: 14px 16px;
+      border-radius: 18px;
+      background: rgba(255,255,255,0.58);
+      border: 1px solid rgba(25,22,18,0.08);
+    }
+    .metric-label {
+      color: var(--muted);
+      font: 700 11px/1 "IBM Plex Sans", sans-serif;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+    .metric-value {
+      font: 700 24px/1.05 "IBM Plex Sans", sans-serif;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 380px 1fr;
+      gap: 18px;
+    }
+    .stack {
+      display: grid;
+      gap: 18px;
+    }
+    .controls {
+      padding: 20px;
+    }
+    .section-title {
+      margin: 0 0 14px;
+      font: 700 18px/1.1 "IBM Plex Sans", sans-serif;
+      letter-spacing: -0.02em;
+    }
+    label {
+      display: block;
+      font: 700 11px/1.1 "IBM Plex Sans", sans-serif;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin: 0 0 6px;
+    }
+    input, textarea, select {
+      width: 100%;
+      border: 1px solid rgba(25,22,18,0.12);
+      background: rgba(255,255,255,0.78);
+      border-radius: 14px;
+      padding: 11px 13px;
+      color: var(--ink);
+      font: 500 14px/1.4 "IBM Plex Sans", sans-serif;
+      outline: none;
+    }
+    textarea { min-height: 108px; resize: vertical; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 12px;
+    }
+    button {
+      border: 0;
+      border-radius: 999px;
+      cursor: pointer;
+      padding: 11px 16px;
+      font: 700 13px/1 "IBM Plex Sans", sans-serif;
+      letter-spacing: 0.02em;
+    }
+    button.primary {
+      background: var(--ink);
+      color: #fff7ee;
+    }
+    button.secondary {
+      background: rgba(255,255,255,0.72);
+      color: var(--ink);
+      border: 1px solid rgba(25,22,18,0.12);
+    }
+    .status {
+      min-height: 18px;
+      margin-top: 10px;
+      color: var(--muted);
+      font: 500 13px/1.4 "IBM Plex Sans", sans-serif;
+    }
+    .workspace {
+      padding: 20px;
+      min-height: 680px;
+      display: grid;
+      grid-template-rows: auto auto 1fr auto;
+      gap: 16px;
+    }
+    .workspace-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: start;
+    }
+    .workspace-head p {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font: 500 14px/1.5 "IBM Plex Sans", sans-serif;
+    }
+    .chips {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .chip {
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(211,107,45,0.1);
+      color: var(--accent);
+      border: 1px solid rgba(211,107,45,0.16);
+      font: 700 11px/1 "IBM Plex Sans", sans-serif;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .messages {
+      border: 1px solid rgba(25,22,18,0.08);
+      border-radius: 20px;
+      padding: 14px;
+      background: rgba(255,255,255,0.55);
+      overflow: auto;
+      min-height: 260px;
+      max-height: 360px;
+    }
+    .msg {
+      padding: 12px 14px;
+      border-radius: 16px;
+      margin-bottom: 10px;
+      font: 500 14px/1.55 "IBM Plex Sans", sans-serif;
+      white-space: pre-wrap;
+    }
+    .msg.system {
+      background: rgba(30,111,92,0.08);
+      border: 1px solid rgba(30,111,92,0.14);
+    }
+    .msg.user {
+      background: rgba(25,22,18,0.06);
+      border: 1px solid rgba(25,22,18,0.08);
+    }
+    .msg.assistant {
+      background: rgba(211,107,45,0.08);
+      border: 1px solid rgba(211,107,45,0.12);
+    }
+    .composer textarea {
+      min-height: 128px;
+    }
+    .output {
+      background: #181612;
+      color: #efe7da;
+      border-radius: 20px;
+      border: 1px solid rgba(255,255,255,0.06);
+      padding: 16px;
+      overflow: auto;
+      max-height: 250px;
+      font: 500 12px/1.5 "SFMono-Regular", "Menlo", monospace;
+      white-space: pre-wrap;
+    }
+    .hint {
+      color: var(--muted);
+      font: 500 12px/1.45 "IBM Plex Sans", sans-serif;
+      margin-top: 8px;
+    }
+    @media (max-width: 1024px) {
+      .hero, .grid, .row { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <article class="panel hero-main">
+        <div class="eyebrow">HIVE-MIND Webapp Bridge</div>
+        <h1>Wrap web AI with memory.</h1>
+        <p class="sub">Use the same HIVE-MIND retrieval engine for ChatGPT-style and Gemini-style clients without MCP. This page prepares scoped context, assembles the prompt envelope, and stores useful outputs back into persisted memory.</p>
+      </article>
+      <aside class="panel hero-side">
+        <div class="metric">
+          <div class="metric-label">Flow</div>
+          <div class="metric-value">Prepare → Send → Store</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Transport</div>
+          <div class="metric-value">HTTP middleware</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Target apps</div>
+          <div class="metric-value">ChatGPT · Gemini · wrappers</div>
+        </div>
+      </aside>
+    </section>
+
+    <section class="grid">
+      <div class="stack">
+        <article class="panel controls">
+          <h2 class="section-title">Environment</h2>
+          <label for="apiBase">API Base</label>
+          <input id="apiBase" value="http://localhost:3000" />
+          <label for="apiKey" style="margin-top: 12px;">API Key</label>
+          <input id="apiKey" value="hmk_live_5bd201c987655495883abfd768c6a2b3757c3901ade829ab" />
+          <div class="actions">
+            <button class="secondary" id="healthBtn">Check Health</button>
+          </div>
+          <div class="status" id="envStatus"></div>
+        </article>
+
+        <article class="panel controls">
+          <h2 class="section-title">Prompt Scope</h2>
+          <div class="row">
+            <div>
+              <label for="platform">Platform</label>
+              <select id="platform">
+                <option value="chatgpt">ChatGPT</option>
+                <option value="gemini">Gemini</option>
+                <option value="claude">Claude</option>
+              </select>
+            </div>
+            <div>
+              <label for="project">Project</label>
+              <input id="project" value="atlas" />
+            </div>
+          </div>
+          <label for="preferredSources" style="margin-top: 12px;">Preferred Sources</label>
+          <input id="preferredSources" value="chatgpt" />
+          <label for="preferredTags" style="margin-top: 12px;">Preferred Tags</label>
+          <input id="preferredTags" value="deploy" />
+          <label for="query" style="margin-top: 12px;">User Prompt</label>
+          <textarea id="query">What do we know about Atlas deployment?</textarea>
+          <div class="actions">
+            <button class="primary" id="prepareBtn">Prepare Context</button>
+            <button class="secondary" id="resetBtn">Reset</button>
+          </div>
+          <div class="status" id="prepareStatus"></div>
+        </article>
+
+        <article class="panel controls">
+          <h2 class="section-title">Store Output</h2>
+          <label for="memoryTitle">Title</label>
+          <input id="memoryTitle" value="Wrapper answer" />
+          <div class="row" style="margin-top: 12px;">
+            <div>
+              <label for="memoryType">Memory Type</label>
+              <select id="memoryType">
+                <option value="fact">fact</option>
+                <option value="lesson">lesson</option>
+                <option value="decision">decision</option>
+                <option value="event">event</option>
+              </select>
+            </div>
+            <div>
+              <label for="importance">Importance</label>
+              <input id="importance" value="0.72" />
+            </div>
+          </div>
+          <label for="memoryTags" style="margin-top: 12px;">Tags</label>
+          <input id="memoryTags" value="wrapper,chatgpt,deploy" />
+          <label for="assistantOutput" style="margin-top: 12px;">Assistant Output</label>
+          <textarea id="assistantOutput" placeholder="Paste the model answer here or generate it below."></textarea>
+          <div class="actions">
+            <button class="primary" id="storeBtn">Store In HIVE-MIND</button>
+          </div>
+          <div class="status" id="storeStatus"></div>
+        </article>
+      </div>
+
+      <article class="panel workspace">
+        <div class="workspace-head">
+          <div>
+            <h2 class="section-title" style="margin:0;">Wrapper Workspace</h2>
+            <p>The left side defines retrieval policy. This workspace shows the exact prompt envelope you can send to a model API or browser wrapper.</p>
+          </div>
+          <div class="chips">
+            <span class="chip">localhost</span>
+            <span class="chip" id="activePlatformChip">chatgpt</span>
+            <span class="chip">shared memory</span>
+          </div>
+        </div>
+
+        <div class="messages" id="messages">
+          <div class="msg system">Press “Prepare Context” to assemble the system prompt from HIVE-MIND recall.</div>
+        </div>
+
+        <div class="composer">
+          <label for="simulatedAnswer">Simulated Model Answer</label>
+          <textarea id="simulatedAnswer" placeholder="Write or paste the answer you would send back from ChatGPT or Gemini."></textarea>
+          <div class="actions">
+            <button class="secondary" id="useSimulatedBtn">Copy To Store Output</button>
+          </div>
+          <div class="hint">This is a local wrapper. It does not call OpenAI or Google directly; it prepares the envelope and lets you save useful outputs back into HIVE-MIND.</div>
+        </div>
+
+        <pre class="output" id="output">Ready.</pre>
+      </article>
+    </section>
+  </main>
+
+  <script type="module">
+    import { HivemindWebClient } from '/web/hivemind-web-sdk.js';
+
+    const $ = (id) => document.getElementById(id);
+    const output = $('output');
+    const messages = $('messages');
+
+    const state = {
+      prepared: null
+    };
+
+    function setStatus(id, text, ok = true) {
+      const el = $(id);
+      el.textContent = text;
+      el.style.color = ok ? '#1e6f5c' : '#b43d25';
+    }
+
+    function setOutput(title, payload) {
+      output.textContent = `${title}\n\n${JSON.stringify(payload, null, 2)}`;
+    }
+
+    function client() {
+      return new HivemindWebClient({
+        baseUrl: $('apiBase').value.trim(),
+        apiKey: $('apiKey').value.trim()
+      });
+    }
+
+    function splitCsv(value) {
+      return value.split(',').map(item => item.trim()).filter(Boolean);
+    }
+
+    function renderPrepared(prepared) {
+      const systemPrompt = prepared?.context?.system_prompt || '';
+      const userMessage = prepared?.prompt_envelope?.messages?.find(msg => msg.role === 'user')?.content || '';
+
+      messages.innerHTML = '';
+      [
+        { role: 'system', content: systemPrompt || 'No system prompt returned.' },
+        { role: 'user', content: userMessage || 'No user prompt.' }
+      ].forEach(msg => {
+        const div = document.createElement('div');
+        div.className = `msg ${msg.role}`;
+        div.textContent = msg.content;
+        messages.appendChild(div);
+      });
+
+      $('activePlatformChip').textContent = prepared.platform;
+    }
+
+    $('healthBtn').onclick = async () => {
+      try {
+        const res = await fetch(`${$('apiBase').value.trim().replace(/\/$/, '')}/health`);
+        const data = await res.json();
+        setStatus('envStatus', `API healthy on port ${data.port}.`, true);
+        setOutput('Health', data);
+      } catch (error) {
+        setStatus('envStatus', error.message, false);
+        setOutput('Health Error', { error: error.message });
+      }
+    };
+
+    $('prepareBtn').onclick = async () => {
+      try {
+        const prepared = await client().prepareContext({
+          platform: $('platform').value,
+          query: $('query').value.trim(),
+          userPrompt: $('query').value.trim(),
+          project: $('project').value.trim() || null,
+          preferredSourcePlatforms: splitCsv($('preferredSources').value),
+          preferredTags: splitCsv($('preferredTags').value),
+          maxMemories: 5
+        });
+        state.prepared = prepared;
+        renderPrepared(prepared);
+        setStatus('prepareStatus', `Prepared ${prepared.context.memories.length} memories using ${prepared.search_method}.`, true);
+        setOutput('Prepared Context', prepared);
+      } catch (error) {
+        setStatus('prepareStatus', error.message, false);
+        setOutput('Prepare Error', { error: error.message });
+      }
+    };
+
+    $('useSimulatedBtn').onclick = () => {
+      $('assistantOutput').value = $('simulatedAnswer').value;
+    };
+
+    $('storeBtn').onclick = async () => {
+      try {
+        const result = await client().storeMemory({
+          platform: $('platform').value,
+          content: $('assistantOutput').value.trim(),
+          memoryType: $('memoryType').value,
+          title: $('memoryTitle').value.trim() || null,
+          tags: splitCsv($('memoryTags').value),
+          importanceScore: Number($('importance').value || 0.5),
+          project: $('project').value.trim() || null,
+          conversationId: state.prepared?.prompt_envelope?.conversation_id || null,
+          metadata: {
+            wrapper: 'webapp-wrapper',
+            prepared_query: $('query').value.trim()
+          }
+        });
+        setStatus('storeStatus', `Stored memory ${result.memory.id}.`, true);
+        setOutput('Stored Memory', result);
+      } catch (error) {
+        setStatus('storeStatus', error.message, false);
+        setOutput('Store Error', { error: error.message });
+      }
+    };
+
+    $('resetBtn').onclick = () => {
+      state.prepared = null;
+      $('assistantOutput').value = '';
+      $('simulatedAnswer').value = '';
+      messages.innerHTML = '<div class="msg system">Press “Prepare Context” to assemble the system prompt from HIVE-MIND recall.</div>';
+      setStatus('prepareStatus', 'Reset.', true);
+      setOutput('Reset', { ok: true });
+    };
+  </script>
+</body>
+</html>

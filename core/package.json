@@ -1,0 +1,52 @@
+{
+  "name": "hivemind-core",
+  "version": "1.0.0",
+  "description": "HIVE-MIND Core Memory Engine - Graph-based AI memory with triple-operator logic, PostgreSQL + Apache AGE",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "node src/index.js",
+    "server": "node src/server.js",
+    "db:migrate": "prisma migrate deploy",
+    "db:migrate:dev": "prisma migrate dev",
+    "db:seed": "node --loader ts-node/esm src/db/seed.ts",
+    "db:studio": "prisma studio",
+    "db:generate": "prisma generate",
+    "db:reset": "prisma migrate reset",
+    "test": "node --test",
+    "test:api": "node --test tests/api/",
+    "test:unit": "node --test tests/unit/",
+    "test:integration": "node --test tests/integration/",
+    "test:coverage": "node --test --experimental-test-coverage",
+    "lint": "eslint src/**/*.ts || echo 'No ESLint configured'",
+    "check": "find src -name '*.js' -exec node --check {} \\;",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@prisma/client": "^5.10.0",
+    "bullmq": "^5.71.0",
+    "cors": "^2.8.5",
+    "ioredis": "^5.10.0",
+    "node-fetch": "^3.3.2",
+    "tree-sitter": "^0.21.1",
+    "tree-sitter-javascript": "^0.21.0",
+    "tree-sitter-python": "^0.21.0",
+    "tree-sitter-typescript": "^0.21.0",
+    "uuid": "^9.0.1",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "prisma": "^5.10.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "prisma": {
+    "schema": "prisma/schema.prisma",
+    "seed": "node --loader ts-node/esm src/db/seed.ts"
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "name": "memory-insights",
+  "version": "1.0.0",
+  "description": "Analyze memory patterns and generate insights about recall trends, memory decay, and relationship networks",
+  "type": "analysis",
+  "author": "HIVE-MIND Team",
+  "license": "EUPL-1.2",
+  "entry": "index.js",
+  "capabilities": [
+    "analyzeRecallPatterns",
+    "detectDecayAnomalies",
+    "generateMemoryReport",
+    "findMemoryClusters",
+    "trackMemoryEvolution"
+  ],
+  "permissions": [
+    "memory:read",
+    "graph:read",
+    "recall:quick",
+    "recall:panorama"
+  ],
+  "apis": [
+    "memory",
+    "graph",
+    "recall"
+  ],
+  "config": {
+    "defaultTimeRange": "30d",
+    "minClusterSize": 3,
+    "decayThreshold": 0.3,
+    "insightsLimit": 10
+  },
+  "tags": [
+    "analysis",
+    "insights",
+    "memory",
+    "reporting"
+  ]
+}

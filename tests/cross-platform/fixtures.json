@@ -1,0 +1,303 @@
+{
+  "version": "1.0.0",
+  "description": "Test fixtures for cross-platform handoff tests",
+  "testUser": {
+    "id": "test-user-fixtures",
+    "email": "test@hivemind.io",
+    "displayName": "Test User"
+  },
+  "memories": {
+    "typescriptPreference": {
+      "id": "550e8400-e29b-41d4-a716-446655440001",
+      "content": "User prefers TypeScript for backend development",
+      "memoryType": "preference",
+      "title": "Backend Language Preference",
+      "tags": ["typescript", "backend", "programming", "javascript"],
+      "sourcePlatform": "chatgpt",
+      "sourceSessionId": "chatgpt-session-001",
+      "importanceScore": 0.8,
+      "documentDate": "2024-01-15T10:30:00Z",
+      "createdAt": "2024-01-15T10:30:00Z",
+      "recallCount": 5,
+      "expectedScore": 0.85
+    },
+    "healthcareProject": {
+      "id": "550e8400-e29b-41d4-a716-446655440002",
+      "content": "User is working on a healthcare startup called MedTech",
+      "memoryType": "fact",
+      "title": "Current Project",
+      "tags": ["healthcare", "startup", "project", "work"],
+      "sourcePlatform": "claude",
+      "sourceSessionId": "claude-session-001",
+      "importanceScore": 0.9,
+      "documentDate": "2024-01-10T14:20:00Z",
+      "createdAt": "2024-01-10T14:20:00Z",
+      "recallCount": 8,
+      "expectedScore": 0.9
+    },
+    "postgresqlDecision": {
+      "id": "550e8400-e29b-41d4-a716-446655440003",
+      "content": "User decided to use PostgreSQL for the database",
+      "memoryType": "decision",
+      "title": "Database Choice",
+      "tags": ["database", "postgresql", "infrastructure", "sql"],
+      "sourcePlatform": "chatgpt",
+      "sourceSessionId": "chatgpt-session-002",
+      "importanceScore": 0.7,
+      "documentDate": "2024-01-12T09:00:00Z",
+      "createdAt": "2024-01-12T09:00:00Z",
+      "recallCount": 3,
+      "expectedScore": 0.72
+    },
+    "microservicesLesson": {
+      "id": "550e8400-e29b-41d4-a716-446655440004",
+      "content": "User learned that microservices added unnecessary complexity for their team size",
+      "memoryType": "lesson",
+      "title": "Architecture Lesson",
+      "tags": ["architecture", "microservices", "lessons", "complexity"],
+      "sourcePlatform": "claude",
+      "sourceSessionId": "claude-session-002",
+      "importanceScore": 0.6,
+      "documentDate": "2024-01-08T16:45:00Z",
+      "createdAt": "2024-01-08T16:45:00Z",
+      "recallCount": 2,
+      "expectedScore": 0.58
+    },
+    "mvpGoal": {
+      "id": "550e8400-e29b-41d4-a716-446655440005",
+      "content": "User aims to launch MVP by Q2 2024",
+      "memoryType": "goal",
+      "title": "MVP Launch Goal",
+      "tags": ["goal", "mvp", "timeline", "q2-2024"],
+      "sourcePlatform": "mcp",
+      "sourceSessionId": "mcp-session-001",
+      "importanceScore": 0.85,
+      "documentDate": "2024-01-05T11:00:00Z",
+      "createdAt": "2024-01-05T11:00:00Z",
+      "recallCount": 6,
+      "expectedScore": 0.82
+    },
+    "reactPreference": {
+      "id": "550e8400-e29b-41d4-a716-446655440006",
+      "content": "User prefers React for frontend development",
+      "memoryType": "preference",
+      "title": "Frontend Framework Preference",
+      "tags": ["react", "frontend", "javascript", "ui"],
+      "sourcePlatform": "perplexity",
+      "sourceSessionId": "perplexity-session-001",
+      "importanceScore": 0.75,
+      "documentDate": "2024-01-14T13:30:00Z",
+      "createdAt": "2024-01-14T13:30:00Z",
+      "recallCount": 4,
+      "expectedScore": 0.78
+    },
+    "dockerEvent": {
+      "id": "550e8400-e29b-41d4-a716-446655440007",
+      "content": "User deployed first Docker container to production",
+      "memoryType": "event",
+      "title": "First Docker Deployment",
+      "tags": ["docker", "deployment", "devops", "milestone"],
+      "sourcePlatform": "chatgpt",
+      "sourceSessionId": "chatgpt-session-003",
+      "importanceScore": 0.65,
+      "documentDate": "2024-01-16T18:00:00Z",
+      "createdAt": "2024-01-16T18:00:00Z",
+      "recallCount": 1,
+      "expectedScore": 0.7
+    },
+    "teamRelationship": {
+      "id": "550e8400-e29b-41d4-a716-446655440008",
+      "content": "User works with a team of 5 developers",
+      "memoryType": "relationship",
+      "title": "Team Size",
+      "tags": ["team", "developers", "work", "relationships"],
+      "sourcePlatform": "claude",
+      "sourceSessionId": "claude-session-003",
+      "importanceScore": 0.7,
+      "documentDate": "2024-01-11T10:00:00Z",
+      "createdAt": "2024-01-11T10:00:00Z",
+      "recallCount": 3,
+      "expectedScore": 0.68
+    }
+  },
+  "sessions": {
+    "chatgptSession1": {
+      "id": "session-chatgpt-001",
+      "platformType": "chatgpt",
+      "platformSessionId": "chatgpt-session-001",
+      "userId": "test-user-fixtures",
+      "startedAt": "2024-01-15T10:00:00Z",
+      "messageCount": 25,
+      "memoriesInjected": [
+        "550e8400-e29b-41d4-a716-446655440001",
+        "550e8400-e29b-41d4-a716-446655440002",
+        "550e8400-e29b-41d4-a716-446655440003"
+      ],
+      "contextWindowUsed": 1250
+    },
+    "claudeSession1": {
+      "id": "session-claude-001",
+      "platformType": "claude",
+      "platformSessionId": "claude-session-001",
+      "userId": "test-user-fixtures",
+      "startedAt": "2024-01-10T14:00:00Z",
+      "messageCount": 18,
+      "memoriesInjected": [
+        "550e8400-e29b-41d4-a716-446655440002",
+        "550e8400-e29b-41d4-a716-446655440004"
+      ],
+      "contextWindowUsed": 980
+    },
+    "mcpSession1": {
+      "id": "session-mcp-001",
+      "platformType": "mcp",
+      "platformSessionId": "mcp-session-001",
+      "userId": "test-user-fixtures",
+      "startedAt": "2024-01-05T10:00:00Z",
+      "messageCount": 12,
+      "memoriesInjected": [
+        "550e8400-e29b-41d4-a716-446655440005"
+      ],
+      "contextWindowUsed": 650
+    }
+  },
+  "testQueries": {
+    "backendLanguage": {
+      "query": "What programming language does the user prefer for backend?",
+      "expectedMemoryIds": ["550e8400-e29b-41d4-a716-446655440001"],
+      "expectedTypes": ["preference"]
+    },
+    "currentProject": {
+      "query": "What project is the user working on?",
+      "expectedMemoryIds": ["550e8400-e29b-41d4-a716-446655440002"],
+      "expectedTypes": ["fact"]
+    },
+    "databaseChoice": {
+      "query": "What database did the user choose?",
+      "expectedMemoryIds": ["550e8400-e29b-41d4-a716-446655440003"],
+      "expectedTypes": ["decision"]
+    },
+    "architectureLessons": {
+      "query": "What has the user learned about architecture?",
+      "expectedMemoryIds": ["550e8400-e29b-41d4-a716-446655440004"],
+      "expectedTypes": ["lesson"]
+    },
+    "goals": {
+      "query": "What are the user's goals?",
+      "expectedMemoryIds": ["550e8400-e29b-41d4-a716-446655440005"],
+      "expectedTypes": ["goal"]
+    },
+    "frontendStack": {
+      "query": "What frontend framework does the user use?",
+      "expectedMemoryIds": ["550e8400-e29b-41d4-a716-446655440006"],
+      "expectedTypes": ["preference"]
+    },
+    "teamContext": {
+      "query": "How big is the user's team?",
+      "expectedMemoryIds": ["550e8400-e29b-41d4-a716-446655440008"],
+      "expectedTypes": ["relationship"]
+    }
+  },
+  "platformConfigurations": {
+    "chatgpt": {
+      "name": "ChatGPT",
+      "authType": "oauth2",
+      "webhookSecret": "test-chatgpt-webhook-secret",
+      "endpoints": {
+        "memories": "/api/memories",
+        "recall": "/api/recall",
+        "webhook": "/integrations/chatgpt/webhook"
+      }
+    },
+    "claude": {
+      "name": "Claude",
+      "authType": "api_key",
+      "webhookSecret": "test-claude-webhook-secret",
+      "endpoints": {
+        "memories": "/api/memories",
+        "recall": "/api/recall",
+        "webhook": "/integrations/claude/webhook"
+      }
+    },
+    "mcp": {
+      "name": "MCP Server",
+      "authType": "api_key",
+      "tools": [
+        "save_memory",
+        "recall",
+        "list_memories",
+        "get_memory",
+        "delete_memory",
+        "get_context",
+        "search_memories",
+        "traverse_graph"
+      ]
+    },
+    "perplexity": {
+      "name": "Perplexity",
+      "authType": "api_key",
+      "webhookSecret": "test-perplexity-webhook-secret",
+      "endpoints": {
+        "memories": "/api/memories",
+        "recall": "/api/recall",
+        "webhook": "/integrations/perplexity/webhook"
+      }
+    }
+  },
+  "expectedBehaviors": {
+    "crossPlatformRecall": {
+      "description": "Memories from any platform should be recallable from any other platform",
+      "test": "Create memory on platform A, recall from platform B",
+      "expected": "Memory found with correct sourcePlatform field"
+    },
+    "contextInjection": {
+      "description": "Context should be injected before LLM inference",
+      "format": "XML with <relevant-memories> root element",
+      "maxTokens": 2000,
+      "maxMemories": 20
+    },
+    "memoryUpdates": {
+      "description": "Updated memories should propagate to all platforms",
+      "test": "Update memory created on platform A, verify visible from platform B",
+      "expected": "Updated content visible within 1 second"
+    },
+    "scoringWeights": {
+      "description": "Scoring should respect configured weights",
+      "defaultWeights": {
+        "similarity": 0.5,
+        "recency": 0.3,
+        "importance": 0.2
+      },
+      "test": "Query with low recency bias should favor high-importance memories"
+    },
+    "performance": {
+      "description": "Recall latency should meet SLA",
+      "p99Target": 300,
+      "p95Target": 200,
+      "p50Target": 100,
+      "unit": "milliseconds"
+    }
+  },
+  "validationRules": {
+    "memoryContent": {
+      "minLength": 1,
+      "maxLength": 10000
+    },
+    "memoryTitle": {
+      "maxLength": 500
+    },
+    "memoryTags": {
+      "maxItems": 20,
+      "tagMaxLength": 50
+    },
+    "importanceScore": {
+      "min": 0,
+      "max": 1
+    },
+    "recallLimit": {
+      "min": 1,
+      "max": 50,
+      "default": 10
+    }
+  }
+}

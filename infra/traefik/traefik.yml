@@ -1,0 +1,179 @@
+# Traefik v3.0 Static Configuration
+# HIVE-MIND EU Sovereign Deployment
+# Compliance: GDPR, NIS2, DORA
+
+# Global settings
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+
+# API and dashboard configuration
+api:
+  dashboard: true
+  insecure: false
+  debug: false
+
+# Entry points configuration
+entryPoints:
+  # HTTP - redirects to HTTPS
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          permanent: true
+      middlewares:
+        - security-headers@file
+
+  # HTTPS - main secure entry point
+  websecure:
+    address: ":443"
+    http:
+      tls:
+        certResolver: letsencrypt
+        options: default
+        domains:
+          - main: "${DOMAIN_NAME:-hivemind.io}"
+            sans:
+              - "*.${DOMAIN_NAME:-hivemind.io}"
+      middlewares:
+        - security-headers@file
+      # HTTP/2 support
+      http2:
+        maxConcurrentStreams: 100
+
+  # Metrics endpoint (internal)
+  metrics:
+    address: ":8082"
+    http:
+      tls:
+        certResolver: letsencrypt
+
+  # Health check endpoint
+  health:
+    address: ":8080"
+
+# Providers configuration
+providers:
+  # Docker provider
+  docker:
+    endpoint: "unix:///var/run/docker.sock"
+    exposedByDefault: false
+    network: hivemind-network
+    watch: true
+    swarmMode: false
+    defaultRule: "false"
+
+  # File provider for dynamic configuration
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+    debugLogGeneratedRules: false
+
+# Certificate resolvers
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: "${ACME_EMAIL:-ops@hivemind.io}"
+      storage: /acme/acme.json
+      caServer: "https://acme-v02.api.letsencrypt.org/directory"
+
+      # DNS Challenge for wildcard certificates (Cloudflare)
+      dnsChallenge:
+        provider: cloudflare
+        resolvers:
+          - "1.1.1.1:53"
+          - "8.8.8.8:53"
+        delayBeforeCheck: 10
+        disablePropagationCheck: false
+
+      # Zero downtime certificate renewal
+      keyType: EC256
+
+# Logging configuration
+log:
+  level: "${TRAEFIK_LOG_LEVEL:-INFO}"
+  format: json
+  filePath: /var/log/traefik/traefik.log
+
+  # No timestamps for structured logging (handled by Docker)
+  noColor: true
+
+# Access log configuration
+accessLog:
+  level: INFO
+  format: json
+  filePath: /var/log/traefik/access.log
+  bufferingSize: 100
+
+  # Filter status codes
+  filters:
+    statusCodes:
+      - "200-299"
+      - "400-499"
+      - "500-599"
+    retryAttempts: true
+    minDuration: "10ms"
+
+  # Field filtering for GDPR compliance
+  fields:
+    defaultMode: keep
+    headers:
+      defaultMode: drop
+      names:
+        # Drop sensitive headers
+        Authorization: drop
+        Cookie: drop
+        Set-Cookie: drop
+        X-Api-Key: drop
+        X-Auth-Token: drop
+        X-Session-Token: drop
+        X-Refresh-Token: drop
+        # Keep useful headers for debugging
+        X-Request-ID: keep
+        X-Correlation-ID: keep
+        User-Agent: keep
+        X-Forwarded-For: keep
+        X-Forwarded-Proto: keep
+        Referer: keep
+
+# Metrics configuration
+metrics:
+  prometheus:
+    entryPoint: metrics
+    addEntryPointsLabels: true
+    addRoutersLabels: true
+    addServicesLabels: true
+    buckets:
+      - 0.01
+      - 0.025
+      - 0.05
+      - 0.1
+      - 0.25
+      - 0.5
+      - 1.0
+      - 2.5
+      - 5.0
+      - 10.0
+
+# Ping for health checks and load balancer health
+ping:
+  entryPoint: health
+  terminatingStatusCode: 503
+
+# Host resolution
+hostResolver:
+  cnameFlattening: true
+
+# Servers transport (for secure backend connections)
+serversTransport:
+  insecureSkipVerify: false
+  rootCAs:
+    - /etc/ssl/certs/ca-certificates.crt
+  maxIdleConnsPerHost: 100
+
+# Forwarding headers
+forwardingHeaders:
+  enabled: true

@@ -1,0 +1,54 @@
+# Qdrant Production Configuration
+# HIVE-MIND - Optimized for 1024-dim vectors (BGE-M3 embeddings)
+
+log_level: INFO
+
+storage:
+  storage_path: /qdrant/storage
+  snapshots_path: /qdrant/snapshots
+  
+  # Performance tuning
+  performance:
+    max_search_threads: 4
+    cpu_count: 2
+    max_optimization_threads: 2
+    
+  # Optimization settings
+  optimization:
+    indexing_threshold: 20000
+    vacuum_min_vector_number: 1000
+    default_segment_number: 4
+    flush_interval_sec: 60
+    
+  # Memory-mapped files
+  memmap:
+    enabled: true
+
+service:
+  http_port: 6333
+  grpc_port: 6334
+  
+  # API key for authentication
+  api_key: dev_api_key_hivemind_2026
+  
+  # CORS for local development
+  cors:
+    enabled: true
+    allow_origin: "*"
+    
+  # JWT RBAC (disable for local dev)
+  jwt_rbac: false
+
+# Cluster configuration (single node for local)
+cluster:
+  enabled: false
+
+# Telemetry (disable for privacy)
+telemetry:
+  disabled: true
+
+# Metrics endpoint for Prometheus
+metrics:
+  enabled: true
+  port: 9090
+  path: /metrics

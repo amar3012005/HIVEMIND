@@ -1,0 +1,360 @@
+# HIVE-MIND Kubernetes Ingress and Services
+# K3s Production Deployment - EU Sovereign
+# Traefik v3.0 Ingress with TLS
+
+---
+# ==========================================
+# INGRESS CLASS
+# ==========================================
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: traefik
+  labels:
+    app: traefik
+spec:
+  controller: traefik.io/ingress-controller
+
+---
+# ==========================================
+# MAIN API INGRESS
+# ==========================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hivemind-api-ingress
+  namespace: hivemind
+  labels:
+    app: hivemind-api
+  annotations:
+    # Traefik specific annotations
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    traefik.ingress.kubernetes.io/router.tls.certresolver: letsencrypt
+
+    # TLS options
+    traefik.ingress.kubernetes.io/router.tls.options: default
+
+    # Middlewares
+    traefik.ingress.kubernetes.io/router.middlewares: hivemind-rate-limit-api@kubernetescrd,hivemind-security-headers@kubernetescrd
+
+    # Rate limiting
+    traefik.ingress.kubernetes.io/rate-limit-average: "100"
+    traefik.ingress.kubernetes.io/rate-limit-burst: "200"
+
+    # CORS
+    traefik.ingress.kubernetes.io/cors-allow-origin: "https://hivemind.io,https://app.hivemind.io"
+    traefik.ingress.kubernetes.io/cors-allow-methods: "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+    traefik.ingress.kubernetes.io/cors-allow-headers: "Authorization,Content-Type,X-Request-ID"
+    traefik.ingress.kubernetes.io/cors-allow-credentials: "true"
+
+    # Security headers
+    traefik.ingress.kubernetes.io/headers-custom-response: |
+      X-Content-Type-Options: nosniff
+      X-Frame-Options: DENY
+      X-XSS-Protection: 1; mode=block
+      Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+      Content-Security-Policy: default-src 'self'
+
+    # SSL redirect
+    traefik.ingress.kubernetes.io/ssl-redirect: "true"
+
+    # Service configuration
+    traefik.ingress.kubernetes.io/service.sticky: "true"
+    traefik.ingress.kubernetes.io/service.sticky.cookie.httponly: "true"
+    traefik.ingress.kubernetes.io/service.sticky.cookie.secure: "true"
+
+    # Health check
+    traefik.ingress.kubernetes.io/healthcheck-path: /health
+    traefik.ingress.kubernetes.io/healthcheck-interval: "30s"
+    traefik.ingress.kubernetes.io/healthcheck-timeout: "10s"
+
+spec:
+  ingressClassName: traefik
+
+  # TLS configuration
+  tls:
+    - hosts:
+        - api.hivemind.io
+        - app.hivemind.io
+      secretName: hivemind-tls-secret
+
+  # Rules
+  rules:
+    # API subdomain
+    - host: api.hivemind.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: hivemind-api
+                port:
+                  number: 80
+
+    # App subdomain
+    - host: app.hivemind.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: hivemind-api
+                port:
+                  number: 80
+
+    # Main domain
+    - host: hivemind.io
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: hivemind-api
+                port:
+                  number: 80
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: hivemind-api
+                port:
+                  number: 80
+
+---
+# ==========================================
+# MONITORING INGRESS (Grafana)
+# ==========================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: grafana-ingress
+  namespace: hivemind
+  labels:
+    app: grafana
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    traefik.ingress.kubernetes.io/router.tls.certresolver: letsencrypt
+    traefik.ingress.kubernetes.io/router.middlewares: hivemind-auth-monitoring@kubernetescrd
+    # Restrict to internal network
+    traefik.ingress.kubernetes.io/ip-whitelist-source-range: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - grafana.hivemind.io
+      secretName: grafana-tls-secret
+  rules:
+    - host: grafana.hivemind.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: grafana-service
+                port:
+                  number: 3000
+
+---
+# ==========================================
+# PROMETHEUS INGRESS
+# ==========================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: prometheus-ingress
+  namespace: hivemind
+  labels:
+    app: prometheus
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    traefik.ingress.kubernetes.io/router.tls.certresolver: letsencrypt
+    traefik.ingress.kubernetes.io/router.middlewares: hivemind-auth-monitoring@kubernetescrd
+    traefik.ingress.kubernetes.io/ip-whitelist-source-range: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - prometheus.hivemind.io
+      secretName: prometheus-tls-secret
+  rules:
+    - host: prometheus.hivemind.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: prometheus-service
+                port:
+                  number: 9090
+
+---
+# ==========================================
+# GRAFANA SERVICE
+# ==========================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana-service
+  namespace: hivemind
+  labels:
+    app: grafana
+spec:
+  type: ClusterIP
+  selector:
+    app: grafana
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+      protocol: TCP
+
+---
+# ==========================================
+# PROMETHEUS SERVICE
+# ==========================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-service
+  namespace: hivemind
+  labels:
+    app: prometheus
+spec:
+  type: ClusterIP
+  selector:
+    app: prometheus
+  ports:
+    - name: http
+      port: 9090
+      targetPort: 9090
+      protocol: TCP
+
+---
+# ==========================================
+# REDIS SERVICE
+# ==========================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+  namespace: hivemind
+  labels:
+    app: redis
+spec:
+  type: ClusterIP
+  clusterIP: None  # Headless for StatefulSet
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+      protocol: TCP
+
+---
+# ==========================================
+# QDRANT SERVICE
+# ==========================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: qdrant-service
+  namespace: hivemind
+  labels:
+    app: qdrant
+spec:
+  type: ClusterIP
+  selector:
+    app: qdrant
+  ports:
+    - name: http
+      port: 6333
+      targetPort: 6333
+      protocol: TCP
+    - name: grpc
+      port: 6334
+      targetPort: 6334
+      protocol: TCP
+
+---
+# ==========================================
+# TLS SECRET (Template)
+# ==========================================
+# Note: In production, use cert-manager or external secrets
+# This is a template - replace with actual certificate or use cert-manager
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hivemind-tls-secret
+  namespace: hivemind
+  labels:
+    app: hivemind-api
+type: kubernetes.io/tls
+# data:
+#   tls.crt: <base64 encoded certificate>
+#   tls.key: <base64 encoded private key>
+stringData:
+  # Placeholder - will be populated by Traefik ACME
+  tls.crt: ""
+  tls.key: ""
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: grafana-tls-secret
+  namespace: hivemind
+  labels:
+    app: grafana
+type: kubernetes.io/tls
+stringData:
+  tls.crt: ""
+  tls.key: ""
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: prometheus-tls-secret
+  namespace: hivemind
+  labels:
+    app: prometheus
+type: kubernetes.io/tls
+stringData:
+  tls.crt: ""
+  tls.key: ""
+
+---
+# ==========================================
+# EXTERNAL SECRET STORE (Optional - for production)
+# ==========================================
+# Uncomment and configure when using External Secrets Operator
+# apiVersion: external-secrets.io/v1beta1
+# kind: ExternalSecret
+# metadata:
+#   name: hivemind-secrets
+#   namespace: hivemind
+# spec:
+#   refreshInterval: 1h
+#   secretStoreRef:
+#     name: ovhcloud-hsm
+#     kind: ClusterSecretStore
+#   target:
+#     name: hivemind-api-secrets
+#   data:
+#     - secretKey: DATABASE_URL
+#       remoteRef:
+#         key: hivemind/database
+#         property: url
+#     - secretKey: POSTGRES_PASSWORD
+#       remoteRef:
+#         key: hivemind/database
+#         property: password

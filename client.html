@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HIVE-MIND - Sovereign Memory</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: linear-gradient(135deg, #0a0a0f 0%, #12121a 100%);
+            min-height: 100vh;
+            color: #f8fafc;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        }
+        .glass {
+            background: rgba(18, 18, 26, 0.6);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(99, 102, 241, 0.2);
+            border-radius: 12px;
+        }
+        .btn-primary {
+            background: linear-gradient(135deg, #6366f1, #8b5cf6);
+            transition: all 0.2s ease;
+        }
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 40px rgba(99, 102, 241, 0.4);
+        }
+        .card {
+            transition: all 0.2s ease;
+        }
+        .card:hover {
+            transform: translateY(-4px);
+            border-color: rgba(99, 102, 241, 0.4);
+        }
+        .input-dark {
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(99, 102, 241, 0.3);
+            color: #f8fafc;
+            border-radius: 8px;
+        }
+        .input-dark:focus {
+            outline: none;
+            border-color: #6366f1;
+            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+        }
+        .tab-btn {
+            transition: all 0.2s ease;
+        }
+        .tab-btn.active {
+            background: rgba(99, 102, 241, 0.2);
+            border-bottom: 2px solid #6366f1;
+        }
+        .toast {
+            animation: slideIn 0.3s ease;
+        }
+        @keyframes slideIn {
+            from { transform: translateX(400px); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+        [x-cloak] { display: none !important; }
+    </style>
+</head>
+<body>
+    <div x-data="hiveMind()" x-init="init()" class="min-h-screen">
+        <!-- Header -->
+        <header class="glass m-4 p-6 flex justify-between items-center">
+            <div>
+                <h1 class="text-3xl font-bold bg-gradient-to-r from-indigo-400 to-violet-400 bg-clip-text text-transparent">
+                    🧠 HIVE-MIND
+                </h1>
+                <p class="text-gray-400 text-sm mt-1">Sovereign AI Memory Platform</p>
+            </div>
+            <div class="flex items-center gap-4">
+                <div class="flex items-center gap-2">
+                    <div class="w-2 h-2 rounded-full" :class="apiStatus === 'connected' ? 'bg-green-500' : 'bg-red-500'"></div>
+                    <span class="text-sm text-gray-400" x-text="apiStatus"></span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Navigation -->
+        <nav class="px-4 mb-4">
+            <div class="glass p-2 flex gap-2 overflow-x-auto">
+                <template x-for="tab in tabs" :key="tab">
+                    <button 
+                        @click="currentTab = tab"
+                        class="tab-btn px-6 py-3 rounded-lg font-medium whitespace-nowrap"
+                        :class="{'active bg-indigo-500/20 text-indigo-400': currentTab === tab, 'text-gray-400 hover:text-white': currentTab !== tab}"
+                        x-text="tab"
+                    ></button>
+                </template>
+            </div>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="px-4 pb-4">
+            <!-- Dashboard Tab -->
+            <div x-show="currentTab === 'Dashboard'" x-transition class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                <div class="glass p-6 card">
+                    <div class="text-gray-400 text-sm mb-2">Total Memories</div>
+                    <div class="text-4xl font-bold text-indigo-400" x-text="stats.total_memories || 0"></div>
+                </div>
+                <div class="glass p-6 card">
+                    <div class="text-gray-400 text-sm mb-2">Active Memories</div>
+                    <div class="text-4xl font-bold text-green-400" x-text="stats.active_memories || 0"></div>
+                </div>
+                <div class="glass p-6 card">
+                    <div class="text-gray-400 text-sm mb-2">Relationships</div>
+                    <div class="text-4xl font-bold text-violet-400" x-text="stats.relationships || 0"></div>
+                </div>
+                
+                <div class="glass p-6 card md:col-span-2">
+                    <h3 class="text-lg font-semibold mb-4">Recent Memories</h3>
+                    <div class="space-y-3 max-h-64 overflow-y-auto">
+                        <template x-for="mem in memories.slice(0, 5)" :key="mem.id">
+                            <div class="p-3 bg-black/20 rounded-lg">
+                                <div class="text-sm" x-text="mem.content"></div>
+                                <div class="flex gap-2 mt-2">
+                                    <template x-for="tag in mem.tags.slice(0, 3)" :key="tag">
+                                        <span class="text-xs px-2 py-1 bg-indigo-500/20 text-indigo-400 rounded" x-text="tag"></span>
+                                    </template>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+                
+                <div class="glass p-6 card">
+                    <h3 class="text-lg font-semibold mb-4">Tag Distribution</h3>
+                    <canvas id="tagChart" width="200" height="200"></canvas>
+                </div>
+            </div>
+
+            <!-- Store Tab -->
+            <div x-show="currentTab === 'Store'" x-transition>
+                <div class="glass p-6 max-w-2xl mx-auto">
+                    <h3 class="text-xl font-semibold mb-4">Store New Memory</h3>
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-sm text-gray-400 mb-2">Content</label>
+                            <textarea 
+                                x-model="newMemory.content"
+                                class="input-dark w-full p-3 h-32 resize-none"
+                                placeholder="What would you like to remember?"
+                            ></textarea>
+                            <div class="text-xs text-gray-500 mt-1" x-text="`${newMemory.content.length} chars`"></div>
+                        </div>
+                        <div>
+                            <label class="block text-sm text-gray-400 mb-2">Tags (comma separated)</label>
+                            <input 
+                                type="text"
+                                x-model="newMemory.tags"
+                                class="input-dark w-full p-3"
+                                placeholder="tag1, tag2, tag3"
+                            >
+                        </div>
+                        <div>
+                            <label class="block text-sm text-gray-400 mb-2">Project</label>
+                            <input 
+                                type="text"
+                                x-model="newMemory.project"
+                                class="input-dark w-full p-3"
+                                placeholder="My Project"
+                            >
+                        </div>
+                        <button 
+                            @click="storeMemory()"
+                            class="btn-primary w-full py-3 rounded-lg font-semibold"
+                            :disabled="loading"
+                        >
+                            <span x-show="!loading">💾 Store Memory</span>
+                            <span x-show="loading">⏳ Saving...</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Search Tab -->
+            <div x-show="currentTab === 'Search'" x-transition>
+                <div class="glass p-6 max-w-3xl mx-auto">
+                    <h3 class="text-xl font-semibold mb-4">Search Memories</h3>
+                    <div class="flex gap-2 mb-4">
+                        <input 
+                            type="text"
+                            x-model="searchQuery"
+                            @input="searchMemories()"
+                            class="input-dark flex-1 p-3"
+                            placeholder="Search by meaning or keywords..."
+                        >
+                    </div>
+                    <div class="space-y-3">
+                        <template x-for="mem in searchResults" :key="mem.id">
+                            <div class="glass p-4 card">
+                                <div class="flex justify-between items-start">
+                                    <div class="flex-1">
+                                        <div class="text-sm mb-2" x-text="mem.content"></div>
+                                        <div class="flex gap-2 flex-wrap">
+                                            <template x-for="tag in mem.tags" :key="tag">
+                                                <span class="text-xs px-2 py-1 bg-indigo-500/20 text-indigo-400 rounded" x-text="tag"></span>
+                                            </template>
+                                        </div>
+                                    </div>
+                                    <div class="text-right">
+                                        <div class="text-xs text-gray-400">Score</div>
+                                        <div class="text-lg font-bold text-green-400" x-text="mem.score ? (mem.score * 100).toFixed(0) + '%' : '-'"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </template>
+                        <div x-show="searchResults.length === 0" class="text-center text-gray-400 py-8">
+                            No results found
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Graph Tab -->
+            <div x-show="currentTab === 'Graph'" x-transition>
+                <div class="glass p-6">
+                    <h3 class="text-xl font-semibold mb-4">Memory Relationships</h3>
+                    <div class="space-y-3 max-h-96 overflow-y-auto">
+                        <template x-for="rel in relationships" :key="rel.id">
+                            <div class="glass p-4 flex items-center justify-between">
+                                <div class="flex items-center gap-4">
+                                    <span class="text-xs px-2 py-1 bg-indigo-500/20 text-indigo-400 rounded" x-text="rel.type"></span>
+                                    <span class="text-sm" x-text="rel.from_id"></span>
+                                    <span class="text-gray-400">→</span>
+                                    <span class="text-sm" x-text="rel.to_id"></span>
+                                </div>
+                            </div>
+                        </template>
+                        <div x-show="relationships.length === 0" class="text-center text-gray-400 py-8">
+                            No relationships yet
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Relationships Tab -->
+            <div x-show="currentTab === 'Relationships'" x-transition>
+                <div class="glass p-6">
+                    <h3 class="text-xl font-semibold mb-4">All Relationships</h3>
+                    <div class="space-y-3">
+                        <template x-for="rel in relationships" :key="rel.id">
+                            <div class="glass p-4">
+                                <div class="flex justify-between items-center">
+                                    <div>
+                                        <span class="text-xs px-2 py-1 bg-violet-500/20 text-violet-400 rounded" x-text="rel.type"></span>
+                                        <span class="ml-3 text-sm" x-text="`${rel.from_id} → ${rel.to_id}`"></span>
+                                    </div>
+                                    <button @click="deleteRelationship(rel.id)" class="text-red-400 hover:text-red-300">🗑️</button>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Memories Tab -->
+            <div x-show="currentTab === 'Memories'" x-transition>
+                <div class="glass p-6">
+                    <h3 class="text-xl font-semibold mb-4">All Memories</h3>
+                    <div class="space-y-3 max-h-[600px] overflow-y-auto">
+                        <template x-for="mem in memories" :key="mem.id">
+                            <div class="glass p-4 card">
+                                <div class="mb-2" x-text="mem.content"></div>
+                                <div class="flex gap-2 flex-wrap mb-2">
+                                    <template x-for="tag in mem.tags" :key="tag">
+                                        <span class="text-xs px-2 py-1 bg-indigo-500/20 text-indigo-400 rounded" x-text="tag"></span>
+                                    </template>
+                                </div>
+                                <div class="flex gap-4 text-xs text-gray-400">
+                                    <span>Created: <span x-text="new Date(mem.created_at).toLocaleDateString()"></span></span>
+                                    <span>Latest: <span :class="mem.is_latest ? 'text-green-400' : 'text-gray-500'" x-text="mem.is_latest ? 'Yes' : 'No'"></span></span>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Settings Tab -->
+            <div x-show="currentTab === 'Settings'" x-transition>
+                <div class="glass p-6 max-w-2xl mx-auto">
+                    <h3 class="text-xl font-semibold mb-4">API Configuration</h3>
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-sm text-gray-400 mb-2">Qdrant URL</label>
+                            <input x-model="config.qdrantUrl" class="input-dark w-full p-3" value="http://localhost:9200">
+                        </div>
+                        <div>
+                            <label class="block text-sm text-gray-400 mb-2">Qdrant API Key</label>
+                            <input x-model="config.qdrantKey" type="password" class="input-dark w-full p-3" value="dev_api_key_hivemind_2026">
+                        </div>
+                        <div class="flex gap-2">
+                            <button @click="testConnection()" class="btn-primary px-6 py-3 rounded-lg">Test Connection</button>
+                            <button @click="saveConfig()" class="btn-primary px-6 py-3 rounded-lg">Save</button>
+                        </div>
+                        <div x-show="connectionStatus" class="p-3 rounded-lg" :class="connectionStatus.success ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'" x-text="connectionStatus.message"></div>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Toast Notifications -->
+        <div class="fixed top-4 right-4 z-50 space-y-2">
+            <template x-for="toast in toasts" :key="toast.id">
+                <div class="toast glass px-6 py-4 rounded-lg shadow-2xl flex items-center gap-3"
+                     :class="toast.type === 'success' ? 'border-green-500' : toast.type === 'error' ? 'border-red-500' : 'border-yellow-500'">
+                    <span x-text="toast.type === 'success' ? '✅' : toast.type === 'error' ? '❌' : '⚠️'"></span>
+                    <span x-text="toast.message"></span>
+                </div>
+            </template>
+        </div>
+    </div>
+
+    <script>
+        function hiveMind() {
+            return {
+                currentTab: 'Dashboard',
+                tabs: ['Dashboard', 'Store', 'Search', 'Graph', 'Relationships', 'Memories', 'Settings'],
+                loading: false,
+                apiStatus: 'disconnected',
+                stats: {},
+                memories: [],
+                relationships: [],
+                searchQuery: '',
+                searchResults: [],
+                newMemory: { content: '', tags: '', project: '' },
+                config: { qdrantUrl: 'http://localhost:9200', qdrantKey: 'dev_api_key_hivemind_2026' },
+                connectionStatus: null,
+                toasts: [],
+                tagChart: null,
+
+                init() {
+                    this.loadConfig();
+                    this.refresh();
+                    setInterval(() => this.refresh(), 30000);
+                },
+
+                async refresh() {
+                    await Promise.all([
+                        this.fetchStats(),
+                        this.fetchMemories(),
+                        this.fetchRelationships()
+                    ]);
+                    this.updateChart();
+                },
+
+                async fetchStats() {
+                    try {
+                        const res = await fetch('/api/stats');
+                        if (!res.ok) throw new Error('Failed');
+                        this.stats = await res.json();
+                        this.apiStatus = 'connected';
+                    } catch (e) {
+                        this.apiStatus = 'error';
+                    }
+                },
+
+                async fetchMemories() {
+                    try {
+                        const res = await fetch('/api/memories');
+                        if (!res.ok) throw new Error('Failed');
+                        const data = await res.json();
+                        this.memories = data.memories || [];
+                    } catch (e) {
+                        console.error('Failed to fetch memories');
+                    }
+                },
+
+                async fetchRelationships() {
+                    try {
+                        const res = await fetch('/api/memories/traverse', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({start_id: 'all', depth: 1})
+                        });
+                        if (res.ok) {
+                            const data = await res.json();
+                            this.relationships = data.relationships || [];
+                        }
+                    } catch (e) {
+                        this.relationships = [];
+                    }
+                },
+
+                async storeMemory() {
+                    if (!this.newMemory.content.trim()) {
+                        this.toast('Please enter content', 'warning');
+                        return;
+                    }
+                    this.loading = true;
+                    try {
+                        const res = await fetch('/api/memories', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({
+                                content: this.newMemory.content,
+                                tags: this.newMemory.tags.split(',').map(t => t.trim()).filter(Boolean),
+                                project: this.newMemory.project || 'Default'
+                            })
+                        });
+                        if (res.ok) {
+                            this.toast('Memory stored successfully!', 'success');
+                            this.newMemory = { content: '', tags: '', project: '' };
+                            await this.refresh();
+                        } else {
+                            throw new Error('Failed');
+                        }
+                    } catch (e) {
+                        this.toast('Failed to store memory', 'error');
+                    }
+                    this.loading = false;
+                },
+
+                async searchMemories() {
+                    if (!this.searchQuery.trim()) {
+                        this.searchResults = [];
+                        return;
+                    }
+                    try {
+                        const res = await fetch('/api/memories/search', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({ query: this.searchQuery })
+                        });
+                        if (res.ok) {
+                            const data = await res.json();
+                            this.searchResults = data.results || [];
+                        }
+                    } catch (e) {
+                        this.searchResults = [];
+                    }
+                },
+
+                async deleteRelationship(id) {
+                    if (!confirm('Delete this relationship?')) return;
+                    try {
+                        const res = await fetch(`/api/relationships/${id}`, { method: 'DELETE' });
+                        if (res.ok) {
+                            this.toast('Relationship deleted', 'success');
+                            await this.refresh();
+                        }
+                    } catch (e) {
+                        this.toast('Failed to delete', 'error');
+                    }
+                },
+
+                async testConnection() {
+                    try {
+                        const res = await fetch(this.config.qdrantUrl + '/');
+                        if (res.ok) {
+                            this.connectionStatus = { success: true, message: '✅ Qdrant connected!' };
+                        } else {
+                            throw new Error('Failed');
+                        }
+                    } catch (e) {
+                        this.connectionStatus = { success: false, message: '❌ Connection failed' };
+                    }
+                },
+
+                saveConfig() {
+                    localStorage.setItem('hivemind_config', JSON.stringify(this.config));
+                    this.toast('Configuration saved', 'success');
+                },
+
+                loadConfig() {
+                    const saved = localStorage.getItem('hivemind_config');
+                    if (saved) {
+                        this.config = JSON.parse(saved);
+                    }
+                },
+
+                updateChart() {
+                    const ctx = document.getElementById('tagChart');
+                    if (!ctx) return;
+                    
+                    const tagCounts = {};
+                    this.memories.forEach(m => {
+                        m.tags.forEach(tag => {
+                            tagCounts[tag] = (tagCounts[tag] || 0) + 1;
+                        });
+                    });
+
+                    if (this.tagChart) this.tagChart.destroy();
+                    
+                    this.tagChart = new Chart(ctx, {
+                        type: 'doughnut',
+                        data: {
+                            labels: Object.keys(tagCounts),
+                            datasets: [{
+                                data: Object.values(tagCounts),
+                                backgroundColor: ['#6366f1', '#8b5cf6', '#a855f7', '#10b981', '#f59e0b', '#ef4444']
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: { legend: { position: 'bottom', labels: { color: '#94a3b8' } } }
+                        }
+                    });
+                },
+
+                toast(message, type = 'info') {
+                    const id = Date.now();
+                    this.toasts.push({ id, message, type });
+                    setTimeout(() => {
+                        this.toasts = this.toasts.filter(t => t.id !== id);
+                    }, 3000);
+                }
+            }
+        }
+    </script>
+</body>
+</html>

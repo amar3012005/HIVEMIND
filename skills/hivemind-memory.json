@@ -1,0 +1,147 @@
+{
+  "name": "hivemind-memory",
+  "version": "1.0.0",
+  "description": "Core memory engine with graph-based relational ontology. Implements Updates, Extends, Derives triple-operators.",
+  "author": "DavinciAI",
+  "triggers": [
+    "store memory",
+    "remember this",
+    "search memories",
+    "find related",
+    "update memory",
+    "recall",
+    "memory decay"
+  ],
+  "commands": {
+    "memory_store": {
+      "description": "Store content with auto-embedding and optional graph relationships",
+      "args": {
+        "content": { "type": "string", "required": true },
+        "tags": { "type": "array", "required": false },
+        "project": { "type": "string", "required": false },
+        "relationship": { "type": "object", "required": false, "properties": {
+          "type": { "enum": ["Updates", "Extends", "Derives"], "required": true },
+          "target_id": { "type": "string", "required": true }
+        }},
+        "user_id": { "type": "string", "required": true },
+        "org_id": { "type": "string", "required": true }
+      },
+      "returns": {
+        "memory_id": "string",
+        "embedding_id": "string",
+        "graph_node_id": "string",
+        "relationship_edges": "array"
+      }
+    },
+    "memory_search": {
+      "description": "Hybrid semantic + keyword search across memories",
+      "args": {
+        "query": { "type": "string", "required": true },
+        "n_results": { "type": "integer", "default": 10 },
+        "filter": { "type": "object", "properties": {
+          "tags": "array",
+          "project": "string",
+          "org_id": "string",
+          "is_latest": "boolean",
+          "created_after": "datetime",
+          "created_before": "datetime"
+        }},
+        "hybrid_weight": { "type": "number", "default": 0.7, "description": "Vector search weight (0-1)" }
+      },
+      "returns": {
+        "results": "array",
+        "scores": "array",
+        "total_found": "integer"
+      }
+    },
+    "memory_relate": {
+      "description": "Create graph relationship between memories",
+      "args": {
+        "from_id": { "type": "string", "required": true },
+        "to_id": { "type": "string", "required": true },
+        "type": { "enum": ["Updates", "Extends", "Derives"], "required": true },
+        "confidence": { "type": "number", "default": 1.0 }
+      }
+    },
+    "memory_traverse": {
+      "description": "Multi-hop graph traversal using openCypher",
+      "args": {
+        "start_id": { "type": "string", "required": true },
+        "depth": { "type": "integer", "default": 3 },
+        "relationship_types": { "type": "array", "default": ["Updates", "Extends", "Derives"] },
+        "direction": { "enum": ["OUT", "IN", "BOTH"], "default": "BOTH" }
+      },
+      "returns": {
+        "nodes": "array",
+        "edges": "array",
+        "paths": "array"
+      }
+    },
+    "memory_update": {
+      "description": "Update memory with versioning - creates new node and Updates edge",
+      "args": {
+        "memory_id": { "type": "string", "required": true },
+        "new_content": { "type": "string", "required": true },
+        "reason": { "type": "string", "required": false }
+      },
+      "returns": {
+        "new_memory_id": "string",
+        "previous_memory_id": "string",
+        "is_latest": "boolean"
+      }
+    },
+    "memory_decay_scan": {
+      "description": "Apply Ebbinghaus forgetting curve to archive stale memories",
+      "args": {
+        "threshold_days": { "type": "integer", "default": 90 },
+        "dry_run": { "type": "boolean", "default": true }
+      },
+      "returns": {
+        "archived_count": "integer",
+        "affected_memories": "array"
+      }
+    },
+    "memory_reinforce": {
+      "description": "Increase memory strength on successful recall",
+      "args": {
+        "memory_id": { "type": "string", "required": true },
+        "context": { "type": "string", "required": false }
+      },
+      "returns": {
+        "new_strength": "number",
+        "recall_count": "integer",
+        "next_review": "datetime"
+      }
+    }
+  },
+  "dependencies": {
+    "databases": ["postgresql", "qdrant"],
+    "extensions": ["apache_age"],
+    "env_vars": [
+      "POSTGRES_URL",
+      "QDRANT_URL",
+      "QDRANT_API_KEY",
+      "EMBEDDING_MODEL_URL"
+    ]
+  },
+  "schema": {
+    "nodes_table": "memories",
+    "edges_table": "memory_relationships",
+    "fields": {
+      "id": "UUID PRIMARY KEY",
+      "content": "TEXT NOT NULL",
+      "embedding": "VECTOR(1024)",
+      "user_id": "UUID NOT NULL",
+      "org_id": "UUID NOT NULL",
+      "project": "VARCHAR(255)",
+      "tags": "TEXT[]",
+      "is_latest": "BOOLEAN DEFAULT TRUE",
+      "strength": "FLOAT DEFAULT 1.0",
+      "recall_count": "INTEGER DEFAULT 0",
+      "last_confirmed": "TIMESTAMP DEFAULT NOW()",
+      "created_at": "TIMESTAMP DEFAULT NOW()",
+      "document_date": "TIMESTAMP",
+      "event_date": "TIMESTAMP[]"
+    }
+  }
+}

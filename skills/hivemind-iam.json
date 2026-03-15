@@ -1,0 +1,207 @@
+{
+  "name": "hivemind-iam",
+  "version": "1.0.0",
+  "description": "ZITADEL integration for NIS2/DORA compliance. Event-sourced IAM with immutable audit trails.",
+  "author": "DavinciAI",
+  "triggers": [
+    "setup zitadel",
+    "create organization",
+    "add user",
+    "audit log",
+    "compliance",
+    "passkey"
+  ],
+  "commands": {
+    "iam_init": {
+      "description": "Configure ZITADEL with event-sourced architecture",
+      "args": {
+        "provider": { "enum": ["zitadel"], "default": "zitadel" },
+        "instance_url": { "type": "string", "required": true },
+        "master_org": { "type": "string", "default": "HIVEMIND" },
+      "features": { "type": "array", "default": [
+          "event_sourcing",
+          "audit_trail",
+          "passkeys",
+          "organizations",
+          "actions"
+        ]}
+      },
+      "returns": {
+        "instance_id": "string",
+        "admin_user_id": "string",
+        "master_org_id": "string",
+        "event_store_configured": "boolean"
+      }
+    },
+    "iam_org_create": {
+      "description": "Create isolated organization (tenant)",
+      "args": {
+        "name": { "type": "string", "required": true },
+        "domain": { "type": "string", "required": true },
+        "admin_email": { "type": "string", "required": true },
+        "branding": {
+          "type": "object",
+          "properties": {
+            "primary_color": "string",
+            "logo_url": "string",
+            "font_family": "string"
+          }
+        },
+        "settings": {
+          "type": "object",
+          "properties": {
+            "passwordless_enabled": "boolean",
+            "mfa_required": "boolean",
+            "session_lifetime_hours": "integer"
+          }
+        }
+      },
+      "returns": {
+        "org_id": "string",
+        "isolated": "boolean",
+        "admin_invite_sent": "boolean",
+        "login_url": "string"
+      }
+    },
+    "iam_user_create": {
+      "description": "Create user within organization",
+      "args": {
+        "org_id": { "type": "string", "required": true },
+        "email": { "type": "string", "required": true },
+        "username": { "type": "string", "required": true },
+        "roles": { "type": "array", "default": ["user"] },
+        "send_invite": { "type": "boolean", "default": true }
+      },
+      "returns": {
+        "user_id": "string",
+        "invite_url": "string",
+        "status": "enum(active|pending|locked)"
+      }
+    },
+    "iam_policy_set": {
+      "description": "Configure access policies for organization",
+      "args": {
+        "org_id": { "type": "string", "required": true },
+        "policy_type": { "enum": ["password", "lockout", "privacy", "label"], "required": true },
+        "config": { "type": "object", "required": true }
+      },
+      "builtin_policies": {
+        "nis2_compliant": {
+          "mfa_required": true,
+          "password_min_length": 12,
+          "password_complexity": "high",
+          "session_timeout": 480,
+          "lockout_attempts": 5,
+          "audit_retention_days": 2555
+        },
+        "high_security": {
+          "mfa_required": true,
+          "passwordless_preferred": true,
+          "session_timeout": 60,
+          "ip_allowlist": true,
+          "device_binding": true
+        }
+      }
+    },
+    "iam_passkey_enroll": {
+      "description": "Register FIDO2/WebAuthn passkey for user",
+      "args": {
+        "user_id": { "type": "string", "required": true },
+        "device_name": { "type": "string", "default": "Primary Device" },
+        "resident_key": { "type": "boolean", "default": true }
+      },
+      "returns": {
+        "credential_id": "string",
+        "public_key": "string",
+        "aaguid": "string",
+        "registered_at": "datetime"
+      }
+    },
+    "iam_audit_export": {
+      "description": "Export immutable audit trail",
+      "args": {
+        "org_id": { "type": "string", "required": false },
+        "start_date": { "type": "datetime", "required": true },
+        "end_date": { "type": "datetime", "required": true },
+        "format": { "enum": ["json", "csv", "pdf"], "default": "json" },
+        "event_types": { "type": "array", "default": ["user", "session", "policy", "admin"] },
+        "signed": { "type": "boolean", "default": true }
+      },
+      "returns": {
+        "export_id": "string",
+        "download_url": "string",
+        "record_count": "integer",
+        "signature": "string (if signed)",
+        "checksum": "string"
+      }
+    },
+    "iam_tenant_isolate": {
+      "description": "Verify and enforce tenant data isolation",
+      "args": {
+        "org_id": { "type": "string", "required": true }
+      },
+      "checks": [
+        "data_residency_verification",
+        "cross_tenant_access_prevention",
+        "admin_scope_validation",
+        "api_token_isolation"
+      ],
+      "returns": {
+        "isolated": "boolean",
+        "violations": "array",
+        "verification_timestamp": "datetime"
+      }
+    },
+    "iam_delegated_access": {
+      "description": "Configure customer-managed access delegation",
+      "args": {
+        "org_id": { "type": "string", "required": true },
+        "delegate_admin": { "type": "boolean", "default": true },
+        "custom_policies": { "type": "boolean", "default": true }
+      },
+      "returns": {
+        "delegation_enabled": "boolean",
+        "admin_portal_url": "string",
+        "liability_reduction": "string"
+      }
+    }
+  },
+  "compliance_frameworks": {
+    "NIS2": {
+      "requirements": [
+        "Risk management measures",
+        "Incident reporting",
+        "Supply chain security",
+        "Encryption and access control"
+      ],
+      "zitadel_features": [
+        "Event-sourced audit trail",
+        "Immutable logs",
+        "MFA enforcement",
+        "Session management"
+      ]
+    },
+    "DORA": {
+      "requirements": [
+        "ICT risk management",
+        "Digital operational resilience testing",
+        "Incident management",
+        "Third-party risk management"
+      ],
+      "zitadel_features": [
+        "Resilient architecture",
+        "Backup and recovery",
+        "Access logging",
+        "Vendor isolation"
+      ]
+    }
+  },
+  "dependencies": {
+    "zitadel_version": "v2.50+",
+    "env_vars": [
+      "ZITADEL_INSTANCE_URL",
+      "ZITADEL_PAT",
+      "ZITADEL_MASTER_ORG"
+    ]
+  }
+}

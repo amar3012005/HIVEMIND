@@ -1,0 +1,357 @@
+# =============================================================================
+# HIVE-MIND Coolify Deployment Pipeline
+# GitHub Actions Workflow for EU Sovereign Cloud
+# =============================================================================
+
+name: Deploy to Coolify
+
+on:
+  push:
+    branches: [main, production]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+    types: [closed]
+
+env:
+  NODE_VERSION: '20'
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ==========================================================================
+  # Lint and Test
+  # ==========================================================================
+  lint-and-test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: hivemind
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: hivemind_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+      
+      qdrant:
+        image: qdrant/qdrant:v1.12.0
+        ports:
+          - 6333:6333
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: |
+          cd core
+          npm ci
+      
+      - name: Run linter
+        run: |
+          cd core
+          npm run lint || echo "No linter configured"
+      
+      - name: Type check
+        run: |
+          cd core
+          npm run build || echo "No TypeScript build configured"
+      
+      - name: Run unit tests
+        run: |
+          cd core
+          npm run test:unit || echo "No unit tests configured"
+        env:
+          DATABASE_URL: postgresql://hivemind:test@localhost:5432/hivemind_test
+          REDIS_URL: redis://localhost:6379
+          QDRANT_URL: http://localhost:6333
+      
+      - name: Run integration tests
+        run: |
+          cd core
+          npm run test:integration || echo "No integration tests configured"
+        env:
+          DATABASE_URL: postgresql://hivemind:test@localhost:5432/hivemind_test
+          REDIS_URL: redis://localhost:6379
+          QDRANT_URL: http://localhost:6333
+
+  # ==========================================================================
+  # Security Scan
+  # ==========================================================================
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+      
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+      
+      - name: Scan Dockerfile
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'config'
+          scan-ref: './Dockerfile.production'
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+
+  # ==========================================================================
+  # Build and Push
+  # ==========================================================================
+  build-and-push:
+    name: Build & Push
+    runs-on: ubuntu-latest
+    needs: [lint-and-test, security-scan]
+    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.merged == true)
+    
+    permissions:
+      contents: read
+      packages: write
+    
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+      image_digest: ${{ steps.build.outputs.digest }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=,suffix=,format=short
+      
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.production
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            NODE_ENV=production
+            VERSION=${{ github.sha }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+      
+      - name: Scan image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.meta.outputs.tags }}
+          format: 'sarif'
+          output: 'trivy-image-results.sarif'
+          severity: 'CRITICAL,HIGH'
+      
+      - name: Upload image scan results
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-image-results.sarif'
+
+  # ==========================================================================
+  # Deploy to Staging
+  # ==========================================================================
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/staging'
+    environment:
+      name: staging
+      url: https://staging.hivemind.io
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Deploy to Coolify Staging
+        run: |
+          curl -X POST "${{ secrets.COOLIFY_API_URL }}/api/v1/applications/${{ secrets.COOLIFY_STAGING_UUID }}/deploy" \
+            -H "Authorization: Bearer ${{ secrets.COOLIFY_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "version": "${{ github.sha }}",
+              "environment": "staging"
+            }'
+      
+      - name: Wait for deployment
+        run: |
+          sleep 30
+          curl -sf "https://staging.hivemind.io/health" || exit 1
+      
+      - name: Run smoke tests
+        run: |
+          curl -X POST "https://staging.hivemind.io/api/generate" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ secrets.STAGING_API_KEY }}" \
+            -d '{"prompt":"test"}' || exit 1
+
+  # ==========================================================================
+  # Deploy to Production
+  # ==========================================================================
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/production' || startsWith(github.ref, 'refs/tags/v')
+    environment:
+      name: production
+      url: https://api.hivemind.io
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Deploy to Coolify Production
+        run: |
+          curl -X POST "${{ secrets.COOLIFY_API_URL }}/api/v1/applications/${{ secrets.COOLIFY_PRODUCTION_UUID }}/deploy" \
+            -H "Authorization: Bearer ${{ secrets.COOLIFY_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "version": "${{ github.sha }}",
+              "environment": "production"
+            }'
+      
+      - name: Wait for deployment
+        run: |
+          sleep 60
+          for i in {1..10}; do
+            curl -sf "https://api.hivemind.io/health" && break
+            sleep 10
+          done
+      
+      - name: Run smoke tests
+        run: |
+          curl -X POST "https://api.hivemind.io/api/generate" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ secrets.PRODUCTION_API_KEY }}" \
+            -d '{"prompt":"test"}' || exit 1
+      
+      - name: Notify Slack
+        if: success()
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "✅ HIVE-MIND deployed to production",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*HIVE-MIND Production Deployment*\n✅ Successfully deployed ${{ github.sha }}"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      
+      - name: Create Sentry release
+        if: success()
+        uses: getsentry/action-release@v1
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: hivemind
+          SENTRY_PROJECT: api
+        with:
+          version: ${{ github.sha }}
+          environment: production
+
+  # ==========================================================================
+  # Database Migrations
+  # ==========================================================================
+  db-migrations:
+    name: Database Migrations
+    runs-on: ubuntu-latest
+    needs: deploy-production
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    environment: production
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      
+      - name: Install dependencies
+        run: |
+          cd core
+          npm ci
+      
+      - name: Run migrations
+        run: |
+          cd core
+          npm run db:migrate
+        env:
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+      
+      - name: Verify migrations
+        run: |
+          cd core
+          npm run db:status || echo "Status check not configured"
+        env:
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}

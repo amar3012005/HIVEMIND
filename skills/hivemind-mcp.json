@@ -1,0 +1,185 @@
+{
+  "name": "hivemind-mcp",
+  "version": "1.0.0",
+  "description": "Model Context Protocol server for universal AI memory connectivity. Auto-Recall and cross-application memory bridge.",
+  "author": "DavinciAI",
+  "triggers": [
+    "start mcp server",
+    "expose tool",
+    "add mcp resource",
+    "connect client",
+    "auto recall",
+    "mcp endpoint"
+  ],
+  "commands": {
+    "mcp_serve": {
+      "description": "Launch MCP server instance",
+      "args": {
+        "port": { "type": "integer", "default": 3000 },
+        "transport": { "enum": ["sse", "stdio", "websocket"], "default": "sse" },
+        "auth_required": { "type": "boolean", "default": true },
+        "cors_origins": { "type": "array", "default": ["*"] },
+        "rate_limit": { "type": "integer", "default": 100 }
+      },
+      "returns": {
+        "server_url": "string",
+        "transport": "string",
+        "health_endpoint": "string"
+      }
+    },
+    "mcp_expose_tool": {
+      "description": "Register a tool for LLM invocation",
+      "args": {
+        "name": { "type": "string", "required": true },
+        "description": { "type": "string", "required": true },
+        "handler_ref": { "type": "string", "required": true },
+        "parameters": { "type": "object", "required": true },
+        "returns": { "type": "object", "required": true }
+      },
+      "builtin_tools": [
+        {
+          "name": "memory_store",
+          "description": "Store a new memory with optional relationships",
+          "parameters": {
+            "content": "string",
+            "tags": "array",
+            "project": "string"
+          }
+        },
+        {
+          "name": "memory_search",
+          "description": "Search memories by semantic similarity",
+          "parameters": {
+            "query": "string",
+            "n_results": "integer"
+          }
+        },
+        {
+          "name": "memory_forget",
+          "description": "Mark memory as forgotten (soft delete)",
+          "parameters": {
+            "memory_id": "string",
+            "reason": "string"
+          }
+        },
+        {
+          "name": "memory_relate",
+          "description": "Create relationship between two memories",
+          "parameters": {
+            "from_id": "string",
+            "to_id": "string",
+            "relationship_type": "enum(Updates|Extends|Derives)"
+          }
+        }
+      ]
+    },
+    "mcp_expose_resource": {
+      "description": "Expose knowledge graph nodes as accessible resources",
+      "args": {
+        "uri_pattern": { "type": "string", "required": true },
+        "handler_ref": { "type": "string", "required": true },
+        "mime_type": { "type": "string", "default": "application/json" }
+      },
+      "builtin_resources": [
+        {
+          "uri_pattern": "memory://{memory_id}",
+          "description": "Access a specific memory by ID"
+        },
+        {
+          "uri_pattern": "profile://{user_id}",
+          "description": "Access user's dynamic profile"
+        },
+        {
+          "uri_pattern": "project://{project_id}/memories",
+          "description": "List all memories for a project"
+        }
+      ]
+    },
+    "mcp_expose_prompt": {
+      "description": "Register parameterized prompt templates",
+      "args": {
+        "name": { "type": "string", "required": true },
+        "template": { "type": "string", "required": true },
+        "parameters": { "type": "object" }
+      },
+      "builtin_prompts": [
+        {
+          "name": "summarize_session",
+          "template": "Summarize the following conversation into key decisions and lessons learned:\n\n{{session_content}}"
+        },
+        {
+          "name": "contextualize_chunk",
+          "template": "Explain the context of this code snippet within the larger file:\n\nFile: {{filepath}}\nChunk: {{chunk_content}}"
+        },
+        {
+          "name": "resolve_contradiction",
+          "template": "Analyze these two memories for contradictions:\nMemory A: {{memory_a}}\nMemory B: {{memory_b}}\n\nWhich is more recent? Should one update the other?"
+        }
+      ]
+    },
+    "mcp_auto_recall": {
+      "description": "Pre-inference retrieval with weighted scoring",
+      "args": {
+        "session_id": { "type": "string", "required": true },
+        "query_context": { "type": "string", "required": true },
+        "max_memories": { "type": "integer", "default": 5 },
+        "weights": {
+          "type": "object",
+          "default": { "similarity": 0.5, "recency": 0.3, "importance": 0.2 },
+          "properties": {
+            "similarity": "number (0-1)",
+            "recency": "number (0-1)",
+            "importance": "number (0-1)"
+          }
+        }
+      },
+      "returns": {
+        "relevant_memories": "array",
+        "scores": "array",
+        "injection_text": "string (formatted for context window)"
+      },
+      "scoring_formula": "Score = w1 * Similarity + w2 * Recency + w3 * Importance"
+    },
+    "mcp_generate_endpoint": {
+      "description": "Create unique per-user MCP endpoint (Meta-MCP pattern)",
+      "args": {
+        "user_id": { "type": "string", "required": true },
+        "persistent": { "type": "boolean", "default": true },
+        "expires_at": { "type": "datetime" }
+      },
+      "returns": {
+        "endpoint_url": "string",
+        "api_key": "string",
+        "config": "object"
+      }
+    },
+    "mcp_context_window_manager": {
+      "description": "Manage token budgeting and memory injection",
+      "args": {
+        "session_id": { "type": "string", "required": true },
+        "max_tokens": { "type": "integer", "default": 128000 },
+        "reserved_for_memories": { "type": "integer", "default": 4000 }
+      },
+      "returns": {
+        "available_tokens": "integer",
+        "injected_memories": "array",
+        "xml_wrapper": "string"
+      },
+      "injection_format": "<relevant-memories>\n{{memories}}\n</relevant-memories>"
+    }
+  },
+  "mcp_protocol": {
+    "version": "2024-11-05",
+    "capabilities": ["tools", "resources", "prompts", "logging"],
+    "supported_clients": ["Claude Desktop", "Cursor", "OpenCode", "Mastra", "Continue"]
+  },
+  "dependencies": {
+    "sdk": "@modelcontextprotocol/sdk",
+    "transport": ["sse", "stdio"],
+    "env_vars": [
+      "MCP_PORT",
+      "MCP_AUTH_SECRET",
+      "HIVEMIND_API_URL"
+    ]
+  }
+}

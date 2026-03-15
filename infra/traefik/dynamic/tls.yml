@@ -1,0 +1,140 @@
+# Traefik Dynamic Configuration - TLS Options
+# HIVE-MIND EU Sovereign Deployment
+# TLS 1.3 minimum, modern cipher suites
+
+tls:
+  # ==========================================
+  # DEFAULT TLS OPTIONS
+  # ==========================================
+  options:
+    default:
+      minVersion: VersionTLS12
+      maxVersion: VersionTLS13
+      preferServerCipherSuites: true
+      sniStrict: true
+      curvePreferences:
+        - CurveP521
+        - CurveP384
+        - CurveP256
+      cipherSuites:
+        # TLS 1.3 suites
+        - TLS_AES_256_GCM_SHA384
+        - TLS_AES_128_GCM_SHA256
+        - TLS_CHACHA20_POLY1305_SHA256
+        # TLS 1.2 suites (ECDHE for forward secrecy)
+        - TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+        - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+        - TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+        - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+        - TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
+        - TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+
+    # ==========================================
+    # MODERN TLS (TLS 1.3 ONLY)
+    # Use for: API endpoints, admin interfaces
+    # ==========================================
+    modern:
+      minVersion: VersionTLS13
+      maxVersion: VersionTLS13
+      sniStrict: true
+      curvePreferences:
+        - CurveP521
+        - CurveP384
+      cipherSuites:
+        - TLS_AES_256_GCM_SHA384
+        - TLS_AES_128_GCM_SHA256
+        - TLS_CHACHA20_POLY1305_SHA256
+
+    # ==========================================
+    # INTERMEDIATE TLS (TLS 1.2 + 1.3)
+    # Use for: General web endpoints
+    # ==========================================
+    intermediate:
+      minVersion: VersionTLS12
+      maxVersion: VersionTLS13
+      preferServerCipherSuites: true
+      sniStrict: false
+      curvePreferences:
+        - CurveP521
+        - CurveP384
+        - CurveP256
+      cipherSuites:
+        # TLS 1.3 suites
+        - TLS_AES_256_GCM_SHA384
+        - TLS_AES_128_GCM_SHA256
+        - TLS_CHACHA20_POLY1305_SHA256
+        # TLS 1.2 suites
+        - TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+        - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+        - TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+        - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+        - TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
+        - TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+
+    # ==========================================
+    # COMPATIBILITY TLS (Legacy support)
+    # Use for: Legacy client support only
+    # ==========================================
+    compatibility:
+      minVersion: VersionTLS12
+      maxVersion: VersionTLS13
+      preferServerCipherSuites: false
+      sniStrict: false
+      curvePreferences:
+        - CurveP256
+        - CurveP384
+      cipherSuites:
+        # TLS 1.3 suites
+        - TLS_AES_256_GCM_SHA384
+        - TLS_AES_128_GCM_SHA256
+        - TLS_CHACHA20_POLY1305_SHA256
+        # TLS 1.2 suites (including RSA for compatibility)
+        - TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+        - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+        - TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+        - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+        - TLS_RSA_WITH_AES_256_GCM_SHA384
+        - TLS_RSA_WITH_AES_128_GCM_SHA256
+
+    # ==========================================
+    # INTERNAL SERVICES (mTLS ready)
+    # Use for: Internal service communication
+    # ==========================================
+    internal:
+      minVersion: VersionTLS13
+      maxVersion: VersionTLS13
+      sniStrict: true
+      clientAuth:
+        caFiles:
+          - /etc/traefik/certs/internal-ca.crt
+        clientAuthType: VerifyClientCertIfGiven
+      curvePreferences:
+        - CurveP521
+        - CurveP384
+      cipherSuites:
+        - TLS_AES_256_GCM_SHA384
+        - TLS_CHACHA20_POLY1305_SHA256
+
+# TLS Certificates (auto-discovered via Let's Encrypt)
+# Manual certificates can be added here if needed
+tls:
+  certificates:
+    # Example: Custom certificate for internal services
+    # - certFile: /certs/internal.crt
+    #   keyFile: /certs/internal.key
+    #   stores:
+    #     - default
+
+# Certificate Stores
+tls:
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /acme/default.crt
+        keyFile: /acme/default.key
+      defaultGeneratedCert:
+        resolver: letsencrypt
+        domain:
+          main: "${DOMAIN_NAME:-hivemind.io}"
+          sans:
+            - "*.${DOMAIN_NAME:-hivemind.io}"

@@ -1,0 +1,39 @@
+{
+  "name": "temporal-queries",
+  "version": "1.0.0",
+  "description": "Advanced temporal querying for memory version history, time-based traversal, and historical state reconstruction",
+  "type": "query",
+  "author": "HIVE-MIND Team",
+  "license": "EUPL-1.2",
+  "entry": "index.js",
+  "capabilities": [
+    "getVersionHistory",
+    "queryAtTime",
+    "findTemporalChanges",
+    "reconstructState",
+    "compareVersions",
+    "getCurrentState",
+    "findExpiredRelationships"
+  ],
+  "permissions": [
+    "memory:read",
+    "graph:read",
+    "recall:panorama"
+  ],
+  "apis": [
+    "memory",
+    "graph",
+    "recall"
+  ],
+  "config": {
+    "maxVersions": 100,
+    "defaultTimeFormat": "ISO8601",
+    "includeExpired": false
+  },
+  "tags": [
+    "temporal",
+    "versioning",
+    "history",
+    "time-travel"
+  ]
+}

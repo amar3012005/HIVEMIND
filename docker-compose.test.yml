@@ -1,0 +1,33 @@
+# HIVE-MIND - Minimal Testing Setup
+# PostgreSQL 15+ with Apache AGE
+# 
+# Usage:
+#   docker-compose -f docker-compose.test.yml up -d
+#   node tests/test-memory-engine.js
+
+version: '3.8'
+
+services:
+  postgres-age:
+    image: tonghuikang/apache-age:PG15_1.5.0
+    container_name: hivemind-postgres
+    environment:
+      POSTGRES_USER: hivemind
+      POSTGRES_PASSWORD: hivemind_dev_password
+      POSTGRES_DB: hivemind
+      POSTGRES_INITDB_ARGS: "-E UTF8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hivemind -d hivemind"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    name: hivemind-postgres-data

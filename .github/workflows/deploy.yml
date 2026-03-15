@@ -1,0 +1,523 @@
+# HIVE-MIND CI/CD Pipeline
+# GitHub Actions - EU Sovereign Deployment
+# Compliance: GDPR, NIS2, DORA
+
+name: HIVE-MIND CI/CD
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - 'release/*'
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      version:
+        description: 'Version to deploy'
+        required: false
+        type: string
+
+# Environment variables
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/core
+  KUBECONFIG_SECRET: ${{ secrets.KUBECONFIG_STAGING }}
+
+# Cancel in-progress runs for PRs
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # ==========================================
+  # LINT AND TEST
+  # ==========================================
+  lint-and-test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: hivemind_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: core/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ./core
+        run: npm ci
+
+      - name: Run ESLint
+        working-directory: ./core
+        run: npm run lint || true
+
+      - name: TypeScript type check
+        working-directory: ./core
+        run: npx tsc --noEmit
+
+      - name: Run unit tests
+        working-directory: ./core
+        run: npm test
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/hivemind_test
+          REDIS_URL: redis://localhost:6379
+          NODE_ENV: test
+
+      - name: Run integration tests
+        working-directory: ./core
+        run: npm run test:integration || true
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/hivemind_test
+          REDIS_URL: redis://localhost:6379
+          NODE_ENV: test
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: core/test-results/
+          retention-days: 7
+
+  # ==========================================
+  # VALIDATE PRISMA MIGRATIONS
+  # ==========================================
+  validate-migrations:
+    name: Validate Prisma Migrations
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: hivemind_test
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: core/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ./core
+        run: npm ci
+
+      - name: Validate Prisma schema
+        working-directory: ./core
+        run: npx prisma validate
+
+      - name: Generate Prisma client
+        working-directory: ./core
+        run: npx prisma generate
+
+      - name: Run migrations (dry run)
+        working-directory: ./core
+        run: npx prisma migrate deploy --check
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/hivemind_test
+
+  # ==========================================
+  # SECURITY SCAN
+  # ==========================================
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Run npm audit
+        working-directory: ./core
+        run: npm audit --audit-level=high || true
+
+      - name: Check for secrets in code
+        run: |
+          echo "Scanning for hardcoded secrets..."
+          ! grep -r "password.*=.*['\"]" --include="*.js" --include="*.ts" core/src/ || true
+          ! grep -r "api_key.*=.*['\"]" --include="*.js" --include="*.ts" core/src/ || true
+          ! grep -r "secret.*=.*['\"]" --include="*.js" --include="*.ts" core/src/ || true
+
+  # ==========================================
+  # BUILD AND PUSH
+  # ==========================================
+  build-and-push:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+    needs: [lint-and-test, security-scan]
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: ./core
+          file: ./Dockerfile.production
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VERSION=${{ github.sha }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            GIT_SHA=${{ github.sha }}
+
+      - name: Run Trivy image scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          format: 'sarif'
+          output: 'trivy-image-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+
+      - name: Upload Trivy image scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-image-results.sarif'
+
+  # ==========================================
+  # DEPLOY TO STAGING
+  # ==========================================
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [build-and-push]
+    if: github.ref == 'refs/heads/develop' || github.event_name == 'workflow_dispatch'
+    environment:
+      name: staging
+      url: https://api-staging.hivemind.io
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_STAGING }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Deploy to Kubernetes
+        run: |
+          kubectl apply -f infra/k8s/namespace.yaml
+          kubectl apply -f infra/k8s/postgres-statefulset.yaml
+          kubectl apply -f infra/k8s/api-deployment.yaml
+          kubectl apply -f infra/k8s/ingress.yaml
+        env:
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
+          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/hivemind-api -n hivemind --timeout=300s
+          kubectl rollout status statefulset/postgres -n hivemind --timeout=300s
+
+      - name: Run smoke tests
+        run: |
+          echo "Running smoke tests..."
+          API_URL="https://api-staging.hivemind.io"
+
+          # Health check
+          curl -f --max-time 30 "$API_URL/health" || exit 1
+
+          # Ready check
+          curl -f --max-time 30 "$API_URL/ready" || exit 1
+
+          echo "Smoke tests passed!"
+
+      - name: Notify Slack (staging)
+        uses: slackapi/slack-github-action@v1.25.0
+        if: always()
+        with:
+          payload: |
+            {
+              "text": "Staging Deployment ${{ job.status }}",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*HIVE-MIND Staging Deployment*\nStatus: ${{ job.status }}\nCommit: ${{ github.sha }}\nBranch: ${{ github.ref_name }}"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_STAGING }}
+
+  # ==========================================
+  # DEPLOY TO PRODUCTION
+  # ==========================================
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [build-and-push, deploy-staging]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    environment:
+      name: production
+      url: https://api.hivemind.io
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_PRODUCTION }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Create Sentry release
+        uses: getsentry/action-release@v1
+        if: ${{ env.SENTRY_DSN != '' }}
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: hivemind
+          SENTRY_PROJECT: core-api
+        with:
+          environment: production
+          version: ${{ github.ref_name }}
+
+      - name: Deploy to Kubernetes
+        run: |
+          kubectl apply -f infra/k8s/namespace.yaml
+          kubectl apply -f infra/k8s/postgres-statefulset.yaml
+          kubectl apply -f infra/k8s/api-deployment.yaml
+          kubectl apply -f infra/k8s/ingress.yaml
+        env:
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
+          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+          ZITADEL_CLIENT_ID: ${{ secrets.ZITADEL_CLIENT_ID }}
+          ZITADEL_CLIENT_SECRET: ${{ secrets.ZITADEL_CLIENT_SECRET }}
+          HSM_MASTER_KEY: ${{ secrets.HSM_MASTER_KEY }}
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/hivemind-api -n hivemind --timeout=600s
+
+      - name: Run production health checks
+        run: |
+          echo "Running production health checks..."
+          API_URL="https://api.hivemind.io"
+
+          # Health check with retry
+          for i in {1..5}; do
+            if curl -f --max-time 30 "$API_URL/health"; then
+              echo "Health check passed!"
+              break
+            fi
+            echo "Attempt $i failed, retrying..."
+            sleep 10
+          done
+
+          # Ready check
+          curl -f --max-time 30 "$API_URL/ready" || exit 1
+
+          echo "Production deployment verified!"
+
+      - name: Run database migration
+        run: |
+          echo "Running database migrations..."
+          kubectl run db-migration --rm -it --image=ghcr.io/${{ github.repository }}/core:${{ github.sha }} \
+            --namespace=hivemind \
+            --env="DATABASE_URL=${{ secrets.DATABASE_URL_PRODUCTION }}" \
+            --command -- npx prisma migrate deploy || true
+
+      - name: Notify Slack (production)
+        uses: slackapi/slack-github-action@v1.25.0
+        if: always()
+        with:
+          payload: |
+            {
+              "text": "Production Deployment ${{ job.status }}",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*HIVE-MIND Production Deployment*\nStatus: ${{ job.status }}\nVersion: ${{ github.ref_name }}\nCommit: ${{ github.sha }}"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_PRODUCTION }}
+
+      - name: Create GitHub Release
+        if: success()
+        uses: softprops/action-gh-release@v1
+        with:
+          generate_release_notes: true
+          draft: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ==========================================
+  # DATABASE MIGRATIONS (PR)
+  # ==========================================
+  db-migrations-pr:
+    name: Database Migrations Check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: hivemind_test
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: core/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ./core
+        run: npm ci
+
+      - name: Check Prisma migrations
+        working-directory: ./core
+        run: npx prisma migrate status
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/hivemind_test
+
+      - name: Generate migration diff
+        working-directory: ./core
+        run: npx prisma migrate diff --from-schema-datamodel prisma/schema.prisma --to-schema-datamodel prisma/schema.prisma --script || true

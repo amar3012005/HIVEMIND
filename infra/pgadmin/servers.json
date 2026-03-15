@@ -1,0 +1,16 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "HIVE-MIND PostgreSQL",
+      "Group": "HIVE-MIND Development",
+      "Host": "postgres",
+      "Port": 5432,
+      "MaintenanceDB": "hivemind",
+      "Username": "hivemind",
+      "Password": "hivemind_dev_password",
+      "SSLMode": "prefer",
+      "ConnectNow": true,
+      "Comments": "PostgreSQL 15 + Apache AGE for HIVE-MIND cross-platform context preservation"
+    }
+  }
+}

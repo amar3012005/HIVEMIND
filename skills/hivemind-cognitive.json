@@ -1,0 +1,187 @@
+{
+  "name": "hivemind-cognitive",
+  "version": "1.0.0",
+  "description": "Smart forgetting, session compaction, and cognitive lifecycle management. Prevents context rot and information overload.",
+  "author": "DavinciAI",
+  "triggers": [
+    "compact session",
+    "check memory health",
+    "archive old memories",
+    "decay scan",
+    "session end",
+    "forgetting curve"
+  ],
+  "commands": {
+    "cognitive_compact": {
+      "description": "Summarize session at context window threshold",
+      "args": {
+        "session_id": { "type": "string", "required": true },
+        "threshold": { "type": "number", "default": 0.8, "description": "Trigger at 80% of context window" },
+        "max_tokens": { "type": "integer", "default": 128000 },
+        "current_tokens": { "type": "integer", "required": true },
+        "summarization_model": { "enum": ["mistral-7b", "claude-haiku"], "default": "mistral-7b" }
+      },
+      "returns": {
+        "should_compact": "boolean",
+        "summary": "string",
+        "new_memory_id": "string",
+        "tokens_freed": "integer",
+        "fresh_context_window": "boolean"
+      }
+    },
+    "cognitive_decay_calculate": {
+      "description": "Apply Ebbinghaus forgetting curve: P = e^(-t/s)",
+      "args": {
+        "memory_id": { "type": "string", "required": true },
+        "current_time": { "type": "datetime", "default": "now" }
+      },
+      "returns": {
+        "memory_id": "string",
+        "creation_time": "datetime",
+        "last_confirmed": "datetime",
+        "recall_count": "integer",
+        "strength_s": "float",
+        "time_elapsed_t": "float (days)",
+        "recall_probability_p": "float (0-1)",
+        "status": "enum(active|decaying|forgotten)"
+      },
+      "formula": {
+        "description": "Ebbinghaus exponential decay",
+        "base": "P = e^(-t/s)",
+        "strength_adjustment": "s = s0 * (1 + ln(recall_count + 1))",
+        "thresholds": {
+          "active": "> 0.3",
+          "decaying": "0.1 - 0.3",
+          "forgotten": "< 0.1"
+        }
+      }
+    },
+    "cognitive_session_end_hook": {
+      "description": "Scan for decision keywords and auto-create lesson nodes",
+      "args": {
+        "session_id": { "type": "string", "required": true },
+        "session_content": { "type": "string", "required": true },
+        "decision_keywords": {
+          "type": "array",
+          "default": [
+            "i decided",
+            "we decided",
+            "we will use",
+            "i chose",
+            "let's go with",
+            "final decision",
+            "conclusion:",
+            "agreed to",
+            "settled on"
+          ]
+        },
+        "lesson_keywords": {
+          "type": "array",
+          "default": [
+            "lesson learned",
+            "takeaway",
+            "important note",
+            "remember to",
+            "don't forget",
+            "key insight"
+          ]
+        }
+      },
+      "returns": {
+        "decisions_found": "integer",
+        "lessons_found": "integer",
+        "created_nodes": "array",
+        "summary": "string"
+      }
+    },
+    "cognitive_reinforce": {
+      "description": "Increase memory strength on successful recall",
+      "args": {
+        "memory_id": { "type": "string", "required": true },
+        "context": { "type": "string", "required": false },
+        "reinforcement_amount": { "type": "float", "default": 0.1 }
+      },
+      "returns": {
+        "previous_strength": "float",
+        "new_strength": "float",
+        "recall_count": "integer",
+        "next_review_date": "datetime",
+        "half_life_days": "float"
+      }
+    },
+    "cognitive_temporal_ground": {
+      "description": "Extract dual-layer timestamps from content",
+      "args": {
+        "text": { "type": "string", "required": true },
+        "reference_date": { "type": "datetime", "default": "now" }
+      },
+      "returns": {
+        "document_date": "datetime (when recorded)",
+        "event_dates": "array (when facts occurred)",
+        "relative_terms": "array (today, tomorrow, next week)",
+        "resolved_dates": "object"
+      }
+    },
+    "cognitive_archive": {
+      "description": "Move forgotten memories to cold storage",
+      "args": {
+        "dry_run": { "type": "boolean", "default": true },
+        "archive_threshold": { "type": "float", "default": 0.1 },
+        "older_than_days": { "type": "integer", "default": 365 }
+      },
+      "returns": {
+        "archived_count": "integer",
+        "archived_ids": "array",
+        "storage_saved_bytes": "integer"
+      }
+    },
+    "cognitive_importance_score": {
+      "description": "Calculate importance score for memory prioritization",
+      "args": {
+        "memory_id": { "type": "string", "required": true },
+        "factors": {
+          "type": "object",
+          "properties": {
+            "user_marked": "boolean",
+            "contains_pii": "boolean",
+            "is_decision": "boolean",
+            "access_frequency": "integer",
+            "relationship_count": "integer"
+          }
+        }
+      },
+      "returns": {
+        "importance_score": "float (0-1)",
+        "factors": "object",
+        "priority_tier": "enum(critical|high|normal|low)"
+      }
+    }
+  },
+  "lifecycle_stages": [
+    {
+      "stage": "active",
+      "description": "Memory is frequently accessed and recalled",
+      "retention": "Hot storage (fast access)",
+      "decay_rate": "Slow"
+    },
+    {
+      "stage": "decaying",
+      "description": "Memory access is decreasing, strength declining",
+      "retention": "Warm storage",
+      "decay_rate": "Moderate"
+    },
+    {
+      "stage": "forgotten",
+      "description": "Memory below recall threshold but retained for compliance",
+      "retention": "Cold storage (encrypted archive)",
+      "decay_rate": "N/A"
+    }
+  ],
+  "dependencies": {
+    "env_vars": [
+      "ARCHIVE_STORAGE_ENDPOINT",
+      "ARCHIVE_ENCRYPTION_KEY",
+      "RETENTION_DAYS"
+    ]
+  }
+}

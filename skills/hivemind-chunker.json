@@ -1,0 +1,141 @@
+{
+  "name": "hivemind-chunker",
+  "version": "1.0.0",
+  "description": "AST-aware content processing with Tree-sitter. Syntax-aware chunking for code and contextual retrieval for documents.",
+  "author": "DavinciAI",
+  "triggers": [
+    "chunk this code",
+    "parse file",
+    "ingest document",
+    "process repository",
+    "AST chunk",
+    "contextualize"
+  ],
+  "commands": {
+    "chunk_code": {
+      "description": "Parse source code into AST-aware chunks using Tree-sitter",
+      "args": {
+        "filepath": { "type": "string", "required": true },
+        "language": { "type": "string", "required": false, "description": "Auto-detected if not specified" },
+        "strategy": { "enum": ["ast", "semantic", "hybrid"], "default": "ast" },
+        "chunk_size_bytes": { "type": "integer", "default": 1500 },
+        "nws_threshold": { "type": "integer", "default": 100, "description": "Non-whitespace character minimum" }
+      },
+      "returns": {
+        "chunks": "array",
+        "total_chunks": "integer",
+        "ast_nodes_processed": "integer",
+        "scope_tree": "object"
+      }
+    },
+    "chunk_document": {
+      "description": "Split documents with contextual retrieval preparation",
+      "args": {
+        "filepath": { "type": "string", "required": true },
+        "chunk_size": { "type": "integer", "default": 1500 },
+        "overlap": { "type": "integer", "default": 200 },
+        "preserve_headings": { "type": "boolean", "default": true }
+      },
+      "returns": {
+        "chunks": "array",
+        "document_summary": "string"
+      }
+    },
+    "chunk_enrich": {
+      "description": "Add metadata to code chunks: scope tree, signatures, imports, docstrings",
+      "args": {
+        "chunk_id": { "type": "string", "required": true },
+        "include_scope_chain": { "type": "boolean", "default": true },
+        "include_signatures": { "type": "boolean", "default": true },
+        "include_imports": { "type": "boolean", "default": true },
+        "include_docstrings": { "type": "boolean", "default": true }
+      },
+      "returns": {
+        "scope_chain": "string (e.g., 'UserService > getUser')",
+        "signatures": "array",
+        "imports": "array",
+        "docstrings": "array",
+        "entity_type": "string (Class|Method|Function|Interface)"
+      }
+    },
+    "chunk_contextualize": {
+      "description": "Prepend explanatory summary to chunk using lightweight LLM (Mistral 7B)",
+      "args": {
+        "chunk_id": { "type": "string", "required": true },
+        "context_model": { "enum": ["mistral-7b", "claude-haiku"], "default": "mistral-7b" },
+        "document_context": { "type": "string", "required": false }
+      },
+      "returns": {
+        "original_chunk": "string",
+        "contextualized_chunk": "string",
+        "explanatory_prefix": "string"
+      }
+    },
+    "chunk_nws_measure": {
+      "description": "Calculate Non-Whitespace character density for semantic weight",
+      "args": {
+        "text": { "type": "string", "required": true }
+      },
+      "returns": {
+        "total_chars": "integer",
+        "non_whitespace_chars": "integer",
+        "nws_ratio": "float",
+        "logic_density_score": "float"
+      }
+    },
+    "chunk_merge": {
+      "description": "Merge small adjacent chunks to reduce fragmentation",
+      "args": {
+        "chunk_ids": { "type": "array", "required": true },
+        "max_merge_size": { "type": "integer", "default": 1500 }
+      },
+      "returns": {
+        "merged_chunk": "object",
+        "merged_count": "integer"
+      }
+    },
+    "repository_ingest": {
+      "description": "Ingest entire codebase with dependency graph",
+      "args": {
+        "repo_path": { "type": "string", "required": true },
+        "include_patterns": { "type": "array", "default": ["*.ts", "*.js", "*.py", "*.rs", "*.go"] },
+        "exclude_patterns": { "type": "array", "default": ["node_modules", ".git", "dist", "build"] },
+        "build_dependency_graph": { "type": "boolean", "default": true }
+      },
+      "returns": {
+        "files_processed": "integer",
+        "chunks_created": "integer",
+        "dependency_graph": "object",
+        "ingestion_time_ms": "integer"
+      }
+    }
+  },
+  "dependencies": {
+    "binaries": ["tree-sitter"],
+    "languages": [
+      "tree-sitter-typescript",
+      "tree-sitter-python",
+      "tree-sitter-rust",
+      "tree-sitter-go",
+      "tree-sitter-javascript"
+    ],
+    "env_vars": [
+      "MISTRAL_API_KEY",
+      "CHUNKER_CACHE_DIR"
+    ]
+  },
+  "chunk_metadata_schema": {
+    "id": "UUID",
+    "content": "TEXT",
+    "filepath": "VARCHAR(500)",
+    "start_line": "INTEGER",
+    "end_line": "INTEGER",
+    "scope_chain": "VARCHAR(500)",
+    "signatures": "TEXT[]",
+    "imports": "TEXT[]",
+    "docstrings": "TEXT[]",
+    "nws_count": "INTEGER",
+    "entity_type": "VARCHAR(50)",
+    "language": "VARCHAR(20)"
+  }
+}

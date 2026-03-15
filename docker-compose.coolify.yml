@@ -1,0 +1,333 @@
+# =============================================================================
+# HIVE-MIND Coolify Docker Compose Configuration
+# Production-ready for Coolify deployment
+# =============================================================================
+# Usage:
+#   docker-compose -f docker-compose.coolify.yml up -d
+#   docker-compose -f docker-compose.coolify.yml logs -f
+# =============================================================================
+
+version: '3.8'
+
+services:
+  # ==========================================
+  # HIVE-MIND Core API
+  # ==========================================
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.production
+      args:
+        NODE_ENV: production
+    container_name: hivemind-api
+    restart: unless-stopped
+    
+    # Security hardening
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: false
+    
+    # Resource limits for Coolify
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+    
+    environment:
+      # Core
+      - NODE_ENV=production
+      - PORT=3000
+      - HOST=0.0.0.0
+      
+      # Database
+      - DATABASE_URL=${DATABASE_URL}
+      
+      # Vector Store
+      - QDRANT_URL=${QDRANT_URL}
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      
+      # Redis
+      - REDIS_URL=${REDIS_URL}
+      
+      # LLM
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - GROQ_INFERENCE_MODEL=${GROQ_INFERENCE_MODEL:-llama-3.3-70b-versatile}
+      - MISTRAL_API_KEY=${MISTRAL_API_KEY}
+      - MISTRAL_EMBEDDING_MODEL=${MISTRAL_EMBEDDING_MODEL:-mistral-embed}
+      
+      # Security
+      - API_MASTER_KEY=${API_MASTER_KEY}
+      - SESSION_SECRET=${SESSION_SECRET}
+      - HIVEMIND_MASTER_API_KEY=${HIVEMIND_MASTER_API_KEY}
+      - HIVEMIND_ADMIN_SECRET=${HIVEMIND_ADMIN_SECRET}
+      
+      # Features
+      - USE_SITUATIONALIZER=${USE_SITUATIONALIZER:-true}
+      - USE_CONTEXTUAL_EMBEDDING=${USE_CONTEXTUAL_EMBEDDING:-true}
+      - USE_QDRANT_STORAGE=${USE_QDRANT_STORAGE:-true}
+      
+      # Audit
+      - AUDIT_LOG_PATH=/app/logs/audit.log
+      - AUDIT_RETENTION_DAYS=2555
+      
+      # Rate limiting
+      - RATE_LIMIT_WINDOW_MS=60000
+      - RATE_LIMIT_MAX_REQUESTS=100
+      
+      # EU Sovereign
+      - EU_REGION=${EU_REGION:-eu-central-1}
+      - DATA_RESIDENCY=EU
+      - GDPR_MODE=true
+      
+      # Logging
+      - LOG_LEVEL=info
+      - LOG_FORMAT=json
+    
+    ports:
+      - "3000:3000"
+    
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        compress: "true"
+        labels: "hivemind.component,hivemind.tier,environment"
+    
+    volumes:
+      - hivemind-logs:/app/logs
+      - hivemind-data:/app/data
+    
+    labels:
+      - "hivemind.component=api"
+      - "hivemind.tier=core"
+      - "hivemind.region=eu"
+      - "hivemind.compliance=gdpr,nis2,dora"
+      
+      # Coolify labels
+      - "coolify.name=hivemind-api"
+      - "coolify.description=HIVE-MIND Core API"
+      - "coolify.healthcheck=/health"
+      - "coolify.port=3000"
+    
+    networks:
+      - hivemind-network
+
+  # ==========================================
+  # PostgreSQL (Optional - use managed if available)
+  # ==========================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: hivemind-postgres
+    restart: unless-stopped
+    
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 2G
+    
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-hivemind}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB:-hivemind}
+      - POSTGRES_INITDB_ARGS=--encoding=UTF8 --lc-collate=en_US.UTF-8 --lc-ctype=en_US.UTF-8
+      - PGDATA=/var/lib/postgresql/data/pgdata
+      - POSTGRES_HOST_AUTH_METHOD=scram-sha-256
+    
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init-age.sql:/docker-entrypoint-initdb.d/01-install-age.sql:ro
+    
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hivemind} -d ${POSTGRES_DB:-hivemind}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        compress: "true"
+    
+    labels:
+      - "hivemind.component=database"
+      - "hivemind.tier=core"
+      - "hivemind.region=eu"
+      - "coolify.name=hivemind-postgres"
+    
+    networks:
+      - hivemind-network
+
+  # ==========================================
+  # Qdrant Vector Database (Optional)
+  # ==========================================
+  qdrant:
+    image: qdrant/qdrant:v1.12.0
+    container_name: hivemind-qdrant
+    restart: unless-stopped
+    
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 2G
+    
+    environment:
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      - QDRANT__SERVICE__GRPC_PORT=6334
+      - QDRANT__STORAGE__STORAGE_PATH=/qdrant/storage
+      - QDRANT__LOG_LEVEL=INFO
+      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY}
+      - QDRANT__TELEMETRY_DISABLED=true
+    
+    volumes:
+      - qdrant-data:/qdrant/storage
+      - ./infra/qdrant/config.yaml:/qdrant/config/production.yaml:ro
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        compress: "true"
+    
+    labels:
+      - "hivemind.component=vector-store"
+      - "hivemind.tier=core"
+      - "hivemind.region=eu"
+      - "coolify.name=hivemind-qdrant"
+    
+    networks:
+      - hivemind-network
+
+  # ==========================================
+  # Redis (Optional)
+  # ==========================================
+  redis:
+    image: redis:7-alpine
+    container_name: hivemind-redis
+    restart: unless-stopped
+    
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --appendonly yes
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --tcp-keepalive 300
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+    
+    volumes:
+      - redis-data:/data
+    
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        compress: "true"
+    
+    labels:
+      - "hivemind.component=cache"
+      - "hivemind.tier=core"
+      - "hivemind.region=eu"
+      - "coolify.name=hivemind-redis"
+    
+    networks:
+      - hivemind-network
+
+# ==========================================
+# Volumes
+# ==========================================
+volumes:
+  hivemind-logs:
+    driver: local
+  hivemind-data:
+    driver: local
+  postgres-data:
+    driver: local
+  qdrant-data:
+    driver: local
+  redis-data:
+    driver: local
+
+# ==========================================
+# Networks
+# ==========================================
+networks:
+  hivemind-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

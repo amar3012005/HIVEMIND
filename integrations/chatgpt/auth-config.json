@@ -1,0 +1,55 @@
+{
+  "name": "HIVE-MIND OAuth Configuration",
+  "description": "OAuth 2.0 PKCE configuration for ChatGPT Custom GPT integration",
+  "version": "1.0.0",
+  "oauth": {
+    "flow": "pkce",
+    "authorizationUrl": "https://hivemind.auth.zitadel.cloud/oauth/v2/authorize",
+    "tokenUrl": "https://hivemind.auth.zitadel.cloud/oauth/v2/token",
+    "userinfoUrl": "https://hivemind.auth.zitadel.cloud/oidc/v1/userinfo",
+    "clientId": "${CHATGPT_CLIENT_ID}",
+    "clientSecret": "${CHATGPT_CLIENT_SECRET}",
+    "redirectUri": "${CHATGPT_REDIRECT_URI}",
+    "scopes": [
+      "openid",
+      "profile",
+      "email",
+      "urn:zitadel:iam:org:project:id:audience",
+      "urn:zitadel:iam:org:project:id:roles"
+    ],
+    "pkce": {
+      "enabled": true,
+      "codeChallengeMethod": "S256",
+      "stateExpirySeconds": 600
+    }
+  },
+  "endpoints": {
+    "authorize": "/integrations/chatgpt/oauth/authorize",
+    "callback": "/integrations/chatgpt/oauth/callback",
+    "refresh": "/integrations/chatgpt/oauth/refresh",
+    "revoke": "/integrations/chatgpt/oauth/revoke"
+  },
+  "tokenStorage": {
+    "encryption": "LUKS2",
+    "storage": "postgresql",
+    "table": "platform_integrations",
+    "accessTokenColumn": "access_token_encrypted",
+    "refreshTokenColumn": "refresh_token_encrypted"
+  },
+  "security": {
+    "tokenExpirySeconds": 3600,
+    "refreshTokenExpiryDays": 30,
+    "maxConcurrentSessions": 5,
+    "requireHttps": true,
+    "allowedOrigins": [
+      "https://chat.openai.com",
+      "https://api.hivemind.io",
+      "https://api-staging.hivemind.io"
+    ]
+  },
+  "zitadel": {
+    "projectId": "${ZITADEL_PROJECT_ID}",
+    "organizationId": "${ZITADEL_ORG_ID}",
+    "audience": "${ZITADEL_AUDIENCE}"
+  }
+}

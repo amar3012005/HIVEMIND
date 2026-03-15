@@ -1,0 +1,149 @@
+{
+  "mcpServers": {
+    "hivemind": {
+      "command": "node",
+      "args": ["mcp-server/server.js"],
+      "cwd": "/Users/amar/HIVE-MIND",
+      "env": {
+        "HIVEMIND_API_URL": "http://localhost:3000",
+        "HIVEMIND_API_KEY": "${HIVEMIND_API_KEY}",
+        "CURRENT_USER_ID": "${USER_ID}",
+        "MCP_ENDPOINT_PREFIX": "hivemind",
+        "MCP_SECRET_KEY": "${MCP_SECRET_KEY}",
+        "MCP_BASE_URL": "http://localhost:3000",
+        "MCP_SYNC_INTERVAL": "1000",
+        "MCP_MAX_BATCH_SIZE": "10",
+        "MCP_RATE_LIMIT": "60",
+        "MCP_RATE_LIMIT_HOURLY": "1000",
+        "NODE_ENV": "production"
+      },
+      "disabled": false
+    }
+  },
+  "tools": {
+    "save_memory": {
+      "enabled": true,
+      "autoApprove": false,
+      "description": "Save information to persistent cross-platform memory",
+      "syncEnabled": true
+    },
+    "recall": {
+      "enabled": true,
+      "autoApprove": true,
+      "description": "Search and retrieve relevant memories",
+      "syncEnabled": true
+    },
+    "list_memories": {
+      "enabled": true,
+      "autoApprove": true,
+      "description": "List all memories with filtering"
+    },
+    "get_memory": {
+      "enabled": true,
+      "autoApprove": true,
+      "description": "Get a specific memory by ID"
+    },
+    "delete_memory": {
+      "enabled": true,
+      "autoApprove": false,
+      "description": "Delete a memory by ID"
+    },
+    "get_context": {
+      "enabled": true,
+      "autoApprove": true,
+      "description": "Get all relevant context for conversation"
+    },
+    "search_memories": {
+      "enabled": true,
+      "autoApprove": true,
+      "description": "Advanced hybrid search"
+    },
+    "traverse_graph": {
+      "enabled": true,
+      "autoApprove": true,
+      "description": "Traverse memory graph"
+    }
+  },
+  "resources": {
+    "memories://recent": {
+      "enabled": true,
+      "autoApprove": true
+    },
+    "memories://favorites": {
+      "enabled": true,
+      "autoApprove": true
+    },
+    "memories://all": {
+      "enabled": true,
+      "autoApprove": false
+    },
+    "context://current": {
+      "enabled": true,
+      "autoApprove": true
+    },
+    "context://summary": {
+      "enabled": true,
+      "autoApprove": true
+    }
+  },
+  "prompts": {
+    "memory-summary": {
+      "enabled": true
+    },
+    "context-injection": {
+      "enabled": true
+    }
+  },
+  "metaMcpBridge": {
+    "enabled": true,
+    "endpointPrefix": "hivemind",
+    "endpointBaseUrl": "http://localhost:3000",
+    "maxEndpointsPerUser": 5,
+    "rateLimit": {
+      "requestsPerMinute": 60,
+      "requestsPerHour": 1000
+    },
+    "sync": {
+      "interval": 1000,
+      "maxBatchSize": 10,
+      "timeout": 30000,
+      "maxRetries": 3,
+      "retryDelay": 1000
+    }
+  },
+  "crossAppSync": {
+    "enabled": true,
+    "platforms": ["cursor", "claude", "chatgpt"],
+    "protocol": "websocket",
+    "syncOn": {
+      "memoryCreated": true,
+      "memoryUpdated": true,
+      "memoryDeleted": true,
+      "contextView": true,
+      "sessionEnd": true
+    }
+  },
+  "clientIntegrations": {
+    "cursor": {
+      "enabled": true,
+      "configPath": ".cursor/mcp.json",
+      "autoConfigure": true
+    },
+    "claude": {
+      "enabled": true,
+      "configPath": "claude_desktop_config.json",
+      "autoConfigure": true
+    },
+    "chatgpt": {
+      "enabled": true,
+      "type": "custom-gpt",
+      "autoConfigure": true
+    }
+  },
+  "security": {
+    "requireEndpointAuth": true,
+    "validateHmac": true,
+    "maxContextSize": 100000,
+    "contextTtl": 3600000
+  }
+}

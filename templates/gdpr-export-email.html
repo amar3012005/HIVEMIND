@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Your HIVE-MIND Data Export is Ready</title>
+    <style>
+        :root {
+            --primary-color: #6366f1;
+            --success-color: #22c55e;
+            --warning-color: #f59e0b;
+            --text-color: #1f2937;
+            --text-muted: #6b7280;
+            --bg-color: #f9fafb;
+            --card-bg: #ffffff;
+            --border-color: #e5e7eb;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: var(--text-color);
+            background-color: var(--bg-color);
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            background: var(--card-bg);
+            border-radius: 12px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, var(--primary-color), #8b5cf6);
+            color: white;
+            padding: 32px 24px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 24px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .header p {
+            opacity: 0.9;
+            font-size: 14px;
+        }
+
+        .content {
+            padding: 32px 24px;
+        }
+
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 6px 12px;
+            background: rgba(34, 197, 94, 0.1);
+            color: var(--success-color);
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: 500;
+            margin-bottom: 24px;
+        }
+
+        .status-badge svg {
+            width: 16px;
+            height: 16px;
+            margin-right: 6px;
+        }
+
+        .message {
+            font-size: 16px;
+            color: var(--text-color);
+            margin-bottom: 24px;
+        }
+
+        .download-card {
+            background: var(--bg-color);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 24px;
+        }
+
+        .download-card h3 {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 12px;
+            color: var(--text-color);
+        }
+
+        .download-info {
+            display: grid;
+            grid-template-columns: auto 1fr;
+            gap: 12px;
+            font-size: 14px;
+            color: var(--text-muted);
+        }
+
+        .download-info dt {
+            font-weight: 500;
+            color: var(--text-color);
+        }
+
+        .download-button {
+            display: inline-block;
+            width: 100%;
+            padding: 14px 24px;
+            background: var(--primary-color);
+            color: white;
+            text-decoration: none;
+            border-radius: 8px;
+            font-weight: 500;
+            text-align: center;
+            margin-top: 16px;
+            transition: background-color 0.2s;
+        }
+
+        .download-button:hover {
+            background: #4f46e5;
+        }
+
+        .expiry-warning {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            padding: 16px;
+            background: rgba(245, 158, 11, 0.1);
+            border-left: 4px solid var(--warning-color);
+            border-radius: 0 8px 8px 0;
+            margin: 24px 0;
+        }
+
+        .expiry-warning svg {
+            width: 20px;
+            height: 20px;
+            color: var(--warning-color);
+            flex-shrink: 0;
+        }
+
+        .expiry-warning p {
+            font-size: 14px;
+            color: var(--text-color);
+            margin: 0;
+        }
+
+        .expiry-warning strong {
+            color: var(--warning-color);
+        }
+
+        .data-included {
+            margin-top: 24px;
+        }
+
+        .data-included h3 {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 12px;
+        }
+
+        .data-list {
+            list-style: none;
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 8px;
+        }
+
+        .data-list li {
+            display: flex;
+            align-items: center;
+            font-size: 14px;
+            color: var(--text-muted);
+        }
+
+        .data-list li::before {
+            content: "✓";
+            color: var(--success-color);
+            font-weight: bold;
+            margin-right: 8px;
+        }
+
+        .security-notice {
+            margin-top: 24px;
+            padding: 16px;
+            background: var(--bg-color);
+            border-radius: 8px;
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+
+        .security-notice h4 {
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: var(--text-color);
+        }
+
+        .footer {
+            background: var(--bg-color);
+            padding: 24px;
+            text-align: center;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .footer p {
+            font-size: 13px;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+        }
+
+        .footer a {
+            color: var(--primary-color);
+            text-decoration: none;
+        }
+
+        .footer a:hover {
+            text-decoration: underline;
+        }
+
+        .social-links {
+            display: flex;
+            justify-content: center;
+            gap: 16px;
+            margin-top: 16px;
+        }
+
+        .social-links a {
+            color: var(--text-muted);
+            font-size: 13px;
+        }
+
+        @media only screen and (max-width: 480px) {
+            .data-list {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1>📦 Your Data Export is Ready</h1>
+            <p>HIVE-MIND GDPR Export Service</p>
+        </div>
+
+        <!-- Content -->
+        <div class="content">
+            <!-- Status Badge -->
+            <div class="status-badge">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+                </svg>
+                Export Completed
+            </div>
+
+            <!-- Main Message -->
+            <p class="message">
+                Hi there,<br><br>
+                Your personal data export requested on <strong>{{exportDate}}</strong> is now ready for download. 
+                This export contains all your personal data stored in HIVE-MIND, formatted in a portable JSON format.
+            </p>
+
+            <!-- Download Card -->
+            <div class="download-card">
+                <h3>Download Your Data</h3>
+                <dl class="download-info">
+                    <dt>Export ID:</dt>
+                    <dd>{{exportRequestId}}</dd>
+                    
+                    <dt>Format:</dt>
+                    <dd>JSON (compressed)</dd>
+                    
+                    <dt>File Size:</dt>
+                    <dd>{{fileSize}}</dd>
+                    
+                    <dt>Generated:</dt>
+                    <dd>{{generatedAt}}</dd>
+                </dl>
+                
+                <a href="{{downloadUrl}}" class="download-button">
+                    ⬇️ Download Your Data
+                </a>
+            </div>
+
+            <!-- Expiry Warning -->
+            <div class="expiry-warning">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" 
+                          d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z">
+                    </path>
+                </svg>
+                <p>
+                    <strong>Important:</strong> This download link will expire on <strong>{{expiresAt}}</strong>. 
+                    After this time, you'll need to request a new export from your account settings.
+                </p>
+            </div>
+
+            <!-- Data Included -->
+            <div class="data-included">
+                <h3>What's Included in Your Export</h3>
+                <ul class="data-list">
+                    <li>User Profile</li>
+                    <li>Memories</li>
+                    <li>Sessions</li>
+                    <li>Platform Integrations</li>
+                    <li>Consent Records</li>
+                    <li>Audit Summary</li>
+                </ul>
+            </div>
+
+            <!-- Security Notice -->
+            <div class="security-notice">
+                <h4>🔒 Security Notice</h4>
+                <p>
+                    This export contains sensitive personal data. Please download it on a secure device and store it safely. 
+                    The download link is unique to you and should not be shared. Once expired, the link cannot be recovered.
+                </p>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="footer">
+            <p>
+                This export is provided under GDPR Article 20 (Right to Data Portability).
+            </p>
+            <p>
+                Questions? Contact us at <a href="mailto:privacy@hivemind.io">privacy@hivemind.io</a>
+            </p>
+            <p>
+                <a href="https://hivemind.io/privacy">Privacy Policy</a> • 
+                <a href="https://hivemind.io/terms">Terms of Service</a> • 
+                <a href="https://hivemind.io/gdpr">GDPR Rights</a>
+            </p>
+            <div class="social-links">
+                <a href="https://hivemind.io">Website</a>
+                <a href="https://hivemind.io/docs">Documentation</a>
+                <a href="https://status.hivemind.io">Status</a>
+            </div>
+            <p style="margin-top: 16px; font-size: 12px;">
+                HIVE-MIND is hosted in the European Union (Hetzner/Scaleway/OVHcloud) 
+                and complies with GDPR, NIS2, and DORA regulations.
+            </p>
+        </div>
+    </div>
+</body>
+</html>

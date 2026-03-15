@@ -1,0 +1,156 @@
+{
+  "name": "HIVE-MIND Claude Actions Configuration",
+  "description": "Claude Actions API integration configuration for cross-platform memory sync",
+  "version": "1.0.0",
+  "platform": {
+    "name": "claude",
+    "displayName": "Claude",
+    "provider": "Anthropic",
+    "apiVersion": "2024-01-01"
+  },
+  "authentication": {
+    "type": "api_key",
+    "headerName": "X-API-Key",
+    "keyLocation": "header",
+    "keyRotation": {
+      "enabled": true,
+      "rotationIntervalDays": 90,
+      "notifyBeforeExpiryDays": 14
+    }
+  },
+  "webhook": {
+    "enabled": true,
+    "endpoint": "/integrations/claude/webhook",
+    "secretEnv": "CLAUDE_WEBHOOK_SECRET",
+    "signatureHeader": "X-Claude-Signature",
+    "timestampHeader": "X-Claude-Timestamp",
+    "events": [
+      "conversation.start",
+      "conversation.message",
+      "conversation.end",
+      "tool.call",
+      "tool.result"
+    ],
+    "retryPolicy": {
+      "maxRetries": 3,
+      "initialDelayMs": 1000,
+      "maxDelayMs": 30000,
+      "backoffMultiplier": 2
+    },
+    "timeoutMs": 5000
+  },
+  "tools": {
+    "save_memory": {
+      "name": "save_memory",
+      "description": "Save important information to persistent cross-platform memory",
+      "enabled": true,
+      "autoSuggest": true,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": "string",
+            "description": "The information to remember"
+          },
+          "memoryType": {
+            "type": "string",
+            "enum": ["fact", "preference", "decision", "lesson", "goal", "event", "relationship"],
+            "description": "Type of memory"
+          },
+          "title": {
+            "type": "string",
+            "description": "Short title for the memory"
+          },
+          "tags": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Tags for categorization"
+          },
+          "importanceScore": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Importance score (0-1)"
+          }
+        },
+        "required": ["content"]
+      }
+    },
+    "recall_memories": {
+      "name": "recall_memories",
+      "description": "Search for relevant memories",
+      "enabled": true,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Natural language search query"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "default": 10,
+            "description": "Maximum results to return"
+          },
+          "memoryTypes": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Filter by memory types"
+          }
+        },
+        "required": ["query"]
+      }
+    },
+    "get_context": {
+      "name": "get_context",
+      "description": "Get all relevant context for current conversation",
+      "enabled": true,
+      "autoInvoke": {
+        "trigger": "conversation.start",
+        "condition": "user_has_memories"
+      },
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "topic": {
+            "type": "string",
+            "description": "Optional topic to filter context"
+          }
+        }
+      }
+    }
+  },
+  "contextInjection": {
+    "enabled": true,
+    "format": "xml",
+    "tag": "relevant-memories",
+    "maxMemories": 20,
+    "maxTokens": 2000,
+    "injectionPoint": "system_prompt",
+    "scoring": {
+      "similarityWeight": 0.5,
+      "recencyWeight": 0.3,
+      "importanceWeight": 0.2
+    }
+  },
+  "endpoints": {
+    "baseUrl": "https://api.hivemind.io/v1",
+    "memories": "/memories",
+    "recall": "/recall",
+    "context": "/recall/context",
+    "sync": "/sync/status"
+  },
+  "rateLimit": {
+    "requestsPerMinute": 100,
+    "requestsPerHour": 1000,
+    "burstLimit": 20
+  },
+  "logging": {
+    "level": "info",
+    "includeRequestBody": false,
+    "includeResponseBody": false,
+    "maskSensitiveFields": ["api_key", "access_token", "refresh_token"]
+  }
+}

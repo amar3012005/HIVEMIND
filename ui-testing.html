@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HIVEMIND UX Test Console</title>
+  <style>
+    :root {
+      --bg: #070707;
+      --panel: #101010;
+      --panel-2: #141414;
+      --text: #f5f5f5;
+      --muted: #a1a1aa;
+      --line: #262626;
+      --accent: #4ade80;
+      --danger: #ef4444;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Söhne", "Manrope", "SF Pro Text", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(1100px 500px at 50% -10%, rgba(74,222,128,0.16), transparent 60%),
+        linear-gradient(180deg, #090909 0%, #070707 100%);
+      min-height: 100vh;
+    }
+    .banner {
+      width: 100%;
+      font-size: 13px;
+      font-weight: 600;
+      color: #0a0a0a;
+      padding: 8px 16px;
+      text-align: center;
+      background: linear-gradient(90deg, #22c55e, #4ade80, #22c55e);
+    }
+    .shell {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 28px 20px 56px;
+    }
+    .hero {
+      border: 1px solid #1f1f1f;
+      border-radius: 20px;
+      background: rgba(16,16,16,0.85);
+      padding: 28px;
+      margin-bottom: 16px;
+      backdrop-filter: blur(10px);
+    }
+    h1 {
+      margin: 0 0 8px;
+      line-height: 1.05;
+      font-weight: 600;
+      font-size: clamp(32px, 6vw, 64px);
+      letter-spacing: -0.03em;
+    }
+    .sub {
+      margin: 0;
+      color: var(--muted);
+      font-size: 17px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 16px;
+    }
+    .card {
+      background: linear-gradient(180deg, rgba(23,23,23,0.9), rgba(14,14,14,0.92));
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 18px;
+    }
+    .card h2 {
+      margin: 0 0 12px;
+      font-size: 18px;
+      letter-spacing: -0.01em;
+    }
+    .span-6 { grid-column: span 6; }
+    .span-8 { grid-column: span 8; }
+    .span-4 { grid-column: span 4; }
+    .span-12 { grid-column: span 12; }
+    @media (max-width: 960px) {
+      .span-6,.span-8,.span-4,.span-12 { grid-column: span 12; }
+    }
+    label {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin: 0 0 6px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+    }
+    input, textarea, select {
+      width: 100%;
+      border: 1px solid #303030;
+      border-radius: 10px;
+      background: #0d0d0d;
+      color: var(--text);
+      padding: 10px 12px;
+      font: inherit;
+      outline: none;
+    }
+    textarea { min-height: 96px; resize: vertical; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .row-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+    button {
+      border: 1px solid transparent;
+      border-radius: 999px;
+      background: var(--accent);
+      color: #051108;
+      font-weight: 700;
+      padding: 9px 14px;
+      cursor: pointer;
+    }
+    button.secondary {
+      background: transparent;
+      color: var(--text);
+      border-color: #313131;
+    }
+    button.danger {
+      background: #1a0f0f;
+      color: #fecaca;
+      border-color: #5e2222;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 5px 10px;
+      border: 1px solid #2d2d2d;
+      border-radius: 999px;
+      font-size: 12px;
+      color: #d4d4d8;
+      background: #0f0f0f;
+      margin-right: 6px;
+      margin-bottom: 6px;
+    }
+    .status {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 8px;
+      min-height: 16px;
+    }
+    pre {
+      margin: 0;
+      background: #0b0b0b;
+      border: 1px solid #202020;
+      border-radius: 12px;
+      padding: 12px;
+      overflow: auto;
+      max-height: 300px;
+      font-size: 12px;
+      color: #d4d4d8;
+    }
+    .muted { color: var(--muted); }
+    .ok { color: var(--accent); }
+    .bad { color: var(--danger); }
+  </style>
+</head>
+<body>
+  <div class="banner">HIVEMIND UX TEST · Ultimate API Key + Memory API + Docker-local stack validation</div>
+  <main class="shell">
+    <section class="hero">
+      <h1>Stop re-explaining your<br/>business to your AI</h1>
+      <p class="sub">This local test console mirrors the new platform UX direction and validates end-to-end integration against the running API.</p>
+      <div style="margin-top:14px;">
+        <span class="pill">Postgres + AGE (Docker)</span>
+        <span class="pill">Qdrant (Docker)</span>
+        <span class="pill">Memory API (localhost:3000)</span>
+      </div>
+    </section>
+
+    <section class="grid">
+      <article class="card span-6">
+        <h2>Environment</h2>
+        <div class="row">
+          <div>
+            <label>API Base</label>
+            <input id="apiBase" value="http://localhost:3000" />
+          </div>
+          <div>
+            <label>Admin Secret (for key management)</label>
+            <input id="adminSecret" value="local-admin-secret-change-me" />
+          </div>
+        </div>
+        <div class="actions">
+          <button class="secondary" id="healthBtn">Check API Health</button>
+          <button class="secondary" id="listKeysBtn">List Keys</button>
+        </div>
+        <div class="status" id="envStatus"></div>
+      </article>
+
+      <article class="card span-6">
+        <h2>Ultimate API Key</h2>
+        <div class="row-3">
+          <div>
+            <label>Label</label>
+            <input id="keyLabel" value="ultimate-user-key" />
+          </div>
+          <div>
+            <label>User ID</label>
+            <input id="keyUser" value="local-user" />
+          </div>
+          <div>
+            <label>Org ID</label>
+            <input id="keyOrg" value="local-org" />
+          </div>
+        </div>
+        <div class="actions">
+          <button id="generateKeyBtn">Generate Key</button>
+          <button class="secondary" id="copyKeyBtn">Copy Key</button>
+        </div>
+        <label style="margin-top:10px;">Active API Key</label>
+        <input id="activeApiKey" placeholder="Generated key appears here. It is shown once." />
+        <div class="status" id="keyStatus"></div>
+      </article>
+
+      <article class="card span-8">
+        <h2>Memory Operations</h2>
+        <label>Memory Content</label>
+        <textarea id="memoryContent" placeholder="Example: We decided to use Qdrant for vector memory in Project Atlas."></textarea>
+        <div class="row">
+          <div>
+            <label>Project</label>
+            <input id="memoryProject" value="hivemind-enterprise" />
+          </div>
+          <div>
+            <label>Tags (comma-separated)</label>
+            <input id="memoryTags" value="decision,architecture,memory" />
+          </div>
+        </div>
+        <div class="actions">
+          <button id="storeMemoryBtn">Store Memory</button>
+          <button class="secondary" id="loadMemoriesBtn">List Memories</button>
+          <button class="secondary" id="statsBtn">Get Stats</button>
+        </div>
+        <div class="status" id="memoryStatus"></div>
+      </article>
+
+      <article class="card span-4">
+        <h2>Search & Recall</h2>
+        <label>Search Query</label>
+        <input id="searchQuery" value="Qdrant decision" />
+        <div class="actions">
+          <button id="searchBtn">Search</button>
+          <button class="secondary" id="recallBtn">Auto Recall</button>
+        </div>
+        <div class="status muted">All operations use the active Ultimate API key.</div>
+      </article>
+
+      <article class="card span-12">
+        <h2>Response Output</h2>
+        <pre id="output">Ready.</pre>
+      </article>
+    </section>
+  </main>
+
+  <script>
+    const byId = (id) => document.getElementById(id);
+    const outputEl = byId('output');
+    const setOut = (title, payload) => {
+      outputEl.textContent = `${title}\n\n${JSON.stringify(payload, null, 2)}`;
+    };
+
+    async function api(path, options = {}, { auth = true, admin = false } = {}) {
+      const base = byId('apiBase').value.trim().replace(/\/$/, '');
+      const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+      if (auth) {
+        const key = byId('activeApiKey').value.trim();
+        if (!key) throw new Error('No active API key. Generate one first.');
+        headers['Authorization'] = `Bearer ${key}`;
+      }
+      if (admin) {
+        headers['X-Admin-Secret'] = byId('adminSecret').value.trim();
+      }
+      const res = await fetch(`${base}${path}`, { ...options, headers });
+      const text = await res.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = { raw: text }; }
+      if (!res.ok) {
+        const message = data && data.error ? data.error : `Request failed (${res.status})`;
+        throw new Error(message);
+      }
+      return data;
+    }
+
+    byId('healthBtn').onclick = async () => {
+      const statusEl = byId('envStatus');
+      try {
+        const base = byId('apiBase').value.trim().replace(/\/$/, '');
+        const res = await fetch(`${base}/`);
+        statusEl.className = 'status ok';
+        statusEl.textContent = `API reachable (${res.status}).`;
+        setOut('Health Check', { status: res.status, ok: true });
+      } catch (err) {
+        statusEl.className = 'status bad';
+        statusEl.textContent = err.message;
+        setOut('Health Check Error', { error: err.message });
+      }
+    };
+
+    byId('generateKeyBtn').onclick = async () => {
+      const statusEl = byId('keyStatus');
+      try {
+        const payload = {
+          label: byId('keyLabel').value.trim(),
+          user_id: byId('keyUser').value.trim(),
+          org_id: byId('keyOrg').value.trim()
+        };
+        const data = await api('/api/keys/generate', {
+          method: 'POST',
+          body: JSON.stringify(payload)
+        }, { auth: false, admin: true });
+        byId('activeApiKey').value = data.key;
+        statusEl.className = 'status ok';
+        statusEl.textContent = `Key generated: ${data.key_preview}`;
+        setOut('Key Generated', data);
+      } catch (err) {
+        statusEl.className = 'status bad';
+        statusEl.textContent = err.message;
+        setOut('Key Generation Error', { error: err.message });
+      }
+    };
+
+    byId('copyKeyBtn').onclick = async () => {
+      const key = byId('activeApiKey').value.trim();
+      if (!key) return;
+      await navigator.clipboard.writeText(key);
+      byId('keyStatus').className = 'status ok';
+      byId('keyStatus').textContent = 'Key copied to clipboard.';
+    };
+
+    byId('listKeysBtn').onclick = async () => {
+      try {
+        const data = await api('/api/keys', { method: 'GET' }, { auth: false, admin: true });
+        setOut('Key List', data);
+      } catch (err) {
+        setOut('Key List Error', { error: err.message });
+      }
+    };
+
+    byId('storeMemoryBtn').onclick = async () => {
+      const statusEl = byId('memoryStatus');
+      try {
+        const data = await api('/api/memories', {
+          method: 'POST',
+          body: JSON.stringify({
+            content: byId('memoryContent').value.trim(),
+            project: byId('memoryProject').value.trim(),
+            tags: byId('memoryTags').value.split(',').map(t => t.trim()).filter(Boolean)
+          })
+        });
+        statusEl.className = 'status ok';
+        statusEl.textContent = 'Memory saved.';
+        setOut('Store Memory', data);
+      } catch (err) {
+        statusEl.className = 'status bad';
+        statusEl.textContent = err.message;
+        setOut('Store Memory Error', { error: err.message });
+      }
+    };
+
+    byId('loadMemoriesBtn').onclick = async () => {
+      try {
+        const data = await api('/api/memories', { method: 'GET' });
+        setOut('Memories', data);
+      } catch (err) {
+        setOut('Memories Error', { error: err.message });
+      }
+    };
+
+    byId('searchBtn').onclick = async () => {
+      try {
+        const data = await api('/api/memories/search', {
+          method: 'POST',
+          body: JSON.stringify({ query: byId('searchQuery').value.trim(), n_results: 10 })
+        });
+        setOut('Search Results', data);
+      } catch (err) {
+        setOut('Search Error', { error: err.message });
+      }
+    };
+
+    byId('recallBtn').onclick = async () => {
+      try {
+        const data = await api('/api/recall', {
+          method: 'POST',
+          body: JSON.stringify({ query_context: byId('searchQuery').value.trim(), max_memories: 5 })
+        });
+        setOut('Auto Recall', data);
+      } catch (err) {
+        setOut('Auto Recall Error', { error: err.message });
+      }
+    };
+
+    byId('statsBtn').onclick = async () => {
+      try {
+        const data = await api('/api/stats', { method: 'GET' });
+        setOut('Stats', data);
+      } catch (err) {
+        setOut('Stats Error', { error: err.message });
+      }
+    };
+  </script>
+</body>
+</html>

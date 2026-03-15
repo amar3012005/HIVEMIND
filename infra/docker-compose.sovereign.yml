@@ -1,0 +1,321 @@
+# HIVE-MIND Sovereign European Stack
+# EU-native infrastructure: Zero US CLOUD Act exposure
+# Providers: Hetzner (DE/FI), Scaleway (FR), OVHcloud (FR)
+
+version: "3.8"
+
+services:
+  # ==========================================
+  # CORE DATABASE LAYER
+  # ==========================================
+
+  postgres:
+    image: apache/age:latest
+    container_name: hivemind-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-hivemind}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: ${POSTGRES_DB:-hivemind}
+      # LUKS2 encryption key reference (HYOK pattern)
+      LUKS_KEY_ID: ${LUKS_KEY_ID}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d
+    ports:
+      - "127.0.0.1:5432:5432"
+    command: >
+      postgres
+      -c shared_preload_libraries=age
+      -c max_connections=200
+      -c shared_buffers=2GB
+      -c effective_cache_size=6GB
+      -c maintenance_work_mem=512MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+      -c work_mem=5242kB
+      -c min_wal_size=1GB
+      -c max_wal_size=4GB
+      -c max_worker_processes=4
+      -c max_parallel_workers_per_gather=2
+      -c max_parallel_workers=4
+      -c max_parallel_maintenance_workers=2
+    networks:
+      - hivemind_internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hivemind}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    labels:
+      - "hivemind.component=database"
+      - "hivemind.tier=core"
+      - "hivemind.region=eu"
+
+  # ==========================================
+  # VECTOR DATABASE (Qdrant)
+  # ==========================================
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: hivemind-qdrant
+    restart: unless-stopped
+    environment:
+      QDRANT__SERVICE__HTTP_PORT: 6333
+      QDRANT__SERVICE__GRPC_PORT: 6334
+      QDRANT__STORAGE__STORAGE_PATH: /qdrant/storage
+      # EU-only telemetry disable
+      QDRANT__TELEMETRY_DISABLED: "true"
+    volumes:
+      - qdrant_data:/qdrant/storage
+      - ./qdrant/config.yaml:/qdrant/config/production.yaml
+    ports:
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
+    networks:
+      - hivemind_internal
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    labels:
+      - "hivemind.component=vector-store"
+      - "hivemind.tier=core"
+      - "hivemind.region=eu"
+
+  # ==========================================
+  # IAM & IDENTITY (ZITADEL)
+  # ==========================================
+
+  zitadel:
+    image: ghcr.io/zitadel/zitadel:latest
+    container_name: hivemind-zitadel
+    restart: unless-stopped
+    environment:
+      ZITADEL_DATABASE_POSTGRES_HOST: postgres
+      ZITADEL_DATABASE_POSTGRES_PORT: 5432
+      ZITADEL_DATABASE_POSTGRES_DATABASE: zitadel
+      ZITADEL_DATABASE_POSTGRES_USER_USERNAME: zitadel
+      ZITADEL_DATABASE_POSTGRES_USER_PASSWORD: ${ZITADEL_DB_PASSWORD:-changeme}
+      ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE: disable
+      ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE: disable
+      ZITADEL_EXTERNALSECURE: "true"
+      ZITADEL_EXTERNALDOMAIN: ${ZITADEL_DOMAIN:-auth.hivemind.local}
+      ZITADEL_EXTERNALPORT: 443
+      ZITADEL_TLS_ENABLED: "false"  # Handled by reverse proxy
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+    networks:
+      - hivemind_internal
+    command: start-from-init --masterkey ${ZITADEL_MASTERKEY} --tlsMode external
+    labels:
+      - "hivemind.component=iam"
+      - "hivemind.tier=security"
+      - "hivemind.region=eu"
+
+  # ==========================================
+  # MCP SERVER
+  # ==========================================
+
+  mcp-server:
+    build:
+      context: ./mcp-server
+      dockerfile: Dockerfile
+    container_name: hivemind-mcp
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      MCP_PORT: 3000
+      MCP_TRANSPORT: sse
+      MCP_AUTH_SECRET: ${MCP_AUTH_SECRET}
+      POSTGRES_URL: postgres://${POSTGRES_USER:-hivemind}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-hivemind}
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_API_KEY: ${QDRANT_API_KEY}
+      ZITADEL_URL: http://zitadel:8080
+      EMBEDDING_MODEL_URL: ${EMBEDDING_MODEL_URL:-http://localhost:8000}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      zitadel:
+        condition: service_started
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks:
+      - hivemind_internal
+    labels:
+      - "hivemind.component=mcp"
+      - "hivemind.tier=api"
+      - "hivemind.region=eu"
+
+  # ==========================================
+  # EMBEDDING SERVICE (Mistral/Ollama)
+  # ==========================================
+
+  embeddings:
+    image: ollama/ollama:latest
+    container_name: hivemind-embeddings
+    restart: unless-stopped
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      # Download Mistral embeddings model on startup
+      OLLAMA_MODELS: /root/.ollama/models
+    volumes:
+      - ollama_models:/root/.ollama/models
+    ports:
+      - "127.0.0.1:11434:11434"
+    networks:
+      - hivemind_internal
+    # Pre-download mistral embeddings model
+    entrypoint: >
+      sh -c "
+        ollama serve &
+        sleep 5
+        ollama pull mistral
+        ollama pull nomic-embed-text
+        wait
+      "
+    labels:
+      - "hivemind.component=embeddings"
+      - "hivemind.tier=ai"
+      - "hivemind.region=eu"
+      - "hivemind.local-only=true"
+
+  # ==========================================
+  # REVERSE PROXY / SSL TERMINATION
+  # ==========================================
+
+  traefik:
+    image: traefik:v3.0
+    container_name: hivemind-traefik
+    restart: unless-stopped
+    command:
+      - "--api.insecure=false"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
+      # EU-only TLS configuration
+      - "--tls.options.default.minVersion=VersionTLS13"
+      - "--tls.options.default.cipherSuites=TLS_AES_256_GCM_SHA384,TLS_CHACHA20_POLY1305_SHA256"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - letsencrypt_data:/letsencrypt
+    networks:
+      - hivemind_internal
+    labels:
+      - "hivemind.component=gateway"
+      - "hivemind.tier=edge"
+      - "hivemind.region=eu"
+
+  # ==========================================
+  # MONITORING (Prometheus + Grafana)
+  # ==========================================
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: hivemind-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    networks:
+      - hivemind_internal
+    labels:
+      - "hivemind.component=monitoring"
+      - "hivemind.tier=observability"
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: hivemind-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_SERVER_ROOT_URL: ${GRAFANA_URL:-https://grafana.hivemind.local}
+      GF_INSTALL_PLUGINS: grafana-clock-panel,grafana-simple-json-datasource
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    ports:
+      - "127.0.0.1:3001:3000"
+    networks:
+      - hivemind_internal
+    labels:
+      - "hivemind.component=monitoring"
+      - "hivemind.tier=observability"
+
+  # ==========================================
+  # BACKUP SERVICE
+  # ==========================================
+
+  backup:
+    image: offen/docker-volume-backup:latest
+    container_name: hivemind-backup
+    restart: unless-stopped
+    environment:
+      BACKUP_CRON_EXPRESSION: "0 2 * * *"  # Daily at 2 AM
+      BACKUP_RETENTION_DAYS: "30"
+      BACKUP_FILENAME: "hivemind-backup-%Y-%m-%dT%H-%M-%S.tar.gz"
+      BACKUP_ARCHIVE: "/archive"
+      BACKUP_STOP_CONTAINER_LABEL: hivemind.component=database
+      # EU-only S3-compatible storage (Scaleway)
+      AWS_S3_BUCKET_NAME: ${BACKUP_BUCKET}
+      AWS_S3_ENDPOINT: s3.fr-par.scw.cloud
+      AWS_ACCESS_KEY_ID: ${SCW_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${SCW_SECRET_KEY}
+      AWS_DEFAULT_REGION: fr-par
+      # GPG encryption for backups
+      GPG_PASSPHRASE: ${BACKUP_GPG_PASSPHRASE}
+    volumes:
+      - postgres_data:/backup/postgres:ro
+      - qdrant_data:/backup/qdrant:ro
+      - backup_archive:/archive
+    networks:
+      - hivemind_internal
+    labels:
+      - "hivemind.component=backup"
+      - "hivemind.tier=maintenance"
+
+volumes:
+  postgres_data:
+    driver: local
+  qdrant_data:
+    driver: local
+  ollama_models:
+    driver: local
+  letsencrypt_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  backup_archive:
+    driver: local
+
+networks:
+  hivemind_internal:
+    driver: bridge
+    internal: false
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

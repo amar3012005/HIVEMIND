@@ -1,0 +1,762 @@
+// ==========================================
+// HIVE-MIND Prisma Schema
+// PostgreSQL 15+ with Apache AGE extension
+// EU Sovereign: GDPR, NIS2, DORA compliant
+// Data Residency: DE/FR/FI regions only
+// ==========================================
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["multiSchema", "postgresqlExtensions"]
+  output          = "../node_modules/.prisma/client"
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [age, uuid_ossp, pgcrypto]
+  schemas    = ["hivemind", "encryption"]
+}
+
+// ==========================================
+// ENUMS
+// ==========================================
+
+enum MemoryType {
+  fact
+  preference
+  decision
+  lesson
+  goal
+  event
+  relationship
+
+  @@schema("hivemind")
+}
+
+enum RelationshipType {
+  Updates
+  Extends
+  Derives
+
+  @@schema("hivemind")
+}
+
+enum VisibilityScope {
+  private
+  organization
+  public
+
+  @@schema("hivemind")
+}
+
+enum PlatformType {
+  chatgpt
+  claude
+  perplexity
+  gemini
+  other
+
+  @@schema("hivemind")
+}
+
+enum AuthType {
+  oauth2
+  api_key
+  webhook
+
+  @@schema("hivemind")
+}
+
+enum SyncStatus {
+  idle
+  syncing
+  error
+  revoked
+
+  @@schema("hivemind")
+}
+
+enum AuditEventCategory {
+  auth
+  data_access
+  data_modification
+  system
+
+  @@schema("hivemind")
+}
+
+enum AuditAction {
+  create
+  read
+  update
+  delete
+  export
+  erase
+
+  @@schema("hivemind")
+}
+
+enum ExportRequestType {
+  export
+  erasure
+  portability
+
+  @@schema("hivemind")
+}
+
+enum ExportStatus {
+  pending
+  processing
+  completed
+  failed
+
+  @@schema("hivemind")
+}
+
+enum ExportFormat {
+  json
+  csv
+  parquet
+
+  @@schema("hivemind")
+}
+
+// ==========================================
+// MULTI-TENANT FOUNDATION MODELS
+// ==========================================
+
+/// User accounts with ZITADEL IAM integration and HYOK encryption keys
+/// GDPR-ready with soft delete (deleted_at) for right to erasure
+model User {
+  id            String  @id @default(uuid()) @map("id") @db.Uuid
+  zitadelUserId String  @unique @map("zitadel_user_id")
+  email         String  @unique
+  displayName   String? @map("display_name")
+  avatarUrl     String? @map("avatar_url") @db.Text
+  timezone      String  @default("UTC")
+  locale        String  @default("en")
+
+  // HYOK encryption keys (user-specific)
+  encryptionKeyId      String @default(uuid()) @map("encryption_key_id") @db.Uuid
+  encryptionKeyVersion Int    @default(1) @map("encryption_key_version")
+
+  // Relations
+  organizations        UserOrganization[]    @relation("UserOrganizations")
+  memories             Memory[]              @relation("UserMemories")
+  platformIntegrations PlatformIntegration[] @relation("UserPlatformIntegrations")
+  sessions             Session[]             @relation("UserSessions")
+  syncLogs             SyncLog[]             @relation("UserSyncLogs")
+  auditLogs            AuditLog[]            @relation("UserAuditLogs")
+  exportRequests       DataExportRequest[]   @relation("UserExportRequests")
+  apiKeys              ApiKey[]              @relation("UserApiKeys")
+
+  // Timestamps
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+  lastActiveAt DateTime? @map("last_active_at")
+  deletedAt    DateTime? @map("deleted_at")
+
+  @@map("users")
+  @@schema("hivemind")
+}
+
+/// Multi-tenant organizations with EU data residency settings
+/// Supports GDPR, NIS2, DORA compliance flags
+model Organization {
+  id           String @id @default(uuid()) @map("id") @db.Uuid
+  zitadelOrgId String @unique @map("zitadel_org_id")
+  name         String
+  slug         String @unique
+
+  // Compliance
+  dataResidencyRegion String   @default("eu-central") @map("data_residency_region")
+  complianceFlags     String[] @default(["GDPR", "NIS2", "DORA"]) @map("compliance_flags")
+
+  // HYOK configuration
+  hsmProvider String  @default("ovhcloud") @map("hsm_provider")
+  hsmKeyArn   String? @map("hsm_key_arn")
+
+  // Relations
+  users     UserOrganization[] @relation("OrgUserOrganizations")
+  memories  Memory[]           @relation("OrgMemories")
+  auditLogs AuditLog[]         @relation("OrgAuditLogs")
+  apiKeys   ApiKey[]           @relation("OrgApiKeys")
+
+  // Timestamps
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("organizations")
+  @@schema("hivemind")
+}
+
+/// Junction table for user-organization many-to-many relationship
+model UserOrganization {
+  userId    String    @map("user_id") @db.Uuid
+  orgId     String    @map("org_id") @db.Uuid
+  role      String    @default("member")
+  invitedAt DateTime  @default(now()) @map("invited_at")
+  joinedAt  DateTime? @map("joined_at")
+
+  user User         @relation(fields: [userId], references: [id], onDelete: Cascade, name: "UserOrganizations")
+  org  Organization @relation(fields: [orgId], references: [id], onDelete: Cascade, name: "OrgUserOrganizations")
+
+  @@id([userId, orgId])
+  @@index([userId])
+  @@index([orgId])
+  @@map("user_organizations")
+  @@schema("hivemind")
+}
+
+// ==========================================
+// PLATFORM INTEGRATIONS
+// OAuth2, API keys, webhooks for AI platforms
+// ==========================================
+
+/// Cross-platform authentication with AI platforms (ChatGPT, Claude, etc.)
+/// Encrypted tokens using HYOK pattern for EU sovereignty
+model PlatformIntegration {
+  id                  String       @id @default(uuid()) @map("id") @db.Uuid
+  userId              String       @map("user_id") @db.Uuid
+  platformType        PlatformType @map("platform_type")
+  platformUserId      String?      @map("platform_user_id")
+  platformDisplayName String?      @map("platform_display_name")
+
+  // Authentication (encrypted fields)
+  authType               AuthType  @map("auth_type")
+  accessTokenEncrypted   String?   @map("access_token_encrypted") @db.Text
+  refreshTokenEncrypted  String?   @map("refresh_token_encrypted") @db.Text
+  tokenExpiresAt         DateTime? @map("token_expires_at")
+  apiKeyHash             String?   @map("api_key_hash")
+  webhookSecretEncrypted String?   @map("webhook_secret_encrypted") @db.Text
+
+  // OAuth metadata
+  oauthScopes        String[]  @map("oauth_scopes")
+  oauthGrantedAt     DateTime? @map("oauth_granted_at")
+  oauthLastRefreshed DateTime? @map("oauth_last_refreshed")
+
+  // Status tracking
+  isActive     Boolean    @default(true) @map("is_active")
+  lastSyncedAt DateTime?  @map("last_synced_at")
+  syncStatus   SyncStatus @default(idle) @map("sync_status")
+
+  // Error tracking
+  lastErrorMessage    String?   @map("last_error_message") @db.Text
+  lastErrorAt         DateTime? @map("last_error_at")
+  consecutiveFailures Int       @default(0) @map("consecutive_failures")
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade, name: "UserPlatformIntegrations")
+
+  // Timestamps
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([userId, platformType])
+  @@index([userId])
+  @@index([platformType])
+  @@index([isActive, syncStatus])
+  @@map("platform_integrations")
+  @@schema("hivemind")
+}
+
+// ==========================================
+// MEMORIES (Core table)
+// Graph-based memory with versioning and cognitive scoring
+// ==========================================
+
+/// Core memory storage with triple-operator versioning (Updates, Extends, Derives)
+/// Supports cognitive scoring for spaced repetition and Ebbinghaus forgetting curve
+model Memory {
+  id      String  @id @default(uuid()) @map("id") @db.Uuid
+  userId  String  @map("user_id") @db.Uuid
+  orgId   String? @map("org_id") @db.Uuid
+  project String? @map("project")
+
+  // Content
+  content    String
+  memoryType MemoryType @default(fact) @map("memory_type")
+  title      String?
+  tags       String[]
+
+  // Source tracking (cross-platform origin)
+  sourcePlatform  String? @map("source_platform")
+  sourceSessionId String? @map("source_session_id")
+  sourceMessageId String? @map("source_message_id")
+  sourceUrl       String? @map("source_url") @db.Text
+
+  // Triple-operator relationships (versioning)
+  isLatest     Boolean  @default(true) @map("is_latest")
+  supersedesId String?  @map("supersedes_id") @db.Uuid
+  supersedes   Memory?  @relation("MemorySupersedes", fields: [supersedesId], references: [id])
+  supersededBy Memory[] @relation("MemorySupersedes")
+
+  // Cognitive scoring
+  strength        Float    @default(1.0)
+  recallCount     Int      @default(0) @map("recall_count")
+  importanceScore Float    @default(0.5) @map("importance_score")
+  lastConfirmedAt DateTime @default(now()) @map("last_confirmed_at")
+
+  // Temporal grounding
+  documentDate DateTime?  @map("document_date")
+  eventDates   DateTime[] @map("event_dates")
+
+  // Visibility & sharing
+  visibility     VisibilityScope @default(private)
+  sharedWithOrgs String[]        @map("shared_with_orgs") @db.Uuid
+
+  // Vector search metadata
+  embeddingModel     String @default("mistral-embed") @map("embedding_model")
+  embeddingDimension Int    @default(1024) @map("embedding_dimension")
+  embeddingVersion   Int    @default(1) @map("embedding_version")
+
+  // GDPR compliance
+  processingBasis String    @default("consent") @map("processing_basis")
+  retentionUntil  DateTime? @map("retention_until")
+  exportBlocked   Boolean   @default(false) @map("export_blocked")
+
+  // Relations
+  user              User             @relation(fields: [userId], references: [id], onDelete: Cascade, name: "UserMemories")
+  organization      Organization?    @relation(fields: [orgId], references: [id], onDelete: Cascade, name: "OrgMemories")
+  relationshipsFrom Relationship[]   @relation("RelationshipFromMemory")
+  relationshipsTo   Relationship[]   @relation("RelationshipToMemory")
+  vectorEmbedding   VectorEmbedding? @relation("MemoryVectorEmbedding")
+  auditLogs         AuditLog[]       @relation("MemoryAuditLogs")
+  versions          MemoryVersion[]
+  sourceMetadata    SourceMetadata?
+  codeMetadata      CodeMemoryMetadata?
+  derivationSources DerivationJob[]  @relation("DerivationSourceMemory")
+  derivationTargets DerivationJob[]  @relation("DerivationTargetMemory")
+
+  // Timestamps
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  @@index([userId])
+  @@index([orgId])
+  @@index([project])
+  @@index([memoryType])
+  @@index([isLatest])
+  @@index([sourcePlatform])
+  @@index([documentDate])
+  @@index([strength])
+  @@index([deletedAt])
+  @@index([tags])
+  @@map("memories")
+  @@schema("hivemind")
+}
+
+/// Persisted version history for state transitions and temporal audits
+model MemoryVersion {
+  id              String  @id @default(uuid()) @map("id") @db.Uuid
+  memoryId        String  @map("memory_id") @db.Uuid
+  version         Int     @default(1)
+  contentHash     String  @map("content_hash")
+  isLatest        Boolean @default(true) @map("is_latest")
+  reason          String
+  relatedMemoryId String? @map("related_memory_id") @db.Uuid
+  metadata        Json    @default("{}")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@index([memoryId, createdAt])
+  @@index([memoryId, isLatest])
+  @@map("memory_versions")
+  @@schema("hivemind")
+}
+
+/// Normalized source provenance for any memory ingest
+model SourceMetadata {
+  id              String   @id @default(uuid()) @map("id") @db.Uuid
+  memoryId        String   @unique @map("memory_id") @db.Uuid
+  sourceType      String   @map("source_type")
+  sourceId        String?  @map("source_id")
+  sourcePlatform  String?  @map("source_platform")
+  sourceUrl       String?  @map("source_url") @db.Text
+  threadId        String?  @map("thread_id")
+  parentMessageId String?  @map("parent_message_id")
+  ingestedAt      DateTime @default(now()) @map("ingested_at")
+  metadata        Json     @default("{}")
+
+  memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@index([sourceType, sourceId])
+  @@index([sourcePlatform])
+  @@map("source_metadata")
+  @@schema("hivemind")
+}
+
+/// AST and scope metadata for code memories
+model CodeMemoryMetadata {
+  id             String   @id @default(uuid()) @map("id") @db.Uuid
+  memoryId       String   @unique @map("memory_id") @db.Uuid
+  filepath       String
+  language       String
+  entityType     String?  @map("entity_type")
+  entityName     String?  @map("entity_name")
+  startLine      Int?     @map("start_line")
+  endLine        Int?     @map("end_line")
+  scopeChain     String[] @default([]) @map("scope_chain")
+  signatures     String[] @default([])
+  imports        String[] @default([])
+  dependencies   String[] @default([])
+  nwsCount       Int      @default(0) @map("nws_count")
+  metadata       Json     @default("{}")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@index([filepath])
+  @@index([language])
+  @@map("code_memory_metadata")
+  @@schema("hivemind")
+}
+
+/// Async queue for deferred DERIVES evaluation
+model DerivationJob {
+  id             String   @id @default(uuid()) @map("id") @db.Uuid
+  sourceMemoryId String   @map("source_memory_id") @db.Uuid
+  targetMemoryId String   @map("target_memory_id") @db.Uuid
+  confidence     Float
+  status         String   @default("queued")
+  metadata       Json     @default("{}")
+  createdAt      DateTime @default(now()) @map("created_at")
+  processedAt    DateTime? @map("processed_at")
+
+  sourceMemory Memory @relation("DerivationSourceMemory", fields: [sourceMemoryId], references: [id], onDelete: Cascade)
+  targetMemory Memory @relation("DerivationTargetMemory", fields: [targetMemoryId], references: [id], onDelete: Cascade)
+
+  @@index([status, createdAt])
+  @@index([sourceMemoryId])
+  @@index([targetMemoryId])
+  @@map("derivation_jobs")
+  @@schema("hivemind")
+}
+
+/// Graph edges between memories (Updates, Extends, Derives)
+/// Enables complex relationship traversal via Apache AGE
+model Relationship {
+  id     String           @id @default(uuid()) @map("id") @db.Uuid
+  fromId String           @map("from_id") @db.Uuid
+  toId   String           @map("to_id") @db.Uuid
+  type   RelationshipType
+
+  // Confidence scoring
+  confidence          Float   @default(1.0)
+  inferenceModel      String? @map("inference_model")
+  inferencePromptHash String? @map("inference_prompt_hash")
+
+  // Metadata (flexible JSONB)
+  metadata  Json   @default("{}")
+  createdBy String @default("system") @map("created_by")
+
+  // Relations
+  fromMemory Memory @relation(fields: [fromId], references: [id], onDelete: Cascade, name: "RelationshipFromMemory")
+  toMemory   Memory @relation(fields: [toId], references: [id], onDelete: Cascade, name: "RelationshipToMemory")
+
+  // Timestamps
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([fromId, toId, type])
+  @@index([fromId])
+  @@index([toId])
+  @@index([type])
+  @@index([fromId, type])
+  @@index([toId, type])
+  @@map("relationships")
+  @@schema("hivemind")
+}
+
+// ==========================================
+// VECTOR EMBEDDINGS
+// Qdrant sync metadata for semantic search
+// ==========================================
+
+/// Tracks synchronization between PostgreSQL and Qdrant vector database
+/// Ensures consistency for hybrid search (vector + keyword)
+model VectorEmbedding {
+  memoryId         String @id @map("memory_id") @db.Uuid
+  qdrantCollection String @map("qdrant_collection")
+  qdrantPointId    String @map("qdrant_point_id") @db.Uuid
+
+  // Versioning for re-embedding
+  embeddingVersion Int       @default(1) @map("embedding_version")
+  lastReembeddedAt DateTime? @map("last_reembedded_at")
+
+  // Sync status tracking
+  syncStatus       String    @default("synced") @map("sync_status")
+  lastSyncAttempt  DateTime? @map("last_sync_attempt")
+  syncErrorMessage String?   @map("sync_error_message")
+
+  // Relations
+  memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade, name: "MemoryVectorEmbedding")
+
+  // Timestamps
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([syncStatus, lastSyncAttempt])
+  @@map("vector_embeddings")
+  @@schema("hivemind")
+}
+
+// ==========================================
+// SESSIONS
+// Cross-platform session tracking
+// ==========================================
+
+/// Tracks user sessions across all AI platforms for context preservation
+/// Supports automatic context injection and compaction
+model Session {
+  id     String @id @default(uuid()) @map("id") @db.Uuid
+  userId String @map("user_id") @db.Uuid
+
+  // Platform context
+  platformType      String  @map("platform_type")
+  platformSessionId String? @map("platform_session_id")
+
+  // Session metadata
+  title        String?
+  messageCount Int     @default(0) @map("message_count")
+  tokenCount   Int     @default(0) @map("token_count")
+
+  // Context injection tracking
+  memoriesInjected    String[] @map("memories_injected") @db.Uuid
+  contextWindowUsed   Int      @default(0) @map("context_window_used")
+  compactionTriggered Boolean  @default(false) @map("compaction_triggered")
+
+  // Lifecycle
+  startedAt      DateTime  @default(now()) @map("started_at")
+  lastActivityAt DateTime? @map("last_activity_at")
+  endedAt        DateTime? @map("ended_at")
+  endReason      String?   @map("end_reason")
+
+  // Auto-captured decisions/lessons
+  autoCapturedCount Int @default(0) @map("auto_captured_count")
+
+  // Relations
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade, name: "UserSessions")
+  syncLogs SyncLog[] @relation("SessionSyncLogs")
+
+  // Timestamps
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([platformType])
+  @@index([userId, endedAt])
+  @@map("sessions")
+  @@schema("hivemind")
+}
+
+// ==========================================
+// SYNC LOGS
+// Audit trail for cross-platform sync (NIS2/DORA)
+// ==========================================
+
+/// NIS2/DORA compliance: track all sync events with 7-year retention
+/// Enables incident reporting and audit trail reconstruction
+model SyncLog {
+  id     String  @id @default(uuid()) @map("id") @db.Uuid
+  userId String? @map("user_id") @db.Uuid
+
+  // Sync event details
+  eventType      String  @map("event_type")
+  sourcePlatform String? @map("source_platform")
+  targetPlatform String? @map("target_platform")
+
+  // Payload reference
+  memoryIds   String[] @map("memory_ids") @db.Uuid
+  sessionId   String?  @map("session_id") @db.Uuid
+  payloadHash String?  @map("payload_hash")
+
+  // Result tracking
+  status       String  @default("success")
+  errorMessage String? @map("error_message") @db.Text
+  retryCount   Int     @default(0) @map("retry_count")
+
+  // Timing
+  startedAt   DateTime  @default(now()) @map("started_at")
+  completedAt DateTime? @map("completed_at")
+  latencyMs   Int?      @map("latency_ms")
+
+  // Relations
+  user    User?    @relation(fields: [userId], references: [id], onDelete: SetNull, name: "UserSyncLogs")
+  session Session? @relation(fields: [sessionId], references: [id], onDelete: SetNull, name: "SessionSyncLogs")
+
+  @@index([userId])
+  @@index([eventType])
+  @@index([startedAt])
+  @@map("sync_logs")
+  @@schema("hivemind")
+}
+
+// ==========================================
+// AUDIT LOGS
+// Comprehensive audit trail (NIS2/DORA: 7-year retention)
+// ==========================================
+
+/// Comprehensive audit trail for GDPR, NIS2, DORA compliance
+/// 7-year retention for regulatory requirements
+model AuditLog {
+  id             String  @id @default(uuid()) @map("id") @db.Uuid
+  userId         String? @map("user_id") @db.Uuid
+  organizationId String? @map("organization_id") @db.Uuid
+
+  // Event details
+  eventType     String              @map("event_type")
+  eventCategory AuditEventCategory? @map("event_category")
+  resourceType  String?             @map("resource_type")
+  resourceId    String?             @map("resource_id") @db.Uuid
+
+  // Action details
+  action   AuditAction @map("action")
+  oldValue Json?       @map("old_value")
+  newValue Json?       @map("new_value")
+
+  // Context
+  ipAddress    String? @map("ip_address") @db.Inet
+  userAgent    String? @map("user_agent") @db.Text
+  platformType String? @map("platform_type")
+  sessionId    String? @map("session_id") @db.Uuid
+
+  // Compliance
+  processingBasis String? @map("processing_basis")
+  legalBasisNote  String? @map("legal_basis_note") @db.Text
+
+  // Relations
+  user         User?         @relation(fields: [userId], references: [id], onDelete: SetNull, name: "UserAuditLogs")
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull, name: "OrgAuditLogs")
+  memory       Memory?       @relation(fields: [resourceId], references: [id], onDelete: SetNull, name: "MemoryAuditLogs")
+
+  // Timestamps
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([organizationId])
+  @@index([eventType])
+  @@index([createdAt])
+  @@index([resourceType, resourceId])
+  @@index([action])
+  @@map("audit_logs")
+  @@schema("hivemind")
+}
+
+// ==========================================
+// DATA EXPORT/ERASURE (GDPR)
+// ==========================================
+
+/// GDPR right to portability and erasure requests
+/// Supports JSON, CSV, Parquet export formats
+model DataExportRequest {
+  id           String            @id @default(uuid()) @map("id") @db.Uuid
+  userId       String            @map("user_id") @db.Uuid
+  requestType  ExportRequestType
+  status       ExportStatus      @default(pending)
+  exportFormat ExportFormat      @default(json)
+  exportUrl    String?           @map("export_url") @db.Text
+  requestedAt  DateTime          @default(now()) @map("requested_at")
+  completedAt  DateTime?         @map("completed_at")
+  errorMessage String?           @map("error_message") @db.Text
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade, name: "UserExportRequests")
+
+  @@index([userId])
+  @@index([status])
+  @@map("data_export_requests")
+  @@schema("hivemind")
+}
+
+// ==========================================
+// API KEYS (Server-to-Server Authentication)
+// Supports expiry, revocation, and last-used tracking
+// ==========================================
+
+/// API keys for server-to-server authentication with lifecycle management
+/// GDPR, NIS2, DORA compliant with audit logging and rate limiting
+model ApiKey {
+  id     String  @id @default(uuid()) @map("id") @db.Uuid
+  userId String  @map("user_id") @db.Uuid
+  orgId  String? @map("org_id") @db.Uuid
+
+  // Key identification
+  name      String @map("name")
+  keyHash   String @unique @map("key_hash")
+  keyPrefix String @map("key_prefix")
+
+  // Key lifecycle
+  expiresAt     DateTime? @map("expires_at")
+  revokedAt     DateTime? @map("revoked_at")
+  revokedReason String?   @map("revoked_reason")
+
+  // Usage tracking
+  lastUsedAt DateTime? @map("last_used_at")
+  usageCount Int       @default(0) @map("usage_count")
+
+  // Permissions & scopes
+  scopes             String[] @default(["read", "write"])
+  rateLimitPerMinute Int      @default(60) @map("rate_limit_per_minute")
+
+  // Metadata
+  description String? @db.Text
+  createdByIp String? @map("created_by_ip") @db.Inet
+  userAgent   String? @map("user_agent") @db.Text
+
+  // Relations
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade, name: "UserApiKeys")
+  organization Organization? @relation(fields: [orgId], references: [id], onDelete: SetNull, name: "OrgApiKeys")
+
+  // Timestamps
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@index([orgId])
+  @@index([keyHash])
+  @@index([keyPrefix])
+  @@index([userId, revokedAt, expiresAt])
+  @@map("api_keys")
+  @@schema("hivemind")
+}
+
+// ==========================================
+// ENCRYPTION SCHEMA MODELS
+// HYOK encryption audit trail
+// ==========================================
+
+/// Audit log for encryption operations (HYOK pattern)
+/// Tracks all encrypt/decrypt/key_rotation events
+model EncryptionAuditLog {
+  id         String   @id @default(uuid()) @map("id") @db.Uuid
+  operation  String   @map("operation")
+  keyId      String   @map("key_id") @db.Uuid
+  keyVersion Int      @map("key_version")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([keyId])
+  @@index([createdAt])
+  @@map("audit_log")
+  @@schema("encryption")
+}
+
+// ==========================================
+// CUSTOM QUERIES (Prisma Client Extensions)
+// Graph traversal and cognitive scoring
+// ==========================================
+
+// Note: Custom queries are implemented via Prisma Client Extensions
+// Example usage in TypeScript:
+//
+// const prisma = new PrismaClient().$extends({
+//   query: {
+//     memory: {
+//       async findRelevant({ args, query }) {
+//         // Custom query for cognitive scoring with recency bias
+//         return query(args);
+//       }
+//     }
+//   }
+// });

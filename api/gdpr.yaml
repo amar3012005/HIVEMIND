@@ -1,0 +1,829 @@
+openapi: 3.0.3
+info:
+  title: HIVE-MIND GDPR Compliance API
+  description: |
+    API endpoints for GDPR compliance including data export (Article 20), 
+    erasure (Article 17), and consent management (Article 7).
+    
+    All endpoints require authentication and are subject to audit logging.
+  version: 1.0.0
+  contact:
+    name: HIVE-MIND DPO
+    email: dpo@hivemind.io
+  license:
+    name: Proprietary
+    
+servers:
+  - url: https://api.hivemind.io/v1
+    description: Production API
+  - url: https://api.staging.hivemind.io/v1
+    description: Staging API
+
+security:
+  - bearerAuth: []
+  - oauth2: [gdpr]
+
+tags:
+  - name: Export
+    description: GDPR Article 20 - Right to Data Portability
+  - name: Erasure
+    description: GDPR Article 17 - Right to Erasure
+  - name: Consent
+    description: GDPR Article 7 - Conditions for Consent
+  - name: Access
+    description: GDPR Article 15 - Right of Access
+
+paths:
+  /gdpr/export:
+    post:
+      summary: Request data export
+      description: |
+        Initiates an asynchronous export of all user data as required by 
+        GDPR Article 20. Returns a request ID for status tracking.
+        
+        Rate limit: 2 requests per day per user.
+        Export files are retained for 7 days with signed URL access.
+      tags:
+        - Export
+      operationId: requestDataExport
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                format:
+                  type: string
+                  enum: [json, csv]
+                  default: json
+                  description: Export format
+                categories:
+                  type: array
+                  items:
+                    type: string
+                    enum: [profile, memories, sessions, integrations, preferences, consent, audit_log]
+                  description: Data categories to include (default: all)
+      responses:
+        '202':
+          description: Export request accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportRequestResponse'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      
+  /gdpr/export/{requestId}/status:
+    get:
+      summary: Get export status
+      description: Check the status of a data export request
+      tags:
+        - Export
+      operationId: getExportStatus
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Export status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportStatusResponse'
+        '404':
+          description: Export request not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /gdpr/erasure:
+    post:
+      summary: Request data erasure
+      description: |
+        Initiates GDPR Article 17 erasure request ('Right to be Forgotten').
+        
+        Process:
+        1. Immediate soft-delete of user data
+        2. 30-day grace period for cancellation
+        3. Permanent deletion after grace period
+        
+        Audit logs and consent records are retained for 7 years per NIS2/DORA.
+      tags:
+        - Erasure
+      operationId: requestDataErasure
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - confirmation
+              properties:
+                confirmation:
+                  type: boolean
+                  description: Explicit confirmation of erasure request
+                categories:
+                  type: array
+                  items:
+                    type: string
+                    enum: [profile, memories, sessions, integrations, preferences]
+                  description: Categories to erase (default: all)
+                reason:
+                  type: string
+                  description: Optional reason for erasure
+      responses:
+        '202':
+          description: Erasure request accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErasureRequestResponse'
+        '403':
+          description: Legal hold prevents erasure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '400':
+          description: Missing confirmation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /gdpr/erasure/{requestId}/cancel:
+    post:
+      summary: Cancel erasure request
+      description: |
+        Cancel a pending erasure request during the 30-day grace period.
+        Requires the confirmation token from the original request.
+      tags:
+        - Erasure
+      operationId: cancelErasure
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - confirmationToken
+              properties:
+                confirmationToken:
+                  type: string
+                  description: Token from erasure request response
+      responses:
+        '200':
+          description: Erasure cancelled successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  requestId:
+                    type: string
+                  status:
+                    type: string
+                    enum: [cancelled]
+                  message:
+                    type: string
+        '400':
+          description: Cannot cancel (grace period expired or invalid token)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /gdpr/erasure/{requestId}/status:
+    get:
+      summary: Get erasure status
+      description: Check the status of an erasure request
+      tags:
+        - Erasure
+      operationId: getErasureStatus
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Erasure status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErasureStatusResponse'
+
+  /gdpr/consent:
+    get:
+      summary: Get consent status
+      description: Retrieve current consent status for all consent types
+      tags:
+        - Consent
+      operationId: getConsentStatus
+      responses:
+        '200':
+          description: Consent status for all types
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  consents:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ConsentStatus'
+
+    post:
+      summary: Update consent
+      description: Grant or withdraw consent for specific types
+      tags:
+        - Consent
+      operationId: updateConsent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - consentType
+                - granted
+              properties:
+                consentType:
+                  type: string
+                  enum: [tos, privacy, data_processing, ai_memory, marketing, analytics, third_party, cookies]
+                granted:
+                  type: boolean
+                subOptions:
+                  type: object
+                  description: Granular consent options
+                metadata:
+                  type: object
+      responses:
+        '200':
+          description: Consent updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConsentRecord'
+        '400':
+          description: Cannot withdraw required consent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /gdpr/consent/history:
+    get:
+      summary: Get consent history
+      description: Retrieve complete consent history for the user
+      tags:
+        - Consent
+      operationId: getConsentHistory
+      responses:
+        '200':
+          description: Consent history
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  history:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ConsentHistoryEntry'
+
+  /gdpr/access:
+    get:
+      summary: Get data access summary
+      description: |
+        GDPR Article 15 implementation - provides summary of processed data.
+        For full data export, use /gdpr/export endpoint.
+      tags:
+        - Access
+      operationId: getDataAccessSummary
+      responses:
+        '200':
+          description: Data access summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DataAccessSummary'
+
+  /gdpr/audit/export:
+    post:
+      summary: Request audit log export
+      description: |
+        Initiates an export of audit logs for regulatory compliance.
+        Supports NIS2, DORA, and GDPR audit requirements.
+
+        Rate limit: 1 request per hour per user.
+        Export files are retained for 7 days with signed URL access.
+      tags:
+        - Audit
+      operationId: requestAuditExport
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - startDate
+                - endDate
+              properties:
+                format:
+                  type: string
+                  enum: [json, csv, parquet]
+                  default: json
+                  description: Export format
+                startDate:
+                  type: string
+                  format: date-time
+                  description: Start date for export range
+                endDate:
+                  type: string
+                  format: date-time
+                  description: End date for export range
+                categories:
+                  type: array
+                  items:
+                    type: string
+                    enum: [auth, data_access, data_modification, system, security]
+                  description: Event categories to include
+                actions:
+                  type: array
+                  items:
+                    type: string
+                    enum: [create, read, update, delete, export, erase, login, logout]
+                  description: Actions to include
+      responses:
+        '202':
+          description: Export request accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditExportResponse'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '400':
+          description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /gdpr/audit/export/{exportId}/status:
+    get:
+      summary: Get audit export status
+      description: Check the status of an audit log export request
+      tags:
+        - Audit
+      operationId: getAuditExportStatus
+      parameters:
+        - name: exportId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Export status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditExportStatusResponse'
+        '404':
+          description: Export request not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /gdpr/compliance/report:
+    post:
+      summary: Generate compliance report
+      description: |
+        Generate a regulatory compliance report for NIS2, DORA, or GDPR.
+        Reports are generated for specific date ranges and organizations.
+
+        Rate limit: 1 request per hour per organization.
+      tags:
+        - Compliance
+      operationId: generateComplianceReport
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - startDate
+                - endDate
+                - reportType
+              properties:
+                reportType:
+                  type: string
+                  enum: [nis2, dora, gdpr, standard]
+                  description: Type of compliance report
+                startDate:
+                  type: string
+                  format: date-time
+                  description: Start date for report period
+                endDate:
+                  type: string
+                  format: date-time
+                  description: End date for report period
+      responses:
+        '202':
+          description: Report generation started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ComplianceReportResponse'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '400':
+          description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /gdpr/compliance/report/{reportId}/status:
+    get:
+      summary: Get compliance report status
+      description: Check the status of a compliance report generation
+      tags:
+        - Compliance
+      operationId: getComplianceReportStatus
+      parameters:
+        - name: reportId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Report status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ComplianceReportStatusResponse'
+        '404':
+          description: Report not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    oauth2:
+      type: oauth2
+      flows:
+        authorizationCode:
+          authorizationUrl: https://auth.hivemind.io/oauth/authorize
+          tokenUrl: https://auth.hivemind.io/oauth/token
+          scopes:
+            gdpr: Access GDPR compliance endpoints
+            read: Read user data
+            write: Modify user data
+
+  schemas:
+    ExportRequestResponse:
+      type: object
+      properties:
+        requestId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [PROCESSING]
+        estimatedCompletion:
+          type: string
+          format: date-time
+        checkStatusUrl:
+          type: string
+          format: uri
+
+    ExportStatusResponse:
+      type: object
+      properties:
+        requestId:
+          type: string
+        status:
+          type: string
+          enum: [PENDING, PROCESSING, COMPLETED, FAILED]
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+        result:
+          type: object
+          properties:
+            downloadUrl:
+              type: string
+              format: uri
+            expiresAt:
+              type: string
+              format: date-time
+            fileSize:
+              type: integer
+            format:
+              type: string
+        failedReason:
+          type: string
+
+    ErasureRequestResponse:
+      type: object
+      properties:
+        requestId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [grace_period]
+        message:
+          type: string
+        gracePeriodDays:
+          type: integer
+          example: 30
+        scheduledDeletion:
+          type: string
+          format: date-time
+        canCancel:
+          type: boolean
+        cancellationDeadline:
+          type: string
+          format: date-time
+        confirmationToken:
+          type: string
+          description: Required for cancellation
+
+    ErasureStatusResponse:
+      type: object
+      properties:
+        requestId:
+          type: string
+        status:
+          type: string
+          enum: [pending, grace_period, processing, completed, cancelled, failed]
+        requestedAt:
+          type: string
+          format: date-time
+        scheduledDeletion:
+          type: string
+          format: date-time
+        gracePeriodDays:
+          type: integer
+        canCancel:
+          type: boolean
+        cancelledAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+        categories:
+          type: array
+          items:
+            type: string
+        error:
+          type: string
+
+    ConsentStatus:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        required:
+          type: boolean
+        description:
+          type: string
+        url:
+          type: string
+        granted:
+          type: boolean
+        grantedAt:
+          type: string
+          format: date-time
+        withdrawnAt:
+          type: string
+          format: date-time
+        version:
+          type: string
+        needsReconsent:
+          type: boolean
+        subOptions:
+          type: array
+          items:
+            type: object
+
+    ConsentRecord:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        userId:
+          type: string
+        consentType:
+          type: string
+        granted:
+          type: boolean
+        grantedAt:
+          type: string
+          format: date-time
+        consentVersion:
+          type: string
+
+    ConsentHistoryEntry:
+      type: object
+      properties:
+        consentType:
+          type: string
+        granted:
+          type: boolean
+        grantedAt:
+          type: string
+          format: date-time
+        withdrawnAt:
+          type: string
+          format: date-time
+        consentVersion:
+          type: string
+        ipAddress:
+          type: string
+        userAgent:
+          type: string
+
+    DataAccessSummary:
+      type: object
+      properties:
+        userId:
+          type: string
+        generatedAt:
+          type: string
+          format: date-time
+        categories:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              recordCount:
+                type: integer
+              lastUpdated:
+                type: string
+                format: date-time
+        processingPurposes:
+          type: array
+          items:
+            type: string
+        legalBases:
+          type: array
+          items:
+            type: string
+        retentionPeriods:
+          type: object
+        recipients:
+          type: array
+          items:
+            type: string
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+        code:
+          type: string
+        message:
+          type: string
+        details:
+          type: object
+
+    AuditExportResponse:
+      type: object
+      properties:
+        exportId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [PROCESSING]
+        estimatedCompletion:
+          type: string
+          format: date-time
+        checkStatusUrl:
+          type: string
+          format: uri
+
+    AuditExportStatusResponse:
+      type: object
+      properties:
+        exportId:
+          type: string
+        status:
+          type: string
+          enum: [PENDING, PROCESSING, COMPLETED, FAILED]
+        result:
+          type: object
+          properties:
+            downloadUrl:
+              type: string
+              format: uri
+            expiresAt:
+              type: string
+              format: date-time
+            recordCount:
+              type: integer
+            format:
+              type: string
+        failedReason:
+          type: string
+
+    ComplianceReportResponse:
+      type: object
+      properties:
+        reportId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [PROCESSING]
+        estimatedCompletion:
+          type: string
+          format: date-time
+        checkStatusUrl:
+          type: string
+          format: uri
+
+    ComplianceReportStatusResponse:
+      type: object
+      properties:
+        reportId:
+          type: string
+        status:
+          type: string
+          enum: [PENDING, PROCESSING, COMPLETED, FAILED]
+        result:
+          type: object
+          properties:
+            downloadUrl:
+              type: string
+              format: uri
+            expiresAt:
+              type: string
+              format: date-time
+            reportType:
+              type: string
+            recordCount:
+              type: integer
+        failedReason:
+          type: string

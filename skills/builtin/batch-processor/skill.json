@@ -1,0 +1,41 @@
+{
+  "name": "batch-processor",
+  "version": "1.0.0",
+  "description": "Batch ingestion with retry, exponential backoff, and dead letter queue for production-grade memory pipelines",
+  "type": "ingestion",
+  "author": "HIVE-MIND Team",
+  "license": "EUPL-1.2",
+  "entry": "index.js",
+  "capabilities": [
+    "processBatch",
+    "retryFailed",
+    "getQueueStatus",
+    "configureBatch",
+    "flushQueue",
+    "getDeadLetterQueue"
+  ],
+  "permissions": [
+    "memory:write",
+    "memory:read",
+    "store:write"
+  ],
+  "apis": [
+    "memory",
+    "store"
+  ],
+  "config": {
+    "batchSize": 5,
+    "maxRetries": 3,
+    "initialDelay": 1000,
+    "maxDelay": 30000,
+    "backoffFactor": 2,
+    "parallel": false,
+    "queueType": "memory"
+  },
+  "tags": [
+    "ingestion",
+    "batch",
+    "reliability",
+    "pipeline"
+  ]
+}

@@ -1,0 +1,1985 @@
+{
+  "timestamp": "2026-03-15T12:52:20.848Z",
+  "evaluationId": "d21d06a2-9cb5-4e7f-8ff2-3efa5aa387a6",
+  "duration": 8,
+  "summary": {
+    "precisionAt5": {
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "median": 0
+    },
+    "precisionAt10": {
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "median": 0
+    },
+    "recallAt10": {
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "median": 0
+    },
+    "f1At10": {
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "median": 0
+    },
+    "ndcgAt10": {
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "median": 0
+    },
+    "mrr": {
+      "mean": 0,
+      "min": 0,
+      "max": 0,
+      "median": 0
+    },
+    "latencyP99": 1,
+    "latencyP95": 1,
+    "latencyP50": 0,
+    "qualityScore": 10,
+    "totalQueries": 30,
+    "successfulQueries": 30,
+    "failedQueries": 30
+  },
+  "byCategory": {
+    "technical": {
+      "count": 10,
+      "metrics": {
+        "precisionAt5": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "precisionAt10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "recallAt10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "f1At10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "ndcgAt10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "mrr": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        }
+      }
+    },
+    "business": {
+      "count": 10,
+      "metrics": {
+        "precisionAt5": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "precisionAt10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "recallAt10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "f1At10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "ndcgAt10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "mrr": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        }
+      }
+    },
+    "personal": {
+      "count": 10,
+      "metrics": {
+        "precisionAt5": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "precisionAt10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "recallAt10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "f1At10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "ndcgAt10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "mrr": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        }
+      }
+    }
+  },
+  "bySearchMethod": {
+    "hybrid": {
+      "count": 30,
+      "metrics": {
+        "precisionAt5": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "precisionAt10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "recallAt10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "f1At10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "ndcgAt10": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        },
+        "mrr": {
+          "mean": 0,
+          "min": 0,
+          "max": 0,
+          "median": 0
+        }
+      },
+      "latencyP99": 1,
+      "latencyP95": 1
+    }
+  },
+  "failedQueries": [
+    {
+      "query": "What was the decision about the database migration?",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "Show me all project Alpha related memories",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "What did we discuss about the API rate limits?",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "How do we handle authentication in the microservices?",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "What is the caching strategy for Redis?",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "Show me the error handling patterns we use",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "What monitoring tools are we using for production?",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "Explain the event-driven architecture decisions",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "What are the deployment procedures for the backend?",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "How do we manage database connections in the application?",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "What are the Q3 revenue targets?",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "Show me the customer feedback from last month",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "What was discussed in the product roadmap meeting?",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "Who are our main competitors and their strengths?",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "What are the key metrics for user engagement?",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "Show me the budget allocation for marketing",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "What partnerships are we exploring this quarter?",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "What are the hiring plans for the engineering team?",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "Show me the contract terms with our biggest client",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "What was the outcome of the board meeting?",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "What are my action items from yesterday's standup?",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "Show me notes from the one-on-one with my manager",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "What conferences am I planning to attend this year?",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "What books were recommended by the team?",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "What are my goals for this quarter?",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "Show me feedback I received on my presentation",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "What training courses should I complete?",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "What are the key takeaways from the workshop?",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "Who should I connect with about the new project?",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    },
+    {
+      "query": "What time zones do my teammates work in?",
+      "method": "hybrid",
+      "reason": "Thresholds not met"
+    }
+  ],
+  "targets": {
+    "precisionAt5": 0.8,
+    "recallAt10": 0.7,
+    "f1Score": 0.75,
+    "ndcgAt10": 0.75,
+    "mrr": 0.6,
+    "latencyP99": 300
+  },
+  "methods": [
+    "hybrid"
+  ],
+  "rawResults": [
+    {
+      "requestId": "5ce7ee2d-8d0e-4234-87dd-e4124b7ea569",
+      "query": "What was the decision about the database migration?",
+      "category": "technical",
+      "method": "hybrid",
+      "latencyMs": 0,
+      "relevantCount": 2,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 2
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440001",
+        "550e8400-e29b-41d4-a716-446655440002"
+      ],
+      "timestamp": "2026-03-15T12:52:20.843Z"
+    },
+    {
+      "requestId": "7bc8270a-ad84-4db5-bcb6-32f5287d994b",
+      "query": "Show me all project Alpha related memories",
+      "category": "technical",
+      "method": "hybrid",
+      "latencyMs": 0,
+      "relevantCount": 3,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 3
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440003",
+        "550e8400-e29b-41d4-a716-446655440004",
+        "550e8400-e29b-41d4-a716-446655440005"
+      ],
+      "timestamp": "2026-03-15T12:52:20.843Z"
+    },
+    {
+      "requestId": "5113071c-6bda-4ec4-8176-dea1ee0aaaf8",
+      "query": "What did we discuss about the API rate limits?",
+      "category": "technical",
+      "method": "hybrid",
+      "latencyMs": 0,
+      "relevantCount": 1,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 1
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440006"
+      ],
+      "timestamp": "2026-03-15T12:52:20.843Z"
+    },
+    {
+      "requestId": "71ea186d-3884-4283-946b-a7e8037aacfb",
+      "query": "How do we handle authentication in the microservices?",
+      "category": "technical",
+      "method": "hybrid",
+      "latencyMs": 0,
+      "relevantCount": 3,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 3
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440007",
+        "550e8400-e29b-41d4-a716-446655440008",
+        "550e8400-e29b-41d4-a716-446655440009"
+      ],
+      "timestamp": "2026-03-15T12:52:20.843Z"
+    },
+    {
+      "requestId": "d5179532-45f5-4efc-a5bd-f73b8d2a2068",
+      "query": "What is the caching strategy for Redis?",
+      "category": "technical",
+      "method": "hybrid",
+      "latencyMs": 0,
+      "relevantCount": 2,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 2
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440010",
+        "550e8400-e29b-41d4-a716-446655440011"
+      ],
+      "timestamp": "2026-03-15T12:52:20.843Z"
+    },
+    {
+      "requestId": "24969d3b-2931-4169-85f0-1ea694a4de1b",
+      "query": "Show me the error handling patterns we use",
+      "category": "technical",
+      "method": "hybrid",
+      "latencyMs": 1,
+      "relevantCount": 4,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 1,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 4
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440012",
+        "550e8400-e29b-41d4-a716-446655440013",
+        "550e8400-e29b-41d4-a716-446655440014",
+        "550e8400-e29b-41d4-a716-446655440015"
+      ],
+      "timestamp": "2026-03-15T12:52:20.844Z"
+    },
+    {
+      "requestId": "f634ac0a-dea6-4f49-a072-bd0a61d9bcf3",
+      "query": "What monitoring tools are we using for production?",
+      "category": "technical",
+      "method": "hybrid",
+      "latencyMs": 0,
+      "relevantCount": 2,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 2
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440016",
+        "550e8400-e29b-41d4-a716-446655440017"
+      ],
+      "timestamp": "2026-03-15T12:52:20.844Z"
+    },
+    {
+      "requestId": "f1b62a87-7f0b-4c7f-856a-a059e3944a25",
+      "query": "Explain the event-driven architecture decisions",
+      "category": "technical",
+      "method": "hybrid",
+      "latencyMs": 0,
+      "relevantCount": 3,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 3
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440018",
+        "550e8400-e29b-41d4-a716-446655440019",
+        "550e8400-e29b-41d4-a716-446655440020"
+      ],
+      "timestamp": "2026-03-15T12:52:20.844Z"
+    },
+    {
+      "requestId": "b0984b4f-8a66-4418-82cc-3c6864eda5e3",
+      "query": "What are the deployment procedures for the backend?",
+      "category": "technical",
+      "method": "hybrid",
+      "latencyMs": 0,
+      "relevantCount": 2,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 2
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440021",
+        "550e8400-e29b-41d4-a716-446655440022"
+      ],
+      "timestamp": "2026-03-15T12:52:20.844Z"
+    },
+    {
+      "requestId": "8f7b8631-96c6-4012-a9ed-3abac506ab27",
+      "query": "How do we manage database connections in the application?",
+      "category": "technical",
+      "method": "hybrid",
+      "latencyMs": 0,
+      "relevantCount": 2,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 2
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440023",
+        "550e8400-e29b-41d4-a716-446655440024"
+      ],
+      "timestamp": "2026-03-15T12:52:20.844Z"
+    },
+    {
+      "requestId": "b7f64cbe-044f-479e-9fe9-4abf18aaa1a3",
+      "query": "What are the Q3 revenue targets?",
+      "category": "business",
+      "method": "hybrid",
+      "latencyMs": 0,
+      "relevantCount": 2,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 2
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440025",
+        "550e8400-e29b-41d4-a716-446655440026"
+      ],
+      "timestamp": "2026-03-15T12:52:20.844Z"
+    },
+    {
+      "requestId": "c6e7f592-40d5-48ac-9f45-c0c13e00f80c",
+      "query": "Show me the customer feedback from last month",
+      "category": "business",
+      "method": "hybrid",
+      "latencyMs": 0,
+      "relevantCount": 4,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 4
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440027",
+        "550e8400-e29b-41d4-a716-446655440028",
+        "550e8400-e29b-41d4-a716-446655440029",
+        "550e8400-e29b-41d4-a716-446655440030"
+      ],
+      "timestamp": "2026-03-15T12:52:20.844Z"
+    },
+    {
+      "requestId": "53758395-7e46-48d7-8387-0da659f88b91",
+      "query": "What was discussed in the product roadmap meeting?",
+      "category": "business",
+      "method": "hybrid",
+      "latencyMs": 0,
+      "relevantCount": 2,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 2
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440031",
+        "550e8400-e29b-41d4-a716-446655440032"
+      ],
+      "timestamp": "2026-03-15T12:52:20.844Z"
+    },
+    {
+      "requestId": "22a3d296-93b3-428f-a434-b3a4ad5e8bfd",
+      "query": "Who are our main competitors and their strengths?",
+      "category": "business",
+      "method": "hybrid",
+      "latencyMs": 1,
+      "relevantCount": 3,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 1,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 3
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440033",
+        "550e8400-e29b-41d4-a716-446655440034",
+        "550e8400-e29b-41d4-a716-446655440035"
+      ],
+      "timestamp": "2026-03-15T12:52:20.845Z"
+    },
+    {
+      "requestId": "e5fc19f8-ea09-454f-8ad4-8a5f82c27f61",
+      "query": "What are the key metrics for user engagement?",
+      "category": "business",
+      "method": "hybrid",
+      "latencyMs": 0,
+      "relevantCount": 2,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 2
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440036",
+        "550e8400-e29b-41d4-a716-446655440037"
+      ],
+      "timestamp": "2026-03-15T12:52:20.845Z"
+    },
+    {
+      "requestId": "d8863a8a-0785-47af-ad5f-6af289cf6902",
+      "query": "Show me the budget allocation for marketing",
+      "category": "business",
+      "method": "hybrid",
+      "latencyMs": 0,
+      "relevantCount": 2,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 2
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440038",
+        "550e8400-e29b-41d4-a716-446655440039"
+      ],
+      "timestamp": "2026-03-15T12:52:20.845Z"
+    },
+    {
+      "requestId": "96a02179-925f-4c4d-be39-1f4ea70aae7c",
+      "query": "What partnerships are we exploring this quarter?",
+      "category": "business",
+      "method": "hybrid",
+      "latencyMs": 0,
+      "relevantCount": 3,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 3
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440040",
+        "550e8400-e29b-41d4-a716-446655440041",
+        "550e8400-e29b-41d4-a716-446655440042"
+      ],
+      "timestamp": "2026-03-15T12:52:20.845Z"
+    },
+    {
+      "requestId": "d9ec6ab1-8a90-44a1-86b7-fe4e03d50213",
+      "query": "What are the hiring plans for the engineering team?",
+      "category": "business",
+      "method": "hybrid",
+      "latencyMs": 0,
+      "relevantCount": 2,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 2
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440043",
+        "550e8400-e29b-41d4-a716-446655440044"
+      ],
+      "timestamp": "2026-03-15T12:52:20.845Z"
+    },
+    {
+      "requestId": "84cf8247-4e07-4384-b806-388c4bdafdb2",
+      "query": "Show me the contract terms with our biggest client",
+      "category": "business",
+      "method": "hybrid",
+      "latencyMs": 0,
+      "relevantCount": 1,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 1
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440045"
+      ],
+      "timestamp": "2026-03-15T12:52:20.845Z"
+    },
+    {
+      "requestId": "ece9d07c-5d97-43dc-a90c-d7adbab9c2ed",
+      "query": "What was the outcome of the board meeting?",
+      "category": "business",
+      "method": "hybrid",
+      "latencyMs": 0,
+      "relevantCount": 2,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 2
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440046",
+        "550e8400-e29b-41d4-a716-446655440047"
+      ],
+      "timestamp": "2026-03-15T12:52:20.846Z"
+    },
+    {
+      "requestId": "a9040ac1-fb49-4890-9bbb-07b52a322479",
+      "query": "What are my action items from yesterday's standup?",
+      "category": "personal",
+      "method": "hybrid",
+      "latencyMs": 0,
+      "relevantCount": 2,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 2
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440048",
+        "550e8400-e29b-41d4-a716-446655440049"
+      ],
+      "timestamp": "2026-03-15T12:52:20.846Z"
+    },
+    {
+      "requestId": "27c74291-0063-4f58-bc67-03971688eec8",
+      "query": "Show me notes from the one-on-one with my manager",
+      "category": "personal",
+      "method": "hybrid",
+      "latencyMs": 0,
+      "relevantCount": 2,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 2
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440050",
+        "550e8400-e29b-41d4-a716-446655440051"
+      ],
+      "timestamp": "2026-03-15T12:52:20.846Z"
+    },
+    {
+      "requestId": "2580b19e-09d4-41b3-a97d-b1ac0163d5b4",
+      "query": "What conferences am I planning to attend this year?",
+      "category": "personal",
+      "method": "hybrid",
+      "latencyMs": 0,
+      "relevantCount": 2,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 2
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440052",
+        "550e8400-e29b-41d4-a716-446655440053"
+      ],
+      "timestamp": "2026-03-15T12:52:20.846Z"
+    },
+    {
+      "requestId": "5dabe9a1-ca5e-437a-9c80-b8a1fb935024",
+      "query": "What books were recommended by the team?",
+      "category": "personal",
+      "method": "hybrid",
+      "latencyMs": 1,
+      "relevantCount": 3,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 1,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 3
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440054",
+        "550e8400-e29b-41d4-a716-446655440055",
+        "550e8400-e29b-41d4-a716-446655440056"
+      ],
+      "timestamp": "2026-03-15T12:52:20.847Z"
+    },
+    {
+      "requestId": "0b3282ff-2b89-4417-8390-206de8799891",
+      "query": "What are my goals for this quarter?",
+      "category": "personal",
+      "method": "hybrid",
+      "latencyMs": 0,
+      "relevantCount": 2,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 2
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440057",
+        "550e8400-e29b-41d4-a716-446655440058"
+      ],
+      "timestamp": "2026-03-15T12:52:20.847Z"
+    },
+    {
+      "requestId": "3d32f8d8-3617-46dd-95f9-3a615c4ace4b",
+      "query": "Show me feedback I received on my presentation",
+      "category": "personal",
+      "method": "hybrid",
+      "latencyMs": 0,
+      "relevantCount": 2,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 2
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440059",
+        "550e8400-e29b-41d4-a716-446655440060"
+      ],
+      "timestamp": "2026-03-15T12:52:20.847Z"
+    },
+    {
+      "requestId": "2629930d-7ed8-447f-844e-755804bf7bcf",
+      "query": "What training courses should I complete?",
+      "category": "personal",
+      "method": "hybrid",
+      "latencyMs": 0,
+      "relevantCount": 3,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 3
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440061",
+        "550e8400-e29b-41d4-a716-446655440062",
+        "550e8400-e29b-41d4-a716-446655440063"
+      ],
+      "timestamp": "2026-03-15T12:52:20.847Z"
+    },
+    {
+      "requestId": "02c5637c-57eb-4a9d-a045-b4480c8875f4",
+      "query": "What are the key takeaways from the workshop?",
+      "category": "personal",
+      "method": "hybrid",
+      "latencyMs": 0,
+      "relevantCount": 2,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 2
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440064",
+        "550e8400-e29b-41d4-a716-446655440065"
+      ],
+      "timestamp": "2026-03-15T12:52:20.847Z"
+    },
+    {
+      "requestId": "269fa2c9-2825-4a05-8d8f-b1271deac0e6",
+      "query": "Who should I connect with about the new project?",
+      "category": "personal",
+      "method": "hybrid",
+      "latencyMs": 0,
+      "relevantCount": 2,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 2
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440066",
+        "550e8400-e29b-41d4-a716-446655440067"
+      ],
+      "timestamp": "2026-03-15T12:52:20.847Z"
+    },
+    {
+      "requestId": "feb7ce2b-85e2-4406-b7af-76161d81c604",
+      "query": "What time zones do my teammates work in?",
+      "category": "personal",
+      "method": "hybrid",
+      "latencyMs": 0,
+      "relevantCount": 3,
+      "retrievedCount": 0,
+      "metrics": {
+        "precisionAt5": 0,
+        "precisionAt10": 0,
+        "precisionAt20": 0,
+        "recallAt5": 0,
+        "recallAt10": 0,
+        "recallAt20": 0,
+        "f1At5": 0,
+        "f1At10": 0,
+        "f1At20": 0,
+        "ndcgAt5": 0,
+        "ndcgAt10": 0,
+        "ndcgAt20": 0,
+        "mrr": 0,
+        "latencyMs": 0,
+        "truePositivesAt10": 0,
+        "falsePositivesAt10": 0,
+        "falseNegativesAt10": 3
+      },
+      "passed": {
+        "allPassed": false,
+        "checks": {
+          "precisionAt5": false,
+          "recallAt10": false,
+          "f1At10": false,
+          "ndcgAt10": false,
+          "mrr": false,
+          "latency": true
+        },
+        "thresholds": {
+          "precisionAt5": 0.8,
+          "recallAt10": 0.7,
+          "f1Score": 0.75,
+          "ndcgAt10": 0.75,
+          "mrr": 0.6,
+          "latencyP99": 300
+        }
+      },
+      "resultIds": [],
+      "relevantIds": [
+        "550e8400-e29b-41d4-a716-446655440068",
+        "550e8400-e29b-41d4-a716-446655440069",
+        "550e8400-e29b-41d4-a716-446655440070"
+      ],
+      "timestamp": "2026-03-15T12:52:20.847Z"
+    }
+  ]
+}

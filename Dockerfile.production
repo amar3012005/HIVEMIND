@@ -91,13 +91,7 @@ RUN mkdir -p /app/logs /app/data && \
 # Switch to non-root user
 USER nodejs
 
-# Copy production dependencies from deps stage
-COPY --from=deps --chown=nodejs:nodejs /app/node_modules ./node_modules
-
-# Copy generated Prisma Client
-COPY --from=deps --chown=nodejs:nodejs /app/node_modules/.prisma ./node_modules/.prisma
-
-# Copy built application from builder stage
+# Copy built application from builder stage (includes all dependencies and Prisma Client)
 COPY --from=builder --chown=nodejs:nodejs /app/src ./src
 COPY --from=builder --chown=nodejs:nodejs /app/package.json ./
 COPY --from=builder --chown=nodejs:nodejs /app/prisma ./prisma

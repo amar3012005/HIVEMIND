@@ -1,0 +1,80 @@
+# =============================================================================
+# HIVE-MIND PostgreSQL 15 with Apache AGE Extension
+# Production-ready for EU Sovereign Cloud Deployment
+# =============================================================================
+# Build: docker build -t hivemind/postgres-age:15-alpine -f Dockerfile.age .
+# Usage: Used by docker-compose.coolify.yml
+#
+# Apache AGE: https://age.apache.org/
+# AGE enables graph database capabilities on PostgreSQL
+# =============================================================================
+
+FROM postgres:15-alpine
+
+LABEL maintainer="ops@hivemind.io"
+LABEL description="PostgreSQL 15 with Apache AGE extension for HIVE-MIND"
+LABEL version="15-alpine-age"
+LABEL compliance="gdpr,nis2,dora"
+
+# Install build dependencies
+RUN apk add --no-cache --virtual .build-deps \
+    build-base \
+    git \
+    cmake \
+    flex \
+    bison \
+    postgresql-dev \
+    llvm15 \
+    clang15 \
+    && apk add --no-cache \
+    ca-certificates \
+    tzdata
+
+# Build and install Apache AGE
+RUN git clone --depth 1 --branch PG15 https://github.com/apache/age.git /tmp/age \
+    && cd /tmp/age \
+    && make PG_CONFIG=/usr/local/bin/pg_config \
+    && make PG_CONFIG=/usr/local/bin/pg_config install \
+    && rm -rf /tmp/age
+
+# Install additional PostgreSQL extensions
+RUN apk add --no-cache \
+    postgresql15-contrib
+
+# Clean up build dependencies
+RUN apk del .build-deps
+
+# Create extension directory
+RUN mkdir -p /usr/local/share/postgresql/extension \
+    && mkdir -p /usr/local/lib/postgresql
+
+# Copy age control files
+RUN cp /usr/local/share/postgresql/extension/age* /usr/local/share/postgresql/extension/ 2>/dev/null || true
+
+# Set proper permissions
+RUN chown -R postgres:postgres /usr/local/share/postgresql/extension \
+    && chown -R postgres:postgres /usr/local/lib/postgresql
+
+# Configure PostgreSQL for AGE
+RUN echo "shared_preload_libraries = 'age'" >> /usr/local/share/postgresql/postgresql.conf.sample
+
+# Create initialization script for AGE
+RUN mkdir -p /docker-entrypoint-initdb.d
+COPY init-age.sql /docker-entrypoint-initdb.d/01-install-age.sql
+
+# Set proper permissions for init scripts
+RUN chown -R postgres:postgres /docker-entrypoint-initdb.d \
+    && chmod 644 /docker-entrypoint-initdb.d/*.sql
+
+# Health check
+HEALTHCHECK --interval=10s --timeout=5s --start-period=60s --retries=5 \
+    CMD pg_isready -U ${POSTGRES_USER:-hivemind_user} -d ${POSTGRES_DB:-hivemind} || exit 1
+
+# Expose PostgreSQL port
+EXPOSE 5432
+
+# Switch to postgres user
+USER postgres
+
+# Default command
+CMD ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]

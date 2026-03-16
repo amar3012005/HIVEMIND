@@ -190,9 +190,10 @@ services:
     build:
       context: ./infra/postgres
       dockerfile: Dockerfile.age
-    image: hivemind/postgres-age:15-alpine
+    image: hivemind/postgres-age:15-age-custom
     container_name: hivemind-postgres
     command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    shm_size: '128mb'
     hostname: hivemind-postgres
     restart: unless-stopped
 
@@ -239,11 +240,11 @@ services:
       - /etc/localtime:/etc/localtime:ro
 
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hivemind_user} -d ${POSTGRES_DB:-hivemind}"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-hivemind_user} -d $${POSTGRES_DB:-hivemind}"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 60s
+      start_period: 90s
 
     logging:
       driver: "json-file"
@@ -309,11 +310,11 @@ services:
       - /etc/localtime:/etc/localtime:ro
 
     healthcheck:
-      test: ["CMD", "perl", "-e", "use IO::Socket; exit(IO::Socket::INET->new(PeerAddr => '127.0.0.1', PeerPort => 6333) ? 0 : 1)"]
+      test: ["CMD-SHELL", "perl -e 'use IO::Socket; exit(IO::Socket::INET->new(PeerAddr => \"127.0.0.1\", PeerPort => 6333, Timeout => 1) ? 0 : 1)'"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 30s
+      start_period: 90s
 
     logging:
       driver: "json-file"

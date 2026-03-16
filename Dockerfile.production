@@ -62,6 +62,9 @@ COPY core/config ./config
 # Copy root src directory (for three-tier-retrieval and evaluation modules)
 COPY src /src
 
+# Verify the copy worked
+RUN ls -la /src/search/ && echo "✓ src/search copied successfully"
+
 # Generate Prisma client and attempt TypeScript build (may fail on type issues, that's OK)
 RUN npx prisma generate && \
     (npm run build || echo "TypeScript build had errors - will run from source")
@@ -100,6 +103,10 @@ USER nodejs
 COPY --from=builder --chown=nodejs:nodejs /app/src ./src
 COPY --from=builder --chown=nodejs:nodejs /app/config ./config
 COPY --from=builder --chown=nodejs:nodejs /src /src
+
+# Verify all critical files are present
+RUN ls -la /src/search/ 2>/dev/null || echo "WARNING: /src/search not found"
+
 COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=nodejs:nodejs /app/package.json ./
 COPY --from=builder --chown=nodejs:nodejs /app/prisma ./prisma

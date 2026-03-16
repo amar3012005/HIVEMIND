@@ -309,7 +309,7 @@ services:
       - /etc/localtime:/etc/localtime:ro
 
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:6333/healthz"]
+      test: ["CMD", "sh", "-c", "curl -fsS -H \"api-key: ${QDRANT_API_KEY}\" http://localhost:6333/healthz || curl -fsS http://localhost:6333/healthz"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -380,7 +380,7 @@ services:
       - /etc/localtime:/etc/localtime:ro
 
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"${REDIS_PASSWORD}\" ping || redis-cli ping"]
       interval: 10s
       timeout: 5s
       retries: 5

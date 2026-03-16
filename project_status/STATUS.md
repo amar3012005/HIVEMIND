@@ -22,7 +22,7 @@
 
 | Service | Status | Issue | Fix |
 |---------|--------|-------|-----|
-| **App (Node.js)** | ✅ Building | Dockerfile path issues | Fixed paths to use `core/` directory |
+| **App (Node.js)** | 🔄 Rebuilding | `/src/search` module not found at runtime | Added verification steps, need cache-busting rebuild |
 | **PostgreSQL + AGE** | ✅ Building | Bind mount issues | Embeded init files in image |
 | **Qdrant** | ✅ Building | Config bind mount | Removed bind mount, use env vars |
 | **Redis** | ✅ Building | Health check auth | Simplified health check |
@@ -30,13 +30,26 @@
 
 ### Recent Fixes (2026-03-16)
 
-1. **Dockerfile.production** - Fixed to use `core/` directory paths
+1. **Dockerfile.production** - Added verification steps for `/src` copy
 2. **PostgreSQL Image** - Building Apache AGE locally with embedded init scripts
 3. **Health Checks** - Simplified to avoid authentication issues
 4. **Qdrant Config** - Removed problematic bind mount
 
+### Action Required: Force Rebuild in Coolify
+
+The Docker build cache may be preventing the new COPY commands from executing. To force a clean rebuild:
+
+1. **Option A: Update the Dockerfile comment** (add a cache-busting comment)
+2. **Option B: SSH into Coolify server and run:**
+   ```bash
+   docker system prune -a
+   # Then redeploy in Coolify UI
+   ```
+3. **Option C: Change the build context or tag in Coolify UI**
+
 ### Next Steps
-- [ ] Verify all services start healthy
+- [ ] Force rebuild in Coolify (clear build cache)
+- [ ] Verify `/src/search` files present in container logs
 - [ ] Test API endpoints
 - [ ] Configure domain and SSL
 - [ ] Set up monitoring

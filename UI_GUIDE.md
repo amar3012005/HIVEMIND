@@ -11,12 +11,12 @@
 ```bash
 cd /Users/amar/HIVE-MIND/core
 
-# 🔴 SECURITY NOTICE: Generate new API key at https://console.groq.com/
-# Previous key was compromised - see project_status/KEY_ROTATION_RECORD.md
+# 🔴 SECURITY NOTICE: Generate new API keys at https://console.groq.com/ and https://console.mistral.ai/
+# Previous keys were compromised - see project_status/KEY_ROTATION_RECORD.md
 GROQ_API_KEY="your-new-groq-api-key-here" \
-MISTRAL_API_KEY="k2jqLJXdnnSbq51sysEB4YvtR4LnM7hp" \
+MISTRAL_API_KEY="your-new-mistral-api-key-here" \
 QDRANT_URL="http://localhost:9200" \
-QDRANT_API_KEY="dev_api_key_hivemind_2026" \
+QDRANT_API_KEY="your-new-qdrant-api-key-here" \
 node src/server.js
 ```
 

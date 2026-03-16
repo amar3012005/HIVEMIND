@@ -1,98 +1,45 @@
 # HIVE-MIND Core API - Production Dockerfile
-# Multi-stage build for minimal attack surface
-# EU Sovereign: GDPR, NIS2, DORA compliant
-# Security: Non-root user, distroless base, minimal packages
+# Simplified: Everything runs from /app (core directory)
 
-# ==========================================
-# BASE IMAGE
-# ==========================================
 FROM node:20-alpine3.19 AS base
 
-# Install security updates and required packages
 RUN apk upgrade --no-cache && \
-    apk add --no-cache \
-        dumb-init \
-        ca-certificates \
-        tzdata && \
+    apk add --no-cache dumb-init ca-certificates tzdata && \
     update-ca-certificates
 
-# Set working directory
 WORKDIR /app
-
-# ==========================================
-# DEPENDENCIES STAGE
-# ==========================================
-FROM base AS deps
-
-# Copy package files from core (where the actual app is)
-COPY core/package.json core/package-lock.json ./
-
-# Install production dependencies only
-RUN npm ci --omit=dev --ignore-scripts && \
-    npm cache clean --force
-
-# Verify installation
-RUN npm ls --omit=dev --depth=0 || true
 
 # ==========================================
 # BUILD STAGE
 # ==========================================
 FROM base AS builder
 
-# Install build dependencies
-RUN apk add --no-cache \
-    python3 \
-    make \
-    g++ \
-    git
+RUN apk add --no-cache python3 make g++ git
 
-# Copy package files from core
+# Copy package files
 COPY core/package.json core/package-lock.json ./
 COPY core/prisma ./prisma
 COPY core/tsconfig.json ./
 
-# Install all dependencies (including devDependencies for build)
-RUN npm ci && \
-    npm cache clean --force
+# Install dependencies
+RUN npm ci && npm cache clean --force
 
-# Copy source code and config from core
+# Copy source code
 COPY core/src ./src
 COPY core/config ./config
 
-# Copy core src to /core/ as well (for /src imports that reference ../../core/)
-RUN mkdir -p /core && cp -r ./src /core/src
-
-# Copy root src directory (for three-tier-retrieval and evaluation modules)
-COPY src /src
-
-# Copy root package files and install dependencies (required for /src imports)
-COPY package.json package-lock.json* /tmp/root/
-RUN cd /tmp/root && npm ci --omit=dev --ignore-scripts && npm cache clean --force
-
-# Create symlink so /src files can find packages installed in /app/node_modules
-RUN ln -s /app/node_modules /node_modules
-
-# Verify the copy worked
-RUN ls -la /node_modules/@qdrant 2>/dev/null && echo "✓ @qdrant packages installed" || echo "WARNING: @qdrant not found"
-
-# Verify the copy worked
-RUN ls -la /src/search/ && echo "✓ src/search copied successfully"
-
-# Generate Prisma client and attempt TypeScript build (may fail on type issues, that's OK)
-RUN npx prisma generate && \
-    (npm run build || echo "TypeScript build had errors - will run from source")
+# Generate Prisma client
+RUN npx prisma generate
 
 # ==========================================
 # PRODUCTION STAGE
 # ==========================================
 FROM base AS production
 
-# Build arguments
 ARG NODE_ENV=production
 ARG VERSION=1.0.0
 ARG BUILD_DATE
 
-# Environment variables
 ENV NODE_ENV=${NODE_ENV} \
     VERSION=${VERSION} \
     BUILD_DATE=${BUILD_DATE} \
@@ -101,74 +48,28 @@ ENV NODE_ENV=${NODE_ENV} \
     LOG_LEVEL=info \
     LOG_FORMAT=json
 
-# Create non-root user and group
+# Create non-root user
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001 -G nodejs
 
-# Create app directory with proper permissions
 RUN mkdir -p /app/logs /app/data && \
     chown -R nodejs:nodejs /app
 
-# Switch to non-root user
 USER nodejs
 
-# Copy application from builder stage
+# Copy from builder
 COPY --from=builder --chown=nodejs:nodejs /app/src ./src
 COPY --from=builder --chown=nodejs:nodejs /app/config ./config
-COPY --from=builder --chown=nodejs:nodejs /src /src
-COPY --from=builder --chown=nodejs:nodejs /core /core
-COPY --from=builder --chown=nodejs:nodejs /tmp/root/package.json /package.json
-
-# Copy BOTH node_modules directories
-COPY --from=builder --chown=nodejs:nodejs /tmp/root/node_modules /node_modules
 COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=nodejs:nodejs /app/package.json ./
 COPY --from=builder --chown=nodejs:nodejs /app/prisma ./prisma
 
-# Verify all critical files are present
-RUN ls -la /src/search/ 2>/dev/null || echo "WARNING: /src/search not found"
+RUN chmod -R 550 /app && chmod -R 770 /app/logs /app/data
 
-# Set proper permissions
-RUN chmod -R 550 /app && \
-    chmod -R 770 /app/logs /app/data
-
-# Expose port
 EXPOSE 3000
 
-# Health check endpoint
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1
 
-# Use dumb-init as PID 1 for proper signal handling
 ENTRYPOINT ["/usr/bin/dumb-init", "--"]
-
-# Start the application from src (source files are JavaScript)
 CMD ["node", "src/server.js"]
-
-# ==========================================
-# SECURITY SCANNING STAGE (Optional)
-# ==========================================
-FROM production AS security-scan
-
-# This stage is used for Trivy scanning
-# The production image should be used for deployment
-USER root
-RUN apk add --no-cache curl
-USER nodejs
-
-# ==========================================
-# METADATA
-# ==========================================
-LABEL org.opencontainers.image.title="HIVE-MIND Core API"
-LABEL org.opencontainers.image.description="EU Sovereign AI Memory Engine"
-LABEL org.opencontainers.image.vendor="HIVE-MIND"
-LABEL org.opencontainers.image.authors="ops@hivemind.io"
-LABEL org.opencontainers.image.source="https://github.com/hivemind/core"
-LABEL org.opencontainers.image.version=${VERSION}
-LABEL org.opencontainers.image.created=${BUILD_DATE}
-LABEL org.opencontainers.image.revision=${GIT_SHA:-unknown}
-LABEL org.opencontainers.image.licenses="Proprietary"
-LABEL com.hivemind.component="api"
-LABEL com.hivemind.tier="core"
-LABEL com.hivemind.region="eu"
-LABEL com.hivemind.compliance="gdpr,nis2,dora"

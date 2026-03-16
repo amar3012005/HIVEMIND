@@ -67,11 +67,11 @@ const {
 } = await import('./api/validators/memory.validators.js');
 
 // Three-Tier Retrieval imports
-const { ThreeTierRetrieval } = await import('../../src/search/three-tier-retrieval.js');
+const { ThreeTierRetrieval } = await import('./external/search/three-tier-retrieval.js');
 
 // Evaluation imports
-const { RetrievalEvaluator } = await import('../../src/evaluation/retrieval-evaluator.js');
-const { TEST_QUERIES, getSampleQueries } = await import('../../src/evaluation/test-dataset.js');
+const { RetrievalEvaluator } = await import('./external/evaluation/retrieval-evaluator.js');
+const { TEST_QUERIES, getSampleQueries } = await import('./external/evaluation/test-dataset.js');
 const CLIENT_HTML_CANDIDATES = [
   path.join(REPO_ROOT, 'client.html'),
   path.join(PROJECT_ROOT, 'client.html')

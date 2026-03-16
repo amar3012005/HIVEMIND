@@ -308,7 +308,6 @@ services:
 
     volumes:
       - qdrant-data:/qdrant/storage
-      - ./infra/qdrant/config.yaml:/qdrant/config/production.yaml:ro
       - /etc/localtime:/etc/localtime:ro
 
     healthcheck:

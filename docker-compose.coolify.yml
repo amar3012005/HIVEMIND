@@ -1,531 +1,523 @@
-# =============================================================================
-# HIVE-MIND Coolify Docker Compose Configuration
-# Production-ready for EU Sovereign Cloud Deployment
-# =============================================================================
-# Version: 2.0.0
-# Compliance: GDPR, NIS2, DORA
-# Regions: Hetzner DE, Scaleway FR, OVHcloud FR
-#
-# Usage:
-#   docker-compose -f docker-compose.coolify.yml up -d
-#   docker-compose -f docker-compose.coolify.yml logs -f
-#   docker-compose -f docker-compose.coolify.yml ps
-#
-# Health Checks:
-#   curl http://localhost:3000/health
-#   docker-compose -f docker-compose.coolify.yml exec postgres pg_isready -U hivemind
-#   docker-compose -f docker-compose.coolify.yml exec redis redis-cli ping
-# =============================================================================
-
-version: '3.8'
-
 services:
-  # ==========================================
-  # HIVE-MIND Core API
-  # ==========================================
-  app:
-    build:
-      context: .
-      dockerfile: Dockerfile.production
-      args:
-        NODE_ENV: production
-        VERSION: ${VERSION:-2.0.0}
-        BUILD_DATE: ${BUILD_DATE:-unknown}
-    image: hivemind/core-api:${VERSION:-latest}
-    container_name: hivemind-api
-    hostname: hivemind-api
-    restart: unless-stopped
-
-    # Security hardening
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    cap_add:
-      - NET_BIND_SERVICE
-    read_only: false
-    user: "1001:1001"
-
-    # Resource limits for Coolify
-    deploy:
-      resources:
-        limits:
-          cpus: '2'
-          memory: 2G
-        reservations:
-          cpus: '0.5'
-          memory: 512M
-      restart_policy:
-        condition: on-failure
-        delay: 5s
-        max_attempts: 3
-        window: 120s
-
-    environment:
-      # Core Application
-      - NODE_ENV=production
-      - PORT=3000
-      - HOST=0.0.0.0
-      - VERSION=${VERSION:-2.0.0}
-
-      # Database Configuration
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-hivemind_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}?schema=public&connection_limit=20&pool_timeout=30
-      - DATABASE_HOST=postgres
-      - DATABASE_PORT=5432
-      - DATABASE_NAME=${POSTGRES_DB:-hivemind}
-      - DATABASE_USER=${POSTGRES_USER:-hivemind_user}
-      - DATABASE_PASSWORD=${POSTGRES_PASSWORD}
-
-      # Vector Store Configuration
-      - QDRANT_URL=http://qdrant:6333
-      - QDRANT_API_KEY=${QDRANT_API_KEY}
-      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-hivemind_memories}
-
-      # Redis Configuration
-      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
-
-      # LLM API Configuration
-      - GROQ_API_KEY=${GROQ_API_KEY}
-      - GROQ_INFERENCE_MODEL=${GROQ_INFERENCE_MODEL:-llama-3.3-70b-versatile}
-      - MISTRAL_API_KEY=${MISTRAL_API_KEY}
-      - MISTRAL_EMBEDDING_MODEL=${MISTRAL_EMBEDDING_MODEL:-mistral-embed}
-
-      # Security Keys
-      - API_MASTER_KEY=${API_MASTER_KEY}
-      - SESSION_SECRET=${SESSION_SECRET}
-      - HIVEMIND_MASTER_API_KEY=${HIVEMIND_MASTER_API_KEY}
-      - HIVEMIND_ADMIN_SECRET=${HIVEMIND_ADMIN_SECRET}
-
-      # Feature Flags
-      - USE_SITUATIONALIZER=${USE_SITUATIONALIZER:-true}
-      - USE_CONTEXTUAL_EMBEDDING=${USE_CONTEXTUAL_EMBEDDING:-true}
-      - USE_QDRANT_STORAGE=${USE_QDRANT_STORAGE:-true}
-      - USE_AST_CHUNKING=${USE_AST_CHUNKING:-true}
-      - USE_STATEFUL_MANAGER=${USE_STATEFUL_MANAGER:-true}
-
-      # Audit & Logging
-      - AUDIT_LOG_PATH=/app/logs/audit.log
-      - AUDIT_RETENTION_DAYS=${AUDIT_RETENTION_DAYS:-2555}
-      - LOG_LEVEL=${LOG_LEVEL:-info}
-      - LOG_FORMAT=${LOG_FORMAT:-json}
-
-      # Rate Limiting
-      - RATE_LIMIT_WINDOW_MS=${RATE_LIMIT_WINDOW_MS:-60000}
-      - RATE_LIMIT_MAX_REQUESTS=${RATE_LIMIT_MAX_REQUESTS:-100}
-
-      # EU Sovereign Compliance
-      - EU_REGION=${EU_REGION:-eu-central-1}
-      - DATA_RESIDENCY=EU
-      - GDPR_MODE=true
-
-      # Sentry (Optional)
-      - SENTRY_DSN=${SENTRY_DSN:-}
-      - SENTRY_ENVIRONMENT=${SENTRY_ENVIRONMENT:-production}
-
-    ports:
-      - "3000:3000"
-
-    healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
-
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "5"
-        compress: "true"
-        labels: "hivemind.component,hivemind.tier,hivemind.region,environment"
-        tag: "{{.ImageName}}|{{.Name}}|{{.ImageFullID}}|{{.FullID}}"
-
-    volumes:
-      - hivemind-logs:/app/logs
-      - hivemind-data:/app/data
-      - /etc/localtime:/etc/localtime:ro
-
-    labels:
-      # HIVE-MIND Labels
-      - "hivemind.component=api"
-      - "hivemind.tier=core"
-      - "hivemind.region=eu"
-      - "hivemind.compliance=gdpr,nis2,dora"
-      - "hivemind.version=${VERSION:-2.0.0}"
-
-      # Coolify Labels
-      - "coolify.name=hivemind-api"
-      - "coolify.description=HIVE-MIND Core API - EU Sovereign AI Memory Engine"
-      - "coolify.healthcheck=/health"
-      - "coolify.port=3000"
-
-      # Traefik Labels (if using Traefik)
-      - "traefik.enable=true"
-      - "traefik.http.routers.hivemind-api.rule=Host(`${DOMAIN:-localhost}`)"
-      - "traefik.http.routers.hivemind-api.entrypoints=websecure"
-      - "traefik.http.routers.hivemind-api.tls.certresolver=letsencrypt"
-      - "traefik.http.services.hivemind-api.loadbalancer.server.port=3000"
-      - "traefik.http.services.hivemind-api.loadbalancer.healthcheck.path=/health"
-      - "traefik.http.services.hivemind-api.loadbalancer.healthcheck.interval=30s"
-
-    networks:
-      - hivemind-network
-
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      qdrant:
-        condition: service_healthy
-
-  # ==========================================
-  # PostgreSQL 15 with Apache AGE Extension
-  # ==========================================
-  postgres:
-    build:
-      context: ./infra/postgres
-      dockerfile: Dockerfile.age
-    image: hivemind/postgres-age:15-age-custom
-    container_name: hivemind-postgres
-    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
-    shm_size: '128mb'
-    hostname: hivemind-postgres
-    restart: unless-stopped
-
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    cap_add:
-      - CHOWN
-      - SETGID
-      - SETUID
-    user: "999:999"
-
-    deploy:
-      resources:
-        limits:
-          cpus: '2'
-          memory: 4G
-        reservations:
-          cpus: '1'
-          memory: 2G
-      restart_policy:
-        condition: on-failure
-        delay: 10s
-        max_attempts: 5
-
-    environment:
-      - POSTGRES_USER=${POSTGRES_USER:-hivemind_user}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - POSTGRES_DB=${POSTGRES_DB:-hivemind}
-      - POSTGRES_INITDB_ARGS=--encoding=UTF8 --lc-collate=en_US.UTF-8 --lc-ctype=en_US.UTF-8
-      - PGDATA=/var/lib/postgresql/data/pgdata
-      - POSTGRES_HOST_AUTH_METHOD=scram-sha-256
-
-      # Performance Tuning
-      - POSTGRES_SHARED_BUFFERS=1GB
-      - POSTGRES_EFFECTIVE_CACHE_SIZE=3GB
-      - POSTGRES_MAINTENANCE_WORK_MEM=256MB
-      - POSTGRES_WORK_MEM=16MB
-      - POSTGRES_MAX_CONNECTIONS=200
-
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-      - /etc/localtime:/etc/localtime:ro
-
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-hivemind_user} -d $${POSTGRES_DB:-hivemind}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 90s
-
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "5"
-        compress: "true"
-        tag: "{{.ImageName}}|{{.Name}}|{{.ImageFullID}}|{{.FullID}}"
-
-    labels:
-      - "hivemind.component=database"
-      - "hivemind.tier=core"
-      - "hivemind.region=eu"
-      - "hivemind.compliance=gdpr,nis2,dora"
-      - "coolify.name=hivemind-postgres"
-
-    networks:
-      - hivemind-network
-
-  # ==========================================
-  # Qdrant Vector Database
-  # ==========================================
-  qdrant:
-    image: qdrant/qdrant:v1.12.0
-    container_name: hivemind-qdrant
-    hostname: hivemind-qdrant
-    restart: unless-stopped
-
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    user: "1000:1000"
-
-    deploy:
-      resources:
-        limits:
-          cpus: '2'
-          memory: 4G
-        reservations:
-          cpus: '1'
-          memory: 2G
-      restart_policy:
-        condition: on-failure
-        delay: 5s
-        max_attempts: 3
-
-    environment:
-      - QDRANT__SERVICE__HTTP_PORT=6333
-      - QDRANT__SERVICE__GRPC_PORT=6334
-      - QDRANT__STORAGE__STORAGE_PATH=/qdrant/storage
-      - QDRANT__LOG_LEVEL=INFO
-      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY}
-      - QDRANT__TELEMETRY_DISABLED=true
-
-      # Performance Tuning
-      - QDRANT__STORAGE__PERFORMANCE__MAX_SEARCH_THREADS=4
-      - QDRANT__STORAGE__PERFORMANCE__CPU_COUNT=2
-      - QDRANT__STORAGE__OPTIMIZATION__INDEXING_THRESHOLD=20000
-
-    volumes:
-      - qdrant-data:/qdrant/storage
-      - /etc/localtime:/etc/localtime:ro
-
-    healthcheck:
-      test: ["CMD-SHELL", "perl -e 'use IO::Socket; exit(IO::Socket::INET->new(PeerAddr => \"127.0.0.1\", PeerPort => 6333, Timeout => 1) ? 0 : 1)'"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 90s
-
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "5"
-        compress: "true"
-        tag: "{{.ImageName}}|{{.Name}}|{{.ImageFullID}}|{{.FullID}}"
-
-    labels:
-      - "hivemind.component=vector-store"
-      - "hivemind.tier=core"
-      - "hivemind.region=eu"
-      - "hivemind.compliance=gdpr,nis2,dora"
-      - "coolify.name=hivemind-qdrant"
-
-    networks:
-      - hivemind-network
-
-  # ==========================================
-  # Redis - Cache & Session Store
-  # ==========================================
-  redis:
-    image: redis:7-alpine
-    container_name: hivemind-redis
-    hostname: hivemind-redis
-    restart: unless-stopped
-
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    user: "999:999"
-
-    deploy:
-      resources:
-        limits:
-          cpus: '1'
-          memory: 1G
-        reservations:
-          cpus: '0.25'
-          memory: 256M
-      restart_policy:
-        condition: on-failure
-        delay: 5s
-        max_attempts: 3
-
-    command: >
-      redis-server
-      --requirepass "${REDIS_PASSWORD}"
-      --appendonly yes
-      --appendfsync everysec
-      --maxmemory 768mb
-      --maxmemory-policy allkeys-lru
-      --tcp-keepalive 300
-      --save 900 1
-      --save 300 10
-      --save 60 10000
-      --loglevel notice
-      --protected-mode yes
-
-    volumes:
-      - redis-data:/data
-      - /etc/localtime:/etc/localtime:ro
-
-    healthcheck:
-      test: ["CMD-SHELL", "redis-cli $${REDIS_PASSWORD:+-a \"$$REDIS_PASSWORD\"} ping | grep PONG"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "5"
-        compress: "true"
-        tag: "{{.ImageName}}|{{.Name}}|{{.ImageFullID}}|{{.FullID}}"
-
-    labels:
-      - "hivemind.component=cache"
-      - "hivemind.tier=core"
-      - "hivemind.region=eu"
-      - "hivemind.compliance=gdpr,nis2,dora"
-      - "coolify.name=hivemind-redis"
-
-    networks:
-      - hivemind-network
-
-  # ==========================================
-  # Database Backup Service
-  # ==========================================
-  backup:
-    image: offen/docker-volume-backup:v2
-    container_name: hivemind-backup
-    hostname: hivemind-backup
-    restart: unless-stopped
-
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-
-    environment:
-      # Backup Schedule (Daily at 2 AM)
-      - BACKUP_CRON_EXPRESSION=0 2 * * *
-
-      # Retention Policy
-      - BACKUP_RETENTION_DAYS=30
-      - BACKUP_PRUNING_PREFIX=backup-
-
-      # Encryption
-      - BACKUP_ENCRYPTION_KEY=${BACKUP_ENCRYPTION_KEY}
-
-      # S3 Storage (Configure for your provider)
-      - AWS_S3_BUCKET_NAME=${BACKUP_S3_BUCKET}
-      - AWS_ACCESS_KEY_ID=${BACKUP_S3_ACCESS_KEY}
-      - AWS_SECRET_ACCESS_KEY=${BACKUP_S3_SECRET_KEY}
-      - AWS_S3_ENDPOINT=${BACKUP_S3_ENDPOINT}
-      - AWS_S3_REGION=${EU_REGION:-eu-central-1}
-
-      # Notifications
-      - NOTIFICATION_URLS=${BACKUP_NOTIFICATION_URL:-}
-      - NOTIFICATION_LEVEL=${BACKUP_NOTIFICATION_LEVEL:-error}
-
-      # Archive Settings
-      - BACKUP_ARCHIVE="/archive"
-      - BACKUP_FILENAME=backup-%Y-%m-%dT%H-%M-%S.tar.gz
-      - BACKUP_STOP_CONTAINER_LABEL=hivemind.component=database
-      - BACKUP_FROM_SNAPSHOT=true
-      - BACKUP_WAIT_SECONDS=30
-
-    volumes:
-      - postgres-data:/backup/postgres:ro
-      - redis-data:/backup/redis:ro
-      - qdrant-data:/backup/qdrant:ro
-      - hivemind-data:/backup/app-data:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /etc/localtime:/etc/localtime:ro
-
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-        compress: "true"
-
-    labels:
-      - "hivemind.component=backup"
-      - "hivemind.tier=infrastructure"
-      - "hivemind.region=eu"
-      - "hivemind.compliance=gdpr,nis2,dora"
-      - "coolify.name=hivemind-backup"
-
-    networks:
-      - hivemind-network
-
-    depends_on:
-      - postgres
-      - redis
-      - qdrant
-
-# ==========================================
-# Named Volumes
-# ==========================================
+    app:
+        build:
+            context: .
+            dockerfile: Dockerfile.production
+            args:
+                NODE_ENV: production
+                VERSION: '${VERSION:-2.0.0}'
+                BUILD_DATE: '${BUILD_DATE:-unknown}'
+        image: 'hivemind/core-api:${VERSION:-latest}'
+        container_name: app-s0k0s0k40wo44w4w8gcs8ow0-125656582242
+        hostname: hivemind-api
+        restart: unless-stopped
+        # security_opt:
+            # - 'no-new-privileges:true'
+        # cap_drop:
+            # - ALL
+        cap_add:
+            - NET_BIND_SERVICE
+        read_only: false
+        # user: '1001:1001'
+        deploy:
+            resources:
+                limits:
+                    cpus: '2'
+                    memory: 2G
+                reservations:
+                    cpus: '0.5'
+                    memory: 512M
+            restart_policy:
+                condition: on-failure
+                delay: 5s
+                max_attempts: 3
+                window: 120s
+        environment:
+            NODE_ENV: production
+            PORT: '3000'
+            HOST: 0.0.0.0
+            VERSION: '${VERSION:-2.0.0}'
+            DATABASE_URL: 'postgresql://${POSTGRES_USER:-hivemind_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}?schema=public&connection_limit=20&pool_timeout=30'
+            DATABASE_HOST: postgres
+            DATABASE_PORT: '5432'
+            DATABASE_NAME: '${POSTGRES_DB:-hivemind}'
+            DATABASE_USER: '${POSTGRES_USER:-hivemind_user}'
+            DATABASE_PASSWORD: '${POSTGRES_PASSWORD}'
+            QDRANT_URL: 'http://qdrant:6333'
+            QDRANT_API_KEY: '${QDRANT_API_KEY}'
+            QDRANT_COLLECTION: '${QDRANT_COLLECTION:-hivemind_memories}'
+            REDIS_URL: 'redis://:${REDIS_PASSWORD}@redis:6379/0'
+            REDIS_HOST: redis
+            REDIS_PORT: '6379'
+            REDIS_PASSWORD: '${REDIS_PASSWORD}'
+            GROQ_API_KEY: '${GROQ_API_KEY}'
+            GROQ_INFERENCE_MODEL: '${GROQ_INFERENCE_MODEL:-llama-3.3-70b-versatile}'
+            MISTRAL_API_KEY: '${MISTRAL_API_KEY}'
+            MISTRAL_EMBEDDING_MODEL: '${MISTRAL_EMBEDDING_MODEL:-mistral-embed}'
+            API_MASTER_KEY: '${API_MASTER_KEY}'
+            SESSION_SECRET: '${SESSION_SECRET}'
+            HIVEMIND_MASTER_API_KEY: '${HIVEMIND_MASTER_API_KEY}'
+            HIVEMIND_ADMIN_SECRET: '${HIVEMIND_ADMIN_SECRET}'
+            USE_SITUATIONALIZER: '${USE_SITUATIONALIZER:-true}'
+            USE_CONTEXTUAL_EMBEDDING: '${USE_CONTEXTUAL_EMBEDDING:-true}'
+            USE_QDRANT_STORAGE: '${USE_QDRANT_STORAGE:-true}'
+            USE_AST_CHUNKING: '${USE_AST_CHUNKING:-true}'
+            USE_STATEFUL_MANAGER: '${USE_STATEFUL_MANAGER:-true}'
+            AUDIT_LOG_PATH: /app/logs/audit.log
+            AUDIT_RETENTION_DAYS: '${AUDIT_RETENTION_DAYS:-2555}'
+            LOG_LEVEL: '${LOG_LEVEL:-info}'
+            LOG_FORMAT: '${LOG_FORMAT:-json}'
+            RATE_LIMIT_WINDOW_MS: '${RATE_LIMIT_WINDOW_MS:-60000}'
+            RATE_LIMIT_MAX_REQUESTS: '${RATE_LIMIT_MAX_REQUESTS:-100}'
+            EU_REGION: '${EU_REGION:-eu-central-1}'
+            DATA_RESIDENCY: EU
+            GDPR_MODE: 'true'
+            SENTRY_DSN: '${SENTRY_DSN:-}'
+            SENTRY_ENVIRONMENT: '${SENTRY_ENVIRONMENT:-production}'
+            BUILD_DATE: '${BUILD_DATE:-unknown}'
+            POSTGRES_PASSWORD: '${POSTGRES_PASSWORD}'
+            COOLIFY_BRANCH: '"main"'
+            COOLIFY_RESOURCE_UUID: s0k0s0k40wo44w4w8gcs8ow0
+            COOLIFY_CONTAINER_NAME: app-s0k0s0k40wo44w4w8gcs8ow0-125656582242
+            SERVICE_NAME_APP: app
+            SERVICE_NAME_POSTGRES: postgres
+            SERVICE_NAME_QDRANT: qdrant
+            SERVICE_NAME_REDIS: redis
+            SERVICE_NAME_BACKUP: backup
+        ports:
+            - '2026:3000'
+        healthcheck:
+            test:
+                - CMD
+                - wget
+                - '--no-verbose'
+                - '--tries=1'
+                - '--spider'
+                - 'http://localhost:3000/health'
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 60s
+        logging:
+            driver: json-file
+            options:
+                max-size: 10m
+                max-file: '5'
+                compress: 'true'
+                labels: 'hivemind.component,hivemind.tier,hivemind.region,environment'
+                tag: '{{.ImageName}}|{{.Name}}|{{.ImageFullID}}|{{.FullID}}'
+        volumes:
+            - 's0k0s0k40wo44w4w8gcs8ow0_hivemind-logs:/app/logs'
+            - 's0k0s0k40wo44w4w8gcs8ow0_hivemind-data:/app/data'
+            - '/etc/localtime:/etc/localtime:ro'
+        labels:
+            - hivemind.component=api
+            - hivemind.tier=core
+            - hivemind.region=eu
+            - 'hivemind.compliance=gdpr,nis2,dora'
+            - 'hivemind.version=$${VERSION:-2.0.0}'
+            - coolify.name=hivemind-api
+            - 'coolify.description=HIVE-MIND Core API - EU Sovereign AI Memory Engine'
+            - coolify.healthcheck=/health
+            - coolify.port=3000
+            - traefik.enable=true
+            - 'traefik.http.routers.hivemind-api.rule=Host(`$${DOMAIN:-localhost}`)'
+            - traefik.http.routers.hivemind-api.entrypoints=websecure
+            - traefik.http.routers.hivemind-api.tls.certresolver=letsencrypt
+            - traefik.http.services.hivemind-api.loadbalancer.server.port=3000
+            - traefik.http.services.hivemind-api.loadbalancer.healthcheck.path=/health
+            - traefik.http.services.hivemind-api.loadbalancer.healthcheck.interval=30s
+            - coolify.managed=true
+            - coolify.version=4.0.0-beta.462
+            - coolify.applicationId=20
+            - coolify.type=application
+            - coolify.name=app-s0k0s0k40wo44w4w8gcs8ow0-125656582242
+            - coolify.resourceName=hive-mind
+            - coolify.projectName=hivemind
+            - coolify.serviceName=hive-mind
+            - coolify.environmentName=production
+            - coolify.pullRequestId=0
+        networks:
+            hivemind-network: null
+            s0k0s0k40wo44w4w8gcs8ow0: null
+        depends_on:
+            postgres:
+                condition: service_healthy
+            redis:
+                condition: service_healthy
+            qdrant:
+                condition: service_healthy
+        env_file:
+            - .env
+    postgres:
+        build:
+            context: ./infra/postgres
+            dockerfile: Dockerfile.age
+        image: 'hivemind/postgres-age:15-age-custom'
+        container_name: postgres-s0k0s0k40wo44w4w8gcs8ow0-125656634781
+        command:
+            - postgres
+        shm_size: 128mb
+        hostname: hivemind-postgres
+        restart: unless-stopped
+        # security_opt:
+            # - 'no-new-privileges:true'
+        # cap_drop:
+            # - ALL
+        cap_add:
+            - CHOWN
+            - SETGID
+            - SETUID
+        # user: '999:999'
+        deploy:
+            resources:
+                limits:
+                    cpus: '2'
+                    memory: 4G
+                reservations:
+                    cpus: '1'
+                    memory: 2G
+            restart_policy:
+                condition: on-failure
+                delay: 10s
+                max_attempts: 5
+        environment:
+            POSTGRES_USER: '${POSTGRES_USER:-hivemind_user}'
+            POSTGRES_PASSWORD: '${POSTGRES_PASSWORD}'
+            POSTGRES_DB: '${POSTGRES_DB:-hivemind}'
+            POSTGRES_INITDB_ARGS: '--encoding=UTF8 --lc-collate=en_US.UTF-8 --lc-ctype=en_US.UTF-8'
+            PGDATA: /var/lib/postgresql/data/pgdata
+            POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+            POSTGRES_SHARED_BUFFERS: 1GB
+            POSTGRES_EFFECTIVE_CACHE_SIZE: 3GB
+            POSTGRES_MAINTENANCE_WORK_MEM: 256MB
+            POSTGRES_WORK_MEM: 16MB
+            POSTGRES_MAX_CONNECTIONS: '200'
+            COOLIFY_BRANCH: '"main"'
+            COOLIFY_RESOURCE_UUID: s0k0s0k40wo44w4w8gcs8ow0
+            COOLIFY_CONTAINER_NAME: postgres-s0k0s0k40wo44w4w8gcs8ow0-125656634781
+            SERVICE_NAME_APP: app
+            SERVICE_NAME_POSTGRES: postgres
+            SERVICE_NAME_QDRANT: qdrant
+            SERVICE_NAME_REDIS: redis
+            SERVICE_NAME_BACKUP: backup
+        volumes:
+            - 's0k0s0k40wo44w4w8gcs8ow0_postgres-data:/var/lib/postgresql/data'
+            - '/etc/localtime:/etc/localtime:ro'
+        healthcheck:
+            test:
+                - CMD-SHELL
+                - 'pg_isready -U $${POSTGRES_USER:-hivemind_user} -d $${POSTGRES_DB:-hivemind}'
+            interval: 10s
+            timeout: 5s
+            retries: 5
+            start_period: 90s
+        logging:
+            driver: json-file
+            options:
+                max-size: 10m
+                max-file: '5'
+                compress: 'true'
+                tag: '{{.ImageName}}|{{.Name}}|{{.ImageFullID}}|{{.FullID}}'
+        labels:
+            - hivemind.component=database
+            - hivemind.tier=core
+            - hivemind.region=eu
+            - 'hivemind.compliance=gdpr,nis2,dora'
+            - coolify.name=hivemind-postgres
+            - coolify.managed=true
+            - coolify.version=4.0.0-beta.462
+            - coolify.applicationId=20
+            - coolify.type=application
+            - coolify.name=postgres-s0k0s0k40wo44w4w8gcs8ow0-125656634781
+            - coolify.resourceName=hive-mind
+            - coolify.projectName=hivemind
+            - coolify.serviceName=hive-mind
+            - coolify.environmentName=production
+            - coolify.pullRequestId=0
+        networks:
+            hivemind-network: null
+            s0k0s0k40wo44w4w8gcs8ow0: null
+        env_file:
+            - .env
+    qdrant:
+        image: 'qdrant/qdrant:v1.12.0'
+        container_name: qdrant-s0k0s0k40wo44w4w8gcs8ow0-125656653552
+        hostname: hivemind-qdrant
+        restart: unless-stopped
+        # security_opt:
+            # - 'no-new-privileges:true'
+        # cap_drop:
+            # - ALL
+        # user: '1000:1000'
+        deploy:
+            resources:
+                limits:
+                    cpus: '2'
+                    memory: 4G
+                reservations:
+                    cpus: '1'
+                    memory: 2G
+            restart_policy:
+                condition: on-failure
+                delay: 5s
+                max_attempts: 3
+        environment:
+            QDRANT__SERVICE__HTTP_PORT: '6333'
+            QDRANT__SERVICE__GRPC_PORT: '6334'
+            QDRANT__STORAGE__STORAGE_PATH: /qdrant/storage
+            QDRANT__LOG_LEVEL: INFO
+            QDRANT__SERVICE__API_KEY: '${QDRANT_API_KEY}'
+            QDRANT__TELEMETRY_DISABLED: 'true'
+            QDRANT__STORAGE__PERFORMANCE__MAX_SEARCH_THREADS: '4'
+            QDRANT__STORAGE__PERFORMANCE__CPU_COUNT: '2'
+            QDRANT__STORAGE__OPTIMIZATION__INDEXING_THRESHOLD: '20000'
+            QDRANT_API_KEY: '${QDRANT_API_KEY}'
+            COOLIFY_BRANCH: '"main"'
+            COOLIFY_RESOURCE_UUID: s0k0s0k40wo44w4w8gcs8ow0
+            COOLIFY_CONTAINER_NAME: qdrant-s0k0s0k40wo44w4w8gcs8ow0-125656653552
+            SERVICE_NAME_APP: app
+            SERVICE_NAME_POSTGRES: postgres
+            SERVICE_NAME_QDRANT: qdrant
+            SERVICE_NAME_REDIS: redis
+            SERVICE_NAME_BACKUP: backup
+        volumes:
+            - 's0k0s0k40wo44w4w8gcs8ow0_qdrant-data:/qdrant/storage'
+            - '/etc/localtime:/etc/localtime:ro'
+        healthcheck:
+            test:
+                - CMD-SHELL
+                - 'perl -e ''use IO::Socket; exit(IO::Socket::INET->new(PeerAddr => "127.0.0.1", PeerPort => 6333, Timeout => 1) ? 0 : 1)'''
+            interval: 10s
+            timeout: 5s
+            retries: 5
+            start_period: 90s
+        logging:
+            driver: json-file
+            options:
+                max-size: 10m
+                max-file: '5'
+                compress: 'true'
+                tag: '{{.ImageName}}|{{.Name}}|{{.ImageFullID}}|{{.FullID}}'
+        labels:
+            - hivemind.component=vector-store
+            - hivemind.tier=core
+            - hivemind.region=eu
+            - 'hivemind.compliance=gdpr,nis2,dora'
+            - coolify.name=hivemind-qdrant
+            - coolify.managed=true
+            - coolify.version=4.0.0-beta.462
+            - coolify.applicationId=20
+            - coolify.type=application
+            - coolify.name=qdrant-s0k0s0k40wo44w4w8gcs8ow0-125656653552
+            - coolify.resourceName=hive-mind
+            - coolify.projectName=hivemind
+            - coolify.serviceName=hive-mind
+            - coolify.environmentName=production
+            - coolify.pullRequestId=0
+        networks:
+            hivemind-network: null
+            s0k0s0k40wo44w4w8gcs8ow0: null
+        env_file:
+            - .env
+    redis:
+        image: 'redis:7-alpine'
+        container_name: redis-s0k0s0k40wo44w4w8gcs8ow0-125656668820
+        hostname: hivemind-redis
+        restart: unless-stopped
+        # security_opt:
+            # - 'no-new-privileges:true'
+        # cap_drop:
+            # - ALL
+        # user: '999:999'
+        deploy:
+            resources:
+                limits:
+                    cpus: '1'
+                    memory: 1G
+                reservations:
+                    cpus: '0.25'
+                    memory: 256M
+            restart_policy:
+                condition: on-failure
+                delay: 5s
+                max_attempts: 3
+        command: "redis-server --requirepass \"${REDIS_PASSWORD}\" --appendonly yes --appendfsync everysec --maxmemory 768mb --maxmemory-policy allkeys-lru --tcp-keepalive 300 --save 900 1 --save 300 10 --save 60 10000 --loglevel notice --protected-mode yes\n"
+        volumes:
+            - 's0k0s0k40wo44w4w8gcs8ow0_redis-data:/data'
+            - '/etc/localtime:/etc/localtime:ro'
+        healthcheck:
+            test:
+                - CMD-SHELL
+                - 'redis-cli $${REDIS_PASSWORD:+-a "$$REDIS_PASSWORD"} ping | grep PONG'
+            interval: 10s
+            timeout: 5s
+            retries: 5
+            start_period: 10s
+        logging:
+            driver: json-file
+            options:
+                max-size: 10m
+                max-file: '5'
+                compress: 'true'
+                tag: '{{.ImageName}}|{{.Name}}|{{.ImageFullID}}|{{.FullID}}'
+        labels:
+            - hivemind.component=cache
+            - hivemind.tier=core
+            - hivemind.region=eu
+            - 'hivemind.compliance=gdpr,nis2,dora'
+            - coolify.name=hivemind-redis
+            - coolify.managed=true
+            - coolify.version=4.0.0-beta.462
+            - coolify.applicationId=20
+            - coolify.type=application
+            - coolify.name=redis-s0k0s0k40wo44w4w8gcs8ow0-125656668820
+            - coolify.resourceName=hive-mind
+            - coolify.projectName=hivemind
+            - coolify.serviceName=hive-mind
+            - coolify.environmentName=production
+            - coolify.pullRequestId=0
+        networks:
+            hivemind-network: null
+            s0k0s0k40wo44w4w8gcs8ow0: null
+        environment:
+            COOLIFY_BRANCH: '"main"'
+            COOLIFY_RESOURCE_UUID: s0k0s0k40wo44w4w8gcs8ow0
+            COOLIFY_CONTAINER_NAME: redis-s0k0s0k40wo44w4w8gcs8ow0-125656668820
+            SERVICE_NAME_APP: app
+            SERVICE_NAME_POSTGRES: postgres
+            SERVICE_NAME_QDRANT: qdrant
+            SERVICE_NAME_REDIS: redis
+            SERVICE_NAME_BACKUP: backup
+        env_file:
+            - .env
+    backup:
+        image: 'offen/docker-volume-backup:v2'
+        container_name: backup-s0k0s0k40wo44w4w8gcs8ow0-125656683069
+        hostname: hivemind-backup
+        restart: unless-stopped
+        # security_opt:
+            # - 'no-new-privileges:true'
+        # cap_drop:
+            # - ALL
+        environment:
+            BACKUP_CRON_EXPRESSION: '0 2 * * *'
+            BACKUP_RETENTION_DAYS: '30'
+            BACKUP_PRUNING_PREFIX: backup-
+            BACKUP_ENCRYPTION_KEY: '${BACKUP_ENCRYPTION_KEY}'
+            AWS_S3_BUCKET_NAME: '${BACKUP_S3_BUCKET}'
+            AWS_ACCESS_KEY_ID: '${BACKUP_S3_ACCESS_KEY}'
+            AWS_SECRET_ACCESS_KEY: '${BACKUP_S3_SECRET_KEY}'
+            AWS_S3_ENDPOINT: '${BACKUP_S3_ENDPOINT}'
+            AWS_S3_REGION: '${EU_REGION:-eu-central-1}'
+            NOTIFICATION_URLS: '${BACKUP_NOTIFICATION_URL:-}'
+            NOTIFICATION_LEVEL: '${BACKUP_NOTIFICATION_LEVEL:-error}'
+            BACKUP_ARCHIVE: '"/archive"'
+            BACKUP_FILENAME: backup-%Y-%m-%dT%H-%M-%S.tar.gz
+            BACKUP_STOP_CONTAINER_LABEL: hivemind.component=database
+            BACKUP_FROM_SNAPSHOT: 'true'
+            BACKUP_WAIT_SECONDS: '30'
+            BACKUP_S3_BUCKET: '${BACKUP_S3_BUCKET}'
+            BACKUP_S3_ACCESS_KEY: '${BACKUP_S3_ACCESS_KEY}'
+            BACKUP_S3_SECRET_KEY: '${BACKUP_S3_SECRET_KEY}'
+            BACKUP_S3_ENDPOINT: '${BACKUP_S3_ENDPOINT}'
+            COOLIFY_BRANCH: '"main"'
+            COOLIFY_RESOURCE_UUID: s0k0s0k40wo44w4w8gcs8ow0
+            COOLIFY_CONTAINER_NAME: backup-s0k0s0k40wo44w4w8gcs8ow0-125656683069
+            SERVICE_NAME_APP: app
+            SERVICE_NAME_POSTGRES: postgres
+            SERVICE_NAME_QDRANT: qdrant
+            SERVICE_NAME_REDIS: redis
+            SERVICE_NAME_BACKUP: backup
+        volumes:
+            - 's0k0s0k40wo44w4w8gcs8ow0_postgres-data:/backup/postgres:ro'
+            - 's0k0s0k40wo44w4w8gcs8ow0_redis-data:/backup/redis:ro'
+            - 's0k0s0k40wo44w4w8gcs8ow0_qdrant-data:/backup/qdrant:ro'
+            - 's0k0s0k40wo44w4w8gcs8ow0_hivemind-data:/backup/app-data:ro'
+            - '/var/run/docker.sock:/var/run/docker.sock:ro'
+            - '/etc/localtime:/etc/localtime:ro'
+        logging:
+            driver: json-file
+            options:
+                max-size: 10m
+                max-file: '3'
+                compress: 'true'
+        labels:
+            - hivemind.component=backup
+            - hivemind.tier=infrastructure
+            - hivemind.region=eu
+            - 'hivemind.compliance=gdpr,nis2,dora'
+            - coolify.name=hivemind-backup
+            - coolify.managed=true
+            - coolify.version=4.0.0-beta.462
+            - coolify.applicationId=20
+            - coolify.type=application
+            - coolify.name=backup-s0k0s0k40wo44w4w8gcs8ow0-125656683069
+            - coolify.resourceName=hive-mind
+            - coolify.projectName=hivemind
+            - coolify.serviceName=hive-mind
+            - coolify.environmentName=production
+            - coolify.pullRequestId=0
+        networks:
+            hivemind-network: null
+            s0k0s0k40wo44w4w8gcs8ow0: null
+        depends_on:
+            - postgres
+            - redis
+            - qdrant
+        env_file:
+            - .env
 volumes:
-  hivemind-logs:
-    driver: local
-    labels:
-      - "hivemind.component=logs"
-      - "hivemind.backup=true"
-
-  hivemind-data:
-    driver: local
-    labels:
-      - "hivemind.component=data"
-      - "hivemind.backup=true"
-
-  postgres-data:
-    driver: local
-    labels:
-      - "hivemind.component=database"
-      - "hivemind.backup=true"
-      - "hivemind.encryption=luks2"
-
-  qdrant-data:
-    driver: local
-    labels:
-      - "hivemind.component=vector-store"
-      - "hivemind.backup=true"
-      - "hivemind.encryption=luks2"
-
-  redis-data:
-    driver: local
-    labels:
-      - "hivemind.component=cache"
-      - "hivemind.backup=true"
-
-# ==========================================
-# Networks
-# ==========================================
+    hivemind-logs:
+        driver: local
+        labels:
+            - hivemind.component=logs
+            - hivemind.backup=true
+    hivemind-data:
+        driver: local
+        labels:
+            - hivemind.component=data
+            - hivemind.backup=true
+    postgres-data:
+        driver: local
+        labels:
+            - hivemind.component=database
+            - hivemind.backup=true
+            - hivemind.encryption=luks2
+    qdrant-data:
+        driver: local
+        labels:
+            - hivemind.component=vector-store
+            - hivemind.backup=true
+            - hivemind.encryption=luks2
+    redis-data:
+        driver: local
+        labels:
+            - hivemind.component=cache
+            - hivemind.backup=true
+    s0k0s0k40wo44w4w8gcs8ow0_hivemind-logs:
+        name: s0k0s0k40wo44w4w8gcs8ow0_hivemind-logs
+    s0k0s0k40wo44w4w8gcs8ow0_hivemind-data:
+        name: s0k0s0k40wo44w4w8gcs8ow0_hivemind-data
+    s0k0s0k40wo44w4w8gcs8ow0_postgres-data:
+        name: s0k0s0k40wo44w4w8gcs8ow0_postgres-data
+    s0k0s0k40wo44w4w8gcs8ow0_qdrant-data:
+        name: s0k0s0k40wo44w4w8gcs8ow0_qdrant-data
+    s0k0s0k40wo44w4w8gcs8ow0_redis-data:
+        name: s0k0s0k40wo44w4w8gcs8ow0_redis-data
 networks:
-  hivemind-network:
-    driver: bridge
-    internal: false
-    ipam:
-      driver: default
-      config:
-        - subnet: 172.28.0.0/16
-          gateway: 172.28.0.1
-    labels:
-      - "hivemind.network=internal"
-      - "hivemind.encryption=mtls"
+    hivemind-network:
+        driver: bridge
+        internal: false
+        ipam:
+            driver: default
+            config:
+                -
+                    subnet: 172.28.0.0/16
+                    gateway: 172.28.0.1
+        labels:
+            - hivemind.network=internal
+            - hivemind.encryption=mtls
+    s0k0s0k40wo44w4w8gcs8ow0:
+        name: s0k0s0k40wo44w4w8gcs8ow0
+        external: true

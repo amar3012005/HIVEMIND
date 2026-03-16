@@ -69,6 +69,9 @@ COPY src /src
 COPY package.json package-lock.json* /tmp/root/
 RUN cd /tmp/root && npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
+# Create symlink so /src files can find packages installed in /app/node_modules
+RUN ln -s /app/node_modules /node_modules
+
 # Verify the copy worked
 RUN ls -la /src/search/ && echo "✓ src/search copied successfully"
 
@@ -111,15 +114,20 @@ COPY --from=builder --chown=nodejs:nodejs /app/src ./src
 COPY --from=builder --chown=nodejs:nodejs /app/config ./config
 COPY --from=builder --chown=nodejs:nodejs /src /src
 COPY --from=builder --chown=nodejs:nodejs /core /core
-COPY --from=builder --chown=nodejs:nodejs /tmp/root/node_modules /node_modules
 COPY --from=builder --chown=nodejs:nodejs /tmp/root/package.json /package.json
 
-# Verify all critical files are present
-RUN ls -la /src/search/ 2>/dev/null || echo "WARNING: /src/search not found"
-
+# Copy node_modules and create symlink for /src imports
 COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=nodejs:nodejs /app/package.json ./
 COPY --from=builder --chown=nodejs:nodejs /app/prisma ./prisma
+
+# Create symlink so /src files can find packages in /app/node_modules
+USER root
+RUN ln -s /app/node_modules /node_modules
+USER nodejs
+
+# Verify all critical files are present
+RUN ls -la /src/search/ 2>/dev/null || echo "WARNING: /src/search not found"
 
 # Set proper permissions
 RUN chmod -R 550 /app && \

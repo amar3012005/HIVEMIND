@@ -192,6 +192,7 @@ services:
       dockerfile: Dockerfile.age
     image: hivemind/postgres-age:15-alpine
     container_name: hivemind-postgres
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
     hostname: hivemind-postgres
     restart: unless-stopped
 

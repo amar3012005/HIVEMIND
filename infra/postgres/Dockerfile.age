@@ -26,9 +26,13 @@ RUN apk add --no-cache --virtual .build-deps \
     postgresql15-dev \
     llvm15 \
     clang15 \
+    perl \
+    icu-dev \
+    util-linux-dev \
     && apk add --no-cache \
     ca-certificates \
-    tzdata
+    tzdata \
+    icu-libs
 
 # Build and install Apache AGE
 RUN git clone --depth 1 --branch PG15 https://github.com/apache/age.git /tmp/age \

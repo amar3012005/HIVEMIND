@@ -59,6 +59,9 @@ RUN npm ci && \
 COPY core/src ./src
 COPY core/config ./config
 
+# Copy core src to /core/ as well (for /src imports that reference ../../core/)
+RUN mkdir -p /core && cp -r ./src /core/src
+
 # Copy root src directory (for three-tier-retrieval and evaluation modules)
 COPY src /src
 
@@ -107,6 +110,7 @@ USER nodejs
 COPY --from=builder --chown=nodejs:nodejs /app/src ./src
 COPY --from=builder --chown=nodejs:nodejs /app/config ./config
 COPY --from=builder --chown=nodejs:nodejs /src /src
+COPY --from=builder --chown=nodejs:nodejs /core /core
 COPY --from=builder --chown=nodejs:nodejs /tmp/root/node_modules /node_modules
 COPY --from=builder --chown=nodejs:nodejs /tmp/root/package.json /package.json
 

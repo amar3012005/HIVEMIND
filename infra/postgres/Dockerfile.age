@@ -65,9 +65,14 @@ RUN echo "shared_preload_libraries = 'age'" >> /usr/local/share/postgresql/postg
 # Copy initialization script
 COPY ./init-age.sql /docker-entrypoint-initdb.d/01-install-age.sql
 
+# Copy postgresql.conf
+COPY ./postgresql.conf /etc/postgresql/postgresql.conf
+
 # Set proper permissions for init scripts
 RUN chown -R postgres:postgres /docker-entrypoint-initdb.d \
-    && chmod 644 /docker-entrypoint-initdb.d/*.sql
+    && chmod 644 /docker-entrypoint-initdb.d/*.sql \
+    && chown postgres:postgres /etc/postgresql/postgresql.conf \
+    && chmod 644 /etc/postgresql/postgresql.conf
 
 # Health check
 HEALTHCHECK --interval=10s --timeout=5s --start-period=60s --retries=5 \

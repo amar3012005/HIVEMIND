@@ -58,9 +58,8 @@ RUN chown -R postgres:postgres /usr/local/share/postgresql/extension \
 # Configure PostgreSQL for AGE
 RUN echo "shared_preload_libraries = 'age'" >> /usr/local/share/postgresql/postgresql.conf.sample
 
-# Create initialization script for AGE
-RUN mkdir -p /docker-entrypoint-initdb.d
-COPY init-age.sql /docker-entrypoint-initdb.d/01-install-age.sql
+# Copy initialization script
+COPY ./init-age.sql /docker-entrypoint-initdb.d/01-install-age.sql
 
 # Set proper permissions for init scripts
 RUN chown -R postgres:postgres /docker-entrypoint-initdb.d \
@@ -72,9 +71,3 @@ HEALTHCHECK --interval=10s --timeout=5s --start-period=60s --retries=5 \
 
 # Expose PostgreSQL port
 EXPOSE 5432
-
-# Switch to postgres user
-USER postgres
-
-# Default command
-CMD ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]

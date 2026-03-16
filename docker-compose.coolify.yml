@@ -187,9 +187,10 @@ services:
   # PostgreSQL 15 with Apache AGE Extension
   # ==========================================
   postgres:
-    # Using custom image with AGE pre-installed
-    # Build from: infra/postgres/Dockerfile.age
-    image: ${POSTGRES_IMAGE:-hivemind/postgres-age:15-alpine}
+    build:
+      context: ./infra/postgres
+      dockerfile: Dockerfile.age
+    image: hivemind/postgres-age:15-alpine
     container_name: hivemind-postgres
     hostname: hivemind-postgres
     restart: unless-stopped

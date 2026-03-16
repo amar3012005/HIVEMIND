@@ -55,8 +55,9 @@ COPY core/tsconfig.json ./
 RUN npm ci && \
     npm cache clean --force
 
-# Copy source code
+# Copy source code and config
 COPY core/src ./src
+COPY core/config ./config
 
 # Generate Prisma client and attempt TypeScript build (may fail on type issues, that's OK)
 RUN npx prisma generate && \
@@ -94,6 +95,7 @@ USER nodejs
 
 # Copy application from builder stage
 COPY --from=builder --chown=nodejs:nodejs /app/src ./src
+COPY --from=builder --chown=nodejs:nodejs /app/config ./config
 COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=nodejs:nodejs /app/package.json ./
 COPY --from=builder --chown=nodejs:nodejs /app/prisma ./prisma

@@ -9,7 +9,7 @@
 # AGE enables graph database capabilities on PostgreSQL
 # =============================================================================
 
-FROM postgres:15-alpine
+FROM postgres:15-alpine3.18
 
 LABEL maintainer="ops@hivemind.io"
 LABEL description="PostgreSQL 15 with Apache AGE extension for HIVE-MIND"
@@ -23,7 +23,7 @@ RUN apk add --no-cache --virtual .build-deps \
     cmake \
     flex \
     bison \
-    postgresql-dev \
+    postgresql15-dev \
     llvm15 \
     clang15 \
     && apk add --no-cache \

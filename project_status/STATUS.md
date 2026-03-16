@@ -18,6 +18,31 @@
 
 ---
 
+## 🚀 Deployment Status (Coolify)
+
+| Service | Status | Issue | Fix |
+|---------|--------|-------|-----|
+| **App (Node.js)** | ✅ Building | Dockerfile path issues | Fixed paths to use `core/` directory |
+| **PostgreSQL + AGE** | ✅ Building | Bind mount issues | Embeded init files in image |
+| **Qdrant** | ✅ Building | Config bind mount | Removed bind mount, use env vars |
+| **Redis** | ✅ Building | Health check auth | Simplified health check |
+| **Backup** | ✅ Pulling | - | Using offen/docker-volume-backup |
+
+### Recent Fixes (2026-03-16)
+
+1. **Dockerfile.production** - Fixed to use `core/` directory paths
+2. **PostgreSQL Image** - Building Apache AGE locally with embedded init scripts
+3. **Health Checks** - Simplified to avoid authentication issues
+4. **Qdrant Config** - Removed problematic bind mount
+
+### Next Steps
+- [ ] Verify all services start healthy
+- [ ] Test API endpoints
+- [ ] Configure domain and SSL
+- [ ] Set up monitoring
+
+---
+
 ## ✅ Completed Components
 
 ### Core Engine

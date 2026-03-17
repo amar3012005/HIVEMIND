@@ -101,6 +101,7 @@ const prisma = getPrismaClient();
 const persistentMemoryStore = prisma ? new PrismaGraphStore(prisma) : null;
 const persistentMemoryEngine = persistentMemoryStore ? new MemoryGraphEngine({ store: persistentMemoryStore }) : null;
 const qdrantClient = getQdrantClient();
+const groqClient = getGroqClient();
 
 // Initialize Three-Tier Retrieval
 const threeTierRetrieval = new ThreeTierRetrieval({
@@ -127,7 +128,6 @@ const MASTER_API_KEY = process.env.HIVEMIND_MASTER_API_KEY || '';
 const TEST_API_KEY = process.env.HIVEMIND_TEST_API_KEY || '';
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 const REQUIRE_PERSISTED_MEMORY = IS_PRODUCTION || process.env.HIVEMIND_REQUIRE_PERSISTED_MEMORY === 'true';
-const groqClient = getGroqClient();
 const INGESTION_MODULE_CANDIDATES = [
   path.join(REPO_ROOT, 'src', 'ingestion'),
   path.join(PROJECT_ROOT, 'ingestion')

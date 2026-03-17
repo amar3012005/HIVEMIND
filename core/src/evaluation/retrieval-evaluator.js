@@ -16,9 +16,9 @@
 
 import { createThreeTierRetrieval } from '../search/three-tier-retrieval.js';
 import hybridSearch from '../search/hybrid.js';
-import { getQdrantClient } from '../../vector/qdrant-client.js';
-import { getPrismaClient } from '../../db/prisma.js';
-import { PrismaGraphStore } from '../../memory/prisma-graph-store.js';
+import { getQdrantClient } from '../vector/qdrant-client.js';
+import { getPrismaClient } from '../db/prisma.js';
+import { PrismaGraphStore } from '../memory/prisma-graph-store.js';
 
 // ==========================================
 // Configuration

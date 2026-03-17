@@ -1,11 +1,11 @@
 # HIVE-MIND Core API - Production Dockerfile
 # Simplified: Everything runs from /app (core directory)
 
-FROM node:20-alpine3.19 AS base
+FROM node:20-slim AS base
 
-RUN apk upgrade --no-cache && \
-    apk add --no-cache dumb-init ca-certificates tzdata && \
-    update-ca-certificates
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends dumb-init ca-certificates openssl tzdata wget && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -14,7 +14,9 @@ WORKDIR /app
 # ==========================================
 FROM base AS builder
 
-RUN apk add --no-cache python3 make g++ git
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3 make g++ git && \
+    rm -rf /var/lib/apt/lists/*
 
 # Copy package files
 COPY core/package.json core/package-lock.json ./

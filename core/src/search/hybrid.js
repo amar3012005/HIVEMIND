@@ -7,12 +7,12 @@
  * @module search/hybrid
  */
 
-import { getQdrantCollections } from '../../vector/collections.js';
+import { getQdrantCollections } from '../vector/collections.js';
 import ranker from '../recall/ranker.js';
 const { rank, rankHybrid } = ranker;
 import scorer from '../recall/scorer.js';
 const { getVectorComponent, getRecencyComponent, getImportanceComponent, getEbbinghausComponent } = scorer;
-import { getPrismaClient } from '../../db/prisma.js';
+import { getPrismaClient } from '../db/prisma.js';
 import { Prisma } from '@prisma/client';
 
 // ==========================================

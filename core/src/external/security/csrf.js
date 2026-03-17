@@ -256,7 +256,7 @@ function createCsrfMiddleware(options = {}) {
  */
 async function csrfErrorHandler(err, req, res, next) {
   if (err.code === 'CSRF_VALIDATION_FAILED' || err.code === 'CSRF_TOKEN_INVALID') {
-    const { logger } = require('../core/utils/logger');
+    const { logger } = require('../../utils/logger.js');
     const { auditLog } = require('../audit/logger');
 
     logger.warn('CSRF validation failed', {

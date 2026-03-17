@@ -19,9 +19,9 @@
 
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import * as apiKeyService from '../../services/api-key.service.js';
-import * as auditLogService from '../../services/audit-log.service.js';
-import { createApiKeySchema, updateApiKeySchema, revokeApiKeySchema } from '../../services/api-key.service.js';
+import * as apiKeyService from '../services/api-key.service.js';
+import * as auditLogService from '../services/audit-log.service.js';
+import { createApiKeySchema, updateApiKeySchema, revokeApiKeySchema } from '../services/api-key.service.js';
 
 const router = Router();
 

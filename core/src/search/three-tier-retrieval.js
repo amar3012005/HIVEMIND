@@ -15,7 +15,7 @@
  * @requires recall/scorer
  */
 
-import { getQdrantCollections } from '../../vector/collections.js';
+import { getQdrantCollections } from '../vector/collections.js';
 import ranker from '../recall/ranker.js';
 const { rank, formatResults } = ranker;
 import scorer from '../recall/scorer.js';

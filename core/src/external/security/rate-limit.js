@@ -13,7 +13,7 @@
 
 const rateLimit = require('express-rate-limit');
 const RedisStore = require('rate-limit-redis');
-const { logger } = require('../core/utils/logger');
+const { logger } = require('../../utils/logger.js');
 const { auditLog } = require('../audit/logger');
 
 // Configuration

@@ -9,7 +9,7 @@
  */
 
 const { z } = require('zod');
-const { logger } = require('../core/utils/logger');
+const { logger } = require('../../utils/logger.js');
 
 // =============================================================================
 // Common Schema Definitions

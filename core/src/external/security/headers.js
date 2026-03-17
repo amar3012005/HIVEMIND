@@ -179,7 +179,7 @@ function generateCspNonce(req, res) {
  * @param {Object} res - Express response
  */
 function handleCspReport(req, res) {
-  const { logger } = require('../core/utils/logger');
+  const { logger } = require('../../utils/logger.js');
   const { auditLog } = require('../audit/logger');
 
   const report = req.body;

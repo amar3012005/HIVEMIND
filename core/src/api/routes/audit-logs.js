@@ -19,7 +19,7 @@
 
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import * as auditLogService from '../../services/audit-log.service.js';
+import * as auditLogService from '../services/audit-log.service.js';
 
 const router = Router();
 

@@ -1,0 +1,246 @@
+# Coolify-compatible TARA EU Service
+# Domain: demo.davinciai.eu | Orchestrator WSS exposed on port 8030
+#
+# ┌─────────────────────────────────────────────────────────────┐
+# │ IMPORTANT: No ${VAR:-default} patterns used here.           │
+# │ All config comes from Coolify's env var UI or .env.eu.      │
+# │ This prevents Coolify from locking variables.               │
+# └─────────────────────────────────────────────────────────────┘
+
+services:
+  # ═══════════════════════════════════════════════════════════
+  # Redis Cache
+  # ═══════════════════════════════════════════════════════════
+  redis-eu:
+    image: redis:7-alpine
+    volumes:
+      - redis_eu_data:/data
+    command: redis-server --appendonly yes --bind 0.0.0.0
+    networks:
+      eu-stack: null
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    labels:
+      - coolify.managed=true
+      - coolify.type=service
+      - coolify.name=redis-eu
+      - coolify.service.subType=database
+      - coolify.service.subName=redis
+
+  # ═══════════════════════════════════════════════════════════
+  # RAG Service (Internal port 4001)
+  # ═══════════════════════════════════════════════════════════
+  rag-eu:
+    build:
+      context: ./rag-eu
+      dockerfile: Dockerfile
+    command: >
+      sh -c 'export LLM_API_KEY="$${LLM_API_KEY:-$$GROQ_API_KEY}"; export GROQ_API_KEY="$${GROQ_API_KEY:-$$LLM_API_KEY}"; python -m uvicorn daytona_agent.services.rag.app:app --host 0.0.0.0 --port 4001'
+    volumes:
+      - rag_eu_index:/app/index
+    environment:
+      # Internal service URLs (hardcoded — never change per-env)
+      REDIS_URL: redis://redis-eu:6379/0
+      COOLIFY_CONTAINER_NAME: rag-eu
+
+      # Feature flags (hardcoded for production stability)
+      USE_NEW_DETECTIVE: "false"
+      USE_MISSION_BRAIN: "false"
+      USE_LIVE_GRAPH: "false"
+      USE_HIVE_INTERFACE: "false"
+      DAYTONA_RAG_ENABLE_CACHE: "false"
+      DAYTONA_RAG_CACHE_TTL: "0"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    networks:
+      eu-stack: null
+    restart: unless-stopped
+    depends_on:
+      redis-eu:
+        condition: service_healthy
+    labels:
+      - coolify.managed=true
+      - coolify.type=service
+      - coolify.name=rag-eu
+      - coolify.service.subType=application
+      - coolify.service.subName=rag
+    env_file:
+      - .env.eu
+
+  # ═══════════════════════════════════════════════════════════
+  # STT Service (Internal port 4002) — Groq Whisper
+  # ═══════════════════════════════════════════════════════════
+  stt-eu:
+    build:
+      context: ./stt_groq_whisper
+      dockerfile: Dockerfile
+    command: >
+      sh -c 'export GROQ_API_KEY="$${GROQ_API_KEY:-$$LLM_API_KEY}"; uvicorn app:app --host 0.0.0.0 --port 4002'
+    environment:
+      PYTHONUNBUFFERED: 1
+
+      # Internal service URLs (hardcoded)
+      STT_GROQ_HOST: 0.0.0.0
+      STT_GROQ_PORT: 4002
+      ORCHESTRATOR_WS_URL: "wss://orchestrator-eu:4004/ws"
+      STT_SKIP_SSL_VERIFY: "true"
+      ORCHESTRATOR_SKIP_SSL_VERIFY: "true"
+      COOLIFY_CONTAINER_NAME: stt-eu
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - "-c"
+        - "import urllib.request; urllib.request.urlopen('http://localhost:4002/health', timeout=5)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      eu-stack: null
+    restart: unless-stopped
+    depends_on:
+      - orchestrator-eu
+    labels:
+      - coolify.managed=true
+      - coolify.type=service
+      - coolify.name=stt-eu
+      - coolify.service.subType=application
+      - coolify.service.subName=stt
+    env_file:
+      - .env.eu
+
+  # ═══════════════════════════════════════════════════════════
+  # TTS Service (Internal port 4003) — Cartesia
+  # ═══════════════════════════════════════════════════════════
+  tts-eu:
+    build:
+      context: ./tts_cartesia
+      dockerfile: Dockerfile
+    command: "python -m uvicorn app:app --host 0.0.0.0 --port 4003"
+    environment:
+      # Internal service config (hardcoded)
+      TTS_CARTESIA_HOST: 0.0.0.0
+      TTS_CARTESIA_PORT: 4003
+      COOLIFY_CONTAINER_NAME: tts-eu
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:4003/health" ]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      eu-stack: null
+    restart: unless-stopped
+    labels:
+      - coolify.managed=true
+      - coolify.type=service
+      - coolify.name=tts-eu
+      - coolify.service.subType=application
+      - coolify.service.subName=tts
+    env_file:
+      - .env.eu
+
+  # ═══════════════════════════════════════════════════════════
+  # Visual Copilot Service (Internal port 4005)
+  # ═══════════════════════════════════════════════════════════
+  visual-copilot-eu:
+    build:
+      context: ./rag-visual-copilot
+      dockerfile: Dockerfile
+    command: >
+      sh -c 'export GROQ_API_KEY="$${GROQ_API_KEY:-$$LLM_API_KEY}"; python -m uvicorn app:app --host 0.0.0.0 --port 4005'
+    environment:
+      # Internal service config (hardcoded)
+      REDIS_URL: redis://redis-eu:6379/0
+      PORT: "4005"
+      COOLIFY_CONTAINER_NAME: visual-copilot-eu
+    restart: unless-stopped
+    depends_on:
+      redis-eu:
+        condition: service_healthy
+    networks:
+      eu-stack: null
+    labels:
+      - coolify.managed=true
+      - coolify.type=service
+      - coolify.name=visual-copilot-eu
+      - coolify.service.subType=application
+      - coolify.service.subName=visual-copilot
+    env_file:
+      - .env.eu
+
+  # ═══════════════════════════════════════════════════════════
+  # Orchestrator (Internal 4004 → External 8030 with SSL for WSS)
+  # ═══════════════════════════════════════════════════════════
+  orchestrator-eu:
+    build:
+      context: ./Orchestrator-eu
+      dockerfile: Dockerfile
+    command: "uvicorn app:app --host 0.0.0.0 --port 4004 --ssl-keyfile /certs/privkey.pem --ssl-certfile /certs/fullchain.pem --ws-ping-interval 0"
+    ports:
+      - "8030:4004"
+    volumes:
+      - /etc/letsencrypt/live/demo.davinciai.eu/fullchain.pem:/certs/fullchain.pem:ro
+      - /etc/letsencrypt/live/demo.davinciai.eu/privkey.pem:/certs/privkey.pem:ro
+    environment:
+      # Internal service URLs (hardcoded — never change per-env)
+      REDIS_URL: redis://redis-eu:6379/0
+      RAG_SERVICE_URL: http://rag-eu:4001
+      STT_SERVICE_URL: http://stt-eu:4002
+      TTS_SERVICE_URL: http://tts-eu:4003
+      VISUAL_COPILOT_SERVICE_URL: http://visual-copilot-eu:4005
+
+      # Production URLs (hardcoded for this deployment)
+      PUBLIC_URL: "https://demo.davinciai.eu:8030"
+      ORCHESTRATOR_WS_URL: "wss://demo.davinciai.eu:8030/ws"
+      WIDGET_WS_URL: "wss://demo.davinciai.eu:8030/ws"
+
+      # Feature flags (hardcoded for production stability)
+      USE_ULTIMATE_TARA: "false"
+
+      COOLIFY_CONTAINER_NAME: orchestrator-eu
+    networks:
+      eu-stack: null
+    restart: unless-stopped
+    depends_on:
+      redis-eu:
+        condition: service_healthy
+      rag-eu:
+        condition: service_started
+      tts-eu:
+        condition: service_started
+      visual-copilot-eu:
+        condition: service_started
+    labels:
+      - coolify.managed=true
+      - coolify.type=service
+      - coolify.name=orchestrator-eu
+      - coolify.service.subType=application
+      - coolify.service.subName=orchestrator
+      - traefik.enable=true
+      - traefik.http.middlewares.gzip.compress=true
+      - traefik.http.routers.orchestrator-eu-https.entryPoints=https
+      - traefik.http.routers.orchestrator-eu-https.rule=Host(`demo.davinciai.eu`)
+      - traefik.http.routers.orchestrator-eu-https.tls=true
+      - traefik.http.services.orchestrator-eu-https.loadbalancer.server.port=4004
+      - traefik.http.services.orchestrator-eu-https.loadbalancer.server.scheme=https
+    env_file:
+      - .env.eu
+
+volumes:
+  redis_eu_data:
+    name: redis_eu_data
+  rag_eu_index:
+    name: rag_eu_index
+
+networks:
+  coolify:
+    external: true
+  eu-stack:
+    name: eu-stack
+    external: true

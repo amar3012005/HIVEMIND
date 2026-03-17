@@ -15,12 +15,25 @@ services:
       - ./core/.env
     environment:
       PORT: 3000
-      DATABASE_URL: postgres://hivemind:hivemind_dev_password@postgres:5432/hivemind_app
+      NODE_ENV: production
+      DATABASE_URL: postgresql://hivemind:hivemind_dev_password@postgres:5432/hivemind_app?schema=public
       QDRANT_URL: http://qdrant:6333
       QDRANT_API_KEY: dev_api_key_hivemind_2026
+      QDRANT_COLLECTION: hivemind_memories
+      REDIS_URL: redis://redis:6379/0
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      HIVEMIND_ADMIN_SECRET: local-admin-secret-change-me
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      GROQ_INFERENCE_MODEL: ${GROQ_INFERENCE_MODEL:-llama-3.3-70b-versatile}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY}
+      MISTRAL_EMBEDDING_MODEL: ${MISTRAL_EMBEDDING_MODEL:-mistral-embed}
+      HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY:-hm_master_key_99228811}
+      HIVEMIND_ADMIN_SECRET: ${HIVEMIND_ADMIN_SECRET:-local-admin-secret-change-me}
+      USE_SITUATIONALIZER: ${USE_SITUATIONALIZER:-true}
+      USE_CONTEXTUAL_EMBEDDING: ${USE_CONTEXTUAL_EMBEDDING:-true}
+      USE_QDRANT_STORAGE: ${USE_QDRANT_STORAGE:-true}
+      USE_AST_CHUNKING: ${USE_AST_CHUNKING:-true}
+      USE_STATEFUL_MANAGER: ${USE_STATEFUL_MANAGER:-true}
     ports:
       - "3000:3000"
     volumes:

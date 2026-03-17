@@ -1,0 +1,29 @@
+{
+  "name": "@hivemind/mcp-bridge",
+  "version": "1.0.0",
+  "description": "HIVE-MIND MCP Bridge for connecting Claude Desktop/Cursor to hosted MCP service",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "hivemind-mcp-bridge": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/cli.js"
+  },
+  "keywords": ["hivemind", "mcp", "ai", "memory", "claude", "cursor"],
+  "author": "HIVE-MIND Team",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "node-fetch": "^3.3.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

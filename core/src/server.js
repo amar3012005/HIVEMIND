@@ -69,6 +69,15 @@ const {
 // Three-Tier Retrieval imports
 const { ThreeTierRetrieval } = await import('./external/search/three-tier-retrieval.js');
 
+// Hosted MCP Service imports
+const {
+  generateHostedServer,
+  validateConnectionToken,
+  handleInitialize,
+  handleToolsList,
+  handleToolCall
+} = await import('./mcp/hosted-service.js');
+
 // Evaluation imports
 const { RetrievalEvaluator } = await import('./external/evaluation/retrieval-evaluator.js');
 const { TEST_QUERIES, getSampleQueries } = await import('./external/evaluation/test-dataset.js');
@@ -624,6 +633,34 @@ const server = http.createServer(async (req, res) => {
               return jsonResponse(res, { success: true, ...result }, 202);
             } catch (error) {
               return jsonResponse(res, { error: error.message }, 400);
+            }
+          }
+          break;
+
+        // ==========================================
+        // HOSTED MCP SERVICE (Phase 2: Context-as-a-Service)
+        // ==========================================
+        case pathname.match(/^\/api\/mcp\/servers\/([^\/]+)$/)?.input:
+          if (req.method === 'GET') {
+            const pathUserId = pathname.match(/^\/api\/mcp\/servers\/([^\/]+)$/)[1];
+
+            // Verify user matches authenticated user
+            if (userId !== pathUserId) {
+              return jsonResponse(res, {
+                error: 'Forbidden',
+                message: 'User ID does not match authenticated user'
+              }, 403);
+            }
+
+            try {
+              const apiKey = req.headers['x-api-key'] || auth.principal?.rawKey || '';
+              const serverConfig = generateHostedServer(userId, orgId, apiKey);
+              return jsonResponse(res, serverConfig);
+            } catch (error) {
+              return jsonResponse(res, {
+                error: 'Failed to generate MCP server configuration',
+                message: error.message
+              }, 500);
             }
           }
           break;

@@ -1,4 +1,7 @@
 {
+  "env": {
+    "CLAUDE_PROJECT_JOURNAL_ENABLED": "true"
+  },
   "hooks": {
     "PostToolUse": [
       {

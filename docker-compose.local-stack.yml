@@ -16,7 +16,7 @@ services:
     environment:
       PORT: 3000
       NODE_ENV: production
-      DATABASE_URL: postgresql://hivemind:hivemind_dev_password@postgres:5432/hivemind_app?schema=public
+      DATABASE_URL: postgresql://hivemind:hivemind_dev_password@postgres:5432/hivemind_app?schema=hivemind
       QDRANT_URL: http://qdrant:6333
       QDRANT_API_KEY: dev_api_key_hivemind_2026
       QDRANT_COLLECTION: hivemind_memories

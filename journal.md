@@ -1,5 +1,42 @@
 # HIVE-MIND Deployment Journal
 
+## 2026-03-17 20:00 UTC - Memory Save Response Issue FIXED
+
+### Problem
+When saving memory via API, response showed `Memory ID: undefined` instead of actual UUID.
+
+### Root Cause Analysis
+1. **Database schema mismatch**: Tables created in `hivemind` schema
+2. **Connection string wrong**: DATABASE_URL used `schema=public`
+3. **Prisma lookup failed**: Couldn't find tables in public schema
+
+### Fix Applied
+Changed DATABASE_URL in `docker-compose.local-stack.yml`:
+```diff
+- postgresql://hivemind:hivemind_dev_password@postgres:5432/hivemind_app?schema=public
++ postgresql://hivemind:hivemind_dev_password@postgres:5432/hivemind_app?schema=hivemind
+```
+
+### Verification
+```bash
+curl -X POST http://localhost:3000/api/memories \
+  -H "X-API-Key: hm_master_key_99228811" \
+  -d '{"title": "Test", "content": "Test", ...}'
+
+Response: {"id": "621055dd-d40f-4864-8f1a-eeeb74d5d546", ...}
+```
+
+### Current Status
+- **Memory saves**: ✅ Working with ID returned
+- **MCP Hosted Service**: ✅ Working
+- **Local API**: ✅ Fully functional
+
+### Files Modified
+- `docker-compose.local-stack.yml` - Fixed DATABASE_URL schema
+2026-03-17 20:00:00 - Modified: /Users/amar/HIVE-MIND/docker-compose.local-stack.yml
+
+---
+
 ## 2026-03-17 19:45 UTC - Hosted MCP Service Tested Locally
 
 ### Phase 2 Complete: Context-as-a-Service Platform

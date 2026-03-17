@@ -1,0 +1,40 @@
+{
+  "name": "@hivemind/sdk",
+  "version": "1.0.0",
+  "description": "Official JavaScript SDK for HIVE-MIND AI Memory Engine",
+  "type": "module",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test",
+    "lint": "eslint src/**/*.js"
+  },
+  "keywords": [
+    "hivemind",
+    "ai",
+    "memory",
+    "embeddings",
+    "vector-database",
+    "rag"
+  ],
+  "author": "HIVE-MIND Team",
+  "license": "MIT",
+  "dependencies": {
+    "node-fetch": "^3.3.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

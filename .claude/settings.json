@@ -1,0 +1,20 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // .tool_response.filePath' | {
+              read -r file;
+              if [[ "$file" =~ ^(.*)(src|server|api|routes|models|config|docker|infra)/.*\.(js|ts|json|yml|yaml|md|sql)$ ]] || [[ "$file" =~ (package\.json|Dockerfile|docker-compose|\.env|CLAUDE) ]]; then
+                echo "$(date '+%Y-%m-%d %H:%M:%S') - Modified: $file" >> /Users/amar/HIVE-MIND/journal.md;
+              fi
+            } 2>/dev/null || true"
+          }
+        ]
+      }
+    ]
+  }
+}

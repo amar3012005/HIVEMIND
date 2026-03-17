@@ -30,3 +30,30 @@
 - **Port Change**: Migrated SSL port from `8445` to `8050`.
 - **Reason**: Aligned with user's preferred 80XX/84XX port range.
 - **Verification**: ✅ Confirmed healthy at `https://hivemind.davinciai.eu:8050/health`.
+
+## 2026-03-17 14:15:00 UTC - JavaScript SDK Created
+### Feature: @hivemind/sdk for Webapp Integration
+- **Location**: `sdk/` directory
+- **Files Created**:
+  - `sdk/src/index.js` - Main SDK client with all API methods
+  - `sdk/package.json` - NPM package configuration
+  - `sdk/README.md` - Complete documentation
+  - `sdk/examples/basic.js` - Usage examples
+  - `sdk/types/index.d.ts` - TypeScript definitions
+- **Features**:
+  - `HiveMindClient` class with authentication
+  - `save()`, `saveCode()`, `saveConversation()` helpers
+  - `search()`, `query()` for memory retrieval
+  - `bulkSave()`, `update()`, `delete()`, `list()` methods
+  - Error handling with `HiveMindError` class
+- **Usage**:
+  ```javascript
+  import { HiveMindClient } from '@hivemind/sdk';
+  const hivemind = new HiveMindClient({ url, apiKey });
+  await hivemind.save({ title, content, tags });
+  ```
+- **Testing**: ✅ Local test initiated (requires API key verification on server)
+- **Next Steps**:
+  - [ ] Verify API key on Hetzner server
+  - [ ] Complete SDK testing
+  - [ ] Optionally publish to NPM

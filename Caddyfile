@@ -1,11 +1,5 @@
-{
-    email admin@davinciai.eu
-    auto_https off  # Disable automatic HTTPS since we're behind Coolify
-}
-
 hivemind.davinciai.eu {
     reverse_proxy app:3000
 
-    # If you have Cloudflare origin certificates:
-    # tls /etc/caddy/certs/davinciai.eu.crt /etc/caddy/certs/davinciai.eu.key
+    tls /etc/letsencrypt/live/hivemind.davinciai.eu/fullchain.pem /etc/letsencrypt/live/hivemind.davinciai.eu/privkey.pem
 }

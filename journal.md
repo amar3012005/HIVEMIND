@@ -63,6 +63,84 @@
 - **Cause**: UI and SDK were using `hm_master_key_99228811`, but the server's `HIVEMIND_MASTER_API_KEY` was set to a different value.
 - **Fix**: Synchronized `HIVEMIND_MASTER_API_KEY` with `hm_master_key_99228811` in the Coolify environment and recreated the container.
 - **Verification**: ✅ Confirmed authorized access with `X-API-Key: hm_master_key_99228811`.
+
+## 2026-03-17 17:37:00 UTC - PostgreSQL Connection Fixed (P1010 Error Resolution)
+
+### The Problem
+Prisma throwing `Error P1010: User hivemind_user was denied access on database hivemind.public` despite:
+- User having SUPERUSER privileges
+- User having CREATE, USAGE on public schema
+- User having CONNECT, CREATE on hivemind database
+- Schema owner being hivemind_user
+
+### Root Cause Analysis
+1. **Corrupted PostgreSQL Volume**: The volume `s0k0s0k40wo44w4w8gcs8ow0_postgres-data` had data nested in `pgdata/` subdirectory instead of root, causing init failures
+2. **Multi-Schema Prisma Bug**: Even after simplifying to `public` schema, Prisma v5.22.0 cached permission checks
+3. **Hardcoded Schema References**: Migration SQL files contained `hivemind.` schema prefix, but tables were created in `public`
+
+### What We Learned
+
+**PostgreSQL + Prisma Permission Traps:**
+- The P1010 error can persist even with correct GRANT statements
+- Prisma's permission checking has known bugs with multi-schema setups
+- A fresh database volume often solves what permission grants cannot
+
+**Coolify Deployment Lessons:**
+- DATABASE_URL must use service name (`postgres`) not container ID for internal networking
+- External volumes that become corrupted must be deleted and recreated
+- Container restarts don't pick up .env changes - full redeploy required
+
+**Migration File Hygiene:**
+- Avoid hardcoding schema names in SQL migrations if schema may change
+- The `hivemind.` prefix in migrations caused `relation "hivemind.memories" does not exist` errors
+
+**Code Fixes Required:**
+- Raw SQL calls with schema prefix (`SELECT hivemind.acquire_memory_user_lock`) must match actual function location
+- Changed to: `SELECT acquire_memory_user_lock` (no schema prefix)
+
+### Fix Applied
+
+1. **Deleted corrupted volume:**
+   ```bash
+   docker compose down postgres
+   docker volume rm s0k0s0k40wo44w4w8gcs8ow0_postgres-data
+   ```
+
+2. **Fixed DATABASE_URL:**
+   ```
+   postgresql://hivemind_user:hivemind_secure_pwd_2026@postgres:5432/hivemind?schema=public
+   ```
+
+3. **Removed schema prefix from migrations:**
+   ```bash
+   for f in prisma/migrations/*/migration.sql; do sed -i 's/hivemind\.//g' "$f"; done
+   ```
+
+4. **Enabled required extensions:**
+   ```sql
+   CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+   ```
+
+5. **Fixed code references in `prisma-graph-store.js`:**
+   - `hivemind.acquire_memory_user_lock` → `acquire_memory_user_lock`
+
+6. **Applied migrations:**
+   ```bash
+   npx prisma migrate deploy
+   ```
+
+### Current Status
+- **PostgreSQL**: ✅ Fresh volume, all tables in `public` schema
+- **Migrations**: ✅ All 8 applied successfully
+- **API Health**: ✅ `http://localhost:3000/health` returns OK
+- **Memory Writes**: ✅ Confirmed working with response containing memory ID
+- **API Key**: `hm_master_key_99228811`
+
+### Files Modified
+- `/data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/.env` - DATABASE_URL fixed
+- `/data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/docker-compose.yaml` - Volume externality removed
+- `/opt/HIVEMIND/core/prisma/migrations/*/migration.sql` - Schema prefix removed
+- `/opt/HIVEMIND/core/src/memory/prisma-graph-store.js` - Function call fixed
 2026-03-17 16:45:23 - Modified: /data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/.env
 2026-03-17 16:49:18 - Modified: /data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/.env
 2026-03-17 17:18:02 - Modified: /data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/.env

@@ -4,7 +4,7 @@
  * Uses Mistral AI API (mistral-embed model) for 1024-dim embeddings.
  * BGE-M3 based model with multilingual support and 8192 token context.
  *
- * Also supports custom embedding endpoints (e.g., Hana Cloud SentenceTransformer)
+ * Also supports custom embedding endpoints (e.g., Hetzner SentenceTransformer)
  *
  * @module src/embeddings/mistral
  */
@@ -12,7 +12,7 @@
 import fetch from 'node-fetch';
 import https from 'https';
 
-// Support custom embedding endpoint (e.g., Hana Cloud) or Mistral AI
+// Support custom embedding endpoint (e.g., Hetzner) or Mistral AI
 const EMBEDDING_API_URL = process.env.EMBEDDING_MODEL_URL || 'https://api.mistral.ai/v1/embeddings';
 const TARGET_EMBED_DIM = parseInt(process.env.EMBEDDING_DIMENSION || '1024', 10);
 

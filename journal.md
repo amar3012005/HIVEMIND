@@ -57,3 +57,9 @@
   - [ ] Verify API key on Hetzner server
   - [ ] Complete SDK testing
   - [ ] Optionally publish to NPM
+
+## 2026-03-17 - API Key Fix
+- **Issue**: SDK receiving 401 Unauthorized despite using correct master key.
+- **Cause**: UI and SDK were using `hm_master_key_99228811`, but the server's `HIVEMIND_MASTER_API_KEY` was set to a different value.
+- **Fix**: Synchronized `HIVEMIND_MASTER_API_KEY` with `hm_master_key_99228811` in the Coolify environment and recreated the container.
+- **Verification**: ✅ Confirmed authorized access with `X-API-Key: hm_master_key_99228811`.

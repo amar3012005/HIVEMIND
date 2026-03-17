@@ -25,3 +25,8 @@
 ### Current Status
 - **API Health**: ✅ Healthy at `https://hivemind.davinciai.eu:2028/health`
 - **Repository**: Updated and pushed to origin/main.
+
+## 2026-03-17 - Port Migration
+- **Port Change**: Migrated SSL port from `8445` to `8050`.
+- **Reason**: Aligned with user's preferred 80XX/84XX port range.
+- **Verification**: ✅ Confirmed healthy at `https://hivemind.davinciai.eu:8050/health`.

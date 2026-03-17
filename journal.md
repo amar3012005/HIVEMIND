@@ -329,3 +329,89 @@ Prisma throwing `Error P1010: User hivemind_user was denied access on database h
 2026-03-17 23:44:31 - Modified: /opt/HIVEMIND/core/src/embeddings/mistral.js
 2026-03-17 23:51:30 - Modified: /opt/HIVEMIND/core/src/embeddings/mistral.js
 2026-03-17 23:52:18 - Modified: /data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/.env
+
+---
+
+## 2026-03-17 23:55:00 UTC - Qdrant Cloud + Hetzner Embedding Integration COMPLETE
+
+### Integration Summary
+**All memories are now automatically saved to Qdrant Cloud with vector embeddings from Hetzner.**
+
+### Architecture
+``
+User saves memory via MCP/API
+        ↓
+   PostgreSQL (hivemind.memories)
+        ↓
+   Hetzner Embedding Service (384-dim)
+   URL: http://embeddings-eu-...:4006/embed
+        ↓
+   Qdrant Cloud Collection: "BUNDB AGENT"
+   URL: https://24826665-41d6-...eu-central-1.aws.cloud.qdrant.io:6333
+        ↓
+   Semantic search returns ranked results
+``
+
+### Issues Fixed
+
+1. **Qdrant Collection Name Mismatch**
+   - **Problem**: Code used hardcoded `hivemind_${userId}` instead of env variable
+   - **Files Fixed**: `qdrant-client.js`, `server.js`, `persisted-retrieval.js`, `indexer.js`
+   - **Solution**: Changed to `process.env.QDRANT_COLLECTION || 'BUNDB AGENT'`
+
+2. **Hetzner Embedding SSL Certificate**
+   - **Problem**: Self-signed cert (CN=demo.davinciai.eu) doesn't match container hostname
+   - **File Fixed**: `embeddings/mistral.js`
+   - **Solution**: Added `https.Agent({ rejectUnauthorized: false })` for custom endpoints
+
+3. **PostgreSQL pgcrypto Extension**
+   - **Problem**: `digest()` function not found in hivemind schema triggers
+   - **Solution**:
+     - Installed pgcrypto extension
+     - Updated search_path to `hivemind, public`
+     - Recreated triggers with `public.digest()` qualified calls
+
+### Verification Results
+
+| Test | Status | Details |
+|------|--------|---------|
+| Save Memory API | ✅ | Returns memory ID |
+| Embedding Generation | ✅ | 384-dim vectors from Hetzner |
+| Qdrant Storage | ✅ | Vectors stored in "BUNDB AGENT" |
+| Collection Stats | ✅ | 2 points, vector_size: 384 |
+| Semantic Search | ✅ | Returns ranked results |
+| Get Single Memory | ✅ | `/api/memories/:id` works |
+
+### MCP Integration
+**Yes, MCP tools automatically use the Qdrant integration:**
+- `save_memory` → Calls `/api/memories` → PostgreSQL + Qdrant
+- `recall` → Calls `/api/recall` → Semantic search from Qdrant
+- `get_memory`, `list_memories`, `delete_memory` → All work with Qdrant vectors
+
+### Files Modified
+- `core/src/vector/qdrant-client.js` - Use QDRANT_COLLECTION env
+- `core/src/server.js` - Use QDRANT_COLLECTION for storeMemory calls
+- `core/src/memory/persisted-retrieval.js` - Fixed buildCollectionName()
+- `core/src/ingestion/indexer.js` - Fixed buildCollectionName()
+- `core/src/external/ingestion/indexer.js` - Fixed buildCollectionName()
+- `core/src/embeddings/mistral.js` - SSL bypass for Hetzner (self-signed certs)
+- `.env` - Updated comments to reference Hetzner (not Hana Cloud)
+
+### Environment Configuration
+```env
+# Qdrant Cloud
+QDRANT_URL=https://24826665-41d6-4ea6-b13f-fc42438c4c55.eu-central-1-0.aws.cloud.qdrant.io:6333
+QDRANT_API_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+QDRANT_COLLECTION="BUNDB AGENT"
+
+# Hetzner Embedding Service
+EMBEDDING_MODEL_URL=https://embeddings-eu-f8osow0so0w0c0w8gow8ok8s-235454534875:4006/embed
+EMBEDDING_MODEL_NAME=all-MiniLM-L6-v2
+EMBEDDING_DIMENSION=384
+```
+
+### Current Status
+- **Qdrant Cloud**: ✅ Connected, "BUNDB AGENT" collection active
+- **Hetzner Embeddings**: ✅ 384-dim vectors generating successfully
+- **Full Pipeline**: ✅ Save → Embed → Store → Recall all working
+- **MCP Ready**: ✅ All memories saved via Claude Desktop will use Qdrant

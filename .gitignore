@@ -4,6 +4,19 @@
 !.env.example
 .env.test
 .env.coolify
+*.env
+.env.local
+.env.production
+
+# API Keys and Secrets (extra protection)
+*api_key*
+*api-key*
+*apikey*
+*secret*
+*credentials*
+*.pem
+*.key
+*gsk_*
 
 # Database
 *.db

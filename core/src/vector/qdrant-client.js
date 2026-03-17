@@ -12,7 +12,7 @@ import { getMistralEmbedService } from '../embeddings/mistral.js';
 
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:9200';
 const API_KEY = process.env.QDRANT_API_KEY || 'dev_api_key_hivemind_2026';
-const COLLECTION_NAME = process.env.QDRANT_COLLECTION || 'hivemind_memories';
+const COLLECTION_NAME = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
 
 const headers = {
   'Content-Type': 'application/json',

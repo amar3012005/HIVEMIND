@@ -37,7 +37,7 @@ function sortByRelevance(memories, query) {
 }
 
 function buildCollectionName(userId) {
-  return `hivemind_${userId}`;
+  return process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
 }
 
 function normalizeForDedup(content = '') {

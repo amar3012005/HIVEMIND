@@ -490,7 +490,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
   try {
     switch (uri) {
       case 'memories://recent': {
-        const memories = await apiCall('GET', '/memories', { limit: 10 });
+        const memories = await apiCall('GET', '/api/memories', { limit: 10 });
         return {
           contents: [
             {
@@ -503,7 +503,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
       }
 
       case 'memories://favorites': {
-        const memories = await apiCall('GET', '/memories', { 
+        const memories = await apiCall('GET', '/api/memories', { 
           limit: 20,
           minImportance: 0.8
         });
@@ -519,7 +519,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
       }
 
       case 'memories://all': {
-        const memories = await apiCall('GET', '/memories', { limit: 100 });
+        const memories = await apiCall('GET', '/api/memories', { limit: 100 });
         return {
           contents: [
             {
@@ -782,7 +782,7 @@ async function handleListMemories(args, requestId) {
 async function handleGetMemory(args, requestId) {
   const { memoryId, includeRelationships = true } = args;
 
-  const memory = await apiCall('GET', `/memories/${memoryId}?include_relationships=${includeRelationships}`);
+  const memory = await apiCall('GET', `/api/memories/${memoryId}?include_relationships=${includeRelationships}`);
 
   const formatted = formatMemoryDetail(memory);
 
@@ -799,7 +799,7 @@ async function handleGetMemory(args, requestId) {
 async function handleDeleteMemory(args, requestId) {
   const { memoryId } = args;
 
-  await apiCall('DELETE', `/memories/${memoryId}`);
+  await apiCall('DELETE', `/api/memories/${memoryId}`);
 
   logger.info('Memory deleted', { requestId, memoryId });
 

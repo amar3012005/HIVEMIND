@@ -490,6 +490,55 @@ const server = http.createServer(async (req, res) => {
       const userId = principal.userId || DEFAULT_USER;
       const orgId = principal.orgId || DEFAULT_ORG;
 
+      // Handle /api/memories/:id routes (dynamic ID matching)
+      if (pathname.startsWith('/api/memories/') && pathname !== '/api/memories/search' && pathname !== '/api/memories/query' && pathname !== '/api/memories/code/ingest' && pathname !== '/api/memories/traverse' && pathname !== '/api/memories/decay' && pathname !== '/api/memories/reinforce') {
+        if (req.method === 'GET') {
+          if (!ensurePersistedMemoryOrFail(res, '/api/memories/:id')) {
+            return;
+          }
+          const memoryId = pathname.split('/api/memories/')[1];
+          try {
+            if (persistentMemoryStore) {
+              const memory = await persistentMemoryStore.getMemory(memoryId);
+              if (!memory || memory.deleted_at) {
+                return jsonResponse(res, { error: 'Not found' }, 404);
+              }
+              if (memory.user_id !== userId && !principal.scopes?.includes('admin')) {
+                return jsonResponse(res, { error: 'Not found' }, 404);
+              }
+              return jsonResponse(res, memory);
+            }
+            const memory = engine.memories.get(memoryId);
+            if (!memory || memory.deleted_at) {
+              return jsonResponse(res, { error: 'Not found' }, 404);
+            }
+            if (memory.user_id !== userId && !principal.scopes?.includes('admin')) {
+              return jsonResponse(res, { error: 'Not found' }, 404);
+            }
+            return jsonResponse(res, memory);
+          } catch (error) {
+            console.error('Get memory failed:', error);
+            return jsonResponse(res, { error: error.message }, 500);
+          }
+        }
+        if (req.method === 'DELETE') {
+          if (!ensurePersistedMemoryOrFail(res, '/api/memories/:id')) {
+            return;
+          }
+          const memoryId = pathname.split('/api/memories/')[1];
+          try {
+            if (persistentMemoryStore) {
+              await persistentMemoryStore.deleteMemory(memoryId);
+              return jsonResponse(res, { success: true });
+            }
+            engine.deleteMemory(memoryId);
+            return jsonResponse(res, { success: true });
+          } catch (error) {
+            return jsonResponse(res, { error: error.message }, 500);
+          }
+        }
+      }
+
       switch (pathname) {
         case '/api/generate':
           if (req.method === 'POST') {
@@ -754,7 +803,7 @@ const server = http.createServer(async (req, res) => {
               const memory = await persistentMemoryStore.getMemory(result.memoryId);
               if (memory) {
                 await qdrantClient.storeMemory(memory, {
-                  collectionName: `hivemind_${userId}`
+                  collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT'
                 });
               }
 
@@ -942,7 +991,7 @@ const server = http.createServer(async (req, res) => {
                 const memory = await persistentMemoryStore.getMemory(result.memoryId);
                 if (memory) {
                   await qdrantClient.storeMemory(memory, {
-                    collectionName: `hivemind_${userId}`
+                    collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT'
                   });
                 }
                 return jsonResponse(res, {

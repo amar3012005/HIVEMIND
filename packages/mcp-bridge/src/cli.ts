@@ -12,9 +12,9 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { spawn } from 'child_process';
 
-const HIVEMIND_HOSTED_URL = process.env.HIVEMIND_HOSTED_URL;
-const HIVEMIND_CONNECTION_TOKEN = process.env.HIVEMIND_CONNECTION_TOKEN;
-const HIVEMIND_USER_ID = process.env.HIVEMIND_USER_ID;
+const HIVEMIND_HOSTED_URL = process.env.HIVEMIND_HOSTED_URL || '';
+const HIVEMIND_CONNECTION_TOKEN = process.env.HIVEMIND_CONNECTION_TOKEN || '';
+const HIVEMIND_USER_ID = process.env.HIVEMIND_USER_ID || 'unknown';
 
 if (!HIVEMIND_HOSTED_URL || !HIVEMIND_CONNECTION_TOKEN) {
   console.error('Error: HIVEMIND_HOSTED_URL and HIVEMIND_CONNECTION_TOKEN environment variables required');
@@ -42,7 +42,7 @@ async function main() {
       process.exit(1);
     }
 
-    const config = await response.json();
+    const config = await response.json() as { mcp: { serverInfo: { name: string } }, tools: Array<{ name: string }> };
     console.error(`[HIVE-MIND MCP Bridge] Connected! Server: ${config.mcp.serverInfo.name}`);
     console.error(`[HIVE-MIND MCP Bridge] Available tools: ${config.tools.length}`);
 
@@ -86,8 +86,8 @@ async function main() {
             error: { code: -32601, message: 'Method not found' }
           }));
         }
-      } catch (error) {
-        console.error(`[HIVE-MIND MCP Bridge] Error: ${error.message}`);
+      } catch (error: unknown) {
+        console.error(`[HIVE-MIND MCP Bridge] Error: ${(error as Error).message}`);
       }
     });
 

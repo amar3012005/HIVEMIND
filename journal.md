@@ -37,6 +37,74 @@ Response: {"id": "621055dd-d40f-4864-8f1a-eeeb74d5d546", ...}
 
 ---
 
+## 2026-03-17 19:43 UTC - Hetzner Production Deployment COMPLETE
+
+### Deployment Summary
+
+**Location**: Hetzner Cloud (Falkenstein, DE)
+**Domain**: `hivemind.davinciai.eu:8050`
+**Status**: ✅ **PRODUCTION READY**
+
+### Steps Executed
+
+1. **Code Update**:
+   ```bash
+   git fetch origin main && git reset --hard origin/main
+   ```
+
+2. **DATABASE_URL Schema Fix**:
+   ```bash
+   # File: /data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/.env
+   # Changed from schema=public to schema=hivemind
+   DATABASE_URL=postgresql://hivemind_user:hivemind_secure_pwd_2026@postgres:5432/hivemind?schema=hivemind
+   ```
+
+3. **Container Redeploy**:
+   ```bash
+   cd /data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0
+   docker compose down && docker compose up -d --build
+   ```
+
+### Verification Results
+
+| Endpoint | Status | Response |
+|----------|--------|----------|
+| `/health` | ✅ 200 OK | `{"ok":true,"service":"hivemind-api"}` |
+| `/api/mcp/servers/{userId}` | ✅ 200 OK | Full MCP server config |
+
+### MCP Server Details
+
+**Server Info:**
+- Name: `hivemind-hosted-mcp`
+- Version: `2.0.0`
+- Protocol: `2024-11-05`
+
+**Available Tools (9):**
+- `hivemind_save_memory` - Save memories
+- `hivemind_recall` - Search memories
+- `hivemind_get_memory` - Get by ID
+- `hivemind_list_memories` - List with filters
+- `hivemind_update_memory` - Update existing
+- `hivemind_delete_memory` - Delete permanently
+- `hivemind_save_conversation` - Save conversations
+- `hivemind_traverse_graph` - Graph traversal
+- `hivemind_query_with_ai` - AI-powered Q&A
+
+**Connection (for Claude Desktop):**
+```json
+{
+  "HIVEMIND_HOSTED_URL": "https://hivemind.davinciai.eu:8050/api/mcp/servers/00000000-0000-4000-8000-000000000001",
+  "HIVEMIND_CONNECTION_TOKEN": "dd745ed94f6ce6216062821285510a60da26e4c6f964b5fd",
+  "HIVEMIND_USER_ID": "00000000-0000-4000-8000-000000000001",
+  "HIVEMIND_ORG_ID": "00000000-0000-4000-8000-000000000002"
+}
+```
+
+### Files Modified
+- `/data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/.env` - DATABASE_URL schema fixed
+
+---
+
 ## 2026-03-17 19:45 UTC - Hosted MCP Service Tested Locally
 
 ### Phase 2 Complete: Context-as-a-Service Platform
@@ -222,3 +290,40 @@ Prisma throwing `Error P1010: User hivemind_user was denied access on database h
 2026-03-17 17:26:17 - Modified: /data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/.env
 2026-03-17 17:27:08 - Modified: /data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/docker-compose.yaml
 2026-03-17 17:35:48 - Modified: /opt/HIVEMIND/core/src/memory/prisma-graph-store.js
+2026-03-17 19:41:13 - Modified: /data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/.env
+2026-03-17 19:59:40 - Modified: /opt/HIVEMIND/packages/mcp-bridge/src/cli.ts
+2026-03-17 19:59:55 - Modified: /opt/HIVEMIND/packages/mcp-bridge/src/cli.ts
+2026-03-17 20:00:04 - Modified: /opt/HIVEMIND/packages/mcp-bridge/src/cli.ts
+2026-03-17 20:16:12 - Modified: /opt/HIVEMIND/core/src/embeddings/mistral.js
+2026-03-17 20:16:36 - Modified: /opt/HIVEMIND/core/src/embeddings/mistral.js
+2026-03-17 20:16:56 - Modified: /opt/HIVEMIND/core/src/embeddings/mistral.js
+2026-03-17 20:21:06 - Modified: /data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/.env
+2026-03-17 20:33:01 - Modified: /data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/.env
+2026-03-17 20:33:36 - Modified: /opt/HIVEMIND/core/src/embeddings/mistral.js
+2026-03-17 20:33:54 - Modified: /opt/HIVEMIND/core/src/embeddings/mistral.js
+2026-03-17 20:34:08 - Modified: /opt/HIVEMIND/core/src/embeddings/mistral.js
+2026-03-17 20:35:02 - Modified: /data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/docker-compose.yaml
+2026-03-17 20:35:15 - Modified: /data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/docker-compose.yaml
+2026-03-17 20:35:30 - Modified: /data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/.env
+2026-03-17 20:38:26 - Modified: /data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/.env
+2026-03-17 20:38:50 - Modified: /data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/.env
+2026-03-17 20:41:29 - Modified: /data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/.env
+2026-03-17 21:32:31 - Modified: /opt/HIVEMIND/mcp-server/server.js
+2026-03-17 21:32:51 - Modified: /opt/HIVEMIND/mcp-server/server.js
+2026-03-17 21:33:26 - Modified: /opt/HIVEMIND/mcp-server/server.js
+2026-03-17 21:34:07 - Modified: /opt/HIVEMIND/mcp-server/server.js
+2026-03-17 21:34:42 - Modified: /opt/HIVEMIND/mcp-server/server.js
+2026-03-17 21:38:42 - Modified: /opt/HIVEMIND/core/src/server.js
+2026-03-17 21:40:04 - Modified: /opt/HIVEMIND/core/src/server.js
+2026-03-17 21:44:59 - Modified: /opt/HIVEMIND/core/src/server.js
+2026-03-17 21:46:17 - Modified: /opt/HIVEMIND/core/src/server.js
+2026-03-17 21:49:56 - Modified: /data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/.env
+2026-03-17 21:51:28 - Modified: /opt/HIVEMIND/core/src/server.js
+2026-03-17 21:51:39 - Modified: /opt/HIVEMIND/core/src/server.js
+2026-03-17 21:52:10 - Modified: /opt/HIVEMIND/core/src/memory/persisted-retrieval.js
+2026-03-17 21:52:22 - Modified: /opt/HIVEMIND/core/src/ingestion/indexer.js
+2026-03-17 21:52:38 - Modified: /opt/HIVEMIND/core/src/external/ingestion/indexer.js
+2026-03-17 21:52:47 - Modified: /opt/HIVEMIND/core/src/vector/qdrant-client.js
+2026-03-17 23:01:05 - Modified: /data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/.env
+2026-03-17 23:44:17 - Modified: /opt/HIVEMIND/core/src/embeddings/mistral.js
+2026-03-17 23:44:31 - Modified: /opt/HIVEMIND/core/src/embeddings/mistral.js

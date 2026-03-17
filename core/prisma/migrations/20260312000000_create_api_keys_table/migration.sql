@@ -7,7 +7,7 @@
 -- Create API keys table for server-to-server authentication
 -- Supports key expiry, revocation, and last-used tracking
 CREATE TABLE IF NOT EXISTS api_keys (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     org_id UUID REFERENCES organizations(id) ON DELETE SET NULL,
 

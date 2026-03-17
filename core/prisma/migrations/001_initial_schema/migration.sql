@@ -1,13 +1,13 @@
 -- CreateTable
 CREATE TABLE "users" (
-    "id" UUID NOT NULL DEFAULT uuid_generate_v4(),
+    "id" UUID NOT NULL DEFAULT gen_random_uuid(),
     "zitadel_user_id" VARCHAR(255) NOT NULL,
     "email" VARCHAR(255) NOT NULL,
     "display_name" VARCHAR(255),
     "avatar_url" TEXT,
     "timezone" VARCHAR(50) DEFAULT 'UTC',
     "locale" VARCHAR(10) DEFAULT 'en',
-    "encryption_key_id" UUID NOT NULL DEFAULT uuid_generate_v4(),
+    "encryption_key_id" UUID NOT NULL DEFAULT gen_random_uuid(),
     "encryption_key_version" INTEGER DEFAULT 1,
     "created_at" TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -19,7 +19,7 @@ CREATE TABLE "users" (
 
 -- CreateTable
 CREATE TABLE "organizations" (
-    "id" UUID NOT NULL DEFAULT uuid_generate_v4(),
+    "id" UUID NOT NULL DEFAULT gen_random_uuid(),
     "zitadel_org_id" VARCHAR(255) NOT NULL,
     "name" VARCHAR(255) NOT NULL,
     "slug" VARCHAR(100) NOT NULL,
@@ -46,7 +46,7 @@ CREATE TABLE "user_organizations" (
 
 -- CreateTable
 CREATE TABLE "platform_integrations" (
-    "id" UUID NOT NULL DEFAULT uuid_generate_v4(),
+    "id" UUID NOT NULL DEFAULT gen_random_uuid(),
     "user_id" UUID NOT NULL,
     "platform_type" VARCHAR(50) NOT NULL,
     "platform_user_id" VARCHAR(255),
@@ -74,7 +74,7 @@ CREATE TABLE "platform_integrations" (
 
 -- CreateTable
 CREATE TABLE "memories" (
-    "id" UUID NOT NULL DEFAULT uuid_generate_v4(),
+    "id" UUID NOT NULL DEFAULT gen_random_uuid(),
     "user_id" UUID NOT NULL,
     "org_id" UUID,
     "content" TEXT NOT NULL,
@@ -110,7 +110,7 @@ CREATE TABLE "memories" (
 
 -- CreateTable
 CREATE TABLE "relationships" (
-    "id" UUID NOT NULL DEFAULT uuid_generate_v4(),
+    "id" UUID NOT NULL DEFAULT gen_random_uuid(),
     "from_id" UUID NOT NULL,
     "to_id" UUID NOT NULL,
     "type" VARCHAR(50) NOT NULL,
@@ -142,7 +142,7 @@ CREATE TABLE "vector_embeddings" (
 
 -- CreateTable
 CREATE TABLE "sessions" (
-    "id" UUID NOT NULL DEFAULT uuid_generate_v4(),
+    "id" UUID NOT NULL DEFAULT gen_random_uuid(),
     "user_id" UUID,
     "platform_type" VARCHAR(50) NOT NULL,
     "platform_session_id" VARCHAR(255),
@@ -164,7 +164,7 @@ CREATE TABLE "sessions" (
 
 -- CreateTable
 CREATE TABLE "sync_logs" (
-    "id" UUID NOT NULL DEFAULT uuid_generate_v4(),
+    "id" UUID NOT NULL DEFAULT gen_random_uuid(),
     "user_id" UUID,
     "event_type" VARCHAR(50) NOT NULL,
     "source_platform" VARCHAR(50),
@@ -184,7 +184,7 @@ CREATE TABLE "sync_logs" (
 
 -- CreateTable
 CREATE TABLE "audit_logs" (
-    "id" UUID NOT NULL DEFAULT uuid_generate_v4(),
+    "id" UUID NOT NULL DEFAULT gen_random_uuid(),
     "user_id" UUID,
     "organization_id" UUID,
     "event_type" VARCHAR(100) NOT NULL,
@@ -207,7 +207,7 @@ CREATE TABLE "audit_logs" (
 
 -- CreateTable
 CREATE TABLE "data_export_requests" (
-    "id" UUID NOT NULL DEFAULT uuid_generate_v4(),
+    "id" UUID NOT NULL DEFAULT gen_random_uuid(),
     "user_id" UUID NOT NULL,
     "request_type" VARCHAR(50) NOT NULL,
     "status" VARCHAR(50) DEFAULT 'pending',

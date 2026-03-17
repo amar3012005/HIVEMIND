@@ -1,5 +1,8 @@
-hivemind.davinciai.eu {
-    reverse_proxy app:3000
+{
+    admin off
+}
 
+https://hivemind.davinciai.eu:443 {
+    reverse_proxy hivemind-app:3000
     tls /etc/letsencrypt/live/hivemind.davinciai.eu/fullchain.pem /etc/letsencrypt/live/hivemind.davinciai.eu/privkey.pem
 }

@@ -75,12 +75,12 @@ export class PrismaGraphStore {
 
   async advisoryLock(userId, fn) {
     if (this.inTransaction) {
-      await this.client.$executeRawUnsafe('SELECT hivemind.acquire_memory_user_lock($1::uuid)', userId);
+      await this.client.$executeRawUnsafe('SELECT acquire_memory_user_lock($1::uuid)', userId);
       return fn(this);
     }
 
     return this.client.$transaction(async tx => {
-      await tx.$executeRawUnsafe('SELECT hivemind.acquire_memory_user_lock($1::uuid)', userId);
+      await tx.$executeRawUnsafe('SELECT acquire_memory_user_lock($1::uuid)', userId);
       const scopedStore = new PrismaGraphStore(tx, { inTransaction: true });
       return fn(scopedStore);
     });

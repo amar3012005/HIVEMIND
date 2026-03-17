@@ -7,15 +7,13 @@
 
 generator client {
   provider        = "prisma-client-js"
-  previewFeatures = ["multiSchema", "postgresqlExtensions"]
+  previewFeatures = ["postgresqlExtensions"]
   output          = "../node_modules/.prisma/client"
 }
 
 datasource db {
   provider   = "postgresql"
   url        = env("DATABASE_URL")
-  extensions = [age, uuid_ossp, pgcrypto]
-  schemas    = ["hivemind", "encryption"]
 }
 
 // ==========================================
@@ -31,7 +29,7 @@ enum MemoryType {
   event
   relationship
 
-  @@schema("hivemind")
+  
 }
 
 enum RelationshipType {
@@ -39,7 +37,7 @@ enum RelationshipType {
   Extends
   Derives
 
-  @@schema("hivemind")
+  
 }
 
 enum VisibilityScope {
@@ -47,7 +45,7 @@ enum VisibilityScope {
   organization
   public
 
-  @@schema("hivemind")
+  
 }
 
 enum PlatformType {
@@ -57,7 +55,7 @@ enum PlatformType {
   gemini
   other
 
-  @@schema("hivemind")
+  
 }
 
 enum AuthType {
@@ -65,7 +63,7 @@ enum AuthType {
   api_key
   webhook
 
-  @@schema("hivemind")
+  
 }
 
 enum SyncStatus {
@@ -74,7 +72,7 @@ enum SyncStatus {
   error
   revoked
 
-  @@schema("hivemind")
+  
 }
 
 enum AuditEventCategory {
@@ -83,7 +81,7 @@ enum AuditEventCategory {
   data_modification
   system
 
-  @@schema("hivemind")
+  
 }
 
 enum AuditAction {
@@ -94,7 +92,7 @@ enum AuditAction {
   export
   erase
 
-  @@schema("hivemind")
+  
 }
 
 enum ExportRequestType {
@@ -102,7 +100,7 @@ enum ExportRequestType {
   erasure
   portability
 
-  @@schema("hivemind")
+  
 }
 
 enum ExportStatus {
@@ -111,7 +109,7 @@ enum ExportStatus {
   completed
   failed
 
-  @@schema("hivemind")
+  
 }
 
 enum ExportFormat {
@@ -119,7 +117,7 @@ enum ExportFormat {
   csv
   parquet
 
-  @@schema("hivemind")
+  
 }
 
 // ==========================================
@@ -158,7 +156,7 @@ model User {
   deletedAt    DateTime? @map("deleted_at")
 
   @@map("users")
-  @@schema("hivemind")
+  
 }
 
 /// Multi-tenant organizations with EU data residency settings
@@ -188,7 +186,7 @@ model Organization {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@map("organizations")
-  @@schema("hivemind")
+  
 }
 
 /// Junction table for user-organization many-to-many relationship
@@ -206,7 +204,7 @@ model UserOrganization {
   @@index([userId])
   @@index([orgId])
   @@map("user_organizations")
-  @@schema("hivemind")
+  
 }
 
 // ==========================================
@@ -258,7 +256,7 @@ model PlatformIntegration {
   @@index([platformType])
   @@index([isActive, syncStatus])
   @@map("platform_integrations")
-  @@schema("hivemind")
+  
 }
 
 // ==========================================
@@ -345,7 +343,7 @@ model Memory {
   @@index([deletedAt])
   @@index([tags])
   @@map("memories")
-  @@schema("hivemind")
+  
 }
 
 /// Persisted version history for state transitions and temporal audits
@@ -365,7 +363,7 @@ model MemoryVersion {
   @@index([memoryId, createdAt])
   @@index([memoryId, isLatest])
   @@map("memory_versions")
-  @@schema("hivemind")
+  
 }
 
 /// Normalized source provenance for any memory ingest
@@ -386,7 +384,7 @@ model SourceMetadata {
   @@index([sourceType, sourceId])
   @@index([sourcePlatform])
   @@map("source_metadata")
-  @@schema("hivemind")
+  
 }
 
 /// AST and scope metadata for code memories
@@ -412,7 +410,7 @@ model CodeMemoryMetadata {
   @@index([filepath])
   @@index([language])
   @@map("code_memory_metadata")
-  @@schema("hivemind")
+  
 }
 
 /// Async queue for deferred DERIVES evaluation
@@ -433,7 +431,7 @@ model DerivationJob {
   @@index([sourceMemoryId])
   @@index([targetMemoryId])
   @@map("derivation_jobs")
-  @@schema("hivemind")
+  
 }
 
 /// Graph edges between memories (Updates, Extends, Derives)
@@ -467,7 +465,7 @@ model Relationship {
   @@index([fromId, type])
   @@index([toId, type])
   @@map("relationships")
-  @@schema("hivemind")
+  
 }
 
 // ==========================================
@@ -500,7 +498,7 @@ model VectorEmbedding {
 
   @@index([syncStatus, lastSyncAttempt])
   @@map("vector_embeddings")
-  @@schema("hivemind")
+  
 }
 
 // ==========================================
@@ -548,7 +546,7 @@ model Session {
   @@index([platformType])
   @@index([userId, endedAt])
   @@map("sessions")
-  @@schema("hivemind")
+  
 }
 
 // ==========================================
@@ -590,7 +588,7 @@ model SyncLog {
   @@index([eventType])
   @@index([startedAt])
   @@map("sync_logs")
-  @@schema("hivemind")
+  
 }
 
 // ==========================================
@@ -641,7 +639,7 @@ model AuditLog {
   @@index([resourceType, resourceId])
   @@index([action])
   @@map("audit_logs")
-  @@schema("hivemind")
+  
 }
 
 // ==========================================
@@ -667,7 +665,7 @@ model DataExportRequest {
   @@index([userId])
   @@index([status])
   @@map("data_export_requests")
-  @@schema("hivemind")
+  
 }
 
 // ==========================================
@@ -719,7 +717,7 @@ model ApiKey {
   @@index([keyPrefix])
   @@index([userId, revokedAt, expiresAt])
   @@map("api_keys")
-  @@schema("hivemind")
+  
 }
 
 // ==========================================
@@ -739,7 +737,7 @@ model EncryptionAuditLog {
   @@index([keyId])
   @@index([createdAt])
   @@map("audit_log")
-  @@schema("encryption")
+  
 }
 
 // ==========================================

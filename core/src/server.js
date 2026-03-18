@@ -498,17 +498,7 @@ const server = http.createServer(async (req, res) => {
           }
           const memoryId = pathname.split('/api/memories/')[1];
           try {
-            if (persistentMemoryStore) {
-              const memory = await persistentMemoryStore.getMemory(memoryId);
-              if (!memory || memory.deleted_at) {
-                return jsonResponse(res, { error: 'Not found' }, 404);
-              }
-              if (memory.user_id !== userId && !principal.scopes?.includes('admin')) {
-                return jsonResponse(res, { error: 'Not found' }, 404);
-              }
-              return jsonResponse(res, memory);
-            }
-            const memory = engine.memories.get(memoryId);
+            const memory = await persistentMemoryStore.getMemory(memoryId);
             if (!memory || memory.deleted_at) {
               return jsonResponse(res, { error: 'Not found' }, 404);
             }
@@ -527,11 +517,7 @@ const server = http.createServer(async (req, res) => {
           }
           const memoryId = pathname.split('/api/memories/')[1];
           try {
-            if (persistentMemoryStore) {
-              await persistentMemoryStore.deleteMemory(memoryId);
-              return jsonResponse(res, { success: true });
-            }
-            engine.deleteMemory(memoryId);
+            await persistentMemoryStore.deleteMemory(memoryId);
             return jsonResponse(res, { success: true });
           } catch (error) {
             return jsonResponse(res, { error: error.message }, 500);
@@ -856,48 +842,24 @@ const server = http.createServer(async (req, res) => {
             const offset = filters.offset || 0;
             const limit = filters.limit || 50;
 
-            if (persistentMemoryStore) {
-              const { memories, total } = await persistentMemoryStore.listMemories({
-                user_id: userId,
-                org_id: orgId,
-                project,
-                memory_type: filters.memory_type,
-                tags: filters.tags,
-                is_latest: filters.is_latest,
-                offset,
-                limit
-              });
-
-              return jsonResponse(res, {
-                memories,
-                pagination: {
-                  total,
-                  offset,
-                  limit,
-                  has_more: offset + limit < total
-                }
-              });
-            }
-
-            const memories = engine.getAllMemories(userId, orgId);
-            const filteredMemories = memories.filter(m => {
-              if (project && m.project !== project) return false;
-              if (filters.memory_type && m.memory_type !== filters.memory_type) return false;
-              if (filters.tags && filters.tags.length > 0) {
-                if (!m.tags || !filters.tags.some(t => m.tags.includes(t))) return false;
-              }
-              if (filters.is_latest !== undefined && m.is_latest !== filters.is_latest) return false;
-              return true;
+            const { memories, total } = await persistentMemoryStore.listMemories({
+              user_id: userId,
+              org_id: orgId,
+              project,
+              memory_type: filters.memory_type,
+              tags: filters.tags,
+              is_latest: filters.is_latest,
+              offset,
+              limit
             });
-            const paginatedMemories = filteredMemories.slice(offset, offset + limit);
-            
-            return jsonResponse(res, { 
-              memories: paginatedMemories,
+
+            return jsonResponse(res, {
+              memories,
               pagination: {
-                total: filteredMemories.length,
+                total,
                 offset,
                 limit,
-                has_more: offset + limit < filteredMemories.length
+                has_more: offset + limit < total
               }
             });
           } 
@@ -926,7 +888,7 @@ const server = http.createServer(async (req, res) => {
               if (!persistentMemoryEngine) {
                 return jsonResponse(res, {
                   error: 'Persistent memory store unavailable',
-                  message: '/api/memories/code/ingest requires Prisma-backed memory.'
+                  message: '/api/memories requires Prisma-backed memory.'
                 }, 503);
               }
 
@@ -955,9 +917,16 @@ const server = http.createServer(async (req, res) => {
                   }
                 : undefined;
 
-              const engineInput = {
-                ...validation.data,
-                source,
+              const result = await persistentMemoryEngine.ingestMemory({
+                user_id: validation.data.user_id,
+                org_id: validation.data.org_id,
+                project: validation.data.project,
+                content: validation.data.content,
+                tags: validation.data.tags,
+                memory_type: validation.data.memory_type,
+                title: validation.data.title,
+                document_date: validation.data.document_date,
+                event_dates: validation.data.event_dates,
                 relationship,
                 metadata: {
                   ...validation.data.metadata,
@@ -965,54 +934,29 @@ const server = http.createServer(async (req, res) => {
                   source_session_id: validation.data.source_session_id || null,
                   source_message_id: validation.data.source_message_id || null,
                   source_url: validation.data.source_url || null
+                },
+                source_metadata: {
+                  source_type: source?.type || 'manual',
+                  source_id: source?.id || null,
+                  source_platform: source?.platform || null,
+                  source_url: source?.url || null
                 }
-              };
-
-              if (persistentMemoryEngine && persistentMemoryStore) {
-                const result = await persistentMemoryEngine.ingestMemory({
-                  user_id: validation.data.user_id,
-                  org_id: validation.data.org_id,
-                  project: validation.data.project,
-                  content: validation.data.content,
-                  tags: validation.data.tags,
-                  memory_type: validation.data.memory_type,
-                  title: validation.data.title,
-                  document_date: validation.data.document_date,
-                  event_dates: validation.data.event_dates,
-                  relationship,
-                  metadata: engineInput.metadata,
-                  source_metadata: {
-                    source_type: source?.type || 'manual',
-                    source_id: source?.id || null,
-                    source_platform: source?.platform || null,
-                    source_url: source?.url || null
-                  }
+              });
+              const memory = await persistentMemoryStore.getMemory(result.memoryId);
+              if (memory) {
+                await qdrantClient.storeMemory(memory, {
+                  collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT'
                 });
-                const memory = await persistentMemoryStore.getMemory(result.memoryId);
-                if (memory) {
-                  await qdrantClient.storeMemory(memory, {
-                    collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT'
-                  });
-                }
-                return jsonResponse(res, {
-                  success: true,
-                  memory,
-                  relationships: result.edgesCreated,
-                  mutation: {
-                    operation: result.operation,
-                    deprecated_ids: result.deprecatedIds,
-                    processing_ms: result.processingMs
-                  }
-                }, 201);
               }
-
-              const memory = await engine.storeMemory(engineInput);
-              return jsonResponse(res, { 
-                success: true, 
-                memory: memory.memory || null,
-                memories: memory.memories || null,
-                relationships: memory.relationships || [],
-                mutation: memory.mutation || null
+              return jsonResponse(res, {
+                success: true,
+                memory,
+                relationships: result.edgesCreated,
+                mutation: {
+                  operation: result.operation,
+                  deprecated_ids: result.deprecatedIds,
+                  processing_ms: result.processingMs
+                }
               }, 201);
             } catch (error) {
               console.error('Store memory failed:', error);
@@ -1046,21 +990,8 @@ const server = http.createServer(async (req, res) => {
             }
             
             try {
-              if (persistentMemoryStore) {
-                const results = await persistentMemoryStore.searchMemories(validation.data);
-                return jsonResponse(res, {
-                  results,
-                  search_params: {
-                    query: validation.data.query,
-                    project: validation.data.project,
-                    memory_type: validation.data.memory_type,
-                    count: results.length
-                  }
-                });
-              }
-
-              const results = await engine.searchMemories(validation.data);
-              return jsonResponse(res, { 
+              const results = await persistentMemoryStore.searchMemories(validation.data);
+              return jsonResponse(res, {
                 results,
                 search_params: {
                   query: validation.data.query,
@@ -1071,17 +1002,10 @@ const server = http.createServer(async (req, res) => {
               });
             } catch (error) {
               console.error('Search memories failed:', error);
-              if (REQUIRE_PERSISTED_MEMORY) {
-                return jsonResponse(res, {
-                  error: 'Search failed',
-                  message: error.message
-                }, 500);
-              }
-              // Return empty results on error
               return jsonResponse(res, {
-                results: [],
-                warning: 'Search failed: ' + error.message
-              });
+                error: 'Search failed',
+                message: error.message
+              }, 500);
             }
           }
           break;
@@ -1096,20 +1020,7 @@ const server = http.createServer(async (req, res) => {
             }
 
             try {
-              if (persistentMemoryStore) {
-                const result = await queryPersistedMemories(persistentMemoryStore, {
-                  ...body,
-                  user_id: userId,
-                  org_id: orgId
-                });
-
-                return jsonResponse(res, {
-                  pattern: body.pattern,
-                  result
-                });
-              }
-
-              const result = engine.queryMemories({
+              const result = await queryPersistedMemories(persistentMemoryStore, {
                 ...body,
                 user_id: userId,
                 org_id: orgId
@@ -1210,45 +1121,26 @@ const server = http.createServer(async (req, res) => {
               return;
             }
             try {
-              if (persistentMemoryStore) {
-                const result = await recallPersistedMemories(persistentMemoryStore, {
-                  query_context: body.query_context || body.context,
-                  user_id: userId,
-                  org_id: orgId,
-                  project: body.project || null,
-                  source_platforms: body.source_platforms || [],
-                  tags: body.tags || [],
-                  preferred_project: body.preferred_project || body.project || null,
-                  preferred_source_platforms: body.preferred_source_platforms || [],
-                  preferred_tags: body.preferred_tags || [],
-                  max_memories: body.max_memories || 5,
-                  weights: body.weights
-                });
-                jsonResponse(res, result);
-                break;
-              }
-
-              const result = await engine.autoRecall({
+              const result = await recallPersistedMemories(persistentMemoryStore, {
                 query_context: body.query_context || body.context,
                 user_id: userId,
+                org_id: orgId,
+                project: body.project || null,
+                source_platforms: body.source_platforms || [],
+                tags: body.tags || [],
+                preferred_project: body.preferred_project || body.project || null,
+                preferred_source_platforms: body.preferred_source_platforms || [],
+                preferred_tags: body.preferred_tags || [],
                 max_memories: body.max_memories || 5,
                 weights: body.weights
               });
               jsonResponse(res, result);
             } catch (error) {
               console.error('Auto recall failed:', error);
-              if (REQUIRE_PERSISTED_MEMORY) {
-                return jsonResponse(res, {
-                  error: 'Recall failed',
-                  message: error.message
-                }, 500);
-              }
-              // Return empty result on error
-              jsonResponse(res, { 
-                memories: [], 
-                context: null,
-                warning: 'Recall failed: ' + error.message 
-              });
+              return jsonResponse(res, {
+                error: 'Recall failed',
+                message: error.message
+              }, 500);
             }
           }
           break;

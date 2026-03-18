@@ -1,5 +1,68 @@
 # HIVE-MIND Deployment Journal
 
+## 2026-03-18 18:00 UTC - Runtime Consolidation: Postgres/Qdrant Now Only Production Memory Path
+
+### Implementation Complete: Remove engine.local.js Fallback from Production Routes
+
+All critical `/api/memories*` routes now use **only** the `persistentMemoryStore` (PrismaGraphStore) and `persistentMemoryEngine` (MemoryGraphEngine) for production operations. The in-memory `engine.local.js` fallback has been removed.
+
+### Changes Made
+
+**File**: `/opt/HIVEMIND/core/src/server.js`
+
+| Route | Previous | Now |
+|-------|----------|-----|
+| `GET /api/memories` | Fallback to `engine.getAllMemories()` | Prisma-only via `persistentMemoryStore.listMemories()` |
+| `POST /api/memories` | Fallback to `engine.storeMemory()` | Prisma-only via `persistentMemoryEngine.ingestMemory()` + Qdrant upsert |
+| `POST /api/memories/search` | Fallback to `engine.searchMemories()` | Prisma-only via `persistentMemoryStore.searchMemories()` |
+| `GET /api/memories/:id` | Fallback to `engine.memories.get()` | Prisma-only via `persistentMemoryStore.getMemory()` |
+| `DELETE /api/memories/:id` | Fallback to `engine.deleteMemory()` | Prisma-only via `persistentMemoryStore.deleteMemory()` |
+| `POST /api/memories/query` | Fallback to `engine.queryMemories()` | Prisma-only via `queryPersistedMemories()` |
+| `POST /api/recall` | Fallback to `engine.autoRecall()` | Prisma-only via `recallPersistedMemories()` |
+
+### Fail-Fast Behavior
+
+The `ensurePersistedMemoryOrFail()` helper now returns `503 Service Unavailable` when `persistentMemoryStore` is unavailable and `REQUIRE_PERSISTED_MEMORY=true` (production default).
+
+**Before**: Silently fell back to in-memory engine
+**After**: Returns clear error: `"Persistent memory store unavailable. <endpoint> requires Prisma-backed memory in this environment."`
+
+### Dead Code Removed
+
+**Deleted**: `/opt/HIVEMIND/core/src/api/routes/memories.js`
+
+This Express router was never imported or used. All routes are implemented directly in `server.js` using vanilla Node.js http server.
+
+### Utility Endpoints (Unchanged)
+
+The following endpoints still use `engine.local.js` for read-only operations (no persistent state writes):
+- `/api/memories/traverse` - Graph traversal
+- `/api/memories/decay` - Memory decay calculation
+- `/api/memories/reinforce` - Memory reinforcement
+- `/api/relationships` - Manual relationship creation
+- `/api/session/end` - Session end hook
+- `/api/stats` - Engine statistics
+
+These are debug/utility endpoints that don't affect the critical production memory path.
+
+### Deployment Sequence
+
+1. ✅ Code changes complete
+2. ⏳ Deploy to Hetzner with existing env/schema
+3. ⏳ Smoke verification:
+   - `POST /api/memories` → Creates via persistent engine
+   - `POST /api/memories/search` → Returns Prisma results
+   - `PUT /api/memories/:id` → Updates flip `is_latest=false` on prior version
+   - `GET /api/memories/:id` → Returns from Postgres
+   - Service fails closed (503) when Prisma unavailable
+
+### Files Modified
+
+- `/opt/HIVEMIND/core/src/server.js` - Removed all fallback branches
+- `/opt/HIVEMIND/core/src/api/routes/memories.js` - **Deleted** (dead code)
+
+---
+
 ## 2026-03-18 14:00 UTC - Antigravity MCP Integration COMPLETE
 
 ### Final Configuration: Hybrid stdio Approach
@@ -553,3 +616,22 @@ URL: https://www.npmjs.com/package/@amar_528/mcp-bridge
 
 **Docs**: See /opt/HIVEMIND/packages/mcp-bridge/ANTIGRAVITY_SETUP.md
 2026-03-18 13:27:44 - Modified: /opt/HIVEMIND/packages/mcp-bridge/src/cli.ts
+2026-03-18 19:10:47 - Modified: /opt/HIVEMIND/core/src/server.js
+2026-03-18 19:11:41 - Modified: /opt/HIVEMIND/core/src/server.js
+2026-03-18 19:12:01 - Modified: /opt/HIVEMIND/core/src/server.js
+2026-03-18 19:12:38 - Modified: /opt/HIVEMIND/core/src/server.js
+2026-03-18 19:13:01 - Modified: /opt/HIVEMIND/core/src/server.js
+2026-03-18 19:14:18 - Modified: /opt/HIVEMIND/core/src/server.js
+2026-03-18 19:16:36 - Modified: /opt/HIVEMIND/core/src/server.js
+
+
+
+
+[mcp_servers.hivemind]
+command = "node"
+args = ["/Users/amar/HIVE-MIND/packages/mcp-bridge/dist/cli.js", "hosted", "--url", "https://hivemind.davinciai.eu:8050", "--user-id", "00000000-0000-4000-8000-000000000001"]
+enabled = true
+
+[mcp_servers.hivemind.env]
+HIVEMIND_API_KEY = "YOUR_HIVEMIND_API_KEY"
+HIVEMIND_USER_ID = "00000000-0000-4000-8000-000000000001"

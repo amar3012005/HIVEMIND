@@ -83,6 +83,71 @@ The in-memory engine.local.js fallback has been removed from production routes.
 
 ---
 
+## 2026-03-19 08:00 UTC - Hosted MCP + Bridge Stability Run COMPLETE
+
+### Production Readiness: Hosted `/api/mcp/servers/:userId/rpc` now real
+
+- Implemented MCP SDK stdio bridge (`packages/mcp-bridge/src/cli.ts`) so local clients fetch the descriptor, use `connection.endpoints.jsonrpc`, and fall back to HTTP only when the hosted RPC returns `404`. Auth headers now send `X-API-Key` every time.
+- Rebuilt hosted service helpers (`core/src/mcp/hosted-service.js`) so `tools/call` proxies to the real memory REST APIs, returns MCP-compliant responses, and can stream `resources`/`prompts`. Connection tokens are tracked with `getConnectionContext()`.
+- Updated the HTTP server (`core/src/server.js`) to expose `POST /api/mcp/servers/:userId/rpc`, SSE keepalive, and a proper `PUT /api/memories/:id` path so the advertised tool set matches the actual REST capabilities.
+
+### Bug Fixed: Tool Call Params Validation
+
+**Issue**: `tools/call` for `hivemind_list_memories` returned `400: null`
+
+**Root Cause**: The apiClient was passing `undefined` values as params, which URLSearchParams converted to the string `"undefined"`. The API validation rejected `memory_type="undefined"` as an invalid enum value.
+
+**Fix Applied** in `/opt/HIVEMIND/core/src/mcp/hosted-service.js`:
+```javascript
+case 'hivemind_list_memories': {
+  const listParams = {
+    limit: args.limit || 10,
+    offset: Math.max(((args.page || 1) - 1) * (args.limit || 10), 0)
+  };
+  if (args.project) listParams.project = args.project;
+  if (args.tags && Array.isArray(args.tags) && args.tags.length > 0) listParams.tags = args.tags.join(',');
+  if (args.source_type === 'decision') listParams.memory_type = 'decision';
+  return formatToolContent(await apiClient.get('/api/memories', { params: listParams }));
+}
+```
+
+**Environment Fix**: Added `HIVEMIND_BASE_URL=http://localhost:3000` to container env so internal API calls use localhost instead of the external FQDN.
+
+### Smoke Tests (production against `https://hivemind.davinciai.eu:8050`)
+
+| Test | Status | Response |
+|------|--------|----------|
+| `GET /health` | ✅ 200 OK | `{"ok":true,"service":"hivemind-api"}` |
+| `GET /api/mcp/servers/{userId}` | ✅ 200 OK | Descriptor with jsonrpc URL + 9 tools |
+| `POST /rpc initialize` | ✅ 200 OK | `{"name":"hivemind-hosted-mcp","version":"2.0.0"}` |
+| `POST /rpc tools/list` | ✅ 200 OK | 9 tools returned |
+| `POST /rpc tools/call hivemind_list_memories` | ✅ 200 OK | Returns Prisma-backed memories |
+| `POST /rpc tools/call hivemind_get_memory` | ✅ 200 OK | Returns memory by ID |
+| Invalid token | ✅ 401 OK | `{"error":{"message":"Invalid or expired connection token"}}` |
+| `GET /api/mcp/servers/{userId}/sse` | ✅ 200 OK | Returns `event: ping` heartbeats |
+
+### Bridge Compatibility
+
+- Local clients (Claude/Antigravity/Codex) can now reuse the hosted endpoint
+- Antigravity uses `@amar_528/mcp-bridge` for stdio when remote RPC is unavailable
+- Connection token valid for 24 hours
+
+### Production Status
+
+**Domain**: https://hivemind.davinciai.eu:8050
+**API Key**: hm_master_key_99228811
+**Container**: s0k0s0k40wo44w4w8gcs8ow0-230246199607
+**Redeployed**: 2026-03-19 (with HIVEMIND_MCP_DEBUG=true, HIVEMIND_BASE_URL=http://localhost:3000)
+
+### Files Modified
+
+- `/opt/HIVEMIND/core/src/server.js` – new hosted RPC/SSE handling plus memory `PUT`.
+- `/opt/HIVEMIND/core/src/mcp/hosted-service.js` – richer tool responder, token tracking, hivemind_list_memories params fix.
+- `/opt/HIVEMIND/packages/mcp-bridge/src/cli.ts` – MCP SDK stdio bridge with descriptor-driven RPC.
+- `/data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/.env` – Added HIVEMIND_BASE_URL, HIVEMIND_MCP_DEBUG
+
+---
+
 ## 2026-03-18 14:00 UTC - Antigravity MCP Integration COMPLETE
 
 ### Final Configuration: Hybrid stdio Approach
@@ -685,3 +750,4 @@ args = ["/root/.npm-global/lib/node_modules/@amar_528/mcp-bridge/dist/cli.js", "
 2026-03-18 20:16:02 - Modified: /data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/.env
 2026-03-18 20:19:26 - Modified: /opt/HIVEMIND/core/src/mcp/hosted-service.js
 2026-03-18 20:19:44 - Modified: /opt/HIVEMIND/core/src/mcp/hosted-service.js
+2026-03-18 20:36:52 - Modified: /data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/.env

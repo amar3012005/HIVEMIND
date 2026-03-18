@@ -842,16 +842,18 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
       case 'hivemind_get_memory':
         return formatToolContent(await apiClient.get(`/api/memories/${args.memory_id}`));
 
-      case 'hivemind_list_memories':
-        return formatToolContent(await apiClient.get('/api/memories', {
-          params: {
-            project: args.project,
-            tags: args.tags,
-            memory_type: args.source_type === 'decision' ? 'decision' : undefined,
-            limit: args.limit || 10,
-            offset: Math.max(((args.page || 1) - 1) * (args.limit || 10), 0)
-          }
-        }));
+      case 'hivemind_list_memories': {
+        // Build params object with only defined values
+        const listParams = {
+          limit: args.limit || 10,
+          offset: Math.max(((args.page || 1) - 1) * (args.limit || 10), 0)
+        };
+        if (args.project) listParams.project = args.project;
+        if (args.tags && Array.isArray(args.tags) && args.tags.length > 0) listParams.tags = args.tags.join(',');
+        if (args.source_type === 'decision') listParams.memory_type = 'decision';
+
+        return formatToolContent(await apiClient.get('/api/memories', { params: listParams }));
+      }
 
       case 'hivemind_update_memory':
         return formatToolContent(await apiClient.put(`/api/memories/${args.memory_id}`, {

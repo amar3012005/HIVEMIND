@@ -1,5 +1,90 @@
 # HIVE-MIND Deployment Journal
 
+## 2026-03-18 14:00 UTC - Antigravity MCP Integration COMPLETE
+
+### Final Configuration: Hybrid stdio Approach
+
+After testing multiple transport methods, the **hybrid stdio** approach was selected for Antigravity integration.
+
+### Why This Method Wins
+
+| Factor | stdio Only | SSE Only | **Hybrid (Selected)** |
+|--------|------------|----------|----------------------|
+| Handshake reliability | ⚠️ Env var timing | ✅ Token-based | ✅ URL as argument |
+| Path resolution | ⚠️ UI process issues | N/A | ✅ Absolute paths |
+| Supermemory compatible | ✅ Yes | ✅ Yes | ✅ Yes |
+| Works with Antigravity | ⚠️ Partial | ⚠️ Needs OAuth | ✅ No OAuth needed |
+| Graph traversal support | ✅ Full | ✅ Full | ✅ Full |
+
+### Final Configuration
+
+**File**: `/root/.gemini/antigravity/mcp_config.json`
+
+```json
+{
+  "mcp_servers": {
+    "hivemind": {
+      "command": "/usr/bin/node",
+      "args": [
+        "/root/.npm-global/lib/node_modules/@amar_528/mcp-bridge/dist/cli.js",
+        "hosted",
+        "--url",
+        "https://hivemind.davinciai.eu:8050"
+      ],
+      "env": {
+        "HIVEMIND_API_KEY": "hm_master_key_99228811",
+        "HIVEMIND_USER_ID": "00000000-0000-4000-8000-000000000001",
+        "NODE_NO_WARNINGS": "1"
+      }
+    }
+  }
+}
+```
+
+### Key Improvements
+
+1. **URL as argument** - Bypasses env var timing issues during MCP handshake
+2. **`hosted` mode** - Explicitly connects to remote Hetzner API
+3. **Absolute paths** - No `$PATH` resolution in Antigravity's process
+4. **stdio transport** - Compatible with Antigravity's MCP client
+
+### Triple-Operator Knowledge Graph Support
+
+Zod schemas support graph relationships matching Supermemory architecture:
+
+| Operator | Purpose | Schema Fields |
+|----------|---------|---------------|
+| `update` | Replaces memory | `relationship: "update"` + `related_to: <id>` |
+| `extend` | Adds to memory | `relationship: "extend"` + `related_to: <id>` |
+| `derive` | Infers from memory | `relationship: "derive"` + `related_to: <id>` |
+
+### Available Tools (9)
+
+- `hivemind_save_memory` - Save with relationship support
+- `hivemind_recall` - Semantic search (quick/panorama/insight modes)
+- `hivemind_get_memory` - Get by ID
+- `hivemind_list_memories` - List with filters
+- `hivemind_update_memory` - Modify existing
+- `hivemind_delete_memory` - Permanent deletion
+- `hivemind_save_conversation` - Save full conversations
+- `hivemind_traverse_graph` - Navigate relationships
+- `hivemind_query_with_ai` - AI-powered natural language queries
+
+### NPM Package Status
+
+**Package**: `@amar_528/mcp-bridge@2.0.7`
+**URL**: https://www.npmjs.com/package/@amar_528/mcp-bridge
+
+**Key fix in v2.0.7**: Proper newline-delimited JSON parsing for MCP stdio protocol
+
+### Files Modified
+
+- `/root/.gemini/antigravity/mcp_config.json` - Antigravity MCP config
+- `/opt/HIVEMIND/packages/mcp-bridge/src/cli.ts` - stdin buffering fix
+- `/opt/HIVEMIND/.claude/skills/mcp-integration.md` - Updated docs
+
+---
+
 ## 2026-03-17 20:00 UTC - Memory Save Response Issue FIXED
 
 ### Problem
@@ -445,3 +530,26 @@ See journal-agent-system.md for full details.
 2026-03-18 00:41:50 - Modified: /opt/HIVEMIND/packages/mcp-bridge/Dockerfile
 2026-03-18 01:11:07 - Modified: /opt/HIVEMIND/packages/mcp-bridge/package.json
 2026-03-18 01:12:14 - Modified: /opt/HIVEMIND/packages/mcp-bridge/package.json
+2026-03-18 12:49:42 - Modified: /opt/HIVEMIND/packages/mcp-bridge/package.json
+2026-03-18 12:53:39 - Modified: /opt/HIVEMIND/packages/mcp-bridge/package.json
+2026-03-18 12:59:55 - Modified: /opt/HIVEMIND/packages/mcp-bridge/src/cli.ts
+2026-03-18 13:05:47 - Modified: /opt/HIVEMIND/packages/mcp-bridge/package.json
+---
+
+## 2026-03-18 13:30 UTC - Antigravity MCP Bridge COMPLETE
+
+Package published: @amar_528/mcp-bridge@2.0.6
+URL: https://www.npmjs.com/package/@amar_528/mcp-bridge
+
+**Quick Setup for Antigravity**:
+
+1. Install: npm install -g @amar_528/mcp-bridge
+2. Configure claude_desktop_config.json:
+   - command: node
+   - args: [/root/.npm-global/lib/node_modules/@amar_528/mcp-bridge/dist/cli.js]
+   - HIVEMIND_API_URL: https://hivemind.davinciai.eu:8050
+   - HIVEMIND_API_KEY: hm_master_key_99228811
+3. Restart Claude Desktop
+
+**Docs**: See /opt/HIVEMIND/packages/mcp-bridge/ANTIGRAVITY_SETUP.md
+2026-03-18 13:27:44 - Modified: /opt/HIVEMIND/packages/mcp-bridge/src/cli.ts

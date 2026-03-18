@@ -1,30 +1,43 @@
 ---
 
-## 2026-03-18 01:05 UTC - NPM Package PUBLISHED
+## 2026-03-18 13:00 UTC - NPM Bridge v2.0.5 PUBLISHED
 
-### Success!
+### Summary
+Successfully published `@amar_528/mcp-bridge@2.0.5` to NPM.
 
-`@amar_528/mcp-bridge@2.0.0` is now live on NPM.
+**Package URL**: https://www.npmjs.com/package/@amar_528/mcp-bridge
 
-**URL**: https://www.npmjs.com/package/@amar_528/mcp-bridge
+### What Was Fixed
 
-### Usage
+1. **ESM Bin Symlink Issue**: npm doesn't reliably create bin symlinks for ESM modules
+   - Workaround: Use direct node execution or global install + node
 
+2. **Added Module Exports**: Exported functions for programmatic usage
+   - `runHostedBridge()`
+   - `runLocalBridge()`
+   - `loadConfig()`
+   - `BridgeConfig` interface
+
+3. **Updated README**: Documented working configuration options
+
+### Working Antigravity Configuration
+
+**Option 1: Direct Node Execution (Most Reliable)**
+
+Install the package globally first:
 ```bash
-npx @amar_528/mcp-bridge --version
-# 2.0.0
+npm install -g @amar_528/mcp-bridge
 ```
 
-### Antigravity Config
-
+Then add to `claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
     "hivemind": {
-      "command": "npx",
-      "args": ["-y", "@amar_528/mcp-bridge"],
+      "command": "node",
+      "args": ["/usr/local/lib/node_modules/@amar_528/mcp-bridge/dist/cli.js"],
       "env": {
-        "HIVEMIND_API_URL": "https://hivemind.davinciai.eu",
+        "HIVEMIND_API_URL": "https://hivemind.davinciai.eu:8050",
         "HIVEMIND_API_KEY": "hm_master_key_99228811",
         "HIVEMIND_USER_ID": "00000000-0000-4000-8000-000000000001"
       }
@@ -33,15 +46,53 @@ npx @amar_528/mcp-bridge --version
 }
 ```
 
+**Note**: The HIVEMIND API URL includes port 8050 (`https://hivemind.davinciai.eu:8050`)
+
+### Quick Setup for Antigravity
+
+```bash
+# 1. Install package
+npm install -g @amar_528/mcp-bridge
+
+# 2. Test installation
+node /usr/local/lib/node_modules/@amar_528/mcp-bridge/dist/cli.js --version
+
+# 3. Find the actual path
+npm root -g
+# Use this path in claude_desktop_config.json
+```
+
 ### Files Published
 
-- `dist/cli.js` - CLI entrypoint
-- `dist/server.ts` - Zod validation server
-- `README.md` - Documentation
+- `dist/cli.js` - Main CLI with stdio MCP bridging
+- `dist/server.js` - Zod validation server module
+- `dist/wrapper.js` - npx wrapper helper
+- `README.md` - Usage documentation
 - `LICENSE` - MIT
 
-### Next Steps
+### Versions Published
 
-1. Test with `npx @amar_528/mcp-bridge --version`
-2. Update antigravity config
-3. Verify Claude Desktop connects
+| Version | Status | Notes |
+|---------|--------|-------|
+| 2.0.0 | Published | Initial release |
+| 2.0.1 | Published | Fixed bin naming |
+| 2.0.2 | Published | Removed invalid bins |
+| 2.0.3 | Published | Attempted bin fix |
+| 2.0.4 | Published | Fixed main entry |
+| 2.0.5 | Published | Added exports, updated README |
+
+### Next Steps for Antigravity
+
+1. Install package: `npm install -g @amar_528/mcp-bridge`
+2. Test CLI: `node $(npm root -g)/@amar_528/mcp-bridge/dist/cli.js --version`
+3. Update claude_desktop_config.json with working config
+4. Verify MCP tools appear in Claude Desktop
+
+### Infrastructure Notes
+
+The bridge connects:
+- **Claude Desktop/Cursor** (MCP clients)
+- **HIVE-MIND API** (Hetzner Cloud, Falkenstein, Germany)
+- **PostgreSQL + Qdrant** (Memory storage + vectors)
+
+All data remains in EU, satisfying GDPR requirements.

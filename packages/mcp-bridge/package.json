@@ -1,23 +1,24 @@
 {
   "name": "@amar_528/mcp-bridge",
-  "version": "2.0.2",
+  "version": "2.0.7",
   "description": "Sovereign EU MCP Bridge - Connect Claude Desktop/Cursor to HIVE-MIND hosted MCP service with GDPR-compliant data residency",
   "type": "module",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "main": "dist/cli.js",
+  "types": "dist/cli.d.ts",
   "bin": {
-    "hivemind-mcp": "./dist/cli.js"
+    "hivemind-mcp": "dist/cli.js",
+    "hivemind-mcp-bridge": "dist/cli.js"
   },
   "files": [
     "dist",
     "README.md",
+    "ANTIGRAVITY_SETUP.md",
     "LICENSE"
   ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node dist/cli.js",
-    "prepublishOnly": "npm run build",
     "clean": "rm -rf dist"
   },
   "keywords": [
@@ -52,8 +53,5 @@
   },
   "engines": {
     "node": ">=18"
-  },
-  "peerDependencies": {
-    "node-fetch": "^3.3.2"
   }
 }

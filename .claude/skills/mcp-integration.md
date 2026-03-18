@@ -113,7 +113,7 @@ Debug MCP connection issues.
 
 **Issue**: Claude Desktop shows "Connection failed"
 **Fix**:
-1. Check server is running: `curl https://hivemind.davinciai.eu/health`
+1. Check server is running: `curl https://hivemind.davinciai.eu:8050/health`
 2. Check token is valid (24h expiry)
 3. Check userId matches
 4. Check Claude Desktop config:
@@ -121,10 +121,10 @@ Debug MCP connection issues.
 {
   "mcpServers": {
     "hivemind": {
-      "command": "npx",
-      "args": ["-y", "@hivemind/mcp-bridge"],
+      "command": "node",
+      "args": ["/path/to/node_modules/@amar_528/mcp-bridge/dist/cli.js"],
       "env": {
-        "HIVEMIND_API_URL": "https://hivemind.davinciai.eu",
+        "HIVEMIND_API_URL": "https://hivemind.davinciai.eu:8050",
         "HIVEMIND_API_KEY": "hm_master_key_99228811",
         "HIVEMIND_USER_ID": "00000000-0000-4000-8000-000000000001"
       }

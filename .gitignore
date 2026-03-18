@@ -38,6 +38,9 @@ Thumbs.db
 .vscode/
 .idea/
 
+# MCP configuration (contains API keys)
+.mcp.json
+
 # Build
 node_modules/
 dist/

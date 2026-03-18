@@ -226,13 +226,25 @@ async function runHostedBridge(config: BridgeConfig) {
     }
 
     // Start stdio bridge - handle incoming MCP messages
-    process.stdin.on('data', async (data) => {
-      try {
-        const message = JSON.parse(data.toString());
-        await handleMessage(message, config, serverConfig);
-      } catch (error) {
-        log(config, `Error parsing message: ${(error as Error).message}`);
-        sendError(null, -32700, 'Parse error: Invalid JSON');
+    // Use readline-style buffering for newline-delimited JSON
+    let buffer = '';
+    process.stdin.on('data', (chunk) => {
+      buffer += chunk.toString();
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || ''; // Keep last incomplete line in buffer
+
+      for (const line of lines) {
+        if (line.trim()) {
+          try {
+            const message = JSON.parse(line);
+            handleMessage(message, config, serverConfig).catch((err) => {
+              log(config, `Handler error: ${(err as Error).message}`);
+            });
+          } catch (error) {
+            log(config, `Error parsing message: ${(error as Error).message}`);
+            sendError(null, -32700, 'Parse error: Invalid JSON');
+          }
+        }
       }
     });
 
@@ -368,4 +380,8 @@ async function main() {
   }
 }
 
+// Run if called directly
 main().catch(console.error);
+
+// Export for module usage
+export { runHostedBridge, runLocalBridge, loadConfig, BridgeConfig };

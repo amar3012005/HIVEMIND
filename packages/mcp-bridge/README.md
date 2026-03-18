@@ -1,24 +1,12 @@
-# @hivemind/mcp-bridge
+# @amar_528/mcp-bridge
 
 **Sovereign EU MCP Bridge for Claude Desktop and Cursor**
 
-Connect your AI IDE to GDPR-compliant, sovereign European memory storage with a single command.
-
-```bash
-npx @hivemind/mcp-bridge
-```
-
-## Features
-
-- **Sovereign EU Storage**: All data resides in Hetzner Cloud (Falkenstein, Germany)
-- **GDPR Compliant**: No data residency concerns for European enterprises
-- **Semantic Search**: Powered by Qdrant vector database with automatic embedding
-- **Triple-Operator System**: Memories support Updates/Extends/Derives relationships
-- **Zero Configuration**: Works with `npx` - no installation required
+Connect your AI IDE to GDPR-compliant, sovereign European memory storage.
 
 ## Quick Start
 
-### Claude Desktop Configuration
+### Option 1: Claude Desktop (Recommended)
 
 Add this to your `claude_desktop_config.json`:
 
@@ -26,10 +14,10 @@ Add this to your `claude_desktop_config.json`:
 {
   "mcpServers": {
     "hivemind": {
-      "command": "npx",
-      "args": ["-y", "@hivemind/mcp-bridge"],
+      "command": "node",
+      "args": ["/path/to/node_modules/@amar_528/mcp-bridge/dist/cli.js"],
       "env": {
-        "HIVEMIND_API_URL": "https://hivemind.davinciai.eu",
+        "HIVEMIND_API_URL": "https://hivemind.davinciai.eu:8050",
         "HIVEMIND_API_KEY": "hm_master_key_99228811",
         "HIVEMIND_USER_ID": "00000000-0000-4000-8000-000000000001"
       }
@@ -38,18 +26,22 @@ Add this to your `claude_desktop_config.json`:
 }
 ```
 
-### Cursor IDE Configuration
+### Option 2: Global Installation
 
-Add this to your `.cursor/settings.json`:
+```bash
+npm install -g @amar_528/mcp-bridge
+```
+
+Then use the full path in your config:
 
 ```json
 {
   "mcpServers": {
     "hivemind": {
-      "command": "npx",
-      "args": ["-y", "@hivemind/mcp-bridge"],
+      "command": "node",
+      "args": ["/usr/local/lib/node_modules/@amar_528/mcp-bridge/dist/cli.js"],
       "env": {
-        "HIVEMIND_API_URL": "https://hivemind.davinciai.eu",
+        "HIVEMIND_API_URL": "https://hivemind.davinciai.eu:8050",
         "HIVEMIND_API_KEY": "hm_master_key_99228811"
       }
     }

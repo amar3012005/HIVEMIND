@@ -1,0 +1,27 @@
+{
+  "description": "Feature development team - implements new HIVEMIND features end-to-end",
+  "members": [
+    {
+      "name": "feature-lead",
+      "agentType": "general-purpose",
+      "model": "claude-sonnet-4-6"
+    },
+    {
+      "name": "explorer",
+      "agentType": "Explore",
+      "model": "claude-haiku-4-5"
+    },
+    {
+      "name": "tester",
+      "agentType": "general-purpose",
+      "model": "claude-sonnet-4-6"
+    }
+  ],
+  "workflow": {
+    "1_explore": "explorer searches codebase for related code and patterns",
+    "2_plan": "feature-lead creates implementation plan",
+    "3_implement": "feature-lead writes code changes",
+    "4_test": "tester runs tests and validates changes",
+    "5_document": "feature-lead updates documentation"
+  }
+}

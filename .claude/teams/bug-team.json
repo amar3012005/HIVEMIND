@@ -1,0 +1,21 @@
+{
+  "description": "Bug fix team - investigates and resolves bugs quickly",
+  "members": [
+    {
+      "name": "debugger",
+      "agentType": "general-purpose",
+      "model": "claude-sonnet-4-6"
+    },
+    {
+      "name": "explorer",
+      "agentType": "Explore",
+      "model": "claude-haiku-4-5"
+    }
+  ],
+  "workflow": {
+    "1_reproduce": "debugger reproduces and isolates the bug",
+    "2_investigate": "explorer finds related code and history",
+    "3_fix": "debugger implements and tests the fix",
+    "4_verify": "debugger runs full test suite"
+  }
+}

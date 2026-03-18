@@ -1,0 +1,21 @@
+{
+  "description": "Release preparation team - handles deployments and releases",
+  "members": [
+    {
+      "name": "release-manager",
+      "agentType": "general-purpose",
+      "model": "claude-sonnet-4-6"
+    },
+    {
+      "name": "deployment-checker",
+      "agentType": "general-purpose",
+      "model": "claude-sonnet-4-6"
+    }
+  ],
+  "workflow": {
+    "1_prepare": "release-manager reviews changes and updates version",
+    "2_test": "release-manager runs full test suite",
+    "3_deploy": "deployment-checker verifies production health",
+    "4_monitor": "deployment-checker monitors post-deploy metrics"
+  }
+}

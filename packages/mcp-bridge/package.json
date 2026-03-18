@@ -1,23 +1,50 @@
 {
-  "name": "@hivemind/mcp-bridge",
-  "version": "1.0.0",
-  "description": "HIVE-MIND MCP Bridge for connecting Claude Desktop/Cursor to hosted MCP service",
+  "name": "@amar_528/mcp-bridge",
+  "version": "2.0.2",
+  "description": "Sovereign EU MCP Bridge - Connect Claude Desktop/Cursor to HIVE-MIND hosted MCP service with GDPR-compliant data residency",
   "type": "module",
   "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "bin": {
-    "hivemind-mcp-bridge": "./dist/cli.js"
+    "hivemind-mcp": "./dist/cli.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "start": "node dist/cli.js"
+    "start": "node dist/cli.js",
+    "prepublishOnly": "npm run build",
+    "clean": "rm -rf dist"
   },
-  "keywords": ["hivemind", "mcp", "ai", "memory", "claude", "cursor"],
+  "keywords": [
+    "hivemind",
+    "mcp",
+    "model-context-protocol",
+    "claude",
+    "cursor",
+    "ai",
+    "memory",
+    "gdpr",
+    "sovereign",
+    "europe"
+  ],
   "author": "HIVE-MIND Team",
   "license": "MIT",
+  "homepage": "https://github.com/hivemind/mcp-bridge#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hivemind/mcp-bridge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hivemind/mcp-bridge/issues"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "node-fetch": "^3.3.2"
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
@@ -25,5 +52,8 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "peerDependencies": {
+    "node-fetch": "^3.3.2"
   }
 }

@@ -532,3 +532,55 @@ services:
       hivemind-network:
         ipv4_address: 172.28.0.41
     logging: *default-logging
+
+  # ==========================================
+  # ANTIGRAVITY MCP BRIDGE
+  # Sovereign EU MCP server for antigravity project
+  # Connects to @hivemind/mcp-bridge via npx
+  # ==========================================
+  antigravity-mcp:
+    image: hivemind/mcp-bridge:${VERSION:-latest}
+    container_name: antigravity-mcp
+    restart: unless-stopped
+    <<: *default-security-context
+    build:
+      context: ../packages/mcp-bridge
+      dockerfile: Dockerfile
+      args:
+        - NODE_ENV=production
+    environment:
+      - NODE_ENV=production
+      - HIVEMIND_API_URL=${HIVEMIND_API_URL:-https://hivemind.davinciai.eu}
+      - HIVEMIND_API_KEY=${HIVEMIND_API_KEY:?HIVEMIND API key required}
+      - HIVEMIND_USER_ID=${ANTIGRAVITY_USER_ID:-00000000-0000-4000-8000-000000000001}
+      - PROJECT_NAME=antigravity
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.antigravity-mcp.rule=Host(`mcp.${DOMAIN_NAME:-hivemind.io}`) && PathPrefix(`/antigravity`)"
+      - "traefik.http.routers.antigravity-mcp.entrypoints=websecure"
+      - "traefik.http.routers.antigravity-mcp.tls=true"
+      - "traefik.http.routers.antigravity-mcp.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.antigravity-mcp.middlewares=security-headers@file"
+      - "traefik.http.services.antigravity-mcp.loadbalancer.server.port=3001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      hivemind-network:
+        ipv4_address: 172.28.0.50
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3

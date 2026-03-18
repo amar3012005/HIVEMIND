@@ -1,6 +1,8 @@
 {
   "env": {
-    "CLAUDE_PROJECT_JOURNAL_ENABLED": "true"
+    "CLAUDE_PROJECT_JOURNAL_ENABLED": "true",
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+    "CLAUDE_TEAM_NAME": "hivemind"
   },
   "hooks": {
     "PostToolUse": [
@@ -13,6 +15,31 @@
           }
         ]
       }
+    ],
+    "TeammateIdle": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/HIVEMIND/.claude/hooks/teammate-idle.sh"
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/HIVEMIND/.claude/hooks/task-completed.sh"
+          }
+        ]
+      }
     ]
+  },
+  "permissions": {
+    "defaultMode": "default"
   }
 }

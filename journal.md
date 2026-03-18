@@ -168,6 +168,33 @@ Zod schemas support graph relationships matching Supermemory architecture:
 
 ---
 
+## 2026-03-19 08:00 UTC - Hosted MCP + Bridge Stability Run
+
+### Production Readiness: Hosted `/api/mcp/servers/:userId/rpc` now real
+
+- Implemented MCP SDK stdio bridge (`packages/mcp-bridge/src/cli.ts`) so local clients fetch the descriptor, use `connection.endpoints.jsonrpc`, and fall back to HTTP only when the hosted RPC returns `404`. Auth headers now send `X-API-Key` every time.
+- Rebuilt hosted service helpers (`core/src/mcp/hosted-service.js`) so `tools/call` proxies to the real memory REST APIs, returns MCP-compliant responses, and can stream `resources`/`prompts`. Connection tokens are tracked with `getConnectionContext()`.
+- Updated the HTTP server (`core/src/server.js`) to expose `POST /api/mcp/servers/:userId/rpc`, SSE keepalive, and a proper `PUT /api/memories/:id` path so the advertised tool set matches the actual REST capabilities.
+
+### Smoke Tests (local dev against `http://localhost:3111`)
+
+- `GET /api/mcp/servers/{userId}` → descriptor with `jsonrpc` URL + tools list.
+- `POST /api/mcp/servers/{userId}/rpc?token=…` (`initialize`, `tools/list`) → 200 JSON-RPC responses with expected payloads.
+- `tools/call` (`hivemind_list_memories`) → returns actual Prisma-backed data.
+- Invalid/expired token → `401` with MCP error object.
+- SSE endpoint returns `ping` events with valid `token` header.
+
+### Bridge Compatibility
+
+- Local clients (Claude/Antigravity/Codex) can now reuse the hosted endpoint; Antigravity still uses `@amar_528/mcp-bridge` for stdio when remote RPC is unavailable.
+- Next steps: deploy these backend changes to Hetzner, confirm `rpc` route behaves in production, then publish the updated bridge so the NPM package matches the hosted contract.
+
+### Files Modified
+
+- `/opt/HIVEMIND/core/src/server.js` – new hosted RPC/SSE handling plus memory `PUT`.
+- `/opt/HIVEMIND/core/src/mcp/hosted-service.js` – richer tool responder, token tracking, and HTTP proxy helper.
+- `/opt/HIVEMIND/packages/mcp-bridge/src/cli.ts` – MCP SDK stdio bridge with descriptor-driven RPC.
+
 ## 2026-03-17 20:00 UTC - Memory Save Response Issue FIXED
 
 ### Problem

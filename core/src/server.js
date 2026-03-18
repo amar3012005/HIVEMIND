@@ -63,7 +63,8 @@ const {
 const {
   validateCreateMemory,
   validateSearchMemory,
-  validateMemoryQueryParams
+  validateMemoryQueryParams,
+  updateMemorySchema
 } = await import('./api/validators/memory.validators.js');
 
 // Three-Tier Retrieval imports
@@ -71,10 +72,16 @@ const { ThreeTierRetrieval } = await import('./external/search/three-tier-retrie
 
 // Hosted MCP Service imports
 const {
+  createHostedApiClient,
   generateHostedServer,
+  getConnectionContext,
   validateConnectionToken,
   handleInitialize,
   handleToolsList,
+  handleResourcesList,
+  handlePromptsList,
+  handleReadResource,
+  handleGetPrompt,
   handleToolCall
 } = await import('./mcp/hosted-service.js');
 
@@ -321,8 +328,8 @@ function authenticateApiKey(req) {
 const server = http.createServer(async (req, res) => {
   // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, X-Admin-Secret');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, X-Admin-Secret, X-User-Id, X-Org-Id');
 
   if (req.method === 'OPTIONS') {
     res.writeHead(200);
@@ -416,6 +423,108 @@ const server = http.createServer(async (req, res) => {
   if (pathname.startsWith('/api/')) {
     try {
       const body = req.method !== 'GET' ? await parseBody(req) : {};
+
+      const hostedRpcMatch = pathname.match(/^\/api\/mcp\/servers\/([^\/]+)\/rpc$/);
+      if (hostedRpcMatch && req.method === 'POST') {
+        const pathUserId = hostedRpcMatch[1];
+        const token = url.searchParams.get('token') || extractApiKey(req);
+
+        if (!token || !validateConnectionToken(token, pathUserId)) {
+          return jsonResponse(res, {
+            jsonrpc: '2.0',
+            id: body?.id ?? null,
+            error: { code: -32001, message: 'Invalid or expired connection token' }
+          }, 401);
+        }
+
+        const connection = getConnectionContext(token, pathUserId);
+        const connectionOrgId = connection?.orgId || DEFAULT_ORG;
+        const apiClient = createHostedApiClient({
+          baseUrl: process.env.HIVEMIND_BASE_URL || `http://${req.headers.host}`,
+          apiKey: MASTER_API_KEY || '',
+          userId: pathUserId,
+          orgId: connectionOrgId
+        });
+
+        if (!body?.method) {
+          return jsonResponse(res, {
+            jsonrpc: '2.0',
+            id: body?.id ?? null,
+            error: { code: -32600, message: 'Invalid request: method is required' }
+          }, 400);
+        }
+
+        if (body.method === 'notifications/initialized' || body.method === 'initialized') {
+          res.writeHead(202);
+          res.end();
+          return;
+        }
+
+        let result;
+        switch (body.method) {
+          case 'initialize':
+            result = handleInitialize(body.params || {}, pathUserId);
+            break;
+          case 'ping':
+            result = {};
+            break;
+          case 'tools/list':
+            result = handleToolsList(pathUserId, connectionOrgId);
+            break;
+          case 'tools/call':
+            result = await handleToolCall(body.params || {}, pathUserId, connectionOrgId, apiClient);
+            break;
+          case 'resources/list':
+            result = handleResourcesList(pathUserId, connectionOrgId);
+            break;
+          case 'resources/read':
+            result = handleReadResource(body.params || {}, pathUserId, connectionOrgId);
+            break;
+          case 'prompts/list':
+            result = handlePromptsList(pathUserId, connectionOrgId);
+            break;
+          case 'prompts/get':
+            result = handleGetPrompt(body.params || {}, pathUserId, connectionOrgId);
+            break;
+          default:
+            return jsonResponse(res, {
+              jsonrpc: '2.0',
+              id: body.id ?? null,
+              error: { code: -32601, message: `Method not found: ${body.method}` }
+            }, 404);
+        }
+
+        return jsonResponse(res, {
+          jsonrpc: '2.0',
+          id: body.id ?? null,
+          result
+        });
+      }
+
+      const hostedSseMatch = pathname.match(/^\/api\/mcp\/servers\/([^\/]+)\/sse$/);
+      if (hostedSseMatch && req.method === 'GET') {
+        const pathUserId = hostedSseMatch[1];
+        const token = url.searchParams.get('token') || extractApiKey(req);
+
+        if (!token || !validateConnectionToken(token, pathUserId)) {
+          return jsonResponse(res, { error: 'Unauthorized' }, 401);
+        }
+
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+        res.write(`event: endpoint\ndata: ${JSON.stringify({ uri: `/api/mcp/servers/${pathUserId}/rpc?token=${token}` })}\n\n`);
+        res.write(`event: ping\ndata: ${JSON.stringify({ ok: true })}\n\n`);
+
+        const keepAlive = setInterval(() => {
+          res.write(`event: ping\ndata: ${JSON.stringify({ ok: true, ts: new Date().toISOString() })}\n\n`);
+        }, 30000);
+
+        req.on('close', () => {
+          clearInterval(keepAlive);
+        });
+        return;
+      }
 
       // API key management endpoints
       if (pathname === '/api/keys/generate' && req.method === 'POST') {
@@ -519,6 +628,44 @@ const server = http.createServer(async (req, res) => {
           try {
             await persistentMemoryStore.deleteMemory(memoryId);
             return jsonResponse(res, { success: true });
+          } catch (error) {
+            return jsonResponse(res, { error: error.message }, 500);
+          }
+        }
+        if (req.method === 'PUT') {
+          if (!ensurePersistedMemoryOrFail(res, '/api/memories/:id')) {
+            return;
+          }
+          const memoryId = pathname.split('/api/memories/')[1];
+          const scopedBody = {
+            ...body,
+            user_id: userId,
+            org_id: orgId
+          };
+          const validation = updateMemorySchema.safeParse(scopedBody);
+          if (!validation.success) {
+            return jsonResponse(res, {
+              error: 'Validation failed',
+              details: validation.error.flatten()
+            }, 400);
+          }
+          try {
+            const existing = await persistentMemoryStore.getMemory(memoryId);
+            if (!existing || existing.deleted_at) {
+              return jsonResponse(res, { error: 'Not found' }, 404);
+            }
+            if (existing.user_id !== userId && !principal.scopes?.includes('admin')) {
+              return jsonResponse(res, { error: 'Not found' }, 404);
+            }
+            const updated = await persistentMemoryStore.updateMemory(memoryId, {
+              ...validation.data,
+              updated_at: new Date().toISOString(),
+              source_metadata: {
+                source_platform: existing.source_metadata?.source_platform || 'mcp',
+                source_id: existing.source_metadata?.source_id || null
+              }
+            });
+            return jsonResponse(res, { success: true, memory: updated });
           } catch (error) {
             return jsonResponse(res, { error: error.message }, 500);
           }

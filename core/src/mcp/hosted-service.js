@@ -37,6 +37,38 @@ const CONFIG = {
 // In-memory connection tracking (production: use Redis)
 const userConnections = new Map();
 
+function formatToolContent(data) {
+  return {
+    content: [{
+      type: 'text',
+      text: typeof data === 'string' ? data : JSON.stringify(data, null, 2)
+    }]
+  };
+}
+
+function formatToolError(name, error) {
+  return {
+    isError: true,
+    content: [{
+      type: 'text',
+      text: `Error executing ${name}: ${error.message}`
+    }]
+  };
+}
+
+function relationshipTypeToGraphTypes(relationship) {
+  switch (relationship) {
+    case 'update':
+      return ['Updates'];
+    case 'extend':
+      return ['Extends'];
+    case 'derive':
+      return ['Derives'];
+    default:
+      return ['Updates', 'Extends', 'Derives'];
+  }
+}
+
 // ==========================================
 // Hosted MCP Server Generator
 // ==========================================
@@ -590,6 +622,8 @@ function trackConnection(userId, serverConfig) {
   validConnections.push({
     serverId: serverConfig.connection.serverId,
     token: serverConfig.connection.token,
+    userId: serverConfig.connection.userId,
+    orgId: serverConfig.connection.orgId,
     createdAt: new Date().toISOString(),
     expiresAt: serverConfig.connection.expiresAt,
     revoked: false,
@@ -608,6 +642,15 @@ export function revokeAllConnections(userId) {
   if (connections) {
     connections.forEach(c => c.revoked = true);
   }
+}
+
+export function getConnectionContext(token, userId) {
+  const connections = userConnections.get(userId) || [];
+  return connections.find(connection =>
+    connection.token === token
+    && !connection.revoked
+    && new Date(connection.expiresAt) >= new Date()
+  ) || null;
 }
 
 // ==========================================
@@ -647,6 +690,104 @@ export function handleToolsList(userId, orgId) {
   };
 }
 
+export function handleResourcesList(userId, orgId) {
+  return {
+    resources: generateResourcesManifest(userId, orgId)
+  };
+}
+
+export function handlePromptsList(userId, orgId) {
+  return {
+    prompts: generatePromptsManifest(userId, orgId)
+  };
+}
+
+export function handleReadResource(params, userId, orgId) {
+  return {
+    contents: [{
+      uri: params?.uri || 'hivemind://unsupported',
+      mimeType: 'application/json',
+      text: JSON.stringify({
+        message: 'Direct resource reads are not implemented yet.',
+        user_id: userId,
+        org_id: orgId
+      }, null, 2)
+    }]
+  };
+}
+
+export function handleGetPrompt(params, userId, orgId) {
+  return {
+    description: `Prompt '${params?.name || 'unknown'}' from HIVE-MIND`,
+    messages: [{
+      role: 'assistant',
+      content: {
+        type: 'text',
+        text: JSON.stringify({
+          message: 'Direct prompt generation is not implemented yet.',
+          user_id: userId,
+          org_id: orgId,
+          args: params?.arguments || {}
+        }, null, 2)
+      }
+    }]
+  };
+}
+
+export function createHostedApiClient({ baseUrl, apiKey, userId, orgId }) {
+  const normalizedBaseUrl = baseUrl.replace(/\/+$/, '');
+
+  async function request(method, endpoint, { params, body } = {}) {
+    const url = new URL(`${normalizedBaseUrl}${endpoint}`);
+
+    if (params) {
+      for (const [key, value] of Object.entries(params)) {
+        if (value === undefined || value === null) continue;
+        if (Array.isArray(value)) {
+          if (value.length === 0) continue;
+          url.searchParams.set(key, value.join(','));
+          continue;
+        }
+        url.searchParams.set(key, String(value));
+      }
+    }
+
+    const response = await fetch(url, {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+        'X-API-Key': apiKey,
+        'X-User-Id': userId,
+        'X-Org-Id': orgId
+      },
+      body: body ? JSON.stringify(body) : undefined
+    });
+
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(`${method} ${endpoint} failed with ${response.status}: ${JSON.stringify(payload)}`);
+    }
+
+    return payload;
+  }
+
+  return {
+    get(endpoint, options = {}) {
+      return request('GET', endpoint, options);
+    },
+    post(endpoint, body) {
+      return request('POST', endpoint, { body });
+    },
+    put(endpoint, body) {
+      return request('PUT', endpoint, { body });
+    },
+    delete(endpoint, options = {}) {
+      return request('DELETE', endpoint, options);
+    }
+  };
+}
+
 /**
  * Handle tools/call request
  * @param {Object} params - Tool call parameters
@@ -661,100 +802,99 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
   try {
     switch (name) {
       case 'hivemind_save_memory':
-        return await apiClient.post('/api/integrations/webapp/store', {
+        return formatToolContent(await apiClient.post('/api/memories', {
           title: args.title,
           content: args.content,
-          source_type: args.source_type || 'text',
+          memory_type: args.source_type === 'decision' ? 'decision' : 'fact',
+          source_platform: 'mcp',
           tags: args.tags || [],
-          project: args.project,
-          relationship: args.relationship,
-          related_to: args.related_to,
+          project: args.project || null,
+          metadata: {
+            relationship: args.relationship || null,
+            related_to: args.related_to || null,
+            source_type: args.source_type || 'text'
+          },
           user_id: userId,
           org_id: orgId
-        });
+        }));
 
       case 'hivemind_recall':
-        return await apiClient.post('/api/integrations/webapp/prepare', {
+        if (args.mode === 'panorama') {
+          return formatToolContent(await apiClient.post('/api/search/panorama', {
+            query: args.query,
+            limit: args.limit || 5
+          }));
+        }
+        if (args.mode === 'insight') {
+          return formatToolContent(await apiClient.post('/api/search/insight', {
+            query: args.query,
+            limit: args.limit || 5
+          }));
+        }
+        return formatToolContent(await apiClient.post('/api/search/quick', {
           query: args.query,
-          max_memories: args.limit || 5,
           tags: args.tags,
           project: args.project,
-          source_platforms: args.source_type ? [args.source_type] : [],
-          user_id: userId,
-          org_id: orgId
-        });
+          source_platform: args.source_type,
+          limit: args.limit || 5
+        }));
 
       case 'hivemind_get_memory':
-        return await apiClient.get(`/api/memories/${args.memory_id}`, {
-          headers: { 'X-User-Id': userId, 'X-Org-Id': orgId }
-        });
+        return formatToolContent(await apiClient.get(`/api/memories/${args.memory_id}`));
 
       case 'hivemind_list_memories':
-        return await apiClient.get('/api/memories', {
+        return formatToolContent(await apiClient.get('/api/memories', {
           params: {
-            user_id: userId,
-            org_id: orgId,
             project: args.project,
-            tags: args.tags?.join(','),
-            source_type: args.source_type,
+            tags: args.tags,
+            memory_type: args.source_type === 'decision' ? 'decision' : undefined,
             limit: args.limit || 10,
-            page: args.page || 1
+            offset: Math.max(((args.page || 1) - 1) * (args.limit || 10), 0)
           }
-        });
+        }));
 
       case 'hivemind_update_memory':
-        return await apiClient.put(`/api/memories/${args.memory_id}`, {
+        return formatToolContent(await apiClient.put(`/api/memories/${args.memory_id}`, {
           title: args.title,
           content: args.content,
           tags: args.tags,
           user_id: userId,
           org_id: orgId
-        });
+        }));
 
       case 'hivemind_delete_memory':
-        return await apiClient.delete(`/api/memories/${args.memory_id}`, {
-          data: { reason: args.reason, user_id: userId, org_id: orgId }
-        });
+        return formatToolContent(await apiClient.delete(`/api/memories/${args.memory_id}`));
 
       case 'hivemind_save_conversation':
-        return await apiClient.post('/api/integrations/webapp/store', {
+        return formatToolContent(await apiClient.post('/api/memories', {
           title: args.title,
           content: JSON.stringify(args.messages),
-          source_type: 'conversation',
+          memory_type: 'event',
+          source_platform: args.platform || 'mcp',
           tags: [...(args.tags || []), 'conversation', args.platform || 'unknown'],
-          project: args.project,
+          project: args.project || null,
           user_id: userId,
           org_id: orgId
-        });
+        }));
 
       case 'hivemind_traverse_graph':
-        return await apiClient.post('/api/memories/traverse', {
-          memory_id: args.memory_id,
-          relationship: args.relationship || 'all',
+        return formatToolContent(await apiClient.post('/api/memories/traverse', {
+          start_id: args.memory_id,
           depth: args.depth || 2,
-          user_id: userId,
-          org_id: orgId
-        });
+          relationship_types: relationshipTypeToGraphTypes(args.relationship || 'all')
+        }));
 
       case 'hivemind_query_with_ai':
-        return await apiClient.post('/api/query', {
-          question: args.question,
-          context_limit: args.context_limit || 5,
-          user_id: userId,
-          org_id: orgId
-        });
+        return formatToolContent(await apiClient.post('/api/search/insight', {
+          query: args.question,
+          limit: args.context_limit || 5
+        }));
 
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
   } catch (error) {
-    return {
-      isError: true,
-      content: [{
-        type: 'text',
-        text: `Error executing ${name}: ${error.message}`
-      }]
-    };
+    return formatToolError(name, error);
   }
 }
 
@@ -903,11 +1043,17 @@ export function setupHostedMcpRoutes(app, authMiddleware) {
 // ==========================================
 
 export default {
+  createHostedApiClient,
   generateHostedServer,
+  getConnectionContext,
   validateConnectionToken,
   revokeAllConnections,
   handleInitialize,
   handleToolsList,
+  handleResourcesList,
+  handlePromptsList,
+  handleReadResource,
+  handleGetPrompt,
   handleToolCall,
   setupHostedMcpRoutes
 };

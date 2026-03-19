@@ -51,8 +51,8 @@ ENV NODE_ENV=${NODE_ENV} \
     LOG_FORMAT=json
 
 # Create non-root user
-RUN addgroup -g 1001 -S nodejs && \
-    adduser -S nodejs -u 1001 -G nodejs
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser --system --uid 1001 --ingroup nodejs nodejs
 
 RUN mkdir -p /app/logs /app/data && \
     chown -R nodejs:nodejs /app

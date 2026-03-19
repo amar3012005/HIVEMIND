@@ -1051,3 +1051,60 @@ Implemented the first dedicated control-plane path for production onboarding and
 
 - This is the backend/control-plane foundation only; it intentionally does not include the customer-facing web UI yet.
 - Production compose validation is still partially limited by the repo’s current root `.env` expectations, but the service/container wiring itself is now present in code.
+
+## 2026-03-19 13:20 UTC - Dockerized Real-User Validation Completed
+
+Ran the new control-plane and core services as real Docker containers and validated the first-user journey end to end.
+
+### Containers
+
+- `hm-control` on `localhost:3010`
+- `hm-core` on `localhost:3001`
+- `hm-postgres`
+- `hm-redis`
+- `hm-qdrant`
+- `hm-zitadel` mock OIDC provider for login callback testing
+
+### What Was Verified
+
+- `GET /health` succeeded for both control plane and core.
+- `GET /auth/login` returned a valid OIDC redirect with generated `state`.
+- `GET /auth/callback` issued a real `hm_cp_session` cookie.
+- `GET /v1/bootstrap` returned the signed-in user, org state, and core connectivity.
+- `POST /v1/api-keys` created a Prisma-backed API key and returned live Claude, Antigravity, VS Code, and remote MCP descriptors.
+- `POST /api/memories` with the issued API key created a memory successfully inside the Dockerized core.
+- `GET /api/memories?project=docker-e2e` returned the created memory.
+- `POST /api/search/quick` recalled the newly created `Groq API integration note`.
+- `POST /api/mcp/rpc` `initialize` succeeded.
+- `POST /api/mcp/rpc` `tools/list` succeeded and returned the hosted HIVEMIND tools.
+
+### Fix Applied During Validation
+
+- The Dockerized Postgres database initially lacked the custom `acquire_memory_user_lock(UUID)` function because `prisma db push` does not install raw SQL migration functions.
+- Applied `core/prisma/migrations/20260312100000_memory_engine_correctness/migration.sql` into the running Docker Postgres container, after which memory creation succeeded.
+
+### Notes
+
+- The Docker proof currently uses the env-driven internal base URL path and does not hardcode production domains.
+- Quick search in this local container run was keyword-origin because the local Docker test stack did not include the remote embedding service configuration; the memory write, recall, and MCP provisioning flows still completed successfully.
+
+## 2026-03-19 13:40 UTC - Backend Record Consolidated
+
+Created a single clean backend record for the new onboarding/control-plane architecture.
+
+### Added
+
+- `docs/backend-control-plane-record.md`
+
+### Covers
+
+- what was added in the backend
+- how the control-plane connects to the main HIVE-MIND core server
+- env-driven routing through `HIVEMIND_CORE_API_BASE_URL`
+- shared responsibility across Postgres, Redis, and Qdrant
+- the intended user onboarding flow
+- the exact frontend expectations and boundaries
+
+### Purpose
+
+- This document is the canonical handoff/reference point for continuing frontend product work without re-deriving the backend architecture from source files.

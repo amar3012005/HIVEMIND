@@ -52,7 +52,9 @@ const { getPrismaClient, ensureTenantContext } = await import('./db/prisma.js');
 const { MemoryGraphEngine } = await import('./memory/graph-engine.js');
 const { PrismaGraphStore } = await import('./memory/prisma-graph-store.js');
 const { queryPersistedMemories, recallPersistedMemories } = await import('./memory/persisted-retrieval.js');
+const { authenticatePersistedApiKey } = await import('./auth/api-keys.js');
 const { getQdrantClient } = await import('./vector/qdrant-client.js');
+const { getQdrantCollections } = await import('./vector/collections.js');
 const { MCPIngestionService } = await import('./connectors/mcp/service.js');
 const {
   normalizeWebappPlatform,
@@ -75,7 +77,9 @@ const {
   createHostedApiClient,
   generateHostedServer,
   getConnectionContext,
+  getHostedServerByToken,
   validateConnectionToken,
+  revokeAllConnections,
   handleInitialize,
   handleToolsList,
   handleResourcesList,
@@ -110,6 +114,7 @@ const TAMPERMONKEY_USER_SCRIPT_CANDIDATES = [
 ];
 const DATA_DIR = path.join(PROJECT_ROOT, 'data');
 const API_KEYS_FILE_PATH = path.join(DATA_DIR, 'api-keys.json');
+const EVALUATION_REPORTS_DIR = path.join(DATA_DIR, 'evaluation-reports');
 
 // Initialize memory engine with SQLite
 const engine = new MemoryEngine('./hivemind.db');
@@ -117,6 +122,7 @@ const prisma = getPrismaClient();
 const persistentMemoryStore = prisma ? new PrismaGraphStore(prisma) : null;
 const persistentMemoryEngine = persistentMemoryStore ? new MemoryGraphEngine({ store: persistentMemoryStore }) : null;
 const qdrantClient = getQdrantClient();
+const qdrantCollections = getQdrantCollections();
 const groqClient = getGroqClient();
 
 // Initialize Three-Tier Retrieval
@@ -148,6 +154,8 @@ const INGESTION_MODULE_CANDIDATES = [
   path.join(REPO_ROOT, 'src', 'ingestion'),
   path.join(PROJECT_ROOT, 'ingestion')
 ];
+const CONTEXT_CACHE_TTL_MS = Number(process.env.HIVEMIND_CONTEXT_CACHE_TTL_MS || 15000);
+const aggregateCache = new Map();
 
 function loadIngestionPipeline() {
   for (const candidate of INGESTION_MODULE_CANDIDATES) {
@@ -201,6 +209,92 @@ async function getIngestionJobStatus(jobId) {
   };
 }
 
+async function listIngestionJobs({ limit = 20, status = null } = {}) {
+  if (!ingestionPipeline) {
+    return [];
+  }
+
+  if (ingestionPipeline.mode === 'in-memory') {
+    const jobs = Array.from(ingestionPipeline.queueSystem.queue.jobs.values()).map(job => {
+      const dlqEntry = ingestionPipeline.queueSystem.queue.dlq.find(entry => entry.id === job.id);
+      return {
+        jobId: String(job.id),
+        stage: job.progress?.stage || job.data?.stage || 'Queued',
+        status: dlqEntry ? 'failed' : (job.result?.status || 'queued'),
+        attemptsMade: job.attemptsMade || 0,
+        payload: job.data,
+        result: job.result || null,
+        failedReason: dlqEntry?.error || null,
+        enqueuedAt: job.data?.enqueued_at || null
+      };
+    });
+
+    const filtered = status
+      ? jobs.filter(job => `${job.status}`.toLowerCase() === `${status}`.toLowerCase())
+      : jobs;
+
+    return filtered
+      .sort((left, right) => new Date(right.enqueuedAt || 0) - new Date(left.enqueuedAt || 0))
+      .slice(0, limit);
+  }
+
+  const states = status ? [status] : ['active', 'waiting', 'completed', 'failed', 'delayed', 'paused'];
+  const jobs = await ingestionPipeline.queueSystem.queue.getJobs(states, 0, Math.max(limit - 1, 0), true);
+
+  return jobs.map(job => ({
+    jobId: String(job.id),
+    stage: job.progress?.stage || job.data?.stage || 'Queued',
+    status: job.finishedOn ? 'completed' : job.failedReason ? 'failed' : job.processedOn ? 'active' : 'waiting',
+    attemptsMade: job.attemptsMade || 0,
+    payload: job.data,
+    result: job.returnvalue || null,
+    failedReason: job.failedReason || null,
+    enqueuedAt: job.data?.enqueued_at || null
+  }));
+}
+
+async function retryIngestionJob(jobId) {
+  if (!ingestionPipeline || !jobId) {
+    return null;
+  }
+
+  if (ingestionPipeline.mode === 'in-memory') {
+    const failedJob = ingestionPipeline.queueSystem.queue.dlq.find(entry => entry.id === jobId);
+    if (!failedJob?.data && !failedJob?.payload) {
+      return null;
+    }
+
+    const payload = failedJob.payload || failedJob.data;
+    return ingestionPipeline.ingest({
+      ...payload,
+      request_id: payload.request_id || crypto.randomUUID(),
+      idempotency_key: undefined,
+      job_id: undefined
+    });
+  }
+
+  const job = await ingestionPipeline.queueSystem.queue.getJob(jobId);
+  if (job) {
+    await job.retry();
+    return {
+      jobId: String(job.id),
+      stage: job.progress?.stage || job.data?.stage || 'Queued'
+    };
+  }
+
+  const dlqJob = await ingestionPipeline.queueSystem.dlq.getJob(jobId);
+  if (!dlqJob?.data?.payload) {
+    return null;
+  }
+
+  return ingestionPipeline.ingest({
+    ...dlqJob.data.payload,
+    request_id: dlqJob.data.payload.request_id || crypto.randomUUID(),
+    idempotency_key: undefined,
+    job_id: undefined
+  });
+}
+
 function findExistingFile(candidates) {
   for (const candidate of candidates) {
     if (fs.existsSync(candidate)) {
@@ -219,6 +313,194 @@ function ensurePersistedMemoryOrFail(res, endpoint) {
     return false;
   }
   return true;
+}
+
+function countTopValues(values = [], limit = 5) {
+  const counts = new Map();
+  for (const value of values) {
+    const key = `${value || ''}`.trim();
+    if (!key) continue;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+
+  return Array.from(counts.entries())
+    .sort((left, right) => {
+      if (right[1] !== left[1]) return right[1] - left[1];
+      return left[0].localeCompare(right[0]);
+    })
+    .slice(0, limit)
+    .map(([value, count]) => ({ value, count }));
+}
+
+function buildAggregateCacheKey(kind, payload) {
+  return `${kind}:${JSON.stringify(payload)}`;
+}
+
+function getAggregateCache(key) {
+  const entry = aggregateCache.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    aggregateCache.delete(key);
+    return null;
+  }
+  return structuredClone(entry.value);
+}
+
+function setAggregateCache(key, value, ttlMs = CONTEXT_CACHE_TTL_MS) {
+  aggregateCache.set(key, {
+    value: structuredClone(value),
+    expiresAt: Date.now() + ttlMs
+  });
+}
+
+function invalidateAggregateCache({ userId, orgId, project = null }) {
+  const scopeNeedle = JSON.stringify({ userId, orgId, project });
+  for (const key of aggregateCache.keys()) {
+    if (key.includes(scopeNeedle)) {
+      aggregateCache.delete(key);
+    }
+  }
+}
+
+async function buildProfileSummary({ userId, orgId, project = null }) {
+  const cacheKey = buildAggregateCacheKey('profile', { userId, orgId, project });
+  const cached = getAggregateCache(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const latestMemories = await persistentMemoryStore.listLatestMemories({
+    user_id: userId,
+    org_id: orgId,
+    project
+  });
+  const relationships = await persistentMemoryStore.listRelationships({
+    user_id: userId,
+    org_id: orgId,
+    project
+  });
+
+  const relationshipTypes = relationships.reduce((accumulator, relationship) => {
+    accumulator[relationship.type] = (accumulator[relationship.type] || 0) + 1;
+    return accumulator;
+  }, {});
+
+  const summary = {
+    user_id: userId,
+    org_id: orgId,
+    project,
+    memory_count: latestMemories.length,
+    relationship_count: relationships.length,
+    top_tags: countTopValues(latestMemories.flatMap(memory => memory.tags || [])),
+    top_source_platforms: countTopValues(
+      latestMemories.map(memory => memory.source_metadata?.source_platform || memory.source || null)
+    ),
+    recent_titles: latestMemories
+      .map(memory => memory.title)
+      .filter(Boolean)
+      .slice(0, 3),
+    graph_summary: {
+      included_count: latestMemories.length,
+      relationship_types: relationshipTypes
+    }
+  };
+  setAggregateCache(cacheKey, summary);
+  return summary;
+}
+
+async function buildContextPayload({ body, userId, orgId }) {
+  const platform = normalizeWebappPlatform(body.platform || body.source_platform || 'webapp');
+  const query = body.query || body.user_prompt || body.prompt || '';
+  const preferredSources = [...new Set([
+    ...(body.preferred_source_platforms || []),
+    ...(platform ? [platform] : [])
+  ])];
+  const preferredTags = body.preferred_tags || [];
+  const maxMemories = body.max_memories || 5;
+  const project = body.project || null;
+  const cacheKey = buildAggregateCacheKey('context', {
+    userId,
+    orgId,
+    project,
+    query,
+    platform,
+    preferredSources,
+    preferredTags,
+    source_platforms: body.source_platforms || [],
+    tags: body.tags || [],
+    preferred_project: body.preferred_project || project,
+    include_profile: body.include_profile !== false,
+    include_graph_summary: body.include_graph_summary !== false,
+    max_memories: maxMemories
+  });
+  const cached = getAggregateCache(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const recall = await recallPersistedMemories(persistentMemoryStore, {
+    query_context: query,
+    user_id: userId,
+    org_id: orgId,
+    project,
+    source_platforms: body.source_platforms || [],
+    tags: body.tags || [],
+    preferred_project: body.preferred_project || project,
+    preferred_source_platforms: preferredSources,
+    preferred_tags: preferredTags,
+    max_memories: maxMemories
+  });
+
+  const contextEnvelope = buildWebappContextResponse(recall, {
+    query,
+    platform,
+    project,
+    preferredSources,
+    preferredTags,
+    maxMemories
+  });
+
+  const response = {
+    ok: true,
+    platform: contextEnvelope.platform,
+    query: contextEnvelope.query,
+    project: contextEnvelope.project,
+    search_method: contextEnvelope.search_method,
+    policy: contextEnvelope.policy,
+    context: contextEnvelope.context,
+    prompt_envelope: buildPromptEnvelope(body, contextEnvelope.context)
+  };
+
+  const shouldIncludeProfile = body.include_profile !== false;
+  const shouldIncludeGraphSummary = body.include_graph_summary !== false;
+  const profile = shouldIncludeProfile || shouldIncludeGraphSummary
+    ? await buildProfileSummary({ userId, orgId, project })
+    : null;
+
+  if (shouldIncludeProfile && profile) {
+    response.profile = {
+      user_id: profile.user_id,
+      org_id: profile.org_id,
+      project: profile.project,
+      memory_count: profile.memory_count,
+      relationship_count: profile.relationship_count,
+      top_tags: profile.top_tags,
+      top_source_platforms: profile.top_source_platforms,
+      recent_titles: profile.recent_titles
+    };
+  }
+
+  if (shouldIncludeGraphSummary && profile) {
+    response.graph_summary = profile.graph_summary;
+  }
+
+  response.expansion_stats = {
+    included_count: contextEnvelope.context.memories.length,
+    max_memories: maxMemories
+  };
+
+  setAggregateCache(cacheKey, response);
+  return response;
 }
 
 function ensureApiKeyStore() {
@@ -240,6 +522,55 @@ function loadApiKeyStore() {
 function saveApiKeyStore(store) {
   ensureApiKeyStore();
   fs.writeFileSync(API_KEYS_FILE_PATH, JSON.stringify(store, null, 2), 'utf-8');
+}
+
+function ensureEvaluationReportStore() {
+  if (!fs.existsSync(EVALUATION_REPORTS_DIR)) {
+    fs.mkdirSync(EVALUATION_REPORTS_DIR, { recursive: true });
+  }
+}
+
+function evaluationReportPath(evaluationId) {
+  return path.join(EVALUATION_REPORTS_DIR, `${evaluationId}.json`);
+}
+
+function persistEvaluationReport(report) {
+  if (!report?.evaluationId) {
+    return;
+  }
+
+  ensureEvaluationReportStore();
+  fs.writeFileSync(evaluationReportPath(report.evaluationId), JSON.stringify(report, null, 2), 'utf-8');
+}
+
+function loadEvaluationReports() {
+  ensureEvaluationReportStore();
+
+  return fs.readdirSync(EVALUATION_REPORTS_DIR)
+    .filter(file => file.endsWith('.json'))
+    .map(file => {
+      try {
+        return JSON.parse(fs.readFileSync(path.join(EVALUATION_REPORTS_DIR, file), 'utf-8'));
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean)
+    .sort((left, right) => new Date(left.timestamp) - new Date(right.timestamp));
+}
+
+function getEvaluationReportById(evaluationId) {
+  if (!evaluationId) return null;
+  const reportPath = evaluationReportPath(evaluationId);
+  if (!fs.existsSync(reportPath)) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(fs.readFileSync(reportPath, 'utf-8'));
+  } catch {
+    return null;
+  }
 }
 
 function hashApiKey(apiKey) {
@@ -284,9 +615,9 @@ function isAdminRequest(req) {
   return req.headers['x-admin-secret'] === ADMIN_SECRET;
 }
 
-function authenticateApiKey(req) {
+async function authenticateApiKey(req) {
   if (!API_KEY_REQUIRED) {
-    return { ok: true, principal: { userId: DEFAULT_USER, orgId: DEFAULT_ORG, scopes: ['*'] } };
+    return { ok: true, principal: { userId: DEFAULT_USER, orgId: DEFAULT_ORG, scopes: ['*'], rawKey: null } };
   }
 
   const apiKey = extractApiKey(req);
@@ -296,12 +627,27 @@ function authenticateApiKey(req) {
 
   // Accept test API key in non-production environments
   if (!IS_PRODUCTION && apiKey === TEST_API_KEY) {
-    return { ok: true, principal: { userId: DEFAULT_USER, orgId: DEFAULT_ORG, scopes: ['*'], testKey: true } };
+    return { ok: true, principal: { userId: DEFAULT_USER, orgId: DEFAULT_ORG, scopes: ['*'], testKey: true, rawKey: apiKey } };
   }
 
   // Accept master API key in any environment
   if (MASTER_API_KEY && apiKey === MASTER_API_KEY) {
-    return { ok: true, principal: { userId: DEFAULT_USER, orgId: DEFAULT_ORG, scopes: ['*'], master: true } };
+    return { ok: true, principal: { userId: DEFAULT_USER, orgId: DEFAULT_ORG, scopes: ['*'], master: true, rawKey: apiKey } };
+  }
+
+  const persistedRecord = await authenticatePersistedApiKey(prisma, apiKey);
+  if (persistedRecord) {
+    return {
+      ok: true,
+      principal: {
+        keyId: persistedRecord.id,
+        userId: persistedRecord.userId || DEFAULT_USER,
+        orgId: persistedRecord.orgId || DEFAULT_ORG,
+        scopes: persistedRecord.scopes || [],
+        rawKey: apiKey,
+        persisted: true
+      }
+    };
   }
 
   const keyHash = hashApiKey(apiKey);
@@ -320,7 +666,8 @@ function authenticateApiKey(req) {
       keyId: record.id,
       userId: record.userId || DEFAULT_USER,
       orgId: record.orgId || DEFAULT_ORG,
-      scopes: record.scopes || []
+      scopes: record.scopes || [],
+      rawKey: apiKey
     }
   };
 }
@@ -424,12 +771,29 @@ const server = http.createServer(async (req, res) => {
     try {
       const body = req.method !== 'GET' ? await parseBody(req) : {};
 
-      const hostedRpcMatch = pathname.match(/^\/api\/mcp\/servers\/([^\/]+)\/rpc$/);
+      const hostedDescriptorMatch = pathname.match(/^\/api\/mcp\/servers\/([^\/]+)$/);
+      if (hostedDescriptorMatch && req.method === 'GET' && url.searchParams.get('token')) {
+        const pathUserId = hostedDescriptorMatch[1];
+        const token = url.searchParams.get('token') || extractApiKey(req);
+
+        if (!token || !(await validateConnectionToken(token, pathUserId))) {
+          return jsonResponse(res, { error: 'Unauthorized' }, 401);
+        }
+
+        const serverConfig = await getHostedServerByToken(token, pathUserId);
+        if (!serverConfig) {
+          return jsonResponse(res, { error: 'Unauthorized' }, 401);
+        }
+
+        return jsonResponse(res, serverConfig);
+      }
+
+      const hostedRpcMatch = pathname.match(/^\/api\/mcp\/servers\/([^\/]+)\/(rpc|message)$/);
       if (hostedRpcMatch && req.method === 'POST') {
         const pathUserId = hostedRpcMatch[1];
         const token = url.searchParams.get('token') || extractApiKey(req);
 
-        if (!token || !validateConnectionToken(token, pathUserId)) {
+        if (!token || !(await validateConnectionToken(token, pathUserId))) {
           return jsonResponse(res, {
             jsonrpc: '2.0',
             id: body?.id ?? null,
@@ -437,10 +801,10 @@ const server = http.createServer(async (req, res) => {
           }, 401);
         }
 
-        const connection = getConnectionContext(token, pathUserId);
+        const connection = await getConnectionContext(token, pathUserId);
         const connectionOrgId = connection?.orgId || DEFAULT_ORG;
         const apiClient = createHostedApiClient({
-          baseUrl: process.env.HIVEMIND_BASE_URL || `http://${req.headers.host}`,
+          baseUrl: process.env.HIVEMIND_INTERNAL_BASE_URL || process.env.HIVEMIND_BASE_URL || `http://${req.headers.host}`,
           apiKey: MASTER_API_KEY || '',
           userId: pathUserId,
           orgId: connectionOrgId
@@ -506,7 +870,7 @@ const server = http.createServer(async (req, res) => {
         const pathUserId = hostedSseMatch[1];
         const token = url.searchParams.get('token') || extractApiKey(req);
 
-        if (!token || !validateConnectionToken(token, pathUserId)) {
+        if (!token || !(await validateConnectionToken(token, pathUserId))) {
           return jsonResponse(res, { error: 'Unauthorized' }, 401);
         }
 
@@ -591,13 +955,76 @@ const server = http.createServer(async (req, res) => {
       }
 
       // Protect all non-key-management API endpoints
-      const auth = authenticateApiKey(req);
+      const auth = await authenticateApiKey(req);
       if (!auth.ok) {
         return jsonResponse(res, { error: auth.error }, auth.status || 401);
       }
       const principal = auth.principal;
       const userId = principal.userId || DEFAULT_USER;
       const orgId = principal.orgId || DEFAULT_ORG;
+
+      if ((pathname === '/api/mcp/rpc' || pathname === '/api/mcp/message') && req.method === 'POST') {
+        const apiClient = createHostedApiClient({
+          baseUrl: process.env.HIVEMIND_INTERNAL_BASE_URL || process.env.HIVEMIND_BASE_URL || `http://${req.headers.host}`,
+          apiKey: principal.rawKey || MASTER_API_KEY || '',
+          userId,
+          orgId
+        });
+
+        if (!body?.method) {
+          return jsonResponse(res, {
+            jsonrpc: '2.0',
+            id: body?.id ?? null,
+            error: { code: -32600, message: 'Invalid request: method is required' }
+          }, 400);
+        }
+
+        if (body.method === 'notifications/initialized' || body.method === 'initialized') {
+          res.writeHead(202);
+          res.end();
+          return;
+        }
+
+        let result;
+        switch (body.method) {
+          case 'initialize':
+            result = handleInitialize(body.params || {}, userId);
+            break;
+          case 'ping':
+            result = {};
+            break;
+          case 'tools/list':
+            result = handleToolsList(userId, orgId);
+            break;
+          case 'tools/call':
+            result = await handleToolCall(body.params || {}, userId, orgId, apiClient);
+            break;
+          case 'resources/list':
+            result = handleResourcesList(userId, orgId);
+            break;
+          case 'resources/read':
+            result = handleReadResource(body.params || {}, userId, orgId);
+            break;
+          case 'prompts/list':
+            result = handlePromptsList(userId, orgId);
+            break;
+          case 'prompts/get':
+            result = handleGetPrompt(body.params || {}, userId, orgId);
+            break;
+          default:
+            return jsonResponse(res, {
+              jsonrpc: '2.0',
+              id: body?.id ?? null,
+              error: { code: -32601, message: `Method not found: ${body.method}` }
+            }, 404);
+        }
+
+        return jsonResponse(res, {
+          jsonrpc: '2.0',
+          id: body?.id ?? null,
+          result
+        });
+      }
 
       // Handle /api/memories/:id routes (dynamic ID matching)
       if (pathname.startsWith('/api/memories/') && pathname !== '/api/memories/search' && pathname !== '/api/memories/query' && pathname !== '/api/memories/code/ingest' && pathname !== '/api/memories/traverse' && pathname !== '/api/memories/decay' && pathname !== '/api/memories/reinforce') {
@@ -626,7 +1053,12 @@ const server = http.createServer(async (req, res) => {
           }
           const memoryId = pathname.split('/api/memories/')[1];
           try {
+            const existing = await persistentMemoryStore.getMemory(memoryId);
             await persistentMemoryStore.deleteMemory(memoryId);
+            if (existing) {
+              invalidateAggregateCache({ userId, orgId, project: existing.project || null });
+              invalidateAggregateCache({ userId, orgId, project: null });
+            }
             return jsonResponse(res, { success: true });
           } catch (error) {
             return jsonResponse(res, { error: error.message }, 500);
@@ -665,10 +1097,66 @@ const server = http.createServer(async (req, res) => {
                 source_id: existing.source_metadata?.source_id || null
               }
             });
+            invalidateAggregateCache({ userId, orgId, project: existing.project || null });
+            invalidateAggregateCache({ userId, orgId, project: updated.project || null });
+            invalidateAggregateCache({ userId, orgId, project: null });
             return jsonResponse(res, { success: true, memory: updated });
           } catch (error) {
             return jsonResponse(res, { error: error.message }, 500);
           }
+        }
+      }
+
+      if (pathname === '/api/connectors/mcp/jobs' && req.method === 'GET') {
+        const limit = parseInt(url.searchParams.get('limit'), 10) || 50;
+        const endpointName = url.searchParams.get('endpoint_name') || undefined;
+        const status = url.searchParams.get('status') || undefined;
+
+        try {
+          const jobs = mcpIngestionService.listJobs(
+            { user_id: userId, org_id: orgId, endpoint_name: endpointName, status },
+            { limit }
+          );
+          return jsonResponse(res, {
+            success: true,
+            count: jobs.length,
+            jobs
+          });
+        } catch (error) {
+          return jsonResponse(res, { error: error.message }, 400);
+        }
+      }
+
+      const mcpJobActionMatch = pathname.match(/^\/api\/connectors\/mcp\/jobs\/([^\/]+)\/(retry|replay)$/);
+      if (mcpJobActionMatch && req.method === 'POST') {
+        try {
+          const [, jobId, action] = mcpJobActionMatch;
+          const result = await mcpIngestionService.retryJob(
+            jobId,
+            { user_id: userId, org_id: orgId },
+            { replay: action === 'replay' }
+          );
+          return jsonResponse(res, {
+            success: true,
+            action,
+            result
+          }, 202);
+        } catch (error) {
+          return jsonResponse(res, { error: error.message, job_id: error.connectorJobId || null }, 400);
+        }
+      }
+
+      const mcpJobMatch = pathname.match(/^\/api\/connectors\/mcp\/jobs\/([^\/]+)$/);
+      if (mcpJobMatch && req.method === 'GET') {
+        try {
+          const [, jobId] = mcpJobMatch;
+          const job = mcpIngestionService.getJob(jobId, { user_id: userId, org_id: orgId });
+          return jsonResponse(res, {
+            success: true,
+            job
+          });
+        } catch (error) {
+          return jsonResponse(res, { error: error.message }, 404);
         }
       }
 
@@ -796,6 +1284,20 @@ const server = http.createServer(async (req, res) => {
           }
           break;
 
+        case '/api/connectors/mcp/status':
+          if (req.method === 'GET') {
+            try {
+              const status = await mcpIngestionService.listEndpointStatuses({
+                user_id: userId,
+                org_id: orgId
+              });
+              return jsonResponse(res, { success: true, ...status });
+            } catch (error) {
+              return jsonResponse(res, { error: error.message }, 400);
+            }
+          }
+          break;
+
         case '/api/connectors/mcp/ingest':
           if (req.method === 'POST') {
             if (!ensurePersistedMemoryOrFail(res, '/api/connectors/mcp/ingest')) {
@@ -822,9 +1324,41 @@ const server = http.createServer(async (req, res) => {
         // ==========================================
         // HOSTED MCP SERVICE (Phase 2: Context-as-a-Service)
         // ==========================================
+        case pathname.match(/^\/api\/mcp\/servers\/([^\/]+)\/revoke$/)?.input:
+          if (req.method === 'POST') {
+            const pathUserId = pathname.match(/^\/api\/mcp\/servers\/([^\/]+)\/revoke$/)[1];
+
+            if (userId !== pathUserId) {
+              return jsonResponse(res, {
+                error: 'Forbidden',
+                message: 'User ID does not match authenticated user'
+              }, 403);
+            }
+
+            await revokeAllConnections(pathUserId);
+            return jsonResponse(res, {
+              success: true,
+              message: 'All MCP connections revoked'
+            });
+          }
+          break;
+
         case pathname.match(/^\/api\/mcp\/servers\/([^\/]+)$/)?.input:
           if (req.method === 'GET') {
             const pathUserId = pathname.match(/^\/api\/mcp\/servers\/([^\/]+)$/)[1];
+            const connectionToken = url.searchParams.get('token') || extractApiKey(req);
+
+            if (connectionToken && await validateConnectionToken(connectionToken, pathUserId)) {
+              try {
+                const serverConfig = await getHostedServerByToken(connectionToken, pathUserId);
+                return jsonResponse(res, serverConfig);
+              } catch (error) {
+                return jsonResponse(res, {
+                  error: 'Failed to generate MCP server configuration',
+                  message: error.message
+                }, 500);
+              }
+            }
 
             // Verify user matches authenticated user
             if (userId !== pathUserId) {
@@ -853,42 +1387,57 @@ const server = http.createServer(async (req, res) => {
               return;
             }
             try {
-              const platform = normalizeWebappPlatform(body.platform);
-              const preferredSources = [...new Set([
-                ...(body.preferred_source_platforms || []),
-                ...(platform ? [platform] : [])
-              ])];
-              const preferredTags = body.preferred_tags || [];
-              const maxMemories = body.max_memories || 5;
-              const recall = await recallPersistedMemories(persistentMemoryStore, {
-                query_context: body.query || body.user_prompt || body.prompt || '',
-                user_id: userId,
-                org_id: orgId,
-                project: body.project || null,
-                source_platforms: body.source_platforms || [],
-                tags: body.tags || [],
-                preferred_project: body.preferred_project || body.project || null,
-                preferred_source_platforms: preferredSources,
-                preferred_tags: preferredTags,
-                max_memories: maxMemories
-              });
-
-              const context = buildWebappContextResponse(recall, {
-                query: body.query || body.user_prompt || body.prompt || '',
-                platform,
-                project: body.project || null,
-                preferredSources,
-                preferredTags,
-                maxMemories
-              });
-
-              return jsonResponse(res, {
-                ...context,
-                prompt_envelope: buildPromptEnvelope(body, context.context)
-              });
+              return jsonResponse(res, await buildContextPayload({ body, userId, orgId }));
             } catch (error) {
               return jsonResponse(res, {
                 error: 'Webapp context preparation failed',
+                message: error.message
+              }, 400);
+            }
+          }
+          break;
+
+        case '/api/context':
+          if (req.method === 'POST') {
+            if (!ensurePersistedMemoryOrFail(res, '/api/context')) {
+              return;
+            }
+            try {
+              return jsonResponse(res, await buildContextPayload({ body, userId, orgId }));
+            } catch (error) {
+              return jsonResponse(res, {
+                error: 'Context preparation failed',
+                message: error.message
+              }, 400);
+            }
+          }
+          break;
+
+        case '/api/profile':
+          if (req.method === 'GET') {
+            if (!ensurePersistedMemoryOrFail(res, '/api/profile')) {
+              return;
+            }
+            try {
+              const project = url.searchParams.get('project') || null;
+              const profile = await buildProfileSummary({ userId, orgId, project });
+              return jsonResponse(res, {
+                ok: true,
+                profile: {
+                  user_id: profile.user_id,
+                  org_id: profile.org_id,
+                  project: profile.project,
+                  memory_count: profile.memory_count,
+                  relationship_count: profile.relationship_count,
+                  top_tags: profile.top_tags,
+                  top_source_platforms: profile.top_source_platforms,
+                  recent_titles: profile.recent_titles
+                },
+                graph_summary: profile.graph_summary
+              });
+            } catch (error) {
+              return jsonResponse(res, {
+                error: 'Profile summary failed',
                 message: error.message
               }, 400);
             }
@@ -938,6 +1487,8 @@ const server = http.createServer(async (req, res) => {
                 await qdrantClient.storeMemory(memory, {
                   collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT'
                 });
+                invalidateAggregateCache({ userId, orgId, project: memory.project || null });
+                invalidateAggregateCache({ userId, orgId, project: null });
               }
 
               return jsonResponse(res, {
@@ -1094,6 +1645,8 @@ const server = http.createServer(async (req, res) => {
                 await qdrantClient.storeMemory(memory, {
                   collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT'
                 });
+                invalidateAggregateCache({ userId, orgId, project: memory.project || null });
+                invalidateAggregateCache({ userId, orgId, project: null });
               }
               return jsonResponse(res, {
                 success: true,
@@ -1334,7 +1887,7 @@ const server = http.createServer(async (req, res) => {
                 tags,
                 sourcePlatform: source_platform,
                 limit: limit || 10,
-                scoreThreshold: score_threshold || 0.3
+                scoreThreshold: score_threshold ?? parseFloat(process.env.HIVEMIND_VECTOR_SCORE_THRESHOLD || '0.15')
               });
 
               jsonResponse(res, result);
@@ -1543,6 +2096,7 @@ const server = http.createServer(async (req, res) => {
                 methods,
                 warmup: true
               });
+              persistEvaluationReport(report);
 
               return jsonResponse(res, {
                 success: true,
@@ -1562,7 +2116,10 @@ const server = http.createServer(async (req, res) => {
         case '/api/evaluate/results':
           if (req.method === 'GET') {
             try {
-              const latestReport = retrievalEvaluator.getLatestReport();
+              const reportId = url.searchParams.get('evaluation_id');
+              const latestReport = reportId
+                ? getEvaluationReportById(reportId)
+                : retrievalEvaluator.getLatestReport() || loadEvaluationReports().slice(-1)[0];
 
               if (!latestReport) {
                 return jsonResponse(res, {
@@ -1588,7 +2145,7 @@ const server = http.createServer(async (req, res) => {
         case '/api/evaluate/history':
           if (req.method === 'GET') {
             try {
-              const history = retrievalEvaluator.getEvaluationHistory();
+              const history = loadEvaluationReports();
               const limit = parseInt(url.searchParams.get('limit'), 10) || 10;
 
               return jsonResponse(res, {
@@ -1615,7 +2172,7 @@ const server = http.createServer(async (req, res) => {
           if (req.method === 'POST') {
             try {
               const { baseline_id, current_id } = body;
-              const history = retrievalEvaluator.getEvaluationHistory();
+              const history = loadEvaluationReports();
 
               const baseline = baseline_id
                 ? history.find(h => h.evaluationId === baseline_id)
@@ -1651,14 +2208,35 @@ const server = http.createServer(async (req, res) => {
         case '/api/evaluate/dataset':
           if (req.method === 'GET') {
             try {
-              const { getDatasetStats } = await import('../../src/evaluation/test-dataset.js');
-              const stats = getDatasetStats();
+              const filteredCategory = url.searchParams.get('category');
+              const filteredDifficulty = url.searchParams.get('difficulty');
+              let queries = TEST_QUERIES;
+
+              if (filteredCategory) {
+                queries = queries.filter(query => query.category === filteredCategory);
+              }
+
+              if (filteredDifficulty) {
+                queries = queries.filter(query => query.difficulty === filteredDifficulty);
+              }
+
+              const stats = {
+                total: queries.length,
+                categories: queries.reduce((accumulator, query) => {
+                  accumulator[query.category] = (accumulator[query.category] || 0) + 1;
+                  return accumulator;
+                }, {}),
+                difficulties: queries.reduce((accumulator, query) => {
+                  accumulator[query.difficulty] = (accumulator[query.difficulty] || 0) + 1;
+                  return accumulator;
+                }, {}),
+              };
 
               return jsonResponse(res, {
                 success: true,
                 dataset: {
                   stats,
-                  queries: TEST_QUERIES.map(q => ({
+                  queries: queries.map(q => ({
                     query: q.query,
                     category: q.category,
                     difficulty: q.difficulty,
@@ -1714,6 +2292,19 @@ function parseBody(req) {
   });
 }
 
+async function ensureQdrantSearchIndexes() {
+  if (process.env.USE_QDRANT_STORAGE === 'false') {
+    return;
+  }
+
+  try {
+    await qdrantCollections.ensureMemoriesCollectionIndexes(process.env.QDRANT_COLLECTION || 'BUNDB AGENT');
+    console.log('✅ Qdrant payload indexes verified');
+  } catch (error) {
+    console.error('⚠️  Failed to verify Qdrant payload indexes:', error.message);
+  }
+}
+
 const PORT = process.env.PORT || 3000;
 
 server.listen(PORT, () => {
@@ -1748,5 +2339,7 @@ server.listen(PORT, () => {
 ║   Open your browser to get started!                        ║
 ║                                                            ║
 ╚════════════════════════════════════════════════════════════╝
-  `);
+`);
+
+  ensureQdrantSearchIndexes();
 });

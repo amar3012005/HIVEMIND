@@ -12,7 +12,7 @@ npm install -g @amar_528/mcp-bridge
 
 ```bash
 node /root/.npm-global/lib/node_modules/@amar_528/mcp-bridge/dist/cli.js --version
-# Should output: @hivemind/mcp-bridge v2.0.5
+# Should output: @hivemind/mcp-bridge v2.0.7
 ```
 
 ### Step 3: Configure Claude Desktop
@@ -32,14 +32,23 @@ nano ~/Library/Application\ Support/Claude/claude_desktop_config.json
 **Config:**
 ```json
 {
-  "mcpServers": {
+  "mcp_servers": {
     "hivemind": {
-      "command": "node",
-      "args": ["/root/.npm-global/lib/node_modules/@amar_528/mcp-bridge/dist/cli.js"],
+      "command": "/usr/bin/node",
+      "args": [
+        "/root/.npm-global/lib/node_modules/@amar_528/mcp-bridge/dist/cli.js",
+        "hosted",
+        "--url",
+        "https://hivemind.davinciai.eu:8050",
+        "--user-id",
+        "00000000-0000-4000-8000-000000000001"
+      ],
       "env": {
-        "HIVEMIND_API_URL": "https://hivemind.davinciai.eu:8050",
         "HIVEMIND_API_KEY": "hm_master_key_99228811",
-        "HIVEMIND_USER_ID": "00000000-0000-4000-8000-000000000001"
+        "HIVEMIND_CONNECTION_TOKEN": "YOUR_TOKEN",
+        "HIVEMIND_USER_ID": "00000000-0000-4000-8000-000000000001",
+        "HIVEMIND_ORG_ID": "00000000-0000-4000-8000-000000000002",
+        "NODE_NO_WARNINGS": "1"
       }
     }
   }
@@ -62,6 +71,7 @@ Ask Claude: "What MCP tools are available?" or try "Save this to my memory: [som
 1. Check API URL includes port 8050: `https://hivemind.davinciai.eu:8050`
 2. Verify server is running: `curl -k https://hivemind.davinciai.eu:8050/health`
 3. Check API key is correct: `hm_master_key_99228811`
+4. Confirm the descriptor resolves to the public host, not `localhost`
 
 ### Tools not appearing
 1. Verify the CLI path is correct in config

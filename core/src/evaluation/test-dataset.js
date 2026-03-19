@@ -374,6 +374,39 @@ export const TEST_QUERIES = [
   }
 ];
 
+export const CROSS_CLIENT_TEST_QUERIES = [
+  {
+    query: 'Groq API',
+    relevantMemories: ['cross-client-groq-001'],
+    category: 'cross-client',
+    difficulty: 'medium',
+    description: 'Antigravity-saved semantic note should be recalled in Claude quick search',
+    tags: ['antigravity', 'claude', 'semantic', 'groq', 'cross-platform']
+  },
+  {
+    query: 'session security cleanup',
+    relevantMemories: ['cross-client-security-001'],
+    category: 'cross-client',
+    difficulty: 'easy',
+    description: 'Cross-platform recall should prefer the correct session summary over unrelated context',
+    tags: ['session', 'security', 'cross-platform', 'distractor-resistance']
+  },
+  {
+    query: 'what did antigravity save about inference endpoints',
+    relevantMemories: ['cross-client-inference-001', 'cross-client-inference-002'],
+    category: 'cross-client',
+    difficulty: 'hard',
+    description: 'Multi-memory cross-client recall should preserve semantic and platform context',
+    tags: ['antigravity', 'semantic', 'inference', 'multi-hop', 'cross-platform']
+  }
+];
+
+const DATASET_REGISTRY = {
+  default: TEST_QUERIES,
+  'cross-client': CROSS_CLIENT_TEST_QUERIES,
+  all: [...TEST_QUERIES, ...CROSS_CLIENT_TEST_QUERIES]
+};
+
 // ==========================================
 // Dataset Statistics
 // ==========================================
@@ -382,16 +415,18 @@ export const TEST_QUERIES = [
  * Get dataset statistics
  * @returns {Object} Statistics about the test dataset
  */
-export function getDatasetStats() {
+export function getDatasetStats(dataset = 'default') {
+  const queries = getQueriesForDataset(dataset);
   const stats = {
-    total: TEST_QUERIES.length,
+    dataset,
+    total: queries.length,
     byCategory: {},
     byDifficulty: {},
     totalRelevantMemories: 0,
     avgRelevantPerQuery: 0
   };
 
-  for (const query of TEST_QUERIES) {
+  for (const query of queries) {
     // Count by category
     stats.byCategory[query.category] = (stats.byCategory[query.category] || 0) + 1;
 
@@ -413,7 +448,7 @@ export function getDatasetStats() {
  * @returns {Array} Filtered queries
  */
 export function getQueriesByCategory(category) {
-  return TEST_QUERIES.filter(q => q.category === category);
+  return DATASET_REGISTRY.all.filter(q => q.category === category);
 }
 
 /**
@@ -422,7 +457,7 @@ export function getQueriesByCategory(category) {
  * @returns {Array} Filtered queries
  */
 export function getQueriesByDifficulty(difficulty) {
-  return TEST_QUERIES.filter(q => q.difficulty === difficulty);
+  return DATASET_REGISTRY.all.filter(q => q.difficulty === difficulty);
 }
 
 /**
@@ -431,7 +466,7 @@ export function getQueriesByDifficulty(difficulty) {
  * @returns {Array} Sample queries
  */
 export function getSampleQueries(count = 5) {
-  const shuffled = [...TEST_QUERIES].sort(() => 0.5 - Math.random());
+  const shuffled = [...DATASET_REGISTRY.default].sort(() => 0.5 - Math.random());
   return shuffled.slice(0, count);
 }
 
@@ -441,9 +476,21 @@ export function getSampleQueries(count = 5) {
  * @returns {Array} Queries matching any of the tags
  */
 export function getQueriesByTags(tags) {
-  return TEST_QUERIES.filter(q =>
+  return DATASET_REGISTRY.all.filter(q =>
     q.tags.some(tag => tags.includes(tag))
   );
+}
+
+export function getQueriesForDataset(dataset = 'default') {
+  const queries = DATASET_REGISTRY[dataset];
+  if (!queries) {
+    throw new Error(`Unknown dataset: ${dataset}`);
+  }
+  return [...queries];
+}
+
+export function getDatasetNames() {
+  return Object.keys(DATASET_REGISTRY);
 }
 
 // ==========================================
@@ -452,9 +499,12 @@ export function getQueriesByTags(tags) {
 
 export default {
   TEST_QUERIES,
+  CROSS_CLIENT_TEST_QUERIES,
   getDatasetStats,
   getQueriesByCategory,
   getQueriesByDifficulty,
   getSampleQueries,
-  getQueriesByTags
+  getQueriesByTags,
+  getQueriesForDataset,
+  getDatasetNames
 };

@@ -19,23 +19,256 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
+import Redis from 'ioredis';
 
 // ==========================================
 // Configuration
 // ==========================================
 
 const CONFIG = {
-  baseUrl: process.env.HIVEMIND_BASE_URL || 'https://hivemind.davinciai.eu:8050',
+  publicBaseUrl: process.env.HIVEMIND_PUBLIC_BASE_URL
+    || process.env.HIVEMIND_EXTERNAL_URL
+    || 'https://hivemind.davinciai.eu:8050',
+  internalBaseUrl: process.env.HIVEMIND_INTERNAL_BASE_URL
+    || process.env.HIVEMIND_BASE_URL
+    || null,
   apiVersion: '2024-11-05',
   protocolVersion: '2024-11-05',
   serverName: 'hivemind-hosted-mcp',
   serverVersion: '2.0.0',
+  bridgePackageName: process.env.HIVEMIND_MCP_BRIDGE_PACKAGE || '@amar_528/mcp-bridge',
+  tokenSecret: process.env.HIVEMIND_MCP_TOKEN_SECRET || process.env.MCP_SECRET_KEY || 'change-me-in-production',
+  connectionTtlMs: Number(process.env.HIVEMIND_MCP_CONNECTION_TTL_MS || 24 * 60 * 60 * 1000),
+  redisUrl: process.env.HIVEMIND_MCP_REDIS_URL || process.env.REDIS_URL || null,
+  redisHost: process.env.REDIS_HOST || null,
+  redisPort: Number(process.env.REDIS_PORT || 6379),
+  redisPassword: process.env.REDIS_PASSWORD || null,
+  redisPrefix: process.env.HIVEMIND_MCP_REDIS_PREFIX || 'hivemind:mcp',
   maxToolsPerRequest: 64,
   maxConnectionsPerUser: 10
 };
 
-// In-memory connection tracking (production: use Redis)
+// In-memory connection tracking remains the safe fallback.
 const userConnections = new Map();
+const revokedAfterByUser = new Map();
+let redisClientPromise = null;
+let redisWarningLogged = false;
+
+function redisKey(kind, userId, token = null) {
+  return token
+    ? `${CONFIG.redisPrefix}:${kind}:${userId}:${token}`
+    : `${CONFIG.redisPrefix}:${kind}:${userId}`;
+}
+
+async function getRedisClient() {
+  const hasRedisConfig = CONFIG.redisUrl || CONFIG.redisHost;
+  if (!hasRedisConfig) {
+    return null;
+  }
+
+  if (!redisClientPromise) {
+    redisClientPromise = (async () => {
+      const client = CONFIG.redisUrl
+        ? new Redis(CONFIG.redisUrl, {
+            lazyConnect: true,
+            maxRetriesPerRequest: 1,
+            enableOfflineQueue: false
+          })
+        : new Redis({
+            host: CONFIG.redisHost,
+            port: CONFIG.redisPort,
+            password: CONFIG.redisPassword || undefined,
+            lazyConnect: true,
+            maxRetriesPerRequest: 1,
+            enableOfflineQueue: false
+          });
+
+      client.on('error', () => {});
+
+      if (client.status === 'wait') {
+        await client.connect();
+      }
+
+      await client.ping();
+      return client;
+    })().catch(error => {
+      if (!redisWarningLogged) {
+        console.warn('[hosted-mcp] Redis unavailable, falling back to in-memory state:', error.message);
+        redisWarningLogged = true;
+      }
+      redisClientPromise = null;
+      return null;
+    });
+  }
+
+  return redisClientPromise;
+}
+
+async function persistConnectionState(connection) {
+  const client = await getRedisClient();
+  if (!client) return;
+
+  const ttlSeconds = Math.max(Math.ceil((new Date(connection.expiresAt).getTime() - Date.now()) / 1000), 1);
+  await client.set(
+    redisKey('connection', connection.userId, connection.token),
+    JSON.stringify(connection),
+    'EX',
+    ttlSeconds
+  );
+}
+
+async function loadPersistedConnection(userId, token) {
+  const client = await getRedisClient();
+  if (!client) return null;
+
+  const raw = await client.get(redisKey('connection', userId, token));
+  if (!raw) return null;
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+async function markConnectionRevoked(userId, token, expiresAt) {
+  const client = await getRedisClient();
+  if (!client) return;
+
+  const ttlSeconds = Math.max(Math.ceil((new Date(expiresAt).getTime() - Date.now()) / 1000), 1);
+  await client.set(redisKey('revoked', userId, token), '1', 'EX', ttlSeconds);
+}
+
+async function isExplicitlyRevoked(userId, token) {
+  const client = await getRedisClient();
+  if (!client) return false;
+
+  const revoked = await client.get(redisKey('revoked', userId, token));
+  return revoked === '1';
+}
+
+async function getRevokedAfter(userId) {
+  const client = await getRedisClient();
+  const inMemory = revokedAfterByUser.get(userId) || 0;
+  if (!client) {
+    return inMemory;
+  }
+
+  const raw = await client.get(redisKey('revoked-after', userId));
+  return Math.max(inMemory, raw ? Number(raw) : 0);
+}
+
+async function setRevokedAfter(userId, timestampMs) {
+  revokedAfterByUser.set(userId, timestampMs);
+  const client = await getRedisClient();
+  if (!client) return;
+
+  await client.set(
+    redisKey('revoked-after', userId),
+    String(timestampMs),
+    'PX',
+    CONFIG.connectionTtlMs
+  );
+}
+
+function base64UrlEncode(value) {
+  return Buffer.from(JSON.stringify(value)).toString('base64url');
+}
+
+function base64UrlDecode(value) {
+  return JSON.parse(Buffer.from(value, 'base64url').toString('utf8'));
+}
+
+function getDescriptorUrl(userId) {
+  return `${CONFIG.publicBaseUrl}/api/mcp/servers/${userId}`;
+}
+
+function getSimpleDescriptorUrl(userId, token) {
+  return `${getDescriptorUrl(userId)}?token=${token}`;
+}
+
+function getRpcUrl(userId, token) {
+  return `${CONFIG.publicBaseUrl}/api/mcp/servers/${userId}/rpc?token=${token}`;
+}
+
+function getSseUrl(userId, token) {
+  return `${CONFIG.publicBaseUrl}/api/mcp/servers/${userId}/sse?token=${token}`;
+}
+
+function getMessageUrl(userId, token) {
+  return `${CONFIG.publicBaseUrl}/api/mcp/servers/${userId}/message?token=${token}`;
+}
+
+function signTokenPayload(encodedPayload) {
+  return crypto
+    .createHmac('sha256', CONFIG.tokenSecret)
+    .update(encodedPayload)
+    .digest('base64url');
+}
+
+function buildConnectionPayload(userId, orgId, serverId) {
+  const issuedAt = Date.now();
+  const expiresAt = issuedAt + CONFIG.connectionTtlMs;
+
+  return {
+    sub: userId,
+    org: orgId || null,
+    sid: serverId,
+    iat: issuedAt,
+    exp: expiresAt
+  };
+}
+
+function parseSignedConnectionToken(token) {
+  if (!token || typeof token !== 'string' || !token.includes('.')) {
+    return null;
+  }
+
+  const [encodedPayload, signature] = token.split('.');
+  if (!encodedPayload || !signature) {
+    return null;
+  }
+
+  const expected = signTokenPayload(encodedPayload);
+  if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {
+    return null;
+  }
+
+  const payload = base64UrlDecode(encodedPayload);
+  if (!payload?.sub || !payload?.exp || payload.exp < Date.now()) {
+    return null;
+  }
+
+  return payload;
+}
+
+function createSignedConnectionToken(userId, orgId, serverId) {
+  const payload = buildConnectionPayload(userId, orgId, serverId);
+  const encodedPayload = base64UrlEncode(payload);
+  const signature = signTokenPayload(encodedPayload);
+  return {
+    token: `${encodedPayload}.${signature}`,
+    expiresAt: new Date(payload.exp).toISOString()
+  };
+}
+
+async function isTokenRevoked(token, userId) {
+  if (!token || !userId) return true;
+
+  const revokedAfter = await getRevokedAfter(userId);
+  const signedPayload = parseSignedConnectionToken(token);
+  if (signedPayload?.sub === userId) {
+    return signedPayload.iat <= revokedAfter || await isExplicitlyRevoked(userId, token);
+  }
+
+  const connections = userConnections.get(userId) || [];
+  const connection = connections.find(item => item.token === token);
+  if (connection?.revoked) {
+    return true;
+  }
+
+  return await isExplicitlyRevoked(userId, token);
+}
 
 function formatToolContent(data) {
   return {
@@ -82,7 +315,7 @@ function relationshipTypeToGraphTypes(relationship) {
  */
 export function generateHostedServer(userId, orgId, apiKey) {
   const serverId = uuidv4();
-  const connectionToken = generateConnectionToken(userId, orgId, serverId, apiKey);
+  const { token: connectionToken, expiresAt } = createSignedConnectionToken(userId, orgId, serverId);
 
   const serverConfig = {
     // MCP Protocol Metadata
@@ -119,17 +352,18 @@ export function generateHostedServer(userId, orgId, apiKey) {
       serverId,
       userId,
       orgId,
-      baseUrl: CONFIG.baseUrl,
+      baseUrl: CONFIG.publicBaseUrl,
+      internalBaseUrl: CONFIG.internalBaseUrl,
       endpoints: {
         // SSE endpoint for real-time updates
-        sse: `${CONFIG.baseUrl}/api/mcp/servers/${userId}/sse?token=${connectionToken}`,
+        sse: getSseUrl(userId, connectionToken),
         // Message endpoint for tool calls
-        message: `${CONFIG.baseUrl}/api/mcp/servers/${userId}/message?token=${connectionToken}`,
+        message: getMessageUrl(userId, connectionToken),
         // JSON-RPC endpoint for stdio bridge
-        jsonrpc: `${CONFIG.baseUrl}/api/mcp/servers/${userId}/rpc?token=${connectionToken}`
+        jsonrpc: getRpcUrl(userId, connectionToken)
       },
       token: connectionToken,
-      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() // 24 hours
+      expiresAt
     },
 
     // Available Tools (HIVE-MIND capabilities exposed as MCP tools)
@@ -141,12 +375,13 @@ export function generateHostedServer(userId, orgId, apiKey) {
     // Available Prompts
     prompts: generatePromptsManifest(userId, orgId),
 
-    // Client Configuration for Claude Desktop/Cursor
-    clientConfig: generateClientConfig(userId, orgId, connectionToken)
+    // Client Configuration for Claude Desktop/Cursor/Antigravity/VS Code
+    clientConfig: generateClientConfig(userId, orgId, connectionToken),
+    ingestion: generateIngestionConfig(userId, orgId)
   };
 
   // Track connection
-  trackConnection(userId, serverConfig);
+  void trackConnection(userId, serverConfig);
 
   return serverConfig;
 }
@@ -520,39 +755,205 @@ function generatePromptsManifest(userId, orgId) {
  * @param {string} token - Connection token
  * @returns {Object} Client configuration
  */
-function generateClientConfig(userId, orgId, token) {
+function buildBridgeInvocationConfig(userId, orgId, token) {
   return {
-    // Claude Desktop configuration
+    command: 'npx',
+    args: [
+      '-y',
+      CONFIG.bridgePackageName,
+      'hosted',
+      '--url',
+      getDescriptorUrl(userId),
+      '--user-id',
+      userId
+    ],
+    env: {
+      HIVEMIND_API_KEY: 'YOUR_API_KEY',
+      HIVEMIND_CONNECTION_TOKEN: token,
+      HIVEMIND_USER_ID: userId,
+      HIVEMIND_ORG_ID: orgId
+    },
+    descriptorUrl: getDescriptorUrl(userId),
+    rpcUrl: getRpcUrl(userId, token),
+    token,
+    package: CONFIG.bridgePackageName
+  };
+}
+
+function buildPublishedBridgeConfig(userId) {
+  return {
+    command: 'npx',
+    args: [
+      '-y',
+      CONFIG.bridgePackageName,
+      'hosted'
+    ],
+    env: {
+      HIVEMIND_API_URL: CONFIG.publicBaseUrl,
+      HIVEMIND_API_KEY: 'YOUR_API_KEY',
+      HIVEMIND_USER_ID: userId
+    },
+    package: CONFIG.bridgePackageName,
+    compatibility: 'published-npm'
+  };
+}
+
+function generateIngestionConfig(userId, orgId) {
+  const authHeaders = {
+    'X-API-Key': 'YOUR_API_KEY',
+    'X-User-Id': userId,
+    'X-Org-Id': orgId
+  };
+
+  return {
+    xdata: {
+      raw: {
+        endpoint: `${CONFIG.publicBaseUrl}/api/ingest`,
+        method: 'POST',
+        headers: authHeaders,
+        example: {
+          source_type: 'text',
+          content: 'Raw external data to ingest',
+          title: 'Imported XData',
+          project: 'antigravity',
+          tags: ['xdata', 'import'],
+          metadata: {
+            source_system: 'external-webapp'
+          }
+        }
+      },
+      code: {
+        endpoint: `${CONFIG.publicBaseUrl}/api/memories/code/ingest`,
+        method: 'POST',
+        headers: authHeaders,
+        example: {
+          filepath: 'src/example.ts',
+          content: 'export const answer = 42;',
+          language: 'typescript',
+          project: 'antigravity',
+          tags: ['code', 'xdata'],
+          source_platform: 'vscode'
+        }
+      }
+    },
+    webapp: {
+      prepare: {
+        endpoint: `${CONFIG.publicBaseUrl}/api/integrations/webapp/prepare`,
+        method: 'POST',
+        headers: authHeaders,
+        example: {
+          platform: 'chatgpt',
+          query: 'What do we already know about xdata ingestion?',
+          project: 'antigravity',
+          preferred_source_platforms: ['claude', 'antigravity'],
+          preferred_tags: ['xdata'],
+          max_memories: 5
+        }
+      },
+      store: {
+        endpoint: `${CONFIG.publicBaseUrl}/api/integrations/webapp/store`,
+        method: 'POST',
+        headers: authHeaders,
+        example: {
+          platform: 'chatgpt',
+          content: 'Imported xdata summary from web workflow',
+          memory_type: 'fact',
+          title: 'XData import summary',
+          project: 'antigravity',
+          tags: ['xdata', 'webapp']
+        }
+      }
+    },
+    mcpConnector: {
+      register: {
+        endpoint: `${CONFIG.publicBaseUrl}/api/connectors/mcp/endpoints`,
+        method: 'POST',
+        headers: authHeaders,
+        example: {
+          name: 'linear-prod',
+          transport: 'streamable-http',
+          url: 'https://linear.example.com/mcp',
+          bearer_token: 'YOUR_CONNECTOR_TOKEN',
+          adapter_type: 'linear',
+          default_project: 'antigravity',
+          default_tags: ['xdata', 'linear']
+        }
+      },
+      inspect: {
+        endpoint: `${CONFIG.publicBaseUrl}/api/connectors/mcp/inspect`,
+        method: 'POST',
+        headers: authHeaders,
+        example: {
+          name: 'linear-prod'
+        }
+      },
+      ingest: {
+        endpoint: `${CONFIG.publicBaseUrl}/api/connectors/mcp/ingest`,
+        method: 'POST',
+        headers: authHeaders,
+        example: {
+          endpoint_name: 'linear-prod',
+          adapter: 'linear',
+          project: 'antigravity',
+          tags: ['xdata', 'linear'],
+          operation: {
+            type: 'tool',
+            name: 'list_issues',
+            arguments: {
+              team: 'HM'
+            }
+          }
+        }
+      }
+    }
+  };
+}
+
+function generateClientConfig(userId, orgId, token) {
+  const bridge = buildBridgeInvocationConfig(userId, orgId, token);
+  const publishedBridge = buildPublishedBridgeConfig(userId);
+  const descriptorUrl = getDescriptorUrl(userId);
+  const simpleUrl = getSimpleDescriptorUrl(userId, token);
+
+  return {
+    bridge,
+    publishedBridge,
     claudeDesktop: {
-      command: 'npx',
-      args: ['-y', '@hivemind/mcp-bridge', 'hosted'],
-      env: {
-        HIVEMIND_HOSTED_URL: `${CONFIG.baseUrl}/api/mcp/servers/${userId}`,
-        HIVEMIND_CONNECTION_TOKEN: token,
-        HIVEMIND_USER_ID: userId,
-        HIVEMIND_ORG_ID: orgId
+      mcpServers: {
+        hivemind: publishedBridge
       }
     },
 
-    // Cursor configuration
-    cursor: {
-      mcpServers: {
+    antigravity: {
+      mcp_servers: {
         hivemind: {
-          command: 'npx',
-          args: ['-y', '@hivemind/mcp-bridge', 'hosted'],
+          ...publishedBridge,
           env: {
-            HIVEMIND_HOSTED_URL: `${CONFIG.baseUrl}/api/mcp/servers/${userId}`,
-            HIVEMIND_CONNECTION_TOKEN: token,
-            HIVEMIND_USER_ID: userId,
-            HIVEMIND_ORG_ID: orgId
+            ...publishedBridge.env,
+            NODE_NO_WARNINGS: '1'
           }
         }
       }
     },
 
-    // Direct HTTP configuration (for advanced users)
+    vscode: {
+      mcpServers: {
+        hivemind: {
+          ...publishedBridge
+        }
+      }
+    },
+
+    cursor: {
+      mcpServers: {
+        hivemind: {
+          ...publishedBridge
+        }
+      }
+    },
+
     http: {
-      endpoint: `${CONFIG.baseUrl}/api/mcp/servers/${userId}/rpc`,
+      endpoint: getRpcUrl(userId, token),
       headers: {
         'Authorization': `Bearer ${token}`,
         'X-User-Id': userId,
@@ -560,8 +961,9 @@ function generateClientConfig(userId, orgId, token) {
       }
     },
 
-    // Simple URL for copy-paste
-    simpleUrl: `${CONFIG.baseUrl}/api/mcp/servers/${userId}?token=${token}`
+    webappConnectors: generateIngestionConfig(userId, orgId),
+    descriptorUrl,
+    simpleUrl
   };
 }
 
@@ -577,21 +979,17 @@ function generateClientConfig(userId, orgId, token) {
  * @param {string} apiKey - API key
  * @returns {string} Connection token
  */
-function generateConnectionToken(userId, orgId, serverId, apiKey) {
-  const timestamp = Date.now();
-  const data = `${userId}:${orgId}:${serverId}:${timestamp}:${apiKey}`;
-  return crypto.createHash('sha256').update(data).digest('hex').substring(0, 48);
-}
+export async function validateConnectionToken(token, userId) {
+  const signedPayload = parseSignedConnectionToken(token);
+  if (signedPayload) {
+    return signedPayload.sub === userId && !(await isTokenRevoked(token, userId));
+  }
 
-/**
- * Validate connection token
- * @param {string} token - Token to validate
- * @param {string} userId - Expected user ID
- * @returns {boolean} Validation result
- */
-export function validateConnectionToken(token, userId) {
   const connections = userConnections.get(userId);
-  if (!connections) return false;
+  if (!connections?.length) {
+    const persisted = await loadPersistedConnection(userId, token);
+    return !!(persisted && !persisted.revoked && new Date(persisted.expiresAt) >= new Date());
+  }
 
   const connection = connections.find(c => c.token === token && !c.revoked);
   if (!connection) return false;
@@ -609,7 +1007,7 @@ export function validateConnectionToken(token, userId) {
  * @param {string} userId - User ID
  * @param {Object} serverConfig - Server configuration
  */
-function trackConnection(userId, serverConfig) {
+async function trackConnection(userId, serverConfig) {
   const connections = userConnections.get(userId) || [];
 
   // Remove expired connections
@@ -619,7 +1017,7 @@ function trackConnection(userId, serverConfig) {
   );
 
   // Add new connection
-  validConnections.push({
+  const connection = {
     serverId: serverConfig.connection.serverId,
     token: serverConfig.connection.token,
     userId: serverConfig.connection.userId,
@@ -628,29 +1026,110 @@ function trackConnection(userId, serverConfig) {
     expiresAt: serverConfig.connection.expiresAt,
     revoked: false,
     endpoints: serverConfig.connection.endpoints
-  });
+  };
+  validConnections.push(connection);
 
   userConnections.set(userId, validConnections);
+  await persistConnectionState(connection);
 }
 
 /**
  * Revoke all connections for a user
  * @param {string} userId - User ID
  */
-export function revokeAllConnections(userId) {
+export async function revokeAllConnections(userId) {
+  const revokedAt = Date.now();
+  await setRevokedAfter(userId, revokedAt);
   const connections = userConnections.get(userId);
   if (connections) {
-    connections.forEach(c => c.revoked = true);
+    await Promise.all(connections.map(async connection => {
+      connection.revoked = true;
+      await persistConnectionState(connection);
+      await markConnectionRevoked(userId, connection.token, connection.expiresAt);
+    }));
   }
 }
 
-export function getConnectionContext(token, userId) {
+export async function getConnectionContext(token, userId) {
+  const signedPayload = parseSignedConnectionToken(token);
+  if (signedPayload && signedPayload.sub === userId && !(await isTokenRevoked(token, userId))) {
+    return {
+      serverId: signedPayload.sid,
+      token,
+      userId: signedPayload.sub,
+      orgId: signedPayload.org,
+      createdAt: new Date(signedPayload.iat).toISOString(),
+      expiresAt: new Date(signedPayload.exp).toISOString(),
+      revoked: false,
+      endpoints: {
+        sse: getSseUrl(userId, token),
+        message: getMessageUrl(userId, token),
+        jsonrpc: getRpcUrl(userId, token)
+      }
+    };
+  }
+
   const connections = userConnections.get(userId) || [];
-  return connections.find(connection =>
+  const inMemory = connections.find(connection =>
     connection.token === token
     && !connection.revoked
     && new Date(connection.expiresAt) >= new Date()
   ) || null;
+  if (inMemory) {
+    return inMemory;
+  }
+
+  const persisted = await loadPersistedConnection(userId, token);
+  if (!persisted || persisted.revoked || new Date(persisted.expiresAt) < new Date()) {
+    return null;
+  }
+
+  return persisted;
+}
+
+export async function getHostedServerByToken(token, userId) {
+  const connection = await getConnectionContext(token, userId);
+  if (!connection) {
+    return null;
+  }
+
+  return {
+    mcp: {
+      protocolVersion: CONFIG.protocolVersion,
+      serverInfo: {
+        name: CONFIG.serverName,
+        version: CONFIG.serverVersion,
+        vendor: 'hivemind',
+        features: {
+          tools: true,
+          resources: true,
+          prompts: true,
+          logging: true,
+          completions: false
+        }
+      },
+      capabilities: {
+        tools: { listChanged: true },
+        resources: { subscribe: true, listChanged: true },
+        prompts: { listChanged: true }
+      }
+    },
+    connection: {
+      serverId: connection.serverId,
+      userId,
+      orgId: connection.orgId,
+      baseUrl: CONFIG.publicBaseUrl,
+      internalBaseUrl: CONFIG.internalBaseUrl,
+      endpoints: connection.endpoints,
+      token: connection.token,
+      expiresAt: connection.expiresAt
+    },
+    tools: generateToolsManifest(userId, connection.orgId),
+    resources: generateResourcesManifest(userId, connection.orgId),
+    prompts: generatePromptsManifest(userId, connection.orgId),
+    clientConfig: generateClientConfig(userId, connection.orgId, connection.token),
+    ingestion: generateIngestionConfig(userId, connection.orgId)
+  };
 }
 
 // ==========================================
@@ -942,7 +1421,7 @@ export function setupHostedMcpRoutes(app, authMiddleware) {
     const token = req.query.token || req.headers['authorization']?.replace('Bearer ', '');
 
     // Validate connection token
-    if (!validateConnectionToken(token, userId)) {
+    if (!(await validateConnectionToken(token, userId))) {
       return res.status(401).json({
         error: 'Unauthorized',
         message: 'Invalid or expired connection token'
@@ -1003,7 +1482,7 @@ export function setupHostedMcpRoutes(app, authMiddleware) {
     const { userId } = req.params;
     const token = req.query.token;
 
-    if (!validateConnectionToken(token, userId)) {
+    if (!(await validateConnectionToken(token, userId))) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
@@ -1035,7 +1514,7 @@ export function setupHostedMcpRoutes(app, authMiddleware) {
       return res.status(403).json({ error: 'Forbidden' });
     }
 
-    revokeAllConnections(userId);
+    await revokeAllConnections(userId);
     res.json({ success: true, message: 'All MCP connections revoked' });
   });
 }

@@ -17,13 +17,13 @@ import { logger } from '../../utils/logger.js';
 const CONFIG = {
   // Collection names
   collections: {
-    memories: 'hivemind_memories',
-    sessions: 'hivemind_sessions'
+    memories: process.env.QDRANT_COLLECTION || 'BUNDB AGENT',
+    sessions: process.env.QDRANT_SESSIONS_COLLECTION || 'hivemind_sessions'
   },
 
   // Vector configuration
   vectors: {
-    dimension: 1024, // Mistral-embed dimension
+    dimension: parseInt(process.env.EMBEDDING_DIMENSION || '1024', 10),
     distance: 'Cosine'
   },
 
@@ -100,6 +100,11 @@ const MEMORIES_PAYLOAD_INDEXES = [
     field_name: 'source_platform',
     field_schema: 'keyword',
     description: 'Source platform: chatgpt, claude, perplexity, gemini'
+  },
+  {
+    field_name: 'temporal_status',
+    field_schema: 'keyword',
+    description: 'Temporal lifecycle status: active, expired, historical, archived'
   },
   {
     field_name: 'is_latest',
@@ -356,6 +361,18 @@ export class QdrantCollections {
         }
       }
     }
+  }
+
+  /**
+   * Ensure payload indexes exist for an already-created memories collection.
+   */
+  async ensureMemoriesCollectionIndexes(collectionName = CONFIG.collections.memories) {
+    if (!(await this.collectionExists(collectionName))) {
+      logger.warn(`Collection ${collectionName} does not exist yet; skipping index sync`);
+      return;
+    }
+
+    await this.createPayloadIndexes(collectionName, MEMORIES_PAYLOAD_INDEXES);
   }
 
   /**

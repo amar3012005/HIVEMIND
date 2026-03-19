@@ -145,7 +145,17 @@ function normalizeVectorScore(rawScore, metric = 'cosine') {
  * @param {string} metric - Distance metric
  * @returns {object} Component with score and weight
  */
-function getVectorComponent(rawScore, metric = 'cosine') {
+function getVectorComponent(rawScore, metric = 'cosine', treatMissingAsZero = false) {
+  if (treatMissingAsZero && (!Number.isFinite(rawScore) || rawScore <= 0)) {
+    return {
+      name: 'vector',
+      rawScore: rawScore || 0,
+      normalizedScore: 0,
+      weightedScore: 0,
+      weight: CONFIG.weights.vector
+    };
+  }
+
   const normalizedScore = normalizeVectorScore(rawScore, metric);
   const weightedScore = normalizedScore * CONFIG.weights.vector;
 
@@ -335,6 +345,7 @@ function calculateCombinedScore(memory, options = {}) {
   const {
     vectorScore = 0.5,
     vectorMetric = 'cosine',
+    hasVectorSignal = true,
     recencyBias = CONFIG.recency.recencyBias,
     importanceScore = 0.5,
     lastConfirmedAt = new Date(),
@@ -344,7 +355,7 @@ function calculateCombinedScore(memory, options = {}) {
   } = options;
 
   // Get individual components
-  const vectorComponent = getVectorComponent(vectorScore, vectorMetric);
+  const vectorComponent = getVectorComponent(vectorScore, vectorMetric, !hasVectorSignal);
   const recencyComponent = getRecencyComponent(documentDate, { recencyBias });
   const importanceComponent = getImportanceComponent(importanceScore);
   const ebbinghausComponent = getEbbinghausComponent(lastConfirmedAt, strength, recallCount);
@@ -390,14 +401,26 @@ function calculateCombinedScore(memory, options = {}) {
  */
 function scoreMemory(memory, options = {}) {
   const {
-    vectorScore = 0.5,
+    vectorScore = memory.vectorScore ?? memory.similarity_score ?? 0.5,
     vectorMetric = 'cosine',
     recencyBias = CONFIG.recency.recencyBias
   } = options;
 
+  const resolvedVectorScore = Number.isFinite(memory.vectorScore)
+    ? memory.vectorScore
+    : Number.isFinite(memory.similarity_score)
+      ? memory.similarity_score
+      : vectorScore;
+  const hasVectorSignal = Number.isFinite(memory.vectorScore)
+    ? memory.vectorScore > 0
+    : Number.isFinite(memory.similarity_score)
+      ? memory.similarity_score > 0
+      : false;
+
   const result = calculateCombinedScore(memory, {
-    vectorScore,
+    vectorScore: resolvedVectorScore,
     vectorMetric,
+    hasVectorSignal,
     recencyBias,
     importanceScore: memory.importance_score || 0.5,
     lastConfirmedAt: memory.last_confirmed_at || memory.updated_at || memory.created_at,

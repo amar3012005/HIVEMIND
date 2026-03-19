@@ -77,9 +77,9 @@ function rankVectorOnly(memories, options = {}) {
   // Clone and add vector score
   const scored = memories.map(m => ({
     ...m,
-    score: m.similarity_score || 0.5,
+    score: m.vectorScore ?? m.similarity_score ?? 0.5,
     scoreBreakdown: {
-      vector: m.similarity_score || 0.5,
+      vector: m.vectorScore ?? m.similarity_score ?? 0.5,
       recency: 0.5,
       importance: 0.5,
       ebbinghaus: 0.5
@@ -215,8 +215,8 @@ function rankHybrid(memories, options = {}) {
   // Stage 1: Quick vector-based filtering
   // Sort by vector similarity first (faster)
   const sortedByVector = [...memories].sort((a, b) => {
-    const aScore = a.similarity_score || 0;
-    const bScore = b.similarity_score || 0;
+    const aScore = a.similarity_score ?? a.vectorScore ?? a.score ?? 0;
+    const bScore = b.similarity_score ?? b.vectorScore ?? b.score ?? 0;
     return bScore - aScore;
   });
 

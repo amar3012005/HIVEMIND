@@ -26,7 +26,9 @@
 import { RetrievalEvaluator } from './retrieval-evaluator.js';
 import {
   TEST_QUERIES,
+  getDatasetNames,
   getDatasetStats,
+  getQueriesForDataset,
   getQueriesByCategory,
   getQueriesByDifficulty,
   getSampleQueries
@@ -34,12 +36,13 @@ import {
 import { getQdrantClient } from '../../vector/qdrant-client.js';
 import { getPrismaClient } from '../../db/prisma.js';
 import { PrismaGraphStore } from '../../memory/prisma-graph-store.js';
-import { getGroqClient } from '../../core/config/groq.js';
+import { getGroqClient } from '../../../config/groq.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // ==========================================
 // Configuration
@@ -49,7 +52,8 @@ const CONFIG = {
   defaultUserId: process.env.HIVEMIND_DEFAULT_USER_ID || '00000000-0000-4000-8000-000000000001',
   defaultOrgId: process.env.HIVEMIND_DEFAULT_ORG_ID || '00000000-0000-4000-8000-000000000002',
   outputDir: path.join(process.cwd(), 'evaluation-reports'),
-  baselineDir: path.join(process.cwd(), 'evaluation-baselines')
+  baselineDir: path.join(process.cwd(), 'evaluation-baselines'),
+  schemaVersion: '2026-03-19'
 };
 
 // ==========================================
@@ -60,11 +64,13 @@ function parseArgs() {
   const args = process.argv.slice(2);
   const options = {
     method: 'hybrid',
+    dataset: 'default',
     category: null,
     difficulty: null,
     sample: null,
     output: null,
     compare: null,
+    saveBaseline: null,
     userId: CONFIG.defaultUserId,
     orgId: CONFIG.defaultOrgId,
     verbose: false,
@@ -83,6 +89,10 @@ function parseArgs() {
       case '-c':
         options.category = args[++i];
         break;
+      case '--dataset':
+      case '-t':
+        options.dataset = args[++i];
+        break;
       case '--difficulty':
       case '-d':
         options.difficulty = args[++i];
@@ -98,6 +108,9 @@ function parseArgs() {
       case '--compare':
       case '-b':
         options.compare = args[++i];
+        break;
+      case '--save-baseline':
+        options.saveBaseline = args[++i];
         break;
       case '--user-id':
       case '-u':
@@ -140,6 +153,9 @@ Options:
   --category, -c     Filter by category (technical, business, personal)
                      Default: all categories
 
+  --dataset, -t      Dataset to use (default, cross-client, all)
+                     Default: default
+
   --difficulty, -d   Filter by difficulty (easy, medium, hard)
                      Default: all difficulties
 
@@ -151,6 +167,8 @@ Options:
 
   --compare, -b      Compare with baseline report file
                      Default: none
+
+  --save-baseline    Save this run into the baseline directory
 
   --user-id, -u      User ID for evaluation
                      Default: ${CONFIG.defaultUserId}
@@ -185,7 +203,7 @@ Examples:
 // ==========================================
 
 function selectQueries(options) {
-  let queries = [...TEST_QUERIES];
+  let queries = getQueriesForDataset(options.dataset);
 
   // Filter by category
   if (options.category) {
@@ -436,13 +454,35 @@ function generateReportFilename() {
   return `evaluation-report-${timestamp}.json`;
 }
 
-function saveReport(report, filename) {
-  ensureDirectory(CONFIG.outputDir);
+function buildReportEnvelope(report, options, comparison = null) {
+  return {
+    schemaVersion: CONFIG.schemaVersion,
+    kind: 'hivemind.retrieval-evaluation.bundle',
+    generatedAt: new Date().toISOString(),
+    dataset: options.dataset,
+    filters: {
+      category: options.category,
+      difficulty: options.difficulty,
+      sample: options.sample
+    },
+    methods: getSearchMethods(options.method),
+    environment: {
+      userId: options.userId,
+      orgId: options.orgId
+    },
+    report,
+    comparison
+  };
+}
+
+function saveReport(bundle, filename, { baseline = false } = {}) {
+  const outputDir = baseline ? CONFIG.baselineDir : CONFIG.outputDir;
+  ensureDirectory(outputDir);
   const filepath = path.isAbsolute(filename)
     ? filename
-    : path.join(CONFIG.outputDir, filename);
+    : path.join(outputDir, filename);
 
-  fs.writeFileSync(filepath, JSON.stringify(report, null, 2), 'utf-8');
+  fs.writeFileSync(filepath, JSON.stringify(bundle, null, 2), 'utf-8');
   return filepath;
 }
 
@@ -459,7 +499,8 @@ function loadBaseline(filename) {
     throw new Error(`Baseline file not found: ${filepath}`);
   }
 
-  return JSON.parse(fs.readFileSync(filepath, 'utf-8'));
+  const parsed = JSON.parse(fs.readFileSync(filepath, 'utf-8'));
+  return parsed.report || parsed;
 }
 
 // ==========================================
@@ -481,8 +522,9 @@ async function main() {
   console.log('');
 
   // Show dataset stats
-  const stats = getDatasetStats();
+  const stats = getDatasetStats(options.dataset);
   console.log('Dataset Statistics:');
+  console.log(`  Dataset: ${stats.dataset}`);
   console.log(`  Total Queries: ${stats.total}`);
   console.log(`  By Category: ${Object.entries(stats.byCategory).map(([k, v]) => `${k}: ${v}`).join(', ')}`);
   console.log(`  By Difficulty: ${Object.entries(stats.byDifficulty).map(([k, v]) => `${k}: ${v}`).join(', ')}`);
@@ -493,6 +535,7 @@ async function main() {
   const queries = selectQueries(options);
   console.log(`Selected ${queries.length} queries for evaluation`);
   console.log(`  Method: ${options.method}`);
+  console.log(`  Dataset: ${options.dataset}`);
   console.log(`  User ID: ${options.userId}`);
   console.log(`  Org ID: ${options.orgId}`);
   console.log('');
@@ -520,17 +563,19 @@ async function main() {
     userId: options.userId,
     orgId: options.orgId,
     methods,
-    warmup: true
+    warmup: true,
+    dataset: options.dataset
   });
 
   // Display report
   console.log(formatReport(report, options.verbose));
 
   // Compare with baseline if requested
+  let comparison = null;
   if (options.compare) {
     try {
       const baseline = loadBaseline(options.compare);
-      const comparison = evaluator.compareReports(baseline, report);
+      comparison = evaluator.compareReports(baseline, report);
       console.log(formatComparison(comparison));
     } catch (error) {
       console.error(`Failed to load baseline: ${error.message}`);
@@ -538,9 +583,14 @@ async function main() {
   }
 
   // Save report
+  const bundle = buildReportEnvelope(report, options, comparison);
   const outputFile = options.output || generateReportFilename();
-  const outputPath = saveReport(report, outputFile);
+  const outputPath = saveReport(bundle, outputFile);
   console.log(`Report saved to: ${outputPath}`);
+  if (options.saveBaseline) {
+    const baselinePath = saveReport(bundle, options.saveBaseline, { baseline: true });
+    console.log(`Baseline saved to: ${baselinePath}`);
+  }
   console.log('');
 
   // Exit with appropriate code
@@ -548,11 +598,12 @@ async function main() {
   process.exit(allPassed ? 0 : 1);
 }
 
-// Run main
-main().catch(error => {
-  console.error('Evaluation failed:', error);
-  process.exit(1);
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
+  main().catch(error => {
+    console.error('Evaluation failed:', error);
+    process.exit(1);
+  });
+}
 
 // ==========================================
 // Export for programmatic use
@@ -563,6 +614,7 @@ export {
   selectQueries,
   formatReport,
   formatComparison,
+  buildReportEnvelope,
   saveReport,
   loadBaseline,
   CONFIG

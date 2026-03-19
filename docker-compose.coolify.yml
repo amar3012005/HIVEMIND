@@ -37,6 +37,14 @@ services:
             PORT: '3000'
             HOST: 0.0.0.0
             VERSION: '${VERSION:-2.0.0}'
+            HIVEMIND_API_URL: '${HIVEMIND_API_URL:-https://api.hivemind.davinciai.eu}'
+            HIVEMIND_CORE_API_BASE_URL: '${HIVEMIND_CORE_API_BASE_URL:-https://api.hivemind.davinciai.eu}'
+            HIVEMIND_CONTROL_PLANE_PUBLIC_URL: '${HIVEMIND_CONTROL_PLANE_PUBLIC_URL:-https://api.hivemind.davinciai.eu}'
+            HIVEMIND_CONTROL_PLANE_SESSION_SECRET: '${HIVEMIND_CONTROL_PLANE_SESSION_SECRET}'
+            ZITADEL_ISSUER_URL: '${ZITADEL_ISSUER_URL}'
+            ZITADEL_CLIENT_ID: '${ZITADEL_CLIENT_ID}'
+            ZITADEL_CLIENT_SECRET: '${ZITADEL_CLIENT_SECRET}'
+            ZITADEL_REDIRECT_URI: '${ZITADEL_REDIRECT_URI}'
             DATABASE_URL: 'postgresql://${POSTGRES_USER:-hivemind_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}?schema=public&connection_limit=20&pool_timeout=30'
             DATABASE_HOST: postgres
             DATABASE_PORT: '5432'
@@ -132,6 +140,152 @@ services:
             - coolify.applicationId=20
             - coolify.type=application
             - coolify.name=app-s0k0s0k40wo44w4w8gcs8ow0-125656582242
+            - coolify.resourceName=hive-mind
+            - coolify.projectName=hivemind
+            - coolify.serviceName=hive-mind
+            - coolify.environmentName=production
+            - coolify.pullRequestId=0
+        networks:
+            hivemind-network: null
+            s0k0s0k40wo44w4w8gcs8ow0: null
+        depends_on:
+            postgres:
+                condition: service_healthy
+            redis:
+                condition: service_healthy
+            qdrant:
+                condition: service_healthy
+        env_file:
+            - .env
+    control-plane:
+        build:
+            context: .
+            dockerfile: Dockerfile.control-plane
+            args:
+                NODE_ENV: production
+                VERSION: '${VERSION:-2.0.0}'
+                BUILD_DATE: '${BUILD_DATE:-unknown}'
+        image: 'hivemind/control-plane:${VERSION:-latest}'
+        container_name: control-plane-s0k0s0k40wo44w4w8gcs8ow0-125656582243
+        hostname: hivemind-control-plane
+        restart: unless-stopped
+        cap_add:
+            - NET_BIND_SERVICE
+        read_only: false
+        deploy:
+            resources:
+                limits:
+                    cpus: '1'
+                    memory: 1G
+                reservations:
+                    cpus: '0.25'
+                    memory: 256M
+            restart_policy:
+                condition: on-failure
+                delay: 5s
+                max_attempts: 3
+                window: 120s
+        environment:
+            NODE_ENV: production
+            PORT: '3000'
+            HOST: 0.0.0.0
+            VERSION: '${VERSION:-2.0.0}'
+            HIVEMIND_API_URL: '${HIVEMIND_API_URL:-https://api.hivemind.davinciai.eu}'
+            DATABASE_URL: 'postgresql://${POSTGRES_USER:-hivemind_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}?schema=public&connection_limit=20&pool_timeout=30'
+            DATABASE_HOST: postgres
+            DATABASE_PORT: '5432'
+            DATABASE_NAME: '${POSTGRES_DB:-hivemind}'
+            DATABASE_USER: '${POSTGRES_USER:-hivemind_user}'
+            DATABASE_PASSWORD: '${POSTGRES_PASSWORD}'
+            QDRANT_URL: 'http://qdrant:6333'
+            QDRANT_API_KEY: '${QDRANT_API_KEY}'
+            QDRANT_COLLECTION: '${QDRANT_COLLECTION:-hivemind_memories}'
+            REDIS_URL: 'redis://:${REDIS_PASSWORD}@redis:6379/0'
+            REDIS_HOST: redis
+            REDIS_PORT: '6379'
+            REDIS_PASSWORD: '${REDIS_PASSWORD}'
+            GROQ_API_KEY: '${GROQ_API_KEY}'
+            GROQ_INFERENCE_MODEL: '${GROQ_INFERENCE_MODEL:-llama-3.3-70b-versatile}'
+            MISTRAL_API_KEY: '${MISTRAL_API_KEY}'
+            MISTRAL_EMBEDDING_MODEL: '${MISTRAL_EMBEDDING_MODEL:-mistral-embed}'
+            API_MASTER_KEY: '${API_MASTER_KEY}'
+            SESSION_SECRET: '${SESSION_SECRET}'
+            HIVEMIND_MASTER_API_KEY: '${HIVEMIND_MASTER_API_KEY}'
+            HIVEMIND_ADMIN_SECRET: '${HIVEMIND_ADMIN_SECRET}'
+            USE_SITUATIONALIZER: '${USE_SITUATIONALIZER:-true}'
+            USE_CONTEXTUAL_EMBEDDING: '${USE_CONTEXTUAL_EMBEDDING:-true}'
+            USE_QDRANT_STORAGE: '${USE_QDRANT_STORAGE:-true}'
+            USE_AST_CHUNKING: '${USE_AST_CHUNKING:-true}'
+            USE_STATEFUL_MANAGER: '${USE_STATEFUL_MANAGER:-true}'
+            AUDIT_LOG_PATH: /app/logs/audit.log
+            AUDIT_RETENTION_DAYS: '${AUDIT_RETENTION_DAYS:-2555}'
+            LOG_LEVEL: '${LOG_LEVEL:-info}'
+            LOG_FORMAT: '${LOG_FORMAT:-json}'
+            RATE_LIMIT_WINDOW_MS: '${RATE_LIMIT_WINDOW_MS:-60000}'
+            RATE_LIMIT_MAX_REQUESTS: '${RATE_LIMIT_MAX_REQUESTS:-100}'
+            EU_REGION: '${EU_REGION:-eu-central-1}'
+            DATA_RESIDENCY: EU
+            GDPR_MODE: 'true'
+            SENTRY_DSN: '${SENTRY_DSN:-}'
+            SENTRY_ENVIRONMENT: '${SENTRY_ENVIRONMENT:-production}'
+            BUILD_DATE: '${BUILD_DATE:-unknown}'
+            POSTGRES_PASSWORD: '${POSTGRES_PASSWORD}'
+            COOLIFY_BRANCH: '"main"'
+            COOLIFY_RESOURCE_UUID: s0k0s0k40wo44w4w8gcs8ow0
+            COOLIFY_CONTAINER_NAME: control-plane-s0k0s0k40wo44w4w8gcs8ow0-125656582243
+            SERVICE_NAME_APP: control-plane
+            SERVICE_NAME_POSTGRES: postgres
+            SERVICE_NAME_QDRANT: qdrant
+            SERVICE_NAME_REDIS: redis
+            SERVICE_NAME_BACKUP: backup
+        ports:
+            - '2027:3000'
+        healthcheck:
+            test:
+                - CMD
+                - wget
+                - '--no-verbose'
+                - '--tries=1'
+                - '--spider'
+                - 'http://localhost:3000/health'
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 60s
+        logging:
+            driver: json-file
+            options:
+                max-size: 10m
+                max-file: '5'
+                compress: 'true'
+                labels: 'hivemind.component,hivemind.tier,hivemind.region,environment'
+                tag: '{{.ImageName}}|{{.Name}}|{{.ImageFullID}}|{{.FullID}}'
+        volumes:
+            - 's0k0s0k40wo44w4w8gcs8ow0_control-plane-logs:/app/logs'
+            - 's0k0s0k40wo44w4w8gcs8ow0_control-plane-data:/app/data'
+            - '/etc/localtime:/etc/localtime:ro'
+        labels:
+            - hivemind.component=control-plane
+            - hivemind.tier=control-plane
+            - hivemind.region=eu
+            - 'hivemind.compliance=gdpr,nis2,dora'
+            - 'hivemind.version=$${VERSION:-2.0.0}'
+            - coolify.name=hivemind-control-plane
+            - 'coolify.description=HIVE-MIND Production Control Plane - Client Onboarding and API Access'
+            - coolify.healthcheck=/health
+            - coolify.port=3000
+            - traefik.enable=true
+            - 'traefik.http.routers.hivemind-control-plane.rule=Host(`$${CONTROL_PLANE_DOMAIN:-api.hivemind.davinciai.eu}`)'
+            - traefik.http.routers.hivemind-control-plane.entrypoints=websecure
+            - traefik.http.routers.hivemind-control-plane.tls.certresolver=letsencrypt
+            - traefik.http.services.hivemind-control-plane.loadbalancer.server.port=3000
+            - traefik.http.services.hivemind-control-plane.loadbalancer.healthcheck.path=/health
+            - traefik.http.services.hivemind-control-plane.loadbalancer.healthcheck.interval=30s
+            - coolify.managed=true
+            - coolify.version=4.0.0-beta.462
+            - coolify.applicationId=20
+            - coolify.type=application
+            - coolify.name=control-plane-s0k0s0k40wo44w4w8gcs8ow0-125656582243
             - coolify.resourceName=hive-mind
             - coolify.projectName=hivemind
             - coolify.serviceName=hive-mind
@@ -499,6 +653,10 @@ volumes:
         name: s0k0s0k40wo44w4w8gcs8ow0_hivemind-logs
     s0k0s0k40wo44w4w8gcs8ow0_hivemind-data:
         name: s0k0s0k40wo44w4w8gcs8ow0_hivemind-data
+    s0k0s0k40wo44w4w8gcs8ow0_control-plane-logs:
+        name: s0k0s0k40wo44w4w8gcs8ow0_control-plane-logs
+    s0k0s0k40wo44w4w8gcs8ow0_control-plane-data:
+        name: s0k0s0k40wo44w4w8gcs8ow0_control-plane-data
     s0k0s0k40wo44w4w8gcs8ow0_postgres-data:
         name: s0k0s0k40wo44w4w8gcs8ow0_postgres-data
     s0k0s0k40wo44w4w8gcs8ow0_qdrant-data:

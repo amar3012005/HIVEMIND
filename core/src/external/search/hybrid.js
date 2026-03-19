@@ -7,7 +7,8 @@
  * @module search/hybrid
  */
 
-import { getQdrantCollections } from '../../vector/collections.js';
+import { getMistralEmbedService } from '../../embeddings/mistral.js';
+import { getQdrantClient } from '../../vector/qdrant-client.js';
 import ranker from '../recall/ranker.js';
 const { rank, rankHybrid } = ranker;
 import scorer from '../recall/scorer.js';
@@ -46,7 +47,8 @@ const CONFIG = {
   fallback: {
     enableKeywordFallback: true,
     enableGraphFallback: true,
-    minScore: 0.2
+    vectorMinScore: parseFloat(process.env.HIVEMIND_VECTOR_SCORE_THRESHOLD || '0.15'),
+    finalMinScore: parseFloat(process.env.HIVEMIND_FINAL_HYBRID_SCORE_THRESHOLD || '0.10')
   },
 
   // Temporal search configuration
@@ -57,6 +59,9 @@ const CONFIG = {
     historicalVersionField: 'is_latest'
   }
 };
+
+const DEFAULT_COLLECTION = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
+let embedService = null;
 
 // ==========================================
 // Logger
@@ -96,9 +101,9 @@ const logger = {
  */
 async function vectorSearch(queryVector, options = {}) {
   const {
-    collection = 'hivemind_memories',
+    collection = DEFAULT_COLLECTION,
     limit = CONFIG.limits.vectorTopK,
-    scoreThreshold = 0.3,
+    scoreThreshold = CONFIG.fallback.vectorMinScore,
     // Filter options
     userId,
     orgId,
@@ -115,9 +120,6 @@ async function vectorSearch(queryVector, options = {}) {
   } = options;
 
   try {
-    const qdrant = getQdrantCollections();
-    const client = qdrant.getClient();
-
     // Build filter from all options
     const filter = {
       userId,
@@ -137,8 +139,9 @@ async function vectorSearch(queryVector, options = {}) {
     const qdrantFilter = buildQdrantFilter(filter);
 
     // Perform search
-    const results = await client.search(collection, {
+    const results = await getQdrantClient().searchMemories({
       vector: queryVector,
+      collectionName: collection,
       filter: qdrantFilter,
       limit,
       score_threshold: scoreThreshold,
@@ -160,6 +163,100 @@ async function vectorSearch(queryVector, options = {}) {
     });
     return [];
   }
+}
+
+async function semanticSearch(query, options = {}) {
+  const {
+    collection = DEFAULT_COLLECTION,
+    limit = CONFIG.limits.vectorTopK,
+    scoreThreshold = CONFIG.fallback.vectorMinScore,
+    userId,
+    orgId,
+    memoryType,
+    tags,
+    sourcePlatform,
+    isLatest,
+    includeExpired = CONFIG.temporal.defaultIncludeExpired,
+    includeHistorical = CONFIG.temporal.defaultIncludeHistorical,
+    dateRange,
+    minStrength,
+    minImportance,
+    ...additionalFilters
+  } = options;
+
+  const qdrantFilter = buildQdrantFilter({
+    userId,
+    orgId,
+    memoryType,
+    tags,
+    sourcePlatform,
+    isLatest,
+    includeExpired,
+    includeHistorical,
+    dateRange,
+    minStrength,
+    minImportance,
+    ...additionalFilters
+  });
+
+  const results = await getQdrantClient().searchMemories({
+    query,
+    collectionName: collection,
+    filter: qdrantFilter,
+    limit,
+    score_threshold: scoreThreshold
+  });
+
+  return results.map(result => ({
+    id: result.id,
+    score: result.score,
+    payload: result.payload,
+    source: 'vector'
+  }));
+}
+
+async function resolveQueryVector(query, existingVector) {
+  if (Array.isArray(existingVector) && existingVector.length > 0) {
+    return existingVector;
+  }
+
+  if (!query || typeof query !== 'string') {
+    return null;
+  }
+
+  try {
+    embedService ||= getMistralEmbedService();
+    if (!embedService) {
+      logger.warn('Embedding service unavailable for semantic search');
+      return null;
+    }
+
+    return await embedService.embedOne(query);
+  } catch (error) {
+    logger.warn('Failed to generate query embedding for hybrid search', {
+      error: error.message
+    });
+    return null;
+  }
+}
+
+function mergeSemanticResults(...resultSets) {
+  const merged = new Map();
+
+  for (const results of resultSets) {
+    for (const result of results) {
+      const existing = merged.get(result.id);
+      if (!existing || result.score > existing.score) {
+        merged.set(result.id, {
+          ...existing,
+          ...result,
+          source: 'vector'
+        });
+      }
+    }
+  }
+
+  return Array.from(merged.values());
 }
 
 /**
@@ -353,18 +450,22 @@ async function keywordSearch(query, options = {}) {
     const results = await prisma.$queryRaw`
       SELECT 
         m.id, 
+        m.title,
         m.content, 
-        m.metadata, 
+        m.project,
+        m.memory_type,
+        m.source_platform,
+        m.tags,
         m.created_at, 
         m.updated_at,
         ts_rank_cd(
-          to_tsvector('english', m.content), 
+          to_tsvector('english', concat_ws(' ', coalesce(m.title, ''), m.content)), 
           plainto_tsquery('english', ${query})
         ) as score
       FROM memories m
-      WHERE m.user_id = ${userId}
+      WHERE m.user_id = CAST(${userId} AS uuid)
         AND m.deleted_at IS NULL
-        AND to_tsvector('english', m.content) @@ plainto_tsquery('english', ${query})
+        AND to_tsvector('english', concat_ws(' ', coalesce(m.title, ''), m.content)) @@ plainto_tsquery('english', ${query})
       ORDER BY score DESC
       LIMIT ${limit}
     `;
@@ -372,9 +473,15 @@ async function keywordSearch(query, options = {}) {
     // Transform results to expected format
     const formattedResults = results.map(result => ({
       id: result.id,
+      title: result.title,
       content: result.content,
       score: parseFloat(result.score),
-      metadata: result.metadata || {},
+      metadata: {
+        project: result.project || null,
+        memory_type: result.memory_type || null,
+        source_platform: result.source_platform || null,
+        tags: result.tags || []
+      },
       created_at: result.created_at,
       updated_at: result.updated_at,
       source: 'keyword'
@@ -738,7 +845,7 @@ async function graphSearch(memoryId, options = {}) {
 async function hybridSearch(options = {}) {
   const {
     query,
-    queryVector,
+    queryVector: providedQueryVector,
     userId,
     orgId,
     memoryType,
@@ -748,7 +855,7 @@ async function hybridSearch(options = {}) {
     includeExpired = CONFIG.temporal.defaultIncludeExpired,
     includeHistorical = CONFIG.temporal.defaultIncludeHistorical,
     dateRange,
-    minStrength = 0.1,
+    minStrength,
     minImportance,
     limit = CONFIG.limits.finalLimit,
     weights = CONFIG.weights,
@@ -770,10 +877,13 @@ async function hybridSearch(options = {}) {
     throw new Error('userId is required for multi-tenant isolation');
   }
 
+  const queryVector = await resolveQueryVector(query, providedQueryVector);
+
   // Step 1: Vector search
   let vectorResults = [];
+  let directVectorResults = [];
   if (queryVector) {
-    vectorResults = await vectorSearch(queryVector, {
+    directVectorResults = await vectorSearch(queryVector, {
       userId,
       orgId,
       memoryType,
@@ -789,6 +899,27 @@ async function hybridSearch(options = {}) {
       ...additionalFilter
     });
   }
+
+  let semanticFallbackResults = [];
+  if (query) {
+    semanticFallbackResults = await semanticSearch(query, {
+      userId,
+      orgId,
+      memoryType,
+      tags,
+      sourcePlatform,
+      isLatest,
+      includeExpired,
+      includeHistorical,
+      dateRange,
+      minStrength,
+      minImportance,
+      limit: CONFIG.limits.vectorTopK,
+      ...additionalFilter
+    });
+  }
+
+  vectorResults = mergeSemanticResults(directVectorResults, semanticFallbackResults);
 
   // Step 2: Keyword search (if query provided)
   let keywordResults = [];
@@ -822,13 +953,12 @@ async function hybridSearch(options = {}) {
   // Step 5: Rank results
   const rankedResults = rank(combinedResults, {
     strategy: 'hybrid',
-    vectorScore: 0.5,
     recencyBias: 0.7
   });
 
   // Step 6: Apply minimum score threshold
   const filteredResults = rankedResults.filter(
-    r => r.score >= CONFIG.fallback.minScore
+    r => r.score >= CONFIG.fallback.finalMinScore
   );
 
   // Step 7: Limit results
@@ -879,6 +1009,7 @@ function combineSearchResults(vectorResults, keywordResults, graphResults, weigh
   vectorResults.forEach(result => {
     combined.set(result.id, {
       ...result,
+      similarity_score: result.score,
       vectorScore: result.score,
       keywordScore: 0,
       graphScore: 0
@@ -893,6 +1024,7 @@ function combineSearchResults(vectorResults, keywordResults, graphResults, weigh
     } else {
       combined.set(result.id, {
         ...result,
+        similarity_score: 0,
         vectorScore: 0,
         keywordScore: result.score,
         graphScore: 0
@@ -908,6 +1040,7 @@ function combineSearchResults(vectorResults, keywordResults, graphResults, weigh
     } else {
       combined.set(result.id, {
         ...result,
+        similarity_score: 0,
         vectorScore: 0,
         keywordScore: 0,
         graphScore: result.score
@@ -924,6 +1057,7 @@ function combineSearchResults(vectorResults, keywordResults, graphResults, weigh
 
     return {
       ...result,
+      similarity_score: result.vectorScore,
       score: combinedScore,
       breakdown: {
         vector: result.vectorScore * weights.vector,
@@ -966,7 +1100,7 @@ async function fallbackSearch(options = {}) {
     isLatest = true,
     includeExpired = CONFIG.temporal.defaultIncludeExpired,
     includeHistorical = CONFIG.temporal.defaultIncludeHistorical,
-    minStrength = 0.1,
+    minStrength,
     limit = CONFIG.limits.finalLimit
   } = options;
 

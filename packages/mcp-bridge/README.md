@@ -14,12 +14,21 @@ Add this to your `claude_desktop_config.json`:
 {
   "mcpServers": {
     "hivemind": {
-      "command": "node",
-      "args": ["/path/to/node_modules/@amar_528/mcp-bridge/dist/cli.js"],
+      "command": "npx",
+      "args": [
+        "-y",
+        "@amar_528/mcp-bridge",
+        "hosted",
+        "--url",
+        "https://hivemind.davinciai.eu:8050/api/mcp/servers/00000000-0000-4000-8000-000000000001",
+        "--user-id",
+        "00000000-0000-4000-8000-000000000001"
+      ],
       "env": {
-        "HIVEMIND_API_URL": "https://hivemind.davinciai.eu:8050",
-        "HIVEMIND_API_KEY": "hm_master_key_99228811",
-        "HIVEMIND_USER_ID": "00000000-0000-4000-8000-000000000001"
+        "HIVEMIND_API_KEY": "YOUR_API_KEY",
+        "HIVEMIND_CONNECTION_TOKEN": "YOUR_TOKEN",
+        "HIVEMIND_USER_ID": "00000000-0000-4000-8000-000000000001",
+        "HIVEMIND_ORG_ID": "00000000-0000-4000-8000-000000000002"
       }
     }
   }
@@ -39,10 +48,17 @@ Then use the full path in your config:
   "mcpServers": {
     "hivemind": {
       "command": "node",
-      "args": ["/usr/local/lib/node_modules/@amar_528/mcp-bridge/dist/cli.js"],
+      "args": [
+        "/usr/local/lib/node_modules/@amar_528/mcp-bridge/dist/cli.js",
+        "hosted",
+        "--url",
+        "https://hivemind.davinciai.eu:8050/api/mcp/servers/00000000-0000-4000-8000-000000000001",
+        "--user-id",
+        "00000000-0000-4000-8000-000000000001"
+      ],
       "env": {
-        "HIVEMIND_API_URL": "https://hivemind.davinciai.eu:8050",
-        "HIVEMIND_API_KEY": "hm_master_key_99228811"
+        "HIVEMIND_API_KEY": "YOUR_API_KEY",
+        "HIVEMIND_CONNECTION_TOKEN": "YOUR_TOKEN"
       }
     }
   }
@@ -93,8 +109,10 @@ What do I know about the user preferences API?
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `HIVEMIND_API_URL` | Yes | HIVE-MIND API endpoint URL |
+| `HIVEMIND_API_URL` | No | Optional base API URL when `--url` is not passed |
+| `HIVEMIND_HOSTED_URL` | No | Optional hosted descriptor URL when `--url` is not passed |
 | `HIVEMIND_API_KEY` | Yes | Authentication API key |
+| `HIVEMIND_CONNECTION_TOKEN` | No | Hosted MCP connection token |
 | `HIVEMIND_USER_ID` | No | User identifier (auto-generated if not set) |
 
 ## Local Development Mode
@@ -102,14 +120,14 @@ What do I know about the user preferences API?
 For testing against a local HIVE-MIND server:
 
 ```bash
-npx @hivemind/mcp-bridge local --url http://localhost:3000
+npx @amar_528/mcp-bridge local --url http://localhost:3000
 ```
 
 ## Command Line Options
 
 ```
 USAGE:
-  npx @hivemind/mcp-bridge [mode] [options]
+  npx @amar_528/mcp-bridge [mode] [options]
 
 MODES:
   hosted    Connect to hosted HIVE-MIND API (default)
@@ -129,7 +147,7 @@ OPTIONS:
 ```
 ┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
 │  Claude Desktop │────▶│  MCP Bridge      │────▶│  HIVE-MIND API  │
-│  (MCP Client)   │     │  (npx @hivemind) │     │  (Hetzner EU)   │
+│  (MCP Client)   │     │  (npx @amar_528) │     │  (Hetzner EU)   │
 └─────────────────┘     └──────────────────┘     └─────────────────┘
                                                     │
                      ┌──────────────────────────────┼──────────────┐

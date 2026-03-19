@@ -38,7 +38,7 @@ const CONFIG = {
 
   // Score thresholds
   thresholds: {
-    quickSearch: 0.3,
+    quickSearch: parseFloat(process.env.HIVEMIND_VECTOR_SCORE_THRESHOLD || '0.15'),
     panoramaSearch: 0.2,
     insightForge: 0.25
   },
@@ -206,15 +206,18 @@ export class ThreeTierRetrieval {
         depth: this.config.depth.shallow
       });
 
-      // Apply score threshold
+      // Apply score threshold, but don't discard all lexical/hybrid matches.
       const filteredResults = results.results.filter(
         r => r.score >= scoreThreshold
       );
+      const fallbackApplied = filteredResults.length === 0 && results.results.length > 0;
+      const candidateResults = fallbackApplied
+        ? results.results.slice(0, limit)
+        : filteredResults;
 
       // Rank with recency bias for quick results
-      const rankedResults = rank(filteredResults, {
+      const rankedResults = rank(candidateResults, {
         strategy: 'hybrid',
-        vectorScore: 0.6,
         recencyBias: 0.7
       });
 
@@ -237,6 +240,7 @@ export class ThreeTierRetrieval {
           totalFound: results.results.length,
           returnedCount: Math.min(rankedResults.length, limit),
           scoreThreshold,
+          fallbackApplied,
           timestamp: new Date().toISOString()
         }
       };

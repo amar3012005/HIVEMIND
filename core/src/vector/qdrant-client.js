@@ -13,6 +13,7 @@ import { getMistralEmbedService } from '../embeddings/mistral.js';
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:9200';
 const API_KEY = process.env.QDRANT_API_KEY || 'dev_api_key_hivemind_2026';
 const COLLECTION_NAME = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
+const DEFAULT_SCORE_THRESHOLD = parseFloat(process.env.HIVEMIND_VECTOR_SCORE_THRESHOLD || '0.15');
 
 const headers = {
   'Content-Type': 'application/json',
@@ -27,7 +28,7 @@ export class QdrantClient {
   constructor() {
     this.collectionName = COLLECTION_NAME;
     this.embedService = getMistralEmbedService();
-    this.dimension = 1536;
+    this.dimension = parseInt(process.env.EMBEDDING_DIMENSION || '1024', 10);
     this.connected = null; // Cache connection state
   }
 
@@ -46,7 +47,7 @@ export class QdrantClient {
   /**
    * Generate embedding for text
    * @param {string} text - Text to embed
-   * @returns {Promise<number[]>} 1536-dim embedding vector
+   * @returns {Promise<number[]>} Configured embedding vector
    */
   async generateEmbedding(text) {
     if (!this.embedService) {
@@ -90,6 +91,7 @@ export class QdrantClient {
         user_id: memory.user_id,
         org_id: memory.org_id,
         project: memory.project,
+        memory_type: memory.memory_type,
         tags: memory.tags || [],
         content: memory.content,
         is_latest: memory.is_latest ?? true,
@@ -100,6 +102,11 @@ export class QdrantClient {
         content_hash: memory.content_hash,
         relationship_type: memory.relationship_type,
         importance_score: memory.importance_score,
+        strength: memory.strength,
+        recall_count: memory.recall_count,
+        visibility: memory.visibility,
+        embedding_version: memory.embedding_version,
+        temporal_status: memory.temporal_status,
         decay_factor: memory.decay_factor,
         metadata: memory.metadata || {}
       }
@@ -138,10 +145,10 @@ export class QdrantClient {
    * @param {number[]} options.vector - Pre-computed vector (optional)
    * @param {object} options.filter - Qdrant filter (optional)
    * @param {number} options.limit - Max results (default: 10)
-   * @param {number} options.score_threshold - Minimum similarity score (default: 0.5)
+   * @param {number} options.score_threshold - Minimum similarity score
    * @returns {Promise<Array>} Search results
    */
-  async searchMemories({ query, vector, filter, limit = 10, score_threshold = 0.5, collectionName }) {
+  async searchMemories({ query, vector, filter, limit = 10, score_threshold = DEFAULT_SCORE_THRESHOLD, collectionName }) {
     // Check connection first
     const connected = await this.isConnected();
     if (!connected) {
@@ -346,10 +353,19 @@ export class QdrantClient {
           user_id: memory.user_id,
           org_id: memory.org_id,
           project: memory.project,
+          memory_type: memory.memory_type,
           tags: memory.tags || [],
           content: memory.content,
           is_latest: memory.is_latest ?? true,
           created_at: memory.created_at || new Date().toISOString(),
+          source_platform: memory.source_metadata?.source_platform || memory.source || null,
+          document_date: memory.document_date,
+          importance_score: memory.importance_score,
+          strength: memory.strength,
+          recall_count: memory.recall_count,
+          visibility: memory.visibility,
+          embedding_version: memory.embedding_version,
+          temporal_status: memory.temporal_status,
           ...memory
         }
       });
@@ -394,7 +410,7 @@ export class QdrantClient {
         points_count: 0,
         vectors_count: 0,
         indexed_vectors_count: 0,
-        vector_size: 1536,
+        vector_size: this.dimension,
         distance: 'Cosine',
         warning: 'Qdrant is not available'
       };
@@ -428,7 +444,7 @@ export class QdrantClient {
         points_count: 0,
         vectors_count: 0,
         indexed_vectors_count: 0,
-        vector_size: 1024,
+        vector_size: this.dimension,
         distance: 'Cosine',
         error: error.message
       };
@@ -437,7 +453,7 @@ export class QdrantClient {
 
   /**
    * Generate placeholder vector (fallback)
-   * @returns {number[]} Random 1536-dim vector
+   * @returns {number[]} Random placeholder vector matching configured embedding dimension
    * @private
    */
   _generatePlaceholderVector() {

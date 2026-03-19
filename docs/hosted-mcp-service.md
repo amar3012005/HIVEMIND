@@ -47,8 +47,12 @@ Returns a user-specific MCP server configuration.
   "resources": [...],
   "prompts": [...],
   "clientConfig": {
+    "bridge": {...},
     "claudeDesktop": {...},
+    "antigravity": {...},
     "cursor": {...},
+    "vscode": {...},
+    "webappConnectors": {...},
     "simpleUrl": "..."
   }
 }
@@ -127,11 +131,41 @@ Add to `claude_desktop_config.json`:
   "mcpServers": {
     "hivemind": {
       "command": "npx",
-      "args": ["-y", "@hivemind/mcp-bridge", "hosted"],
+      "args": ["-y", "@amar_528/mcp-bridge", "hosted", "--url", "https://hivemind.davinciai.eu:8050/api/mcp/servers/YOUR_USER_ID", "--user-id", "YOUR_USER_ID"],
       "env": {
-        "HIVEMIND_HOSTED_URL": "https://hivemind.davinciai.eu:8050/api/mcp/servers/YOUR_USER_ID",
+        "HIVEMIND_API_KEY": "YOUR_API_KEY",
         "HIVEMIND_CONNECTION_TOKEN": "YOUR_TOKEN",
-        "HIVEMIND_USER_ID": "YOUR_USER_ID"
+        "HIVEMIND_USER_ID": "YOUR_USER_ID",
+        "HIVEMIND_ORG_ID": "YOUR_ORG_ID"
+      }
+    }
+  }
+}
+```
+
+### Antigravity
+
+Add to `~/.gemini/antigravity/mcp_config.json`:
+
+```json
+{
+  "mcp_servers": {
+    "hivemind": {
+      "command": "/usr/bin/node",
+      "args": [
+        "/root/.npm-global/lib/node_modules/@amar_528/mcp-bridge/dist/cli.js",
+        "hosted",
+        "--url",
+        "https://hivemind.davinciai.eu:8050",
+        "--user-id",
+        "YOUR_USER_ID"
+      ],
+      "env": {
+        "HIVEMIND_API_KEY": "YOUR_API_KEY",
+        "HIVEMIND_CONNECTION_TOKEN": "YOUR_TOKEN",
+        "HIVEMIND_USER_ID": "YOUR_USER_ID",
+        "HIVEMIND_ORG_ID": "YOUR_ORG_ID",
+        "NODE_NO_WARNINGS": "1"
       }
     }
   }
@@ -147,15 +181,50 @@ Add to `.cursor/mcp.json`:
   "mcpServers": {
     "hivemind": {
       "command": "npx",
-      "args": ["-y", "@hivemind/mcp-bridge", "hosted"],
+      "args": ["-y", "@amar_528/mcp-bridge", "hosted", "--url", "https://hivemind.davinciai.eu:8050/api/mcp/servers/YOUR_USER_ID", "--user-id", "YOUR_USER_ID"],
       "env": {
-        "HIVEMIND_HOSTED_URL": "https://hivemind.davinciai.eu:8050/api/mcp/servers/YOUR_USER_ID",
-        "HIVEMIND_CONNECTION_TOKEN": "YOUR_TOKEN"
+        "HIVEMIND_API_KEY": "YOUR_API_KEY",
+        "HIVEMIND_CONNECTION_TOKEN": "YOUR_TOKEN",
+        "HIVEMIND_USER_ID": "YOUR_USER_ID",
+        "HIVEMIND_ORG_ID": "YOUR_ORG_ID"
       }
     }
   }
 }
 ```
+
+### VS Code
+
+Add to `.vscode/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "hivemind": {
+      "command": "npx",
+      "args": ["-y", "@amar_528/mcp-bridge", "hosted", "--url", "https://hivemind.davinciai.eu:8050/api/mcp/servers/YOUR_USER_ID", "--user-id", "YOUR_USER_ID"],
+      "env": {
+        "HIVEMIND_API_KEY": "YOUR_API_KEY",
+        "HIVEMIND_CONNECTION_TOKEN": "YOUR_TOKEN",
+        "HIVEMIND_USER_ID": "YOUR_USER_ID",
+        "HIVEMIND_ORG_ID": "YOUR_ORG_ID"
+      }
+    }
+  }
+}
+```
+
+### Webapp Connectors / XData Ingestion
+
+Use the generated `clientConfig.webappConnectors` block when wiring hosted web flows:
+
+- `POST /api/ingest` ingests raw xdata payloads
+- `POST /api/memories/code/ingest` ingests code and documents
+- `POST /api/integrations/webapp/prepare` prepares recall/context for web assistants
+- `POST /api/integrations/webapp/store` stores decisions and answers from web UIs
+- `POST /api/connectors/mcp/endpoints` registers external MCP sources
+- `POST /api/connectors/mcp/inspect` inspects external MCP capabilities
+- `POST /api/connectors/mcp/ingest` imports external MCP data into HIVE-MIND
 
 ### Direct HTTP (Advanced)
 
@@ -176,6 +245,7 @@ curl https://hivemind.davinciai.eu:8050/api/mcp/servers/YOUR_USER_ID/rpc \
 
 - **Connection tokens** expire after 24 hours
 - **Token validation** on every request
+- **Tokenized descriptor URL** available via `clientConfig.simpleUrl`
 - **User ID verification** prevents unauthorized access
 - **Rate limiting** built-in (60 req/min, 1000 req/hour)
 - **HMAC-SHA256** token generation
@@ -218,4 +288,5 @@ curl https://hivemind.davinciai.eu:8050/api/mcp/servers/YOUR_USER_ID/rpc \
 
 - [Model Context Protocol Spec](https://modelcontextprotocol.io/)
 - [Supermemory MCP Implementation](https://github.com/supermemory/supermemory)
+- [Client Configuration Guide](./mcp-client-configuration.md)
 - [HIVE-MIND Architecture](../hivemind.md)

@@ -14,11 +14,13 @@
  * @requires search/hybrid
  */
 
+import crypto from 'node:crypto';
 import { createThreeTierRetrieval } from '../search/three-tier-retrieval.js';
 import hybridSearch from '../search/hybrid.js';
 import { getQdrantClient } from '../../vector/qdrant-client.js';
 import { getPrismaClient } from '../../db/prisma.js';
 import { PrismaGraphStore } from '../../memory/prisma-graph-store.js';
+import { recallPersistedMemories } from '../../memory/persisted-retrieval.js';
 
 // ==========================================
 // Configuration
@@ -264,7 +266,6 @@ export class RetrievalEvaluator {
       case 'recall':
         // Use persisted retrieval if available
         if (this.graphStore) {
-          const { recallPersistedMemories } = await import('../../core/src/memory/persisted-retrieval.js');
           return recallPersistedMemories(this.graphStore, {
             query_context: query,
             user_id: userId,
@@ -528,7 +529,8 @@ export class RetrievalEvaluator {
       userId,
       orgId,
       methods = ['hybrid'],
-      warmup = true
+      warmup = true,
+      dataset = 'default'
     } = options;
 
     const evaluationId = crypto.randomUUID();
@@ -608,6 +610,7 @@ export class RetrievalEvaluator {
       evaluationId,
       duration,
       testQueries,
+      dataset,
       methods,
       failedQueries
     });
@@ -637,7 +640,14 @@ export class RetrievalEvaluator {
    * @returns {Object} Comprehensive report
    */
   generateReport(results, metadata) {
-    const { evaluationId, duration, methods, failedQueries } = metadata;
+    const {
+      evaluationId,
+      duration,
+      methods,
+      failedQueries,
+      dataset = 'default',
+      testQueries = []
+    } = metadata;
 
     // Filter out failed evaluations
     const successfulResults = results.filter(r => !r.error && r.metrics);
@@ -671,8 +681,11 @@ export class RetrievalEvaluator {
     const qualityScore = this.calculateQualityScore(summary, latencyP99);
 
     return {
+      schemaVersion: '2026-03-19',
+      kind: 'hivemind.retrieval-evaluation-report',
       timestamp: new Date().toISOString(),
       evaluationId,
+      dataset,
       duration,
       summary: {
         ...summary,
@@ -686,6 +699,13 @@ export class RetrievalEvaluator {
       },
       byCategory,
       bySearchMethod,
+      queryMetadata: testQueries.map(query => ({
+        query: query.query,
+        category: query.category || 'general',
+        difficulty: query.difficulty || 'unknown',
+        relevantCount: query.relevantMemories?.length || 0,
+        tags: query.tags || []
+      })),
       failedQueries,
       targets: this.config.thresholds,
       methods,
@@ -737,9 +757,11 @@ export class RetrievalEvaluator {
 
     const aggregated = {};
     for (const [category, catResults] of Object.entries(categories)) {
+      const latencies = catResults.map(result => result.latencyMs).sort((a, b) => a - b);
       aggregated[category] = {
         count: catResults.length,
-        metrics: this.calculateSummary(catResults)
+        metrics: this.calculateSummary(catResults),
+        latencyP95: this.calculatePercentile(latencies, 0.95)
       };
     }
 
@@ -771,7 +793,8 @@ export class RetrievalEvaluator {
         count: methodResults.length,
         metrics: this.calculateSummary(methodResults),
         latencyP99: this.calculatePercentile(latencies, 0.99),
-        latencyP95: this.calculatePercentile(latencies, 0.95)
+        latencyP95: this.calculatePercentile(latencies, 0.95),
+        latencyP50: this.calculatePercentile(latencies, 0.50)
       };
     }
 
@@ -912,6 +935,20 @@ export class RetrievalEvaluator {
     } else {
       comparison.assessment = 'stable';
     }
+
+    comparison.overall = {
+      assessment: comparison.assessment,
+      qualityScore: {
+        baseline: baseline.summary?.qualityScore || 0,
+        current: current.summary?.qualityScore || 0,
+        delta: (current.summary?.qualityScore || 0) - (baseline.summary?.qualityScore || 0)
+      },
+      latencyP99: {
+        baseline: baseline.summary?.latencyP99 || 0,
+        current: current.summary?.latencyP99 || 0,
+        delta: (current.summary?.latencyP99 || 0) - (baseline.summary?.latencyP99 || 0)
+      }
+    };
 
     return comparison;
   }

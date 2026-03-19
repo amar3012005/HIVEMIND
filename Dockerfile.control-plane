@@ -1,0 +1,77 @@
+# HIVE-MIND Control Plane - Production Dockerfile
+# Dedicated public-facing deployment target for onboarding and client access.
+
+FROM node:20-slim AS base
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends dumb-init ca-certificates openssl tzdata wget && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# ==========================================
+# BUILD STAGE
+# ==========================================
+FROM base AS builder
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3 make g++ git && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy package files
+COPY core/package.json core/package-lock.json ./
+COPY core/prisma ./prisma
+COPY core/tsconfig.json ./
+
+# Install dependencies
+RUN npm ci && npm cache clean --force
+
+# Copy source code
+COPY core/src ./src
+COPY core/config ./config
+
+# Generate Prisma client
+RUN npx prisma generate
+
+# ==========================================
+# PRODUCTION STAGE
+# ==========================================
+FROM base AS production
+
+ARG NODE_ENV=production
+ARG VERSION=1.0.0
+ARG BUILD_DATE
+
+ENV NODE_ENV=${NODE_ENV} \
+    VERSION=${VERSION} \
+    BUILD_DATE=${BUILD_DATE} \
+    PORT=3000 \
+    HOST=0.0.0.0 \
+    LOG_LEVEL=info \
+    LOG_FORMAT=json
+
+# Create non-root user
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nodejs -u 1001 -G nodejs
+
+RUN mkdir -p /app/logs /app/data && \
+    chown -R nodejs:nodejs /app
+
+USER nodejs
+
+# Copy from builder
+COPY --from=builder --chown=nodejs:nodejs /app/src ./src
+COPY --from=builder --chown=nodejs:nodejs /app/config ./config
+COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
+COPY --from=builder --chown=nodejs:nodejs /app/package.json ./
+COPY --from=builder --chown=nodejs:nodejs /app/prisma ./prisma
+
+RUN chmod -R 550 /app && chmod -R 770 /app/logs /app/data
+
+EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1
+
+ENTRYPOINT ["/usr/bin/dumb-init", "--"]
+CMD ["node", "src/control-plane-server.js"]

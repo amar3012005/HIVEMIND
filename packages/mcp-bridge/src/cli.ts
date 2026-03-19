@@ -91,7 +91,7 @@ function parseArgs(): Partial<BridgeConfig> {
         config.verbose = true;
         break;
       case '--version':
-        console.log(`@hivemind/mcp-bridge v${packageVersion}`);
+        console.log(`@amar_528/mcp-bridge v${packageVersion}`);
         process.exit(0);
       case '--help':
       case '-h':
@@ -109,7 +109,7 @@ HIVE-MIND MCP Bridge v${packageVersion}
 Connect MCP clients to sovereign EU HIVE-MIND hosted service
 
 USAGE:
-  npx @hivemind/mcp-bridge [mode] [options]
+  npx @amar_528/mcp-bridge [mode] [options]
 
 MODES:
   hosted    Connect to hosted HIVE-MIND API (default)
@@ -135,7 +135,11 @@ function normalizeBaseUrl(url: string): string {
 }
 
 function isHostedDescriptorUrl(url: string): boolean {
-  return /\/api\/mcp\/servers\/[^/]+$/i.test(url);
+  return /\/api\/mcp\/servers\/[^/?#]+(?:\?.*)?$/i.test(url);
+}
+
+function stripQueryAndHash(url: string): string {
+  return url.split(/[?#]/, 1)[0];
 }
 
 function loadConfig(): BridgeConfig {
@@ -184,6 +188,8 @@ async function fetchDescriptor(config: BridgeConfig): Promise<HostedDescriptor> 
   if (config.apiKey) {
     headers['X-API-Key'] = config.apiKey;
     headers['Authorization'] = `Bearer ${config.apiKey}`;
+  } else if (config.connectionToken) {
+    headers['Authorization'] = `Bearer ${config.connectionToken}`;
   }
   headers['X-User-Id'] = config.userId;
 
@@ -204,7 +210,7 @@ function resolveRpcEndpoint(config: BridgeConfig, descriptor: HostedDescriptor):
   }
 
   const base = isHostedDescriptorUrl(config.apiUrl)
-    ? normalizeBaseUrl(config.apiUrl).replace(/\/api\/mcp\/servers\/[^/]+$/i, '')
+    ? normalizeBaseUrl(stripQueryAndHash(config.apiUrl)).replace(/\/api\/mcp\/servers\/[^/]+$/i, '')
     : normalizeBaseUrl(config.apiUrl);
 
   const fallback = `${base}/api/mcp/servers/${config.userId}/rpc`;

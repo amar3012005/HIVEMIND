@@ -20,7 +20,7 @@ export class ZitadelOidcClient {
     this.issuer = ensureNoTrailingSlash(this.config.issuerUrl);
   }
 
-  buildAuthorizeUrl(state) {
+  buildAuthorizeUrl(state, options = {}) {
     const params = new URLSearchParams({
       client_id: this.config.clientId,
       response_type: 'code',
@@ -28,6 +28,14 @@ export class ZitadelOidcClient {
       scope: this.config.scope,
       state
     });
+
+    // Pass through OIDC hints for IdP pre-selection (e.g. Google)
+    if (options.idpHint) {
+      params.set('idp_hint', options.idpHint);
+    }
+    if (options.loginHint) {
+      params.set('login_hint', options.loginHint);
+    }
 
     return `${this.issuer}/oauth/v2/authorize?${params.toString()}`;
   }

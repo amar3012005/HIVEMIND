@@ -58,7 +58,11 @@ const CONFIG = {
   zitadelClientId: process.env.ZITADEL_CLIENT_ID || null,
   zitadelClientSecret: process.env.ZITADEL_CLIENT_SECRET || null,
   zitadelRedirectUri: process.env.ZITADEL_REDIRECT_URI || null,
-  postLoginRedirect: process.env.HIVEMIND_CONTROL_PLANE_POST_LOGIN_REDIRECT || '/'
+  postLoginRedirect: process.env.HIVEMIND_CONTROL_PLANE_POST_LOGIN_REDIRECT || '/',
+  allowedOrigins: (process.env.HIVEMIND_CONTROL_PLANE_ALLOWED_ORIGINS || 'https://hivemind.davincisolutions.de')
+    .split(',')
+    .map(o => o.trim())
+    .filter(Boolean)
 };
 
 const prisma = getPrismaClient();
@@ -118,11 +122,13 @@ async function parseBody(req) {
 
 function makeSessionCookie(sessionId) {
   const value = buildSessionCookie(CONFIG.sessionSecret, sessionId);
-  return `${CONFIG.sessionCookieName}=${encodeURIComponent(value)}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${CONFIG.sessionTtlSeconds}`;
+  // SameSite=None; Secure required for cross-site cookie auth
+  // (frontend at hivemind.davincisolutions.de, control plane at api.hivemind.davinciai.eu)
+  return `${CONFIG.sessionCookieName}=${encodeURIComponent(value)}; HttpOnly; Path=/; SameSite=None; Secure; Max-Age=${CONFIG.sessionTtlSeconds}`;
 }
 
 function clearSessionCookie() {
-  return `${CONFIG.sessionCookieName}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0`;
+  return `${CONFIG.sessionCookieName}=; HttpOnly; Path=/; SameSite=None; Secure; Max-Age=0`;
 }
 
 function sanitizeSlug(input) {
@@ -239,7 +245,12 @@ async function buildBootstrapPayload(user) {
 }
 
 const server = http.createServer(async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  // CORS: only allow the configured frontend origin(s) — never '*' with credentials
+  const requestOrigin = req.headers.origin;
+  if (requestOrigin && CONFIG.allowedOrigins.includes(requestOrigin)) {
+    res.setHeader('Access-Control-Allow-Origin', requestOrigin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
@@ -267,7 +278,15 @@ const server = http.createServer(async (req, res) => {
     const state = await sessionStore.createAuthState({
       returnTo: url.searchParams.get('return_to') || CONFIG.postLoginRedirect
     });
-    return redirect(res, zitadelClient.buildAuthorizeUrl(state));
+    // Pass through IdP hints from the frontend (e.g. ?idp_hint=google)
+    const authorizeOptions = {};
+    if (url.searchParams.get('idp_hint')) {
+      authorizeOptions.idpHint = url.searchParams.get('idp_hint');
+    }
+    if (url.searchParams.get('login_hint')) {
+      authorizeOptions.loginHint = url.searchParams.get('login_hint');
+    }
+    return redirect(res, zitadelClient.buildAuthorizeUrl(state, authorizeOptions));
   }
 
   if (pathname === '/auth/callback' && req.method === 'GET') {

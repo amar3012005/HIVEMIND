@@ -1108,3 +1108,38 @@ Created a single clean backend record for the new onboarding/control-plane archi
 ### Purpose
 
 - This document is the canonical handoff/reference point for continuing frontend product work without re-deriving the backend architecture from source files.
+2026-03-20 16:27:10 - Modified: /opt/HIVEMIND/frontend/Da-vinci/src/components/hivemind/app/shared/theme.js
+
+## 2026-03-20 16:40 UTC - SSL Certification Runbook Saved
+
+Documented the production TLS flow in [docs/ssl-certification-runbook.md](/opt/HIVEMIND/docs/ssl-certification-runbook.md).
+
+### Covers
+
+- DNS A records for `hivemind.davinciai.eu`, `api.hivemind.davinciai.eu`, and `core.hivemind.davinciai.eu`
+- ACME TXT challenge naming
+- proxy install and restart order
+- HTTPS verification commands
+- the production host/port split used by HIVE-MIND
+2026-03-20 18:51:52 - Modified: /opt/HIVEMIND/core/src/connectors/framework/provider-adapter.js
+2026-03-20 18:52:29 - Modified: /opt/HIVEMIND/core/src/connectors/framework/connector-store.js
+2026-03-20 18:52:46 - Modified: /opt/HIVEMIND/core/src/connectors/framework/sync-engine.js
+2026-03-20 18:53:14 - Modified: /opt/HIVEMIND/core/src/connectors/providers/gmail/oauth.js
+2026-03-20 18:53:53 - Modified: /opt/HIVEMIND/core/src/connectors/providers/gmail/adapter.js
+2026-03-20 18:54:07 - Modified: /opt/HIVEMIND/core/src/control-plane-server.js
+2026-03-20 18:54:19 - Modified: /opt/HIVEMIND/core/src/control-plane-server.js
+2026-03-20 18:55:09 - Modified: /opt/HIVEMIND/core/src/control-plane-server.js
+2026-03-20 19:00:35 - Modified: /opt/HIVEMIND/core/src/server.js
+2026-03-20 19:01:03 - Modified: /opt/HIVEMIND/frontend/Da-vinci/src/components/hivemind/app/shared/api-client.js
+
+## 2026-03-20 19:15 UTC - Connector Framework v1 Verification Notes Saved
+
+Saved the connector verification record to [journal-connector-framework-v1.md](/opt/HIVEMIND/journal-connector-framework-v1.md) and the implementation reference to [docs/connector-framework-v1-readme.md](/opt/HIVEMIND/docs/connector-framework-v1-readme.md).
+
+### Covers
+
+- the provider-agnostic framework files now present in core
+- Gmail-first OAuth and adapter implementation surface
+- frontend connector UI wiring now present
+- verification steps that passed
+- the concrete backend/frontend gaps still blocking a full production-ready sign-off

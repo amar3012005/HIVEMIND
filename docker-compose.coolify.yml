@@ -37,9 +37,11 @@ services:
             PORT: '3000'
             HOST: 0.0.0.0
             VERSION: '${VERSION:-2.0.0}'
-            HIVEMIND_API_URL: '${HIVEMIND_API_URL:-https://api.hivemind.davinciai.eu}'
-            HIVEMIND_CORE_API_BASE_URL: '${HIVEMIND_CORE_API_BASE_URL:-https://api.hivemind.davinciai.eu}'
-            HIVEMIND_CONTROL_PLANE_PUBLIC_URL: '${HIVEMIND_CONTROL_PLANE_PUBLIC_URL:-https://api.hivemind.davinciai.eu}'
+            HIVEMIND_API_URL: '${HIVEMIND_API_URL:-https://core.hivemind.davinciai.eu:8050}'
+            HIVEMIND_CORE_API_BASE_URL: '${HIVEMIND_CORE_API_BASE_URL:-https://core.hivemind.davinciai.eu:8050}'
+            HIVEMIND_CONTROL_PLANE_PUBLIC_URL: '${HIVEMIND_CONTROL_PLANE_PUBLIC_URL:-https://api.hivemind.davinciai.eu:8040}'
+            HIVEMIND_ALLOWED_ORIGINS: '${HIVEMIND_ALLOWED_ORIGINS:-https://hivemind.davinciai.eu}'
+            HIVEMIND_CONTROL_PLANE_ALLOWED_ORIGINS: '${HIVEMIND_CONTROL_PLANE_ALLOWED_ORIGINS:-https://hivemind.davinciai.eu}'
             HIVEMIND_CONTROL_PLANE_SESSION_SECRET: '${HIVEMIND_CONTROL_PLANE_SESSION_SECRET}'
             ZITADEL_ISSUER_URL: '${ZITADEL_ISSUER_URL}'
             ZITADEL_CLIENT_ID: '${ZITADEL_CLIENT_ID}'
@@ -129,7 +131,7 @@ services:
             - coolify.healthcheck=/health
             - coolify.port=3000
             - traefik.enable=true
-            - 'traefik.http.routers.hivemind-api.rule=Host(`$${DOMAIN:-localhost}`)'
+            - 'traefik.http.routers.hivemind-api.rule=Host(`$${APP_DOMAIN:-core.hivemind.davinciai.eu}`)'
             - traefik.http.routers.hivemind-api.entrypoints=websecure
             - traefik.http.routers.hivemind-api.tls.certresolver=letsencrypt
             - traefik.http.services.hivemind-api.loadbalancer.server.port=3000
@@ -190,7 +192,11 @@ services:
             PORT: '3000'
             HOST: 0.0.0.0
             VERSION: '${VERSION:-2.0.0}'
-            HIVEMIND_API_URL: '${HIVEMIND_API_URL:-https://api.hivemind.davinciai.eu}'
+            HIVEMIND_API_URL: '${HIVEMIND_API_URL:-https://core.hivemind.davinciai.eu:8050}'
+            HIVEMIND_CORE_API_BASE_URL: '${HIVEMIND_CORE_API_BASE_URL:-https://core.hivemind.davinciai.eu:8050}'
+            HIVEMIND_CONTROL_PLANE_PUBLIC_URL: '${HIVEMIND_CONTROL_PLANE_PUBLIC_URL:-https://api.hivemind.davinciai.eu:8040}'
+            HIVEMIND_ALLOWED_ORIGINS: '${HIVEMIND_ALLOWED_ORIGINS:-https://hivemind.davinciai.eu}'
+            HIVEMIND_CONTROL_PLANE_ALLOWED_ORIGINS: '${HIVEMIND_CONTROL_PLANE_ALLOWED_ORIGINS:-https://hivemind.davinciai.eu}'
             DATABASE_URL: 'postgresql://${POSTGRES_USER:-hivemind_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}?schema=public&connection_limit=20&pool_timeout=30'
             DATABASE_HOST: postgres
             DATABASE_PORT: '5432'

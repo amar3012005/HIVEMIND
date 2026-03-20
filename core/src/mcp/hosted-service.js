@@ -28,7 +28,7 @@ import Redis from 'ioredis';
 const CONFIG = {
   publicBaseUrl: process.env.HIVEMIND_PUBLIC_BASE_URL
     || process.env.HIVEMIND_EXTERNAL_URL
-    || 'https://hivemind.davinciai.eu:8050',
+    || 'https://core.hivemind.davinciai.eu:8050',
   internalBaseUrl: process.env.HIVEMIND_INTERNAL_BASE_URL
     || process.env.HIVEMIND_BASE_URL
     || null,

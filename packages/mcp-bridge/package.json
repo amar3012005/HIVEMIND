@@ -1,6 +1,6 @@
 {
   "name": "@amar_528/mcp-bridge",
-  "version": "2.0.7",
+  "version": "2.0.9",
   "description": "Sovereign EU MCP Bridge - Connect Claude Desktop/Cursor to HIVE-MIND hosted MCP service with GDPR-compliant data residency",
   "type": "module",
   "main": "dist/cli.js",

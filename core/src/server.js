@@ -156,7 +156,7 @@ const INGESTION_MODULE_CANDIDATES = [
 ];
 const CONTEXT_CACHE_TTL_MS = Number(process.env.HIVEMIND_CONTEXT_CACHE_TTL_MS || 15000);
 const aggregateCache = new Map();
-const ALLOWED_ORIGINS = (process.env.HIVEMIND_ALLOWED_ORIGINS || 'https://hivemind.davincisolutions.de')
+const ALLOWED_ORIGINS = (process.env.HIVEMIND_ALLOWED_ORIGINS || 'https://hivemind.davinciai.eu')
   .split(',')
   .map(origin => origin.trim())
   .filter(Boolean);
@@ -820,9 +820,12 @@ const server = http.createServer(async (req, res) => {
 
         const connection = await getConnectionContext(token, pathUserId);
         const connectionOrgId = connection?.orgId || DEFAULT_ORG;
+        const requestApiKey = typeof req.headers['x-api-key'] === 'string'
+          ? req.headers['x-api-key'].trim()
+          : '';
         const apiClient = createHostedApiClient({
           baseUrl: process.env.HIVEMIND_INTERNAL_BASE_URL || process.env.HIVEMIND_BASE_URL || `http://${req.headers.host}`,
-          apiKey: MASTER_API_KEY || '',
+          apiKey: requestApiKey || '',
           userId: pathUserId,
           orgId: connectionOrgId
         });
@@ -1334,6 +1337,70 @@ const server = http.createServer(async (req, res) => {
               return jsonResponse(res, { success: true, ...result }, 202);
             } catch (error) {
               return jsonResponse(res, { error: error.message }, 400);
+            }
+          }
+          break;
+
+        // ==========================================
+        // CONNECTOR FRAMEWORK SYNC (Provider-agnostic)
+        // ==========================================
+        case '/api/connectors/sync':
+          if (req.method === 'POST') {
+            if (!persistentMemoryEngine || !persistentMemoryStore) {
+              return jsonResponse(res, { error: 'Persistent memory unavailable' }, 503);
+            }
+            try {
+              const provider = body.provider;
+              const syncUserId = body.user_id || userId;
+              const syncOrgId = body.org_id || orgId;
+
+              // Dynamically load provider adapter
+              const adapterModules = {
+                gmail: './connectors/providers/gmail/adapter.js',
+              };
+              const adapterPath = adapterModules[provider];
+              if (!adapterPath) {
+                return jsonResponse(res, { error: `Unknown provider: ${provider}` }, 400);
+              }
+
+              const mod = await import(adapterPath);
+              const AdapterClass = mod.GmailAdapter || mod.default;
+              const adapter = new AdapterClass();
+
+              // Build sync engine
+              const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
+              const { SyncEngine } = await import('./connectors/framework/sync-engine.js');
+              const cStore = new ConnectorStore(prisma);
+              const syncEngine = new SyncEngine({
+                connectorStore: cStore,
+                memoryEngine: persistentMemoryEngine,
+                memoryStore: persistentMemoryStore,
+                prisma,
+              });
+
+              // Run sync in background
+              const incremental = body.incremental !== false;
+              const cursor = body.cursor || null;
+
+              setImmediate(async () => {
+                try {
+                  const result = await syncEngine.runSync({
+                    adapter,
+                    userId: syncUserId,
+                    orgId: syncOrgId,
+                    provider,
+                    cursor,
+                    incremental,
+                  });
+                  console.log(`[connector-sync] ${provider}:${syncUserId} → ${result.status} (imported: ${result.imported}, skipped: ${result.skipped})`);
+                } catch (syncErr) {
+                  console.error(`[connector-sync] ${provider}:${syncUserId} failed:`, syncErr.message);
+                }
+              });
+
+              return jsonResponse(res, { success: true, message: 'Sync enqueued', provider }, 202);
+            } catch (error) {
+              return jsonResponse(res, { error: error.message }, 500);
             }
           }
           break;

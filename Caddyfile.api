@@ -1,0 +1,8 @@
+{
+    admin off
+}
+
+https://api.hivemind.davinciai.eu:443 {
+    reverse_proxy hivemind-control-plane:3000
+    tls /etc/letsencrypt/live/api.hivemind.davinciai.eu/fullchain.pem /etc/letsencrypt/live/api.hivemind.davinciai.eu/privkey.pem
+}

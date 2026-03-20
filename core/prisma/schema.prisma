@@ -53,6 +53,7 @@ enum PlatformType {
   claude
   perplexity
   gemini
+  gmail
   other
 
   
@@ -217,9 +218,10 @@ model UserOrganization {
 model PlatformIntegration {
   id                  String       @id @default(uuid()) @map("id") @db.Uuid
   userId              String       @map("user_id") @db.Uuid
-  platformType        PlatformType @map("platform_type")
+  platformType        String       @map("platform_type")
   platformUserId      String?      @map("platform_user_id")
   platformDisplayName String?      @map("platform_display_name")
+  connectorMetadata   Json         @default("{}") @map("connector_metadata")
 
   // Authentication (encrypted fields)
   authType               AuthType  @map("auth_type")

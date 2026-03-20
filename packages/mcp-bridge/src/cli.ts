@@ -7,10 +7,10 @@
  * 2) Calls hosted MCP JSON-RPC endpoint from server descriptor (connection.endpoints.jsonrpc).
  */
 
-import { readFileSync } from 'fs';
-import { dirname, join } from 'path';
-import { fileURLToPath } from 'url';
-import { randomUUID } from 'crypto';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { randomUUID } from 'node:crypto';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
@@ -148,7 +148,7 @@ function loadConfig(): BridgeConfig {
   const verbose = cli.verbose || false;
 
   if (mode === 'hosted') {
-    const apiUrl = cli.apiUrl || process.env.HIVEMIND_API_URL || process.env.HIVEMIND_HOSTED_URL || 'https://hivemind.davinciai.eu:8050';
+    const apiUrl = cli.apiUrl || process.env.HIVEMIND_API_URL || process.env.HIVEMIND_HOSTED_URL || 'https://core.hivemind.davinciai.eu:8050';
     const apiKey = cli.apiKey || process.env.HIVEMIND_API_KEY || process.env.HIVEMIND_MASTER_API_KEY;
     const userId = cli.userId || process.env.HIVEMIND_USER_ID || process.env.CURRENT_USER_ID || generateUserId();
     const connectionToken = cli.connectionToken || process.env.HIVEMIND_CONNECTION_TOKEN;

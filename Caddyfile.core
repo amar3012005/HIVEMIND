@@ -3,6 +3,6 @@
 }
 
 https://core.hivemind.davinciai.eu:443 {
-    reverse_proxy hivemind-app:3000
+    reverse_proxy hivemind-api:3000
     tls /etc/letsencrypt/live/core.hivemind.davinciai.eu/fullchain.pem /etc/letsencrypt/live/core.hivemind.davinciai.eu/privkey.pem
 }

@@ -11,7 +11,7 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 
-const HIVEMIND_URL = process.env.HIVEMIND_URL || 'https://hivemind.davinciai.eu:8050';
+const HIVEMIND_URL = process.env.HIVEMIND_URL || 'https://core.hivemind.davinciai.eu:8050';
 const HIVEMIND_API_KEY = process.env.HIVEMIND_API_KEY;
 
 if (!HIVEMIND_API_KEY) {

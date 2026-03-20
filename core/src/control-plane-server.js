@@ -12,6 +12,7 @@ import {
 import { buildAllClientDescriptors, buildClientDescriptor } from './control-plane/descriptors.js';
 import { ControlPlaneSessionStore, buildSessionCookie, verifySessionCookie } from './control-plane/session-store.js';
 import { ZitadelOidcClient } from './control-plane/zitadel.js';
+import { ConnectorStore } from './connectors/framework/connector-store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
@@ -45,7 +46,7 @@ const CONFIG = {
   publicBaseUrl: process.env.HIVEMIND_CONTROL_PLANE_PUBLIC_URL || `http://localhost:${process.env.CONTROL_PLANE_PORT || process.env.PORT || 3010}`,
   coreApiBaseUrl: process.env.HIVEMIND_CORE_API_BASE_URL
     || process.env.HIVEMIND_API_URL
-    || 'https://api.hivemind.davinciai.eu',
+    || 'https://core.hivemind.davinciai.eu:8050',
   sessionCookieName: process.env.HIVEMIND_CONTROL_PLANE_SESSION_COOKIE || 'hm_cp_session',
   sessionSecret: process.env.HIVEMIND_CONTROL_PLANE_SESSION_SECRET || process.env.SESSION_SECRET || 'change-me',
   sessionTtlSeconds: Number(process.env.HIVEMIND_CONTROL_PLANE_SESSION_TTL_SECONDS || 60 * 60 * 24 * 7),
@@ -61,7 +62,7 @@ const CONFIG = {
   postLoginRedirect: process.env.HIVEMIND_CONTROL_PLANE_POST_LOGIN_REDIRECT || '/',
   allowedOrigins: (process.env.HIVEMIND_CONTROL_PLANE_ALLOWED_ORIGINS
     || process.env.HIVEMIND_ALLOWED_ORIGINS
-    || 'https://hivemind.davincisolutions.de')
+    || 'https://hivemind.davinciai.eu')
     .split(',')
     .map(o => o.trim())
     .filter(Boolean)
@@ -69,6 +70,22 @@ const CONFIG = {
 
 const prisma = getPrismaClient();
 const sessionStore = new ControlPlaneSessionStore(CONFIG);
+const connectorStore = prisma ? new ConnectorStore(prisma) : null;
+
+// Provider registry — add new providers here
+const PROVIDER_REGISTRY = {
+  gmail: {
+    oauthModule: './connectors/providers/gmail/oauth.js',
+    adapterModule: './connectors/providers/gmail/adapter.js',
+    adapterClass: 'GmailAdapter',
+    label: 'Gmail',
+    scopes: ['https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/userinfo.email'],
+  },
+};
+
+function getConnectorCallbackUrl(provider) {
+  return `${CONFIG.publicBaseUrl}/v1/connectors/${provider}/callback`;
+}
 const zitadelClient = (CONFIG.zitadelIssuerUrl && CONFIG.zitadelClientId && CONFIG.zitadelClientSecret && CONFIG.zitadelRedirectUri)
   ? new ZitadelOidcClient({
       issuerUrl: CONFIG.zitadelIssuerUrl,
@@ -489,6 +506,218 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { error: error.message }, 400);
     }
   }
+
+  // ─── Connector OAuth Routes ──────────────────────────────────────
+
+  // GET /v1/connectors — list all connectors for current user
+  if (pathname === '/v1/connectors' && req.method === 'GET') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    if (!connectorStore) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+
+    const connectors = await connectorStore.listConnectors(current.session.userId);
+
+    // Merge with provider registry to show available + connected
+    const result = Object.entries(PROVIDER_REGISTRY).map(([providerId, meta]) => {
+      const connector = connectors.find(c => c.provider === providerId);
+      return {
+        provider: providerId,
+        label: meta.label,
+        status: connector ? connector.status : 'disconnected',
+        account_ref: connector?.account_ref || null,
+        last_sync_at: connector?.last_sync_at || null,
+        last_error: connector?.last_error || null,
+        is_active: connector?.is_active || false,
+        scopes: connector?.scopes || meta.scopes,
+        created_at: connector?.created_at || null,
+      };
+    });
+
+    return jsonResponse(res, { connectors: result });
+  }
+
+  // POST /v1/connectors/:provider/start — begin OAuth flow
+  const connectorStartMatch = pathname.match(/^\/v1\/connectors\/([a-z_-]+)\/start$/);
+  if (connectorStartMatch && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+
+    const provider = connectorStartMatch[1];
+    const providerConfig = PROVIDER_REGISTRY[provider];
+    if (!providerConfig) {
+      return jsonResponse(res, { error: `Unknown provider: ${provider}` }, 400);
+    }
+
+    try {
+      const { buildAuthUrl } = await import(providerConfig.oauthModule);
+      const body = await parseBody(req);
+      const returnTo = body.return_to || '/hivemind/app/connectors';
+
+      // Create CSRF-safe state bound to user/org
+      const stateId = await sessionStore.createAuthState({
+        userId: current.session.userId,
+        orgId: current.session.orgId,
+        provider,
+        returnTo,
+      });
+
+      const authUrl = buildAuthUrl({
+        redirectUri: getConnectorCallbackUrl(provider),
+        state: stateId,
+      });
+
+      return jsonResponse(res, { auth_url: authUrl });
+    } catch (error) {
+      return jsonResponse(res, { error: error.message }, 500);
+    }
+  }
+
+  // GET /v1/connectors/:provider/callback — OAuth callback
+  const connectorCallbackMatch = pathname.match(/^\/v1\/connectors\/([a-z_-]+)\/callback$/);
+  if (connectorCallbackMatch && req.method === 'GET') {
+    const provider = connectorCallbackMatch[1];
+    const providerConfig = PROVIDER_REGISTRY[provider];
+    if (!providerConfig) {
+      return jsonResponse(res, { error: `Unknown provider: ${provider}` }, 400);
+    }
+
+    const code = url.searchParams.get('code');
+    const state = url.searchParams.get('state');
+    const error = url.searchParams.get('error');
+
+    if (error) {
+      return redirect(res, `/hivemind/app/connectors?connector_error=${encodeURIComponent(error)}`);
+    }
+
+    if (!code || !state) {
+      return jsonResponse(res, { error: 'Missing code or state' }, 400);
+    }
+
+    // Verify CSRF state
+    const authState = await sessionStore.consumeAuthState(state);
+    if (!authState || authState.provider !== provider) {
+      return redirect(res, `/hivemind/app/connectors?connector_error=invalid_state`);
+    }
+
+    try {
+      const { exchangeCode } = await import(providerConfig.oauthModule);
+      const tokens = await exchangeCode({
+        code,
+        redirectUri: getConnectorCallbackUrl(provider),
+      });
+
+      // Store encrypted tokens
+      await connectorStore.upsertConnector({
+        userId: authState.userId,
+        provider,
+        accountRef: tokens.email || tokens.account_ref || null,
+        accessToken: tokens.access_token,
+        refreshToken: tokens.refresh_token,
+        tokenExpiresAt: tokens.expires_in
+          ? new Date(Date.now() + tokens.expires_in * 1000).toISOString()
+          : null,
+        scopes: providerConfig.scopes,
+      });
+
+      // Enqueue initial sync (fire-and-forget background)
+      setImmediate(async () => {
+        try {
+          const apiKey = process.env.HIVEMIND_MASTER_API_KEY;
+          if (!apiKey) {
+            console.error(`[connector] HIVEMIND_MASTER_API_KEY is not configured; initial sync skipped for ${provider}:${authState.userId}`);
+            return;
+          }
+          const syncResponse = await fetch(`${CONFIG.coreApiBaseUrl}/api/connectors/sync`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-API-Key': apiKey,
+            },
+            body: JSON.stringify({
+              provider,
+              user_id: authState.userId,
+              org_id: authState.orgId,
+              incremental: false,
+            }),
+          });
+          console.log(`[connector] Initial sync enqueued for ${provider}:${authState.userId} → ${syncResponse.status}`);
+        } catch (syncError) {
+          console.error(`[connector] Initial sync failed for ${provider}:`, syncError.message);
+        }
+      });
+
+      const returnTo = authState.returnTo || '/hivemind/app/connectors';
+      return redirect(res, `${returnTo}?connector_success=${provider}`);
+    } catch (tokenError) {
+      console.error(`[connector] OAuth exchange failed for ${provider}:`, tokenError.message);
+      return redirect(res, `/hivemind/app/connectors?connector_error=${encodeURIComponent(tokenError.message)}`);
+    }
+  }
+
+  // GET /v1/connectors/:provider/status — detailed connector status
+  const connectorStatusMatch = pathname.match(/^\/v1\/connectors\/([a-z_-]+)\/status$/);
+  if (connectorStatusMatch && req.method === 'GET') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    if (!connectorStore) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+
+    const connector = await connectorStore.getConnector(current.session.userId, connectorStatusMatch[1]);
+    if (!connector) {
+      return jsonResponse(res, { provider: connectorStatusMatch[1], status: 'disconnected' });
+    }
+    return jsonResponse(res, connector);
+  }
+
+  // POST /v1/connectors/:provider/disconnect
+  const connectorDisconnectMatch = pathname.match(/^\/v1\/connectors\/([a-z_-]+)\/disconnect$/);
+  if (connectorDisconnectMatch && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    if (!connectorStore) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+
+    const success = await connectorStore.disconnect(current.session.userId, connectorDisconnectMatch[1]);
+    return jsonResponse(res, { success, provider: connectorDisconnectMatch[1] });
+  }
+
+  // POST /v1/connectors/:provider/resync — trigger manual resync
+  const connectorResyncMatch = pathname.match(/^\/v1\/connectors\/([a-z_-]+)\/resync$/);
+  if (connectorResyncMatch && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+
+    const provider = connectorResyncMatch[1];
+    const connector = await connectorStore?.getConnector(current.session.userId, provider);
+    if (!connector || connector.status === 'disconnected') {
+      return jsonResponse(res, { error: 'Connector not connected' }, 400);
+    }
+
+    // Trigger sync via core API
+    try {
+      const apiKey = process.env.HIVEMIND_MASTER_API_KEY;
+      if (!apiKey) {
+        return jsonResponse(res, { error: 'HIVEMIND_MASTER_API_KEY is not configured' }, 503);
+      }
+      const body = await parseBody(req);
+      await fetch(`${CONFIG.coreApiBaseUrl}/api/connectors/sync`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': apiKey,
+        },
+        body: JSON.stringify({
+          provider,
+          user_id: current.session.userId,
+          org_id: current.session.orgId,
+          incremental: body.incremental !== false,
+        }),
+      });
+      return jsonResponse(res, { success: true, message: 'Sync enqueued' });
+    } catch (error) {
+      return jsonResponse(res, { error: error.message }, 500);
+    }
+  }
+
+  // ─── End Connector Routes ──────────────────────────────────────
 
   if (pathname === '/' && req.method === 'GET') {
     return jsonResponse(res, {

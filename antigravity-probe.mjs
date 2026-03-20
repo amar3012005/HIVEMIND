@@ -6,7 +6,7 @@ const transport = new StdioClientTransport({
   args: ['-y', '@amar_528/mcp-bridge', 'hosted'],
   env: {
     ...process.env,
-    HIVEMIND_API_URL: 'https://hivemind.davinciai.eu:8050',
+    HIVEMIND_API_URL: 'https://core.hivemind.davinciai.eu:8050',
     HIVEMIND_API_KEY: 'hm_master_key_99228811',
     HIVEMIND_USER_ID: '00000000-0000-4000-8000-000000000001',
     NODE_NO_WARNINGS: '1'

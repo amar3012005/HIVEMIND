@@ -59,7 +59,9 @@ const CONFIG = {
   zitadelClientSecret: process.env.ZITADEL_CLIENT_SECRET || null,
   zitadelRedirectUri: process.env.ZITADEL_REDIRECT_URI || null,
   postLoginRedirect: process.env.HIVEMIND_CONTROL_PLANE_POST_LOGIN_REDIRECT || '/',
-  allowedOrigins: (process.env.HIVEMIND_CONTROL_PLANE_ALLOWED_ORIGINS || 'https://hivemind.davincisolutions.de')
+  allowedOrigins: (process.env.HIVEMIND_CONTROL_PLANE_ALLOWED_ORIGINS
+    || process.env.HIVEMIND_ALLOWED_ORIGINS
+    || 'https://hivemind.davincisolutions.de')
     .split(',')
     .map(o => o.trim())
     .filter(Boolean)
@@ -75,6 +77,7 @@ const zitadelClient = (CONFIG.zitadelIssuerUrl && CONFIG.zitadelClientId && CONF
       redirectUri: CONFIG.zitadelRedirectUri
     })
   : null;
+const USE_SECURE_CROSS_SITE_COOKIE = CONFIG.publicBaseUrl.startsWith('https://');
 
 function jsonResponse(res, body, status = 200, headers = {}) {
   res.writeHead(status, {
@@ -123,12 +126,27 @@ async function parseBody(req) {
 function makeSessionCookie(sessionId) {
   const value = buildSessionCookie(CONFIG.sessionSecret, sessionId);
   // SameSite=None; Secure required for cross-site cookie auth
-  // (frontend at hivemind.davincisolutions.de, control plane at api.hivemind.davinciai.eu)
   return `${CONFIG.sessionCookieName}=${encodeURIComponent(value)}; HttpOnly; Path=/; SameSite=None; Secure; Max-Age=${CONFIG.sessionTtlSeconds}`;
 }
 
 function clearSessionCookie() {
   return `${CONFIG.sessionCookieName}=; HttpOnly; Path=/; SameSite=None; Secure; Max-Age=0`;
+}
+
+function applyCorsHeaders(req, res) {
+  const origin = req.headers.origin;
+  if (!origin) {
+    return;
+  }
+
+  if (CONFIG.allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Vary', 'Origin');
+  }
+
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 }
 
 function sanitizeSlug(input) {
@@ -245,17 +263,10 @@ async function buildBootstrapPayload(user) {
 }
 
 const server = http.createServer(async (req, res) => {
-  // CORS: only allow the configured frontend origin(s) — never '*' with credentials
-  const requestOrigin = req.headers.origin;
-  if (requestOrigin && CONFIG.allowedOrigins.includes(requestOrigin)) {
-    res.setHeader('Access-Control-Allow-Origin', requestOrigin);
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-  }
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  applyCorsHeaders(req, res);
 
   if (req.method === 'OPTIONS') {
-    res.writeHead(200);
+    res.writeHead(204);
     res.end();
     return;
   }

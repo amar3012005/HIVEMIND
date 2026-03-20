@@ -156,6 +156,10 @@ const INGESTION_MODULE_CANDIDATES = [
 ];
 const CONTEXT_CACHE_TTL_MS = Number(process.env.HIVEMIND_CONTEXT_CACHE_TTL_MS || 15000);
 const aggregateCache = new Map();
+const ALLOWED_ORIGINS = (process.env.HIVEMIND_ALLOWED_ORIGINS || 'https://hivemind.davincisolutions.de')
+  .split(',')
+  .map(origin => origin.trim())
+  .filter(Boolean);
 
 function loadIngestionPipeline() {
   for (const candidate of INGESTION_MODULE_CANDIDATES) {
@@ -168,6 +172,21 @@ function loadIngestionPipeline() {
   }
 
   return null;
+}
+
+function applyCorsHeaders(req, res) {
+  const origin = req.headers.origin;
+  if (!origin) {
+    return;
+  }
+
+  if (ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+  }
+
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, X-Admin-Secret, X-User-Id, X-Org-Id');
 }
 
 const ingestionPipeline = loadIngestionPipeline();
@@ -674,12 +693,10 @@ async function authenticateApiKey(req) {
 
 const server = http.createServer(async (req, res) => {
   // CORS headers
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, X-Admin-Secret, X-User-Id, X-Org-Id');
+  applyCorsHeaders(req, res);
 
   if (req.method === 'OPTIONS') {
-    res.writeHead(200);
+    res.writeHead(204);
     res.end();
     return;
   }

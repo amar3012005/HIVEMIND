@@ -401,11 +401,29 @@ export const CROSS_CLIENT_TEST_QUERIES = [
   }
 ];
 
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename_ds = fileURLToPath(import.meta.url);
+const __dirname_ds = path.dirname(__filename_ds);
+
 const DATASET_REGISTRY = {
   default: TEST_QUERIES,
   'cross-client': CROSS_CLIENT_TEST_QUERIES,
   all: [...TEST_QUERIES, ...CROSS_CLIENT_TEST_QUERIES]
 };
+
+// Dynamically load tenant dataset if generated file exists (gitignored, never committed)
+try {
+  const tenantPath = path.join(__dirname_ds, '../../evaluation-reports/tenant-dataset.generated.json');
+  if (fs.existsSync(tenantPath)) {
+    const tenantData = JSON.parse(fs.readFileSync(tenantPath, 'utf-8'));
+    if (Array.isArray(tenantData) && tenantData.length > 0) {
+      DATASET_REGISTRY.tenant = tenantData;
+    }
+  }
+} catch { /* tenant dataset not generated yet — run build-gold-dataset.js first */ }
 
 // ==========================================
 // Dataset Statistics

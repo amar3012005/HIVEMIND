@@ -62,3 +62,7 @@ qdrant_data/
 # Backup files
 *.bak
 *.backup
+
+# Generated evaluation datasets (may contain real memory content/IDs)
+evaluation-reports/tenant-dataset.generated.json
+evaluation-reports/baseline.json

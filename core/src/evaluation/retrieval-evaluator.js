@@ -680,6 +680,30 @@ export class RetrievalEvaluator {
     // Overall quality score
     const qualityScore = this.calculateQualityScore(summary, latencyP99);
 
+    // Separate latency vs relevance benchmarks
+    const latencyBenchmark = {
+      p50_ms: latencyP50,
+      p95_ms: latencyP95,
+      p99_ms: latencyP99,
+      target_p99_ms: this.config.thresholds.latencyP99 || 300,
+      pass: latencyP99 <= (this.config.thresholds.latencyP99 || 300),
+    };
+
+    const relevanceBenchmark = {
+      precision_at_5: summary.precisionAt5?.mean || 0,
+      recall_at_10: summary.recallAt10?.mean || 0,
+      ndcg_at_10: summary.ndcgAt10?.mean || 0,
+      mrr: summary.mrr?.mean || 0,
+      targets: {
+        precision_at_5: 0.5,
+        recall_at_10: 0.4,
+        ndcg_at_10: 0.4,
+        mrr: 0.3,
+      },
+      pass: (summary.precisionAt5?.mean || 0) >= 0.5
+        && (summary.recallAt10?.mean || 0) >= 0.4,
+    };
+
     return {
       schemaVersion: '2026-03-19',
       kind: 'hivemind.retrieval-evaluation-report',
@@ -697,6 +721,8 @@ export class RetrievalEvaluator {
         successfulQueries: successfulResults.length,
         failedQueries: failedQueries.length
       },
+      latency_benchmark: latencyBenchmark,
+      relevance_benchmark: relevanceBenchmark,
       byCategory,
       bySearchMethod,
       queryMetadata: testQueries.map(query => ({

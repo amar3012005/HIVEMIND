@@ -26,6 +26,9 @@ COPY core/tsconfig.json ./
 # Install dependencies
 RUN npm ci && npm cache clean --force
 
+# Cache-bust arg: pass --build-arg CACHE_BUST=$(date +%s) to force src refresh
+ARG CACHE_BUST=1
+
 # Copy source code
 COPY core/src ./src
 COPY core/config ./config

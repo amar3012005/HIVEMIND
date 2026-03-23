@@ -7,6 +7,7 @@ services:
                 NODE_ENV: production
                 VERSION: '${VERSION:-2.0.0}'
                 BUILD_DATE: '${BUILD_DATE:-unknown}'
+                CACHE_BUST: '${CACHE_BUST:-20260323}'
         image: 'hivemind/core-api:${VERSION:-latest}'
         container_name: app-s0k0s0k40wo44w4w8gcs8ow0-125656582242
         hostname: hivemind-api

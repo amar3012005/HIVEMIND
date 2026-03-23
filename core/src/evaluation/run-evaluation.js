@@ -56,6 +56,11 @@ const CONFIG = {
   schemaVersion: '2026-03-19'
 };
 
+const DEMO_TENANT = {
+  userId: '00000000-0000-4000-8000-000000000001',
+  orgId: '00000000-0000-4000-8000-000000000002'
+};
+
 // ==========================================
 // CLI Argument Parsing
 // ==========================================
@@ -73,6 +78,8 @@ function parseArgs() {
     saveBaseline: null,
     userId: CONFIG.defaultUserId,
     orgId: CONFIG.defaultOrgId,
+    userIdProvided: false,
+    orgIdProvided: false,
     verbose: false,
     help: false
   };
@@ -118,9 +125,11 @@ function parseArgs() {
       case '--user-id':
       case '-u':
         options.userId = args[++i];
+        options.userIdProvided = true;
         break;
       case '--org-id':
         options.orgId = args[++i];
+        options.orgIdProvided = true;
         break;
       case '--verbose':
       case '-v':
@@ -200,6 +209,29 @@ Examples:
   # Save report to specific file
   node run-evaluation.js --output my-report.json
 `);
+}
+
+function validateOptions(options) {
+  if (options.dataset !== 'tenant') {
+    return;
+  }
+
+  const usingDemoTenant =
+    options.userId === DEMO_TENANT.userId &&
+    options.orgId === DEMO_TENANT.orgId;
+
+  if (!usingDemoTenant) {
+    return;
+  }
+
+  console.error('');
+  console.error('Tenant evaluation is blocked for the fake demo UUIDs.');
+  console.error('Generate and run the tenant dataset against the real user/org instead:');
+  console.error('');
+  console.error('  node src/evaluation/build-gold-dataset.js --user-id REAL_USER_ID --org-id REAL_ORG_ID');
+  console.error('  node src/evaluation/run-evaluation.js --dataset tenant --user-id REAL_USER_ID --org-id REAL_ORG_ID --method quick');
+  console.error('');
+  process.exit(1);
 }
 
 // ==========================================
@@ -538,6 +570,8 @@ async function main() {
     showHelp();
     process.exit(0);
   }
+
+  validateOptions(options);
 
   console.log('');
   console.log('╔════════════════════════════════════════════════════════════╗');

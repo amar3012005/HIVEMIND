@@ -403,6 +403,20 @@ function buildQdrantFilter(filter) {
   return result;
 }
 
+function normalizeKeywordQuery(query) {
+  if (!query || typeof query !== 'string') {
+    return '';
+  }
+
+  const normalized = query
+    .trim()
+    .replace(/^(tell me about|what did we discuss about|what do we know about|what is|what are|show me|explain|describe|summarize|tell me|find|give me|what happened with|what was decided about|what about)\s*:?\s*/i, '')
+    .replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, '')
+    .trim();
+
+  return normalized || query.trim();
+}
+
 // ==========================================
 // Keyword Search
 // ==========================================
@@ -439,6 +453,7 @@ async function keywordSearch(query, options = {}) {
 
   try {
     const prisma = getPrismaClient();
+    const searchText = normalizeKeywordQuery(query);
 
     if (!prisma) {
       logger.error('Keyword search failed: Prisma client not available');
@@ -448,20 +463,34 @@ async function keywordSearch(query, options = {}) {
     // Execute PostgreSQL full-text search with parameterized queries
     // Using Prisma's $queryRaw with template literals for SQL injection protection
     const results = await prisma.$queryRaw`
-      SELECT 
-        m.id, 
-        m.content, 
-        m.metadata, 
-        m.created_at, 
+      SELECT
+        m.id,
+        m.title,
+        m.content,
+        m.tags,
+        m.memory_type,
+        m.source_platform,
+        m.document_date,
+        m.created_at,
         m.updated_at,
         ts_rank_cd(
-          to_tsvector('english', m.content), 
-          plainto_tsquery('english', ${query})
-        ) as score
+          to_tsvector(
+            'english',
+            COALESCE(m.title, '') || ' ' ||
+            COALESCE(m.content, '') || ' ' ||
+            COALESCE(array_to_string(m.tags, ' '), '')
+          ),
+          plainto_tsquery('english', ${searchText})
+        ) AS score
       FROM memories m
-      WHERE m.user_id = ${userId}
+      WHERE m.user_id = ${userId}::uuid
         AND m.deleted_at IS NULL
-        AND to_tsvector('english', m.content) @@ plainto_tsquery('english', ${query})
+        AND to_tsvector(
+          'english',
+          COALESCE(m.title, '') || ' ' ||
+          COALESCE(m.content, '') || ' ' ||
+          COALESCE(array_to_string(m.tags, ' '), '')
+        ) @@ plainto_tsquery('english', ${searchText})
       ORDER BY score DESC
       LIMIT ${limit}
     `;
@@ -469,9 +498,13 @@ async function keywordSearch(query, options = {}) {
     // Transform results to expected format
     const formattedResults = results.map(result => ({
       id: result.id,
+      title: result.title || null,
       content: result.content,
       score: parseFloat(result.score),
-      metadata: result.metadata || {},
+      tags: Array.isArray(result.tags) ? result.tags : [],
+      memoryType: result.memory_type || null,
+      sourcePlatform: result.source_platform || null,
+      documentDate: result.document_date || null,
       created_at: result.created_at,
       updated_at: result.updated_at,
       source: 'keyword'
@@ -951,8 +984,11 @@ async function hybridSearch(options = {}) {
     r => r.score >= CONFIG.fallback.finalMinScore
   );
 
-  // Step 7: Limit results
-  const finalResults = filteredResults.slice(0, limit);
+  // Step 7: Apply precision boosts (title/tag/project/dedup)
+  const boostedResults = applyPrecisionBoosts(filteredResults, query, { project });
+
+  // Step 8: Limit results
+  const finalResults = boostedResults.slice(0, limit);
 
   const duration = Date.now() - startTime;
 
@@ -1056,6 +1092,113 @@ function combineSearchResults(vectorResults, keywordResults, graphResults, weigh
       }
     };
   });
+}
+
+// ==========================================
+// Precision Boosts (Sprint 2)
+// ==========================================
+
+const GENERIC_PREFIXES = [
+  'tell me about', 'what is', 'what are', 'show me', 'explain',
+  'how do we', 'how does', 'what was', 'what were', 'who is',
+  'describe', 'give me', 'find', 'search for', 'look up',
+];
+
+function normalizeQuery(query) {
+  let q = (query || '').toLowerCase().trim();
+  for (const prefix of GENERIC_PREFIXES) {
+    if (q.startsWith(prefix)) {
+      q = q.slice(prefix.length).trim();
+      break;
+    }
+  }
+  // Strip trailing question mark
+  if (q.endsWith('?')) q = q.slice(0, -1).trim();
+  return q;
+}
+
+function tokenize(text) {
+  return (text || '').toLowerCase().split(/\W+/).filter(t => t.length > 2);
+}
+
+function tokenOverlap(a, b) {
+  const setA = new Set(tokenize(a));
+  const setB = new Set(tokenize(b));
+  if (setA.size === 0 || setB.size === 0) return 0;
+  let overlap = 0;
+  for (const t of setA) {
+    if (setB.has(t)) overlap++;
+  }
+  return overlap / Math.min(setA.size, setB.size);
+}
+
+/**
+ * Apply precision boosts to ranked results.
+ * Runs after combineSearchResults, before final sort.
+ *
+ * Boosts: exact title match, tag overlap, project match, is_latest.
+ * Penalties: near-duplicate crowding.
+ */
+function applyPrecisionBoosts(results, query, options = {}) {
+  if (!results || results.length === 0) return results;
+
+  const normQuery = normalizeQuery(query);
+  const queryTokens = tokenize(normQuery);
+
+  // Score boosts
+  for (const r of results) {
+    let boost = 0;
+    const title = r.title || r.payload?.title || '';
+    const tags = r.tags || r.payload?.tags || [];
+    const project = r.project || r.payload?.project || '';
+    const isLatest = r.is_latest ?? r.payload?.is_latest ?? true;
+
+    // Exact title substring match (+0.25)
+    if (title && normQuery.length > 3 && title.toLowerCase().includes(normQuery)) {
+      boost += 0.25;
+    } else if (title) {
+      // Partial title token overlap (+0.1 per overlapping token, max 0.2)
+      const titleTokens = tokenize(title);
+      const overlap = queryTokens.filter(t => titleTokens.includes(t)).length;
+      boost += Math.min(overlap * 0.1, 0.2);
+    }
+
+    // Tag overlap (+0.15 per matching tag, max 0.3)
+    if (tags.length > 0 && queryTokens.length > 0) {
+      const tagSet = new Set(tags.map(t => t.toLowerCase()));
+      const tagMatches = queryTokens.filter(t => tagSet.has(t)).length;
+      boost += Math.min(tagMatches * 0.15, 0.3);
+    }
+
+    // Project match (+0.1)
+    if (options.project && project && project === options.project) {
+      boost += 0.1;
+    }
+
+    // is_latest boost (+0.05)
+    if (isLatest) {
+      boost += 0.05;
+    }
+
+    r.score = (r.score || 0) + boost;
+    r._precisionBoost = boost;
+  }
+
+  // Near-duplicate penalty: remove results with >85% token overlap with a higher-scored result
+  results.sort((a, b) => b.score - a.score);
+  const kept = [];
+  for (const r of results) {
+    const content = r.content || r.payload?.content || '';
+    const isDuplicate = kept.some(k => {
+      const kContent = k.content || k.payload?.content || '';
+      return tokenOverlap(content, kContent) > 0.85;
+    });
+    if (!isDuplicate) {
+      kept.push(r);
+    }
+  }
+
+  return kept;
 }
 
 // ==========================================

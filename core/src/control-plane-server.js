@@ -13,6 +13,11 @@ import { buildAllClientDescriptors, buildClientDescriptor } from './control-plan
 import { ControlPlaneSessionStore, buildSessionCookie, verifySessionCookie } from './control-plane/session-store.js';
 import { ZitadelOidcClient } from './control-plane/zitadel.js';
 import { ConnectorStore } from './connectors/framework/connector-store.js';
+import {
+  installConsoleCapture,
+  getRecentLogs,
+  getLogSummary,
+} from './admin/live-log-store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
@@ -40,6 +45,7 @@ function loadLocalEnv(envPath) {
 }
 
 loadLocalEnv(path.join(PROJECT_ROOT, '.env'));
+installConsoleCapture('control-plane');
 
 const CONFIG = {
   port: Number(process.env.CONTROL_PLANE_PORT || process.env.PORT || 3010),
@@ -71,6 +77,7 @@ const CONFIG = {
 const prisma = getPrismaClient();
 const sessionStore = new ControlPlaneSessionStore(CONFIG);
 const connectorStore = prisma ? new ConnectorStore(prisma) : null;
+const ADMIN_SECRET = process.env.HIVEMIND_ADMIN_SECRET || 'local-admin-secret-change-me';
 
 // Provider registry — add new providers here
 const PROVIDER_REGISTRY = {
@@ -81,11 +88,110 @@ const PROVIDER_REGISTRY = {
     label: 'Gmail',
     scopes: ['https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/userinfo.email'],
   },
+  slack: {
+    oauthModule: './connectors/providers/slack/oauth.js',
+    adapterModule: './connectors/providers/slack/adapter.js',
+    adapterClass: 'SlackAdapter',
+    label: 'Slack',
+    scopes: ['channels:history', 'channels:read', 'users:read'],
+  },
+  github: {
+    oauthModule: './connectors/providers/github/oauth.js',
+    adapterModule: './connectors/providers/github/adapter.js',
+    adapterClass: 'GitHubAdapter',
+    label: 'GitHub',
+    scopes: ['repo', 'read:user'],
+  },
+  notion: {
+    oauthModule: './connectors/providers/notion/oauth.js',
+    adapterModule: './connectors/providers/notion/adapter.js',
+    adapterClass: 'NotionAdapter',
+    label: 'Notion',
+    scopes: [],
+  },
+  gdrive: {
+    oauthModule: './connectors/providers/gdrive/oauth.js',
+    adapterModule: './connectors/providers/gdrive/adapter.js',
+    adapterClass: 'GDriveAdapter',
+    label: 'Google Drive',
+    scopes: ['https://www.googleapis.com/auth/drive.readonly'],
+  },
 };
 
 function getConnectorCallbackUrl(provider) {
   return `${CONFIG.publicBaseUrl}/v1/connectors/${provider}/callback`;
 }
+
+function isAdminAuthorized(req, url) {
+  return req.headers['x-admin-secret'] === ADMIN_SECRET || url.searchParams.get('admin_secret') === ADMIN_SECRET;
+}
+
+function buildAdminServiceSnapshot() {
+  return {
+    service: 'control-plane',
+    observed_at: new Date().toISOString(),
+    health: {
+      ok: true,
+      service: 'hivemind-control-plane',
+      core_api_base_url: CONFIG.coreApiBaseUrl,
+    },
+    runtime: {
+      pid: process.pid,
+      uptime_seconds: Math.round(process.uptime()),
+      rss_mb: Math.round(process.memoryUsage().rss / 1024 / 1024),
+      heap_used_mb: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+      node_env: process.env.NODE_ENV || 'development',
+    },
+    summary: getLogSummary('control-plane'),
+    logs: getRecentLogs({ service: 'control-plane', limit: 150 }),
+  };
+}
+
+function encodeConnectorState(payload) {
+  const issuedAt = Date.now();
+  const body = Buffer.from(JSON.stringify({ ...payload, issuedAt }), 'utf8').toString('base64url');
+  const signature = crypto.createHmac('sha256', CONFIG.sessionSecret).update(body).digest('base64url');
+  return `${body}.${signature}`;
+}
+
+function decodeConnectorState(stateToken) {
+  if (!stateToken || !stateToken.includes('.')) {
+    return null;
+  }
+
+  const [body, signature] = stateToken.split('.');
+  if (!body || !signature) {
+    return null;
+  }
+
+  const expected = crypto.createHmac('sha256', CONFIG.sessionSecret).update(body).digest('base64url');
+  const signatureBuffer = Buffer.from(signature);
+  const expectedBuffer = Buffer.from(expected);
+  if (signatureBuffer.length !== expectedBuffer.length) {
+    return null;
+  }
+  if (!crypto.timingSafeEqual(signatureBuffer, expectedBuffer)) {
+    return null;
+  }
+
+  try {
+    const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+    if (!payload || typeof payload !== 'object') {
+      return null;
+    }
+    const issuedAt = Number(payload.issuedAt || 0);
+    if (!issuedAt || Number.isNaN(issuedAt)) {
+      return null;
+    }
+    if (Date.now() - issuedAt > CONFIG.authStateTtlSeconds * 1000) {
+      return null;
+    }
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
 const zitadelClient = (CONFIG.zitadelIssuerUrl && CONFIG.zitadelClientId && CONFIG.zitadelClientSecret && CONFIG.zitadelRedirectUri)
   ? new ZitadelOidcClient({
       issuerUrl: CONFIG.zitadelIssuerUrl,
@@ -290,6 +396,13 @@ const server = http.createServer(async (req, res) => {
 
   const url = new URL(req.url, `http://${req.headers.host}`);
   const pathname = url.pathname;
+
+  if (pathname === '/admin/api/logs' && req.method === 'GET') {
+    if (!isAdminAuthorized(req, url)) {
+      return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    }
+    return jsonResponse(res, buildAdminServiceSnapshot());
+  }
 
   if (pathname === '/health') {
     return jsonResponse(res, {
@@ -553,8 +666,8 @@ const server = http.createServer(async (req, res) => {
       const body = await parseBody(req);
       const returnTo = body.return_to || '/hivemind/app/connectors';
 
-      // Create CSRF-safe state bound to user/org
-      const stateId = await sessionStore.createAuthState({
+      // Create CSRF-safe stateless state bound to user/org
+      const stateId = encodeConnectorState({
         userId: current.session.userId,
         orgId: current.session.orgId,
         provider,
@@ -594,7 +707,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Verify CSRF state
-    const authState = await sessionStore.consumeAuthState(state);
+    const authState = decodeConnectorState(state);
     if (!authState || authState.provider !== provider) {
       return redirect(res, `/hivemind/app/connectors?connector_error=invalid_state`);
     }

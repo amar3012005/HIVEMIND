@@ -7,6 +7,10 @@
  * @module evaluation/test-dataset
  */
 
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
 // ==========================================
 // Test Query Dataset
 // ==========================================
@@ -406,6 +410,21 @@ const DATASET_REGISTRY = {
   'cross-client': CROSS_CLIENT_TEST_QUERIES,
   all: [...TEST_QUERIES, ...CROSS_CLIENT_TEST_QUERIES]
 };
+
+const __filename_ds = fileURLToPath(import.meta.url);
+const __dirname_ds = path.dirname(__filename_ds);
+
+try {
+  const tenantPath = path.join(__dirname_ds, '../../../evaluation-reports/tenant-dataset.generated.json');
+  if (fs.existsSync(tenantPath)) {
+    const tenantData = JSON.parse(fs.readFileSync(tenantPath, 'utf-8'));
+    if (Array.isArray(tenantData) && tenantData.length > 0) {
+      DATASET_REGISTRY.tenant = tenantData;
+    }
+  }
+} catch {
+  // Tenant dataset not generated yet.
+}
 
 // ==========================================
 // Dataset Statistics

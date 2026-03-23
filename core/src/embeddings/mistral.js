@@ -11,9 +11,24 @@
 
 import fetch from 'node-fetch';
 import https from 'https';
+import crypto from 'node:crypto';
+
+function resolveEmbeddingApiUrl() {
+  if (process.env.EMBEDDING_MODEL_URL) {
+    return process.env.EMBEDDING_MODEL_URL;
+  }
+
+  // In the live Docker stack, the dedicated embeddings service is available
+  // on a separate internal network even when no explicit env var is present.
+  if (process.env.QDRANT_URL === 'http://hm-qdrant:6333') {
+    return 'https://embeddings-eu:4006/embed';
+  }
+
+  return 'https://api.mistral.ai/v1/embeddings';
+}
 
 // Support custom embedding endpoint (e.g., Hetzner) or Mistral AI
-const EMBEDDING_API_URL = process.env.EMBEDDING_MODEL_URL || 'https://api.mistral.ai/v1/embeddings';
+const EMBEDDING_API_URL = resolveEmbeddingApiUrl();
 const TARGET_EMBED_DIM = parseInt(process.env.EMBEDDING_DIMENSION || '1024', 10);
 
 // Detect if using a custom local endpoint (SentenceTransformer format)
@@ -30,6 +45,87 @@ function normalizeVectorDimension(vector, targetDim = TARGET_EMBED_DIM) {
     normalized.push(0);
   }
   return normalized;
+}
+
+function tokenize(text) {
+  return String(text || '')
+    .toLowerCase()
+    .match(/[a-z0-9_]+/g) || [];
+}
+
+function hashBytes(input) {
+  return crypto.createHash('sha256').update(String(input)).digest();
+}
+
+function generateDeterministicEmbedding(text, targetDim = TARGET_EMBED_DIM) {
+  const vector = new Array(targetDim).fill(0);
+  const tokens = tokenize(text);
+
+  if (tokens.length === 0) {
+    return vector;
+  }
+
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    const digest = hashBytes(`${token}:${i}`);
+
+    for (let j = 0; j < 4; j++) {
+      const idx = digest.readUInt16BE((j * 2) % (digest.length - 1)) % targetDim;
+      const sign = digest[(j * 7) % digest.length] % 2 === 0 ? 1 : -1;
+      const weight = 1 + (token.length % 7) * 0.1;
+      vector[idx] += sign * weight;
+    }
+  }
+
+  let norm = 0;
+  for (const value of vector) {
+    norm += value * value;
+  }
+  norm = Math.sqrt(norm) || 1;
+
+  return vector.map(value => value / norm);
+}
+
+class LocalFallbackEmbedService {
+  constructor(dimension = TARGET_EMBED_DIM) {
+    this.dimension = dimension;
+    this.cache = new Map();
+    this.provider = 'local-fallback';
+  }
+
+  async embed(input) {
+    const inputs = Array.isArray(input) ? input : [input];
+    const cacheKey = JSON.stringify(inputs);
+
+    if (this.cache.has(cacheKey)) {
+      return this.cache.get(cacheKey);
+    }
+
+    const embeddings = inputs.map(text => normalizeVectorDimension(generateDeterministicEmbedding(text, this.dimension), this.dimension));
+    this.cache.set(cacheKey, embeddings);
+    return embeddings;
+  }
+
+  async embedOne(text) {
+    const [embedding] = await this.embed(text);
+    return embedding;
+  }
+
+  getDimension() {
+    return this.dimension;
+  }
+
+  clearCache() {
+    this.cache.clear();
+  }
+
+  getCacheStats() {
+    return { size: this.cache.size, provider: this.provider };
+  }
+
+  async testConnection() {
+    return true;
+  }
 }
 
 export class MistralEmbedService {
@@ -176,11 +272,14 @@ export function getMistralEmbedService() {
   if (!instance) {
     const apiKey = process.env.MISTRAL_API_KEY || process.env.EMBEDDING_API_KEY;
     const model = process.env.MISTRAL_EMBEDDING_MODEL || process.env.EMBEDDING_MODEL_NAME || 'mistral-embed';
-    const baseUrl = process.env.EMBEDDING_MODEL_URL;
+    const baseUrl = resolveEmbeddingApiUrl();
 
-    // Allow no API key for local/embedded endpoints
-    if (!apiKey && (!baseUrl || baseUrl.startsWith('http'))) {
-      console.warn('⚠️  Neither MISTRAL_API_KEY nor EMBEDDING_API_KEY configured. Embeddings may fail.');
+    // Use deterministic local embeddings only when we have neither a provider key
+    // nor a configured internal/custom endpoint to talk to.
+    if (!apiKey && (!baseUrl || (!baseUrl.includes('/embed') && baseUrl.includes('mistral.ai')))) {
+      console.warn('⚠️  Neither MISTRAL_API_KEY nor EMBEDDING_API_KEY configured. Using local fallback embeddings.');
+      instance = new LocalFallbackEmbedService();
+      return instance;
     }
 
     instance = new MistralEmbedService(apiKey, model, baseUrl);

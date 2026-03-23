@@ -1243,7 +1243,17 @@ export function createHostedApiClient({ baseUrl, apiKey, userId, orgId }) {
       body: body ? JSON.stringify(body) : undefined
     });
 
-    const payload = await response.json().catch(() => null);
+    const rawText = await response.text();
+    let payload = null;
+
+    if (rawText) {
+      try {
+        payload = JSON.parse(rawText);
+      } catch {
+        payload = rawText;
+      }
+    }
+
     if (!response.ok) {
       throw new Error(`${method} ${endpoint} failed with ${response.status}: ${JSON.stringify(payload)}`);
     }
@@ -1267,6 +1277,56 @@ export function createHostedApiClient({ baseUrl, apiKey, userId, orgId }) {
   };
 }
 
+function normalizeMemoryText(value, fallback = '') {
+  if (typeof value === 'string') {
+    return value.trim();
+  }
+
+  if (value == null) {
+    return fallback;
+  }
+
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+
+  return String(value).trim();
+}
+
+function normalizeTags(tags) {
+  if (!Array.isArray(tags)) {
+    return [];
+  }
+
+  return tags.map(tag => normalizeMemoryText(tag)).filter(Boolean);
+}
+
+function buildRelationship(relationship, relatedTo) {
+  if (!relationship || !relatedTo) {
+    return null;
+  }
+
+  const relationshipMap = {
+    update: 'Updates',
+    extend: 'Extends',
+    derive: 'Derives'
+  };
+
+  const type = relationshipMap[relationship];
+  if (!type) {
+    return null;
+  }
+
+  return {
+    type,
+    target_id: relatedTo
+  };
+}
+
 /**
  * Handle tools/call request
  * @param {Object} params - Tool call parameters
@@ -1280,22 +1340,34 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
 
   try {
     switch (name) {
-      case 'hivemind_save_memory':
+      case 'hivemind_save_memory': {
+        const title = normalizeMemoryText(args.title);
+        const content = normalizeMemoryText(args.content);
+        const relationship = buildRelationship(args.relationship, args.related_to);
+
+        if (!title) {
+          throw new Error('hivemind_save_memory requires a non-empty title');
+        }
+
+        if (!content) {
+          throw new Error('hivemind_save_memory requires non-empty content');
+        }
+
         return formatToolContent(await apiClient.post('/api/memories', {
-          title: args.title,
-          content: args.content,
+          title,
+          content,
           memory_type: args.source_type === 'decision' ? 'decision' : 'fact',
           source_platform: 'mcp',
-          tags: args.tags || [],
-          project: args.project || null,
+          tags: normalizeTags(args.tags),
+          project: normalizeMemoryText(args.project, null) || null,
+          relationship,
           metadata: {
-            relationship: args.relationship || null,
-            related_to: args.related_to || null,
             source_type: args.source_type || 'text'
           },
           user_id: userId,
           org_id: orgId
         }));
+      }
 
       case 'hivemind_recall':
         if (args.mode === 'panorama') {

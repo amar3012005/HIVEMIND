@@ -68,6 +68,12 @@ const {
   validateMemoryQueryParams,
   updateMemorySchema
 } = await import('./api/validators/memory.validators.js');
+const {
+  installConsoleCapture,
+  getRecentLogs,
+  getLogSummary,
+} = await import('./admin/live-log-store.js');
+const { renderAdminLogsPage } = await import('./admin/logs-dashboard.js');
 
 // Three-Tier Retrieval imports
 const { ThreeTierRetrieval } = await import('./external/search/three-tier-retrieval.js');
@@ -91,7 +97,7 @@ const {
 
 // Evaluation imports
 const { RetrievalEvaluator } = await import('./external/evaluation/retrieval-evaluator.js');
-const { TEST_QUERIES, getSampleQueries } = await import('./external/evaluation/test-dataset.js');
+const { TEST_QUERIES, getSampleQueries, getQueriesByCategory, getQueriesByDifficulty, getQueriesForDataset } = await import('./external/evaluation/test-dataset.js');
 const CLIENT_HTML_CANDIDATES = [
   path.join(REPO_ROOT, 'client.html'),
   path.join(PROJECT_ROOT, 'client.html')
@@ -115,6 +121,8 @@ const TAMPERMONKEY_USER_SCRIPT_CANDIDATES = [
 const DATA_DIR = path.join(PROJECT_ROOT, 'data');
 const API_KEYS_FILE_PATH = path.join(DATA_DIR, 'api-keys.json');
 const EVALUATION_REPORTS_DIR = path.join(DATA_DIR, 'evaluation-reports');
+
+installConsoleCapture('core');
 
 // Initialize memory engine with SQLite
 const engine = new MemoryEngine('./hivemind.db');
@@ -143,6 +151,7 @@ const retrievalEvaluator = new RetrievalEvaluator({
 const DEFAULT_USER = process.env.HIVEMIND_DEFAULT_USER_ID || '00000000-0000-4000-8000-000000000001';
 const DEFAULT_ORG = process.env.HIVEMIND_DEFAULT_ORG_ID || '00000000-0000-4000-8000-000000000002';
 const ADMIN_SECRET = process.env.HIVEMIND_ADMIN_SECRET || 'local-admin-secret-change-me';
+const CONTROL_PLANE_ADMIN_BASE_URL = process.env.HIVEMIND_CONTROL_PLANE_BASE_URL || 'https://api.hivemind.davinciai.eu:8040';
 const API_KEY_REQUIRED = process.env.HIVEMIND_API_KEY_REQUIRED !== 'false';
 const MASTER_API_KEY = process.env.HIVEMIND_MASTER_API_KEY || '';
 // Test API key for development/testing (accepted when NODE_ENV is not 'production')
@@ -549,6 +558,19 @@ function ensureEvaluationReportStore() {
   }
 }
 
+function getHostedApiBaseUrl(req) {
+  if (process.env.HIVEMIND_INTERNAL_BASE_URL || process.env.HIVEMIND_BASE_URL) {
+    return process.env.HIVEMIND_INTERNAL_BASE_URL || process.env.HIVEMIND_BASE_URL;
+  }
+
+  const forwardedProto = typeof req.headers['x-forwarded-proto'] === 'string'
+    ? req.headers['x-forwarded-proto'].split(',')[0].trim()
+    : '';
+  const protocol = forwardedProto || 'https';
+
+  return `${protocol}://${req.headers.host}`;
+}
+
 function evaluationReportPath(evaluationId) {
   return path.join(EVALUATION_REPORTS_DIR, `${evaluationId}.json`);
 }
@@ -634,6 +656,31 @@ function isAdminRequest(req) {
   return req.headers['x-admin-secret'] === ADMIN_SECRET;
 }
 
+function isAdminAuthorized(req, url) {
+  return isAdminRequest(req) || url.searchParams.get('admin_secret') === ADMIN_SECRET;
+}
+
+function buildAdminServiceSnapshot() {
+  return {
+    service: 'core',
+    observed_at: new Date().toISOString(),
+    health: {
+      ok: true,
+      service: 'hivemind-api',
+      port: process.env.PORT || 3000,
+    },
+    runtime: {
+      pid: process.pid,
+      uptime_seconds: Math.round(process.uptime()),
+      rss_mb: Math.round(process.memoryUsage().rss / 1024 / 1024),
+      heap_used_mb: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+      node_env: process.env.NODE_ENV || 'development',
+    },
+    summary: getLogSummary('core'),
+    logs: getRecentLogs({ service: 'core', limit: 150 }),
+  };
+}
+
 async function authenticateApiKey(req) {
   if (!API_KEY_REQUIRED) {
     return { ok: true, principal: { userId: DEFAULT_USER, orgId: DEFAULT_ORG, scopes: ['*'], rawKey: null } };
@@ -703,6 +750,68 @@ const server = http.createServer(async (req, res) => {
 
   const url = new URL(req.url, `http://${req.headers.host}`);
   const pathname = url.pathname;
+
+  if (pathname === '/admin/logs' && req.method === 'GET') {
+    const content = renderAdminLogsPage({
+      controlPlaneBaseUrl: CONTROL_PLANE_ADMIN_BASE_URL,
+      coreBaseUrl: process.env.HIVEMIND_PUBLIC_BASE_URL || `http://localhost:${process.env.PORT || 3000}`,
+    });
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.writeHead(200);
+    res.end(content);
+    return;
+  }
+
+  if (pathname === '/admin/api/logs' && req.method === 'GET') {
+    if (!isAdminAuthorized(req, url)) {
+      return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    }
+    return jsonResponse(res, buildAdminServiceSnapshot());
+  }
+
+  if (pathname === '/admin/api/observability' && req.method === 'GET') {
+    if (!isAdminAuthorized(req, url)) {
+      return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    }
+
+    const adminSecret = req.headers['x-admin-secret'] || url.searchParams.get('admin_secret') || '';
+    const core = buildAdminServiceSnapshot();
+    let controlPlane = {
+      service: 'control-plane',
+      observed_at: new Date().toISOString(),
+      health: { ok: false, service: 'hivemind-control-plane' },
+      runtime: {},
+      summary: { total: 0, errors: 0, warnings: 0, lastErrorAt: null, lastWarningAt: null },
+      logs: [],
+      error: null,
+    };
+
+    try {
+      const response = await fetch(`${CONTROL_PLANE_ADMIN_BASE_URL}/admin/api/logs`, {
+        headers: {
+          'X-Admin-Secret': adminSecret,
+        },
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || `Control plane request failed with ${response.status}`);
+      }
+      controlPlane = payload;
+    } catch (error) {
+      controlPlane.error = error.message;
+    }
+
+    const logs = [...(core.logs || []), ...(controlPlane.logs || [])]
+      .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+      .slice(0, 250);
+
+    return jsonResponse(res, {
+      observed_at: new Date().toISOString(),
+      core,
+      control_plane: controlPlane,
+      logs,
+    });
+  }
 
   if (pathname === '/health') {
     return jsonResponse(res, {
@@ -824,7 +933,7 @@ const server = http.createServer(async (req, res) => {
           ? req.headers['x-api-key'].trim()
           : '';
         const apiClient = createHostedApiClient({
-          baseUrl: process.env.HIVEMIND_INTERNAL_BASE_URL || process.env.HIVEMIND_BASE_URL || `http://${req.headers.host}`,
+          baseUrl: getHostedApiBaseUrl(req),
           apiKey: requestApiKey || '',
           userId: pathUserId,
           orgId: connectionOrgId
@@ -985,7 +1094,7 @@ const server = http.createServer(async (req, res) => {
 
       if ((pathname === '/api/mcp/rpc' || pathname === '/api/mcp/message') && req.method === 'POST') {
         const apiClient = createHostedApiClient({
-          baseUrl: process.env.HIVEMIND_INTERNAL_BASE_URL || process.env.HIVEMIND_BASE_URL || `http://${req.headers.host}`,
+          baseUrl: getHostedApiBaseUrl(req),
           apiKey: principal.rawKey || MASTER_API_KEY || '',
           userId,
           orgId
@@ -1177,6 +1286,62 @@ const server = http.createServer(async (req, res) => {
           });
         } catch (error) {
           return jsonResponse(res, { error: error.message }, 404);
+        }
+      }
+
+      if (pathname === '/api/connectors/sync' && req.method === 'POST') {
+        if (!persistentMemoryEngine || !persistentMemoryStore) {
+          return jsonResponse(res, { error: 'Persistent memory unavailable' }, 503);
+        }
+        try {
+          const provider = body.provider;
+          const syncUserId = body.user_id || userId;
+          const syncOrgId = body.org_id || orgId;
+
+          const adapterModules = {
+            gmail: './connectors/providers/gmail/adapter.js',
+          };
+          const adapterPath = adapterModules[provider];
+          if (!adapterPath) {
+            return jsonResponse(res, { error: `Unknown provider: ${provider}` }, 400);
+          }
+
+          const mod = await import(adapterPath);
+          const AdapterClass = mod.GmailAdapter || mod.default;
+          const adapter = new AdapterClass();
+
+          const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
+          const { SyncEngine } = await import('./connectors/framework/sync-engine.js');
+          const cStore = new ConnectorStore(prisma);
+          const syncEngine = new SyncEngine({
+            connectorStore: cStore,
+            memoryEngine: persistentMemoryEngine,
+            memoryStore: persistentMemoryStore,
+            prisma,
+          });
+
+          const incremental = body.incremental !== false;
+          const cursor = body.cursor || null;
+
+          setImmediate(async () => {
+            try {
+              const result = await syncEngine.runSync({
+                adapter,
+                userId: syncUserId,
+                orgId: syncOrgId,
+                provider,
+                cursor,
+                incremental,
+              });
+              console.log(`[connector-sync] ${provider}:${syncUserId} → ${result.status} (imported: ${result.imported}, skipped: ${result.skipped})`);
+            } catch (syncErr) {
+              console.error(`[connector-sync] ${provider}:${syncUserId} failed:`, syncErr.message);
+            }
+          });
+
+          return jsonResponse(res, { success: true, message: 'Sync enqueued', provider }, 202);
+        } catch (error) {
+          return jsonResponse(res, { error: error.message }, 500);
         }
       }
 
@@ -2153,6 +2318,7 @@ const server = http.createServer(async (req, res) => {
                 queries,
                 methods = ['hybrid'],
                 sample_size,
+                dataset,
                 category: batchCategory,
                 difficulty
               } = body;
@@ -2161,13 +2327,28 @@ const server = http.createServer(async (req, res) => {
 
               // Use built-in test dataset if no queries provided
               if (!testQueries) {
-                if (sample_size) {
+                const selectedDataset = dataset || (userId && userId !== DEFAULT_USER ? 'tenant' : 'default');
+
+                if (selectedDataset) {
+                  try {
+                    testQueries = getQueriesForDataset(selectedDataset);
+                  } catch (error) {
+                    if (dataset) {
+                      throw error;
+                    }
+                    testQueries = null;
+                  }
+                }
+
+                if (testQueries) {
+                  if (sample_size) {
+                    testQueries = testQueries.slice(0, sample_size);
+                  }
+                } else if (sample_size) {
                   testQueries = getSampleQueries(sample_size);
                 } else if (batchCategory) {
-                  const { getQueriesByCategory } = await import('../../src/evaluation/test-dataset.js');
                   testQueries = getQueriesByCategory(batchCategory);
                 } else if (difficulty) {
-                  const { getQueriesByDifficulty } = await import('../../src/evaluation/test-dataset.js');
                   testQueries = getQueriesByDifficulty(difficulty);
                 } else {
                   testQueries = TEST_QUERIES;
@@ -2382,10 +2563,10 @@ async function ensureQdrantSearchIndexes() {
   }
 
   try {
-    await qdrantCollections.ensureMemoriesCollectionIndexes(process.env.QDRANT_COLLECTION || 'BUNDB AGENT');
-    console.log('✅ Qdrant payload indexes verified');
+    await qdrantCollections.createAllCollections();
+    console.log('✅ Qdrant collections verified');
   } catch (error) {
-    console.error('⚠️  Failed to verify Qdrant payload indexes:', error.message);
+    console.error('⚠️  Failed to verify Qdrant collections:', error.message);
   }
 }
 

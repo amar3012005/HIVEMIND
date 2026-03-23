@@ -654,11 +654,60 @@ export class RetrievalEvaluator {
 
     if (successfulResults.length === 0) {
       return {
+        schemaVersion: '2026-03-19',
+        kind: 'hivemind.retrieval-evaluation-report',
         timestamp: new Date().toISOString(),
         evaluationId,
+        dataset,
         duration,
+        methods,
+        summary: {
+          totalQueries: results.length,
+          successfulQueries: 0,
+          failedQueries: failedQueries.length,
+          qualityScore: 0,
+          precisionAt5: { mean: 0, min: 0, max: 0, median: 0 },
+          recallAt10: { mean: 0, min: 0, max: 0, median: 0 },
+          f1At10: { mean: 0, min: 0, max: 0, median: 0 },
+          ndcgAt10: { mean: 0, min: 0, max: 0, median: 0 },
+          mrr: { mean: 0, min: 0, max: 0, median: 0 },
+          latencyP99: 0,
+          latencyP95: 0,
+          latencyP50: 0
+        },
+        latency_benchmark: {
+          p50_ms: 0,
+          p95_ms: 0,
+          p99_ms: 0,
+          target_p99_ms: this.config.thresholds.latencyP99 || 300,
+          pass: false
+        },
+        relevance_benchmark: {
+          precision_at_5: 0,
+          recall_at_10: 0,
+          ndcg_at_10: 0,
+          mrr: 0,
+          targets: {
+            precision_at_5: 0.5,
+            recall_at_10: 0.4,
+            ndcg_at_10: 0.4,
+            mrr: 0.3
+          },
+          pass: false
+        },
+        byCategory: {},
+        bySearchMethod: {},
+        queryMetadata: testQueries.map(query => ({
+          query: query.query,
+          category: query.category || 'general',
+          difficulty: query.difficulty || 'unknown',
+          relevantCount: query.relevantMemories?.length || 0,
+          tags: query.tags || []
+        })),
         error: 'No successful evaluations',
-        failedQueries
+        failedQueries,
+        targets: this.config.thresholds,
+        rawResults: []
       };
     }
 

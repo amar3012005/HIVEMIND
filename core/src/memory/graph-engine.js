@@ -233,6 +233,7 @@ export class MemoryGraphEngine {
         updated_at: nowIso()
       });
 
+      const nextVersion = (target.version || 1) + 1;
       const edge = await store.createRelationship({
         id: uuidv4(),
         from_id: sourceId,
@@ -251,7 +252,8 @@ export class MemoryGraphEngine {
       await this._recordVersionSnapshot(store, source, {
         reason: 'Updates',
         is_latest: true,
-        related_memory_id: targetId
+        related_memory_id: targetId,
+        version: nextVersion
       });
 
       return {
@@ -277,6 +279,7 @@ export class MemoryGraphEngine {
         throw new Error('Tenant scope violation in applyExtends');
       }
 
+      const nextVersion = (target.version || 1) + 1;
       const edge = await store.createRelationship({
         id: uuidv4(),
         from_id: sourceId,
@@ -290,7 +293,8 @@ export class MemoryGraphEngine {
       await this._recordVersionSnapshot(store, source, {
         reason: 'Extends',
         is_latest: true,
-        related_memory_id: targetId
+        related_memory_id: targetId,
+        version: nextVersion
       });
 
       return {
@@ -326,6 +330,7 @@ export class MemoryGraphEngine {
         throw new Error('Tenant scope violation in applyDerives');
       }
 
+      const nextVersion = (target.version || 1) + 1;
       const edge = await store.createRelationship({
         id: uuidv4(),
         from_id: sourceId,
@@ -339,7 +344,8 @@ export class MemoryGraphEngine {
       await this._recordVersionSnapshot(store, source, {
         reason: 'Derives',
         is_latest: true,
-        related_memory_id: targetId
+        related_memory_id: targetId,
+        version: nextVersion
       });
 
       return {
@@ -392,11 +398,11 @@ export class MemoryGraphEngine {
     };
   }
 
-  async _recordVersionSnapshot(store, memory, { reason, is_latest, related_memory_id }) {
+  async _recordVersionSnapshot(store, memory, { reason, is_latest, related_memory_id, version }) {
     await store.createMemoryVersion({
       id: uuidv4(),
       memory_id: memory.id,
-      version: memory.version || 1,
+      version: version || memory.version || 1,
       is_latest,
       reason,
       related_memory_id,

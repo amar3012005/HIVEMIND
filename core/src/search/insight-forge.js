@@ -730,15 +730,21 @@ export class InsightForge {
         for (const rel of related || []) {
           const fromEntity = this.findEntityForMemory(rel.from_id, results, entities);
           const toEntity = this.findEntityForMemory(rel.to_id, results, entities);
+          const fromNode = (fromEntity && toEntity && fromEntity.id === toEntity.id)
+            ? await this.createMemoryAnchor(rel.from_id, results)
+            : (fromEntity || await this.createMemoryAnchor(rel.from_id, results));
+          const toNode = (fromEntity && toEntity && fromEntity.id === toEntity.id)
+            ? await this.createMemoryAnchor(rel.to_id, results)
+            : (toEntity || await this.createMemoryAnchor(rel.to_id, results));
 
-          if (fromEntity && toEntity && fromEntity.id !== toEntity.id) {
+          if (fromNode && toNode && fromNode.id !== toNode.id) {
             chains.push({
               id: `chain-${chains.length + 1}`,
-              from: fromEntity,
-              to: toEntity,
+              from: fromNode,
+              to: toNode,
               relationship: rel.type,
               confidence: rel.confidence || 0.5,
-              path: [fromEntity.name, rel.type, toEntity.name],
+              path: [fromNode.name, rel.type, toNode.name],
               evidence: rel.metadata || {}
             });
           }
@@ -813,14 +819,45 @@ export class InsightForge {
     if (!result) return null;
 
     const content = (result.content || result.memory?.content || '').toLowerCase();
+    const title = (result.title || result.memory?.title || '').toLowerCase();
+    const tagText = Array.isArray(result.tags || result.memory?.tags)
+      ? (result.tags || result.memory?.tags).join(' ').toLowerCase()
+      : '';
+    const haystack = `${title}\n${content}\n${tagText}`;
 
     for (const entity of entities) {
-      if (content.includes(entity.name.toLowerCase())) {
+      if (haystack.includes(entity.name.toLowerCase())) {
         return entity;
       }
     }
 
     return null;
+  }
+
+  async createMemoryAnchor(memoryId, results) {
+    const result = results.find(r => (r.id || r.memory?.id) === memoryId);
+    let memory = result?.memory || null;
+
+    if ((!memory || !memory.title) && this.graphStore?.getMemory) {
+      memory = await this.graphStore.getMemory(memoryId);
+    }
+
+    if (!result && !memory) return null;
+
+    const title = result?.title || result?.memory?.title || memory?.title;
+    const content = result?.content || result?.memory?.content || memory?.content || '';
+    const label = title || content.slice(0, 80) || memoryId;
+
+    return {
+      id: `memory-${memoryId}`,
+      name: label,
+      memoryId,
+      title: title || null,
+      displayLabel: `${label} (${memoryId})`,
+      type: 'memory',
+      confidence: result?.score || 0.5,
+      extractedAt: new Date().toISOString()
+    };
   }
 
   /**

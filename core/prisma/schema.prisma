@@ -59,23 +59,6 @@ enum PlatformType {
   
 }
 
-enum AuthType {
-  oauth2
-  api_key
-  webhook
-
-  
-}
-
-enum SyncStatus {
-  idle
-  syncing
-  error
-  revoked
-
-  
-}
-
 enum AuditEventCategory {
   auth
   data_access
@@ -224,7 +207,7 @@ model PlatformIntegration {
   connectorMetadata   Json         @default("{}") @map("connector_metadata")
 
   // Authentication (encrypted fields)
-  authType               AuthType  @map("auth_type")
+  authType               String    @map("auth_type")
   accessTokenEncrypted   String?   @map("access_token_encrypted") @db.Text
   refreshTokenEncrypted  String?   @map("refresh_token_encrypted") @db.Text
   tokenExpiresAt         DateTime? @map("token_expires_at")
@@ -239,7 +222,7 @@ model PlatformIntegration {
   // Status tracking
   isActive     Boolean    @default(true) @map("is_active")
   lastSyncedAt DateTime?  @map("last_synced_at")
-  syncStatus   SyncStatus @default(idle) @map("sync_status")
+  syncStatus   String    @default("idle") @map("sync_status")
 
   // Error tracking
   lastErrorMessage    String?   @map("last_error_message") @db.Text

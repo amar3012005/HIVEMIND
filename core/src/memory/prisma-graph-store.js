@@ -274,6 +274,56 @@ export class PrismaGraphStore {
     return records.map(mapRelationshipRecord);
   }
 
+  async getRelatedMemories(memoryId, { maxDepth = 2, minConfidence = 0 } = {}) {
+    const visitedMemoryIds = new Set([memoryId]);
+    const visitedEdgeIds = new Set();
+    const collected = [];
+    let frontier = new Set([memoryId]);
+
+    for (let depth = 0; depth < maxDepth && frontier.size > 0; depth += 1) {
+      const frontierIds = Array.from(frontier);
+
+      const records = await this.client.relationship.findMany({
+        where: {
+          confidence: { gte: minConfidence },
+          OR: [
+            { fromId: { in: frontierIds } },
+            { toId: { in: frontierIds } }
+          ],
+          fromMemory: { deletedAt: null },
+          toMemory: { deletedAt: null }
+        },
+        orderBy: { createdAt: 'desc' }
+      });
+
+      const nextFrontier = new Set();
+
+      for (const record of records) {
+        if (visitedEdgeIds.has(record.id)) {
+          continue;
+        }
+
+        visitedEdgeIds.add(record.id);
+        const mapped = mapRelationshipRecord(record);
+        collected.push(mapped);
+
+        if (!visitedMemoryIds.has(record.fromId)) {
+          visitedMemoryIds.add(record.fromId);
+          nextFrontier.add(record.fromId);
+        }
+
+        if (!visitedMemoryIds.has(record.toId)) {
+          visitedMemoryIds.add(record.toId);
+          nextFrontier.add(record.toId);
+        }
+      }
+
+      frontier = nextFrontier;
+    }
+
+    return collected;
+  }
+
   async createRelationship(edge) {
     const created = await this.client.relationship.create({
       data: {

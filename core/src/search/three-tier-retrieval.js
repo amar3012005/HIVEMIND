@@ -119,13 +119,13 @@ export class ThreeTierRetrieval {
     this.config = { ...CONFIG, ...(options.config || {}) };
 
     // Initialize sub-modules
-    this.panoramaSearch = new PanoramaSearch({
+    this.panoramaSearchEngine = new PanoramaSearch({
       vectorStore: this.vectorStore,
       graphStore: this.graphStore,
       config: this.config
     });
 
-    this.insightForge = new InsightForge({
+    this.insightForgeEngine = new InsightForge({
       vectorStore: this.vectorStore,
       graphStore: this.graphStore,
       llmClient: this.llmClient,
@@ -306,7 +306,7 @@ export class ThreeTierRetrieval {
 
     try {
       // Delegate to PanoramaSearch module
-      const results = await this.panoramaSearch.search(query, {
+      const results = await this.panoramaSearchEngine.search(query, {
         userId,
         orgId,
         includeExpired,
@@ -400,7 +400,7 @@ export class ThreeTierRetrieval {
 
     try {
       // Delegate to InsightForge module
-      const results = await this.insightForge.analyze(query, {
+      const results = await this.insightForgeEngine.analyze(query, {
         userId,
         orgId,
         simulationRequirement,

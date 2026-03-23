@@ -9,6 +9,7 @@
 
 import fetch from 'node-fetch';
 import { getMistralEmbedService } from '../embeddings/mistral.js';
+import { getQdrantCollections } from './collections.js';
 
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:9200';
 const API_KEY = process.env.QDRANT_API_KEY || 'dev_api_key_hivemind_2026';
@@ -30,6 +31,38 @@ export class QdrantClient {
     this.embedService = getMistralEmbedService();
     this.dimension = parseInt(process.env.EMBEDDING_DIMENSION || '1024', 10);
     this.connected = null; // Cache connection state
+    this.collectionReady = null;
+  }
+
+  async ensureCollection(collectionName = this.collectionName) {
+    if (this.collectionReady === collectionName) {
+      return true;
+    }
+
+    try {
+      const response = await fetch(`${QDRANT_URL}/collections/${resolveCollectionName(collectionName)}`, { headers });
+      if (response.ok) {
+        this.collectionReady = collectionName;
+        return true;
+      }
+
+      if (response.status !== 404) {
+        return false;
+      }
+
+      const collections = getQdrantCollections({
+        url: QDRANT_URL,
+        apiKey: API_KEY
+      });
+
+      await collections.createMemoriesCollection();
+      await collections.ensureMemoriesCollectionIndexes(resolveCollectionName(collectionName));
+      this.collectionReady = collectionName;
+      return true;
+    } catch (error) {
+      console.error('Failed to ensure Qdrant collection:', error.message);
+      return false;
+    }
   }
 
   /**
@@ -76,6 +109,13 @@ export class QdrantClient {
       return memory.id;
     }
 
+    const collectionName = resolveCollectionName(options.collectionName);
+    const collectionReady = await this.ensureCollection(collectionName);
+    if (!collectionReady) {
+      console.warn('⚠️  Qdrant collection unavailable, storing in-memory only');
+      return memory.id;
+    }
+
     // Generate embedding from content
     const embedding = await this.generateEmbedding(memory.content);
 
@@ -83,7 +123,6 @@ export class QdrantClient {
       console.warn('⚠️  Storing memory without embedding');
     }
 
-    const collectionName = resolveCollectionName(options.collectionName);
     const point = {
       id: memory.id,
       vector: embedding || this._generatePlaceholderVector(),
@@ -156,6 +195,13 @@ export class QdrantClient {
       return [];
     }
 
+    const resolvedCollection = resolveCollectionName(collectionName);
+    const collectionReady = await this.ensureCollection(resolvedCollection);
+    if (!collectionReady) {
+      console.warn('⚠️  Qdrant collection unavailable, search returning empty results');
+      return [];
+    }
+
     // Generate query embedding if not provided
     let searchVector = vector;
     if (!searchVector && query) {
@@ -167,10 +213,14 @@ export class QdrantClient {
       return [];
     }
 
+    const effectiveScoreThreshold = this.embedService?.provider === 'local-fallback'
+      ? 0
+      : score_threshold;
+
     const searchRequest = {
       vector: searchVector,
       limit,
-      score_threshold,
+      score_threshold: effectiveScoreThreshold,
       with_payload: true,
       with_vector: false
     };
@@ -182,7 +232,7 @@ export class QdrantClient {
 
     try {
       const response = await fetch(
-        `${QDRANT_URL}/collections/${resolveCollectionName(collectionName)}/points/search`,
+        `${QDRANT_URL}/collections/${resolvedCollection}/points/search`,
         {
           method: 'POST',
           headers,

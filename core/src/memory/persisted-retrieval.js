@@ -85,13 +85,13 @@ function tagOverlapRatio(leftTags = [], rightTags = []) {
 
 function isNearDuplicate(left, right) {
   const similarity = computeTokenSimilarity(left.memory.content || '', right.memory.content || '');
-  if (similarity >= 0.92) return true;
+  if (similarity >= 0.85) return true;
 
   const sameSourcePlatform = (left.memory.source_metadata?.source_platform || left.memory.source)
     && (left.memory.source_metadata?.source_platform || left.memory.source) === (right.memory.source_metadata?.source_platform || right.memory.source);
   const coverage = lexicalCoverage(left.memory.content || '', right.memory.content || '');
   const tagOverlap = tagOverlapRatio(left.memory.tags || [], right.memory.tags || []);
-  if (sameSourcePlatform && tagOverlap >= 0.6 && coverage >= 0.68) return true;
+  if (sameSourcePlatform && tagOverlap >= 0.5 && coverage >= 0.60) return true;
 
   return false;
 }
@@ -155,8 +155,8 @@ function applyRecallRelevanceFloor(scored) {
   if (scored.length === 0) return [];
   const topScore = scored[0].score;
   const topSimilarity = scored[0].similarityScore ?? 0;
-  const minimumScore = Math.max(topScore * 0.2, 0.08);
-  const minimumSimilarity = Math.max(topSimilarity * 0.35, 0.18);
+  const minimumScore = Math.max(topScore * 0.30, 0.12);
+  const minimumSimilarity = Math.max(topSimilarity * 0.40, 0.22);
   const filtered = scored.filter(item =>
     item.score >= minimumScore &&
     (item.similarityScore ?? 0) >= minimumSimilarity
@@ -246,7 +246,7 @@ async function vectorCandidatesForRecall(store, {
     tags,
     is_latest: true,
     limit: Math.max(max_memories * 4, 20),
-    score_threshold: 0.15,
+    score_threshold: 0.25,
     collectionName: buildCollectionName(user_id)
   });
 
@@ -656,6 +656,14 @@ export async function recallPersistedMemories(store, {
       preferred_source_platforms,
       preferred_tags
     });
+    let score = (weights.similarity ?? 0.45) * similarityScore +
+        (weights.recency ?? 0.15) * recencyScore +
+        (weights.importance ?? 0.1) * importanceScore +
+        (weights.vector ?? 0.2) * vectorScore +
+        (weights.graph ?? 0.05) * graphScore +
+        (weights.policy ?? 0.05) * policyScore;
+    // Superseded memory penalty
+    if (memory.is_latest === false) score *= 0.55;
     return {
       memory,
       vectorScore,
@@ -664,12 +672,7 @@ export async function recallPersistedMemories(store, {
       policyScore,
       similarityScore,
       recencyScore,
-      score: (weights.similarity ?? 0.45) * similarityScore +
-        (weights.recency ?? 0.15) * recencyScore +
-        (weights.importance ?? 0.1) * importanceScore +
-        (weights.vector ?? 0.2) * vectorScore +
-        (weights.graph ?? 0.05) * graphScore +
-        (weights.policy ?? 0.05) * policyScore
+      score
     };
   });
 
@@ -686,18 +689,21 @@ export async function recallPersistedMemories(store, {
       preferred_tags
     });
 
+    let score = (weights.similarity ?? 0.45) * (candidate.similarityScore || 0) +
+        (weights.recency ?? 0.15) * recencyScore +
+        (weights.importance ?? 0.1) * importanceScore +
+        (weights.vector ?? 0.2) * (candidate.vectorScore || 0) +
+        (weights.graph ?? 0.05) * graphScore +
+        (weights.policy ?? 0.05) * policyScore;
+    // Superseded memory penalty
+    if (candidate.memory?.is_latest === false) score *= 0.55;
     return {
       ...candidate,
       keywordScore: candidate.similarityScore || 0,
       graphScore,
       policyScore,
       recencyScore,
-      score: (weights.similarity ?? 0.45) * (candidate.similarityScore || 0) +
-        (weights.recency ?? 0.15) * recencyScore +
-        (weights.importance ?? 0.1) * importanceScore +
-        (weights.vector ?? 0.2) * (candidate.vectorScore || 0) +
-        (weights.graph ?? 0.05) * graphScore +
-        (weights.policy ?? 0.05) * policyScore
+      score
     };
   });
 

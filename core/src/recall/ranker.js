@@ -234,8 +234,93 @@ function rankHybrid(memories, options = {}) {
   // Filter by minimum score
   const filtered = scored.filter(m => m.score >= minScore);
 
-  // Return top stage2Limit results
-  return filtered.slice(0, stage2Limit);
+  // Enforce diversity in top-5, then return top stage2Limit
+  return enforceDiversity(filtered.slice(0, stage2Limit), { topK: 5, minContentDiversity: 0.70 });
+}
+
+// ==========================================
+// Diversity Enforcement
+// ==========================================
+
+/**
+ * Enforce diversity in top-K results:
+ * - Content-hash dedup (skip exact content matches)
+ * - Near-duplicate demotion in top-K (>70% token overlap)
+ * - Source diversity cap (max 3 same source_platform in top-K)
+ */
+function enforceDiversity(results, options = {}) {
+  const { maxSameSource = 3, minContentDiversity = 0.70, topK = 5 } = options;
+
+  if (!results || results.length <= topK) return results;
+
+  const diverse = [];
+  const sourceCount = new Map();
+  const contentHashes = new Set();
+
+  for (const r of results) {
+    const content = (r.content || r.payload?.content || '').toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+
+    // Content-hash dedup
+    const hash = simpleHash(content);
+    if (contentHashes.has(hash)) continue;
+    contentHashes.add(hash);
+
+    let demoted = false;
+
+    // Near-duplicate check against top-K selected so far
+    if (diverse.length < topK) {
+      const tooSimilar = diverse.some(d => {
+        const dContent = (d.content || d.payload?.content || '').toLowerCase()
+          .replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+        return tokenOverlapRatio(content, dContent) > minContentDiversity;
+      });
+      if (tooSimilar) demoted = true;
+    }
+
+    // Source diversity cap
+    const source = r.source_platform || r.payload?.source_platform || 'unknown';
+    const count = sourceCount.get(source) || 0;
+    if (!demoted && diverse.length < topK && count >= maxSameSource) {
+      demoted = true;
+    }
+
+    if (!demoted) {
+      sourceCount.set(source, count + 1);
+    }
+
+    r._demoted = demoted;
+    diverse.push(r);
+  }
+
+  // Non-demoted first (by score), then demoted (by score)
+  diverse.sort((a, b) => {
+    if (a._demoted && !b._demoted) return 1;
+    if (!a._demoted && b._demoted) return -1;
+    return (b.score || 0) - (a.score || 0);
+  });
+
+  return diverse;
+}
+
+function simpleHash(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) - hash) + str.charCodeAt(i);
+    hash = hash & hash;
+  }
+  return hash;
+}
+
+function tokenOverlapRatio(a, b) {
+  const setA = new Set(a.split(' ').filter(t => t.length >= 3));
+  const setB = new Set(b.split(' ').filter(t => t.length >= 3));
+  if (setA.size === 0 || setB.size === 0) return 0;
+  let overlap = 0;
+  const smaller = setA.size <= setB.size ? setA : setB;
+  const larger = setA.size <= setB.size ? setB : setA;
+  for (const t of smaller) if (larger.has(t)) overlap++;
+  return overlap / smaller.size;
 }
 
 // ==========================================
@@ -482,6 +567,7 @@ export default {
   rankHybrid,
 
   // Utilities
+  enforceDiversity,
   normalizeScores,
   filterByScore,
   limitResults,

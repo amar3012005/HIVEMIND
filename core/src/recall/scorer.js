@@ -15,10 +15,11 @@
 const CONFIG = {
   // Scoring weights (must sum to 1.0)
   weights: {
-    vector: 0.4,        // Vector similarity score (0-1)
-    recency: 0.3,       // Recency bias with exponential decay
-    importance: 0.2,    // Memory importance score (0-1)
-    ebbinghaus: 0.1     // Ebbinghaus forgetting curve
+    vector: 0.35,       // Vector similarity score (0-1)
+    recency: 0.25,      // Recency bias with exponential decay
+    importance: 0.20,   // Memory importance score (0-1)
+    ebbinghaus: 0.05,   // Ebbinghaus forgetting curve
+    matchBonus: 0.15    // Title/tag/entity exact-match signal
   },
 
   // Recency configuration
@@ -328,6 +329,69 @@ function getEbbinghausComponent(lastConfirmedAt, strength, recallCount, options 
 }
 
 // ==========================================
+// Match Bonus Scoring (title/tag/entity signals)
+// ==========================================
+
+/**
+ * Calculate match bonus component based on exact lexical matches
+ *
+ * @param {object} memory - Memory object
+ * @param {string} queryContext - Original query text
+ * @returns {object} Match bonus component
+ */
+function getMatchBonusComponent(memory, queryContext = '') {
+  if (!queryContext || typeof queryContext !== 'string') {
+    return {
+      name: 'matchBonus',
+      rawScore: 0,
+      normalizedScore: 0,
+      weightedScore: 0,
+      weight: CONFIG.weights.matchBonus
+    };
+  }
+
+  const queryLower = queryContext.toLowerCase();
+  const queryTokens = queryLower.split(/\W+/).filter(t => t.length > 2);
+  let score = 0;
+
+  // Title exact substring match (strongest signal): +0.5
+  const title = (memory.title || '').toLowerCase();
+  if (title && queryLower.length > 3 && title.includes(queryLower)) {
+    score += 0.5;
+  } else if (title) {
+    // Partial title token overlap: +0.15 per token, max 0.4
+    const titleTokens = title.split(/\W+/).filter(t => t.length > 2);
+    const overlap = queryTokens.filter(t => titleTokens.includes(t)).length;
+    score += Math.min(overlap * 0.15, 0.4);
+  }
+
+  // Tag exact match: +0.2 per matching tag, max 0.4
+  const tags = (memory.tags || []).map(t => t.toLowerCase());
+  const tagMatches = queryTokens.filter(t => tags.includes(t)).length;
+  score += Math.min(tagMatches * 0.2, 0.4);
+
+  // Content bigram match: +0.1 per bigram hit, max 0.2
+  const content = (memory.content || '').toLowerCase();
+  if (queryTokens.length >= 2) {
+    let bigramHits = 0;
+    for (let i = 0; i < queryTokens.length - 1; i++) {
+      const bigram = queryTokens[i] + ' ' + queryTokens[i + 1];
+      if (content.includes(bigram)) bigramHits++;
+    }
+    score += Math.min(bigramHits * 0.1, 0.2);
+  }
+
+  const normalizedScore = clamp(score, 0, 1);
+  return {
+    name: 'matchBonus',
+    rawScore: score,
+    normalizedScore,
+    weightedScore: normalizedScore * CONFIG.weights.matchBonus,
+    weight: CONFIG.weights.matchBonus
+  };
+}
+
+// ==========================================
 // Combined Scoring
 // ==========================================
 
@@ -351,7 +415,8 @@ function calculateCombinedScore(memory, options = {}) {
     lastConfirmedAt = new Date(),
     strength = 1.0,
     recallCount = 0,
-    documentDate = new Date()
+    documentDate = new Date(),
+    queryContext = ''
   } = options;
 
   // Get individual components
@@ -359,14 +424,15 @@ function calculateCombinedScore(memory, options = {}) {
   const recencyComponent = getRecencyComponent(documentDate, { recencyBias });
   const importanceComponent = getImportanceComponent(importanceScore);
   const ebbinghausComponent = getEbbinghausComponent(lastConfirmedAt, strength, recallCount);
+  const matchBonusComponent = getMatchBonusComponent(memory, queryContext);
 
-  // Calculate final score with weighted components
-  // Note: Recency and Ebbinghaus weights are adjusted by recencyBias
+  // Calculate final score with 5 weighted components
   const finalScore = clamp(
     vectorComponent.weightedScore +
     recencyComponent.weightedScore +
     importanceComponent.weightedScore +
-    ebbinghausComponent.weightedScore,
+    ebbinghausComponent.weightedScore +
+    matchBonusComponent.weightedScore,
     CONFIG.bounds.minScore,
     CONFIG.bounds.maxScore
   );
@@ -377,16 +443,19 @@ function calculateCombinedScore(memory, options = {}) {
       vector: vectorComponent,
       recency: recencyComponent,
       importance: importanceComponent,
-      ebbinghaus: ebbinghausComponent
+      ebbinghaus: ebbinghausComponent,
+      matchBonus: matchBonusComponent
     },
     breakdown: {
       vector: vectorComponent.weightedScore,
       recency: recencyComponent.weightedScore,
       importance: importanceComponent.weightedScore,
-      ebbinghaus: ebbinghausComponent.weightedScore
+      ebbinghaus: ebbinghausComponent.weightedScore,
+      matchBonus: matchBonusComponent.weightedScore
     },
     metadata: {
       recencyBias,
+      queryContext: queryContext ? queryContext.slice(0, 50) : null,
       timestamp: Date.now()
     }
   };
@@ -426,7 +495,8 @@ function scoreMemory(memory, options = {}) {
     lastConfirmedAt: memory.last_confirmed_at || memory.updated_at || memory.created_at,
     strength: memory.strength || 1.0,
     recallCount: memory.recall_count || 0,
-    documentDate: memory.document_date || memory.created_at
+    documentDate: memory.document_date || memory.created_at,
+    queryContext: options.queryContext || ''
   });
 
   return {
@@ -522,11 +592,13 @@ function adjustWeightsForQuery(query) {
   }
 
   // Normalize weights to sum to 1.0
-  const total = weights.vector + weights.recency + weights.importance + weights.ebbinghaus;
+  if (!weights.matchBonus) weights.matchBonus = CONFIG.weights.matchBonus;
+  const total = weights.vector + weights.recency + weights.importance + weights.ebbinghaus + weights.matchBonus;
   weights.vector /= total;
   weights.recency /= total;
   weights.importance /= total;
   weights.ebbinghaus /= total;
+  weights.matchBonus /= total;
 
   return weights;
 }
@@ -695,6 +767,7 @@ export default {
   getRecencyComponent,
   getImportanceComponent,
   getEbbinghausComponent,
+  getMatchBonusComponent,
 
   // Utilities
   normalizeVectorScore,

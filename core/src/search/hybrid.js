@@ -47,8 +47,10 @@ const CONFIG = {
   fallback: {
     enableKeywordFallback: true,
     enableGraphFallback: true,
-    vectorMinScore: parseFloat(process.env.HIVEMIND_VECTOR_SCORE_THRESHOLD || '0.15'),
-    finalMinScore: parseFloat(process.env.HIVEMIND_FINAL_HYBRID_SCORE_THRESHOLD || '0.10')
+    vectorMinScore: parseFloat(process.env.HIVEMIND_VECTOR_SCORE_THRESHOLD || '0.20'),
+    finalMinScore: parseFloat(process.env.HIVEMIND_FINAL_HYBRID_SCORE_THRESHOLD || '0.15'),
+    documentThreshold: 0.35,
+    chunkThreshold: 0.25
   },
 
   // Temporal search configuration
@@ -965,11 +967,14 @@ async function hybridSearch(options = {}) {
     });
   }
 
+  // Step 3.5: Pre-filter weak candidates before combination
+  const preFiltered = applyPreFilterThresholds(vectorResults, keywordResults, graphResults, options);
+
   // Step 4: Combine and rank results
   const combinedResults = combineSearchResults(
-    vectorResults,
-    keywordResults,
-    graphResults,
+    preFiltered.vectorResults,
+    preFiltered.keywordResults,
+    preFiltered.graphResults,
     weights
   );
 
@@ -1095,6 +1100,65 @@ function combineSearchResults(vectorResults, keywordResults, graphResults, weigh
 }
 
 // ==========================================
+// Query Preprocessing
+// ==========================================
+
+const TEMPORAL_PATTERNS = [
+  /\b(today|yesterday|this week|last week|this month|last month|recently|recent|latest|newest)\b/i,
+  /\b(in|on|since|before|after|during)\s+\d{4}/i,
+  /\b(january|february|march|april|may|june|july|august|september|october|november|december)\b/i,
+];
+
+const EXPLORATORY_PATTERNS = [
+  /\b(tell me about|everything about|related to|associated with|overview)\b/i,
+  /\b(summarize|summary|recap)\b/i,
+];
+
+function preprocessQuery(query) {
+  if (!query || typeof query !== 'string') {
+    return { cleanedQuery: '', intent: 'factual', entities: [], weightOverrides: null };
+  }
+
+  const cleaned = normalizeQuery(query);
+
+  let intent = 'factual';
+  if (TEMPORAL_PATTERNS.some(p => p.test(query))) intent = 'temporal';
+  else if (EXPLORATORY_PATTERNS.some(p => p.test(query))) intent = 'exploratory';
+
+  const quotedEntities = (query.match(/"([^"]+)"/g) || []).map(s => s.replace(/"/g, ''));
+  const capitalizedEntities = (query.match(/\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*/g) || [])
+    .filter(e => !['Tell', 'What', 'How', 'Show', 'Find', 'Give', 'The', 'When', 'Where', 'Who'].includes(e));
+  const entities = [...new Set([...quotedEntities, ...capitalizedEntities])];
+
+  let weightOverrides = null;
+  if (intent === 'temporal') {
+    weightOverrides = { vector: 0.45, keyword: 0.35, graph: 0.20 };
+  } else if (intent === 'exploratory') {
+    weightOverrides = { vector: 0.50, keyword: 0.25, graph: 0.25 };
+  }
+
+  return { cleanedQuery: cleaned, intent, entities, weightOverrides };
+}
+
+// ==========================================
+// Pre-Filter Thresholds
+// ==========================================
+
+function applyPreFilterThresholds(vectorResults, keywordResults, graphResults, options = {}) {
+  const docThreshold = options.documentThreshold ?? CONFIG.fallback.documentThreshold;
+  const chunkThreshold = options.chunkThreshold ?? CONFIG.fallback.chunkThreshold;
+
+  const filteredVector = vectorResults.filter(r => r.score >= docThreshold);
+  const filteredKeyword = keywordResults.filter(r => r.score >= chunkThreshold);
+
+  // Safety: keep top-3 per source if filtering empties it
+  const safeVector = filteredVector.length > 0 ? filteredVector : vectorResults.slice(0, 3);
+  const safeKeyword = filteredKeyword.length > 0 ? filteredKeyword : keywordResults.slice(0, 3);
+
+  return { vectorResults: safeVector, keywordResults: safeKeyword, graphResults };
+}
+
+// ==========================================
 // Precision Boosts (Sprint 2)
 // ==========================================
 
@@ -1175,9 +1239,12 @@ function applyPrecisionBoosts(results, query, options = {}) {
       boost += 0.1;
     }
 
-    // is_latest boost (+0.05)
+    // is_latest: boost latest (+0.08), penalize superseded (*0.6)
     if (isLatest) {
-      boost += 0.05;
+      boost += 0.08;
+    } else {
+      r.score = (r.score || 0) * 0.6;
+      r._supersededPenalty = true;
     }
 
     r.score = (r.score || 0) + boost;
@@ -1191,7 +1258,7 @@ function applyPrecisionBoosts(results, query, options = {}) {
     const content = r.content || r.payload?.content || '';
     const isDuplicate = kept.some(k => {
       const kContent = k.content || k.payload?.content || '';
-      return tokenOverlap(content, kContent) > 0.85;
+      return tokenOverlap(content, kContent) > 0.80;
     });
     if (!isDuplicate) {
       kept.push(r);

@@ -653,6 +653,52 @@ function generateToolsManifest(userId, orgId) {
         },
         required: ['question']
       }
+    },
+    // ── Web Intelligence tools ──────────────────────────────
+    {
+      name: 'hivemind_web_search',
+      description: 'Search the web and return structured results. Requires web_search entitlement. Returns async job receipt.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Search query' },
+          domains: { type: 'array', items: { type: 'string' }, description: 'Optional domain allowlist' },
+          limit: { type: 'number', description: 'Max results (default: 10)' }
+        },
+        required: ['query']
+      }
+    },
+    {
+      name: 'hivemind_web_crawl',
+      description: 'Crawl web pages and extract content. Requires web_crawl entitlement. Returns async job receipt.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          urls: { type: 'array', items: { type: 'string' }, description: 'Seed URLs to crawl' },
+          depth: { type: 'number', description: 'Crawl depth (default: 1, max: 3)' },
+          page_limit: { type: 'number', description: 'Max pages (default: 10, max: 50)' }
+        },
+        required: ['urls']
+      }
+    },
+    {
+      name: 'hivemind_web_job_status',
+      description: 'Check status of a web search or crawl job.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          job_id: { type: 'string', description: 'Job ID from search/crawl submission' }
+        },
+        required: ['job_id']
+      }
+    },
+    {
+      name: 'hivemind_web_usage',
+      description: 'Check web intelligence quota and usage.',
+      inputSchema: {
+        type: 'object',
+        properties: {}
+      }
     }
   ];
 }
@@ -1442,6 +1488,35 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
           query: args.question,
           limit: args.context_limit || 5
         }));
+
+      // ── Web Intelligence handlers ─────────────────────────
+      case 'hivemind_web_search': {
+        const res = await apiClient.post('/api/web/search/jobs', {
+          query: args.query,
+          domains: args.domains,
+          limit: args.limit || 10
+        });
+        return formatToolContent(res);
+      }
+
+      case 'hivemind_web_crawl': {
+        const res = await apiClient.post('/api/web/crawl/jobs', {
+          urls: args.urls,
+          depth: Math.min(args.depth || 1, 3),
+          page_limit: Math.min(args.page_limit || 10, 50)
+        });
+        return formatToolContent(res);
+      }
+
+      case 'hivemind_web_job_status': {
+        const res = await apiClient.get(`/api/web/jobs/${args.job_id}`);
+        return formatToolContent(res);
+      }
+
+      case 'hivemind_web_usage': {
+        const res = await apiClient.get('/api/web/usage');
+        return formatToolContent(res);
+      }
 
       default:
         throw new Error(`Unknown tool: ${name}`);

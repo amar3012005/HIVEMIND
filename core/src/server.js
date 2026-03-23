@@ -52,7 +52,9 @@ const { getPrismaClient, ensureTenantContext } = await import('./db/prisma.js');
 const { MemoryGraphEngine } = await import('./memory/graph-engine.js');
 const { PrismaGraphStore } = await import('./memory/prisma-graph-store.js');
 const { queryPersistedMemories, recallPersistedMemories } = await import('./memory/persisted-retrieval.js');
-const { authenticatePersistedApiKey } = await import('./auth/api-keys.js');
+const { authenticatePersistedApiKey, hasEntitlement } = await import('./auth/api-keys.js');
+const { WebJobStore } = await import('./web/web-job-store.js');
+const { BrowserRuntime } = await import('./web/browser-runtime.js');
 const { getQdrantClient } = await import('./vector/qdrant-client.js');
 const { getQdrantCollections } = await import('./vector/collections.js');
 const { MCPIngestionService } = await import('./connectors/mcp/service.js');
@@ -121,6 +123,13 @@ const TAMPERMONKEY_USER_SCRIPT_CANDIDATES = [
 const DATA_DIR = path.join(PROJECT_ROOT, 'data');
 const API_KEYS_FILE_PATH = path.join(DATA_DIR, 'api-keys.json');
 const EVALUATION_REPORTS_DIR = path.join(DATA_DIR, 'evaluation-reports');
+
+// Web Intelligence
+const WEB_JOBS_FILE = path.join(DATA_DIR, 'web-jobs.json');
+const webJobStore = new WebJobStore(WEB_JOBS_FILE);
+const browserRuntime = new BrowserRuntime();
+const WEB_SEARCH_DAILY_LIMIT = Number(process.env.HIVEMIND_WEB_SEARCH_DAILY_LIMIT || 100);
+const WEB_CRAWL_DAILY_LIMIT = Number(process.env.HIVEMIND_WEB_CRAWL_DAILY_LIMIT || 500);
 
 installConsoleCapture('core');
 
@@ -1569,6 +1578,132 @@ const server = http.createServer(async (req, res) => {
             }
           }
           break;
+
+        // ==========================================
+        // WEB INTELLIGENCE (Search + Crawl)
+        // ==========================================
+        case '/api/web/search/jobs':
+          if (req.method === 'POST') {
+            if (!hasEntitlement(principal, 'web_search')) {
+              return jsonResponse(res, { error: 'Feature not enabled', code: 'feature_not_enabled', required_entitlement: 'web_search' }, 403);
+            }
+            try {
+              const usage = await webJobStore.getUsage(userId);
+              if (usage.web_search_requests >= WEB_SEARCH_DAILY_LIMIT) {
+                return jsonResponse(res, { error: 'Daily search quota exceeded', code: 'quota_exceeded', limit: WEB_SEARCH_DAILY_LIMIT, used: usage.web_search_requests }, 429);
+              }
+              const { query, domains, limit: searchLimit } = body;
+              if (!query) {
+                return jsonResponse(res, { error: 'query is required' }, 400);
+              }
+              const job = await webJobStore.create({ type: 'search', params: { query, domains: domains || [], limit: searchLimit || 10 }, userId, orgId });
+              setImmediate(async () => {
+                try {
+                  await webJobStore.update(job.id, { status: 'running' });
+                  const result = await browserRuntime.search({ query, domains: domains || [], limit: searchLimit || 10 });
+                  await webJobStore.update(job.id, {
+                    status: 'succeeded',
+                    results: result.results,
+                    runtime_used: result.runtime_used,
+                    fallback_applied: result.fallback_applied,
+                    duration_ms: result.duration_ms,
+                  });
+                } catch (err) {
+                  await webJobStore.update(job.id, { status: 'failed', error: err.message });
+                  console.error(`[web-search] job ${job.id} failed:`, err.message);
+                }
+              });
+              return jsonResponse(res, { job_id: job.id, status: 'queued', type: 'search' }, 202);
+            } catch (error) {
+              return jsonResponse(res, { error: error.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/web/crawl/jobs':
+          if (req.method === 'POST') {
+            if (!hasEntitlement(principal, 'web_crawl')) {
+              return jsonResponse(res, { error: 'Feature not enabled', code: 'feature_not_enabled', required_entitlement: 'web_crawl' }, 403);
+            }
+            try {
+              const usage = await webJobStore.getUsage(userId);
+              if (usage.web_crawl_pages >= WEB_CRAWL_DAILY_LIMIT) {
+                return jsonResponse(res, { error: 'Daily crawl quota exceeded', code: 'quota_exceeded', limit: WEB_CRAWL_DAILY_LIMIT, used: usage.web_crawl_pages }, 429);
+              }
+              const { urls, depth, page_limit: pageLimit, include, exclude } = body;
+              if (!urls || !Array.isArray(urls) || urls.length === 0) {
+                return jsonResponse(res, { error: 'urls array is required' }, 400);
+              }
+              const effectivePageLimit = Math.min(pageLimit || 50, WEB_CRAWL_DAILY_LIMIT - usage.web_crawl_pages);
+              const job = await webJobStore.create({ type: 'crawl', params: { urls, depth: depth || 1, pageLimit: effectivePageLimit, include, exclude }, userId, orgId });
+              setImmediate(async () => {
+                try {
+                  await webJobStore.update(job.id, { status: 'running' });
+                  const result = await browserRuntime.crawl({ urls, depth: depth || 1, pageLimit: effectivePageLimit, include, exclude });
+                  await webJobStore.update(job.id, {
+                    status: 'succeeded',
+                    results: result.pages,
+                    runtime_used: result.runtime_used,
+                    fallback_applied: result.fallback_applied,
+                    duration_ms: result.duration_ms,
+                    pages_processed: result.pages.length,
+                  });
+                } catch (err) {
+                  await webJobStore.update(job.id, { status: 'failed', error: err.message });
+                  console.error(`[web-crawl] job ${job.id} failed:`, err.message);
+                }
+              });
+              return jsonResponse(res, { job_id: job.id, status: 'queued', type: 'crawl' }, 202);
+            } catch (error) {
+              return jsonResponse(res, { error: error.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/web/jobs':
+          if (req.method === 'GET') {
+            try {
+              const listType = url.searchParams.get('type') || undefined;
+              const listLimit = Number(url.searchParams.get('limit') || 50);
+              const jobs = await webJobStore.list({ userId, orgId }, { limit: listLimit, type: listType });
+              return jsonResponse(res, { jobs });
+            } catch (error) {
+              return jsonResponse(res, { error: error.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/web/usage':
+          if (req.method === 'GET') {
+            try {
+              const usage = await webJobStore.getUsage(userId);
+              const now = new Date();
+              const resetAt = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).toISOString();
+              return jsonResponse(res, {
+                web_search_requests: { used: usage.web_search_requests, limit: WEB_SEARCH_DAILY_LIMIT, reset_at: resetAt },
+                web_crawl_pages: { used: usage.web_crawl_pages, limit: WEB_CRAWL_DAILY_LIMIT, reset_at: resetAt },
+              });
+            } catch (error) {
+              return jsonResponse(res, { error: error.message }, 500);
+            }
+          }
+          break;
+
+        case pathname.match(/^\/api\/web\/jobs\/([^/]+)$/)?.input: {
+          if (req.method === 'GET') {
+            try {
+              const jobId = pathname.match(/^\/api\/web\/jobs\/([^/]+)$/)[1];
+              const job = await webJobStore.get(jobId, { userId, orgId });
+              if (!job) {
+                return jsonResponse(res, { error: 'Job not found' }, 404);
+              }
+              return jsonResponse(res, job);
+            } catch (error) {
+              return jsonResponse(res, { error: error.message }, 500);
+            }
+          }
+          break;
+        }
 
         // ==========================================
         // HOSTED MCP SERVICE (Phase 2: Context-as-a-Service)

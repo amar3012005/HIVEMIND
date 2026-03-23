@@ -3,7 +3,7 @@
 > Single source of truth for all MCP clients (Claude, VS Code, Antigravity, Cursor, Codex).
 > Only transport/config differs by platform. Tool names, schemas, and behavior are identical.
 
-## Tool Set (9 tools)
+## Tool Set (13 tools)
 
 ### hivemind_save_memory
 Save a new memory to persistent storage.
@@ -112,6 +112,46 @@ LLM-powered analysis over memories.
 
 **Output:** `{answer, evidence: [...], sub_queries: [...], entity_insights: [...]}`
 
+### hivemind_web_search
+Search the web and return structured results. Requires `web_search` entitlement. Returns async job receipt.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| query | string | yes | Search query |
+| domains | string[] | no | Optional domain allowlist |
+| limit | number | no | Max results (default: 10) |
+
+**Output:** `{job_id, status, created_at}` — poll with `hivemind_web_job_status`.
+
+### hivemind_web_crawl
+Crawl web pages and extract content. Requires `web_crawl` entitlement. Returns async job receipt.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| urls | string[] | yes | Seed URLs to crawl |
+| depth | number | no | Crawl depth (default: 1, max: 3) |
+| page_limit | number | no | Max pages (default: 10, max: 50) |
+
+**Output:** `{job_id, status, created_at}` — poll with `hivemind_web_job_status`.
+
+### hivemind_web_job_status
+Check status of a web search or crawl job.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| job_id | string | yes | Job ID from search/crawl submission |
+
+**Output:** `{job_id, status, results?, error?}` — `status` is `pending`, `running`, `completed`, or `failed`.
+
+### hivemind_web_usage
+Check web intelligence quota and usage.
+
+| Field | Type | Required |
+|-------|------|----------|
+| *(none)* | — | — |
+
+**Output:** `{searches_used, searches_limit, crawls_used, crawls_limit, reset_at}`
+
 ## Relationship Enum
 
 At the MCP layer, relationships use lowercase values:
@@ -136,7 +176,7 @@ The `text` field contains a JSON string. Clients parse via `JSON.parse(content[0
 [{"type": "text", "text": "{\"error\":\"message\",\"code\":\"ERROR_CODE\"}"}]
 ```
 
-Codes: `NOT_FOUND`, `VALIDATION_ERROR`, `AUTH_ERROR`, `RATE_LIMITED`, `INTERNAL_ERROR`.
+Codes: `NOT_FOUND`, `VALIDATION_ERROR`, `AUTH_ERROR`, `RATE_LIMITED`, `INTERNAL_ERROR`, `ENTITLEMENT_REQUIRED`.
 
 ## Validation Rules
 
@@ -183,3 +223,5 @@ Body: JSON-RPC 2.0
 - Protocol: `2024-11-05`
 - Server: `hivemind-hosted-mcp` v2.0.0
 - Bridge: `@amar_528/mcp-bridge`
+
+

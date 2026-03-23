@@ -1,5 +1,19 @@
 import crypto from 'crypto';
 
+export const ENTITLEMENT_SCOPES = [
+  'memory:read',
+  'memory:write',
+  'mcp',
+  'web_search',
+  'web_crawl',
+];
+
+export function hasEntitlement(principal, entitlement) {
+  if (!principal || !Array.isArray(principal.scopes)) return false;
+  if (principal.scopes.includes('*')) return true;
+  return principal.scopes.includes(entitlement);
+}
+
 export function hashApiKey(apiKey) {
   return crypto.createHash('sha256').update(apiKey).digest('hex');
 }

@@ -118,6 +118,55 @@ const PROVIDER_REGISTRY = {
   },
 };
 
+async function getProviderRuntimeConfig(providerConfig) {
+  if (!providerConfig?.oauthModule) {
+    return null;
+  }
+
+  try {
+    const oauthModule = await import(providerConfig.oauthModule);
+    if (typeof oauthModule.getOAuthConfig === 'function') {
+      return oauthModule.getOAuthConfig();
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function evaluateProviderConfiguration(providerId, oauthConfig) {
+  if (!oauthConfig) {
+    return {
+      configured: false,
+      disabledReason: 'OAuth module unavailable',
+    };
+  }
+
+  const clientId = String(oauthConfig.clientId || '').trim();
+  const clientSecret = String(oauthConfig.clientSecret || '').trim();
+  const requiresSecret = providerId !== 'notion' ? true : true;
+
+  if (!clientId) {
+    return {
+      configured: false,
+      disabledReason: 'Missing client ID',
+    };
+  }
+
+  if (requiresSecret && !clientSecret) {
+    return {
+      configured: false,
+      disabledReason: 'Missing client secret',
+    };
+  }
+
+  return {
+    configured: true,
+    disabledReason: null,
+  };
+}
+
 function getConnectorCallbackUrl(provider) {
   return `${CONFIG.publicBaseUrl}/v1/connectors/${provider}/callback`;
 }
@@ -631,20 +680,29 @@ const server = http.createServer(async (req, res) => {
     const connectors = await connectorStore.listConnectors(current.session.userId);
 
     // Merge with provider registry to show available + connected
-    const result = Object.entries(PROVIDER_REGISTRY).map(([providerId, meta]) => {
+    const result = await Promise.all(Object.entries(PROVIDER_REGISTRY).map(async ([providerId, meta]) => {
       const connector = connectors.find(c => c.provider === providerId);
+      const oauthConfig = await getProviderRuntimeConfig(meta);
+      const availability = evaluateProviderConfiguration(providerId, oauthConfig);
+      const status = connector
+        ? connector.status
+        : availability.configured
+          ? 'disconnected'
+          : 'not_configured';
       return {
         provider: providerId,
         label: meta.label,
-        status: connector ? connector.status : 'disconnected',
+        status,
         account_ref: connector?.account_ref || null,
         last_sync_at: connector?.last_sync_at || null,
         last_error: connector?.last_error || null,
         is_active: connector?.is_active || false,
         scopes: connector?.scopes || meta.scopes,
         created_at: connector?.created_at || null,
+        configured: availability.configured,
+        disabled_reason: availability.disabledReason,
       };
-    });
+    }));
 
     return jsonResponse(res, { connectors: result });
   }
@@ -662,7 +720,20 @@ const server = http.createServer(async (req, res) => {
     }
 
     try {
-      const { buildAuthUrl } = await import(providerConfig.oauthModule);
+      const oauthModule = await import(providerConfig.oauthModule);
+      const availability = evaluateProviderConfiguration(
+        provider,
+        typeof oauthModule.getOAuthConfig === 'function' ? oauthModule.getOAuthConfig() : null
+      );
+
+      if (!availability.configured) {
+        return jsonResponse(res, {
+          error: `${provider} connector is not configured`,
+          message: availability.disabledReason,
+        }, 503);
+      }
+
+      const { buildAuthUrl } = oauthModule;
       const body = await parseBody(req);
       const returnTo = body.return_to || '/hivemind/app/connectors';
 

@@ -2151,36 +2151,12 @@ a{color:#a78bfa}</style></head><body>
                 metadata: { email: tokens.email },
               });
 
-              console.log(`[gmail-oauth] Connected for user=${stateUserId} email=${tokens.email}`);
+              console.log(`[gmail-oauth] Connected for user=${stateUserId} email=${tokens.email}. Awaiting sync configuration.`);
 
-              // Trigger initial sync in background
-              (async () => {
-                try {
-                  const { GmailAdapter } = await import('./connectors/providers/gmail/adapter.js');
-                  const { SyncEngine } = await import('./connectors/framework/sync-engine.js');
-                  const adapter = new GmailAdapter();
-                  const syncConnStore = new ConnectorStore(prisma);
-                  const syncEngine = new SyncEngine({
-                    store: syncConnStore,
-                    memoryEngine: persistentMemoryEngine,
-                    memoryStore: persistentMemoryStore,
-                  });
-                  const result = await syncEngine.sync({
-                    userId: stateUserId,
-                    orgId: stateOrgId,
-                    provider: 'gmail',
-                    adapter,
-                    incremental: false,
-                  });
-                  console.log(`[gmail-sync] Initial sync complete: imported=${result.imported}, skipped=${result.skipped}`);
-                } catch (syncErr) {
-                  console.error(`[gmail-sync] Initial sync failed:`, syncErr.message);
-                }
-              })();
-
-              // Redirect to frontend connectors page
+              // Do NOT auto-sync — redirect to frontend with needs_config flag
+              // User will configure filters (labels, date range, exclusions) before sync starts
               const frontendUrl = process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu';
-              res.writeHead(302, { Location: `${frontendUrl}/hivemind/app/connectors?connected=gmail&email=${encodeURIComponent(tokens.email || '')}` });
+              res.writeHead(302, { Location: `${frontendUrl}/hivemind/app/connectors?connected=gmail&needs_config=true&email=${encodeURIComponent(tokens.email || '')}` });
               res.end();
               return;
             } catch (err) {
@@ -2222,6 +2198,200 @@ a{color:#a78bfa}</style></head><body>
               const dcStore = new ConnectorStore(prisma);
               await dcStore.disconnect(userId, 'gmail');
               return jsonResponse(res, { disconnected: true });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        // Gmail sync settings + trigger
+        case '/api/connectors/gmail/sync':
+          if (req.method === 'POST') {
+            // Accept sync configuration from the frontend settings panel
+            const {
+              date_range = '30d',         // '7d', '30d', '90d', '365d', 'all'
+              folders = ['INBOX', 'SENT'], // Gmail label IDs
+              exclude_categories = [],     // ['promotions', 'social', 'updates', 'forums']
+              max_emails = 500,            // safety limit
+              container_tag = null,        // optional project/container isolation
+            } = body;
+
+            if (!persistentMemoryEngine || !persistentMemoryStore) {
+              return jsonResponse(res, { error: 'Memory engine unavailable' }, 503);
+            }
+
+            try {
+              const { ConnectorStore, decryptToken } = await import('./connectors/framework/connector-store.js');
+              const syncStore = new ConnectorStore(prisma);
+              const connector = await syncStore.getConnector(userId, 'gmail');
+              if (!connector) {
+                return jsonResponse(res, { error: 'Gmail not connected. Complete OAuth first.' }, 400);
+              }
+
+              // Build Gmail API query from user settings
+              const queryParts = [];
+
+              // Date range filter
+              const dateRanges = { '7d': 7, '30d': 30, '90d': 90, '365d': 365 };
+              if (date_range !== 'all' && dateRanges[date_range]) {
+                const after = new Date(Date.now() - dateRanges[date_range] * 86400000);
+                queryParts.push(`after:${after.getFullYear()}/${after.getMonth() + 1}/${after.getDate()}`);
+              }
+
+              // Folder filter (label inclusion)
+              if (folders.length > 0 && !folders.includes('ALL')) {
+                queryParts.push(`in:${folders.map(f => f.toLowerCase()).join(' OR in:')}`);
+              }
+
+              // Exclude categories
+              for (const cat of exclude_categories) {
+                queryParts.push(`-category:${cat}`);
+              }
+
+              const gmailQuery = queryParts.join(' ');
+
+              // Store settings in connector metadata
+              await syncStore.updateStatus(userId, 'gmail', {
+                status: 'syncing',
+                cursor: connector.connectorMetadata?.cursor || null,
+                syncStats: null,
+              });
+
+              // Return immediately, sync in background
+              const syncId = crypto.randomUUID();
+              console.log(`[gmail-sync] Starting configured sync id=${syncId} user=${userId} query="${gmailQuery}" maxEmails=${max_emails}`);
+
+              // Background sync
+              (async () => {
+                try {
+                  const accessToken = decryptToken(connector.accessTokenEncrypted);
+                  if (!accessToken) throw new Error('Could not decrypt access token');
+
+                  const GMAIL_API = 'https://gmail.googleapis.com/gmail/v1/users/me';
+                  const params = new URLSearchParams({
+                    maxResults: String(Math.min(max_emails, 100)),
+                    q: gmailQuery,
+                  });
+
+                  let totalImported = 0;
+                  let totalSkipped = 0;
+                  let pageToken = null;
+
+                  do {
+                    if (pageToken) params.set('pageToken', pageToken);
+                    const listResp = await fetch(`${GMAIL_API}/threads?${params}`, {
+                      headers: { Authorization: `Bearer ${accessToken}` },
+                    });
+                    if (!listResp.ok) throw new Error(`Gmail API ${listResp.status}: ${await listResp.text()}`);
+                    const listData = await listResp.json();
+
+                    const threads = listData.threads || [];
+                    for (const threadStub of threads) {
+                      if (totalImported + totalSkipped >= max_emails) break;
+
+                      try {
+                        const threadResp = await fetch(`${GMAIL_API}/threads/${threadStub.id}?format=full`, {
+                          headers: { Authorization: `Bearer ${accessToken}` },
+                        });
+                        if (!threadResp.ok) { totalSkipped++; continue; }
+                        const thread = await threadResp.json();
+                        const messages = thread.messages || [];
+
+                        for (const msg of messages) {
+                          if (totalImported >= max_emails) break;
+
+                          const headers = msg.payload?.headers || [];
+                          const getH = (n) => headers.find(h => h.name.toLowerCase() === n.toLowerCase())?.value || '';
+                          const subject = getH('Subject') || '(no subject)';
+                          const from = getH('From');
+                          const date = getH('Date');
+                          const labels = (msg.labelIds || []).map(l => l.replace(/^CATEGORY_/, '').toLowerCase());
+
+                          // Skip excluded categories
+                          if (exclude_categories.some(cat => labels.includes(cat))) {
+                            totalSkipped++;
+                            continue;
+                          }
+
+                          // Extract body
+                          let bodyText = msg.snippet || '';
+                          const payload = msg.payload;
+                          if (payload) {
+                            const textPart = (payload.parts || []).find(p => p.mimeType === 'text/plain');
+                            if (textPart?.body?.data) {
+                              try { bodyText = Buffer.from(textPart.body.data, 'base64url').toString('utf-8'); } catch {}
+                            } else if (payload.mimeType === 'text/plain' && payload.body?.data) {
+                              try { bodyText = Buffer.from(payload.body.data, 'base64url').toString('utf-8'); } catch {}
+                            }
+                          }
+
+                          // Strip null bytes
+                          bodyText = bodyText.replace(/\x00/g, '');
+
+                          const content = `Subject: ${subject}\nFrom: ${from}\nDate: ${date}\n\n${bodyText}`.slice(0, 8000);
+                          const tags = ['gmail', ...labels.filter(l => !['unread', 'inbox'].includes(l))];
+                          if (from) {
+                            const emailMatch = from.match(/<([^>]+)>/);
+                            if (emailMatch) tags.push(`from:${emailMatch[1].split('@')[0]}`);
+                          }
+
+                          try {
+                            await persistentMemoryEngine.ingestMemory({
+                              content,
+                              title: subject,
+                              tags,
+                              memory_type: 'fact',
+                              document_date: date ? new Date(date).toISOString() : null,
+                              source: 'gmail',
+                              source_metadata: {
+                                source_type: 'gmail',
+                                source_platform: 'gmail',
+                                source_id: msg.id,
+                                thread_id: thread.id,
+                              },
+                              project: container_tag || null,
+                              user_id: userId,
+                              org_id: orgId,
+                            });
+                            totalImported++;
+                          } catch (ingestErr) {
+                            console.warn(`[gmail-sync] Ingest failed for msg ${msg.id}:`, ingestErr.message);
+                            totalSkipped++;
+                          }
+                        }
+                      } catch (threadErr) {
+                        console.warn(`[gmail-sync] Thread ${threadStub.id} failed:`, threadErr.message);
+                        totalSkipped++;
+                      }
+                    }
+
+                    pageToken = listData.nextPageToken;
+                  } while (pageToken && totalImported + totalSkipped < max_emails);
+
+                  // Update connector status
+                  await syncStore.updateStatus(userId, 'gmail', {
+                    status: 'idle',
+                    syncStats: { imported: totalImported, skipped: totalSkipped, query: gmailQuery },
+                  });
+
+                  console.log(`[gmail-sync] Complete: imported=${totalImported}, skipped=${totalSkipped}`);
+                } catch (syncErr) {
+                  console.error(`[gmail-sync] Failed:`, syncErr.message);
+                  try {
+                    await syncStore.updateStatus(userId, 'gmail', {
+                      status: 'idle',
+                      error: syncErr.message,
+                    });
+                  } catch {}
+                }
+              })();
+
+              return jsonResponse(res, {
+                sync_id: syncId,
+                status: 'syncing',
+                settings: { date_range, folders, exclude_categories, max_emails, container_tag, gmail_query: gmailQuery },
+                message: 'Sync started in background. Check /api/connectors/gmail/status for progress.',
+              });
             } catch (err) {
               return jsonResponse(res, { error: err.message }, 500);
             }

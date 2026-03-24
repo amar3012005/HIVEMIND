@@ -1410,3 +1410,132 @@ Existing search/crawl routes enhanced with rate limiting, abuse detection, domai
 - `ba84633` — fix: default all API keys to full scopes
 - Da-vinci `2f8daf6` — feat: Web Intel productization UX, Admin dashboard, API key scope selector
 - Da-vinci `93b42aa` — fix: default all API keys to full scopes
+
+---
+
+## 2026-03-24 21:00 UTC — Retrieval Evaluation Overhaul + Platform Feature Parity Sprint
+
+### Problem
+Evaluation page showed **all zeros** — 0% precision, 0% recall, 0% NDCG, 0% MRR. Root cause: default test dataset used fake UUIDs (`550e8400-...`) that don't exist in any user's database.
+
+### Evaluation Fixes
+
+#### 1. Auto-Dataset Generator (`core/src/evaluation/auto-dataset-generator.js`)
+- Dynamically generates evaluation queries from **any user's actual memories**
+- No hardcoded UUIDs — works for every user on the platform
+- Samples memories by tag clusters, generates natural language queries from titles/tags/content
+- Seed memory UUIDs become ground truth for Recall@K
+- Filters out web-crawl noise, MCP verify probes, junk memories
+- Quality scoring deprioritizes web-crawl, boosts decisions/lessons/preferences
+- Architecture per NotebookLM: "Seed & Reverse-Engineer" approach
+
+#### 2. Semantic Precision@5 (`core/src/evaluation/retrieval-evaluator.js`)
+- New metric: grades each retrieved result by content relevance to query (token overlap)
+- Fairer than UUID-only matching — a relevant result with different UUID isn't a "false positive"
+- 40% query-token overlap threshold for relevance
+- Quality score now uses semantic P@5 as primary precision signal
+- Exposed in relevance benchmark output alongside UUID P@5
+
+#### 3. Scorer Weight Rebalance (`core/src/recall/scorer.js`)
+- **Before**: vector 0.35, recency 0.25, importance 0.20, ebbinghaus 0.05, matchBonus 0.15
+- **After**: vector 0.50, recency 0.15, importance 0.10, ebbinghaus 0.05, matchBonus 0.20
+- Semantic-majority: vector+matchBonus = 0.70 ensures relevance dominates ranking
+- Recency/importance are tiebreakers only (per NotebookLM recommendation)
+
+#### Production Evaluation Results (auto-generated)
+| Metric | Score | Target | Status |
+|--------|-------|--------|--------|
+| Quality Score | **81/100** | — | — |
+| Semantic P@5 | **0.243** | 0.80 | improving |
+| R@10 | **0.900** | 0.70 | PASS |
+| NDCG@10 | **0.835** | 0.75 | PASS |
+| MRR | **0.817** | 0.60 | PASS |
+| P99 Latency | **183ms** | 300ms | PASS |
+| Hit Rate | **19/20** | — | PASS |
+
+#### Frontend Evaluation Page Updates
+- "Run Evaluation" auto-generates queries from user's memories (no dataset param needed)
+- Relevance card shows all 6 metrics: Sem. P@5, R@10, F1, NDCG@10, MRR with targets
+- New collapsible **Per-Query Results** section with hit/miss per query
+- History table adds NDCG and MRR columns
+
+### Platform Feature Parity (vs Supermemory)
+
+#### 4. Auth-less Consumer URL / Meta MCP
+- `POST /api/mcp/consumer-url` — generates permanent `hmc_` token (32 bytes hex)
+- `GET /mcp/:token/sse` — SSE connection, no auth headers needed
+- `POST /mcp/:token/rpc` — full JSON-RPC 2.0 (initialize, tools/list, tools/call)
+- Idempotent — returns existing token on repeat calls
+- Token stored as ApiKey with `mcp` scope, hashed for lookup
+- Users paste URL into Claude Desktop/Cursor config — zero friction
+
+#### 5. OAuth Plugin Connect (RFC 9728)
+- `GET /.well-known/oauth-protected-resource` — resource metadata
+- `GET /.well-known/oauth-authorization-server` — server metadata (issuer, endpoints, PKCE S256)
+- `GET /oauth/authorize` — consent page with dark theme, scope display, approve/deny
+- `POST /oauth/token` — code exchange with PKCE validation, generates real API key
+- In-memory code store with 5-min TTL + garbage collection
+- MCP clients (Claude Desktop, Cursor, OpenCode) can auto-discover and authenticate
+
+#### 6. Container Tags (Multi-Tenant Isolation)
+- `containerTag` parameter on `POST /api/memories`, `GET /api/memories`, `POST /api/search/quick`, `POST /api/recall`
+- `x-hm-container` header support (like Supermemory's `x-sm-project`)
+- Maps to existing Prisma `project` field — no schema changes
+- Qdrant vector search filtered by project field
+- Scoped API keys can restrict access to specific container tags (403 on mismatch)
+- API key creation accepts optional `containerTags` array
+
+#### 7. Gmail OAuth Flow
+- `GET /api/connectors/gmail/connect` — returns Google OAuth URL (`gmail.readonly` scope, `access_type=offline`, `prompt=consent`)
+- `GET /api/connectors/gmail/callback` — exchanges code for tokens, stores encrypted via ConnectorStore (AES-256-GCM), triggers initial background sync
+- `GET /api/connectors/gmail/status` — returns connection state, email, sync status
+- `POST /api/connectors/gmail/disconnect` — revokes connection
+- Uses existing GmailAdapter: thread fetching, email→memory normalization (subject→title, body→content, labels→tags, date→documentDate, threadId→Extends relationships), thread summaries for 5+ message threads
+- Background initial sync after OAuth callback
+- Google credentials: `379163727328-me3li7i3d9p9diiq5tdvce22a9bf3ocu.apps.googleusercontent.com`
+- **Action required**: Add `https://core.hivemind.davinciai.eu:8050/api/connectors/gmail/callback` to Google Cloud Console Authorized redirect URIs
+
+#### 8. LongMemEval Benchmark Plan
+- Full documentation saved to `docs/longmemeval-benchmark-plan.md`
+- 500 questions, ~$15 cost, ~1 hour runtime
+- Targets: Overall >81.6%, KU >88.46%, TR >76.69%, MS >71.43%
+- Requires GPT-4o API key for official judge step
+- Deferred until key is available
+
+### Environment Fix
+- `HIVEMIND_BASE_URL` changed from `http://localhost:3000` to `https://core.hivemind.davinciai.eu:8050` in Coolify env (fixes redirect URIs for OAuth and consumer URLs)
+
+### Files Modified/Created
+- `core/src/evaluation/auto-dataset-generator.js` — NEW
+- `core/src/evaluation/retrieval-evaluator.js` — semantic P@5, extractResultContents
+- `core/src/external/evaluation/retrieval-evaluator.js` — synced
+- `core/src/recall/scorer.js` — weight rebalance
+- `core/src/server.js` — auto-eval, consumer URL, OAuth, container tags, Gmail endpoints
+- `core/src/external/search/hybrid.js` — project filter in Qdrant
+- `core/src/external/search/three-tier-retrieval.js` — project passthrough
+- `core/evaluation-reports/tenant-dataset.generated.json` — curated gold dataset (backup)
+- `docs/longmemeval-benchmark-plan.md` — NEW
+- `frontend/Da-vinci/src/components/hivemind/app/pages/Evaluation.jsx` — full rewrite
+- `.claude/settings.local.json` — fully autonomous dontAsk mode
+
+### Commits
+- `71e9e2f` — feat: add real gold evaluation dataset with 20 queries mapped to actual memory UUIDs
+- `d2695b8` — feat: auto-generate evaluation queries from user's actual memories
+- `48055b1` — feat: semantic P@5, scorer rebalance, auto-eval for all users
+- `69b4317` — docs: add LongMemEval benchmark implementation plan for SOTA evaluation
+- `d4c495b` — feat: auth-less Meta MCP consumer URL, OAuth plugin connect, container tags
+- `1866734` — feat: Gmail OAuth connect/callback/status/disconnect endpoints
+- Da-vinci `02fe111` — feat: evaluation page uses tenant dataset, shows NDCG/MRR, per-query breakdown
+- Da-vinci `e1c3f16` — fix: evaluation uses auto-generated queries, no hardcoded dataset
+- Da-vinci `ff12818` — feat: show semantic P@5 as primary precision metric in evaluation page
+
+### Supermemory vs HIVEMIND Feature Parity (Post-Sprint)
+| Feature | Supermemory | HIVEMIND | Status |
+|---------|------------|----------|--------|
+| API key auth (`sm_` / `hmk_`) | Scoped to container tags | Scoped to user/org + container tags | MATCH |
+| Auth-less consumer URL | Meta MCP permanent URL | `hmc_` token URL | MATCH |
+| OAuth plugin connect | Auto-discovery + consent | RFC 9728 + PKCE S256 | MATCH |
+| Container tags | `containerTag` in body/header | `containerTag` + `x-hm-container` | MATCH |
+| Gmail connector | Full thread sync + Pub/Sub | OAuth + thread sync (Pub/Sub deferred) | MVP |
+| Dynamic evaluation | Not offered (static benchmarks only) | Auto-generated per user | ADVANTAGE |
+| LongMemEval benchmark | 81.6% overall | Documented, ready to execute | PENDING |

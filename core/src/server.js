@@ -1587,9 +1587,7 @@ const server = http.createServer(async (req, res) => {
         // ==========================================
         case '/api/web/search/jobs':
           if (req.method === 'POST') {
-            if (!hasEntitlement(principal, 'web_search')) {
-              return jsonResponse(res, { error: 'Feature not enabled', code: 'feature_not_enabled', required_entitlement: 'web_search' }, 403);
-            }
+            // Web search open to all authenticated users (entitlement gate removed — all keys get access)
             try {
               // Rate limit check
               const rlCheck = webRateLimiter.check(userId);
@@ -1655,9 +1653,7 @@ const server = http.createServer(async (req, res) => {
 
         case '/api/web/crawl/jobs':
           if (req.method === 'POST') {
-            if (!hasEntitlement(principal, 'web_crawl')) {
-              return jsonResponse(res, { error: 'Feature not enabled', code: 'feature_not_enabled', required_entitlement: 'web_crawl' }, 403);
-            }
+            // Web crawl open to all authenticated users (entitlement gate removed — all keys get access)
             try {
               // Rate limit check
               const rlCheck = webRateLimiter.check(userId);
@@ -1903,17 +1899,6 @@ const server = http.createServer(async (req, res) => {
         // Limits check
         case '/api/web/limits':
           if (req.method === 'GET') {
-            if (!hasEntitlement(principal, 'web_search') && !hasEntitlement(principal, 'web_crawl')) {
-              return jsonResponse(
-                res,
-                {
-                  error: 'Feature not enabled',
-                  code: 'feature_not_enabled',
-                  required_entitlements: ['web_search', 'web_crawl'],
-                },
-                403
-              );
-            }
             try {
               const limits = await webJobStore.checkLimits(userId);
               return jsonResponse(res, limits);

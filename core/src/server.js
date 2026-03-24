@@ -107,6 +107,7 @@ const {
 // Evaluation imports
 const { RetrievalEvaluator } = await import('./external/evaluation/retrieval-evaluator.js');
 const { TEST_QUERIES, getSampleQueries, getQueriesByCategory, getQueriesByDifficulty, getQueriesForDataset } = await import('./external/evaluation/test-dataset.js');
+const { generateEvalQueries } = await import('./evaluation/auto-dataset-generator.js');
 const CLIENT_HTML_CANDIDATES = [
   path.join(REPO_ROOT, 'client.html'),
   path.join(PROJECT_ROOT, 'client.html')
@@ -3126,31 +3127,46 @@ const server = http.createServer(async (req, res) => {
 
               // Use built-in test dataset if no queries provided
               if (!testQueries) {
-                const selectedDataset = dataset || (userId && userId !== DEFAULT_USER ? 'tenant' : 'default');
-
-                if (selectedDataset) {
+                // 1. If explicit dataset requested, try that
+                if (dataset) {
                   try {
-                    testQueries = getQueriesForDataset(selectedDataset);
+                    testQueries = getQueriesForDataset(dataset);
                   } catch (error) {
-                    if (dataset) {
-                      throw error;
-                    }
+                    // If 'tenant' or other named dataset fails, fall through to auto-gen
+                    if (dataset !== 'default') testQueries = null;
+                    else throw error;
+                  }
+                }
+
+                // 2. Auto-generate from user's actual memories (works for any user)
+                if (!testQueries && userId) {
+                  try {
+                    testQueries = await generateEvalQueries(userId, orgId, {
+                      maxQueries: sample_size || 20,
+                      maxMemories: 300
+                    });
+                  } catch (autoErr) {
+                    console.warn('[EVAL] Auto-generation failed, falling back to default:', autoErr.message);
                     testQueries = null;
                   }
                 }
 
-                if (testQueries) {
+                // 3. Fallback to static dataset
+                if (!testQueries || testQueries.length === 0) {
                   if (sample_size) {
-                    testQueries = testQueries.slice(0, sample_size);
+                    testQueries = getSampleQueries(sample_size);
+                  } else if (batchCategory) {
+                    testQueries = getQueriesByCategory(batchCategory);
+                  } else if (difficulty) {
+                    testQueries = getQueriesByDifficulty(difficulty);
+                  } else {
+                    testQueries = TEST_QUERIES;
                   }
-                } else if (sample_size) {
-                  testQueries = getSampleQueries(sample_size);
-                } else if (batchCategory) {
-                  testQueries = getQueriesByCategory(batchCategory);
-                } else if (difficulty) {
-                  testQueries = getQueriesByDifficulty(difficulty);
-                } else {
-                  testQueries = TEST_QUERIES;
+                }
+
+                // Apply sample_size if set
+                if (sample_size && testQueries.length > sample_size) {
+                  testQueries = testQueries.slice(0, sample_size);
                 }
               }
 

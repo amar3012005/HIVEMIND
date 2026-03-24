@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { ConflictDetector, computeTokenSimilarity } from './conflict-detector.js';
 import { RelationshipClassifier } from './relationship-classifier.js';
 import { extractCodeChunks, detectCodeLanguage } from './code-ingestion.js';
+import { PredictCalibrateFilter } from './predict-calibrate.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -89,7 +90,9 @@ export class MemoryGraphEngine {
     store,
     conflictDetector = new ConflictDetector(),
     relationshipClassifier = new RelationshipClassifier({ conflictDetector }),
-    deriveThreshold = 0.75
+    deriveThreshold = 0.75,
+    predictCalibrate = false,
+    predictCalibrateOptions = {}
   } = {}) {
     if (!store) {
       throw new Error('MemoryGraphEngine requires a store');
@@ -99,6 +102,10 @@ export class MemoryGraphEngine {
     this.conflictDetector = conflictDetector;
     this.relationshipClassifier = relationshipClassifier;
     this.deriveThreshold = deriveThreshold;
+    this.predictCalibrate = predictCalibrate;
+    this.predictCalibrateFilter = predictCalibrate
+      ? new PredictCalibrateFilter(predictCalibrateOptions)
+      : null;
   }
 
   async ingestMemory(input) {
@@ -109,6 +116,33 @@ export class MemoryGraphEngine {
       const transactionalStore = lockedStore || this.store;
       return transactionalStore.transaction(async store => {
         const latestMemories = await store.listLatestMemories(baseMemory);
+
+        // --- Predict-Calibrate filter ---
+        let pcResult = null;
+        if (this.predictCalibrateFilter) {
+          pcResult = this.predictCalibrateFilter.filter(baseMemory, latestMemories);
+          if (!pcResult.shouldStore) {
+            return {
+              memoryId: baseMemory.id,
+              operation: 'skipped_redundant',
+              noveltyScore: pcResult.noveltyScore,
+              maxSimilarity: pcResult.maxSimilarity,
+              reason: pcResult.reason,
+              deprecatedIds: [],
+              edgesCreated: [],
+              processingMs: Date.now() - startedAt
+            };
+          }
+          // Replace content with delta-extracted content when trimmed
+          if (pcResult.deltaExtracted && pcResult.deltaContent) {
+            baseMemory.content = pcResult.deltaContent;
+          }
+          // Attach fingerprint to the memory record
+          if (pcResult.fingerprint) {
+            baseMemory.contentFingerprint = pcResult.fingerprint;
+          }
+        }
+
         const classification = input.skip_relationship_classification
           ? { operation: 'created', relationship: null }
           : input.relationship
@@ -161,6 +195,14 @@ export class MemoryGraphEngine {
         }
 
         await this._enqueueDeriveCandidates(store, baseMemory, latestMemories);
+
+        // Attach predict-calibrate metadata when available
+        if (pcResult) {
+          result.noveltyScore = pcResult.noveltyScore;
+          result.maxSimilarity = pcResult.maxSimilarity;
+          result.deltaExtracted = pcResult.deltaExtracted || false;
+        }
+
         return result;
       });
     });
@@ -376,6 +418,7 @@ export class MemoryGraphEngine {
       document_date: input.document_date || null,
       event_dates: input.event_dates || [],
       metadata: input.metadata || {},
+      contentFingerprint: null,
       source_metadata: input.source_metadata || {
         source_type: 'manual',
         source_id: null,

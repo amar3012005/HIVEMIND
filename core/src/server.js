@@ -51,6 +51,11 @@ const { getGroqClient } = await import('../config/groq.js');
 const { getPrismaClient, ensureTenantContext } = await import('./db/prisma.js');
 const { MemoryGraphEngine } = await import('./memory/graph-engine.js');
 const { PrismaGraphStore } = await import('./memory/prisma-graph-store.js');
+const { CognitiveOperator, detectQueryIntent, computeDynamicWeights, getMemoryTypeBoost } = await import('./memory/operator-layer.js');
+const { ContextAutopilot, scoreForRetention } = await import('./memory/context-autopilot.js');
+const { BiTemporalEngine } = await import('./memory/bi-temporal.js');
+const { StigmergicCoT } = await import('./memory/stigmergic-cot.js');
+const { ByzantineConsensus } = await import('./memory/byzantine-consensus.js');
 const { queryPersistedMemories, recallPersistedMemories } = await import('./memory/persisted-retrieval.js');
 const { authenticatePersistedApiKey, hasEntitlement } = await import('./auth/api-keys.js');
 const { WebJobStore } = await import('./web/web-job-store.js');
@@ -139,7 +144,27 @@ installConsoleCapture('core');
 const engine = new MemoryEngine('./hivemind.db');
 const prisma = getPrismaClient();
 const persistentMemoryStore = prisma ? new PrismaGraphStore(prisma) : null;
-const persistentMemoryEngine = persistentMemoryStore ? new MemoryGraphEngine({ store: persistentMemoryStore }) : null;
+const persistentMemoryEngine = persistentMemoryStore ? new MemoryGraphEngine({
+  store: persistentMemoryStore,
+  predictCalibrate: true,
+  predictCalibrateOptions: {
+    strongMatchThreshold: 0.70,
+    partialMatchThreshold: 0.50,
+    sentenceNoveltyThreshold: 0.35,
+    topK: 5,
+    minSimilarityForComparison: 0.15
+  }
+}) : null;
+const cognitiveOperator = persistentMemoryStore ? new CognitiveOperator({ store: persistentMemoryStore }) : null;
+const biTemporalEngine = persistentMemoryStore ? new BiTemporalEngine({ store: persistentMemoryStore, prisma }) : null;
+const stigmergicCoT = persistentMemoryStore ? new StigmergicCoT({ store: persistentMemoryStore, traceTTLMinutes: 30 }) : null;
+const byzantineConsensus = new ByzantineConsensus({ commitThreshold: 80 });
+const contextAutopilot = persistentMemoryStore ? new ContextAutopilot({
+  store: persistentMemoryStore,
+  maxContextTokens: 128_000,
+  compactionThreshold: 0.80,
+  criticalMemoryCount: 15
+}) : null;
 const qdrantClient = getQdrantClient();
 const qdrantCollections = getQdrantCollections();
 const groqClient = getGroqClient();
@@ -2258,6 +2283,22 @@ const server = http.createServer(async (req, res) => {
                   source_url: source?.url || null
                 }
               });
+
+              // Handle predict-calibrate skipped memories
+              if (result.operation === 'skipped_redundant') {
+                return jsonResponse(res, {
+                  success: true,
+                  skipped: true,
+                  mutation: {
+                    operation: result.operation,
+                    reason: result.reason,
+                    novelty_score: result.noveltyScore,
+                    max_similarity: result.maxSimilarity,
+                    processing_ms: result.processingMs
+                  }
+                }, 200);
+              }
+
               const memory = await persistentMemoryStore.getMemory(result.memoryId);
               if (memory) {
                 await qdrantClient.storeMemory(memory, {
@@ -2273,7 +2314,9 @@ const server = http.createServer(async (req, res) => {
                 mutation: {
                   operation: result.operation,
                   deprecated_ids: result.deprecatedIds,
-                  processing_ms: result.processingMs
+                  processing_ms: result.processingMs,
+                  novelty_score: result.noveltyScore ?? null,
+                  delta_extracted: result.deltaExtracted ?? false
                 }
               }, 201);
             } catch (error) {
@@ -2433,12 +2476,286 @@ const server = http.createServer(async (req, res) => {
           }
           break;
 
+        case '/api/temporal/as-of':
+          if (req.method === 'POST') {
+            if (!biTemporalEngine) return jsonResponse(res, { error: 'Bi-temporal engine unavailable' }, 503);
+            try {
+              const txTime = body.transaction_time ? new Date(body.transaction_time) : null;
+              const validTime = body.valid_time ? new Date(body.valid_time) : null;
+
+              let result;
+              if (txTime && validTime) {
+                result = await biTemporalEngine.biTemporalSnapshot(userId, orgId, txTime, validTime);
+              } else if (txTime) {
+                result = await biTemporalEngine.asOfTransaction(userId, orgId, txTime);
+              } else if (validTime) {
+                result = await biTemporalEngine.asOfValid(userId, orgId, validTime);
+              } else {
+                return jsonResponse(res, { error: 'Provide transaction_time and/or valid_time' }, 400);
+              }
+
+              return jsonResponse(res, {
+                query: { transaction_time: body.transaction_time, valid_time: body.valid_time },
+                count: result.length,
+                memories: result
+              });
+            } catch (error) {
+              console.error('Temporal query failed:', error);
+              return jsonResponse(res, { error: 'Temporal query failed', message: error.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/temporal/diff':
+          if (req.method === 'POST') {
+            if (!biTemporalEngine) return jsonResponse(res, { error: 'Bi-temporal engine unavailable' }, 503);
+            try {
+              if (!body.time_a || !body.time_b) {
+                return jsonResponse(res, { error: 'Provide time_a and time_b' }, 400);
+              }
+              const diff = await biTemporalEngine.temporalDiff(userId, orgId, new Date(body.time_a), new Date(body.time_b));
+              return jsonResponse(res, diff);
+            } catch (error) {
+              console.error('Temporal diff failed:', error);
+              return jsonResponse(res, { error: 'Temporal diff failed', message: error.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/temporal/timeline':
+          if (req.method === 'POST') {
+            if (!biTemporalEngine) return jsonResponse(res, { error: 'Bi-temporal engine unavailable' }, 503);
+            try {
+              if (!body.memory_id) return jsonResponse(res, { error: 'Provide memory_id' }, 400);
+              const timeline = await biTemporalEngine.getTemporalTimeline(body.memory_id);
+              return jsonResponse(res, { memory_id: body.memory_id, versions: timeline });
+            } catch (error) {
+              return jsonResponse(res, { error: 'Timeline failed', message: error.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/swarm/thought':
+          if (req.method === 'POST') {
+            if (!stigmergicCoT) return jsonResponse(res, { error: 'Stigmergic CoT unavailable' }, 503);
+            try {
+              const result = await stigmergicCoT.recordThought(body.agent_id || 'default', {
+                userId, orgId,
+                content: body.content,
+                taskId: body.task_id,
+                parentThoughtId: body.parent_thought_id,
+                reasoning_type: body.reasoning_type || 'step',
+                confidence: body.confidence || 1.0,
+                metadata: body.metadata || {}
+              });
+              return jsonResponse(res, result, 201);
+            } catch (error) {
+              return jsonResponse(res, { error: 'Record thought failed', message: error.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/swarm/trace':
+          if (req.method === 'POST') {
+            if (!stigmergicCoT) return jsonResponse(res, { error: 'Stigmergic CoT unavailable' }, 503);
+            try {
+              const result = await stigmergicCoT.depositTrace(body.agent_id || 'default', {
+                userId, orgId,
+                action: body.action,
+                result: body.result,
+                success: body.success !== false,
+                taskId: body.task_id,
+                targetMemoryId: body.target_memory_id,
+                metadata: body.metadata || {}
+              });
+              return jsonResponse(res, result, 201);
+            } catch (error) {
+              return jsonResponse(res, { error: 'Deposit trace failed', message: error.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/swarm/follow':
+          if (req.method === 'POST') {
+            if (!stigmergicCoT) return jsonResponse(res, { error: 'Stigmergic CoT unavailable' }, 503);
+            try {
+              const result = await stigmergicCoT.followTraces(userId, orgId, {
+                taskId: body.task_id,
+                action: body.action,
+                limit: body.limit || 20
+              });
+              return jsonResponse(res, result);
+            } catch (error) {
+              return jsonResponse(res, { error: 'Follow traces failed', message: error.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/swarm/prune':
+          if (req.method === 'POST') {
+            if (!stigmergicCoT) return jsonResponse(res, { error: 'Stigmergic CoT unavailable' }, 503);
+            try {
+              const result = await stigmergicCoT.pruneStaleTraces(userId, orgId, { maxAgeDays: body.max_age_days });
+              return jsonResponse(res, result);
+            } catch (error) {
+              return jsonResponse(res, { error: 'Prune failed', message: error.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/consensus/evaluate':
+          if (req.method === 'POST') {
+            try {
+              if (!body.content) return jsonResponse(res, { error: 'Provide content to evaluate' }, 400);
+
+              // Get related existing memories for context
+              const relatedMemories = persistentMemoryStore
+                ? await persistentMemoryStore.searchMemories({
+                    query: body.content,
+                    user_id: userId,
+                    org_id: orgId,
+                    n_results: 5
+                  })
+                : [];
+
+              const result = byzantineConsensus.evaluateUpdate(
+                { content: body.content, memory_type: body.memory_type || 'fact' },
+                relatedMemories,
+                body.external_votes || []
+              );
+
+              return jsonResponse(res, result);
+            } catch (error) {
+              return jsonResponse(res, { error: 'Consensus evaluation failed', message: error.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/cognitive-frame':
+          if (req.method === 'POST') {
+            if (!cognitiveOperator) {
+              return jsonResponse(res, { error: 'Cognitive operator unavailable' }, 503);
+            }
+            try {
+              const frameResult = await cognitiveOperator.assembleFrame(userId, orgId, {
+                query: body.query || body.query_context || '',
+                project: body.project || null,
+                maxTokens: body.max_tokens || 4000
+              });
+
+              const injection = cognitiveOperator.prioritizeForInjection(frameResult, body.context_budget || 2000);
+              const payload = cognitiveOperator.formatInjectionPayload(injection.injected);
+
+              return jsonResponse(res, {
+                intent: frameResult.intent,
+                dynamic_weights: frameResult.dynamicWeights,
+                frame: frameResult.frame,
+                token_count: frameResult.tokenCount,
+                injection: {
+                  injected_count: injection.injected.length,
+                  dropped_count: injection.dropped.length,
+                  total_tokens: injection.totalTokens,
+                  payload
+                }
+              });
+            } catch (error) {
+              console.error('Cognitive frame failed:', error);
+              return jsonResponse(res, { error: 'Cognitive frame assembly failed', message: error.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/context/monitor':
+          if (req.method === 'POST') {
+            if (!contextAutopilot) {
+              return jsonResponse(res, { error: 'Context autopilot unavailable' }, 503);
+            }
+            try {
+              const tokenCount = body.token_count || body.tokens_used || 0;
+              const sessionId = body.session_id || 'default';
+              const status = contextAutopilot.monitorContext(sessionId, tokenCount);
+              return jsonResponse(res, status);
+            } catch (error) {
+              return jsonResponse(res, { error: 'Monitor failed', message: error.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/context/archive':
+          if (req.method === 'POST') {
+            if (!contextAutopilot) {
+              return jsonResponse(res, { error: 'Context autopilot unavailable' }, 503);
+            }
+            try {
+              const sessionId = body.session_id || 'default';
+              const turns = body.turns || body.messages || [];
+              const result = contextAutopilot.archiveTurns(sessionId, turns);
+              return jsonResponse(res, result);
+            } catch (error) {
+              return jsonResponse(res, { error: 'Archive failed', message: error.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/context/compact':
+          if (req.method === 'POST') {
+            if (!contextAutopilot) {
+              return jsonResponse(res, { error: 'Context autopilot unavailable' }, 503);
+            }
+            try {
+              const sessionId = body.session_id || 'default';
+              const result = await contextAutopilot.compactSession(sessionId, {
+                userId,
+                orgId,
+                project: body.project || null,
+                recentMessages: body.recent_messages || []
+              });
+              return jsonResponse(res, result);
+            } catch (error) {
+              console.error('Compaction failed:', error);
+              return jsonResponse(res, { error: 'Compaction failed', message: error.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/coherence-check':
+          if (req.method === 'POST') {
+            if (!cognitiveOperator) {
+              return jsonResponse(res, { error: 'Cognitive operator unavailable' }, 503);
+            }
+            try {
+              const allLatest = await persistentMemoryStore.listLatestMemories({
+                user_id: userId,
+                org_id: orgId,
+                project: body.project || null
+              });
+
+              const coherence = cognitiveOperator.maintainCoherence(allLatest, {
+                content: body.content,
+                memory_type: body.memory_type || 'fact'
+              });
+
+              return jsonResponse(res, coherence);
+            } catch (error) {
+              console.error('Coherence check failed:', error);
+              return jsonResponse(res, { error: 'Coherence check failed', message: error.message }, 500);
+            }
+          }
+          break;
+
         case '/api/recall':
           if (req.method === 'POST') {
             if (!ensurePersistedMemoryOrFail(res, '/api/recall')) {
               return;
             }
             try {
+              // Apply dynamic weights from Operator Layer if available
+              let recallWeights = body.weights;
+              if (cognitiveOperator && !recallWeights) {
+                const intent = detectQueryIntent(body.query_context || body.context || '');
+                recallWeights = computeDynamicWeights(intent);
+              }
+
               const result = await recallPersistedMemories(persistentMemoryStore, {
                 query_context: body.query_context || body.context,
                 user_id: userId,
@@ -2450,8 +2767,24 @@ const server = http.createServer(async (req, res) => {
                 preferred_source_platforms: body.preferred_source_platforms || [],
                 preferred_tags: body.preferred_tags || [],
                 max_memories: body.max_memories || 5,
-                weights: body.weights
+                weights: recallWeights
               });
+
+              // Apply memory type boosts from Operator Layer
+              if (cognitiveOperator && result.memories) {
+                const intent = detectQueryIntent(body.query_context || body.context || '');
+                for (const m of result.memories) {
+                  const boost = getMemoryTypeBoost(intent, m.memory_type || 'fact');
+                  if (boost !== 1.0) {
+                    m.score = (m.score || 0) * boost;
+                    m.operator_boost = boost;
+                  }
+                }
+                // Re-sort after boosts
+                result.memories.sort((a, b) => (b.score || 0) - (a.score || 0));
+                result.intent = intent;
+              }
+
               jsonResponse(res, result);
             } catch (error) {
               console.error('Auto recall failed:', error);

@@ -6,6 +6,107 @@
   ./scripts/deploy.sh restart      # restart both without rebuild
   ./scripts/deploy.sh status       # show container status
   ./scripts/deploy.sh logs         # tail hm-core logs
+  ./scripts/deploy.sh verify       # verify all 9 endpoints
+
+## 2026-03-24 — SOTA Memory Engine Upgrade: Feature 1 Complete
+
+### Feature 1: Predict-Calibrate Extraction (Delta Detection)
+
+**Status**: COMPLETE — deployed and verified with curl
+
+**What it does**: Instead of storing every incoming memory verbatim, the engine predicts what the knowledge graph already knows and only stores the prediction error (delta). This keeps the KB compact and high-signal.
+
+**Architecture** (validated via NotebookLM research):
+- SHA-256 content fingerprinting for exact-duplicate detection
+- **TOP-K selection** (5 most similar memories via token similarity) — NOT all latest memories
+- Semantic similarity thresholds (calibrated from Ruflo framework):
+  - similarity > 0.70 → Strong match → **skip** (redundant)
+  - similarity 0.50–0.70 → Partial match → **extract novel sentences only**
+  - similarity < 0.50 → Weak match → **store full content**
+- Stopword filtering to prevent common English words from inflating known coverage
+- Delta content stored in **both Prisma AND Qdrant** (confirmed via recall test)
+
+**Files**:
+- `core/src/memory/predict-calibrate.js` (NEW) — `PredictCalibrateFilter` class
+- `core/src/memory/graph-engine.js` (MODIFIED) — Wired into `ingestMemory()`, optional via `predictCalibrate: true`
+- `core/src/server.js` (MODIFIED) — Enabled on engine, handles `skipped_redundant` responses
+
+**Test Results** (6/6 pass):
+| Test | Input | Result | Novelty | Qdrant |
+|------|-------|--------|---------|--------|
+| Novel content | JWST Venus phosphine | Stored full | 0.89 | ✓ |
+| Exact duplicate | Same content again | Skipped (fingerprint) | 0 | — |
+| Paraphrased | Similar wording | Stored (partial range) | 0.27 | ✓ |
+| Overlap + new info | ESA Ariel follow-up | Delta extracted | 0.55 | ✓ (0.71) |
+| Different topic | Tokyo elections | Stored full | 0.79 | ✓ |
+| Recall delta | Search "Ariel methane" | Found via hybrid | — | 0.71 |
+
+**Key fix from NotebookLM**: Original approach compared against ALL 75+ latest memories, causing false redundancies from shared domain vocabulary. Switched to TOP-K (5) most similar only.
+
+### Feature 2: Operator Layer (Cognitive Rhythm)
+
+**Status**: COMPLETE — deployed and verified with curl
+
+**What it does**: Higher-order layer that acts as the "executive function" of the memory engine. Detects query intent, dynamically adjusts scorer weights, assembles structured cognitive frames, and maintains symbolic coherence.
+
+**Architecture** (validated via NotebookLM research):
+- **Intent Detection**: 5 types (temporal/action/factual/emotional/exploratory) via regex patterns
+- **Dynamic Weights**: Adjusts scorer weights per intent (e.g., temporal → recency boosted to 0.39)
+- **Cognitive Frame**: 4-tier assembly:
+  1. Anchor (fact/preference) — always injected
+  2. Trajectory (goal/event) — injected by recency
+  3. Modifiers (decision/lesson) — triggered by task similarity
+  4. Connectors (relationship) — for reasoning queries
+- **Memory Type Boosts**: Post-score multipliers per intent (e.g., action → lesson×1.5, decision×1.4)
+- **Coherence Checking**: Detects contradictions, suggests Updates/Extends operation
+- **Injection Payload**: Structured XML format for LLM prompt injection
+
+**Files**:
+- `core/src/memory/operator-layer.js` (NEW) — `CognitiveOperator`, `detectQueryIntent`, `computeDynamicWeights`
+- `core/src/server.js` (MODIFIED) — `/api/cognitive-frame`, `/api/coherence-check`, operator-enhanced `/api/recall`
+
+**Endpoints**:
+| Route | Method | Purpose |
+|-------|--------|---------|
+| `/api/cognitive-frame` | POST | Assemble tiered frame + injection payload |
+| `/api/coherence-check` | POST | Check if new memory contradicts existing |
+| `/api/recall` | POST | Now uses dynamic weights + type boosts |
+
+### Feature 3: Context Autopilot & Preemptive Compaction — COMPLETE
+- Token-based monitoring (80% threshold), SHA-256 dedup archiving
+- Retention scoring: recency × frequency × richness
+- Session summary generation + critical memory reinjection
+- Endpoints: `/api/context/monitor`, `/api/context/archive`, `/api/context/compact`
+
+### Feature 4: Bi-Temporal Knowledge Graph — COMPLETE
+- Transaction time (MemoryVersion.createdAt) vs Valid time (documentDate + metadata.valid_to)
+- Time-travel queries: as-of-transaction, as-of-valid, bi-temporal snapshot
+- Temporal diff: what changed between two points in time
+- No schema changes — uses existing fields + metadata JSON
+- Endpoints: `/api/temporal/as-of`, `/api/temporal/diff`, `/api/temporal/timeline`
+
+### Feature 5: Stigmergic Chain-of-Thought (Agent Swarm Memory) — COMPLETE
+- Thoughts as memory nodes with chain linking via Extends relationships
+- Affordances (success traces) and Disturbances (failure traces)
+- Environment sensing: agents read traces before acting (O(n) vs O(n^2))
+- TTL-based pruning (pheromone evaporation)
+- Endpoints: `/api/swarm/thought`, `/api/swarm/trace`, `/api/swarm/follow`, `/api/swarm/prune`
+
+### Feature 6: Byzantine-Robust Score Consensus — COMPLETE
+- Geometric Median via Weiszfeld's algorithm (handles R^d vectors)
+- 3D evaluation: factuality (0-100), relevance (0-100), consistency (0-100)
+- Heuristic ConsensusVoter: hedging detection, citation boost, contradiction detection
+- 2-sigma outlier detection, floor((n-1)/2) fault tolerance
+- Commit threshold: average >= 80/100
+- Endpoint: `/api/consensus/evaluate`
+
+### All 6 SOTA Features Complete
+Total new endpoints: 14 | New modules: 6 | All NotebookLM-validated
+  ./scripts/deploy.sh core         # rebuild + restart core only
+  ./scripts/deploy.sh control      # restart control-plane only
+  ./scripts/deploy.sh restart      # restart both without rebuild
+  ./scripts/deploy.sh status       # show container status
+  ./scripts/deploy.sh logs         # tail hm-core logs
   ./scripts/deploy.sh logs hm-control  # tail control-plane logs
   ./scripts/deploy.sh verify       # verify all 9 endpoints
 

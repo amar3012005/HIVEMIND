@@ -28,7 +28,7 @@ export async function createPersistedApiKey(prisma, {
   orgId = null,
   name,
   description = null,
-  scopes = ['memory:read', 'memory:write', 'mcp'],
+  scopes = ['memory:read', 'memory:write', 'mcp', 'web_search', 'web_crawl', 'web_admin'],
   expiresAt = null,
   rateLimitPerMinute = 60,
   createdByIp = null,

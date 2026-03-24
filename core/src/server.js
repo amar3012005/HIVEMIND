@@ -1404,7 +1404,9 @@ a{color:#a78bfa}</style></head><body>
   // API Routes
   if (pathname.startsWith('/api/')) {
     try {
-      const body = req.method !== 'GET' ? await parseBody(req) : {};
+      // Skip JSON body parsing for multipart upload endpoints
+      const isMultipart = (req.headers['content-type'] || '').includes('multipart/form-data');
+      const body = (req.method !== 'GET' && !isMultipart) ? await parseBody(req) : {};
 
       const hostedDescriptorMatch = pathname.match(/^\/api\/mcp\/servers\/([^\/]+)$/);
       if (hostedDescriptorMatch && req.method === 'GET' && url.searchParams.get('token')) {
@@ -2413,6 +2415,113 @@ a{color:#a78bfa}</style></head><body>
                 message: 'Sync started in background. Check /api/connectors/gmail/status for progress.',
               });
             } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        // ==========================================
+        // KNOWLEDGE BASE — Document Upload
+        // ==========================================
+
+        case '/api/knowledge/upload':
+          if (req.method === 'POST') {
+            if (!persistentMemoryEngine) {
+              return jsonResponse(res, { error: 'Memory engine unavailable' }, 503);
+            }
+
+            try {
+              // Parse multipart form data manually (no external dep)
+              const contentType = req.headers['content-type'] || '';
+              if (!contentType.includes('multipart/form-data')) {
+                return jsonResponse(res, { error: 'Content-Type must be multipart/form-data' }, 400);
+              }
+
+              const boundaryMatch = contentType.match(/boundary=(.+)/);
+              if (!boundaryMatch) {
+                return jsonResponse(res, { error: 'Missing boundary in Content-Type' }, 400);
+              }
+
+              const rawBody = await new Promise((resolve) => {
+                const chunks = [];
+                req.on('data', (c) => chunks.push(c));
+                req.on('end', () => resolve(Buffer.concat(chunks)));
+              });
+
+              // Simple multipart parser
+              const boundary = boundaryMatch[1].trim();
+              const parts = parseMultipart(rawBody, boundary);
+
+              const filePart = parts.find(p => p.filename);
+              if (!filePart) {
+                return jsonResponse(res, { error: 'No file uploaded. Send a file field in multipart form data.' }, 400);
+              }
+
+              // Extract optional form fields
+              const containerTag = parts.find(p => p.name === 'containerTag')?.value || null;
+              const customTags = parts.find(p => p.name === 'tags')?.value || '';
+              const userTags = customTags ? customTags.split(',').map(t => t.trim()).filter(Boolean) : [];
+
+              // Validate file size (max 10MB)
+              if (filePart.data.length > 10 * 1024 * 1024) {
+                return jsonResponse(res, { error: 'File too large. Maximum 10MB.' }, 413);
+              }
+
+              // Validate file type
+              const allowedTypes = ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'text/plain', 'text/markdown', 'text/csv'];
+              const ext = (filePart.filename || '').split('.').pop()?.toLowerCase();
+              const allowedExts = ['pdf', 'docx', 'txt', 'md', 'csv'];
+              if (!allowedTypes.includes(filePart.contentType) && !allowedExts.includes(ext)) {
+                return jsonResponse(res, { error: `Unsupported file type: ${filePart.contentType || ext}. Allowed: PDF, DOCX, TXT, MD, CSV` }, 415);
+              }
+
+              const { processDocument } = await import('./knowledge/document-chunker.js');
+              const { summary, chunks } = await processDocument(
+                filePart.data,
+                filePart.contentType || `text/${ext}`,
+                filePart.filename,
+                { user_id: userId, org_id: orgId, project: containerTag, tags: userTags }
+              );
+
+              // Ingest summary + chunks in background, return immediately
+              const uploadId = crypto.randomUUID();
+              console.log(`[knowledge] Upload id=${uploadId} file=${filePart.filename} chunks=${chunks.length}`);
+
+              // Start background ingestion
+              (async () => {
+                let ingested = 0;
+                let failed = 0;
+                try {
+                  // Ingest document summary first
+                  await persistentMemoryEngine.ingestMemory(summary);
+                  ingested++;
+
+                  // Ingest each chunk
+                  for (const chunk of chunks) {
+                    try {
+                      await persistentMemoryEngine.ingestMemory(chunk);
+                      ingested++;
+                    } catch (chunkErr) {
+                      console.warn(`[knowledge] Chunk ${chunk.metadata.chunk_index} failed:`, chunkErr.message);
+                      failed++;
+                    }
+                  }
+                  console.log(`[knowledge] Upload ${uploadId} complete: ingested=${ingested}, failed=${failed}`);
+                } catch (err) {
+                  console.error(`[knowledge] Upload ${uploadId} failed:`, err.message);
+                }
+              })();
+
+              return jsonResponse(res, {
+                upload_id: uploadId,
+                filename: filePart.filename,
+                size_bytes: filePart.data.length,
+                chunks: chunks.length + 1, // +1 for summary
+                status: 'processing',
+                message: `Document "${filePart.filename}" uploaded. ${chunks.length} chunks + 1 summary being ingested.`,
+              });
+            } catch (err) {
+              console.error('[knowledge] Upload failed:', err.message);
               return jsonResponse(res, { error: err.message }, 500);
             }
           }
@@ -4259,6 +4368,61 @@ function parseBody(req) {
       }
     });
   });
+}
+
+/**
+ * Parse multipart/form-data into parts.
+ * Each part has: { name, filename, contentType, data (Buffer), value (string for text fields) }
+ */
+function parseMultipart(buffer, boundary) {
+  const parts = [];
+  const boundaryBuf = Buffer.from(`--${boundary}`);
+  const endBuf = Buffer.from(`--${boundary}--`);
+
+  let pos = 0;
+  // Skip preamble — find first boundary
+  const firstBoundary = buffer.indexOf(boundaryBuf, pos);
+  if (firstBoundary < 0) return parts;
+  pos = firstBoundary + boundaryBuf.length + 2; // skip boundary + \r\n
+
+  while (pos < buffer.length) {
+    // Find next boundary
+    const nextBoundary = buffer.indexOf(boundaryBuf, pos);
+    if (nextBoundary < 0) break;
+
+    // Part data is between pos and nextBoundary - 2 (strip trailing \r\n)
+    const partData = buffer.subarray(pos, nextBoundary - 2);
+
+    // Split headers from body (separated by \r\n\r\n)
+    const headerEnd = partData.indexOf('\r\n\r\n');
+    if (headerEnd < 0) { pos = nextBoundary + boundaryBuf.length + 2; continue; }
+
+    const headerStr = partData.subarray(0, headerEnd).toString('utf-8');
+    const bodyBuf = partData.subarray(headerEnd + 4);
+
+    // Parse Content-Disposition
+    const nameMatch = headerStr.match(/name="([^"]+)"/);
+    const filenameMatch = headerStr.match(/filename="([^"]+)"/);
+    const ctMatch = headerStr.match(/Content-Type:\s*(.+)/i);
+
+    const part = {
+      name: nameMatch?.[1] || null,
+      filename: filenameMatch?.[1] || null,
+      contentType: ctMatch?.[1]?.trim() || null,
+      data: bodyBuf,
+      value: !filenameMatch ? bodyBuf.toString('utf-8').trim() : null,
+    };
+
+    parts.push(part);
+
+    // Check for end boundary
+    const afterBoundary = buffer.subarray(nextBoundary + boundaryBuf.length, nextBoundary + boundaryBuf.length + 2);
+    if (afterBoundary.toString() === '--') break;
+
+    pos = nextBoundary + boundaryBuf.length + 2;
+  }
+
+  return parts;
 }
 
 async function ensureQdrantSearchIndexes() {

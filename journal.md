@@ -1143,3 +1143,115 @@ Saved the connector verification record to [journal-connector-framework-v1.md](/
 - frontend connector UI wiring now present
 - verification steps that passed
 - the concrete backend/frontend gaps still blocking a full production-ready sign-off
+
+---
+
+## 2026-03-24 10:00 UTC — Web Intelligence Productization (Full Stack)
+
+### Summary
+
+Complete productization of Web Intelligence across backend and frontend. Lightpanda browser runtime was previously fixed and verified in production (crawl succeeds with `runtime_used: "lightpanda"`). This session hardened everything around it.
+
+### Backend Changes
+
+#### New: `core/src/web/web-policy.js` — Safety/Policy Layer
+- Domain allow/deny rules (blocks internal IPs, adult domains, malware sites)
+- Content filtering (strips scripts, iframes, data URIs; 500KB cap)
+- `UserRateLimiter` — sliding window per-user burst protection (10/min, 60/hr)
+- `detectAbuse()` — flags rapid fire, duplicate URLs, deep crawls
+- `getRobotsWarning()` — advisory warnings for restricted domains (Twitter, Facebook, etc.)
+
+#### Enhanced: `core/src/web/browser-runtime.js` — Reliability Controls
+- `DomainConcurrencyTracker` — max 3 concurrent navigations per domain
+- `CircuitBreaker` — 5-failure threshold opens circuit, 60s auto-reset to half-open
+- Per-job timeout — `HIVEMIND_WEB_JOB_TIMEOUT_MS` (default 2min), `Promise.race` wrapper
+- Fallback telemetry — tracks lightpanda/fallback success/failure counts, circuit breaker trips, avg duration
+- Error classification — `navigation_failed`, `timeout`, `blocked_site`, `concurrency_limit`, `circuit_open`
+
+#### Enhanced: `core/src/web/web-job-store.js` — Metrics & Billing
+- `retry(jobId, scope)` — creates new job from failed job with `retried_from` link
+- `getMonthlyUsage(userId)` — calendar month accounting with configurable limits
+- `getMetrics(orgId?)` — admin aggregates: success rate, p95 latency, top errors, runtime distribution, queue depth
+- `exportUsage(scope, { from, to })` — daily usage buckets for billing
+- `checkLimits(userId)` — soft (80%) / hard limit checks for daily + monthly
+
+#### Enhanced: `core/src/server.js` — 7 New Routes
+| Route | Method | Purpose |
+|-------|--------|---------|
+| `/api/web/jobs/:id/retry` | POST | Retry a failed job |
+| `/api/web/jobs/:id/save-to-memory` | POST | Save job results to memory with provenance tags |
+| `/api/web/admin/metrics` | GET | Admin metrics (requires `web_admin` scope) |
+| `/api/web/usage/monthly` | GET | Monthly usage accounting |
+| `/api/web/usage/export` | GET | Usage export by date range |
+| `/api/web/limits` | GET | Daily + monthly limit check |
+| `/api/web/policy/check-domain` | POST | Domain policy validation |
+
+Existing search/crawl routes enhanced with rate limiting, abuse detection, domain validation, and monthly quota checks.
+
+#### MCP Tools Visibility Gating
+- `generateToolsManifest()` now accepts `{ scopes }` option
+- `hivemind_web_search` only visible if user has `web_search` scope
+- `hivemind_web_crawl` only visible if user has `web_crawl` scope
+- `hivemind_web_job_status` / `hivemind_web_usage` visible if either web scope present
+- Backend entitlement checks remain as defense-in-depth
+
+#### Admin Authorization
+- Added `web_admin` to `ENTITLEMENT_SCOPES`
+- `/api/web/admin/metrics` returns 403 without `web_admin` scope
+- Platform-admin (`*` scope) sees all orgs; org-scoped admin sees own org only
+
+#### Default API Key Scopes
+- Changed default from `['memory:read', 'memory:write', 'mcp']` to include `web_search`, `web_crawl`, `web_admin`
+- All new API keys get full access by default
+
+### Frontend Changes (Da-vinci)
+
+#### Rewritten: `pages/WebIntelligence.jsx`
+- Entitlement locked/unlocked UX — blurred overlay + upgrade CTA when feature disabled
+- Daily + monthly quota bars, color-coded (green/amber/red), soft-limit warnings
+- Domain policy check on crawl URL blur — inline blocked/warning/OK badges
+- Live job polling (2s interval) with animated progress indicator
+- Retry button on failed jobs, Save to Memory on succeeded jobs
+- Clear error type labels (navigation_failed, timeout, blocked_site, etc.)
+- Partial result badge ("3/10 pages") when job has mixed success
+- Expandable result cards (title, URL, snippet) with individual save buttons
+
+#### New: `pages/WebAdmin.jsx` — Observability Dashboard
+- 6 metric cards: total jobs, success rate, avg/p95 duration, queue depth, 24h count
+- Runtime distribution bars (lightpanda vs fetch)
+- Telemetry panel (circuit breaker trips, concurrency rejections, uptime)
+- Top errors table with counts and percentages
+- 30-second auto-refresh + manual refresh
+
+#### Rewritten: `pages/ApiKeys.jsx` — Scope-Aware Key Management
+- All keys created with full scopes by default (memory + web + admin)
+- Scope badges displayed on each existing key row
+- Key Created Banner shows applied scopes + "Test Access" button
+- Test Access button verifies key works against `/health`
+
+#### Updated: `pages/ApiKeySetup.jsx` — Onboarding
+- Scope preset selector (Standard / Web Intelligence / Admin) — defaults to Admin
+- Test Access button on key reveal screen
+- Scope badges shown after generation
+
+#### Wiring
+- `HiveMindApp.jsx` — added `/web-admin` route
+- `Sidebar.jsx` — Web Admin nav item gated by admin access probe (hidden if 403)
+- `TopBar.jsx` — web-admin title/description
+- `api-client.js` — 7 new methods: retryWebJob, saveWebResultToMemory, getWebAdminMetrics, getWebMonthlyUsage, getWebUsageExport, getWebLimits, checkDomainPolicy
+
+### Tests — 60 Passing
+
+| File | Tests | Covers |
+|------|-------|--------|
+| `tests/web/web-policy.test.js` | 17 | Domain validation, content filtering, rate limiter, abuse detection, robots warnings |
+| `tests/web/web-job-store.test.js` | 11 | CRUD, retry, monthly usage, metrics, limits, export |
+| `tests/web/browser-runtime.test.js` | 13 | Concurrency tracker, circuit breaker states, telemetry snapshot |
+| `tests/web/mcp-tools-visibility.test.js` | 8 | Tool appears/disappears by scope, wildcard, defaults |
+| `tests/web/admin-auth.test.js` | 11 | web_admin grant/deny, wildcard, master key regression |
+
+### Commits
+- `66cf27d` — feat: Web Intelligence productization — safety, reliability, observability, scope gating
+- `ba84633` — fix: default all API keys to full scopes
+- Da-vinci `2f8daf6` — feat: Web Intel productization UX, Admin dashboard, API key scope selector
+- Da-vinci `93b42aa` — fix: default all API keys to full scopes

@@ -1,0 +1,217 @@
+[
+  {
+    "query": "What is TARA and what does it do?",
+    "relevantMemories": [
+      "e7a552e5-e48e-4e27-ad48-46483d8917fa",
+      "b0d073b9-585c-441b-8e10-b9ff56bc58bf",
+      "c6d55bc9-15e4-4854-88a4-266339e0fd21"
+    ],
+    "category": "technical",
+    "difficulty": "easy",
+    "description": "Retrieve TARA project overview and architecture",
+    "tags": ["tara", "architecture", "dual-stream"]
+  },
+  {
+    "query": "TTS audio quality fixes and Cartesia WebSocket",
+    "relevantMemories": [
+      "e209236e-64ef-4c76-9711-6288a743d334",
+      "77529521-23f4-4812-b4f1-ef493068cf9f",
+      "b0d073b9-585c-441b-8e10-b9ff56bc58bf"
+    ],
+    "category": "technical",
+    "difficulty": "medium",
+    "description": "Find TTS audio quality fixes including Cartesia auth",
+    "tags": ["tts", "cartesia", "audio-quality", "websocket"]
+  },
+  {
+    "query": "STT endpointing and German pronunciation",
+    "relevantMemories": [
+      "dd5bce37-defc-474b-872e-97d41a1f50ef",
+      "b6f217a8-0251-4df7-b868-14c415440b1d",
+      "77529521-23f4-4812-b4f1-ef493068cf9f"
+    ],
+    "category": "technical",
+    "difficulty": "medium",
+    "description": "Find STT tuning and German language support details",
+    "tags": ["stt", "endpointing", "german", "robustness"]
+  },
+  {
+    "query": "Docker configuration analysis and Caddy network routing",
+    "relevantMemories": [
+      "5ecc5dca-ef29-4685-a9b3-b07cd03d7551",
+      "c6d55bc9-15e4-4854-88a4-266339e0fd21"
+    ],
+    "category": "technical",
+    "difficulty": "medium",
+    "description": "Find Docker config analysis and Caddy network routing observations",
+    "tags": ["docker", "caddy", "network", "container"]
+  },
+  {
+    "query": "Connector failure and Prisma schema issues",
+    "relevantMemories": [
+      "6306eda3-2679-469c-8863-d6e9cdeaf106"
+    ],
+    "category": "technical",
+    "difficulty": "medium",
+    "description": "Find connector creation failures and Postgres enum drift",
+    "tags": ["connector", "prisma", "schema-drift"]
+  },
+  {
+    "query": "Prisma connector failure and schema drift",
+    "relevantMemories": [
+      "6306eda3-2679-469c-8863-d6e9cdeaf106"
+    ],
+    "category": "technical",
+    "difficulty": "hard",
+    "description": "Find Prisma/Postgres enum schema drift issues",
+    "tags": ["prisma", "postgres", "enum", "schema-drift"]
+  },
+  {
+    "query": "Knowledge base documentation and architecture overview",
+    "relevantMemories": [
+      "276c5eca-4ece-4659-96ca-f5b323484ef8",
+      "69b921bd-6839-4dfa-b81a-3e47576e13a8"
+    ],
+    "category": "technical",
+    "difficulty": "easy",
+    "description": "Find knowledge base docs and architecture references",
+    "tags": ["documentation", "architecture", "knowledge-base"]
+  },
+  {
+    "query": "Da'Vinci AI enterprise platform and Tara voice agent",
+    "relevantMemories": [
+      "a0b472bf-fe67-400b-bb76-c61b877a62b2",
+      "e7a552e5-e48e-4e27-ad48-46483d8917fa"
+    ],
+    "category": "business",
+    "difficulty": "easy",
+    "description": "Find Da'Vinci platform overview and TARA voice agent details",
+    "tags": ["davinci", "tara", "enterprise", "voice-agent"]
+  },
+  {
+    "query": "Da'Vinci Solutions products and AI automation",
+    "relevantMemories": [
+      "a0b472bf-fe67-400b-bb76-c61b877a62b2"
+    ],
+    "category": "business",
+    "difficulty": "easy",
+    "description": "Find Da'Vinci Solutions company and product overview",
+    "tags": ["davinci", "enterprise-automation", "ai-agents"]
+  },
+  {
+    "query": "Jetson Orin Nano multimodal AI and edge deployment",
+    "relevantMemories": [
+      "1293f004-413e-4976-8acc-1e36e8b0edd7"
+    ],
+    "category": "technical",
+    "difficulty": "medium",
+    "description": "Find Jetson edge AI setup and wildlife monitoring project",
+    "tags": ["jetson-orin-nano", "edge-ai", "multimodal-ai", "tensorrt"]
+  },
+  {
+    "query": "HIVEMIND agent usage instructions and best practices",
+    "relevantMemories": [
+      "69b921bd-6839-4dfa-b81a-3e47576e13a8"
+    ],
+    "category": "technical",
+    "difficulty": "easy",
+    "description": "Find HIVEMIND operational manual for agents",
+    "tags": ["hivemind", "agent-instructions", "best-practices"]
+  },
+  {
+    "query": "NotebookLM project and BLAIQ documentation",
+    "relevantMemories": [
+      "276c5eca-4ece-4659-96ca-f5b323484ef8",
+      "a945549c-2638-44b3-8f6b-154969387382"
+    ],
+    "category": "technical",
+    "difficulty": "medium",
+    "description": "Find NotebookLM setup and BLAIQ Core docs",
+    "tags": ["notebooklm", "documentation", "blaiq"]
+  },
+  {
+    "query": "Voice widget architecture and routing",
+    "relevantMemories": [
+      "91dcab9b-27ef-453b-a489-af901c02da66",
+      "8546a15f-0519-4f5c-87c6-1fa6fd06ad66"
+    ],
+    "category": "technical",
+    "difficulty": "medium",
+    "description": "Find voice/UI widget architecture and German support",
+    "tags": ["voice-widget", "routing", "german-support"]
+  },
+  {
+    "query": "Pipeline summary window and Redis session management",
+    "relevantMemories": [
+      "e09df59f-195b-45a4-a352-17f48d129759",
+      "b6f217a8-0251-4df7-b868-14c415440b1d"
+    ],
+    "category": "technical",
+    "difficulty": "hard",
+    "description": "Find pipeline progress with summary window and RAG",
+    "tags": ["pipeline", "summary-window", "rag", "redis"]
+  },
+  {
+    "query": "Memory engine persistence rules and session saving",
+    "relevantMemories": [
+      "c82156cf-33bd-4968-9d9a-957d27e89c63",
+      "9e5365fe-8be3-4c1c-a3a9-9c669d0b34c1"
+    ],
+    "category": "technical",
+    "difficulty": "medium",
+    "description": "Find rules about saving session changes to HIVEMIND",
+    "tags": ["memory-engine", "session-persistence", "rules"]
+  },
+  {
+    "query": "Productization sprint and milestones completed",
+    "relevantMemories": [
+      "4648c7e7-c5d0-49dc-bb27-fb5416597cb2"
+    ],
+    "category": "business",
+    "difficulty": "medium",
+    "description": "Find sprint completion and productization milestones",
+    "tags": ["milestone", "productization", "sprint-complete"]
+  },
+  {
+    "query": "BLAIQ core UI and orchestrator work",
+    "relevantMemories": [
+      "7b0485ed-6eab-42e0-89b3-4e285900594b",
+      "276c5eca-4ece-4659-96ca-f5b323484ef8"
+    ],
+    "category": "technical",
+    "difficulty": "medium",
+    "description": "Find BLAIQ frontend shell and orchestrator session",
+    "tags": ["blaiq", "core-ui", "orchestrator"]
+  },
+  {
+    "query": "Hannover company location and GDPR compliance",
+    "relevantMemories": [
+      "a0b472bf-fe67-400b-bb76-c61b877a62b2"
+    ],
+    "category": "business",
+    "difficulty": "hard",
+    "description": "Find company location and compliance details",
+    "tags": ["hannover", "gdpr-compliant", "enterprise"]
+  },
+  {
+    "query": "TARA deployment status and subagent analysis",
+    "relevantMemories": [
+      "b0d073b9-585c-441b-8e10-b9ff56bc58bf",
+      "e7a552e5-e48e-4e27-ad48-46483d8917fa"
+    ],
+    "category": "technical",
+    "difficulty": "hard",
+    "description": "Find TARA deployment status and parallel subagent work",
+    "tags": ["tara", "deployment", "subagent"]
+  },
+  {
+    "query": "Cartesia authentication and authorization header fix",
+    "relevantMemories": [
+      "e209236e-64ef-4c76-9711-6288a743d334"
+    ],
+    "category": "technical",
+    "difficulty": "easy",
+    "description": "Find the Cartesia WebSocket auth header fix",
+    "tags": ["cartesia", "authentication", "fix"]
+  }
+]

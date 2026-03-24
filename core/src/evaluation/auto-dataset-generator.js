@@ -57,6 +57,24 @@ function generateQuery(memory) {
   if (titleLower.startsWith('rpc smoke')) return null;
   if (titleLower.startsWith('smoke test')) return null;
 
+  // Skip transactional/notification emails (terrible evaluation queries)
+  const TRANSACTIONAL_PATTERNS = /\b(otp|confirm|verification|verify|refund|receipt|password|reset|alert|pending|unsubscribe|do not reply|noreply|no-reply|invoice|billing|subscription|activate|deactivate|security alert|sign.?in|log.?in|two.?factor|2fa|mfa|token|code:|pin:|one.?time)\b/i;
+  if (TRANSACTIONAL_PATTERNS.test(titleLower) || TRANSACTIONAL_PATTERNS.test(contentLower.slice(0, 200))) return null;
+
+  // Skip email forwards/replies with no substance
+  if (/^(re:|fwd:|fw:)\s/i.test(titleLower) && content.length < 200) return null;
+
+  // Skip ALL Gmail-sourced memories — raw emails are not distilled knowledge,
+  // they make terrible evaluation queries and pollute metrics
+  const isGmail = tags.some(t => t === 'gmail') || (memory.sourcePlatform === 'gmail');
+  if (isGmail) return null;
+  // Skip thread summaries (auto-generated, not user knowledge)
+  if (tags.includes('thread-summary')) return null;
+  // Skip stigmergic CoT traces (system traces, not user knowledge)
+  if (tags.includes('cot') || tags.includes('trace')) return null;
+  // Skip web-search result memories (often poorly indexed)
+  if (tags.includes('web-search') && !title) return null;
+
   // Strategy 1: Title-based query
   if (title && title.length > 10) {
     if (title.includes('?')) return title;
@@ -148,6 +166,10 @@ function scoreQuality(memory) {
   const isWebCrawl = tags.some(t => t === 'web:crawl' || t === 'source:web-intelligence' || t === 'web-crawl');
   if (isWebCrawl) score -= 5;
 
+  // Heavily penalize Gmail-sourced memories (transactional noise, poor eval queries)
+  const isGmail = tags.some(t => t === 'gmail');
+  if (isGmail) score -= 8;
+
   // Boost user-created decisions/lessons/preferences (high-value memories)
   const type = memory.memoryType || 'fact';
   if (['decision', 'lesson', 'preference', 'goal'].includes(type)) score += 2;
@@ -179,6 +201,8 @@ export async function generateEvalQueries(userId, orgId, options = {}) {
   const where = { userId, deletedAt: null, isLatest: true };
   if (orgId) where.orgId = orgId;
 
+  // Prefer non-gmail, high-quality memories first
+  // Fetch more than needed so we can filter aggressively
   const memories = await prisma.memory.findMany({
     where,
     orderBy: { createdAt: 'desc' },
@@ -189,6 +213,7 @@ export async function generateEvalQueries(userId, orgId, options = {}) {
       content: true,
       tags: true,
       memoryType: true,
+      sourcePlatform: true,
       createdAt: true,
     },
   });
@@ -197,14 +222,21 @@ export async function generateEvalQueries(userId, orgId, options = {}) {
     return [];
   }
 
+  // Post-filter: skip memories with very short content (< 50 chars)
+  const filtered = memories.filter(m => (m.content || '').length >= 50);
+
+  if (filtered.length === 0) {
+    return [];
+  }
+
   // Group by tag clusters
-  const groups = groupByTags(memories);
+  const groups = groupByTags(filtered);
 
   // Generate candidate queries
   const candidates = [];
   const seenQueries = new Set();
 
-  for (const mem of memories) {
+  for (const mem of filtered) {
     const query = generateQuery(mem);
     if (!query) continue;
 

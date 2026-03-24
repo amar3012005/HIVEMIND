@@ -2313,26 +2313,46 @@ a{color:#a78bfa}</style></head><body>
                             continue;
                           }
 
-                          // Extract body
-                          let bodyText = msg.snippet || '';
-                          const payload = msg.payload;
-                          if (payload) {
-                            const textPart = (payload.parts || []).find(p => p.mimeType === 'text/plain');
-                            if (textPart?.body?.data) {
-                              try { bodyText = Buffer.from(textPart.body.data, 'base64url').toString('utf-8'); } catch {}
-                            } else if (payload.mimeType === 'text/plain' && payload.body?.data) {
-                              try { bodyText = Buffer.from(payload.body.data, 'base64url').toString('utf-8'); } catch {}
+                          // Extract body — deep recursive MIME parsing
+                          let bodyText = '';
+                          const _decodeB64 = (d) => { try { return Buffer.from(d, 'base64url').toString('utf-8'); } catch { try { return Buffer.from(d, 'base64').toString('utf-8'); } catch { return ''; } } };
+                          const _stripHtml = (h) => h.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '').replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, ' ').trim();
+                          const _extractText = (part) => {
+                            if (!part) return '';
+                            // Direct body
+                            if (part.mimeType === 'text/plain' && part.body?.data) return _decodeB64(part.body.data);
+                            if (part.mimeType === 'text/html' && part.body?.data) return _stripHtml(_decodeB64(part.body.data));
+                            // Recurse into parts (multipart/alternative, multipart/mixed, etc.)
+                            if (part.parts) {
+                              // Prefer text/plain over text/html
+                              const plain = part.parts.find(p => p.mimeType === 'text/plain');
+                              if (plain?.body?.data) return _decodeB64(plain.body.data);
+                              const html = part.parts.find(p => p.mimeType === 'text/html');
+                              if (html?.body?.data) return _stripHtml(_decodeB64(html.body.data));
+                              // Deep recurse (multipart/mixed containing multipart/alternative)
+                              for (const sub of part.parts) {
+                                const result = _extractText(sub);
+                                if (result.length > 20) return result;
+                              }
                             }
-                          }
+                            return '';
+                          };
+                          bodyText = _extractText(msg.payload) || msg.snippet || '';
 
-                          // Strip null bytes
-                          bodyText = bodyText.replace(/\x00/g, '');
+                          // Strip null bytes + excessive whitespace
+                          bodyText = bodyText.replace(/\x00/g, '').replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 
-                          const content = `Subject: ${subject}\nFrom: ${from}\nDate: ${date}\n\n${bodyText}`.slice(0, 8000);
+                          // Also extract To header for better searchability
+                          const to = getH('To');
+                          const content = `Subject: ${subject}\nFrom: ${from}\nTo: ${to}\nDate: ${date}\n\n${bodyText}`.slice(0, 8000);
                           const tags = ['gmail', ...labels.filter(l => !['unread', 'inbox'].includes(l))];
                           if (from) {
                             const emailMatch = from.match(/<([^>]+)>/);
                             if (emailMatch) tags.push(`from:${emailMatch[1].split('@')[0]}`);
+                          }
+                          if (to) {
+                            const toMatch = to.match(/<([^>]+)>/);
+                            if (toMatch) tags.push(`to:${toMatch[1].split('@')[0]}`);
                           }
 
                           try {
@@ -4015,7 +4035,7 @@ a{color:#a78bfa}</style></head><body>
                       maxMemories: 300
                     });
                   } catch (autoErr) {
-                    console.warn('[EVAL] Auto-generation failed, falling back to default:', autoErr.message);
+                    console.warn('[EVAL] Auto-generation failed, falling back to default:', autoErr.message, autoErr.stack);
                     testQueries = null;
                   }
                 }

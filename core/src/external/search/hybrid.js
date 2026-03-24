@@ -289,6 +289,16 @@ function buildQdrantFilter(filter) {
     });
   }
 
+  // Project / containerTag filter
+  if (filter.project) {
+    must.push({
+      key: 'project',
+      match: {
+        value: filter.project
+      }
+    });
+  }
+
   // Memory type filter
   if (filter.memoryType) {
     must.push({
@@ -848,6 +858,7 @@ async function hybridSearch(options = {}) {
     queryVector: providedQueryVector,
     userId,
     orgId,
+    project,
     memoryType,
     tags,
     sourcePlatform,
@@ -886,6 +897,7 @@ async function hybridSearch(options = {}) {
     directVectorResults = await vectorSearch(queryVector, {
       userId,
       orgId,
+      project,
       memoryType,
       tags,
       sourcePlatform,
@@ -905,6 +917,7 @@ async function hybridSearch(options = {}) {
     semanticFallbackResults = await semanticSearch(query, {
       userId,
       orgId,
+      project,
       memoryType,
       tags,
       sourcePlatform,

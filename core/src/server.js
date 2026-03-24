@@ -57,7 +57,7 @@ const { BiTemporalEngine } = await import('./memory/bi-temporal.js');
 const { StigmergicCoT } = await import('./memory/stigmergic-cot.js');
 const { ByzantineConsensus } = await import('./memory/byzantine-consensus.js');
 const { queryPersistedMemories, recallPersistedMemories } = await import('./memory/persisted-retrieval.js');
-const { authenticatePersistedApiKey, hasEntitlement } = await import('./auth/api-keys.js');
+const { authenticatePersistedApiKey, hasEntitlement, hashApiKey: hashPersistedApiKey } = await import('./auth/api-keys.js');
 const { WebJobStore } = await import('./web/web-job-store.js');
 const { BrowserRuntime, getTelemetry } = await import('./web/browser-runtime.js');
 const { validateDomain, filterContent, UserRateLimiter, detectAbuse, getRobotsWarning } = await import('./web/web-policy.js');
@@ -202,6 +202,21 @@ const INGESTION_MODULE_CANDIDATES = [
 ];
 const CONTEXT_CACHE_TTL_MS = Number(process.env.HIVEMIND_CONTEXT_CACHE_TTL_MS || 15000);
 const aggregateCache = new Map();
+
+// OAuth 2.0 authorization code store (in-memory, 5 min TTL)
+const OAUTH_BASE_URL = process.env.HIVEMIND_OAUTH_BASE_URL || 'https://core.hivemind.davinciai.eu:8050';
+const OAUTH_SCOPES_SUPPORTED = ['memory:read', 'memory:write', 'mcp', 'web_search', 'web_crawl'];
+const oauthCodeStore = new Map(); // code -> { clientId, redirectUri, scope, codeChallenge, codeChallengeMethod, userId, orgId, expiresAt }
+const OAUTH_CODE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+function cleanExpiredOAuthCodes() {
+  const now = Date.now();
+  for (const [code, entry] of oauthCodeStore) {
+    if (now > entry.expiresAt) oauthCodeStore.delete(code);
+  }
+}
+setInterval(cleanExpiredOAuthCodes, 60_000);
+
 const ALLOWED_ORIGINS = (process.env.HIVEMIND_ALLOWED_ORIGINS || 'https://hivemind.davinciai.eu')
   .split(',')
   .map(origin => origin.trim())
@@ -659,7 +674,7 @@ function generateRawApiKey() {
   return `hmk_live_${crypto.randomBytes(24).toString('hex')}`;
 }
 
-function generateApiKeyRecord({ label, userId, orgId, scopes = ['memory:read', 'memory:write'] }) {
+function generateApiKeyRecord({ label, userId, orgId, scopes = ['memory:read', 'memory:write'], containerTags = null }) {
   const rawKey = generateRawApiKey();
   const now = new Date().toISOString();
   const record = {
@@ -670,6 +685,7 @@ function generateApiKeyRecord({ label, userId, orgId, scopes = ['memory:read', '
     userId: userId || DEFAULT_USER,
     orgId: orgId || DEFAULT_ORG,
     scopes,
+    containerTags: Array.isArray(containerTags) && containerTags.length > 0 ? containerTags : null,
     createdAt: now,
     lastUsedAt: null,
     revokedAt: null
@@ -695,6 +711,60 @@ function isAdminRequest(req) {
 
 function isAdminAuthorized(req, url) {
   return isAdminRequest(req) || url.searchParams.get('admin_secret') === ADMIN_SECRET;
+}
+
+// ── Consumer URL / Meta MCP token helpers ──
+const CONSUMER_TOKEN_PREFIX = 'hmc_';
+
+function generateConsumerToken() {
+  return `${CONSUMER_TOKEN_PREFIX}${crypto.randomBytes(32).toString('hex')}`;
+}
+
+async function resolveConsumerToken(token) {
+  if (!prisma || !token || !token.startsWith(CONSUMER_TOKEN_PREFIX)) {
+    return null;
+  }
+  try {
+    const keyHash = hashPersistedApiKey(token);
+    const record = await prisma.apiKey.findUnique({
+      where: { keyHash }
+    });
+    if (!record || record.revokedAt) {
+      return null;
+    }
+    if (record.expiresAt && new Date(record.expiresAt).getTime() <= Date.now()) {
+      return null;
+    }
+    // Update usage stats (fire-and-forget)
+    prisma.apiKey.update({
+      where: { id: record.id },
+      data: { lastUsedAt: new Date(), usageCount: { increment: 1 } }
+    }).catch(() => {});
+    return {
+      userId: record.userId || DEFAULT_USER,
+      orgId: record.orgId || DEFAULT_ORG,
+      scopes: record.scopes || ['mcp'],
+      rawKey: token
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function findExistingConsumerToken(userId) {
+  if (!prisma) return null;
+  try {
+    const record = await prisma.apiKey.findFirst({
+      where: {
+        userId,
+        name: 'consumer-url',
+        revokedAt: null
+      }
+    });
+    return record;
+  } catch {
+    return null;
+  }
 }
 
 function buildAdminServiceSnapshot() {
@@ -740,6 +810,18 @@ async function authenticateApiKey(req) {
 
   const persistedRecord = await authenticatePersistedApiKey(prisma, apiKey);
   if (persistedRecord) {
+    // Parse containerTags from description field (JSON-encoded) for persisted keys
+    let persistedContainerTags = null;
+    if (persistedRecord.description) {
+      try {
+        const meta = JSON.parse(persistedRecord.description);
+        if (Array.isArray(meta.containerTags)) {
+          persistedContainerTags = meta.containerTags;
+        }
+      } catch {
+        // description is plain text, not JSON — no containerTags
+      }
+    }
     return {
       ok: true,
       principal: {
@@ -747,6 +829,7 @@ async function authenticateApiKey(req) {
         userId: persistedRecord.userId || DEFAULT_USER,
         orgId: persistedRecord.orgId || DEFAULT_ORG,
         scopes: persistedRecord.scopes || [],
+        containerTags: persistedContainerTags,
         rawKey: apiKey,
         persisted: true
       }
@@ -770,6 +853,7 @@ async function authenticateApiKey(req) {
       userId: record.userId || DEFAULT_USER,
       orgId: record.orgId || DEFAULT_ORG,
       scopes: record.scopes || [],
+      containerTags: record.containerTags || null,
       rawKey: apiKey
     }
   };
@@ -929,6 +1013,394 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // ── Consumer URL / Meta MCP: auth-less token-based SSE & RPC ──
+  const consumerSseMatch = pathname.match(/^\/mcp\/([^\/]+)\/sse$/);
+  if (consumerSseMatch && req.method === 'GET') {
+    const token = consumerSseMatch[1];
+    const consumer = await resolveConsumerToken(token);
+    if (!consumer) {
+      return jsonResponse(res, { error: 'Invalid or expired consumer token' }, 401);
+    }
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.write(`event: endpoint\ndata: ${JSON.stringify({ uri: `/mcp/${token}/rpc` })}\n\n`);
+    res.write(`event: ping\ndata: ${JSON.stringify({ ok: true })}\n\n`);
+
+    const keepAlive = setInterval(() => {
+      res.write(`event: ping\ndata: ${JSON.stringify({ ok: true, ts: new Date().toISOString() })}\n\n`);
+    }, 30000);
+
+    req.on('close', () => {
+      clearInterval(keepAlive);
+    });
+    return;
+  }
+
+  const consumerRpcMatch = pathname.match(/^\/mcp\/([^\/]+)\/rpc$/);
+  if (consumerRpcMatch && req.method === 'POST') {
+    const token = consumerRpcMatch[1];
+    const consumer = await resolveConsumerToken(token);
+    if (!consumer) {
+      return jsonResponse(res, {
+        jsonrpc: '2.0',
+        id: null,
+        error: { code: -32001, message: 'Invalid or expired consumer token' }
+      }, 401);
+    }
+
+    const body = await parseBody(req);
+    const { userId, orgId, rawKey } = consumer;
+
+    const apiClient = createHostedApiClient({
+      baseUrl: getHostedApiBaseUrl(req),
+      apiKey: rawKey || '',
+      userId,
+      orgId
+    });
+
+    if (!body?.method) {
+      return jsonResponse(res, {
+        jsonrpc: '2.0',
+        id: body?.id ?? null,
+        error: { code: -32600, message: 'Invalid request: method is required' }
+      }, 400);
+    }
+
+    if (body.method === 'notifications/initialized' || body.method === 'initialized') {
+      res.writeHead(202);
+      res.end();
+      return;
+    }
+
+    let result;
+    switch (body.method) {
+      case 'initialize':
+        result = handleInitialize(body.params || {}, userId);
+        break;
+      case 'ping':
+        result = {};
+        break;
+      case 'tools/list':
+        result = handleToolsList(userId, orgId, { scopes: consumer.scopes || ['*'] });
+        break;
+      case 'tools/call':
+        result = await handleToolCall(body.params || {}, userId, orgId, apiClient);
+        break;
+      case 'resources/list':
+        result = handleResourcesList(userId, orgId);
+        break;
+      case 'resources/read':
+        result = handleReadResource(body.params || {}, userId, orgId);
+        break;
+      case 'prompts/list':
+        result = handlePromptsList(userId, orgId);
+        break;
+      case 'prompts/get':
+        result = handleGetPrompt(body.params || {}, userId, orgId);
+        break;
+      default:
+        return jsonResponse(res, {
+          jsonrpc: '2.0',
+          id: body?.id ?? null,
+          error: { code: -32601, message: `Method not found: ${body.method}` }
+        }, 404);
+    }
+
+    return jsonResponse(res, {
+      jsonrpc: '2.0',
+      id: body?.id ?? null,
+      result
+    });
+  }
+
+  // ── OAuth 2.0 Discovery & Endpoints ──────────────────────────────────────
+
+  if (pathname === '/.well-known/oauth-protected-resource' && req.method === 'GET') {
+    return jsonResponse(res, {
+      resource: OAUTH_BASE_URL,
+      authorization_servers: [OAUTH_BASE_URL],
+      scopes_supported: OAUTH_SCOPES_SUPPORTED
+    });
+  }
+
+  if (pathname === '/.well-known/oauth-authorization-server' && req.method === 'GET') {
+    return jsonResponse(res, {
+      issuer: OAUTH_BASE_URL,
+      authorization_endpoint: `${OAUTH_BASE_URL}/oauth/authorize`,
+      token_endpoint: `${OAUTH_BASE_URL}/oauth/token`,
+      scopes_supported: OAUTH_SCOPES_SUPPORTED,
+      response_types_supported: ['code'],
+      grant_types_supported: ['authorization_code'],
+      code_challenge_methods_supported: ['S256']
+    });
+  }
+
+  if (pathname === '/oauth/authorize' && req.method === 'GET') {
+    const clientId = url.searchParams.get('client_id') || '';
+    const redirectUri = url.searchParams.get('redirect_uri') || '';
+    const scope = url.searchParams.get('scope') || '';
+    const state = url.searchParams.get('state') || '';
+    const codeChallenge = url.searchParams.get('code_challenge') || '';
+    const codeChallengeMethod = url.searchParams.get('code_challenge_method') || '';
+
+    if (!clientId || !redirectUri) {
+      return jsonResponse(res, { error: 'invalid_request', error_description: 'client_id and redirect_uri are required' }, 400);
+    }
+
+    // Check for session cookie (simple cookie-based auth: hivemind_session=<admin_secret>)
+    const cookies = (req.headers.cookie || '').split(';').reduce((acc, c) => {
+      const [k, ...v] = c.trim().split('=');
+      if (k) acc[k.trim()] = v.join('=').trim();
+      return acc;
+    }, {});
+    const isLoggedIn = cookies['hivemind_session'] === ADMIN_SECRET;
+
+    if (isLoggedIn) {
+      // Show consent page
+      const requestedScopes = scope ? scope.split(/[\s+]/).filter(s => OAUTH_SCOPES_SUPPORTED.includes(s)) : ['memory:read'];
+      const scopeListHtml = requestedScopes.map(s => `<li><code>${s}</code></li>`).join('');
+      const consentHtml = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HIVEMIND - Authorize Application</title>
+<style>
+  body{font-family:system-ui,-apple-system,sans-serif;background:#0a0a0f;color:#e0e0e0;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}
+  .card{background:#16161e;border:1px solid #2a2a3a;border-radius:12px;padding:2rem;max-width:420px;width:90%}
+  h1{font-size:1.3rem;margin:0 0 0.5rem;color:#a78bfa}
+  h2{font-size:1rem;margin:0 0 1rem;color:#888}
+  .app-name{color:#60a5fa;font-weight:600}
+  ul{padding-left:1.2rem;margin:0.5rem 0 1.5rem}
+  li{margin:0.3rem 0}
+  code{background:#1e1e2e;padding:2px 6px;border-radius:4px;font-size:0.85rem}
+  .actions{display:flex;gap:0.75rem}
+  button{flex:1;padding:0.6rem;border:none;border-radius:8px;font-size:0.95rem;cursor:pointer;font-weight:500}
+  .approve{background:#22c55e;color:#000} .approve:hover{background:#16a34a}
+  .deny{background:#333;color:#ccc} .deny:hover{background:#444}
+</style></head><body>
+<div class="card">
+  <h1>Authorize Application</h1>
+  <h2><span class="app-name">${clientId.replace(/[<>&"']/g, '')}</span> wants to access your HIVEMIND memories</h2>
+  <p>This application is requesting the following permissions:</p>
+  <ul>${scopeListHtml}</ul>
+  <form method="POST" action="/oauth/authorize">
+    <input type="hidden" name="client_id" value="${clientId.replace(/"/g, '&quot;')}">
+    <input type="hidden" name="redirect_uri" value="${redirectUri.replace(/"/g, '&quot;')}">
+    <input type="hidden" name="scope" value="${requestedScopes.join(' ')}">
+    <input type="hidden" name="state" value="${state.replace(/"/g, '&quot;')}">
+    <input type="hidden" name="code_challenge" value="${codeChallenge.replace(/"/g, '&quot;')}">
+    <input type="hidden" name="code_challenge_method" value="${codeChallengeMethod.replace(/"/g, '&quot;')}">
+    <div class="actions">
+      <button type="submit" name="action" value="approve" class="approve">Approve</button>
+      <button type="submit" name="action" value="deny" class="deny">Deny</button>
+    </div>
+  </form>
+</div></body></html>`;
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.writeHead(200);
+      res.end(consentHtml);
+      return;
+    }
+
+    // Not logged in — show login form
+    const loginHtml = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HIVEMIND - Sign In</title>
+<style>
+  body{font-family:system-ui,-apple-system,sans-serif;background:#0a0a0f;color:#e0e0e0;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}
+  .card{background:#16161e;border:1px solid #2a2a3a;border-radius:12px;padding:2rem;max-width:380px;width:90%}
+  h1{font-size:1.3rem;margin:0 0 0.3rem;color:#a78bfa}
+  p{color:#888;font-size:0.9rem;margin:0 0 1.2rem}
+  label{display:block;font-size:0.85rem;color:#aaa;margin-bottom:0.3rem}
+  input[type=password]{width:100%;padding:0.55rem;border:1px solid #333;border-radius:6px;background:#1e1e2e;color:#e0e0e0;font-size:0.95rem;box-sizing:border-box;margin-bottom:1rem}
+  button{width:100%;padding:0.6rem;background:#a78bfa;color:#000;border:none;border-radius:8px;font-size:0.95rem;cursor:pointer;font-weight:500}
+  button:hover{background:#8b5cf6}
+</style></head><body>
+<div class="card">
+  <h1>Sign in to HIVEMIND</h1>
+  <p>An application wants to connect to your memories.</p>
+  <form method="POST" action="/oauth/login">
+    <input type="hidden" name="client_id" value="${clientId.replace(/"/g, '&quot;')}">
+    <input type="hidden" name="redirect_uri" value="${redirectUri.replace(/"/g, '&quot;')}">
+    <input type="hidden" name="scope" value="${scope.replace(/"/g, '&quot;')}">
+    <input type="hidden" name="state" value="${state.replace(/"/g, '&quot;')}">
+    <input type="hidden" name="code_challenge" value="${codeChallenge.replace(/"/g, '&quot;')}">
+    <input type="hidden" name="code_challenge_method" value="${codeChallengeMethod.replace(/"/g, '&quot;')}">
+    <label for="admin_secret">Admin Secret</label>
+    <input type="password" id="admin_secret" name="admin_secret" required autofocus>
+    <button type="submit">Sign In</button>
+  </form>
+</div></body></html>`;
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.writeHead(200);
+    res.end(loginHtml);
+    return;
+  }
+
+  // OAuth login POST — validates admin secret, sets session cookie, redirects to consent
+  if (pathname === '/oauth/login' && req.method === 'POST') {
+    const rawBody = await new Promise((resolve) => {
+      let data = '';
+      req.on('data', chunk => data += chunk);
+      req.on('end', () => resolve(data));
+    });
+    const params = new URLSearchParams(rawBody);
+    const secret = params.get('admin_secret') || '';
+
+    if (secret !== ADMIN_SECRET) {
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.writeHead(401);
+      res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>HIVEMIND</title>
+<style>body{font-family:system-ui;background:#0a0a0f;color:#e0e0e0;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}
+.card{background:#16161e;border:1px solid #2a2a3a;border-radius:12px;padding:2rem;max-width:380px;width:90%;text-align:center}
+a{color:#a78bfa}</style></head><body>
+<div class="card"><h2 style="color:#f87171">Invalid credentials</h2><p><a href="javascript:history.back()">Try again</a></p></div></body></html>`);
+      return;
+    }
+
+    // Redirect back to /oauth/authorize with all params preserved
+    const authorizeParams = new URLSearchParams();
+    for (const key of ['client_id', 'redirect_uri', 'scope', 'state', 'code_challenge', 'code_challenge_method']) {
+      const val = params.get(key);
+      if (val) authorizeParams.set(key, val);
+    }
+
+    res.setHeader('Set-Cookie', `hivemind_session=${ADMIN_SECRET}; Path=/; HttpOnly; SameSite=Lax; Max-Age=3600`);
+    res.writeHead(302, { Location: `/oauth/authorize?${authorizeParams.toString()}` });
+    res.end();
+    return;
+  }
+
+  // OAuth authorize POST — user approved or denied consent
+  if (pathname === '/oauth/authorize' && req.method === 'POST') {
+    const rawBody = await new Promise((resolve) => {
+      let data = '';
+      req.on('data', chunk => data += chunk);
+      req.on('end', () => resolve(data));
+    });
+    const params = new URLSearchParams(rawBody);
+    const action = params.get('action');
+    const clientId = params.get('client_id') || '';
+    const redirectUri = params.get('redirect_uri') || '';
+    const scope = params.get('scope') || '';
+    const state = params.get('state') || '';
+    const codeChallenge = params.get('code_challenge') || '';
+    const codeChallengeMethod = params.get('code_challenge_method') || '';
+
+    if (action === 'deny') {
+      const denyUrl = new URL(redirectUri);
+      denyUrl.searchParams.set('error', 'access_denied');
+      if (state) denyUrl.searchParams.set('state', state);
+      res.writeHead(302, { Location: denyUrl.toString() });
+      res.end();
+      return;
+    }
+
+    // Generate authorization code
+    const code = crypto.randomBytes(32).toString('hex');
+    oauthCodeStore.set(code, {
+      clientId,
+      redirectUri,
+      scope,
+      codeChallenge,
+      codeChallengeMethod,
+      userId: DEFAULT_USER,
+      orgId: DEFAULT_ORG,
+      expiresAt: Date.now() + OAUTH_CODE_TTL_MS
+    });
+
+    const callbackUrl = new URL(redirectUri);
+    callbackUrl.searchParams.set('code', code);
+    if (state) callbackUrl.searchParams.set('state', state);
+    res.writeHead(302, { Location: callbackUrl.toString() });
+    res.end();
+    return;
+  }
+
+  // OAuth token endpoint
+  if (pathname === '/oauth/token' && req.method === 'POST') {
+    const rawBody = await new Promise((resolve) => {
+      let data = '';
+      req.on('data', chunk => data += chunk);
+      req.on('end', () => resolve(data));
+    });
+
+    // Support both application/x-www-form-urlencoded and application/json
+    let tokenParams;
+    const contentType = (req.headers['content-type'] || '').toLowerCase();
+    if (contentType.includes('application/json')) {
+      try { tokenParams = JSON.parse(rawBody); } catch { tokenParams = {}; }
+    } else {
+      const parsed = new URLSearchParams(rawBody);
+      tokenParams = Object.fromEntries(parsed.entries());
+    }
+
+    const grantType = tokenParams.grant_type;
+    const code = tokenParams.code || '';
+    const redirectUri = tokenParams.redirect_uri || '';
+    const clientId = tokenParams.client_id || '';
+    const codeVerifier = tokenParams.code_verifier || '';
+
+    if (grantType !== 'authorization_code') {
+      return jsonResponse(res, { error: 'unsupported_grant_type' }, 400);
+    }
+
+    const entry = oauthCodeStore.get(code);
+    if (!entry) {
+      return jsonResponse(res, { error: 'invalid_grant', error_description: 'Authorization code is invalid or expired.' }, 400);
+    }
+
+    // Consume code immediately (one-time use)
+    oauthCodeStore.delete(code);
+
+    if (Date.now() > entry.expiresAt) {
+      return jsonResponse(res, { error: 'invalid_grant', error_description: 'Authorization code has expired.' }, 400);
+    }
+
+    if (entry.clientId !== clientId) {
+      return jsonResponse(res, { error: 'invalid_grant', error_description: 'client_id mismatch.' }, 400);
+    }
+
+    if (entry.redirectUri !== redirectUri) {
+      return jsonResponse(res, { error: 'invalid_grant', error_description: 'redirect_uri mismatch.' }, 400);
+    }
+
+    // PKCE validation (S256)
+    if (entry.codeChallenge) {
+      if (!codeVerifier) {
+        return jsonResponse(res, { error: 'invalid_grant', error_description: 'code_verifier is required for PKCE.' }, 400);
+      }
+      const expectedChallenge = crypto
+        .createHash('sha256')
+        .update(codeVerifier)
+        .digest('base64url');
+      if (expectedChallenge !== entry.codeChallenge) {
+        return jsonResponse(res, { error: 'invalid_grant', error_description: 'PKCE code_verifier validation failed.' }, 400);
+      }
+    }
+
+    // Generate API key with requested scopes
+    const requestedScopes = entry.scope
+      ? entry.scope.split(/[\s+]/).filter(s => OAUTH_SCOPES_SUPPORTED.includes(s))
+      : ['memory:read'];
+
+    const { rawKey, record } = generateApiKeyRecord({
+      label: `oauth-${clientId}`,
+      userId: entry.userId,
+      orgId: entry.orgId,
+      scopes: requestedScopes
+    });
+    const store = loadApiKeyStore();
+    store.keys.push(record);
+    saveApiKeyStore(store);
+
+    return jsonResponse(res, {
+      access_token: rawKey,
+      token_type: 'bearer',
+      scope: requestedScopes.join(' ')
+    });
+  }
+
   // API Routes
   if (pathname.startsWith('/api/')) {
     try {
@@ -1066,7 +1538,8 @@ const server = http.createServer(async (req, res) => {
           label: body.label,
           userId: body.user_id,
           orgId: body.org_id,
-          scopes: body.scopes
+          scopes: body.scopes,
+          containerTags: body.containerTags
         });
         const store = loadApiKeyStore();
         store.keys.push(record);
@@ -1080,6 +1553,7 @@ const server = http.createServer(async (req, res) => {
           user_id: record.userId,
           org_id: record.orgId,
           scopes: record.scopes,
+          container_tags: record.containerTags || null,
           created_at: record.createdAt,
           warning: 'Store this key now. It will not be shown again in full.'
         });
@@ -1114,6 +1588,7 @@ const server = http.createServer(async (req, res) => {
           user_id: k.userId,
           org_id: k.orgId,
           scopes: k.scopes,
+          container_tags: k.containerTags || null,
           created_at: k.createdAt,
           last_used_at: k.lastUsedAt,
           revoked_at: k.revokedAt
@@ -1129,6 +1604,74 @@ const server = http.createServer(async (req, res) => {
       const principal = auth.principal;
       const userId = principal.userId || DEFAULT_USER;
       const orgId = principal.orgId || DEFAULT_ORG;
+
+      // ── Container Tag (multi-tenant namespace) resolution ──
+      // Priority: x-hm-container header > body.containerTag > query param > scoped key default
+      const headerContainer = req.headers['x-hm-container'] || null;
+      const bodyContainer = body?.containerTag || null;
+      const queryContainer = url.searchParams.get('containerTag') || null;
+      const keyContainerTags = principal.containerTags || null;
+      const resolvedContainerTag = headerContainer || bodyContainer || queryContainer || null;
+
+      // If the API key is scoped to specific containerTags, enforce it
+      if (keyContainerTags && keyContainerTags.length > 0) {
+        if (resolvedContainerTag && !keyContainerTags.includes(resolvedContainerTag)) {
+          return jsonResponse(res, {
+            error: 'Forbidden',
+            message: `This API key is scoped to containerTags: [${keyContainerTags.join(', ')}]. Requested containerTag "${resolvedContainerTag}" is not allowed.`
+          }, 403);
+        }
+      }
+      // Effective container: explicit request > single-scoped key default > null
+      const effectiveContainerTag = resolvedContainerTag
+        || (keyContainerTags && keyContainerTags.length === 1 ? keyContainerTags[0] : null);
+
+      // ── Consumer URL generation (authenticated) ──
+      if (pathname === '/api/mcp/consumer-url' && req.method === 'POST') {
+        // Check if user already has a consumer URL
+        const existing = await findExistingConsumerToken(userId);
+        if (existing) {
+          const baseUrl = getHostedApiBaseUrl(req);
+          let fullToken = existing.keyPrefix;
+          try { fullToken = JSON.parse(existing.description).fullToken || fullToken; } catch {}
+          return jsonResponse(res, {
+            url: `${baseUrl}/mcp/${fullToken}/sse`,
+            token: fullToken,
+            created_at: existing.createdAt
+          });
+        }
+
+        // Generate a new consumer token and store it as an ApiKey record
+        const consumerToken = generateConsumerToken();
+        const tokenHash = hashPersistedApiKey(consumerToken);
+        try {
+          await prisma.apiKey.create({
+            data: {
+              userId,
+              orgId,
+              name: 'consumer-url',
+              keyHash: tokenHash,
+              keyPrefix: consumerToken.slice(0, 12),
+              description: JSON.stringify({ fullToken: consumerToken }),
+              scopes: ['mcp'],
+              expiresAt: null,
+              rateLimitPerMinute: 120,
+              createdByIp: req.headers['x-forwarded-for'] || req.socket?.remoteAddress || null,
+              userAgent: req.headers['user-agent'] || null
+            }
+          });
+        } catch (err) {
+          console.error('[consumer-url] Failed to create consumer token:', err);
+          return jsonResponse(res, { error: 'Failed to create consumer token' }, 500);
+        }
+
+        const baseUrl = getHostedApiBaseUrl(req);
+        return jsonResponse(res, {
+          url: `${baseUrl}/mcp/${consumerToken}/sse`,
+          token: consumerToken,
+          warning: 'Store this URL securely. The token will not be shown again in full.'
+        });
+      }
 
       if ((pathname === '/api/mcp/rpc' || pathname === '/api/mcp/message') && req.method === 'POST') {
         const apiClient = createHostedApiClient({
@@ -2170,7 +2713,11 @@ const server = http.createServer(async (req, res) => {
                 queryParams[key] = value;
               }
             }
-            
+            // containerTag → project mapping (containerTag is an alias for project)
+            if (!queryParams.project && effectiveContainerTag) {
+              queryParams.project = effectiveContainerTag;
+            }
+
             const validation = validateMemoryQueryParams(queryParams);
             if (!validation.success) {
               return jsonResponse(res, { 
@@ -2216,6 +2763,10 @@ const server = http.createServer(async (req, res) => {
               user_id: userId,  // Override with authenticated user
               org_id: orgId     // Override with authenticated org
             };
+            // containerTag → project mapping
+            if (!scopedBody.project && effectiveContainerTag) {
+              scopedBody.project = effectiveContainerTag;
+            }
             
             const validation = validateCreateMemory(scopedBody);
             if (!validation.success) {
@@ -2757,14 +3308,17 @@ const server = http.createServer(async (req, res) => {
                 recallWeights = computeDynamicWeights(intent);
               }
 
+              // containerTag → project mapping for recall
+              const recallProject = body.project || effectiveContainerTag || null;
+
               const result = await recallPersistedMemories(persistentMemoryStore, {
                 query_context: body.query_context || body.context,
                 user_id: userId,
                 org_id: orgId,
-                project: body.project || null,
+                project: recallProject,
                 source_platforms: body.source_platforms || [],
                 tags: body.tags || [],
-                preferred_project: body.preferred_project || body.project || null,
+                preferred_project: body.preferred_project || recallProject,
                 preferred_source_platforms: body.preferred_source_platforms || [],
                 preferred_tags: body.preferred_tags || [],
                 max_memories: body.max_memories || 5,
@@ -2920,7 +3474,7 @@ const server = http.createServer(async (req, res) => {
               return;
             }
             try {
-              const { query, memory_type, tags, source_platform, limit, score_threshold } = body;
+              const { query, memory_type, tags, source_platform, limit, score_threshold, project } = body;
 
               if (!query || typeof query !== 'string') {
                 return jsonResponse(res, {
@@ -2929,9 +3483,13 @@ const server = http.createServer(async (req, res) => {
                 }, 400);
               }
 
+              // containerTag → project mapping for search
+              const searchProject = project || effectiveContainerTag || null;
+
               const result = await threeTierRetrieval.quickSearch(query, {
                 userId,
                 orgId,
+                project: searchProject,
                 memoryType: memory_type,
                 tags,
                 sourcePlatform: source_platform,

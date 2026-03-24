@@ -125,7 +125,7 @@ export class ThreeTierRetrieval {
       config: this.config
     });
 
-    this.insightForge = new InsightForge({
+    this.insightEngine = new InsightForge({
       vectorStore: this.vectorStore,
       graphStore: this.graphStore,
       llmClient: this.llmClient,
@@ -171,6 +171,7 @@ export class ThreeTierRetrieval {
     const {
       userId,
       orgId,
+      project,
       memoryType,
       tags,
       sourcePlatform,
@@ -182,6 +183,7 @@ export class ThreeTierRetrieval {
       requestId,
       query,
       userId,
+      project: project || null,
       limit
     });
 
@@ -196,6 +198,7 @@ export class ThreeTierRetrieval {
         query,
         userId,
         orgId,
+        project,
         memoryType,
         tags,
         sourcePlatform,
@@ -400,7 +403,7 @@ export class ThreeTierRetrieval {
 
     try {
       // Delegate to InsightForge module
-      const results = await this.insightForge.analyze(query, {
+      const results = await this.insightEngine.analyze(query, {
         userId,
         orgId,
         simulationRequirement,

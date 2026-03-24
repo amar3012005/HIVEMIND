@@ -1828,6 +1828,9 @@ const server = http.createServer(async (req, res) => {
               const { resultIndex, title, tags } = body;
               const items = typeof resultIndex === 'number' ? [job.results[resultIndex]].filter(Boolean) : job.results;
               if (items.length === 0) return jsonResponse(res, { error: 'Invalid result index' }, 400);
+              if (!persistentMemoryEngine) {
+                return jsonResponse(res, { error: 'Memory persistence unavailable' }, 503);
+              }
               const savedIds = [];
               for (const item of items) {
                 const content = item.snippet || item.text || item.content || JSON.stringify(item);
@@ -1835,14 +1838,24 @@ const server = http.createServer(async (req, res) => {
                 const memTags = [...(tags || []), `web:${job.type}`, 'source:web-intelligence'];
                 if (item.url) memTags.push(`url:${item.url}`);
                 const filtered = filterContent(content);
-                const mem = await persistentMemoryStore.addMemory({
+                const ingestResult = await persistentMemoryEngine.ingestMemory({
+                  user_id: userId,
+                  org_id: orgId,
                   content: filtered.text,
                   title: memTitle,
                   source_platform: 'web_intelligence',
                   tags: memTags,
-                  metadata: { web_job_id: jobId, url: item.url, runtime_used: job.runtime_used, crawled_at: job.created_at },
-                }, userId, orgId);
-                if (mem?.id) savedIds.push(mem.id);
+                  memory_type: 'fact',
+                  metadata: {
+                    web_job_id: jobId,
+                    url: item.url,
+                    runtime_used: job.runtime_used,
+                    crawled_at: job.created_at
+                  }
+                });
+                if (ingestResult?.memoryId) {
+                  savedIds.push(ingestResult.memoryId);
+                }
               }
               return jsonResponse(res, { saved: savedIds.length, memory_ids: savedIds });
             } catch (error) {
@@ -2441,6 +2454,103 @@ const server = http.createServer(async (req, res) => {
               console.error('Auto recall failed:', error);
               return jsonResponse(res, {
                 error: 'Recall failed',
+                message: error.message
+              }, 500);
+            }
+          }
+          break;
+
+        case '/api/graph':
+          if (req.method === 'GET') {
+            if (!ensurePersistedMemoryOrFail(res, '/api/graph')) {
+              return;
+            }
+            try {
+              const graphProject = url.searchParams.get('project') || null;
+              const graphLimit = Math.min(parseInt(url.searchParams.get('limit')) || 200, 500);
+              const includeEdges = url.searchParams.get('include_edges') !== 'false';
+
+              const scopeWhere = {
+                userId: userId,
+                orgId: orgId,
+                deletedAt: null,
+                ...(graphProject ? { project: graphProject } : {})
+              };
+
+              const memoryRecords = await prisma.memory.findMany({
+                where: scopeWhere,
+                include: {
+                  sourceMetadata: true
+                },
+                orderBy: { updatedAt: 'desc' },
+                take: graphLimit
+              });
+
+              const now = Date.now();
+              const projectSet = new Set();
+              const tagSet = new Set();
+
+              const nodes = memoryRecords.map(r => {
+                const updatedAt = r.updatedAt instanceof Date ? r.updatedAt : new Date(r.updatedAt);
+                const createdAt = r.createdAt instanceof Date ? r.createdAt : new Date(r.createdAt);
+                const daysSinceUpdate = (now - updatedAt.getTime()) / (1000 * 60 * 60 * 24);
+                const temporalWeight = Math.exp(-daysSinceUpdate / 30);
+
+                if (r.project) projectSet.add(r.project);
+                if (r.tags) r.tags.forEach(t => tagSet.add(t));
+
+                return {
+                  id: r.id,
+                  title: r.title || '',
+                  content: (r.content || '').slice(0, 200),
+                  memoryType: r.memoryType || null,
+                  tags: r.tags || [],
+                  project: r.project || null,
+                  sourcePlatform: r.sourceMetadata?.sourcePlatform || r.sourcePlatform || null,
+                  importanceScore: r.importanceScore,
+                  strength: r.strength,
+                  recallCount: r.recallCount,
+                  isLatest: r.isLatest,
+                  createdAt: createdAt.toISOString(),
+                  updatedAt: updatedAt.toISOString(),
+                  daysSinceUpdate: Math.round(daysSinceUpdate * 100) / 100,
+                  temporalWeight: Math.round(temporalWeight * 10000) / 10000
+                };
+              });
+
+              let edges = [];
+              if (includeEdges && memoryRecords.length > 0) {
+                const memoryIds = memoryRecords.map(r => r.id);
+                const relRecords = await prisma.relationship.findMany({
+                  where: {
+                    fromId: { in: memoryIds },
+                    toId: { in: memoryIds }
+                  },
+                  orderBy: { createdAt: 'desc' }
+                });
+
+                edges = relRecords.map(r => ({
+                  source: r.fromId,
+                  target: r.toId,
+                  type: r.type,
+                  confidence: r.confidence
+                }));
+              }
+
+              return jsonResponse(res, {
+                nodes,
+                edges,
+                meta: {
+                  nodeCount: nodes.length,
+                  edgeCount: edges.length,
+                  projects: Array.from(projectSet).sort(),
+                  tags: Array.from(tagSet).sort()
+                }
+              });
+            } catch (error) {
+              console.error('Graph endpoint failed:', error);
+              return jsonResponse(res, {
+                error: 'Graph generation failed',
                 message: error.message
               }, 500);
             }

@@ -2088,6 +2088,147 @@ a{color:#a78bfa}</style></head><body>
           break;
 
         // ==========================================
+        // GMAIL OAUTH FLOW
+        // ==========================================
+
+        case '/api/connectors/gmail/connect':
+          if (req.method === 'GET') {
+            const { buildAuthUrl } = await import('./connectors/providers/gmail/oauth.js');
+            const gmailRedirectUri = `${process.env.HIVEMIND_BASE_URL || getHostedApiBaseUrl(req)}/api/connectors/gmail/callback`;
+            const gmailState = Buffer.from(JSON.stringify({ userId, orgId })).toString('base64url');
+            const authorizationUrl = buildAuthUrl({ redirectUri: gmailRedirectUri, state: gmailState });
+            return jsonResponse(res, { url: authorizationUrl, redirect_uri: gmailRedirectUri });
+          }
+          break;
+
+        case '/api/connectors/gmail/callback':
+          if (req.method === 'GET') {
+            const callbackCode = url.searchParams.get('code');
+            const callbackState = url.searchParams.get('state');
+            const callbackError = url.searchParams.get('error');
+
+            if (callbackError) {
+              res.writeHead(302, { Location: `${process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu'}/hivemind/app/connectors?error=${encodeURIComponent(callbackError)}` });
+              res.end();
+              return;
+            }
+
+            if (!callbackCode) {
+              return jsonResponse(res, { error: 'Missing authorization code' }, 400);
+            }
+
+            try {
+              // Parse state to get userId/orgId
+              let stateUserId = userId, stateOrgId = orgId;
+              if (callbackState) {
+                try {
+                  const parsed = JSON.parse(Buffer.from(callbackState, 'base64url').toString());
+                  stateUserId = parsed.userId || stateUserId;
+                  stateOrgId = parsed.orgId || stateOrgId;
+                } catch {}
+              }
+
+              const { exchangeCode } = await import('./connectors/providers/gmail/oauth.js');
+              const gmailCallbackUri = `${process.env.HIVEMIND_BASE_URL || getHostedApiBaseUrl(req)}/api/connectors/gmail/callback`;
+              const tokens = await exchangeCode({ code: callbackCode, redirectUri: gmailCallbackUri });
+
+              // Store connection via ConnectorStore
+              const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
+              const connStore = new ConnectorStore(prisma);
+
+              const tokenExpiresAt = tokens.expires_in
+                ? new Date(Date.now() + tokens.expires_in * 1000)
+                : null;
+
+              await connStore.upsertConnector({
+                userId: stateUserId,
+                provider: 'gmail',
+                accountRef: tokens.email || null,
+                accessToken: tokens.access_token,
+                refreshToken: tokens.refresh_token,
+                tokenExpiresAt,
+                scopes: tokens.scope?.split(' ') || ['https://www.googleapis.com/auth/gmail.readonly'],
+                metadata: { email: tokens.email },
+              });
+
+              console.log(`[gmail-oauth] Connected for user=${stateUserId} email=${tokens.email}`);
+
+              // Trigger initial sync in background
+              (async () => {
+                try {
+                  const { GmailAdapter } = await import('./connectors/providers/gmail/adapter.js');
+                  const { SyncEngine } = await import('./connectors/framework/sync-engine.js');
+                  const adapter = new GmailAdapter();
+                  const syncConnStore = new ConnectorStore(prisma);
+                  const syncEngine = new SyncEngine({
+                    store: syncConnStore,
+                    memoryEngine: persistentMemoryEngine,
+                    memoryStore: persistentMemoryStore,
+                  });
+                  const result = await syncEngine.sync({
+                    userId: stateUserId,
+                    orgId: stateOrgId,
+                    provider: 'gmail',
+                    adapter,
+                    incremental: false,
+                  });
+                  console.log(`[gmail-sync] Initial sync complete: imported=${result.imported}, skipped=${result.skipped}`);
+                } catch (syncErr) {
+                  console.error(`[gmail-sync] Initial sync failed:`, syncErr.message);
+                }
+              })();
+
+              // Redirect to frontend connectors page
+              const frontendUrl = process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu';
+              res.writeHead(302, { Location: `${frontendUrl}/hivemind/app/connectors?connected=gmail&email=${encodeURIComponent(tokens.email || '')}` });
+              res.end();
+              return;
+            } catch (err) {
+              console.error('[gmail-oauth] Callback failed:', err.message);
+              const frontendUrl = process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu';
+              res.writeHead(302, { Location: `${frontendUrl}/hivemind/app/connectors?error=${encodeURIComponent(err.message)}` });
+              res.end();
+              return;
+            }
+          }
+          break;
+
+        case '/api/connectors/gmail/status':
+          if (req.method === 'GET') {
+            try {
+              const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
+              const statusStore = new ConnectorStore(prisma);
+              const connection = await statusStore.getConnector(userId, 'gmail');
+              if (!connection) {
+                return jsonResponse(res, { connected: false });
+              }
+              return jsonResponse(res, {
+                connected: true,
+                email: connection.platformUserId,
+                status: connection.syncStatus,
+                last_synced: connection.lastSyncedAt,
+                last_error: connection.lastErrorMessage,
+              });
+            } catch (err) {
+              return jsonResponse(res, { connected: false, error: err.message });
+            }
+          }
+          break;
+
+        case '/api/connectors/gmail/disconnect':
+          if (req.method === 'POST') {
+            try {
+              const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
+              const dcStore = new ConnectorStore(prisma);
+              await dcStore.disconnect(userId, 'gmail');
+              return jsonResponse(res, { disconnected: true });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        // ==========================================
         // CONNECTOR FRAMEWORK SYNC (Provider-agnostic)
         // ==========================================
         case '/api/connectors/sync':

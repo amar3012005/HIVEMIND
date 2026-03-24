@@ -394,11 +394,15 @@ async function callToolFallback(
 async function runBridge(config: BridgeConfig): Promise<void> {
   const descriptor = await fetchDescriptor(config);
   const { url: rpcUrl, token } = resolveRpcEndpoint(config, descriptor);
+  log(config, `Descriptor fetched successfully for user ${config.userId}`);
+  log(config, `Resolved RPC endpoint: ${rpcUrl}`);
+  log(config, `Resolved connection token: ${token ? 'present' : 'absent'}`);
 
   const capabilities = descriptor.mcp?.capabilities || { tools: {} };
   const tools = descriptor.tools || [];
   const resources = descriptor.resources || [];
   const prompts = descriptor.prompts || [];
+  log(config, `Bridge manifest: ${tools.length} tools, ${resources.length} resources, ${prompts.length} prompts`);
 
   const server = new Server(
     { name: 'hivemind-mcp-bridge', version: packageVersion },
@@ -438,6 +442,7 @@ async function runBridge(config: BridgeConfig): Promise<void> {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  log(config, 'Bridge ready on stdio transport; waiting for MCP client requests');
 }
 
 async function main() {

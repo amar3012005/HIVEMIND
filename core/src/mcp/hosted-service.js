@@ -367,7 +367,8 @@ export function generateHostedServer(userId, orgId, apiKey) {
     },
 
     // Available Tools (HIVE-MIND capabilities exposed as MCP tools)
-    tools: generateToolsManifest(userId, orgId),
+    // Descriptor shows all tools; actual calls are entitlement-gated at execution time
+    tools: generateToolsManifest(userId, orgId, { scopes: ['*'] }),
 
     // Available Resources
     resources: generateResourcesManifest(userId, orgId),
@@ -390,10 +391,18 @@ export function generateHostedServer(userId, orgId, apiKey) {
  * Generate MCP tools manifest for HIVE-MIND capabilities
  * @param {string} userId - User ID
  * @param {string} orgId - Organization ID
+ * @param {object} [options={}]
+ * @param {string[]} [options.scopes] - User entitlement scopes (used to gate web tools)
  * @returns {Array} MCP tools manifest
  */
-function generateToolsManifest(userId, orgId) {
-  return [
+function generateToolsManifest(userId, orgId, options = {}) {
+  const scopes = Array.isArray(options.scopes) ? options.scopes : [];
+  const hasAll = scopes.includes('*');
+  const hasWebSearch = hasAll || scopes.includes('web_search');
+  const hasWebCrawl = hasAll || scopes.includes('web_crawl');
+  const hasAnyWeb = hasWebSearch || hasWebCrawl;
+
+  const tools = [
     {
       name: 'hivemind_save_memory',
       description: 'Save information to HIVE-MIND persistent memory. Use this to store important facts, code snippets, decisions, or context that should be remembered across conversations.',
@@ -654,8 +663,11 @@ function generateToolsManifest(userId, orgId) {
         required: ['question']
       }
     },
-    // ── Web Intelligence tools ──────────────────────────────
-    {
+  ];
+
+  // ── Web Intelligence tools (scope-gated) ──────────────────
+  if (hasWebSearch) {
+    tools.push({
       name: 'hivemind_web_search',
       description: 'Search the web and return structured results. Requires web_search entitlement. Returns async job receipt.',
       inputSchema: {
@@ -667,8 +679,10 @@ function generateToolsManifest(userId, orgId) {
         },
         required: ['query']
       }
-    },
-    {
+    });
+  }
+  if (hasWebCrawl) {
+    tools.push({
       name: 'hivemind_web_crawl',
       description: 'Crawl web pages and extract content. Requires web_crawl entitlement. Returns async job receipt.',
       inputSchema: {
@@ -680,8 +694,10 @@ function generateToolsManifest(userId, orgId) {
         },
         required: ['urls']
       }
-    },
-    {
+    });
+  }
+  if (hasAnyWeb) {
+    tools.push({
       name: 'hivemind_web_job_status',
       description: 'Check status of a web search or crawl job.',
       inputSchema: {
@@ -691,16 +707,18 @@ function generateToolsManifest(userId, orgId) {
         },
         required: ['job_id']
       }
-    },
-    {
+    });
+    tools.push({
       name: 'hivemind_web_usage',
       description: 'Check web intelligence quota and usage.',
       inputSchema: {
         type: 'object',
         properties: {}
       }
-    }
-  ];
+    });
+  }
+
+  return tools;
 }
 
 /**
@@ -1170,7 +1188,7 @@ export async function getHostedServerByToken(token, userId) {
       token: connection.token,
       expiresAt: connection.expiresAt
     },
-    tools: generateToolsManifest(userId, connection.orgId),
+    tools: generateToolsManifest(userId, connection.orgId, { scopes: connection.scopes || ['*'] }),
     resources: generateResourcesManifest(userId, connection.orgId),
     prompts: generatePromptsManifest(userId, connection.orgId),
     clientConfig: generateClientConfig(userId, connection.orgId, connection.token),
@@ -1207,11 +1225,13 @@ export function handleInitialize(params, userId) {
  * Handle tools/list request
  * @param {string} userId - User ID
  * @param {string} orgId - Organization ID
+ * @param {object} [options={}]
+ * @param {string[]} [options.scopes] - User entitlement scopes for tool visibility gating
  * @returns {Object} Tools list result
  */
-export function handleToolsList(userId, orgId) {
+export function handleToolsList(userId, orgId, options = {}) {
   return {
-    tools: generateToolsManifest(userId, orgId)
+    tools: generateToolsManifest(userId, orgId, { scopes: options.scopes })
   };
 }
 

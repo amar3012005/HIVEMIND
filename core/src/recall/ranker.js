@@ -256,23 +256,28 @@ function enforceDiversity(results, options = {}) {
   const diverse = [];
   const sourceCount = new Map();
   const contentHashes = new Set();
+  let keptTopKCount = 0;
 
   for (const r of results) {
     const content = (r.content || r.payload?.content || '').toLowerCase()
       .replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+    const title = (r.title || r.payload?.title || '').toLowerCase().trim();
+    const fingerprintSource = content || title || String(r.id || '');
 
     // Content-hash dedup
-    const hash = simpleHash(content);
+    const hash = simpleHash(fingerprintSource);
     if (contentHashes.has(hash)) continue;
     contentHashes.add(hash);
 
     let demoted = false;
 
     // Near-duplicate check against top-K selected so far
-    if (diverse.length < topK) {
+    if (keptTopKCount < topK) {
       const tooSimilar = diverse.some(d => {
+        if (d._demoted) return false;
         const dContent = (d.content || d.payload?.content || '').toLowerCase()
           .replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+        if (!content || !dContent) return false;
         return tokenOverlapRatio(content, dContent) > minContentDiversity;
       });
       if (tooSimilar) demoted = true;
@@ -281,12 +286,15 @@ function enforceDiversity(results, options = {}) {
     // Source diversity cap
     const source = r.source_platform || r.payload?.source_platform || 'unknown';
     const count = sourceCount.get(source) || 0;
-    if (!demoted && diverse.length < topK && count >= maxSameSource) {
+    if (!demoted && keptTopKCount < topK && count >= maxSameSource) {
       demoted = true;
     }
 
     if (!demoted) {
       sourceCount.set(source, count + 1);
+      if (keptTopKCount < topK) {
+        keptTopKCount++;
+      }
     }
 
     r._demoted = demoted;

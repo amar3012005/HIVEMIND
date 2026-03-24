@@ -6,6 +6,7 @@ export const ENTITLEMENT_SCOPES = [
   'mcp',
   'web_search',
   'web_crawl',
+  'web_admin',
 ];
 
 export function hasEntitlement(principal, entitlement) {

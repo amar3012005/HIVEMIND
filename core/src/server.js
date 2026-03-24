@@ -54,7 +54,9 @@ const { PrismaGraphStore } = await import('./memory/prisma-graph-store.js');
 const { queryPersistedMemories, recallPersistedMemories } = await import('./memory/persisted-retrieval.js');
 const { authenticatePersistedApiKey, hasEntitlement } = await import('./auth/api-keys.js');
 const { WebJobStore } = await import('./web/web-job-store.js');
-const { BrowserRuntime } = await import('./web/browser-runtime.js');
+const { BrowserRuntime, getTelemetry } = await import('./web/browser-runtime.js');
+const { validateDomain, filterContent, UserRateLimiter, detectAbuse, getRobotsWarning } = await import('./web/web-policy.js');
+const webRateLimiter = new UserRateLimiter({ maxPerMinute: 10, maxPerHour: 60 });
 const { getQdrantClient } = await import('./vector/qdrant-client.js');
 const { getQdrantCollections } = await import('./vector/collections.js');
 const { MCPIngestionService } = await import('./connectors/mcp/service.js');
@@ -971,7 +973,8 @@ const server = http.createServer(async (req, res) => {
             result = {};
             break;
           case 'tools/list':
-            result = handleToolsList(pathUserId, connectionOrgId);
+            // Connection-token path: scopes stored in connection context, default to ['*'] for issued tokens
+            result = handleToolsList(pathUserId, connectionOrgId, { scopes: connection?.scopes || ['*'] });
             break;
           case 'tools/call':
             result = await handleToolCall(body.params || {}, pathUserId, connectionOrgId, apiClient);
@@ -1132,7 +1135,7 @@ const server = http.createServer(async (req, res) => {
             result = {};
             break;
           case 'tools/list':
-            result = handleToolsList(userId, orgId);
+            result = handleToolsList(userId, orgId, { scopes: principal.scopes || [] });
             break;
           case 'tools/call':
             result = await handleToolCall(body.params || {}, userId, orgId, apiClient);
@@ -1588,19 +1591,49 @@ const server = http.createServer(async (req, res) => {
               return jsonResponse(res, { error: 'Feature not enabled', code: 'feature_not_enabled', required_entitlement: 'web_search' }, 403);
             }
             try {
+              // Rate limit check
+              const rlCheck = webRateLimiter.check(userId);
+              if (!rlCheck.allowed) {
+                return jsonResponse(res, { error: 'Rate limit exceeded', code: 'rate_limited', retry_after_ms: rlCheck.retryAfterMs }, 429);
+              }
               const usage = await webJobStore.getUsage(userId);
               if (usage.web_search_requests >= WEB_SEARCH_DAILY_LIMIT) {
                 return jsonResponse(res, { error: 'Daily search quota exceeded', code: 'quota_exceeded', limit: WEB_SEARCH_DAILY_LIMIT, used: usage.web_search_requests }, 429);
+              }
+              // Monthly limit check
+              const limits = await webJobStore.checkLimits(userId);
+              if (limits.monthly.search.exceeded) {
+                return jsonResponse(res, { error: 'Monthly search quota exceeded', code: 'monthly_quota_exceeded', limit: limits.monthly.search.hard, used: limits.monthly.search.used }, 429);
               }
               const { query, domains, limit: searchLimit } = body;
               if (!query) {
                 return jsonResponse(res, { error: 'query is required' }, 400);
               }
+              // Abuse detection
+              const abuseCheck = detectAbuse({ userId, type: 'search', query, recentJobCount: usage.web_search_requests });
+              if (abuseCheck.action === 'block') {
+                return jsonResponse(res, { error: 'Request blocked', code: 'abuse_detected', reason: abuseCheck.reason }, 403);
+              }
+              webRateLimiter.record(userId);
               const job = await webJobStore.create({ type: 'search', params: { query, domains: domains || [], limit: searchLimit || 10 }, userId, orgId });
               setImmediate(async () => {
                 try {
                   await webJobStore.update(job.id, { status: 'running' });
                   const result = await browserRuntime.search({ query, domains: domains || [], limit: searchLimit || 10 });
+                  const resultCount = Array.isArray(result.results) ? result.results.length : 0;
+                  const errors = Array.isArray(result.errors) ? result.errors : [];
+                  if (resultCount === 0 && errors.length > 0) {
+                    await webJobStore.update(job.id, {
+                      status: 'failed',
+                      error: errors[0]?.error || 'search_failed',
+                      runtime_used: result.runtime_used,
+                      fallback_applied: result.fallback_applied,
+                      duration_ms: result.duration_ms,
+                      pages_processed: 0,
+                      results: []
+                    });
+                    return;
+                  }
                   await webJobStore.update(job.id, {
                     status: 'succeeded',
                     results: result.results,
@@ -1626,27 +1659,71 @@ const server = http.createServer(async (req, res) => {
               return jsonResponse(res, { error: 'Feature not enabled', code: 'feature_not_enabled', required_entitlement: 'web_crawl' }, 403);
             }
             try {
+              // Rate limit check
+              const rlCheck = webRateLimiter.check(userId);
+              if (!rlCheck.allowed) {
+                return jsonResponse(res, { error: 'Rate limit exceeded', code: 'rate_limited', retry_after_ms: rlCheck.retryAfterMs }, 429);
+              }
               const usage = await webJobStore.getUsage(userId);
               if (usage.web_crawl_pages >= WEB_CRAWL_DAILY_LIMIT) {
                 return jsonResponse(res, { error: 'Daily crawl quota exceeded', code: 'quota_exceeded', limit: WEB_CRAWL_DAILY_LIMIT, used: usage.web_crawl_pages }, 429);
+              }
+              // Monthly limit check
+              const limits = await webJobStore.checkLimits(userId);
+              if (limits.monthly.crawl.exceeded) {
+                return jsonResponse(res, { error: 'Monthly crawl quota exceeded', code: 'monthly_quota_exceeded', limit: limits.monthly.crawl.hard, used: limits.monthly.crawl.used }, 429);
               }
               const { urls, depth, page_limit: pageLimit, include, exclude } = body;
               if (!urls || !Array.isArray(urls) || urls.length === 0) {
                 return jsonResponse(res, { error: 'urls array is required' }, 400);
               }
-              const effectivePageLimit = Math.min(pageLimit || 50, WEB_CRAWL_DAILY_LIMIT - usage.web_crawl_pages);
-              const job = await webJobStore.create({ type: 'crawl', params: { urls, depth: depth || 1, pageLimit: effectivePageLimit, include, exclude }, userId, orgId });
+              // Domain policy validation
+              const domainErrors = [];
+              for (const u of urls) {
+                const domainCheck = validateDomain(u);
+                if (!domainCheck.allowed) domainErrors.push({ url: u, reason: domainCheck.reason });
+              }
+              if (domainErrors.length === urls.length) {
+                return jsonResponse(res, { error: 'All URLs blocked by policy', code: 'domain_blocked', details: domainErrors }, 403);
+              }
+              // Abuse detection
+              const abuseCheck = detectAbuse({ userId, type: 'crawl', urls, recentJobCount: usage.web_crawl_pages });
+              if (abuseCheck.action === 'block') {
+                return jsonResponse(res, { error: 'Request blocked', code: 'abuse_detected', reason: abuseCheck.reason }, 403);
+              }
+              webRateLimiter.record(userId);
+              // Filter allowed URLs
+              const allowedUrls = domainErrors.length > 0 ? urls.filter(u => !domainErrors.find(e => e.url === u)) : urls;
+              const requestedPageLimit = Number(pageLimit ?? 50);
+              const normalizedPageLimit = Number.isFinite(requestedPageLimit) && requestedPageLimit > 0 ? requestedPageLimit : 50;
+              const effectiveDepth = Number.isFinite(Number(depth)) ? Number(depth) : 1;
+              const effectivePageLimit = Math.min(normalizedPageLimit, WEB_CRAWL_DAILY_LIMIT - usage.web_crawl_pages);
+              const job = await webJobStore.create({ type: 'crawl', params: { urls: allowedUrls, depth: effectiveDepth, pageLimit: effectivePageLimit, include, exclude, domain_warnings: domainErrors }, userId, orgId });
               setImmediate(async () => {
                 try {
                   await webJobStore.update(job.id, { status: 'running' });
-                  const result = await browserRuntime.crawl({ urls, depth: depth || 1, pageLimit: effectivePageLimit, include, exclude });
+                  const result = await browserRuntime.crawl({ urls: allowedUrls, depth: effectiveDepth, pageLimit: effectivePageLimit, include, exclude });
+                  const pagesProcessed = Array.isArray(result.pages) ? result.pages.length : 0;
+                  const errors = Array.isArray(result.errors) ? result.errors : [];
+                  if (pagesProcessed === 0 && errors.length > 0) {
+                    await webJobStore.update(job.id, {
+                      status: 'failed',
+                      error: errors[0]?.error || 'crawl_failed',
+                      runtime_used: result.runtime_used,
+                      fallback_applied: result.fallback_applied,
+                      duration_ms: result.duration_ms,
+                      pages_processed: 0,
+                      results: []
+                    });
+                    return;
+                  }
                   await webJobStore.update(job.id, {
                     status: 'succeeded',
                     results: result.pages,
                     runtime_used: result.runtime_used,
                     fallback_applied: result.fallback_applied,
                     duration_ms: result.duration_ms,
-                    pages_processed: result.pages.length,
+                    pages_processed: pagesProcessed,
                   });
                 } catch (err) {
                   await webJobStore.update(job.id, { status: 'failed', error: err.message });
@@ -1704,6 +1781,162 @@ const server = http.createServer(async (req, res) => {
           }
           break;
         }
+
+        // Retry a failed web job
+        case pathname.match(/^\/api\/web\/jobs\/([^/]+)\/retry$/)?.input: {
+          if (req.method === 'POST') {
+            try {
+              const jobId = pathname.match(/^\/api\/web\/jobs\/([^/]+)\/retry$/)[1];
+              const newJob = await webJobStore.retry(jobId, { userId, orgId });
+              if (!newJob) {
+                return jsonResponse(res, { error: 'Job not found or not retryable (must be failed)' }, 400);
+              }
+              // Re-execute the job
+              setImmediate(async () => {
+                try {
+                  await webJobStore.update(newJob.id, { status: 'running' });
+                  const p = newJob.params;
+                  const result = newJob.type === 'search'
+                    ? await browserRuntime.search({ query: p.query, domains: p.domains || [], limit: p.limit || 10 })
+                    : await browserRuntime.crawl({ urls: p.urls, depth: p.depth || 1, pageLimit: p.pageLimit || 50, include: p.include, exclude: p.exclude });
+                  const items = newJob.type === 'search' ? result.results : result.pages;
+                  const count = Array.isArray(items) ? items.length : 0;
+                  const errors = Array.isArray(result.errors) ? result.errors : [];
+                  if (count === 0 && errors.length > 0) {
+                    await webJobStore.update(newJob.id, { status: 'failed', error: errors[0]?.error || `${newJob.type}_failed`, runtime_used: result.runtime_used, fallback_applied: result.fallback_applied, duration_ms: result.duration_ms, pages_processed: 0, results: [] });
+                  } else {
+                    await webJobStore.update(newJob.id, { status: 'succeeded', results: items, runtime_used: result.runtime_used, fallback_applied: result.fallback_applied, duration_ms: result.duration_ms, pages_processed: newJob.type === 'crawl' ? count : undefined });
+                  }
+                } catch (err) {
+                  await webJobStore.update(newJob.id, { status: 'failed', error: err.message });
+                }
+              });
+              return jsonResponse(res, { job_id: newJob.id, status: 'queued', type: newJob.type, retried_from: jobId }, 202);
+            } catch (error) {
+              return jsonResponse(res, { error: error.message }, 500);
+            }
+          }
+          break;
+        }
+
+        // Save web job result to memory
+        case pathname.match(/^\/api\/web\/jobs\/([^/]+)\/save-to-memory$/)?.input: {
+          if (req.method === 'POST') {
+            try {
+              const jobId = pathname.match(/^\/api\/web\/jobs\/([^/]+)\/save-to-memory$/)[1];
+              const job = await webJobStore.get(jobId, { userId, orgId });
+              if (!job) return jsonResponse(res, { error: 'Job not found' }, 404);
+              if (job.status !== 'succeeded' || !Array.isArray(job.results) || job.results.length === 0) {
+                return jsonResponse(res, { error: 'Job has no results to save' }, 400);
+              }
+              const { resultIndex, title, tags } = body;
+              const items = typeof resultIndex === 'number' ? [job.results[resultIndex]].filter(Boolean) : job.results;
+              if (items.length === 0) return jsonResponse(res, { error: 'Invalid result index' }, 400);
+              const savedIds = [];
+              for (const item of items) {
+                const content = item.snippet || item.text || item.content || JSON.stringify(item);
+                const memTitle = title || item.title || item.url || `Web ${job.type} result`;
+                const memTags = [...(tags || []), `web:${job.type}`, 'source:web-intelligence'];
+                if (item.url) memTags.push(`url:${item.url}`);
+                const filtered = filterContent(content);
+                const mem = await persistentMemoryStore.addMemory({
+                  content: filtered.text,
+                  title: memTitle,
+                  source_platform: 'web_intelligence',
+                  tags: memTags,
+                  metadata: { web_job_id: jobId, url: item.url, runtime_used: job.runtime_used, crawled_at: job.created_at },
+                }, userId, orgId);
+                if (mem?.id) savedIds.push(mem.id);
+              }
+              return jsonResponse(res, { saved: savedIds.length, memory_ids: savedIds });
+            } catch (error) {
+              return jsonResponse(res, { error: error.message }, 500);
+            }
+          }
+          break;
+        }
+
+        // Admin metrics for web intelligence (requires web_admin or admin:* scope)
+        case '/api/web/admin/metrics':
+          if (req.method === 'GET') {
+            if (!hasEntitlement(principal, 'web_admin')) {
+              return jsonResponse(res, { error: 'Admin access required', code: 'insufficient_scope', required_entitlement: 'web_admin' }, 403);
+            }
+            try {
+              // Platform-admin (scope '*') sees all; org-scoped admin sees own org only
+              const isGlobalAdmin = principal.scopes?.includes('*') || principal.master;
+              const metrics = await webJobStore.getMetrics(isGlobalAdmin ? undefined : orgId);
+              const runtimeTelemetry = getTelemetry();
+              return jsonResponse(res, { ...metrics, runtime_telemetry: runtimeTelemetry });
+            } catch (error) {
+              return jsonResponse(res, { error: error.message }, 500);
+            }
+          }
+          break;
+
+        // Monthly usage
+        case '/api/web/usage/monthly':
+          if (req.method === 'GET') {
+            try {
+              const monthly = await webJobStore.getMonthlyUsage(userId);
+              return jsonResponse(res, monthly);
+            } catch (error) {
+              return jsonResponse(res, { error: error.message }, 500);
+            }
+          }
+          break;
+
+        // Usage export
+        case '/api/web/usage/export':
+          if (req.method === 'GET') {
+            try {
+              const from = url.searchParams.get('from');
+              const to = url.searchParams.get('to');
+              const exportData = await webJobStore.exportUsage({ userId, orgId }, { from, to });
+              return jsonResponse(res, { usage: exportData });
+            } catch (error) {
+              return jsonResponse(res, { error: error.message }, 500);
+            }
+          }
+          break;
+
+        // Limits check
+        case '/api/web/limits':
+          if (req.method === 'GET') {
+            if (!hasEntitlement(principal, 'web_search') && !hasEntitlement(principal, 'web_crawl')) {
+              return jsonResponse(
+                res,
+                {
+                  error: 'Feature not enabled',
+                  code: 'feature_not_enabled',
+                  required_entitlements: ['web_search', 'web_crawl'],
+                },
+                403
+              );
+            }
+            try {
+              const limits = await webJobStore.checkLimits(userId);
+              return jsonResponse(res, limits);
+            } catch (error) {
+              return jsonResponse(res, { error: error.message }, 500);
+            }
+          }
+          break;
+
+        // Domain policy check
+        case '/api/web/policy/check-domain':
+          if (req.method === 'POST') {
+            try {
+              const { url: checkUrl } = body;
+              if (!checkUrl) return jsonResponse(res, { error: 'url is required' }, 400);
+              const domainResult = validateDomain(checkUrl);
+              const robotsResult = getRobotsWarning(checkUrl);
+              return jsonResponse(res, { ...domainResult, ...robotsResult });
+            } catch (error) {
+              return jsonResponse(res, { error: error.message }, 500);
+            }
+          }
+          break;
 
         // ==========================================
         // HOSTED MCP SERVICE (Phase 2: Context-as-a-Service)

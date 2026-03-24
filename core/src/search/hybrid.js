@@ -111,6 +111,7 @@ async function vectorSearch(queryVector, options = {}) {
     orgId,
     memoryType,
     tags,
+    project,
     sourcePlatform,
     isLatest,
     includeExpired = CONFIG.temporal.defaultIncludeExpired,
@@ -176,6 +177,7 @@ async function semanticSearch(query, options = {}) {
     orgId,
     memoryType,
     tags,
+    project,
     sourcePlatform,
     isLatest,
     includeExpired = CONFIG.temporal.defaultIncludeExpired,
@@ -875,6 +877,7 @@ async function hybridSearch(options = {}) {
     orgId,
     memoryType,
     tags,
+    project,
     sourcePlatform,
     isLatest = true,
     includeExpired = CONFIG.temporal.defaultIncludeExpired,
@@ -889,12 +892,19 @@ async function hybridSearch(options = {}) {
   } = options;
 
   const startTime = Date.now();
+  const queryProfile = preprocessQuery(query);
+  const effectiveQuery = queryProfile.cleanedQuery || query || '';
+  const effectiveWeights = queryProfile.weightOverrides
+    ? { ...weights, ...queryProfile.weightOverrides }
+    : weights;
 
   logger.info('Starting hybrid search', {
     query,
+    effectiveQuery,
     userId,
     limit,
-    weights
+    weights: effectiveWeights,
+    intent: queryProfile.intent
   });
 
   // Validate required parameters
@@ -902,7 +912,7 @@ async function hybridSearch(options = {}) {
     throw new Error('userId is required for multi-tenant isolation');
   }
 
-  const queryVector = await resolveQueryVector(query, providedQueryVector);
+  const queryVector = await resolveQueryVector(effectiveQuery, providedQueryVector);
 
   // Step 1: Vector search
   let vectorResults = [];
@@ -926,8 +936,8 @@ async function hybridSearch(options = {}) {
   }
 
   let semanticFallbackResults = [];
-  if (query) {
-    semanticFallbackResults = await semanticSearch(query, {
+  if (effectiveQuery) {
+    semanticFallbackResults = await semanticSearch(effectiveQuery, {
       userId,
       orgId,
       memoryType,
@@ -948,8 +958,8 @@ async function hybridSearch(options = {}) {
 
   // Step 2: Keyword search (if query provided)
   let keywordResults = [];
-  if (query) {
-    keywordResults = await keywordSearch(query, {
+  if (effectiveQuery) {
+    keywordResults = await keywordSearch(effectiveQuery, {
       userId,
       orgId,
       limit: CONFIG.limits.keywordTopK
@@ -975,13 +985,14 @@ async function hybridSearch(options = {}) {
     preFiltered.vectorResults,
     preFiltered.keywordResults,
     preFiltered.graphResults,
-    weights
+    effectiveWeights
   );
 
   // Step 5: Rank results
   const rankedResults = rank(combinedResults, {
     strategy: 'hybrid',
-    recencyBias: 0.7
+    recencyBias: 0.7,
+    queryContext: effectiveQuery
   });
 
   // Step 6: Apply minimum score threshold
@@ -990,7 +1001,7 @@ async function hybridSearch(options = {}) {
   );
 
   // Step 7: Apply precision boosts (title/tag/project/dedup)
-  const boostedResults = applyPrecisionBoosts(filteredResults, query, { project });
+  const boostedResults = applyPrecisionBoosts(filteredResults, effectiveQuery, { project });
 
   // Step 8: Limit results
   const finalResults = boostedResults.slice(0, limit);

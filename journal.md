@@ -1,5 +1,14 @@
 # HIVE-MIND Deployment Journal
 
+  ./scripts/deploy.sh              # rebuild + restart core & control + verify
+  ./scripts/deploy.sh core         # rebuild + restart core only
+  ./scripts/deploy.sh control      # restart control-plane only
+  ./scripts/deploy.sh restart      # restart both without rebuild
+  ./scripts/deploy.sh status       # show container status
+  ./scripts/deploy.sh logs         # tail hm-core logs
+  ./scripts/deploy.sh logs hm-control  # tail control-plane logs
+  ./scripts/deploy.sh verify       # verify all 9 endpoints
+
 ## 2026-03-18 18:00 UTC - Runtime Consolidation: Postgres/Qdrant Now Only Production Memory Path
 
 ### Implementation Complete: Remove engine.local.js Fallback from Production Routes

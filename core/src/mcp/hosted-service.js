@@ -378,7 +378,10 @@ export function generateHostedServer(userId, orgId, apiKey) {
 
     // Client Configuration for Claude Desktop/Cursor/Antigravity/VS Code
     clientConfig: generateClientConfig(userId, orgId, connectionToken),
-    ingestion: generateIngestionConfig(userId, orgId)
+    ingestion: generateIngestionConfig(userId, orgId),
+
+    // System prompt for AI platforms — tells Claude/Cursor/Antigravity how to use HIVEMIND tools
+    systemPrompt: generateSystemPrompt(userId, orgId)
   };
 
   // Track connection
@@ -777,6 +780,11 @@ function generateResourcesManifest(userId, orgId) {
 function generatePromptsManifest(userId, orgId) {
   return [
     {
+      name: 'hivemind_system_prompt',
+      description: 'HIVEMIND system prompt — comprehensive instructions for AI platforms on when and how to use every HIVEMIND MCP tool (memory, search, web intelligence). Load this at the start of every session.',
+      arguments: []
+    },
+    {
       name: 'memory_summary',
       description: 'Generate a summary of relevant memories for the current context',
       arguments: [
@@ -789,7 +797,7 @@ function generatePromptsManifest(userId, orgId) {
     },
     {
       name: 'context_injection',
-      description: 'Inject relevant memories into the conversation context',
+      description: 'Inject relevant memories and the HIVEMIND usage guide into conversation context',
       arguments: [
         {
           name: 'query',
@@ -810,6 +818,149 @@ function generatePromptsManifest(userId, orgId) {
       ]
     }
   ];
+}
+
+/**
+ * Generate the HIVEMIND system prompt that teaches AI platforms
+ * (Claude, Cursor, Antigravity, VS Code Copilot) when and how
+ * to use each MCP tool.  Injected into the server descriptor and
+ * the `context_injection` prompt.
+ */
+function generateSystemPrompt(userId, orgId) {
+  return `You are connected to HIVEMIND — a persistent memory engine for AI agents.
+HIVEMIND gives you long-term memory, semantic search, knowledge-graph traversal,
+and live web intelligence.  Use the tools below proactively to give the user
+a personalised, context-aware experience.
+
+━━━ WHEN TO USE EACH TOOL ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+## 1. MEMORY — read & write the user's knowledge base
+
+### hivemind_save_memory
+USE WHEN: The user shares a fact, preference, decision, code snippet,
+meeting note, or anything worth remembering across sessions.
+HOW:  { title, content, tags: ["topic"], source_platform: "claude" }
+TIP:  Always tag memories.  Use specific tags ("project:acme", "lang:rust")
+      so retrieval is precise later.  Don't save trivial chit-chat.
+
+### hivemind_recall
+USE WHEN: The user asks a question that might be answered by their
+saved memories, OR you need context before answering.
+HOW:  { query: "user's question", mode: "quick" }
+MODES:
+  • "quick"    → fast vector search, best for simple lookups
+  • "panorama" → timeline-aware, best for "what happened last week?"
+  • "insight"  → AI-powered sub-queries, best for complex questions
+TIP:  Call this FIRST if the user references past conversations,
+      preferences, or stored knowledge.
+
+### hivemind_list_memories
+USE WHEN: The user asks "show me my memories about X" or wants to browse.
+HOW:  { tags: ["X"], limit: 10 }
+
+### hivemind_get_memory
+USE WHEN: You already have a memory ID and need the full content.
+HOW:  { memory_id: "uuid" }
+
+### hivemind_update_memory
+USE WHEN: A stored fact is outdated and needs correction.
+HOW:  { memory_id: "uuid", content: "corrected text" }
+
+### hivemind_delete_memory
+USE WHEN: The user explicitly asks to forget something.
+HOW:  { memory_id: "uuid" }
+
+### hivemind_save_conversation
+USE WHEN: A conversation is ending and contains important context.
+HOW:  { messages: [...], tags: ["session"] }
+TIP:  Summarise the conversation — don't dump the raw transcript.
+
+### hivemind_traverse_graph
+USE WHEN: The user asks "what's related to X?" or you want to explore
+connections between memories (e.g. "how does project A connect to person B?").
+HOW:  { start_memory_id: "uuid", depth: 2 }
+
+### hivemind_query_with_ai
+USE WHEN: The user asks a broad or complex question that benefits from
+AI-synthesised answers over their memory base (e.g. "summarise everything
+I know about our Q3 roadmap").
+HOW:  { question: "..." }
+
+## 2. WEB INTELLIGENCE — search & crawl the live web
+
+### hivemind_web_search
+USE WHEN: The user needs up-to-date information that wouldn't be in
+their memories (news, docs, pricing, release notes, etc.).
+HOW:  { query: "search terms", limit: 10, domains: ["docs.example.com"] }
+NOTE: Returns a job receipt.  Poll with hivemind_web_job_status.
+FLOW: submit → poll status → read results → optionally save to memory.
+
+### hivemind_web_crawl
+USE WHEN: The user wants to extract content from specific URLs
+(documentation, blog posts, product pages, etc.).
+HOW:  { urls: ["https://example.com/docs"], depth: 1, page_limit: 10 }
+NOTE: Same async pattern — submit, poll, read.
+TIP:  Keep depth ≤ 2 and page_limit reasonable to avoid long waits.
+
+### hivemind_web_job_status
+USE WHEN: You submitted a web search or crawl and need to check if
+it's done.
+HOW:  { job_id: "uuid" }
+STATUS VALUES: queued → running → succeeded / failed
+TIP:  Poll every 3-5 seconds.  Once "succeeded", results are in the
+      response.  If "failed", report the error type to the user.
+
+### hivemind_web_usage
+USE WHEN: The user asks about their web quota or you want to check
+before submitting a job.
+HOW:  {} (no parameters)
+RETURNS: daily & monthly search/crawl usage with limits.
+
+━━━ DECISION FLOWCHART ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+User asks a question →
+  1. Is it about something they've told you before?
+     → hivemind_recall({ query, mode: "quick" })
+  2. Is it about recent events, live data, or external docs?
+     → hivemind_web_search or hivemind_web_crawl
+  3. Is it a complex synthesis question over their knowledge?
+     → hivemind_query_with_ai
+  4. Does the answer contain something worth remembering?
+     → hivemind_save_memory after responding
+
+User shares information →
+  1. Is it a fact, preference, or decision?
+     → hivemind_save_memory
+  2. Is it a whole conversation worth preserving?
+     → hivemind_save_conversation
+
+User asks "what do you know about X?" →
+  → hivemind_recall + hivemind_traverse_graph
+
+User asks "search the web for X" →
+  → hivemind_web_search → poll → present results
+  → Ask: "Want me to save any of these to your memory?"
+
+User asks "crawl this page" / shares a URL →
+  → hivemind_web_crawl → poll → present extracted content
+  → Ask: "Want me to save this to your memory?"
+
+━━━ BEST PRACTICES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+• ALWAYS recall before answering if the question might relate to stored knowledge.
+• ALWAYS tag memories with relevant topics for precise future retrieval.
+• NEVER save sensitive data (passwords, tokens, private keys) to memory.
+• When saving web results to memory, include the source URL as a tag.
+• Prefer "quick" recall for simple lookups; use "insight" for synthesis.
+• After a web search/crawl, offer to save useful results to memory.
+• If recall returns nothing useful, tell the user honestly — don't hallucinate.
+• Use traverse_graph to discover non-obvious connections between topics.
+
+━━━ CONTEXT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+User ID: ${userId}
+Org ID:  ${orgId}
+`;
 }
 
 /**
@@ -1206,7 +1357,7 @@ export async function getHostedServerByToken(token, userId) {
  * @param {string} userId - User ID
  * @returns {Object} Initialize result
  */
-export function handleInitialize(params, userId) {
+export function handleInitialize(params, userId, orgId) {
   return {
     protocolVersion: CONFIG.protocolVersion,
     serverInfo: {
@@ -1217,7 +1368,8 @@ export function handleInitialize(params, userId) {
       tools: { listChanged: true },
       resources: { subscribe: true, listChanged: true },
       prompts: { listChanged: true }
-    }
+    },
+    instructions: generateSystemPrompt(userId, orgId || 'default')
   };
 }
 
@@ -1262,18 +1414,57 @@ export function handleReadResource(params, userId, orgId) {
 }
 
 export function handleGetPrompt(params, userId, orgId) {
+  const name = params?.name || 'unknown';
+
+  // Return the HIVEMIND system prompt for context_injection
+  if (name === 'context_injection' || name === 'hivemind_system_prompt') {
+    return {
+      description: 'HIVEMIND system prompt — teaches AI platforms when and how to use each tool',
+      messages: [{
+        role: 'assistant',
+        content: {
+          type: 'text',
+          text: generateSystemPrompt(userId, orgId)
+        }
+      }]
+    };
+  }
+
+  if (name === 'memory_summary') {
+    const topic = params?.arguments?.topic || 'general';
+    return {
+      description: `Summarise memories about "${topic}"`,
+      messages: [{
+        role: 'assistant',
+        content: {
+          type: 'text',
+          text: `Use hivemind_recall with mode "insight" and query "${topic}" to retrieve relevant memories, then summarise them for the user.`
+        }
+      }]
+    };
+  }
+
+  if (name === 'knowledge_graph_explorer') {
+    const startTopic = params?.arguments?.start_topic || '';
+    return {
+      description: `Explore knowledge graph from "${startTopic}"`,
+      messages: [{
+        role: 'assistant',
+        content: {
+          type: 'text',
+          text: `Use hivemind_recall to find memories about "${startTopic}", then use hivemind_traverse_graph on the top result to explore connections. Present the relationship map to the user.`
+        }
+      }]
+    };
+  }
+
   return {
-    description: `Prompt '${params?.name || 'unknown'}' from HIVE-MIND`,
+    description: `Prompt '${name}' from HIVE-MIND`,
     messages: [{
       role: 'assistant',
       content: {
         type: 'text',
-        text: JSON.stringify({
-          message: 'Direct prompt generation is not implemented yet.',
-          user_id: userId,
-          org_id: orgId,
-          args: params?.arguments || {}
-        }, null, 2)
+        text: generateSystemPrompt(userId, orgId)
       }
     }]
   };

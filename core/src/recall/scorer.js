@@ -14,12 +14,14 @@
 
 const CONFIG = {
   // Scoring weights (must sum to 1.0)
+  // Semantic-majority: vector+matchBonus=0.70 ensures relevance dominates ranking.
+  // Recency/importance are tiebreakers only.
   weights: {
-    vector: 0.35,       // Vector similarity score (0-1)
-    recency: 0.25,      // Recency bias with exponential decay
-    importance: 0.20,   // Memory importance score (0-1)
+    vector: 0.50,       // Vector similarity score (0-1) — primary signal
+    recency: 0.15,      // Recency bias with exponential decay — tiebreaker
+    importance: 0.10,   // Memory importance score (0-1) — tiebreaker
     ebbinghaus: 0.05,   // Ebbinghaus forgetting curve
-    matchBonus: 0.15    // Title/tag/entity exact-match signal
+    matchBonus: 0.20    // Title/tag/entity exact-match signal — secondary signal
   },
 
   // Recency configuration

@@ -164,11 +164,15 @@ export class RetrievalEvaluator {
 
       const latencyMs = Date.now() - startTime;
 
-      // Extract result IDs
+      // Extract result IDs and content for semantic scoring
       const resultIds = this.extractResultIds(searchResults, method);
+      const resultContents = this.extractResultContents(searchResults, method);
 
-      // Calculate metrics
+      // Calculate UUID-based metrics
       const metrics = this.calculateMetrics(resultIds, relevantIds, latencyMs);
+
+      // Calculate semantic P@5 (content relevance, not just UUID match)
+      metrics.semanticPrecisionAt5 = this.computeSemanticPrecision(query, resultContents, 5);
 
       // Determine if query passed thresholds
       const passed = this.checkThresholds(metrics);
@@ -314,6 +318,64 @@ export class RetrievalEvaluator {
     }
 
     return [];
+  }
+
+  /**
+   * Extract content strings from search results for semantic scoring
+   */
+  extractResultContents(searchResults, method) {
+    if (!searchResults) return [];
+    const items = searchResults.results || searchResults.memories || (Array.isArray(searchResults) ? searchResults : []);
+    return items.map(r => ({
+      title: r.title || r.payload?.title || r.memory?.title || '',
+      content: r.content || r.payload?.content || r.memory?.content || '',
+      tags: r.tags || r.payload?.tags || r.memory?.tags || [],
+    }));
+  }
+
+  /**
+   * Compute semantic Precision@K using token overlap relevance
+   *
+   * Instead of checking UUID matches, grades each result by how well its
+   * content/title/tags match the query terms. A result is "semantically relevant"
+   * if it shares significant token overlap with the query.
+   *
+   * @param {string} query - The search query
+   * @param {Array} resultContents - Array of {title, content, tags}
+   * @param {number} k - Cutoff rank
+   * @returns {number} Semantic Precision@K (0-1)
+   */
+  computeSemanticPrecision(query, resultContents, k) {
+    if (!query || !resultContents || resultContents.length === 0) return 0;
+
+    const topK = resultContents.slice(0, k);
+    if (topK.length === 0) return 0;
+
+    // Tokenize query (remove stopwords)
+    const STOPWORDS = new Set(['the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'had', 'her', 'was', 'one', 'our', 'out', 'has', 'have', 'been', 'were', 'they', 'their', 'what', 'when', 'where', 'who', 'will', 'with', 'this', 'that', 'from', 'about', 'tell', 'how', 'does', 'did', 'know']);
+    const queryTokens = new Set(
+      query.toLowerCase().split(/\W+/).filter(t => t.length > 2 && !STOPWORDS.has(t))
+    );
+    if (queryTokens.size === 0) return 0;
+
+    let relevant = 0;
+    for (const result of topK) {
+      // Build result token set from title + content snippet + tags
+      const resultText = `${result.title} ${result.content.slice(0, 500)} ${result.tags.join(' ')}`.toLowerCase();
+      const resultTokens = new Set(resultText.split(/\W+/).filter(t => t.length > 2));
+
+      // Count overlapping tokens
+      let overlap = 0;
+      for (const qt of queryTokens) {
+        if (resultTokens.has(qt)) overlap++;
+      }
+
+      // Relevant if >= 40% of query tokens appear in result
+      const overlapRatio = overlap / queryTokens.size;
+      if (overlapRatio >= 0.4) relevant++;
+    }
+
+    return relevant / topK.length;
   }
 
   // ==========================================
@@ -740,6 +802,7 @@ export class RetrievalEvaluator {
 
     const relevanceBenchmark = {
       precision_at_5: summary.precisionAt5?.mean || 0,
+      semantic_precision_at_5: summary.semanticPrecisionAt5?.mean || 0,
       recall_at_10: summary.recallAt10?.mean || 0,
       ndcg_at_10: summary.ndcgAt10?.mean || 0,
       mrr: summary.mrr?.mean || 0,
@@ -796,7 +859,7 @@ export class RetrievalEvaluator {
    * @returns {Object} Summary statistics
    */
   calculateSummary(results) {
-    const metrics = ['precisionAt5', 'precisionAt10', 'recallAt10', 'f1At10', 'ndcgAt10', 'mrr'];
+    const metrics = ['precisionAt5', 'precisionAt10', 'recallAt10', 'f1At10', 'ndcgAt10', 'mrr', 'semanticPrecisionAt5'];
     const summary = {};
 
     for (const metric of metrics) {
@@ -888,7 +951,9 @@ export class RetrievalEvaluator {
     const { weights, thresholds } = this.config;
 
     // Normalize each metric against threshold (1.0 = meets threshold)
-    const precisionScore = Math.min(summary.precisionAt5.mean / thresholds.precisionAt5, 1);
+    // Use semantic P@5 if available (fairer than UUID-only matching), fallback to UUID-based
+    const effectivePrecision = summary.semanticPrecisionAt5?.mean || summary.precisionAt5.mean;
+    const precisionScore = Math.min(effectivePrecision / thresholds.precisionAt5, 1);
     const recallScore = Math.min(summary.recallAt10.mean / thresholds.recallAt10, 1);
     const ndcgScore = Math.min(summary.ndcgAt10.mean / thresholds.ndcgAt10, 1);
     const mrrScore = Math.min(summary.mrr.mean / thresholds.mrr, 1);

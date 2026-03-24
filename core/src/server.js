@@ -1838,11 +1838,14 @@ const server = http.createServer(async (req, res) => {
                 const memTags = [...(tags || []), `web:${job.type}`, 'source:web-intelligence'];
                 if (item.url) memTags.push(`url:${item.url}`);
                 const filtered = filterContent(content);
+                // Strip null bytes that PostgreSQL rejects (0x00)
+                const cleanText = filtered.text.replace(/\x00/g, '');
+                const cleanTitle = memTitle.replace(/\x00/g, '');
                 const ingestResult = await persistentMemoryEngine.ingestMemory({
                   user_id: userId,
                   org_id: orgId,
-                  content: filtered.text,
-                  title: memTitle,
+                  content: cleanText,
+                  title: cleanTitle,
                   source_platform: 'web_intelligence',
                   tags: memTags,
                   memory_type: 'fact',

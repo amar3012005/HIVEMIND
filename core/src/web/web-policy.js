@@ -168,7 +168,7 @@ export function filterContent(text, options = {}) {
   }
 
   const maxBytes = options.maxBytes ?? MAX_CONTENT_BYTES;
-  let filtered = text;
+  let filtered = text.replace(/\x00/g, ''); // Strip null bytes (PostgreSQL rejects 0x00)
   let filteredCount = 0;
 
   for (const pattern of DANGEROUS_CONTENT_PATTERNS) {

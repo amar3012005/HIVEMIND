@@ -32,15 +32,17 @@ export async function parseFile(buffer, mimeType, filename) {
 
   // PDF
   if (mimeType === 'application/pdf' || ext === 'pdf') {
-    const pdfParse = (await import('pdf-parse')).default;
-    const result = await pdfParse(buffer);
+    const { PDFParse } = await import('pdf-parse');
+    const parser = new PDFParse({ data: buffer });
+    await parser.load();
+    const text = await parser.getText();
+    const info = await parser.getInfo().catch(() => ({}));
     return {
-      text: result.text,
+      text,
       metadata: {
-        pages: result.numpages,
-        title: result.info?.Title || filename,
-        author: result.info?.Author || null,
-        creationDate: result.info?.CreationDate || null,
+        pages: info?.numPages || null,
+        title: info?.Title || filename,
+        author: info?.Author || null,
       },
     };
   }

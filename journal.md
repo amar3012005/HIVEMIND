@@ -102,6 +102,50 @@
 
 ### All 6 SOTA Features Complete
 Total new endpoints: 14 | New modules: 6 | All NotebookLM-validated
+
+### Frontend: Engine Intelligence Page — COMPLETE (2026-03-24)
+- New page at `/hivemind/app/engine` with 4 interactive panels
+- **Cognitive Frame Viewer**: query → intent detection → dynamic weights → tiered memory assembly
+- **Byzantine Consensus Evaluator**: paste content → 3D scores → commit/reject verdict
+- **Temporal Explorer**: bi-temporal diff and time-travel between any two dates
+- **Swarm Activity**: live agent traces, affordances (success), disturbances (failures)
+- 14 new API client functions in `api-client.js`
+- Sidebar nav: "Engine" under Data section (Cpu icon)
+- Commits: `bbf388c` (core, HIVEMIND repo) + `a70b6a0` (frontend, Da-vinci repo)
+
+### Architecture Summary (as of 2026-03-24)
+
+**Core modules** (`core/src/memory/`):
+| Module | Feature | Key Class/Export |
+|--------|---------|-----------------|
+| `predict-calibrate.js` | Delta extraction | `PredictCalibrateFilter` |
+| `operator-layer.js` | Cognitive rhythm | `CognitiveOperator`, `detectQueryIntent`, `computeDynamicWeights` |
+| `context-autopilot.js` | Preemptive compaction | `ContextAutopilot`, `scoreForRetention` |
+| `bi-temporal.js` | Time-travel queries | `BiTemporalEngine` |
+| `stigmergic-cot.js` | Agent swarm memory | `StigmergicCoT`, `ReasoningChainBuilder` |
+| `byzantine-consensus.js` | Hallucination protection | `ByzantineConsensus`, `ConsensusVoter`, `weiszfeldSolver` |
+
+**All new API endpoints** (14 total):
+| Endpoint | Method | Feature |
+|----------|--------|---------|
+| `/api/cognitive-frame` | POST | Operator Layer |
+| `/api/coherence-check` | POST | Operator Layer |
+| `/api/context/monitor` | POST | Context Autopilot |
+| `/api/context/archive` | POST | Context Autopilot |
+| `/api/context/compact` | POST | Context Autopilot |
+| `/api/temporal/as-of` | POST | Bi-Temporal |
+| `/api/temporal/diff` | POST | Bi-Temporal |
+| `/api/temporal/timeline` | POST | Bi-Temporal |
+| `/api/swarm/thought` | POST | Stigmergic CoT |
+| `/api/swarm/trace` | POST | Stigmergic CoT |
+| `/api/swarm/follow` | POST | Stigmergic CoT |
+| `/api/swarm/prune` | POST | Stigmergic CoT |
+| `/api/consensus/evaluate` | POST | Byzantine Consensus |
+| `/api/recall` | POST | Enhanced with dynamic weights + type boosts |
+
+**Repos**:
+- Core: `github.com/amar3012005/HIVEMIND` (main)
+- Frontend: `github.com/amar3012005/Da-vinci` (main, Vercel auto-deploy)
   ./scripts/deploy.sh core         # rebuild + restart core only
   ./scripts/deploy.sh control      # restart control-plane only
   ./scripts/deploy.sh restart      # restart both without rebuild
@@ -727,6 +771,7 @@ User saves memory via MCP/API
 
 ### MCP Integration
 **Yes, MCP tools automatically use the Qdrant integration:**
+
 - `save_memory` → Calls `/api/memories` → PostgreSQL + Qdrant
 - `recall` → Calls `/api/recall` → Semantic search from Qdrant
 - `get_memory`, `list_memories`, `delete_memory` → All work with Qdrant vectors

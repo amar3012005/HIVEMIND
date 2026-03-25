@@ -317,7 +317,7 @@ function applyCorsHeaders(req, res) {
     res.setHeader('Vary', 'Origin');
   }
 
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 }
 
@@ -427,14 +427,106 @@ async function buildBootstrapPayload(user) {
     onboarding: {
       needs_org_setup: !org,
       has_api_key: apiKeys.length > 0,
-      needs_first_source: apiKeys.length > 0 && !org,  // guide to connect first source
+      needs_first_source: apiKeys.length > 0 && !org,
     },
     connectivity: {
       core_api_base_url: CONFIG.coreApiBaseUrl,
       core_health: coreHealth
     },
-    client_support: ['claude', 'antigravity', 'vscode', 'remote-mcp']
+    client_support: ['claude', 'antigravity', 'vscode', 'remote-mcp'],
+    // Session key: frontend uses this to call core API without manual key setup.
+    // Auto-creates one if user has an org but no keys yet.
+    session_api_key: org ? await getOrCreateSessionKey(user.id, org.id) : null,
   };
+}
+
+/**
+ * Get or create a session API key for the frontend.
+ * Reuses existing 'auto-session' key if available, creates one if not.
+ * Returns the raw key string.
+ */
+async function getOrCreateSessionKey(userId, orgId) {
+  try {
+    // Check for existing auto-session key
+    const existing = await prisma.apiKey.findFirst({
+      where: { userId, name: 'auto-session', revokedAt: null },
+    });
+    if (existing) {
+      // Return the raw key from description (stored at creation time)
+      try {
+        const meta = JSON.parse(existing.description || '{}');
+        if (meta.rawKey) return meta.rawKey;
+      } catch {}
+      // If no raw key stored, create a new one
+    }
+
+    // Create a new session key
+    const result = await createPersistedApiKey(prisma, {
+      userId,
+      orgId,
+      name: 'auto-session',
+      scopes: ['memory', 'search', 'web_search', 'web_crawl', 'mcp', 'admin'],
+    });
+
+    // Store raw key in description for future bootstrap calls
+    if (result.record?.id && result.rawKey) {
+      await prisma.apiKey.update({
+        where: { id: result.record.id },
+        data: { description: JSON.stringify({ rawKey: result.rawKey, auto: true }) },
+      }).catch(() => {});
+    }
+
+    return result.rawKey || null;
+  } catch (err) {
+    console.warn('[bootstrap] Failed to get/create session key:', err.message);
+    return null;
+  }
+}
+
+/**
+ * Generic proxy: forward an authenticated frontend request to the core API.
+ * Authenticates with the master API key and injects user/org context headers.
+ */
+async function proxyToCore(req, res, { session, method, path, body, query, rawBody }) {
+  try {
+    const coreUrl = new URL(path, CONFIG.coreApiBaseUrl);
+    if (query) coreUrl.search = query;
+
+    const headers = {
+      'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+      'X-HM-User-Id': session.userId || '',
+      'X-HM-Org-Id': session.orgId || '',
+    };
+
+    // Forward content-type for POST/multipart
+    if (req.headers['content-type']) {
+      headers['Content-Type'] = req.headers['content-type'];
+    }
+
+    const fetchOpts = { method, headers };
+
+    if (method !== 'GET' && method !== 'HEAD') {
+      if (rawBody) {
+        fetchOpts.body = rawBody; // multipart — forward as-is
+      } else if (body && Object.keys(body).length > 0) {
+        fetchOpts.body = JSON.stringify(body);
+        if (!headers['Content-Type']) {
+          headers['Content-Type'] = 'application/json';
+        }
+      }
+    }
+
+    const coreResp = await fetch(coreUrl.toString(), fetchOpts);
+    const respBody = await coreResp.text();
+
+    res.writeHead(coreResp.status, {
+      'Content-Type': coreResp.headers.get('content-type') || 'application/json',
+    });
+    res.end(respBody);
+  } catch (err) {
+    console.error('[proxy] Error forwarding to core:', err.message);
+    jsonResponse(res, { error: 'Proxy error', detail: err.message }, 502);
+  }
 }
 
 const server = http.createServer(async (req, res) => {
@@ -993,6 +1085,47 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ─── End Connector Routes ──────────────────────────────────────
+
+  // ─── Proxy Routes (session-cookie → core API with master key) ─────
+  if (pathname.startsWith('/v1/proxy/')) {
+    const current = await requireSession(req, res);
+    if (!current) return;
+
+    // Map /v1/proxy/health → /health, everything else → /api/...
+    let corePath;
+    if (pathname === '/v1/proxy/health') {
+      corePath = '/health';
+    } else {
+      corePath = pathname.replace('/v1/proxy/', '/api/');
+    }
+
+    const isMultipart = (req.headers['content-type'] || '').startsWith('multipart/');
+
+    // Read body: raw Buffer for multipart, parsed JSON for everything else
+    let body = undefined;
+    let rawBody = undefined;
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      if (isMultipart) {
+        const chunks = [];
+        for await (const chunk of req) {
+          chunks.push(chunk);
+        }
+        rawBody = Buffer.concat(chunks);
+      } else {
+        body = await parseBody(req);
+      }
+    }
+
+    return proxyToCore(req, res, {
+      session: current.session,
+      method: req.method,
+      path: corePath,
+      body,
+      query: url.search || '',
+      rawBody,
+    });
+  }
+  // ─── End Proxy Routes ─────────────────────────────────────────
 
   if (pathname === '/' && req.method === 'GET') {
     return jsonResponse(res, {

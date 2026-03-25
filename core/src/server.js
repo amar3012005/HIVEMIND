@@ -804,8 +804,11 @@ async function authenticateApiKey(req) {
   }
 
   // Accept master API key in any environment
+  // When used by the control plane proxy, X-HM-User-Id/X-HM-Org-Id override defaults
   if (MASTER_API_KEY && apiKey === MASTER_API_KEY) {
-    return { ok: true, principal: { userId: DEFAULT_USER, orgId: DEFAULT_ORG, scopes: ['*'], master: true, rawKey: apiKey } };
+    const proxyUserId = req.headers['x-hm-user-id'] || DEFAULT_USER;
+    const proxyOrgId = req.headers['x-hm-org-id'] || DEFAULT_ORG;
+    return { ok: true, principal: { userId: proxyUserId, orgId: proxyOrgId, scopes: ['*'], master: true, rawKey: apiKey } };
   }
 
   const persistedRecord = await authenticatePersistedApiKey(prisma, apiKey);

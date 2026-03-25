@@ -355,7 +355,8 @@ async function resolveCurrentOrg(userId) {
     include: { org: true },
     orderBy: { joinedAt: 'asc' }
   });
-  return membership?.org || null;
+  if (!membership) return { org: null, role: null };
+  return { org: membership.org, role: membership.role || 'admin' };
 }
 
 async function upsertUserFromZitadel(userInfo) {
@@ -393,7 +394,7 @@ async function upsertUserFromZitadel(userInfo) {
 }
 
 async function buildBootstrapPayload(user) {
-  const org = await resolveCurrentOrg(user.id);
+  const { org, role } = await resolveCurrentOrg(user.id);
   const apiKeys = await listPersistedApiKeys(prisma, user.id, org?.id || null);
   let coreHealth = null;
 
@@ -415,7 +416,8 @@ async function buildBootstrapPayload(user) {
       id: user.id,
       email: user.email,
       display_name: user.displayName,
-      zitadel_user_id: user.zitadelUserId
+      zitadel_user_id: user.zitadelUserId,
+      role: role || 'admin',  // admin | developer | viewer
     },
     organization: org ? {
       id: org.id,
@@ -424,7 +426,8 @@ async function buildBootstrapPayload(user) {
     } : null,
     onboarding: {
       needs_org_setup: !org,
-      has_api_key: apiKeys.length > 0
+      has_api_key: apiKeys.length > 0,
+      needs_first_source: apiKeys.length > 0 && !org,  // guide to connect first source
     },
     connectivity: {
       core_api_base_url: CONFIG.coreApiBaseUrl,
@@ -461,6 +464,98 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
+  // ─── Direct Google OAuth (bypasses Zitadel) ──────────────────
+  if (pathname === '/auth/google' && req.method === 'GET') {
+    const googleClientId = process.env.GOOGLE_CLIENT_ID;
+    if (!googleClientId) {
+      return jsonResponse(res, { error: 'Google OAuth not configured' }, 503);
+    }
+    const state = await sessionStore.createAuthState({
+      returnTo: url.searchParams.get('return_to') || CONFIG.postLoginRedirect,
+      provider: 'google',
+    });
+    const cpBase = `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers.host}`;
+    const googleParams = new URLSearchParams({
+      client_id: googleClientId,
+      redirect_uri: `${cpBase}/auth/google/callback`,
+      response_type: 'code',
+      scope: 'openid email profile',
+      access_type: 'offline',
+      prompt: 'consent',
+      state,
+    });
+    return redirect(res, `https://accounts.google.com/o/oauth2/v2/auth?${googleParams}`);
+  }
+
+  if (pathname === '/auth/google/callback' && req.method === 'GET') {
+    const code = url.searchParams.get('code');
+    const state = url.searchParams.get('state');
+    const error = url.searchParams.get('error');
+
+    if (error) {
+      return redirect(res, `${CONFIG.postLoginRedirect}?auth_error=${encodeURIComponent(error)}`);
+    }
+    if (!code || !state) {
+      return jsonResponse(res, { error: 'Missing code or state' }, 400);
+    }
+
+    const authState = await sessionStore.consumeAuthState(state);
+    if (!authState) {
+      return jsonResponse(res, { error: 'Invalid login state' }, 400);
+    }
+
+    try {
+      // Exchange code for tokens
+      const cpBase = `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers.host}`;
+      const tokenResp = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          code,
+          client_id: process.env.GOOGLE_CLIENT_ID,
+          client_secret: process.env.GOOGLE_CLIENT_SECRET,
+          redirect_uri: `${cpBase}/auth/google/callback`,
+          grant_type: 'authorization_code',
+        }),
+      });
+
+      if (!tokenResp.ok) {
+        const errText = await tokenResp.text();
+        throw new Error(`Google token exchange failed: ${errText}`);
+      }
+
+      const tokens = await tokenResp.json();
+
+      // Get user info
+      const userInfoResp = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+        headers: { Authorization: `Bearer ${tokens.access_token}` },
+      });
+      const userInfo = await userInfoResp.json();
+
+      // Upsert user — use Google sub as zitadel user id (with prefix to avoid collision)
+      const user = await upsertUserFromZitadel({
+        sub: `google:${userInfo.id}`,
+        email: userInfo.email,
+        name: userInfo.name,
+        picture: userInfo.picture,
+        locale: userInfo.locale,
+      });
+
+      const { org } = await resolveCurrentOrg(user.id);
+      const sessionId = await sessionStore.createSession({
+        userId: user.id,
+        email: user.email,
+        orgId: org?.id || null,
+      });
+
+      return redirect(res, authState.returnTo || CONFIG.postLoginRedirect, [makeSessionCookie(sessionId)]);
+    } catch (err) {
+      console.error('[google-auth] Callback failed:', err.message);
+      return redirect(res, `${CONFIG.postLoginRedirect}?auth_error=${encodeURIComponent(err.message)}`);
+    }
+  }
+
+  // ─── Zitadel SSO Login ──────────────────────────────────────
   if (pathname === '/auth/login' && req.method === 'GET') {
     if (!zitadelClient) {
       return jsonResponse(res, { error: 'ZITADEL not configured' }, 503);
@@ -468,11 +563,7 @@ const server = http.createServer(async (req, res) => {
     const state = await sessionStore.createAuthState({
       returnTo: url.searchParams.get('return_to') || CONFIG.postLoginRedirect
     });
-    // Pass through IdP hints from the frontend (e.g. ?idp_hint=google)
     const authorizeOptions = {};
-    if (url.searchParams.get('idp_hint')) {
-      authorizeOptions.idpHint = url.searchParams.get('idp_hint');
-    }
     if (url.searchParams.get('login_hint')) {
       authorizeOptions.loginHint = url.searchParams.get('login_hint');
     }
@@ -498,7 +589,7 @@ const server = http.createServer(async (req, res) => {
     try {
       const { userInfo } = await zitadelClient.exchangeAndResolveUser(code);
       const user = await upsertUserFromZitadel(userInfo);
-      const org = await resolveCurrentOrg(user.id);
+      const { org } = await resolveCurrentOrg(user.id);
       const sessionId = await sessionStore.createSession({
         userId: user.id,
         email: user.email,

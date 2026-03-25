@@ -1873,6 +1873,12 @@ a{color:#a78bfa}</style></head><body>
                 source_id: existing.source_metadata?.source_id || null
               }
             });
+            // Embed updated memory in Qdrant
+            if (qdrantClient && updated) {
+              try {
+                await qdrantClient.storeMemory(updated, { collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT' });
+              } catch {}
+            }
             invalidateAggregateCache({ userId, orgId, project: existing.project || null });
             invalidateAggregateCache({ userId, orgId, project: updated.project || null });
             invalidateAggregateCache({ userId, orgId, project: null });
@@ -2422,7 +2428,7 @@ a{color:#a78bfa}</style></head><body>
                           }
 
                           try {
-                            await persistentMemoryEngine.ingestMemory({
+                            const gmailResult = await persistentMemoryEngine.ingestMemory({
                               content,
                               title: subject,
                               tags,
@@ -2439,6 +2445,13 @@ a{color:#a78bfa}</style></head><body>
                               user_id: userId,
                               org_id: orgId,
                             });
+                            // Embed in Qdrant for vector search
+                            if (gmailResult?.memoryId && qdrantClient) {
+                              try {
+                                const gmailMem = await persistentMemoryStore.getMemory(gmailResult.memoryId);
+                                if (gmailMem) await qdrantClient.storeMemory(gmailMem, { collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT' });
+                              } catch {}
+                            }
                             totalImported++;
                           } catch (ingestErr) {
                             console.warn(`[gmail-sync] Ingest failed for msg ${msg.id}:`, ingestErr.message);
@@ -2555,22 +2568,37 @@ a{color:#a78bfa}</style></head><body>
               (async () => {
                 let ingested = 0;
                 let failed = 0;
+                const collectionName = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
+
+                const ingestAndEmbed = async (payload) => {
+                  const result = await persistentMemoryEngine.ingestMemory(payload);
+                  // Also embed in Qdrant for vector search
+                  if (result?.memoryId && qdrantClient) {
+                    try {
+                      const memory = await persistentMemoryStore.getMemory(result.memoryId);
+                      if (memory) {
+                        await qdrantClient.storeMemory(memory, { collectionName });
+                      }
+                    } catch (embedErr) {
+                      console.warn(`[knowledge] Qdrant embed failed for ${result.memoryId}:`, embedErr.message);
+                    }
+                  }
+                };
+
                 try {
-                  // Ingest document summary first
-                  await persistentMemoryEngine.ingestMemory(summary);
+                  await ingestAndEmbed(summary);
                   ingested++;
 
-                  // Ingest each chunk
                   for (const chunk of chunks) {
                     try {
-                      await persistentMemoryEngine.ingestMemory(chunk);
+                      await ingestAndEmbed(chunk);
                       ingested++;
                     } catch (chunkErr) {
-                      console.warn(`[knowledge] Chunk ${chunk.metadata.chunk_index} failed:`, chunkErr.message);
+                      console.warn(`[knowledge] Chunk ${chunk.metadata?.chunk_index} failed:`, chunkErr.message);
                       failed++;
                     }
                   }
-                  console.log(`[knowledge] Upload ${uploadId} complete: ingested=${ingested}, failed=${failed}`);
+                  console.log(`[knowledge] Upload ${uploadId} complete: ingested=${ingested}, failed=${failed}, qdrant=${collectionName}`);
                 } catch (err) {
                   console.error(`[knowledge] Upload ${uploadId} failed:`, err.message);
                 }

@@ -35,24 +35,28 @@ export async function parseFile(buffer, mimeType, filename) {
     const { PDFParse } = await import('pdf-parse');
     const parser = new PDFParse({ data: buffer });
     await parser.load();
-    const text = await parser.getText();
+    const textResult = await parser.getText();
+    // getText() returns { pages: [...], text: string, total: number }
+    const text = typeof textResult === 'string' ? textResult : (textResult?.text || '');
     const info = await parser.getInfo().catch(() => ({}));
+    // getInfo() returns { total, info: { PDFFormatVersion, ... }, metadata, ... }
     return {
-      text,
+      text: String(text),
       metadata: {
-        pages: info?.numPages || null,
-        title: info?.Title || filename,
-        author: info?.Author || null,
+        pages: info?.total || textResult?.total || null,
+        title: info?.info?.Title || filename,
+        author: info?.info?.Author || null,
       },
     };
   }
 
   // DOCX
   if (mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || ext === 'docx') {
-    const mammoth = (await import('mammoth')).default;
+    const mammothMod = await import('mammoth');
+    const mammoth = mammothMod.default || mammothMod;
     const result = await mammoth.extractRawText({ buffer });
     return {
-      text: result.value,
+      text: String(result?.value || ''),
       metadata: { title: filename },
     };
   }
@@ -63,7 +67,7 @@ export async function parseFile(buffer, mimeType, filename) {
     const lines = text.split('\n');
     const headers = lines[0] || '';
     return {
-      text,
+      text: String(text),
       metadata: {
         title: filename,
         headers: headers.split(',').map(h => h.trim()),
@@ -75,7 +79,7 @@ export async function parseFile(buffer, mimeType, filename) {
   // TXT, MD, and fallback
   const text = buffer.toString('utf-8');
   return {
-    text,
+    text: String(text),
     metadata: { title: filename },
   };
 }
@@ -260,18 +264,21 @@ export function generateDocumentSummary(text, metadata) {
 export async function processDocument(buffer, mimeType, filename, context = {}) {
   const { text, metadata } = await parseFile(buffer, mimeType, filename);
 
-  if (!text || text.trim().length < 10) {
+  // Ensure text is always a string
+  const docText = typeof text === 'string' ? text : String(text?.text || text || '');
+
+  if (!docText || docText.trim().length < 10) {
     throw new Error('Document appears to be empty or could not be parsed');
   }
 
-  const sections = extractSections(text);
-  const chunks = chunkText(text);
+  const sections = extractSections(docText);
+  const chunks = chunkText(docText);
   const docTitle = metadata.title || filename || 'Untitled Document';
   const baseTags = ['knowledge-base', 'document', ...(context.tags || [])];
 
   // Document summary memory
   const summary = {
-    content: generateDocumentSummary(text, metadata),
+    content: generateDocumentSummary(docText, metadata),
     title: `Document: ${docTitle}`,
     tags: [...baseTags, 'document-summary'],
     memory_type: 'fact',
@@ -286,7 +293,7 @@ export async function processDocument(buffer, mimeType, filename, context = {}) 
     metadata: {
       document_title: docTitle,
       total_chunks: chunks.length,
-      total_chars: text.length,
+      total_chars: docText.length,
       pages: metadata.pages || null,
       author: metadata.author || null,
       sections: sections.map(s => s.title),
@@ -298,7 +305,7 @@ export async function processDocument(buffer, mimeType, filename, context = {}) 
 
   // Per-chunk memories
   const chunkPayloads = chunks.map((chunk, idx) => {
-    const section = getSectionForChunk(chunk.text, sections, text);
+    const section = getSectionForChunk(chunk.text, sections, docText);
     const chunkTitle = section
       ? `${docTitle} — ${section.title}`
       : `${docTitle} — Part ${idx + 1}`;

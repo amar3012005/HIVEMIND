@@ -1601,6 +1601,67 @@ a{color:#a78bfa}</style></head><body>
         return jsonResponse(res, { keys });
       }
 
+      // Gmail OAuth callback — browser redirect from Google, no API key possible
+      if (pathname === '/api/connectors/gmail/callback' && req.method === 'GET') {
+        const callbackCode = url.searchParams.get('code');
+        const callbackState = url.searchParams.get('state');
+        const callbackError = url.searchParams.get('error');
+
+        if (callbackError) {
+          const frontendUrl = process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu';
+          res.writeHead(302, { Location: `${frontendUrl}/hivemind/app/connectors?error=${encodeURIComponent(callbackError)}` });
+          res.end();
+          return;
+        }
+
+        if (!callbackCode) {
+          return jsonResponse(res, { error: 'Missing authorization code' }, 400);
+        }
+
+        try {
+          let stateUserId = DEFAULT_USER, stateOrgId = DEFAULT_ORG;
+          if (callbackState) {
+            try {
+              const parsed = JSON.parse(Buffer.from(callbackState, 'base64url').toString());
+              stateUserId = parsed.userId || stateUserId;
+              stateOrgId = parsed.orgId || stateOrgId;
+            } catch {}
+          }
+
+          const { exchangeCode } = await import('./connectors/providers/gmail/oauth.js');
+          const gmailCallbackUri = `${process.env.HIVEMIND_BASE_URL || getHostedApiBaseUrl(req)}/api/connectors/gmail/callback`;
+          const tokens = await exchangeCode({ code: callbackCode, redirectUri: gmailCallbackUri });
+
+          const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
+          const connStore = new ConnectorStore(prisma);
+          const tokenExpiresAt = tokens.expires_in ? new Date(Date.now() + tokens.expires_in * 1000) : null;
+
+          await connStore.upsertConnector({
+            userId: stateUserId,
+            provider: 'gmail',
+            accountRef: tokens.email || null,
+            accessToken: tokens.access_token,
+            refreshToken: tokens.refresh_token,
+            tokenExpiresAt,
+            scopes: tokens.scope?.split(' ') || ['https://www.googleapis.com/auth/gmail.readonly'],
+            metadata: { email: tokens.email },
+          });
+
+          console.log(`[gmail-oauth] Connected for user=${stateUserId} email=${tokens.email}. Awaiting sync configuration.`);
+
+          const frontendUrl = process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu';
+          res.writeHead(302, { Location: `${frontendUrl}/hivemind/app/connectors?connected=gmail&needs_config=true&email=${encodeURIComponent(tokens.email || '')}` });
+          res.end();
+          return;
+        } catch (err) {
+          console.error('[gmail-oauth] Callback failed:', err.message);
+          const frontendUrl = process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu';
+          res.writeHead(302, { Location: `${frontendUrl}/hivemind/app/connectors?error=${encodeURIComponent(err.message)}` });
+          res.end();
+          return;
+        }
+      }
+
       // Protect all non-key-management API endpoints
       const auth = await authenticateApiKey(req);
       if (!auth.ok) {

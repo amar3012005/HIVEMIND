@@ -186,12 +186,12 @@ async function evaluateInstance(instance) {
   const { question_id, question, question_type } = instance;
   const isAbstention = question_id.endsWith('_abs');
 
-  // Search for relevant memories (scoped to this question's project)
+  // Search for relevant memories across all benchmark memories (not project-scoped)
+  // Each question's haystack was ingested per-question, but answers may share content
   let searchResults;
   try {
     searchResults = await apiCall('POST', '/api/search/quick', {
       query: question,
-      project: `lme-${question_id}`,
       limit: 10,
     });
   } catch {

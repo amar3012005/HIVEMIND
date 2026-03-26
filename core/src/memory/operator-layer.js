@@ -468,6 +468,39 @@ export class CognitiveOperator {
   }
 
   /**
+   * Assemble a stable observation prefix from all observation-type memories.
+   * Mastra-style: chronological log of observations, token-budget capped.
+   *
+   * @param {string} userId
+   * @param {string} orgId
+   * @param {{ project?: string, maxTokens?: number }} options
+   * @returns {Promise<{ prefix: string, tokenCount: number, observationCount: number }>}
+   */
+  async assembleObservationPrefix(userId, orgId, { project, maxTokens = 8000 } = {}) {
+    const allMemories = await this.store.listLatestMemories({ user_id: userId, org_id: orgId, project });
+    const observations = allMemories
+      .filter(m => m.memory_type === 'observation')
+      .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+
+    if (observations.length === 0) {
+      return { prefix: '', tokenCount: 0, observationCount: 0 };
+    }
+
+    const lines = [];
+    let tokens = 0;
+    for (const obs of observations) {
+      const line = obs.content || '';
+      const lineTokens = Math.ceil(line.length / 4);
+      if (tokens + lineTokens > maxTokens) break;
+      lines.push(line);
+      tokens += lineTokens;
+    }
+
+    const prefix = `<observation-log>\n${lines.join('\n')}\n</observation-log>`;
+    return { prefix, tokenCount: tokens, observationCount: lines.length };
+  }
+
+  /**
    * Build a structured frame object from sections.
    * @param {Array} sections
    * @returns {object}

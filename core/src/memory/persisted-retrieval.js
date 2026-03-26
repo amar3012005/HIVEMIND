@@ -713,12 +713,35 @@ export async function recallPersistedMemories(store, {
   const top = deduped
     .sort((a, b) => b.score - a.score)
     .slice(0, max_memories);
+  // Try observation prefix first (Mastra-style stable context)
+  let observationPrefix = '';
+  let hasObservations = false;
+  try {
+    const { CognitiveOperator } = await import('./operator-layer.js');
+    if (store) {
+      const operator = new CognitiveOperator(store);
+      const { prefix, observationCount } = await operator.assembleObservationPrefix(
+        user_id, org_id, { project, maxTokens: 4000 }
+      );
+      if (observationCount >= 3) {
+        observationPrefix = prefix;
+        hasObservations = true;
+      }
+    }
+  } catch {
+    // Observation prefix not available — fall through to standard retrieval
+  }
+
   let injectionText;
   try {
     const { formatChainOfNotePayload } = await import('./operator-layer.js');
     injectionText = formatChainOfNotePayload(top.map(item => item.memory || item), query_context || '');
   } catch {
     injectionText = `<relevant-memories>\n${top.map(item => `- ${(item.memory || item).content}`).join('\n')}\n</relevant-memories>`;
+  }
+
+  if (hasObservations) {
+    injectionText = observationPrefix + '\n\n' + injectionText;
   }
 
   return {

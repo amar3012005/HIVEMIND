@@ -4,8 +4,8 @@ import { ConflictDetector, computeTokenSimilarity } from './conflict-detector.js
 import { RelationshipClassifier } from './relationship-classifier.js';
 import { extractCodeChunks, detectCodeLanguage } from './code-ingestion.js';
 import { PredictCalibrateFilter } from './predict-calibrate.js';
-import { Observer } from './observer.js';
-import { buildObservationPayload } from './observation-store.js';
+import { Observer } from './observer.js'; // kept for backward compat, not initialized
+import { buildObservationPayload, formatObservation } from './observation-store.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -109,28 +109,8 @@ export class MemoryGraphEngine {
     this.predictCalibrateFilter = predictCalibrate
       ? new PredictCalibrateFilter(predictCalibrateOptions)
       : null;
-    // Observer with Groq LLM if API key available, heuristic fallback otherwise
-    const groqApiKey = process.env.GROQ_API_KEY;
-    if (groqApiKey) {
-      const groqClient = {
-        chat: {
-          completions: {
-            create: async (params) => {
-              const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-                method: 'POST',
-                headers: { 'Authorization': `Bearer ${groqApiKey}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify(params),
-              });
-              if (!resp.ok) throw new Error(`Groq ${resp.status}`);
-              return resp.json();
-            }
-          }
-        }
-      };
-      this.observer = new Observer({ groqClient, useLLM: true });
-    } else {
-      this.observer = new Observer();
-    }
+    // Observer is superseded by MemoryProcessor (unified single-call pipeline).
+    // this.observer is intentionally not initialized; Observer import kept for backward compat.
   }
 
   async ingestMemory(input) {
@@ -168,51 +148,46 @@ export class MemoryGraphEngine {
           }
         }
 
-        // LLM conflict resolution for high-similarity content
-        if (pcResult && pcResult.needsConflictResolution && pcResult.matchedMemoryIds?.length > 0) {
+        // Unified Memory Processor: single LLM call for relationship + observation + facts
+        if (baseMemory.memory_type !== 'observation' && pcResult && pcResult.shouldStore !== false) {
           try {
-            const { ConflictResolver } = await import('./conflict-resolver.js');
-            const resolver = new ConflictResolver();
-            const matchedMem = latestMemories.find(m => m.id === pcResult.matchedMemoryIds[0]);
-            if (matchedMem) {
-              const resolution = await resolver.resolve(baseMemory, matchedMem);
-              if (resolution.action === 'NOOP') {
-                // True duplicate confirmed by LLM — skip
-                return { memoryId: null, operation: 'skipped_redundant', reason: 'llm_confirmed_duplicate' };
-              }
-              if (resolution.action === 'UPDATE') {
-                // Set explicit relationship for the graph engine to process
-                input.relationship = { type: 'Updates', target_id: resolution.targetId, confidence: 0.9 };
-              }
-              if (resolution.action === 'EXTEND') {
-                input.relationship = { type: 'Extends', target_id: resolution.targetId, confidence: 0.8 };
-              }
-            }
-          } catch (resolveErr) {
-            console.warn('[conflict-resolver] Resolution failed:', resolveErr.message);
-          }
-        }
+            const { MemoryProcessor } = await import('./memory-processor.js');
+            const processor = new MemoryProcessor();
 
-        // Observer: compress delta into observation node
-        if (this.observer && pcResult && pcResult.shouldStore !== false && baseMemory.memory_type !== 'observation') {
-          try {
-            const obsResult = await this.observer.observe({
-              content: baseMemory.content,
-              documentDate: baseMemory.document_date || baseMemory.created_at,
-              tags: baseMemory.tags || [],
-            });
-            if (obsResult.observation) {
+            // Gather similar memories for comparison
+            const similarMemories = pcResult.needsConflictResolution && pcResult.matchedMemoryIds?.length > 0
+              ? latestMemories.filter(m => pcResult.matchedMemoryIds.includes(m.id))
+              : [];
+
+            const result = await processor.process(baseMemory, similarMemories);
+
+            // Apply relationship
+            if (result.relationship.action === 'NOOP') {
+              return { memoryId: null, operation: 'skipped_redundant', reason: 'llm_confirmed_duplicate' };
+            }
+            if (result.relationship.action === 'UPDATE' && result.relationship.targetId) {
+              input.relationship = { type: 'Updates', target_id: result.relationship.targetId, confidence: 0.9 };
+            }
+            if (result.relationship.action === 'EXTEND' && result.relationship.targetId) {
+              input.relationship = { type: 'Extends', target_id: result.relationship.targetId, confidence: 0.8 };
+            }
+
+            // Store observation if produced
+            if (result.observation) {
+              const obsText = formatObservation({
+                content: result.observation,
+                priority: result.priority,
+                observationDate: baseMemory.document_date || baseMemory.created_at,
+              });
               const obsPayload = buildObservationPayload({
                 userId: baseMemory.user_id,
                 orgId: baseMemory.org_id,
-                observationText: obsResult.observation,
+                observationText: obsText,
                 observationDate: baseMemory.document_date || baseMemory.created_at,
-                referencedDate: obsResult.referencedDate,
                 project: baseMemory.project,
                 sourceTags: baseMemory.tags || [],
               });
-              // Store observation as separate memory (use transactional store, skip relationship classification)
-              const obsId = crypto.randomUUID ? crypto.randomUUID() : `obs-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+              const obsId = crypto.randomUUID ? crypto.randomUUID() : `obs-${Date.now()}`;
               await transactionalStore.createMemory({
                 ...obsPayload,
                 id: obsId,
@@ -222,8 +197,8 @@ export class MemoryGraphEngine {
                 updated_at: new Date().toISOString(),
               });
             }
-          } catch (obsErr) {
-            console.warn('[observer] Observation failed:', obsErr.message);
+          } catch (procErr) {
+            console.warn('[memory-processor] Processing failed:', procErr.message);
           }
         }
 

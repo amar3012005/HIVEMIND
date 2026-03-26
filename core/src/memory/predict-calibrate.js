@@ -66,25 +66,25 @@ export function computeSentenceNovelty(sentence, knownTokens) {
  *   2. Select TOP-K most similar memories (not all) to compute known coverage.
  *      This prevents large KB vocabulary from inflating false redundancies.
  *   3. Use semantic similarity thresholds (Ruflo framework calibration):
- *      - similarity > 0.70 → strong match → skip (redundant)
- *      - similarity 0.50–0.70 → partial match → extract delta
- *      - similarity < 0.50 → weak match → store full content
+ *      - similarity >= 0.90 → high similarity → route to LLM conflict resolver (UPDATE not duplicate)
+ *      - similarity 0.60–0.90 → partial match → extract delta
+ *      - similarity < 0.60 → weak match → store full content
  *   4. Token-level delta extraction for partial matches.
  *   5. Delta content gets stored in both Prisma AND Qdrant.
  */
 export class PredictCalibrateFilter {
   /**
    * @param {object} options
-   * @param {number} options.strongMatchThreshold — similarity above this ⇒ skip (default 0.70)
-   * @param {number} options.partialMatchThreshold — similarity above this ⇒ extract delta (default 0.50)
+   * @param {number} options.strongMatchThreshold — similarity above this ⇒ route to LLM conflict resolver (default 0.90)
+   * @param {number} options.partialMatchThreshold — similarity above this ⇒ extract delta (default 0.60)
    * @param {number} options.sentenceNoveltyThreshold — min per-sentence novelty to keep (default 0.35)
    * @param {number} options.topK — max similar memories to compare against (default 5)
    * @param {number} options.minSimilarityForComparison — min similarity to be considered a candidate (default 0.15)
    * @param {number} options.fingerprintCacheSize — max recent hashes kept for dedup (default 10_000)
    */
   constructor({
-    strongMatchThreshold = 0.70,
-    partialMatchThreshold = 0.50,
+    strongMatchThreshold = 0.90,
+    partialMatchThreshold = 0.60,
     sentenceNoveltyThreshold = 0.35,
     topK = 5,
     minSimilarityForComparison = 0.15,
@@ -198,26 +198,31 @@ export class PredictCalibrateFilter {
    * Compute the information delta using semantic similarity thresholds.
    *
    * Thresholds (calibrated from Ruflo framework per NotebookLM research):
-   *   - maxSimilarity > 0.70: Strong match → skip (redundant)
-   *   - maxSimilarity 0.50-0.70: Partial match → extract novel sentences only
-   *   - maxSimilarity < 0.50: Weak match → store full content (novel)
+   *   - maxSimilarity >= 0.90: High similarity → route to LLM conflict resolver (may be UPDATE not duplicate)
+   *   - maxSimilarity 0.60-0.90: Partial match → extract novel sentences only
+   *   - maxSimilarity < 0.60: Weak match → store full content (novel)
    *
    * @param {{ content: string }} newMemory
    * @param {{ knownTokens: Set<string>, knownCoverage: number, maxSimilarity: number, matchedMemories: Array }} prediction
-   * @returns {{ shouldStore: boolean, deltaContent?: string, noveltyScore: number, maxSimilarity: number, reason?: string, deltaExtracted: boolean }}
+   * @param {Array<{ id: string, content: string, similarity: number }>} [topKMemories] — used to collect matched IDs for conflict resolution
+   * @returns {{ shouldStore: boolean, needsConflictResolution?: boolean, matchedMemoryIds?: Array<string>, deltaContent?: string, noveltyScore: number, maxSimilarity: number, reason?: string, deltaExtracted: boolean }}
    */
-  extractDelta(newMemory, prediction) {
+  extractDelta(newMemory, prediction, topKMemories = []) {
     const { maxSimilarity, knownCoverage, knownTokens } = prediction;
     const noveltyScore = 1 - knownCoverage;
 
-    // Strong match — this information is already well-covered
+    // High similarity — don't skip; route to LLM conflict resolver.
+    // The memory might be a knowledge UPDATE, not a duplicate.
     if (maxSimilarity >= this.strongMatchThreshold) {
       return {
-        shouldStore: false,
-        reason: 'redundant',
+        shouldStore: true,
+        needsConflictResolution: true,
+        matchedMemoryIds: topKMemories.map(m => m.id),
         noveltyScore,
         maxSimilarity,
-        deltaExtracted: false
+        deltaContent: null,
+        deltaExtracted: false,
+        reason: 'high_similarity_needs_resolution'
       };
     }
 
@@ -267,7 +272,7 @@ export class PredictCalibrateFilter {
    *
    * @param {{ content: string }} newMemory
    * @param {Array<{ id: string, content: string }>} existingMemories — all latest memories for the user
-   * @returns {{ shouldStore: boolean, deltaContent?: string, noveltyScore: number, maxSimilarity: number, reason?: string, fingerprint: string, deltaExtracted: boolean }}
+   * @returns {{ shouldStore: boolean, needsConflictResolution?: boolean, matchedMemoryIds?: Array<string>, deltaContent?: string, noveltyScore: number, maxSimilarity: number, reason?: string, fingerprint: string, deltaExtracted: boolean }}
    */
   filter(newMemory, existingMemories) {
     // Step 1: exact-duplicate detection via SHA-256 fingerprint
@@ -302,7 +307,8 @@ export class PredictCalibrateFilter {
     const prediction = this.predictKnownContent(newMemory, topK);
 
     // Step 4: extract delta using semantic similarity thresholds
-    const delta = this.extractDelta(newMemory, prediction);
+    // Pass topK so high-similarity results can report matched IDs for conflict resolution
+    const delta = this.extractDelta(newMemory, prediction, topK);
     return { ...delta, fingerprint };
   }
 }

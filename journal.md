@@ -1632,3 +1632,33 @@ Upgrade HIVEMIND's ingestion and retrieval pipeline to score >90% on LongMemEval
 - Wire round-splitter into MCP conversation ingestion and Gmail sync
 - Run LongMemEval-S benchmark (plan: `docs/longmemeval-benchmark-plan.md`, cost: ~$15)
 - If >88%: ship as SOTA claim. If <88%: implement Observer/Reflector (Phase 2)
+
+---
+
+## 2026-03-26 13:30 UTC — Gmail Fix + Data Quality Sprint
+
+### Gmail Ingestion Fixed
+- Root cause 1: sync used `decryptToken(connector.accessTokenEncrypted)` but `getConnector()` returns mapped record WITHOUT the encrypted field
+- Root cause 2: OAuth access tokens expire after 1 hour, no refresh logic existed
+- Fix: `getAccessToken()` now auto-refreshes via Google refresh_token endpoint
+- Gmail sync tested: 4 emails imported successfully
+
+### Data Quality Fixes
+- is_latest confirmed working in `applyUpdate()`
+- Chat questions no longer saved as memories (regex gate)
+- LongMemEval data excluded from production search (Qdrant must_not + Prisma filter)
+- Duplicate observations prevented via SHA-256 fingerprint check
+- Qdrant buildQdrantFilter excludes `longmemeval` tag
+
+### Talk to HIVE Chat
+- Slide-out panel (420px right side) with framer-motion animation
+- Model selector: Llama 3.3 70B, GPT-OSS 120B, GPT-OSS 20B
+- POST /api/chat endpoint: recall → Groq LLM → response with sources
+- Bidirectional: acknowledges new facts, saves statements but not questions
+- Floating FAB button on every page
+
+### Still Needed
+- Intelligent Gmail ingestion (thread linking, fact extraction, noise filtering)
+- Optimized MCP system prompt (auto-save/recall without user prompting)
+- ReACT orchestrator
+- Source-routing Observer (different strategies per content type)

@@ -719,7 +719,7 @@ export async function recallPersistedMemories(store, {
   try {
     const { CognitiveOperator } = await import('./operator-layer.js');
     if (store) {
-      const operator = new CognitiveOperator(store);
+      const operator = new CognitiveOperator({ store });
       const { prefix, observationCount } = await operator.assembleObservationPrefix(
         user_id, org_id, { project, maxTokens: 4000 }
       );

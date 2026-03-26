@@ -4575,6 +4575,128 @@ a{color:#a78bfa}</style></head><body>
           }
           break;
 
+        // ==========================================
+        // CHAT — Talk to HIVE (memory-augmented LLM)
+        // ==========================================
+        case '/api/chat':
+          if (req.method === 'POST') {
+            const { message, model = 'llama-3.3-70b-versatile', history = [] } = body;
+            if (!message || typeof message !== 'string') {
+              return jsonResponse(res, { error: 'message is required' }, 400);
+            }
+
+            const groqKey = process.env.GROQ_API_KEY;
+            if (!groqKey) {
+              return jsonResponse(res, { error: 'Chat not available — no LLM API key configured' }, 503);
+            }
+
+            try {
+              // Step 1: Recall memories for context
+              let memories = [];
+              let injectionText = '';
+              let userProfileText = '';
+
+              if (persistentMemoryStore) {
+                try {
+                  const recallResult = await recallPersistedMemories(persistentMemoryStore, {
+                    query_context: message,
+                    user_id: userId,
+                    org_id: orgId,
+                    max_memories: 5,
+                  });
+                  memories = (recallResult.memories || []).map(m => ({
+                    id: m.id,
+                    title: m.title || (m.content || '').slice(0, 60),
+                    content: (m.content || '').slice(0, 300),
+                    score: m.score || 0,
+                    tags: m.tags || [],
+                  }));
+                  injectionText = recallResult.injectionText || '';
+                } catch (recallErr) {
+                  console.warn('[chat] Recall failed:', recallErr.message);
+                }
+              }
+
+              // Step 2: Build system prompt with user profile + memories
+              const systemPrompt = `You are HIVE, a personal AI assistant with access to the user's memory graph. You remember everything the user has told you across conversations, emails, documents, and notes.
+
+${injectionText ? `Here is what you know:\n\n${injectionText}` : 'No specific memories found for this query.'}
+
+RULES:
+- Answer based on the user's memories when relevant.
+- Be conversational, helpful, and concise.
+- If you reference a specific memory, mention it naturally.
+- If you don't have the information in memory, say so honestly.
+- Never hallucinate facts not present in the provided context.`;
+
+              // Step 3: Build message history for Groq
+              const groqMessages = [
+                { role: 'system', content: systemPrompt },
+                ...history.slice(-10).map(h => ({ role: h.role, content: h.content })),
+                { role: 'user', content: message },
+              ];
+
+              // Step 4: Call Groq
+              const modelMap = {
+                'llama-3.3-70b-versatile': 'llama-3.3-70b-versatile',
+                'gpt-oss-120b': 'openai/gpt-oss-120b',
+                'gpt-oss-20b': 'openai/gpt-oss-20b',
+              };
+              const groqModel = modelMap[model] || model;
+              const groqParams = {
+                model: groqModel,
+                messages: groqMessages,
+                max_tokens: 1000,
+                temperature: 0.7,
+              };
+              if (groqModel.includes('gpt-oss')) {
+                groqParams.include_reasoning = false;
+                groqParams.max_tokens = 1500; // extra headroom for reasoning
+              }
+
+              const groqResp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${groqKey}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify(groqParams),
+              });
+
+              if (!groqResp.ok) {
+                const errText = await groqResp.text();
+                throw new Error(`Groq ${groqResp.status}: ${errText.slice(0, 200)}`);
+              }
+
+              const groqData = await groqResp.json();
+              const response = (groqData.choices[0]?.message?.content || '')
+                .replace(/[\uD800-\uDFFF]/g, '').trim();
+
+              // Step 5: Save this conversation turn as a memory (observation)
+              if (persistentMemoryEngine && response.length > 20) {
+                persistentMemoryEngine.ingestMemory({
+                  content: `User: ${message}\nAssistant: ${response}`,
+                  title: `Chat: ${message.slice(0, 50)}`,
+                  tags: ['chat', 'talk-to-hive'],
+                  memory_type: 'event',
+                  user_id: userId,
+                  org_id: orgId,
+                }).catch(() => {}); // fire and forget
+              }
+
+              return jsonResponse(res, {
+                response,
+                sources: memories,
+                model: groqModel,
+                usage: {
+                  prompt_tokens: groqData.usage?.prompt_tokens,
+                  completion_tokens: groqData.usage?.completion_tokens,
+                },
+              });
+            } catch (chatErr) {
+              console.error('[chat] Failed:', chatErr.message);
+              return jsonResponse(res, { error: chatErr.message }, 500);
+            }
+          }
+          break;
+
         default:
           res.writeHead(404);
           res.end(JSON.stringify({ error: 'Not found' }));

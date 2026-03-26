@@ -718,6 +718,12 @@ export async function recallPersistedMemories(store, {
   const filtered = applyRecallRelevanceFloor(ranked);
   const deduped = collapseNearDuplicates(filtered);
   const top = deduped
+    .filter(item => {
+      // Exclude benchmark data from production recall
+      const tags = (item.memory || item).tags || [];
+      if (!project && tags.includes('longmemeval')) return false;
+      return true;
+    })
     .sort((a, b) => b.score - a.score)
     .slice(0, max_memories);
   // Try observation prefix first (Mastra-style stable context)

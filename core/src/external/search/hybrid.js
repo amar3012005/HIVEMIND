@@ -329,6 +329,14 @@ function buildQdrantFilter(filter) {
     });
   }
 
+  // Exclude benchmark data from production search (unless project-scoped)
+  if (!filter.project) {
+    mustNot.push({
+      key: 'tags',
+      match: { value: 'longmemeval' }
+    });
+  }
+
   // Is latest filter
   if (filter.isLatest !== undefined) {
     must.push({

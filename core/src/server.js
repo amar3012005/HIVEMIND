@@ -451,47 +451,90 @@ function invalidateAggregateCache({ userId, orgId, project = null }) {
 async function buildProfileSummary({ userId, orgId, project = null }) {
   const cacheKey = buildAggregateCacheKey('profile', { userId, orgId, project });
   const cached = getAggregateCache(cacheKey);
-  if (cached) {
-    return cached;
-  }
+  if (cached) return cached;
 
-  const latestMemories = await persistentMemoryStore.listLatestMemories({
-    user_id: userId,
-    org_id: orgId,
-    project
-  });
-  const relationships = await persistentMemoryStore.listRelationships({
-    user_id: userId,
-    org_id: orgId,
-    project
-  });
+  if (!prisma) return { memory_count: 0, relationship_count: 0, observation_count: 0, top_tags: [], top_source_platforms: [], recent_titles: [], graph_summary: {}, cognitive_profile: { static_facts: [], dynamic_context: [] } };
 
-  const relationshipTypes = relationships.reduce((accumulator, relationship) => {
-    accumulator[relationship.type] = (accumulator[relationship.type] || 0) + 1;
-    return accumulator;
-  }, {});
+  try {
+    // Fast count queries instead of loading all records
+    const where = { userId, orgId, deletedAt: null, isLatest: true };
+    if (project) where.project = project;
 
-  const summary = {
-    user_id: userId,
-    org_id: orgId,
-    project,
-    memory_count: latestMemories.length,
-    relationship_count: relationships.length,
-    top_tags: countTopValues(latestMemories.flatMap(memory => memory.tags || [])),
-    top_source_platforms: countTopValues(
-      latestMemories.map(memory => memory.source_metadata?.source_platform || memory.source || null)
-    ),
-    recent_titles: latestMemories
-      .map(memory => memory.title)
+    const [memoryCount, recentMemories, relationships] = await Promise.all([
+      prisma.memory.count({ where }),
+      prisma.memory.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: 20,
+        select: { id: true, title: true, tags: true, sourcePlatform: true, memoryType: true, content: true, createdAt: true },
+      }),
+      prisma.memoryRelationship.count({
+        where: { OR: [{ sourceMemory: { userId, orgId } }, { targetMemory: { userId, orgId } }] },
+      }).catch(() => 0),
+    ]);
+
+    // Count observations from recent memories tags
+    const observationCount = recentMemories.filter(m => (m.tags || []).includes('observation')).length;
+
+    // Aggregate tags and platforms from recent sample
+    const allTags = recentMemories.flatMap(m => m.tags || []);
+    const tagCounts = {};
+    for (const t of allTags) tagCounts[t] = (tagCounts[t] || 0) + 1;
+    const topTags = Object.entries(tagCounts)
+      .filter(([t]) => !['observation', 'longmemeval'].includes(t) && !t.startsWith('qid:') && !t.startsWith('session:'))
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([t]) => t);
+
+    const platforms = recentMemories.map(m => m.sourcePlatform).filter(Boolean);
+    const platCounts = {};
+    for (const p of platforms) platCounts[p] = (platCounts[p] || 0) + 1;
+    const topPlatforms = Object.entries(platCounts).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([p]) => p);
+
+    const recentTitles = recentMemories.map(m => m.title).filter(Boolean).slice(0, 5);
+
+    // Build cognitive profile from observations
+    const observations = recentMemories
+      .filter(m => (m.tags || []).includes('observation'))
+      .map(m => m.content || '');
+
+    const staticFacts = observations
+      .filter(c => c.includes('🔴'))
+      .map(c => c.replace(/^🔴\s*\[\d{4}-\d{2}-\d{2}\]\s*(\(ref:.*?\)\s*)?/gm, '').trim())
       .filter(Boolean)
-      .slice(0, 3),
-    graph_summary: {
-      included_count: latestMemories.length,
-      relationship_types: relationshipTypes
-    }
-  };
-  setAggregateCache(cacheKey, summary);
-  return summary;
+      .slice(0, 10);
+
+    const dynamicContext = observations
+      .filter(c => c.includes('🟡') && !c.includes('🔴'))
+      .map(c => c.replace(/^🟡\s*\[\d{4}-\d{2}-\d{2}\]\s*(\(ref:.*?\)\s*)?/gm, '').trim())
+      .filter(Boolean)
+      .slice(0, 10);
+
+    const summary = {
+      user_id: userId,
+      org_id: orgId,
+      project,
+      memory_count: memoryCount,
+      observation_count: observationCount,
+      relationship_count: typeof relationships === 'number' ? relationships : 0,
+      top_tags: topTags,
+      top_source_platforms: topPlatforms,
+      recent_titles: recentTitles,
+      graph_summary: {
+        included_count: memoryCount,
+      },
+      cognitive_profile: {
+        static_facts: staticFacts,
+        dynamic_context: dynamicContext,
+      },
+    };
+
+    setAggregateCache(cacheKey, summary, 30000); // 30s cache
+    return summary;
+  } catch (err) {
+    console.warn('[profile] Build failed:', err.message);
+    return { memory_count: 0, relationship_count: 0, observation_count: 0, top_tags: [], top_source_platforms: [], recent_titles: [], graph_summary: {}, cognitive_profile: { static_facts: [], dynamic_context: [] } };
+  }
 }
 
 async function buildContextPayload({ body, userId, orgId }) {
@@ -3180,12 +3223,14 @@ a{color:#a78bfa}</style></head><body>
           break;
 
         case '/api/profile':
-          if (req.method === 'GET') {
+          if (req.method === 'GET' || req.method === 'POST') {
             if (!ensurePersistedMemoryOrFail(res, '/api/profile')) {
               return;
             }
             try {
-              const project = url.searchParams.get('project') || null;
+              const project = req.method === 'POST'
+                ? (body.project || null)
+                : (url.searchParams.get('project') || null);
               const profile = await buildProfileSummary({ userId, orgId, project });
               return jsonResponse(res, {
                 ok: true,
@@ -3194,10 +3239,12 @@ a{color:#a78bfa}</style></head><body>
                   org_id: profile.org_id,
                   project: profile.project,
                   memory_count: profile.memory_count,
+                  observation_count: profile.observation_count,
                   relationship_count: profile.relationship_count,
                   top_tags: profile.top_tags,
                   top_source_platforms: profile.top_source_platforms,
-                  recent_titles: profile.recent_titles
+                  recent_titles: profile.recent_titles,
+                  cognitive_profile: profile.cognitive_profile,
                 },
                 graph_summary: profile.graph_summary
               });

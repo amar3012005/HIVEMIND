@@ -713,7 +713,13 @@ export async function recallPersistedMemories(store, {
   const top = deduped
     .sort((a, b) => b.score - a.score)
     .slice(0, max_memories);
-  const injectionText = `<relevant-memories>\n${top.map(item => `- ${item.memory.content}`).join('\n')}\n</relevant-memories>`;
+  let injectionText;
+  try {
+    const { formatChainOfNotePayload } = await import('./operator-layer.js');
+    injectionText = formatChainOfNotePayload(top.map(item => item.memory || item), query_context || '');
+  } catch {
+    injectionText = `<relevant-memories>\n${top.map(item => `- ${(item.memory || item).content}`).join('\n')}\n</relevant-memories>`;
+  }
 
   return {
     memories: top.map(item => ({

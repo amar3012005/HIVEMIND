@@ -491,3 +491,40 @@ export class CognitiveOperator {
     return frame;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Chain-of-Note Injection
+// ---------------------------------------------------------------------------
+
+/**
+ * Format memories for injection using the Chain-of-Note pattern.
+ * Forces the LLM to write a brief note for each memory before reasoning,
+ * improving reading accuracy by directing attention to relevance per item.
+ *
+ * @param {Array} memories — memory objects with id, content, memory_type, created_at
+ * @param {string} query — the user's current query
+ * @returns {string} Structured prompt payload
+ */
+export function formatChainOfNotePayload(memories, query) {
+  const memoryJSON = memories.map((m, i) => ({
+    id: m.id,
+    type: m.memory_type || 'fact',
+    date: m.created_at || m.document_date || null,
+    content: (m.content || '').slice(0, 1000),
+  }));
+
+  return `<chain-of-note>
+<query>${query}</query>
+<memories>
+${JSON.stringify(memoryJSON, null, 2)}
+</memories>
+<INSTRUCTIONS>
+You have been given relevant memories from the user's knowledge graph.
+Follow this exact process:
+1. For EACH memory above, write a brief note: what information does it contain that is relevant to the query? If it is not relevant, write "Not relevant."
+2. After processing all memories, reason over your notes to synthesize the final answer.
+3. If memories contain conflicting information, prefer the most recent date.
+4. If no memory contains the answer, say "I don't have information about this in my memory."
+</INSTRUCTIONS>
+</chain-of-note>`;
+}

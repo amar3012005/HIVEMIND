@@ -2465,8 +2465,8 @@ a{color:#a78bfa}</style></head><body>
               // Background sync
               (async () => {
                 try {
-                  const accessToken = decryptToken(connector.accessTokenEncrypted);
-                  if (!accessToken) throw new Error('Could not decrypt access token');
+                  const accessToken = await syncStore.getAccessToken(userId, 'gmail');
+                  if (!accessToken) throw new Error('Gmail access token not found or expired. Please reconnect Gmail.');
 
                   const GMAIL_API = 'https://gmail.googleapis.com/gmail/v1/users/me';
                   const params = new URLSearchParams({

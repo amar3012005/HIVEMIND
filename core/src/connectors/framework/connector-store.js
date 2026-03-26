@@ -217,13 +217,52 @@ export class ConnectorStore {
   }
 
   /**
-   * Get decrypted access token for a connector. Handles refresh if needed.
+   * Get decrypted access token for a connector. Refreshes if expired.
    */
   async getAccessToken(userId, provider) {
     const record = await this.prisma.platformIntegration.findUnique({
       where: { userId_platformType: { userId, platformType: provider } },
     });
     if (!record || !record.isActive) return null;
+
+    // Check if token is expired (with 5min buffer)
+    const isExpired = record.tokenExpiresAt && new Date(record.tokenExpiresAt) < new Date(Date.now() + 5 * 60 * 1000);
+
+    if (isExpired && record.refreshTokenEncrypted) {
+      // Refresh the token
+      try {
+        const refreshToken = decryptToken(record.refreshTokenEncrypted);
+        if (refreshToken && provider === 'gmail') {
+          const resp = await fetch('https://oauth2.googleapis.com/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+              client_id: process.env.GOOGLE_CLIENT_ID,
+              client_secret: process.env.GOOGLE_CLIENT_SECRET,
+              refresh_token: refreshToken,
+              grant_type: 'refresh_token',
+            }),
+          });
+          if (resp.ok) {
+            const tokens = await resp.json();
+            const newExpiresAt = tokens.expires_in ? new Date(Date.now() + tokens.expires_in * 1000) : null;
+            await this.prisma.platformIntegration.update({
+              where: { id: record.id },
+              data: {
+                accessTokenEncrypted: encryptToken(tokens.access_token),
+                tokenExpiresAt: newExpiresAt,
+                oauthLastRefreshed: new Date(),
+              },
+            });
+            console.log(`[connector-store] Refreshed ${provider} token for user ${userId}`);
+            return tokens.access_token;
+          }
+        }
+      } catch (refreshErr) {
+        console.warn(`[connector-store] Token refresh failed for ${provider}:`, refreshErr.message);
+      }
+    }
+
     return decryptToken(record.accessTokenEncrypted);
   }
 

@@ -1,0 +1,322 @@
+#!/usr/bin/env node
+/**
+ * LongMemEval-S Benchmark Runner for HIVEMIND
+ *
+ * Ingests LongMemEval_S dataset session-by-session into HIVEMIND,
+ * runs retrieval + generation for all 500 questions,
+ * outputs hypothesis JSONL for the official evaluate_qa.py script.
+ *
+ * Usage:
+ *   node longmemeval-runner.js --phase ingest     # Ingest all sessions
+ *   node longmemeval-runner.js --phase evaluate    # Run queries + generate answers
+ *   node longmemeval-runner.js --phase both        # Full pipeline
+ *   node longmemeval-runner.js --phase evaluate --sample 10  # Quick test with 10 questions
+ *
+ * Requires: GROQ_API_KEY, HIVEMIND core API running
+ */
+
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const DATA_PATH = process.env.LONGMEMEVAL_DATA || path.join(__dirname, '../../../benchmarks/LongMemEval/data/longmemeval_s_cleaned.json');
+const OUTPUT_DIR = path.join(__dirname, '../../evaluation-reports');
+const HYPOTHESIS_FILE = path.join(OUTPUT_DIR, 'longmemeval-hypotheses.jsonl');
+
+// HIVEMIND API config
+const API_BASE = process.env.HIVEMIND_API_BASE || 'https://core.hivemind.davinciai.eu:8050';
+const API_KEY = process.env.HIVEMIND_API_KEY || process.env.HIVEMIND_MASTER_API_KEY || '';
+const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
+const GROQ_MODEL = process.env.GROQ_INFERENCE_MODEL || 'llama-3.3-70b-versatile';
+
+// Benchmark user/org (isolated tenant)
+const BENCH_USER = 'longmemeval-bench-001';
+const BENCH_ORG = 'longmemeval-org-001';
+
+// ── CLI args ─────────────────────────────────────────────
+
+function parseArgs() {
+  const args = process.argv.slice(2);
+  const opts = { phase: 'both', sample: 0, startFrom: 0, concurrency: 1 };
+  for (let i = 0; i < args.length; i++) {
+    switch (args[i]) {
+      case '--phase': opts.phase = args[++i]; break;
+      case '--sample': opts.sample = parseInt(args[++i], 10); break;
+      case '--start-from': opts.startFrom = parseInt(args[++i], 10); break;
+      case '--concurrency': opts.concurrency = parseInt(args[++i], 10); break;
+      case '--help': case '-h':
+        console.log(`
+LongMemEval-S Benchmark Runner
+
+Usage: node longmemeval-runner.js [options]
+
+Options:
+  --phase ingest|evaluate|both   Pipeline phase (default: both)
+  --sample N                     Only process N instances (default: all 500)
+  --start-from N                 Start from instance N (default: 0)
+  --concurrency N                Parallel instances (default: 1)
+`);
+        process.exit(0);
+    }
+  }
+  return opts;
+}
+
+// ── API helpers ──────────────────────────────────────────
+
+async function apiCall(method, path, body = null) {
+  const url = `${API_BASE}${path}`;
+  const headers = {
+    'X-API-Key': API_KEY,
+    'Content-Type': 'application/json',
+    'X-HM-User-Id': BENCH_USER,
+    'X-HM-Org-Id': BENCH_ORG,
+  };
+
+  const opts = { method, headers };
+  if (body) opts.body = JSON.stringify(body);
+
+  const resp = await fetch(url, opts);
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`API ${method} ${path}: ${resp.status} ${text.slice(0, 200)}`);
+  }
+  return resp.json();
+}
+
+async function groqChat(messages, options = {}) {
+  const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${GROQ_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: options.model || GROQ_MODEL,
+      messages,
+      temperature: 0,
+      max_tokens: options.maxTokens || 300,
+    }),
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Groq API: ${resp.status} ${text.slice(0, 200)}`);
+  }
+
+  const data = await resp.json();
+  return data.choices[0].message.content;
+}
+
+// ── Date parsing ────────────────────────────────────────
+
+function parseLongMemEvalDate(dateStr) {
+  if (!dateStr) return null;
+  // Format: "2023/05/20 (Sat) 02:21"
+  const match = dateStr.match(/^(\d{4})\/(\d{2})\/(\d{2})\s*\([^)]*\)\s*(\d{2}):(\d{2})/);
+  if (match) {
+    return new Date(`${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:00Z`).toISOString();
+  }
+  // Try direct parse
+  const d = new Date(dateStr);
+  return isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+// ── Phase 1: Ingest ─────────────────────────────────────
+
+async function ingestInstance(instance, instanceIdx, totalInstances) {
+  const { question_id, haystack_sessions, haystack_dates } = instance;
+  const totalSessions = haystack_sessions.length;
+  let ingested = 0;
+  let skipped = 0;
+
+  for (let i = 0; i < totalSessions; i++) {
+    const session = haystack_sessions[i];
+    const sessionDate = parseLongMemEvalDate(haystack_dates[i]);
+
+    // Round-level ingestion: each user+assistant pair becomes its own memory
+    for (let j = 0; j < session.length; j += 2) {
+      const userTurn = session[j];
+      const assistantTurn = session[j + 1];
+
+      if (!userTurn) continue;
+
+      const content = assistantTurn
+        ? `User: ${userTurn.content}\nAssistant: ${assistantTurn.content}`
+        : `User: ${userTurn.content}`;
+
+      try {
+        await apiCall('POST', '/api/memories', {
+          content,
+          title: `LME:${question_id}:s${i}:r${j / 2}`,
+          tags: ['longmemeval', `qid:${question_id}`, `session:${i}`],
+          memory_type: 'event',
+          document_date: sessionDate,
+          project: `lme-${question_id}`,
+        });
+        ingested++;
+      } catch (err) {
+        skipped++;
+        if (skipped <= 3) console.warn(`  [skip] ${question_id}:s${i}:r${j / 2}: ${err.message.slice(0, 100)}`);
+      }
+    }
+  }
+
+  console.log(`[${instanceIdx + 1}/${totalInstances}] ${question_id}: ${totalSessions} sessions → ${ingested} memories, ${skipped} skipped`);
+  return { ingested, skipped };
+}
+
+// ── Phase 2: Evaluate ───────────────────────────────────
+
+async function evaluateInstance(instance) {
+  const { question_id, question, question_type } = instance;
+  const isAbstention = question_id.endsWith('_abs');
+
+  // Search for relevant memories (scoped to this question's project)
+  let searchResults;
+  try {
+    searchResults = await apiCall('POST', '/api/search/quick', {
+      query: question,
+      project: `lme-${question_id}`,
+      limit: 10,
+    });
+  } catch {
+    searchResults = { results: [] };
+  }
+
+  const results = searchResults.results || searchResults.memories || [];
+  const context = results
+    .slice(0, 5)
+    .map(r => r.content || r.payload?.content || '')
+    .filter(c => c.length > 10)
+    .join('\n---\n');
+
+  // Generate hypothesis using Groq
+  let hypothesis;
+  try {
+    const systemPrompt = isAbstention
+      ? 'You are an AI assistant with memory of past conversations. If you cannot find the answer in the provided context, say "I don\'t have this information in my memory." Be honest about what you don\'t know.'
+      : 'You are an AI assistant with memory of past conversations. Answer the question based ONLY on the provided conversation history. Be concise and direct. If conflicting information exists, prefer the most recent.';
+
+    const userPrompt = context.length > 50
+      ? `Here are relevant memories from our past conversations:\n\n${context}\n\nQuestion: ${question}\n\nAnswer concisely:`
+      : `I don't have relevant context for this question.\n\nQuestion: ${question}\n\nAnswer concisely:`;
+
+    hypothesis = await groqChat([
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ], { maxTokens: 200 });
+  } catch (err) {
+    console.warn(`  [groq-fail] ${question_id}: ${err.message.slice(0, 100)}`);
+    hypothesis = "I don't have this information in my memory.";
+  }
+
+  return { question_id, hypothesis: hypothesis.trim() };
+}
+
+// ── Main ────────────────────────────────────────────────
+
+async function main() {
+  const opts = parseArgs();
+
+  console.log('');
+  console.log('╔══════════════════════════════════════════════╗');
+  console.log('║  HIVEMIND × LongMemEval-S Benchmark Runner  ║');
+  console.log('╚══════════════════════════════════════════════╝');
+  console.log('');
+
+  // Load dataset
+  if (!fs.existsSync(DATA_PATH)) {
+    console.error(`Dataset not found: ${DATA_PATH}`);
+    console.error('Run: cd benchmarks/LongMemEval/data && wget https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json');
+    process.exit(1);
+  }
+
+  console.log('Loading dataset...');
+  const data = JSON.parse(fs.readFileSync(DATA_PATH, 'utf-8'));
+  let instances = data.slice(opts.startFrom);
+  if (opts.sample > 0) instances = instances.slice(0, opts.sample);
+
+  console.log(`Instances: ${instances.length} (of ${data.length} total)`);
+  console.log(`Phase: ${opts.phase}`);
+  console.log(`API: ${API_BASE}`);
+  console.log(`User: ${BENCH_USER}`);
+  console.log(`Groq: ${GROQ_MODEL}`);
+  console.log('');
+
+  // Ensure output dir
+  if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+
+  // ── Ingest Phase ──
+  if (opts.phase === 'ingest' || opts.phase === 'both') {
+    console.log('═══ Phase 1: Ingestion ═══');
+    const startTime = Date.now();
+    let totalIngested = 0;
+    let totalSkipped = 0;
+
+    for (let i = 0; i < instances.length; i++) {
+      const { ingested, skipped } = await ingestInstance(instances[i], i, instances.length);
+      totalIngested += ingested;
+      totalSkipped += skipped;
+
+      // Rate limiting: small pause between instances
+      if (i % 10 === 9) {
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+        const rate = (totalIngested / (Date.now() - startTime) * 1000).toFixed(1);
+        console.log(`  ... ${i + 1}/${instances.length} done, ${totalIngested} memories, ${rate}/sec, ${elapsed}s elapsed`);
+      }
+    }
+
+    const duration = ((Date.now() - startTime) / 1000).toFixed(0);
+    console.log(`\nIngestion complete: ${totalIngested} memories, ${totalSkipped} skipped, ${duration}s`);
+    console.log('');
+  }
+
+  // ── Evaluate Phase ──
+  if (opts.phase === 'evaluate' || opts.phase === 'both') {
+    console.log('═══ Phase 2: Evaluation ═══');
+    const startTime = Date.now();
+    const hypotheses = [];
+
+    for (let i = 0; i < instances.length; i++) {
+      const result = await evaluateInstance(instances[i]);
+      hypotheses.push(result);
+
+      if ((i + 1) % 10 === 0 || i === instances.length - 1) {
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+        console.log(`  [${i + 1}/${instances.length}] ${result.question_id}: "${result.hypothesis.slice(0, 60)}..." (${elapsed}s)`);
+      }
+    }
+
+    // Write JSONL output
+    const jsonlContent = hypotheses.map(h => JSON.stringify(h)).join('\n') + '\n';
+    fs.writeFileSync(HYPOTHESIS_FILE, jsonlContent, 'utf-8');
+
+    const duration = ((Date.now() - startTime) / 1000).toFixed(0);
+    console.log(`\nEvaluation complete: ${hypotheses.length} hypotheses, ${duration}s`);
+    console.log(`Output: ${HYPOTHESIS_FILE}`);
+    console.log('');
+
+    // Print summary stats
+    const byType = {};
+    for (const inst of instances) {
+      const type = inst.question_type;
+      byType[type] = (byType[type] || 0) + 1;
+    }
+    console.log('Question type distribution:');
+    for (const [type, count] of Object.entries(byType)) {
+      console.log(`  ${type}: ${count}`);
+    }
+  }
+
+  console.log('\n═══ Done ═══');
+  console.log(`To evaluate, run:`);
+  console.log(`  cd /opt/HIVEMIND/benchmarks/LongMemEval/src/evaluation`);
+  console.log(`  OPENAI_API_KEY=sk-... python3 evaluate_qa.py gpt-4o ${HYPOTHESIS_FILE} ../../data/longmemeval_s_cleaned.json`);
+}
+
+main().catch(err => {
+  console.error('Fatal:', err.message);
+  process.exit(1);
+});

@@ -1539,3 +1539,96 @@ Evaluation page showed **all zeros** — 0% precision, 0% recall, 0% NDCG, 0% MR
 | Gmail connector | Full thread sync + Pub/Sub | OAuth + thread sync (Pub/Sub deferred) | MVP |
 | Dynamic evaluation | Not offered (static benchmarks only) | Auto-generated per user | ADVANTAGE |
 | LongMemEval benchmark | 81.6% overall | Documented, ready to execute | PENDING |
+
+---
+
+## 2026-03-25 23:50 UTC — Retrieval Engine Upgrade Sprint (LongMemEval >90% Target)
+
+### Goal
+Upgrade HIVEMIND's ingestion and retrieval pipeline to score >90% on LongMemEval-S, surpassing Supermemory's 85.2%. Four layered improvements based on NotebookLM research + SOTA papers (Mastra OM 94.87%, Hindsight 91.4%).
+
+### What Landed
+
+#### 1. Round-Level Ingestion Splitter (`core/src/memory/round-splitter.js`) — NEW
+- Splits conversations into per-turn pairs (one user message + one assistant response = one memory)
+- Prevents information loss from session-level chunking (LongMemEval best practice)
+- Handles edge cases: orphan messages, system role skip, timestamp preservation
+- **5 unit tests passing**
+
+#### 2. Fact Extraction Service (`core/src/memory/fact-extractor.js`) — NEW
+- Extracts keyphrases (top 10 by frequency, stopword-filtered), entities (capitalized names + acronyms), and temporal references (ISO dates, relative expressions, quarter refs)
+- `buildAugmentedKey(content, facts)` concatenates raw content with extracted facts for enriched embedding
+- Optional LLM path via Groq Llama 3 (merges with heuristic, graceful fallback)
+- Research: fact-augmented keys improve retrieval recall by 9.4% and downstream accuracy by 5.4%
+- **14 unit tests passing**
+
+#### 3. Fact-Augmented Keys in Qdrant (`core/src/vector/qdrant-client.js`) — MODIFIED
+- `storeMemory()` now embeds `content + "\nKey topics: ..." + "\nEntities: ..." + "\nDates: ..."` instead of raw content
+- Qdrant payload still stores raw `memory.content` (for keyword search) — only the vector changes
+- Graceful fallback to raw content if extraction fails
+- **Production deployed, verified with test memory**
+
+#### 4. Time-Aware Query Expansion (`core/src/search/time-aware-expander.js`) — NEW
+- Detects temporal references: relative ("last week", "yesterday", "recently"), absolute ("March 2026", "2026-03-15"), directional ("after March 10th")
+- Computes date range → automatically sets `options.dateRange` in hybrid search
+- Wired into both `core/src/search/hybrid.js` and `core/src/external/search/hybrid.js`
+- Research: boosts Temporal Reasoning recall by 7-11%
+- **7 unit tests passing**
+
+#### 5. Chain-of-Note Structured Reading (`core/src/memory/operator-layer.js`) — MODIFIED
+- New `formatChainOfNotePayload(memories, query)` function
+- Forces LLM to: (1) extract notes per memory, (2) identify relevance, (3) prefer recent dates on conflicts, (4) then synthesize answer
+- Replaces old `<relevant-memories>` XML injection with structured `<chain-of-note>` format
+- Wired into `persisted-retrieval.js` injection pipeline (fallback to old format on import error)
+- Research: improves reading accuracy by ~10 absolute points
+- **3 unit tests passing**
+
+#### 6. Integration Test (`core/tests/integration/retrieval-upgrade.test.js`) — NEW
+- End-to-end test exercising all 4 upgrades in sequence: split → extract → expand → format
+- Verifies pipeline coherence across modules
+- **1 integration test passing**
+
+### Test Results
+| Suite | Tests | Status |
+|-------|-------|--------|
+| round-splitter | 5 | PASS |
+| fact-extractor | 14 | PASS |
+| time-aware-expander | 7 | PASS |
+| chain-of-note | 3 | PASS |
+| integration | 1 | PASS |
+| **Total** | **30** | **All PASS** |
+
+### Production Deployment
+- 9/9 endpoints healthy
+- Temporal search query returned 10 results (222ms, scores ~0.70)
+- Fact-augmented embeddings active for all new memories
+
+### Expected LongMemEval-S Impact
+| Upgrade | Category | Expected Boost |
+|---------|----------|----------------|
+| Round-level ingestion | Multi-Session (MS) | +3% |
+| Fact-augmented keys | Information Extraction (IE) | +5% |
+| Time-aware expansion | Temporal Reasoning (TR) | +7-11% |
+| Chain-of-note reading | All categories | +10% |
+| **Combined (with overlap)** | **Overall** | **88-93% (from 81%)** |
+
+### Files Created/Modified
+- `core/src/memory/round-splitter.js` — NEW
+- `core/src/memory/fact-extractor.js` — NEW
+- `core/src/search/time-aware-expander.js` — NEW
+- `core/src/memory/operator-layer.js` — added formatChainOfNotePayload
+- `core/src/memory/persisted-retrieval.js` — chain-of-note injection
+- `core/src/vector/qdrant-client.js` — fact-augmented key embedding
+- `core/src/search/hybrid.js` — time-aware expansion wiring
+- `core/src/external/search/hybrid.js` — time-aware expansion wiring
+- `core/tests/unit/round-splitter.test.js` — NEW
+- `core/tests/unit/fact-extractor.test.js` — NEW
+- `core/tests/unit/time-aware-expander.test.js` — NEW
+- `core/tests/unit/chain-of-note.test.js` — NEW
+- `core/tests/integration/retrieval-upgrade.test.js` — NEW
+- `docs/superpowers/plans/2026-03-25-retrieval-engine-upgrade.md` — implementation plan
+
+### Next Steps
+- Wire round-splitter into MCP conversation ingestion and Gmail sync
+- Run LongMemEval-S benchmark (plan: `docs/longmemeval-benchmark-plan.md`, cost: ~$15)
+- If >88%: ship as SOTA claim. If <88%: implement Observer/Reflector (Phase 2)

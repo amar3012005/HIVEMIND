@@ -237,33 +237,34 @@ export class Observer {
    */
   async _observeWithLLM(content) {
     const inputTokens = Math.ceil(content.length / 4);
-    const maxOutputTokens = Math.max(60, Math.min(Math.ceil(inputTokens / 3), 300));
+    // gpt-oss-20b needs ~300 reasoning tokens + output tokens
+    // Give it enough headroom: reasoning + output budget
+    const outputBudget = Math.max(60, Math.min(Math.ceil(inputTokens / 3), 200));
+    const maxTokens = outputBudget + 400; // reasoning headroom
 
     try {
       const response = await this.groqClient.chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
+        model: 'openai/gpt-oss-20b',
         messages: [
           {
             role: 'system',
-            content: `You are a memory compression agent for a personal AI assistant. Your job is to distill conversation turns into dense, factual observation notes.
-
-RULES:
-- Extract ONLY the user's personal facts, preferences, decisions, events, and stated information.
-- Ignore assistant responses, generic questions, pleasantries.
-- Use two-level bullet format: top-level for main facts, sub-bullets for details.
-- Tag each top-level bullet with priority: 🔴 (critical personal fact), 🟡 (useful context), 🟢 (minor detail).
-- Include specific dates, names, numbers, locations — never drop these.
-- If the user mentions a CHANGE (new job, moved, preference update), mark it 🔴 and note it supersedes previous info.
-- If there are NO memorable user facts (just greetings, generic questions, thanks), output exactly: TRIVIAL
-- Be extremely concise. Target ${maxOutputTokens} tokens maximum.`
+            content: `You are a memory compression agent. Extract ONLY user personal facts from this conversation.
+Output one line per fact with emoji: 🔴 (critical personal fact), 🟡 (useful context), 🟢 (minor).
+Include specific dates, names, numbers, locations — never drop these.
+If a CHANGE is mentioned (new job, moved, preference update), mark it 🔴.
+If NO memorable user facts (greetings, generic questions, thanks), output: TRIVIAL
+Max 5 lines. Be extremely concise.`
           },
           { role: 'user', content: content.slice(0, 3000) }
         ],
-        max_tokens: maxOutputTokens,
+        max_tokens: maxTokens,
         temperature: 0,
+        include_reasoning: false,
       });
 
-      const text = (response.choices[0]?.message?.content || '').trim();
+      // Sanitize: strip null bytes, lone surrogates, and control chars
+      const rawText = (response.choices[0]?.message?.content || '');
+      const text = rawText.replace(/\x00/g, '').replace(/[\uD800-\uDFFF]/g, '').replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '').trim();
       if (text === 'TRIVIAL' || text.length < 5) return null;
 
       // Override heuristic priority if LLM flagged 🔴

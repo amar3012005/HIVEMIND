@@ -169,6 +169,27 @@ export class PrismaGraphStore {
     return mapMemoryRecord(record);
   }
 
+  async deleteMemory(id) {
+    const deleted = await this.client.memory.update({
+      where: { id },
+      data: {
+        deletedAt: new Date(),
+        isLatest: false,
+        updatedAt: new Date()
+      },
+      include: {
+        sourceMetadata: true,
+        codeMetadata: true,
+        versions: {
+          orderBy: { createdAt: 'desc' },
+          take: 1
+        }
+      }
+    });
+
+    return mapMemoryRecord(deleted);
+  }
+
   async listLatestMemories({ user_id, org_id, project }) {
     const records = await this.client.memory.findMany({
       where: { ...scopedMemoryWhere({ user_id, org_id, project }), isLatest: true },

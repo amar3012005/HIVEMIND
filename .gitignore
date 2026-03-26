@@ -58,3 +58,4 @@ key-rotation-report-*.json
 # Secret scanning and replacements
 replacements.txt
 MiroFish
+benchmarks/

@@ -1,0 +1,432 @@
+{
+  "schemaVersion": "2026-03-19",
+  "kind": "hivemind.retrieval-evaluation.bundle",
+  "generatedAt": "2026-03-21T11:52:30.052Z",
+  "dataset": "default",
+  "filters": {
+    "category": null,
+    "difficulty": null,
+    "sample": 3
+  },
+  "methods": [
+    "hybrid"
+  ],
+  "environment": {
+    "userId": "10843871-7459-46db-a951-9ef1de9d0ff1",
+    "orgId": "9eb1c947-88d2-486e-b289-f7a2853005e6"
+  },
+  "report": {
+    "schemaVersion": "2026-03-19",
+    "kind": "hivemind.retrieval-evaluation-report",
+    "timestamp": "2026-03-21T11:52:30.051Z",
+    "evaluationId": "ac54956e-3897-4838-8db4-64991084dd2b",
+    "dataset": "default",
+    "duration": 313,
+    "summary": {
+      "precisionAt5": {
+        "mean": 0,
+        "min": 0,
+        "max": 0,
+        "median": 0
+      },
+      "precisionAt10": {
+        "mean": 0,
+        "min": 0,
+        "max": 0,
+        "median": 0
+      },
+      "recallAt10": {
+        "mean": 0,
+        "min": 0,
+        "max": 0,
+        "median": 0
+      },
+      "f1At10": {
+        "mean": 0,
+        "min": 0,
+        "max": 0,
+        "median": 0
+      },
+      "ndcgAt10": {
+        "mean": 0,
+        "min": 0,
+        "max": 0,
+        "median": 0
+      },
+      "mrr": {
+        "mean": 0,
+        "min": 0,
+        "max": 0,
+        "median": 0
+      },
+      "latencyP99": 47,
+      "latencyP95": 47,
+      "latencyP50": 44,
+      "qualityScore": 10,
+      "totalQueries": 3,
+      "successfulQueries": 3,
+      "failedQueries": 3
+    },
+    "byCategory": {
+      "technical": {
+        "count": 2,
+        "metrics": {
+          "precisionAt5": {
+            "mean": 0,
+            "min": 0,
+            "max": 0,
+            "median": 0
+          },
+          "precisionAt10": {
+            "mean": 0,
+            "min": 0,
+            "max": 0,
+            "median": 0
+          },
+          "recallAt10": {
+            "mean": 0,
+            "min": 0,
+            "max": 0,
+            "median": 0
+          },
+          "f1At10": {
+            "mean": 0,
+            "min": 0,
+            "max": 0,
+            "median": 0
+          },
+          "ndcgAt10": {
+            "mean": 0,
+            "min": 0,
+            "max": 0,
+            "median": 0
+          },
+          "mrr": {
+            "mean": 0,
+            "min": 0,
+            "max": 0,
+            "median": 0
+          }
+        },
+        "latencyP95": 47
+      },
+      "personal": {
+        "count": 1,
+        "metrics": {
+          "precisionAt5": {
+            "mean": 0,
+            "min": 0,
+            "max": 0,
+            "median": 0
+          },
+          "precisionAt10": {
+            "mean": 0,
+            "min": 0,
+            "max": 0,
+            "median": 0
+          },
+          "recallAt10": {
+            "mean": 0,
+            "min": 0,
+            "max": 0,
+            "median": 0
+          },
+          "f1At10": {
+            "mean": 0,
+            "min": 0,
+            "max": 0,
+            "median": 0
+          },
+          "ndcgAt10": {
+            "mean": 0,
+            "min": 0,
+            "max": 0,
+            "median": 0
+          },
+          "mrr": {
+            "mean": 0,
+            "min": 0,
+            "max": 0,
+            "median": 0
+          }
+        },
+        "latencyP95": 43
+      }
+    },
+    "bySearchMethod": {
+      "hybrid": {
+        "count": 3,
+        "metrics": {
+          "precisionAt5": {
+            "mean": 0,
+            "min": 0,
+            "max": 0,
+            "median": 0
+          },
+          "precisionAt10": {
+            "mean": 0,
+            "min": 0,
+            "max": 0,
+            "median": 0
+          },
+          "recallAt10": {
+            "mean": 0,
+            "min": 0,
+            "max": 0,
+            "median": 0
+          },
+          "f1At10": {
+            "mean": 0,
+            "min": 0,
+            "max": 0,
+            "median": 0
+          },
+          "ndcgAt10": {
+            "mean": 0,
+            "min": 0,
+            "max": 0,
+            "median": 0
+          },
+          "mrr": {
+            "mean": 0,
+            "min": 0,
+            "max": 0,
+            "median": 0
+          }
+        },
+        "latencyP99": 47,
+        "latencyP95": 47,
+        "latencyP50": 44
+      }
+    },
+    "queryMetadata": [
+      {
+        "query": "Show me the error handling patterns we use",
+        "category": "technical",
+        "difficulty": "medium",
+        "relevantCount": 4,
+        "tags": [
+          "error-handling",
+          "patterns",
+          "best-practices"
+        ]
+      },
+      {
+        "query": "What are my goals for this quarter?",
+        "category": "personal",
+        "difficulty": "easy",
+        "relevantCount": 2,
+        "tags": [
+          "goals",
+          "quarterly",
+          "objectives",
+          "personal-growth"
+        ]
+      },
+      {
+        "query": "What was the decision about the database migration?",
+        "category": "technical",
+        "difficulty": "medium",
+        "relevantCount": 2,
+        "tags": [
+          "database",
+          "migration",
+          "architecture",
+          "decision"
+        ]
+      }
+    ],
+    "failedQueries": [
+      {
+        "query": "Show me the error handling patterns we use",
+        "method": "hybrid",
+        "reason": "Thresholds not met"
+      },
+      {
+        "query": "What are my goals for this quarter?",
+        "method": "hybrid",
+        "reason": "Thresholds not met"
+      },
+      {
+        "query": "What was the decision about the database migration?",
+        "method": "hybrid",
+        "reason": "Thresholds not met"
+      }
+    ],
+    "targets": {
+      "precisionAt5": 0.8,
+      "recallAt10": 0.7,
+      "f1Score": 0.75,
+      "ndcgAt10": 0.75,
+      "mrr": 0.6,
+      "latencyP99": 300
+    },
+    "methods": [
+      "hybrid"
+    ],
+    "rawResults": [
+      {
+        "requestId": "af060f64-aa94-468c-a8a5-eff30e07b745",
+        "query": "Show me the error handling patterns we use",
+        "category": "technical",
+        "method": "hybrid",
+        "latencyMs": 47,
+        "relevantCount": 4,
+        "retrievedCount": 0,
+        "metrics": {
+          "precisionAt5": 0,
+          "precisionAt10": 0,
+          "precisionAt20": 0,
+          "recallAt5": 0,
+          "recallAt10": 0,
+          "recallAt20": 0,
+          "f1At5": 0,
+          "f1At10": 0,
+          "f1At20": 0,
+          "ndcgAt5": 0,
+          "ndcgAt10": 0,
+          "ndcgAt20": 0,
+          "mrr": 0,
+          "latencyMs": 47,
+          "truePositivesAt10": 0,
+          "falsePositivesAt10": 0,
+          "falseNegativesAt10": 4
+        },
+        "passed": {
+          "allPassed": false,
+          "checks": {
+            "precisionAt5": false,
+            "recallAt10": false,
+            "f1At10": false,
+            "ndcgAt10": false,
+            "mrr": false,
+            "latency": true
+          },
+          "thresholds": {
+            "precisionAt5": 0.8,
+            "recallAt10": 0.7,
+            "f1Score": 0.75,
+            "ndcgAt10": 0.75,
+            "mrr": 0.6,
+            "latencyP99": 300
+          }
+        },
+        "resultIds": [],
+        "relevantIds": [
+          "550e8400-e29b-41d4-a716-446655440012",
+          "550e8400-e29b-41d4-a716-446655440013",
+          "550e8400-e29b-41d4-a716-446655440014",
+          "550e8400-e29b-41d4-a716-446655440015"
+        ],
+        "timestamp": "2026-03-21T11:52:29.961Z"
+      },
+      {
+        "requestId": "8ca588bf-0b57-4330-b3aa-c19d8c50e677",
+        "query": "What are my goals for this quarter?",
+        "category": "personal",
+        "method": "hybrid",
+        "latencyMs": 43,
+        "relevantCount": 2,
+        "retrievedCount": 0,
+        "metrics": {
+          "precisionAt5": 0,
+          "precisionAt10": 0,
+          "precisionAt20": 0,
+          "recallAt5": 0,
+          "recallAt10": 0,
+          "recallAt20": 0,
+          "f1At5": 0,
+          "f1At10": 0,
+          "f1At20": 0,
+          "ndcgAt5": 0,
+          "ndcgAt10": 0,
+          "ndcgAt20": 0,
+          "mrr": 0,
+          "latencyMs": 43,
+          "truePositivesAt10": 0,
+          "falsePositivesAt10": 0,
+          "falseNegativesAt10": 2
+        },
+        "passed": {
+          "allPassed": false,
+          "checks": {
+            "precisionAt5": false,
+            "recallAt10": false,
+            "f1At10": false,
+            "ndcgAt10": false,
+            "mrr": false,
+            "latency": true
+          },
+          "thresholds": {
+            "precisionAt5": 0.8,
+            "recallAt10": 0.7,
+            "f1Score": 0.75,
+            "ndcgAt10": 0.75,
+            "mrr": 0.6,
+            "latencyP99": 300
+          }
+        },
+        "resultIds": [],
+        "relevantIds": [
+          "550e8400-e29b-41d4-a716-446655440057",
+          "550e8400-e29b-41d4-a716-446655440058"
+        ],
+        "timestamp": "2026-03-21T11:52:30.005Z"
+      },
+      {
+        "requestId": "b265e068-836e-41fc-9ee4-7df2d6622438",
+        "query": "What was the decision about the database migration?",
+        "category": "technical",
+        "method": "hybrid",
+        "latencyMs": 44,
+        "relevantCount": 2,
+        "retrievedCount": 0,
+        "metrics": {
+          "precisionAt5": 0,
+          "precisionAt10": 0,
+          "precisionAt20": 0,
+          "recallAt5": 0,
+          "recallAt10": 0,
+          "recallAt20": 0,
+          "f1At5": 0,
+          "f1At10": 0,
+          "f1At20": 0,
+          "ndcgAt5": 0,
+          "ndcgAt10": 0,
+          "ndcgAt20": 0,
+          "mrr": 0,
+          "latencyMs": 44,
+          "truePositivesAt10": 0,
+          "falsePositivesAt10": 0,
+          "falseNegativesAt10": 2
+        },
+        "passed": {
+          "allPassed": false,
+          "checks": {
+            "precisionAt5": false,
+            "recallAt10": false,
+            "f1At10": false,
+            "ndcgAt10": false,
+            "mrr": false,
+            "latency": true
+          },
+          "thresholds": {
+            "precisionAt5": 0.8,
+            "recallAt10": 0.7,
+            "f1Score": 0.75,
+            "ndcgAt10": 0.75,
+            "mrr": 0.6,
+            "latencyP99": 300
+          }
+        },
+        "resultIds": [],
+        "relevantIds": [
+          "550e8400-e29b-41d4-a716-446655440001",
+          "550e8400-e29b-41d4-a716-446655440002"
+        ],
+        "timestamp": "2026-03-21T11:52:30.049Z"
+      }
+    ]
+  },
+  "comparison": null
+}

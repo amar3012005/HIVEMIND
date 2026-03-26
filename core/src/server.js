@@ -453,25 +453,64 @@ async function buildProfileSummary({ userId, orgId, project = null }) {
   const cached = getAggregateCache(cacheKey);
   if (cached) return cached;
 
-  if (!prisma) return { memory_count: 0, relationship_count: 0, observation_count: 0, top_tags: [], top_source_platforms: [], recent_titles: [], graph_summary: {}, cognitive_profile: { static_facts: [], dynamic_context: [] } };
+  if (!prisma || !prisma.memory) {
+    console.warn('[profile] prisma.memory is undefined, prisma type:', typeof prisma, 'keys:', Object.keys(prisma).slice(0, 5));
+    // Try using persistentMemoryStore instead
+    if (persistentMemoryStore) {
+      try {
+        const mems = await persistentMemoryStore.listLatestMemories({ user_id: userId, org_id: orgId, project });
+        const recent = mems.slice(0, 20);
+        const obs = recent.filter(m => (m.tags || []).includes('observation'));
+        const allTags = recent.flatMap(m => m.tags || []);
+        const tagCounts = {};
+        for (const t of allTags) tagCounts[t] = (tagCounts[t] || 0) + 1;
+        const topTags = Object.entries(tagCounts)
+          .filter(([t]) => !['observation', 'longmemeval'].includes(t) && !t.startsWith('qid:') && !t.startsWith('session:'))
+          .sort((a, b) => b[1] - a[1]).slice(0, 10).map(([t]) => t);
+
+        const staticFacts = obs.filter(m => (m.content || '').includes('🔴')).map(m => (m.content || '').replace(/^🔴\s*\[\d{4}-\d{2}-\d{2}\]\s*(\(ref:.*?\)\s*)?/gm, '').trim()).filter(Boolean).slice(0, 10);
+        const dynamicContext = obs.filter(m => (m.content || '').includes('🟡') && !(m.content || '').includes('🔴')).map(m => (m.content || '').replace(/^🟡\s*\[\d{4}-\d{2}-\d{2}\]\s*(\(ref:.*?\)\s*)?/gm, '').trim()).filter(Boolean).slice(0, 10);
+
+        const summary = {
+          user_id: userId, org_id: orgId, project,
+          memory_count: mems.length,
+          observation_count: obs.length,
+          relationship_count: 0,
+          top_tags: topTags,
+          top_source_platforms: [...new Set(recent.map(m => m.source_metadata?.source_platform).filter(Boolean))].slice(0, 5),
+          recent_titles: recent.map(m => m.title).filter(Boolean).slice(0, 5),
+          graph_summary: { included_count: mems.length },
+          cognitive_profile: { static_facts: staticFacts, dynamic_context: dynamicContext },
+        };
+        setAggregateCache(cacheKey, summary, 30000);
+        return summary;
+      } catch (storeErr) {
+        console.warn('[profile] Store fallback failed:', storeErr.message);
+      }
+    }
+    return { memory_count: 0, relationship_count: 0, observation_count: 0, top_tags: [], top_source_platforms: [], recent_titles: [], graph_summary: {}, cognitive_profile: { static_facts: [], dynamic_context: [] } };
+  }
 
   try {
     // Fast count queries instead of loading all records
     const where = { userId, orgId, deletedAt: null, isLatest: true };
     if (project) where.project = project;
 
-    const [memoryCount, recentMemories, relationships] = await Promise.all([
-      prisma.memory.count({ where }),
+    const [memoryCount, recentMemories] = await Promise.all([
+      prisma.memory.count({ where }).catch(() => 0),
       prisma.memory.findMany({
         where,
         orderBy: { createdAt: 'desc' },
         take: 20,
         select: { id: true, title: true, tags: true, sourcePlatform: true, memoryType: true, content: true, createdAt: true },
-      }),
-      prisma.memoryRelationship.count({
-        where: { OR: [{ sourceMemory: { userId, orgId } }, { targetMemory: { userId, orgId } }] },
-      }).catch(() => 0),
+      }).catch(() => []),
     ]);
+    // Relationship count — use raw query since model name may vary
+    let relationships = 0;
+    try {
+      const relRows = await prisma.$queryRawUnsafe('SELECT COUNT(*)::int as c FROM "MemoryRelationship"');
+      relationships = relRows?.[0]?.c || 0;
+    } catch { relationships = 0; }
 
     // Count observations from recent memories tags
     const observationCount = recentMemories.filter(m => (m.tags || []).includes('observation')).length;

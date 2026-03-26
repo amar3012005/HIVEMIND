@@ -109,7 +109,28 @@ export class MemoryGraphEngine {
     this.predictCalibrateFilter = predictCalibrate
       ? new PredictCalibrateFilter(predictCalibrateOptions)
       : null;
-    this.observer = new Observer();
+    // Observer with Groq LLM if API key available, heuristic fallback otherwise
+    const groqApiKey = process.env.GROQ_API_KEY;
+    if (groqApiKey) {
+      const groqClient = {
+        chat: {
+          completions: {
+            create: async (params) => {
+              const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${groqApiKey}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify(params),
+              });
+              if (!resp.ok) throw new Error(`Groq ${resp.status}`);
+              return resp.json();
+            }
+          }
+        }
+      };
+      this.observer = new Observer({ groqClient, useLLM: true });
+    } else {
+      this.observer = new Observer();
+    }
   }
 
   async ingestMemory(input) {

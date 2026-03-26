@@ -119,15 +119,22 @@ export function buildObservationPayload({
   sourceTags,
 }) {
   return {
-    memory_type: 'observation',
-    userId,
-    orgId,
+    memory_type: 'fact',  // Prisma enum doesn't have 'observation', use 'fact' + tag 'observation' to identify
+    user_id: userId,
+    org_id: orgId,
     content: observationText,
-    observationDate: observationDate ?? null,
-    referencedDate: referencedDate ?? null,
-    project: project ?? 'default',
-    sourceTags: sourceTags ?? [],
-    estimatedTokens: estimateTokens(observationText ?? ''),
-    createdAt: new Date().toISOString(),
+    title: `Observation: ${(observationText || '').replace(/^[🔴🟡🟢]\s*\[\d{4}-\d{2}-\d{2}\]\s*(\(ref:.*?\)\s*)?/, '').slice(0, 60)}`,
+    tags: ['observation', ...(sourceTags || []).filter(t => t !== 'observation')],
+    document_date: observationDate || null,
+    source_metadata: {
+      source_platform: 'observer',
+      source_type: 'observation',
+    },
+    metadata: {
+      observation_date: observationDate || null,
+      referenced_date: referencedDate || null,
+      pipeline: 'observer-reflector',
+    },
+    project: project || null,
   };
 }

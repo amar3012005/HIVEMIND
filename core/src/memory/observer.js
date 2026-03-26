@@ -194,10 +194,20 @@ export class Observer {
 
     let observationText;
     let compressed = false;
+    let effectivePriority = priority.toLowerCase();
 
     if (this.useLLM && this.groqClient) {
+      this._lastLLMPriority = null;
       observationText = await this._observeWithLLM(content);
-      compressed = observationText.length < content.length;
+      if (observationText) {
+        compressed = observationText.length < content.length;
+        if (this._lastLLMPriority) effectivePriority = this._lastLLMPriority;
+      } else {
+        // LLM returned TRIVIAL or failed — fall back to heuristic
+        const compressedText = compress(userContent);
+        compressed = compressedText.length < content.length;
+        observationText = compressedText;
+      }
     } else {
       const compressedText = compress(userContent);
       compressed = compressedText.length < content.length;
@@ -206,7 +216,7 @@ export class Observer {
 
     const observation = formatObservation({
       content: observationText,
-      priority: priority.toLowerCase(),
+      priority: effectivePriority,
       observationDate: documentDate ?? new Date().toISOString().slice(0, 10),
       referencedDate: referencedDate ?? undefined,
     });
@@ -220,26 +230,53 @@ export class Observer {
   }
 
   /**
-   * LLM-based observation (Groq).
+   * LLM-based observation using Groq.
+   * Single call extracts: compressed observation + priority + entities + dates.
+   * Targets 4x compression ratio.
    * @private
    */
   async _observeWithLLM(content) {
-    const response = await this.groqClient.chat.completions.create({
-      model: 'llama3-8b-8192',
-      messages: [
-        {
-          role: 'system',
-          content:
-            'You are a memory compression agent. Extract only the key user facts from this conversation turn. ' +
-            'Output a single dense sentence of at most 200 characters. Focus on: personal facts, preferences, events. ' +
-            'If there are no memorable facts, output: TRIVIAL',
-        },
-        { role: 'user', content },
-      ],
-      max_tokens: 80,
-      temperature: 0,
-    });
-    const text = response.choices[0]?.message?.content?.trim() ?? '';
-    return text === 'TRIVIAL' ? null : text;
+    const inputTokens = Math.ceil(content.length / 4);
+    const maxOutputTokens = Math.max(60, Math.min(Math.ceil(inputTokens / 3), 300));
+
+    try {
+      const response = await this.groqClient.chat.completions.create({
+        model: 'llama-3.3-70b-versatile',
+        messages: [
+          {
+            role: 'system',
+            content: `You are a memory compression agent for a personal AI assistant. Your job is to distill conversation turns into dense, factual observation notes.
+
+RULES:
+- Extract ONLY the user's personal facts, preferences, decisions, events, and stated information.
+- Ignore assistant responses, generic questions, pleasantries.
+- Use two-level bullet format: top-level for main facts, sub-bullets for details.
+- Tag each top-level bullet with priority: 🔴 (critical personal fact), 🟡 (useful context), 🟢 (minor detail).
+- Include specific dates, names, numbers, locations — never drop these.
+- If the user mentions a CHANGE (new job, moved, preference update), mark it 🔴 and note it supersedes previous info.
+- If there are NO memorable user facts (just greetings, generic questions, thanks), output exactly: TRIVIAL
+- Be extremely concise. Target ${maxOutputTokens} tokens maximum.`
+          },
+          { role: 'user', content: content.slice(0, 3000) }
+        ],
+        max_tokens: maxOutputTokens,
+        temperature: 0,
+      });
+
+      const text = (response.choices[0]?.message?.content || '').trim();
+      if (text === 'TRIVIAL' || text.length < 5) return null;
+
+      // Override heuristic priority if LLM flagged 🔴
+      if (text.includes('🔴')) this._lastLLMPriority = 'high';
+      else if (text.includes('🟡')) this._lastLLMPriority = 'medium';
+      else this._lastLLMPriority = 'low';
+
+      // Strip emoji prefixes for clean observation text (formatObservation adds them back)
+      const cleaned = text.replace(/^[🔴🟡🟢]\s*/gm, '').trim();
+      return cleaned;
+    } catch (err) {
+      console.warn('[observer-llm] Groq call failed, falling back to heuristic:', err.message);
+      return null; // Falls back to heuristic in observe()
+    }
   }
 }

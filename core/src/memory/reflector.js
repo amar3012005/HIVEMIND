@@ -34,9 +34,13 @@ export class Reflector {
   /**
    * @param {object} [options]
    * @param {number} [options.tokenThreshold=15000] — prune 🟢 entries above this limit
+   * @param {object} [options.groqClient] — Groq client for LLM-powered reflection
+   * @param {boolean} [options.useLLM=false] — use LLM for supersession detection
    */
   constructor(options = {}) {
     this.tokenThreshold = options.tokenThreshold ?? 15000;
+    this.groqClient = options.groqClient ?? null;
+    this.useLLM = options.useLLM ?? false;
   }
 
   /**
@@ -45,13 +49,22 @@ export class Reflector {
    * @returns {Promise<{observations: string[], superseded: string[], merged: number, pruned: number}>}
    */
   async reflect(observations) {
-    // Step 1: detect superseded
+    if (!observations || observations.length === 0) {
+      return { observations: [], superseded: [], merged: 0, pruned: 0 };
+    }
+
+    // Use LLM reflection if available and enough observations to justify the call
+    if (this.useLLM && this.groqClient && observations.length >= 5) {
+      try {
+        return await this._reflectWithLLM(observations);
+      } catch (err) {
+        console.warn('[reflector-llm] LLM reflection failed, falling back to heuristic:', err.message);
+      }
+    }
+
+    // Heuristic fallback
     const { current: afterSupersede, superseded } = this.detectSuperseded(observations);
-
-    // Step 2: merge related
     const { merged: afterMerge, mergeCount } = this.mergeRelated(afterSupersede);
-
-    // Step 3: prune low-priority if total tokens exceed threshold
     const { pruned: finalObs, pruneCount } = this._pruneIfNeeded(afterMerge);
 
     return {
@@ -219,5 +232,81 @@ export class Reflector {
 
     const pruned = observations.filter((_, i) => !toRemove.has(i));
     return { pruned, pruneCount: toRemove.size };
+  }
+
+  /**
+   * LLM-powered reflection using Groq.
+   * The LLM reads all observations and outputs a restructured, consolidated log.
+   * Detects semantic supersession that Jaccard overlap misses.
+   * @private
+   */
+  async _reflectWithLLM(observations) {
+    const inputLog = observations.join('\n');
+    const inputTokens = estimateTokens(inputLog);
+    const maxOutputTokens = Math.max(100, Math.min(Math.ceil(inputTokens * 0.7), 2000));
+
+    const response = await this.groqClient.chat.completions.create({
+      model: 'llama-3.3-70b-versatile',
+      messages: [
+        {
+          role: 'system',
+          content: `You are a memory consolidation agent. You will receive a log of dated observations about a user.
+
+YOUR TASK:
+1. Identify SUPERSEDED facts — if the user changed a preference, job, address, etc., REMOVE the old entry and keep only the latest.
+2. MERGE related observations that describe the same topic into a single combined entry.
+3. REMOVE trivial or redundant observations that add no informational value.
+4. PRESERVE all specific facts: names, dates, numbers, locations, preferences.
+5. Keep the emoji priority tags (🔴 🟡 🟢) and date brackets [YYYY-MM-DD].
+
+OUTPUT FORMAT:
+- One observation per line, same format as input
+- Mark any SUPERSEDED entries on a separate line starting with "SUPERSEDED:" followed by the dropped observation
+- Output should be shorter than input (consolidation = compression)
+
+Do NOT add new information. Do NOT hallucinate facts.`
+        },
+        {
+          role: 'user',
+          content: `Consolidate this observation log:\n\n${inputLog}`
+        }
+      ],
+      max_tokens: maxOutputTokens,
+      temperature: 0,
+    });
+
+    const output = (response.choices[0]?.message?.content || '').trim();
+    if (!output || output.length < 10) {
+      // LLM returned empty — fall back to heuristic
+      throw new Error('LLM returned empty reflection');
+    }
+
+    // Parse output: separate current observations from superseded
+    const lines = output.split('\n').map(l => l.trim()).filter(Boolean);
+    const superseded = [];
+    const current = [];
+
+    for (const line of lines) {
+      if (line.startsWith('SUPERSEDED:')) {
+        superseded.push(line.replace('SUPERSEDED:', '').trim());
+      } else if (line.match(/^[🔴🟡🟢]/)) {
+        current.push(line);
+      }
+    }
+
+    // If LLM didn't produce valid observations, fall back
+    if (current.length === 0) {
+      throw new Error('LLM produced no valid observations');
+    }
+
+    const mergeCount = Math.max(0, observations.length - current.length - superseded.length);
+    const { pruned: finalObs, pruneCount } = this._pruneIfNeeded(current);
+
+    return {
+      observations: finalObs,
+      superseded,
+      merged: mergeCount,
+      pruned: pruneCount,
+    };
   }
 }

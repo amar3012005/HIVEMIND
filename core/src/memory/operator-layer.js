@@ -479,7 +479,7 @@ export class CognitiveOperator {
   async assembleObservationPrefix(userId, orgId, { project, maxTokens = 8000 } = {}) {
     const allMemories = await this.store.listLatestMemories({ user_id: userId, org_id: orgId, project });
     const observations = allMemories
-      .filter(m => m.memory_type === 'observation')
+      .filter(m => (m.tags || []).includes('observation'))
       .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
 
     if (observations.length === 0) {

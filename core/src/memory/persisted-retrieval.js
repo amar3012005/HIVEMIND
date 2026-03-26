@@ -741,7 +741,29 @@ export async function recallPersistedMemories(store, {
   }
 
   if (hasObservations) {
-    injectionText = observationPrefix + '\n\n' + injectionText;
+    // Include original raw chunks alongside observations (Supermemory pattern)
+    const rawSupplementary = top.slice(0, 3)
+      .map(item => (item.memory || item).content || '')
+      .filter(c => c.length > 20)
+      .join('\n---\n');
+
+    const supplement = rawSupplementary
+      ? `\n\n<raw-context>\n${rawSupplementary}\n</raw-context>`
+      : '';
+
+    injectionText = observationPrefix + supplement + '\n\n' + injectionText;
+  }
+
+  // Inject user profile (static facts, ~50ms)
+  try {
+    const { UserProfile } = await import('./user-profile.js');
+    const userProfileManager = new UserProfile(store);
+    const { profile: userProfileText } = await userProfileManager.getProfile(user_id, org_id);
+    if (userProfileText) {
+      injectionText = userProfileText + '\n\n' + injectionText;
+    }
+  } catch {
+    // User profile not available
   }
 
   return {

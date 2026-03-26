@@ -41,9 +41,15 @@ export class BiTemporalEngine {
     const txTime = new Date(transactionTime);
 
     if (!this.prisma) {
-      const all = await this.store.listLatestMemories({ user_id: userId, org_id: orgId });
-      return all
+      // Use all memories (not just isLatest) to include superseded historical records.
+      const allMemories = this.store.memories
+        ? Array.from(this.store.memories.values()).filter(
+            m => m.user_id === userId && m.org_id === orgId && !m.deleted_at
+          )
+        : await this.store.listLatestMemories({ user_id: userId, org_id: orgId });
+      return allMemories
         .filter(m => new Date(m.created_at) <= txTime)
+        .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
         .map(m => ({
           memoryId: m.id, content: m.content, version: m.version || 1,
           memory_type: m.memory_type, createdAt: m.created_at,
@@ -51,29 +57,25 @@ export class BiTemporalEngine {
         }));
     }
 
-    const versions = await this.prisma.memoryVersion.findMany({
+    // Query memories directly: all that existed at txTime (not filtered by isLatest —
+    // historical snapshots must include memories that were later superseded).
+    const memories = await this.prisma.memory.findMany({
       where: {
-        memory: { userId, orgId, deletedAt: null },
-        createdAt: { lte: txTime }
+        userId,
+        orgId,
+        createdAt: { lte: new Date(txTime) },
+        deletedAt: null
       },
-      orderBy: { createdAt: 'desc' },
-      include: { memory: true }
+      orderBy: { createdAt: 'desc' }
     });
 
-    const seen = new Map();
-    for (const v of versions) {
-      if (!seen.has(v.memoryId)) {
-        const mem = v.memory || {};
-        seen.set(v.memoryId, {
-          memoryId: v.memoryId, content: mem.content || '', version: v.version,
-          memory_type: mem.memoryType || 'fact',
-          createdAt: v.createdAt instanceof Date ? v.createdAt.toISOString() : v.createdAt,
-          documentDate: mem.documentDate instanceof Date ? mem.documentDate.toISOString() : (mem.documentDate || null),
-          metadata: mem.metadata || {}, tags: mem.tags || [], isLatest: v.isLatest
-        });
-      }
-    }
-    return Array.from(seen.values());
+    return memories.map(mem => ({
+      memoryId: mem.id, content: mem.content || '', version: mem.version || 1,
+      memory_type: mem.memoryType || 'fact',
+      createdAt: mem.createdAt instanceof Date ? mem.createdAt.toISOString() : mem.createdAt,
+      documentDate: mem.documentDate instanceof Date ? mem.documentDate.toISOString() : (mem.documentDate || null),
+      metadata: mem.metadata || {}, tags: mem.tags || [], isLatest: mem.isLatest
+    }));
   }
 
   /**
@@ -88,8 +90,13 @@ export class BiTemporalEngine {
     const vTime = new Date(validTime);
 
     if (!this.prisma) {
-      const all = await this.store.listLatestMemories({ user_id: userId, org_id: orgId });
-      return all.filter(m => {
+      // Use all memories (not just isLatest) to include superseded historical records.
+      const allMemories = this.store.memories
+        ? Array.from(this.store.memories.values()).filter(
+            m => m.user_id === userId && m.org_id === orgId && !m.deleted_at
+          )
+        : await this.store.listLatestMemories({ user_id: userId, org_id: orgId });
+      return allMemories.filter(m => {
         const docDate = m.document_date ? new Date(m.document_date) : new Date(m.created_at);
         const validTo = m.metadata?.valid_to ? new Date(m.metadata.valid_to) : null;
         return docDate <= vTime && (!validTo || validTo >= vTime);

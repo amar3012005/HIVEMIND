@@ -116,8 +116,17 @@ export class QdrantClient {
       return memory.id;
     }
 
-    // Generate embedding from content
-    const embedding = await this.generateEmbedding(memory.content);
+    // Fact-augmented key expansion: embed enriched key, store raw content in payload
+    let embeddingInput = memory.content;
+    try {
+      const { extractFacts, buildAugmentedKey } = await import('../memory/fact-extractor.js');
+      const facts = await extractFacts(memory.content || '', { useLLM: false });
+      embeddingInput = buildAugmentedKey(memory.content || '', facts);
+    } catch (augErr) {
+      // Fallback to raw content if fact extraction fails
+      console.warn('[qdrant] Fact extraction failed, using raw content:', augErr.message);
+    }
+    const embedding = await this.generateEmbedding(embeddingInput);
 
     if (!embedding) {
       console.warn('⚠️  Storing memory without embedding');

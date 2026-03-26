@@ -168,6 +168,31 @@ export class MemoryGraphEngine {
           }
         }
 
+        // LLM conflict resolution for high-similarity content
+        if (pcResult && pcResult.needsConflictResolution && pcResult.matchedMemoryIds?.length > 0) {
+          try {
+            const { ConflictResolver } = await import('./conflict-resolver.js');
+            const resolver = new ConflictResolver();
+            const matchedMem = latestMemories.find(m => m.id === pcResult.matchedMemoryIds[0]);
+            if (matchedMem) {
+              const resolution = await resolver.resolve(baseMemory, matchedMem);
+              if (resolution.action === 'NOOP') {
+                // True duplicate confirmed by LLM — skip
+                return { memoryId: null, operation: 'skipped_redundant', reason: 'llm_confirmed_duplicate' };
+              }
+              if (resolution.action === 'UPDATE') {
+                // Set explicit relationship for the graph engine to process
+                input.relationship = { type: 'Updates', target_id: resolution.targetId, confidence: 0.9 };
+              }
+              if (resolution.action === 'EXTEND') {
+                input.relationship = { type: 'Extends', target_id: resolution.targetId, confidence: 0.8 };
+              }
+            }
+          } catch (resolveErr) {
+            console.warn('[conflict-resolver] Resolution failed:', resolveErr.message);
+          }
+        }
+
         // Observer: compress delta into observation node
         if (this.observer && pcResult && pcResult.shouldStore !== false && baseMemory.memory_type !== 'observation') {
           try {

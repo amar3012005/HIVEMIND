@@ -117,7 +117,7 @@ describe('buildObservationPayload', () => {
       project: 'default',
       sourceTags: ['chat'],
     });
-    assert.equal(payload.memory_type, 'observation');
+    assert.equal(payload.memory_type, 'fact'); // Prisma enum doesn't have 'observation', uses 'fact' + tag
     assert.ok(typeof payload === 'object', 'should return an object');
   });
 
@@ -128,8 +128,8 @@ describe('buildObservationPayload', () => {
       observationText: 'User prefers dark mode.',
       observationDate: '2026-03-21',
     });
-    assert.equal(payload.userId, 'user-123');
-    assert.equal(payload.orgId, 'org-456');
+    assert.equal(payload.user_id, 'user-123');  // snake_case for Prisma store
+    assert.equal(payload.org_id, 'org-456');
     assert.ok(payload.content || payload.memory || payload.observationText || payload.text, 'payload should have some text field');
   });
 });

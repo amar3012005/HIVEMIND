@@ -1,8 +1,11 @@
 import { v4 as uuidv4 } from 'uuid';
+import crypto from 'crypto';
 import { ConflictDetector, computeTokenSimilarity } from './conflict-detector.js';
 import { RelationshipClassifier } from './relationship-classifier.js';
 import { extractCodeChunks, detectCodeLanguage } from './code-ingestion.js';
 import { PredictCalibrateFilter } from './predict-calibrate.js';
+import { Observer } from './observer.js';
+import { buildObservationPayload } from './observation-store.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -106,6 +109,7 @@ export class MemoryGraphEngine {
     this.predictCalibrateFilter = predictCalibrate
       ? new PredictCalibrateFilter(predictCalibrateOptions)
       : null;
+    this.observer = new Observer();
   }
 
   async ingestMemory(input) {
@@ -140,6 +144,40 @@ export class MemoryGraphEngine {
           // Attach fingerprint to the memory record
           if (pcResult.fingerprint) {
             baseMemory.contentFingerprint = pcResult.fingerprint;
+          }
+        }
+
+        // Observer: compress delta into observation node
+        if (this.observer && pcResult && pcResult.shouldStore !== false && baseMemory.memory_type !== 'observation') {
+          try {
+            const obsResult = await this.observer.observe({
+              content: baseMemory.content,
+              documentDate: baseMemory.document_date || baseMemory.created_at,
+              tags: baseMemory.tags || [],
+            });
+            if (obsResult.observation) {
+              const obsPayload = buildObservationPayload({
+                userId: baseMemory.user_id,
+                orgId: baseMemory.org_id,
+                observationText: obsResult.observation,
+                observationDate: baseMemory.document_date || baseMemory.created_at,
+                referencedDate: obsResult.referencedDate,
+                project: baseMemory.project,
+                sourceTags: baseMemory.tags || [],
+              });
+              // Store observation as separate memory (use transactional store, skip relationship classification)
+              const obsId = crypto.randomUUID ? crypto.randomUUID() : `obs-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+              await transactionalStore.createMemory({
+                ...obsPayload,
+                id: obsId,
+                is_latest: true,
+                version: 1,
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+              });
+            }
+          } catch (obsErr) {
+            console.warn('[observer] Observation failed:', obsErr.message);
           }
         }
 

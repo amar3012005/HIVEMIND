@@ -1639,13 +1639,24 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
             limit: args.limit || 5
           }));
         }
-        return formatToolContent(await apiClient.post('/api/search/quick', {
-          query: args.query,
-          tags: args.tags,
-          project: args.project,
-          source_platform: args.source_type,
-          limit: args.limit || 5
-        }));
+        {
+          // Default mode: use /api/recall so the response includes the
+          // user-profile + observation prefix in injection_text (Problem 2 fix)
+          const recallResult = await apiClient.post('/api/recall', {
+            query_context: args.query,
+            tags: args.tags || [],
+            project: args.project || null,
+            source_platforms: args.source_type ? [args.source_type] : [],
+            max_memories: args.limit || 5
+          });
+          // Expose injection_text so the LLM receives full context (profile + chain-of-note)
+          return formatToolContent({
+            memories: recallResult.memories || [],
+            injection_text: recallResult.injectionText || recallResult.injection_text || null,
+            search_method: recallResult.search_method || 'persisted-recall',
+            expansion_stats: recallResult.expansion_stats || null
+          });
+        }
 
       case 'hivemind_get_memory':
         return formatToolContent(await apiClient.get(`/api/memories/${args.memory_id}`));

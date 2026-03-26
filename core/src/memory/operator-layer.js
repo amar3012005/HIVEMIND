@@ -543,6 +543,7 @@ export function formatChainOfNotePayload(memories, query) {
     id: m.id,
     type: m.memory_type || 'fact',
     date: m.created_at || m.document_date || null,
+    is_latest: m.is_latest !== false, // true unless explicitly superseded
     content: (m.content || '').slice(0, 1000),
   }));
 

@@ -186,14 +186,24 @@ async function evaluateInstance(instance) {
   const { question_id, question, question_type } = instance;
   const isAbstention = question_id.endsWith('_abs');
 
-  // Search for relevant memories across all benchmark memories (not project-scoped)
-  // Each question's haystack was ingested per-question, but answers may share content
+  // Search for relevant memories — try project-scoped first, fall back to global
   let searchResults;
   try {
     searchResults = await apiCall('POST', '/api/search/quick', {
       query: question,
+      project: `lme-${question_id}`,
       limit: 10,
     });
+    // If project-scoped returned too few results, try global
+    const results = searchResults.results || searchResults.memories || [];
+    if (results.length < 3) {
+      const globalResults = await apiCall('POST', '/api/search/quick', {
+        query: question,
+        limit: 10,
+      });
+      const globalR = globalResults.results || globalResults.memories || [];
+      if (globalR.length > results.length) searchResults = globalResults;
+    }
   } catch {
     searchResults = { results: [] };
   }
@@ -216,10 +226,19 @@ async function evaluateInstance(instance) {
       ? `Here are relevant memories from our past conversations:\n\n${context}\n\nQuestion: ${question}\n\nAnswer concisely:`
       : `I don't have relevant context for this question.\n\nQuestion: ${question}\n\nAnswer concisely:`;
 
+    // Use llama for generation (gpt-oss-120b returns empty strings sometimes)
     hypothesis = await groqChat([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
-    ], { maxTokens: 200 });
+    ], { model: 'llama-3.3-70b-versatile', maxTokens: 200 });
+
+    // Retry with fallback if empty
+    if (!hypothesis || hypothesis.trim().length === 0) {
+      hypothesis = await groqChat([
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ], { model: 'llama-3.3-70b-versatile', maxTokens: 200 });
+    }
   } catch (err) {
     console.warn(`  [groq-fail] ${question_id}: ${err.message.slice(0, 100)}`);
     hypothesis = "I don't have this information in my memory.";

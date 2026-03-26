@@ -2498,94 +2498,122 @@ a{color:#a78bfa}</style></head><body>
                         const thread = await threadResp.json();
                         const messages = thread.messages || [];
 
-                        for (const msg of messages) {
-                          if (totalImported >= max_emails) break;
+                        // ── Thread-level ingestion ──────────────────────────────────
+                        if (totalImported >= max_emails) break;
 
+                        // MIME helpers (defined once per thread, cheap)
+                        const _decodeB64 = (d) => { try { return Buffer.from(d, 'base64url').toString('utf-8'); } catch { try { return Buffer.from(d, 'base64').toString('utf-8'); } catch { return ''; } } };
+                        const _stripHtml = (h) => h.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '').replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, ' ').trim();
+                        const _extractText = (part) => {
+                          if (!part) return '';
+                          if (part.mimeType === 'text/plain' && part.body?.data) return _decodeB64(part.body.data);
+                          if (part.mimeType === 'text/html' && part.body?.data) return _stripHtml(_decodeB64(part.body.data));
+                          if (part.parts) {
+                            const plain = part.parts.find(p => p.mimeType === 'text/plain');
+                            if (plain?.body?.data) return _decodeB64(plain.body.data);
+                            const html = part.parts.find(p => p.mimeType === 'text/html');
+                            if (html?.body?.data) return _stripHtml(_decodeB64(html.body.data));
+                            for (const sub of part.parts) {
+                              const result = _extractText(sub);
+                              if (result.length > 20) return result;
+                            }
+                          }
+                          return '';
+                        };
+
+                        // Gather thread-level labels from all messages (union)
+                        const threadLabelSet = new Set();
+                        for (const msg of messages) {
+                          for (const lbl of (msg.labelIds || [])) {
+                            threadLabelSet.add(lbl.replace(/^CATEGORY_/, '').toLowerCase());
+                          }
+                        }
+                        const threadLabels = [...threadLabelSet];
+
+                        // Skip excluded categories (thread-level)
+                        if (exclude_categories.some(cat => threadLabels.includes(cat))) {
+                          totalSkipped++;
+                          continue;
+                        }
+
+                        // Build per-message content blocks and collect metadata
+                        const messageBlocks = [];
+                        const participants = new Set();
+                        for (const msg of messages) {
                           const headers = msg.payload?.headers || [];
                           const getH = (n) => headers.find(h => h.name.toLowerCase() === n.toLowerCase())?.value || '';
-                          const subject = getH('Subject') || '(no subject)';
                           const from = getH('From');
-                          const date = getH('Date');
-                          const labels = (msg.labelIds || []).map(l => l.replace(/^CATEGORY_/, '').toLowerCase());
-
-                          // Skip excluded categories
-                          if (exclude_categories.some(cat => labels.includes(cat))) {
-                            totalSkipped++;
-                            continue;
-                          }
-
-                          // Extract body — deep recursive MIME parsing
-                          let bodyText = '';
-                          const _decodeB64 = (d) => { try { return Buffer.from(d, 'base64url').toString('utf-8'); } catch { try { return Buffer.from(d, 'base64').toString('utf-8'); } catch { return ''; } } };
-                          const _stripHtml = (h) => h.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '').replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, ' ').trim();
-                          const _extractText = (part) => {
-                            if (!part) return '';
-                            // Direct body
-                            if (part.mimeType === 'text/plain' && part.body?.data) return _decodeB64(part.body.data);
-                            if (part.mimeType === 'text/html' && part.body?.data) return _stripHtml(_decodeB64(part.body.data));
-                            // Recurse into parts (multipart/alternative, multipart/mixed, etc.)
-                            if (part.parts) {
-                              // Prefer text/plain over text/html
-                              const plain = part.parts.find(p => p.mimeType === 'text/plain');
-                              if (plain?.body?.data) return _decodeB64(plain.body.data);
-                              const html = part.parts.find(p => p.mimeType === 'text/html');
-                              if (html?.body?.data) return _stripHtml(_decodeB64(html.body.data));
-                              // Deep recurse (multipart/mixed containing multipart/alternative)
-                              for (const sub of part.parts) {
-                                const result = _extractText(sub);
-                                if (result.length > 20) return result;
-                              }
-                            }
-                            return '';
-                          };
-                          bodyText = _extractText(msg.payload) || msg.snippet || '';
-
-                          // Strip null bytes + excessive whitespace
-                          bodyText = bodyText.replace(/\x00/g, '').replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
-
-                          // Also extract To header for better searchability
                           const to = getH('To');
-                          const content = `Subject: ${subject}\nFrom: ${from}\nTo: ${to}\nDate: ${date}\n\n${bodyText}`.slice(0, 8000);
-                          const tags = ['gmail', ...labels.filter(l => !['unread', 'inbox'].includes(l))];
-                          if (from) {
-                            const emailMatch = from.match(/<([^>]+)>/);
-                            if (emailMatch) tags.push(`from:${emailMatch[1].split('@')[0]}`);
-                          }
-                          if (to) {
-                            const toMatch = to.match(/<([^>]+)>/);
-                            if (toMatch) tags.push(`to:${toMatch[1].split('@')[0]}`);
-                          }
+                          const date = getH('Date');
+                          let bodyText = _extractText(msg.payload) || msg.snippet || '';
+                          bodyText = bodyText.replace(/\x00/g, '').replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+                          messageBlocks.push(`[${from} — ${date}]\n${bodyText}`);
+                          if (from) participants.add(from);
+                          if (to) participants.add(to);
+                        }
 
-                          try {
-                            const gmailResult = await persistentMemoryEngine.ingestMemory({
-                              content,
-                              title: subject,
-                              tags,
-                              memory_type: 'fact',
-                              document_date: date ? new Date(date).toISOString() : null,
-                              source: 'gmail',
-                              source_metadata: {
-                                source_type: 'gmail',
-                                source_platform: 'gmail',
-                                source_id: msg.id,
-                                thread_id: thread.id,
-                              },
-                              project: container_tag || null,
-                              user_id: userId,
-                              org_id: orgId,
-                            });
-                            // Embed in Qdrant for vector search
-                            if (gmailResult?.memoryId && qdrantClient) {
-                              try {
-                                const gmailMem = await persistentMemoryStore.getMemory(gmailResult.memoryId);
-                                if (gmailMem) await qdrantClient.storeMemory(gmailMem, { collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT' });
-                              } catch {}
-                            }
-                            totalImported++;
-                          } catch (ingestErr) {
-                            console.warn(`[gmail-sync] Ingest failed for msg ${msg.id}:`, ingestErr.message);
-                            totalSkipped++;
+                        // Subject + dates from first/last message
+                        const firstMsg = messages[0];
+                        const lastMsg = messages[messages.length - 1];
+                        const firstHeaders = firstMsg?.payload?.headers || [];
+                        const getFirstH = (n) => firstHeaders.find(h => h.name.toLowerCase() === n.toLowerCase())?.value || '';
+                        const subject = getFirstH('Subject') || '(no subject)';
+                        const firstDate = getFirstH('Date');
+                        const lastHeaders = lastMsg?.payload?.headers || [];
+                        const lastDate = lastHeaders.find(h => h.name.toLowerCase() === 'date')?.value;
+
+                        // Build full thread content
+                        const threadContent = messageBlocks.join('\n\n---\n\n');
+
+                        // ── Noise filtering ──────────────────────────────────────────
+                        const SKIP_PATTERNS = /\b(unsubscribe|opt[.\s-]?out|no[.\s-]?reply|noreply|do not reply|verify your|confirm your|reset your password|OTP|one[.\s-]?time passcode|one[.\s-]?time code|security alert|account alert|sign[.\s-]?in attempt|unusual sign|new sign[.\s-]?in|your receipt|order confirmation|payment confirmation|invoice #|your shipment|has been shipped|out of office|auto[.\s-]?reply|automatic reply)\b/i;
+                        if (SKIP_PATTERNS.test(subject) || SKIP_PATTERNS.test(threadContent.slice(0, 600))) {
+                          console.log(`[gmail-sync] Skipping noise thread: "${subject}"`);
+                          totalSkipped++;
+                          continue;
+                        }
+
+                        // Build tags
+                        const tags = ['gmail', `gmail-thread:${thread.id}`, ...threadLabels.filter(l => !['unread', 'inbox'].includes(l))];
+                        for (const p of participants) {
+                          const emailMatch = p.match(/<([^>]+)>/);
+                          if (emailMatch) tags.push(`participant:${emailMatch[1].split('@')[0]}`);
+                        }
+
+                        // Assemble final content with header summary
+                        const content = `Email Thread: ${subject}\n\n${threadContent}`.slice(0, 8000);
+
+                        try {
+                          const gmailResult = await persistentMemoryEngine.ingestMemory({
+                            content,
+                            title: subject,
+                            tags,
+                            memory_type: 'event',
+                            document_date: firstDate ? new Date(firstDate).toISOString() : null,
+                            source: 'gmail',
+                            source_metadata: {
+                              source_type: 'gmail',
+                              source_platform: 'gmail',
+                              source_id: `thread:${thread.id}`,
+                              thread_id: thread.id,
+                              message_count: messages.length,
+                              last_message_date: lastDate || null,
+                            },
+                            project: container_tag || null,
+                            user_id: userId,
+                            org_id: orgId,
+                          });
+                          // Embed thread memory in Qdrant for vector search
+                          if (gmailResult?.memoryId && qdrantClient) {
+                            try {
+                              const gmailMem = await persistentMemoryStore.getMemory(gmailResult.memoryId);
+                              if (gmailMem) await qdrantClient.storeMemory(gmailMem, { collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT' });
+                            } catch {}
                           }
+                          totalImported++;
+                        } catch (ingestErr) {
+                          console.warn(`[gmail-sync] Ingest failed for thread ${thread.id}:`, ingestErr.message);
+                          totalSkipped++;
                         }
                       } catch (threadErr) {
                         console.warn(`[gmail-sync] Thread ${threadStub.id} failed:`, threadErr.message);

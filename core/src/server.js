@@ -4623,21 +4623,52 @@ a{color:#a78bfa}</style></head><body>
               let memories = [];
               let injectionText = '';
               let userProfileText = '';
+              const isRecencyQuery = /\b(latest|newest|most recent|last message|last email|just now|right now|current)\b/i.test(message);
 
               if (persistentMemoryStore) {
                 try {
+
                   const recallResult = await recallPersistedMemories(persistentMemoryStore, {
                     query_context: message,
                     user_id: userId,
                     org_id: orgId,
-                    max_memories: 5,
+                    max_memories: isRecencyQuery ? 10 : 5,
                   });
-                  memories = (recallResult.memories || []).map(m => ({
+                  let recalledMemories = recallResult.memories || [];
+
+                  // For recency queries, re-sort by created_at descending
+                  if (isRecencyQuery && recalledMemories.length > 0) {
+                    recalledMemories.sort((a, b) => {
+                      const dateA = new Date(a.created_at || a.document_date || 0);
+                      const dateB = new Date(b.created_at || b.document_date || 0);
+                      return dateB - dateA;
+                    });
+                    // Also fetch the absolutely newest memories directly from store
+                    try {
+                      const newest = await persistentMemoryStore.listLatestMemories({
+                        user_id: userId, org_id: orgId,
+                      });
+                      // Get top 5 newest non-observation, non-longmemeval memories
+                      const recentReal = newest
+                        .filter(m => !(m.tags || []).includes('observation') && !(m.tags || []).includes('longmemeval'))
+                        .slice(0, 5);
+                      // Prepend to recall results (dedup by id)
+                      const existingIds = new Set(recalledMemories.map(m => m.id));
+                      for (const m of recentReal) {
+                        if (!existingIds.has(m.id)) {
+                          recalledMemories.unshift(m);
+                        }
+                      }
+                    } catch {}
+                  }
+
+                  memories = recalledMemories.slice(0, 10).map(m => ({
                     id: m.id,
                     title: m.title || (m.content || '').slice(0, 60),
                     content: (m.content || '').slice(0, 300),
                     score: m.score || 0,
                     tags: m.tags || [],
+                    created_at: m.created_at,
                   }));
                   injectionText = recallResult.injectionText || '';
                 } catch (recallErr) {
@@ -4646,8 +4677,9 @@ a{color:#a78bfa}</style></head><body>
               }
 
               // Step 2: Build system prompt with user profile + memories
+              const recencyHint = isRecencyQuery ? '\n\nIMPORTANT: The user is asking about their MOST RECENT activity. The memories below are sorted newest-first. Focus on the FIRST memory — that is the most recent one. Include its date/time.' : '';
               const systemPrompt = `You are HIVE, a personal AI assistant with persistent memory. You remember everything the user has shared across conversations, emails, documents, and notes.
-
+${recencyHint}
 ${injectionText ? `Here is what you currently know about the user:\n\n${injectionText}` : ''}
 
 BEHAVIOR:

@@ -84,6 +84,10 @@ const {
 } = await import('./admin/live-log-store.js');
 const { renderAdminLogsPage } = await import('./admin/logs-dashboard.js');
 
+// Billing / usage tracking
+const { UsageTracker } = await import('./billing/usage-tracker.js');
+const { PlanStore } = await import('./billing/plan-store.js');
+
 // Three-Tier Retrieval imports
 const { ThreeTierRetrieval } = await import('./external/search/three-tier-retrieval.js');
 
@@ -144,6 +148,8 @@ installConsoleCapture('core');
 // Initialize memory engine with SQLite
 const engine = new MemoryEngine('./hivemind.db');
 const prisma = getPrismaClient();
+const usageTracker = prisma ? new UsageTracker(prisma) : null;
+const planStore = prisma ? new PlanStore(prisma) : null;
 const persistentMemoryStore = prisma ? new PrismaGraphStore(prisma) : null;
 const persistentMemoryEngine = persistentMemoryStore ? new MemoryGraphEngine({
   store: persistentMemoryStore,
@@ -1995,6 +2001,47 @@ a{color:#a78bfa}</style></head><body>
           return jsonResponse(res, { success: true, message: 'Sync enqueued', provider }, 202);
         } catch (error) {
           return jsonResponse(res, { error: error.message }, 500);
+        }
+      }
+
+      // ── Usage tracking + plan enforcement ──
+      if (usageTracker && planStore && orgId) {
+        const orgPlan = await planStore.getOrgPlan(orgId);
+        const limits = await usageTracker.checkLimits(orgId, orgPlan.id);
+
+        // Enforce hard limits for free tier
+        if (!limits.allowed) {
+          return jsonResponse(res, {
+            error: 'Usage limit exceeded',
+            exceeded: limits.exceeded,
+            usage: limits.usage,
+            plan: orgPlan.id,
+            upgrade_url: 'https://hivemind.davinciai.eu/hivemind/app/billing',
+          }, 429);
+        }
+
+        // Set warning headers
+        if (limits.warnings.length > 0) {
+          res.setHeader('X-HiveMind-Usage-Warning', limits.warnings[0]);
+        }
+
+        // Track search queries
+        if (pathname.includes('/search') || pathname.includes('/recall')) {
+          usageTracker.recordQuery(orgId).catch(() => {});
+        }
+
+        // Track token usage (estimate from request body)
+        if (body?.content) {
+          const estimatedTokens = Math.ceil((body.content.length || 0) / 4);
+          usageTracker.recordTokens(orgId, estimatedTokens).catch(() => {});
+        }
+
+        // Feature gating — only gate web search/crawl creation, not status/admin endpoints
+        if (!orgPlan.features.webIntelligence && req.method === 'POST' && (pathname === '/api/web/search/jobs' || pathname === '/api/web/crawl/jobs')) {
+          return jsonResponse(res, { error: 'Web Intelligence requires Pro plan or higher', upgrade_url: 'https://hivemind.davinciai.eu/hivemind/app/billing' }, 403);
+        }
+        if (pathname.includes('/swarm') && !orgPlan.features.agentSwarm) {
+          return jsonResponse(res, { error: 'Agent Swarm requires Scale plan or higher', upgrade_url: 'https://hivemind.davinciai.eu/hivemind/app/billing' }, 403);
         }
       }
 
@@ -4422,6 +4469,23 @@ a{color:#a78bfa}</style></head><body>
                 message: error.message
               }, 500);
             }
+          }
+          break;
+
+        case '/api/billing/usage':
+          if (req.method === 'GET') {
+            if (!usageTracker || !planStore) return jsonResponse(res, { error: 'Billing not available' }, 503);
+            const billingPlan = await planStore.getOrgPlan(orgId);
+            const billingUsage = await usageTracker.getUsage(orgId);
+            const billingLimits = await usageTracker.checkLimits(orgId, billingPlan.id);
+            return jsonResponse(res, { plan: billingPlan.id, planName: billingPlan.name, usage: billingUsage, limits: billingPlan.limits, warnings: billingLimits.warnings });
+          }
+          break;
+
+        case '/api/billing/plans':
+          if (req.method === 'GET') {
+            const { getAllPlans } = await import('./billing/plans.js');
+            return jsonResponse(res, { plans: getAllPlans() });
           }
           break;
 

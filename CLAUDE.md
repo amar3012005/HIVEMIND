@@ -12,10 +12,10 @@
         "@amar_528/mcp-bridge",
         "hosted",
         "--url",
-        "https://core.hivemind.davinciai.eu:8050/api/mcp/servers/YOUR_USER_ID"
+        "https://core.hivemind.davinciai.eu:8050/api/mcp/servers/986ac853-5597-40b2-b48a-02dc88d3ae1d"
       ],
       "env": {
-        "HIVEMIND_API_KEY": "YOUR_API_KEY"
+        "HIVEMIND_API_KEY": "hmk_live_55ef294b6b3dd68369c70c3e6617df999fbee42c33e01b57"
       }
     }
   }

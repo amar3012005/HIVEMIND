@@ -876,6 +876,13 @@ async function hybridSearch(options = {}) {
 
   const startTime = Date.now();
 
+  // Temporal query expansion: extract date ranges from natural language
+  const { expandTemporalQuery } = await import('../../search/time-aware-expander.js');
+  const temporalExpansion = expandTemporalQuery(options.query || query || '');
+  if (temporalExpansion.hasTemporalFilter && !options.dateRange) {
+    options.dateRange = temporalExpansion.dateRange;
+  }
+
   logger.info('Starting hybrid search', {
     query,
     userId,

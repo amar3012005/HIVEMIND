@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      width: 360px;
+      font-family: 'Segoe UI', -apple-system, sans-serif;
+      background: #faf9f4;
+      color: #0a0a0a;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 16px;
+      border-bottom: 1px solid #e3e0db;
+      background: white;
+    }
+    .logo {
+      width: 32px; height: 32px;
+      background: rgba(17,125,255,0.1);
+      border: 1px solid rgba(17,125,255,0.2);
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px;
+    }
+    .title { font-weight: 700; font-size: 15px; }
+    .subtitle { font-size: 10px; color: #a3a3a3; font-family: monospace; }
+
+    .section { padding: 16px; }
+    .section-title { font-size: 11px; color: #525252; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px; }
+
+    /* Setup */
+    .setup-form { display: flex; flex-direction: column; gap: 8px; }
+    .input {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #e3e0db;
+      border-radius: 8px;
+      font-size: 13px;
+      background: white;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .input:focus { border-color: #117dff; }
+    .input::placeholder { color: #d4d0ca; }
+
+    /* Buttons */
+    .btn {
+      display: flex; align-items: center; justify-content: center; gap: 6px;
+      width: 100%;
+      padding: 10px;
+      border: none; border-radius: 8px;
+      font-size: 13px; font-weight: 600;
+      cursor: pointer; transition: all 0.2s;
+    }
+    .btn-primary { background: #117dff; color: white; }
+    .btn-primary:hover { background: #0066e0; }
+    .btn-secondary { background: white; color: #0a0a0a; border: 1px solid #e3e0db; }
+    .btn-secondary:hover { background: #f3f1ec; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* Actions */
+    .actions { display: flex; flex-direction: column; gap: 8px; }
+
+    /* Status */
+    .status {
+      display: flex; align-items: center; gap: 6px;
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 12px;
+      margin-top: 8px;
+    }
+    .status-success { background: #f0fdf4; color: #16a34a; border: 1px solid #bbf7d0; }
+    .status-error { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
+    .status-info { background: #eff6ff; color: #117dff; border: 1px solid #bfdbfe; }
+
+    .dot { width: 6px; height: 6px; border-radius: 50%; }
+    .dot-green { background: #22c55e; }
+    .dot-red { background: #ef4444; }
+
+    /* Stats */
+    .stats { display: flex; gap: 12px; margin-top: 8px; }
+    .stat { flex: 1; text-align: center; padding: 8px; background: white; border: 1px solid #e3e0db; border-radius: 8px; }
+    .stat-value { font-size: 18px; font-weight: 700; color: #117dff; }
+    .stat-label { font-size: 9px; color: #a3a3a3; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px; }
+
+    /* Quick Recall */
+    .recall-input { display: flex; gap: 6px; }
+    .recall-input .input { flex: 1; }
+    .recall-input .btn { width: auto; padding: 10px 14px; }
+    .recall-results { margin-top: 8px; }
+    .recall-item {
+      padding: 8px 10px;
+      background: white;
+      border: 1px solid #eae7e1;
+      border-radius: 8px;
+      margin-bottom: 4px;
+      font-size: 12px;
+      color: #525252;
+    }
+    .recall-item-title { font-weight: 600; color: #0a0a0a; margin-bottom: 2px; }
+    .recall-item-score { font-size: 10px; color: #a3a3a3; font-family: monospace; }
+
+    .hidden { display: none; }
+    .footer { padding: 12px 16px; border-top: 1px solid #e3e0db; text-align: center; }
+    .footer a { color: #117dff; text-decoration: none; font-size: 11px; }
+    .footer a:hover { text-decoration: underline; }
+
+    .eu-badge {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 4px 8px; border-radius: 6px;
+      background: #f0fdf4; border: 1px solid #bbf7d0;
+      font-size: 9px; color: #16a34a; margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <!-- Header -->
+  <div class="header">
+    <div class="logo">🧠</div>
+    <div>
+      <div class="title">HIVEMIND</div>
+      <div class="subtitle">Memory Engine</div>
+    </div>
+  </div>
+
+  <!-- Setup (shown when no API key) -->
+  <div id="setup" class="section">
+    <div class="section-title">Connect to HIVEMIND</div>
+    <div class="setup-form">
+      <input id="apiKeyInput" class="input" type="password" placeholder="Paste your API key (hmk_live_...)" />
+      <input id="apiBaseInput" class="input" type="text" placeholder="API URL (default: core.hivemind.davinciai.eu:8050)" />
+      <button id="connectBtn" class="btn btn-primary">Connect</button>
+    </div>
+    <div id="setupStatus"></div>
+  </div>
+
+  <!-- Connected View -->
+  <div id="connected" class="section hidden">
+    <!-- Status -->
+    <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 12px;">
+      <div class="dot dot-green"></div>
+      <span style="font-size: 12px; color: #16a34a; font-weight: 600;">Connected</span>
+      <span id="userEmail" style="font-size: 11px; color: #a3a3a3; margin-left: auto;"></span>
+    </div>
+
+    <!-- Stats -->
+    <div class="stats">
+      <div class="stat">
+        <div class="stat-value" id="memoryCount">-</div>
+        <div class="stat-label">Memories</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="obsCount">-</div>
+        <div class="stat-label">Observations</div>
+      </div>
+    </div>
+
+    <!-- Actions -->
+    <div class="section-title" style="margin-top: 16px;">Quick Actions</div>
+    <div class="actions">
+      <button id="savePageBtn" class="btn btn-primary">
+        📄 Save This Page
+      </button>
+      <button id="saveSelectionBtn" class="btn btn-secondary">
+        ✂️ Save Selection
+      </button>
+    </div>
+
+    <!-- Quick Recall -->
+    <div class="section-title" style="margin-top: 16px;">Quick Recall</div>
+    <div class="recall-input">
+      <input id="recallInput" class="input" placeholder="Search your memories..." />
+      <button id="recallBtn" class="btn btn-primary">🔍</button>
+    </div>
+    <div id="recallResults" class="recall-results"></div>
+
+    <div id="actionStatus"></div>
+
+    <div class="eu-badge">🇪🇺 EU Sovereign — Frankfurt, Germany</div>
+
+    <!-- Disconnect -->
+    <button id="disconnectBtn" class="btn btn-secondary" style="margin-top: 12px; font-size: 11px; color: #a3a3a3;">
+      Disconnect
+    </button>
+  </div>
+
+  <!-- Footer -->
+  <div class="footer">
+    <a href="https://hivemind.davinciai.eu" target="_blank">hivemind.davinciai.eu</a>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

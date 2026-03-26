@@ -44,19 +44,17 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   }
 
   if (info.menuItemId === 'hivemind-save-page') {
-    // Inject script to capture page content
     try {
-      const results = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: capturePageContent,
-      });
+      // Inject smart extractor + execute
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['extractors.js'] });
+      const results = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => smartExtract() });
       const pageContent = results[0]?.result;
       if (pageContent) {
         await saveToHivemind(config, {
           content: pageContent.content,
-          title: pageContent.title,
-          tags: ['browser-extension', 'webpage', `url:${tab.url}`],
-          source: 'browser-extension',
+          title: pageContent.title || tab.title,
+          tags: ['browser-extension', ...(pageContent.tags || []), `url:${tab.url}`],
+          source: pageContent.platform || 'browser-extension',
         });
         showBadge('OK', '#22c55e');
       }
@@ -193,47 +191,24 @@ async function handleSavePage(tabId) {
 
   try {
     const tab = await chrome.tabs.get(tabId);
-    const results = await chrome.scripting.executeScript({
-      target: { tabId },
-      func: capturePageContent,
-    });
+    // Inject smart extractor + execute
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['extractors.js'] });
+    const results = await chrome.scripting.executeScript({ target: { tabId }, func: () => smartExtract() });
     const pageContent = results[0]?.result;
     if (!pageContent) return { success: false, error: 'Could not capture page' };
 
     return saveToHivemind(config, {
       content: pageContent.content,
       title: pageContent.title || tab.title,
-      tags: ['browser-extension', 'webpage', `url:${tab.url}`],
-      source: 'browser-extension',
+      tags: ['browser-extension', ...(pageContent.tags || []), `url:${tab.url}`],
+      source: pageContent.platform || 'browser-extension',
     });
   } catch (err) {
     return { success: false, error: err.message };
   }
 }
 
-// ── Page Content Capture (injected into tab) ────────────
-
-function capturePageContent() {
-  // Extract meaningful text content, stripping nav/ads/scripts
-  const article = document.querySelector('article, main, [role="main"], .content, .post-content, .entry-content');
-  const target = article || document.body;
-
-  // Clone and clean
-  const clone = target.cloneNode(true);
-  clone.querySelectorAll('script, style, nav, header, footer, aside, .sidebar, .ad, .advertisement, iframe, noscript').forEach(el => el.remove());
-
-  const text = clone.innerText
-    .replace(/\n{3,}/g, '\n\n')
-    .replace(/\t+/g, ' ')
-    .trim()
-    .slice(0, 8000);
-
-  return {
-    title: document.title,
-    content: `# ${document.title}\n\nURL: ${window.location.href}\n\n${text}`,
-    url: window.location.href,
-  };
-}
+// Page capture now handled by extractors.js (smartExtract)
 
 // ── Badge Helper ────────────────────────────────────────
 

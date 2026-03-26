@@ -179,23 +179,34 @@ export class MemoryGraphEngine {
                 priority: result.priority,
                 observationDate: baseMemory.document_date || baseMemory.created_at,
               });
-              const obsPayload = buildObservationPayload({
-                userId: baseMemory.user_id,
-                orgId: baseMemory.org_id,
-                observationText: obsText,
-                observationDate: baseMemory.document_date || baseMemory.created_at,
-                project: baseMemory.project,
-                sourceTags: baseMemory.tags || [],
+
+              // Check for duplicate observation before storing (SHA-256 fingerprint)
+              const obsFingerprint = crypto.createHash('sha256').update(obsText).digest('hex');
+              const existingObs = latestMemories.filter(m => (m.tags || []).includes('observation'));
+              const isDuplicate = existingObs.some(m => {
+                const existingFp = crypto.createHash('sha256').update(m.content || '').digest('hex');
+                return existingFp === obsFingerprint;
               });
-              const obsId = crypto.randomUUID ? crypto.randomUUID() : `obs-${Date.now()}`;
-              await transactionalStore.createMemory({
-                ...obsPayload,
-                id: obsId,
-                is_latest: true,
-                version: 1,
-                created_at: new Date().toISOString(),
-                updated_at: new Date().toISOString(),
-              });
+
+              if (!isDuplicate) {
+                const obsPayload = buildObservationPayload({
+                  userId: baseMemory.user_id,
+                  orgId: baseMemory.org_id,
+                  observationText: obsText,
+                  observationDate: baseMemory.document_date || baseMemory.created_at,
+                  project: baseMemory.project,
+                  sourceTags: baseMemory.tags || [],
+                });
+                const obsId = crypto.randomUUID ? crypto.randomUUID() : `obs-${Date.now()}`;
+                await transactionalStore.createMemory({
+                  ...obsPayload,
+                  id: obsId,
+                  is_latest: true,
+                  version: 1,
+                  created_at: new Date().toISOString(),
+                  updated_at: new Date().toISOString(),
+                });
+              }
             }
           } catch (procErr) {
             console.warn('[memory-processor] Processing failed:', procErr.message);

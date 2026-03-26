@@ -272,7 +272,12 @@ async function vectorCandidatesForRecall(store, {
     };
   }));
 
-  return hydrated.filter(Boolean);
+  return hydrated.filter(item => {
+    if (!item) return false;
+    // Exclude benchmark data from production recall when no specific project is set
+    if (!project && (item.memory?.tags || []).includes('longmemeval')) return false;
+    return true;
+  });
 }
 
 function timelineFor(memory, memoryById, relationships) {
@@ -612,6 +617,8 @@ export async function recallPersistedMemories(store, {
   });
 
   const filteredLexical = lexicalCandidates.filter(memory => {
+    // Exclude benchmark data from production recall when no specific project is set
+    if (!project && (memory.tags || []).includes('longmemeval')) return false;
     if (source_platforms.length === 0) return true;
     const sourcePlatform = memory.source_metadata?.source_platform || memory.source || null;
     return source_platforms.includes(sourcePlatform);

@@ -4671,15 +4671,21 @@ BEHAVIOR:
                 .replace(/[\uD800-\uDFFF]/g, '').trim();
 
               // Step 5: Save this conversation turn as a memory (observation)
+              // Only save when the user is TELLING something new, not asking a question
               if (persistentMemoryEngine && response.length > 20) {
-                persistentMemoryEngine.ingestMemory({
-                  content: `User: ${message}\nAssistant: ${response}`,
-                  title: `Chat: ${message.slice(0, 50)}`,
-                  tags: ['chat', 'talk-to-hive'],
-                  memory_type: 'event',
-                  user_id: userId,
-                  org_id: orgId,
-                }).catch(() => {}); // fire and forget
+                const isQuestion = /^(what|when|where|who|how|why|do |does |did |is |are |can |could |tell me|show me)/i.test(message.trim());
+                const hasMemoryKeywords = /\b(remember|save|don't forget|note that|update|my new|i just|i got|i moved|i changed|i bought|i sold)\b/i.test(message.trim());
+
+                if (!isQuestion || hasMemoryKeywords) {
+                  persistentMemoryEngine.ingestMemory({
+                    content: `User: ${message}\nAssistant: ${response}`,
+                    title: `Chat: ${message.slice(0, 50)}`,
+                    tags: ['chat', 'talk-to-hive'],
+                    memory_type: 'event',
+                    user_id: userId,
+                    org_id: orgId,
+                  }).catch(() => {}); // fire and forget
+                }
               }
 
               return jsonResponse(res, {

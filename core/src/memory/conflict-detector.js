@@ -51,7 +51,10 @@ export function computeTokenSimilarity(left = '', right = '') {
 }
 
 export class ConflictDetector {
-  constructor({ threshold = 0.92 } = {}) {
+  // Lowered from 0.92 to 0.45 — the old threshold was so high that
+  // only near-exact duplicates qualified as candidates, causing 0 graph edges.
+  // Knowledge updates ("20 days → 25 days") typically have 0.5-0.7 Jaccard similarity.
+  constructor({ threshold = 0.45 } = {}) {
     this.threshold = threshold;
   }
 

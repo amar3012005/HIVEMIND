@@ -24,6 +24,16 @@ const MONTH_MAP = {
   december: 11, dec: 11
 };
 
+const WEEKDAY_MAP = {
+  sunday: 0,
+  monday: 1,
+  tuesday: 2,
+  wednesday: 3,
+  thursday: 4,
+  friday: 5,
+  saturday: 6
+};
+
 /**
  * Format a Date as an ISO 8601 date string (YYYY-MM-DD)
  * @param {Date} d
@@ -79,6 +89,30 @@ function endOfDay(now) {
 }
 
 /**
+ * Add a number of UTC days to a date.
+ * @param {Date} date
+ * @param {number} days
+ * @returns {Date}
+ */
+function addUTCDays(date, days) {
+  const d = new Date(date);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d;
+}
+
+/**
+ * Add a number of UTC months to a date.
+ * @param {Date} date
+ * @param {number} months
+ * @returns {Date}
+ */
+function addUTCMonths(date, months) {
+  const d = new Date(date);
+  d.setUTCMonth(d.getUTCMonth() + months);
+  return d;
+}
+
+/**
  * Get the start of the ISO week (Monday) containing `now`.
  * @param {Date} now
  * @returns {Date}
@@ -114,6 +148,62 @@ function endOfMonth(year, month) {
 }
 
 /**
+ * Resolve a weekday reference (last/this/next Monday, etc.) into a date range.
+ * @param {Date} now
+ * @param {string} scope
+ * @param {string} weekdayName
+ * @returns {{ start: string, end: string }}
+ */
+function weekdayRange(now, scope, weekdayName) {
+  const weekday = WEEKDAY_MAP[weekdayName];
+  const today = startOfDay(now);
+  let base;
+
+  if (scope === 'this') {
+    const weekStart = startOfWeek(now);
+    const offset = weekday === 0 ? 6 : weekday - 1;
+    base = addUTCDays(weekStart, offset);
+  } else {
+    const currentWeekday = today.getUTCDay();
+    let delta = weekday - currentWeekday;
+
+    if (scope === 'last') {
+      if (delta >= 0) {
+        delta -= 7;
+      }
+    } else if (scope === 'next') {
+      if (delta <= 0) {
+        delta += 7;
+      }
+    }
+
+    base = addUTCDays(today, delta);
+  }
+
+  return range(startOfDay(base), endOfDay(base));
+}
+
+/**
+ * Resolve a quarter reference into a date range.
+ * @param {Date} now
+ * @param {'last'|'this'|'next'} scope
+ * @returns {{ start: string, end: string }}
+ */
+function quarterRange(now, scope) {
+  const currentQuarterMonth = Math.floor(now.getUTCMonth() / 3) * 3;
+  let start = new Date(Date.UTC(now.getUTCFullYear(), currentQuarterMonth, 1));
+
+  if (scope === 'last') {
+    start = addUTCMonths(start, -3);
+  } else if (scope === 'next') {
+    start = addUTCMonths(start, 3);
+  }
+
+  const end = endOfMonth(start.getUTCFullYear(), start.getUTCMonth() + 2);
+  return range(start, end);
+}
+
+/**
  * Expand a query string to detect temporal references and extract a date range.
  *
  * @param {string|null|undefined} query - The raw query string
@@ -145,7 +235,43 @@ export function expandTemporalQuery(query) {
   }
 
   // ----------------------------------------------------------------
-  // 2. Fixed relative keywords
+  // 2. Weekday and quarter references
+  // ----------------------------------------------------------------
+  const weekdayMatch = q.match(/\b(last|this|next)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/);
+  if (weekdayMatch) {
+    return {
+      hasTemporalFilter: true,
+      dateRange: weekdayRange(now, weekdayMatch[1], weekdayMatch[2]),
+      temporalHint: `${weekdayMatch[1]} ${weekdayMatch[2]}`
+    };
+  }
+
+  const quarterMatch = q.match(/\b(last|this|next)\s+quarter\b/);
+  if (quarterMatch) {
+    return {
+      hasTemporalFilter: true,
+      dateRange: quarterRange(now, quarterMatch[1]),
+      temporalHint: `${quarterMatch[1]} quarter`
+    };
+  }
+
+  const explicitQuarterMatch = q.match(/\b(q[1-4])\s*(\d{4})\b/);
+  if (explicitQuarterMatch) {
+    const quarter = parseInt(explicitQuarterMatch[1].slice(1), 10);
+    const year = parseInt(explicitQuarterMatch[2], 10);
+    const startMonth = (quarter - 1) * 3;
+    return {
+      hasTemporalFilter: true,
+      dateRange: range(
+        new Date(Date.UTC(year, startMonth, 1)),
+        endOfMonth(year, startMonth + 2)
+      ),
+      temporalHint: `${explicitQuarterMatch[1].toUpperCase()} ${year}`
+    };
+  }
+
+  // ----------------------------------------------------------------
+  // 3. Fixed relative keywords
   // ----------------------------------------------------------------
   if (/\byesterday\b/.test(q)) {
     const start = daysBack(now, 1);
@@ -223,7 +349,7 @@ export function expandTemporalQuery(query) {
   }
 
   // ----------------------------------------------------------------
-  // 3. Absolute month + year: "March 2026", "in March 2026"
+  // 4. Absolute month + year: "March 2026", "in March 2026"
   // ----------------------------------------------------------------
   const monthYearPattern = new RegExp(
     `\\b(${Object.keys(MONTH_MAP).join('|')})\\s+(\\d{4})\\b`
@@ -242,7 +368,7 @@ export function expandTemporalQuery(query) {
   }
 
   // ----------------------------------------------------------------
-  // 4. Absolute ISO date: "2026-03-15"
+  // 5. Absolute ISO date: "2026-03-15"
   // ----------------------------------------------------------------
   const isoDateMatch = q.match(/\b(\d{4}-\d{2}-\d{2})\b/);
   if (isoDateMatch) {
@@ -284,7 +410,7 @@ export function expandTemporalQuery(query) {
   }
 
   // ----------------------------------------------------------------
-  // 5. "after/since" without a bare ISO date already captured above
+  // 6. "after/since" without a bare ISO date already captured above
   //    (handles edge case where pattern wasn't caught above)
   // ----------------------------------------------------------------
   const afterMatch2 = q.match(/\b(?:after|since)\s+(\d{4}-\d{2}-\d{2})\b/);

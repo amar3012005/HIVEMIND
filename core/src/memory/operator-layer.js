@@ -21,7 +21,8 @@ import { computeTokenSimilarity } from './conflict-detector.js';
 // ---------------------------------------------------------------------------
 
 const TEMPORAL_PATTERNS = [
-  /\b(when|yesterday|today|last\s+(?:week|month|year)|ago|before|after|since|during|timeline|history|past|evolution)\b/i,
+  /\b(when|yesterday|today|last\s+(?:week|month|year|quarter|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|next\s+(?:week|month|year|quarter|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|this\s+(?:week|month|year|quarter|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|ago|before|after|since|during|timeline|history|past|evolution)\b/i,
+  /\b(?:q[1-4]\s+\d{4}|\d{4}\s+q[1-4])\b/i,
   /\b\d{4}[-/]\d{2}[-/]\d{2}\b/,
   /\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\b/i
 ];

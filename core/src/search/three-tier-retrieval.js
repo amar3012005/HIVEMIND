@@ -171,6 +171,7 @@ export class ThreeTierRetrieval {
     const {
       userId,
       orgId,
+      project,
       memoryType,
       tags,
       sourcePlatform,
@@ -196,6 +197,7 @@ export class ThreeTierRetrieval {
         query,
         userId,
         orgId,
+        project,
         memoryType,
         tags,
         sourcePlatform,
@@ -286,6 +288,7 @@ export class ThreeTierRetrieval {
     const {
       userId,
       orgId,
+      project,
       includeExpired = true,
       includeHistorical = true,
       dateRange,
@@ -309,6 +312,7 @@ export class ThreeTierRetrieval {
       const results = await this.panoramaSearchEngine.search(query, {
         userId,
         orgId,
+        project,
         includeExpired,
         includeHistorical,
         dateRange,

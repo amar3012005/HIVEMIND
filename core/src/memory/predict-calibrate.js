@@ -30,15 +30,24 @@ function tokenize(text = '') {
 }
 
 /**
- * Split text into sentences using common sentence-ending punctuation.
- * Falls back to the full text as a single "sentence" if no splits are found.
+ * Split text into atomic units using sentence boundaries, semicolons, blank
+ * lines, and bullet-style line breaks. This gives the delta extractor a more
+ * granular view of long updates.
  */
 export function extractSentences(text = '') {
-  const raw = text
-    .split(/(?<=[.!?])\s+/)
-    .map(s => s.trim())
-    .filter(s => s.length > 0);
-  return raw.length > 0 ? raw : [text.trim()].filter(Boolean);
+  const normalized = String(text || '').replace(/\r\n/g, '\n').trim();
+  if (!normalized) return [];
+
+  const raw = normalized
+    .split(/\n{2,}/)
+    .flatMap(chunk => chunk.split(/\n+/))
+    .flatMap(chunk => chunk.split(/(?<=[.!?;])\s+/))
+    .map((part) => part
+      .replace(/^\s*(?:[-*+]\s+|\d+[.)]\s+)/, '')
+      .trim())
+    .filter((part) => part.length > 0);
+
+  return raw.length > 0 ? raw : [normalized];
 }
 
 /**

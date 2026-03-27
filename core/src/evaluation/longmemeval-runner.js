@@ -17,12 +17,14 @@
 
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
+import { buildBenchmarkContext, getLongMemEvalRetrievalPlan } from './longmemeval-routing.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_PATH = process.env.LONGMEMEVAL_DATA || path.join(__dirname, '../../../benchmarks/LongMemEval/data/longmemeval_s_cleaned.json');
 const OUTPUT_DIR = path.join(__dirname, '../../evaluation-reports');
 const HYPOTHESIS_FILE = path.join(OUTPUT_DIR, 'longmemeval-hypotheses.jsonl');
+const LONGMEMEVAL_REPORT_FILE = path.join(OUTPUT_DIR, 'longmemeval-report.json');
 
 // HIVEMIND API config
 const API_BASE = process.env.HIVEMIND_API_BASE || 'https://core.hivemind.davinciai.eu:8050';
@@ -120,6 +122,340 @@ async function groqChat(messages, options = {}) {
   throw new Error('Groq API: max retries exceeded');
 }
 
+function normalizeSearchResult(result, rank = 0) {
+  if (!result) return null;
+  const payload = result.payload || {};
+  const content = result.content || payload.content || '';
+
+  return {
+    id: result.id || payload.id || payload.memoryId || null,
+    title: result.title || payload.title || '',
+    content,
+    score: Number.isFinite(result.score) ? result.score : (Number.isFinite(payload.score) ? payload.score : null),
+    project: result.project || payload.project || null,
+    tags: result.tags || payload.tags || [],
+    session: result.session || payload.session || null,
+    memoryType: result.memoryType || payload.memoryType || payload.memory_type || null,
+    sourcePlatform: result.sourcePlatform || payload.sourcePlatform || null,
+    rank: rank + 1
+  };
+}
+
+function normalizeSearchResults(searchResults) {
+  const items = searchResults?.results || searchResults?.memories || [];
+  return items
+    .map((result, rank) => normalizeSearchResult(result, rank))
+    .filter(item => item && (item.content || item.title || item.id));
+}
+
+function selectContextResults(searchResults, limit = 5) {
+  const normalized = normalizeSearchResults(searchResults);
+  const selected = [];
+  const seen = new Set();
+
+  for (const item of normalized) {
+    const contentKey = (item.content || '')
+      .toLowerCase()
+      .replace(/\s+/g, ' ')
+      .trim();
+    const signature = contentKey
+      || item.id
+      || `${(item.title || '').toLowerCase()}::${(item.content || '').slice(0, 160).toLowerCase().replace(/\s+/g, ' ')}`;
+
+    if (seen.has(signature)) {
+      continue;
+    }
+
+    seen.add(signature);
+    selected.push(item);
+    if (selected.length >= limit) break;
+  }
+
+  return selected;
+}
+
+function looksLikeAbstention(text) {
+  return /don't have this information in my memory|do not have this information in my memory|i don't know|i do not know|cannot find|can't find|not enough context|not in my memory/i.test(text || '');
+}
+
+function classifyLongMemEvalBottleneck(entry) {
+  const retrieval = entry.retrieval || {};
+  const resultCount = retrieval.resultCount || 0;
+  const contextChars = retrieval.contextChars || 0;
+  const fallbackUsed = !!retrieval.usedGlobalFallback;
+  const hypothesis = entry.hypothesis || '';
+  const isAbstentionAnswer = looksLikeAbstention(hypothesis);
+  const judged = typeof entry.autoeval_label === 'string';
+  const correct = entry.autoeval_label === 'yes';
+
+  if (entry.isAbstention && judged && correct) {
+    return {
+      type: 'abstention_success',
+      severity: 'low',
+      reason: 'The model correctly abstained on an unanswerable question',
+      evidence: {
+        hypothesis: hypothesis.slice(0, 120)
+      }
+    };
+  }
+
+  if (entry.isAbstention && judged && !correct) {
+    return {
+      type: 'abstention_failure',
+      severity: 'high',
+      reason: 'The model failed to handle an unanswerable question correctly',
+      evidence: {
+        questionType: entry.question_type,
+        hypothesis: hypothesis.slice(0, 120)
+      }
+    };
+  }
+
+  if (!entry.isAbstention && judged && !correct && isAbstentionAnswer) {
+    return {
+      type: 'over_abstention',
+      severity: 'high',
+      reason: 'Answerable question was abstained',
+      evidence: {
+        questionType: entry.question_type,
+        hypothesis: hypothesis.slice(0, 120)
+      }
+    };
+  }
+
+  if (resultCount === 0) {
+    return {
+      type: 'empty_context',
+      severity: 'high',
+      reason: 'No retrieval context was returned',
+      evidence: {
+        resultCount,
+        contextChars
+      }
+    };
+  }
+
+  if (fallbackUsed) {
+    return {
+      type: 'scope_fallback',
+      severity: 'medium',
+      reason: 'Project-scoped retrieval required a global fallback',
+      evidence: {
+        projectResultCount: retrieval.projectResultCount || 0,
+        globalResultCount: retrieval.globalResultCount || 0
+      }
+    };
+  }
+
+  if (contextChars < 120) {
+    return {
+      type: 'thin_context',
+      severity: 'medium',
+      reason: 'The generated context was too small to support answering',
+      evidence: {
+        contextChars,
+        resultCount
+      }
+    };
+  }
+
+  if (judged && !correct) {
+    return {
+      type: 'generation_or_reasoning_gap',
+      severity: 'medium',
+      reason: 'Context existed, but the final answer was still incorrect',
+      evidence: {
+        questionType: entry.question_type,
+        hypothesis: hypothesis.slice(0, 120)
+      }
+    };
+  }
+
+  return {
+    type: 'healthy',
+    severity: 'low',
+    reason: 'No dominant bottleneck detected',
+    evidence: {
+      resultCount,
+      contextChars
+    }
+  };
+}
+
+function mean(values) {
+  const filtered = values.filter(v => typeof v === 'number' && Number.isFinite(v));
+  if (filtered.length === 0) return 0;
+  return filtered.reduce((sum, value) => sum + value, 0) / filtered.length;
+}
+
+function summarizeEntries(entries) {
+  const total = entries.length;
+  const answerable = entries.filter(entry => !entry.isAbstention).length;
+  const abstention = total - answerable;
+  const judged = entries.filter(entry => typeof entry.autoeval_label === 'string');
+  const correct = judged.filter(entry => entry.autoeval_label === 'yes').length;
+
+  const retrieval = {
+    averageSearchLatencyMs: Math.round(mean(entries.map(entry => entry.retrieval?.searchLatencyMs)) * 100) / 100,
+    averageGenerationLatencyMs: Math.round(mean(entries.map(entry => entry.retrieval?.generationLatencyMs)) * 100) / 100,
+    averageContextChars: Math.round(mean(entries.map(entry => entry.retrieval?.contextChars)) * 100) / 100,
+    averageResultCount: Math.round(mean(entries.map(entry => entry.retrieval?.resultCount)) * 100) / 100,
+    projectScopedCount: entries.filter(entry => (entry.retrieval?.projectResultCount || 0) > 0).length,
+    fallbackCount: entries.filter(entry => entry.retrieval?.usedGlobalFallback).length,
+    emptyContextCount: entries.filter(entry => (entry.retrieval?.resultCount || 0) === 0).length
+  };
+
+  const judgedSummary = judged.length > 0
+    ? {
+        judged: judged.length,
+        correct,
+        accuracy: Math.round((correct / judged.length) * 10000) / 100,
+        answerable: judged.filter(entry => !entry.isAbstention).length,
+        abstention: judged.filter(entry => entry.isAbstention).length
+      }
+    : {
+        judged: 0,
+        correct: 0,
+        accuracy: 0,
+        answerable: 0,
+        abstention: 0
+      };
+
+  const byQuestionType = {};
+  for (const entry of judged) {
+    const type = entry.question_type || 'unknown';
+    if (!byQuestionType[type]) {
+      byQuestionType[type] = {
+        total: 0,
+        correct: 0,
+        fallbackCount: 0,
+        emptyContextCount: 0,
+        averageContextChars: 0,
+        averageSearchLatencyMs: 0
+      };
+    }
+    const bucket = byQuestionType[type];
+    bucket.total += 1;
+    if (entry.autoeval_label === 'yes') bucket.correct += 1;
+    if (entry.retrieval?.usedGlobalFallback) bucket.fallbackCount += 1;
+    if ((entry.retrieval?.resultCount || 0) === 0) bucket.emptyContextCount += 1;
+    bucket.averageContextChars += entry.retrieval?.contextChars || 0;
+    bucket.averageSearchLatencyMs += entry.retrieval?.searchLatencyMs || 0;
+  }
+
+  for (const bucket of Object.values(byQuestionType)) {
+    bucket.accuracy = bucket.total > 0 ? Math.round((bucket.correct / bucket.total) * 10000) / 100 : 0;
+    bucket.averageContextChars = bucket.total > 0 ? Math.round((bucket.averageContextChars / bucket.total) * 100) / 100 : 0;
+    bucket.averageSearchLatencyMs = bucket.total > 0 ? Math.round((bucket.averageSearchLatencyMs / bucket.total) * 100) / 100 : 0;
+  }
+
+  const bottlenecks = {};
+  const bottleneckExamples = {};
+  const classified = judged.length > 0 ? judged : entries;
+  for (const entry of classified) {
+    const bottleneck = classifyLongMemEvalBottleneck(entry);
+    bottlenecks[bottleneck.type] = (bottlenecks[bottleneck.type] || 0) + 1;
+    if (!bottleneckExamples[bottleneck.type]) bottleneckExamples[bottleneck.type] = [];
+    if (bottleneckExamples[bottleneck.type].length < 3) {
+      bottleneckExamples[bottleneck.type].push({
+        question_id: entry.question_id,
+        question_type: entry.question_type,
+        reason: bottleneck.reason
+      });
+    }
+  }
+
+  const classifiedTotal = classified.length || 1;
+  const topBottlenecks = Object.entries(bottlenecks)
+    .map(([type, count]) => ({
+      type,
+      count,
+      share: Math.round((count / classifiedTotal) * 1000) / 10,
+      examples: bottleneckExamples[type] || []
+    }))
+    .sort((a, b) => {
+      if (a.type === 'healthy' && b.type !== 'healthy') return 1;
+      if (b.type === 'healthy' && a.type !== 'healthy') return -1;
+      if (b.count !== a.count) return b.count - a.count;
+      return a.type.localeCompare(b.type);
+    });
+
+  return {
+    totalQuestions: total,
+    answerableQuestions: answerable,
+    abstentionQuestions: abstention,
+    judgedQuestions: judgedSummary.judged,
+    judgedAccuracy: judgedSummary.accuracy,
+    judgedCorrect: judgedSummary.correct,
+    retrieval,
+    byQuestionType,
+    bottlenecks: {
+      counts: bottlenecks,
+      top: topBottlenecks
+    }
+  };
+}
+
+function buildLongMemEvalReport({
+  phase,
+  dataPath,
+  totalDatasetSize,
+  sample,
+  startFrom,
+  instances,
+  records,
+  ingestion = null,
+  timings = {},
+  judgeFile = null
+}) {
+  const summary = summarizeEntries(records);
+  const judgedRecords = records.filter(entry => typeof entry.autoeval_label === 'string');
+  const judgedAccuracy = summary.judgedQuestions > 0
+    ? Math.round((summary.judgedCorrect / summary.judgedQuestions) * 10000) / 100
+    : 0;
+
+  const failedExamples = judgedRecords
+    .filter(entry => entry.autoeval_label !== 'yes')
+    .slice(0, 10)
+    .map(entry => ({
+      question_id: entry.question_id,
+      question_type: entry.question_type,
+      isAbstention: entry.isAbstention,
+      verdict: entry.autoeval_label,
+      bottleneck: classifyLongMemEvalBottleneck(entry).type,
+      hypothesis: entry.hypothesis?.slice(0, 160) || ''
+    }));
+
+  return {
+    schemaVersion: '2026-03-27',
+    kind: 'hivemind.longmemeval-benchmark-report',
+    generatedAt: new Date().toISOString(),
+    phase,
+    dataPath,
+    datasetSize: totalDatasetSize,
+    sample,
+    startFrom,
+    instanceCount: instances.length,
+    benchUser: BENCH_USER,
+    benchOrg: BENCH_ORG,
+    model: GROQ_MODEL,
+    timings,
+    ingestion,
+    summary: {
+      ...summary,
+      judgedAccuracy
+    },
+    bottlenecks: summary.bottlenecks,
+    byQuestionType: summary.byQuestionType,
+    failedExamples,
+    files: {
+      hypotheses: HYPOTHESIS_FILE,
+      judged: judgeFile,
+      report: LONGMEMEVAL_REPORT_FILE
+    }
+  };
+}
+
 // ── Date parsing ────────────────────────────────────────
 
 function parseLongMemEvalDate(dateStr) {
@@ -185,42 +521,65 @@ async function ingestInstance(instance, instanceIdx, totalInstances) {
 async function evaluateInstance(instance) {
   const { question_id, question, question_type } = instance;
   const isAbstention = question_id.endsWith('_abs');
+  const retrievalPlan = getLongMemEvalRetrievalPlan({ question, questionType: question_type });
 
-  // Search for relevant memories — try project-scoped first, fall back to global
+  // Search for relevant memories using the strongest path for the query type.
   let searchResults;
+  let projectSearchResults;
+  let fallbackSearchResults;
+  let usedGlobalFallback = false;
+  const searchStart = Date.now();
   try {
-    searchResults = await apiCall('POST', '/api/search/quick', {
-      query: question,
-      project: `lme-${question_id}`,
-      limit: 10,
+    projectSearchResults = await apiCall('POST', retrievalPlan.route === 'panorama' ? '/api/search/panorama' : '/api/recall', {
+      ...retrievalPlan.body,
+      project: `lme-${question_id}`
     });
-    // If project-scoped returned too few results, try global
-    const results = searchResults.results || searchResults.memories || [];
-    if (results.length < 3) {
-      const globalResults = await apiCall('POST', '/api/search/quick', {
+
+    const rawItems = normalizeSearchResults(projectSearchResults);
+    if (rawItems.length < 3 && retrievalPlan.route === 'recall') {
+      fallbackSearchResults = await apiCall('POST', '/api/search/panorama', {
         query: question,
-        limit: 10,
+        project: `lme-${question_id}`,
+        include_expired: true,
+        include_historical: true,
+        limit: 15,
+        include_timeline: false
       });
-      const globalR = globalResults.results || globalResults.memories || [];
-      if (globalR.length > results.length) searchResults = globalResults;
+
+      const fallbackItems = normalizeSearchResults(fallbackSearchResults);
+      if (fallbackItems.length > rawItems.length) {
+        searchResults = fallbackSearchResults;
+        usedGlobalFallback = true;
+      }
+    }
+
+    if (!searchResults) {
+      searchResults = projectSearchResults;
     }
   } catch {
     searchResults = { results: [] };
   }
+  const searchLatencyMs = Date.now() - searchStart;
 
-  const results = searchResults.results || searchResults.memories || [];
-  const context = results
-    .slice(0, 5)
-    .map(r => r.content || r.payload?.content || '')
-    .filter(c => c.length > 10)
-    .join('\n---\n');
+  const projectResults = normalizeSearchResults(projectSearchResults);
+  const fallbackResults = normalizeSearchResults(fallbackSearchResults);
+  const selectedResults = selectContextResults(searchResults, retrievalPlan.contextLimit);
+
+  const context = buildBenchmarkContext({
+    results: selectedResults,
+    memories: selectedResults
+  }, {
+    maxItems: retrievalPlan.contextLimit,
+    maxChars: 7000
+  });
 
   // Generate hypothesis using Groq
   let hypothesis;
+  const generationStart = Date.now();
   try {
     const systemPrompt = isAbstention
       ? 'You are an AI assistant with memory of past conversations. If you cannot find the answer in the provided context, say "I don\'t have this information in my memory." Be honest about what you don\'t know.'
-      : 'You are an AI assistant with memory of past conversations. Answer the question based ONLY on the provided conversation history. Be concise and direct. If conflicting information exists, prefer the most recent.';
+      : `You are an AI assistant with memory of past conversations. ${retrievalPlan.systemHint} Be concise and direct.`;
 
     const userPrompt = context.length > 50
       ? `Here are relevant memories from our past conversations:\n\n${context}\n\nQuestion: ${question}\n\nAnswer concisely:`
@@ -243,8 +602,36 @@ async function evaluateInstance(instance) {
     console.warn(`  [groq-fail] ${question_id}: ${err.message.slice(0, 100)}`);
     hypothesis = "I don't have this information in my memory.";
   }
+  const generationLatencyMs = Date.now() - generationStart;
 
-  return { question_id, hypothesis: hypothesis.trim() };
+  return {
+    question_id,
+    question_type,
+    isAbstention,
+    hypothesis: hypothesis.trim(),
+    retrieval: {
+      route: retrievalPlan.route,
+      query: question,
+      projectResultCount: projectResults.length,
+      fallbackResultCount: fallbackResults.length,
+      resultCount: normalizeSearchResults(searchResults).length,
+      selectedContextCount: selectedResults.length,
+      contextChars: context.length,
+      searchLatencyMs,
+      generationLatencyMs,
+      usedGlobalFallback,
+      topResults: selectedResults.map((result, index) => ({
+        rank: index + 1,
+        id: result.id,
+        title: result.title,
+        score: result.score,
+        project: result.project,
+        session: result.session,
+        memoryType: result.memoryType,
+        sourcePlatform: result.sourcePlatform
+      }))
+    }
+  };
 }
 
 // ── Main ────────────────────────────────────────────────
@@ -280,6 +667,10 @@ async function main() {
   // Ensure output dir
   if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 
+  let ingestionSummary = null;
+  let evaluationRecords = [];
+  let judgedRecords = [];
+
   // ── Ingest Phase ──
   if (['ingest', 'both', 'all'].includes(opts.phase)) {
     console.log('═══ Phase 1: Ingestion ═══');
@@ -303,6 +694,12 @@ async function main() {
     const duration = ((Date.now() - startTime) / 1000).toFixed(0);
     console.log(`\nIngestion complete: ${totalIngested} memories, ${totalSkipped} skipped, ${duration}s`);
     console.log('');
+
+    ingestionSummary = {
+      totalIngested,
+      totalSkipped,
+      durationSeconds: Number(duration)
+    };
   }
 
   // ── Evaluate Phase ──
@@ -324,6 +721,7 @@ async function main() {
     // Write JSONL output
     const jsonlContent = hypotheses.map(h => JSON.stringify(h)).join('\n') + '\n';
     fs.writeFileSync(HYPOTHESIS_FILE, jsonlContent, 'utf-8');
+    evaluationRecords = hypotheses;
 
     const duration = ((Date.now() - startTime) / 1000).toFixed(0);
     console.log(`\nEvaluation complete: ${hypotheses.length} hypotheses, ${duration}s`);
@@ -340,6 +738,22 @@ async function main() {
     for (const [type, count] of Object.entries(byType)) {
       console.log(`  ${type}: ${count}`);
     }
+
+    const evaluationReport = buildLongMemEvalReport({
+      phase: 'evaluate',
+      dataPath: DATA_PATH,
+      totalDatasetSize: data.length,
+      sample: opts.sample,
+      startFrom: opts.startFrom,
+      instances,
+      records: evaluationRecords,
+      ingestion: ingestionSummary,
+      timings: {
+        evaluationSeconds: Number(duration)
+      }
+    });
+    fs.writeFileSync(LONGMEMEVAL_REPORT_FILE, JSON.stringify(evaluationReport, null, 2), 'utf-8');
+    console.log(`Partial report: ${LONGMEMEVAL_REPORT_FILE}`);
   }
 
   // ── Judge Phase ──
@@ -426,6 +840,7 @@ async function main() {
     // Write judged results
     const judgedFile = HYPOTHESIS_FILE.replace('.jsonl', '.judged.jsonl');
     fs.writeFileSync(judgedFile, judged.map(j => JSON.stringify(j)).join('\n') + '\n', 'utf-8');
+    judgedRecords = judged;
 
     const duration = ((Date.now() - startTime) / 1000).toFixed(0);
     console.log(`\n═══ RESULTS ═══`);
@@ -438,12 +853,44 @@ async function main() {
     }
     console.log(`\nDuration: ${duration}s`);
     console.log(`Judged output: ${judgedFile}`);
+
+    const finalReport = buildLongMemEvalReport({
+      phase: opts.phase === 'all' ? 'all' : 'judge',
+      dataPath: DATA_PATH,
+      totalDatasetSize: data.length,
+      sample: opts.sample,
+      startFrom: opts.startFrom,
+      instances,
+      records: judgedRecords.length > 0 ? judgedRecords : hypotheses,
+      ingestion: ingestionSummary,
+      timings: {
+        judgeSeconds: Number(duration)
+      },
+      judgeFile: judgedFile
+    });
+    fs.writeFileSync(LONGMEMEVAL_REPORT_FILE, JSON.stringify(finalReport, null, 2), 'utf-8');
+    console.log(`Report: ${LONGMEMEVAL_REPORT_FILE}`);
   }
 
   console.log('\n═══ Done ═══');
 }
 
-main().catch(err => {
-  console.error('Fatal:', err.message);
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(err => {
+    console.error('Fatal:', err.message);
+    process.exit(1);
+  });
+}
+
+export {
+  normalizeSearchResult,
+  normalizeSearchResults,
+  selectContextResults,
+  looksLikeAbstention,
+  classifyLongMemEvalBottleneck,
+  summarizeEntries,
+  buildLongMemEvalReport,
+  evaluateInstance,
+  ingestInstance,
+  parseLongMemEvalDate
+};

@@ -21,6 +21,20 @@ const CATEGORY_KEYWORDS = {
   personal: ['preference', 'rule', 'habit', 'reminder', 'note', 'journal'],
 };
 
+const NOISE_MEMORY_TYPES = new Set(['trace', 'cot', 'observation', 'system', 'notification', 'tool', 'debug']);
+
+function isNoiseMemory(memory) {
+  const title = (memory.title || '').trim().toLowerCase();
+  const content = (memory.content || '').trim().toLowerCase();
+  const type = (memory.memoryType || '').trim().toLowerCase();
+
+  if (NOISE_MEMORY_TYPES.has(type)) return true;
+  if (title.includes('benchmark') || title.includes('smoke') || title.includes('probe')) return true;
+  if (content.includes('benchmark') || content.includes('smoke test') || content.includes('do not reply')) return true;
+
+  return false;
+}
+
 function classifyCategory(memory) {
   const text = `${memory.title || ''} ${(memory.tags || []).join(' ')} ${memory.content?.slice(0, 200) || ''}`.toLowerCase();
   let best = 'technical';
@@ -42,6 +56,7 @@ function generateQuery(memory) {
 
   // Skip junk memories (too short, test probes, web-crawl noise, etc.)
   if (content.length < 20 && !title) return null;
+  if (isNoiseMemory(memory)) return null;
   const contentLower = content.trim().toLowerCase();
   const titleLower = (title || '').trim().toLowerCase();
   if (['probe', 'tmp', 'deltmp', 'bridge-auth-test', 'bridge-auth-test-4'].includes(contentLower)) return null;
@@ -173,6 +188,7 @@ function scoreQuality(memory) {
   // Boost user-created decisions/lessons/preferences (high-value memories)
   const type = memory.memoryType || 'fact';
   if (['decision', 'lesson', 'preference', 'goal'].includes(type)) score += 2;
+  if (NOISE_MEMORY_TYPES.has(type)) score -= 8;
 
   return score;
 }

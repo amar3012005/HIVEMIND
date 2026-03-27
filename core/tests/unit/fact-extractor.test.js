@@ -16,6 +16,15 @@ describe('extractFacts - keyphrases', () => {
     assert.ok(hasMysql, `Expected mysql in keyphrases, got: ${facts.keyphrases.join(', ')}`);
   });
 
+  it('extracts multi-word topic phrases for compact benchmark-style facts', async () => {
+    const content = 'The database migration improved advanced indexing and reduced schema changes. ' +
+      'That database migration also simplified rollback planning.';
+    const facts = await extractFacts(content);
+    const lower = facts.keyphrases.map(k => k.toLowerCase());
+    assert.ok(lower.some(k => k.includes('database migration')), `Expected "database migration" in keyphrases, got: ${facts.keyphrases.join(', ')}`);
+    assert.ok(lower.some(k => k.includes('advanced indexing')), `Expected "advanced indexing" in keyphrases, got: ${facts.keyphrases.join(', ')}`);
+  });
+
   it('returns at most 10 keyphrases', async () => {
     const content = Array.from({ length: 50 }, (_, i) => `word${i} token${i} item${i}`).join(' ');
     const facts = await extractFacts(content);
@@ -61,6 +70,14 @@ describe('extractFacts - entities', () => {
     const facts = await extractFacts(content);
     const joined = facts.entities.join(' ');
     assert.ok(joined.includes('API') || joined.includes('HTTP') || joined.includes('NASA'), `Expected acronym in entities, got: ${facts.entities.join(', ')}`);
+  });
+
+  it('extracts mixed-case technical entities like OpenAI and PostgreSQL', async () => {
+    const content = 'OpenAI reviewed the PostgreSQL integration and the GitHub rollout plan.';
+    const facts = await extractFacts(content);
+    const joined = facts.entities.join(' ');
+    assert.ok(joined.includes('OpenAI'), `Expected OpenAI in entities, got: ${facts.entities.join(', ')}`);
+    assert.ok(joined.includes('PostgreSQL'), `Expected PostgreSQL in entities, got: ${facts.entities.join(', ')}`);
   });
 });
 
@@ -122,5 +139,12 @@ describe('buildAugmentedKey', () => {
     if (facts.temporalRefs.length > 0) {
       assert.ok(augmented.includes('Dates:'), 'Should include Dates section');
     }
+  });
+
+  it('carries multi-word topic phrases into the augmented key', async () => {
+    const content = 'The database migration improved advanced indexing and reduced schema changes.';
+    const facts = await extractFacts(content);
+    const augmented = buildAugmentedKey(content, facts).toLowerCase();
+    assert.ok(augmented.includes('database migration') || augmented.includes('advanced indexing'), `Expected richer phrase content in augmented key, got: ${augmented}`);
   });
 });

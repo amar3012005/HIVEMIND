@@ -129,6 +129,7 @@ export class PanoramaSearch {
     const {
       userId,
       orgId,
+      project,
       includeExpired = true,
       includeHistorical = true,
       dateRange,
@@ -157,6 +158,7 @@ export class PanoramaSearch {
       const searchResults = await this.executeTemporalSearch(query, {
         userId,
         orgId,
+        project,
         includeExpired,
         includeHistorical,
         dateRange,
@@ -239,6 +241,7 @@ export class PanoramaSearch {
     const {
       userId,
       orgId,
+      project,
       includeExpired,
       includeHistorical,
       dateRange,
@@ -250,7 +253,8 @@ export class PanoramaSearch {
     const temporalFilter = this.buildTemporalFilter({
       includeExpired,
       includeHistorical,
-      dateRange
+      dateRange,
+      project
     });
 
     // Perform hybrid search
@@ -258,6 +262,7 @@ export class PanoramaSearch {
       query,
       userId,
       orgId,
+      project,
       limit,
       includeExpired,
       includeHistorical,
@@ -287,7 +292,7 @@ export class PanoramaSearch {
    * @returns {Object} Temporal filter
    */
   buildTemporalFilter(options) {
-    const { includeExpired, includeHistorical, dateRange } = options;
+    const { includeExpired, includeHistorical, dateRange, project } = options;
     const must = [];
 
     // Add temporal status filters
@@ -311,6 +316,13 @@ export class PanoramaSearch {
       }
 
       must.push(rangeFilter);
+    }
+
+    if (project) {
+      must.push({
+        key: 'project',
+        match: { value: project }
+      });
     }
 
     return { must };

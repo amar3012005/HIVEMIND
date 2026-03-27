@@ -57,6 +57,7 @@ const { BiTemporalEngine } = await import('./memory/bi-temporal.js');
 const { StigmergicCoT } = await import('./memory/stigmergic-cot.js');
 const { ByzantineConsensus } = await import('./memory/byzantine-consensus.js');
 const { queryPersistedMemories, recallPersistedMemories } = await import('./memory/persisted-retrieval.js');
+const { expandTemporalQuery } = await import('./search/time-aware-expander.js');
 const { authenticatePersistedApiKey, hasEntitlement, hashApiKey: hashPersistedApiKey } = await import('./auth/api-keys.js');
 const { WebJobStore } = await import('./web/web-job-store.js');
 const { BrowserRuntime, getTelemetry } = await import('./web/browser-runtime.js');
@@ -4838,6 +4839,8 @@ a{color:#a78bfa}</style></head><body>
                 recallWeights = computeDynamicWeights(intent);
               }
 
+              const temporalExpansion = expandTemporalQuery(body.query_context || body.context || '');
+
               // containerTag → project mapping for recall
               const recallProject = body.project || effectiveContainerTag || null;
 
@@ -4851,6 +4854,7 @@ a{color:#a78bfa}</style></head><body>
                 preferred_project: body.preferred_project || recallProject,
                 preferred_source_platforms: body.preferred_source_platforms || [],
                 preferred_tags: body.preferred_tags || [],
+                date_range: body.date_range || temporalExpansion.dateRange || null,
                 max_memories: body.max_memories || 5,
                 weights: recallWeights
               });
@@ -5047,6 +5051,7 @@ a{color:#a78bfa}</style></head><body>
             try {
               const {
                 query,
+                project,
                 include_expired,
                 include_historical,
                 date_range,
@@ -5062,9 +5067,11 @@ a{color:#a78bfa}</style></head><body>
                 }, 400);
               }
 
+              const searchProject = project || effectiveContainerTag || null;
               const result = await threeTierRetrieval.panoramaSearch(query, {
                 userId,
                 orgId,
+                project: searchProject,
                 includeExpired: include_expired !== false,
                 includeHistorical: include_historical !== false,
                 dateRange: date_range,

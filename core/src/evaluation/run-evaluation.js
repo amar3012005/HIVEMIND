@@ -321,10 +321,14 @@ function formatReport(report, verbose = false) {
   };
 
   lines.push(formatMetric('Precision@5', summary.precisionAt5.mean.toFixed(3), report.targets.precisionAt5));
+  lines.push(formatMetric('Semantic P@5', summary.semanticPrecisionAt5?.mean.toFixed(3) || '0.000', report.targets.semanticPrecisionAt5 || report.targets.precisionAt5));
   lines.push(formatMetric('Recall@10', summary.recallAt10.mean.toFixed(3), report.targets.recallAt10));
   lines.push(formatMetric('F1@10', summary.f1At10.mean.toFixed(3), report.targets.f1Score));
   lines.push(formatMetric('NDCG@10', summary.ndcgAt10.mean.toFixed(3), report.targets.ndcgAt10));
   lines.push(formatMetric('MRR', summary.mrr.mean.toFixed(3), report.targets.mrr));
+  if (summary.semanticGapAt5) {
+    lines.push(`  Label alignment gap: ${summary.semanticGapAt5.mean.toFixed(3)}`);
+  }
   lines.push('');
 
   // Latency
@@ -390,6 +394,21 @@ function formatReport(report, verbose = false) {
     lines.push('');
   }
 
+  if (report.bottleneckSummary?.top?.length > 0) {
+    lines.push('┌────────────────────────────────────────────────────────────┐');
+    lines.push('│ BOTTLENECKS                                                │');
+    lines.push('└────────────────────────────────────────────────────────────┘');
+    lines.push('');
+
+    for (const bottleneck of report.bottleneckSummary.top.slice(0, 5)) {
+      lines.push(`  ${bottleneck.type}: ${bottleneck.count} (${bottleneck.share}%)`);
+      if (bottleneck.examples?.length) {
+        lines.push(`    Example: ${bottleneck.examples[0].substring(0, 70)}`);
+      }
+    }
+    lines.push('');
+  }
+
   // Verbose: Raw Results
   if (verbose && report.rawResults) {
     lines.push('┌────────────────────────────────────────────────────────────┐');
@@ -422,7 +441,7 @@ function formatReport(report, verbose = false) {
     if (report.relevance_benchmark) {
       const rb = report.relevance_benchmark;
       const status = rb.pass ? 'PASS' : 'FAIL';
-      lines.push(`  Relevance: ${status}  (P@5: ${rb.precision_at_5.toFixed(3)}, R@10: ${rb.recall_at_10.toFixed(3)}, MRR: ${rb.mrr.toFixed(3)})`);
+      lines.push(`  Relevance: ${status}  (P@5: ${rb.precision_at_5.toFixed(3)}, SP@5: ${rb.semantic_precision_at_5.toFixed(3)}, R@10: ${rb.recall_at_10.toFixed(3)}, MRR: ${rb.mrr.toFixed(3)})`);
     }
     lines.push('');
   }

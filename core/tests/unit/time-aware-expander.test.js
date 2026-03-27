@@ -38,6 +38,42 @@ describe('expandTemporalQuery - relative: last week', () => {
   });
 });
 
+describe('expandTemporalQuery - weekday references', () => {
+  it('returns the most recent Tuesday for last Tuesday and the upcoming Monday for next Monday', () => {
+    const lastTuesday = expandTemporalQuery('what changed last Tuesday?');
+    assert.equal(lastTuesday.hasTemporalFilter, true, 'should have temporal filter');
+    assert.ok(lastTuesday.dateRange, 'should have dateRange');
+    const lastTuesdayStart = new Date(lastTuesday.dateRange.start);
+    assert.equal(lastTuesdayStart.getUTCFullYear(), 2026);
+    assert.equal(lastTuesdayStart.getUTCMonth(), 2);
+    assert.equal(lastTuesdayStart.getUTCDate(), 24);
+
+    const nextMonday = expandTemporalQuery('what is planned for next Monday?');
+    assert.equal(nextMonday.hasTemporalFilter, true, 'should have temporal filter');
+    assert.ok(nextMonday.dateRange, 'should have dateRange');
+    const nextMondayStart = new Date(nextMonday.dateRange.start);
+    assert.equal(nextMondayStart.getUTCFullYear(), 2026);
+    assert.equal(nextMondayStart.getUTCMonth(), 2);
+    assert.equal(nextMondayStart.getUTCDate(), 30);
+  });
+});
+
+describe('expandTemporalQuery - quarter references', () => {
+  it('returns hasTemporalFilter true and Q1 2026 range', () => {
+    const result = expandTemporalQuery('what happened in Q1 2026?');
+    assert.equal(result.hasTemporalFilter, true, 'should have temporal filter');
+    assert.ok(result.dateRange, 'should have dateRange');
+    const start = new Date(result.dateRange.start);
+    const end = new Date(result.dateRange.end);
+    assert.equal(start.getUTCFullYear(), 2026);
+    assert.equal(start.getUTCMonth(), 0);
+    assert.equal(start.getUTCDate(), 1);
+    assert.equal(end.getUTCFullYear(), 2026);
+    assert.equal(end.getUTCMonth(), 2);
+    assert.equal(end.getUTCDate(), 31);
+  });
+});
+
 describe('expandTemporalQuery - absolute month+year: in March 2026', () => {
   it('returns hasTemporalFilter true and March date range (month index 2)', () => {
     const result = expandTemporalQuery('what happened in March 2026?');

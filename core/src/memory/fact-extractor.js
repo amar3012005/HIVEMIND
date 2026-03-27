@@ -50,21 +50,90 @@ function tokenize(text) {
 }
 
 /**
- * Heuristic keyphrase extraction: frequency-ranked top-10 tokens.
+ * Normalize content into token runs that are suitable for phrase extraction.
+ * Stopwords break a run, so phrases stay semantically compact.
  */
-function extractKeyphrasesHeuristic(content) {
-  const tokens = tokenize(content);
-  if (tokens.length === 0) return [];
+function tokenizePhraseRuns(content) {
+  const normalized = String(content || '')
+    .replace(/([a-z])([A-Z][a-z])/g, '$1 $2')
+    .replace(/[_/]+/g, ' ')
+    .replace(/[^A-Za-z0-9\s-]/g, ' ')
+    .toLowerCase();
 
-  const freq = new Map();
-  for (const t of tokens) {
-    freq.set(t, (freq.get(t) || 0) + 1);
+  const tokens = normalized
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+
+  const runs = [];
+  let current = [];
+
+  for (const token of tokens) {
+    const meaningful = !STOPWORDS.has(token) && (token.length > 2 || /\d/.test(token));
+    if (meaningful) {
+      current.push(token);
+      continue;
+    }
+
+    if (current.length > 0) {
+      runs.push(current);
+      current = [];
+    }
   }
 
-  return [...freq.entries()]
-    .sort((a, b) => b[1] - a[1])
+  if (current.length > 0) {
+    runs.push(current);
+  }
+
+  return runs;
+}
+
+/**
+ * Heuristic keyphrase extraction: scores unigram, bigram, and trigram candidates
+ * from contiguous token runs, then returns the top 10 phrases.
+ */
+function extractKeyphrasesHeuristic(content) {
+  const runs = tokenizePhraseRuns(content);
+  if (runs.length === 0) return [];
+
+  const scored = new Map();
+  let runOffset = 0;
+
+  for (const run of runs) {
+    const maxSize = Math.min(3, run.length);
+    for (let size = 1; size <= maxSize; size++) {
+      for (let index = 0; index + size <= run.length; index++) {
+        const phraseTokens = run.slice(index, index + size);
+        const phrase = phraseTokens.join(' ').trim();
+        const key = phrase.toLowerCase();
+        const existing = scored.get(key);
+        const score = 1 + (size - 1) * 0.75;
+
+        if (existing) {
+          existing.score += score;
+          continue;
+        }
+
+        scored.set(key, {
+          phrase,
+          score,
+          size,
+          firstIndex: runOffset + index,
+        });
+      }
+    }
+
+    runOffset += run.length + 1;
+  }
+
+  return [...scored.values()]
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      if (b.size !== a.size) return b.size - a.size;
+      return a.firstIndex - b.firstIndex;
+    })
     .slice(0, 10)
-    .map(([word]) => word);
+    .map(({ phrase }) => phrase);
 }
 
 /**
@@ -88,6 +157,16 @@ function extractEntitiesHeuristic(content) {
   // Acronyms: API, NASA, HTTP, REST (3+ chars, all caps, optionally with digits/underscores)
   const acronymRe = /\b([A-Z][A-Z0-9_]{2,})\b/g;
   while ((m = acronymRe.exec(content)) !== null && results.length < 15) {
+    const val = m[1];
+    if (!seen.has(val)) {
+      seen.add(val);
+      results.push(val);
+    }
+  }
+
+  // Mixed-case technical names: PostgreSQL, OpenAI, GitHub, MySQL
+  const mixedCaseRe = /\b([A-Z][A-Za-z0-9]*(?:[A-Z][A-Za-z0-9]+)+)\b/g;
+  while ((m = mixedCaseRe.exec(content)) !== null && results.length < 15) {
     const val = m[1];
     if (!seen.has(val)) {
       seen.add(val);

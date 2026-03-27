@@ -70,6 +70,25 @@ test('preserves timestamps when provided', () => {
   assert.equal(rounds[0].timestamp, '2024-01-01T10:00:00Z');
 });
 
+test('splits multi-paragraph assistant replies into smaller rounds', () => {
+  const messages = [
+    { role: 'user', content: 'Summarize the rollout plan.' },
+    { role: 'assistant', content: 'Phase 1: inventory the services.\n\nPhase 2: migrate the database.\n\nPhase 3: validate the cutover.' },
+  ];
+
+  const rounds = splitIntoRounds(messages);
+
+  assert.equal(rounds.length, 3);
+  assert.equal(rounds[0].assistantContent, 'Phase 1: inventory the services.');
+  assert.equal(rounds[0].assistantSegmentIndex, 0);
+  assert.equal(rounds[0].assistantSegmentCount, 3);
+  assert.equal(rounds[1].assistantContent, 'Phase 2: migrate the database.');
+  assert.equal(rounds[1].assistantSegmentIndex, 1);
+  assert.equal(rounds[2].assistantContent, 'Phase 3: validate the cutover.');
+  assert.equal(rounds[2].assistantSegmentIndex, 2);
+  assert.ok(rounds.every((round) => round.userContent === 'Summarize the rollout plan.'));
+});
+
 test('returns empty array for empty input', () => {
   const rounds = splitIntoRounds([]);
   assert.deepEqual(rounds, []);

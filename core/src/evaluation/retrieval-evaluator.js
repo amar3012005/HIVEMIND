@@ -173,6 +173,14 @@ export class RetrievalEvaluator {
 
       // Calculate semantic P@5 (content relevance, not just UUID match)
       metrics.semanticPrecisionAt5 = this.computeSemanticPrecision(query, resultContents, 5);
+      metrics.semanticGapAt5 = Math.max(0, metrics.semanticPrecisionAt5 - metrics.precisionAt5);
+
+      const diagnostics = this.diagnoseBottlenecks(metrics, {
+        query,
+        category,
+        method,
+        relevantCount: relevantIds.length
+      });
 
       // Determine if query passed thresholds
       const passed = this.checkThresholds(metrics);
@@ -186,6 +194,7 @@ export class RetrievalEvaluator {
         relevantCount: relevantIds.length,
         retrievedCount: resultIds.length,
         metrics,
+        diagnostics,
         passed,
         resultIds,
         relevantIds,
@@ -214,6 +223,18 @@ export class RetrievalEvaluator {
         category,
         method,
         error: error.message,
+        diagnostics: {
+          primary: {
+            type: 'execution_error',
+            severity: 'high',
+            reason: error.message
+          },
+          bottlenecks: [{
+            type: 'execution_error',
+            severity: 'high',
+            reason: error.message
+          }]
+        },
         passed: false,
         timestamp: new Date().toISOString()
       };
@@ -393,6 +414,7 @@ export class RetrievalEvaluator {
    */
   calculateMetrics(resultIds, relevantIds, latencyMs) {
     const relevantSet = new Set(relevantIds);
+    const rankSignals = this.calculateRankSignals(resultIds, relevantIds);
 
     return {
       precisionAt5: this.calculatePrecision(resultIds, relevantIds, 5),
@@ -409,10 +431,50 @@ export class RetrievalEvaluator {
       ndcgAt20: this.calculateNDCG(resultIds, relevantIds, 20),
       mrr: this.calculateMRR(resultIds, relevantIds),
       latencyMs,
+      ...rankSignals,
       // Additional metrics
       truePositivesAt10: resultIds.slice(0, 10).filter(id => relevantSet.has(id)).length,
       falsePositivesAt10: resultIds.slice(0, 10).filter(id => !relevantSet.has(id)).length,
       falseNegativesAt10: relevantIds.filter(id => !resultIds.slice(0, 10).includes(id)).length
+    };
+  }
+
+  /**
+   * Calculate rank-based retrieval signals.
+   *
+   * @private
+   * @param {string[]} resultIds - Retrieved memory IDs
+   * @param {string[]} relevantIds - Ground truth relevant IDs
+   * @returns {Object} Rank signals
+   */
+  calculateRankSignals(resultIds, relevantIds) {
+    if (!resultIds.length || !relevantIds.length) {
+      return {
+        firstRelevantRank: null,
+        relevantHitsAt1: 0,
+        relevantHitsAt5: 0,
+        relevantHitsAt10: 0,
+        relevantHitsAt20: 0
+      };
+    }
+
+    const relevantSet = new Set(relevantIds);
+    const relevantRanks = [];
+
+    for (let i = 0; i < resultIds.length; i++) {
+      if (relevantSet.has(resultIds[i])) {
+        relevantRanks.push(i + 1);
+      }
+    }
+
+    const countAt = (limit) => relevantRanks.filter(rank => rank <= limit).length;
+
+    return {
+      firstRelevantRank: relevantRanks.length > 0 ? relevantRanks[0] : null,
+      relevantHitsAt1: countAt(1),
+      relevantHitsAt5: countAt(5),
+      relevantHitsAt10: countAt(10),
+      relevantHitsAt20: countAt(20)
     };
   }
 
@@ -543,6 +605,85 @@ export class RetrievalEvaluator {
     return 0; // No relevant results found
   }
 
+  /**
+   * Diagnose the likely retrieval bottleneck for a query.
+   *
+   * @private
+   * @param {Object} metrics - Calculated metrics
+   * @param {Object} context - Evaluation context
+   * @returns {Object} Bottleneck diagnostics
+   */
+  diagnoseBottlenecks(metrics, context = {}) {
+    const { thresholds } = this.config;
+    const bottlenecks = [];
+
+    const add = (type, severity, reason, evidence = {}) => {
+      bottlenecks.push({ type, severity, reason, evidence });
+    };
+
+    if (metrics.latencyMs > thresholds.latencyP99) {
+      add('latency', 'high', 'Query exceeded the latency budget', {
+        latencyMs: metrics.latencyMs,
+        thresholdMs: thresholds.latencyP99
+      });
+    }
+
+    if (metrics.semanticGapAt5 >= 0.25 && metrics.semanticPrecisionAt5 >= 0.5) {
+      add('label_alignment', 'medium', 'Semantic matches are stronger than exact-label matches', {
+        precisionAt5: metrics.precisionAt5,
+        semanticPrecisionAt5: metrics.semanticPrecisionAt5,
+        gapAt5: metrics.semanticGapAt5
+      });
+    }
+
+    if (metrics.recallAt10 === 0) {
+      add('coverage', 'high', 'No relevant memory appeared in the top 10', {
+        firstRelevantRank: metrics.firstRelevantRank,
+        relevantCount: context.relevantCount || 0
+      });
+    } else if (metrics.firstRelevantRank !== null && metrics.firstRelevantRank > 10) {
+      add('ranking', 'medium', 'Relevant memory was found but ranked too low', {
+        firstRelevantRank: metrics.firstRelevantRank,
+        recallAt10: metrics.recallAt10,
+        mrr: metrics.mrr
+      });
+    }
+
+    if (metrics.precisionAt5 < thresholds.precisionAt5 && metrics.recallAt10 >= thresholds.recallAt10) {
+      add('noise', 'medium', 'Top-k retrieval is noisy despite reasonable recall', {
+        precisionAt5: metrics.precisionAt5,
+        recallAt10: metrics.recallAt10
+      });
+    }
+
+    if (metrics.ndcgAt10 < thresholds.ndcgAt10 && metrics.recallAt10 > 0) {
+      add('ordering', 'medium', 'Relevant memories are being surfaced, but the ordering is weak', {
+        ndcgAt10: metrics.ndcgAt10,
+        recallAt10: metrics.recallAt10
+      });
+    }
+
+    if (bottlenecks.length === 0) {
+      add('healthy', 'low', 'Query met all benchmark thresholds', {
+        precisionAt5: metrics.precisionAt5,
+        recallAt10: metrics.recallAt10,
+        mrr: metrics.mrr
+      });
+    }
+
+    const severityRank = { high: 0, medium: 1, low: 2 };
+    bottlenecks.sort((a, b) => {
+      const severityDelta = severityRank[a.severity] - severityRank[b.severity];
+      if (severityDelta !== 0) return severityDelta;
+      return a.type.localeCompare(b.type);
+    });
+
+    return {
+      primary: bottlenecks[0],
+      bottlenecks
+    };
+  }
+
   // ==========================================
   // Threshold Checking
   // ==========================================
@@ -646,7 +787,8 @@ export class RetrievalEvaluator {
             failedQueries.push({
               query: testQuery.query,
               method,
-              reason: evaluation.error || 'Thresholds not met'
+              reason: evaluation.error || evaluation.diagnostics?.primary?.type || 'Thresholds not met',
+              bottleneck: evaluation.diagnostics?.primary?.type || null
             });
           }
         } catch (error) {
@@ -729,6 +871,8 @@ export class RetrievalEvaluator {
           failedQueries: failedQueries.length,
           qualityScore: 0,
           precisionAt5: { mean: 0, min: 0, max: 0, median: 0 },
+          semanticPrecisionAt5: { mean: 0, min: 0, max: 0, median: 0 },
+          semanticGapAt5: { mean: 0, min: 0, max: 0, median: 0 },
           recallAt10: { mean: 0, min: 0, max: 0, median: 0 },
           f1At10: { mean: 0, min: 0, max: 0, median: 0 },
           ndcgAt10: { mean: 0, min: 0, max: 0, median: 0 },
@@ -746,11 +890,14 @@ export class RetrievalEvaluator {
         },
         relevance_benchmark: {
           precision_at_5: 0,
+          semantic_precision_at_5: 0,
+          semantic_gap_at_5: 0,
           recall_at_10: 0,
           ndcg_at_10: 0,
           mrr: 0,
           targets: {
             precision_at_5: 0.5,
+            semantic_precision_at_5: 0.5,
             recall_at_10: 0.4,
             ndcg_at_10: 0.4,
             mrr: 0.3
@@ -768,6 +915,7 @@ export class RetrievalEvaluator {
         })),
         error: 'No successful evaluations',
         failedQueries,
+        bottleneckSummary: this.aggregateBottlenecks(successfulResults),
         targets: this.config.thresholds,
         rawResults: []
       };
@@ -781,6 +929,9 @@ export class RetrievalEvaluator {
 
     // Calculate by search method
     const bySearchMethod = this.aggregateByMethod(successfulResults);
+
+    // Diagnose bottlenecks across the full batch
+    const bottleneckSummary = this.aggregateBottlenecks(successfulResults);
 
     // Calculate latency percentiles
     const latencies = successfulResults.map(r => r.latencyMs).sort((a, b) => a - b);
@@ -803,11 +954,13 @@ export class RetrievalEvaluator {
     const relevanceBenchmark = {
       precision_at_5: summary.precisionAt5?.mean || 0,
       semantic_precision_at_5: summary.semanticPrecisionAt5?.mean || 0,
+      semantic_gap_at_5: summary.semanticGapAt5?.mean || 0,
       recall_at_10: summary.recallAt10?.mean || 0,
       ndcg_at_10: summary.ndcgAt10?.mean || 0,
       mrr: summary.mrr?.mean || 0,
       targets: {
         precision_at_5: 0.5,
+        semantic_precision_at_5: 0.5,
         recall_at_10: 0.4,
         ndcg_at_10: 0.4,
         mrr: 0.3,
@@ -845,6 +998,7 @@ export class RetrievalEvaluator {
         tags: query.tags || []
       })),
       failedQueries,
+      bottleneckSummary,
       targets: this.config.thresholds,
       methods,
       rawResults: successfulResults
@@ -859,11 +1013,24 @@ export class RetrievalEvaluator {
    * @returns {Object} Summary statistics
    */
   calculateSummary(results) {
-    const metrics = ['precisionAt5', 'precisionAt10', 'recallAt10', 'f1At10', 'ndcgAt10', 'mrr', 'semanticPrecisionAt5'];
+    const metrics = ['precisionAt5', 'precisionAt10', 'recallAt10', 'f1At10', 'ndcgAt10', 'mrr', 'semanticPrecisionAt5', 'semanticGapAt5', 'firstRelevantRank'];
     const summary = {};
 
     for (const metric of metrics) {
-      const values = results.map(r => r.metrics[metric]).filter(v => v !== undefined);
+      const values = results
+        .map(r => r.metrics[metric])
+        .filter(v => typeof v === 'number' && Number.isFinite(v));
+
+      if (values.length === 0) {
+        summary[metric] = {
+          mean: 0,
+          min: 0,
+          max: 0,
+          median: 0
+        };
+        continue;
+      }
+
       summary[metric] = {
         mean: values.reduce((a, b) => a + b, 0) / values.length,
         min: Math.min(...values),
@@ -937,6 +1104,63 @@ export class RetrievalEvaluator {
     }
 
     return aggregated;
+  }
+
+  /**
+   * Aggregate bottlenecks across a batch.
+   *
+   * @private
+   * @param {Array} results - Successful evaluation results
+   * @returns {Object} Bottleneck summary
+   */
+  aggregateBottlenecks(results) {
+    const counts = {};
+    const examples = {};
+    let healthyCount = 0;
+
+    for (const result of results) {
+      const primary = result.diagnostics?.primary?.type || 'unknown';
+      if (primary === 'healthy') healthyCount++;
+
+      const bottlenecks = result.diagnostics?.bottlenecks || [];
+      if (bottlenecks.length === 0) {
+        counts.unknown = (counts.unknown || 0) + 1;
+        if (!examples.unknown) examples.unknown = [];
+        if (examples.unknown.length < 3) examples.unknown.push(result.query);
+        continue;
+      }
+
+      for (const bottleneck of bottlenecks) {
+        counts[bottleneck.type] = (counts[bottleneck.type] || 0) + 1;
+        if (!examples[bottleneck.type]) examples[bottleneck.type] = [];
+        if (examples[bottleneck.type].length < 3) {
+          examples[bottleneck.type].push(result.query);
+        }
+      }
+    }
+
+    const total = results.length || 1;
+    const top = Object.entries(counts)
+      .map(([type, count]) => ({
+        type,
+        count,
+        share: Math.round((count / total) * 1000) / 10,
+        examples: examples[type] || []
+      }))
+      .sort((a, b) => {
+        if (a.type === 'healthy' && b.type !== 'healthy') return 1;
+        if (b.type === 'healthy' && a.type !== 'healthy') return -1;
+        if (b.count !== a.count) return b.count - a.count;
+        return a.type.localeCompare(b.type);
+      });
+
+    return {
+      totalQueries: results.length,
+      healthyQueries: healthyCount,
+      counts,
+      top,
+      examples
+    };
   }
 
   /**
@@ -1040,7 +1264,7 @@ export class RetrievalEvaluator {
       unchanged: {}
     };
 
-    const metrics = ['precisionAt5', 'recallAt10', 'f1At10', 'ndcgAt10', 'mrr'];
+    const metrics = ['precisionAt5', 'semanticPrecisionAt5', 'recallAt10', 'f1At10', 'ndcgAt10', 'mrr'];
 
     for (const metric of metrics) {
       const baselineValue = baseline.summary[metric]?.mean || 0;

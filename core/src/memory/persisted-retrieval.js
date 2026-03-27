@@ -1,5 +1,6 @@
 import { computeTokenSimilarity } from './conflict-detector.js';
 import { getQdrantClient } from '../vector/qdrant-client.js';
+import { expandTemporalQuery } from '../search/time-aware-expander.js';
 
 function scopeChain(ast = {}) {
   if (Array.isArray(ast.scopeChain)) return ast.scopeChain;
@@ -224,6 +225,37 @@ function policyBoost(memory, {
   return score;
 }
 
+function parseDateRangeBoundary(value) {
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function isMemoryInDateRange(memory, dateRange) {
+  if (!dateRange) return true;
+
+  const start = parseDateRangeBoundary(dateRange.start);
+  const end = parseDateRangeBoundary(dateRange.end);
+  const candidateDates = [
+    memory.document_date,
+    memory.created_at,
+    memory.metadata?.record_time,
+    memory.metadata?.event_time,
+    memory.metadata?.valid_from,
+    memory.metadata?.valid_to
+  ]
+    .map(parseDateRangeBoundary)
+    .filter(Boolean);
+
+  if (candidateDates.length === 0) return false;
+
+  return candidateDates.some(date => {
+    if (start && date < start) return false;
+    if (end && date > end) return false;
+    return true;
+  });
+}
+
 async function vectorCandidatesForRecall(store, {
   query_context,
   user_id,
@@ -231,7 +263,8 @@ async function vectorCandidatesForRecall(store, {
   project,
   source_platforms = [],
   tags = [],
-  max_memories
+  max_memories,
+  dateRange = null
 }) {
   const qdrantClient = getQdrantClient();
   const connected = await qdrantClient.isConnected();
@@ -259,6 +292,7 @@ async function vectorCandidatesForRecall(store, {
     const memoryId = result.payload?.memory_id || result.id;
     const memory = await store.getMemory(memoryId);
     if (!memory) return null;
+    if (!isMemoryInDateRange(memory, dateRange)) return null;
 
     return {
       memory,
@@ -604,8 +638,12 @@ export async function recallPersistedMemories(store, {
   preferred_tags = [],
   max_memories = 5,
   weights = { similarity: 0.45, recency: 0.15, importance: 0.1, vector: 0.2, graph: 0.05, policy: 0.05 },
-  graph_expansion_depth = 2
+  graph_expansion_depth = 2,
+  date_range = null
 }) {
+  const temporalExpansion = expandTemporalQuery(query_context);
+  const effectiveDateRange = date_range || temporalExpansion.dateRange || null;
+
   const lexicalCandidates = await store.searchMemories({
     query: query_context,
     user_id,
@@ -613,12 +651,15 @@ export async function recallPersistedMemories(store, {
     project,
     tags,
     is_latest: true,
-    n_results: Math.max(max_memories * 4, 20)
+    n_results: Math.max(max_memories * 4, 20),
+    created_after: effectiveDateRange?.start,
+    created_before: effectiveDateRange?.end
   });
 
   const filteredLexical = lexicalCandidates.filter(memory => {
     // Exclude benchmark data from production recall when no specific project is set
     if (!project && (memory.tags || []).includes('longmemeval')) return false;
+    if (!isMemoryInDateRange(memory, effectiveDateRange)) return false;
     if (source_platforms.length === 0) return true;
     const sourcePlatform = memory.source_metadata?.source_platform || memory.source || null;
     return source_platforms.includes(sourcePlatform);
@@ -631,7 +672,8 @@ export async function recallPersistedMemories(store, {
     project,
     source_platforms,
     tags,
-    max_memories
+    max_memories,
+    dateRange: effectiveDateRange
   });
   const relationships = await store.listRelationships({ user_id, org_id, project, limit: 1000 });
   const relationshipCounts = buildRelationshipIndex(relationships);
@@ -650,6 +692,10 @@ export async function recallPersistedMemories(store, {
   });
 
   const scoredLexical = filteredLexical.map(memory => {
+    if (!isMemoryInDateRange(memory, effectiveDateRange)) {
+      return null;
+    }
+
     const similarityScore = computeTokenSimilarity(query_context || '', memory.content || '');
     const now = Date.now();
     const created = new Date(memory.created_at).getTime();
@@ -681,9 +727,13 @@ export async function recallPersistedMemories(store, {
       recencyScore,
       score
     };
-  });
+  }).filter(Boolean);
 
   const enrichedVector = vectorCandidates.map(candidate => {
+    if (!isMemoryInDateRange(candidate.memory, effectiveDateRange)) {
+      return null;
+    }
+
     const now = Date.now();
     const created = new Date(candidate.memory.created_at).getTime();
     const daysAgo = Number.isFinite(created) ? (now - created) / (1000 * 60 * 60 * 24) : 365;
@@ -712,7 +762,7 @@ export async function recallPersistedMemories(store, {
       recencyScore,
       score
     };
-  });
+  }).filter(Boolean);
 
   const ranked = mergeCandidateLists(scoredLexical, enrichedVector, expandedCandidates).sort((a, b) => b.score - a.score);
   const filtered = applyRecallRelevanceFloor(ranked);

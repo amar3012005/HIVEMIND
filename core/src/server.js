@@ -108,6 +108,19 @@ const {
   handleToolCall
 } = await import('./mcp/hosted-service.js');
 
+// Trail Executor imports
+const { TrailExecutor } = await import('./executor/execution-loop.js');
+const { ForceRouter } = await import('./executor/force-router.js');
+const { TrailSelector } = await import('./executor/trail-selector.js');
+const { ActionBinder } = await import('./executor/action-binder.js');
+const { ToolRegistry } = await import('./executor/tool-registry.js');
+const { ToolRunner } = await import('./executor/tool-runner.js');
+const { OutcomeWriter } = await import('./executor/outcome-writer.js');
+const { LeaseManager } = await import('./executor/lease-manager.js');
+const { WeightUpdater } = await import('./executor/weight-updater.js');
+const { PromotionMux } = await import('./executor/promotion-mux.js');
+const { InMemoryStore } = await import('./executor/stores/in-memory-store.js');
+
 // Evaluation imports
 const { RetrievalEvaluator } = await import('./external/evaluation/retrieval-evaluator.js');
 const { TEST_QUERIES, getSampleQueries, getQueriesByCategory, getQueriesByDifficulty, getQueriesForDataset } = await import('./external/evaluation/test-dataset.js');
@@ -166,6 +179,87 @@ const cognitiveOperator = persistentMemoryStore ? new CognitiveOperator({ store:
 const biTemporalEngine = persistentMemoryStore ? new BiTemporalEngine({ store: persistentMemoryStore, prisma }) : null;
 const stigmergicCoT = persistentMemoryStore ? new StigmergicCoT({ store: persistentMemoryStore, traceTTLMinutes: 30 }) : null;
 const byzantineConsensus = new ByzantineConsensus({ commitThreshold: 80 });
+
+// ─── Trail Executor Runtime ───────────────────────────────────────────────────
+// Uses PrismaStore when available, falls back to InMemoryStore for dev/testing
+let trailExecutor = null;
+try {
+  let executorStore;
+  try {
+    const { PrismaStore } = await import('./executor/stores/prisma-store.js');
+    executorStore = prisma ? new PrismaStore(prisma) : new InMemoryStore();
+  } catch {
+    executorStore = new InMemoryStore();
+  }
+
+  const trailToolRegistry = new ToolRegistry();
+  const trailToolRunner = new ToolRunner(trailToolRegistry);
+  const forceRouter = new ForceRouter({
+    forceWeights: {
+      goalAttraction: 1.0,
+      affordanceAttraction: 1.0,
+      conflictRepulsion: 1.0,
+      congestionRepulsion: 1.0,
+      costRepulsion: 1.0,
+    }
+  });
+  const leaseManager = new LeaseManager(executorStore);
+  const trailSelector = new TrailSelector(executorStore, leaseManager, forceRouter);
+  const actionBinder = new ActionBinder(trailToolRegistry);
+  const outcomeWriter = new OutcomeWriter(executorStore);
+  const weightUpdater = new WeightUpdater(executorStore);
+  const promotionMux = new PromotionMux(executorStore);
+
+  // Register initial tools (minimal V1 set)
+  trailToolRegistry.register({
+    name: 'graph_query',
+    description: 'Query the knowledge graph for facts',
+    params: {
+      query: { type: 'string', required: true, description: 'Search query' },
+      limit: { type: 'number', required: false, description: 'Max results' },
+    },
+    maxTokens: 5000,
+    timeoutMs: 15000,
+  });
+  trailToolRegistry.register({
+    name: 'http_request',
+    description: 'Make an HTTP API request',
+    params: {
+      url: { type: 'string', required: true, description: 'Target URL' },
+      method: { type: 'string', required: false, description: 'HTTP method' },
+    },
+    maxTokens: 10000,
+    timeoutMs: 30000,
+  });
+  trailToolRegistry.register({
+    name: 'write_observation',
+    description: 'Write an observation to the operational graph',
+    params: {
+      kind: { type: 'string', required: true, description: 'Observation kind' },
+      content: { type: 'string', required: true, description: 'Observation content' },
+    },
+    maxTokens: 2000,
+    timeoutMs: 5000,
+  });
+
+  trailExecutor = new TrailExecutor({
+    trailSelector,
+    actionBinder,
+    toolRunner: trailToolRunner,
+    outcomeWriter,
+    leaseManager,
+    weightUpdater,
+    promotionMux,
+    store: executorStore,
+  });
+  trailExecutor._store = executorStore;
+  trailExecutor._toolRegistry = trailToolRegistry;
+  trailExecutor._toolRunner = trailToolRunner;
+  console.log('[TrailExecutor] Cognitive runtime initialized',
+    executorStore.constructor.name === 'PrismaStore' ? '(Prisma persistence)' : '(in-memory)');
+} catch (err) {
+  console.warn('[TrailExecutor] Failed to initialize:', err.message);
+}
 const contextAutopilot = persistentMemoryStore ? new ContextAutopilot({
   store: persistentMemoryStore,
   maxContextTokens: 128_000,
@@ -3845,6 +3939,103 @@ a{color:#a78bfa}</style></head><body>
             } catch (error) {
               return jsonResponse(res, { error: 'Prune failed', message: error.message }, 500);
             }
+          }
+          break;
+
+        // ─── Trail Executor Endpoints ─────────────────────────────────────────────
+
+        case '/api/swarm/execute':
+          if (req.method === 'POST') {
+            if (!trailExecutor) return jsonResponse(res, { error: 'Trail Executor unavailable' }, 503);
+            try {
+              if (!body.goal) return jsonResponse(res, { error: 'goal is required' }, 400);
+
+              const agentId = body.agent_id || `agent_${userId}`;
+              const config = {
+                maxSteps: Math.min(body.max_steps || 10, 50),
+                budget: {
+                  maxTokens: body.budget?.max_tokens || 50000,
+                  maxCostUsd: body.budget?.max_cost_usd || 1.0,
+                  maxWallClockMs: body.budget?.max_wall_clock_ms || 60000,
+                },
+                routing: {
+                  strategy: body.routing?.strategy || 'force_softmax',
+                  temperature: body.routing?.temperature ?? 1.0,
+                  topK: body.routing?.top_k,
+                  forceWeights: body.routing?.force_weights || {
+                    goalAttraction: 1.0,
+                    affordanceAttraction: 1.0,
+                    conflictRepulsion: 1.0,
+                    congestionRepulsion: 1.0,
+                    costRepulsion: 1.0,
+                  },
+                },
+                promotionThreshold: body.promotion_threshold ?? 0.8,
+                promotionRuleId: body.promotion_rule_id || 'default',
+              };
+
+              const result = await trailExecutor.execute(body.goal, agentId, config);
+              return jsonResponse(res, result);
+            } catch (error) {
+              return jsonResponse(res, { error: 'Trail execution failed', message: error.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/swarm/trails':
+          if (req.method === 'POST') {
+            if (!trailExecutor) return jsonResponse(res, { error: 'Trail Executor unavailable' }, 503);
+            try {
+              if (!body.goal_id) return jsonResponse(res, { error: 'goal_id is required' }, 400);
+              if (!body.next_action?.tool) return jsonResponse(res, { error: 'next_action.tool is required' }, 400);
+
+              const trail = {
+                id: crypto.randomUUID(),
+                goalId: body.goal_id,
+                agentId: body.agent_id || `agent_${userId}`,
+                status: 'active',
+                nextAction: {
+                  tool: body.next_action.tool,
+                  paramsTemplate: body.next_action.params_template || {},
+                  version: body.next_action.version,
+                },
+                steps: [],
+                executionEventIds: [],
+                successScore: 0,
+                confidence: body.confidence ?? 0.5,
+                weight: body.weight ?? 0.5,
+                decayRate: body.decay_rate ?? 0.05,
+                tags: body.tags || [],
+                createdAt: new Date().toISOString(),
+              };
+
+              await trailExecutor._store.putTrail(trail);
+              return jsonResponse(res, trail, 201);
+            } catch (error) {
+              return jsonResponse(res, { error: 'Create trail failed', message: error.message }, 500);
+            }
+          }
+          if (req.method === 'GET') {
+            if (!trailExecutor) return jsonResponse(res, { error: 'Trail Executor unavailable' }, 503);
+            try {
+              const url = new URL(req.url, `http://${req.headers.host}`);
+              const goalId = url.searchParams.get('goal_id');
+              if (!goalId) return jsonResponse(res, { error: 'goal_id query param is required' }, 400);
+              const trails = await trailExecutor._store.getCandidateTrails(goalId);
+              return jsonResponse(res, { trails, count: trails.length });
+            } catch (error) {
+              return jsonResponse(res, { error: 'List trails failed', message: error.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/swarm/executor/status':
+          if (req.method === 'GET') {
+            return jsonResponse(res, {
+              available: !!trailExecutor,
+              store: trailExecutor?._store?.constructor?.name || 'none',
+              tools: trailExecutor?._toolRegistry?.listTools()?.map(t => t.name) || [],
+            });
           }
           break;
 

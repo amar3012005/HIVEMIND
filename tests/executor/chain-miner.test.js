@@ -70,3 +70,106 @@ describe('Blueprint trail storage', () => {
     expect(trail.kind).toBe('raw');
   });
 });
+
+import { ChainMiner } from '../../core/src/executor/chain-miner.js';
+
+describe('ChainMiner', () => {
+  let store;
+  let miner;
+
+  beforeEach(() => {
+    store = new InMemoryStore();
+    miner = new ChainMiner(store, {
+      minOccurrences: 3,
+      minSuccessRate: 0.9,
+      maxAvgLatencyMs: 5000,
+      lookbackRuns: 50,
+      autoActivate: true,
+    });
+  });
+
+  function seedChainRuns(goalId, toolSequences) {
+    store.chainRuns = store.chainRuns || [];
+    for (const seq of toolSequences) {
+      store.chainRuns.push({
+        goalId,
+        trailId: 'trail_' + Math.random().toString(36).slice(2, 8),
+        toolSequence: seq,
+        successRate: 1.0,
+        doneReason: 'tool_signaled_completion',
+        totalLatencyMs: seq.length * 30,
+      });
+    }
+  }
+
+  it('should detect repeated chain pattern above threshold', async () => {
+    seedChainRuns('goal_1', [
+      ['graph_query', 'write_observation'],
+      ['graph_query', 'write_observation'],
+      ['graph_query', 'write_observation'],
+      ['graph_query', 'write_observation'],
+      ['write_observation'],
+    ]);
+
+    const result = await miner.mine('goal_1');
+    expect(result.candidatesCreated + result.blueprintsActivated).toBeGreaterThan(0);
+    const detail = result.details.find(d => d.chainSignature === 'graph_query>write_observation');
+    expect(detail).toBeDefined();
+    expect(detail.occurrences).toBe(4);
+  });
+
+  it('should skip patterns below minOccurrences', async () => {
+    seedChainRuns('goal_2', [
+      ['graph_query', 'write_observation'],
+      ['graph_query', 'write_observation'],
+      ['write_observation'],
+    ]);
+
+    const result = await miner.mine('goal_2');
+    const gqWo = result.details.find(d => d.chainSignature === 'graph_query>write_observation');
+    expect(gqWo.action).toBe('below_threshold');
+  });
+
+  it('should not create duplicate blueprints (idempotent)', async () => {
+    seedChainRuns('goal_3', [
+      ['graph_query', 'write_observation'],
+      ['graph_query', 'write_observation'],
+      ['graph_query', 'write_observation'],
+    ]);
+
+    const result1 = await miner.mine('goal_3');
+    expect(result1.candidatesCreated + result1.blueprintsActivated).toBeGreaterThan(0);
+
+    const result2 = await miner.mine('goal_3');
+    expect(result2.blueprintsSkippedExisting).toBeGreaterThan(0);
+    expect(result2.candidatesCreated).toBe(0);
+    expect(result2.blueprintsActivated).toBe(0);
+  });
+
+  it('should create blueprint trail with correct structure', async () => {
+    seedChainRuns('goal_4', [
+      ['graph_query', 'write_observation'],
+      ['graph_query', 'write_observation'],
+      ['graph_query', 'write_observation'],
+    ]);
+
+    await miner.mine('goal_4');
+
+    const allTrails = [...store.trails.values()];
+    const blueprint = allTrails.find(t => t.kind === 'blueprint');
+    expect(blueprint).toBeDefined();
+    expect(blueprint.blueprintMeta.chainSignature).toBe('graph_query>write_observation');
+    expect(blueprint.blueprintMeta.actionSequence).toHaveLength(2);
+    expect(blueprint.blueprintMeta.actionSequence[0].tool).toBe('graph_query');
+    expect(blueprint.blueprintMeta.actionSequence[1].tool).toBe('write_observation');
+    expect(blueprint.blueprintMeta.state).toBe('active');
+    expect(blueprint.blueprintMeta.version).toBe(1);
+    expect(blueprint.blueprintMeta.sourceEventCount).toBe(3);
+  });
+
+  it('should canonicalize signatures correctly', () => {
+    expect(ChainMiner.canonicalize(['graph_query', 'write_observation'])).toBe('graph_query>write_observation');
+    expect(ChainMiner.canonicalize(['  graph_query ', ' write_observation'])).toBe('graph_query>write_observation');
+    expect(ChainMiner.canonicalize(['a', '', 'b'])).toBe('a>b');
+  });
+});

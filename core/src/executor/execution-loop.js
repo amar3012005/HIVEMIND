@@ -110,6 +110,7 @@ export class TrailExecutor {
 
     const events = [];
     let step = 0;
+    let doneReason = 'budget_exhausted'; // default
     const maxSteps = config.maxSteps ?? 10;
     const budget = config.budget ?? {};
     const promotionThreshold = config.promotionThreshold ?? 0.8;
@@ -140,7 +141,10 @@ export class TrailExecutor {
           config.routing,
         );
 
-        if (!selection) break; // No viable trails
+        if (!selection) {
+          doneReason = 'no_viable_trails';
+          break;
+        }
 
         const { trail, decision: routingDecision } = selection;
 
@@ -219,6 +223,7 @@ export class TrailExecutor {
             // Check if done
             if (toolResult.output.done === true) {
               workingMemory.done = true;
+              doneReason = 'tool_signaled_completion';
             }
           }
 
@@ -279,6 +284,16 @@ export class TrailExecutor {
 
     const trailsUpdated = [...new Set(events.map((e) => e.trail_id))];
 
+    // Build chain summary — compact record of the tool sequence
+    const chainSummary = {
+      toolSequence: events.map((e) => e.action_name),
+      trailSequence: events.map((e) => e.trail_id),
+      uniqueTrails: trailsUpdated.length,
+      successRate: events.length ? events.filter((e) => e.success).length / events.length : 0,
+      totalLatencyMs: events.reduce((sum, e) => sum + (e.latency_ms || 0), 0),
+      doneReason,
+    };
+
     return {
       goal,
       agentId,
@@ -287,6 +302,7 @@ export class TrailExecutor {
       finalState: { ...workingMemory },
       trailsUpdated,
       observationsForEval: workingMemory.observations,
+      chainSummary,
       nextRecommendedGoal: undefined,
     };
   }

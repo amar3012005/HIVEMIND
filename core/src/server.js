@@ -139,6 +139,8 @@ const { storeDecision } = await import('./executor/decision/store-decision.js');
 const { recallDecision } = await import('./executor/decision/recall-decision.js');
 const { generateDecisionKey } = await import('./executor/decision/decision-key.js');
 const { checkMerge } = await import('./executor/decision/merge-check.js');
+const { scoreEvidence } = await import('./executor/decision/score-evidence.js');
+const { assembleAnswer } = await import('./executor/decision/assemble-answer.js');
 
 const CLIENT_HTML_CANDIDATES = [
   path.join(REPO_ROOT, 'client.html'),
@@ -394,12 +396,34 @@ try {
   });
 
   trailToolRunner.register('link_evidence', async (params) => {
-    return linkEvidence({
+    const result = await linkEvidence({
       decision_statement: params.decision_statement,
       tags: params.tags || [],
       source_platform: params.source_platform || 'unknown',
       scope: params.scope,
     }, persistentMemoryStore);
+
+    // LLM-based evidence relevance scoring
+    if (groqClient?.isAvailable() && result.supporting?.length > 0) {
+      try {
+        const scored = await scoreEvidence(
+          params.decision_statement,
+          result.supporting.map(e => ({ id: e.ref_id, content: e.snippet, platform: e.platform })),
+          groqClient
+        );
+        result.supporting = result.supporting.filter((e, i) => {
+          const score = scored.find(s => s.id === e.ref_id || scored.indexOf(s) === i);
+          return score ? score.llm_relevant !== false : true;
+        });
+        // Recalculate evidence strength with LLM scores
+        if (scored.length > 0) {
+          const avgStrength = scored.reduce((s, e) => s + (e.llm_strength || 0.5), 0) / scored.length;
+          result.evidence_strength = Math.min(result.evidence_strength, avgStrength);
+        }
+      } catch { /* best-effort scoring */ }
+    }
+
+    return result;
   });
 
   trailToolRunner.register('store_decision', async (params) => {
@@ -455,12 +479,21 @@ try {
   });
 
   trailToolRunner.register('recall_decision', async (params) => {
-    return recallDecision({
+    const result = await recallDecision({
       query: params.query,
       scope: params.scope,
       project: params.project,
       top_k: params.top_k || 5,
     }, persistentMemoryStore);
+
+    // LLM answer assembly
+    if (groqClient?.isAvailable() && result.decisions?.length > 0 && params.query) {
+      try {
+        result.assembled_answer = await assembleAnswer(params.query, result.decisions, groqClient);
+      } catch { /* best-effort assembly */ }
+    }
+
+    return result;
   });
 
   const reputationEngine = new ReputationEngine(executorStore);

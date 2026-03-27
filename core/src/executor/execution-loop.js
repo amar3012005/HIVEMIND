@@ -161,77 +161,162 @@ export class TrailExecutor {
         lease = leaseResult.lease;
 
         try {
-          // C. BIND: resolve action parameters
-          let boundAction;
-          try {
-            boundAction = await this.actionBinder.bind(
-              trail.nextAction,
-              workingMemory,
-              canonicalState,
-            );
-          } catch (bindError) {
-            // Bind failed — log and continue to next step
-            step++;
-            continue;
-          }
+          // C-F: EXECUTE (branch on trail kind)
+          if (trail.kind === 'blueprint' && trail.blueprintMeta?.actionSequence?.length) {
+            // ── BLUEPRINT EXECUTION: composite action sequence ──
+            let innerSteps = 0;
+            let innerSucceeded = 0;
+            let innerLatencyMs = 0;
+            let blueprintDoneReason = 'all_steps_completed';
 
-          // D. EXECUTE: run the tool
-          let toolResult;
-          try {
-            toolResult = await this.toolRunner.run(boundAction, budget);
-          } catch (runError) {
-            toolResult = {
-              success: false,
-              error: runError.message,
-              output: null,
-              durationMs: 0,
-              tokensUsed: 0,
-              metadata: {},
+            for (const actionRef of trail.blueprintMeta.actionSequence) {
+              let boundAction;
+              try {
+                boundAction = await this.actionBinder.bind(actionRef, workingMemory, canonicalState);
+              } catch {
+                blueprintDoneReason = 'blueprint_bind_failed';
+                workingMemory.failuresCount++;
+                break;
+              }
+
+              let toolResult;
+              try {
+                toolResult = await this.toolRunner.run(boundAction, budget);
+              } catch (runError) {
+                toolResult = {
+                  success: false, error: runError.message,
+                  output: null, durationMs: 0, tokensUsed: 0, metadata: {},
+                };
+              }
+
+              innerSteps++;
+              innerLatencyMs += toolResult.durationMs ?? 0;
+
+              // Write per-step event (blueprint steps are NOT opaque)
+              const outcomeToolResult = {
+                result: toolResult.success ? toolResult.output : null,
+                error: toolResult.success ? null : (toolResult.error || 'Unknown error'),
+                latencyMs: toolResult.durationMs ?? 0,
+                tokensUsed: toolResult.tokensUsed ?? 0,
+                estimatedCostUsd: toolResult.metadata?.estimatedCostUsd ?? 0,
+              };
+              workingMemory.stepIndex = step;
+              const event = await this.outcomeWriter.write(
+                trail, boundAction, outcomeToolResult, routingDecision, workingMemory,
+              );
+              events.push(event);
+
+              // Update working memory (chain flows between steps)
+              if (toolResult.success && toolResult.output) {
+                if (typeof toolResult.output === 'object' && toolResult.output !== null) {
+                  Object.assign(workingMemory.context, toolResult.output);
+                }
+                innerSucceeded++;
+
+                if (toolResult.output.done === true) {
+                  workingMemory.done = true;
+                  doneReason = 'tool_signaled_completion';
+                  blueprintDoneReason = 'tool_signaled_completion';
+                  break;
+                }
+              }
+
+              if (!toolResult.success) {
+                workingMemory.failuresCount++;
+                workingMemory.done = true;
+                doneReason = 'blueprint_step_failed';
+                blueprintDoneReason = 'blueprint_step_failed';
+                break;
+              }
+            }
+
+            workingMemory.recentTrailHistory.push(trail.id);
+
+            // Store blueprint execution summary
+            workingMemory._blueprintExecSummary = {
+              blueprintId: trail.id,
+              chainSignature: trail.blueprintMeta.chainSignature,
+              stepsAttempted: innerSteps,
+              stepsSucceeded: innerSucceeded,
+              totalLatencyMs: innerLatencyMs,
+              doneReason: blueprintDoneReason,
             };
-          }
 
-          // E. WRITE EVENT: persist the outcome
-          const outcomeToolResult = {
-            result: toolResult.success ? toolResult.output : null,
-            error: toolResult.success ? null : (toolResult.error || 'Unknown error'),
-            latencyMs: toolResult.durationMs ?? 0,
-            tokensUsed: toolResult.tokensUsed ?? 0,
-            estimatedCostUsd: toolResult.metadata?.estimatedCostUsd ?? 0,
-          };
+          } else {
+            // ── SINGLE-ACTION EXECUTION (existing code) ──
 
-          workingMemory.stepIndex = step;
-
-          const event = await this.outcomeWriter.write(
-            trail,
-            boundAction,
-            outcomeToolResult,
-            routingDecision,
-            workingMemory,
-          );
-
-          events.push(event);
-
-          // F. UPDATE WORKING MEMORY
-          if (toolResult.success && toolResult.output) {
-            // Incorporate result into context
-            if (typeof toolResult.output === 'object' && toolResult.output !== null) {
-              Object.assign(workingMemory.context, toolResult.output);
-            } else {
-              workingMemory.context[`step_${step}_result`] = toolResult.output;
+            // C. BIND: resolve action parameters
+            let boundAction;
+            try {
+              boundAction = await this.actionBinder.bind(
+                trail.nextAction,
+                workingMemory,
+                canonicalState,
+              );
+            } catch (bindError) {
+              // Bind failed — log and continue to next step
+              step++;
+              continue;
             }
 
-            // Check if done
-            if (toolResult.output.done === true) {
-              workingMemory.done = true;
-              doneReason = 'tool_signaled_completion';
+            // D. EXECUTE: run the tool
+            let toolResult;
+            try {
+              toolResult = await this.toolRunner.run(boundAction, budget);
+            } catch (runError) {
+              toolResult = {
+                success: false,
+                error: runError.message,
+                output: null,
+                durationMs: 0,
+                tokensUsed: 0,
+                metadata: {},
+              };
             }
-          }
 
-          if (!toolResult.success) {
-            workingMemory.failuresCount++;
-          }
+            // E. WRITE EVENT: persist the outcome
+            const outcomeToolResult = {
+              result: toolResult.success ? toolResult.output : null,
+              error: toolResult.success ? null : (toolResult.error || 'Unknown error'),
+              latencyMs: toolResult.durationMs ?? 0,
+              tokensUsed: toolResult.tokensUsed ?? 0,
+              estimatedCostUsd: toolResult.metadata?.estimatedCostUsd ?? 0,
+            };
 
-          workingMemory.recentTrailHistory.push(trail.id);
+            workingMemory.stepIndex = step;
+
+            const event = await this.outcomeWriter.write(
+              trail,
+              boundAction,
+              outcomeToolResult,
+              routingDecision,
+              workingMemory,
+            );
+
+            events.push(event);
+
+            // F. UPDATE WORKING MEMORY
+            if (toolResult.success && toolResult.output) {
+              // Incorporate result into context
+              if (typeof toolResult.output === 'object' && toolResult.output !== null) {
+                Object.assign(workingMemory.context, toolResult.output);
+              } else {
+                workingMemory.context[`step_${step}_result`] = toolResult.output;
+              }
+
+              // Check if done
+              if (toolResult.output.done === true) {
+                workingMemory.done = true;
+                doneReason = 'tool_signaled_completion';
+              }
+            }
+
+            if (!toolResult.success) {
+              workingMemory.failuresCount++;
+            }
+
+            workingMemory.recentTrailHistory.push(trail.id);
+          }
 
           // G. UPDATE WEIGHT (if weightUpdater available)
           if (this.weightUpdater) {
@@ -285,6 +370,7 @@ export class TrailExecutor {
     const trailsUpdated = [...new Set(events.map((e) => e.trail_id))];
 
     // Build chain summary — compact record of the tool sequence
+    const bpSummary = workingMemory._blueprintExecSummary;
     const chainSummary = {
       toolSequence: events.map((e) => e.action_name),
       trailSequence: events.map((e) => e.trail_id),
@@ -292,6 +378,12 @@ export class TrailExecutor {
       successRate: events.length ? events.filter((e) => e.success).length / events.length : 0,
       totalLatencyMs: events.reduce((sum, e) => sum + (e.latency_ms || 0), 0),
       doneReason,
+      usedBlueprint: !!bpSummary,
+      blueprintId: bpSummary?.blueprintId || null,
+      blueprintChainSignature: bpSummary?.chainSignature || null,
+      outerSteps: step,
+      innerSteps: events.length,
+      blueprintExecutionSummary: bpSummary || null,
     };
 
     return {

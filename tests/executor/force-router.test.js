@@ -16,6 +16,8 @@ import {
   recentFailureScore,
   activeLeasePressure,
   queueDepthPressure,
+  trustedAgentUsage,
+  pathContinuityScore,
 } from '../../core/src/executor/force-router.js';
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -262,5 +264,77 @@ describe('ForceRouter', () => {
       expect(router.computeForces(candidate, { goal: 'test' }).blueprintBoost).toBe(0);
       expect(router.computeForces(deprecated, { goal: 'test' }).blueprintBoost).toBe(0);
     });
+  });
+});
+
+describe('ForceRouter V2: social + momentum', () => {
+  it('should compute socialAttraction from trail creator reputation', () => {
+    const router = new ForceRouter({ forceWeights: { social: 0.2 } });
+    const trail = {
+      id: 't1', agentId: 'expert_agent', kind: 'raw', status: 'active',
+      tags: [], steps: [], successScore: 0.8, confidence: 0.9,
+      nextAction: { tool: 'a', paramsTemplate: {} },
+    };
+    const forces = router.computeForces(trail, {
+      goal: 'test',
+      reputationContext: { agentScores: { expert_agent: { success_rate: 0.95 } } },
+    });
+    expect(forces.socialAttraction).toBeGreaterThan(0);
+    expect(forces.socialAttraction).toBeLessThanOrEqual(0.25 * 0.2);
+  });
+
+  it('should return zero socialAttraction without reputation context', () => {
+    const router = new ForceRouter({ forceWeights: { social: 0.2 } });
+    const trail = {
+      id: 't1', agentId: 'unknown', kind: 'raw', status: 'active',
+      tags: [], steps: [], successScore: 0.5, confidence: 0.5,
+      nextAction: { tool: 'a', paramsTemplate: {} },
+    };
+    const forces = router.computeForces(trail, { goal: 'test' });
+    expect(forces.socialAttraction).toBe(0);
+  });
+
+  it('should compute momentum for same trail continuation', () => {
+    const router = new ForceRouter({ forceWeights: { momentum: 0.15 } });
+    const trail = {
+      id: 't1', kind: 'raw', status: 'active',
+      tags: [], steps: [], successScore: 0.5, confidence: 0.5,
+      nextAction: { tool: 'a', paramsTemplate: {} },
+    };
+    const forces = router.computeForces(trail, {
+      goal: 'test', recentTrailHistory: ['t0', 't1'],
+    });
+    expect(forces.momentum).toBeGreaterThan(0);
+  });
+
+  it('should compute family momentum for same tool trails', () => {
+    const router = new ForceRouter({ forceWeights: { momentum: 0.15 } });
+    const trail = {
+      id: 't2', kind: 'raw', status: 'active',
+      tags: [], steps: [], successScore: 0.5, confidence: 0.5,
+      nextAction: { tool: 'graph_query', paramsTemplate: {} },
+    };
+    const forces = router.computeForces(trail, {
+      goal: 'test', recentTrailHistory: ['t0', 't1'], trailFamilyKey: 'graph_query',
+    });
+    expect(forces.momentum).toBeGreaterThan(0);
+  });
+
+  it('social + momentum should not dominate over conflict', () => {
+    const router = new ForceRouter({
+      forceWeights: { goalAttraction: 1.0, social: 0.2, momentum: 0.15, conflictRepulsion: 1.0 },
+    });
+    const riskyTrail = {
+      id: 't1', agentId: 'star_agent', kind: 'raw', status: 'active',
+      tags: [], steps: [{ status: 'failed' }, { status: 'failed' }],
+      successScore: 0.1, confidence: 0.1,
+      nextAction: { tool: 'a', paramsTemplate: {} },
+    };
+    const forces = router.computeForces(riskyTrail, {
+      goal: 'test',
+      reputationContext: { agentScores: { star_agent: { success_rate: 1.0 } } },
+      recentTrailHistory: ['t1'],
+    });
+    expect(forces.conflictRepulsion).toBeGreaterThan(forces.socialAttraction + forces.momentum);
   });
 });

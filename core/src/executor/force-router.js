@@ -145,6 +145,39 @@ export function recentReusePenalty(trail, recentTrailHistory) {
   return Math.max(0, 1.0 - (idx * 0.3));
 }
 
+/**
+ * Social attraction: prefer trails created/used by high-reputation agents.
+ * Capped at 0.25 to prevent runaway prestige effects.
+ * @param {Trail} trail
+ * @param {{ agentScores?: Record<string, { success_rate: number }> }} [reputationContext]
+ * @returns {number} 0-0.25
+ */
+export function trustedAgentUsage(trail, reputationContext) {
+  if (!reputationContext?.agentScores) return 0;
+  const creatorRep = reputationContext.agentScores[trail.agentId];
+  if (!creatorRep) return 0;
+  return Math.min(creatorRep.success_rate * 0.5, 0.25);
+}
+
+/**
+ * Momentum: prefer trails that continue the agent's current productive path.
+ * Same trail = 0.8, same family = 0.3, unrelated = 0.
+ * @param {Trail} trail
+ * @param {string[]} recentTrailHistory
+ * @param {string} [trailFamilyKey]
+ * @returns {number}
+ */
+export function pathContinuityScore(trail, recentTrailHistory, trailFamilyKey) {
+  if (!recentTrailHistory?.length) return 0;
+  const lastTrailId = recentTrailHistory[recentTrailHistory.length - 1];
+  if (trail.id === lastTrailId) return 0.8;
+  if (trailFamilyKey) {
+    const trailKey = trail.blueprintMeta?.chainSignature || trail.nextAction?.tool || '';
+    if (trailKey && trailKey === trailFamilyKey) return 0.3;
+  }
+  return 0;
+}
+
 // ─── ForceRouter ─────────────────────────────────────────────────────────────
 
 /** @type {ForceWeights} */
@@ -170,7 +203,7 @@ export class ForceRouter {
    * @returns {ForceVector}
    */
   computeForces(trail, context = {}) {
-    const { goal = '', state = {}, leaseInfo, queueInfo, recentTrailHistory } = context;
+    const { goal = '', state = {}, leaseInfo, queueInfo, recentTrailHistory, reputationContext, trailFamilyKey } = context;
     const w = this.weights;
 
     const goalAttr =
@@ -188,12 +221,17 @@ export class ForceRouter {
       (trail.kind === 'blueprint' && trail.blueprintMeta?.state === 'active')
         ? (w.blueprintPrior ?? 0) : 0;
 
-    const net = goalAttr + affordanceAttr + blueprintBoost - conflictRep - congestionRep - costRep;
+    const social = (w.social ?? 0) * trustedAgentUsage(trail, reputationContext);
+    const mom = (w.momentum ?? 0) * pathContinuityScore(trail, recentTrailHistory, trailFamilyKey);
+
+    const net = goalAttr + affordanceAttr + blueprintBoost + social + mom - conflictRep - congestionRep - costRep;
 
     return {
       goalAttraction: goalAttr,
       affordanceAttraction: affordanceAttr,
       blueprintBoost,
+      socialAttraction: social,
+      momentum: mom,
       conflictRepulsion: conflictRep,
       congestionRepulsion: congestionRep,
       costRepulsion: costRep,

@@ -220,4 +220,47 @@ describe('ForceRouter', () => {
       expect(counts.b).toBeGreaterThan(80);
     });
   });
+
+  describe('blueprint boost', () => {
+    it('should add blueprintPrior to net force for active blueprints', () => {
+      const router = new ForceRouter({ forceWeights: { blueprintPrior: 0.3 } });
+      const blueprintTrail = {
+        id: 'bp_1', kind: 'blueprint', status: 'active',
+        blueprintMeta: { state: 'active', chainSignature: 'a>b' },
+        tags: [], steps: [], successScore: 0.8, confidence: 0.9,
+        nextAction: { tool: 'a', paramsTemplate: {} },
+      };
+      const rawTrail = {
+        id: 'raw_1', kind: 'raw', status: 'active',
+        tags: [], steps: [], successScore: 0.8, confidence: 0.9,
+        nextAction: { tool: 'a', paramsTemplate: {} },
+      };
+
+      const bpForces = router.computeForces(blueprintTrail, { goal: 'test' });
+      const rawForces = router.computeForces(rawTrail, { goal: 'test' });
+
+      expect(bpForces.net).toBeGreaterThan(rawForces.net);
+      expect(bpForces.blueprintBoost).toBe(0.3);
+      expect(rawForces.blueprintBoost).toBe(0);
+    });
+
+    it('should not boost candidate or deprecated blueprints', () => {
+      const router = new ForceRouter({ forceWeights: { blueprintPrior: 0.3 } });
+      const candidate = {
+        id: 'bp_2', kind: 'blueprint', status: 'active',
+        blueprintMeta: { state: 'candidate' },
+        tags: [], steps: [], successScore: 0.8, confidence: 0.9,
+        nextAction: { tool: 'a', paramsTemplate: {} },
+      };
+      const deprecated = {
+        id: 'bp_3', kind: 'blueprint', status: 'active',
+        blueprintMeta: { state: 'deprecated' },
+        tags: [], steps: [], successScore: 0.8, confidence: 0.9,
+        nextAction: { tool: 'a', paramsTemplate: {} },
+      };
+
+      expect(router.computeForces(candidate, { goal: 'test' }).blueprintBoost).toBe(0);
+      expect(router.computeForces(deprecated, { goal: 'test' }).blueprintBoost).toBe(0);
+    });
+  });
 });

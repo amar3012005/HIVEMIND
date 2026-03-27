@@ -48,9 +48,18 @@ export class TrailSelector {
     const activeTrails = allTrails.filter((t) => t.status === 'active');
     if (!activeTrails.length) return null;
 
+    // 2b. Filter out non-selectable blueprints (candidate/deprecated)
+    const selectableTrails = activeTrails.filter((t) => {
+      if (t.kind === 'blueprint') {
+        return t.blueprintMeta?.state === 'active';
+      }
+      return true; // raw trails always selectable
+    });
+    if (!selectableTrails.length) return null;
+
     // 3. Compute force vector for each candidate (with reuse penalty)
     const candidates = await Promise.all(
-      activeTrails.map(async (trail) => {
+      selectableTrails.map(async (trail) => {
         const leaseInfo = this.leaseManager
           ? await this.leaseManager.getLeaseInfo(trail.id)
           : { leased: false };
@@ -75,7 +84,7 @@ export class TrailSelector {
     /** @type {RoutingDecision} */
     const decision = {
       selectedTrailId: selected.trail.id,
-      candidateTrailIds: activeTrails.map((t) => t.id),
+      candidateTrailIds: selectableTrails.map((t) => t.id),
       forceVector: selected.forces,
       temperature,
       strategy: routingConfig.strategy ?? 'force_softmax',

@@ -184,11 +184,16 @@ export class ForceRouter {
     const costRep =
       w.costRepulsion * (estimatedTokenCost(trail) + estimatedLatencyCost(trail));
 
-    const net = goalAttr + affordanceAttr - conflictRep - congestionRep - costRep;
+    const blueprintBoost =
+      (trail.kind === 'blueprint' && trail.blueprintMeta?.state === 'active')
+        ? (w.blueprintPrior ?? 0) : 0;
+
+    const net = goalAttr + affordanceAttr + blueprintBoost - conflictRep - congestionRep - costRep;
 
     return {
       goalAttraction: goalAttr,
       affordanceAttraction: affordanceAttr,
+      blueprintBoost,
       conflictRepulsion: conflictRep,
       congestionRepulsion: congestionRep,
       costRepulsion: costRep,

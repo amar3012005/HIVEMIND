@@ -8,6 +8,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { TrailSelector } from '../../core/src/executor/trail-selector.js';
 import { ForceRouter } from '../../core/src/executor/force-router.js';
+import { InMemoryStore } from '../../core/src/executor/stores/in-memory-store.js';
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -169,5 +170,55 @@ describe('TrailSelector', () => {
     expect(result).not.toBeNull();
     expect(result.trailId).toBe('active-1');
     expect(result.decision.candidateTrailIds).toEqual(['active-1']);
+  });
+});
+
+describe('TrailSelector blueprint filtering', () => {
+  it('should exclude candidate blueprints from selection', async () => {
+    const store = new InMemoryStore();
+    await store.putTrail({
+      id: 'raw_1', goalId: 'g1', agentId: 'a1', status: 'active', kind: 'raw',
+      nextAction: { tool: 'echo', paramsTemplate: {} },
+      steps: [], executionEventIds: [], successScore: 0.5, confidence: 0.5,
+      weight: 0.5, decayRate: 0.05, tags: [], createdAt: new Date().toISOString(),
+    });
+    await store.putTrail({
+      id: 'bp_cand', goalId: 'g1', agentId: 'a1', status: 'active', kind: 'blueprint',
+      nextAction: { tool: 'echo', paramsTemplate: {} },
+      blueprintMeta: { state: 'candidate', chainSignature: 'echo', actionSequence: [] },
+      steps: [], executionEventIds: [], successScore: 0.9, confidence: 0.9,
+      weight: 0.9, decayRate: 0.05, tags: [], createdAt: new Date().toISOString(),
+    });
+
+    const router = new ForceRouter();
+    const leaseManager = { getLeaseInfo: async () => ({ leased: false }) };
+    const selector = new TrailSelector(store, leaseManager, router);
+
+    const selection = await selector.selectNext('g1', { goalId: 'g1', namespaceId: 'a1' }, 'a1', { temperature: 1.0 });
+    expect(selection.trail.id).toBe('raw_1');
+  });
+
+  it('should exclude deprecated blueprints from selection', async () => {
+    const store = new InMemoryStore();
+    await store.putTrail({
+      id: 'raw_1', goalId: 'g1', agentId: 'a1', status: 'active', kind: 'raw',
+      nextAction: { tool: 'echo', paramsTemplate: {} },
+      steps: [], executionEventIds: [], successScore: 0.5, confidence: 0.5,
+      weight: 0.5, decayRate: 0.05, tags: [], createdAt: new Date().toISOString(),
+    });
+    await store.putTrail({
+      id: 'bp_dep', goalId: 'g1', agentId: 'a1', status: 'active', kind: 'blueprint',
+      nextAction: { tool: 'echo', paramsTemplate: {} },
+      blueprintMeta: { state: 'deprecated', chainSignature: 'echo', actionSequence: [] },
+      steps: [], executionEventIds: [], successScore: 0.9, confidence: 0.9,
+      weight: 0.9, decayRate: 0.05, tags: [], createdAt: new Date().toISOString(),
+    });
+
+    const router = new ForceRouter();
+    const leaseManager = { getLeaseInfo: async () => ({ leased: false }) };
+    const selector = new TrailSelector(store, leaseManager, router);
+
+    const selection = await selector.selectNext('g1', { goalId: 'g1', namespaceId: 'a1' }, 'a1', { temperature: 1.0 });
+    expect(selection.trail.id).toBe('raw_1');
   });
 });

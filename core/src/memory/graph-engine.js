@@ -124,7 +124,7 @@ export class MemoryGraphEngine {
 
         // --- Predict-Calibrate filter ---
         let pcResult = null;
-        if (this.predictCalibrateFilter) {
+        if (this.predictCalibrateFilter && !input.skipPredictCalibrate) {
           pcResult = this.predictCalibrateFilter.filter(baseMemory, latestMemories);
           if (!pcResult.shouldStore) {
             return {

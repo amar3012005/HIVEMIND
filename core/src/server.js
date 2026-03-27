@@ -4005,6 +4005,7 @@ a{color:#a78bfa}</style></head><body>
                 document_date: validation.data.document_date,
                 event_dates: validation.data.event_dates,
                 relationship,
+                skipPredictCalibrate: body.skipPredictCalibrate === true,
                 metadata: {
                   ...validation.data.metadata,
                   source_platform: validation.data.source_platform || null,

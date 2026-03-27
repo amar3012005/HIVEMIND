@@ -289,6 +289,46 @@ export class PrismaStore {
     });
   }
 
+  // ─── Observation Methods ────────────────────────────────────────────────
+
+  /** Write an observation to op_observations. */
+  async writeObservation(obs) {
+    const row = await this.prisma.opObservation.create({
+      data: {
+        id: obs.id,
+        agent_id: obs.agent_id,
+        kind: obs.kind,
+        content: obs.content,
+        certainty: obs.certainty ?? 0.5,
+        source_event_id: obs.source_event_id || null,
+        related_to_trail: obs.related_to_trail || null,
+      },
+    });
+    return { id: row.id, kind: row.kind, timestamp: row.timestamp };
+  }
+
+  /** List recent observations, optionally filtered by agent. */
+  async listObservations({ agentId, kind, limit = 20 } = {}) {
+    const rows = await this.prisma.opObservation.findMany({
+      where: {
+        agent_id: agentId || undefined,
+        kind: kind || undefined,
+      },
+      orderBy: { timestamp: 'desc' },
+      take: limit,
+    });
+    return rows.map((r) => ({
+      id: r.id,
+      agent_id: r.agent_id,
+      kind: r.kind,
+      content: r.content,
+      certainty: r.certainty,
+      source_event_id: r.source_event_id,
+      related_to_trail: r.related_to_trail,
+      timestamp: r.timestamp?.toISOString?.() || r.timestamp,
+    }));
+  }
+
   // ─── Row Mappers (snake_case DB → camelCase JS) ──────────────────────────
 
   _mapTrailRow(row) {

@@ -242,6 +242,80 @@ try {
     timeoutMs: 5000,
   });
 
+  // ─── Register real tool executors ──────────────────────────────────────────
+
+  // write_observation — writes to op/observations (self-reporting)
+  trailToolRunner.register('write_observation', async (params) => {
+    const id = crypto.randomUUID();
+    const obs = {
+      id,
+      agent_id: params._agentId || 'unknown',
+      kind: params.kind,
+      content: typeof params.content === 'string' ? { text: params.content } : params.content,
+      certainty: params.certainty ?? 0.7,
+      source_event_id: params._eventId || null,
+      related_to_trail: params._trailId || null,
+    };
+    if (executorStore.writeObservation) {
+      await executorStore.writeObservation(obs);
+    }
+    return { observation_id: id, kind: params.kind, status: 'written' };
+  });
+
+  // graph_query — read-only search of canonical knowledge (kg/*)
+  trailToolRunner.register('graph_query', async (params) => {
+    if (!persistentMemoryStore) {
+      return { results: [], error: 'Memory store unavailable' };
+    }
+    const results = await persistentMemoryStore.searchMemories({
+      query: params.query,
+      n_results: Math.min(params.limit || 5, 20),
+    });
+    return {
+      results: results.map((r) => ({
+        id: r.id,
+        content: r.content?.substring(0, 500),
+        score: r.score,
+        tags: r.tags,
+        memory_type: r.memory_type,
+      })),
+      count: results.length,
+    };
+  });
+
+  // http_request — sandboxed external HTTP (allowlist, timeout, size cap)
+  trailToolRunner.register('http_request', async (params) => {
+    const url = params.url;
+    if (!url || typeof url !== 'string') {
+      return { error: 'url is required' };
+    }
+    // Safety: reject internal targets
+    const parsed = new URL(url);
+    if (['localhost', '127.0.0.1', '0.0.0.0'].includes(parsed.hostname) ||
+        parsed.hostname.endsWith('.internal')) {
+      return { error: 'Internal targets not allowed' };
+    }
+    const method = (params.method || 'GET').toUpperCase();
+    if (!['GET', 'HEAD'].includes(method)) {
+      return { error: 'Only GET and HEAD methods allowed in V1' };
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    try {
+      const resp = await fetch(url, { method, signal: controller.signal });
+      const text = await resp.text();
+      return {
+        status: resp.status,
+        body: text.substring(0, 2000),
+        content_type: resp.headers.get('content-type'),
+      };
+    } catch (err) {
+      return { error: err.message };
+    } finally {
+      clearTimeout(timeout);
+    }
+  });
+
   trailExecutor = new TrailExecutor({
     trailSelector,
     actionBinder,

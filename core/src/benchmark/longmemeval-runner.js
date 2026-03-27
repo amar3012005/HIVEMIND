@@ -279,10 +279,20 @@ Answer the question directly and concisely in 1-3 sentences. Only use informatio
   // ── Step 11: Score ──
   const scoring = scoreAnswer(hypothesis, q.answer);
 
-  // ── Step 12: Cleanup ──
+  // ── Step 12: Cleanup (aggressive — delete by tag + by ID) ──
   for (const id of ingestedIds) {
     try { await hmApi(`/api/memories/${id}`, 'DELETE'); } catch {}
   }
+  // Also cleanup any memories with 'lme' tag that weren't tracked
+  try {
+    const allMems = await hmApi('/api/memories?limit=200');
+    const mems = allMems?.memories || [];
+    for (const m of mems) {
+      if ((m.tags || []).includes('lme') || (m.title || '').startsWith('Session ') || (m.title || '').startsWith('Chat session')) {
+        try { await hmApi(`/api/memories/${m.id}`, 'DELETE'); } catch {}
+      }
+    }
+  } catch {}
 
   return {
     question_id: q.question_id,

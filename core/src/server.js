@@ -130,6 +130,15 @@ const { InMemoryStore } = await import('./executor/stores/in-memory-store.js');
 const { RetrievalEvaluator } = await import('./external/evaluation/retrieval-evaluator.js');
 const { TEST_QUERIES, getSampleQueries, getQueriesByCategory, getQueriesByDifficulty, getQueriesForDataset } = await import('./external/evaluation/test-dataset.js');
 const { generateEvalQueries } = await import('./evaluation/auto-dataset-generator.js');
+
+// Decision Intelligence imports
+const { detectDecisionCandidate } = await import('./executor/decision/detect-heuristics.js');
+const { classifyDecision } = await import('./executor/decision/classify-decision.js');
+const { linkEvidence } = await import('./executor/decision/link-evidence.js');
+const { storeDecision } = await import('./executor/decision/store-decision.js');
+const { recallDecision } = await import('./executor/decision/recall-decision.js');
+const { generateDecisionKey } = await import('./executor/decision/decision-key.js');
+
 const CLIENT_HTML_CANDIDATES = [
   path.join(REPO_ROOT, 'client.html'),
   path.join(PROJECT_ROOT, 'client.html')
@@ -247,6 +256,51 @@ try {
     timeoutMs: 5000,
   });
 
+  // Decision Intelligence tools
+  trailToolRegistry.register({
+    name: 'detect_decision_candidate',
+    description: 'Heuristic scan for decision signals in content',
+    params: {
+      content: { type: 'string', required: true, description: 'Raw content to scan' },
+      platform: { type: 'string', required: true, description: 'Source platform (gmail/slack/github)' },
+    },
+    maxTokens: 1000, timeoutMs: 5000,
+  });
+  trailToolRegistry.register({
+    name: 'classify_decision',
+    description: 'LLM-based decision confirmation and structured extraction',
+    params: {
+      content: { type: 'string', required: true, description: 'Content to classify' },
+      platform: { type: 'string', required: true, description: 'Source platform' },
+    },
+    maxTokens: 2000, timeoutMs: 15000,
+  });
+  trailToolRegistry.register({
+    name: 'link_evidence',
+    description: 'Cross-platform evidence search for decision corroboration',
+    params: {
+      decision_statement: { type: 'string', required: true, description: 'Decision to find evidence for' },
+    },
+    maxTokens: 5000, timeoutMs: 15000,
+  });
+  trailToolRegistry.register({
+    name: 'store_decision',
+    description: 'Store a structured decision object with merge-on-key',
+    params: {
+      decision_statement: { type: 'string', required: true, description: 'The decision statement' },
+      decision_type: { type: 'string', required: true, description: 'Type of decision' },
+    },
+    maxTokens: 2000, timeoutMs: 10000,
+  });
+  trailToolRegistry.register({
+    name: 'recall_decision',
+    description: 'Provenance-aware decision retrieval',
+    params: {
+      query: { type: 'string', required: true, description: 'Natural language recall query' },
+    },
+    maxTokens: 5000, timeoutMs: 10000,
+  });
+
   // ─── Register real tool executors ──────────────────────────────────────────
 
   // write_observation — writes to op/observations (self-reporting)
@@ -321,6 +375,66 @@ try {
     }
   });
 
+  // Decision tool executors
+  trailToolRunner.register('detect_decision_candidate', async (params) => {
+    return detectDecisionCandidate({
+      content: params.content,
+      platform: params.platform,
+      metadata: params.metadata || {},
+    });
+  });
+
+  trailToolRunner.register('classify_decision', async (params) => {
+    return classifyDecision({
+      content: params.content,
+      platform: params.platform,
+      context: { signals: params.signals || [], thread_context: params.thread_context },
+    }, groqClient);
+  });
+
+  trailToolRunner.register('link_evidence', async (params) => {
+    return linkEvidence({
+      decision_statement: params.decision_statement,
+      tags: params.tags || [],
+      source_platform: params.source_platform || 'unknown',
+      scope: params.scope,
+    }, persistentMemoryStore);
+  });
+
+  trailToolRunner.register('store_decision', async (params) => {
+    const dKey = generateDecisionKey(
+      params.scope?.project || 'default',
+      params.decision_type || 'choice',
+      params.decision_statement,
+    );
+    return storeDecision({
+      decision_object: {
+        decision_key: dKey,
+        decision_statement: params.decision_statement,
+        decision_type: params.decision_type || 'choice',
+        rationale: params.rationale,
+        alternatives_rejected: params.alternatives_rejected || [],
+        participants: params.participants || [],
+        evidence: params.evidence || { supporting: [], conflicting: [] },
+        confidence: params.confidence || 0.5,
+        evidence_strength: params.evidence_strength || 0,
+        source_platform: params.source_platform || 'unknown',
+        tags: params.tags || [],
+        scope: params.scope,
+        detected_at: new Date().toISOString(),
+      },
+    }, persistentMemoryStore);
+  });
+
+  trailToolRunner.register('recall_decision', async (params) => {
+    return recallDecision({
+      query: params.query,
+      scope: params.scope,
+      project: params.project,
+      top_k: params.top_k || 5,
+    }, persistentMemoryStore);
+  });
+
   const reputationEngine = new ReputationEngine(executorStore);
 
   trailExecutor = new TrailExecutor({
@@ -357,6 +471,42 @@ try {
 
   const metaEvaluator = new MetaEvaluator(executorStore, parameterRegistry);
   trailExecutor._metaEvaluator = metaEvaluator;
+
+  // Seed decision intelligence trails (idempotent — trails are checked by goalId)
+  const decisionTrails = [
+    { goalId: 'capture_decision', tool: 'detect_decision_candidate', params: { content: '$ctx.rawContent', platform: '$ctx.platform' }, tags: ['gmail', 'detect'], weight: 0.75, confidence: 0.8 },
+    { goalId: 'capture_decision', tool: 'detect_decision_candidate', params: { content: '$ctx.rawContent', platform: '$ctx.platform' }, tags: ['slack', 'detect'], weight: 0.75, confidence: 0.8 },
+    { goalId: 'capture_decision', tool: 'detect_decision_candidate', params: { content: '$ctx.rawContent', platform: '$ctx.platform' }, tags: ['github', 'detect'], weight: 0.75, confidence: 0.8 },
+    { goalId: 'capture_decision', tool: 'classify_decision', params: { content: '$ctx.rawContent', platform: '$ctx.platform' }, tags: ['classify'], weight: 0.7, confidence: 0.7 },
+    { goalId: 'capture_decision', tool: 'link_evidence', params: { decision_statement: '$ctx.decision_statement' }, tags: ['link', 'evidence'], weight: 0.65, confidence: 0.7 },
+    { goalId: 'capture_decision', tool: 'store_decision', params: { decision_statement: '$ctx.decision_statement', decision_type: '$ctx.decision_type' }, tags: ['store', 'decision'], weight: 0.6, confidence: 0.7 },
+    { goalId: 'recall_decision', tool: 'recall_decision', params: { query: '$ctx.query' }, tags: ['recall', 'query'], weight: 0.8, confidence: 0.8 },
+    { goalId: 'recall_decision', tool: 'recall_decision', params: { query: '$ctx.query', project: '$ctx.project' }, tags: ['recall', 'scope'], weight: 0.75, confidence: 0.8 },
+  ];
+
+  for (const t of decisionTrails) {
+    const existing = await executorStore.getCandidateTrails(t.goalId);
+    const alreadyExists = existing.some(e => e.nextAction?.tool === t.tool && JSON.stringify(e.tags) === JSON.stringify(t.tags));
+    if (!alreadyExists) {
+      await executorStore.putTrail({
+        id: crypto.randomUUID(),
+        goalId: t.goalId,
+        agentId: 'system',
+        status: 'active',
+        kind: 'raw',
+        nextAction: { tool: t.tool, paramsTemplate: t.params },
+        steps: [],
+        executionEventIds: [],
+        successScore: 0,
+        confidence: t.confidence,
+        weight: t.weight,
+        decayRate: 0.05,
+        tags: t.tags,
+        createdAt: new Date().toISOString(),
+      });
+    }
+  }
+  console.log('[DecisionIntelligence] Decision tools registered, trails seeded');
 
   console.log('[TrailExecutor] Cognitive runtime initialized',
     executorStore.constructor.name === 'PrismaStore' ? '(Prisma persistence)' : '(in-memory)');

@@ -12,8 +12,8 @@ generator client {
 }
 
 datasource db {
-  provider   = "postgresql"
-  url        = env("DATABASE_URL")
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 // ==========================================
@@ -28,24 +28,18 @@ enum MemoryType {
   goal
   event
   relationship
-
-  
 }
 
 enum RelationshipType {
   Updates
   Extends
   Derives
-
-  
 }
 
 enum VisibilityScope {
   private
   organization
   public
-
-  
 }
 
 enum PlatformType {
@@ -55,8 +49,6 @@ enum PlatformType {
   gemini
   gmail
   other
-
-  
 }
 
 enum AuditEventCategory {
@@ -64,8 +56,6 @@ enum AuditEventCategory {
   data_access
   data_modification
   system
-
-  
 }
 
 enum AuditAction {
@@ -75,16 +65,12 @@ enum AuditAction {
   delete
   export
   erase
-
-  
 }
 
 enum ExportRequestType {
   export
   erasure
   portability
-
-  
 }
 
 enum ExportStatus {
@@ -92,16 +78,12 @@ enum ExportStatus {
   processing
   completed
   failed
-
-  
 }
 
 enum ExportFormat {
   json
   csv
   parquet
-
-  
 }
 
 // ==========================================
@@ -140,7 +122,6 @@ model User {
   deletedAt    DateTime? @map("deleted_at")
 
   @@map("users")
-  
 }
 
 /// Multi-tenant organizations with EU data residency settings
@@ -170,7 +151,6 @@ model Organization {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@map("organizations")
-  
 }
 
 /// Junction table for user-organization many-to-many relationship
@@ -188,7 +168,6 @@ model UserOrganization {
   @@index([userId])
   @@index([orgId])
   @@map("user_organizations")
-  
 }
 
 // ==========================================
@@ -199,12 +178,12 @@ model UserOrganization {
 /// Cross-platform authentication with AI platforms (ChatGPT, Claude, etc.)
 /// Encrypted tokens using HYOK pattern for EU sovereignty
 model PlatformIntegration {
-  id                  String       @id @default(uuid()) @map("id") @db.Uuid
-  userId              String       @map("user_id") @db.Uuid
-  platformType        String       @map("platform_type")
-  platformUserId      String?      @map("platform_user_id")
-  platformDisplayName String?      @map("platform_display_name")
-  connectorMetadata   Json         @default("{}") @map("connector_metadata")
+  id                  String  @id @default(uuid()) @map("id") @db.Uuid
+  userId              String  @map("user_id") @db.Uuid
+  platformType        String  @map("platform_type")
+  platformUserId      String? @map("platform_user_id")
+  platformDisplayName String? @map("platform_display_name")
+  connectorMetadata   Json    @default("{}") @map("connector_metadata")
 
   // Authentication (encrypted fields)
   authType               String    @map("auth_type")
@@ -220,8 +199,8 @@ model PlatformIntegration {
   oauthLastRefreshed DateTime? @map("oauth_last_refreshed")
 
   // Status tracking
-  isActive     Boolean    @default(true) @map("is_active")
-  lastSyncedAt DateTime?  @map("last_synced_at")
+  isActive     Boolean   @default(true) @map("is_active")
+  lastSyncedAt DateTime? @map("last_synced_at")
   syncStatus   String    @default("idle") @map("sync_status")
 
   // Error tracking
@@ -241,7 +220,6 @@ model PlatformIntegration {
   @@index([platformType])
   @@index([isActive, syncStatus])
   @@map("platform_integrations")
-  
 }
 
 // ==========================================
@@ -300,17 +278,17 @@ model Memory {
   exportBlocked   Boolean   @default(false) @map("export_blocked")
 
   // Relations
-  user              User             @relation(fields: [userId], references: [id], onDelete: Cascade, name: "UserMemories")
-  organization      Organization?    @relation(fields: [orgId], references: [id], onDelete: Cascade, name: "OrgMemories")
-  relationshipsFrom Relationship[]   @relation("RelationshipFromMemory")
-  relationshipsTo   Relationship[]   @relation("RelationshipToMemory")
-  vectorEmbedding   VectorEmbedding? @relation("MemoryVectorEmbedding")
-  auditLogs         AuditLog[]       @relation("MemoryAuditLogs")
+  user              User                @relation(fields: [userId], references: [id], onDelete: Cascade, name: "UserMemories")
+  organization      Organization?       @relation(fields: [orgId], references: [id], onDelete: Cascade, name: "OrgMemories")
+  relationshipsFrom Relationship[]      @relation("RelationshipFromMemory")
+  relationshipsTo   Relationship[]      @relation("RelationshipToMemory")
+  vectorEmbedding   VectorEmbedding?    @relation("MemoryVectorEmbedding")
+  auditLogs         AuditLog[]          @relation("MemoryAuditLogs")
   versions          MemoryVersion[]
   sourceMetadata    SourceMetadata?
   codeMetadata      CodeMemoryMetadata?
-  derivationSources DerivationJob[]  @relation("DerivationSourceMemory")
-  derivationTargets DerivationJob[]  @relation("DerivationTargetMemory")
+  derivationSources DerivationJob[]     @relation("DerivationSourceMemory")
+  derivationTargets DerivationJob[]     @relation("DerivationTargetMemory")
 
   // Timestamps
   createdAt DateTime  @default(now()) @map("created_at")
@@ -328,19 +306,18 @@ model Memory {
   @@index([deletedAt])
   @@index([tags])
   @@map("memories")
-  
 }
 
 /// Persisted version history for state transitions and temporal audits
 model MemoryVersion {
-  id              String  @id @default(uuid()) @map("id") @db.Uuid
-  memoryId        String  @map("memory_id") @db.Uuid
-  version         Int     @default(1)
-  contentHash     String  @map("content_hash")
-  isLatest        Boolean @default(true) @map("is_latest")
+  id              String   @id @default(uuid()) @map("id") @db.Uuid
+  memoryId        String   @map("memory_id") @db.Uuid
+  version         Int      @default(1)
+  contentHash     String   @map("content_hash")
+  isLatest        Boolean  @default(true) @map("is_latest")
   reason          String
-  relatedMemoryId String? @map("related_memory_id") @db.Uuid
-  metadata        Json    @default("{}")
+  relatedMemoryId String?  @map("related_memory_id") @db.Uuid
+  metadata        Json     @default("{}")
   createdAt       DateTime @default(now()) @map("created_at")
 
   memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
@@ -348,7 +325,6 @@ model MemoryVersion {
   @@index([memoryId, createdAt])
   @@index([memoryId, isLatest])
   @@map("memory_versions")
-  
 }
 
 /// Normalized source provenance for any memory ingest
@@ -369,44 +345,42 @@ model SourceMetadata {
   @@index([sourceType, sourceId])
   @@index([sourcePlatform])
   @@map("source_metadata")
-  
 }
 
 /// AST and scope metadata for code memories
 model CodeMemoryMetadata {
-  id             String   @id @default(uuid()) @map("id") @db.Uuid
-  memoryId       String   @unique @map("memory_id") @db.Uuid
-  filepath       String
-  language       String
-  entityType     String?  @map("entity_type")
-  entityName     String?  @map("entity_name")
-  startLine      Int?     @map("start_line")
-  endLine        Int?     @map("end_line")
-  scopeChain     String[] @default([]) @map("scope_chain")
-  signatures     String[] @default([])
-  imports        String[] @default([])
-  dependencies   String[] @default([])
-  nwsCount       Int      @default(0) @map("nws_count")
-  metadata       Json     @default("{}")
-  createdAt      DateTime @default(now()) @map("created_at")
+  id           String   @id @default(uuid()) @map("id") @db.Uuid
+  memoryId     String   @unique @map("memory_id") @db.Uuid
+  filepath     String
+  language     String
+  entityType   String?  @map("entity_type")
+  entityName   String?  @map("entity_name")
+  startLine    Int?     @map("start_line")
+  endLine      Int?     @map("end_line")
+  scopeChain   String[] @default([]) @map("scope_chain")
+  signatures   String[] @default([])
+  imports      String[] @default([])
+  dependencies String[] @default([])
+  nwsCount     Int      @default(0) @map("nws_count")
+  metadata     Json     @default("{}")
+  createdAt    DateTime @default(now()) @map("created_at")
 
   memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
 
   @@index([filepath])
   @@index([language])
   @@map("code_memory_metadata")
-  
 }
 
 /// Async queue for deferred DERIVES evaluation
 model DerivationJob {
-  id             String   @id @default(uuid()) @map("id") @db.Uuid
-  sourceMemoryId String   @map("source_memory_id") @db.Uuid
-  targetMemoryId String   @map("target_memory_id") @db.Uuid
+  id             String    @id @default(uuid()) @map("id") @db.Uuid
+  sourceMemoryId String    @map("source_memory_id") @db.Uuid
+  targetMemoryId String    @map("target_memory_id") @db.Uuid
   confidence     Float
-  status         String   @default("queued")
-  metadata       Json     @default("{}")
-  createdAt      DateTime @default(now()) @map("created_at")
+  status         String    @default("queued")
+  metadata       Json      @default("{}")
+  createdAt      DateTime  @default(now()) @map("created_at")
   processedAt    DateTime? @map("processed_at")
 
   sourceMemory Memory @relation("DerivationSourceMemory", fields: [sourceMemoryId], references: [id], onDelete: Cascade)
@@ -416,7 +390,6 @@ model DerivationJob {
   @@index([sourceMemoryId])
   @@index([targetMemoryId])
   @@map("derivation_jobs")
-  
 }
 
 /// Graph edges between memories (Updates, Extends, Derives)
@@ -450,7 +423,6 @@ model Relationship {
   @@index([fromId, type])
   @@index([toId, type])
   @@map("relationships")
-  
 }
 
 // ==========================================
@@ -483,7 +455,6 @@ model VectorEmbedding {
 
   @@index([syncStatus, lastSyncAttempt])
   @@map("vector_embeddings")
-  
 }
 
 // ==========================================
@@ -531,7 +502,6 @@ model Session {
   @@index([platformType])
   @@index([userId, endedAt])
   @@map("sessions")
-  
 }
 
 // ==========================================
@@ -573,7 +543,6 @@ model SyncLog {
   @@index([eventType])
   @@index([startedAt])
   @@map("sync_logs")
-  
 }
 
 // ==========================================
@@ -624,7 +593,6 @@ model AuditLog {
   @@index([resourceType, resourceId])
   @@index([action])
   @@map("audit_logs")
-  
 }
 
 // ==========================================
@@ -650,7 +618,6 @@ model DataExportRequest {
   @@index([userId])
   @@index([status])
   @@map("data_export_requests")
-  
 }
 
 // ==========================================
@@ -702,7 +669,6 @@ model ApiKey {
   @@index([keyPrefix])
   @@index([userId, revokedAt, expiresAt])
   @@map("api_keys")
-  
 }
 
 // ==========================================
@@ -722,7 +688,6 @@ model EncryptionAuditLog {
   @@index([keyId])
   @@index([createdAt])
   @@map("audit_log")
-  
 }
 
 // ==========================================
@@ -743,3 +708,188 @@ model EncryptionAuditLog {
 //     }
 //   }
 // });
+
+// ==========================================
+// TRAIL EXECUTOR — OPERATIONAL COGNITION (op/*)
+// Agents, goals, trails, execution events, leases, observations
+// ==========================================
+
+/// Registered agents with role, model version, and skill manifest
+model OpAgent {
+  id            String   @id @default(uuid())
+  agent_id      String   @unique
+  role          String
+  model_version String
+  skills        Json     @default("[]")
+  status        String   @default("active") // active, idle, error
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
+
+  @@map("op_agents")
+}
+
+/// Goals assigned to agents, supporting hierarchical decomposition
+model OpGoal {
+  id             String   @id @default(uuid())
+  goal_text      String
+  context        Json     @default("{}")
+  priority       Int      @default(0)
+  agent_id       String
+  parent_goal_id String?
+  status         String   @default("open") // open, in_progress, resolved
+  created_at     DateTime @default(now())
+  updated_at     DateTime @updatedAt
+
+  @@map("op_goals")
+}
+
+/// Executable trails: weighted plans attached to a goal, with decay and confidence
+model OpTrail {
+  id                  String    @id @default(uuid())
+  goal_id             String
+  agent_id            String
+  status              String    @default("active") // active, blocked, decayed, archived
+  next_action         Json? // ActionRef: { tool, paramsTemplate, version }
+  steps               Json      @default("[]") // compact summary only
+  execution_event_ids Json      @default("[]")
+  success_score       Float     @default(0)
+  confidence          Float     @default(0)
+  weight              Float     @default(0.5)
+  decay_rate          Float     @default(0.05)
+  tags                Json      @default("[]")
+  created_at          DateTime  @default(now())
+  last_executed_at    DateTime?
+  updated_at          DateTime  @updatedAt
+
+  @@index([goal_id])
+  @@index([agent_id])
+  @@index([weight])
+  @@index([status])
+  @@map("op_trails")
+}
+
+/// Immutable execution events recording each step outcome
+model OpExecutionEvent {
+  id                 String   @id @default(uuid())
+  trail_id           String
+  agent_id           String
+  step_index         Int
+  action_name        String
+  bound_params       Json     @default("{}")
+  result             Json?
+  error              String?
+  latency_ms         Int
+  success            Boolean
+  tokens_used        Int?
+  estimated_cost_usd Float?
+  routing            Json? // RoutingDecision: { selectedTrailId, candidateTrailIds, forceVector, temperature, strategy }
+  timestamp          DateTime @default(now())
+  created_at         DateTime @default(now())
+
+  @@index([trail_id])
+  @@index([agent_id])
+  @@index([created_at])
+  @@map("op_execution_events")
+}
+
+/// Distributed lease for exclusive trail execution (prevents double-work)
+model OpTrailLease {
+  id           String   @id @default(uuid())
+  trail_id     String   @unique
+  agent_id     String
+  acquired_at  DateTime @default(now())
+  expires_at   DateTime
+  heartbeat_at DateTime @default(now())
+
+  @@index([trail_id])
+  @@index([expires_at])
+  @@map("op_trail_leases")
+}
+
+/// Agent observations: sensory inputs, inferences, environment signals
+model OpObservation {
+  id               String   @id @default(uuid())
+  agent_id         String
+  kind             String
+  content          Json
+  certainty        Float    @default(0.5)
+  source_event_id  String?
+  related_to_trail String?
+  timestamp        DateTime @default(now())
+
+  @@index([agent_id])
+  @@map("op_observations")
+}
+
+// ==========================================
+// TRAIL EXECUTOR — CONTROL & LEARNING (meta/*)
+// Evaluations, trail weights, reputation, promotions, decay schedules
+// ==========================================
+
+/// Post-execution evaluations by meta-evaluator agents
+model MetaEvaluation {
+  id                String   @id @default(uuid())
+  trail_id          String
+  evaluator_id      String
+  correctness_score Float
+  efficiency_score  Float
+  reasoning         String
+  confidence        Float
+  timestamp         DateTime @default(now())
+
+  @@index([trail_id])
+  @@map("meta_evaluations")
+}
+
+/// Materialized composite weight for each trail (precomputed for routing)
+model MetaTrailWeight {
+  trail_id      String   @id @unique
+  weight        Float
+  components    Json // { base_confidence, failure_penalty, agent_reputation_boost, novelty_discount, downstream_success_factor }
+  updated_at    DateTime @updatedAt
+  next_decay_at DateTime
+
+  @@map("meta_trail_weights")
+}
+
+/// Per-agent reputation scores for trust-weighted routing
+model MetaReputation {
+  agent_id        String   @id @unique
+  success_rate    Float    @default(0)
+  avg_confidence  Float    @default(0)
+  skill_scores    Json     @default("{}")
+  recent_attempts Int      @default(0)
+  updated_at      DateTime @updatedAt
+
+  @@map("meta_reputation")
+}
+
+/// Candidates for observation-to-memory promotion (gated pipeline)
+model MetaPromotionCandidate {
+  id                String    @id @default(uuid())
+  source_event_id   String
+  trail_id          String
+  promotion_rule_id String
+  observations      Json      @default("[]")
+  confidence        Float
+  status            String    @default("pending") // pending, approved, rejected, deferred
+  dedupe_key        String    @unique // idempotency: (source_event_id + promotion_rule_id + target_fact_kind)
+  created_at        DateTime  @default(now())
+  decided_at        DateTime?
+
+  @@index([status])
+  @@index([created_at])
+  @@map("meta_promotion_candidates")
+}
+
+/// Configurable decay schedules for trails and observations
+model MetaDecaySchedule {
+  id             String   @id @default(uuid())
+  target_type    String // trail, observation
+  half_life_days Int
+  min_weight     Float
+  applies_to     Json // { namespace, kind }
+  created_at     DateTime @default(now())
+
+  @@map("meta_decay_schedules")
+}

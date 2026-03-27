@@ -143,10 +143,21 @@ export class ChainMiner {
       }
 
       // 6. Create blueprint trail
+      // Look up existing raw trails to inherit paramsTemplate for each tool
+      const existingTrails = await this.store.getCandidateTrails(goalId);
+      const toolParamsMap = new Map();
+      for (const t of existingTrails) {
+        if (t.kind !== 'blueprint' && t.nextAction?.tool && t.nextAction.paramsTemplate) {
+          if (!toolParamsMap.has(t.nextAction.tool)) {
+            toolParamsMap.set(t.nextAction.tool, t.nextAction.paramsTemplate);
+          }
+        }
+      }
+
       const toolSequence = runs[0].toolSequence;
       const actionSequence = toolSequence.map(tool => ({
         tool,
-        paramsTemplate: {},
+        paramsTemplate: toolParamsMap.get(tool) || {},
       }));
 
       const blueprintTrail = {

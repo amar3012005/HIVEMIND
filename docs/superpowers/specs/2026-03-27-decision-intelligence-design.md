@@ -35,6 +35,8 @@ Decisions progress through two tiers:
   id: uuid,
   type: "decision_candidate" | "validated_decision",
   decision_key: string,            // canonical dedup key: hash(project + decision_type + normalized_statement)
+  // Normalization: lowercase, strip punctuation, collapse whitespace, no synonym expansion in V1
+  review_status: "unreviewed" | "confirmed" | "rejected",  // for medium-confidence human review
 
   // The decision itself
   decision_statement: "Use Redis for caching instead of Postgres",
@@ -100,7 +102,7 @@ Decisions progress through two tiers:
 
 | Condition | Result | State Reason |
 |-----------|--------|-------------|
-| LLM confidence ≥ 0.8 AND ≥ 2 evidence sources | Auto-validate | `cross_platform_corroborated` |
+| LLM confidence ≥ 0.8 AND ≥ 2 evidence sources (preferably from 2 distinct platforms) | Auto-validate | `cross_platform_corroborated` |
 | LLM confidence ≥ 0.6 AND 1 evidence source | Stay candidate | `single_source_only` |
 | LLM confidence < 0.6 | Discard or observation | `low_classifier_confidence` |
 | New evidence arrives for existing candidate | Re-evaluate, may promote | `cross_platform_corroborated` |
@@ -130,7 +132,7 @@ Output: { is_candidate: boolean, signals: string[], confidence: number, needs_mo
 |----------|---------|
 | Gmail | Phrases: "approved", "let's go with", "decided to", "we agreed". Reply-chain with resolution pattern. |
 | Slack | Phrases: "we're going with", "closing this", "final answer". Emoji reactions (checkmark, thumbsup). Thread resolution pattern. |
-| GitHub | Event types: PR merged, issue closed with comment, review approved, label "decision". Close/merge comments with rationale. |
+| GitHub | Event types: PR merged, issue closed with comment, review approved, label "decision". Close/merge comments with rationale. Note: merged PRs may indicate *implementation* of a prior decision rather than the decision itself — weight accordingly via relationship type. |
 
 #### `classify_decision`
 
@@ -339,6 +341,8 @@ A recall is correct **only if all three hold**:
 
 For each real decision: document the statement, rationale, evidence sources, participants.
 
+**Annotation blindness**: The person scoring recall results should ideally not be the same person who built the pipeline or phrased the recall prompts, to reduce confirmation bias.
+
 **Benchmark Steps:**
 
 1. **Detection test**: Feed all 50 through heuristic pipeline → measure recall, precision
@@ -373,7 +377,7 @@ Track via Dashboard:
 - Implement `detect_decision_candidate` (heuristic engine)
 - Implement `classify_decision` (Groq LLM wrapper)
 - Implement `link_evidence` (cross-platform search + graph traversal)
-- Implement `store_decision` (merge-on-key, promotion logic)
+- Implement `store_decision` (merge-on-key writer; promotion status computed upstream)
 - Implement `recall_decision` (multi-signal ranking)
 - Register all 5 tools in server.js
 

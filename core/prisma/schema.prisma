@@ -757,6 +757,8 @@ model OpTrail {
   weight              Float     @default(0.5)
   decay_rate          Float     @default(0.05)
   tags                Json      @default("[]")
+  kind                String    @default("raw") // raw, blueprint
+  blueprint_meta      Json? // BlueprintMeta object for kind="blueprint"
   created_at          DateTime  @default(now())
   last_executed_at    DateTime?
   updated_at          DateTime  @updatedAt
@@ -765,6 +767,7 @@ model OpTrail {
   @@index([agent_id])
   @@index([weight])
   @@index([status])
+  @@index([kind])
   @@map("op_trails")
 }
 

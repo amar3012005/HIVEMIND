@@ -120,6 +120,7 @@ const { LeaseManager } = await import('./executor/lease-manager.js');
 const { ChainMiner } = await import('./executor/chain-miner.js');
 const { WeightUpdater } = await import('./executor/weight-updater.js');
 const { PromotionMux } = await import('./executor/promotion-mux.js');
+const { ReputationEngine } = await import('./executor/reputation-engine.js');
 const { InMemoryStore } = await import('./executor/stores/in-memory-store.js');
 
 // Evaluation imports
@@ -317,6 +318,8 @@ try {
     }
   });
 
+  const reputationEngine = new ReputationEngine(executorStore);
+
   trailExecutor = new TrailExecutor({
     trailSelector,
     actionBinder,
@@ -325,6 +328,7 @@ try {
     leaseManager,
     weightUpdater,
     promotionMux,
+    reputationEngine,
     store: executorStore,
   });
   trailExecutor._store = executorStore;
@@ -339,6 +343,7 @@ try {
     autoActivate: true,
   });
   trailExecutor._chainMiner = chainMiner;
+  trailExecutor._reputationEngine = reputationEngine;
   console.log('[TrailExecutor] Cognitive runtime initialized',
     executorStore.constructor.name === 'PrismaStore' ? '(Prisma persistence)' : '(in-memory)');
 } catch (err) {
@@ -2339,6 +2344,42 @@ a{color:#a78bfa}</style></head><body>
         }
       }
 
+      // Dynamic route: /api/swarm/agents/:agent_id
+      if (pathname.startsWith('/api/swarm/agents/') && pathname !== '/api/swarm/agents') {
+        const agentId = decodeURIComponent(pathname.split('/api/swarm/agents/')[1]);
+        if (agentId && !agentId.includes('/')) {
+          if (req.method === 'GET') {
+            if (!trailExecutor) return jsonResponse(res, { error: 'Trail Executor unavailable' }, 503);
+            try {
+              const agent = await trailExecutor._store.getAgent(agentId);
+              if (!agent) return jsonResponse(res, { error: 'Agent not found' }, 404);
+              const reputation = trailExecutor._reputationEngine
+                ? await trailExecutor._reputationEngine.getReputation(agentId)
+                : null;
+              return jsonResponse(res, { agent, reputation });
+            } catch (error) {
+              return jsonResponse(res, { error: 'Get agent failed', message: error.message }, 500);
+            }
+          }
+          if (req.method === 'PATCH') {
+            if (!trailExecutor) return jsonResponse(res, { error: 'Trail Executor unavailable' }, 503);
+            try {
+              const agent = await trailExecutor._store.getAgent(agentId);
+              if (!agent) return jsonResponse(res, { error: 'Agent not found' }, 404);
+              const updates = {};
+              if (body.role) updates.role = body.role;
+              if (body.skills) updates.skills = body.skills;
+              if (body.status) updates.status = body.status;
+              if (body.model_version) updates.model_version = body.model_version;
+              const updated = await trailExecutor._store.updateAgent(agentId, updates);
+              return jsonResponse(res, { agent: updated });
+            } catch (error) {
+              return jsonResponse(res, { error: 'Update agent failed', message: error.message }, 500);
+            }
+          }
+        }
+      }
+
       switch (pathname) {
         case '/api/generate':
           if (req.method === 'POST') {
@@ -4171,10 +4212,21 @@ a{color:#a78bfa}</style></head><body>
 
         case '/api/swarm/executor/status':
           if (req.method === 'GET') {
+            let agentCounts = { total: 0, active: 0, idle: 0, suspended: 0 };
+            if (trailExecutor?._store?.listAgents) {
+              try {
+                const all = await trailExecutor._store.listAgents();
+                agentCounts.total = all.length;
+                agentCounts.active = all.filter(a => a.status === 'active').length;
+                agentCounts.idle = all.filter(a => a.status === 'idle').length;
+                agentCounts.suspended = all.filter(a => a.status === 'suspended').length;
+              } catch { /* non-fatal */ }
+            }
             return jsonResponse(res, {
               available: !!trailExecutor,
               store: trailExecutor?._store?.constructor?.name || 'none',
               tools: trailExecutor?._toolRegistry?.listTools()?.map(t => t.name) || [],
+              agents: agentCounts,
             });
           }
           break;
@@ -4223,6 +4275,46 @@ a{color:#a78bfa}</style></head><body>
               });
             } catch (error) {
               return jsonResponse(res, { error: 'List blueprints failed', message: error.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/swarm/agents':
+          if (req.method === 'POST') {
+            if (!trailExecutor) return jsonResponse(res, { error: 'Trail Executor unavailable' }, 503);
+            try {
+              if (!body.agent_id) return jsonResponse(res, { error: 'agent_id is required' }, 400);
+              const existing = await trailExecutor._store.getAgent(body.agent_id);
+              if (existing) return jsonResponse(res, { error: 'Agent already exists', agent: existing }, 409);
+              const agent = await trailExecutor._store.ensureAgent(body.agent_id, {
+                role: body.role || 'generalist',
+                model: body.model || '',
+                skills: body.skills || [],
+                source: 'explicit',
+              });
+              return jsonResponse(res, { agent }, 201);
+            } catch (error) {
+              return jsonResponse(res, { error: 'Register agent failed', message: error.message }, 500);
+            }
+          }
+          if (req.method === 'GET') {
+            if (!trailExecutor) return jsonResponse(res, { error: 'Trail Executor unavailable' }, 503);
+            try {
+              const url = new URL(req.url, `http://${req.headers.host}`);
+              const filters = {};
+              if (url.searchParams.get('role')) filters.role = url.searchParams.get('role');
+              if (url.searchParams.get('status')) filters.status = url.searchParams.get('status');
+              if (url.searchParams.get('source')) filters.source = url.searchParams.get('source');
+              const agents = await trailExecutor._store.listAgents(filters);
+              return jsonResponse(res, {
+                agents: agents.map(a => ({
+                  agent_id: a.agent_id, role: a.role, status: a.status,
+                  source: a.source, skills: a.skills, last_seen_at: a.last_seen_at,
+                })),
+                count: agents.length,
+              });
+            } catch (error) {
+              return jsonResponse(res, { error: 'List agents failed', message: error.message }, 500);
             }
           }
           break;

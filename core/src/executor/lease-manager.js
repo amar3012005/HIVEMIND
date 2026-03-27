@@ -56,6 +56,21 @@ export class LeaseManager {
   }
 
   /**
+   * Get lease info for a trail (used by TrailSelector for force computation).
+   *
+   * @param {string} trailId
+   * @returns {Promise<{ leased: boolean, agentId?: string }>}
+   */
+  async getLeaseInfo(trailId) {
+    if (this.store.getLeaseInfo) {
+      return this.store.getLeaseInfo(trailId);
+    }
+    // Fallback: use isLeased
+    const leased = await this.store.isLeased(trailId);
+    return { leased };
+  }
+
+  /**
    * Check whether a trail currently has an active (unexpired) lease.
    *
    * @param {string} trailId

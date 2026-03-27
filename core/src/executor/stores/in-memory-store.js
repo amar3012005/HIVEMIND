@@ -127,6 +127,15 @@ export class InMemoryStore {
     }
   }
 
+  /** Get lease info for a trail (used by TrailSelector for force computation). */
+  async getLeaseInfo(trailId) {
+    const lease = this.leases.get(trailId);
+    if (!lease || lease.expiresAt < Date.now()) {
+      return { leased: false };
+    }
+    return { leased: true, agentId: lease.agentId };
+  }
+
   /** Check whether a trail has an active (unexpired) lease. */
   async isLeased(trailId) {
     const lease = this.leases.get(trailId);

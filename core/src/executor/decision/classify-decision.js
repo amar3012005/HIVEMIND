@@ -22,7 +22,7 @@ ${content}
 
 DETECTION SIGNALS: ${(context.signals || []).join(', ')}
 ${context.thread_context ? `THREAD CONTEXT:\n${context.thread_context}` : ''}
-
+${context.thread_context ? `\nFull thread context (the trigger message is part of this conversation):\n${context.thread_context}\n\nIMPORTANT: The decision may be spread across multiple messages in this thread. Extract the complete decision, rationale, and participants from the ENTIRE thread, not just the trigger message.\n` : ''}
 Respond with ONLY a JSON object (no markdown, no explanation):
 {
   "is_decision": true/false,

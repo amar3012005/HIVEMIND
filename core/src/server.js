@@ -138,6 +138,7 @@ const { linkEvidence } = await import('./executor/decision/link-evidence.js');
 const { storeDecision } = await import('./executor/decision/store-decision.js');
 const { recallDecision } = await import('./executor/decision/recall-decision.js');
 const { generateDecisionKey } = await import('./executor/decision/decision-key.js');
+const { checkMerge } = await import('./executor/decision/merge-check.js');
 
 const CLIENT_HTML_CANDIDATES = [
   path.join(REPO_ROOT, 'client.html'),
@@ -407,23 +408,50 @@ try {
       params.decision_type || 'choice',
       params.decision_statement,
     );
-    return storeDecision({
-      decision_object: {
-        decision_key: dKey,
-        decision_statement: params.decision_statement,
-        decision_type: params.decision_type || 'choice',
-        rationale: params.rationale,
-        alternatives_rejected: params.alternatives_rejected || [],
-        participants: params.participants || [],
-        evidence: params.evidence || { supporting: [], conflicting: [] },
-        confidence: params.confidence || 0.5,
-        evidence_strength: params.evidence_strength || 0,
-        source_platform: params.source_platform || 'unknown',
-        tags: params.tags || [],
-        scope: params.scope,
-        detected_at: new Date().toISOString(),
-      },
-    }, persistentMemoryStore);
+    const decisionObject = {
+      decision_key: dKey,
+      decision_statement: params.decision_statement,
+      decision_type: params.decision_type || 'choice',
+      rationale: params.rationale,
+      alternatives_rejected: params.alternatives_rejected || [],
+      participants: params.participants || [],
+      evidence: params.evidence || { supporting: [], conflicting: [] },
+      confidence: params.confidence || 0.5,
+      evidence_strength: params.evidence_strength || 0,
+      source_platform: params.source_platform || 'unknown',
+      tags: params.tags || [],
+      scope: params.scope,
+      detected_at: new Date().toISOString(),
+    };
+
+    // LLM-based cross-platform merge check
+    if (groqClient?.isAvailable() && persistentMemoryStore && decisionObject.decision_statement) {
+      try {
+        const existingMemories = await persistentMemoryStore.searchMemories({
+          query: decisionObject.decision_statement,
+          memory_type: 'decision',
+          n_results: 10,
+        });
+        const existingDecisions = existingMemories
+          .filter(m => m.metadata?.decision_statement)
+          .map(m => ({ id: m.id, decision_statement: m.metadata.decision_statement, scope: m.metadata?.scope }));
+
+        if (existingDecisions.length > 0) {
+          const mergeResult = await checkMerge(
+            decisionObject.decision_statement,
+            existingDecisions,
+            groqClient
+          );
+          if (mergeResult.is_same_decision && mergeResult.matches_id) {
+            decisionObject._mergeTargetId = mergeResult.matches_id;
+            decisionObject._mergeRelationship = mergeResult.relationship;
+            decisionObject._mergeConfidence = mergeResult.confidence;
+          }
+        }
+      } catch { /* merge check is best-effort */ }
+    }
+
+    return storeDecision({ decision_object: decisionObject }, persistentMemoryStore);
   });
 
   trailToolRunner.register('recall_decision', async (params) => {

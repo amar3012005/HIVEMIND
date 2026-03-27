@@ -1,0 +1,531 @@
+{
+  "version": "1.0.0",
+  "description": "Decision Intelligence ground truth dataset — 50 items across Gmail, Slack, GitHub platforms",
+  "created": "2026-03-27",
+  "items": [
+    {
+      "id": "gt-001",
+      "content": "After reviewing all three proposals, we decided to go with the microservices architecture. The monolith approach won't scale for our needs.",
+      "platform": "slack",
+      "metadata": {},
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "choice",
+        "decision_statement": "Chose microservices architecture over monolith",
+        "recall_question": "What architecture did we decide on?"
+      }
+    },
+    {
+      "id": "gt-002",
+      "content": "Let's go with PostgreSQL for the primary datastore. We evaluated DynamoDB and MongoDB but Postgres gives us the relational guarantees we need.",
+      "platform": "slack",
+      "metadata": {},
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "choice",
+        "decision_statement": "Selected PostgreSQL as primary datastore over DynamoDB and MongoDB",
+        "recall_question": "Which database did we choose for the primary datastore?"
+      }
+    },
+    {
+      "id": "gt-003",
+      "content": "Approved the Q2 budget for the infrastructure team. Total allocation: $450K.",
+      "platform": "gmail",
+      "metadata": {},
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "approval",
+        "decision_statement": "Approved Q2 infrastructure budget at $450K",
+        "recall_question": "Was the Q2 infrastructure budget approved?"
+      }
+    },
+    {
+      "id": "gt-004",
+      "content": "Hey team, the standup is moving to 10am starting next week. Please update your calendars.",
+      "platform": "slack",
+      "metadata": {},
+      "label": "non_decision",
+      "ground_truth": null
+    },
+    {
+      "id": "gt-005",
+      "content": "I merged the authentication refactor PR. All tests pass and it's been reviewed by two team members.",
+      "platform": "github",
+      "metadata": { "eventType": "pull_request.merged" },
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "resolution",
+        "decision_statement": "Merged authentication refactor after two reviews",
+        "recall_question": "What happened with the authentication refactor PR?"
+      }
+    },
+    {
+      "id": "gt-006",
+      "content": "What do you think about using Redis for caching? Should we consider Memcached instead?",
+      "platform": "slack",
+      "metadata": {},
+      "label": "non_decision",
+      "ground_truth": null
+    },
+    {
+      "id": "gt-007",
+      "content": "We agreed to prioritize the mobile app over the desktop client for Q3. Mobile has 3x the user demand.",
+      "platform": "slack",
+      "metadata": {},
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "priority",
+        "decision_statement": "Prioritized mobile app over desktop client for Q3",
+        "recall_question": "What did we prioritize for Q3, mobile or desktop?"
+      }
+    },
+    {
+      "id": "gt-008",
+      "content": "Just pushed a small typo fix to the README. No review needed.",
+      "platform": "github",
+      "metadata": {},
+      "label": "non_decision",
+      "ground_truth": null
+    },
+    {
+      "id": "gt-009",
+      "content": "I'll handle the deployment pipeline migration. Assigned to me starting Monday.",
+      "platform": "slack",
+      "metadata": {},
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "assignment",
+        "decision_statement": "Deployment pipeline migration assigned to team member",
+        "recall_question": "Who is handling the deployment pipeline migration?"
+      }
+    },
+    {
+      "id": "gt-010",
+      "content": "Closing this issue in favor of #234 which covers the same scope with a better approach.",
+      "platform": "github",
+      "metadata": { "eventType": "issues.closed" },
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "resolution",
+        "decision_statement": "Closed issue in favor of #234 as better approach",
+        "recall_question": "Why was the original issue closed?"
+      }
+    },
+    {
+      "id": "gt-011",
+      "content": "Meeting notes from the all-hands: company picnic is June 15th, new parking policy starts May 1st.",
+      "platform": "gmail",
+      "metadata": {},
+      "label": "non_decision",
+      "ground_truth": null
+    },
+    {
+      "id": "gt-012",
+      "content": "We're rejecting the vendor proposal from Acme Corp. Their pricing doesn't align with our budget constraints.",
+      "platform": "gmail",
+      "metadata": {},
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "rejection",
+        "decision_statement": "Rejected Acme Corp vendor proposal due to pricing",
+        "recall_question": "Did we accept or reject the Acme Corp proposal?"
+      }
+    },
+    {
+      "id": "gt-013",
+      "content": "LGTM, please proceed with the deployment to staging. We can monitor over the weekend.",
+      "platform": "gmail",
+      "metadata": {},
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "approval",
+        "decision_statement": "Approved staging deployment with weekend monitoring",
+        "recall_question": "Was the staging deployment approved?"
+      }
+    },
+    {
+      "id": "gt-014",
+      "content": "Maybe we should consider using GraphQL? I'm not sure if REST is the best choice here.",
+      "platform": "slack",
+      "metadata": {},
+      "label": "non_decision",
+      "ground_truth": null
+    },
+    {
+      "id": "gt-015",
+      "content": "We picked TypeScript for the new backend service. The type safety will help with the complex domain model.",
+      "platform": "slack",
+      "metadata": {},
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "choice",
+        "decision_statement": "Chose TypeScript for new backend service",
+        "recall_question": "What language did we pick for the new backend service?"
+      }
+    },
+    {
+      "id": "gt-016",
+      "content": "Consensus reached: we'll use Terraform for infrastructure-as-code instead of Pulumi.",
+      "platform": "slack",
+      "metadata": {},
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "choice",
+        "decision_statement": "Chose Terraform over Pulumi for infrastructure-as-code",
+        "recall_question": "Which IaC tool did we select, Terraform or Pulumi?"
+      }
+    },
+    {
+      "id": "gt-017",
+      "content": "Here's the weekly metrics report. DAU is up 12%, retention steady at 45%.",
+      "platform": "gmail",
+      "metadata": {},
+      "label": "non_decision",
+      "ground_truth": null
+    },
+    {
+      "id": "gt-018",
+      "content": "Shipping the feature flag system today. It's been tested in staging for a week with no issues.",
+      "platform": "slack",
+      "metadata": {},
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "approval",
+        "decision_statement": "Approved shipping feature flag system to production",
+        "recall_question": "When did we ship the feature flag system?"
+      }
+    },
+    {
+      "id": "gt-019",
+      "content": "PR review: the code looks clean but I have some concerns about the error handling. See inline comments.",
+      "platform": "github",
+      "metadata": { "eventType": "pull_request_review.submitted" },
+      "label": "ambiguous",
+      "ground_truth": null
+    },
+    {
+      "id": "gt-020",
+      "content": "Final answer: we're going with AWS over GCP. The enterprise support contract is better and half the team already has AWS experience.",
+      "platform": "slack",
+      "metadata": {},
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "choice",
+        "decision_statement": "Selected AWS over GCP for cloud provider",
+        "recall_question": "Which cloud provider did we choose, AWS or GCP?"
+      }
+    },
+    {
+      "id": "gt-021",
+      "content": "I'm thinking about maybe switching to Vite for the build system. Could be faster, probably worth exploring.",
+      "platform": "slack",
+      "metadata": {},
+      "label": "non_decision",
+      "ground_truth": null
+    },
+    {
+      "id": "gt-022",
+      "content": "Deprioritizing the admin dashboard redesign. Customer-facing features take precedence this quarter.",
+      "platform": "slack",
+      "metadata": {},
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "priority",
+        "decision_statement": "Deprioritized admin dashboard redesign in favor of customer-facing features",
+        "recall_question": "What happened with the admin dashboard redesign?"
+      }
+    },
+    {
+      "id": "gt-023",
+      "content": "Resolved the memory leak issue in the worker pool. Root cause was unclosed database connections.",
+      "platform": "github",
+      "metadata": {},
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "resolution",
+        "decision_statement": "Resolved worker pool memory leak caused by unclosed DB connections",
+        "recall_question": "What caused the memory leak in the worker pool?"
+      }
+    },
+    {
+      "id": "gt-024",
+      "content": "Can someone take a look at the failing CI pipeline? I think it's a flaky test but not sure.",
+      "platform": "slack",
+      "metadata": {},
+      "label": "non_decision",
+      "ground_truth": null
+    },
+    {
+      "id": "gt-025",
+      "content": "Going ahead with the sign off on the SOC2 compliance documentation. All sections reviewed and approved.",
+      "platform": "gmail",
+      "metadata": {},
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "approval",
+        "decision_statement": "Signed off on SOC2 compliance documentation",
+        "recall_question": "Was the SOC2 compliance documentation approved?"
+      }
+    },
+    {
+      "id": "gt-026",
+      "content": "Rolling out the new onboarding flow to 50% of users. A/B test results were significantly positive.",
+      "platform": "slack",
+      "metadata": {},
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "choice",
+        "decision_statement": "Rolling out new onboarding flow to 50% of users based on positive A/B results",
+        "recall_question": "What percentage of users got the new onboarding flow?"
+      }
+    },
+    {
+      "id": "gt-027",
+      "content": "Reminder: please submit your expense reports by end of week.",
+      "platform": "gmail",
+      "metadata": {},
+      "label": "non_decision",
+      "ground_truth": null
+    },
+    {
+      "id": "gt-028",
+      "content": "We went with React Query over SWR for data fetching. The devtools and mutation handling are more mature.",
+      "platform": "slack",
+      "metadata": {},
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "choice",
+        "decision_statement": "Chose React Query over SWR for data fetching",
+        "recall_question": "Which data fetching library did we choose?"
+      }
+    },
+    {
+      "id": "gt-029",
+      "content": "Should we add rate limiting to the public API? Any thoughts on what the limits should be?",
+      "platform": "slack",
+      "metadata": {},
+      "label": "non_decision",
+      "ground_truth": null
+    },
+    {
+      "id": "gt-030",
+      "content": "I'm taking ownership of the API versioning strategy. Will present a proposal next sprint.",
+      "platform": "slack",
+      "metadata": {},
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "assignment",
+        "decision_statement": "Team member took ownership of API versioning strategy",
+        "recall_question": "Who is responsible for the API versioning strategy?"
+      }
+    },
+    {
+      "id": "gt-031",
+      "content": "Declining the partnership offer from DataCorp. Their data practices don't meet our privacy standards.",
+      "platform": "gmail",
+      "metadata": {},
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "rejection",
+        "decision_statement": "Declined DataCorp partnership due to privacy concerns",
+        "recall_question": "Why did we decline the DataCorp partnership?"
+      }
+    },
+    {
+      "id": "gt-032",
+      "content": "The sprint retro went well. Team morale is high and velocity improved by 15%.",
+      "platform": "slack",
+      "metadata": {},
+      "label": "non_decision",
+      "ground_truth": null
+    },
+    {
+      "id": "gt-033",
+      "content": "Merged the payment gateway integration. Stripe is now our primary processor, replacing Braintree.",
+      "platform": "github",
+      "metadata": { "eventType": "pull_request.merged" },
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "resolution",
+        "decision_statement": "Merged payment gateway integration switching from Braintree to Stripe",
+        "recall_question": "Which payment processor did we switch to?"
+      }
+    },
+    {
+      "id": "gt-034",
+      "content": "Let's move forward with the Figma-to-code workflow. Design team is already onboarded.",
+      "platform": "slack",
+      "metadata": {},
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "approval",
+        "decision_statement": "Approved Figma-to-code workflow adoption",
+        "recall_question": "Did we adopt the Figma-to-code workflow?"
+      }
+    },
+    {
+      "id": "gt-035",
+      "content": "FYI the office will be closed next Friday for maintenance. Work from home that day.",
+      "platform": "gmail",
+      "metadata": {},
+      "label": "non_decision",
+      "ground_truth": null
+    },
+    {
+      "id": "gt-036",
+      "content": "Opting for Datadog over New Relic for observability. The Kubernetes integration is significantly better.",
+      "platform": "slack",
+      "metadata": {},
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "choice",
+        "decision_statement": "Chose Datadog over New Relic for observability",
+        "recall_question": "Which observability platform did we select?"
+      }
+    },
+    {
+      "id": "gt-037",
+      "content": "Perhaps we could look at Rust for the performance-critical paths? Not sure if the learning curve is worth it though.",
+      "platform": "slack",
+      "metadata": {},
+      "label": "non_decision",
+      "ground_truth": null
+    },
+    {
+      "id": "gt-038",
+      "content": "Deploying the new search indexer to production tonight. All integration tests green.",
+      "platform": "slack",
+      "metadata": {},
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "approval",
+        "decision_statement": "Approved production deployment of new search indexer",
+        "recall_question": "When was the search indexer deployed to production?"
+      }
+    },
+    {
+      "id": "gt-039",
+      "content": "Closed this PR. The approach is too invasive — let's try incremental refactoring instead.",
+      "platform": "github",
+      "metadata": { "eventType": "pull_request.closed" },
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "rejection",
+        "decision_statement": "Closed PR in favor of incremental refactoring approach",
+        "recall_question": "Why was the refactoring PR closed?"
+      }
+    },
+    {
+      "id": "gt-040",
+      "content": "Updated the CI config to use Node 20. No functional changes.",
+      "platform": "github",
+      "metadata": {},
+      "label": "non_decision",
+      "ground_truth": null
+    },
+    {
+      "id": "gt-041",
+      "content": "We selected Jest over Mocha for the test framework. The snapshot testing and mocking capabilities sealed it.",
+      "platform": "slack",
+      "metadata": {},
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "choice",
+        "decision_statement": "Selected Jest over Mocha for test framework",
+        "recall_question": "Which test framework did we choose?"
+      }
+    },
+    {
+      "id": "gt-042",
+      "content": "The new hire starts next Monday. Please make sure their dev environment is set up.",
+      "platform": "slack",
+      "metadata": {},
+      "label": "non_decision",
+      "ground_truth": null
+    },
+    {
+      "id": "gt-043",
+      "content": "Assigned to Sarah — she'll lead the security audit across all services.",
+      "platform": "slack",
+      "metadata": {},
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "assignment",
+        "decision_statement": "Sarah assigned to lead security audit across all services",
+        "recall_question": "Who is leading the security audit?"
+      }
+    },
+    {
+      "id": "gt-044",
+      "content": "We might want to consider adding WebSocket support. It could improve real-time features, but I'm not sure about the infrastructure cost.",
+      "platform": "slack",
+      "metadata": {},
+      "label": "non_decision",
+      "ground_truth": null
+    },
+    {
+      "id": "gt-045",
+      "content": "Go ahead and proceed with the database migration. The rollback plan is solid.",
+      "platform": "gmail",
+      "metadata": {},
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "approval",
+        "decision_statement": "Approved database migration with rollback plan",
+        "recall_question": "Was the database migration approved?"
+      }
+    },
+    {
+      "id": "gt-046",
+      "content": "Merging the accessibility improvements. WCAG 2.1 AA compliance is now met across all pages.",
+      "platform": "github",
+      "metadata": { "eventType": "pull_request.merged" },
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "resolution",
+        "decision_statement": "Merged accessibility improvements achieving WCAG 2.1 AA compliance",
+        "recall_question": "Did we achieve WCAG 2.1 AA compliance?"
+      }
+    },
+    {
+      "id": "gt-047",
+      "content": "Not going with the outsourced QA team. We'll build testing capabilities in-house instead.",
+      "platform": "slack",
+      "metadata": {},
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "rejection",
+        "decision_statement": "Rejected outsourced QA in favor of building in-house testing capabilities",
+        "recall_question": "Did we go with outsourced QA or in-house?"
+      }
+    },
+    {
+      "id": "gt-048",
+      "content": "Interesting article on distributed systems: https://example.com/dist-systems. Worth a read for the team.",
+      "platform": "slack",
+      "metadata": {},
+      "label": "non_decision",
+      "ground_truth": null
+    },
+    {
+      "id": "gt-049",
+      "content": "The design review looks good overall. I think we could improve the color contrast but it's a minor thing.",
+      "platform": "slack",
+      "metadata": {},
+      "label": "ambiguous",
+      "ground_truth": null
+    },
+    {
+      "id": "gt-050",
+      "content": "Prioritizing the API rate limiter over the webhook system. Customer complaints about abuse are increasing.",
+      "platform": "slack",
+      "metadata": {},
+      "label": "decision",
+      "ground_truth": {
+        "decision_type": "priority",
+        "decision_statement": "Prioritized API rate limiter over webhook system due to abuse complaints",
+        "recall_question": "What did we prioritize, the rate limiter or webhook system?"
+      }
+    }
+  ]
+}

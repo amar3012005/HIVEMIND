@@ -20,7 +20,7 @@ export const PLANS = {
     },
     features: {
       webIntelligence: false,
-      agentSwarm: false,
+      agentSwarm: true,
       mcpProtocol: true,
       graphVisualization: true,
       llmObserver: false, // heuristic only
@@ -47,7 +47,7 @@ export const PLANS = {
     },
     features: {
       webIntelligence: true,
-      agentSwarm: false,
+      agentSwarm: true,
       mcpProtocol: true,
       graphVisualization: true,
       llmObserver: true,

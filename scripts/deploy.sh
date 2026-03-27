@@ -50,7 +50,7 @@ start_core() {
     -e "REDIS_URL=redis://:redis_secure_vault_7711@${COOLIFY_REDIS}:6379/0" \
     -e "HIVEMIND_ALLOWED_ORIGINS=https://hivemind.davinciai.eu" \
     node:20 \
-    sh -c "npx prisma generate 2>/dev/null; node src/server.js"
+    sh -c "npx prisma generate 2>/dev/null; npx prisma migrate deploy 2>&1 || echo '[migrate] skipped'; node src/server.js"
 
   log "Waiting for health..."
   for i in $(seq 1 30); do
@@ -105,6 +105,7 @@ verify() {
   check "Domain Policy"   "$B/api/web/policy/check-domain" POST '{"url":"https://example.com"}'
   check "Web Search"      "$B/api/web/search/jobs" POST '{"query":"test"}'
   check "Eval Results"    "$B/api/evaluate/results"
+  check "Executor Status" "$B/api/swarm/executor/status"
   echo ""
   log "Results: ${GREEN}$pass passed${NC}, ${RED}$fail failed${NC}"
 }

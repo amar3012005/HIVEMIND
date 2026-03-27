@@ -224,19 +224,44 @@ meta/decay_schedules/{id}
 
 ### 2. Core Components
 
-#### **TrailSelector**
+#### **TrailSelector (with ForceRouter)**
 ```typescript
-async selectBest(
+async selectNext(
   goal: string,
   context: WorkingMemory,
   agentId: string
 ): Promise<Trail>
 ```
-- Queries `op/trails` for goal-relevant trails
-- Ranks by `meta/trails_weights`
-- Applies agent reputation weighting
-- **Does NOT select**: trails with active leases (LeaseManager.isLeased())
-- Returns highest-weight available trail
+- Queries `op/trails` for goal-relevant candidate trails
+- Computes **force vector** per candidate (not just weight):
+  - `F_goal` — semantic similarity + historical success for this goal type
+  - `F_affordance` — executable now? params bindable? permissions valid?
+  - `F_conflict` — contradicts canonical knowledge? recent failures? evaluator flags?
+  - `F_congestion` — active leases? queue depth? recently over-executed?
+  - `F_cost` — estimated token cost, latency, API cost
+  - (V2) `F_social` — swarm success, trusted agent usage, consensus strength
+  - (V2) `F_momentum` — path continuity with agent's recent trail history
+- `F_net = F_goal + F_affordance - F_conflict - F_congestion - F_cost`
+- Applies **softmax sampling** (not argmax) with configurable temperature
+- Returns selected trail (probabilistic, not deterministic)
+
+**Force inputs by namespace:**
+- `kg/*` → canonical constraints, factual consistency, semantic similarity
+- `op/*` → active trails, leases, execution events, queue depth, recent outcomes
+- `meta/*` → agent reputation, evaluator confidence, cost history, exploration penalty
+
+```typescript
+type ForceVector = {
+  goalAttraction: number
+  affordanceAttraction: number
+  conflictRepulsion: number
+  congestionRepulsion: number
+  costRepulsion: number
+  socialAttraction: number    // V2
+  momentum: number            // V2
+  net: number
+}
+```
 
 #### **ActionBinder**
 ```typescript
@@ -380,13 +405,14 @@ class TrailExecutor {
     // PHASE 2: Execution Loop
     while (step < config.maxSteps && !workingMemory.isDone()) {
 
-      // A. SELECT: Pick best available trail
-      const trail = await trailSelector.selectBest(
+      // A. SELECT: Force-routed trail selection (softmax, not argmax)
+      const selection = await trailSelector.selectNext(
         goal,
         workingMemory.context,
         agentId
       )
-      if (!trail) break
+      if (!selection) break
+      const { trail, forces, alternatives } = selection
 
       // B. ACQUIRE LEASE (Concurrency Control) ⭐
       const lease = await leaseManager.acquireLease(
@@ -435,7 +461,7 @@ class TrailExecutor {
       }
       const latency = performance.now() - startTime
 
-      // F. WRITE EXECUTION EVENT (Canonical)
+      // F. WRITE EXECUTION EVENT (Canonical + Routing Explainability)
       const event: ExecutionEvent = {
         id: uuid(),
         trail_id: trail.id,
@@ -447,7 +473,13 @@ class TrailExecutor {
         error: error ? error.message : null,
         latency_ms: latency,
         success: !error,
-        timestamp: now()
+        timestamp: now(),
+        routing: {                          // ← Force vector for explainability
+          selected_trail_id: trail.id,
+          alternatives_considered: alternatives.map(a => a.trail.id),
+          force_vector: forces,
+          temperature: config.selectionTemperature
+        }
       }
       await graphStore.writeEvent(event)  // → op/execution_events
       events.push(event)
@@ -774,7 +806,15 @@ meta/agent_capabilities/{agent_id}
 
 ---
 
-### **GAP C: Force-Driven Routing** ⏳ (After Gap B)
+### **GAP C: Force-Driven Routing** ✅ COLLAPSED INTO GAP A
+
+**Key Insight**: The Social Force Model is not a separate phase. It is the routing mechanism inside `TrailSelector` from day one. ForceRouter sits inside trail selection, computing `F_net = F_goal + F_affordance + F_social - F_conflict - F_congestion - F_cost` per candidate, then applying softmax sampling.
+
+**V1 (ships with Gap A)**: goal attraction, affordance attraction, conflict repulsion, congestion repulsion, cost repulsion
+**V2 (ships with Gap B)**: social attraction (swarm pheromones), momentum (path continuity)
+**V3 (ships with Gap D)**: learned force weights, per-agent adaptive calibration
+
+**Original section preserved for reference:**
 
 **What it unblocks**: Autonomous coordination without hard-coded logic
 
@@ -926,17 +966,17 @@ MetaAgent loop:
 
 ---
 
-## **Dependency Graph**
+## **Dependency Graph (Updated)**
 
 ```
-  [GAP A: Execution] (Foundation)
+  [GAP A: Execution + Force Routing V1] (Foundation + Adaptive Routing)
          ↓
-         └──→ [GAP B: Identity] (Agents become first-class)
+         └──→ [GAP B: Identity + Force Routing V2] (Social forces + Momentum)
                     ↓
-                    └──→ [GAP C: Force Routing] (Autonomous coordination)
-                               ↓
-                               └──→ [GAP D: Meta-Loop] (Self-evolution)
+                    └──→ [GAP D: Meta-Loop + Force Routing V3] (Learned weights)
 ```
+
+**Key Change**: Gap C collapsed into Gap A. Social Force Model is the routing mechanism inside TrailSelector, not a separate system. Force terms graduate across phases (V1 → V2 → V3).
 
 **Key Rule**: Each gap builds on the previous. Skipping a gap creates problems.
 

@@ -1,0 +1,44 @@
+{
+  "timestamp": "2026-03-27T21:09:21.083Z",
+  "condition": "CSI + P0 LLM (recall reranking, update detection, memory summarization)",
+  "total": 500,
+  "correct": 142,
+  "accuracy": 0.284,
+  "byType": {
+    "temporal-reasoning": {
+      "accuracy": 0.3609022556390977,
+      "correct": 48,
+      "total": 133
+    },
+    "multi-session": {
+      "accuracy": 0.09774436090225563,
+      "correct": 13,
+      "total": 133
+    },
+    "knowledge-update": {
+      "accuracy": 0.3974358974358974,
+      "correct": 31,
+      "total": 78
+    },
+    "single-session-preference": {
+      "accuracy": 0.3,
+      "correct": 9,
+      "total": 30
+    },
+    "single-session-assistant": {
+      "accuracy": 0.3392857142857143,
+      "correct": 19,
+      "total": 56
+    },
+    "single-session-user": {
+      "accuracy": 0.3142857142857143,
+      "correct": 22,
+      "total": 70
+    }
+  },
+  "abstention": {
+    "correct": 0,
+    "total": 30
+  },
+  "elapsed_seconds": 0.1
+}

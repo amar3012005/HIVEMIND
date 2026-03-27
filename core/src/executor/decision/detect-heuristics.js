@@ -13,22 +13,24 @@
 const DECISION_PHRASES = {
   common: [
     /\b(decided|decision|i decided|we decided|we('re| are) going with|going with|let('s|us) (go with|proceed|move forward))\b/i,
-    /\b(approved|approval|we agreed|agreed|consensus|final answer|resolved)\b/i,
-    /\b(chosen|chose|picked|selected|went with|opting for)\b/i,
+    /\b(approved|approving|approval|we agreed|agreed|consensus|final answer|resolved)\b/i,
+    /\b(chosen|chose|picked|selected|went with|opting for|we should go with|should go with)\b/i,
     /\b(accepted|accepting|declined|declining|rejected|rejecting|not going with|closing in favor)\b/i,
-    /\b(prioritiz(e|ed|ing)|deprioritiz(e|ed|ing))\b/i,
-    /\b(assigned|assigned to|taking ownership|i('ll| will) handle)\b/i,
+    /\b(prioritiz(e|ed|ing)|deprioritiz(e|ed|ing)|bump(ed|ing)? to p[0-3]|now p[0-3])\b/i,
+    /\b(assigned|assigned to|taking ownership|i('ll| will) handle|can you own)\b/i,
     /\b(i('m| am) going with|switching to|migrating to|moving to)\b/i,
     /\b(i like .+ more|prefer .+ over|better than)\b/i,
+    /\b(deferred|postponed|tabled|revisit|overrid(e|ing|den))\b/i,
+    /\b(confirmed|supersede(s|d)?|rollout complete|is live|shipped)\b/i,
   ],
   gmail: [
     /\b(please proceed|go ahead|sign(ed)? off|lgtm)\b/i,
   ],
   slack: [
-    /\b(shipping|merging|deploying|rolling out)\b/i,
+    /\b(shipping|merging|deploying|rolling out|great call)\b/i,
   ],
   github: [
-    /\b(merged|closed|resolved|fixed)\b/i,
+    /\b(merged|closed|resolved|fixed|ticket created)\b/i,
   ],
 };
 

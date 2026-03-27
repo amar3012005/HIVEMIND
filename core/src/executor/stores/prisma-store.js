@@ -337,6 +337,113 @@ export class PrismaStore {
       .slice(0, limit);
   }
 
+  // ─── Agent Methods ──────────────────────────────────────────────────────────
+
+  async ensureAgent(agentId, defaults = {}) {
+    const existing = await this.prisma.opAgent.findFirst({ where: { agent_id: agentId } });
+    if (existing) return this._mapAgentRow(existing);
+    const created = await this.prisma.opAgent.create({
+      data: {
+        agent_id: agentId,
+        role: defaults.role || 'generalist',
+        model_version: defaults.model || '',
+        skills: defaults.skills || [],
+        status: 'active',
+        source: defaults.source || 'implicit',
+      },
+    });
+    return this._mapAgentRow(created);
+  }
+
+  async getAgent(agentId) {
+    const row = await this.prisma.opAgent.findFirst({ where: { agent_id: agentId } });
+    return row ? this._mapAgentRow(row) : null;
+  }
+
+  async listAgents(filters = {}) {
+    const where = {};
+    if (filters.role) where.role = filters.role;
+    if (filters.status) where.status = filters.status;
+    if (filters.source) where.source = filters.source;
+    const rows = await this.prisma.opAgent.findMany({ where, orderBy: { created_at: 'desc' } });
+    return rows.map(r => this._mapAgentRow(r));
+  }
+
+  async updateAgent(agentId, updates) {
+    const data = {};
+    if (updates.role) data.role = updates.role;
+    if (updates.skills) data.skills = updates.skills;
+    if (updates.status) data.status = updates.status;
+    if (updates.model_version) data.model_version = updates.model_version;
+    try {
+      const row = await this.prisma.opAgent.update({ where: { agent_id: agentId }, data });
+      return this._mapAgentRow(row);
+    } catch { return null; }
+  }
+
+  async updateAgentLastSeen(agentId) {
+    try {
+      await this.prisma.opAgent.update({ where: { agent_id: agentId }, data: { last_seen_at: new Date() } });
+    } catch { /* agent may not exist */ }
+  }
+
+  _mapAgentRow(row) {
+    return {
+      id: row.id,
+      agent_id: row.agent_id,
+      role: row.role,
+      model_version: row.model_version,
+      skills: Array.isArray(row.skills) ? row.skills : JSON.parse(row.skills || '[]'),
+      status: row.status,
+      source: row.source || 'implicit',
+      last_seen_at: row.last_seen_at?.toISOString?.() || row.last_seen_at,
+      created_at: row.created_at?.toISOString?.() || row.created_at,
+      updated_at: row.updated_at?.toISOString?.() || row.updated_at,
+    };
+  }
+
+  // ─── Reputation Methods (enhanced) ──────────────────────────────────────────
+
+  async getReputation(agentId) {
+    const row = await this.prisma.metaReputation.findUnique({ where: { agent_id: agentId } });
+    if (!row) return null;
+    const scores = row.skill_scores || {};
+    return {
+      agent_id: row.agent_id,
+      success_rate: row.success_rate,
+      avg_confidence: row.avg_confidence,
+      skill_scores: scores.skill_scores || scores,
+      blueprint_scores: scores.blueprint_scores || {},
+      specialization_confidence: scores.specialization_confidence || { explorer: 0, operator: 0, evaluator: 0 },
+      recent_attempts: row.recent_attempts,
+      updated_at: row.updated_at?.toISOString?.() || row.updated_at,
+    };
+  }
+
+  async updateReputation(agentId, rep) {
+    const skillScoresPayload = {
+      skill_scores: rep.skill_scores || {},
+      blueprint_scores: rep.blueprint_scores || {},
+      specialization_confidence: rep.specialization_confidence || {},
+    };
+    await this.prisma.metaReputation.upsert({
+      where: { agent_id: agentId },
+      create: {
+        agent_id: agentId,
+        success_rate: rep.success_rate ?? 0.5,
+        avg_confidence: rep.avg_confidence ?? 0.5,
+        skill_scores: skillScoresPayload,
+        recent_attempts: rep.recent_attempts ?? 0,
+      },
+      update: {
+        success_rate: rep.success_rate ?? 0.5,
+        avg_confidence: rep.avg_confidence ?? 0.5,
+        skill_scores: skillScoresPayload,
+        recent_attempts: rep.recent_attempts ?? 0,
+      },
+    });
+  }
+
   // ─── Observation Methods ────────────────────────────────────────────────
 
   /** Write an observation to op_observations. */

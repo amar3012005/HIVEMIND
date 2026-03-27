@@ -199,6 +199,72 @@ export class InMemoryStore {
     return this.chainRuns.filter(r => r.goalId === goalId).slice(-limit);
   }
 
+  // ─── Agent Methods ──────────────────────────────────────────────────────────
+
+  async ensureAgent(agentId, defaults = {}) {
+    if (!this._agents) this._agents = new Map();
+    const existing = this._agents.get(agentId);
+    if (existing) return existing;
+    const agent = {
+      id: randomUUID(),
+      agent_id: agentId,
+      role: defaults.role || 'generalist',
+      model_version: defaults.model || '',
+      skills: defaults.skills || [],
+      status: 'active',
+      source: defaults.source || 'implicit',
+      last_seen_at: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    this._agents.set(agentId, agent);
+    return agent;
+  }
+
+  async getAgent(agentId) {
+    if (!this._agents) return null;
+    return this._agents.get(agentId) ?? null;
+  }
+
+  async listAgents(filters = {}) {
+    if (!this._agents) return [];
+    let agents = [...this._agents.values()];
+    if (filters.role) agents = agents.filter(a => a.role === filters.role);
+    if (filters.status) agents = agents.filter(a => a.status === filters.status);
+    if (filters.source) agents = agents.filter(a => a.source === filters.source);
+    return agents;
+  }
+
+  async updateAgent(agentId, updates) {
+    if (!this._agents) return null;
+    const agent = this._agents.get(agentId);
+    if (!agent) return null;
+    if (updates.role) agent.role = updates.role;
+    if (updates.skills) agent.skills = updates.skills;
+    if (updates.status) agent.status = updates.status;
+    if (updates.model_version) agent.model_version = updates.model_version;
+    agent.updated_at = new Date().toISOString();
+    return agent;
+  }
+
+  async updateAgentLastSeen(agentId) {
+    if (!this._agents) return;
+    const agent = this._agents.get(agentId);
+    if (agent) agent.last_seen_at = new Date().toISOString();
+  }
+
+  // ─── Reputation Methods ─────────────────────────────────────────────────────
+
+  async getReputation(agentId) {
+    if (!this._reputations) return null;
+    return this._reputations.get(agentId) ?? null;
+  }
+
+  async updateReputation(agentId, rep) {
+    if (!this._reputations) this._reputations = new Map();
+    this._reputations.set(agentId, { agent_id: agentId, ...rep, updated_at: new Date().toISOString() });
+  }
+
   /** Remove all expired leases. */
   async cleanExpired() {
     const now = Date.now();

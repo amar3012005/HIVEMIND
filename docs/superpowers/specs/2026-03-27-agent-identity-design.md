@@ -1,4 +1,4 @@
-# Agent Identity + Reputation + Role Specialization
+
 
 **Date**: 2026-03-27
 **Status**: Design Document (Ready for Implementation Planning)
@@ -90,7 +90,19 @@ ALTER TABLE op_agents ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ;
 }
 ```
 
-**No schema migration needed** — `skill_scores` is already a JSONB column. The richer JSON structure (adding `blueprint_scores`, `specialization_confidence`) fits within the existing column.
+**No schema migration needed** — `skill_scores` is already a JSONB column. The `MetaReputation` row stores a single reputation document where `skill_scores`, `blueprint_scores`, and `specialization_confidence` are **sibling fields** in the same JSONB object (not nested inside each other). The Prisma column `skill_scores` is repurposed as the full reputation payload.
+
+**Canonical default reputation object** (used when no reputation exists):
+```js
+{
+  success_rate: 0.5,
+  avg_confidence: 0.5,
+  skill_scores: {},
+  blueprint_scores: {},
+  specialization_confidence: { explorer: 0, operator: 0, evaluator: 0 },
+  recent_attempts: 0,
+}
+```
 
 ### Distinction: Declared vs Observed
 
@@ -200,6 +212,8 @@ function trustedAgentUsage(trail, reputationContext) {
   if (!reputationContext) return 0;
 
   // V1 proxy: use the reputation of the trail's creator/last-user
+  // reputationContext.agentScores is a Map<agentId, { success_rate }> preloaded
+  // by the ExecutionLoop before selection (lightweight store query for known trail creators)
   const creatorRep = reputationContext.agentScores?.[trail.agentId];
   if (!creatorRep) return 0;
 
@@ -308,6 +322,7 @@ POST /api/swarm/execute { goal, agent_id }
   ├─ 1. ensureAgent(agent_id)
   │     └─ idempotent upsert: if not exists → create { source: "implicit", role: "generalist" }
   │     └─ if exists → load profile
+  │     └─ if agent.status === "suspended" → reject with 403 "Agent is suspended"
   │     └─ race-safe: unique constraint on agent_id, upsert-or-read pattern
   │
   ├─ 2. loadReputation(agent_id)
@@ -322,6 +337,7 @@ POST /api/swarm/execute { goal, agent_id }
   │     └─ EMA update: success_rate, skill_scores, blueprint_scores
   │     └─ recompute specialization_confidence
   │     └─ update agent.last_seen_at
+  │     └─ if reputation write fails: log error, return execution result normally (never fail the response)
   │
   ├─ 5. storeChainRun (existing, async)
   ├─ 6. mine blueprints (existing, async)

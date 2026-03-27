@@ -101,7 +101,7 @@ export class TrailExecutor {
 
     /** @type {WorkingMemory} */
     const workingMemory = {
-      context: {},
+      context: config.initialContext || {},
       observations: [],
       recentTrailHistory: [],
       done: false,

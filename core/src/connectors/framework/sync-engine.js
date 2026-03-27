@@ -198,15 +198,20 @@ export class SyncEngine {
     setImmediate(async () => {
       try {
         await this.trailExecutor.execute('capture_decision', agentId, {
-          maxSteps: 4,
+          maxSteps: 2,
           budget: { maxTokens: 5000, maxWallClockMs: 15000 },
+          initialContext: {
+            rawContent: content,
+            platform: platform,
+            threadMeta: payload.metadata || {},
+          },
           routing: {
             strategy: 'force_softmax',
-            temperature: 0.5,
+            temperature: 0.3,
             forceWeights: {
               goalAttraction: 1.0,
               affordanceAttraction: 1.0,
-              blueprintPrior: 0.3,
+              blueprintPrior: 1.0,
               conflictRepulsion: 1.0,
               congestionRepulsion: 1.0,
               costRepulsion: 1.0,

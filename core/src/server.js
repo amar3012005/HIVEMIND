@@ -4369,6 +4369,7 @@ a{color:#a78bfa}</style></head><body>
                 },
                 promotionThreshold: body.promotion_threshold ?? 0.8,
                 promotionRuleId: body.promotion_rule_id || 'default',
+                initialContext: body.initial_context || undefined,
               };
 
               const result = await trailExecutor.execute(body.goal, agentId, config);
@@ -4409,6 +4410,8 @@ a{color:#a78bfa}</style></head><body>
                 goalId: body.goal_id,
                 agentId: body.agent_id || `agent_${userId}`,
                 status: 'active',
+                kind: body.kind || 'raw',
+                blueprintMeta: body.blueprint_meta || null,
                 nextAction: {
                   tool: body.next_action.tool,
                   paramsTemplate: body.next_action.params_template || {},

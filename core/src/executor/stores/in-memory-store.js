@@ -48,7 +48,9 @@ export class InMemoryStore {
 
   /** Retrieve a trail by ID. */
   async getTrail(trailId) {
-    return this.trails.get(trailId) ?? null;
+    const trail = this.trails.get(trailId) ?? null;
+    if (trail && !trail.kind) trail.kind = 'raw';
+    return trail;
   }
 
   /** Return all trails matching a given goalId. */
@@ -58,7 +60,7 @@ export class InMemoryStore {
 
   /** Seed a trail into the store (test helper). */
   async putTrail(trail) {
-    this.trails.set(trail.id, trail);
+    this.trails.set(trail.id, { kind: 'raw', blueprintMeta: null, ...trail });
   }
 
   // ─── Lease Methods (atomic check-and-set) ───────────────────────────────────

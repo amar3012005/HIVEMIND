@@ -1,0 +1,127 @@
+{
+  "schemaVersion": "2026-03-27",
+  "kind": "hivemind.longmemeval-benchmark-report",
+  "generatedAt": "2026-03-27T23:26:29.661Z",
+  "phase": "evaluate",
+  "dataPath": "./benchmarks/LongMemEval/data/longmemeval_oracle.json",
+  "datasetSize": 500,
+  "sample": 30,
+  "startFrom": 0,
+  "instanceCount": 30,
+  "benchUser": "longmemeval-bench-001",
+  "benchOrg": "longmemeval-org-001",
+  "model": "llama-3.3-70b-versatile",
+  "timings": {
+    "evaluationSeconds": 33
+  },
+  "ingestion": null,
+  "summary": {
+    "totalQuestions": 30,
+    "answerableQuestions": 30,
+    "abstentionQuestions": 0,
+    "judgedQuestions": 0,
+    "judgedAccuracy": 0,
+    "judgedCorrect": 0,
+    "retrieval": {
+      "averageSearchLatencyMs": 845.57,
+      "averageGenerationLatencyMs": 257.87,
+      "averageContextChars": 1879.43,
+      "averageResultCount": 0.97,
+      "projectScopedCount": 29,
+      "fallbackCount": 0,
+      "emptyContextCount": 1
+    },
+    "byQuestionType": {},
+    "bottlenecks": {
+      "counts": {
+        "healthy": 29,
+        "empty_context": 1
+      },
+      "top": [
+        {
+          "type": "empty_context",
+          "count": 1,
+          "share": 3.3,
+          "examples": [
+            {
+              "question_id": "gpt4_5dcc0aab",
+              "question_type": "temporal-reasoning",
+              "reason": "No retrieval context was returned"
+            }
+          ]
+        },
+        {
+          "type": "healthy",
+          "count": 29,
+          "share": 96.7,
+          "examples": [
+            {
+              "question_id": "gpt4_2655b836",
+              "question_type": "temporal-reasoning",
+              "reason": "No dominant bottleneck detected"
+            },
+            {
+              "question_id": "gpt4_2487a7cb",
+              "question_type": "temporal-reasoning",
+              "reason": "No dominant bottleneck detected"
+            },
+            {
+              "question_id": "gpt4_76048e76",
+              "question_type": "temporal-reasoning",
+              "reason": "No dominant bottleneck detected"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "bottlenecks": {
+    "counts": {
+      "healthy": 29,
+      "empty_context": 1
+    },
+    "top": [
+      {
+        "type": "empty_context",
+        "count": 1,
+        "share": 3.3,
+        "examples": [
+          {
+            "question_id": "gpt4_5dcc0aab",
+            "question_type": "temporal-reasoning",
+            "reason": "No retrieval context was returned"
+          }
+        ]
+      },
+      {
+        "type": "healthy",
+        "count": 29,
+        "share": 96.7,
+        "examples": [
+          {
+            "question_id": "gpt4_2655b836",
+            "question_type": "temporal-reasoning",
+            "reason": "No dominant bottleneck detected"
+          },
+          {
+            "question_id": "gpt4_2487a7cb",
+            "question_type": "temporal-reasoning",
+            "reason": "No dominant bottleneck detected"
+          },
+          {
+            "question_id": "gpt4_76048e76",
+            "question_type": "temporal-reasoning",
+            "reason": "No dominant bottleneck detected"
+          }
+        ]
+      }
+    ]
+  },
+  "byQuestionType": {},
+  "failedExamples": [],
+  "files": {
+    "hypotheses": "/opt/HIVEMIND/core/evaluation-reports/longmemeval-hypotheses.jsonl",
+    "judged": null,
+    "report": "/opt/HIVEMIND/core/evaluation-reports/longmemeval-report.json"
+  }
+}

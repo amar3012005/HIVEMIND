@@ -2406,6 +2406,7 @@ a{color:#a78bfa}</style></head><body>
             memoryEngine: persistentMemoryEngine,
             memoryStore: persistentMemoryStore,
             prisma,
+            trailExecutor,
           });
 
           const incremental = body.incremental !== false;

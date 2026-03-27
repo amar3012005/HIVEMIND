@@ -15,11 +15,12 @@ export class SyncEngine {
    * @param {import('../../memory/graph-engine.js').MemoryGraphEngine} deps.memoryEngine
    * @param {import('../../memory/prisma-graph-store.js').PrismaGraphStore} deps.memoryStore
    */
-  constructor({ connectorStore, memoryEngine, memoryStore, prisma }) {
+  constructor({ connectorStore, memoryEngine, memoryStore, prisma, trailExecutor }) {
     this.connectorStore = connectorStore;
     this.memoryEngine = memoryEngine;
     this.memoryStore = memoryStore;
     this.prisma = prisma;
+    this.trailExecutor = trailExecutor || null;
     this._dedupeCache = new Map(); // in-memory for now; can be Redis later
   }
 
@@ -124,6 +125,9 @@ export class SyncEngine {
               await this._ingestWithRetry(payload, sourceId, userId);
               telemetry.imported++;
               this._markSeen(sourceId, userId, provider);
+
+              // Trigger decision capture asynchronously (non-blocking)
+              this._triggerDecisionCapture(payload, provider, userId, orgId);
             }
           } catch (recordError) {
             telemetry.failed++;
@@ -176,6 +180,44 @@ export class SyncEngine {
       }
       throw error;
     }
+  }
+
+  /**
+   * Trigger decision capture for a newly ingested connector payload.
+   * Non-blocking — fires and forgets. Errors are logged, never thrown.
+   */
+  _triggerDecisionCapture(payload, provider, userId, orgId) {
+    if (!this.trailExecutor) return;
+
+    const content = payload.content;
+    if (!content || content.length < 20) return; // too short to be a decision
+
+    const platform = payload.source_metadata?.source_type || provider;
+    const agentId = `connector_${platform}`;
+
+    setImmediate(async () => {
+      try {
+        await this.trailExecutor.execute('capture_decision', agentId, {
+          maxSteps: 4,
+          budget: { maxTokens: 5000, maxWallClockMs: 15000 },
+          routing: {
+            strategy: 'force_softmax',
+            temperature: 0.5,
+            forceWeights: {
+              goalAttraction: 1.0,
+              affordanceAttraction: 1.0,
+              blueprintPrior: 0.3,
+              conflictRepulsion: 1.0,
+              congestionRepulsion: 1.0,
+              costRepulsion: 1.0,
+            },
+          },
+        });
+      } catch (err) {
+        // Non-fatal — decision capture should never block sync
+        console.warn(`[sync-engine] Decision capture failed for ${platform}:${userId}:`, err.message);
+      }
+    });
   }
 
   async _isDuplicate(dedupeKey, userId, provider) {

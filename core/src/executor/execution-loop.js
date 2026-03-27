@@ -130,6 +130,7 @@ export class TrailExecutor {
           namespaceId,
           state: workingMemory.context,
           queueInfo: { depth: step },
+          recentTrailHistory: workingMemory.recentTrailHistory || [],
         };
 
         const selection = await this.trailSelector.selectNext(

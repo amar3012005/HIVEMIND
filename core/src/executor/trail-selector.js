@@ -31,13 +31,13 @@ export class TrailSelector {
    * Select the next trail to advance.
    *
    * @param {string} goal - Goal description text
-   * @param {{ goalId: string, namespaceId: string, state?: Record<string, *>, queueInfo?: { depth?: number } }} context
+   * @param {{ goalId: string, namespaceId: string, state?: Record<string, *>, queueInfo?: { depth?: number }, recentTrailHistory?: string[] }} context
    * @param {string} agentId
    * @param {RoutingConfig} routingConfig
    * @returns {Promise<SelectedTrail | null>}
    */
   async selectNext(goal, context, agentId, routingConfig) {
-    const { goalId, namespaceId, state = {}, queueInfo } = context;
+    const { goalId, namespaceId, state = {}, queueInfo, recentTrailHistory } = context;
     const temperature = routingConfig.temperature ?? 1.0;
 
     // 1. Get candidate trails from graphStore
@@ -48,7 +48,7 @@ export class TrailSelector {
     const activeTrails = allTrails.filter((t) => t.status === 'active');
     if (!activeTrails.length) return null;
 
-    // 3. Compute force vector for each candidate
+    // 3. Compute force vector for each candidate (with reuse penalty)
     const candidates = await Promise.all(
       activeTrails.map(async (trail) => {
         const leaseInfo = this.leaseManager
@@ -60,6 +60,7 @@ export class TrailSelector {
           state,
           leaseInfo,
           queueInfo,
+          recentTrailHistory,
         });
 
         return { trail, forces };

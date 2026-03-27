@@ -129,6 +129,22 @@ export function estimatedLatencyCost(_trail) {
   return 0.1;
 }
 
+/**
+ * Penalize trails that appear in recent history.
+ * Immediate repeat = 1.0, decays with distance.
+ * @param {Trail} trail
+ * @param {string[]} recentTrailHistory - recent trail IDs (most recent last)
+ * @returns {number} 0-1
+ */
+export function recentReusePenalty(trail, recentTrailHistory) {
+  if (!recentTrailHistory?.length) return 0;
+  const reversed = [...recentTrailHistory].reverse();
+  const idx = reversed.indexOf(trail.id);
+  if (idx === -1) return 0;
+  // Immediate reuse = 1.0, one step ago = 0.7, two = 0.5, three = 0.3
+  return Math.max(0, 1.0 - (idx * 0.3));
+}
+
 // ─── ForceRouter ─────────────────────────────────────────────────────────────
 
 /** @type {ForceWeights} */
@@ -150,11 +166,11 @@ export class ForceRouter {
    * Compute the force vector for a single candidate trail.
    *
    * @param {Trail} trail
-   * @param {{ goal?: string, state?: Record<string, *>, leaseInfo?: { leased?: boolean }, queueInfo?: { depth?: number } }} context
+   * @param {{ goal?: string, state?: Record<string, *>, leaseInfo?: { leased?: boolean }, queueInfo?: { depth?: number }, recentTrailHistory?: string[] }} context
    * @returns {ForceVector}
    */
   computeForces(trail, context = {}) {
-    const { goal = '', state = {}, leaseInfo, queueInfo } = context;
+    const { goal = '', state = {}, leaseInfo, queueInfo, recentTrailHistory } = context;
     const w = this.weights;
 
     const goalAttr =
@@ -164,7 +180,7 @@ export class ForceRouter {
     const conflictRep =
       w.conflictRepulsion * (contradictionRisk(trail) + recentFailureScore(trail));
     const congestionRep =
-      w.congestionRepulsion * (activeLeasePressure(trail, leaseInfo) + queueDepthPressure(trail, queueInfo));
+      w.congestionRepulsion * (activeLeasePressure(trail, leaseInfo) + queueDepthPressure(trail, queueInfo) + recentReusePenalty(trail, recentTrailHistory));
     const costRep =
       w.costRepulsion * (estimatedTokenCost(trail) + estimatedLatencyCost(trail));
 

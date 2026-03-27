@@ -259,7 +259,7 @@ try {
     if (executorStore.writeObservation) {
       await executorStore.writeObservation(obs);
     }
-    return { observation_id: id, kind: params.kind, status: 'written' };
+    return { observation_id: id, kind: params.kind, status: 'written', done: true };
   });
 
   // graph_query — read-only search of canonical knowledge (kg/*)

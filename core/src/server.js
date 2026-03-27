@@ -121,6 +121,9 @@ const { ChainMiner } = await import('./executor/chain-miner.js');
 const { WeightUpdater } = await import('./executor/weight-updater.js');
 const { PromotionMux } = await import('./executor/promotion-mux.js');
 const { ReputationEngine } = await import('./executor/reputation-engine.js');
+const { ParameterRegistry } = await import('./executor/parameter-registry.js');
+const { Dashboard } = await import('./executor/dashboard.js');
+const { MetaEvaluator } = await import('./executor/meta-evaluator.js');
 const { InMemoryStore } = await import('./executor/stores/in-memory-store.js');
 
 // Evaluation imports
@@ -344,6 +347,17 @@ try {
   });
   trailExecutor._chainMiner = chainMiner;
   trailExecutor._reputationEngine = reputationEngine;
+
+  const parameterRegistry = new ParameterRegistry(executorStore);
+  parameterRegistry.seedDefaults().catch(err => console.warn('[ParameterRegistry] Seed failed:', err.message));
+  trailExecutor._parameterRegistry = parameterRegistry;
+
+  const dashboard = new Dashboard(executorStore);
+  trailExecutor._dashboard = dashboard;
+
+  const metaEvaluator = new MetaEvaluator(executorStore, parameterRegistry);
+  trailExecutor._metaEvaluator = metaEvaluator;
+
   console.log('[TrailExecutor] Cognitive runtime initialized',
     executorStore.constructor.name === 'PrismaStore' ? '(Prisma persistence)' : '(in-memory)');
 } catch (err) {
@@ -2344,6 +2358,18 @@ a{color:#a78bfa}</style></head><body>
         }
       }
 
+      // Dynamic route: GET /api/swarm/meta/parameters/:key
+      if (pathname.startsWith('/api/swarm/meta/parameters/') && req.method === 'GET') {
+        if (!trailExecutor?._parameterRegistry) return jsonResponse(res, { error: 'ParameterRegistry unavailable' }, 503);
+        try {
+          const key = decodeURIComponent(pathname.split('/api/swarm/meta/parameters/')[1]);
+          const history = await trailExecutor._parameterRegistry.getHistory(key);
+          return jsonResponse(res, history);
+        } catch (error) {
+          return jsonResponse(res, { error: 'Get parameter failed', message: error.message }, 500);
+        }
+      }
+
       // Dynamic route: /api/swarm/agents/:agent_id
       if (pathname.startsWith('/api/swarm/agents/') && pathname !== '/api/swarm/agents') {
         const agentId = decodeURIComponent(pathname.split('/api/swarm/agents/')[1]);
@@ -4315,6 +4341,130 @@ a{color:#a78bfa}</style></head><body>
               });
             } catch (error) {
               return jsonResponse(res, { error: 'List agents failed', message: error.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/swarm/dashboard/overview':
+          if (req.method === 'GET') {
+            if (!trailExecutor?._dashboard) return jsonResponse(res, { error: 'Dashboard unavailable' }, 503);
+            try {
+              const url = new URL(req.url, `http://${req.headers.host}`);
+              const window = url.searchParams.get('window') || '7d';
+              const result = await trailExecutor._dashboard.overview({ window });
+              return jsonResponse(res, result);
+            } catch (error) {
+              return jsonResponse(res, { error: 'Dashboard failed', message: error.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/swarm/dashboard/executions':
+          if (req.method === 'GET') {
+            if (!trailExecutor?._dashboard) return jsonResponse(res, { error: 'Dashboard unavailable' }, 503);
+            try {
+              const url = new URL(req.url, `http://${req.headers.host}`);
+              const result = await trailExecutor._dashboard.executions({
+                limit: parseInt(url.searchParams.get('limit') || '50'),
+                agentId: url.searchParams.get('agent_id'),
+                goal: url.searchParams.get('goal'),
+                window: url.searchParams.get('window') || '7d',
+              });
+              return jsonResponse(res, result);
+            } catch (error) {
+              return jsonResponse(res, { error: 'Dashboard failed', message: error.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/swarm/dashboard/blueprints':
+          if (req.method === 'GET') {
+            if (!trailExecutor?._dashboard) return jsonResponse(res, { error: 'Dashboard unavailable' }, 503);
+            try {
+              const url = new URL(req.url, `http://${req.headers.host}`);
+              const result = await trailExecutor._dashboard.blueprints({ window: url.searchParams.get('window') || '7d' });
+              return jsonResponse(res, result);
+            } catch (error) {
+              return jsonResponse(res, { error: 'Dashboard failed', message: error.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/swarm/dashboard/agents':
+          if (req.method === 'GET') {
+            if (!trailExecutor?._dashboard) return jsonResponse(res, { error: 'Dashboard unavailable' }, 503);
+            try {
+              const url = new URL(req.url, `http://${req.headers.host}`);
+              const result = await trailExecutor._dashboard.agents({ window: url.searchParams.get('window') || '7d' });
+              return jsonResponse(res, result);
+            } catch (error) {
+              return jsonResponse(res, { error: 'Dashboard failed', message: error.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/swarm/meta/evaluate':
+          if (req.method === 'POST') {
+            if (!trailExecutor?._metaEvaluator) return jsonResponse(res, { error: 'MetaEvaluator unavailable' }, 503);
+            try {
+              const result = await trailExecutor._metaEvaluator.evaluate({
+                lookbackRuns: body.lookback_runs || 50,
+                goalFilter: body.goal_filter,
+                agentFilter: body.agent_filter,
+              });
+              return jsonResponse(res, result);
+            } catch (error) {
+              return jsonResponse(res, { error: 'Evaluation failed', message: error.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/swarm/meta/parameters':
+          if (req.method === 'GET') {
+            if (!trailExecutor?._parameterRegistry) return jsonResponse(res, { error: 'ParameterRegistry unavailable' }, 503);
+            try {
+              const all = await trailExecutor._parameterRegistry.getAll();
+              return jsonResponse(res, { parameters: all, count: Object.keys(all).length });
+            } catch (error) {
+              return jsonResponse(res, { error: 'Get parameters failed', message: error.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/swarm/meta/apply':
+          if (req.method === 'POST') {
+            if (!trailExecutor?._parameterRegistry) return jsonResponse(res, { error: 'ParameterRegistry unavailable' }, 503);
+            try {
+              if (!body.changes || !Array.isArray(body.changes)) return jsonResponse(res, { error: 'changes array is required' }, 400);
+              const result = await trailExecutor._parameterRegistry.applyRecommendations(body.changes, body.updated_by || 'admin');
+
+              // Log the apply action as observation
+              if (trailExecutor._store.writeObservation) {
+                trailExecutor._store.writeObservation({
+                  id: crypto.randomUUID(),
+                  agent_id: 'meta_apply',
+                  kind: 'meta_apply',
+                  content: { changes: result.changes, updated_by: body.updated_by || 'admin' },
+                  certainty: 1.0,
+                }).catch(() => {});
+              }
+
+              return jsonResponse(res, result);
+            } catch (error) {
+              return jsonResponse(res, { error: 'Apply failed', message: error.message }, 400);
+            }
+          }
+          break;
+
+        case '/api/swarm/meta/rollback':
+          if (req.method === 'POST') {
+            if (!trailExecutor?._parameterRegistry) return jsonResponse(res, { error: 'ParameterRegistry unavailable' }, 503);
+            try {
+              if (!body.param) return jsonResponse(res, { error: 'param is required' }, 400);
+              const result = await trailExecutor._parameterRegistry.rollback(body.param);
+              return jsonResponse(res, result);
+            } catch (error) {
+              return jsonResponse(res, { error: 'Rollback failed', message: error.message }, 400);
             }
           }
           break;

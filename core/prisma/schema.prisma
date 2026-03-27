@@ -716,14 +716,16 @@ model EncryptionAuditLog {
 
 /// Registered agents with role, model version, and skill manifest
 model OpAgent {
-  id            String   @id @default(uuid())
-  agent_id      String   @unique
+  id            String    @id @default(uuid())
+  agent_id      String    @unique
   role          String
   model_version String
-  skills        Json     @default("[]")
-  status        String   @default("active") // active, idle, error
-  created_at    DateTime @default(now())
-  updated_at    DateTime @updatedAt
+  skills        Json      @default("[]")
+  status        String    @default("active") // active, idle, error
+  source        String    @default("implicit") // implicit, explicit
+  last_seen_at  DateTime?
+  created_at    DateTime  @default(now())
+  updated_at    DateTime  @updatedAt
 
   @@map("op_agents")
 }

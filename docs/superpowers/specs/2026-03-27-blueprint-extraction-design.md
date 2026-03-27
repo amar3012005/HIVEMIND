@@ -109,6 +109,10 @@ A blueprint trail has all normal trail fields, plus:
 - **`state`**: `"candidate"` (detected but not yet active), `"active"` (available for selection), `"deprecated"` (retired, not selected).
 - **`version`**: Integer, incremented if blueprint is re-promoted with updated stats.
 
+**Storage note**: Blueprints are stored in `op_trails` for execution reuse in V1. They represent promoted procedural knowledge and may later graduate to a dedicated procedural namespace (e.g., `kg/procedures`), but the current design keeps them in the operational layer for simplicity.
+
+**Parameter generalization note**: V1 blueprint extraction assumes the discovered sequence is reusable with the existing `paramsTemplate` abstraction (e.g., `$ctx.`, `$kg.` bindings). More complex parameter abstraction (where structurally similar chains differ in bound values) is deferred to V2.
+
 ---
 
 ## Component 1: ChainMiner
@@ -188,7 +192,7 @@ mine(goalId):
 ### Idempotency
 
 Mining is safe to call repeatedly:
-- Deduplication by `(goalId, chainSignature, version)` prevents duplicate blueprints
+- **Dedupe key**: `unique(goalId, chainSignature, version)` defines blueprint identity. For V1, version remains `1` unless the pattern is intentionally re-promoted with materially changed stats or sequence.
 - Stats are updated on existing candidates if re-mined
 - No race conditions: check-then-create in single transaction
 
@@ -288,7 +292,12 @@ const net = goalAttr + affordanceAttr + blueprintBoost
 - **Default boost: 0.3** — enough to prefer proven patterns when force scores are close
 - **Configurable**: `routing.forceWeights.blueprintPrior` in execution config
 - **Not dominant**: Raw trails can still win with stronger goal attraction or if the blueprint is congested
-- **Only active blueprints**: Candidates and deprecated blueprints get no boost
+
+**Selector exclusion rules:**
+- `state: "candidate"` blueprints are **not selectable** (not yet proven enough for execution)
+- `state: "deprecated"` blueprints are **never selectable** (retired from use)
+- `state: "active"` blueprints are selectable and receive the prior boost
+- The `TrailSelector` filters by `status === 'active'` AND (`kind === 'raw'` OR `blueprintMeta.state === 'active'`)
 
 ---
 

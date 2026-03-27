@@ -136,7 +136,7 @@ export function getLongMemEvalRetrievalPlan({ question, questionType } = {}) {
 
   if (isTemporal) {
     return {
-      route: 'panorama',
+      route: 'recall',
       body: {
         query: question,
         include_expired: true,

@@ -177,7 +177,9 @@ function extractBestSentence(question, memories) {
 async function processQuestion(q, hmApi, groqKey) {
   const ingestedIds = [];
 
-  // ── Step 1: Ingest haystack sessions ──
+  // ── Step 1: Ingest haystack sessions with project isolation ──
+  const projectId = `lme-${q.question_id}`;
+
   for (let sIdx = 0; sIdx < q.haystack_sessions.length; sIdx++) {
     const session = q.haystack_sessions[sIdx];
     const fullContent = session.map(t => `[${t.role}]: ${t.content}`).join('\n');
@@ -187,9 +189,10 @@ async function processQuestion(q, hmApi, groqKey) {
     const result = await hmApi('/api/memories', 'POST', {
       content: fullContent.substring(0, 4000),
       title: `Session ${sIdx + 1}${date ? ` (${date})` : ''}`,
-      tags: ['longmemeval', q.question_type],
-      memory_type: 'fact',
+      tags: ['longmemeval', q.question_type, q.question_id],
+      memory_type: 'event',
       document_date: date,
+      project: projectId,
       skipPredictCalibrate: true,
     });
 
@@ -197,8 +200,8 @@ async function processQuestion(q, hmApi, groqKey) {
     if (id) ingestedIds.push(id);
   }
 
-  // Brief pause for Qdrant indexing
-  await new Promise(r => setTimeout(r, 150));
+  // Pause for Qdrant indexing
+  await new Promise(r => setTimeout(r, 200));
 
   // ── Step 2: Cognitive Frame (Operator Layer) ──
   let intent = null;
@@ -213,23 +216,35 @@ async function processQuestion(q, hmApi, groqKey) {
     // Operator Layer unavailable, continue without it
   }
 
-  // ── Step 3 + 4: Parallel retrieval (recall + search) ──
-  const [recallResult, searchResult] = await Promise.all([
+  // ── Step 3 + 4: Parallel retrieval (recall + quick search + panorama) ──
+  // All filtered by project to only get THIS question's memories
+  const [recallResult, quickResult, panoramaResult] = await Promise.all([
     hmApi('/api/recall', 'POST', {
       query_context: q.question,
       mode: 'panorama',
       max_memories: 10,
+      project: projectId,
       weights: dynamicWeights || undefined,
     }),
-    hmApi('/api/memories/search', 'POST', {
+    hmApi('/api/search/quick', 'POST', {
       query: q.question,
+      project: projectId,
       limit: 10,
+    }),
+    hmApi('/api/search/panorama', 'POST', {
+      query: q.question,
+      project: projectId,
+      limit: 10,
+      include_expired: true,
+      include_historical: true,
     }),
   ]);
 
   // ── Step 5: Merge + dedupe ──
   const recalled = Array.isArray(recallResult) ? recallResult : recallResult.memories || recallResult.results || [];
-  const searched = Array.isArray(searchResult) ? searchResult : searchResult.results || searchResult.memories || [];
+  const quickSearched = Array.isArray(quickResult) ? quickResult : quickResult.results || quickResult.memories || [];
+  const panoramaSearched = Array.isArray(panoramaResult) ? panoramaResult : panoramaResult.results || panoramaResult.memories || [];
+  const searched = [...quickSearched, ...panoramaSearched];
 
   const seenIds = new Set();
   const merged = [];

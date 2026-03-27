@@ -119,7 +119,7 @@ export class ThreeTierRetrieval {
     this.config = { ...CONFIG, ...(options.config || {}) };
 
     // Initialize sub-modules
-    this.panoramaSearch = new PanoramaSearch({
+    this.panoramaSearchEngine = new PanoramaSearch({
       vectorStore: this.vectorStore,
       graphStore: this.graphStore,
       config: this.config
@@ -309,7 +309,7 @@ export class ThreeTierRetrieval {
 
     try {
       // Delegate to PanoramaSearch module
-      const results = await this.panoramaSearch.search(query, {
+      const results = await this.panoramaSearchEngine.search(query, {
         userId,
         orgId,
         includeExpired,

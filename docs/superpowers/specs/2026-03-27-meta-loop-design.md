@@ -76,7 +76,7 @@ System-level summary. All metrics are averages/aggregates over the selected time
       "congestionRepulsion": 0.05,
       "costRepulsion": 0.05
     },
-    "note": "Force contributions are averaged over all routing decisions in the selected window"
+    "note": "Force contributions and avgTemperature are computed from the effective routing config used in actual executions (including per-request overrides), not just registry defaults"
   }
 }
 ```
@@ -124,7 +124,7 @@ Blueprint performance comparison. Filter: `?window=7d`
 }
 ```
 
-**`winRate` definition**: percentage of eligible executions (where both raw trails and this blueprint were candidates) where the blueprint was selected and completed successfully.
+**`winRate` definition**: percentage of eligible executions where the blueprint was selected and completed successfully. An execution is "eligible" if the blueprint was `active` and matched the goal context at selection time, while at least one comparable raw trail was also selectable.
 
 #### `GET /api/swarm/dashboard/agents`
 
@@ -167,6 +167,8 @@ class MetaEvaluator {
 
   async evaluate(options) → EvaluationReport
   // options = { lookbackRuns?: number, goalFilter?: string, agentFilter?: string }
+  // Note: lookbackRuns is the primary bound on evaluation cost. Keep capped in V1
+  // to prevent expensive scans as execution history grows.
 }
 ```
 
@@ -382,9 +384,11 @@ Bootstrap defaults are used only for registry initialization and as fail-safe wh
 
 **Missing key behavior**: Return bootstrap default, log a warning. Do not fail the execution.
 
+**Startup behavior**: If registry seeding partially fails (e.g., database temporarily unavailable), startup continues using bootstrap defaults with warnings. The service should never fail to start due to missing parameters.
+
 ### Bulk Apply Semantics
 
-`POST /api/swarm/meta/apply` validates all changes first, then applies atomically in a single transaction. If any validation fails, no changes are applied.
+`POST /api/swarm/meta/apply` validates all changes first, then applies atomically in a single transaction. If any validation fails, no changes are applied. Every apply also emits an observation (`kind: "meta_apply"`) logging: changed keys, `updated_by`, timestamp, and optional source evaluation ID. This enables auditing of all configuration changes.
 
 ### Rollback
 

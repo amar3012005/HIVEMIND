@@ -887,6 +887,17 @@ model MetaPromotionCandidate {
   @@map("meta_promotion_candidates")
 }
 
+/// Centralized runtime configuration parameters with audit trail
+model MetaParameter {
+  key            String   @id
+  value          Json
+  updated_at     DateTime @default(now()) @updatedAt
+  updated_by     String   @default("system")
+  previous_value Json?
+
+  @@map("meta_parameters")
+}
+
 /// Configurable decay schedules for trails and observations
 model MetaDecaySchedule {
   id             String   @id @default(uuid())

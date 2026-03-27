@@ -444,6 +444,42 @@ export class PrismaStore {
     });
   }
 
+  // ─── Parameter Methods ────────────────────────────────────────────────────
+
+  async getParameter(key) {
+    const row = await this.prisma.metaParameter.findUnique({ where: { key } });
+    return row || null;
+  }
+
+  async getAllParameters() {
+    const rows = await this.prisma.metaParameter.findMany();
+    const result = {};
+    for (const row of rows) {
+      result[row.key] = row.value;
+    }
+    return result;
+  }
+
+  async setParameter(key, value, updatedBy = 'system') {
+    const existing = await this.prisma.metaParameter.findUnique({ where: { key } });
+    await this.prisma.metaParameter.upsert({
+      where: { key },
+      create: { key, value, updated_by: updatedBy },
+      update: { value, previous_value: existing?.value ?? null, updated_by: updatedBy },
+    });
+  }
+
+  async rollbackParameter(key) {
+    const existing = await this.prisma.metaParameter.findUnique({ where: { key } });
+    if (!existing || existing.previous_value === null) return null;
+    const rolledBack = { from: existing.value, to: existing.previous_value };
+    await this.prisma.metaParameter.update({
+      where: { key },
+      data: { value: existing.previous_value, previous_value: null, updated_by: 'rollback' },
+    });
+    return rolledBack;
+  }
+
   // ─── Observation Methods ────────────────────────────────────────────────
 
   /** Write an observation to op_observations. */

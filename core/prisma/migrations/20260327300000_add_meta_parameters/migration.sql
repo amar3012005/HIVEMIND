@@ -1,0 +1,7 @@
+CREATE TABLE IF NOT EXISTS meta_parameters (
+  key TEXT NOT NULL PRIMARY KEY,
+  value JSONB NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_by TEXT NOT NULL DEFAULT 'system',
+  previous_value JSONB
+);

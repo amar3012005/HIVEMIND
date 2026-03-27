@@ -265,6 +265,46 @@ export class InMemoryStore {
     this._reputations.set(agentId, { agent_id: agentId, ...rep, updated_at: new Date().toISOString() });
   }
 
+  // ─── Parameter Methods ────────────────────────────────────────────────────
+
+  async getParameter(key) {
+    if (!this._parameters) return null;
+    return this._parameters.get(key) ?? null;
+  }
+
+  async getAllParameters() {
+    if (!this._parameters) return {};
+    const result = {};
+    for (const [k, v] of this._parameters) {
+      result[k] = v.value;
+    }
+    return result;
+  }
+
+  async setParameter(key, value, updatedBy = 'system') {
+    if (!this._parameters) this._parameters = new Map();
+    const existing = this._parameters.get(key);
+    this._parameters.set(key, {
+      key,
+      value,
+      previous_value: existing?.value ?? null,
+      updated_at: new Date().toISOString(),
+      updated_by: updatedBy,
+    });
+  }
+
+  async rollbackParameter(key) {
+    if (!this._parameters) return null;
+    const existing = this._parameters.get(key);
+    if (!existing || existing.previous_value === null) return null;
+    const rolledBack = { from: existing.value, to: existing.previous_value };
+    existing.value = existing.previous_value;
+    existing.previous_value = null;
+    existing.updated_at = new Date().toISOString();
+    existing.updated_by = 'rollback';
+    return rolledBack;
+  }
+
   /** Remove all expired leases. */
   async cleanExpired() {
     const now = Date.now();

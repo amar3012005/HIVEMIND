@@ -117,6 +117,7 @@ const { ToolRegistry } = await import('./executor/tool-registry.js');
 const { ToolRunner } = await import('./executor/tool-runner.js');
 const { OutcomeWriter } = await import('./executor/outcome-writer.js');
 const { LeaseManager } = await import('./executor/lease-manager.js');
+const { ChainMiner } = await import('./executor/chain-miner.js');
 const { WeightUpdater } = await import('./executor/weight-updater.js');
 const { PromotionMux } = await import('./executor/promotion-mux.js');
 const { InMemoryStore } = await import('./executor/stores/in-memory-store.js');
@@ -329,6 +330,15 @@ try {
   trailExecutor._store = executorStore;
   trailExecutor._toolRegistry = trailToolRegistry;
   trailExecutor._toolRunner = trailToolRunner;
+
+  const chainMiner = new ChainMiner(executorStore, {
+    minOccurrences: 3,
+    minSuccessRate: 0.9,
+    maxAvgLatencyMs: 5000,
+    lookbackRuns: 50,
+    autoActivate: true,
+  });
+  trailExecutor._chainMiner = chainMiner;
   console.log('[TrailExecutor] Cognitive runtime initialized',
     executorStore.constructor.name === 'PrismaStore' ? '(Prisma persistence)' : '(in-memory)');
 } catch (err) {
@@ -2295,6 +2305,40 @@ a{color:#a78bfa}</style></head><body>
         }
       }
 
+      // Dynamic route: PATCH /api/swarm/blueprints/:id
+      if (pathname.startsWith('/api/swarm/blueprints/') && pathname !== '/api/swarm/blueprints/mine' && req.method === 'PATCH') {
+        if (!trailExecutor) return jsonResponse(res, { error: 'Trail Executor unavailable' }, 503);
+        try {
+          const blueprintId = pathname.split('/api/swarm/blueprints/')[1];
+          if (!blueprintId) return jsonResponse(res, { error: 'blueprint id is required' }, 400);
+          if (!body.state || !['active', 'deprecated'].includes(body.state)) {
+            return jsonResponse(res, { error: 'state must be "active" or "deprecated"' }, 400);
+          }
+
+          const trail = await trailExecutor._store.getTrail(blueprintId);
+          if (!trail || trail.kind !== 'blueprint') {
+            return jsonResponse(res, { error: 'Blueprint not found' }, 404);
+          }
+
+          if (body.expected_version != null && trail.blueprintMeta?.version !== body.expected_version) {
+            return jsonResponse(res, { error: 'Version mismatch', current_version: trail.blueprintMeta?.version }, 409);
+          }
+
+          trail.blueprintMeta.state = body.state;
+          await trailExecutor._store.putTrail(trail);
+
+          return jsonResponse(res, {
+            id: trail.id,
+            chainSignature: trail.blueprintMeta.chainSignature,
+            state: trail.blueprintMeta.state,
+            version: trail.blueprintMeta.version,
+            updated_at: new Date().toISOString(),
+          });
+        } catch (error) {
+          return jsonResponse(res, { error: 'Update blueprint failed', message: error.message }, 500);
+        }
+      }
+
       switch (pathname) {
         case '/api/generate':
           if (req.method === 'POST') {
@@ -4049,6 +4093,12 @@ a{color:#a78bfa}</style></head><body>
               };
 
               const result = await trailExecutor.execute(body.goal, agentId, config);
+
+              // Non-blocking: mine for blueprint candidates after each execution
+              if (trailExecutor._chainMiner) {
+                trailExecutor._chainMiner.mine(body.goal).catch(() => {});
+              }
+
               return jsonResponse(res, result);
             } catch (error) {
               return jsonResponse(res, { error: 'Trail execution failed', message: error.message }, 500);
@@ -4094,8 +4144,12 @@ a{color:#a78bfa}</style></head><body>
             try {
               const url = new URL(req.url, `http://${req.headers.host}`);
               const goalId = url.searchParams.get('goal_id');
+              const kindFilter = url.searchParams.get('kind');
               if (!goalId) return jsonResponse(res, { error: 'goal_id query param is required' }, 400);
-              const trails = await trailExecutor._store.getCandidateTrails(goalId);
+              let trails = await trailExecutor._store.getCandidateTrails(goalId);
+              if (kindFilter) {
+                trails = trails.filter(t => (t.kind || 'raw') === kindFilter);
+              }
               return jsonResponse(res, { trails, count: trails.length });
             } catch (error) {
               return jsonResponse(res, { error: 'List trails failed', message: error.message }, 500);
@@ -4110,6 +4164,54 @@ a{color:#a78bfa}</style></head><body>
               store: trailExecutor?._store?.constructor?.name || 'none',
               tools: trailExecutor?._toolRegistry?.listTools()?.map(t => t.name) || [],
             });
+          }
+          break;
+
+        case '/api/swarm/blueprints/mine':
+          if (req.method === 'POST') {
+            if (!trailExecutor?._chainMiner) return jsonResponse(res, { error: 'ChainMiner unavailable' }, 503);
+            try {
+              if (!body.goal_id) return jsonResponse(res, { error: 'goal_id is required' }, 400);
+              const mineResult = await trailExecutor._chainMiner.mine(body.goal_id);
+              return jsonResponse(res, mineResult);
+            } catch (error) {
+              return jsonResponse(res, { error: 'Mining failed', message: error.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/swarm/blueprints':
+          if (req.method === 'GET') {
+            if (!trailExecutor) return jsonResponse(res, { error: 'Trail Executor unavailable' }, 503);
+            try {
+              const url = new URL(req.url, `http://${req.headers.host}`);
+              const goalId = url.searchParams.get('goal_id');
+              const stateFilter = url.searchParams.get('state');
+              if (!goalId) return jsonResponse(res, { error: 'goal_id query param is required' }, 400);
+
+              const allTrails = await trailExecutor._store.getCandidateTrails(goalId);
+              let blueprints = allTrails.filter(t => t.kind === 'blueprint');
+              if (stateFilter) {
+                blueprints = blueprints.filter(t => t.blueprintMeta?.state === stateFilter);
+              }
+
+              return jsonResponse(res, {
+                blueprints: blueprints.map(b => ({
+                  id: b.id,
+                  chainSignature: b.blueprintMeta?.chainSignature,
+                  state: b.blueprintMeta?.state,
+                  version: b.blueprintMeta?.version,
+                  promotionStats: b.blueprintMeta?.promotionStats,
+                  sourceEventCount: b.blueprintMeta?.sourceEventCount,
+                  promotedAt: b.blueprintMeta?.promotedAt,
+                  actionSequence: b.blueprintMeta?.actionSequence,
+                  weight: b.weight,
+                })),
+                count: blueprints.length,
+              });
+            } catch (error) {
+              return jsonResponse(res, { error: 'List blueprints failed', message: error.message }, 500);
+            }
           }
           break;
 

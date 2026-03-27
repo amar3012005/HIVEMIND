@@ -1,0 +1,41 @@
+{
+  "timestamp": "2026-03-27T14:43:39.269Z",
+  "groundTruth": {
+    "total": 50,
+    "decisions": 31
+  },
+  "detection": {
+    "recall": 1,
+    "precision": 1,
+    "f1": 1,
+    "tp": 31,
+    "fn": 0,
+    "fp": 0
+  },
+  "classification": {
+    "precision": 1,
+    "candidates": 32,
+    "note": "simulated without live LLM"
+  },
+  "recall": {
+    "top1Accuracy": 0.8709677419354839,
+    "top3Accuracy": 1,
+    "total": 31
+  },
+  "baseline": {
+    "baseline": {
+      "top1Accuracy": 0.6451612903225806,
+      "top3Accuracy": 0.967741935483871
+    },
+    "csi": {
+      "top1Accuracy": 0.8709677419354839,
+      "top3Accuracy": 1
+    },
+    "improvement": {
+      "top1Delta": 0.22580645161290325,
+      "top3Delta": 0.032258064516129004
+    }
+  },
+  "passCount": 5,
+  "totalTargets": 5
+}

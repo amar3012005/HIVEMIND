@@ -18,6 +18,10 @@ export class InMemoryStore {
     this.trails = new Map();
     /** @type {Map<string, import('../types/lease.types.js').TrailLease>} */
     this.leases = new Map(); // keyed by trailId
+    /** @type {Map<string, { trail_id: string, weight: number, components: Object, updated_at: string }>} */
+    this.trailWeights = new Map();
+    /** @type {Array<Object>} */
+    this.promotionCandidates = [];
   }
 
   // ─── Event Methods ──────────────────────────────────────────────────────────
@@ -132,6 +136,42 @@ export class InMemoryStore {
       return false;
     }
     return true;
+  }
+
+  // ─── Weight Methods ──────────────────────────────────────────────────────────
+
+  /** Persist a trail weight along with its component breakdown. */
+  async updateTrailWeight(trailId, weight, components) {
+    this.trailWeights.set(trailId, {
+      trail_id: trailId,
+      weight,
+      components,
+      updated_at: new Date().toISOString(),
+    });
+    const trail = this.trails.get(trailId);
+    if (trail) trail.weight = weight;
+  }
+
+  /** Retrieve stored weight info for a trail. */
+  async getTrailWeight(trailId) {
+    return this.trailWeights.get(trailId) ?? null;
+  }
+
+  // ─── Promotion Methods ─────────────────────────────────────────────────────
+
+  /** Store a promotion candidate, enforcing dedupe_key uniqueness. */
+  async emitPromotionCandidate(candidate) {
+    const existing = this.promotionCandidates.find(
+      (c) => c.dedupe_key === candidate.dedupe_key,
+    );
+    if (existing) return null;
+    this.promotionCandidates.push(candidate);
+    return candidate;
+  }
+
+  /** Return promotion candidates, optionally filtered by status. */
+  async getPromotionCandidates(status) {
+    return this.promotionCandidates.filter((c) => !status || c.status === status);
   }
 
   /** Remove all expired leases. */

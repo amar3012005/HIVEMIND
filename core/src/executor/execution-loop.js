@@ -61,6 +61,7 @@ export class TrailExecutor {
     leaseManager,
     weightUpdater = null,
     promotionMux = null,
+    reputationEngine = null,
     store,
   }) {
     this.trailSelector = trailSelector;
@@ -70,6 +71,7 @@ export class TrailExecutor {
     this.leaseManager = leaseManager;
     this.weightUpdater = weightUpdater;
     this.promotionMux = promotionMux;
+    this.reputationEngine = reputationEngine;
     this.store = store;
   }
 
@@ -119,6 +121,29 @@ export class TrailExecutor {
     const goalId = goal; // Use goal text as goalId for now
     const namespaceId = agentId; // Use agentId as namespace for now
 
+    // Ensure agent exists (auto-create if implicit)
+    if (this.store.ensureAgent) {
+      try {
+        const agent = await this.store.ensureAgent(agentId);
+        if (agent.status === 'suspended') {
+          return {
+            goal, agentId, stepsExecuted: 0, eventsLogged: 0,
+            finalState: workingMemory, trailsUpdated: [],
+            observationsForEval: [], chainSummary: { doneReason: 'agent_suspended' },
+            error: 'Agent is suspended',
+          };
+        }
+      } catch { /* non-fatal */ }
+    }
+
+    // Load agent reputation for routing context
+    let agentReputation = null;
+    if (this.reputationEngine) {
+      try {
+        agentReputation = await this.reputationEngine.getReputation(agentId);
+      } catch { /* non-fatal */ }
+    }
+
     // ── PHASE 2: Execution Loop ──────────────────────────────────────────────
 
     while (step < maxSteps && !workingMemory.done) {
@@ -132,6 +157,9 @@ export class TrailExecutor {
           state: workingMemory.context,
           queueInfo: { depth: step },
           recentTrailHistory: workingMemory.recentTrailHistory || [],
+          reputationContext: agentReputation ? {
+            agentScores: { [agentId]: { success_rate: agentReputation.success_rate } },
+          } : null,
         };
 
         const selection = await this.trailSelector.selectNext(
@@ -385,6 +413,18 @@ export class TrailExecutor {
       innerSteps: events.length,
       blueprintExecutionSummary: bpSummary || null,
     };
+
+    // Update reputation from execution outcome (synchronous, non-fatal)
+    if (this.reputationEngine) {
+      try {
+        await this.reputationEngine.updateFromExecution(agentId, {
+          chainSummary,
+          stepsExecuted: step,
+        });
+      } catch {
+        // Reputation write failed — don't fail the response
+      }
+    }
 
     return {
       goal,

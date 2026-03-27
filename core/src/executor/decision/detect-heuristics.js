@@ -12,12 +12,14 @@
 // Decision signal phrases by platform
 const DECISION_PHRASES = {
   common: [
-    /\b(decided|decision|we('re| are) going with|let('s|us) (go with|proceed|move forward))\b/i,
-    /\b(approved|approval|we agreed|consensus|final answer|resolved)\b/i,
-    /\b(chosen|picked|selected|went with|opting for)\b/i,
-    /\b(closing in favor|rejecting|declining|not going with)\b/i,
+    /\b(decided|decision|i decided|we decided|we('re| are) going with|going with|let('s|us) (go with|proceed|move forward))\b/i,
+    /\b(approved|approval|we agreed|agreed|consensus|final answer|resolved)\b/i,
+    /\b(chosen|chose|picked|selected|went with|opting for)\b/i,
+    /\b(accepted|accepting|declined|declining|rejected|rejecting|not going with|closing in favor)\b/i,
     /\b(prioritiz(e|ed|ing)|deprioritiz(e|ed|ing))\b/i,
-    /\b(assigned to|taking ownership|i('ll| will) handle)\b/i,
+    /\b(assigned|assigned to|taking ownership|i('ll| will) handle)\b/i,
+    /\b(i('m| am) going with|switching to|migrating to|moving to)\b/i,
+    /\b(i like .+ more|prefer .+ over|better than)\b/i,
   ],
   gmail: [
     /\b(please proceed|go ahead|sign(ed)? off|lgtm)\b/i,

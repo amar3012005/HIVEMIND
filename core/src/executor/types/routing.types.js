@@ -8,7 +8,7 @@
 
 /**
  * Strategy used to select the next trail to advance.
- * @typedef {'force_field' | 'round_robin' | 'priority'} TrailSelectionStrategy
+ * @typedef {'best' | 'random' | 'score_prop' | 'score_child_prop' | 'force_softmax'} TrailSelectionStrategy
  */
 
 /**
@@ -16,9 +16,9 @@
  *
  * @typedef {Object} RoutingConfig
  * @property {TrailSelectionStrategy} strategy - Selection algorithm
- * @property {ForceWeights} weights - Tunable multipliers for each force dimension
- * @property {number} [explorationEpsilon] - Probability of random trail pick (0-1, default: 0.05)
- * @property {number} [recomputeEveryNSteps] - Recalculate forces every N steps (default: 1)
+ * @property {number} temperature - Softmax temperature (higher = more exploration, lower = more exploitation)
+ * @property {number} [topK] - Only consider top K candidates before softmax (default: all)
+ * @property {ForceWeights} forceWeights - Tunable multipliers for each force dimension
  */
 
 /**
@@ -52,10 +52,11 @@
  * Output of the routing subsystem: which trail to advance and why.
  *
  * @typedef {Object} RoutingDecision
- * @property {import('./agent.types.js').TrailId} trailId - Selected trail
+ * @property {import('./agent.types.js').TrailId} selectedTrailId - Selected trail
+ * @property {import('./agent.types.js').TrailId[]} candidateTrailIds - All trails considered
  * @property {ForceVector} forceVector - Force snapshot that produced the decision
- * @property {'force_field' | 'exploration' | 'priority_override'} reason
- * @property {number} timestamp - Unix epoch ms
+ * @property {number} temperature - Softmax temperature used
+ * @property {TrailSelectionStrategy} strategy - Strategy that was applied
  */
 
 export const ROUTING_TYPES = Symbol.for('hivemind.executor.routing.types');

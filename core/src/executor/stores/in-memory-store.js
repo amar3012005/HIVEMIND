@@ -185,6 +185,20 @@ export class InMemoryStore {
     return this.promotionCandidates.filter((c) => !status || c.status === status);
   }
 
+  // ─── Chain Run Methods ─────────────────────────────────────────────────────
+
+  /** Store a completed chain run summary for blueprint mining. */
+  async storeChainRun(run) {
+    if (!this.chainRuns) this.chainRuns = [];
+    this.chainRuns.push(run);
+  }
+
+  /** Get chain runs for a goal, ordered by most recent. */
+  async getChainRuns(goalId, limit = 50) {
+    if (!this.chainRuns) return [];
+    return this.chainRuns.filter(r => r.goalId === goalId).slice(-limit);
+  }
+
   /** Remove all expired leases. */
   async cleanExpired() {
     const now = Date.now();

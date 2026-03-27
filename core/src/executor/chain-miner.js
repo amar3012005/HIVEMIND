@@ -205,43 +205,17 @@ export class ChainMiner {
    * @returns {Promise<Array<{goalId: string, toolSequence: string[], successRate: number, doneReason: string, totalLatencyMs: number}>>}
    */
   async _getChainRuns(goalId) {
-    // If store has chainRuns (InMemoryStore test helper)
+    // Use store.getChainRuns if available (both InMemoryStore and PrismaStore)
+    if (this.store.getChainRuns) {
+      return this.store.getChainRuns(goalId, this.lookbackRuns);
+    }
+
+    // Legacy fallback: use chainRuns array (InMemoryStore test helper)
     if (this.store.chainRuns) {
-      return this.store.chainRuns.filter(r => r.goalId === goalId);
+      return this.store.chainRuns.filter(r => r.goalId === goalId).slice(-this.lookbackRuns);
     }
 
-    // For PrismaStore: reconstruct from execution events
-    if (this.store.getExecutionRuns) {
-      return this.store.getExecutionRuns(goalId);
-    }
-
-    // Fallback: reconstruct from raw events
-    const events = this.store.events
-      ? this.store.events.filter(e => e.success)
-      : [];
-
-    // Group events by trail_id to reconstruct runs
-    /** @type {Map<string, Array>} */
-    const byTrail = new Map();
-    for (const evt of events) {
-      if (!byTrail.has(evt.trail_id)) byTrail.set(evt.trail_id, []);
-      byTrail.get(evt.trail_id).push(evt);
-    }
-
-    const runs = [];
-    for (const [trailId, trailEvents] of byTrail) {
-      const sorted = trailEvents.sort((a, b) => a.step_index - b.step_index);
-      runs.push({
-        goalId,
-        trailId,
-        toolSequence: sorted.map(e => e.action_name),
-        successRate: sorted.filter(e => e.success).length / sorted.length,
-        doneReason: 'tool_signaled_completion',
-        totalLatencyMs: sorted.reduce((s, e) => s + (e.latency_ms || 0), 0),
-      });
-    }
-
-    return runs;
+    return [];
   }
 
   /**

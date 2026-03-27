@@ -293,6 +293,50 @@ export class PrismaStore {
     });
   }
 
+  // ─── Chain Run Methods ──────────────────────────────────────────────────
+
+  /** Store a completed chain run summary for blueprint mining (as an observation). */
+  async storeChainRun(run) {
+    await this.prisma.opObservation.create({
+      data: {
+        agent_id: run.agentId || 'system',
+        kind: 'chain_run',
+        content: {
+          goalId: run.goalId,
+          toolSequence: run.toolSequence,
+          successRate: run.successRate,
+          doneReason: run.doneReason,
+          totalLatencyMs: run.totalLatencyMs,
+        },
+        certainty: run.successRate ?? 1.0,
+        related_to_trail: run.trailId || null,
+      },
+    });
+  }
+
+  /** Get chain runs for a goal from stored observations. */
+  async getChainRuns(goalId, limit = 50) {
+    const rows = await this.prisma.opObservation.findMany({
+      where: { kind: 'chain_run' },
+      orderBy: { timestamp: 'desc' },
+      take: limit * 3, // over-fetch to filter by goalId in content
+    });
+
+    return rows
+      .map(r => {
+        const c = r.content;
+        return c?.goalId === goalId ? {
+          goalId: c.goalId,
+          toolSequence: c.toolSequence,
+          successRate: c.successRate,
+          doneReason: c.doneReason,
+          totalLatencyMs: c.totalLatencyMs,
+        } : null;
+      })
+      .filter(Boolean)
+      .slice(0, limit);
+  }
+
   // ─── Observation Methods ────────────────────────────────────────────────
 
   /** Write an observation to op_observations. */

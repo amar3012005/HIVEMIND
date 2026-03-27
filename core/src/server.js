@@ -4094,6 +4094,18 @@ a{color:#a78bfa}</style></head><body>
 
               const result = await trailExecutor.execute(body.goal, agentId, config);
 
+              // Store chain run for blueprint mining
+              if (result.chainSummary && trailExecutor._store.storeChainRun) {
+                trailExecutor._store.storeChainRun({
+                  goalId: body.goal,
+                  agentId: agentId,
+                  toolSequence: result.chainSummary.toolSequence || [],
+                  successRate: result.chainSummary.successRate ?? 1.0,
+                  doneReason: result.chainSummary.doneReason || 'unknown',
+                  totalLatencyMs: result.chainSummary.totalLatencyMs || 0,
+                }).catch(() => {});
+              }
+
               // Non-blocking: mine for blueprint candidates after each execution
               if (trailExecutor._chainMiner) {
                 trailExecutor._chainMiner.mine(body.goal).catch(() => {});

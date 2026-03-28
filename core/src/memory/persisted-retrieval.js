@@ -285,7 +285,9 @@ async function vectorCandidatesForRecall(store, {
   source_platforms = [],
   tags = [],
   max_memories,
-  dateRange = null
+  dateRange = null,
+  scoreThreshold = 0.25,
+  candidatePoolSize = Math.max(max_memories * 4, 20)
 }) {
   const qdrantClient = getQdrantClient();
   const connected = await qdrantClient.isConnected();
@@ -299,8 +301,8 @@ async function vectorCandidatesForRecall(store, {
     project,
     tags,
     is_latest: true,
-    limit: Math.max(max_memories * 4, 20),
-    score_threshold: 0.25,
+    limit: candidatePoolSize,
+    score_threshold: scoreThreshold,
     collectionName: buildCollectionName(user_id)
   });
 
@@ -665,6 +667,10 @@ export async function recallPersistedMemories(store, {
   const temporalExpansion = expandTemporalQuery(query_context);
   const effectiveDateRange = date_range || temporalExpansion.dateRange || null;
   const temporalComparison = temporalExpansion.hasTemporalFilter || isTemporalComparisonQuery(query_context);
+  const candidatePoolSize = temporalComparison
+    ? Math.max(max_memories * 8, 40)
+    : Math.max(max_memories * 4, 20);
+  const vectorScoreThreshold = temporalComparison ? 0.18 : 0.25;
 
   const lexicalCandidates = await store.searchMemories({
     query: query_context,
@@ -673,7 +679,7 @@ export async function recallPersistedMemories(store, {
     project,
     tags,
     is_latest: true,
-    n_results: Math.max(max_memories * 4, 20),
+    n_results: candidatePoolSize,
     created_after: effectiveDateRange?.start,
     created_before: effectiveDateRange?.end
   });
@@ -695,7 +701,9 @@ export async function recallPersistedMemories(store, {
     source_platforms,
     tags,
     max_memories,
-    dateRange: effectiveDateRange
+    dateRange: effectiveDateRange,
+    scoreThreshold: vectorScoreThreshold,
+    candidatePoolSize
   });
   const relationships = await store.listRelationships({ user_id, org_id, project, limit: 1000 });
   const relationshipCounts = buildRelationshipIndex(relationships);

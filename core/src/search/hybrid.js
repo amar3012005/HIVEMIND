@@ -924,6 +924,7 @@ async function hybridSearch(options = {}) {
     limit = CONFIG.limits.finalLimit,
     weights = CONFIG.weights,
     depth = 'medium',
+    finalScoreThreshold = CONFIG.fallback.finalMinScore,
     filter: additionalFilter = {}
   } = options;
 
@@ -1047,11 +1048,14 @@ async function hybridSearch(options = {}) {
 
   // Step 6: Apply minimum score threshold
   const filteredResults = rankedResults.filter(
-    r => r.score >= CONFIG.fallback.finalMinScore
+    r => r.score >= finalScoreThreshold
   );
+  const candidateResults = filteredResults.length > 0
+    ? filteredResults
+    : rankedResults.slice(0, Math.max(limit, 10));
 
   // Step 7: Apply precision boosts (title/tag/project/dedup)
-  const boostedResults = applyPrecisionBoosts(filteredResults, effectiveQuery, { project });
+  const boostedResults = applyPrecisionBoosts(candidateResults, effectiveQuery, { project });
 
   // Step 8: Limit results
   const finalResults = boostedResults.slice(0, limit);
@@ -1080,7 +1084,8 @@ async function hybridSearch(options = {}) {
         includeHistorical,
         dateRange: effectiveDateRange
       },
-      depth
+      depth,
+      fallbackApplied: filteredResults.length === 0 && rankedResults.length > 0
     }
   };
 }

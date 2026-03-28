@@ -278,8 +278,95 @@ export class MemoryGraphEngine {
 
         const shouldRunProcessor = baseMemory.memory_type !== 'observation' && !input.skipProcessing;
 
-        // Unified Memory Processor: single LLM call for relationship + observation + facts
-        if (shouldRunProcessor) {
+        // --- Fact-Augment-Only mode (benchmark mode) ---
+        // Runs the MemoryProcessor to extract facts but ignores relationship results
+        // (no UPDATE/EXTEND/NOOP merging). Prepends extracted facts to content for
+        // better embedding quality, then stores the observation as normal.
+        if (input.factAugmentOnly && shouldRunProcessor) {
+          try {
+
+            const { MemoryProcessor } = await import('./memory-processor.js');
+            const processor = new MemoryProcessor();
+
+            const similarMemories = pcResult?.needsConflictResolution && pcResult.matchedMemoryIds?.length > 0
+              ? latestMemories.filter(m => pcResult.matchedMemoryIds.includes(m.id))
+              : this.conflictDetector.detectCandidates(baseMemory, latestMemories).map(candidate => candidate.memory);
+
+            const result = await processor.process(baseMemory, similarMemories);
+
+
+            // Build fact prefix from extracted entities/dates
+            const factParts = [];
+            if (result.facts?.entities?.length) factParts.push(...result.facts.entities);
+            if (result.facts?.dates?.length) factParts.push(...result.facts.dates);
+
+            if (factParts.length > 0) {
+              baseMemory.content = `[FACTS: ${factParts.join('. ')}.]\n\n${baseMemory.content}`;
+
+            } else {
+
+            }
+
+            baseMemory.metadata = {
+              ...(baseMemory.metadata || {}),
+              extracted_facts: result.facts || { entities: [], dates: [] },
+              memory_priority: result.priority || 'medium',
+              fact_augment_only: true,
+              processed_at: nowIso()
+            };
+
+            // Store observation if produced (still useful for searchable memories)
+            if (result.observation) {
+              const obsText = formatObservation({
+                content: result.observation,
+                priority: result.priority,
+                observationDate: baseMemory.document_date || baseMemory.created_at,
+              });
+
+              const obsFingerprint = crypto.createHash('sha256').update(obsText).digest('hex');
+              const existingObs = latestMemories.filter(m => (m.tags || []).includes('observation'));
+              const isDuplicate = existingObs.some(m => {
+                const existingFp = crypto.createHash('sha256').update(m.content || '').digest('hex');
+                return existingFp === obsFingerprint;
+              });
+
+              if (!isDuplicate) {
+                const obsPayload = buildObservationPayload({
+                  userId: baseMemory.user_id,
+                  orgId: baseMemory.org_id,
+                  observationText: obsText,
+                  observationDate: baseMemory.document_date || baseMemory.created_at,
+                  project: baseMemory.project,
+                  sourceTags: baseMemory.tags || [],
+                });
+                const obsId = crypto.randomUUID ? crypto.randomUUID() : `obs-${Date.now()}`;
+                await store.createMemory({
+                  ...obsPayload,
+                  id: obsId,
+                  is_latest: true,
+                  version: 1,
+                  created_at: new Date().toISOString(),
+                  updated_at: new Date().toISOString(),
+                });
+                await this._recordVersionSnapshot(store, {
+                  ...obsPayload,
+                  id: obsId,
+                  version: 1,
+                  metadata: obsPayload.metadata || {}
+                }, {
+                  reason: 'created',
+                  is_latest: true,
+                  related_memory_id: null
+                });
+              }
+            }
+          } catch (procErr) {
+            // Fallback: store original content without augmentation
+            console.warn('[memory-processor] factAugmentOnly failed, storing original:', procErr.message);
+          }
+        }
+        // --- Standard processor path (full relationship handling) ---
+        else if (shouldRunProcessor) {
           try {
             const { MemoryProcessor } = await import('./memory-processor.js');
             const processor = new MemoryProcessor();

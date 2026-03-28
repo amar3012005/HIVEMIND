@@ -540,6 +540,14 @@ export class QdrantClient {
       return false;
     }
   }
+
+  /**
+   * Get the configured collection name
+   * @returns {string} Current collection name
+   */
+  getCollectionName() {
+    return this.collectionName;
+  }
 }
 
 // Singleton instance

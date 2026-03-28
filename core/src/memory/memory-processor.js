@@ -22,8 +22,10 @@ export class MemoryProcessor {
    */
   async process(newMemory, similarMemories = []) {
     if (!this.groqApiKey) {
+
       return this._heuristicProcess(newMemory, similarMemories);
     }
+
 
     const hasSimilar = similarMemories.length > 0;
     const existingContext = hasSimilar
@@ -41,30 +43,26 @@ export class MemoryProcessor {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          model: 'openai/gpt-oss-20b',
+          model: 'llama-3.3-70b-versatile',
           messages: [
             {
               role: 'system',
-              content: `You are a memory engine processor. Analyze the NEW memory and output ALL of the following in a single response:
+              content: `You are a memory engine processor. You MUST output EXACTLY 5 lines. Analyze the NEW memory and output:
 
-LINE 1 — RELATIONSHIP: Compare against existing memories (if any). Output exactly one of:
-  ADD: [reason] — new topic, no relationship to existing
-  UPDATE: [existing_id] [reason] — supersedes/corrects an existing memory
-  EXTEND: [existing_id] [reason] — adds details to an existing topic
-  NOOP: [reason] — exact semantic duplicate, no new information
+RELATIONSHIP: ADD: new topic
+PRIORITY: MEDIUM
+OBSERVATION: 🟡 User did something
+ENTITIES: entity1, entity2
+DATES: date1, date2
 
-LINE 2 — PRIORITY: Exactly one of: HIGH, MEDIUM, LOW
-  HIGH = personal facts (name, job, address, family, finances, health)
-  MEDIUM = preferences, events, decisions, plans
-  LOW = generic questions, casual chat, greetings
+Rules for each line:
+- RELATIONSHIP: One of ADD/UPDATE/EXTEND/NOOP with reason
+- PRIORITY: HIGH (personal facts), MEDIUM (events/preferences), LOW (casual)
+- OBSERVATION: 1-2 sentence summary with emoji 🔴/🟡/🟢. Write TRIVIAL if nothing notable.
+- ENTITIES: Comma-separated people, places, orgs, products, activities, events. Write NONE if empty.
+- DATES: Comma-separated dates/times mentioned (exact or relative like "two months ago"). Write NONE if empty.
 
-LINE 3 — OBSERVATION: A dense 1-2 sentence summary of the key user facts. Use emoji: 🔴 (high), 🟡 (medium), 🟢 (low). If no memorable facts, write: TRIVIAL
-
-LINE 4 — ENTITIES: Comma-separated list of key entities (people, places, orgs, products). If none, write: NONE
-
-LINE 5 — DATES: Comma-separated dates mentioned. If none, write: NONE
-
-Be concise. Never hallucinate facts not in the input.`
+IMPORTANT: You MUST output all 5 lines. Never skip any line.`
             },
             {
               role: 'user',
@@ -75,7 +73,6 @@ Be concise. Never hallucinate facts not in the input.`
           ],
           max_tokens: maxTokens,
           temperature: 0,
-          include_reasoning: false,
         }),
       });
 
@@ -84,14 +81,15 @@ Be concise. Never hallucinate facts not in the input.`
       const output = (data.choices[0]?.message?.content || '')
         .replace(/[\uD800-\uDFFF]/g, '').replace(/\x00/g, '').trim();
 
-      return this._parseOutput(output, similarMemories);
+
+      return this._parseOutput(output, similarMemories, newMemory.content);
     } catch (err) {
       console.warn('[memory-processor] LLM failed, using heuristic:', err.message);
       return this._heuristicProcess(newMemory, similarMemories);
     }
   }
 
-  _parseOutput(output, similarMemories) {
+  _parseOutput(output, similarMemories, originalContent) {
     const lines = output.split('\n').map(l => l.trim()).filter(Boolean);
 
     // Parse RELATIONSHIP
@@ -129,23 +127,51 @@ Be concise. Never hallucinate facts not in the input.`
       }
     }
 
-    // Parse ENTITIES
+    // Parse ENTITIES (tolerant: handles bullets, lowercase, extra spacing)
     let entities = [];
-    const entLine = lines.find(l => /^ENTITIES[:\s]/i.test(l));
+    const entLine = lines.find(l => /^[-*\s]*ENTITIES\s*[:\-]/i.test(l));
     if (entLine) {
-      const raw = entLine.replace(/^ENTITIES[:\s]*/i, '').trim();
-      if (raw && raw !== 'NONE') {
+      const raw = entLine.replace(/^[-*\s]*ENTITIES\s*[:\-]\s*/i, '').trim();
+      if (raw && raw.toUpperCase() !== 'NONE') {
         entities = raw.split(',').map(e => e.trim()).filter(Boolean);
       }
     }
 
-    // Parse DATES
+    // Parse DATES (tolerant: handles bullets, lowercase, extra spacing)
     let dates = [];
-    const dateLine = lines.find(l => /^DATES[:\s]/i.test(l));
+    const dateLine = lines.find(l => /^[-*\s]*DATES\s*[:\-]/i.test(l));
     if (dateLine) {
-      const raw = dateLine.replace(/^DATES[:\s]*/i, '').trim();
-      if (raw && raw !== 'NONE') {
+      const raw = dateLine.replace(/^[-*\s]*DATES\s*[:\-]\s*/i, '').trim();
+      if (raw && raw.toUpperCase() !== 'NONE') {
         dates = raw.split(',').map(d => d.trim()).filter(Boolean);
+      }
+    }
+
+    // Fallback: extract entities and dates from the full LLM output text
+    if (entities.length === 0 && dates.length === 0) {
+      const quotedEntities = output.match(/['"]([^'"]{3,50})['"]/g);
+      if (quotedEntities) {
+        entities = quotedEntities.map(q => q.replace(/['"]/g, '').trim()).slice(0, 5);
+      }
+
+      const datePatterns = output.match(/\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s*\d{4})?|\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|\b(?:two|three|four|five|six|seven|eight|nine|ten)\s+(?:days?|weeks?|months?|years?)\s+ago\b|\b\d+\s+(?:days?|weeks?|months?)\s+ago\b/gi);
+      if (datePatterns) {
+        dates = [...new Set(datePatterns.map(d => d.trim()))].slice(0, 5);
+      }
+    }
+
+    // Last resort: extract from original memory content
+    if (entities.length === 0) {
+      const properNouns = (originalContent || '').match(/\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+/g);
+      if (properNouns) {
+        entities = [...new Set(properNouns)].slice(0, 5);
+      }
+    }
+
+    if (dates.length === 0) {
+      const contentDates = (originalContent || '').match(/\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s*\d{4})?|\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|\b(?:two|three|four|five|six|seven|eight|nine|ten)\s+(?:days?|weeks?|months?|years?)\s+ago\b|\b\d+\s+(?:days?|weeks?|months?)\s+ago\b/gi);
+      if (contentDates) {
+        dates = [...new Set(contentDates.map(d => d.trim()))].slice(0, 5);
       }
     }
 
@@ -165,6 +191,21 @@ Be concise. Never hallucinate facts not in the input.`
     if (/\b(my|i)\s+(name|job|work|live|born|salary|degree)\b/i.test(content)) priority = 'high';
     if (/\b(thanks|joke|hello|hi|bye)\b/i.test(content)) priority = 'low';
 
-    return { relationship, observation: null, facts: { entities: [], dates: [] }, priority };
+    // Extract entities from original content (proper nouns)
+    let entities = [];
+    const rawContent = newMemory.content || '';
+    const properNouns = rawContent.match(/\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+/g);
+    if (properNouns) {
+      entities = [...new Set(properNouns)].slice(0, 5);
+    }
+
+    // Extract dates from original content
+    let dates = [];
+    const contentDates = rawContent.match(/\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s*\d{4})?|\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|\b(?:two|three|four|five|six|seven|eight|nine|ten)\s+(?:days?|weeks?|months?|years?)\s+ago\b|\b\d+\s+(?:days?|weeks?|months?)\s+ago\b/gi);
+    if (contentDates) {
+      dates = [...new Set(contentDates.map(d => d.trim()))].slice(0, 5);
+    }
+
+    return { relationship, observation: null, facts: { entities, dates }, priority };
   }
 }

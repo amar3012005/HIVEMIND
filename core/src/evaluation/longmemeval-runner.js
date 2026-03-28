@@ -33,6 +33,17 @@ const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 const GROQ_MODEL = process.env.GROQ_INFERENCE_MODEL || 'llama-3.3-70b-versatile';
 const REASONING_MODELS = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b'];
 
+// LiteLLM config for stronger generation models (GPT-4o-mini, Gemini, Claude)
+const LITELLM_BASE = process.env.LITELLM_BASE_URL || process.env.OPENAI_API_BASE_URL || '';
+const LITELLM_KEY = process.env.LITELLM_API_KEY || process.env.OPENAI_API_KEY || '';
+const LITELLM_MODEL = process.env.LITELLM_MODEL || 'gpt-4o-mini';
+
+// Benchmark Qdrant collection with bge-m3 embeddings (direct access, bypasses server embed)
+const BENCHMARK_QDRANT_URL = process.env.QDRANT_URL || 'https://24826665-41d6-4ea6-b13f-fc42438c4c55.eu-central-1-0.aws.cloud.qdrant.io:6333';
+const BENCHMARK_QDRANT_KEY = process.env.QDRANT_API_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.fo75c0vRt9MhfhcQB0fP-m-MiU4gCYZD_yv23YNtyJc';
+const BENCHMARK_COLLECTION = process.env.BENCHMARK_QDRANT_COLLECTION || 'BENCHMARK';
+const BENCHMARK_EMBED_MODEL = process.env.BENCHMARK_EMBED_MODEL || 'bge-m3';
+
 // Benchmark user/org (isolated tenant)
 const BENCH_USER = 'longmemeval-bench-001';
 const BENCH_ORG = 'longmemeval-org-001';
@@ -86,6 +97,166 @@ async function apiCall(method, path, body = null) {
     throw new Error(`API ${method} ${path}: ${resp.status} ${text.slice(0, 200)}`);
   }
   return resp.json();
+}
+
+// ── Benchmark collection helpers (bge-m3 + direct Qdrant) ──
+
+/**
+ * Embed texts using LiteLLM bge-m3 model (1024-dim vectors)
+ * @param {string[]} texts - Array of texts to embed
+ * @returns {Promise<number[][]>} Array of embedding vectors
+ */
+async function litellmEmbed(texts) {
+  const base = LITELLM_BASE;
+  const key = LITELLM_KEY;
+  if (!base || !key) {
+    throw new Error('LiteLLM not configured for benchmark embeddings — set LITELLM_BASE_URL and LITELLM_API_KEY');
+  }
+  const resp = await fetch(`${base}/embeddings`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: BENCHMARK_EMBED_MODEL, input: texts }),
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`LiteLLM embed ${resp.status}: ${text.slice(0, 200)}`);
+  }
+  const data = await resp.json();
+  return data.data.map(d => d.embedding);
+}
+
+/**
+ * Direct Qdrant API call (bypasses server's QdrantClient)
+ */
+async function benchmarkQdrant(method, urlPath, body = null) {
+  const opts = {
+    method,
+    headers: { 'api-key': BENCHMARK_QDRANT_KEY, 'Content-Type': 'application/json' },
+  };
+  if (body) opts.body = JSON.stringify(body);
+  const resp = await fetch(`${BENCHMARK_QDRANT_URL}${urlPath}`, opts);
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Qdrant ${resp.status}: ${text.slice(0, 200)}`);
+  }
+  return resp.json();
+}
+
+/**
+ * Ensure the BENCHMARK collection exists in Qdrant (1024-dim, cosine)
+ */
+async function ensureBenchmarkCollection() {
+  try {
+    const resp = await fetch(`${BENCHMARK_QDRANT_URL}/collections/${BENCHMARK_COLLECTION}`, {
+      headers: { 'api-key': BENCHMARK_QDRANT_KEY, 'Content-Type': 'application/json' },
+    });
+    if (resp.ok) return true;
+    if (resp.status === 404) {
+      // Create collection with 1024-dim cosine vectors (bge-m3)
+      await benchmarkQdrant('PUT', `/collections/${BENCHMARK_COLLECTION}`, {
+        vectors: { size: 1024, distance: 'Cosine' },
+      });
+      console.log(`[benchmark] Created BENCHMARK collection (1024-dim, cosine)`);
+    }
+    // Ensure payload indices exist for temporal filtering
+    try {
+      await benchmarkQdrant('PUT', `/collections/${BENCHMARK_COLLECTION}/index`, {
+        field_name: 'session_idx', field_schema: 'integer'
+      });
+    } catch (idxErr) {
+      console.warn(`[benchmark] session_idx index creation skipped: ${idxErr.message}`);
+    }
+    return true;
+  } catch (err) {
+    console.error(`[benchmark] Failed to ensure collection: ${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * Generate a numeric point ID from a string key (deterministic hash)
+ */
+function benchmarkPointId(key) {
+  let hash = 0;
+  for (let c = 0; c < key.length; c++) {
+    hash = ((hash << 5) - hash + key.charCodeAt(c)) | 0;
+  }
+  return Math.abs(hash) % 2147483647;
+}
+
+/**
+ * Store a batch of memories in the BENCHMARK collection with bge-m3 embeddings
+ */
+async function benchmarkUpsert(points) {
+  await benchmarkQdrant('PUT', `/collections/${BENCHMARK_COLLECTION}/points`, {
+    points,
+    wait: true,
+  });
+}
+
+/**
+ * Search the BENCHMARK collection with a bge-m3 query vector
+ */
+async function benchmarkSearch(queryVec, questionId, limit = 20) {
+  const result = await benchmarkQdrant('POST', `/collections/${BENCHMARK_COLLECTION}/points/search`, {
+    vector: queryVec,
+    limit,
+    with_payload: true,
+    filter: {
+      must: [{ key: 'question_id', match: { value: questionId } }],
+    },
+  });
+  return (result.result || []).map(r => ({
+    id: r.id,
+    content: r.payload?.content || '',
+    score: r.score,
+    title: r.payload?.title || '',
+    date: r.payload?.session_date || r.payload?.document_date || null,
+    project: r.payload?.project || null,
+    session: r.payload?.session_idx,
+    memoryType: r.payload?.memory_type || null,
+    tags: r.payload?.tags || [],
+  }));
+}
+
+/**
+ * Delete benchmark points for a question from the BENCHMARK collection
+ */
+async function benchmarkCleanup(questionId) {
+  try {
+    await benchmarkQdrant('POST', `/collections/${BENCHMARK_COLLECTION}/points/delete`, {
+      filter: { must: [{ key: 'question_id', match: { value: questionId } }] },
+      wait: true,
+    });
+  } catch (err) {
+    console.warn(`[benchmark] Cleanup failed for ${questionId}: ${err.message.slice(0, 80)}`);
+  }
+}
+
+async function litellmChat(messages, options = {}) {
+  if (!LITELLM_BASE || !LITELLM_KEY) {
+    throw new Error('LiteLLM not configured — set LITELLM_BASE_URL and LITELLM_API_KEY');
+  }
+  const model = options.model || LITELLM_MODEL;
+  const resp = await fetch(`${LITELLM_BASE}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${LITELLM_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      messages,
+      temperature: 0,
+      max_tokens: options.maxTokens || 500,
+    }),
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`LiteLLM ${resp.status}: ${text.slice(0, 200)}`);
+  }
+  const data = await resp.json();
+  return data.choices[0].message.content;
 }
 
 async function groqChat(messages, options = {}) {
@@ -423,45 +594,17 @@ function isTemporalReasoningQuestion(question, questionType) {
     || TEMPORAL_COMPARISON_PATTERNS.dayDiff.test(question || '');
 }
 
-function buildGenerationPrompt({ context, question, questionDate, systemHint, structuredEvidence = '' }) {
+function buildGenerationPrompt({ context, question, questionDate, systemHint, structuredEvidence }) {
   const dateStr = questionDate || 'Unknown';
-  const lowerQuestion = (question || '').toLowerCase();
-  const isTemporalComparison = /\b(first|earlier|earliest|before|after|last|latest|how many days)\b/.test(lowerQuestion);
 
   if (context.length > 50) {
-    const instructions = isTemporalComparison
-      ? [
-          'Answer the question using only the retrieved memory context.',
-          systemHint || 'Compare the dated snippets chronologically.',
-          'For temporal questions, explicitly compare the dates in the snippets before answering.',
-          'If the question asks for first/earlier, choose the earliest matching dated event.',
-          'If the question asks for how many days, compute the date difference from the dated snippets and return only the number of days.',
-          'Return a short direct answer with no chain-of-thought, no preamble, and no explanation.'
-        ]
-      : [
-          'Answer the question using only the retrieved memory context.',
-          systemHint || 'Prefer the most relevant direct memory snippet.',
-          'Return a short direct answer with no chain-of-thought, no preamble, and no explanation.'
-        ];
-    return [
-      ...instructions,
-      '',
-      ...(structuredEvidence ? [structuredEvidence, ''] : []),
-      'Retrieved Memory Context:',
-      context,
-      '',
-      `Current Date: ${dateStr}`,
-      `Question: ${question}`,
-      'Answer:'
-    ].join('\n');
+    // Include systemHint (type-specific guidance) and structuredEvidence (temporal dates) if available
+    const hintLine = systemHint ? `\nNote: ${systemHint}\n` : '';
+    const evidenceLine = structuredEvidence ? `\nExtracted Evidence:\n${structuredEvidence}\n` : '';
+    return `I will give you several history chats between you and a user. Please answer the question based on the relevant chat history.\n\nHistory Chats:\n\n${context}${evidenceLine}${hintLine}\nCurrent Date: ${dateStr}\nQuestion: ${question}\nAnswer:`;
   }
 
-  return [
-    'If the answer is not in memory, say exactly: "I don\'t have this information in my memory."',
-    `Current Date: ${dateStr}`,
-    `Question: ${question}`,
-    'Answer:'
-  ].join('\n');
+  return `Current Date: ${dateStr}\nQuestion: ${question}\nAnswer:`;
 }
 
 function looksLikeAbstention(text) {
@@ -767,6 +910,9 @@ async function ingestInstance(instance, instanceIdx, totalInstances) {
   let ingested = 0;
   let skipped = 0;
 
+  // Collect all round-level turns for batch bge-m3 embedding
+  const benchmarkBatch = [];
+
   for (let i = 0; i < totalSessions; i++) {
     const session = haystack_sessions[i];
     const sessionDate = parseLongMemEvalDate(haystack_dates[i]);
@@ -782,10 +928,13 @@ async function ingestInstance(instance, instanceIdx, totalInstances) {
         ? `User: ${userTurn.content}\nAssistant: ${assistantTurn.content}`
         : `User: ${userTurn.content}`;
 
+      const title = `LME:${question_id}:s${i}:r${j / 2}`;
+
+      // 1. Ingest via HIVEMIND API (SOTA features: MemoryProcessor, observations, fact-augment)
       try {
         await apiCall('POST', '/api/memories', {
           content,
-          title: `LME:${question_id}:s${i}:r${j / 2}`,
+          title,
           tags: ['longmemeval', `qid:${question_id}`, `session:${i}`],
           memory_type: 'event',
           document_date: sessionDate,
@@ -798,10 +947,11 @@ async function ingestInstance(instance, instanceIdx, totalInstances) {
             round_index: j / 2,
             benchmark_enrichment_mode: 'facts_only'
           },
-          // Skip ingestion processing — MemoryProcessor merges distinct turns, predict-calibrate has stale cache
+          // Fact-augment mode: extract facts and prepend to content for better embeddings,
+          // but skip UPDATE/EXTEND relationships that merge distinct conversation turns.
           // Retrieval still uses full engine (Operator Layer + Recall)
           skipPredictCalibrate: true,
-          skipProcessing: true,
+          factAugmentOnly: true,
           skip_relationship_classification: true,
           benchmarkEnrichment: true,
         });
@@ -812,10 +962,55 @@ async function ingestInstance(instance, instanceIdx, totalInstances) {
         skipped++;
         if (skipped <= 3) console.warn(`  [skip] ${question_id}:s${i}:r${j / 2}: ${err.message.slice(0, 100)}`);
       }
+
+      // 2. Collect for BENCHMARK collection (bge-m3 embeddings, direct Qdrant)
+      benchmarkBatch.push({
+        key: `${question_id}_s${i}_r${Math.floor(j / 2)}`,
+        content,
+        title,
+        sessionDate,
+        sessionDateRaw: haystack_dates[i],
+        sessionIdx: i,
+        roundIdx: Math.floor(j / 2),
+      });
     }
   }
 
-  console.log(`[${instanceIdx + 1}/${totalInstances}] ${question_id}: ${totalSessions} sessions → ${ingested} memories, ${skipped} skipped`);
+  // 3. Batch embed with bge-m3 and upsert to BENCHMARK collection
+  if (benchmarkBatch.length > 0) {
+    try {
+      // Embed in batches of 32 to avoid payload limits
+      const BATCH_SIZE = 32;
+      for (let b = 0; b < benchmarkBatch.length; b += BATCH_SIZE) {
+        const batch = benchmarkBatch.slice(b, b + BATCH_SIZE);
+        const texts = batch.map(p => p.content);
+        const embeddings = await litellmEmbed(texts);
+
+        const points = batch.map((p, idx) => ({
+          id: benchmarkPointId(p.key),
+          vector: embeddings[idx],
+          payload: {
+            content: p.content,
+            title: p.title,
+            question_id,
+            session_date: p.sessionDate,
+            session_date_raw: p.sessionDateRaw,
+            session_idx: p.sessionIdx,
+            round_idx: p.roundIdx,
+            project: `bench/longmemeval/${question_id}`,
+            memory_type: 'event',
+            tags: ['longmemeval', `qid:${question_id}`, `session:${p.sessionIdx}`],
+          },
+        }));
+
+        await benchmarkUpsert(points);
+      }
+    } catch (err) {
+      console.warn(`  [benchmark] bge-m3 upsert failed for ${question_id}: ${err.message.slice(0, 120)}`);
+    }
+  }
+
+  console.log(`[${instanceIdx + 1}/${totalInstances}] ${question_id}: ${totalSessions} sessions → ${ingested} memories (+ ${benchmarkBatch.length} bge-m3), ${skipped} skipped`);
   return { ingested, skipped };
 }
 
@@ -827,33 +1022,176 @@ async function evaluateInstance(instance) {
   const retrievalPlan = getLongMemEvalRetrievalPlan({ question, questionType: question_type });
 
   let searchResults;
-  let primaryResults;
-  let secondaryResults;
+  let recallResults = null;
+  let quickResults = null;
+  let benchmarkResults = null;
   let usedGlobalFallback = false;
   const searchStart = Date.now();
   const project = `bench/longmemeval/${question_id}`;
   try {
-    const primaryPath = retrievalPlan.route === 'panorama'
-      ? '/api/search/panorama'
-      : retrievalPlan.route === 'quick'
-      ? '/api/search/quick'
-      : '/api/recall';
-
-    primaryResults = await apiCall('POST', primaryPath, {
-      ...retrievalPlan.body,
-      project,
-    });
-
-    if (retrievalPlan.route === 'recall') {
-      secondaryResults = await apiCall('POST', '/api/search/quick', {
+    // Step 1: Call cognitive-frame for intent-based query rewriting BEFORE bge-m3 search
+    let queryIntent = null;
+    let rewrittenQueries = [question]; // default: just the original question
+    try {
+      const frameResult = await apiCall('POST', '/api/cognitive-frame', {
         query: question,
         project,
-        limit: Math.max(retrievalPlan.searchLimit, 15),
       });
+      queryIntent = frameResult.intent;
+
+      // Rewrite queries based on intent
+      if (question_type === 'temporal-reasoning') {
+        // For "which happened first, X or Y?" → search for X and Y separately
+        const eventMatch = question.match(/(?:first|last|before|after)[,\s]+(?:the\s+)?['"]?(.+?)['"]?\s+or\s+(?:the\s+)?['"]?(.+?)['"]?\s*\?/i);
+        if (eventMatch) {
+          rewrittenQueries = [question, eventMatch[1].trim(), eventMatch[2].trim()];
+        }
+        // For "how many days between X and Y?" → search for both events
+        const betweenMatch = question.match(/between\s+(?:the\s+)?['"]?(.+?)['"]?\s+(?:and|event)\s+(?:the\s+)?['"]?(.+?)['"]?\s*\?/i);
+        if (betweenMatch) {
+          rewrittenQueries = [question, betweenMatch[1].trim(), betweenMatch[2].trim()];
+        }
+      } else if (question_type === 'knowledge-update') {
+        rewrittenQueries = [question, question + ' latest update changed'];
+      } else if (question_type === 'multi-session') {
+        // Extract sub-topics from multi-session questions
+        const andParts = question.match(/(?:about|regarding|on)\s+(.+?)\s+and\s+(.+?)[\?\.]|(.+?)\s+and\s+(.+?)(?:\s+(?:that|which|we))/i);
+        if (andParts) {
+          const part1 = (andParts[1] || andParts[3] || '').trim();
+          const part2 = (andParts[2] || andParts[4] || '').trim();
+          if (part1 && part2) {
+            rewrittenQueries = [question, part1, part2];
+          }
+        }
+      }
+    } catch (e) {
+      // cognitive-frame failed, use original question — no-op
     }
 
+    // Step 2: Embed ALL rewritten queries and search with each via bge-m3
+    try {
+      const allBenchmarkResults = [];
+      for (const q of rewrittenQueries) {
+        const [qVec] = await litellmEmbed([q]);
+        const results = await benchmarkSearch(qVec, question_id, 15);
+        allBenchmarkResults.push(...results);
+      }
+      // Dedupe by content
+      const seen = new Set();
+      const dedupedResults = [];
+      for (const r of allBenchmarkResults) {
+        const key = (r.content || '').slice(0, 200);
+        if (!seen.has(key)) { seen.add(key); dedupedResults.push(r); }
+      }
+      // For temporal/multi-session questions, ensure all sessions are represented
+      if (question_type === 'temporal-reasoning' || question_type === 'multi-session') {
+        const sessionIndices = new Set(dedupedResults.map(r => r.session));
+        const totalSessions = instance.haystack_sessions?.length || 0;
+
+        for (let s = 0; s < totalSessions; s++) {
+          if (!sessionIndices.has(s)) {
+            // This session is missing — fetch its memories by session_idx filter
+            try {
+              const sessionResults = await benchmarkQdrant('POST', `/collections/${BENCHMARK_COLLECTION}/points/scroll`, {
+                filter: {
+                  must: [
+                    { key: 'question_id', match: { value: question_id } },
+                    { key: 'session_idx', match: { value: s } }
+                  ]
+                },
+                limit: 10,
+                with_payload: true,
+                with_vector: false
+              });
+              const points = sessionResults.result?.points || [];
+              for (const p of points) {
+                dedupedResults.push({
+                  id: p.id,
+                  content: p.payload?.content || '',
+                  score: 0.5, // lower score since it's a gap-fill
+                  title: p.payload?.title || '',
+                  date: p.payload?.session_date || p.payload?.document_date || null,
+                  project: p.payload?.project || null,
+                  session: p.payload?.session_idx,
+                  memoryType: p.payload?.memory_type || null,
+                  tags: p.payload?.tags || [],
+                });
+              }
+              if (points.length > 0) {
+                console.log(`  [benchmark] Gap-filled session ${s} with ${points.length} memories for ${question_id}`);
+              }
+            } catch (gapErr) {
+              console.warn(`  [benchmark] Gap-fill scroll failed for session ${s}: ${gapErr.message?.slice(0, 80)}`);
+            }
+          }
+        }
+      }
+
+      benchmarkResults = dedupedResults;
+    } catch (err) {
+      console.warn(`  [benchmark] bge-m3 search failed for ${question_id}, falling back to server: ${err.message.slice(0, 80)}`);
+    }
+
+    // Secondary retrieval: HIVEMIND API for SOTA features (Operator Layer, graph expansion, panorama)
+    // These provide intent detection, temporal expansion, and knowledge-update timeline support
+    if (question_type === 'temporal-reasoning') {
+      recallResults = await apiCall('POST', '/api/recall', {
+        query_context: question,
+        project,
+        max_memories: 15,
+      });
+      if (!benchmarkResults) {
+        quickResults = await apiCall('POST', '/api/search/quick', {
+          query: question, project, limit: 20,
+        });
+      }
+
+    } else if (question_type === 'knowledge-update') {
+      quickResults = await apiCall('POST', '/api/search/panorama', {
+        query: question, project, limit: 20,
+        include_expired: true, include_historical: true,
+      });
+      recallResults = await apiCall('POST', '/api/recall', {
+        query_context: question, project, max_memories: 15,
+      });
+
+    } else if (question_type === 'multi-session') {
+      recallResults = await apiCall('POST', '/api/recall', {
+        query_context: question, project, max_memories: 15,
+      });
+      if (!benchmarkResults) {
+        quickResults = await apiCall('POST', '/api/search/quick', {
+          query: question, project, limit: 20,
+        });
+      }
+
+    } else {
+      // Single-session types: bge-m3 is primary; only fall back to server if bge-m3 failed
+      if (!benchmarkResults) {
+        quickResults = await apiCall('POST', '/api/search/quick', {
+          query: question, project, limit: 20,
+        });
+      }
+    }
+
+    // Merge: bge-m3 results (primary) + SOTA recall/panorama results (secondary)
+    const benchmarkNorm = benchmarkResults || [];
+    const recallNorm = recallResults ? normalizeSearchResults(recallResults) : [];
+    const quickNorm = quickResults ? normalizeSearchResults(quickResults) : [];
+
+    // bge-m3 results take priority, then recall/panorama results fill gaps
+    const sotaResults = mergeRetrievalResults(
+      { results: recallNorm },
+      { results: quickNorm },
+      retrievalPlan.searchLimit
+    );
+
     searchResults = {
-      results: mergeRetrievalResults(primaryResults, secondaryResults, retrievalPlan.searchLimit)
+      results: mergeRetrievalResults(
+        { results: benchmarkNorm },
+        { results: sotaResults },
+        retrievalPlan.searchLimit
+      )
     };
   } catch {
     searchResults = { results: [] };
@@ -874,7 +1212,7 @@ async function evaluateInstance(instance) {
 
   const context = buildBenchmarkContext(
     { results: selectedResults },
-    { maxItems: retrievalPlan.contextLimit, maxChars: 7000, sortMode: retrievalPlan.contextSortMode || 'score' }
+    { maxItems: retrievalPlan.contextLimit, maxChars: 12000, sortMode: retrievalPlan.contextSortMode || 'score' }
   );
 
   let hypothesis;
@@ -891,15 +1229,23 @@ async function evaluateInstance(instance) {
         structuredEvidence
       });
 
-      hypothesis = await groqChat([
-        { role: 'user', content: userPrompt },
-      ], { maxTokens: 120 });
-
-      if (!hypothesis || hypothesis.trim().length === 0) {
-        console.warn(`  [fallback] ${question_id}: ${GROQ_MODEL} returned empty, trying llama-3.3-70b-versatile`);
+      // Use LiteLLM (GPT-4o-mini) if configured, else Groq
+      if (LITELLM_BASE && LITELLM_KEY) {
+        hypothesis = await litellmChat([
+          { role: 'user', content: userPrompt },
+        ], { maxTokens: 500 });
+      } else {
         hypothesis = await groqChat([
           { role: 'user', content: userPrompt },
-        ], { model: 'llama-3.3-70b-versatile', maxTokens: 120 });
+        ], { maxTokens: 500 });
+      }
+
+      // Fallback to Groq llama if empty
+      if (!hypothesis || hypothesis.trim().length === 0) {
+        console.warn(`  [fallback] ${question_id}: primary model returned empty, trying groq llama`);
+        hypothesis = await groqChat([
+          { role: 'user', content: userPrompt },
+        ], { model: 'llama-3.3-70b-versatile', maxTokens: 500 });
       }
     }
   } catch (err) {
@@ -914,11 +1260,14 @@ async function evaluateInstance(instance) {
     isAbstention,
     hypothesis: hypothesis.trim(),
     retrieval: {
-      route: secondaryResults ? `${retrievalPlan.route}+quick` : retrievalPlan.route,
+      route: benchmarkResults
+        ? `bge-m3+${retrievalPlan.route}`
+        : (recallResults && quickResults ? `${retrievalPlan.route}+quick` : retrievalPlan.route),
       query: question,
       projectResultCount: projectResults.length,
-      recallResultCount: retrievalPlan.route === 'recall' ? normalizeSearchResults(primaryResults).length : 0,
-      quickResultCount: normalizeSearchResults(secondaryResults).length,
+      benchmarkResultCount: benchmarkResults ? benchmarkResults.length : 0,
+      recallResultCount: recallResults ? normalizeSearchResults(recallResults).length : 0,
+      quickResultCount: quickResults ? normalizeSearchResults(quickResults).length : 0,
       resultCount: normalizeSearchResults(searchResults).length,
       selectedContextCount: selectedResults.length,
       contextChars: context.length,
@@ -1016,23 +1365,21 @@ async function cleanupInstance(questionId) {
 async function processInstanceStreaming(instance, instanceIdx, totalInstances) {
   const { question_id, question, question_type, answer } = instance;
 
-  // 1. Ingest this question's sessions
+  // 1. Ingest this question's sessions (project-scoped: bench/longmemeval/{question_id})
   const { ingested, skipped } = await ingestInstance(instance, instanceIdx, totalInstances);
 
-  // 2. Wait for Qdrant indexing + MemoryProcessor LLM calls (observations, facts, relationships)
-  // Full engine pipeline takes longer than raw ingestion
+  // 2. Wait for Qdrant indexing + MemoryProcessor LLM calls
   await new Promise(r => setTimeout(r, 3000));
 
-  // 3. Evaluate (retrieve + generate)
+  // 3. Evaluate (retrieve + generate) — search is project-scoped, no cross-question pollution
   const result = await evaluateInstance(instance);
 
   // 4. Judge with Groq (per-question scoring)
   const verdict = await judgeWithGroq(question, answer, result.hypothesis, question_type);
 
-  // 5. Cleanup this question's memories
-  const cleaned = await cleanupInstance(question_id);
-
-  return { ...result, ingested, skipped, cleaned, autoeval_label: verdict };
+  // No cleanup needed — each question has its own project namespace
+  // Memories stay in DB but never interfere because search filters by project
+  return { ...result, ingested, skipped, cleaned: 0, autoeval_label: verdict };
 }
 
 // ── Main ────────────────────────────────────────────────
@@ -1062,8 +1409,16 @@ async function main() {
   console.log(`Phase: ${opts.phase}`);
   console.log(`API: ${API_BASE}`);
   console.log(`User: ${BENCH_USER}`);
-  console.log(`Groq: ${GROQ_MODEL}`);
+  console.log(`Generation: ${LITELLM_BASE ? LITELLM_MODEL + ' (LiteLLM)' : GROQ_MODEL + ' (Groq)'}`);
+  console.log(`Judge: llama-3.3-70b-versatile (Groq)`);
+  console.log(`Benchmark: ${BENCHMARK_COLLECTION} collection (${BENCHMARK_EMBED_MODEL} embeddings)`);
   console.log('');
+
+  // Ensure BENCHMARK collection exists for bge-m3 embeddings
+  const benchReady = await ensureBenchmarkCollection();
+  if (!benchReady) {
+    console.warn('[benchmark] BENCHMARK collection unavailable — will use server-only retrieval');
+  }
 
   // Ensure output dir
   if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });

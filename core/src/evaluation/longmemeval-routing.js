@@ -125,7 +125,7 @@ function buildContextSnippet(item = {}) {
   return `${header}${content}`;
 }
 
-export function buildBenchmarkContext(searchResults, { maxItems = 6, maxChars = 7000, sortMode = 'score' } = {}) {
+export function buildBenchmarkContext(searchResults, { maxItems = 15, maxChars = 12000, sortMode = 'score' } = {}) {
   const deduped = uniqueByContent(extractItems(searchResults));
   const items = sortMode === 'date_asc'
     ? sortSearchItemsChronologically(deduped, 'asc')
@@ -160,10 +160,10 @@ export function getLongMemEvalRetrievalPlan({ question, questionType } = {}) {
       body: {
         query_context: question,
         date_range: temporalExpansion.dateRange || null,
-        max_memories: 15
+        max_memories: 20
       },
-      searchLimit: 15,
-      contextLimit: 8,
+      searchLimit: 20,
+      contextLimit: 15,
       contextSortMode: 'date_asc',
       systemHint: temporalExpansion.temporalHint
         ? `Temporal focus: ${temporalExpansion.temporalHint}. Compare the snippet dates chronologically and answer using the earliest or latest matching event exactly as asked.`
@@ -178,11 +178,11 @@ export function getLongMemEvalRetrievalPlan({ question, questionType } = {}) {
         query: question,
         include_expired: true,
         include_historical: true,
-        limit: 15,
+        limit: 20,
         include_timeline: true
       },
-      searchLimit: 15,
-      contextLimit: 8,
+      searchLimit: 20,
+      contextLimit: 15,
       contextSortMode: 'date_desc',
       systemHint: 'Knowledge-update focus: prefer the updated answer, but keep prior context available when it explains the change.'
     };
@@ -193,10 +193,10 @@ export function getLongMemEvalRetrievalPlan({ question, questionType } = {}) {
       route: 'quick',
       body: {
         query: question,
-        limit: 10
+        limit: 20
       },
-      searchLimit: 10,
-      contextLimit: 5,
+      searchLimit: 20,
+      contextLimit: 15,
       contextSortMode: 'score',
       systemHint: 'Single-session focus: answer with the most specific direct detail from the retrieved session snippets only.'
     };
@@ -206,10 +206,10 @@ export function getLongMemEvalRetrievalPlan({ question, questionType } = {}) {
     route: 'recall',
     body: {
       query_context: question,
-      max_memories: 8
+      max_memories: 20
     },
-    searchLimit: 8,
-    contextLimit: 6,
+    searchLimit: 20,
+    contextLimit: 15,
     contextSortMode: 'score',
     systemHint: 'Answer from the retrieved memory context only. If memories conflict, prefer the most recent valid memory.'
   };

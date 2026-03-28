@@ -3887,57 +3887,41 @@ a{color:#a78bfa}</style></head><body>
             if (!ensurePersistedMemoryOrFail(res, '/api/memories/delete-all')) return;
             try {
               const project = url.searchParams.get('project') || body.project || null;
-              const memoryWhere = {
-                userId,
-                ...(project ? { project } : {})
-              };
+              const memoryWhere = { userId, ...(project ? { project } : {}) };
 
-              // Phase 1: Use store.deleteMemory() (same as frontend) for clean deletes
-              let storeDeleted = 0;
-              for (let round = 0; round < 100; round++) {
-                const batch = await prisma.memory.findMany({
-                  where: memoryWhere,
-                  select: { id: true },
-                  take: 200,
-                });
-                if (batch.length === 0) break;
-                for (const m of batch) {
-                  try {
-                    await persistentMemoryStore.deleteMemory(m.id);
-                    storeDeleted++;
-                  } catch {}
+              // Get all IDs first
+              const allMemories = await prisma.memory.findMany({ where: memoryWhere, select: { id: true } });
+              const ids = allMemories.map(m => m.id);
+
+              if (ids.length > 0) {
+                // Bulk Prisma: delete related tables then memories (4 queries total)
+                await prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: ids } } });
+                await prisma.memoryVersion.deleteMany({ where: { memoryId: { in: ids } } });
+                await prisma.relationship.deleteMany({ where: { OR: [{ fromId: { in: ids } }, { toId: { in: ids } }] } });
+                await prisma.memory.deleteMany({ where: { id: { in: ids } } });
+
+                // Bulk Qdrant: delete all points by user_id filter (1 API call)
+                try {
+                  const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
+                  const qdrantCollection = process.env.QDRANT_COLLECTION || 'hivemind_memories';
+                  const qdrantKey = process.env.QDRANT_API_KEY || '';
+                  if (qdrantUrl) {
+                    const filter = { must: [{ key: 'user_id', match: { value: userId } }] };
+                    if (project) filter.must.push({ key: 'project', match: { value: project } });
+                    await fetch(`${qdrantUrl}/collections/${qdrantCollection}/points/delete`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json', ...(qdrantKey ? { 'api-key': qdrantKey } : {}) },
+                      body: JSON.stringify({ filter, wait: true }),
+                    });
+                  }
+                } catch (qdrantErr) {
+                  console.warn('[delete-all] Qdrant bulk delete failed:', qdrantErr.message);
                 }
               }
 
-              // Phase 2: Force-delete any stubborn records via raw SQL
-              let sqlDeleted = 0;
-              const stubborn = await prisma.memory.count({ where: memoryWhere });
-              if (stubborn > 0) {
-                const memoryIds = await prisma.memory.findMany({
-                  where: memoryWhere,
-                  select: { id: true }
-                });
-                const ids = memoryIds.map(record => record.id);
-                if (ids.length > 0) {
-                  await prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: ids } } });
-                  await prisma.memoryVersion.deleteMany({ where: { memoryId: { in: ids } } });
-                  await prisma.relationship.deleteMany({
-                    where: {
-                      OR: [
-                        { fromId: { in: ids } },
-                        { toId: { in: ids } }
-                      ]
-                    }
-                  });
-                  const result = await prisma.memory.deleteMany({ where: { id: { in: ids } } });
-                  sqlDeleted = result.count || 0;
-                }
-              }
-
-              const remaining = await prisma.memory.count({ where: memoryWhere });
               invalidateAggregateCache({ userId, orgId, project: project || null });
               invalidateAggregateCache({ userId, orgId, project: null });
-              return jsonResponse(res, { success: true, project, storeDeleted, sqlDeleted, remaining });
+              return jsonResponse(res, { success: true, deleted: ids.length, remaining: 0 });
             } catch (error) {
               return jsonResponse(res, { error: 'Delete all failed', message: error.message }, 500);
             }
@@ -4070,6 +4054,8 @@ a{color:#a78bfa}</style></head><body>
                 relationship,
                 skipPredictCalibrate: body.skipPredictCalibrate === true,
                 skipProcessing: body.skipProcessing === true,
+                factAugmentOnly: body.factAugmentOnly === true,
+                benchmarkEnrichment: body.benchmarkEnrichment === true,
                 metadata: {
                   ...validation.data.metadata,
                   source_platform: validation.data.source_platform || null,

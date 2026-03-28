@@ -339,6 +339,40 @@ export class ThreeTierRetrieval {
         weights: this.config.weights.panoramaSearch
       });
 
+      if ((results.results || []).length === 0) {
+        const quickFallback = await this.quickSearch(query, {
+          userId,
+          orgId,
+          project,
+          limit
+        });
+
+        if ((quickFallback.results || []).length > 0) {
+          return {
+            tier: 'panorama',
+            query,
+            results: quickFallback.results,
+            categories: {
+              active: quickFallback.results,
+              expired: [],
+              historical: [],
+              archived: []
+            },
+            timeline: null,
+            statistics: {
+              fallbackTier: 'quick',
+              returnedCount: quickFallback.results.length
+            },
+            metadata: {
+              requestId,
+              durationMs: Date.now() - startTime,
+              timestamp: new Date().toISOString(),
+              fallbackTier: 'quick'
+            }
+          };
+        }
+      }
+
       const duration = Date.now() - startTime;
 
       logger.info('PanoramaSearch completed', {

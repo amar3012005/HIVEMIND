@@ -5194,6 +5194,13 @@ a{color:#a78bfa}</style></head><body>
                 includeAnalysis: include_analysis !== false
               });
 
+              if (searchProject && Array.isArray(result.results)) {
+                result.results = result.results.filter((entry) => {
+                  const scopedProject = entry?.project || entry?.payload?.project || entry?.memory?.project || null;
+                  return scopedProject === searchProject;
+                });
+              }
+
               jsonResponse(res, result);
             } catch (error) {
               console.error('InsightForge failed:', error);

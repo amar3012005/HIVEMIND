@@ -5603,9 +5603,20 @@ a{color:#a78bfa}</style></head><body>
                     query_context: message,
                     user_id: userId,
                     org_id: orgId,
-                    max_memories: isRecencyQuery ? 10 : 5,
+                    max_memories: isRecencyQuery ? 15 : 10,
+                    inject_parent_chunks: true,
                   });
                   let recalledMemories = recallResult.memories || [];
+
+                  // Inject parent chunks for fact-memories (richer context)
+                  for (const mem of recalledMemories) {
+                    if ((mem.tags || []).includes('extracted-fact') && mem.metadata?.parent_memory_id) {
+                      try {
+                        const parent = await persistentMemoryStore.getMemory(mem.metadata.parent_memory_id);
+                        if (parent) mem.parent_chunk = parent.content;
+                      } catch {}
+                    }
+                  }
 
                   // For recency queries, re-sort by created_at descending
                   if (isRecencyQuery && recalledMemories.length > 0) {
@@ -5633,14 +5644,20 @@ a{color:#a78bfa}</style></head><body>
                     } catch {}
                   }
 
-                  memories = recalledMemories.slice(0, 10).map(m => ({
-                    id: m.id,
-                    title: m.title || (m.content || '').slice(0, 60),
-                    content: (m.content || '').slice(0, 300),
-                    score: m.score || 0,
-                    tags: m.tags || [],
-                    created_at: m.created_at,
-                  }));
+                  memories = recalledMemories.slice(0, 15).map(m => {
+                    const isFact = (m.tags || []).includes('extracted-fact');
+                    return {
+                      id: m.id,
+                      title: m.title || (m.content || '').slice(0, 60),
+                      content: (m.content || '').slice(0, isFact ? 500 : 800),
+                      parent_chunk: m.parent_chunk ? m.parent_chunk.slice(0, 600) : undefined,
+                      score: m.score || 0,
+                      tags: m.tags || [],
+                      memory_type: m.memory_type,
+                      created_at: m.created_at,
+                      document_date: m.document_date,
+                    };
+                  });
                   injectionText = recallResult.injectionText || '';
                 } catch (recallErr) {
                   console.warn('[chat] Recall failed:', recallErr.message);
@@ -5661,9 +5678,31 @@ BEHAVIOR:
 - If you don't have the information in memory, say so honestly.
 - Never hallucinate facts not present in the provided context.`;
 
-              // Step 3: Build message history for Groq
+              // Step 3: Build memory context for the LLM
+              let memoryContext = '';
+              if (memories.length > 0) {
+                const factMems = memories.filter(m => (m.tags || []).includes('extracted-fact'));
+                const regularMems = memories.filter(m => !(m.tags || []).includes('extracted-fact') && !(m.tags || []).includes('observation'));
+                const obsMems = memories.filter(m => (m.tags || []).includes('observation'));
+
+                const parts = [];
+                if (factMems.length > 0) {
+                  parts.push('Key Facts:\n' + factMems.map(m => `• ${m.content}`).join('\n'));
+                }
+                if (obsMems.length > 0) {
+                  parts.push('Observations:\n' + obsMems.map(m => `• ${m.content}`).join('\n'));
+                }
+                for (const m of regularMems.slice(0, 5)) {
+                  const date = m.document_date ? ` [${m.document_date.slice(0, 10)}]` : '';
+                  parts.push(`Memory${date}: ${m.content}`);
+                  if (m.parent_chunk) parts.push(`Full context: ${m.parent_chunk}`);
+                }
+                memoryContext = '\n\nRetrieved Memories:\n' + parts.join('\n\n');
+              }
+
+              // Step 4: Build message history for Groq
               const groqMessages = [
-                { role: 'system', content: systemPrompt },
+                { role: 'system', content: systemPrompt + memoryContext },
                 ...history.slice(-10).map(h => ({ role: h.role, content: h.content })),
                 { role: 'user', content: message },
               ];

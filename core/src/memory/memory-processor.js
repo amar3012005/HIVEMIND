@@ -32,8 +32,10 @@ export class MemoryProcessor {
       ? similarMemories.slice(0, 3).map((m, i) => `EXISTING_${i + 1} [id:${m.id}]:\n${(m.content || '').slice(0, 500)}`).join('\n\n')
       : '';
 
-    const inputTokens = Math.ceil((newMemory.content || '').length / 4);
-    const maxTokens = Math.max(200, Math.min(inputTokens + 400, 800));
+    const contentLength = (newMemory.content || '').length;
+    const inputTokens = Math.ceil(contentLength / 4);
+    // Scale output tokens with input — longer content needs more facts extracted
+    const maxTokens = Math.max(300, Math.min(inputTokens + 500, 2000));
 
     try {
       const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -47,28 +49,41 @@ export class MemoryProcessor {
           messages: [
             {
               role: 'system',
-              content: `You are a memory engine processor. You MUST output EXACTLY 5 lines. Analyze the NEW memory and output:
+              content: `You are a memory engine. Quote the user's EXACT words as fact sentences. Do NOT paraphrase or summarize.
+
+Output EXACTLY 6 sections:
 
 RELATIONSHIP: ADD: new topic
 PRIORITY: MEDIUM
-OBSERVATION: 🟡 User did something
+OBSERVATION: 🟡 [one sentence about what user said]
 ENTITIES: entity1, entity2
 DATES: date1, date2
+FACT_SENTENCES:
+- I participated in a webinar on "Data Analysis using Python" two months ago
+- I've been a member of 'Book Lovers Unite' for about two weeks now
+- I just got back from the "Run for the Cure" event on October 15th
 
-Rules for each line:
-- RELATIONSHIP: One of ADD/UPDATE/EXTEND/NOOP with reason
-- PRIORITY: HIGH (personal facts), MEDIUM (events/preferences), LOW (casual)
-- OBSERVATION: 1-2 sentence summary with emoji 🔴/🟡/🟢. Write TRIVIAL if nothing notable.
-- ENTITIES: Comma-separated people, places, orgs, products, activities, events. Write NONE if empty.
-- DATES: Comma-separated dates/times mentioned (exact or relative like "two months ago"). Write NONE if empty.
+Rules:
+- RELATIONSHIP: ADD/UPDATE/EXTEND/NOOP
+- PRIORITY: HIGH/MEDIUM/LOW
+- OBSERVATION: One sentence summary with 🔴/🟡/🟢. Write TRIVIAL if nothing.
+- ENTITIES: Names, places, orgs, events from user's words. Write NONE if empty.
+- DATES: ALL dates/times/durations the user mentioned (keep exact wording like "two months ago", "last Saturday", "October 15th", "for about two weeks"). Write NONE if empty.
+- FACT_SENTENCES: Copy the user's EXACT sentences that contain personal facts. Keep their original wording — do NOT rephrase. Include dates, durations, event names exactly as the user wrote them. Only extract from "User:" parts, NEVER from "Assistant:" parts. Extract ALL personal facts — for long conversations, extract up to 15 facts. Write NONE if no personal facts.
 
-IMPORTANT: You MUST output all 5 lines. Never skip any line.`
+CRITICAL RULES:
+1. QUOTE the user's exact words. "I've been a member for two weeks" stays as-is.
+2. Only extract STATEMENTS, never questions. "Can you suggest ways to minimize distractions?" is a QUESTION — skip it.
+3. Look for: "I did X", "I attended X", "I've been X", "I got X", "I just came back from X", "I booked X", "I participated in X".
+4. Skip turns where the user only asks questions with no personal facts.
+5. If a turn has no personal statements, write FACT_SENTENCES: NONE.`
             },
             {
               role: 'user',
+              // Scale content limit with input size — don't truncate short content, allow more for long sessions
               content: hasSimilar
-                ? `EXISTING MEMORIES:\n${existingContext}\n\nNEW MEMORY:\n${(newMemory.content || '').slice(0, 2000)}`
-                : `NEW MEMORY:\n${(newMemory.content || '').slice(0, 2000)}`
+                ? `EXISTING MEMORIES:\n${existingContext}\n\nNEW MEMORY:\n${(newMemory.content || '').slice(0, 6000)}`
+                : `NEW MEMORY:\n${(newMemory.content || '').slice(0, 8000)}`
             }
           ],
           max_tokens: maxTokens,
@@ -175,7 +190,27 @@ IMPORTANT: You MUST output all 5 lines. Never skip any line.`
       }
     }
 
-    return { relationship, observation, facts: { entities, dates }, priority };
+    // Parse FACT_SENTENCES
+    let factSentences = [];
+    const factStartIdx = lines.findIndex(l => /^[-*\s]*FACT.?SENTENCES?\s*[:\-]/i.test(l));
+    if (factStartIdx >= 0) {
+      for (let k = factStartIdx + 1; k < lines.length; k++) {
+        const line = lines[k].trim();
+        if (line.startsWith('- ') || line.startsWith('* ')) {
+          const fact = line.replace(/^[-*]\s*/, '').trim();
+          if (fact.length > 10 && fact !== 'NONE') factSentences.push(fact);
+        } else if (/^[A-Z_]+[:\s]/i.test(line)) {
+          break; // Hit next section
+        }
+      }
+    }
+
+    // Fallback: extract fact sentences from observation text
+    if (factSentences.length === 0 && observation) {
+      factSentences = observation.split(/[.!]/).map(s => s.trim()).filter(s => s.length > 15).slice(0, 3);
+    }
+
+    return { relationship, observation, facts: { entities, dates }, factSentences, priority };
   }
 
   _heuristicProcess(newMemory, similarMemories) {
@@ -191,21 +226,46 @@ IMPORTANT: You MUST output all 5 lines. Never skip any line.`
     if (/\b(my|i)\s+(name|job|work|live|born|salary|degree)\b/i.test(content)) priority = 'high';
     if (/\b(thanks|joke|hello|hi|bye)\b/i.test(content)) priority = 'low';
 
-    // Extract entities from original content (proper nouns)
-    let entities = [];
+    // Extract from USER content only (not assistant recommendations)
+    // For session-based content with multiple User:/Assistant: turns, extract ALL user parts
     const rawContent = newMemory.content || '';
-    const properNouns = rawContent.match(/\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+/g);
+    const userPart = rawContent.split('\n')
+      .filter(line => /^User:/i.test(line.trim()))
+      .map(line => line.replace(/^User:\s*/i, ''))
+      .join('\n') || rawContent;
+
+    let entities = [];
+    const properNouns = userPart.match(/\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+/g);
     if (properNouns) {
       entities = [...new Set(properNouns)].slice(0, 5);
     }
 
-    // Extract dates from original content
+    // Extract dates from USER content only
     let dates = [];
-    const contentDates = rawContent.match(/\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s*\d{4})?|\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|\b(?:two|three|four|five|six|seven|eight|nine|ten)\s+(?:days?|weeks?|months?|years?)\s+ago\b|\b\d+\s+(?:days?|weeks?|months?)\s+ago\b/gi);
+    const contentDates = userPart.match(/\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s*\d{4})?|\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|\b(?:two|three|four|five|six|seven|eight|nine|ten)\s+(?:days?|weeks?|months?|years?)\s+ago\b|\b\d+\s+(?:days?|weeks?|months?)\s+ago\b/gi);
     if (contentDates) {
       dates = [...new Set(contentDates.map(d => d.trim()))].slice(0, 5);
     }
 
-    return { relationship, observation: null, facts: { entities, dates }, priority };
+    // Extract fact STATEMENTS from USER content (skip questions)
+    // For long content (sessions), extract ALL user turns — each may contain facts
+    let factSentences = [];
+    // Split by "User:" to handle multi-turn sessions
+    const userTurns = userPart.split(/\nUser:\s*/i).filter(t => t.length > 10);
+    for (const turn of userTurns) {
+      const sentences = turn.replace(/^User:\s*/i, '').split(/[.!?\n]/).map(s => s.trim()).filter(s => s.length > 15);
+      const factIndicators = /\b(I|my|me|we|our|I'm|I've|I'll|name|live|work|plan|visit|stay|born|moved|started|joined|bought|attended|participated|favorite|prefer|got|booked|recently|just)\b/i;
+      for (const s of sentences) {
+        if (s.includes('?') || /^(can|could|do|does|would|should|what|how|where|when|why|is|are)\b/i.test(s)) continue;
+        if (factIndicators.test(s)) {
+          factSentences.push(s);
+        }
+      }
+    }
+    // Scale max facts with content length — longer content gets more facts
+    const maxFacts = Math.max(5, Math.min(Math.ceil(rawContent.length / 500), 20));
+    factSentences = factSentences.slice(0, maxFacts);
+
+    return { relationship, observation: null, facts: { entities, dates }, factSentences, priority };
   }
 }

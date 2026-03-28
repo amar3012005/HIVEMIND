@@ -11,6 +11,17 @@ import fetch from 'node-fetch';
 import { getMistralEmbedService } from '../embeddings/mistral.js';
 import { getQdrantCollections } from './collections.js';
 
+// Dynamic embedding service: EMBEDDING_PROVIDER=litellm switches to bge-m3 via LiteLLM
+let _litellmService = null;
+async function getLiteLLMEmbed() {
+  if (!_litellmService) {
+    const { getLiteLLMEmbedService } = await import('../embeddings/litellm.js');
+    _litellmService = getLiteLLMEmbedService();
+  }
+  return _litellmService;
+}
+const USE_LITELLM = process.env.EMBEDDING_PROVIDER === 'litellm';
+
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:9200';
 const API_KEY = process.env.QDRANT_API_KEY || 'dev_api_key_hivemind_2026';
 const COLLECTION_NAME = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
@@ -28,10 +39,11 @@ function resolveCollectionName(collectionName) {
 export class QdrantClient {
   constructor() {
     this.collectionName = COLLECTION_NAME;
-    this.embedService = getMistralEmbedService();
+    this.embedService = USE_LITELLM ? null : getMistralEmbedService(); // null = async init
     this.dimension = parseInt(process.env.EMBEDDING_DIMENSION || '1024', 10);
-    this.connected = null; // Cache connection state
+    this.connected = null;
     this.collectionReady = null;
+    this._litellmReady = USE_LITELLM ? getLiteLLMEmbed().then(svc => { this.embedService = svc; }) : null;
   }
 
   async ensureCollection(collectionName = this.collectionName) {
@@ -83,11 +95,14 @@ export class QdrantClient {
    * @returns {Promise<number[]>} Configured embedding vector
    */
   async generateEmbedding(text) {
+    // Wait for async LiteLLM init if needed
+    if (this._litellmReady) await this._litellmReady;
+
     if (!this.embedService) {
       console.warn('⚠️  Embedding service not available');
       return null;
     }
-    
+
     try {
       return await this.embedService.embedOne(text);
     } catch (error) {
@@ -116,15 +131,21 @@ export class QdrantClient {
       return memory.id;
     }
 
-    // Fact-augmented key expansion: embed enriched key, store raw content in payload
-    let embeddingInput = memory.content;
-    try {
-      const { extractFacts, buildAugmentedKey } = await import('../memory/fact-extractor.js');
-      const facts = await extractFacts(memory.content || '', { useLLM: false });
-      embeddingInput = buildAugmentedKey(memory.content || '', facts);
-    } catch (augErr) {
-      // Fallback to raw content if fact extraction fails
-      console.warn('[qdrant] Fact extraction failed, using raw content:', augErr.message);
+    // Contextual Retrieval: embed enriched key (facts + content), store raw content in payload
+    let embeddingInput = memory.content || '';
+    const pipelineFactSentences = memory.metadata?.factSentences || [];
+    if (pipelineFactSentences.length > 0) {
+      // Prefer pre-extracted factSentences from MemoryProcessor (cleaner, no brackets)
+      embeddingInput = pipelineFactSentences.join('. ') + '\n\n' + embeddingInput;
+    } else {
+      // Fallback: extract facts on-the-fly via fact-extractor
+      try {
+        const { extractFacts, buildAugmentedKey } = await import('../memory/fact-extractor.js');
+        const facts = await extractFacts(memory.content || '', { useLLM: false });
+        embeddingInput = buildAugmentedKey(memory.content || '', facts);
+      } catch (augErr) {
+        console.warn('[qdrant] Fact extraction failed, using raw content:', augErr.message);
+      }
     }
     const embedding = await this.generateEmbedding(embeddingInput);
 
@@ -147,6 +168,7 @@ export class QdrantClient {
         source: memory.source || memory.source_metadata?.source_platform || null,
         source_platform: memory.source_metadata?.source_platform || memory.source || null,
         document_date: memory.document_date,
+        event_dates: memory.event_dates || [],
         content_hash: memory.content_hash,
         relationship_type: memory.relationship_type,
         importance_score: memory.importance_score,

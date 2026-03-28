@@ -4923,6 +4923,22 @@ a{color:#a78bfa}</style></head><body>
                 result.intent = intent;
               }
 
+              // Inject parent chunks for fact-memories
+              const injectParentChunks = body.inject_parent_chunks !== false;
+              if (injectParentChunks && result.memories && result.memories.length > 0) {
+                for (const mem of result.memories) {
+                  if ((mem.tags || []).includes('extracted-fact') && mem.metadata?.parent_memory_id) {
+                    try {
+                      const parent = await persistentMemoryStore.getMemory(mem.metadata.parent_memory_id);
+                      if (parent) {
+                        mem.parent_chunk = parent.content;
+                        mem.parent_document_date = parent.document_date;
+                      }
+                    } catch {}
+                  }
+                }
+              }
+
               jsonResponse(res, result);
             } catch (error) {
               console.error('Auto recall failed:', error);

@@ -12,6 +12,88 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+/**
+ * Parse extracted date strings into ISO event dates.
+ * Handles both absolute dates ("October 15th", "March 3") and
+ * relative dates ("two months ago", "last Saturday") anchored to documentDate.
+ */
+function parseEventDates(rawDates, documentDate) {
+  if (!rawDates || rawDates.length === 0) return [];
+  const anchor = documentDate ? new Date(documentDate) : new Date();
+  if (isNaN(anchor.getTime())) return [];
+
+  const wordToNum = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12 };
+
+  const parsed = [];
+  for (const raw of rawDates) {
+    const s = (raw || '').trim().toLowerCase();
+    if (!s || s === 'none') continue;
+
+    // Relative: "X days/weeks/months/years ago"
+    const relMatch = s.match(/(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(days?|weeks?|months?|years?)\s+ago/i);
+    if (relMatch) {
+      const num = parseInt(relMatch[1], 10) || wordToNum[relMatch[1]] || 1;
+      const unit = relMatch[2].replace(/s$/, '');
+      const d = new Date(anchor);
+      if (unit === 'day') d.setDate(d.getDate() - num);
+      else if (unit === 'week') d.setDate(d.getDate() - num * 7);
+      else if (unit === 'month') d.setMonth(d.getMonth() - num);
+      else if (unit === 'year') d.setFullYear(d.getFullYear() - num);
+      parsed.push(d.toISOString());
+      continue;
+    }
+
+    // Relative: "last Saturday/Monday/..."
+    const lastDayMatch = s.match(/last\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)/i);
+    if (lastDayMatch) {
+      const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+      const targetDay = dayNames.indexOf(lastDayMatch[1].toLowerCase());
+      const d = new Date(anchor);
+      const currentDay = d.getDay();
+      const diff = (currentDay - targetDay + 7) % 7 || 7;
+      d.setDate(d.getDate() - diff);
+      parsed.push(d.toISOString());
+      continue;
+    }
+
+    // Relative: "about two weeks now" / "for two weeks"
+    const durationMatch = s.match(/(?:about|for)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(days?|weeks?|months?)/i);
+    if (durationMatch) {
+      const num = parseInt(durationMatch[1], 10) || wordToNum[durationMatch[1]] || 1;
+      const unit = durationMatch[2].replace(/s$/, '');
+      const d = new Date(anchor);
+      if (unit === 'day') d.setDate(d.getDate() - num);
+      else if (unit === 'week') d.setDate(d.getDate() - num * 7);
+      else if (unit === 'month') d.setMonth(d.getMonth() - num);
+      parsed.push(d.toISOString());
+      continue;
+    }
+
+    // Absolute: "October 15th", "March 3", "January 10, 2023"
+    const months = { january: 0, february: 1, march: 2, april: 3, may: 4, june: 5, july: 6, august: 7, september: 8, october: 9, november: 10, december: 11 };
+    const absMatch = s.match(/(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s*(\d{4}))?/i);
+    if (absMatch) {
+      const month = months[absMatch[1].toLowerCase()];
+      const day = parseInt(absMatch[2], 10);
+      const year = absMatch[3] ? parseInt(absMatch[3], 10) : anchor.getFullYear();
+      const d = new Date(year, month, day);
+      if (!isNaN(d.getTime())) parsed.push(d.toISOString());
+      continue;
+    }
+
+    // Numeric: "3/22", "05/20/2023"
+    const numMatch = s.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/);
+    if (numMatch) {
+      const month = parseInt(numMatch[1], 10) - 1;
+      const day = parseInt(numMatch[2], 10);
+      const year = numMatch[3] ? (numMatch[3].length === 2 ? 2000 + parseInt(numMatch[3], 10) : parseInt(numMatch[3], 10)) : anchor.getFullYear();
+      const d = new Date(year, month, day);
+      if (!isNaN(d.getTime())) parsed.push(d.toISOString());
+    }
+  }
+  return parsed;
+}
+
 function deriveDocumentDate(input = {}) {
   if (input.document_date) {
     return input.document_date;
@@ -277,6 +359,7 @@ export class MemoryGraphEngine {
         }
 
         const shouldRunProcessor = baseMemory.memory_type !== 'observation' && !input.skipProcessing;
+        let processorResult = null;
 
         // --- Fact-Augment-Only mode (benchmark mode) ---
         // Runs the MemoryProcessor to extract facts but ignores relationship results
@@ -293,27 +376,38 @@ export class MemoryGraphEngine {
               : this.conflictDetector.detectCandidates(baseMemory, latestMemories).map(candidate => candidate.memory);
 
             const result = await processor.process(baseMemory, similarMemories);
+            processorResult = result;
 
-
-            // Build fact prefix from extracted entities/dates
+            // Build fact prefix from extracted entities/dates AND fact sentences
             const factParts = [];
-            if (result.facts?.entities?.length) factParts.push(...result.facts.entities);
-            if (result.facts?.dates?.length) factParts.push(...result.facts.dates);
+            if (result.factSentences?.length) factParts.push(...result.factSentences);
+            else {
+              if (result.facts?.entities?.length) factParts.push(...result.facts.entities);
+              if (result.facts?.dates?.length) factParts.push(...result.facts.dates);
+            }
 
             if (factParts.length > 0) {
               baseMemory.content = `[FACTS: ${factParts.join('. ')}.]\n\n${baseMemory.content}`;
-
             } else {
 
             }
 
+            // Parse extracted dates into ISO event_dates (anchor relative dates to documentDate)
+            const rawDates = result.facts?.dates || [];
+            const eventDates = parseEventDates(rawDates, baseMemory.document_date);
+
             baseMemory.metadata = {
               ...(baseMemory.metadata || {}),
+              factSentences: result.factSentences || [],
               extracted_facts: result.facts || { entities: [], dates: [] },
               memory_priority: result.priority || 'medium',
               fact_augment_only: true,
               processed_at: nowIso()
             };
+            // Store parsed event dates on the memory for Qdrant filtering
+            if (eventDates.length > 0) {
+              baseMemory.event_dates = eventDates;
+            }
 
             // Store observation if produced (still useful for searchable memories)
             if (result.observation) {
@@ -377,13 +471,22 @@ export class MemoryGraphEngine {
               : this.conflictDetector.detectCandidates(baseMemory, latestMemories).map(candidate => candidate.memory);
 
             const result = await processor.process(baseMemory, similarMemories);
+            processorResult = result;
+
+            // Parse extracted dates into ISO event_dates
+            const rawDatesStd = result.facts?.dates || [];
+            const eventDatesStd = parseEventDates(rawDatesStd, baseMemory.document_date);
 
             baseMemory.metadata = {
               ...(baseMemory.metadata || {}),
+              factSentences: result.factSentences || [],
               extracted_facts: result.facts || { entities: [], dates: [] },
               memory_priority: result.priority || 'medium',
               processed_at: nowIso()
             };
+            if (eventDatesStd.length > 0) {
+              baseMemory.event_dates = eventDatesStd;
+            }
 
             // Apply relationship
             if (result.relationship.action === 'NOOP') {
@@ -455,6 +558,48 @@ export class MemoryGraphEngine {
           : this.relationshipClassifier.classifyRelationship(baseMemory, latestMemories);
 
         await store.createMemory(baseMemory);
+
+        // --- Create fact-memories (separate searchable memories per extracted fact) ---
+        const factSentences = processorResult?.factSentences || [];
+        const factMemoryIds = [];
+        if (factSentences.length > 0) {
+          for (const fact of factSentences.slice(0, 15)) { // Scale with content — up to 15 fact-memories per parent
+            const factId = crypto.randomUUID ? crypto.randomUUID() : `fact-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            await store.createMemory({
+              id: factId,
+              user_id: baseMemory.user_id,
+              org_id: baseMemory.org_id,
+              project: baseMemory.project,
+              content: fact,
+              title: `Fact: ${fact.slice(0, 60)}`,
+              tags: [...(baseMemory.tags || []), 'extracted-fact'],
+              memory_type: 'fact',
+              is_latest: true,
+              version: 1,
+              importance_score: 0.8,
+              document_date: baseMemory.document_date,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+              metadata: {
+                parent_memory_id: baseMemory.id,
+                extraction_source: 'memory_processor',
+                extracted_at: new Date().toISOString(),
+              },
+            });
+            // Create Extends relationship: fact → parent
+            await store.createRelationship({
+              id: crypto.randomUUID ? crypto.randomUUID() : `rel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              from_id: factId,
+              to_id: baseMemory.id,
+              type: 'Extends',
+              confidence: 0.9,
+              metadata: { source: 'fact_extraction' },
+              created_by: 'memory_processor',
+            });
+            factMemoryIds.push(factId);
+          }
+        }
+
         await this._persistSourceMetadata(store, baseMemory, input.source_metadata || baseMemory.source_metadata);
 
         if (input.code_metadata) {

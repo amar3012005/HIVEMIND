@@ -87,3 +87,52 @@ test('hybridSearch falls back to ranked candidates when final score floor remove
     client.searchMemories = originalSearchMemories;
   }
 });
+
+test('hybridSearch hard-filters vector results to the requested project scope', async () => {
+  const client = getQdrantClient();
+  const originalIsConnected = client.isConnected;
+  const originalEnsureCollection = client.ensureCollection;
+  const originalSearchMemories = client.searchMemories;
+
+  client.isConnected = async () => true;
+  client.ensureCollection = async () => true;
+  client.searchMemories = async () => ([
+    {
+      id: 'wrong-project',
+      score: 0.91,
+      payload: {
+        content: 'Leaked result from another project.',
+        project: 'bench/other-project',
+        user_id: '00000000-0000-4000-8000-000000000121',
+        is_latest: true
+      }
+    },
+    {
+      id: 'right-project',
+      score: 0.67,
+      payload: {
+        content: 'Scoped result from the requested project.',
+        project: 'bench/requested-project',
+        user_id: '00000000-0000-4000-8000-000000000121',
+        is_latest: true
+      }
+    }
+  ]);
+
+  try {
+    const result = await hybridSearch.hybridSearch({
+      query: 'workshop timeline',
+      queryVector: [0.1, 0.2, 0.3],
+      userId: '00000000-0000-4000-8000-000000000121',
+      project: 'bench/requested-project',
+      limit: 5,
+      weights: { vector: 1, keyword: 0, graph: 0 }
+    });
+
+    assert.deepEqual(result.results.map(item => item.id), ['right-project']);
+  } finally {
+    client.isConnected = originalIsConnected;
+    client.ensureCollection = originalEnsureCollection;
+    client.searchMemories = originalSearchMemories;
+  }
+});

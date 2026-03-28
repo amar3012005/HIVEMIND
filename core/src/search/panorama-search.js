@@ -267,6 +267,7 @@ export class PanoramaSearch {
       limit,
       includeExpired,
       includeHistorical,
+      vectorScoreThreshold: 0.12,
       finalScoreThreshold: 0.05,
       filter: temporalFilter,
       weights,

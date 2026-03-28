@@ -117,6 +117,50 @@ function isTemporalComparisonQuery(query = '') {
   return /\b(first|earlier|earliest|before|after|later|last|how many days|which .* first|which .* came first)\b/i.test(query);
 }
 
+function normalizedQueryTokens(query = '') {
+  return normalizeForDedup(query)
+    .split(' ')
+    .filter(token => token.length >= 3);
+}
+
+function temporalQueryEntities(query = '') {
+  const quoted = Array.from(query.matchAll(/"([^"]+)"/g)).map(match => normalizeForDedup(match[1]));
+  const eventPhrases = Array.from(query.matchAll(/\b(?:the|a|an)\s+([a-z0-9][a-z0-9' -]{1,60}?(?:workshop|webinar|meeting|trip|vacation|conference|phone|tablet|device|bike|car))\b/gi))
+    .map(match => normalizeForDedup(match[1]));
+  return [...new Set([...quoted, ...eventPhrases])].filter(Boolean);
+}
+
+function temporalSignalBoost(memory = {}, query = '', temporalComparison = false) {
+  if (!temporalComparison) return 0;
+
+  const content = normalizeForDedup(memory.content || '');
+  const title = normalizeForDedup(memory.title || '');
+  const haystack = `${title} ${content}`.trim();
+  const entities = temporalQueryEntities(query);
+  const tokens = normalizedQueryTokens(query);
+  const hasExplicitDate = Boolean(temporalAnchor(memory));
+  const hasEventSignal = /\b(attended|joined|bought|purchased|scheduled|met|went|prepared|preparing|participated|ordered|got)\b/i.test(memory.content || '')
+    || /\b(workshop|webinar|meeting|trip|vacation|conference|phone|tablet|device|bike|car)\b/i.test(memory.content || '');
+
+  let boost = 0;
+
+  for (const entity of entities) {
+    if (entity && haystack.includes(entity)) {
+      boost += 0.14;
+    }
+  }
+
+  if (tokens.length > 0) {
+    const overlap = tokens.filter(token => haystack.includes(token)).length;
+    boost += Math.min(overlap * 0.015, 0.12);
+  }
+
+  if (hasExplicitDate) boost += 0.12;
+  if (hasEventSignal) boost += 0.10;
+
+  return Math.min(boost, 0.45);
+}
+
 function collapseNearDuplicates(scored, options = {}) {
   const { preserveTemporalDistinctness = false } = options;
   const unique = [];
@@ -183,7 +227,7 @@ function applyRecallRelevanceFloor(scored, options = {}) {
     item.score >= minimumScore &&
     (item.similarityScore ?? 0) >= minimumSimilarity
   );
-  return filtered.length > 0 ? filtered : scored.slice(0, temporalComparison ? 3 : 1);
+  return filtered.length > 0 ? filtered : scored.slice(0, temporalComparison ? 5 : 1);
 }
 
 function mergeCandidateLists(...lists) {
@@ -739,12 +783,14 @@ export async function recallPersistedMemories(store, {
       preferred_source_platforms,
       preferred_tags
     });
+    const temporalBoost = temporalSignalBoost(memory, query_context, temporalComparison);
     let score = (weights.similarity ?? 0.45) * similarityScore +
         (weights.recency ?? 0.15) * recencyScore +
         (weights.importance ?? 0.1) * importanceScore +
         (weights.vector ?? 0.2) * vectorScore +
         (weights.graph ?? 0.05) * graphScore +
-        (weights.policy ?? 0.05) * policyScore;
+        (weights.policy ?? 0.05) * policyScore +
+        temporalBoost;
     // Superseded memory penalty
     if (memory.is_latest === false) score *= 0.55;
     return {
@@ -753,6 +799,7 @@ export async function recallPersistedMemories(store, {
       keywordScore: similarityScore,
       graphScore,
       policyScore,
+      temporalBoost,
       similarityScore,
       recencyScore,
       score
@@ -775,13 +822,15 @@ export async function recallPersistedMemories(store, {
       preferred_source_platforms,
       preferred_tags
     });
+    const temporalBoost = temporalSignalBoost(candidate.memory, query_context, temporalComparison);
 
     let score = (weights.similarity ?? 0.45) * (candidate.similarityScore || 0) +
         (weights.recency ?? 0.15) * recencyScore +
         (weights.importance ?? 0.1) * importanceScore +
         (weights.vector ?? 0.2) * (candidate.vectorScore || 0) +
         (weights.graph ?? 0.05) * graphScore +
-        (weights.policy ?? 0.05) * policyScore;
+        (weights.policy ?? 0.05) * policyScore +
+        temporalBoost;
     // Superseded memory penalty
     if (candidate.memory?.is_latest === false) score *= 0.55;
     return {
@@ -789,6 +838,7 @@ export async function recallPersistedMemories(store, {
       keywordScore: candidate.similarityScore || 0,
       graphScore,
       policyScore,
+      temporalBoost,
       recencyScore,
       score
     };

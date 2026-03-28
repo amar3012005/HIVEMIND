@@ -4,6 +4,9 @@ import {
   buildLongMemEvalReport,
   classifyLongMemEvalBottleneck,
   buildGenerationPrompt,
+  buildTemporalEvidenceContext,
+  extractTemporalEvidence,
+  answerTemporalQuestion,
   mergeRetrievalResults,
   selectContextResults,
   normalizeSearchResults
@@ -159,4 +162,57 @@ test('generation prompt asks for a short direct answer without chain-of-thought'
   assert.match(prompt, /Retrieved Memory Context:/);
   assert.match(prompt, /Question: Which webinar did I attend first\?/);
   assert.doesNotMatch(prompt, /step by step/i);
+});
+
+test('temporal evidence extractor and comparator answer first-event questions deterministically', () => {
+  const evidence = extractTemporalEvidence(
+    'Which event did I attend first, the "Effective Time Management" workshop or the "Data Analysis using Python" webinar?',
+    [
+      {
+        id: 'm1',
+        content: 'I attended the Effective Time Management workshop last Saturday.',
+        date: '2023-05-28T21:04:00.000Z'
+      },
+      {
+        id: 'm2',
+        content: 'I attended the Data Analysis using Python webinar two months ago.',
+        date: '2023-03-28T07:17:00.000Z'
+      }
+    ]
+  );
+
+  const answer = answerTemporalQuestion(
+    'Which event did I attend first, the "Effective Time Management" workshop or the "Data Analysis using Python" webinar?',
+    evidence
+  );
+  const structured = buildTemporalEvidenceContext('Which event did I attend first?', evidence);
+
+  assert.equal(evidence.length, 2);
+  assert.equal(answer.answer, 'Data Analysis using Python');
+  assert.equal(answer.mode, 'deterministic');
+  assert.match(structured, /Structured Temporal Evidence:/);
+  assert.match(structured, /2023-03-28/);
+});
+
+test('temporal comparator computes explicit day differences from dated evidence', () => {
+  const answer = answerTemporalQuestion(
+    'How many days before the meeting was the workshop?',
+    [
+      {
+        memoryId: 'workshop',
+        matchedTargets: ['workshop'],
+        date: new Date('2023-01-10T00:00:00.000Z'),
+        snippet: 'Workshop happened on January 10.'
+      },
+      {
+        memoryId: 'meeting',
+        matchedTargets: ['meeting'],
+        date: new Date('2023-01-17T00:00:00.000Z'),
+        snippet: 'Meeting prep was on January 17.'
+      }
+    ]
+  );
+
+  assert.equal(answer.answer, '7');
+  assert.equal(answer.mode, 'deterministic');
 });

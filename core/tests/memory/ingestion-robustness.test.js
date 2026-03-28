@@ -137,3 +137,49 @@ test('source metadata persistence keeps custom metadata payloads', async () => {
   assert.equal(lastSource.metadata.session_date, '2023/05/28 (Sun) 07:17');
   assert.equal(lastSource.metadata.question_id, 'gpt4_2487a7cb');
 });
+
+test('benchmark enrichment adds fact metadata without relationship classification', async () => {
+  let classifierCalls = 0;
+  const relationshipClassifier = {
+    classifyRelationship() {
+      classifierCalls += 1;
+      return {
+        operation: 'updated',
+        relationship: {
+          type: 'Updates',
+          targetId: 'first-memory',
+          confidence: 0.9
+        }
+      };
+    }
+  };
+
+  const store = new InMemoryGraphStore();
+  const engine = new MemoryGraphEngine({ store, relationshipClassifier, predictCalibrate: false });
+  const userId = '00000000-0000-4000-8000-000000001231';
+  const orgId = '00000000-0000-4000-8000-000000001232';
+
+  const result = await engine.ingestMemory({
+    user_id: userId,
+    org_id: orgId,
+    project: 'bench/q1',
+    content: 'I attended the Data Analysis using Python webinar two months ago.',
+    metadata: {
+      session_date: '2023/05/28 (Sun) 07:17',
+      question_id: 'gpt4_2487a7cb'
+    },
+    skipProcessing: true,
+    skip_relationship_classification: true,
+    benchmarkEnrichment: true
+  });
+
+  const stored = await store.getMemory(result.memoryId);
+
+  assert.equal(classifierCalls, 0);
+  assert.equal(result.operation, 'created');
+  assert.equal(stored.metadata.benchmark_enrichment_mode, 'facts_only');
+  assert.ok(Array.isArray(stored.metadata.extracted_facts.entities));
+  assert.ok(Array.isArray(stored.metadata.extracted_facts.dates));
+  assert.ok(Array.isArray(stored.metadata.extracted_facts.keyphrases));
+  assert.equal(stored.metadata.question_id, 'gpt4_2487a7cb');
+});

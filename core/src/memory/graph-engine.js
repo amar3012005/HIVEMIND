@@ -6,6 +6,7 @@ import { extractCodeChunks, detectCodeLanguage } from './code-ingestion.js';
 import { PredictCalibrateFilter } from './predict-calibrate.js';
 import { Observer } from './observer.js'; // kept for backward compat, not initialized
 import { buildObservationPayload, formatObservation } from './observation-store.js';
+import { extractFacts } from './fact-extractor.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -254,6 +255,24 @@ export class MemoryGraphEngine {
           // Attach fingerprint to the memory record
           if (pcResult.fingerprint) {
             baseMemory.contentFingerprint = pcResult.fingerprint;
+          }
+        }
+
+        if (input.benchmarkEnrichment === true) {
+          try {
+            const facts = await extractFacts(baseMemory.content, { useLLM: false });
+            baseMemory.metadata = {
+              ...(baseMemory.metadata || {}),
+              benchmark_enrichment_mode: 'facts_only',
+              extracted_facts: {
+                entities: facts.entities || [],
+                dates: facts.temporalRefs || [],
+                keyphrases: facts.keyphrases || []
+              },
+              benchmark_summary: facts.summary || ''
+            };
+          } catch (enrichmentError) {
+            console.warn('[benchmark-enrichment] Failed:', enrichmentError.message);
           }
         }
 

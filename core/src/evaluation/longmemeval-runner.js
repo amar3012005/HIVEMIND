@@ -218,7 +218,198 @@ function mergeRetrievalResults(primaryResults, secondaryResults, limit = 15) {
   return merged;
 }
 
-function buildGenerationPrompt({ context, question, questionDate, systemHint }) {
+const TEMPORAL_COMPARISON_PATTERNS = {
+  first: /\b(first|earlier|earliest|came first)\b/i,
+  last: /\b(last|later|latest|newest|came last)\b/i,
+  dayDiff: /\bhow many days\b/i
+};
+
+const TEMPORAL_EVENT_SIGNAL = /\b(attended|joined|bought|purchased|scheduled|met|went|prepared|preparing|participated|ordered|got)\b/i;
+const EVENT_NOUN_PATTERN = /\b(workshop|webinar|meeting|trip|vacation|conference|phone|tablet|device|bike|car)\b/i;
+
+function parseComparableDate(value) {
+  if (!value) return null;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed;
+}
+
+function normalizePhrase(phrase = '') {
+  return phrase
+    .toLowerCase()
+    .replace(/[“”"']/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractQuestionTargets(question = '') {
+  const quoted = (question.match(/"([^"]+)"/g) || []).map(part => part.slice(1, -1).trim());
+  if (quoted.length >= 2) {
+    return [...new Set(quoted)];
+  }
+
+  const alternatives = [];
+  for (const match of question.matchAll(/\bthe\s+([^?]+?)\s+or\s+the\s+([^?]+?)(?:\?|$)/gi)) {
+    alternatives.push(match[1].trim(), match[2].trim());
+  }
+
+  const capitalized = (question.match(/\b[A-Z][a-zA-Z0-9]+(?:\s+[A-Z][a-zA-Z0-9]+)*/g) || [])
+    .filter(token => !['Which', 'What', 'How', 'Did', 'I', 'The'].includes(token));
+
+  const eventPhrases = [];
+  for (const match of question.matchAll(/\b(?:the|a|an)\s+([a-z0-9][a-z0-9' -]{1,50}?(?:workshop|webinar|meeting|trip|vacation|conference|phone|tablet|device|bike|car))\b/gi)) {
+    eventPhrases.push(match[1].trim());
+  }
+
+  return [...new Set([...alternatives, ...capitalized, ...eventPhrases])].filter(Boolean);
+}
+
+function extractTemporalEvidence(question, results = []) {
+  const targets = extractQuestionTargets(question);
+  const normalizedTargets = targets.map(normalizePhrase);
+
+  return results
+    .map((result, index) => {
+      const date = parseComparableDate(result.date);
+      const content = result.content || '';
+      const title = result.title || '';
+      const haystack = `${title}\n${content}`;
+      const normalizedHaystack = normalizePhrase(haystack);
+      const matchedTargets = targets.filter((target, targetIndex) => {
+        const normalized = normalizedTargets[targetIndex];
+        return normalized && normalizedHaystack.includes(normalized);
+      });
+
+      return {
+        memoryId: result.id,
+        rank: index + 1,
+        date,
+        isoDate: date ? date.toISOString() : null,
+        content,
+        title,
+        matchedTargets,
+        hasEventSignal: TEMPORAL_EVENT_SIGNAL.test(haystack) || EVENT_NOUN_PATTERN.test(haystack),
+        snippet: haystack.replace(/\s+/g, ' ').trim().slice(0, 220)
+      };
+    })
+    .filter(item => item.date || item.matchedTargets.length > 0 || item.hasEventSignal)
+    .sort((left, right) => {
+      if (left.date && right.date) return left.date - right.date;
+      if (left.date) return -1;
+      if (right.date) return 1;
+      return left.rank - right.rank;
+    });
+}
+
+function buildTemporalEvidenceContext(question, evidence = []) {
+  const lines = evidence
+    .filter(item => item.date)
+    .slice(0, 6)
+    .map(item => {
+      const targetLabel = item.matchedTargets.length > 0
+        ? item.matchedTargets.join(' | ')
+        : (item.title || item.snippet);
+      return `- ${targetLabel} — ${item.isoDate?.slice(0, 10) || 'unknown'} — ${item.snippet}`;
+    });
+
+  if (lines.length === 0) {
+    return '';
+  }
+
+  return [
+    'Structured Temporal Evidence:',
+    ...lines,
+    '',
+    `Question: ${question}`
+  ].join('\n');
+}
+
+function pickTargetDate(target, evidence = []) {
+  const normalizedTarget = normalizePhrase(target);
+  const candidates = evidence.filter(item =>
+    item.date && item.matchedTargets.some(match => normalizePhrase(match) === normalizedTarget)
+  );
+  if (candidates.length === 0) return null;
+  return candidates[0];
+}
+
+function answerTemporalQuestion(question, evidence = []) {
+  if (!Array.isArray(evidence) || evidence.length === 0) {
+    return null;
+  }
+
+  const targets = extractQuestionTargets(question);
+  const datedEvidence = evidence.filter(item => item.date);
+  if (datedEvidence.length === 0) {
+    return null;
+  }
+
+  if (TEMPORAL_COMPARISON_PATTERNS.dayDiff.test(question)) {
+    const datedTargets = targets
+      .map(target => ({ target, candidate: pickTargetDate(target, evidence) }))
+      .filter(entry => entry.candidate);
+    const first = datedTargets[0]?.candidate || datedEvidence[0];
+    const second = datedTargets[1]?.candidate || datedEvidence[1];
+    if (first?.date && second?.date) {
+      const diffDays = Math.round(Math.abs(second.date - first.date) / (1000 * 60 * 60 * 24));
+      return {
+        answer: String(diffDays),
+        confidence: 0.92,
+        mode: 'deterministic',
+        evidenceCount: 2
+      };
+    }
+  }
+
+  const targetCandidates = targets
+    .map(target => ({ target, candidate: pickTargetDate(target, evidence) }))
+    .filter(entry => entry.candidate);
+
+  if (targetCandidates.length >= 2) {
+    const sorted = [...targetCandidates].sort((left, right) => left.candidate.date - right.candidate.date);
+    if (TEMPORAL_COMPARISON_PATTERNS.first.test(question)) {
+      return {
+        answer: sorted[0].target,
+        confidence: 0.95,
+        mode: 'deterministic',
+        evidenceCount: sorted.length
+      };
+    }
+    if (TEMPORAL_COMPARISON_PATTERNS.last.test(question)) {
+      return {
+        answer: sorted[sorted.length - 1].target,
+        confidence: 0.95,
+        mode: 'deterministic',
+        evidenceCount: sorted.length
+      };
+    }
+  }
+
+  if (TEMPORAL_COMPARISON_PATTERNS.first.test(question) || TEMPORAL_COMPARISON_PATTERNS.last.test(question)) {
+    const sorted = [...datedEvidence].sort((left, right) => left.date - right.date);
+    const chosen = TEMPORAL_COMPARISON_PATTERNS.first.test(question) ? sorted[0] : sorted[sorted.length - 1];
+    const fallbackLabel = chosen.matchedTargets[0] || chosen.title || chosen.snippet;
+    if (fallbackLabel) {
+      return {
+        answer: fallbackLabel,
+        confidence: 0.7,
+        mode: 'fallback_deterministic',
+        evidenceCount: sorted.length
+      };
+    }
+  }
+
+  return null;
+}
+
+function isTemporalReasoningQuestion(question, questionType) {
+  return questionType === 'temporal-reasoning'
+    || TEMPORAL_COMPARISON_PATTERNS.first.test(question || '')
+    || TEMPORAL_COMPARISON_PATTERNS.last.test(question || '')
+    || TEMPORAL_COMPARISON_PATTERNS.dayDiff.test(question || '');
+}
+
+function buildGenerationPrompt({ context, question, questionDate, systemHint, structuredEvidence = '' }) {
   const dateStr = questionDate || 'Unknown';
   const lowerQuestion = (question || '').toLowerCase();
   const isTemporalComparison = /\b(first|earlier|earliest|before|after|last|latest|how many days)\b/.test(lowerQuestion);
@@ -241,6 +432,7 @@ function buildGenerationPrompt({ context, question, questionDate, systemHint }) 
     return [
       ...instructions,
       '',
+      ...(structuredEvidence ? [structuredEvidence, ''] : []),
       'Retrieved Memory Context:',
       context,
       '',
@@ -584,10 +776,20 @@ async function ingestInstance(instance, instanceIdx, totalInstances) {
           memory_type: 'event',
           document_date: sessionDate,
           project: `bench/longmemeval/${question_id}`,
+          metadata: {
+            session_date: sessionDate,
+            session_date_raw: haystack_dates[i],
+            question_id,
+            session_index: i,
+            round_index: j / 2,
+            benchmark_enrichment_mode: 'facts_only'
+          },
           // Skip ingestion processing — MemoryProcessor merges distinct turns, predict-calibrate has stale cache
           // Retrieval still uses full engine (Operator Layer + Recall)
           skipPredictCalibrate: true,
           skipProcessing: true,
+          skip_relationship_classification: true,
+          benchmarkEnrichment: true,
         });
         ingested++;
         // Small delay to avoid overwhelming the API + embedding service
@@ -646,6 +848,16 @@ async function evaluateInstance(instance) {
 
   const projectResults = normalizeSearchResults(searchResults);
   const selectedResults = selectContextResults(searchResults, retrievalPlan.searchLimit);
+  const temporalEvidence = isTemporalReasoningQuestion(question, question_type)
+    ? extractTemporalEvidence(question, selectedResults)
+    : [];
+  const temporalAnswer = temporalEvidence.length > 0
+    ? answerTemporalQuestion(question, temporalEvidence)
+    : null;
+  const structuredEvidence = temporalEvidence.length > 0
+    ? buildTemporalEvidenceContext(question, temporalEvidence)
+    : '';
+
   const context = buildBenchmarkContext(
     { results: selectedResults },
     { maxItems: retrievalPlan.contextLimit, maxChars: 7000, sortMode: retrievalPlan.contextSortMode || 'score' }
@@ -654,22 +866,27 @@ async function evaluateInstance(instance) {
   let hypothesis;
   const generationStart = Date.now();
   try {
-    const userPrompt = buildGenerationPrompt({
-      context,
-      question,
-      questionDate: question_date,
-      systemHint: retrievalPlan.systemHint
-    });
+    if (temporalAnswer?.confidence >= 0.9) {
+      hypothesis = temporalAnswer.answer;
+    } else {
+      const userPrompt = buildGenerationPrompt({
+        context,
+        question,
+        questionDate: question_date,
+        systemHint: retrievalPlan.systemHint,
+        structuredEvidence
+      });
 
-    hypothesis = await groqChat([
-      { role: 'user', content: userPrompt },
-    ], { maxTokens: 120 });
-
-    if (!hypothesis || hypothesis.trim().length === 0) {
-      console.warn(`  [fallback] ${question_id}: ${GROQ_MODEL} returned empty, trying llama-3.3-70b-versatile`);
       hypothesis = await groqChat([
         { role: 'user', content: userPrompt },
-      ], { model: 'llama-3.3-70b-versatile', maxTokens: 120 });
+      ], { maxTokens: 120 });
+
+      if (!hypothesis || hypothesis.trim().length === 0) {
+        console.warn(`  [fallback] ${question_id}: ${GROQ_MODEL} returned empty, trying llama-3.3-70b-versatile`);
+        hypothesis = await groqChat([
+          { role: 'user', content: userPrompt },
+        ], { model: 'llama-3.3-70b-versatile', maxTokens: 120 });
+      }
     }
   } catch (err) {
     console.warn(`  [groq-fail] ${question_id}: ${err.message.slice(0, 100)}`);
@@ -703,6 +920,15 @@ async function evaluateInstance(instance) {
         session: result.session,
         memoryType: result.memoryType,
         sourcePlatform: result.sourcePlatform
+      })),
+      temporalComparatorUsed: !!temporalAnswer,
+      temporalEvidenceCount: temporalEvidence.length,
+      temporalAnswerMode: temporalAnswer?.mode || (structuredEvidence ? 'compressed_prompt' : 'raw_prompt'),
+      temporalCandidates: temporalEvidence.slice(0, 4).map(item => ({
+        memoryId: item.memoryId,
+        date: item.isoDate,
+        matchedTargets: item.matchedTargets,
+        hasEventSignal: item.hasEventSignal
       }))
     }
   };
@@ -1124,6 +1350,9 @@ export {
   selectContextResults,
   mergeRetrievalResults,
   buildGenerationPrompt,
+  extractTemporalEvidence,
+  answerTemporalQuestion,
+  buildTemporalEvidenceContext,
   looksLikeAbstention,
   classifyLongMemEvalBottleneck,
   summarizeEntries,

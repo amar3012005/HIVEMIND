@@ -1124,7 +1124,7 @@ async function hybridSearch(options = {}) {
     : rankedResults.slice(0, Math.max(limit, 10));
 
   // Step 7: Apply precision boosts (title/tag/project/dedup)
-  const boostedResults = applyPrecisionBoosts(candidateResults, effectiveQuery, { project });
+  const boostedResults = applyPrecisionBoosts(candidateResults, effectiveQuery, { project, queryProfile });
 
   // Step 8: Enforce scope defensively on final output
   const scopedResults = enforceScope(boostedResults, { userId, orgId, project });
@@ -1247,6 +1247,12 @@ const TEMPORAL_PATTERNS = [
   /\b(january|february|march|april|may|june|july|august|september|october|november|december)\b/i,
 ];
 
+const TEMPORAL_COMPARISON_PATTERNS = {
+  first: /\b(first|earlier|earliest|came first)\b/i,
+  last: /\b(last|later|latest|newest|came last)\b/i,
+  dayDiff: /\bhow many days\b/i
+};
+
 const EXPLORATORY_PATTERNS = [
   /\b(tell me about|everything about|related to|associated with|overview)\b/i,
   /\b(summarize|summary|recap)\b/i,
@@ -1254,7 +1260,7 @@ const EXPLORATORY_PATTERNS = [
 
 function preprocessQuery(query) {
   if (!query || typeof query !== 'string') {
-    return { cleanedQuery: '', intent: 'factual', entities: [], weightOverrides: null };
+    return { cleanedQuery: '', intent: 'factual', entities: [], weightOverrides: null, comparisonIntent: null };
   }
 
   const cleaned = normalizeQuery(query);
@@ -1267,6 +1273,10 @@ function preprocessQuery(query) {
   const capitalizedEntities = (query.match(/\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*/g) || [])
     .filter(e => !['Tell', 'What', 'How', 'Show', 'Find', 'Give', 'The', 'When', 'Where', 'Who'].includes(e));
   const entities = [...new Set([...quotedEntities, ...capitalizedEntities])];
+  let comparisonIntent = null;
+  if (TEMPORAL_COMPARISON_PATTERNS.dayDiff.test(query)) comparisonIntent = 'day_diff';
+  else if (TEMPORAL_COMPARISON_PATTERNS.first.test(query)) comparisonIntent = 'first';
+  else if (TEMPORAL_COMPARISON_PATTERNS.last.test(query)) comparisonIntent = 'last';
 
   let weightOverrides = null;
   if (intent === 'temporal') {
@@ -1275,7 +1285,7 @@ function preprocessQuery(query) {
     weightOverrides = { vector: 0.50, keyword: 0.25, graph: 0.25 };
   }
 
-  return { cleanedQuery: cleaned, intent, entities, weightOverrides };
+  return { cleanedQuery: cleaned, intent, entities, weightOverrides, comparisonIntent };
 }
 
 // ==========================================
@@ -1334,6 +1344,23 @@ function tokenOverlap(a, b) {
   return overlap / Math.min(setA.size, setB.size);
 }
 
+function normalizeComparableText(text = '') {
+  return (text || '').toLowerCase().replace(/[“”"'`]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function parseComparableDate(value) {
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function extractTemporalQueryEntities(query = '', queryProfile = {}) {
+  const quoted = (query.match(/"([^"]+)"/g) || []).map(item => item.replace(/"/g, '').trim());
+  const eventPhrases = Array.from(query.matchAll(/\b(?:the|a|an)\s+([a-z0-9][a-z0-9' -]{1,60}?(?:workshop|webinar|meeting|trip|vacation|conference|phone|tablet|device|bike|car))\b/gi))
+    .map(match => match[1].trim());
+  return [...new Set([...(queryProfile.entities || []), ...quoted, ...eventPhrases])].filter(Boolean);
+}
+
 /**
  * Apply precision boosts to ranked results.
  * Runs after combineSearchResults, before final sort.
@@ -1346,6 +1373,9 @@ function applyPrecisionBoosts(results, query, options = {}) {
 
   const normQuery = normalizeQuery(query);
   const queryTokens = tokenize(normQuery);
+  const queryProfile = options.queryProfile || {};
+  const temporalEntities = extractTemporalQueryEntities(query, queryProfile).map(normalizeComparableText);
+  const temporalComparison = queryProfile.intent === 'temporal' || Boolean(queryProfile.comparisonIntent);
 
   // Score boosts
   for (const r of results) {
@@ -1354,6 +1384,11 @@ function applyPrecisionBoosts(results, query, options = {}) {
     const tags = r.tags || r.payload?.tags || [];
     const project = r.project || r.payload?.project || '';
     const isLatest = r.is_latest ?? r.payload?.is_latest ?? true;
+    const content = r.content || r.payload?.content || '';
+    const haystack = normalizeComparableText(`${title} ${content}`);
+    const hasDate = Boolean(r.documentDate || r.document_date || r.date || r.payload?.document_date || r.payload?.documentDate);
+    const hasEventSignal = /\b(attended|joined|bought|purchased|scheduled|met|went|prepared|preparing|participated|ordered|got)\b/i.test(content)
+      || /\b(workshop|webinar|meeting|trip|vacation|conference|phone|tablet|device|bike|car)\b/i.test(content);
 
     // Exact title substring match (+0.25)
     if (title && normQuery.length > 3 && title.toLowerCase().includes(normQuery)) {
@@ -1377,6 +1412,13 @@ function applyPrecisionBoosts(results, query, options = {}) {
       boost += 0.1;
     }
 
+    if (temporalComparison) {
+      const entityHits = temporalEntities.filter(entity => entity && haystack.includes(entity)).length;
+      boost += Math.min(entityHits * 0.18, 0.36);
+      if (hasDate) boost += 0.12;
+      if (hasEventSignal) boost += 0.08;
+    }
+
     // is_latest: boost latest (+0.08), penalize superseded (*0.6)
     if (isLatest) {
       boost += 0.08;
@@ -1389,6 +1431,34 @@ function applyPrecisionBoosts(results, query, options = {}) {
     r._precisionBoost = boost;
   }
 
+  if (temporalComparison && queryProfile.comparisonIntent) {
+    const dated = results
+      .map(result => ({
+        result,
+        date: parseComparableDate(
+          result.documentDate || result.document_date || result.date || result.payload?.document_date || result.payload?.documentDate || null
+        )
+      }))
+      .filter(item => item.date)
+      .sort((left, right) => left.date - right.date);
+
+    if (dated.length >= 2) {
+      dated.forEach((item, index) => {
+        const normalizedRank = dated.length === 1 ? 1 : index / (dated.length - 1);
+        let chronologyBoost = 0;
+        if (queryProfile.comparisonIntent === 'first') {
+          chronologyBoost = (1 - normalizedRank) * 0.2;
+        } else if (queryProfile.comparisonIntent === 'last') {
+          chronologyBoost = normalizedRank * 0.2;
+        } else if (queryProfile.comparisonIntent === 'day_diff') {
+          chronologyBoost = 0.05;
+        }
+        item.result.score = (item.result.score || 0) + chronologyBoost;
+        item.result._chronologyBoost = chronologyBoost;
+      });
+    }
+  }
+
   // Near-duplicate penalty: remove results with >85% token overlap with a higher-scored result
   results.sort((a, b) => b.score - a.score);
   const kept = [];
@@ -1396,6 +1466,13 @@ function applyPrecisionBoosts(results, query, options = {}) {
     const content = r.content || r.payload?.content || '';
     const isDuplicate = kept.some(k => {
       const kContent = k.content || k.payload?.content || '';
+      if (temporalComparison) {
+        const leftDate = r.documentDate || r.document_date || r.date || r.payload?.document_date || r.payload?.documentDate || null;
+        const rightDate = k.documentDate || k.document_date || k.date || k.payload?.document_date || k.payload?.documentDate || null;
+        if (leftDate && rightDate && leftDate !== rightDate) {
+          return false;
+        }
+      }
       return tokenOverlap(content, kContent) > 0.80;
     });
     if (!isDuplicate) {

@@ -137,3 +137,55 @@ test('hybridSearch hard-filters vector results to the requested project scope', 
     client.searchMemories = originalSearchMemories;
   }
 });
+
+test('hybridSearch boosts date-bearing event results for temporal comparisons', async () => {
+  const client = getQdrantClient();
+  const originalIsConnected = client.isConnected;
+  const originalEnsureCollection = client.ensureCollection;
+  const originalSearchMemories = client.searchMemories;
+
+  client.isConnected = async () => true;
+  client.ensureCollection = async () => true;
+  client.searchMemories = async () => ([
+    {
+      id: 'workshop',
+      score: 0.82,
+      payload: {
+        content: 'I attended the Effective Time Management workshop last Saturday.',
+        project: 'bench/requested-project',
+        user_id: '00000000-0000-4000-8000-000000000131',
+        is_latest: true,
+        document_date: '2023-05-28T21:04:00.000Z'
+      }
+    },
+    {
+      id: 'webinar',
+      score: 0.80,
+      payload: {
+        content: 'I attended the Data Analysis using Python webinar two months ago.',
+        project: 'bench/requested-project',
+        user_id: '00000000-0000-4000-8000-000000000131',
+        is_latest: true,
+        document_date: '2023-03-28T07:17:00.000Z'
+      }
+    }
+  ]);
+
+  try {
+    const result = await hybridSearch.hybridSearch({
+      query: 'Which event did I attend first, the "Effective Time Management" workshop or the "Data Analysis using Python" webinar?',
+      queryVector: [0.1, 0.2, 0.3],
+      userId: '00000000-0000-4000-8000-000000000131',
+      project: 'bench/requested-project',
+      limit: 5,
+      weights: { vector: 1, keyword: 0, graph: 0 }
+    });
+
+    assert.equal(result.results[0].id, 'webinar');
+    assert.ok(result.results[0].score >= result.results[1].score);
+  } finally {
+    client.isConnected = originalIsConnected;
+    client.ensureCollection = originalEnsureCollection;
+    client.searchMemories = originalSearchMemories;
+  }
+});

@@ -8,6 +8,7 @@ import {
   extractTemporalEvidence,
   answerTemporalQuestion,
   mergeRetrievalResults,
+  makeRunConfig,
   selectContextResults,
   normalizeSearchResults
 } from '../../src/evaluation/longmemeval-runner.js';
@@ -129,7 +130,13 @@ test('longmemeval report exposes bottlenecks and judge coverage', () => {
     timings: {
       judgeSeconds: 6
     },
-    judgeFile: '/tmp/longmemeval.judged.jsonl'
+    judgeFile: '/tmp/longmemeval.judged.jsonl',
+    runConfig: {
+      benchmarkMode: 'hybrid',
+      cleanup: true,
+      useBenchmarkCollection: true,
+      useServerMemory: true
+    }
   });
 
   const abstentionBottleneck = classifyLongMemEvalBottleneck(records[1]);
@@ -145,6 +152,37 @@ test('longmemeval report exposes bottlenecks and judge coverage', () => {
   assert.equal(abstentionBottleneck.type, 'abstention_failure');
   assert.equal(fallbackBottleneck.type, 'scope_fallback');
   assert.equal(report.files.judged, '/tmp/longmemeval.judged.jsonl');
+  assert.equal(report.runConfig.benchmarkMode, 'hybrid');
+  assert.equal(report.runConfig.cleanup, true);
+  assert.equal(report.summary.retrieval.averageJudgeLatencyMs, 0);
+});
+
+test('makeRunConfig derives retrieval sources from benchmark mode', () => {
+  const direct = makeRunConfig({ benchmarkMode: 'direct', cleanup: false }, true);
+  const engine = makeRunConfig({ benchmarkMode: 'engine', cleanup: true }, true);
+  const hybridWithoutBench = makeRunConfig({ benchmarkMode: 'hybrid', cleanup: true }, false);
+
+  assert.deepEqual(direct, {
+    benchmarkMode: 'direct',
+    cleanup: false,
+    useBenchmarkCollection: true,
+    useServerMemory: false,
+    benchCollectionReady: true
+  });
+  assert.deepEqual(engine, {
+    benchmarkMode: 'engine',
+    cleanup: true,
+    useBenchmarkCollection: false,
+    useServerMemory: true,
+    benchCollectionReady: true
+  });
+  assert.deepEqual(hybridWithoutBench, {
+    benchmarkMode: 'hybrid',
+    cleanup: true,
+    useBenchmarkCollection: false,
+    useServerMemory: true,
+    benchCollectionReady: false
+  });
 });
 
 test('runner merges retrieval results by id and normalized content', () => {

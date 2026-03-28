@@ -12,7 +12,7 @@ test('temporal questions route to panorama with a temporal window', () => {
   });
 
   assert.equal(plan.route, 'recall');
-  assert.equal(plan.body.max_memories, 15);
+  assert.equal(plan.body.max_memories, 20);
   assert.equal(plan.body.query_context, 'What happened in March 2026?');
   assert.equal(plan.body.date_range.start, '2026-03-01');
   assert.equal(plan.body.date_range.end, '2026-03-31');
@@ -39,7 +39,7 @@ test('single-session preference questions route to quick search', () => {
 
   assert.equal(plan.route, 'quick');
   assert.equal(plan.body.query, 'What format do I prefer?');
-  assert.equal(plan.body.limit, 10);
+  assert.equal(plan.body.limit, 20);
   assert.match(plan.systemHint, /Single-session focus/);
 });
 

@@ -43,6 +43,8 @@ const BENCHMARK_QDRANT_URL = process.env.QDRANT_URL || 'https://24826665-41d6-4e
 const BENCHMARK_QDRANT_KEY = process.env.QDRANT_API_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.fo75c0vRt9MhfhcQB0fP-m-MiU4gCYZD_yv23YNtyJc';
 const BENCHMARK_COLLECTION = process.env.BENCHMARK_QDRANT_COLLECTION || 'BENCHMARK';
 const BENCHMARK_EMBED_MODEL = process.env.BENCHMARK_EMBED_MODEL || 'bge-m3';
+const BENCHMARK_MODE = process.env.LONGMEMEVAL_BENCHMARK_MODE || 'hybrid';
+const LONGMEMEVAL_CLEANUP = process.env.LONGMEMEVAL_CLEANUP !== '0';
 
 // Benchmark user/org (isolated tenant)
 const BENCH_USER = 'longmemeval-bench-001';
@@ -52,13 +54,22 @@ const BENCH_ORG = 'longmemeval-org-001';
 
 function parseArgs() {
   const args = process.argv.slice(2);
-  const opts = { phase: 'all', sample: 0, startFrom: 0, concurrency: 1 };
+  const opts = {
+    phase: 'all',
+    sample: 0,
+    startFrom: 0,
+    concurrency: 1,
+    benchmarkMode: BENCHMARK_MODE,
+    cleanup: LONGMEMEVAL_CLEANUP,
+  };
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
       case '--phase': opts.phase = args[++i]; break;
       case '--sample': opts.sample = parseInt(args[++i], 10); break;
       case '--start-from': opts.startFrom = parseInt(args[++i], 10); break;
       case '--concurrency': opts.concurrency = parseInt(args[++i], 10); break;
+      case '--benchmark-mode': opts.benchmarkMode = args[++i]; break;
+      case '--cleanup': opts.cleanup = args[++i] !== 'false'; break;
       case '--help': case '-h':
         console.log(`
 LongMemEval-S Benchmark Runner
@@ -70,11 +81,30 @@ Options:
   --sample N                     Only process N instances (default: all 500)
   --start-from N                 Start from instance N (default: 0)
   --concurrency N                Parallel instances (default: 1)
+  --benchmark-mode direct|engine|hybrid
+                                Retrieval/index mode (default: hybrid)
+  --cleanup true|false          Delete per-question memories after stream mode (default: true)
 `);
         process.exit(0);
     }
   }
+  if (!['direct', 'engine', 'hybrid'].includes(opts.benchmarkMode)) {
+    throw new Error(`Unsupported benchmark mode: ${opts.benchmarkMode}`);
+  }
   return opts;
+}
+
+function makeRunConfig(opts = {}, benchCollectionReady = true) {
+  const benchmarkMode = opts.benchmarkMode || BENCHMARK_MODE;
+  const useBenchmarkCollection = benchCollectionReady && benchmarkMode !== 'engine';
+  const useServerMemory = benchmarkMode !== 'direct';
+  return {
+    benchmarkMode,
+    cleanup: opts.cleanup ?? LONGMEMEVAL_CLEANUP,
+    useBenchmarkCollection,
+    useServerMemory,
+    benchCollectionReady
+  };
 }
 
 // ── API helpers ──────────────────────────────────────────
@@ -598,13 +628,12 @@ function buildGenerationPrompt({ context, question, questionDate, systemHint, st
   const dateStr = questionDate || 'Unknown';
 
   if (context.length > 50) {
-    // Include systemHint (type-specific guidance) and structuredEvidence (temporal dates) if available
-    const hintLine = systemHint ? `\nNote: ${systemHint}\n` : '';
-    const evidenceLine = structuredEvidence ? `\nExtracted Evidence:\n${structuredEvidence}\n` : '';
-    return `I will give you several history chats between you and a user. Please answer the question based on the relevant chat history.\n\nHistory Chats:\n\n${context}${evidenceLine}${hintLine}\nCurrent Date: ${dateStr}\nQuestion: ${question}\nAnswer:`;
+    const hintLine = systemHint ? `\nNote: ${systemHint}` : '';
+    const evidenceLine = structuredEvidence ? `\nStructured Evidence:\n${structuredEvidence}\n` : '\n';
+    return `Return a short direct answer using only the retrieved memory context. Do not explain your reasoning.${hintLine}\n\nRetrieved Memory Context:\n${context}${evidenceLine}Current Date: ${dateStr}\nQuestion: ${question}\nAnswer:`;
   }
 
-  return `Current Date: ${dateStr}\nQuestion: ${question}\nAnswer:`;
+  return `Return a short direct answer using only the provided memory evidence. Do not explain your reasoning.\nCurrent Date: ${dateStr}\nQuestion: ${question}\nAnswer:`;
 }
 
 function looksLikeAbstention(text) {
@@ -731,6 +760,9 @@ function summarizeEntries(entries) {
   const retrieval = {
     averageSearchLatencyMs: Math.round(mean(entries.map(entry => entry.retrieval?.searchLatencyMs)) * 100) / 100,
     averageGenerationLatencyMs: Math.round(mean(entries.map(entry => entry.retrieval?.generationLatencyMs)) * 100) / 100,
+    averageJudgeLatencyMs: Math.round(mean(entries.map(entry => entry.retrieval?.judgeLatencyMs)) * 100) / 100,
+    averageIngestLatencyMs: Math.round(mean(entries.map(entry => entry.retrieval?.ingestLatencyMs)) * 100) / 100,
+    averageCleanupLatencyMs: Math.round(mean(entries.map(entry => entry.retrieval?.cleanupLatencyMs)) * 100) / 100,
     averageContextChars: Math.round(mean(entries.map(entry => entry.retrieval?.contextChars)) * 100) / 100,
     averageResultCount: Math.round(mean(entries.map(entry => entry.retrieval?.resultCount)) * 100) / 100,
     projectScopedCount: entries.filter(entry => (entry.retrieval?.projectResultCount || 0) > 0).length,
@@ -839,7 +871,8 @@ function buildLongMemEvalReport({
   records,
   ingestion = null,
   timings = {},
-  judgeFile = null
+  judgeFile = null,
+  runConfig = null
 }) {
   const summary = summarizeEntries(records);
   const judgedRecords = records.filter(entry => typeof entry.autoeval_label === 'string');
@@ -872,6 +905,7 @@ function buildLongMemEvalReport({
     benchUser: BENCH_USER,
     benchOrg: BENCH_ORG,
     model: GROQ_MODEL,
+    runConfig,
     timings,
     ingestion,
     summary: {
@@ -1016,7 +1050,7 @@ async function ingestInstance(instance, instanceIdx, totalInstances) {
 
 // ── Phase 2: Evaluate ───────────────────────────────────
 
-async function evaluateInstance(instance) {
+async function evaluateInstance(instance, runConfig = makeRunConfig()) {
   const { question_id, question, question_type, question_date } = instance;
   const isAbstention = question_id.endsWith('_abs');
   const retrievalPlan = getLongMemEvalRetrievalPlan({ question, questionType: question_type });
@@ -1070,6 +1104,9 @@ async function evaluateInstance(instance) {
 
     // Step 2: Embed ALL rewritten queries and search with each via bge-m3
     try {
+      if (!runConfig.useBenchmarkCollection) {
+        throw new Error('benchmark collection disabled for this run mode');
+      }
       const allBenchmarkResults = [];
       for (const q of rewrittenQueries) {
         const [qVec] = await litellmEmbed([q]);
@@ -1134,7 +1171,7 @@ async function evaluateInstance(instance) {
 
     // Secondary retrieval: HIVEMIND API for SOTA features (Operator Layer, graph expansion, panorama)
     // These provide intent detection, temporal expansion, and knowledge-update timeline support
-    if (question_type === 'temporal-reasoning') {
+    if (runConfig.useServerMemory && question_type === 'temporal-reasoning') {
       recallResults = await apiCall('POST', '/api/recall', {
         query_context: question,
         project,
@@ -1146,7 +1183,7 @@ async function evaluateInstance(instance) {
         });
       }
 
-    } else if (question_type === 'knowledge-update') {
+    } else if (runConfig.useServerMemory && question_type === 'knowledge-update') {
       quickResults = await apiCall('POST', '/api/search/panorama', {
         query: question, project, limit: 20,
         include_expired: true, include_historical: true,
@@ -1155,7 +1192,7 @@ async function evaluateInstance(instance) {
         query_context: question, project, max_memories: 15,
       });
 
-    } else if (question_type === 'multi-session') {
+    } else if (runConfig.useServerMemory && question_type === 'multi-session') {
       recallResults = await apiCall('POST', '/api/recall', {
         query_context: question, project, max_memories: 15,
       });
@@ -1165,7 +1202,7 @@ async function evaluateInstance(instance) {
         });
       }
 
-    } else {
+    } else if (runConfig.useServerMemory) {
       // Single-session types: bge-m3 is primary; only fall back to server if bge-m3 failed
       if (!benchmarkResults) {
         quickResults = await apiCall('POST', '/api/search/quick', {
@@ -1260,6 +1297,7 @@ async function evaluateInstance(instance) {
     isAbstention,
     hypothesis: hypothesis.trim(),
     retrieval: {
+      benchmarkMode: runConfig.benchmarkMode,
       route: benchmarkResults
         ? `bge-m3+${retrievalPlan.route}`
         : (recallResults && quickResults ? `${retrievalPlan.route}+quick` : retrievalPlan.route),
@@ -1362,24 +1400,46 @@ async function cleanupInstance(questionId) {
 
 // ── Per-question streaming pipeline ──────────────────────
 
-async function processInstanceStreaming(instance, instanceIdx, totalInstances) {
+async function processInstanceStreaming(instance, instanceIdx, totalInstances, runConfig = makeRunConfig()) {
   const { question_id, question, question_type, answer } = instance;
 
   // 1. Ingest this question's sessions (project-scoped: bench/longmemeval/{question_id})
+  const ingestStart = Date.now();
   const { ingested, skipped } = await ingestInstance(instance, instanceIdx, totalInstances);
+  const ingestLatencyMs = Date.now() - ingestStart;
 
   // 2. Wait for Qdrant indexing + MemoryProcessor LLM calls
   await new Promise(r => setTimeout(r, 3000));
 
   // 3. Evaluate (retrieve + generate) — search is project-scoped, no cross-question pollution
-  const result = await evaluateInstance(instance);
+  const result = await evaluateInstance(instance, runConfig);
 
   // 4. Judge with Groq (per-question scoring)
+  const judgeStart = Date.now();
   const verdict = await judgeWithGroq(question, answer, result.hypothesis, question_type);
+  const judgeLatencyMs = Date.now() - judgeStart;
 
-  // No cleanup needed — each question has its own project namespace
-  // Memories stay in DB but never interfere because search filters by project
-  return { ...result, ingested, skipped, cleaned: 0, autoeval_label: verdict };
+  let cleaned = 0;
+  let cleanupLatencyMs = 0;
+  if (runConfig.cleanup) {
+    const cleanupStart = Date.now();
+    cleaned = await cleanupInstance(question_id);
+    cleanupLatencyMs = Date.now() - cleanupStart;
+  }
+
+  return {
+    ...result,
+    ingested,
+    skipped,
+    cleaned,
+    autoeval_label: verdict,
+    retrieval: {
+      ...result.retrieval,
+      ingestLatencyMs,
+      judgeLatencyMs,
+      cleanupLatencyMs
+    }
+  };
 }
 
 // ── Main ────────────────────────────────────────────────
@@ -1407,6 +1467,8 @@ async function main() {
 
   console.log(`Instances: ${instances.length} (of ${data.length} total)`);
   console.log(`Phase: ${opts.phase}`);
+  console.log(`Mode: ${opts.benchmarkMode}`);
+  console.log(`Cleanup: ${opts.cleanup ? 'enabled' : 'disabled'}`);
   console.log(`API: ${API_BASE}`);
   console.log(`User: ${BENCH_USER}`);
   console.log(`Generation: ${LITELLM_BASE ? LITELLM_MODEL + ' (LiteLLM)' : GROQ_MODEL + ' (Groq)'}`);
@@ -1419,6 +1481,7 @@ async function main() {
   if (!benchReady) {
     console.warn('[benchmark] BENCHMARK collection unavailable — will use server-only retrieval');
   }
+  const runConfig = makeRunConfig(opts, benchReady);
 
   // Ensure output dir
   if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
@@ -1441,7 +1504,7 @@ async function main() {
     let totalJudged = 0;
 
     for (let i = 0; i < instances.length; i++) {
-      const result = await processInstanceStreaming(instances[i], i, instances.length);
+      const result = await processInstanceStreaming(instances[i], i, instances.length, runConfig);
       hypotheses.push(result);
       totalIngested += result.ingested || 0;
       totalCleaned += result.cleaned || 0;
@@ -1494,7 +1557,8 @@ async function main() {
       instances,
       records: evaluationRecords,
       ingestion: ingestionSummary,
-      timings: { totalSeconds: Number(duration) }
+      timings: { totalSeconds: Number(duration) },
+      runConfig
     });
     fs.writeFileSync(LONGMEMEVAL_REPORT_FILE, JSON.stringify(evaluationReport, null, 2), 'utf-8');
     console.log(`Partial report: ${LONGMEMEVAL_REPORT_FILE}`);
@@ -1540,7 +1604,7 @@ async function main() {
     const hypotheses = [];
 
     for (let i = 0; i < instances.length; i++) {
-      const result = await evaluateInstance(instances[i]);
+      const result = await evaluateInstance(instances[i], runConfig);
       hypotheses.push(result);
 
       if ((i + 1) % 10 === 0 || i === instances.length - 1) {
@@ -1581,7 +1645,8 @@ async function main() {
       ingestion: ingestionSummary,
       timings: {
         evaluationSeconds: Number(duration)
-      }
+      },
+      runConfig
     });
     fs.writeFileSync(LONGMEMEVAL_REPORT_FILE, JSON.stringify(evaluationReport, null, 2), 'utf-8');
     console.log(`Partial report: ${LONGMEMEVAL_REPORT_FILE}`);
@@ -1697,7 +1762,8 @@ async function main() {
       timings: {
         judgeSeconds: Number(duration)
       },
-      judgeFile: judgedFile
+      judgeFile: judgedFile,
+      runConfig
     });
     fs.writeFileSync(LONGMEMEVAL_REPORT_FILE, JSON.stringify(finalReport, null, 2), 'utf-8');
     console.log(`Report: ${LONGMEMEVAL_REPORT_FILE}`);
@@ -1728,5 +1794,7 @@ export {
   buildLongMemEvalReport,
   evaluateInstance,
   ingestInstance,
-  parseLongMemEvalDate
+  parseLongMemEvalDate,
+  parseArgs,
+  makeRunConfig
 };

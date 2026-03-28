@@ -198,6 +198,7 @@ export class ThreeTierRetrieval {
         userId,
         orgId,
         project,
+        isLatest: true,
         memoryType,
         tags,
         sourcePlatform,

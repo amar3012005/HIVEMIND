@@ -29,6 +29,7 @@ test('PanoramaSearch does not force latest-only filtering for historical search'
     assert.ok(capturedOptions);
     assert.equal(capturedOptions.project, 'bench/panorama-test');
     assert.equal(capturedOptions.isLatest, undefined);
+    assert.equal(capturedOptions.finalScoreThreshold, 0.05);
   } finally {
     hybridSearch.hybridSearch = originalHybridSearch;
   }

@@ -118,6 +118,21 @@ function expandProbeFromCluster(cluster = {}) {
   return [];
 }
 
+function scanBudgetForScope({ scope = 'project', project = null, region = null }) {
+  if (region) return 400;
+  if (project) return 900;
+  if (scope === 'workspace') return 600;
+  return 900;
+}
+
+function sortNewestFirst(memories = []) {
+  return [...memories].sort((left, right) => {
+    const leftTime = new Date(left?.created_at || 0).getTime();
+    const rightTime = new Date(right?.created_at || 0).getTime();
+    return rightTime - leftTime;
+  });
+}
+
 async function clusterSemanticMemories(memories = []) {
   const clusters = [];
 
@@ -320,6 +335,7 @@ export class FaradayAgent {
     isCancelled = () => false,
   } = {}) {
     const observations = [];
+    const scanBudget = scanBudgetForScope({ scope, project, region });
 
     const updateProgress = async (step, totalSteps, currentStep) => {
       await onProgress({
@@ -361,6 +377,12 @@ export class FaradayAgent {
         const content = normalizeText(memory.content || '');
         return path.includes(regionNorm) || title.includes(regionNorm) || content.includes(regionNorm);
       });
+    }
+
+    const totalScopedMemories = memories.length;
+    const truncatedBaseScope = totalScopedMemories > scanBudget;
+    if (truncatedBaseScope) {
+      memories = sortNewestFirst(memories).slice(0, scanBudget);
     }
 
     if (isCancelled()) {
@@ -502,6 +524,9 @@ export class FaradayAgent {
         : 'Inspect the highest-count file groups for code smell and test gaps.',
       extra: {
         memory_count: memoryCount,
+        total_scoped_memories: totalScopedMemories,
+        scan_budget: scanBudget,
+        truncated_base_scope: truncatedBaseScope,
         relationship_count: relationshipCount,
         semantic_probe_count: semanticProbes.length,
         semantic_seed_count: semanticSeeds.length,

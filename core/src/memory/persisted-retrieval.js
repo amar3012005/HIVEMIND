@@ -331,7 +331,8 @@ async function vectorCandidatesForRecall(store, {
   max_memories,
   dateRange = null,
   scoreThreshold = 0.25,
-  candidatePoolSize = Math.max(max_memories * 4, 20)
+  candidatePoolSize = Math.max(max_memories * 4, 20),
+  is_latest = true,
 }) {
   const qdrantClient = getQdrantClient();
   const connected = await qdrantClient.isConnected();
@@ -344,7 +345,7 @@ async function vectorCandidatesForRecall(store, {
     org_id,
     project,
     tags,
-    is_latest: true,
+    is_latest,
     limit: candidatePoolSize,
     score_threshold: scoreThreshold,
     collectionName: buildCollectionName(user_id)
@@ -706,7 +707,10 @@ export async function recallPersistedMemories(store, {
   max_memories = 5,
   weights = { similarity: 0.45, recency: 0.15, importance: 0.1, vector: 0.2, graph: 0.05, policy: 0.05 },
   graph_expansion_depth = 2,
-  date_range = null
+  date_range = null,
+  is_latest,           // boolean — undefined = default (true), false = include superseded
+  include_expired,     // boolean — include expired memories
+  sort,                // 'score' | 'date_asc' | 'date_desc'
 }) {
   const temporalExpansion = expandTemporalQuery(query_context);
   const effectiveDateRange = date_range || temporalExpansion.dateRange || null;
@@ -716,13 +720,16 @@ export async function recallPersistedMemories(store, {
     : Math.max(max_memories * 4, 20);
   const vectorScoreThreshold = temporalComparison ? 0.18 : 0.25;
 
+  // is_latest: undefined = default true, false = include superseded versions
+  const effectiveIsLatest = is_latest !== undefined ? is_latest : true;
+
   const lexicalCandidates = await store.searchMemories({
     query: query_context,
     user_id,
     org_id,
     project,
     tags,
-    is_latest: true,
+    is_latest: effectiveIsLatest,
     n_results: candidatePoolSize,
     created_after: effectiveDateRange?.start,
     created_before: effectiveDateRange?.end
@@ -747,7 +754,8 @@ export async function recallPersistedMemories(store, {
     max_memories,
     dateRange: effectiveDateRange,
     scoreThreshold: vectorScoreThreshold,
-    candidatePoolSize
+    candidatePoolSize,
+    is_latest: effectiveIsLatest,
   });
   const relationships = await store.listRelationships({ user_id, org_id, project, limit: 1000 });
   const relationshipCounts = buildRelationshipIndex(relationships);
@@ -854,7 +862,20 @@ export async function recallPersistedMemories(store, {
       if (!project && tags.includes('longmemeval')) return false;
       return true;
     })
-    .sort((a, b) => b.score - a.score)
+    .sort((a, b) => {
+      // Apply requested sort mode
+      if (sort === 'date_asc') {
+        const dateA = new Date(a.memory?.document_date || a.document_date || a.memory?.created_at || a.created_at || 0);
+        const dateB = new Date(b.memory?.document_date || b.document_date || b.memory?.created_at || b.created_at || 0);
+        return dateA - dateB;
+      }
+      if (sort === 'date_desc') {
+        const dateA = new Date(a.memory?.document_date || a.document_date || a.memory?.created_at || a.created_at || 0);
+        const dateB = new Date(b.memory?.document_date || b.document_date || b.memory?.created_at || b.created_at || 0);
+        return dateB - dateA;
+      }
+      return b.score - a.score; // default: score descending
+    })
     .slice(0, max_memories);
   // Try observation prefix first (Mastra-style stable context)
   let observationPrefix = '';

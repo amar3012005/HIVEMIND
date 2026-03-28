@@ -4929,7 +4929,11 @@ a{color:#a78bfa}</style></head><body>
                 preferred_tags: body.preferred_tags || [],
                 date_range: body.date_range || temporalExpansion.dateRange || null,
                 max_memories: body.max_memories || 5,
-                weights: recallWeights
+                weights: recallWeights,
+                // Type-specific filters (exposed for retrieval routing)
+                is_latest: body.is_latest,              // boolean — filter to latest versions only
+                include_expired: body.include_expired,  // boolean — include expired memories
+                sort: body.sort,                        // 'score' | 'date_asc' | 'date_desc'
               });
 
               // Apply memory type boosts from Operator Layer
@@ -4942,8 +4946,10 @@ a{color:#a78bfa}</style></head><body>
                     m.operator_boost = boost;
                   }
                 }
-                // Re-sort after boosts
-                result.memories.sort((a, b) => (b.score || 0) - (a.score || 0));
+                // Re-sort after boosts (only if no explicit sort mode requested)
+                if (!body.sort || body.sort === 'score') {
+                  result.memories.sort((a, b) => (b.score || 0) - (a.score || 0));
+                }
                 result.intent = intent;
               }
 

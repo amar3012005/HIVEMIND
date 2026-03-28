@@ -150,67 +150,104 @@ export function buildBenchmarkContext(searchResults, { maxItems = 15, maxChars =
 
 export function getLongMemEvalRetrievalPlan({ question, questionType } = {}) {
   const temporalExpansion = expandTemporalQuery(question || '');
-  const isTemporal = questionType === 'temporal-reasoning' || temporalExpansion.hasTemporalFilter;
-  const isKnowledgeUpdate = questionType === 'knowledge-update';
-  const isSingleSession = questionType === 'single-session-preference';
 
-  if (isTemporal) {
-    return {
-      route: 'recall',
-      body: {
-        query_context: question,
-        date_range: temporalExpansion.dateRange || null,
-        max_memories: 20
-      },
-      searchLimit: 20,
-      contextLimit: 15,
-      contextSortMode: 'date_asc',
-      systemHint: temporalExpansion.temporalHint
-        ? `Temporal focus: ${temporalExpansion.temporalHint}. Compare the snippet dates chronologically and answer using the earliest or latest matching event exactly as asked.`
-        : 'Temporal focus: compare the snippet dates chronologically and answer using the earliest or latest matching event exactly as asked.'
-    };
+  // Type-specific retrieval routing — each question type gets the optimal search strategy
+  switch (questionType) {
+    case 'temporal-reasoning':
+      return {
+        route: 'recall',
+        body: {
+          query_context: question,
+          date_range: temporalExpansion.dateRange || null,
+          max_memories: 20,
+          sort: 'date_asc',  // chronological ordering helps temporal reasoning
+        },
+        searchLimit: 20,
+        contextLimit: 15,
+        contextSortMode: 'date_asc',
+        systemHint: 'Calculate dates precisely. Show your arithmetic. Use the exact dates from the context. If asked "how many days/weeks/months", count from the specific dates mentioned.',
+      };
+
+    case 'knowledge-update':
+      return {
+        route: 'recall',  // recall with is_latest + merge panorama for version history
+        body: {
+          query_context: question,
+          max_memories: 20,
+          is_latest: true,  // only latest versions of facts
+          sort: 'date_desc',  // most recent first
+        },
+        mergeWithPanorama: true,  // also fetch panorama for version chain
+        searchLimit: 20,
+        contextLimit: 15,
+        contextSortMode: 'date_desc',
+        enablePredictCalibrate: true,  // enable Updates relationship + is_latest marking
+        systemHint: 'Give the MOST RECENT version of the fact. If information was updated or changed, use the latest version ONLY. Look for the newest date.',
+      };
+
+    case 'multi-session':
+      return {
+        route: 'recall',
+        body: {
+          query_context: question,
+          max_memories: 30,  // need more — facts scattered across sessions
+        },
+        searchLimit: 30,
+        contextLimit: 20,
+        contextSortMode: 'score',
+        systemHint: 'Synthesize ALL information across ALL sessions. When asked to count, enumerate EACH item from EVERY session. Do not miss any.',
+      };
+
+    case 'single-session-user':
+      return {
+        route: 'quick',
+        body: {
+          query: question,
+          limit: 20,
+        },
+        searchLimit: 20,
+        contextLimit: 15,
+        contextSortMode: 'score',
+        systemHint: 'Answer with the specific detail the user mentioned in conversation. Be precise and exact.',
+      };
+
+    case 'single-session-assistant':
+      return {
+        route: 'quick',
+        body: {
+          query: question,
+          limit: 20,
+        },
+        searchLimit: 20,
+        contextLimit: 15,
+        contextSortMode: 'score',
+        systemHint: 'Recall the exact information the assistant previously provided to the user. Be precise.',
+      };
+
+    case 'single-session-preference':
+      return {
+        route: 'recall',  // Operator Layer for preference intent detection
+        body: {
+          query_context: question,
+          max_memories: 20,
+        },
+        searchLimit: 20,
+        contextLimit: 15,
+        contextSortMode: 'score',
+        systemHint: 'Focus on the user\'s personal preferences, opinions, and choices. What did the user specifically prefer, like, or choose? Use their stated preferences to personalize the response.',
+      };
+
+    default:
+      return {
+        route: 'recall',
+        body: {
+          query_context: question,
+          max_memories: 20,
+        },
+        searchLimit: 20,
+        contextLimit: 15,
+        contextSortMode: 'score',
+        systemHint: 'Answer from the retrieved memory context only. If memories conflict, prefer the most recent valid memory.',
+      };
   }
-
-  if (isKnowledgeUpdate) {
-    return {
-      route: 'panorama',
-      body: {
-        query: question,
-        include_expired: true,
-        include_historical: true,
-        limit: 20,
-        include_timeline: true
-      },
-      searchLimit: 20,
-      contextLimit: 15,
-      contextSortMode: 'date_desc',
-      systemHint: 'Knowledge-update focus: prefer the updated answer, but keep prior context available when it explains the change.'
-    };
-  }
-
-  if (isSingleSession) {
-    return {
-      route: 'quick',
-      body: {
-        query: question,
-        limit: 20
-      },
-      searchLimit: 20,
-      contextLimit: 15,
-      contextSortMode: 'score',
-      systemHint: 'Single-session focus: answer with the most specific direct detail from the retrieved session snippets only.'
-    };
-  }
-
-  return {
-    route: 'recall',
-    body: {
-      query_context: question,
-      max_memories: 20
-    },
-    searchLimit: 20,
-    contextLimit: 15,
-    contextSortMode: 'score',
-    systemHint: 'Answer from the retrieved memory context only. If memories conflict, prefer the most recent valid memory.'
-  };
 }

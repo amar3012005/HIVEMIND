@@ -78,8 +78,8 @@ function isScopedPanoramaResult(result, { userId, orgId, project }) {
   const payloadOrgId = payload.org_id || payload.orgId || null;
   const payloadProject = payload.project || null;
 
-  if (userId && payloadUserId && payloadUserId !== userId) return false;
-  if (orgId && payloadOrgId && payloadOrgId !== orgId) return false;
+  if (userId && payloadUserId !== userId) return false;
+  if (orgId && payloadOrgId !== orgId) return false;
   if (project && payloadProject !== project) return false;
   return true;
 }
@@ -273,14 +273,6 @@ export class PanoramaSearch {
       weights
     } = options;
 
-    // Build temporal filter for Qdrant
-    const temporalFilter = this.buildTemporalFilter({
-      includeExpired,
-      includeHistorical,
-      dateRange,
-      project
-    });
-
     const enforceScope = (items = []) => items.filter(result => isScopedPanoramaResult(result, {
       userId,
       orgId,
@@ -299,7 +291,7 @@ export class PanoramaSearch {
       includeHistorical,
       vectorScoreThreshold: 0.12,
       finalScoreThreshold: 0.05,
-      filter: temporalFilter,
+      dateRange,
       weights,
       depth: 'full'
     });
@@ -382,30 +374,40 @@ export class PanoramaSearch {
     }
 
     const where = {
-      user_id: userId,
-      deleted_at: null
+      userId,
+      deletedAt: null
     };
-    if (orgId) where.org_id = orgId;
+    if (orgId) where.orgId = orgId;
     if (project) where.project = project;
-    if (!includeHistorical) where.is_latest = true;
+    if (!includeHistorical) where.isLatest = true;
     if (dateRange?.start || dateRange?.end) {
-      where.document_date = {};
-      if (dateRange.start) where.document_date.gte = new Date(dateRange.start);
-      if (dateRange.end) where.document_date.lte = new Date(dateRange.end);
+      where.documentDate = {};
+      if (dateRange.start) where.documentDate.gte = new Date(dateRange.start);
+      if (dateRange.end) where.documentDate.lte = new Date(dateRange.end);
     }
 
     const memories = await prisma.memory.findMany({
       where,
       orderBy: [
-        { document_date: 'desc' },
-        { created_at: 'desc' }
+        { documentDate: 'desc' },
+        { createdAt: 'desc' }
       ],
       take: Math.max(limit * 3, 20)
     });
 
     return memories
       .map(memory => ({
-        ...memory,
+        id: memory.id,
+        user_id: memory.userId,
+        org_id: memory.orgId,
+        project: memory.project,
+        title: memory.title,
+        content: memory.content,
+        tags: memory.tags,
+        is_latest: memory.isLatest,
+        document_date: memory.documentDate,
+        created_at: memory.createdAt,
+        updated_at: memory.updatedAt,
         score: lexicalProjectScore(query, `${memory.title || ''} ${memory.content || ''}`),
         source: 'panorama_fallback'
       }))

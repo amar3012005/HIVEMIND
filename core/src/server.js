@@ -3886,11 +3886,17 @@ a{color:#a78bfa}</style></head><body>
           if (req.method === 'DELETE') {
             if (!ensurePersistedMemoryOrFail(res, '/api/memories/delete-all')) return;
             try {
+              const project = url.searchParams.get('project') || body.project || null;
+              const memoryWhere = {
+                userId,
+                ...(project ? { project } : {})
+              };
+
               // Phase 1: Use store.deleteMemory() (same as frontend) for clean deletes
               let storeDeleted = 0;
               for (let round = 0; round < 100; round++) {
                 const batch = await prisma.memory.findMany({
-                  where: { userId },
+                  where: memoryWhere,
                   select: { id: true },
                   take: 200,
                 });
@@ -3905,19 +3911,33 @@ a{color:#a78bfa}</style></head><body>
 
               // Phase 2: Force-delete any stubborn records via raw SQL
               let sqlDeleted = 0;
-              const stubborn = await prisma.memory.count({ where: { userId } });
+              const stubborn = await prisma.memory.count({ where: memoryWhere });
               if (stubborn > 0) {
-                // Delete related tables first, then memories — use parameterized query
-                await prisma.$executeRaw`DELETE FROM hivemind.source_metadata WHERE memory_id IN (SELECT id FROM hivemind.memories WHERE user_id = ${userId}::uuid)`;
-                await prisma.$executeRaw`DELETE FROM hivemind.memory_versions WHERE memory_id IN (SELECT id FROM hivemind.memories WHERE user_id = ${userId}::uuid)`;
-                await prisma.$executeRaw`DELETE FROM hivemind.relationships WHERE from_id IN (SELECT id FROM hivemind.memories WHERE user_id = ${userId}::uuid) OR to_id IN (SELECT id FROM hivemind.memories WHERE user_id = ${userId}::uuid)`;
-                const result = await prisma.$executeRaw`DELETE FROM hivemind.memories WHERE user_id = ${userId}::uuid`;
-                sqlDeleted = result;
+                const memoryIds = await prisma.memory.findMany({
+                  where: memoryWhere,
+                  select: { id: true }
+                });
+                const ids = memoryIds.map(record => record.id);
+                if (ids.length > 0) {
+                  await prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: ids } } });
+                  await prisma.memoryVersion.deleteMany({ where: { memoryId: { in: ids } } });
+                  await prisma.relationship.deleteMany({
+                    where: {
+                      OR: [
+                        { fromId: { in: ids } },
+                        { toId: { in: ids } }
+                      ]
+                    }
+                  });
+                  const result = await prisma.memory.deleteMany({ where: { id: { in: ids } } });
+                  sqlDeleted = result.count || 0;
+                }
               }
 
-              const remaining = await prisma.memory.count({ where: { userId } });
+              const remaining = await prisma.memory.count({ where: memoryWhere });
+              invalidateAggregateCache({ userId, orgId, project: project || null });
               invalidateAggregateCache({ userId, orgId, project: null });
-              return jsonResponse(res, { success: true, storeDeleted, sqlDeleted, remaining });
+              return jsonResponse(res, { success: true, project, storeDeleted, sqlDeleted, remaining });
             } catch (error) {
               return jsonResponse(res, { error: 'Delete all failed', message: error.message }, 500);
             }

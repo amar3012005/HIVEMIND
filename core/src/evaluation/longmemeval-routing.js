@@ -90,6 +90,20 @@ function sortSearchItems(items) {
   });
 }
 
+function sortSearchItemsChronologically(items, direction = 'asc') {
+  const factor = direction === 'desc' ? -1 : 1;
+  return [...items].sort((left, right) => {
+    const leftDate = new Date(getMemoryDate(left) || 0).getTime();
+    const rightDate = new Date(getMemoryDate(right) || 0).getTime();
+    if (leftDate !== rightDate) return (leftDate - rightDate) * factor;
+
+    const scoreDiff = getMemoryScore(right) - getMemoryScore(left);
+    if (scoreDiff !== 0) return scoreDiff;
+
+    return getMemoryTitle(left).localeCompare(getMemoryTitle(right));
+  });
+}
+
 function buildContextSnippet(item = {}) {
   const title = getMemoryTitle(item);
   const tags = getMemoryTags(item);
@@ -111,8 +125,13 @@ function buildContextSnippet(item = {}) {
   return `${header}${content}`;
 }
 
-export function buildBenchmarkContext(searchResults, { maxItems = 6, maxChars = 7000 } = {}) {
-  const items = sortSearchItems(uniqueByContent(extractItems(searchResults)));
+export function buildBenchmarkContext(searchResults, { maxItems = 6, maxChars = 7000, sortMode = 'score' } = {}) {
+  const deduped = uniqueByContent(extractItems(searchResults));
+  const items = sortMode === 'date_asc'
+    ? sortSearchItemsChronologically(deduped, 'asc')
+    : sortMode === 'date_desc'
+      ? sortSearchItemsChronologically(deduped, 'desc')
+      : sortSearchItems(deduped);
   const lines = [];
   let totalChars = 0;
 
@@ -145,9 +164,10 @@ export function getLongMemEvalRetrievalPlan({ question, questionType } = {}) {
       },
       searchLimit: 15,
       contextLimit: 8,
+      contextSortMode: 'date_asc',
       systemHint: temporalExpansion.temporalHint
-        ? `Temporal focus: ${temporalExpansion.temporalHint}. Prefer memories inside the requested time window and resolve conflicts using the most recent valid memory.`
-        : 'Temporal focus: prefer memories inside the requested time window and resolve conflicts using the most recent valid memory.'
+        ? `Temporal focus: ${temporalExpansion.temporalHint}. Compare the snippet dates chronologically and answer using the earliest or latest matching event exactly as asked.`
+        : 'Temporal focus: compare the snippet dates chronologically and answer using the earliest or latest matching event exactly as asked.'
     };
   }
 
@@ -163,6 +183,7 @@ export function getLongMemEvalRetrievalPlan({ question, questionType } = {}) {
       },
       searchLimit: 15,
       contextLimit: 8,
+      contextSortMode: 'date_desc',
       systemHint: 'Knowledge-update focus: prefer the updated answer, but keep prior context available when it explains the change.'
     };
   }
@@ -176,6 +197,7 @@ export function getLongMemEvalRetrievalPlan({ question, questionType } = {}) {
       },
       searchLimit: 10,
       contextLimit: 5,
+      contextSortMode: 'score',
       systemHint: 'Single-session focus: answer with the most specific direct detail from the retrieved session snippets only.'
     };
   }
@@ -188,6 +210,7 @@ export function getLongMemEvalRetrievalPlan({ question, questionType } = {}) {
     },
     searchLimit: 8,
     contextLimit: 6,
+    contextSortMode: 'score',
     systemHint: 'Answer from the retrieved memory context only. If memories conflict, prefer the most recent valid memory.'
   };
 }

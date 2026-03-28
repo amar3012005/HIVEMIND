@@ -77,3 +77,28 @@ test('benchmark context dedupes repeated memory content and preserves metadata',
   assert.match(context, /title=Second memory/);
   assert.equal((context.match(/Alpha answer from session one\./g) || []).length, 1);
 });
+
+test('temporal benchmark context can be sorted chronologically', () => {
+  const context = buildBenchmarkContext({
+    results: [
+      {
+        score: 0.95,
+        title: 'Later memory',
+        content: 'Later event.',
+        document_date: '2026-03-05',
+        memory_type: 'event',
+        tags: ['longmemeval']
+      },
+      {
+        score: 0.70,
+        title: 'Earlier memory',
+        content: 'Earlier event.',
+        document_date: '2026-03-01',
+        memory_type: 'event',
+        tags: ['longmemeval']
+      }
+    ]
+  }, { maxItems: 5, sortMode: 'date_asc' });
+
+  assert.ok(context.indexOf('Earlier event.') < context.indexOf('Later event.'));
+});

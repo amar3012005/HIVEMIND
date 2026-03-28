@@ -220,12 +220,26 @@ function mergeRetrievalResults(primaryResults, secondaryResults, limit = 15) {
 
 function buildGenerationPrompt({ context, question, questionDate, systemHint }) {
   const dateStr = questionDate || 'Unknown';
+  const lowerQuestion = (question || '').toLowerCase();
+  const isTemporalComparison = /\b(first|earlier|earliest|before|after|last|latest|how many days)\b/.test(lowerQuestion);
 
   if (context.length > 50) {
+    const instructions = isTemporalComparison
+      ? [
+          'Answer the question using only the retrieved memory context.',
+          systemHint || 'Compare the dated snippets chronologically.',
+          'For temporal questions, explicitly compare the dates in the snippets before answering.',
+          'If the question asks for first/earlier, choose the earliest matching dated event.',
+          'If the question asks for how many days, compute the date difference from the dated snippets and return only the number of days.',
+          'Return a short direct answer with no chain-of-thought, no preamble, and no explanation.'
+        ]
+      : [
+          'Answer the question using only the retrieved memory context.',
+          systemHint || 'Prefer the most relevant direct memory snippet.',
+          'Return a short direct answer with no chain-of-thought, no preamble, and no explanation.'
+        ];
     return [
-      'Answer the question using only the retrieved memory context.',
-      systemHint || 'Prefer the most relevant direct memory snippet.',
-      'Return a short direct answer with no chain-of-thought, no preamble, and no explanation.',
+      ...instructions,
       '',
       'Retrieved Memory Context:',
       context,
@@ -634,7 +648,7 @@ async function evaluateInstance(instance) {
   const selectedResults = selectContextResults(searchResults, retrievalPlan.searchLimit);
   const context = buildBenchmarkContext(
     { results: selectedResults },
-    { maxItems: retrievalPlan.contextLimit, maxChars: 7000 }
+    { maxItems: retrievalPlan.contextLimit, maxChars: 7000, sortMode: retrievalPlan.contextSortMode || 'score' }
   );
 
   let hypothesis;
@@ -737,10 +751,14 @@ Respond with ONLY "yes" or "no".`;
 // ── Cleanup: delete all memories for a question ──────────
 
 async function cleanupInstance(questionId) {
-  // Project-scoped cleanup: only delete this question's memories
-  // Qdrant filters by project so cross-question pollution is minimal
   let totalDeleted = 0;
   try {
+    const bulkResult = await apiCall('DELETE', `/api/memories/delete-all?project=${encodeURIComponent(`bench/longmemeval/${questionId}`)}`);
+    totalDeleted = (bulkResult.storeDeleted || 0) + (bulkResult.sqlDeleted || 0);
+    if (totalDeleted > 0 || bulkResult.remaining === 0) {
+      return totalDeleted;
+    }
+
     for (let round = 0; round < 5; round++) {
       const result = await apiCall('GET', `/api/memories?limit=200&project=bench/longmemeval/${questionId}`);
       const memories = result?.memories || [];

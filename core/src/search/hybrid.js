@@ -127,6 +127,7 @@ async function vectorSearch(queryVector, options = {}) {
     const filter = {
       userId,
       orgId,
+      project,
       memoryType,
       tags,
       sourcePlatform,
@@ -191,6 +192,7 @@ async function semanticSearch(query, options = {}) {
   const qdrantFilter = buildQdrantFilter({
     userId,
     orgId,
+    project,
     memoryType,
     tags,
     sourcePlatform,
@@ -289,6 +291,16 @@ function buildQdrantFilter(filter) {
       key: 'org_id',
       match: {
         value: filter.orgId
+      }
+    });
+  }
+
+  // Project filter
+  if (filter.project) {
+    must.push({
+      key: 'project',
+      match: {
+        value: filter.project
       }
     });
   }
@@ -399,6 +411,13 @@ function buildQdrantFilter(filter) {
     });
   }
 
+  if (Array.isArray(filter.must)) {
+    must.push(...filter.must);
+  }
+  if (Array.isArray(filter.must_not)) {
+    mustNot.push(...filter.must_not);
+  }
+
   const result = { must };
   if (mustNot.length > 0) {
     result.must_not = mustNot;
@@ -440,6 +459,12 @@ async function keywordSearch(query, options = {}) {
   const {
     userId,
     orgId,
+    project,
+    memoryType,
+    tags,
+    sourcePlatform,
+    isLatest,
+    dateRange,
     limit = CONFIG.limits.keywordTopK,
     minScore = 0.2
   } = options;
@@ -488,6 +513,14 @@ async function keywordSearch(query, options = {}) {
         ) AS score
       FROM memories m
       WHERE m.user_id = ${userId}::uuid
+        AND (${orgId ? Prisma.sql`m.org_id = ${orgId}::uuid AND` : Prisma.empty} TRUE)
+        AND (${project ? Prisma.sql`m.project = ${project} AND` : Prisma.empty} TRUE)
+        AND (${memoryType ? Prisma.sql`m.memory_type = ${memoryType} AND` : Prisma.empty} TRUE)
+        AND (${sourcePlatform ? Prisma.sql`m.source_platform = ${sourcePlatform} AND` : Prisma.empty} TRUE)
+        AND (${typeof isLatest === 'boolean' ? Prisma.sql`m.is_latest = ${isLatest} AND` : Prisma.empty} TRUE)
+        AND (${tags && tags.length > 0 ? Prisma.sql`m.tags && ${tags}::text[] AND` : Prisma.empty} TRUE)
+        AND (${dateRange?.start ? Prisma.sql`m.document_date >= ${new Date(dateRange.start)} AND` : Prisma.empty} TRUE)
+        AND (${dateRange?.end ? Prisma.sql`m.document_date <= ${new Date(dateRange.end)} AND` : Prisma.empty} TRUE)
         AND m.deleted_at IS NULL
         AND to_tsvector(
           'english',
@@ -1312,6 +1345,7 @@ async function fallbackSearch(options = {}) {
     query,
     userId,
     orgId,
+    project,
     memoryType,
     tags,
     sourcePlatform,
@@ -1333,6 +1367,11 @@ async function fallbackSearch(options = {}) {
     const keywordResults = await keywordSearch(query, {
       userId,
       orgId,
+      project,
+      memoryType,
+      tags,
+      sourcePlatform,
+      isLatest,
       limit
     });
 
@@ -1347,6 +1386,7 @@ async function fallbackSearch(options = {}) {
     {
       userId,
       orgId,
+      project,
       memoryType,
       tags,
       sourcePlatform,

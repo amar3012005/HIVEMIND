@@ -109,7 +109,16 @@ function preferCandidate(left, right) {
   return new Date(right.memory.created_at) > new Date(left.memory.created_at) ? right : left;
 }
 
-function collapseNearDuplicates(scored) {
+function temporalAnchor(memory = {}) {
+  return memory.metadata?.session_date || memory.document_date || memory.created_at || null;
+}
+
+function isTemporalComparisonQuery(query = '') {
+  return /\b(first|earlier|earliest|before|after|later|last|how many days|which .* first|which .* came first)\b/i.test(query);
+}
+
+function collapseNearDuplicates(scored, options = {}) {
+  const { preserveTemporalDistinctness = false } = options;
   const unique = [];
   const seenNormalized = new Map();
 
@@ -130,6 +139,13 @@ function collapseNearDuplicates(scored) {
     let duplicateIndex = -1;
     for (let index = 0; index < unique.length; index += 1) {
       const existing = unique[index];
+      if (preserveTemporalDistinctness) {
+        const existingAnchor = temporalAnchor(existing.memory);
+        const candidateAnchor = temporalAnchor(candidate.memory);
+        if (existingAnchor && candidateAnchor && existingAnchor !== candidateAnchor) {
+          continue;
+        }
+      }
       if (isNearDuplicate(existing, candidate)) {
         duplicateIndex = index;
         const preferred = preferCandidate(existing, candidate);
@@ -152,17 +168,22 @@ function collapseNearDuplicates(scored) {
   return unique;
 }
 
-function applyRecallRelevanceFloor(scored) {
+function applyRecallRelevanceFloor(scored, options = {}) {
+  const { temporalComparison = false } = options;
   if (scored.length === 0) return [];
   const topScore = scored[0].score;
   const topSimilarity = scored[0].similarityScore ?? 0;
-  const minimumScore = Math.max(topScore * 0.30, 0.12);
-  const minimumSimilarity = Math.max(topSimilarity * 0.40, 0.22);
+  const minimumScore = temporalComparison
+    ? Math.max(topScore * 0.20, 0.08)
+    : Math.max(topScore * 0.30, 0.12);
+  const minimumSimilarity = temporalComparison
+    ? Math.max(topSimilarity * 0.25, 0.14)
+    : Math.max(topSimilarity * 0.40, 0.22);
   const filtered = scored.filter(item =>
     item.score >= minimumScore &&
     (item.similarityScore ?? 0) >= minimumSimilarity
   );
-  return filtered.length > 0 ? filtered : scored.slice(0, 1);
+  return filtered.length > 0 ? filtered : scored.slice(0, temporalComparison ? 3 : 1);
 }
 
 function mergeCandidateLists(...lists) {
@@ -643,6 +664,7 @@ export async function recallPersistedMemories(store, {
 }) {
   const temporalExpansion = expandTemporalQuery(query_context);
   const effectiveDateRange = date_range || temporalExpansion.dateRange || null;
+  const temporalComparison = temporalExpansion.hasTemporalFilter || isTemporalComparisonQuery(query_context);
 
   const lexicalCandidates = await store.searchMemories({
     query: query_context,
@@ -765,8 +787,8 @@ export async function recallPersistedMemories(store, {
   }).filter(Boolean);
 
   const ranked = mergeCandidateLists(scoredLexical, enrichedVector, expandedCandidates).sort((a, b) => b.score - a.score);
-  const filtered = applyRecallRelevanceFloor(ranked);
-  const deduped = collapseNearDuplicates(filtered);
+  const filtered = applyRecallRelevanceFloor(ranked, { temporalComparison });
+  const deduped = collapseNearDuplicates(filtered, { preserveTemporalDistinctness: temporalComparison });
   const top = deduped
     .filter(item => {
       // Exclude benchmark data from production recall

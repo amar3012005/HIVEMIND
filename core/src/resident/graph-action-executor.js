@@ -107,7 +107,7 @@ export class GraphActionExecutor {
 
     let created = 0;
     for (let i = 1; i < memories.length; i++) {
-      await this.store.createRelationship({
+      await this._safeCreateRelationship({
         id: randomUUID(),
         from_id: memories[i].id,
         to_id: memories[i - 1].id,
@@ -152,7 +152,7 @@ export class GraphActionExecutor {
 
     let merged = 0;
     for (const dup of duplicates) {
-      await this.store.createRelationship({
+      await this._safeCreateRelationship({
         id: randomUUID(),
         from_id: dup.id,
         to_id: canonical.id,
@@ -247,7 +247,7 @@ export class GraphActionExecutor {
 
     let created = 0;
     for (let i = 1; i < memoryIds.length; i++) {
-      await this.store.createRelationship({
+      await this._safeCreateRelationship({
         id: randomUUID(),
         from_id: memoryIds[i],
         to_id: memoryIds[0],
@@ -282,6 +282,18 @@ export class GraphActionExecutor {
       return true;
     } catch {
       return false;
+    }
+  }
+
+  /** Create a relationship, skipping if it already exists (unique constraint). */
+  async _safeCreateRelationship(edge) {
+    try {
+      await this.store.createRelationship(edge);
+      return true;
+    } catch (err) {
+      // Unique constraint = relationship already exists = not an error
+      if (err.message?.includes('Unique constraint')) return false;
+      throw err;
     }
   }
 }

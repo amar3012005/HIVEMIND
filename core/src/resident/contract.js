@@ -60,6 +60,7 @@ export const FARADAY_OBSERVATION_KINDS = [
   'code_smell',
   'risk_candidate',
   'reasoning_trail',
+  'llm_cluster_analysis',
 ];
 
 export const FEYNMAN_OBSERVATION_KINDS = [

@@ -221,7 +221,7 @@ export class InMemoryGraphStore {
       }))
       .sort((left, right) => right._score - left._score || new Date(right.created_at) - new Date(left.created_at));
 
-    return all.slice(0, n_results).map(({ _score, ...memory }) => ({ ...memory }));
+    return all.slice(0, n_results).map(({ _score, ...memory }) => ({ ...memory, score: _score }));
   }
 
   async listRelationships({ user_id, org_id, project, relationship_types, limit = 2000 } = {}) {
@@ -313,6 +313,48 @@ export class MemoryGraphEngine {
       const transactionalStore = lockedStore || this.store;
       return transactionalStore.transaction(async store => {
         const latestMemories = await store.listLatestMemories(baseMemory);
+
+        // --- Smart Ingest: search-first duplicate/update detection ---
+        if (input.smartIngest !== false && !input.skipPredictCalibrate) {
+          try {
+            const similar = await store.searchMemories({
+              query: baseMemory.content.slice(0, 500),
+              user_id: baseMemory.user_id,
+              org_id: baseMemory.org_id,
+              project: baseMemory.project,
+              n_results: 3,
+              is_latest: true,
+            });
+
+            const topMatch = similar[0];
+            if (topMatch && topMatch.score > 0.85) {
+              const { MemoryProcessor } = await import('./memory-processor.js');
+              const processor = new MemoryProcessor();
+              const result = await processor.process(baseMemory, [topMatch]);
+
+              if (result.relationship.action === 'NOOP') {
+                return {
+                  memoryId: baseMemory.id,
+                  operation: 'skipped_redundant',
+                  reason: 'smart_ingest_duplicate',
+                  matchedMemoryId: topMatch.id,
+                  similarity: topMatch.score,
+                  processingMs: Date.now() - startedAt,
+                };
+              }
+
+              if (result.relationship.action === 'UPDATE') {
+                input.relationship = {
+                  type: 'Updates',
+                  target_id: topMatch.id,
+                  confidence: 0.9,
+                };
+              }
+            }
+          } catch (smartIngestErr) {
+            console.warn('[smart-ingest] Search-first check failed:', smartIngestErr.message);
+          }
+        }
 
         // --- Predict-Calibrate filter ---
         let pcResult = null;
@@ -409,8 +451,10 @@ export class MemoryGraphEngine {
               baseMemory.event_dates = eventDates;
             }
 
-            // Store observation if produced (still useful for searchable memories)
-            if (result.observation) {
+            // Store observation ONLY if no fact-memories were created
+            // (facts are more searchable than observations — avoid duplicating)
+            const hasUsefulFacts = (result.factSentences || []).filter(f => f.length >= 20).length > 0;
+            if (result.observation && !hasUsefulFacts) {
               const obsText = formatObservation({
                 content: result.observation,
                 priority: result.priority,
@@ -499,8 +543,9 @@ export class MemoryGraphEngine {
               input.relationship = { type: 'Extends', target_id: result.relationship.targetId, confidence: 0.8 };
             }
 
-            // Store observation if produced
-            if (result.observation) {
+            // Store observation ONLY if no fact-memories were created
+            const hasUsefulFactsStd = (result.factSentences || []).filter(f => f.length >= 20).length > 0;
+            if (result.observation && !hasUsefulFactsStd) {
               const obsText = formatObservation({
                 content: result.observation,
                 priority: result.priority,
@@ -560,10 +605,19 @@ export class MemoryGraphEngine {
         await store.createMemory(baseMemory);
 
         // --- Create fact-memories (separate searchable memories per extracted fact) ---
-        const factSentences = processorResult?.factSentences || [];
+        // Filter out trivial/noise sentences before creating fact-memories
+        const TRIVIAL_PATTERNS = /^(thanks|thank you|that sounds|great|okay|sure|yes|no|I see|I agree|I understand|wow|cool|nice|oh|hmm|interesting|exactly|right|got it|I am (so )?(excited|happy|glad|sorry))/i;
+        const rawFactSentences = processorResult?.factSentences || [];
+        const factSentences = rawFactSentences.filter(f => {
+          if (f.length < 20) return false; // too short to be useful
+          if (TRIVIAL_PATTERNS.test(f)) return false; // sentiment, not fact
+          // Skip if it's essentially the same as the parent title
+          if (baseMemory.title && f.toLowerCase().includes(baseMemory.title.toLowerCase().slice(0, 30))) return false;
+          return true;
+        });
         const factMemoryIds = [];
         if (factSentences.length > 0) {
-          for (const fact of factSentences.slice(0, 15)) { // Scale with content — up to 15 fact-memories per parent
+          for (const fact of factSentences.slice(0, 8)) { // Max 8 meaningful facts per parent
             const factId = crypto.randomUUID ? crypto.randomUUID() : `fact-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
             await store.createMemory({
               id: factId,

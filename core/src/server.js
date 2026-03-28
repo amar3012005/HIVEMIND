@@ -4082,6 +4082,7 @@ a{color:#a78bfa}</style></head><body>
                 skipProcessing: body.skipProcessing === true,
                 factAugmentOnly: body.factAugmentOnly === true,
                 benchmarkEnrichment: body.benchmarkEnrichment === true,
+                smartIngest: body.smartIngest !== false,
                 metadata: {
                   ...validation.data.metadata,
                   source_platform: validation.data.source_platform || null,
@@ -5799,17 +5800,19 @@ a{color:#a78bfa}</style></head><body>
 
               // Step 2: Build system prompt with user profile + memories
               const recencyHint = isRecencyQuery ? '\n\nIMPORTANT: The user is asking about their MOST RECENT activity. The memories below are sorted newest-first. Focus on the FIRST memory — that is the most recent one. Include its date/time.' : '';
-              const systemPrompt = `You are HIVE, a personal AI assistant with persistent memory. You remember everything the user has shared across conversations, emails, documents, and notes.
+              const systemPrompt = `You are HIVE, a personal AI assistant with persistent memory. You remember everything the user has shared with you.
 ${recencyHint}
-${injectionText ? `Here is what you currently know about the user:\n\n${injectionText}` : ''}
+${injectionText ? `Here is what you know about the user:\n\n${injectionText}` : ''}
 
-BEHAVIOR:
-- When the user ASKS a question: answer using their memories. Cite specific facts naturally.
-- When the user TELLS you something new (a fact, preference, update, event): acknowledge it naturally in your response. Say something like "Got it" or "I'll keep that in mind" — the memory system stores it automatically in the background.
-- When the user CORRECTS something: acknowledge the update. For example "Updated — I now know your new address is..."
-- Be conversational, warm, and concise. Never robotic.
-- If you don't have the information in memory, say so honestly.
-- Never hallucinate facts not present in the provided context.`;
+RULES:
+- Answer DIRECTLY. No listing memories, no "Let me check", no "Based on my notes". Just answer like a friend who remembers.
+- Be concise. One clear answer, then stop. Add detail only if the user asks for it.
+- When the user tells you something new: acknowledge briefly ("Got it", "Noted"). The memory system saves it automatically.
+- When the user corrects something: confirm the update naturally ("Updated — your new address is...").
+- If you genuinely don't know, say "I don't have that in my memory" — don't guess.
+- Never list which memories you used or say "Relevant/Not relevant".
+- Never start with "Based on my memories" or "Let me check my records".
+- Talk like a knowledgeable friend, not a database query tool.`;
 
               // Step 3: Build memory context for the LLM
               let memoryContext = '';

@@ -498,6 +498,42 @@ export class ResidentRunManager {
   async _onRunCompleted(run, result) {
     const agentId = run.agent_id;
 
+    // 0. Faraday LLM findings → execute directly (skip Feynman/Turing for clear-cut cases)
+    if (agentId === 'faraday' && this.memoryStore) {
+      try {
+        const obs = result.observations || [];
+        const llmObs = obs.filter(o => o.kind === 'llm_cluster_analysis');
+        if (llmObs.length > 0) {
+          const { GraphActionExecutor } = await import('./graph-action-executor.js');
+          const executor = new GraphActionExecutor({ memoryStore: this.memoryStore });
+
+          const actions = [];
+          for (const o of llmObs) {
+            const llmActions = o.content?.actions || [];
+            for (const a of llmActions) {
+              if (a.type === 'merge_duplicate' || a.type === 'merge') {
+                const targetIds = a.memory_ids || (a.canonical_id && a.absorb_ids ? [a.canonical_id, ...a.absorb_ids] : []);
+                if (targetIds.length >= 2) {
+                  actions.push({ recommendation: 'merge_duplicate_cluster', confidence: 0.88, target_memory_ids: targetIds });
+                }
+              }
+              if (a.type === 'link_update') {
+                actions.push({ recommendation: 'link_update_chain', confidence: 0.88, target_memory_ids: [a.old_id, a.new_id].filter(Boolean) });
+              }
+            }
+          }
+
+          if (actions.length > 0) {
+            const actionResult = await executor.executeActions(actions, { minConfidence: 0.7, project: run.project });
+            run.graph_actions_result = actionResult;
+            this.logger?.log?.(`[run-manager] Faraday direct actions: ${actionResult.executed} executed, ${actionResult.skipped} skipped, ${actionResult.failed} failed`);
+          }
+        }
+      } catch (err) {
+        this.logger?.warn?.(`[run-manager] Faraday direct actions failed: ${err.message}`);
+      }
+    }
+
     // 1. Execute graph actions (Turing's recommendations)
     if (agentId === 'turing' && result.action_candidates?.length > 0) {
       try {

@@ -321,6 +321,133 @@ export class FaradayAgent {
     this.logger = logger;
   }
 
+  async _analyzeClusterWithLLM(cluster, memoryStore) {
+    const groqKey = process.env.GROQ_API_KEY;
+    if (!groqKey) return null;
+
+    // Use actual memory objects from the cluster (not memory_ids)
+    const clusterMemories = cluster.memories || [];
+    const memories = [];
+    for (const mem of clusterMemories.slice(0, 6)) {
+      if (mem?.id) {
+        memories.push({
+          id: mem.id,
+          content: (mem.content || '').slice(0, 400),
+          date: mem.document_date || mem.created_at,
+        });
+      }
+    }
+
+    // If cluster has no inline memories, try fetching by memory_ids as fallback
+    if (memories.length < 2 && cluster.memory_ids?.length >= 2) {
+      for (const id of cluster.memory_ids.slice(0, 6)) {
+        if (memories.find((m) => m.id === id)) continue;
+        try {
+          const mem = await memoryStore.getMemory(id);
+          if (mem) {
+            memories.push({
+              id: mem.id,
+              content: (mem.content || '').slice(0, 400),
+              date: mem.document_date || mem.created_at,
+            });
+          }
+        } catch {
+          /* best effort */
+        }
+      }
+    }
+
+    if (memories.length < 2) return null;
+
+    const memoryList = memories
+      .map((m) => `[${m.id.slice(0, 8)}] (${m.date ? new Date(m.date).toISOString().slice(0, 10) : '?'}): ${m.content}`)
+      .join('\n\n');
+
+    try {
+      const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${groqKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'llama-3.3-70b-versatile',
+          messages: [
+            {
+              role: 'system',
+              content: `You analyze clusters of related memories. For each cluster, determine:
+1. DUPLICATES: Which memories say the same thing? List their IDs.
+2. UPDATE_CHAIN: Which memories supersede older versions? List old→new pairs.
+3. CONFLICTS: Are there contradicting facts? List the conflicting IDs and what conflicts.
+4. MERGE_RECOMMENDATION: Should any be merged? Which ID is canonical?
+
+Output format (one per line):
+DUPLICATES: [id1, id2] — reason
+UPDATE_CHAIN: old_id → new_id — reason
+CONFLICT: [id1, id2] — what conflicts
+MERGE: canonical_id absorbs [id1, id2] — reason
+NONE — if the cluster has no issues
+
+Be specific. Use the actual memory IDs shown in brackets.`,
+            },
+            {
+              role: 'user',
+              content: `Analyze this cluster of ${memories.length} related memories:\n\n${memoryList}`,
+            },
+          ],
+          max_tokens: 500,
+          temperature: 0,
+        }),
+      });
+
+      if (!resp.ok) return null;
+      const data = await resp.json();
+      const output = data.choices?.[0]?.message?.content || '';
+
+      // Parse LLM output into structured actions
+      const actions = [];
+      const lines = output
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean);
+      for (const line of lines) {
+        if (line.startsWith('DUPLICATES:')) {
+          const ids =
+            line
+              .match(/\[([^\]]+)\]/)?.[1]
+              ?.split(',')
+              .map((s) => s.trim()) || [];
+          if (ids.length >= 2) actions.push({ type: 'merge_duplicate', memory_ids: ids, reason: line });
+        }
+        if (line.startsWith('UPDATE_CHAIN:')) {
+          const match = line.match(/(\S+)\s*→\s*(\S+)/);
+          if (match) actions.push({ type: 'link_update', old_id: match[1], new_id: match[2], reason: line });
+        }
+        if (line.startsWith('CONFLICT:')) {
+          const ids =
+            line
+              .match(/\[([^\]]+)\]/)?.[1]
+              ?.split(',')
+              .map((s) => s.trim()) || [];
+          if (ids.length >= 2) actions.push({ type: 'conflict', memory_ids: ids, reason: line });
+        }
+        if (line.startsWith('MERGE:')) {
+          const canonical = line.match(/^MERGE:\s*(\S+)/)?.[1];
+          const absorbs =
+            line
+              .match(/absorbs\s*\[([^\]]+)\]/)?.[1]
+              ?.split(',')
+              .map((s) => s.trim()) || [];
+          if (canonical && absorbs.length) actions.push({ type: 'merge', canonical_id: canonical, absorb_ids: absorbs, reason: line });
+        }
+      }
+
+      return { raw: output, actions, memory_ids: memories.map((m) => m.id) };
+    } catch (err) {
+      return null;
+    }
+  }
+
   async run({
     agentId = 'faraday',
     userId,
@@ -704,6 +831,32 @@ export class FaradayAgent {
           duplicate_count: group.length,
         },
       }));
+    }
+
+    // LLM-powered cluster analysis — runs after heuristic detection
+    for (const cluster of semanticClusters.slice(0, 5)) {
+      if (isCancelled()) break;
+      if ((cluster.memories?.length || 0) < 2) continue;
+
+      const llmAnalysis = await this._analyzeClusterWithLLM(cluster, this.memoryStore);
+      if (llmAnalysis?.actions?.length > 0) {
+        cluster.llm_analysis = llmAnalysis;
+        observations.push({
+          id: randomUUID(),
+          agent_id: agentId,
+          kind: 'llm_cluster_analysis',
+          certainty: 0.88,
+          content: {
+            summary: `LLM analysis of cluster "${cluster.keywords?.slice(0, 5).join(', ')}": ${llmAnalysis.actions.length} findings`,
+            actions: llmAnalysis.actions,
+            related_memory_ids: llmAnalysis.memory_ids,
+            raw_analysis: llmAnalysis.raw,
+          },
+          source_event_id: runId,
+          related_to_trail: runId,
+          timestamp: new Date().toISOString(),
+        });
+      }
     }
 
     if (observations.length === 1) {

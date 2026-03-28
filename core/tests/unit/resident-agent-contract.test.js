@@ -81,6 +81,7 @@ test('resident run lifecycle has explicit states and explicit observation kinds'
     'code_smell',
     'risk_candidate',
     'reasoning_trail',
+    'llm_cluster_analysis',
   ]);
   assert.deepEqual(FARADAY_OBSERVATION_FIELDS, [
     'id',

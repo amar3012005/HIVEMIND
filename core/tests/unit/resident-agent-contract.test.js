@@ -44,6 +44,8 @@ test('resident agent contract exposes stable endpoint names for the frontend', (
     'current_step',
     'observations_count',
     'progress',
+    'result',
+    'trail_mark',
   ]);
 });
 

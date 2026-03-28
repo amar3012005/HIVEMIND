@@ -174,10 +174,120 @@ export class ResidentRunManager {
     run.observations_count = result.observations_count ?? run.observations.length;
     run.current_step = result.current_step || run.current_step;
     run.summary = result.summary || null;
+
+    const trailMark = this._buildTrailMark(run, result);
+    if (trailMark && this.executorStore?.putTrail) {
+      try {
+        await this.executorStore.putTrail(trailMark);
+      } catch (error) {
+        this.logger?.warn?.('[Resident] Failed to persist Faraday trail mark:', error?.message || error);
+      }
+    }
+    run.trail_mark = trailMark || null;
+    if (run.result && trailMark) {
+      run.result = { ...run.result, trail_mark: trailMark };
+    }
+
     run.updated_at = nowIso();
     run.finished_at = run.status === 'running' ? null : (run.finished_at || nowIso());
     this.runs.set(run.run_id, run);
     return this._publicRun(run);
+  }
+
+  _buildTrailMark(run, result) {
+    const semanticClusters = Array.isArray(result?.summary?.semantic_clusters)
+      ? result.summary.semantic_clusters
+      : [];
+    const topCluster = semanticClusters[0] || null;
+    const semanticProbes = Array.isArray(result?.summary?.semantic_probes)
+      ? result.summary.semantic_probes
+      : [];
+    const semanticSeedIds = Array.isArray(result?.summary?.semantic_seeds)
+      ? result.summary.semantic_seeds
+      : [];
+    const observationIds = Array.isArray(result?.observations)
+      ? result.observations.map((observation) => observation.id).filter(Boolean)
+      : [];
+
+    const trailId = `resident-faraday-${run.run_id}`;
+    const goalId = `resident:${run.scope}:${run.project || 'workspace'}`;
+    const label = topCluster?.label || 'semantic scan';
+    const nextAgentPrompt = topCluster
+      ? `Follow the semantic trail mark for "${topCluster.label}" and verify whether it is a real risk cluster.`
+      : `Follow the strongest semantic region in this scope and verify whether it contains a genuine anomaly.`;
+
+    return {
+      id: trailId,
+      trail_id: trailId,
+      goalId,
+      agentId: 'faraday',
+      status: 'active',
+      kind: 'resident_mark',
+      summary: topCluster
+        ? `Follow ${topCluster.label} as the leading semantic trail mark.`
+        : `Follow the highest-signal semantic cluster for ${run.scope}.`,
+      next_agent_prompt: nextAgentPrompt,
+      semantic_probes: semanticProbes,
+      semantic_seeds: semanticSeedIds,
+      semantic_clusters: semanticClusters,
+      observation_ids: observationIds,
+      blueprintMeta: {
+        resident_mark: true,
+        run_id: run.run_id,
+        scope: run.scope,
+        project: run.project,
+        region: run.region,
+        goal: run.goal,
+        semantic_probes: semanticProbes,
+        semantic_seeds: semanticSeedIds,
+        semantic_clusters: semanticClusters,
+        observation_ids: observationIds,
+        next_agent_prompt: nextAgentPrompt,
+      },
+      nextAction: {
+        toolName: 'resident.follow_mark',
+        params: {
+          run_id: run.run_id,
+          trail_id: trailId,
+          scope: run.scope,
+          project: run.project,
+          region: run.region,
+          semantic_cluster: label,
+        },
+        rationale: nextAgentPrompt,
+      },
+      steps: [
+        {
+          index: 0,
+          status: 'succeeded',
+          action: {
+            toolName: 'resident.semantic_probe',
+            params: {
+              probes: semanticProbes,
+            },
+          },
+          resultSummary: topCluster
+            ? `Semantic trail mark recorded for ${topCluster.label} (${topCluster.count} memories).`
+            : 'Semantic trail mark recorded for the strongest available region.',
+          tokensUsed: 0,
+          durationMs: 0,
+          timestamp: Date.now(),
+        },
+      ],
+      executionEventIds: [],
+      successScore: topCluster ? Math.min(1, 0.4 + (topCluster.count * 0.1)) : 0.35,
+      confidence: topCluster?.score ? Math.min(1, topCluster.score / 10) : 0.45,
+      weight: topCluster ? Math.min(1, 0.6 + (topCluster.count * 0.05)) : 0.5,
+      decayRate: 0.02,
+      tags: [
+        'resident',
+        'faraday',
+        'semantic_mark',
+        `scope:${run.scope}`,
+        ...(run.project ? [`project:${run.project}`] : []),
+      ],
+      createdAt: nowIso(),
+    };
   }
 
   _createRun(agentId, payload, context) {
@@ -225,6 +335,7 @@ export class ResidentRunManager {
       observations_count: run.observations_count,
       progress: run.progress,
       result: run.result,
+      trail_mark: run.trail_mark || null,
       error: run.error,
     };
   }

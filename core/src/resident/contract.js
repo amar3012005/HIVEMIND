@@ -36,6 +36,8 @@ export const RESIDENT_AGENT_ENDPOINTS = {
       'current_step',
       'observations_count',
       'progress',
+      'result',
+      'trail_mark',
     ],
   },
   listObservations: {

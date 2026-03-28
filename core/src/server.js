@@ -2300,7 +2300,7 @@ a{color:#a78bfa}</style></head><body>
       }
 
       // Handle /api/memories/:id routes (dynamic ID matching)
-      if (pathname.startsWith('/api/memories/') && pathname !== '/api/memories/search' && pathname !== '/api/memories/query' && pathname !== '/api/memories/code/ingest' && pathname !== '/api/memories/traverse' && pathname !== '/api/memories/decay' && pathname !== '/api/memories/reinforce') {
+      if (pathname.startsWith('/api/memories/') && pathname !== '/api/memories/search' && pathname !== '/api/memories/query' && pathname !== '/api/memories/code/ingest' && pathname !== '/api/memories/traverse' && pathname !== '/api/memories/decay' && pathname !== '/api/memories/reinforce' && pathname !== '/api/memories/delete-all') {
         if (req.method === 'GET') {
           if (!ensurePersistedMemoryOrFail(res, '/api/memories/:id')) {
             return;
@@ -3882,6 +3882,48 @@ a{color:#a78bfa}</style></head><body>
           }
           break;
 
+        case '/api/memories/delete-all':
+          if (req.method === 'DELETE') {
+            if (!ensurePersistedMemoryOrFail(res, '/api/memories/delete-all')) return;
+            try {
+              // Phase 1: Use store.deleteMemory() (same as frontend) for clean deletes
+              let storeDeleted = 0;
+              for (let round = 0; round < 100; round++) {
+                const batch = await prisma.memory.findMany({
+                  where: { userId },
+                  select: { id: true },
+                  take: 200,
+                });
+                if (batch.length === 0) break;
+                for (const m of batch) {
+                  try {
+                    await persistentMemoryStore.deleteMemory(m.id);
+                    storeDeleted++;
+                  } catch {}
+                }
+              }
+
+              // Phase 2: Force-delete any stubborn records via raw SQL
+              let sqlDeleted = 0;
+              const stubborn = await prisma.memory.count({ where: { userId } });
+              if (stubborn > 0) {
+                // Delete related tables first, then memories — use parameterized query
+                await prisma.$executeRaw`DELETE FROM hivemind.source_metadata WHERE memory_id IN (SELECT id FROM hivemind.memories WHERE user_id = ${userId}::uuid)`;
+                await prisma.$executeRaw`DELETE FROM hivemind.memory_versions WHERE memory_id IN (SELECT id FROM hivemind.memories WHERE user_id = ${userId}::uuid)`;
+                await prisma.$executeRaw`DELETE FROM hivemind.relationships WHERE from_id IN (SELECT id FROM hivemind.memories WHERE user_id = ${userId}::uuid) OR to_id IN (SELECT id FROM hivemind.memories WHERE user_id = ${userId}::uuid)`;
+                const result = await prisma.$executeRaw`DELETE FROM hivemind.memories WHERE user_id = ${userId}::uuid`;
+                sqlDeleted = result;
+              }
+
+              const remaining = await prisma.memory.count({ where: { userId } });
+              invalidateAggregateCache({ userId, orgId, project: null });
+              return jsonResponse(res, { success: true, storeDeleted, sqlDeleted, remaining });
+            } catch (error) {
+              return jsonResponse(res, { error: 'Delete all failed', message: error.message }, 500);
+            }
+          }
+          break;
+
         case '/api/memories':
           if (req.method === 'GET') {
             if (!ensurePersistedMemoryOrFail(res, '/api/memories')) {
@@ -4007,6 +4049,7 @@ a{color:#a78bfa}</style></head><body>
                 event_dates: validation.data.event_dates,
                 relationship,
                 skipPredictCalibrate: body.skipPredictCalibrate === true,
+                skipProcessing: body.skipProcessing === true,
                 metadata: {
                   ...validation.data.metadata,
                   source_platform: validation.data.source_platform || null,

@@ -1,59 +1,83 @@
 {
   "schemaVersion": "2026-03-27",
   "kind": "hivemind.longmemeval-benchmark-report",
-  "generatedAt": "2026-03-27T23:26:29.661Z",
-  "phase": "evaluate",
+  "generatedAt": "2026-03-28T03:59:33.444Z",
+  "phase": "stream",
   "dataPath": "./benchmarks/LongMemEval/data/longmemeval_oracle.json",
   "datasetSize": 500,
-  "sample": 30,
+  "sample": 5,
   "startFrom": 0,
-  "instanceCount": 30,
+  "instanceCount": 5,
   "benchUser": "longmemeval-bench-001",
   "benchOrg": "longmemeval-org-001",
   "model": "llama-3.3-70b-versatile",
   "timings": {
-    "evaluationSeconds": 33
+    "totalSeconds": 31
   },
-  "ingestion": null,
+  "ingestion": {
+    "totalIngested": 66,
+    "totalSkipped": 0,
+    "durationSeconds": 31
+  },
   "summary": {
-    "totalQuestions": 30,
-    "answerableQuestions": 30,
+    "totalQuestions": 5,
+    "answerableQuestions": 5,
     "abstentionQuestions": 0,
-    "judgedQuestions": 0,
-    "judgedAccuracy": 0,
-    "judgedCorrect": 0,
+    "judgedQuestions": 5,
+    "judgedAccuracy": 40,
+    "judgedCorrect": 2,
     "retrieval": {
-      "averageSearchLatencyMs": 845.57,
-      "averageGenerationLatencyMs": 257.87,
-      "averageContextChars": 1879.43,
-      "averageResultCount": 0.97,
-      "projectScopedCount": 29,
+      "averageSearchLatencyMs": 283,
+      "averageGenerationLatencyMs": 893,
+      "averageContextChars": 8510.2,
+      "averageResultCount": 25,
+      "projectScopedCount": 5,
       "fallbackCount": 0,
-      "emptyContextCount": 1
+      "emptyContextCount": 0
     },
-    "byQuestionType": {},
+    "byQuestionType": {
+      "temporal-reasoning": {
+        "total": 5,
+        "correct": 2,
+        "fallbackCount": 0,
+        "emptyContextCount": 0,
+        "averageContextChars": 8510.2,
+        "averageSearchLatencyMs": 283,
+        "accuracy": 40
+      }
+    },
     "bottlenecks": {
       "counts": {
-        "healthy": 29,
-        "empty_context": 1
+        "healthy": 2,
+        "generation_or_reasoning_gap": 3
       },
       "top": [
         {
-          "type": "empty_context",
-          "count": 1,
-          "share": 3.3,
+          "type": "generation_or_reasoning_gap",
+          "count": 3,
+          "share": 60,
           "examples": [
             {
-              "question_id": "gpt4_5dcc0aab",
+              "question_id": "gpt4_2487a7cb",
               "question_type": "temporal-reasoning",
-              "reason": "No retrieval context was returned"
+              "reason": "Context existed, but the final answer was still incorrect"
+            },
+            {
+              "question_id": "gpt4_76048e76",
+              "question_type": "temporal-reasoning",
+              "reason": "Context existed, but the final answer was still incorrect"
+            },
+            {
+              "question_id": "0bb5a684",
+              "question_type": "temporal-reasoning",
+              "reason": "Context existed, but the final answer was still incorrect"
             }
           ]
         },
         {
           "type": "healthy",
-          "count": 29,
-          "share": 96.7,
+          "count": 2,
+          "share": 40,
           "examples": [
             {
               "question_id": "gpt4_2655b836",
@@ -61,12 +85,7 @@
               "reason": "No dominant bottleneck detected"
             },
             {
-              "question_id": "gpt4_2487a7cb",
-              "question_type": "temporal-reasoning",
-              "reason": "No dominant bottleneck detected"
-            },
-            {
-              "question_id": "gpt4_76048e76",
+              "question_id": "gpt4_2312f94c",
               "question_type": "temporal-reasoning",
               "reason": "No dominant bottleneck detected"
             }
@@ -77,26 +96,36 @@
   },
   "bottlenecks": {
     "counts": {
-      "healthy": 29,
-      "empty_context": 1
+      "healthy": 2,
+      "generation_or_reasoning_gap": 3
     },
     "top": [
       {
-        "type": "empty_context",
-        "count": 1,
-        "share": 3.3,
+        "type": "generation_or_reasoning_gap",
+        "count": 3,
+        "share": 60,
         "examples": [
           {
-            "question_id": "gpt4_5dcc0aab",
+            "question_id": "gpt4_2487a7cb",
             "question_type": "temporal-reasoning",
-            "reason": "No retrieval context was returned"
+            "reason": "Context existed, but the final answer was still incorrect"
+          },
+          {
+            "question_id": "gpt4_76048e76",
+            "question_type": "temporal-reasoning",
+            "reason": "Context existed, but the final answer was still incorrect"
+          },
+          {
+            "question_id": "0bb5a684",
+            "question_type": "temporal-reasoning",
+            "reason": "Context existed, but the final answer was still incorrect"
           }
         ]
       },
       {
         "type": "healthy",
-        "count": 29,
-        "share": 96.7,
+        "count": 2,
+        "share": 40,
         "examples": [
           {
             "question_id": "gpt4_2655b836",
@@ -104,12 +133,7 @@
             "reason": "No dominant bottleneck detected"
           },
           {
-            "question_id": "gpt4_2487a7cb",
-            "question_type": "temporal-reasoning",
-            "reason": "No dominant bottleneck detected"
-          },
-          {
-            "question_id": "gpt4_76048e76",
+            "question_id": "gpt4_2312f94c",
             "question_type": "temporal-reasoning",
             "reason": "No dominant bottleneck detected"
           }
@@ -117,8 +141,43 @@
       }
     ]
   },
-  "byQuestionType": {},
-  "failedExamples": [],
+  "byQuestionType": {
+    "temporal-reasoning": {
+      "total": 5,
+      "correct": 2,
+      "fallbackCount": 0,
+      "emptyContextCount": 0,
+      "averageContextChars": 8510.2,
+      "averageSearchLatencyMs": 283,
+      "accuracy": 40
+    }
+  },
+  "failedExamples": [
+    {
+      "question_id": "gpt4_2487a7cb",
+      "question_type": "temporal-reasoning",
+      "isAbstention": false,
+      "verdict": "no",
+      "bottleneck": "generation_or_reasoning_gap",
+      "hypothesis": "To answer the question, let's extract the relevant information from the chat history:\n\n1. The user attended a workshop on \"Effective Time Management\" at the loc"
+    },
+    {
+      "question_id": "gpt4_76048e76",
+      "question_type": "temporal-reasoning",
+      "isAbstention": false,
+      "verdict": "no",
+      "bottleneck": "generation_or_reasoning_gap",
+      "hypothesis": "To answer the question, let's extract the relevant information from the chat history:\n\n1. In Session 1 (2023/03/10 08:11), the user mentions that they recently "
+    },
+    {
+      "question_id": "0bb5a684",
+      "question_type": "temporal-reasoning",
+      "isAbstention": false,
+      "verdict": "no",
+      "bottleneck": "generation_or_reasoning_gap",
+      "hypothesis": "To answer the question, let's extract the relevant information from the chat history.\n\n1. The current date is 2023/01/13 (Fri) 19:39.\n2. The user attended the w"
+    }
+  ],
   "files": {
     "hypotheses": "/opt/HIVEMIND/core/evaluation-reports/longmemeval-hypotheses.jsonl",
     "judged": null,

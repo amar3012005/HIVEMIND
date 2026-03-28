@@ -30,7 +30,8 @@ const LONGMEMEVAL_REPORT_FILE = path.join(OUTPUT_DIR, 'longmemeval-report.json')
 const API_BASE = process.env.HIVEMIND_API_BASE || 'https://core.hivemind.davinciai.eu:8050';
 const API_KEY = process.env.HIVEMIND_API_KEY || process.env.HIVEMIND_MASTER_API_KEY || '';
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
-const GROQ_MODEL = process.env.GROQ_INFERENCE_MODEL || 'openai/gpt-oss-120b';
+const GROQ_MODEL = process.env.GROQ_INFERENCE_MODEL || 'llama-3.3-70b-versatile';
+const REASONING_MODELS = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b'];
 
 // Benchmark user/org (isolated tenant)
 const BENCH_USER = 'longmemeval-bench-001';
@@ -89,19 +90,31 @@ async function apiCall(method, path, body = null) {
 
 async function groqChat(messages, options = {}) {
   const maxRetries = 3;
+  const model = options.model || GROQ_MODEL;
+  const isReasoning = REASONING_MODELS.some(m => model.includes(m));
+
   for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const body = {
+      model,
+      messages,
+      max_tokens: options.maxTokens || 300,
+    };
+
+    // Reasoning models (gpt-oss-*): disable reasoning to get content directly
+    if (isReasoning) {
+      body.include_reasoning = false;
+      // Reasoning models don't support temperature
+    } else {
+      body.temperature = 0;
+    }
+
     const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${GROQ_API_KEY}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        model: options.model || GROQ_MODEL,
-        messages,
-        temperature: 0,
-        max_tokens: options.maxTokens || 300,
-      }),
+      body: JSON.stringify(body),
     });
 
     if (resp.status === 429 || resp.status === 503) {
@@ -137,6 +150,7 @@ function normalizeSearchResult(result, rank = 0) {
     session: result.session || payload.session || null,
     memoryType: result.memoryType || payload.memoryType || payload.memory_type || null,
     sourcePlatform: result.sourcePlatform || payload.sourcePlatform || null,
+    date: result.document_date || result.documentDate || payload.document_date || payload.documentDate || result.created_at || payload.created_at || null,
     rank: rank + 1
   };
 }
@@ -460,12 +474,11 @@ function buildLongMemEvalReport({
 
 function parseLongMemEvalDate(dateStr) {
   if (!dateStr) return null;
-  // Format: "2023/05/20 (Sat) 02:21"
+  // Convert to ISO for API storage (document_date must be valid date)
   const match = dateStr.match(/^(\d{4})\/(\d{2})\/(\d{2})\s*\([^)]*\)\s*(\d{2}):(\d{2})/);
   if (match) {
     return new Date(`${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:00Z`).toISOString();
   }
-  // Try direct parse
   const d = new Date(dateStr);
   return isNaN(d.getTime()) ? null : d.toISOString();
 }
@@ -501,6 +514,10 @@ async function ingestInstance(instance, instanceIdx, totalInstances) {
           memory_type: 'event',
           document_date: sessionDate,
           project: `bench/longmemeval/${question_id}`,
+          // Skip ingestion processing — MemoryProcessor merges distinct turns, predict-calibrate has stale cache
+          // Retrieval still uses full engine (Operator Layer + Recall)
+          skipPredictCalibrate: true,
+          skipProcessing: true,
         });
         ingested++;
         // Small delay to avoid overwhelming the API + embedding service
@@ -519,118 +536,103 @@ async function ingestInstance(instance, instanceIdx, totalInstances) {
 // ── Phase 2: Evaluate ───────────────────────────────────
 
 async function evaluateInstance(instance) {
-  const { question_id, question, question_type } = instance;
+  const { question_id, question, question_type, question_date } = instance;
   const isAbstention = question_id.endsWith('_abs');
   const retrievalPlan = getLongMemEvalRetrievalPlan({ question, questionType: question_type });
 
-  // Search for relevant memories using the strongest path for the query type.
+  // Use FULL engine pipeline: Operator Layer (intent + dynamic weights) → Recall (hybrid + graph)
+  // Then augment with quick search to catch anything recall deduped away
   let searchResults;
-  let projectSearchResults;
-  let fallbackSearchResults;
+  let recallResults;
+  let quickResults;
   let usedGlobalFallback = false;
   const searchStart = Date.now();
+  const project = `bench/longmemeval/${question_id}`;
   try {
-    // Use /api/search/quick (Qdrant hybrid 70% vector) as primary — recall dedupes too aggressively
-    projectSearchResults = await apiCall('POST', '/api/search/quick', {
-      query: question,
-      project: `bench/longmemeval/${question_id}`,
-      limit: retrievalPlan.searchLimit || 10,
+    // 1. Primary: /api/recall with Operator Layer (intent detection, dynamic weights, temporal expansion, memory type boosts)
+    recallResults = await apiCall('POST', '/api/recall', {
+      query_context: question,
+      project,
+      max_memories: 15,
     });
 
-    const rawItems = normalizeSearchResults(projectSearchResults);
-    if (rawItems.length < 3) {
-      // Fallback: try recall (Qdrant hybrid + graph expansion) without project filter
-      fallbackSearchResults = await apiCall('POST', '/api/recall', {
-        query_context: question,
-        max_memories: 10,
-      });
+    // 2. Secondary: /api/search/quick (Qdrant hybrid) to catch what recall deduped
+    quickResults = await apiCall('POST', '/api/search/quick', {
+      query: question,
+      project,
+      limit: 20,
+    });
 
-      const fallbackItems = normalizeSearchResults(fallbackSearchResults);
-      if (fallbackItems.length > rawItems.length) {
-        searchResults = fallbackSearchResults;
-        usedGlobalFallback = true;
+    // 3. Merge both result sets — recall first (higher quality), then quick fills gaps
+    const recallNorm = normalizeSearchResults(recallResults);
+    const quickNorm = normalizeSearchResults(quickResults);
+    const seenIds = new Set(recallNorm.map(r => r.id));
+    const merged = [...recallNorm];
+    for (const r of quickNorm) {
+      if (!seenIds.has(r.id)) {
+        merged.push(r);
+        seenIds.add(r.id);
       }
     }
-
-    if (!searchResults) {
-      searchResults = projectSearchResults;
-    }
+    searchResults = { results: merged };
   } catch {
     searchResults = { results: [] };
   }
   const searchLatencyMs = Date.now() - searchStart;
 
-  const projectResults = normalizeSearchResults(projectSearchResults);
-  const fallbackResults = normalizeSearchResults(fallbackSearchResults);
-  const selectedResults = selectContextResults(searchResults, retrievalPlan.contextLimit);
+  const projectResults = normalizeSearchResults(searchResults);
+  const fallbackResults = [];
+  // Use all available results — oracle dataset has only 10-18 memories per question
+  const selectedResults = selectContextResults(searchResults, 15);
 
-  const context = buildBenchmarkContext({
-    results: selectedResults,
-    memories: selectedResults
-  }, {
-    maxItems: retrievalPlan.contextLimit,
-    maxChars: 7000
-  });
+  // Build context in official LongMemEval session format
+  // Use raw haystack_dates from the instance for accurate date display
+  const haystackDates = instance.haystack_dates || [];
+  let context = '';
+  {
+    const maxChars = 10000;
+    let totalChars = 0;
+    const sessionBlocks = [];
+    for (let i = 0; i < selectedResults.length; i++) {
+      const r = selectedResults[i];
+      // Extract session index from title (format: LME:{qid}:s{idx}:r{round})
+      let sessionDate = r.date || 'Unknown';
+      const titleMatch = (r.title || '').match(/:s(\d+):/);
+      if (titleMatch) {
+        const sessionIdx = parseInt(titleMatch[1], 10);
+        if (haystackDates[sessionIdx]) {
+          sessionDate = haystackDates[sessionIdx]; // Raw date like "2023/05/20 (Sat) 02:21"
+        }
+      }
+      const block = `### Session ${i + 1}:\nSession Date: ${sessionDate}\nSession Content:\n${r.content}`;
+      if (totalChars + block.length > maxChars) break;
+      sessionBlocks.push(block);
+      totalChars += block.length;
+    }
+    context = sessionBlocks.join('\n\n');
+  }
 
   // Generate hypothesis using Groq
+  // Match official LongMemEval prompt exactly: user-only (no system prompt), CoT, 500 max tokens
   let hypothesis;
   const generationStart = Date.now();
   try {
-    // Robust type-aware system prompts
-    const TYPE_PROMPTS = {
-      'temporal-reasoning': `You are an AI assistant with perfect memory of past conversations. You MUST answer temporal questions precisely.
-
-RULES:
-- If asked "which happened first/last", state the event and its date
-- If asked "how many days between X and Y", CALCULATE the exact number of days from the dates mentioned
-- If asked "how long since X", compute the duration from the dates in the conversation
-- Dates are provided in the memories. Extract them and do the arithmetic.
-- "X days" means count calendar days between the two events
-- Always give a specific number or answer, never say "I don't know" if dates are present`,
-
-      'knowledge-update': `You are an AI assistant with perfect memory. Information may have been UPDATED across conversations.
-
-RULES:
-- Always give the MOST RECENT version of any fact
-- If the user first said "I like pizza" then later said "I switched to sushi", the answer is sushi
-- Look for phrases like "changed", "switched", "updated", "actually", "now" that indicate updates
-- The latest conversation has the most current information`,
-
-      'multi-session': `You are an AI assistant who remembers ALL past conversations. You must synthesize information across multiple sessions.
-
-RULES:
-- Combine facts from different conversations to give a complete answer
-- If asked to count items, list ALL of them from ALL sessions
-- If asked about multiple events, reference each one with details
-- Be specific — include names, dates, numbers`,
-
-      'single-session-user': `You are an AI assistant with perfect memory. Answer with the exact fact the user mentioned in conversation. Be precise and concise.`,
-
-      'single-session-assistant': `You are an AI assistant. You must recall the exact information you (the assistant) previously provided to the user. Be precise.`,
-
-      'single-session-preference': `You are an AI assistant who remembers the user's preferences. Answer using their stated preferences, tastes, and personal choices from past conversations.`,
-    };
-
-    const systemPrompt = isAbstention
-      ? 'You are an AI assistant with memory of past conversations. If the specific information asked about was NEVER mentioned in any conversation, say "I don\'t have this information in my memory." Only abstain if the topic was truly never discussed.'
-      : TYPE_PROMPTS[question_type] || `You are an AI assistant with memory of past conversations. ${retrievalPlan.systemHint} Be concise and direct.`;
-
+    const dateStr = question_date || 'Unknown';
     const userPrompt = context.length > 50
-      ? `Here are relevant memories from our past conversations:\n\n${context}\n\nQuestion: ${question}\n\nIMPORTANT: If dates are mentioned, calculate any time differences precisely. Answer concisely and directly with the specific fact or number requested:`
-      : `I don't have relevant context for this question.\n\nQuestion: ${question}\n\nAnswer concisely:`;
+      ? `I will give you several history chats between you and a user. Please answer the question based on the relevant chat history. Answer the question step by step: first extract all the relevant information, and then reason over the information to get the answer.\n\n\nHistory Chats:\n\n${context}\n\nCurrent Date: ${dateStr}\nQuestion: ${question}\nAnswer (step by step):`
+      : `Current Date: ${dateStr}\nQuestion: ${question}\nAnswer:`;
 
-    // Use llama for generation (gpt-oss-120b returns empty strings sometimes)
+    // Official format: user-only prompt, no system prompt, temperature 0, 500 max tokens
     hypothesis = await groqChat([
-      { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
-    ], { model: 'llama-3.3-70b-versatile', maxTokens: 200 });
+    ], { maxTokens: 500 });
 
-    // Retry with fallback if empty
+    // Fallback to llama if reasoning model returns empty
     if (!hypothesis || hypothesis.trim().length === 0) {
+      console.warn(`  [fallback] ${question_id}: ${GROQ_MODEL} returned empty, trying llama-3.3-70b-versatile`);
       hypothesis = await groqChat([
-        { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
-      ], { model: 'llama-3.3-70b-versatile', maxTokens: 200 });
+      ], { model: 'llama-3.3-70b-versatile', maxTokens: 500 });
     }
   } catch (err) {
     console.warn(`  [groq-fail] ${question_id}: ${err.message.slice(0, 100)}`);
@@ -644,10 +646,11 @@ RULES:
     isAbstention,
     hypothesis: hypothesis.trim(),
     retrieval: {
-      route: retrievalPlan.route,
+      route: 'recall+quick (full engine)',
       query: question,
       projectResultCount: projectResults.length,
-      fallbackResultCount: fallbackResults.length,
+      recallResultCount: normalizeSearchResults(recallResults).length,
+      quickResultCount: normalizeSearchResults(quickResults).length,
       resultCount: normalizeSearchResults(searchResults).length,
       selectedContextCount: selectedResults.length,
       contextChars: context.length,
@@ -688,13 +691,22 @@ Rules:
 
 Respond with ONLY "yes" or "no".`;
 
-    const verdict = await groqChat([
+    // Always use llama for judging — reasoning models are overkill for yes/no classification
+    const rawVerdict = await groqChat([
       { role: 'system', content: 'You are a strict but fair evaluator. Respond with only "yes" or "no".' },
       { role: 'user', content: prompt },
     ], { model: 'llama-3.3-70b-versatile', maxTokens: 5 });
 
-    return verdict.trim().toLowerCase().startsWith('yes') ? 'yes' : 'no';
-  } catch {
+    const verdict = rawVerdict.trim().toLowerCase().startsWith('yes') ? 'yes' : 'no';
+    if (verdict === 'no') {
+      console.log(`    [judge] Q: ${question.slice(0, 60)}...`);
+      console.log(`    [judge] Expected: ${answer.slice(0, 60)}`);
+      console.log(`    [judge] Got: ${hypothesis.slice(0, 60)}`);
+      console.log(`    [judge] Raw: "${rawVerdict.trim()}"`);
+    }
+    return verdict;
+  } catch (e) {
+    console.warn(`    [judge-error] ${e.message?.slice(0, 80)}`);
     return 'error';
   }
 }
@@ -702,20 +714,20 @@ Respond with ONLY "yes" or "no".`;
 // ── Cleanup: delete all memories for a question ──────────
 
 async function cleanupInstance(questionId) {
-  const project = `bench/longmemeval/${questionId}`;
+  // Project-scoped cleanup: only delete this question's memories
+  // Qdrant filters by project so cross-question pollution is minimal
+  let totalDeleted = 0;
   try {
-    // Fetch all memories for this project
-    const result = await apiCall('GET', `/api/memories?limit=200&project=${encodeURIComponent(project)}`);
-    const memories = result?.memories || [];
-    for (const m of memories) {
-      if (m.id) {
-        try { await apiCall('DELETE', `/api/memories/${m.id}`); } catch {}
+    for (let round = 0; round < 5; round++) {
+      const result = await apiCall('GET', `/api/memories?limit=200&project=bench/longmemeval/${questionId}`);
+      const memories = result?.memories || [];
+      if (memories.length === 0) break;
+      for (const m of memories) {
+        try { await apiCall('DELETE', `/api/memories/${m.id}`); totalDeleted++; } catch {}
       }
     }
-    return memories.length;
-  } catch {
-    return 0;
-  }
+  } catch {}
+  return totalDeleted;
 }
 
 // ── Per-question streaming pipeline ──────────────────────
@@ -726,8 +738,9 @@ async function processInstanceStreaming(instance, instanceIdx, totalInstances) {
   // 1. Ingest this question's sessions
   const { ingested, skipped } = await ingestInstance(instance, instanceIdx, totalInstances);
 
-  // 2. Wait for Qdrant indexing (needs ~1s for reliable vector search)
-  await new Promise(r => setTimeout(r, 1000));
+  // 2. Wait for Qdrant indexing + MemoryProcessor LLM calls (observations, facts, relationships)
+  // Full engine pipeline takes longer than raw ingestion
+  await new Promise(r => setTimeout(r, 3000));
 
   // 3. Evaluate (retrieve + generate)
   const result = await evaluateInstance(instance);
@@ -942,7 +955,7 @@ async function main() {
   if (opts.phase === 'judge' || opts.phase === 'all') {
     console.log('═══ Phase 3: LLM-as-Judge (via Groq) ═══');
     // gpt-oss-120b returns empty on yes/no tasks; llama-3.3-70b works correctly as judge
-    const JUDGE_MODEL = 'llama-3.3-70b-versatile';
+    const JUDGE_MODEL = 'llama-3.3-70b-versatile'; // Reliable for yes/no classification
 
     if (!fs.existsSync(HYPOTHESIS_FILE)) {
       console.error(`No hypothesis file found: ${HYPOTHESIS_FILE}`);

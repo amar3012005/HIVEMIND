@@ -149,7 +149,7 @@ export class MemoryGraphEngine {
         }
 
         // Unified Memory Processor: single LLM call for relationship + observation + facts
-        if (baseMemory.memory_type !== 'observation' && pcResult && pcResult.shouldStore !== false) {
+        if (baseMemory.memory_type !== 'observation' && pcResult && pcResult.shouldStore !== false && !input.skipProcessing) {
           try {
             const { MemoryProcessor } = await import('./memory-processor.js');
             const processor = new MemoryProcessor();

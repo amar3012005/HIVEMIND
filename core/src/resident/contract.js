@@ -68,6 +68,10 @@ export const FEYNMAN_OBSERVATION_KINDS = [
 
 export const TURING_OBSERVATION_KINDS = [
   'verification',
+  'merge_candidate',
+  'relationship_candidate',
+  'noise_reduction_candidate',
+  'promotion_candidate',
 ];
 
 export const FARADAY_OBSERVATION_FIELDS = [

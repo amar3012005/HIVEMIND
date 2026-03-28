@@ -94,7 +94,13 @@ test('resident run lifecycle has explicit states and explicit observation kinds'
   ]);
   assert.deepEqual(FEYNMAN_OBSERVATION_KINDS, ['hypothesis']);
   assert.deepEqual(FEYNMAN_OBSERVATION_FIELDS, FARADAY_OBSERVATION_FIELDS);
-  assert.deepEqual(TURING_OBSERVATION_KINDS, ['verification']);
+  assert.deepEqual(TURING_OBSERVATION_KINDS, [
+    'verification',
+    'merge_candidate',
+    'relationship_candidate',
+    'noise_reduction_candidate',
+    'promotion_candidate',
+  ]);
   assert.deepEqual(TURING_OBSERVATION_FIELDS, FARADAY_OBSERVATION_FIELDS);
 });
 

@@ -18,9 +18,10 @@ function buildAgentDescriptor(agentId) {
   const base = {
     agent_id: agentId,
     role: 'explorer',
-    status: agentId === 'faraday' ? 'active' : 'planned',
-    source: agentId === 'faraday' ? 'explicit' : 'planned',
+    status: 'active',
+    source: 'explicit',
     capabilities: [],
+    skills: [],
   };
 
   if (agentId === 'faraday') {
@@ -28,7 +29,12 @@ function buildAgentDescriptor(agentId) {
       ...base,
       name: 'Faraday',
       capabilities: ['graph_walk', 'anomaly_detect', 'write_observation'],
+      skills: ['semantic_probe', 'duplicate_cluster_detection', 'stale_signal_detection', 'trail_marking'],
       default_scope: 'project',
+      summary: 'Explorer that scans the graph for semantic anomalies, duplicate clusters, stale assumptions, and weakly connected regions.',
+      persona: 'Restless graph scout. High-recall, skeptical of silence, optimized to notice weak signals before they become findings.',
+      goal: 'Map suspicious semantic regions, leave trails, and surface evidence-rich anomalies for the next resident agent.',
+      reasoning_style: 'heuristic_semantic_scan',
     };
   }
 
@@ -37,10 +43,13 @@ function buildAgentDescriptor(agentId) {
       ...base,
       name: 'Feynman',
       role: 'analyst',
-      status: 'active',
-      source: 'explicit',
       capabilities: ['hypothesis_form', 'causal_explain', 'link_evidence'],
+      skills: ['causal_reasoning', 'evidence_linking', 'contradiction_spotting', 'hypothesis_structuring'],
       default_scope: 'project',
+      summary: 'Analyst that explains Faraday trails, turns evidence into hypotheses, and prepares verification-ready claims.',
+      persona: 'Patient explainer. Turns clusters into understandable mechanisms and asks what assumption ties the evidence together.',
+      goal: 'Convert raw resident trails into explicit, testable hypotheses with rationale, evidence summaries, and verification checks.',
+      reasoning_style: 'causal_synthesis',
     };
   }
 
@@ -48,10 +57,13 @@ function buildAgentDescriptor(agentId) {
     ...base,
     name: 'Turing',
     role: 'verifier',
-    status: 'active',
-    source: 'explicit',
     capabilities: ['verify_hypothesis', 'score_confidence', 'promote_finding'],
+    skills: ['cross_memory_verification', 'noise_reduction', 'relationship_recommendation', 'promotion_gating'],
     default_scope: 'project',
+    summary: 'Verifier that tests Feynman hypotheses, suppresses noise, recommends merges and links, and gates promotion into graph knowledge.',
+    persona: 'Adversarial skeptic. Prefers evidence spread over eloquence, rejects weak patterns, and only advances findings that reshape the graph safely.',
+    goal: 'Reduce noise, connect related nodes, identify merge and update candidates, and decide which findings deserve promotion.',
+    reasoning_style: 'verification_and_graph_shaping',
   };
 }
 
@@ -83,7 +95,7 @@ export class ResidentRunManager {
       this.agentDescriptors.map((descriptor) => this.executorStore.ensureAgent(descriptor.agent_id, {
         role: descriptor.role,
         source: descriptor.source,
-        skills: descriptor.capabilities,
+        skills: descriptor.skills?.length ? descriptor.skills : descriptor.capabilities,
       }).catch(() => null))
     );
   }

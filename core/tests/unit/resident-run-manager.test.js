@@ -93,6 +93,10 @@ test('resident run manager executes Faraday and records structured observations'
 
   const agents = manager.listAgents();
   assert.ok(agents.some((agent) => agent.agent_id === 'faraday'));
+  const faradayAgent = agents.find((agent) => agent.agent_id === 'faraday');
+  assert.match(faradayAgent.persona, /graph scout/i);
+  assert.ok(Array.isArray(faradayAgent.skills));
+  assert.ok(faradayAgent.skills.includes('trail_marking'));
 
   const run = await manager.runAgent('faraday', {
     project: 'proj-a',
@@ -225,18 +229,30 @@ test('resident run manager executes Turing against the latest Feynman hypotheses
   assert.ok(Array.isArray(completedTuring.result?.verification_results));
   assert.ok(completedTuring.result.verification_results.length >= 1);
   assert.equal(completedTuring.result.trail_mark.kind, 'resident_verification_mark');
+  assert.ok(Array.isArray(completedTuring.result?.action_candidates));
+  assert.ok(completedTuring.result.action_candidates.length >= 1);
+  assert.ok(
+    completedTuring.result.action_candidates.some((item) =>
+      ['merge_candidate', 'relationship_candidate', 'noise_reduction_candidate', 'promotion_candidate'].includes(item.kind)),
+  );
   assert.ok(
     completedTuring.result.verification_results.some((item) => ['likely_true', 'uncertain', 'weak'].includes(item.verdict)),
   );
+  assert.ok(Array.isArray(completedTuring.result.trail_mark.action_candidates));
 
   const storedTrail = await executorStore.getTrail(completedTuring.result.trail_mark.trail_id);
   assert.ok(storedTrail);
   assert.equal(storedTrail.kind, 'resident_verification_mark');
   assert.equal(storedTrail.blueprintMeta.resident_verification_mark, true);
+  assert.ok(storedTrail.blueprintMeta.relationship_candidate_count >= 0);
 
   const storedObservations = await executorStore.listObservations({ agentId: 'turing' });
   assert.ok(storedObservations.length >= 1);
-  assert.equal(storedObservations[0].kind, 'verification');
+  assert.ok(storedObservations.some((item) => item.kind === 'verification'));
+  assert.ok(
+    storedObservations.some((item) =>
+      ['merge_candidate', 'relationship_candidate', 'noise_reduction_candidate', 'promotion_candidate'].includes(item.kind)),
+  );
 });
 
 test('resident run manager can cancel a queued run and exposes failure for unsupported agents', async () => {

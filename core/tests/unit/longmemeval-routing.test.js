@@ -11,9 +11,9 @@ test('temporal questions route to panorama with a temporal window', () => {
     questionType: 'temporal-reasoning'
   });
 
-  assert.equal(plan.route, 'panorama');
-  assert.equal(plan.body.include_expired, true);
-  assert.equal(plan.body.include_historical, true);
+  assert.equal(plan.route, 'recall');
+  assert.equal(plan.body.max_memories, 15);
+  assert.equal(plan.body.query_context, 'What happened in March 2026?');
   assert.equal(plan.body.date_range.start, '2026-03-01');
   assert.equal(plan.body.date_range.end, '2026-03-31');
   assert.match(plan.systemHint, /Temporal focus/);
@@ -29,6 +29,18 @@ test('knowledge update questions route to panorama without dropping history', ()
   assert.equal(plan.body.include_expired, true);
   assert.equal(plan.body.include_historical, true);
   assert.match(plan.systemHint, /Knowledge-update focus/);
+});
+
+test('single-session preference questions route to quick search', () => {
+  const plan = getLongMemEvalRetrievalPlan({
+    question: 'What format do I prefer?',
+    questionType: 'single-session-preference'
+  });
+
+  assert.equal(plan.route, 'quick');
+  assert.equal(plan.body.query, 'What format do I prefer?');
+  assert.equal(plan.body.limit, 10);
+  assert.match(plan.systemHint, /Single-session focus/);
 });
 
 test('benchmark context dedupes repeated memory content and preserves metadata', () => {
@@ -65,4 +77,3 @@ test('benchmark context dedupes repeated memory content and preserves metadata',
   assert.match(context, /title=Second memory/);
   assert.equal((context.match(/Alpha answer from session one\./g) || []).length, 1);
 });
-

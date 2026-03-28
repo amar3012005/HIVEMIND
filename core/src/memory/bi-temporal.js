@@ -1,3 +1,5 @@
+import crypto from 'node:crypto';
+
 /**
  * Bi-Temporal Knowledge Graph
  *
@@ -66,6 +68,13 @@ export class BiTemporalEngine {
         createdAt: { lte: new Date(txTime) },
         deletedAt: null
       },
+      include: {
+        sourceMetadata: true,
+        versions: {
+          orderBy: { createdAt: 'desc' },
+          take: 1
+        }
+      },
       orderBy: { createdAt: 'desc' }
     });
 
@@ -74,7 +83,7 @@ export class BiTemporalEngine {
       memory_type: mem.memoryType || 'fact',
       createdAt: mem.createdAt instanceof Date ? mem.createdAt.toISOString() : mem.createdAt,
       documentDate: mem.documentDate instanceof Date ? mem.documentDate.toISOString() : (mem.documentDate || null),
-      metadata: mem.metadata || {}, tags: mem.tags || [], isLatest: mem.isLatest
+      metadata: mem.versions?.[0]?.metadata || mem.sourceMetadata?.metadata || {}, tags: mem.tags || [], isLatest: mem.isLatest
     }));
   }
 
@@ -107,18 +116,25 @@ export class BiTemporalEngine {
     }
 
     const memories = await this.prisma.memory.findMany({
-      where: { userId, orgId, deletedAt: null, documentDate: { lte: vTime } }
+      where: { userId, orgId, deletedAt: null, documentDate: { lte: vTime } },
+      include: {
+        sourceMetadata: true,
+        versions: {
+          orderBy: { createdAt: 'desc' },
+          take: 1
+        }
+      }
     });
 
     return memories
       .filter(m => {
-        const validTo = (m.metadata || {}).valid_to;
+        const validTo = (m.versions?.[0]?.metadata || m.sourceMetadata?.metadata || {}).valid_to;
         return !validTo || new Date(validTo) >= vTime;
       })
       .map(m => ({
         memoryId: m.id, content: m.content, memory_type: m.memoryType,
         documentDate: m.documentDate instanceof Date ? m.documentDate.toISOString() : m.documentDate,
-        validTo: (m.metadata || {}).valid_to || null, isLatest: m.isLatest, tags: m.tags || []
+        validTo: (m.versions?.[0]?.metadata || m.sourceMetadata?.metadata || {}).valid_to || null, isLatest: m.isLatest, tags: m.tags || []
       }));
   }
 
@@ -219,12 +235,33 @@ export class BiTemporalEngine {
   async closeValidWindow(memoryId, validTo) {
     if (!this.prisma) return { success: false, reason: 'No Prisma client' };
 
-    const memory = await this.prisma.memory.findUnique({ where: { id: memoryId }, select: { metadata: true } });
+    const memory = await this.prisma.memory.findUnique({
+      where: { id: memoryId },
+      include: {
+        versions: {
+          orderBy: { createdAt: 'desc' },
+          take: 1
+        }
+      }
+    });
     if (!memory) return { success: false, reason: 'Memory not found' };
 
-    await this.prisma.memory.update({
-      where: { id: memoryId },
-      data: { metadata: { ...(memory.metadata || {}), valid_to: new Date(validTo).toISOString() } }
+    const latestVersion = memory.versions?.[0];
+    const nextVersion = (latestVersion?.version || 0) + 1;
+    await this.prisma.memoryVersion.create({
+      data: {
+        id: crypto.randomUUID(),
+        memoryId,
+        version: nextVersion,
+        contentHash: latestVersion?.contentHash || '',
+        isLatest: memory.isLatest,
+        reason: 'close_valid_window',
+        relatedMemoryId: null,
+        metadata: {
+          ...(latestVersion?.metadata || {}),
+          valid_to: new Date(validTo).toISOString()
+        }
+      }
     });
 
     return { success: true, memoryId, validTo: new Date(validTo).toISOString() };

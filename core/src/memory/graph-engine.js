@@ -62,6 +62,44 @@ export class InMemoryGraphStore {
       .map(memory => ({ ...memory }));
   }
 
+  async searchMemories({ query = '', user_id, org_id, project, tags, n_results = 10, is_latest } = {}) {
+    const q = (query || '').trim();
+    const all = Array.from(this.memories.values())
+      .filter(memory => memory.user_id === user_id && memory.org_id === org_id)
+      .filter(memory => !project || memory.project === project)
+      .filter(memory => typeof is_latest === 'boolean' ? memory.is_latest === is_latest : true)
+      .filter(memory => !tags?.length || tags.every(tag => (memory.tags || []).includes(tag)))
+      .map(memory => ({
+        ...memory,
+        _score: q ? computeTokenSimilarity(q, memory.content || '') : 1
+      }))
+      .sort((left, right) => right._score - left._score || new Date(right.created_at) - new Date(left.created_at));
+
+    return all.slice(0, n_results).map(({ _score, ...memory }) => ({ ...memory }));
+  }
+
+  async listRelationships({ user_id, org_id, project, relationship_types, limit = 2000 } = {}) {
+    const scopedIds = new Set(
+      Array.from(this.memories.values())
+        .filter(memory => memory.user_id === user_id && memory.org_id === org_id)
+        .filter(memory => !project || memory.project === project)
+        .map(memory => memory.id)
+    );
+
+    return this.relationships
+      .filter(edge => scopedIds.has(edge.from_id) && scopedIds.has(edge.to_id))
+      .filter(edge => !relationship_types?.length || relationship_types.includes(edge.type))
+      .slice(0, limit)
+      .map(edge => ({ ...edge }));
+  }
+
+  async getRelatedMemories(memoryId, { maxDepth = 1 } = {}) {
+    if (maxDepth <= 0) return [];
+    return this.relationships
+      .filter(edge => edge.from_id === memoryId || edge.to_id === memoryId)
+      .map(edge => ({ ...edge }));
+  }
+
   async createRelationship(edge) {
     this.relationships.push({ ...edge });
     return { ...edge };
@@ -148,18 +186,27 @@ export class MemoryGraphEngine {
           }
         }
 
+        const shouldRunProcessor = baseMemory.memory_type !== 'observation' && !input.skipProcessing;
+
         // Unified Memory Processor: single LLM call for relationship + observation + facts
-        if (baseMemory.memory_type !== 'observation' && pcResult && pcResult.shouldStore !== false && !input.skipProcessing) {
+        if (shouldRunProcessor) {
           try {
             const { MemoryProcessor } = await import('./memory-processor.js');
             const processor = new MemoryProcessor();
 
             // Gather similar memories for comparison
-            const similarMemories = pcResult.needsConflictResolution && pcResult.matchedMemoryIds?.length > 0
+            const similarMemories = pcResult?.needsConflictResolution && pcResult.matchedMemoryIds?.length > 0
               ? latestMemories.filter(m => pcResult.matchedMemoryIds.includes(m.id))
-              : [];
+              : this.conflictDetector.detectCandidates(baseMemory, latestMemories).map(candidate => candidate.memory);
 
             const result = await processor.process(baseMemory, similarMemories);
+
+            baseMemory.metadata = {
+              ...(baseMemory.metadata || {}),
+              extracted_facts: result.facts || { entities: [], dates: [] },
+              memory_priority: result.priority || 'medium',
+              processed_at: nowIso()
+            };
 
             // Apply relationship
             if (result.relationship.action === 'NOOP') {
@@ -198,13 +245,23 @@ export class MemoryGraphEngine {
                   sourceTags: baseMemory.tags || [],
                 });
                 const obsId = crypto.randomUUID ? crypto.randomUUID() : `obs-${Date.now()}`;
-                await transactionalStore.createMemory({
+                await store.createMemory({
                   ...obsPayload,
                   id: obsId,
                   is_latest: true,
                   version: 1,
                   created_at: new Date().toISOString(),
                   updated_at: new Date().toISOString(),
+                });
+                await this._recordVersionSnapshot(store, {
+                  ...obsPayload,
+                  id: obsId,
+                  version: 1,
+                  metadata: obsPayload.metadata || {}
+                }, {
+                  reason: 'created',
+                  is_latest: true,
+                  related_memory_id: null
                 });
               }
             }

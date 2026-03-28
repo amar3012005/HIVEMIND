@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import {
   buildLongMemEvalReport,
   classifyLongMemEvalBottleneck,
+  buildGenerationPrompt,
+  mergeRetrievalResults,
   selectContextResults,
   normalizeSearchResults
 } from '../../src/evaluation/longmemeval-runner.js';
@@ -121,4 +123,40 @@ test('longmemeval report exposes bottlenecks and judge coverage', () => {
   assert.equal(abstentionBottleneck.type, 'abstention_failure');
   assert.equal(fallbackBottleneck.type, 'scope_fallback');
   assert.equal(report.files.judged, '/tmp/longmemeval.judged.jsonl');
+});
+
+test('runner merges retrieval results by id and normalized content', () => {
+  const merged = mergeRetrievalResults(
+    {
+      results: [
+        { id: 'm1', content: 'Alpha memory snippet', score: 0.9 },
+        { id: 'm2', content: 'Beta memory snippet', score: 0.8 }
+      ]
+    },
+    {
+      results: [
+        { id: 'm2', content: 'Beta memory snippet', score: 0.79 },
+        { id: 'm3', content: 'alpha   memory   snippet', score: 0.7 },
+        { id: 'm4', content: 'Gamma memory snippet', score: 0.69 }
+      ]
+    },
+    10
+  );
+
+  assert.equal(merged.length, 3);
+  assert.deepEqual(merged.map(item => item.id), ['m1', 'm2', 'm4']);
+});
+
+test('generation prompt asks for a short direct answer without chain-of-thought', () => {
+  const prompt = buildGenerationPrompt({
+    context: '- (score=0.900) User attended the webinar in March.',
+    question: 'Which webinar did I attend first?',
+    questionDate: '2023/05/28 (Sun) 06:47',
+    systemHint: 'Temporal focus: use the date window.'
+  });
+
+  assert.match(prompt, /Return a short direct answer/);
+  assert.match(prompt, /Retrieved Memory Context:/);
+  assert.match(prompt, /Question: Which webinar did I attend first\?/);
+  assert.doesNotMatch(prompt, /step by step/i);
 });

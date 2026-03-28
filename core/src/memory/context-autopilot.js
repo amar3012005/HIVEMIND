@@ -18,6 +18,7 @@
  */
 
 import crypto from 'node:crypto';
+import { v4 as uuidv4 } from 'uuid';
 
 // ---------------------------------------------------------------------------
 // Token Estimation
@@ -266,10 +267,19 @@ export class ContextAutopilot {
     const critical = scored.slice(0, this.criticalMemoryCount);
     const totalRetentionScore = critical.reduce((s, m) => s + m._retention.score, 0);
 
+    const summaryMemoryId = await this._persistSessionSummary({
+      sessionId,
+      userId,
+      orgId,
+      project,
+      summary
+    });
+
     // 4. Build injection payload
     const injectionPayload = this._buildInjectionPayload(summary, critical);
 
     return {
+      summaryMemoryId,
       summary,
       summaryTokens,
       criticalMemories: critical.map(m => ({
@@ -391,5 +401,87 @@ export class ContextAutopilot {
   clearSession(sessionId) {
     this._sessionHashes.delete(sessionId);
     this._sessionArchive.delete(sessionId);
+  }
+
+  async _persistSessionSummary({ sessionId, userId, orgId, project, summary }) {
+    if (!summary || summary === 'No session activity to summarize.') {
+      return null;
+    }
+
+    const summaryHash = contentHash(summary);
+    const allMemories = await this.store.listLatestMemories({
+      user_id: userId,
+      org_id: orgId,
+      project: project || null
+    });
+
+    const existing = allMemories.find(memory =>
+      (memory.tags || []).includes('session-summary')
+      && (memory.tags || []).includes(`session:${sessionId}`)
+      && contentHash(memory.content || '') === summaryHash
+    );
+
+    if (existing) {
+      return existing.id;
+    }
+
+    const now = new Date().toISOString();
+    const payload = {
+      id: uuidv4(),
+      user_id: userId,
+      org_id: orgId,
+      project: project || null,
+      content: summary,
+      title: `Session Summary: ${sessionId}`,
+      memory_type: 'fact',
+      tags: ['session-summary', `session:${sessionId}`],
+      is_latest: true,
+      version: 1,
+      created_at: now,
+      updated_at: now,
+      document_date: now,
+      metadata: {
+        session_id: sessionId,
+        summary_hash: summaryHash,
+        source: 'context-autopilot'
+      },
+      source_metadata: {
+        source_type: 'context_autopilot',
+        source_id: sessionId,
+        source_platform: 'context-autopilot',
+        source_url: null
+      }
+    };
+
+    const created = await this.store.createMemory(payload);
+    if (typeof this.store.createMemoryVersion === 'function') {
+      await this.store.createMemoryVersion({
+        id: uuidv4(),
+        memory_id: payload.id,
+        version: 1,
+        content_hash: summaryHash,
+        is_latest: true,
+        reason: 'session_summary',
+        related_memory_id: null,
+        metadata: payload.metadata,
+        created_at: now
+      });
+    }
+    if (typeof this.store.createSourceMetadata === 'function') {
+      await this.store.createSourceMetadata({
+        id: uuidv4(),
+        memory_id: payload.id,
+        source_type: payload.source_metadata.source_type,
+        source_id: payload.source_metadata.source_id,
+        source_platform: payload.source_metadata.source_platform,
+        source_url: payload.source_metadata.source_url,
+        thread_id: sessionId,
+        parent_message_id: null,
+        ingested_at: now,
+        metadata: payload.metadata
+      });
+    }
+
+    return created?.id || payload.id;
   }
 }

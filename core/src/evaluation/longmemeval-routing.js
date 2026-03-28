@@ -133,17 +133,15 @@ export function getLongMemEvalRetrievalPlan({ question, questionType } = {}) {
   const temporalExpansion = expandTemporalQuery(question || '');
   const isTemporal = questionType === 'temporal-reasoning' || temporalExpansion.hasTemporalFilter;
   const isKnowledgeUpdate = questionType === 'knowledge-update';
+  const isSingleSession = questionType === 'single-session-preference';
 
   if (isTemporal) {
     return {
       route: 'recall',
       body: {
-        query: question,
-        include_expired: true,
-        include_historical: true,
+        query_context: question,
         date_range: temporalExpansion.dateRange || null,
-        limit: 15,
-        include_timeline: false
+        max_memories: 15
       },
       searchLimit: 15,
       contextLimit: 8,
@@ -169,6 +167,19 @@ export function getLongMemEvalRetrievalPlan({ question, questionType } = {}) {
     };
   }
 
+  if (isSingleSession) {
+    return {
+      route: 'quick',
+      body: {
+        query: question,
+        limit: 10
+      },
+      searchLimit: 10,
+      contextLimit: 5,
+      systemHint: 'Single-session focus: answer with the most specific direct detail from the retrieved session snippets only.'
+    };
+  }
+
   return {
     route: 'recall',
     body: {
@@ -180,4 +191,3 @@ export function getLongMemEvalRetrievalPlan({ question, questionType } = {}) {
     systemHint: 'Answer from the retrieved memory context only. If memories conflict, prefer the most recent valid memory.'
   };
 }
-

@@ -1,7 +1,20 @@
+import crypto from 'node:crypto';
 import { computeTokenSimilarity } from './conflict-detector.js';
 
 function mapMemoryRecord(record) {
   if (!record) return null;
+
+  const latestVersionMetadata = record.versions?.[0]?.metadata || {};
+  const sourceMetadataPayload = record.sourceMetadata?.metadata || {};
+  const codeMetadataPayload = record.codeMetadata ? {
+    ast_metadata: {
+      scopeChain: record.codeMetadata.scopeChain,
+      signature: record.codeMetadata.signatures?.[0] || null,
+      imports: record.codeMetadata.imports || []
+    },
+    filepath: record.codeMetadata.filepath,
+    language: record.codeMetadata.language
+  } : {};
 
   return {
     id: record.id,
@@ -33,15 +46,9 @@ function mapMemoryRecord(record) {
       source_url: record.sourceUrl || null
     },
     metadata: {
-      ...(record.codeMetadata ? {
-        ast_metadata: {
-          scopeChain: record.codeMetadata.scopeChain,
-          signature: record.codeMetadata.signatures?.[0] || null,
-          imports: record.codeMetadata.imports || []
-        },
-        filepath: record.codeMetadata.filepath,
-        language: record.codeMetadata.language
-      } : {})
+      ...latestVersionMetadata,
+      ...sourceMetadataPayload,
+      ...codeMetadataPayload
     }
   };
 }
@@ -97,7 +104,7 @@ export class PrismaGraphStore {
   }
 
   async createMemory(memory) {
-    const created = await this.client.memory.create({
+    await this.client.memory.create({
       data: {
         id: memory.id,
         userId: memory.user_id,
@@ -115,21 +122,28 @@ export class PrismaGraphStore {
         memoryType: memory.memory_type || 'fact',
         title: memory.title || null
       },
-      include: {
-        sourceMetadata: true,
-        codeMetadata: true,
-        versions: {
-          orderBy: { createdAt: 'desc' },
-          take: 1
-        }
-      }
     });
 
-    return mapMemoryRecord(created);
+    if (memory.source_metadata || memory.metadata) {
+      await this.createSourceMetadata({
+        id: crypto.randomUUID(),
+        memory_id: memory.id,
+        source_type: memory.source_metadata?.source_type || 'manual',
+        source_id: memory.source_metadata?.source_id || null,
+        source_platform: memory.source_metadata?.source_platform || null,
+        source_url: memory.source_metadata?.source_url || null,
+        thread_id: memory.source_metadata?.thread_id || null,
+        parent_message_id: memory.source_metadata?.parent_message_id || null,
+        ingested_at: memory.created_at,
+        metadata: memory.metadata || {}
+      });
+    }
+
+    return this.getMemory(memory.id);
   }
 
   async updateMemory(id, patch) {
-    const updated = await this.client.memory.update({
+    await this.client.memory.update({
       where: { id },
       data: {
         isLatest: patch.is_latest,
@@ -140,17 +154,24 @@ export class PrismaGraphStore {
         sourcePlatform: patch.source_metadata?.source_platform,
         sourceMessageId: patch.source_metadata?.source_id
       },
-      include: {
-        sourceMetadata: true,
-        codeMetadata: true,
-        versions: {
-          orderBy: { createdAt: 'desc' },
-          take: 1
-        }
-      }
     });
 
-    return mapMemoryRecord(updated);
+    if (patch.source_metadata || patch.metadata) {
+      await this.createSourceMetadata({
+        id: crypto.randomUUID(),
+        memory_id: id,
+        source_type: patch.source_metadata?.source_type || 'manual',
+        source_id: patch.source_metadata?.source_id || null,
+        source_platform: patch.source_metadata?.source_platform || null,
+        source_url: patch.source_metadata?.source_url || null,
+        thread_id: patch.source_metadata?.thread_id || null,
+        parent_message_id: patch.source_metadata?.parent_message_id || null,
+        ingested_at: patch.updated_at,
+        metadata: patch.metadata || {}
+      });
+    }
+
+    return this.getMemory(id);
   }
 
   async getMemory(id) {

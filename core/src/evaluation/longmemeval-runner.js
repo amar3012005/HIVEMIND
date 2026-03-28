@@ -188,6 +188,62 @@ function selectContextResults(searchResults, limit = 5) {
   return selected;
 }
 
+function mergeRetrievalResults(primaryResults, secondaryResults, limit = 15) {
+  const merged = [];
+  const seenIds = new Set();
+  const seenContent = new Set();
+
+  for (const source of [primaryResults, secondaryResults]) {
+    for (const item of normalizeSearchResults(source)) {
+      const contentKey = (item.content || '')
+        .toLowerCase()
+        .replace(/\s+/g, ' ')
+        .trim();
+      const identity = item.id || null;
+
+      if ((identity && seenIds.has(identity)) || (contentKey && seenContent.has(contentKey))) {
+        continue;
+      }
+
+      if (identity) seenIds.add(identity);
+      if (contentKey) seenContent.add(contentKey);
+      merged.push(item);
+
+      if (merged.length >= limit) {
+        return merged;
+      }
+    }
+  }
+
+  return merged;
+}
+
+function buildGenerationPrompt({ context, question, questionDate, systemHint }) {
+  const dateStr = questionDate || 'Unknown';
+
+  if (context.length > 50) {
+    return [
+      'Answer the question using only the retrieved memory context.',
+      systemHint || 'Prefer the most relevant direct memory snippet.',
+      'Return a short direct answer with no chain-of-thought, no preamble, and no explanation.',
+      '',
+      'Retrieved Memory Context:',
+      context,
+      '',
+      `Current Date: ${dateStr}`,
+      `Question: ${question}`,
+      'Answer:'
+    ].join('\n');
+  }
+
+  return [
+    'If the answer is not in memory, say exactly: "I don\'t have this information in my memory."',
+    `Current Date: ${dateStr}`,
+    `Question: ${question}`,
+    'Answer:'
+  ].join('\n');
+}
+
 function looksLikeAbstention(text) {
   return /don't have this information in my memory|do not have this information in my memory|i don't know|i do not know|cannot find|can't find|not enough context|not in my memory/i.test(text || '');
 }
@@ -540,99 +596,66 @@ async function evaluateInstance(instance) {
   const isAbstention = question_id.endsWith('_abs');
   const retrievalPlan = getLongMemEvalRetrievalPlan({ question, questionType: question_type });
 
-  // Use FULL engine pipeline: Operator Layer (intent + dynamic weights) → Recall (hybrid + graph)
-  // Then augment with quick search to catch anything recall deduped away
   let searchResults;
-  let recallResults;
-  let quickResults;
+  let primaryResults;
+  let secondaryResults;
   let usedGlobalFallback = false;
   const searchStart = Date.now();
   const project = `bench/longmemeval/${question_id}`;
   try {
-    // 1. Primary: /api/recall with Operator Layer (intent detection, dynamic weights, temporal expansion, memory type boosts)
-    recallResults = await apiCall('POST', '/api/recall', {
-      query_context: question,
+    const primaryPath = retrievalPlan.route === 'panorama'
+      ? '/api/search/panorama'
+      : retrievalPlan.route === 'quick'
+      ? '/api/search/quick'
+      : '/api/recall';
+
+    primaryResults = await apiCall('POST', primaryPath, {
+      ...retrievalPlan.body,
       project,
-      max_memories: 15,
     });
 
-    // 2. Secondary: /api/search/quick (Qdrant hybrid) to catch what recall deduped
-    quickResults = await apiCall('POST', '/api/search/quick', {
-      query: question,
-      project,
-      limit: 20,
-    });
-
-    // 3. Merge both result sets — recall first (higher quality), then quick fills gaps
-    const recallNorm = normalizeSearchResults(recallResults);
-    const quickNorm = normalizeSearchResults(quickResults);
-    const seenIds = new Set(recallNorm.map(r => r.id));
-    const merged = [...recallNorm];
-    for (const r of quickNorm) {
-      if (!seenIds.has(r.id)) {
-        merged.push(r);
-        seenIds.add(r.id);
-      }
+    if (retrievalPlan.route === 'recall') {
+      secondaryResults = await apiCall('POST', '/api/search/quick', {
+        query: question,
+        project,
+        limit: Math.max(retrievalPlan.searchLimit, 15),
+      });
     }
-    searchResults = { results: merged };
+
+    searchResults = {
+      results: mergeRetrievalResults(primaryResults, secondaryResults, retrievalPlan.searchLimit)
+    };
   } catch {
     searchResults = { results: [] };
   }
   const searchLatencyMs = Date.now() - searchStart;
 
   const projectResults = normalizeSearchResults(searchResults);
-  const fallbackResults = [];
-  // Use all available results — oracle dataset has only 10-18 memories per question
-  const selectedResults = selectContextResults(searchResults, 15);
+  const selectedResults = selectContextResults(searchResults, retrievalPlan.searchLimit);
+  const context = buildBenchmarkContext(
+    { results: selectedResults },
+    { maxItems: retrievalPlan.contextLimit, maxChars: 7000 }
+  );
 
-  // Build context in official LongMemEval session format
-  // Use raw haystack_dates from the instance for accurate date display
-  const haystackDates = instance.haystack_dates || [];
-  let context = '';
-  {
-    const maxChars = 10000;
-    let totalChars = 0;
-    const sessionBlocks = [];
-    for (let i = 0; i < selectedResults.length; i++) {
-      const r = selectedResults[i];
-      // Extract session index from title (format: LME:{qid}:s{idx}:r{round})
-      let sessionDate = r.date || 'Unknown';
-      const titleMatch = (r.title || '').match(/:s(\d+):/);
-      if (titleMatch) {
-        const sessionIdx = parseInt(titleMatch[1], 10);
-        if (haystackDates[sessionIdx]) {
-          sessionDate = haystackDates[sessionIdx]; // Raw date like "2023/05/20 (Sat) 02:21"
-        }
-      }
-      const block = `### Session ${i + 1}:\nSession Date: ${sessionDate}\nSession Content:\n${r.content}`;
-      if (totalChars + block.length > maxChars) break;
-      sessionBlocks.push(block);
-      totalChars += block.length;
-    }
-    context = sessionBlocks.join('\n\n');
-  }
-
-  // Generate hypothesis using Groq
-  // Match official LongMemEval prompt exactly: user-only (no system prompt), CoT, 500 max tokens
   let hypothesis;
   const generationStart = Date.now();
   try {
-    const dateStr = question_date || 'Unknown';
-    const userPrompt = context.length > 50
-      ? `I will give you several history chats between you and a user. Please answer the question based on the relevant chat history. Answer the question step by step: first extract all the relevant information, and then reason over the information to get the answer.\n\n\nHistory Chats:\n\n${context}\n\nCurrent Date: ${dateStr}\nQuestion: ${question}\nAnswer (step by step):`
-      : `Current Date: ${dateStr}\nQuestion: ${question}\nAnswer:`;
+    const userPrompt = buildGenerationPrompt({
+      context,
+      question,
+      questionDate: question_date,
+      systemHint: retrievalPlan.systemHint
+    });
 
-    // Official format: user-only prompt, no system prompt, temperature 0, 500 max tokens
     hypothesis = await groqChat([
       { role: 'user', content: userPrompt },
-    ], { maxTokens: 500 });
+    ], { maxTokens: 120 });
 
-    // Fallback to llama if reasoning model returns empty
     if (!hypothesis || hypothesis.trim().length === 0) {
       console.warn(`  [fallback] ${question_id}: ${GROQ_MODEL} returned empty, trying llama-3.3-70b-versatile`);
       hypothesis = await groqChat([
         { role: 'user', content: userPrompt },
-      ], { model: 'llama-3.3-70b-versatile', maxTokens: 500 });
+      ], { model: 'llama-3.3-70b-versatile', maxTokens: 120 });
     }
   } catch (err) {
     console.warn(`  [groq-fail] ${question_id}: ${err.message.slice(0, 100)}`);
@@ -646,11 +669,11 @@ async function evaluateInstance(instance) {
     isAbstention,
     hypothesis: hypothesis.trim(),
     retrieval: {
-      route: 'recall+quick (full engine)',
+      route: secondaryResults ? `${retrievalPlan.route}+quick` : retrievalPlan.route,
       query: question,
       projectResultCount: projectResults.length,
-      recallResultCount: normalizeSearchResults(recallResults).length,
-      quickResultCount: normalizeSearchResults(quickResults).length,
+      recallResultCount: retrievalPlan.route === 'recall' ? normalizeSearchResults(primaryResults).length : 0,
+      quickResultCount: normalizeSearchResults(secondaryResults).length,
       resultCount: normalizeSearchResults(searchResults).length,
       selectedContextCount: selectedResults.length,
       contextChars: context.length,
@@ -1081,6 +1104,8 @@ export {
   normalizeSearchResult,
   normalizeSearchResults,
   selectContextResults,
+  mergeRetrievalResults,
+  buildGenerationPrompt,
   looksLikeAbstention,
   classifyLongMemEvalBottleneck,
   summarizeEntries,

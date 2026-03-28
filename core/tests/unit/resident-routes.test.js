@@ -7,7 +7,7 @@ test('resident route dispatcher returns the expected API shapes', async () => {
     async listAgents() {
       return [
         { agent_id: 'faraday', status: 'active' },
-        { agent_id: 'feynman', status: 'planned' },
+        { agent_id: 'feynman', status: 'active' },
       ];
     },
     async startRun(agentId, body) {

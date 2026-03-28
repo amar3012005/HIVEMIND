@@ -133,6 +133,52 @@ test('resident run manager executes Faraday and records structured observations'
   assert.ok(storedTrail.blueprintMeta.semantic_probes.length >= 3);
 });
 
+test('resident run manager executes Feynman against the latest Faraday trail mark', async () => {
+  const executorStore = new InMemoryStore();
+  const graphStore = createMemoryStoreFixture();
+  const manager = new ResidentRunManager({
+    store: executorStore,
+    graphStore,
+    logger: { warn() {}, log() {} },
+  });
+
+  await manager.seedAgents();
+
+  const faraday = await manager.runAgent('faraday', {
+    project: 'proj-a',
+    scope: 'project',
+    goal: 'inspect code/test gaps',
+    region: 'core/src/auth',
+  });
+  const completedFaraday = await waitForRun(manager, faraday.run_id);
+  assert.equal(completedFaraday.status, 'completed');
+
+  const feynman = await manager.runAgent('feynman', {
+    project: 'proj-a',
+    scope: 'project',
+    goal: 'explain the strongest resident signals',
+    region: 'core/src/auth',
+  });
+  const completedFeynman = await waitForRun(manager, feynman.run_id);
+
+  assert.equal(completedFeynman.status, 'completed');
+  assert.ok(completedFeynman.observations_count >= 1);
+  assert.equal(completedFeynman.result.observations[0].kind, 'hypothesis');
+  assert.ok(Array.isArray(completedFeynman.result?.hypotheses));
+  assert.ok(completedFeynman.result.hypotheses.length >= 1);
+  assert.equal(completedFeynman.result.trail_mark.kind, 'resident_hypothesis_mark');
+  assert.match(completedFeynman.result.trail_mark.next_agent_prompt, /Turing/i);
+
+  const storedTrail = await executorStore.getTrail(completedFeynman.result.trail_mark.trail_id);
+  assert.ok(storedTrail);
+  assert.equal(storedTrail.kind, 'resident_hypothesis_mark');
+  assert.equal(storedTrail.blueprintMeta.resident_hypothesis_mark, true);
+
+  const storedObservations = await executorStore.listObservations({ agentId: 'feynman' });
+  assert.ok(storedObservations.length >= 1);
+  assert.equal(storedObservations[0].kind, 'hypothesis');
+});
+
 test('resident run manager can cancel a queued run and exposes failure for unsupported agents', async () => {
   const executorStore = new InMemoryStore();
   const manager = new ResidentRunManager({
@@ -145,6 +191,11 @@ test('resident run manager can cancel a queued run and exposes failure for unsup
   assert.equal(cancelled, null);
 
   const unsupported = await manager.runAgent('feynman', { project: 'proj-a' });
-  assert.equal(unsupported.status, 'failed');
-  assert.match(unsupported.error, /Only Faraday/);
+  const failedFeynman = await waitForRun(manager, unsupported.run_id);
+  assert.equal(failedFeynman.status, 'failed');
+  assert.match(failedFeynman.error, /No completed Faraday run/);
+
+  const unsupportedAgent = await manager.runAgent('turing', { project: 'proj-a' });
+  assert.equal(unsupportedAgent.status, 'failed');
+  assert.match(unsupportedAgent.error, /Faraday and Feynman/);
 });

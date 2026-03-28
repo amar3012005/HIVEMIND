@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import {
   FARADAY_OBSERVATION_FIELDS,
   FARADAY_OBSERVATION_KINDS,
+  FEYNMAN_OBSERVATION_FIELDS,
+  FEYNMAN_OBSERVATION_KINDS,
   RESIDENT_AGENT_ENDPOINTS,
   RESIDENT_AGENT_IDS,
   RESIDENT_RUN_STATES,
@@ -24,7 +26,7 @@ test('resident agent contract exposes stable endpoint names for the frontend', (
 
   assert.equal(RESIDENT_AGENT_ENDPOINTS.runAgent.method, 'POST');
   assert.equal(RESIDENT_AGENT_ENDPOINTS.runAgent.pathTemplate, '/api/swarm/resident/agents/:agent_id/run');
-  assert.deepEqual(RESIDENT_AGENT_ENDPOINTS.runAgent.requestKeys, ['scope', 'goal', 'project', 'region', 'dry_run']);
+  assert.deepEqual(RESIDENT_AGENT_ENDPOINTS.runAgent.requestKeys, ['scope', 'goal', 'project', 'region', 'dry_run', 'run_id', 'trail_id']);
   assert.deepEqual(RESIDENT_AGENT_ENDPOINTS.runAgent.responseKeys, ['run_id', 'agent_id', 'status', 'scope', 'started_at']);
 
   assert.equal(RESIDENT_AGENT_ENDPOINTS.getRun.pathTemplate, '/api/swarm/resident/runs/:run_id');
@@ -88,6 +90,8 @@ test('resident run lifecycle has explicit states and explicit observation kinds'
     'related_to_trail',
     'timestamp',
   ]);
+  assert.deepEqual(FEYNMAN_OBSERVATION_KINDS, ['hypothesis']);
+  assert.deepEqual(FEYNMAN_OBSERVATION_FIELDS, FARADAY_OBSERVATION_FIELDS);
 });
 
 test('resident fixtures are frontend-consumable without guessing field names', () => {

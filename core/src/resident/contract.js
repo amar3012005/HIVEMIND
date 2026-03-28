@@ -16,7 +16,7 @@ export const RESIDENT_AGENT_ENDPOINTS = {
   runAgent: {
     method: 'POST',
     pathTemplate: '/api/swarm/resident/agents/:agent_id/run',
-    requestKeys: ['scope', 'goal', 'project', 'region', 'dry_run'],
+    requestKeys: ['scope', 'goal', 'project', 'region', 'dry_run', 'run_id', 'trail_id'],
     responseKeys: ['run_id', 'agent_id', 'status', 'scope', 'started_at'],
   },
   getRun: {
@@ -62,6 +62,10 @@ export const FARADAY_OBSERVATION_KINDS = [
   'reasoning_trail',
 ];
 
+export const FEYNMAN_OBSERVATION_KINDS = [
+  'hypothesis',
+];
+
 export const FARADAY_OBSERVATION_FIELDS = [
   'id',
   'agent_id',
@@ -72,3 +76,5 @@ export const FARADAY_OBSERVATION_FIELDS = [
   'related_to_trail',
   'timestamp',
 ];
+
+export const FEYNMAN_OBSERVATION_FIELDS = FARADAY_OBSERVATION_FIELDS;

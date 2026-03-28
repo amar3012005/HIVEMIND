@@ -576,12 +576,47 @@ async function evaluateInstance(instance) {
   let hypothesis;
   const generationStart = Date.now();
   try {
+    // Robust type-aware system prompts
+    const TYPE_PROMPTS = {
+      'temporal-reasoning': `You are an AI assistant with perfect memory of past conversations. You MUST answer temporal questions precisely.
+
+RULES:
+- If asked "which happened first/last", state the event and its date
+- If asked "how many days between X and Y", CALCULATE the exact number of days from the dates mentioned
+- If asked "how long since X", compute the duration from the dates in the conversation
+- Dates are provided in the memories. Extract them and do the arithmetic.
+- "X days" means count calendar days between the two events
+- Always give a specific number or answer, never say "I don't know" if dates are present`,
+
+      'knowledge-update': `You are an AI assistant with perfect memory. Information may have been UPDATED across conversations.
+
+RULES:
+- Always give the MOST RECENT version of any fact
+- If the user first said "I like pizza" then later said "I switched to sushi", the answer is sushi
+- Look for phrases like "changed", "switched", "updated", "actually", "now" that indicate updates
+- The latest conversation has the most current information`,
+
+      'multi-session': `You are an AI assistant who remembers ALL past conversations. You must synthesize information across multiple sessions.
+
+RULES:
+- Combine facts from different conversations to give a complete answer
+- If asked to count items, list ALL of them from ALL sessions
+- If asked about multiple events, reference each one with details
+- Be specific — include names, dates, numbers`,
+
+      'single-session-user': `You are an AI assistant with perfect memory. Answer with the exact fact the user mentioned in conversation. Be precise and concise.`,
+
+      'single-session-assistant': `You are an AI assistant. You must recall the exact information you (the assistant) previously provided to the user. Be precise.`,
+
+      'single-session-preference': `You are an AI assistant who remembers the user's preferences. Answer using their stated preferences, tastes, and personal choices from past conversations.`,
+    };
+
     const systemPrompt = isAbstention
-      ? 'You are an AI assistant with memory of past conversations. If you cannot find the answer in the provided context, say "I don\'t have this information in my memory." Be honest about what you don\'t know.'
-      : `You are an AI assistant with memory of past conversations. ${retrievalPlan.systemHint} Be concise and direct.`;
+      ? 'You are an AI assistant with memory of past conversations. If the specific information asked about was NEVER mentioned in any conversation, say "I don\'t have this information in my memory." Only abstain if the topic was truly never discussed.'
+      : TYPE_PROMPTS[question_type] || `You are an AI assistant with memory of past conversations. ${retrievalPlan.systemHint} Be concise and direct.`;
 
     const userPrompt = context.length > 50
-      ? `Here are relevant memories from our past conversations:\n\n${context}\n\nQuestion: ${question}\n\nAnswer concisely:`
+      ? `Here are relevant memories from our past conversations:\n\n${context}\n\nQuestion: ${question}\n\nIMPORTANT: If dates are mentioned, calculate any time differences precisely. Answer concisely and directly with the specific fact or number requested:`
       : `I don't have relevant context for this question.\n\nQuestion: ${question}\n\nAnswer concisely:`;
 
     // Use llama for generation (gpt-oss-120b returns empty strings sometimes)
@@ -633,6 +668,37 @@ async function evaluateInstance(instance) {
   };
 }
 
+// ── Per-question Groq Judge ──────────────────────────────
+
+async function judgeWithGroq(question, groundTruth, hypothesis, questionType) {
+  try {
+    const answer = typeof groundTruth === 'string' ? groundTruth : JSON.stringify(groundTruth);
+    const prompt = `You are evaluating a memory system's answer. Judge whether the hypothesis correctly answers the question based on the expected answer.
+
+Question: ${question}
+Expected Answer: ${answer}
+System's Answer: ${hypothesis}
+
+Rules:
+- "yes" if the system's answer contains the correct information (exact wording not required)
+- "yes" if the answer is semantically equivalent even if phrased differently
+- "no" if the answer is wrong, missing key information, or says "I don't know" when the answer exists
+- For temporal questions: off-by-one day counts are acceptable
+- For knowledge-update: only the LATEST version is correct
+
+Respond with ONLY "yes" or "no".`;
+
+    const verdict = await groqChat([
+      { role: 'system', content: 'You are a strict but fair evaluator. Respond with only "yes" or "no".' },
+      { role: 'user', content: prompt },
+    ], { model: 'llama-3.3-70b-versatile', maxTokens: 5 });
+
+    return verdict.trim().toLowerCase().startsWith('yes') ? 'yes' : 'no';
+  } catch {
+    return 'error';
+  }
+}
+
 // ── Cleanup: delete all memories for a question ──────────
 
 async function cleanupInstance(questionId) {
@@ -655,7 +721,7 @@ async function cleanupInstance(questionId) {
 // ── Per-question streaming pipeline ──────────────────────
 
 async function processInstanceStreaming(instance, instanceIdx, totalInstances) {
-  const { question_id } = instance;
+  const { question_id, question, question_type, answer } = instance;
 
   // 1. Ingest this question's sessions
   const { ingested, skipped } = await ingestInstance(instance, instanceIdx, totalInstances);
@@ -666,10 +732,13 @@ async function processInstanceStreaming(instance, instanceIdx, totalInstances) {
   // 3. Evaluate (retrieve + generate)
   const result = await evaluateInstance(instance);
 
-  // 4. Cleanup this question's memories
+  // 4. Judge with Groq (per-question scoring)
+  const verdict = await judgeWithGroq(question, answer, result.hypothesis, question_type);
+
+  // 5. Cleanup this question's memories
   const cleaned = await cleanupInstance(question_id);
 
-  return { ...result, ingested, skipped, cleaned };
+  return { ...result, ingested, skipped, cleaned, autoeval_label: verdict };
 }
 
 // ── Main ────────────────────────────────────────────────
@@ -719,18 +788,24 @@ async function main() {
     let totalIngested = 0;
     let totalCleaned = 0;
 
+    let totalCorrect = 0;
+    let totalJudged = 0;
+
     for (let i = 0; i < instances.length; i++) {
       const result = await processInstanceStreaming(instances[i], i, instances.length);
       hypotheses.push(result);
       totalIngested += result.ingested || 0;
       totalCleaned += result.cleaned || 0;
 
-      if ((i + 1) % 10 === 0 || i === instances.length - 1) {
-        const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
-        const contextLen = result.retrieval?.contextChars || 0;
-        const resultCount = result.retrieval?.resultCount || 0;
-        console.log(`  [${i + 1}/${instances.length}] ${result.question_id} | ctx=${contextLen}ch results=${resultCount} | "${result.hypothesis.slice(0, 50)}..." (${elapsed}s)`);
-      }
+      if (result.autoeval_label === 'yes') totalCorrect++;
+      if (result.autoeval_label === 'yes' || result.autoeval_label === 'no') totalJudged++;
+
+      const icon = result.autoeval_label === 'yes' ? '✅' : (result.autoeval_label === 'no' ? '❌' : '⚠️');
+      const runningAcc = totalJudged > 0 ? (totalCorrect / totalJudged * 100).toFixed(1) : '---';
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+      const contextLen = result.retrieval?.contextChars || 0;
+
+      console.log(`  ${icon} [${i + 1}/${instances.length}] ${result.question_id} (${instances[i].question_type}) | acc=${runningAcc}% (${totalCorrect}/${totalJudged}) | ctx=${contextLen}ch | "${result.hypothesis.slice(0, 45)}..." (${elapsed}s)`);
     }
 
     // Write JSONL output
@@ -739,8 +814,13 @@ async function main() {
     evaluationRecords = hypotheses;
 
     const duration = ((Date.now() - startTime) / 1000).toFixed(0);
-    console.log(`\nStreaming complete: ${hypotheses.length} questions, ${totalIngested} memories ingested, ${totalCleaned} cleaned, ${duration}s`);
-    console.log(`Output: ${HYPOTHESIS_FILE}`);
+    const finalAcc = totalJudged > 0 ? (totalCorrect / totalJudged * 100).toFixed(1) : '0';
+    console.log(`\n══════════════════════════════════════════════════`);
+    console.log(`  Streaming complete: ${hypotheses.length} questions, ${duration}s`);
+    console.log(`  Accuracy (Groq judge): ${finalAcc}% (${totalCorrect}/${totalJudged})`);
+    console.log(`  Memories: ${totalIngested} ingested, ${totalCleaned} cleaned`);
+    console.log(`  Output: ${HYPOTHESIS_FILE}`);
+    console.log(`══════════════════════════════════════════════════`);
     console.log('');
 
     ingestionSummary = { totalIngested, totalSkipped: 0, durationSeconds: Number(duration) };

@@ -209,7 +209,8 @@ export class ResidentRunManager {
       ? result.observations.map((observation) => observation.id).filter(Boolean)
       : [];
 
-    const trailId = `resident-faraday-${run.run_id}`;
+    const trailId = randomUUID();
+    const markKey = `resident-faraday:${run.run_id}`;
     const goalId = `resident:${run.scope}:${run.project || 'workspace'}`;
     const label = topCluster?.label || 'semantic scan';
     const nextAgentPrompt = topCluster
@@ -219,6 +220,7 @@ export class ResidentRunManager {
     return {
       id: trailId,
       trail_id: trailId,
+      mark_key: markKey,
       goalId,
       agentId: 'faraday',
       status: 'active',
@@ -233,6 +235,7 @@ export class ResidentRunManager {
       observation_ids: observationIds,
       blueprintMeta: {
         resident_mark: true,
+        mark_key: markKey,
         run_id: run.run_id,
         scope: run.scope,
         project: run.project,
@@ -249,6 +252,7 @@ export class ResidentRunManager {
         params: {
           run_id: run.run_id,
           trail_id: trailId,
+          mark_key: markKey,
           scope: run.scope,
           project: run.project,
           region: run.region,

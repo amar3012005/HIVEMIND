@@ -69,6 +69,18 @@ const logger = {
   debug: (msg, ctx) => console.debug(`[INSIGHT-FORGE DEBUG] ${msg}`, ctx || {})
 };
 
+function isScopedResult(result, { userId, orgId, project }) {
+  const payload = result?.payload || result?.memory || result || {};
+  const payloadUserId = payload.user_id || payload.userId || null;
+  const payloadOrgId = payload.org_id || payload.orgId || null;
+  const payloadProject = payload.project || null;
+
+  if (userId && payloadUserId && payloadUserId !== userId) return false;
+  if (orgId && payloadOrgId && payloadOrgId !== orgId) return false;
+  if (project && payloadProject && payloadProject !== project) return false;
+  return true;
+}
+
 // ==========================================
 // System Prompts
 // ==========================================
@@ -509,7 +521,11 @@ export class InsightForge {
 
         return {
           subQuery,
-          results: results.results || [],
+          results: (results.results || []).filter(result => isScopedResult(result, {
+            userId,
+            orgId,
+            project
+          })),
           durationMs: Date.now() - startTime,
           success: true
         };

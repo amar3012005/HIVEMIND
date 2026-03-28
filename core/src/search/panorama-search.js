@@ -71,6 +71,18 @@ const logger = {
   debug: (msg, ctx) => console.debug(`[PANORAMA DEBUG] ${msg}`, ctx || {})
 };
 
+function isScopedPanoramaResult(result, { userId, orgId, project }) {
+  const payload = result?.payload || result?.memory || result || {};
+  const payloadUserId = payload.user_id || payload.userId || null;
+  const payloadOrgId = payload.org_id || payload.orgId || null;
+  const payloadProject = payload.project || null;
+
+  if (userId && payloadUserId && payloadUserId !== userId) return false;
+  if (orgId && payloadOrgId && payloadOrgId !== orgId) return false;
+  if (project && payloadProject && payloadProject !== project) return false;
+  return true;
+}
+
 // ==========================================
 // PanoramaSearch Class
 // ==========================================
@@ -257,8 +269,14 @@ export class PanoramaSearch {
       project
     });
 
+    const enforceScope = (items = []) => items.filter(result => isScopedPanoramaResult(result, {
+      userId,
+      orgId,
+      project
+    }));
+
     // Perform hybrid search
-    const results = await hybridSearch.hybridSearch({
+    let results = await hybridSearch.hybridSearch({
       query,
       userId,
       orgId,
@@ -273,6 +291,38 @@ export class PanoramaSearch {
       weights,
       depth: 'full'
     });
+
+    results = {
+      ...results,
+      results: enforceScope(results.results || [])
+    };
+
+    if ((results.results || []).length === 0) {
+      const fallbackResults = await hybridSearch.hybridSearch({
+        query,
+        userId,
+        orgId,
+        project,
+        isLatest: includeHistorical ? undefined : true,
+        limit,
+        includeExpired,
+        includeHistorical,
+        dateRange,
+        vectorScoreThreshold: 0,
+        finalScoreThreshold: 0,
+        weights: {
+          vector: 0.7,
+          keyword: 0.2,
+          graph: 0.1
+        },
+        depth: 'full'
+      });
+
+      results = {
+        ...fallbackResults,
+        results: enforceScope(fallbackResults.results || [])
+      };
+    }
 
     // If graph store is available, enhance with graph traversal
     if (this.graphStore) {

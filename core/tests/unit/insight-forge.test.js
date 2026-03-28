@@ -9,12 +9,29 @@ test('InsightForge scopes sub-query searches by project', async () => {
 
   hybridSearch.hybridSearch = async (options) => {
     calls.push(options);
-    return { results: [] };
+    return {
+      results: [
+        {
+          id: `${options.query}-match`,
+          payload: {
+            project: 'benchmark-project',
+            user_id: '00000000-0000-4000-8000-000000001231'
+          }
+        },
+        {
+          id: `${options.query}-leak`,
+          payload: {
+            project: 'wrong-project',
+            user_id: '00000000-0000-4000-8000-000000001231'
+          }
+        }
+      ]
+    };
   };
 
   try {
     const forge = new InsightForge({ llmClient: { generate: async () => '' } });
-    await forge.searchSubQueries(
+    const results = await forge.searchSubQueries(
       [
         { id: 'sq-1', query: 'first event', focus: 'temporal', weight: 0.5 },
         { id: 'sq-2', query: 'second event', focus: 'temporal', weight: 0.5 }
@@ -30,6 +47,14 @@ test('InsightForge scopes sub-query searches by project', async () => {
     assert.equal(calls.length, 2);
     assert.equal(calls[0].project, 'benchmark-project');
     assert.equal(calls[1].project, 'benchmark-project');
+    assert.deepEqual(
+      results[0].results.map((item) => item.id),
+      ['first event-match']
+    );
+    assert.deepEqual(
+      results[1].results.map((item) => item.id),
+      ['second event-match']
+    );
   } finally {
     hybridSearch.hybridSearch = originalHybridSearch;
   }

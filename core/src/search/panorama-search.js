@@ -368,6 +368,19 @@ export class PanoramaSearch {
       limit
     } = options;
 
+    const keywordFallback = await hybridSearch.keywordSearch(query, {
+      userId,
+      orgId,
+      project,
+      isLatest: includeHistorical ? undefined : true,
+      dateRange,
+      limit: Math.max(limit * 2, 20),
+      minScore: 0
+    });
+    if (keywordFallback.length > 0) {
+      return keywordFallback.slice(0, limit);
+    }
+
     const prisma = getPrismaClient();
     if (!prisma) {
       return [];

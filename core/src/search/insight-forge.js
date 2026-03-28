@@ -77,7 +77,7 @@ function isScopedResult(result, { userId, orgId, project }) {
 
   if (userId && payloadUserId && payloadUserId !== userId) return false;
   if (orgId && payloadOrgId && payloadOrgId !== orgId) return false;
-  if (project && payloadProject && payloadProject !== project) return false;
+  if (project && payloadProject !== project) return false;
   return true;
 }
 

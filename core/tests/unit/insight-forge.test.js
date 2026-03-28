@@ -15,14 +15,23 @@ test('InsightForge scopes sub-query searches by project', async () => {
           id: `${options.query}-match`,
           payload: {
             project: 'benchmark-project',
-            user_id: '00000000-0000-4000-8000-000000001231'
+            user_id: '00000000-0000-4000-8000-000000001231',
+            org_id: '00000000-0000-4000-8000-000000001232'
           }
         },
         {
           id: `${options.query}-leak`,
           payload: {
             project: 'wrong-project',
-            user_id: '00000000-0000-4000-8000-000000001231'
+            user_id: '00000000-0000-4000-8000-000000001231',
+            org_id: '00000000-0000-4000-8000-000000001232'
+          }
+        },
+        {
+          id: `${options.query}-missing-project`,
+          payload: {
+            user_id: '00000000-0000-4000-8000-000000001231',
+            org_id: '00000000-0000-4000-8000-000000001232'
           }
         }
       ]

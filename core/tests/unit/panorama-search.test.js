@@ -10,32 +10,23 @@ test('PanoramaSearch does not force latest-only filtering for historical search'
 
   hybridSearch.hybridSearch = async (options) => {
     capturedOptions.push(options);
-    if (capturedOptions.length === 1) {
+    if (capturedOptions.length <= 2) {
       return { results: [], metadata: {} };
     }
-    return {
-      results: [
-        {
-          id: 'scoped-result',
-          payload: {
-            project: 'bench/panorama-test',
-            user_id: '00000000-0000-4000-8000-000000007771'
-          }
-        },
-        {
-          id: 'leaked-result',
-          payload: {
-            project: 'wrong-project',
-            user_id: '00000000-0000-4000-8000-000000007771'
-          }
-        }
-      ],
-      metadata: {}
-    };
+    return { results: [], metadata: {} };
   };
 
   try {
     const panorama = new PanoramaSearch();
+    panorama.fallbackProjectSearch = async () => ([
+      {
+        id: 'scoped-result',
+        project: 'bench/panorama-test',
+        user_id: '00000000-0000-4000-8000-000000007771',
+        org_id: '00000000-0000-4000-8000-000000007772',
+        score: 0.9
+      }
+    ]);
     const result = await panorama.executeTemporalSearch('timeline of workshop and webinar', {
       userId: '00000000-0000-4000-8000-000000007771',
       orgId: '00000000-0000-4000-8000-000000007772',

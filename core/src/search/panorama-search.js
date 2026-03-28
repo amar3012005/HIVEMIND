@@ -15,6 +15,7 @@ import ranker from '../recall/ranker.js';
 const { rank, formatResults } = ranker;
 import scorer from '../recall/scorer.js';
 const { scoreAndRank, getRecencyComponent } = scorer;
+import { getPrismaClient } from '../db/prisma.js';
 
 // ==========================================
 // Configuration
@@ -79,8 +80,19 @@ function isScopedPanoramaResult(result, { userId, orgId, project }) {
 
   if (userId && payloadUserId && payloadUserId !== userId) return false;
   if (orgId && payloadOrgId && payloadOrgId !== orgId) return false;
-  if (project && payloadProject && payloadProject !== project) return false;
+  if (project && payloadProject !== project) return false;
   return true;
+}
+
+function lexicalProjectScore(query = '', text = '') {
+  const queryTokens = String(query)
+    .toLowerCase()
+    .split(/[^a-z0-9]+/i)
+    .filter(token => token.length >= 3);
+  const haystack = String(text).toLowerCase();
+  if (queryTokens.length === 0 || !haystack) return 0;
+  const matched = queryTokens.filter(token => haystack.includes(token));
+  return matched.length / queryTokens.length;
 }
 
 // ==========================================
@@ -324,6 +336,22 @@ export class PanoramaSearch {
       };
     }
 
+    if ((results.results || []).length === 0) {
+      results = {
+        results: await this.fallbackProjectSearch(query, {
+          userId,
+          orgId,
+          project,
+          includeHistorical,
+          dateRange,
+          limit
+        }),
+        metadata: {
+          fallback: 'project_memory_scan'
+        }
+      };
+    }
+
     // If graph store is available, enhance with graph traversal
     if (this.graphStore) {
       const enhancedResults = await this.enhanceWithGraph(results.results, {
@@ -336,6 +364,54 @@ export class PanoramaSearch {
     }
 
     return results;
+  }
+
+  async fallbackProjectSearch(query, options) {
+    const {
+      userId,
+      orgId,
+      project,
+      includeHistorical,
+      dateRange,
+      limit
+    } = options;
+
+    const prisma = getPrismaClient();
+    if (!prisma) {
+      return [];
+    }
+
+    const where = {
+      user_id: userId,
+      deleted_at: null
+    };
+    if (orgId) where.org_id = orgId;
+    if (project) where.project = project;
+    if (!includeHistorical) where.is_latest = true;
+    if (dateRange?.start || dateRange?.end) {
+      where.document_date = {};
+      if (dateRange.start) where.document_date.gte = new Date(dateRange.start);
+      if (dateRange.end) where.document_date.lte = new Date(dateRange.end);
+    }
+
+    const memories = await prisma.memory.findMany({
+      where,
+      orderBy: [
+        { document_date: 'desc' },
+        { created_at: 'desc' }
+      ],
+      take: Math.max(limit * 3, 20)
+    });
+
+    return memories
+      .map(memory => ({
+        ...memory,
+        score: lexicalProjectScore(query, `${memory.title || ''} ${memory.content || ''}`),
+        source: 'panorama_fallback'
+      }))
+      .filter(result => result.score > 0)
+      .sort((left, right) => right.score - left.score)
+      .slice(0, limit);
   }
 
   /**

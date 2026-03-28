@@ -8,6 +8,7 @@ test('resident route dispatcher returns the expected API shapes', async () => {
       return [
         { agent_id: 'faraday', status: 'active' },
         { agent_id: 'feynman', status: 'active' },
+        { agent_id: 'turing', status: 'active' },
       ];
     },
     async startRun(agentId, body) {
@@ -75,7 +76,7 @@ test('resident route dispatcher returns the expected API shapes', async () => {
 
   const agents = await routes.dispatch({ pathname: '/api/swarm/resident/agents', method: 'GET' });
   assert.equal(agents.statusCode, 200);
-  assert.equal(agents.body.count, 2);
+  assert.equal(agents.body.count, 3);
   assert.equal(agents.body.agents[0].agent_id, 'faraday');
 
   const started = await routes.dispatch({

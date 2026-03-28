@@ -168,6 +168,9 @@ test('resident run manager executes Feynman against the latest Faraday trail mar
   assert.ok(completedFeynman.result.hypotheses.length >= 1);
   assert.equal(completedFeynman.result.trail_mark.kind, 'resident_hypothesis_mark');
   assert.match(completedFeynman.result.trail_mark.next_agent_prompt, /Turing/i);
+  assert.ok(Array.isArray(completedFeynman.result.hypotheses[0].verification_checks));
+  assert.ok(completedFeynman.result.hypotheses[0].verification_checks.length >= 2);
+  assert.ok(completedFeynman.result.hypotheses[0].supporting_evidence_summary || completedFeynman.result.trail_mark.hypotheses[0].supporting_evidence_summary);
 
   const storedTrail = await executorStore.getTrail(completedFeynman.result.trail_mark.trail_id);
   assert.ok(storedTrail);
@@ -177,6 +180,63 @@ test('resident run manager executes Feynman against the latest Faraday trail mar
   const storedObservations = await executorStore.listObservations({ agentId: 'feynman' });
   assert.ok(storedObservations.length >= 1);
   assert.equal(storedObservations[0].kind, 'hypothesis');
+});
+
+test('resident run manager executes Turing against the latest Feynman hypotheses', async () => {
+  const executorStore = new InMemoryStore();
+  const graphStore = createMemoryStoreFixture();
+  const manager = new ResidentRunManager({
+    store: executorStore,
+    graphStore,
+    logger: { warn() {}, log() {} },
+  });
+
+  await manager.seedAgents();
+
+  const faraday = await manager.runAgent('faraday', {
+    project: 'proj-a',
+    scope: 'project',
+    goal: 'inspect code/test gaps',
+    region: 'core/src/auth',
+  });
+  const completedFaraday = await waitForRun(manager, faraday.run_id);
+  assert.equal(completedFaraday.status, 'completed');
+
+  const feynman = await manager.runAgent('feynman', {
+    project: 'proj-a',
+    scope: 'project',
+    goal: 'explain the strongest resident signals',
+    region: 'core/src/auth',
+  });
+  const completedFeynman = await waitForRun(manager, feynman.run_id);
+  assert.equal(completedFeynman.status, 'completed');
+
+  const turing = await manager.runAgent('turing', {
+    project: 'proj-a',
+    scope: 'project',
+    goal: 'verify the strongest resident hypotheses',
+    region: 'core/src/auth',
+  });
+  const completedTuring = await waitForRun(manager, turing.run_id);
+
+  assert.equal(completedTuring.status, 'completed');
+  assert.ok(completedTuring.observations_count >= 1);
+  assert.equal(completedTuring.result.observations[0].kind, 'verification');
+  assert.ok(Array.isArray(completedTuring.result?.verification_results));
+  assert.ok(completedTuring.result.verification_results.length >= 1);
+  assert.equal(completedTuring.result.trail_mark.kind, 'resident_verification_mark');
+  assert.ok(
+    completedTuring.result.verification_results.some((item) => ['likely_true', 'uncertain', 'weak'].includes(item.verdict)),
+  );
+
+  const storedTrail = await executorStore.getTrail(completedTuring.result.trail_mark.trail_id);
+  assert.ok(storedTrail);
+  assert.equal(storedTrail.kind, 'resident_verification_mark');
+  assert.equal(storedTrail.blueprintMeta.resident_verification_mark, true);
+
+  const storedObservations = await executorStore.listObservations({ agentId: 'turing' });
+  assert.ok(storedObservations.length >= 1);
+  assert.equal(storedObservations[0].kind, 'verification');
 });
 
 test('resident run manager can cancel a queued run and exposes failure for unsupported agents', async () => {
@@ -195,7 +255,12 @@ test('resident run manager can cancel a queued run and exposes failure for unsup
   assert.equal(failedFeynman.status, 'failed');
   assert.match(failedFeynman.error, /No completed Faraday run/);
 
-  const unsupportedAgent = await manager.runAgent('turing', { project: 'proj-a' });
+  const unsupportedTuring = await manager.runAgent('turing', { project: 'proj-a' });
+  const failedTuring = await waitForRun(manager, unsupportedTuring.run_id);
+  assert.equal(failedTuring.status, 'failed');
+  assert.match(failedTuring.error, /No completed Feynman run/);
+
+  const unsupportedAgent = await manager.runAgent('unknown-agent', { project: 'proj-a' });
   assert.equal(unsupportedAgent.status, 'failed');
-  assert.match(unsupportedAgent.error, /Faraday and Feynman/);
+  assert.match(unsupportedAgent.error, /Faraday, Feynman, and Turing/);
 });

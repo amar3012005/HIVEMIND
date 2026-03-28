@@ -66,6 +66,10 @@ export const FEYNMAN_OBSERVATION_KINDS = [
   'hypothesis',
 ];
 
+export const TURING_OBSERVATION_KINDS = [
+  'verification',
+];
+
 export const FARADAY_OBSERVATION_FIELDS = [
   'id',
   'agent_id',
@@ -78,3 +82,4 @@ export const FARADAY_OBSERVATION_FIELDS = [
 ];
 
 export const FEYNMAN_OBSERVATION_FIELDS = FARADAY_OBSERVATION_FIELDS;
+export const TURING_OBSERVATION_FIELDS = FARADAY_OBSERVATION_FIELDS;

@@ -1,41 +1,5 @@
 import { randomUUID } from 'node:crypto';
 
-function hypothesisObservation({
-  runId,
-  summary,
-  rationale,
-  hypothesisType,
-  region,
-  confidence,
-  evidenceRefs = [],
-  relatedFiles = [],
-  relatedMemoryIds = [],
-  nextAction,
-  supportingSignals = [],
-}) {
-  return {
-    id: randomUUID(),
-    agent_id: 'feynman',
-    kind: 'hypothesis',
-    certainty: confidence,
-    content: {
-      summary,
-      rationale,
-      hypothesis_type: hypothesisType,
-      region,
-      confidence,
-      evidence_refs: evidenceRefs,
-      related_files: relatedFiles,
-      related_memory_ids: relatedMemoryIds,
-      supporting_signals: supportingSignals,
-      next_action: nextAction,
-    },
-    source_event_id: runId,
-    related_to_trail: runId,
-    timestamp: new Date().toISOString(),
-  };
-}
-
 function normalizeWords(values = []) {
   return values
     .flatMap((value) => String(value || '').toLowerCase().split(/[\s/._:-]+/))
@@ -60,23 +24,6 @@ function inferHypothesisType(cluster = {}) {
   return 'emerging_pattern';
 }
 
-function buildRationale({ cluster, observationKinds = [], scope, goal }) {
-  const parts = [
-    `Faraday grouped ${cluster.count} related memories under "${cluster.label}".`,
-  ];
-  if (cluster.keywords?.length) {
-    parts.push(`Shared keywords: ${cluster.keywords.slice(0, 5).join(', ')}.`);
-  }
-  if (observationKinds.length) {
-    parts.push(`Supporting observations: ${observationKinds.join(', ')}.`);
-  }
-  if (goal) {
-    parts.push(`This aligns with the resident goal: ${goal}.`);
-  }
-  parts.push(`Treat this as a ${scope} explanation candidate until Turing verifies it.`);
-  return parts.join(' ');
-}
-
 function buildSummary(type, cluster) {
   const label = cluster.label || 'semantic region';
   if (type === 'recurring_operational_issue') {
@@ -92,6 +39,153 @@ function buildSummary(type, cluster) {
     return `Hypothesis: ${label} is a repeated pattern cluster worth formalizing.`;
   }
   return `Hypothesis: ${label} is a meaningful semantic pattern, not just an isolated memory.`;
+}
+
+function summariseSupportingSignals(observationKinds = []) {
+  const counts = new Map();
+  for (const kind of observationKinds) {
+    counts.set(kind, (counts.get(kind) || 0) + 1);
+  }
+  return [...counts.entries()].map(([kind, count]) => `${kind}${count > 1 ? ` x${count}` : ''}`);
+}
+
+function buildVerificationChecks(type, cluster) {
+  const label = cluster.label || 'semantic region';
+  if (type === 'recurring_operational_issue') {
+    return [
+      `Check whether the evidence refs for "${label}" span multiple threads or memory sources.`,
+      `Check whether the latest related memories still indicate failure rather than a resolved state.`,
+      `Check whether the same keywords recur in distinct evidence refs, not just one duplicated memory.`,
+    ];
+  }
+  if (type === 'stale_or_conflicting_truth') {
+    return [
+      `Check whether the evidence refs for "${label}" contain contradictory numeric or policy values.`,
+      `Check whether one evidence ref is clearly newer and should supersede the others.`,
+      `Check whether the underlying memories should be linked through an update relationship.`,
+    ];
+  }
+  if (type === 'temporal_update_chain') {
+    return [
+      `Check whether the evidence refs for "${label}" describe a before/after state change.`,
+      `Check whether the latest memory agrees with the proposed timeline.`,
+      `Check whether the cluster mixes two separate schedules that should not be merged.`,
+    ];
+  }
+  return [
+    `Check whether the evidence refs for "${label}" come from more than one conversation or source.`,
+    `Check whether the cluster has enough distinct evidence to justify a reusable finding.`,
+  ];
+}
+
+function buildCounterEvidence(type, cluster) {
+  const label = cluster.label || 'semantic region';
+  if (type === 'recurring_operational_issue') {
+    return `Counter-evidence would be a newer memory showing ${label} was resolved or a single duplicated thread causing the cluster.`;
+  }
+  if (type === 'stale_or_conflicting_truth') {
+    return `Counter-evidence would be a clear latest memory that resolves the older policy statements in ${label}.`;
+  }
+  if (type === 'temporal_update_chain') {
+    return `Counter-evidence would be a latest memory showing no actual state transition for ${label}.`;
+  }
+  return `Counter-evidence would show that ${label} is only one narrow conversation fragment and not a cross-memory pattern.`;
+}
+
+function buildWhyNow({ cluster, faradayRun, scope }) {
+  const count = cluster.count || 0;
+  const updatedAt = faradayRun?.updated_at || faradayRun?.finished_at || null;
+  const timePart = updatedAt ? ` It was surfaced in the latest ${scope} Faraday pass at ${updatedAt}.` : '';
+  if (count >= 5) {
+    return `This matters now because the cluster already spans ${count} related memories, which is large enough to hide repeated failure or stale-truth patterns.${timePart}`;
+  }
+  return `This matters now because the cluster has enough repeated evidence to justify verification before it hardens into graph knowledge.${timePart}`;
+}
+
+function buildEvidenceSummary(cluster = {}) {
+  const fileCount = Array.isArray(cluster.related_files) ? cluster.related_files.length : 0;
+  const evidenceCount = Array.isArray(cluster.evidence_refs) ? cluster.evidence_refs.length : 0;
+  const keywordSummary = (cluster.keywords || []).slice(0, 5).join(', ');
+  return `Cluster size ${cluster.count || 0}; evidence refs ${evidenceCount}; related files ${fileCount}; keywords: ${keywordSummary || 'n/a'}.`;
+}
+
+function buildRationale({ cluster, observationKinds = [], scope, goal }) {
+  const parts = [
+    `Faraday grouped ${cluster.count} related memories under "${cluster.label}".`,
+  ];
+  if (cluster.keywords?.length) {
+    parts.push(`Shared keywords: ${cluster.keywords.slice(0, 5).join(', ')}.`);
+  }
+  const signals = summariseSupportingSignals(observationKinds);
+  if (signals.length) {
+    parts.push(`Supporting observations: ${signals.join(', ')}.`);
+  }
+  if (goal) {
+    parts.push(`This aligns with the resident goal: ${goal}.`);
+  }
+  parts.push(`Treat this as a ${scope} explanation candidate until Turing verifies it.`);
+  return parts.join(' ');
+}
+
+function computeNoveltyScore(cluster = {}) {
+  const evidenceCount = Array.isArray(cluster.evidence_refs) ? cluster.evidence_refs.length : 0;
+  const keywordCount = Array.isArray(cluster.keywords) ? cluster.keywords.length : 0;
+  return Math.min(1, 0.3 + evidenceCount * 0.08 + keywordCount * 0.03);
+}
+
+function computeConfidence(cluster = {}, type) {
+  const base = type === 'stale_or_conflicting_truth' ? 0.58 : 0.54;
+  const count = Math.min(cluster.count || 0, 6);
+  const fileSpread = Math.min((cluster.related_files || []).length, 5);
+  return Math.min(0.94, base + count * 0.05 + fileSpread * 0.02);
+}
+
+function hypothesisObservation({
+  runId,
+  summary,
+  rationale,
+  hypothesisType,
+  region,
+  confidence,
+  whyNow,
+  evidenceSummary,
+  evidenceRefs = [],
+  relatedFiles = [],
+  relatedMemoryIds = [],
+  verificationChecks = [],
+  counterEvidence,
+  nextAction,
+  supportingSignals = [],
+  noveltyScore,
+  claimsToVerify = [],
+}) {
+  return {
+    id: randomUUID(),
+    agent_id: 'feynman',
+    kind: 'hypothesis',
+    certainty: confidence,
+    content: {
+      summary,
+      rationale,
+      hypothesis_type: hypothesisType,
+      region,
+      confidence,
+      why_now: whyNow,
+      supporting_evidence_summary: evidenceSummary,
+      evidence_refs: evidenceRefs,
+      related_files: relatedFiles,
+      related_memory_ids: relatedMemoryIds,
+      supporting_signals: supportingSignals,
+      verification_checks: verificationChecks,
+      counter_evidence: counterEvidence,
+      novelty_score: noveltyScore,
+      claims_to_verify: claimsToVerify,
+      next_action: nextAction,
+    },
+    source_event_id: runId,
+    related_to_trail: runId,
+    timestamp: new Date().toISOString(),
+  };
 }
 
 function buildHypothesisMark({ runId, scope, project, region, goal, hypotheses }) {
@@ -119,8 +213,11 @@ function buildHypothesisMark({ runId, scope, project, region, goal, hypotheses }
       rationale: hypothesis.content.rationale,
       hypothesis_type: hypothesis.content.hypothesis_type,
       confidence: hypothesis.certainty,
+      why_now: hypothesis.content.why_now,
+      supporting_evidence_summary: hypothesis.content.supporting_evidence_summary,
       evidence_refs: hypothesis.content.evidence_refs || [],
       related_files: hypothesis.content.related_files || [],
+      verification_checks: hypothesis.content.verification_checks || [],
     })),
     blueprintMeta: {
       resident_hypothesis_mark: true,
@@ -136,7 +233,10 @@ function buildHypothesisMark({ runId, scope, project, region, goal, hypotheses }
         rationale: hypothesis.content.rationale,
         hypothesis_type: hypothesis.content.hypothesis_type,
         confidence: hypothesis.certainty,
+        why_now: hypothesis.content.why_now,
+        supporting_evidence_summary: hypothesis.content.supporting_evidence_summary,
         evidence_refs: hypothesis.content.evidence_refs || [],
+        verification_checks: hypothesis.content.verification_checks || [],
       })),
       next_agent_prompt: nextPrompt,
     },
@@ -242,7 +342,13 @@ export class FeynmanAgent {
     const observationKinds = faradayObservations.map((observation) => observation.kind).filter(Boolean);
     const hypotheses = semanticClusters.slice(0, 3).map((cluster) => {
       const type = inferHypothesisType(cluster);
-      const confidence = Math.min(0.92, 0.58 + Math.min(cluster.count || 0, 6) * 0.06);
+      const confidence = computeConfidence(cluster, type);
+      const verificationChecks = buildVerificationChecks(type, cluster);
+      const claimsToVerify = [
+        buildSummary(type, cluster).replace(/^Hypothesis:\s*/, '').replace(/\.$/, ''),
+        `Evidence count remains coherent across ${cluster.count || 0} related memories`,
+      ];
+
       return hypothesisObservation({
         runId,
         summary: buildSummary(type, cluster),
@@ -250,11 +356,17 @@ export class FeynmanAgent {
         hypothesisType: type,
         region: cluster.label || region || project || scope,
         confidence,
+        whyNow: buildWhyNow({ cluster, faradayRun, scope }),
+        evidenceSummary: buildEvidenceSummary(cluster),
         evidenceRefs: cluster.evidence_refs || [],
         relatedFiles: cluster.related_files || [],
         relatedMemoryIds: cluster.evidence_refs || [],
+        verificationChecks,
+        counterEvidence: buildCounterEvidence(type, cluster),
+        noveltyScore: computeNoveltyScore(cluster),
+        claimsToVerify,
         nextAction: `Ask Turing to verify whether "${cluster.label}" is a real ${type.replaceAll('_', ' ')}.`,
-        supportingSignals: observationKinds,
+        supportingSignals: summariseSupportingSignals(observationKinds),
       });
     });
 
@@ -303,6 +415,10 @@ export class FeynmanAgent {
         rationale: hypothesis.content.rationale,
         confidence: hypothesis.certainty,
         hypothesis_type: hypothesis.content.hypothesis_type,
+        why_now: hypothesis.content.why_now,
+        supporting_evidence_summary: hypothesis.content.supporting_evidence_summary,
+        verification_checks: hypothesis.content.verification_checks,
+        novelty_score: hypothesis.content.novelty_score,
       })),
       summary: {
         scope,

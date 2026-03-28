@@ -8,6 +8,8 @@ import {
   RESIDENT_AGENT_ENDPOINTS,
   RESIDENT_AGENT_IDS,
   RESIDENT_RUN_STATES,
+  TURING_OBSERVATION_FIELDS,
+  TURING_OBSERVATION_KINDS,
 } from '../../src/resident/contract.js';
 import {
   makeFaradayObservationFixture,
@@ -92,6 +94,8 @@ test('resident run lifecycle has explicit states and explicit observation kinds'
   ]);
   assert.deepEqual(FEYNMAN_OBSERVATION_KINDS, ['hypothesis']);
   assert.deepEqual(FEYNMAN_OBSERVATION_FIELDS, FARADAY_OBSERVATION_FIELDS);
+  assert.deepEqual(TURING_OBSERVATION_KINDS, ['verification']);
+  assert.deepEqual(TURING_OBSERVATION_FIELDS, FARADAY_OBSERVATION_FIELDS);
 });
 
 test('resident fixtures are frontend-consumable without guessing field names', () => {

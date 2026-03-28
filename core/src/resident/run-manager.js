@@ -4,9 +4,11 @@ import {
   FEYNMAN_OBSERVATION_FIELDS,
   RESIDENT_AGENT_IDS,
   RESIDENT_RUN_STATES,
+  TURING_OBSERVATION_FIELDS,
 } from './contract.js';
 import { FaradayAgent } from './faraday.js';
 import { FeynmanAgent } from './feynman.js';
+import { TuringAgent } from './turing.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -46,6 +48,8 @@ function buildAgentDescriptor(agentId) {
     ...base,
     name: 'Turing',
     role: 'verifier',
+    status: 'active',
+    source: 'explicit',
     capabilities: ['verify_hypothesis', 'score_confidence', 'promote_finding'],
     default_scope: 'project',
   };
@@ -67,6 +71,10 @@ export class ResidentRunManager {
       observationStore: this.executorStore,
       logger,
     });
+    this.turing = new TuringAgent({
+      observationStore: this.executorStore,
+      logger,
+    });
   }
 
   async seedAgents() {
@@ -84,7 +92,11 @@ export class ResidentRunManager {
     return this.agentDescriptors.map((agent) => ({
       ...agent,
       run_states: RESIDENT_RUN_STATES,
-      observation_fields: agent.agent_id === 'feynman' ? FEYNMAN_OBSERVATION_FIELDS : FARADAY_OBSERVATION_FIELDS,
+      observation_fields: agent.agent_id === 'feynman'
+        ? FEYNMAN_OBSERVATION_FIELDS
+        : agent.agent_id === 'turing'
+          ? TURING_OBSERVATION_FIELDS
+          : FARADAY_OBSERVATION_FIELDS,
       active_runs: [...this.runs.values()].filter((run) => run.agent_id === agent.agent_id && run.status === 'running').length,
       last_run_at: [...this.runs.values()]
         .filter((run) => run.agent_id === agent.agent_id && run.started_at)
@@ -93,10 +105,10 @@ export class ResidentRunManager {
   }
 
   async runAgent(agentId, payload = {}, context = {}) {
-    if (!['faraday', 'feynman'].includes(agentId)) {
+    if (!['faraday', 'feynman', 'turing'].includes(agentId)) {
       const run = this._createRun(agentId, payload, context);
       run.status = 'failed';
-      run.error = 'Only Faraday and Feynman are implemented in V1';
+      run.error = 'Only Faraday, Feynman, and Turing are implemented in V1';
       run.finished_at = nowIso();
       run.updated_at = run.finished_at;
       this.runs.set(run.run_id, run);
@@ -105,7 +117,11 @@ export class ResidentRunManager {
 
     const run = this._createRun(agentId, payload, context);
     this.runs.set(run.run_id, run);
-    const executor = agentId === 'feynman' ? this._executeFeynman.bind(this) : this._executeFaraday.bind(this);
+    const executor = agentId === 'feynman'
+      ? this._executeFeynman.bind(this)
+      : agentId === 'turing'
+        ? this._executeTuring.bind(this)
+        : this._executeFaraday.bind(this);
     executor(run, payload, context).catch((error) => {
       const current = this.runs.get(run.run_id);
       if (!current || current.status === 'cancelled') return;
@@ -271,6 +287,74 @@ export class ResidentRunManager {
     return this._publicRun(run);
   }
 
+  async _executeTuring(run, payload, context) {
+    run.status = 'running';
+    run.started_at = run.started_at || nowIso();
+    run.updated_at = nowIso();
+    this.runs.set(run.run_id, run);
+
+    const source = await this._resolveTuringSource(payload, run);
+    if (!source) {
+      run.status = 'failed';
+      run.error = 'No completed Feynman run was available for Turing to verify.';
+      run.updated_at = nowIso();
+      run.finished_at = nowIso();
+      this.runs.set(run.run_id, run);
+      return this._publicRun(run);
+    }
+
+    const result = await this.turing.run({
+      agentId: run.agent_id,
+      scope: run.scope,
+      project: run.project,
+      region: run.region,
+      goal: run.goal,
+      dryRun: run.dry_run,
+      runId: run.run_id,
+      feynmanRun: source.run,
+      feynmanTrail: source.trail,
+      hypotheses: source.hypotheses,
+      onProgress: async (progress) => {
+        run.current_step = progress.current_step;
+        run.progress = progress;
+        run.updated_at = nowIso();
+        this.runs.set(run.run_id, run);
+      },
+      isCancelled: () => run.cancel_requested === true,
+    });
+
+    if (run.cancel_requested) {
+      run.status = 'cancelled';
+      run.cancelled_at = run.cancelled_at || nowIso();
+    } else {
+      run.status = result.status || 'completed';
+    }
+
+    run.result = result;
+    run.observations = Array.isArray(result.observations) ? result.observations : [];
+    run.observations_count = result.observations_count ?? run.observations.length;
+    run.current_step = result.current_step || run.current_step;
+    run.summary = result.summary || null;
+
+    const trailMark = result?.trail_mark || null;
+    if (trailMark && this.executorStore?.putTrail) {
+      try {
+        await this.executorStore.putTrail(trailMark);
+      } catch (error) {
+        this.logger?.warn?.('[Resident] Failed to persist Turing verification mark:', error?.message || error);
+      }
+    }
+    run.trail_mark = trailMark;
+    if (run.result && trailMark) {
+      run.result = { ...run.result, trail_mark: trailMark };
+    }
+
+    run.updated_at = nowIso();
+    run.finished_at = run.status === 'running' ? null : (run.finished_at || nowIso());
+    this.runs.set(run.run_id, run);
+    return this._publicRun(run);
+  }
+
   async _resolveFeynmanSource(payload, run) {
     const explicitRunId = payload.run_id || payload.runId || null;
     const explicitTrailId = payload.trail_id || payload.trailId || null;
@@ -323,6 +407,50 @@ export class ResidentRunManager {
       }
     }
     return [];
+  }
+
+  async _resolveTuringSource(payload, run) {
+    const explicitRunId = payload.run_id || payload.runId || null;
+    const explicitTrailId = payload.trail_id || payload.trailId || null;
+
+    if (explicitRunId) {
+      const sourceRun = this.runs.get(explicitRunId) || null;
+      if (sourceRun?.agent_id === 'feynman') {
+        return {
+          run: sourceRun,
+          trail: sourceRun.trail_mark || null,
+          hypotheses: sourceRun.result?.hypotheses || [],
+        };
+      }
+    }
+
+    if (explicitTrailId && this.executorStore?.getTrail) {
+      const trail = await this.executorStore.getTrail(explicitTrailId);
+      if (trail) {
+        const sourceRunId = trail.blueprintMeta?.run_id || null;
+        const sourceRun = sourceRunId ? (this.runs.get(sourceRunId) || null) : null;
+        return {
+          run: sourceRun,
+          trail,
+          hypotheses: sourceRun?.result?.hypotheses || trail.blueprintMeta?.hypotheses || [],
+        };
+      }
+    }
+
+    const candidates = [...this.runs.values()]
+      .filter((candidate) => candidate.agent_id === 'feynman' && candidate.status === 'completed')
+      .filter((candidate) => !run.project || candidate.project === run.project)
+      .filter((candidate) => !run.region || candidate.region === run.region)
+      .filter((candidate) => !run.scope || candidate.scope === run.scope)
+      .sort((left, right) => new Date(right.updated_at || right.started_at || 0) - new Date(left.updated_at || left.started_at || 0));
+
+    const latest = candidates[0] || null;
+    if (!latest) return null;
+    return {
+      run: latest,
+      trail: latest.trail_mark || null,
+      hypotheses: latest.result?.hypotheses || [],
+    };
   }
 
   _buildTrailMark(run, result) {

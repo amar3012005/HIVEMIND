@@ -530,20 +530,19 @@ async function evaluateInstance(instance) {
   let usedGlobalFallback = false;
   const searchStart = Date.now();
   try {
-    projectSearchResults = await apiCall('POST', retrievalPlan.route === 'panorama' ? '/api/search/panorama' : '/api/recall', {
-      ...retrievalPlan.body,
-      project: `lme-${question_id}`
+    // Use /api/search/quick (Qdrant hybrid 70% vector) as primary — recall dedupes too aggressively
+    projectSearchResults = await apiCall('POST', '/api/search/quick', {
+      query: question,
+      project: `lme-${question_id}`,
+      limit: retrievalPlan.searchLimit || 10,
     });
 
     const rawItems = normalizeSearchResults(projectSearchResults);
-    if (rawItems.length < 3 && retrievalPlan.route === 'recall') {
-      fallbackSearchResults = await apiCall('POST', '/api/search/panorama', {
-        query: question,
-        project: `lme-${question_id}`,
-        include_expired: true,
-        include_historical: true,
-        limit: 15,
-        include_timeline: false
+    if (rawItems.length < 3) {
+      // Fallback: try recall (Qdrant hybrid + graph expansion) without project filter
+      fallbackSearchResults = await apiCall('POST', '/api/recall', {
+        query_context: question,
+        max_memories: 10,
       });
 
       const fallbackItems = normalizeSearchResults(fallbackSearchResults);
@@ -634,6 +633,45 @@ async function evaluateInstance(instance) {
   };
 }
 
+// ── Cleanup: delete all memories for a question ──────────
+
+async function cleanupInstance(questionId) {
+  const project = `lme-${questionId}`;
+  try {
+    // Fetch all memories for this project
+    const result = await apiCall('GET', `/api/memories?limit=200&project=${encodeURIComponent(project)}`);
+    const memories = result?.memories || [];
+    for (const m of memories) {
+      if (m.id) {
+        try { await apiCall('DELETE', `/api/memories/${m.id}`); } catch {}
+      }
+    }
+    return memories.length;
+  } catch {
+    return 0;
+  }
+}
+
+// ── Per-question streaming pipeline ──────────────────────
+
+async function processInstanceStreaming(instance, instanceIdx, totalInstances) {
+  const { question_id } = instance;
+
+  // 1. Ingest this question's sessions
+  const { ingested, skipped } = await ingestInstance(instance, instanceIdx, totalInstances);
+
+  // 2. Wait for Qdrant indexing (needs ~1s for reliable vector search)
+  await new Promise(r => setTimeout(r, 1000));
+
+  // 3. Evaluate (retrieve + generate)
+  const result = await evaluateInstance(instance);
+
+  // 4. Cleanup this question's memories
+  const cleaned = await cleanupInstance(question_id);
+
+  return { ...result, ingested, skipped, cleaned };
+}
+
 // ── Main ────────────────────────────────────────────────
 
 async function main() {
@@ -671,7 +709,71 @@ async function main() {
   let evaluationRecords = [];
   let judgedRecords = [];
 
-  // ── Ingest Phase ──
+  // ── STREAMING MODE: per-question ingest→evaluate→cleanup ──
+  if (opts.phase === 'stream') {
+    console.log('═══ Streaming Mode: Per-Question Pipeline ═══');
+    console.log('  Each question: ingest → retrieve → generate → cleanup');
+    console.log('');
+    const startTime = Date.now();
+    const hypotheses = [];
+    let totalIngested = 0;
+    let totalCleaned = 0;
+
+    for (let i = 0; i < instances.length; i++) {
+      const result = await processInstanceStreaming(instances[i], i, instances.length);
+      hypotheses.push(result);
+      totalIngested += result.ingested || 0;
+      totalCleaned += result.cleaned || 0;
+
+      if ((i + 1) % 10 === 0 || i === instances.length - 1) {
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+        const contextLen = result.retrieval?.contextChars || 0;
+        const resultCount = result.retrieval?.resultCount || 0;
+        console.log(`  [${i + 1}/${instances.length}] ${result.question_id} | ctx=${contextLen}ch results=${resultCount} | "${result.hypothesis.slice(0, 50)}..." (${elapsed}s)`);
+      }
+    }
+
+    // Write JSONL output
+    const jsonlContent = hypotheses.map(h => JSON.stringify(h)).join('\n') + '\n';
+    fs.writeFileSync(HYPOTHESIS_FILE, jsonlContent, 'utf-8');
+    evaluationRecords = hypotheses;
+
+    const duration = ((Date.now() - startTime) / 1000).toFixed(0);
+    console.log(`\nStreaming complete: ${hypotheses.length} questions, ${totalIngested} memories ingested, ${totalCleaned} cleaned, ${duration}s`);
+    console.log(`Output: ${HYPOTHESIS_FILE}`);
+    console.log('');
+
+    ingestionSummary = { totalIngested, totalSkipped: 0, durationSeconds: Number(duration) };
+
+    // Print question type distribution
+    const byType = {};
+    for (const inst of instances) {
+      const type = inst.question_type;
+      byType[type] = (byType[type] || 0) + 1;
+    }
+    console.log('Question type distribution:');
+    for (const [type, count] of Object.entries(byType)) {
+      console.log(`  ${type}: ${count}`);
+    }
+
+    const evaluationReport = buildLongMemEvalReport({
+      phase: 'stream',
+      dataPath: DATA_PATH,
+      totalDatasetSize: data.length,
+      sample: opts.sample,
+      startFrom: opts.startFrom,
+      instances,
+      records: evaluationRecords,
+      ingestion: ingestionSummary,
+      timings: { totalSeconds: Number(duration) }
+    });
+    fs.writeFileSync(LONGMEMEVAL_REPORT_FILE, JSON.stringify(evaluationReport, null, 2), 'utf-8');
+    console.log(`Partial report: ${LONGMEMEVAL_REPORT_FILE}`);
+    console.log('\n═══ Done ═══');
+    return;
+  }
+
+  // ── Ingest Phase (batch mode — original) ──
   if (['ingest', 'both', 'all'].includes(opts.phase)) {
     console.log('═══ Phase 1: Ingestion ═══');
     const startTime = Date.now();

@@ -513,14 +513,14 @@ async function keywordSearch(query, options = {}) {
         ) AS score
       FROM memories m
       WHERE m.user_id = ${userId}::uuid
-        AND (${orgId ? Prisma.sql`m.org_id = ${orgId}::uuid AND` : Prisma.empty} TRUE)
-        AND (${project ? Prisma.sql`m.project = ${project} AND` : Prisma.empty} TRUE)
-        AND (${memoryType ? Prisma.sql`m.memory_type = ${memoryType} AND` : Prisma.empty} TRUE)
-        AND (${sourcePlatform ? Prisma.sql`m.source_platform = ${sourcePlatform} AND` : Prisma.empty} TRUE)
-        AND (${typeof isLatest === 'boolean' ? Prisma.sql`m.is_latest = ${isLatest} AND` : Prisma.empty} TRUE)
-        AND (${tags && tags.length > 0 ? Prisma.sql`m.tags && ${tags}::text[] AND` : Prisma.empty} TRUE)
-        AND (${dateRange?.start ? Prisma.sql`m.document_date >= ${new Date(dateRange.start)} AND` : Prisma.empty} TRUE)
-        AND (${dateRange?.end ? Prisma.sql`m.document_date <= ${new Date(dateRange.end)} AND` : Prisma.empty} TRUE)
+        AND (${orgId}::uuid IS NULL OR m.org_id = ${orgId}::uuid)
+        AND (${project}::text IS NULL OR m.project = ${project})
+        AND (${memoryType}::text IS NULL OR m.memory_type = ${memoryType})
+        AND (${sourcePlatform}::text IS NULL OR m.source_platform = ${sourcePlatform})
+        AND (${typeof isLatest === 'boolean' ? isLatest : null}::boolean IS NULL OR m.is_latest = ${typeof isLatest === 'boolean' ? isLatest : null}::boolean)
+        AND (${tags && tags.length > 0 ? tags : null}::text[] IS NULL OR m.tags && ${tags && tags.length > 0 ? tags : null}::text[])
+        AND (${dateRange?.start ? new Date(dateRange.start) : null}::timestamptz IS NULL OR m.document_date >= ${dateRange?.start ? new Date(dateRange.start) : null}::timestamptz)
+        AND (${dateRange?.end ? new Date(dateRange.end) : null}::timestamptz IS NULL OR m.document_date <= ${dateRange?.end ? new Date(dateRange.end) : null}::timestamptz)
         AND m.deleted_at IS NULL
         AND to_tsvector(
           'english',

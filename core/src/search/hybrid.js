@@ -1002,6 +1002,12 @@ async function hybridSearch(options = {}) {
     keywordResults = await keywordSearch(effectiveQuery, {
       userId,
       orgId,
+      project,
+      memoryType,
+      tags,
+      sourcePlatform,
+      isLatest,
+      dateRange,
       limit: CONFIG.limits.keywordTopK
     });
   }

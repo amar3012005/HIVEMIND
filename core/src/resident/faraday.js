@@ -47,6 +47,16 @@ function jaccardOverlap(left, right) {
   return union.size === 0 ? 0 : intersection.length / union.size;
 }
 
+function yieldToEventLoop() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+async function yieldEvery(index, every = 100) {
+  if (index > 0 && index % every === 0) {
+    await yieldToEventLoop();
+  }
+}
+
 function semanticSignature(memory = {}) {
   const tokens = tokenizeSemantic([memory.title, memoryPath(memory), memory.content].filter(Boolean).join(' '));
   return tokens.slice(0, 12).sort().join(' ');
@@ -108,10 +118,11 @@ function expandProbeFromCluster(cluster = {}) {
   return [];
 }
 
-function clusterSemanticMemories(memories = []) {
+async function clusterSemanticMemories(memories = []) {
   const clusters = [];
 
-  for (const memory of memories) {
+  for (const [index, memory] of memories.entries()) {
+    await yieldEvery(index, 120);
     const tokens = tokenizeSemantic([memory.title, memory.content, memoryPath(memory)].filter(Boolean).join(' '));
     if (tokens.length === 0) continue;
 
@@ -142,7 +153,8 @@ function clusterSemanticMemories(memories = []) {
     if (sourceKey) cluster.sourceCounts[sourceKey] = (cluster.sourceCounts[sourceKey] || 0) + 1;
   }
 
-  for (const cluster of clusters) {
+  for (const [index, cluster] of clusters.entries()) {
+    await yieldEvery(index, 60);
     const tokenCounts = new Map();
     for (const memory of cluster.memories) {
       for (const token of tokenizeSemantic([memory.title, memory.content, memoryPath(memory)].filter(Boolean).join(' '))) {
@@ -179,7 +191,8 @@ async function collectRelatedMemoryIds(memoryStore, seedMemory, scopeFilter) {
 async function fetchMemoriesByIds(memoryStore, ids = [], scopeFilter = {}) {
   if (!memoryStore?.getMemory) return [];
   const loaded = [];
-  for (const id of ids) {
+  for (const [index, id] of ids.entries()) {
+    await yieldEvery(index, 40);
     try {
       const memory = await memoryStore.getMemory(id, scopeFilter);
       if (memory) loaded.push(memory);
@@ -394,7 +407,8 @@ export class FaradayAgent {
 
     const semanticSeeds = [...semanticSeedMap.values()].sort((left, right) => (right.score || 0) - (left.score || 0));
     const seedRelatedIds = new Set();
-    for (const seed of semanticSeeds.slice(0, 5)) {
+    for (const [index, seed] of semanticSeeds.slice(0, 5).entries()) {
+      await yieldEvery(index, 2);
       const relatedIds = await collectRelatedMemoryIds(this.memoryStore, seed, {
         user_id: userId,
         org_id: orgId,
@@ -420,9 +434,10 @@ export class FaradayAgent {
 
     const files = new Map();
     const duplicateGroups = new Map();
-    const semanticClusters = clusterSemanticMemories(memories);
+    const semanticClusters = await clusterSemanticMemories(memories);
 
-    for (const memory of memories) {
+    for (const [index, memory] of memories.entries()) {
+      await yieldEvery(index, 120);
       const fileKey = String(memoryPath(memory) || memory.id);
       if (!files.has(fileKey)) {
         files.set(fileKey, []);
@@ -498,7 +513,8 @@ export class FaradayAgent {
       },
     }));
 
-    for (const cluster of semanticClusters.slice(0, 3)) {
+    for (const [index, cluster] of semanticClusters.slice(0, 3).entries()) {
+      await yieldEvery(index, 1);
       if (isCancelled()) {
         return {
           status: 'cancelled',
@@ -533,7 +549,10 @@ export class FaradayAgent {
 
     await updateProgress(3, 4, 'detecting_anomalies');
 
+    let fileIndex = 0;
     for (const [file, group] of files.entries()) {
+      await yieldEvery(fileIndex, 80);
+      fileIndex += 1;
       if (isCancelled()) {
         return {
           status: 'cancelled',
@@ -595,7 +614,10 @@ export class FaradayAgent {
       }
     }
 
+    let duplicateIndex = 0;
     for (const [signature, group] of duplicateGroups.entries()) {
+      await yieldEvery(duplicateIndex, 120);
+      duplicateIndex += 1;
       if (isCancelled()) {
         return {
           status: 'cancelled',

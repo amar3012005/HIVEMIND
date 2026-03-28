@@ -30,6 +30,25 @@ test('longmemeval runner deduplicates retrieval context snippets', () => {
   assert.equal(selected[1].id, 'm3');
 });
 
+test('normalizeSearchResults keeps session_date from metadata for temporal evidence', () => {
+  const normalized = normalizeSearchResults({
+    results: [
+      {
+        id: 'm1',
+        content: 'I attended the workshop.',
+        payload: {
+          metadata: {
+            session_date: '2023/05/28 (Sun) 21:04'
+          }
+        }
+      }
+    ]
+  });
+
+  assert.equal(normalized.length, 1);
+  assert.equal(normalized[0].date, '2023/05/28 (Sun) 21:04');
+});
+
 test('longmemeval report exposes bottlenecks and judge coverage', () => {
   const records = [
     {

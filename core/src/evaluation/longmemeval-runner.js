@@ -139,6 +139,20 @@ function normalizeSearchResult(result, rank = 0) {
   if (!result) return null;
   const payload = result.payload || {};
   const content = result.content || payload.content || '';
+  const metadata = result.metadata || payload.metadata || {};
+  const sourceMetadata = result.source_metadata || payload.source_metadata || {};
+  const date = result.document_date
+    || result.documentDate
+    || payload.document_date
+    || payload.documentDate
+    || result.session_date
+    || payload.session_date
+    || metadata.session_date
+    || metadata.document_date
+    || sourceMetadata.session_date
+    || result.created_at
+    || payload.created_at
+    || null;
 
   return {
     id: result.id || payload.id || payload.memoryId || null,
@@ -150,7 +164,7 @@ function normalizeSearchResult(result, rank = 0) {
     session: result.session || payload.session || null,
     memoryType: result.memoryType || payload.memoryType || payload.memory_type || null,
     sourcePlatform: result.sourcePlatform || payload.sourcePlatform || null,
-    date: result.document_date || result.documentDate || payload.document_date || payload.documentDate || result.created_at || payload.created_at || null,
+    date,
     rank: rank + 1
   };
 }

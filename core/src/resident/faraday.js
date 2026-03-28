@@ -360,7 +360,7 @@ export class FaradayAgent {
     if (memories.length < 2) return null;
 
     const memoryList = memories
-      .map((m) => `[${m.id.slice(0, 8)}] (${m.date ? new Date(m.date).toISOString().slice(0, 10) : '?'}): ${m.content}`)
+      .map((m) => `[${m.id}] (${m.date ? new Date(m.date).toISOString().slice(0, 10) : '?'}): ${m.content}`)
       .join('\n\n');
 
     try {
@@ -388,7 +388,7 @@ CONFLICT: [id1, id2] — what conflicts
 MERGE: canonical_id absorbs [id1, id2] — reason
 NONE — if the cluster has no issues
 
-Be specific. Use the actual memory IDs shown in brackets.`,
+IMPORTANT: Use the FULL memory IDs exactly as shown in brackets (they are UUIDs like abc12345-6789-...). Do not truncate.`,
             },
             {
               role: 'user',

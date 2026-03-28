@@ -263,14 +263,28 @@ export class GraphActionExecutor {
 
   // ── helpers ──────────────────────────────────────────────────────
 
-  /** Fetch memories by IDs, silently dropping any that fail to load. */
+  /** Fetch memories by IDs (supports partial UUID matching), silently dropping any that fail. */
   async _fetchMemories(ids) {
     const memories = [];
     for (const id of ids) {
+      if (!id) continue;
       try {
+        // Try exact match first
         const mem = await this.store.getMemory(id);
-        if (mem) memories.push(mem);
-      } catch { /* skip missing */ }
+        if (mem) { memories.push(mem); continue; }
+      } catch { /* not found by exact ID */ }
+
+      // If ID is partial (< 36 chars), try prefix search via listMemories
+      if (id.length < 36) {
+        try {
+          const { memories: found } = await this.store.listMemories({
+            user_id: memories[0]?.user_id, // use scope from first found memory
+            limit: 5,
+          });
+          const match = (found || []).find(m => m.id.startsWith(id));
+          if (match) { memories.push(match); continue; }
+        } catch { /* skip */ }
+      }
     }
     return memories;
   }

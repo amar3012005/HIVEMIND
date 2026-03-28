@@ -76,6 +76,42 @@ const logger = {
   debug: (msg, ctx) => console.debug(`[HYBRID SEARCH DEBUG] ${msg}`, ctx || {})
 };
 
+function matchesHardScope(payload = {}, filters = {}) {
+  const {
+    userId,
+    orgId,
+    project,
+    memoryType,
+    tags,
+    sourcePlatform,
+    isLatest,
+    dateRange
+  } = filters;
+
+  if (userId && payload.user_id && payload.user_id !== userId) return false;
+  if (orgId && payload.org_id && payload.org_id !== orgId) return false;
+  if (project && payload.project && payload.project !== project) return false;
+  if (memoryType && payload.memory_type && payload.memory_type !== memoryType) return false;
+  if (sourcePlatform) {
+    const payloadSource = payload.source_platform || payload.source || null;
+    if (payloadSource && payloadSource !== sourcePlatform) return false;
+  }
+  if (typeof isLatest === 'boolean' && typeof payload.is_latest === 'boolean' && payload.is_latest !== isLatest) {
+    return false;
+  }
+  if (Array.isArray(tags) && tags.length > 0 && Array.isArray(payload.tags)) {
+    const hasOverlap = payload.tags.some(tag => tags.includes(tag));
+    if (!hasOverlap) return false;
+  }
+  if (dateRange && payload.document_date) {
+    const documentDate = new Date(payload.document_date);
+    if (dateRange.start && documentDate < new Date(dateRange.start)) return false;
+    if (dateRange.end && documentDate > new Date(dateRange.end)) return false;
+  }
+
+  return true;
+}
+
 // ==========================================
 // Vector Search
 // ==========================================
@@ -153,12 +189,23 @@ async function vectorSearch(queryVector, options = {}) {
     });
 
     // Transform results
-    return results.map(result => ({
+    return results
+      .map(result => ({
       id: result.id,
       score: result.score,
       payload: result.payload,
       source: 'vector'
-    }));
+      }))
+      .filter(result => matchesHardScope(result.payload, {
+        userId,
+        orgId,
+        project,
+        memoryType,
+        tags,
+        sourcePlatform,
+        isLatest,
+        dateRange
+      }));
   } catch (error) {
     logger.error('Vector search failed', {
       error: error.message,
@@ -213,12 +260,23 @@ async function semanticSearch(query, options = {}) {
     score_threshold: scoreThreshold
   });
 
-  return results.map(result => ({
+  return results
+    .map(result => ({
     id: result.id,
     score: result.score,
     payload: result.payload,
     source: 'vector'
-  }));
+    }))
+    .filter(result => matchesHardScope(result.payload, {
+      userId,
+      orgId,
+      project,
+      memoryType,
+      tags,
+      sourcePlatform,
+      isLatest,
+      dateRange
+    }));
 }
 
 async function resolveQueryVector(query, existingVector) {
@@ -494,11 +552,15 @@ async function keywordSearch(query, options = {}) {
     const results = await prisma.$queryRaw`
       SELECT
         m.id,
+        m.user_id,
+        m.org_id,
+        m.project,
         m.title,
         m.content,
         m.tags,
         m.memory_type,
         m.source_platform,
+        m.is_latest,
         m.document_date,
         m.created_at,
         m.updated_at,
@@ -535,12 +597,16 @@ async function keywordSearch(query, options = {}) {
     // Transform results to expected format
     const formattedResults = results.map(result => ({
       id: result.id,
+      user_id: result.user_id,
+      org_id: result.org_id,
+      project: result.project,
       title: result.title || null,
       content: result.content,
       score: parseFloat(result.score),
       tags: Array.isArray(result.tags) ? result.tags : [],
       memoryType: result.memory_type || null,
       sourcePlatform: result.source_platform || null,
+      is_latest: result.is_latest,
       documentDate: result.document_date || null,
       created_at: result.created_at,
       updated_at: result.updated_at,
@@ -924,6 +990,7 @@ async function hybridSearch(options = {}) {
     limit = CONFIG.limits.finalLimit,
     weights = CONFIG.weights,
     depth = 'medium',
+    vectorScoreThreshold = CONFIG.fallback.vectorMinScore,
     finalScoreThreshold = CONFIG.fallback.finalMinScore,
     filter: additionalFilter = {}
   } = options;
@@ -973,6 +1040,7 @@ async function hybridSearch(options = {}) {
       dateRange: effectiveDateRange,
       minStrength,
       minImportance,
+      scoreThreshold: vectorScoreThreshold,
       limit: CONFIG.limits.vectorTopK,
       ...additionalFilter
     });
@@ -993,6 +1061,7 @@ async function hybridSearch(options = {}) {
       dateRange: effectiveDateRange,
       minStrength,
       minImportance,
+      scoreThreshold: vectorScoreThreshold,
       limit: CONFIG.limits.vectorTopK,
       ...additionalFilter
     });
@@ -1057,8 +1126,11 @@ async function hybridSearch(options = {}) {
   // Step 7: Apply precision boosts (title/tag/project/dedup)
   const boostedResults = applyPrecisionBoosts(candidateResults, effectiveQuery, { project });
 
-  // Step 8: Limit results
-  const finalResults = boostedResults.slice(0, limit);
+  // Step 8: Enforce scope defensively on final output
+  const scopedResults = enforceScope(boostedResults, { userId, orgId, project });
+
+  // Step 9: Limit results
+  const finalResults = scopedResults.slice(0, limit);
 
   const duration = Date.now() - startTime;
 
@@ -1332,6 +1404,29 @@ function applyPrecisionBoosts(results, query, options = {}) {
   }
 
   return kept;
+}
+
+function matchesScopedValue(actual, expected) {
+  return expected == null || actual == null || actual === expected;
+}
+
+function enforceScope(results, scope = {}) {
+  if (!results || results.length === 0) {
+    return [];
+  }
+
+  const { userId, orgId, project } = scope;
+
+  return results.filter((result) => {
+    const payload = result.payload || result.memory || {};
+    const actualUserId = result.user_id || payload.user_id || null;
+    const actualOrgId = result.org_id || payload.org_id || null;
+    const actualProject = result.project || payload.project || null;
+
+    return matchesScopedValue(actualUserId, userId)
+      && matchesScopedValue(actualOrgId, orgId)
+      && matchesScopedValue(actualProject, project);
+  });
 }
 
 // ==========================================

@@ -15,11 +15,20 @@ test('hybridSearch forwards project scope into vector and semantic Qdrant filter
   client.ensureCollection = async () => true;
   client.searchMemories = async ({ filter }) => {
     seenFilters.push(filter);
-    return [];
+    return [{
+      id: 'memory-leak',
+      score: 0.91,
+      payload: {
+        user_id: '00000000-0000-4000-8000-000000000101',
+        org_id: '00000000-0000-4000-8000-000000000102',
+        project: 'other-project',
+        content: 'Should be filtered out'
+      }
+    }];
   };
 
   try {
-    await hybridSearch.hybridSearch({
+    const result = await hybridSearch.hybridSearch({
       query: 'which event came first',
       queryVector: [0.1, 0.2, 0.3],
       userId: '00000000-0000-4000-8000-000000000101',
@@ -31,6 +40,7 @@ test('hybridSearch forwards project scope into vector and semantic Qdrant filter
     assert.equal(seenFilters.length, 2);
     assert.equal(seenFilters[0].must.find(item => item.key === 'project')?.match?.value, 'bench/test-project');
     assert.equal(seenFilters[1].must.find(item => item.key === 'project')?.match?.value, 'bench/test-project');
+    assert.equal(result.results.length, 0);
   } finally {
     client.isConnected = originalIsConnected;
     client.ensureCollection = originalEnsureCollection;

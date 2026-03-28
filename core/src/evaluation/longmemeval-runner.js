@@ -240,12 +240,52 @@ const TEMPORAL_COMPARISON_PATTERNS = {
 
 const TEMPORAL_EVENT_SIGNAL = /\b(attended|joined|bought|purchased|scheduled|met|went|prepared|preparing|participated|ordered|got)\b/i;
 const EVENT_NOUN_PATTERN = /\b(workshop|webinar|meeting|trip|vacation|conference|phone|tablet|device|bike|car)\b/i;
+const MONTH_INDEX = {
+  january: 0, jan: 0,
+  february: 1, feb: 1,
+  march: 2, mar: 2,
+  april: 3, apr: 3,
+  may: 4,
+  june: 5, jun: 5,
+  july: 6, jul: 6,
+  august: 7, aug: 7,
+  september: 8, sep: 8, sept: 8,
+  october: 9, oct: 9,
+  november: 10, nov: 10,
+  december: 11, dec: 11
+};
 
 function parseComparableDate(value) {
   if (!value) return null;
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return null;
   return parsed;
+}
+
+function extractDateMentions(text = '', fallbackYear = null) {
+  const mentions = [];
+
+  for (const match of text.matchAll(/\b(January|February|March|April|May|June|July|August|September|Sept|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Oct|Nov|Dec)\s+(\d{1,2})(?:st|nd|rd|th)?(?:,\s*(\d{4}))?/gi)) {
+    const monthKey = match[1].toLowerCase();
+    const monthIndex = MONTH_INDEX[monthKey];
+    const day = Number(match[2]);
+    const year = match[3] ? Number(match[3]) : fallbackYear;
+    if (monthIndex == null || !day || !year) continue;
+    const date = new Date(Date.UTC(year, monthIndex, day));
+    if (Number.isNaN(date.getTime())) continue;
+    mentions.push({ index: match.index ?? 0, date, raw: match[0] });
+  }
+
+  for (const match of text.matchAll(/\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/g)) {
+    const month = Number(match[1]) - 1;
+    const day = Number(match[2]);
+    const year = Number(match[3]);
+    const date = new Date(Date.UTC(year, month, day));
+    if (Number.isNaN(date.getTime())) continue;
+    mentions.push({ index: match.index ?? 0, date, raw: match[0] });
+  }
+
+  return mentions.sort((left, right) => left.index - right.index);
 }
 
 function normalizePhrase(phrase = '') {
@@ -278,9 +318,11 @@ function extractQuestionTargets(question = '') {
   return [...new Set([...alternatives, ...capitalized, ...eventPhrases])].filter(Boolean);
 }
 
-function extractTemporalEvidence(question, results = []) {
+function extractTemporalEvidence(question, results = [], questionDate = null) {
   const targets = extractQuestionTargets(question);
   const normalizedTargets = targets.map(normalizePhrase);
+  const anchorYear = parseComparableDate(questionDate)?.getUTCFullYear() || null;
+  const acquisitionQuestion = /\b(got|get|buy|bought|purchase|purchased|receive|received|own|owned)\b/i.test(question);
 
   return results
     .map((result, index) => {
@@ -289,19 +331,50 @@ function extractTemporalEvidence(question, results = []) {
       const title = result.title || '';
       const haystack = `${title}\n${content}`;
       const normalizedHaystack = normalizePhrase(haystack);
+      const lowerHaystack = haystack.toLowerCase();
+      const dateMentions = extractDateMentions(haystack, anchorYear);
       const matchedTargets = targets.filter((target, targetIndex) => {
         const normalized = normalizedTargets[targetIndex];
         return normalized && normalizedHaystack.includes(normalized);
       });
+      const targetDates = Object.fromEntries(matchedTargets.flatMap(target => {
+        const idx = lowerHaystack.indexOf(target.toLowerCase());
+        if (idx === -1 || dateMentions.length === 0) return [];
+        const rankedMentions = dateMentions
+          .map(mention => {
+            const left = Math.max(0, Math.min(idx, mention.index) - 20);
+            const right = Math.min(haystack.length, Math.max(idx, mention.index) + 40);
+            const window = haystack.slice(left, right);
+            const isPreorderOnly = /pre-?order/i.test(window) && !/\b(bought|purchased|got|received|owned)\b/i.test(window);
+            return {
+              mention,
+              distance: Math.abs(mention.index - idx),
+              afterTarget: mention.index >= idx,
+              isPreorderOnly
+            };
+          })
+          .filter(item => !(acquisitionQuestion && item.isPreorderOnly))
+          .sort((left, right) => {
+            if (left.afterTarget !== right.afterTarget) {
+              return left.afterTarget ? -1 : 1;
+            }
+            return left.distance - right.distance;
+          });
+        const nearest = rankedMentions[0]?.mention || null;
+        return nearest ? [[normalizePhrase(target), nearest.date.toISOString()]] : [];
+      }));
 
       return {
         memoryId: result.id,
         rank: index + 1,
-        date,
-        isoDate: date ? date.toISOString() : null,
+        date: date || (Object.values(targetDates)[0] ? parseComparableDate(Object.values(targetDates)[0]) : null),
+        isoDate: date
+          ? date.toISOString()
+          : (Object.values(targetDates)[0] || null),
         content,
         title,
         matchedTargets,
+        targetDates,
         hasEventSignal: TEMPORAL_EVENT_SIGNAL.test(haystack) || EVENT_NOUN_PATTERN.test(haystack),
         snippet: haystack.replace(/\s+/g, ' ').trim().slice(0, 220)
       };
@@ -341,10 +414,16 @@ function buildTemporalEvidenceContext(question, evidence = []) {
 function pickTargetDate(target, evidence = []) {
   const normalizedTarget = normalizePhrase(target);
   const candidates = evidence.filter(item =>
-    item.date && item.matchedTargets.some(match => normalizePhrase(match) === normalizedTarget)
-  );
+    (item.targetDates?.[normalizedTarget] || item.date)
+    && item.matchedTargets.some(match => normalizePhrase(match) === normalizedTarget)
+  ).map(item => ({
+    ...item,
+    date: item.targetDates?.[normalizedTarget]
+      ? parseComparableDate(item.targetDates[normalizedTarget])
+      : item.date
+  }));
   if (candidates.length === 0) return null;
-  return candidates[0];
+  return candidates.sort((left, right) => left.date - right.date)[0];
 }
 
 function answerTemporalQuestion(question, evidence = []) {
@@ -397,6 +476,15 @@ function answerTemporalQuestion(question, evidence = []) {
         evidenceCount: sorted.length
       };
     }
+  }
+
+  if (targetCandidates.length === 1 && (TEMPORAL_COMPARISON_PATTERNS.first.test(question) || TEMPORAL_COMPARISON_PATTERNS.last.test(question))) {
+    return {
+      answer: targetCandidates[0].target,
+      confidence: 0.9,
+      mode: 'single_target_deterministic',
+      evidenceCount: 1
+    };
   }
 
   if (TEMPORAL_COMPARISON_PATTERNS.first.test(question) || TEMPORAL_COMPARISON_PATTERNS.last.test(question)) {
@@ -863,7 +951,7 @@ async function evaluateInstance(instance) {
   const projectResults = normalizeSearchResults(searchResults);
   const selectedResults = selectContextResults(searchResults, retrievalPlan.searchLimit);
   const temporalEvidence = isTemporalReasoningQuestion(question, question_type)
-    ? extractTemporalEvidence(question, selectedResults)
+    ? extractTemporalEvidence(question, selectedResults, question_date)
     : [];
   const temporalAnswer = temporalEvidence.length > 0
     ? answerTemporalQuestion(question, temporalEvidence)

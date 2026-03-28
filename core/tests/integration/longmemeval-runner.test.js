@@ -235,3 +235,24 @@ test('temporal comparator computes explicit day differences from dated evidence'
   assert.equal(answer.answer, '7');
   assert.equal(answer.mode, 'deterministic');
 });
+
+test('temporal evidence can extract target-specific dates from the same memory blob', () => {
+  const evidence = extractTemporalEvidence(
+    'Which device did I got first, the Samsung Galaxy S22 or the Dell XPS 13?',
+    [
+      {
+        id: 'm1',
+        content: 'The Dell XPS 13 was pre-ordered on January 28th, and the Samsung Galaxy S22 was bought on February 20th.',
+      }
+    ],
+    '2023/03/01 (Wed) 10:00'
+  );
+
+  const answer = answerTemporalQuestion(
+    'Which device did I got first, the Samsung Galaxy S22 or the Dell XPS 13?',
+    evidence
+  );
+
+  assert.equal(evidence[0].targetDates['samsung galaxy s22'], '2023-02-20T00:00:00.000Z');
+  assert.equal(answer.answer, 'Samsung Galaxy S22');
+});

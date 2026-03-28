@@ -1407,7 +1407,7 @@ function applyPrecisionBoosts(results, query, options = {}) {
 }
 
 function matchesScopedValue(actual, expected) {
-  return expected == null || actual == null || actual === expected;
+  return expected == null || actual === expected;
 }
 
 function enforceScope(results, scope = {}) {

@@ -61,6 +61,7 @@ test('hybridSearch falls back to ranked candidates when final score floor remove
       id: 'memory-1',
       score: 0.05,
       payload: {
+        user_id: '00000000-0000-4000-8000-000000000111',
         content: 'Data Analysis using Python webinar happened before the workshop.',
         project: 'bench/test-project',
         is_latest: true,

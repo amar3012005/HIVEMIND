@@ -75,8 +75,8 @@ function isScopedResult(result, { userId, orgId, project }) {
   const payloadOrgId = payload.org_id || payload.orgId || null;
   const payloadProject = payload.project || null;
 
-  if (userId && payloadUserId && payloadUserId !== userId) return false;
-  if (orgId && payloadOrgId && payloadOrgId !== orgId) return false;
+  if (userId && payloadUserId !== userId) return false;
+  if (orgId && payloadOrgId !== orgId) return false;
   if (project && payloadProject !== project) return false;
   return true;
 }

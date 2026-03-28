@@ -500,7 +500,7 @@ async function ingestInstance(instance, instanceIdx, totalInstances) {
           tags: ['longmemeval', `qid:${question_id}`, `session:${i}`],
           memory_type: 'event',
           document_date: sessionDate,
-          project: `lme-${question_id}`,
+          project: `bench/longmemeval/${question_id}`,
         });
         ingested++;
         // Small delay to avoid overwhelming the API + embedding service
@@ -533,7 +533,7 @@ async function evaluateInstance(instance) {
     // Use /api/search/quick (Qdrant hybrid 70% vector) as primary — recall dedupes too aggressively
     projectSearchResults = await apiCall('POST', '/api/search/quick', {
       query: question,
-      project: `lme-${question_id}`,
+      project: `bench/longmemeval/${question_id}`,
       limit: retrievalPlan.searchLimit || 10,
     });
 
@@ -636,7 +636,7 @@ async function evaluateInstance(instance) {
 // ── Cleanup: delete all memories for a question ──────────
 
 async function cleanupInstance(questionId) {
-  const project = `lme-${questionId}`;
+  const project = `bench/longmemeval/${questionId}`;
   try {
     // Fetch all memories for this project
     const result = await apiCall('GET', `/api/memories?limit=200&project=${encodeURIComponent(project)}`);

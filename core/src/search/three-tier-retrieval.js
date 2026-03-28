@@ -90,6 +90,24 @@ const logger = {
   debug: (msg, ctx) => console.debug(`[THREE-TIER DEBUG] ${msg}`, ctx || {})
 };
 
+function matchesScope(result, { userId, orgId, project } = {}) {
+  const payload = result?.payload || result?.memory || {};
+  const actualUserId = result?.user_id || payload.user_id || null;
+  const actualOrgId = result?.org_id || payload.org_id || null;
+  const actualProject = result?.project || payload.project || null;
+
+  return (userId == null || actualUserId == null || actualUserId === userId)
+    && (orgId == null || actualOrgId == null || actualOrgId === orgId)
+    && (project == null || actualProject == null || actualProject === project);
+}
+
+function filterScopedResults(results, scope) {
+  if (!Array.isArray(results)) {
+    return [];
+  }
+  return results.filter((result) => matchesScope(result, scope));
+}
+
 // ==========================================
 // ThreeTierRetrieval Class
 // ==========================================
@@ -416,6 +434,7 @@ export class ThreeTierRetrieval {
         includeAnalysis,
         weights: this.config.weights.insightForge
       });
+      const scopedResults = filterScopedResults(results.results, { userId, orgId, project });
 
       const duration = Date.now() - startTime;
 
@@ -431,6 +450,7 @@ export class ThreeTierRetrieval {
         tier: 'insight',
         query,
         ...results,
+        results: scopedResults,
         metadata: {
           requestId,
           durationMs: duration,

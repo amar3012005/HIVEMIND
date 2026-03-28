@@ -408,7 +408,7 @@ export class PanoramaSearch {
       take: Math.max(limit * 3, 20)
     });
 
-    return memories
+    const scoredResults = memories
       .map(memory => ({
         id: memory.id,
         user_id: memory.userId,
@@ -424,9 +424,10 @@ export class PanoramaSearch {
         score: lexicalProjectScore(query, `${memory.title || ''} ${memory.content || ''}`),
         source: 'panorama_fallback'
       }))
-      .filter(result => result.score > 0)
-      .sort((left, right) => right.score - left.score)
-      .slice(0, limit);
+      .sort((left, right) => right.score - left.score);
+
+    const lexicalMatches = scoredResults.filter(result => result.score > 0);
+    return (lexicalMatches.length > 0 ? lexicalMatches : scoredResults).slice(0, limit);
   }
 
   /**

@@ -5143,6 +5143,28 @@ a{color:#a78bfa}</style></head><body>
                 includeTimeline: include_timeline !== false
               });
 
+              if (searchProject && Array.isArray(result.results) && result.results.length === 0) {
+                const scopedFallback = await persistentMemoryStore.searchMemories({
+                  query,
+                  user_id: userId,
+                  org_id: orgId,
+                  project: searchProject,
+                  is_latest: include_historical !== false ? undefined : true,
+                  n_results: limit || 50
+                });
+
+                if (scopedFallback.length > 0) {
+                  result.results = scopedFallback;
+                  if (result.categories) {
+                    result.categories.historical = scopedFallback;
+                  }
+                  result.metadata = {
+                    ...(result.metadata || {}),
+                    fallback: 'route_scoped_memory_search'
+                  };
+                }
+              }
+
               jsonResponse(res, result);
             } catch (error) {
               console.error('PanoramaSearch failed:', error);

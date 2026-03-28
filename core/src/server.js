@@ -5169,6 +5169,7 @@ a{color:#a78bfa}</style></head><body>
             try {
               const {
                 query,
+                project,
                 simulation_requirement,
                 sub_query_limit,
                 results_per_sub_query,
@@ -5182,9 +5183,11 @@ a{color:#a78bfa}</style></head><body>
                 }, 400);
               }
 
+              const searchProject = project || effectiveContainerTag || null;
               const result = await threeTierRetrieval.insightForge(query, {
                 userId,
                 orgId,
+                project: searchProject,
                 simulationRequirement: simulation_requirement,
                 subQueryLimit: sub_query_limit || 5,
                 resultsPerSubQuery: results_per_sub_query || 15,

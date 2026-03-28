@@ -54,3 +54,86 @@ test('ingestion still runs memory processing when predict-calibrate is skipped',
     MemoryProcessor.prototype.process = original;
   }
 });
+
+test('skipProcessing preserves raw memories without relationship merging', async () => {
+  let classifierCalls = 0;
+  const relationshipClassifier = {
+    classifyRelationship() {
+      classifierCalls += 1;
+      return {
+        operation: 'updated',
+        relationship: {
+          type: 'Updates',
+          targetId: 'first-memory',
+          confidence: 0.9
+        }
+      };
+    }
+  };
+
+  const store = new InMemoryGraphStore();
+  const engine = new MemoryGraphEngine({ store, relationshipClassifier, predictCalibrate: false });
+  const userId = '00000000-0000-4000-8000-000000001211';
+  const orgId = '00000000-0000-4000-8000-000000001212';
+
+  const first = await engine.ingestMemory({
+    id: 'first-memory',
+    user_id: userId,
+    org_id: orgId,
+    project: 'benchmark',
+    content: 'I attended the Effective Time Management workshop last Saturday.',
+    metadata: { session_date: '2023/05/28 (Sun) 21:04' },
+    skipProcessing: true
+  });
+
+  const second = await engine.ingestMemory({
+    id: 'second-memory',
+    user_id: userId,
+    org_id: orgId,
+    project: 'benchmark',
+    content: 'I attended the Data Analysis using Python webinar two months ago.',
+    metadata: { session_date: '2023/05/28 (Sun) 07:17' },
+    skipProcessing: true
+  });
+
+  const latest = await store.listLatestMemories({ user_id: userId, org_id: orgId, project: 'benchmark' });
+  const firstStored = await store.getMemory(first.memoryId);
+  const secondStored = await store.getMemory(second.memoryId);
+
+  assert.equal(classifierCalls, 0);
+  assert.equal(first.operation, 'created');
+  assert.equal(second.operation, 'created');
+  assert.equal(latest.length, 2);
+  assert.equal(firstStored.is_latest, true);
+  assert.equal(secondStored.is_latest, true);
+  assert.equal(firstStored.document_date, '2023-05-28T21:04:00.000Z');
+  assert.equal(secondStored.document_date, '2023-05-28T07:17:00.000Z');
+});
+
+test('source metadata persistence keeps custom metadata payloads', async () => {
+  const store = new InMemoryGraphStore();
+  const engine = new MemoryGraphEngine({ store, predictCalibrate: false });
+  const userId = '00000000-0000-4000-8000-000000001221';
+  const orgId = '00000000-0000-4000-8000-000000001222';
+
+  await engine.ingestMemory({
+    user_id: userId,
+    org_id: orgId,
+    project: 'metadata',
+    content: 'I attended a webinar on statistical graphics.',
+    metadata: {
+      session_date: '2023/05/28 (Sun) 07:17',
+      question_id: 'gpt4_2487a7cb'
+    },
+    source_metadata: {
+      source_type: 'manual',
+      source_platform: 'benchmark'
+    },
+    skipProcessing: true
+  });
+
+  assert.ok(store.sources.length >= 1);
+  const lastSource = store.sources.at(-1);
+  assert.equal(lastSource.metadata.session_date, '2023/05/28 (Sun) 07:17');
+  assert.equal(lastSource.metadata.question_id, 'gpt4_2487a7cb');
+});

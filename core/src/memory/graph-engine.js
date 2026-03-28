@@ -11,6 +11,69 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function deriveDocumentDate(input = {}) {
+  if (input.document_date) {
+    return input.document_date;
+  }
+
+  const candidates = [
+    input.metadata?.session_date,
+    input.metadata?.document_date,
+    input.metadata?.question_date,
+    input.metadata?.observation_date
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    const parsed = parseFlexibleDate(candidate);
+    if (parsed) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
+function parseFlexibleDate(value) {
+  if (!value) return null;
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value.toISOString();
+  }
+
+  if (typeof value !== 'string') return null;
+
+  const normalized = value
+    .replace(/\s*\([^)]+\)\s*/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const match = normalized.match(
+    /^(\d{4})[/-](\d{2})[/-](\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/
+  );
+
+  if (match) {
+    const [, year, month, day, hour = '00', minute = '00', second = '00'] = match;
+    const parsed = new Date(Date.UTC(
+      Number(year),
+      Number(month) - 1,
+      Number(day),
+      Number(hour),
+      Number(minute),
+      Number(second)
+    ));
+
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed.toISOString();
+    }
+  }
+
+  const native = new Date(normalized);
+  if (!Number.isNaN(native.getTime())) {
+    return native.toISOString();
+  }
+
+  return null;
+}
+
 export class InMemoryGraphStore {
   constructor() {
     this.memories = new Map();
@@ -270,7 +333,8 @@ export class MemoryGraphEngine {
           }
         }
 
-        const classification = input.skip_relationship_classification
+        const shouldSkipRelationshipClassification = input.skip_relationship_classification || input.skipProcessing === true;
+        const classification = shouldSkipRelationshipClassification
           ? { operation: 'created', relationship: null }
           : input.relationship
           ? this._explicitClassification(input.relationship)
@@ -529,6 +593,7 @@ export class MemoryGraphEngine {
 
   _buildMemoryRecord(input) {
     const timestamp = nowIso();
+    const documentDate = deriveDocumentDate(input);
     return {
       id: input.id || uuidv4(),
       user_id: input.user_id,
@@ -542,7 +607,7 @@ export class MemoryGraphEngine {
       version: 1,
       created_at: timestamp,
       updated_at: timestamp,
-      document_date: input.document_date || null,
+      document_date: documentDate,
       event_dates: input.event_dates || [],
       metadata: input.metadata || {},
       contentFingerprint: null,
@@ -592,7 +657,8 @@ export class MemoryGraphEngine {
       source_url: sourceMetadata?.source_url || null,
       thread_id: sourceMetadata?.thread_id || null,
       parent_message_id: sourceMetadata?.parent_message_id || null,
-      ingested_at: nowIso()
+      ingested_at: nowIso(),
+      metadata: memory.metadata || {}
     });
   }
 

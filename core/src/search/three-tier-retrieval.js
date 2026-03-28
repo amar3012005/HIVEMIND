@@ -381,6 +381,7 @@ export class ThreeTierRetrieval {
     const {
       userId,
       orgId,
+      project,
       simulationRequirement,
       subQueryLimit = 5,
       resultsPerSubQuery = 15,
@@ -407,6 +408,7 @@ export class ThreeTierRetrieval {
       const results = await this.insightForgeEngine.analyze(query, {
         userId,
         orgId,
+        project,
         simulationRequirement,
         subQueryLimit,
         resultsPerSubQuery,

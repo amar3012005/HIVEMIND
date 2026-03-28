@@ -235,6 +235,7 @@ export class InsightForge {
     const {
       userId,
       orgId,
+      project,
       simulationRequirement,
       subQueryLimit = this.config.subQueries.defaultCount,
       resultsPerSubQuery = 15,
@@ -263,6 +264,7 @@ export class InsightForge {
       const subQueryResults = await this.searchSubQueries(subQueries, {
         userId,
         orgId,
+        project,
         limit: resultsPerSubQuery
       });
 
@@ -486,7 +488,7 @@ export class InsightForge {
    * @returns {Promise<Array>} Results for each sub-query
    */
   async searchSubQueries(subQueries, options) {
-    const { userId, orgId, limit } = options;
+    const { userId, orgId, project, limit } = options;
 
     const searchPromises = subQueries.map(async (subQuery) => {
       const startTime = Date.now();
@@ -496,6 +498,7 @@ export class InsightForge {
           query: subQuery.query,
           userId,
           orgId,
+          project,
           limit,
           weights: {
             vector: 0.6,

@@ -499,11 +499,12 @@ export class PrismaStore {
   }
 
   /** List recent observations, optionally filtered by agent. */
-  async listObservations({ agentId, kind, limit = 20 } = {}) {
+  async listObservations({ agentId, kind, sourceEventId, limit = 20 } = {}) {
     const rows = await this.prisma.opObservation.findMany({
       where: {
         agent_id: agentId || undefined,
         kind: kind || undefined,
+        source_event_id: sourceEventId || undefined,
       },
       orderBy: { timestamp: 'desc' },
       take: limit,

@@ -22,6 +22,8 @@ export class InMemoryStore {
     this.trailWeights = new Map();
     /** @type {Array<Object>} */
     this.promotionCandidates = [];
+    /** @type {Array<Object>} */
+    this.observations = [];
   }
 
   // ─── Event Methods ──────────────────────────────────────────────────────────
@@ -251,6 +253,33 @@ export class InMemoryStore {
     if (!this._agents) return;
     const agent = this._agents.get(agentId);
     if (agent) agent.last_seen_at = new Date().toISOString();
+  }
+
+  // ─── Observation Methods ───────────────────────────────────────────────────
+
+  async writeObservation(obs) {
+    const row = {
+      id: obs.id,
+      agent_id: obs.agent_id,
+      kind: obs.kind,
+      content: obs.content,
+      certainty: obs.certainty ?? 0.5,
+      source_event_id: obs.source_event_id || null,
+      related_to_trail: obs.related_to_trail || null,
+      timestamp: obs.timestamp || new Date().toISOString(),
+    };
+    this.observations.push(row);
+    return row;
+  }
+
+  async listObservations({ agentId, kind, sourceEventId, limit = 20 } = {}) {
+    let rows = [...this.observations];
+    if (agentId) rows = rows.filter((row) => row.agent_id === agentId);
+    if (kind) rows = rows.filter((row) => row.kind === kind);
+    if (sourceEventId) rows = rows.filter((row) => row.source_event_id === sourceEventId);
+    return rows
+      .slice(-limit)
+      .map((row) => ({ ...row }));
   }
 
   // ─── Reputation Methods ─────────────────────────────────────────────────────

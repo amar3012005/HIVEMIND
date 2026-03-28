@@ -126,6 +126,8 @@ const { ParameterRegistry } = await import('./executor/parameter-registry.js');
 const { Dashboard } = await import('./executor/dashboard.js');
 const { MetaEvaluator } = await import('./executor/meta-evaluator.js');
 const { InMemoryStore } = await import('./executor/stores/in-memory-store.js');
+const { ResidentRunManager } = await import('./resident/run-manager.js');
+const { createResidentRoutes } = await import('./resident/routes.js');
 
 // Evaluation imports
 const { RetrievalEvaluator } = await import('./external/evaluation/retrieval-evaluator.js');
@@ -575,6 +577,15 @@ try {
 } catch (err) {
   console.warn('[TrailExecutor] Failed to initialize:', err.message);
 }
+const residentRunManager = new ResidentRunManager({
+  store: trailExecutor?._store || new InMemoryStore(),
+  graphStore: persistentMemoryStore,
+  logger: console,
+});
+residentRunManager.seedAgents().catch((error) => {
+  console.warn('[Resident] Failed to seed resident agents:', error.message);
+});
+const residentRoutes = createResidentRoutes(residentRunManager);
 const contextAutopilot = persistentMemoryStore ? new ContextAutopilot({
   store: persistentMemoryStore,
   maxContextTokens: 128_000,
@@ -2580,6 +2591,19 @@ a{color:#a78bfa}</style></head><body>
           return jsonResponse(res, history);
         } catch (error) {
           return jsonResponse(res, { error: 'Get parameter failed', message: error.message }, 500);
+        }
+      }
+
+      if (residentRoutes) {
+        const residentResult = await residentRoutes.dispatch({
+          pathname,
+          method: req.method,
+          body,
+          userId,
+          orgId,
+        });
+        if (residentResult) {
+          return jsonResponse(res, residentResult.body, residentResult.statusCode);
         }
       }
 

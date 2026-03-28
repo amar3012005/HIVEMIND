@@ -278,7 +278,7 @@ export class InsightForge {
       const relationshipChains = await this.buildRelationshipChains(
         entityInsights,
         aggregatedResults,
-        { userId, orgId }
+        { userId, orgId, project }
       );
 
       // Step 6: Extract semantic facts
@@ -709,7 +709,7 @@ export class InsightForge {
    * @returns {Promise<Array>} Relationship chains
    */
   async buildRelationshipChains(entities, results, options) {
-    const { userId, orgId } = options;
+    const { userId, orgId, project } = options;
 
     if (!this.graphStore || entities.length < 2) {
       return this.buildSimpleChains(entities, results);
@@ -727,7 +727,10 @@ export class InsightForge {
         // Get related memories through graph
         const related = await this.graphStore.getRelatedMemories(memoryId, {
           maxDepth: this.config.chains.maxDepth,
-          minConfidence: this.config.chains.minConfidence
+          minConfidence: this.config.chains.minConfidence,
+          user_id: userId,
+          org_id: orgId,
+          project
         });
 
         for (const rel of related || []) {

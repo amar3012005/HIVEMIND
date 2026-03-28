@@ -316,7 +316,7 @@ export class PrismaGraphStore {
     return records.map(mapRelationshipRecord);
   }
 
-  async getRelatedMemories(memoryId, { maxDepth = 2, minConfidence = 0 } = {}) {
+  async getRelatedMemories(memoryId, { maxDepth = 2, minConfidence = 0, user_id, org_id, project } = {}) {
     const visitedMemoryIds = new Set([memoryId]);
     const visitedEdgeIds = new Set();
     const collected = [];
@@ -332,8 +332,8 @@ export class PrismaGraphStore {
             { fromId: { in: frontierIds } },
             { toId: { in: frontierIds } }
           ],
-          fromMemory: { deletedAt: null },
-          toMemory: { deletedAt: null }
+          fromMemory: scopedMemoryWhere({ user_id, org_id, project }),
+          toMemory: scopedMemoryWhere({ user_id, org_id, project })
         },
         orderBy: { createdAt: 'desc' }
       });

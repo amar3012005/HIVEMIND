@@ -34,3 +34,36 @@ test('InsightForge scopes sub-query searches by project', async () => {
     hybridSearch.hybridSearch = originalHybridSearch;
   }
 });
+
+test('InsightForge scopes graph relationship expansion by project', async () => {
+  const calls = [];
+  const forge = new InsightForge({
+    llmClient: { generate: async () => '' },
+    graphStore: {
+      getRelatedMemories: async (_memoryId, options) => {
+        calls.push(options);
+        return [];
+      }
+    }
+  });
+
+  await forge.buildRelationshipChains(
+    [
+      { id: 'entity-a', name: 'Workshop' },
+      { id: 'entity-b', name: 'Webinar' }
+    ],
+    [
+      { id: 'memory-1', content: 'Workshop happened first.' },
+      { id: 'memory-2', content: 'Webinar happened later.' }
+    ],
+    {
+      userId: '00000000-0000-4000-8000-000000001231',
+      orgId: '00000000-0000-4000-8000-000000001232',
+      project: 'benchmark-project'
+    }
+  );
+
+  assert.ok(calls.length > 0);
+  assert.equal(calls[0].project, 'benchmark-project');
+  assert.equal(calls[0].user_id, '00000000-0000-4000-8000-000000001231');
+});

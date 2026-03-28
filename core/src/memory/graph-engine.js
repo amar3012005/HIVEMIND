@@ -156,10 +156,18 @@ export class InMemoryGraphStore {
       .map(edge => ({ ...edge }));
   }
 
-  async getRelatedMemories(memoryId, { maxDepth = 1 } = {}) {
+  async getRelatedMemories(memoryId, { maxDepth = 1, user_id, org_id, project } = {}) {
     if (maxDepth <= 0) return [];
+    const scopedIds = new Set(
+      Array.from(this.memories.values())
+        .filter(memory => !user_id || memory.user_id === user_id)
+        .filter(memory => !org_id || memory.org_id === org_id)
+        .filter(memory => !project || memory.project === project)
+        .map(memory => memory.id)
+    );
     return this.relationships
       .filter(edge => edge.from_id === memoryId || edge.to_id === memoryId)
+      .filter(edge => scopedIds.size === 0 || (scopedIds.has(edge.from_id) && scopedIds.has(edge.to_id)))
       .map(edge => ({ ...edge }));
   }
 

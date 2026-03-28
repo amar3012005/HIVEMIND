@@ -263,6 +263,7 @@ export class PanoramaSearch {
       userId,
       orgId,
       project,
+      isLatest: includeHistorical ? undefined : true,
       limit,
       includeExpired,
       includeHistorical,
@@ -276,6 +277,7 @@ export class PanoramaSearch {
       const enhancedResults = await this.enhanceWithGraph(results.results, {
         userId,
         orgId,
+        project,
         includeExpired
       });
       return { ...results, results: enhancedResults };
@@ -337,7 +339,7 @@ export class PanoramaSearch {
    * @returns {Promise<Array>} Enhanced results
    */
   async enhanceWithGraph(results, options) {
-    const { userId, orgId, includeExpired } = options;
+    const { userId, orgId, project, includeExpired } = options;
 
     const enhanced = [];
 
@@ -352,7 +354,10 @@ export class PanoramaSearch {
         // Get related memories through graph
         const related = await this.graphStore.getRelatedMemories(memoryId, {
           maxDepth: 2,
-          includeExpired
+          includeExpired,
+          user_id: userId,
+          org_id: orgId,
+          project
         });
 
         // Calculate graph boost based on connectivity

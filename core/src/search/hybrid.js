@@ -662,6 +662,7 @@ function buildRelationshipTypeFilter(relationshipTypes) {
  * @param {string} options.userId - User ID for multi-tenant isolation (required)
  * @param {string} options.orgId - Organization ID for additional isolation
  * @param {number} options.limit - Maximum results to return (default: 20)
+ * @param {string} options.project - Project scope for tenant sub-partitioning
  * @returns {Array} Graph search results with relationship information
  */
 async function graphSearch(memoryId, options = {}) {
@@ -671,6 +672,7 @@ async function graphSearch(memoryId, options = {}) {
     relationshipTypes = CONFIG.graph.relationshipTypes,
     userId,
     orgId,
+    project,
     limit = CONFIG.limits.graphTopK
   } = options;
 
@@ -739,6 +741,7 @@ async function graphSearch(memoryId, options = {}) {
         WHERE ALL(rel IN r WHERE rel.confidence >= ${validatedMinConfidence})
           AND n.user_id = ${userId}
           ${orgId ? Prisma.raw(`AND n.org_id = '${orgId}'`) : Prisma.raw('')}
+          ${project ? Prisma.raw(`AND n.project = '${project.replace(/'/g, "''")}'`) : Prisma.raw('')}
           AND n.id != ${memoryId}
         RETURN
           n.id as id,
@@ -912,7 +915,7 @@ async function hybridSearch(options = {}) {
     tags,
     project,
     sourcePlatform,
-    isLatest = true,
+    isLatest,
     includeExpired = CONFIG.temporal.defaultIncludeExpired,
     includeHistorical = CONFIG.temporal.defaultIncludeHistorical,
     dateRange,
@@ -934,9 +937,7 @@ async function hybridSearch(options = {}) {
   // Temporal query expansion: extract date ranges from natural language
   const { expandTemporalQuery } = await import('./time-aware-expander.js');
   const temporalExpansion = expandTemporalQuery(effectiveQuery || options.query || '');
-  if (temporalExpansion.hasTemporalFilter && !options.dateRange) {
-    options.dateRange = temporalExpansion.dateRange;
-  }
+  const effectiveDateRange = dateRange || (temporalExpansion.hasTemporalFilter ? temporalExpansion.dateRange : null);
 
   logger.info('Starting hybrid search', {
     query,
@@ -961,13 +962,14 @@ async function hybridSearch(options = {}) {
     directVectorResults = await vectorSearch(queryVector, {
       userId,
       orgId,
+      project,
       memoryType,
       tags,
       sourcePlatform,
       isLatest,
       includeExpired,
       includeHistorical,
-      dateRange,
+      dateRange: effectiveDateRange,
       minStrength,
       minImportance,
       limit: CONFIG.limits.vectorTopK,
@@ -980,13 +982,14 @@ async function hybridSearch(options = {}) {
     semanticFallbackResults = await semanticSearch(effectiveQuery, {
       userId,
       orgId,
+      project,
       memoryType,
       tags,
       sourcePlatform,
       isLatest,
       includeExpired,
       includeHistorical,
-      dateRange,
+      dateRange: effectiveDateRange,
       minStrength,
       minImportance,
       limit: CONFIG.limits.vectorTopK,
@@ -1007,7 +1010,7 @@ async function hybridSearch(options = {}) {
       tags,
       sourcePlatform,
       isLatest,
-      dateRange,
+      dateRange: effectiveDateRange,
       limit: CONFIG.limits.keywordTopK
     });
   }
@@ -1019,7 +1022,8 @@ async function hybridSearch(options = {}) {
       maxDepth: CONFIG.graph.maxDepth,
       minConfidence: CONFIG.graph.minConfidence,
       userId,
-      orgId
+      orgId,
+      project
     });
   }
 
@@ -1074,7 +1078,7 @@ async function hybridSearch(options = {}) {
       temporal: {
         includeExpired,
         includeHistorical,
-        dateRange
+        dateRange: effectiveDateRange
       },
       depth
     }

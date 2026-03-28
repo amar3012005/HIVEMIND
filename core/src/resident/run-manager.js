@@ -68,9 +68,11 @@ function buildAgentDescriptor(agentId) {
 }
 
 export class ResidentRunManager {
-  constructor({ executorStore, memoryStore, store, graphStore, logger = console } = {}) {
+  constructor({ executorStore, memoryStore, store, graphStore, reputationEngine, chainMiner, logger = console } = {}) {
     this.executorStore = executorStore || store || null;
     this.memoryStore = memoryStore || graphStore || null;
+    this.reputationEngine = reputationEngine || null;
+    this.chainMiner = chainMiner || null;
     this.logger = logger;
     this.runs = new Map();
     this.agentDescriptors = RESIDENT_AGENT_IDS.map(buildAgentDescriptor);
@@ -228,6 +230,11 @@ export class ResidentRunManager {
     run.updated_at = nowIso();
     run.finished_at = run.status === 'running' ? null : (run.finished_at || nowIso());
     this.runs.set(run.run_id, run);
+
+    if (run.status === 'completed') {
+      try { await this._onRunCompleted(run, result); } catch {}
+    }
+
     return this._publicRun(run);
   }
 
@@ -296,6 +303,11 @@ export class ResidentRunManager {
     run.updated_at = nowIso();
     run.finished_at = run.status === 'running' ? null : (run.finished_at || nowIso());
     this.runs.set(run.run_id, run);
+
+    if (run.status === 'completed') {
+      try { await this._onRunCompleted(run, result); } catch {}
+    }
+
     return this._publicRun(run);
   }
 
@@ -306,6 +318,7 @@ export class ResidentRunManager {
     this.runs.set(run.run_id, run);
 
     const source = await this._resolveTuringSource(payload, run);
+    this.logger?.log?.(`[turing] Resolved source: hypotheses=${source?.hypotheses?.length || 0}, run=${source?.run?.run_id || 'none'}`);
     if (!source) {
       run.status = 'failed';
       run.error = 'No completed Feynman run was available for Turing to verify.';
@@ -364,6 +377,11 @@ export class ResidentRunManager {
     run.updated_at = nowIso();
     run.finished_at = run.status === 'running' ? null : (run.finished_at || nowIso());
     this.runs.set(run.run_id, run);
+
+    if (run.status === 'completed') {
+      try { await this._onRunCompleted(run, result); } catch {}
+    }
+
     return this._publicRun(run);
   }
 
@@ -428,10 +446,13 @@ export class ResidentRunManager {
     if (explicitRunId) {
       const sourceRun = this.runs.get(explicitRunId) || null;
       if (sourceRun?.agent_id === 'feynman') {
+        const a = sourceRun.result?.hypotheses;
+        const b = sourceRun.trail_mark?.blueprintMeta?.hypotheses;
+        const c = sourceRun.result?.trail_mark?.blueprintMeta?.hypotheses;
         return {
           run: sourceRun,
-          trail: sourceRun.trail_mark || null,
-          hypotheses: sourceRun.result?.hypotheses || [],
+          trail: sourceRun.trail_mark || sourceRun.result?.trail_mark || null,
+          hypotheses: (a?.length ? a : null) || (b?.length ? b : null) || (c?.length ? c : null) || [],
         };
       }
     }
@@ -441,10 +462,13 @@ export class ResidentRunManager {
       if (trail) {
         const sourceRunId = trail.blueprintMeta?.run_id || null;
         const sourceRun = sourceRunId ? (this.runs.get(sourceRunId) || null) : null;
+        const a = sourceRun?.result?.hypotheses;
+        const b = sourceRun?.trail_mark?.blueprintMeta?.hypotheses;
+        const c = trail.blueprintMeta?.hypotheses;
         return {
           run: sourceRun,
           trail,
-          hypotheses: sourceRun?.result?.hypotheses || trail.blueprintMeta?.hypotheses || [],
+          hypotheses: (a?.length ? a : null) || (b?.length ? b : null) || (c?.length ? c : null) || [],
         };
       }
     }
@@ -458,11 +482,68 @@ export class ResidentRunManager {
 
     const latest = candidates[0] || null;
     if (!latest) return null;
+    // Hypotheses can be in result.hypotheses OR trail_mark.blueprintMeta.hypotheses
+    // Use .length check because empty arrays are truthy in JS
+    const h1 = latest.result?.hypotheses;
+    const h2 = latest.trail_mark?.blueprintMeta?.hypotheses;
+    const h3 = latest.result?.trail_mark?.blueprintMeta?.hypotheses;
+    const hypotheses = (h1?.length ? h1 : null) || (h2?.length ? h2 : null) || (h3?.length ? h3 : null) || [];
     return {
       run: latest,
-      trail: latest.trail_mark || null,
-      hypotheses: latest.result?.hypotheses || [],
+      trail: latest.trail_mark || latest.result?.trail_mark || null,
+      hypotheses,
     };
+  }
+
+  async _onRunCompleted(run, result) {
+    const agentId = run.agent_id;
+
+    // 1. Execute graph actions (Turing's recommendations)
+    if (agentId === 'turing' && result.action_candidates?.length > 0) {
+      try {
+        const { GraphActionExecutor } = await import('./graph-action-executor.js');
+        const executor = new GraphActionExecutor({ memoryStore: this.memoryStore });
+        const actionResult = await executor.executeActions(result.action_candidates, {
+          minConfidence: 0.65,
+          project: run.project,
+        });
+        run.graph_actions_result = actionResult;
+        this.logger.log(`[run-manager] Turing graph actions: ${actionResult.executed} executed, ${actionResult.skipped} skipped`);
+      } catch (err) {
+        this.logger.warn(`[run-manager] Graph action execution failed: ${err.message}`);
+      }
+    }
+
+    // 2. Update reputation for this agent
+    if (this.reputationEngine) {
+      try {
+        await this.reputationEngine.updateFromExecution(agentId, {
+          chainSummary: {
+            successRate: result.status === 'completed' ? 1.0 : 0.0,
+            doneReason: result.status === 'completed' ? 'tool_signaled_completion' : 'failed',
+            toolSequence: [agentId],
+            totalLatencyMs: Date.now() - new Date(run.started_at).getTime(),
+          },
+        });
+      } catch {}
+    }
+
+    // 3. Mine for blueprints (non-blocking)
+    if (this.chainMiner) {
+      this.chainMiner.mine(run.goal || `resident:${agentId}`).catch(() => {});
+    }
+
+    // 4. Store chain run for future mining
+    if (this.executorStore?.storeChainRun) {
+      this.executorStore.storeChainRun({
+        goalId: run.goal || `resident:${agentId}`,
+        agentId,
+        toolSequence: [agentId],
+        successRate: result.status === 'completed' ? 1.0 : 0.0,
+        doneReason: result.status,
+        totalLatencyMs: Date.now() - new Date(run.started_at).getTime(),
+      }).catch(() => {});
+    }
   }
 
   _buildTrailMark(run, result) {
@@ -611,6 +692,7 @@ export class ResidentRunManager {
       progress: run.progress,
       result: run.result,
       trail_mark: run.trail_mark || null,
+      graph_actions_result: run.graph_actions_result || null,
       error: run.error,
     };
   }

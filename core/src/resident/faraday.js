@@ -348,6 +348,25 @@ export class FaradayAgent {
 
     await updateProgress(1, 4, 'loading_memories');
 
+    // Load past observations to avoid re-discovering known anomalies
+    let pastObservationMemoryIds = new Set();
+    try {
+      if (this.observationStore?.listObservations) {
+        const pastObs = await this.observationStore.listObservations({
+          agent_id: 'faraday',
+          limit: 100,
+        });
+        for (const obs of pastObs) {
+          const relatedIds = obs.content?.related_memory_ids || obs.content?.evidence_refs || [];
+          for (const id of relatedIds) pastObservationMemoryIds.add(id);
+        }
+      }
+    } catch {
+      /* best effort — store may not support listObservations */
+    }
+
+    let newAnomalyCount = 0;
+
     let memories = [];
     if (this.memoryStore?.listLatestMemories) {
       memories = await this.memoryStore.listLatestMemories({
@@ -595,47 +614,55 @@ export class FaradayAgent {
       const fileLabel = String(file).slice(0, 120);
 
       if (codeLike && group.length >= 3 && !testLike) {
-        observations.push(observationPayload({
-          agentId,
-          runId,
-          kind: 'code_smell',
-          summary: `High-churn code region ${fileLabel} has repeated memory updates without matching tests.`,
-          region: region || project || scope,
-          signalType: 'test_gap',
-          severity: 'medium',
-          confidence: 0.84,
-          evidenceRefs: relatedIds.slice(0, 5),
-          relatedFiles: [fileLabel],
-          relatedMemoryIds: relatedIds.slice(0, 10),
-          nextAction: `Verify test coverage for ${fileLabel}.`,
-          extra: {
-            memory_count: group.length,
-            has_tests: testLike,
-            has_docs: docLike,
-          },
-        }));
+        const alreadyKnown = relatedIds.some(id => pastObservationMemoryIds.has(id));
+        if (!alreadyKnown) {
+          newAnomalyCount += 1;
+          observations.push(observationPayload({
+            agentId,
+            runId,
+            kind: 'code_smell',
+            summary: `High-churn code region ${fileLabel} has repeated memory updates without matching tests.`,
+            region: region || project || scope,
+            signalType: 'test_gap',
+            severity: 'medium',
+            confidence: 0.84,
+            evidenceRefs: relatedIds.slice(0, 5),
+            relatedFiles: [fileLabel],
+            relatedMemoryIds: relatedIds.slice(0, 10),
+            nextAction: `Verify test coverage for ${fileLabel}.`,
+            extra: {
+              memory_count: group.length,
+              has_tests: testLike,
+              has_docs: docLike,
+            },
+          }));
+        }
       }
 
       if (codeLike && !docLike && group.length >= 2) {
-        observations.push(observationPayload({
-          agentId,
-          runId,
-          kind: 'risk_candidate',
-          summary: `Code region ${fileLabel} has repeated updates but no nearby documentation signal.`,
-          region: region || project || scope,
-          signalType: 'stale_doc',
-          severity: 'medium',
-          confidence: 0.78,
-          evidenceRefs: relatedIds.slice(0, 5),
-          relatedFiles: [fileLabel],
-          relatedMemoryIds: relatedIds.slice(0, 10),
-          nextAction: `Add or refresh documentation for ${fileLabel}.`,
-          extra: {
-            memory_count: group.length,
-            has_tests: testLike,
-            has_docs: docLike,
-          },
-        }));
+        const alreadyKnown = relatedIds.some(id => pastObservationMemoryIds.has(id));
+        if (!alreadyKnown) {
+          newAnomalyCount += 1;
+          observations.push(observationPayload({
+            agentId,
+            runId,
+            kind: 'risk_candidate',
+            summary: `Code region ${fileLabel} has repeated updates but no nearby documentation signal.`,
+            region: region || project || scope,
+            signalType: 'stale_doc',
+            severity: 'medium',
+            confidence: 0.78,
+            evidenceRefs: relatedIds.slice(0, 5),
+            relatedFiles: [fileLabel],
+            relatedMemoryIds: relatedIds.slice(0, 10),
+            nextAction: `Add or refresh documentation for ${fileLabel}.`,
+            extra: {
+              memory_count: group.length,
+              has_tests: testLike,
+              has_docs: docLike,
+            },
+          }));
+        }
       }
     }
 
@@ -654,6 +681,11 @@ export class FaradayAgent {
 
       if (group.length < 2) continue;
 
+      const dupMemoryIds = group.map((memory) => memory.id);
+      const alreadyKnown = dupMemoryIds.some(id => pastObservationMemoryIds.has(id));
+      if (alreadyKnown) continue;
+
+      newAnomalyCount += 1;
       observations.push(observationPayload({
         agentId,
         runId,
@@ -663,9 +695,9 @@ export class FaradayAgent {
         signalType: 'duplicate_memory',
         severity: 'low',
         confidence: 0.7,
-        evidenceRefs: group.map((memory) => memory.id).slice(0, 10),
+        evidenceRefs: dupMemoryIds.slice(0, 10),
         relatedFiles: group.map((memory) => memoryPath(memory)).filter(Boolean).slice(0, 10),
-        relatedMemoryIds: group.map((memory) => memory.id).slice(0, 10),
+        relatedMemoryIds: dupMemoryIds.slice(0, 10),
         nextAction: 'Review whether these memories should be merged, linked, or left separate.',
         extra: {
           signature,
@@ -716,6 +748,8 @@ export class FaradayAgent {
       semantic_seeds: semanticSeeds.slice(0, 10).map((memory) => memory.id),
       semantic_clusters: topSemanticClusters,
       observation_ids: observations.map((observation) => observation.id),
+      past_observations_checked: pastObservationMemoryIds.size,
+      new_anomalies_found: newAnomalyCount,
       scope,
       project,
       region,

@@ -515,6 +515,9 @@ export class TuringAgent {
         summary: item.content.summary,
         recommendation: item.content.recommendation,
         confidence: item.certainty,
+        target_memory_ids: item.content.target_memory_ids || [],
+        rationale: item.content.rationale || '',
+        expected_impact: item.content.expected_impact || '',
       })),
       summary: {
         scope,

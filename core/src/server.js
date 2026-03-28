@@ -580,6 +580,8 @@ try {
 const residentRunManager = new ResidentRunManager({
   store: trailExecutor?._store || new InMemoryStore(),
   graphStore: persistentMemoryStore,
+  reputationEngine: trailExecutor?._reputationEngine || null,
+  chainMiner: trailExecutor?._chainMiner || null,
   logger: console,
 });
 residentRunManager.seedAgents().catch((error) => {
@@ -4987,8 +4989,9 @@ a{color:#a78bfa}</style></head><body>
             }
             try {
               const graphProject = url.searchParams.get('project') || null;
-              const graphLimit = Math.min(parseInt(url.searchParams.get('limit')) || 200, 500);
+              const graphLimit = Math.min(parseInt(url.searchParams.get('limit')) || 300, 1000);
               const includeEdges = url.searchParams.get('include_edges') !== 'false';
+              const includeResidents = url.searchParams.get('include_residents') !== 'false';
 
               const scopeWhere = {
                 userId: userId,
@@ -4997,20 +5000,66 @@ a{color:#a78bfa}</style></head><body>
                 ...(graphProject ? { project: graphProject } : {})
               };
 
-              const memoryRecords = await prisma.memory.findMany({
-                where: scopeWhere,
-                include: {
-                  sourceMetadata: true
+              // ── Smart priority-based node selection ──
+              // Layer 1: High-value nodes (facts, observations, promoted-risks) — always shown
+              const highValueNodes = await prisma.memory.findMany({
+                where: {
+                  ...scopeWhere,
+                  tags: { hasSome: ['extracted-fact', 'promoted-risk', 'observation', 'turing-verified'] },
                 },
-                orderBy: { updatedAt: 'desc' },
-                take: graphLimit
+                include: { sourceMetadata: true },
+                orderBy: { importanceScore: 'desc' },
+                take: Math.floor(graphLimit * 0.25), // 25% of budget
               });
+              const seenIds = new Set(highValueNodes.map(r => r.id));
+
+              // Layer 2: Connected nodes (have relationships) — show the graph structure
+              const allRelationships = await prisma.relationship.findMany({
+                where: {
+                  OR: [
+                    { fromMemory: { userId, orgId, deletedAt: null } },
+                    { toMemory: { userId, orgId, deletedAt: null } },
+                  ],
+                },
+                select: { fromId: true, toId: true, type: true, confidence: true, createdBy: true },
+                take: 2000,
+              });
+              const connectedNodeIds = new Set();
+              for (const rel of allRelationships) {
+                connectedNodeIds.add(rel.fromId);
+                connectedNodeIds.add(rel.toId);
+              }
+              // Remove already-loaded IDs
+              for (const id of seenIds) connectedNodeIds.delete(id);
+
+              const connectedBudget = Math.floor(graphLimit * 0.35); // 35% of budget
+              const connectedNodes = connectedNodeIds.size > 0
+                ? await prisma.memory.findMany({
+                    where: { id: { in: [...connectedNodeIds].slice(0, connectedBudget) }, ...scopeWhere },
+                    include: { sourceMetadata: true },
+                  })
+                : [];
+              for (const r of connectedNodes) seenIds.add(r.id);
+
+              // Layer 3: Recent memories — fill remaining budget
+              const recentBudget = graphLimit - seenIds.size;
+              const recentNodes = recentBudget > 0
+                ? await prisma.memory.findMany({
+                    where: { ...scopeWhere, id: { notIn: [...seenIds] } },
+                    include: { sourceMetadata: true },
+                    orderBy: { updatedAt: 'desc' },
+                    take: recentBudget,
+                  })
+                : [];
+
+              // Merge all layers
+              const allRecords = [...highValueNodes, ...connectedNodes, ...recentNodes];
 
               const now = Date.now();
               const projectSet = new Set();
               const tagSet = new Set();
 
-              const nodes = memoryRecords.map(r => {
+              const nodes = allRecords.map(r => {
                 const updatedAt = r.updatedAt instanceof Date ? r.updatedAt : new Date(r.updatedAt);
                 const createdAt = r.createdAt instanceof Date ? r.createdAt : new Date(r.createdAt);
                 const daysSinceUpdate = (now - updatedAt.getTime()) / (1000 * 60 * 60 * 24);
@@ -5018,6 +5067,13 @@ a{color:#a78bfa}</style></head><body>
 
                 if (r.project) projectSet.add(r.project);
                 if (r.tags) r.tags.forEach(t => tagSet.add(t));
+
+                // Classify node layer for frontend visualization
+                const isFact = (r.tags || []).includes('extracted-fact');
+                const isObservation = (r.tags || []).includes('observation') || r.memoryType === 'observation';
+                const isPromotedRisk = (r.tags || []).includes('promoted-risk');
+                const isTuringVerified = (r.tags || []).includes('turing-verified');
+                const nodeLayer = isPromotedRisk ? 'promoted' : isTuringVerified ? 'verified' : isFact ? 'fact' : isObservation ? 'observation' : 'memory';
 
                 return {
                   id: r.id,
@@ -5034,38 +5090,115 @@ a{color:#a78bfa}</style></head><body>
                   createdAt: createdAt.toISOString(),
                   updatedAt: updatedAt.toISOString(),
                   daysSinceUpdate: Math.round(daysSinceUpdate * 100) / 100,
-                  temporalWeight: Math.round(temporalWeight * 10000) / 10000
+                  temporalWeight: Math.round(temporalWeight * 10000) / 10000,
+                  nodeLayer, // 'fact' | 'observation' | 'promoted' | 'verified' | 'memory'
                 };
               });
 
+              // Build edges from relationships
+              const nodeIdSet = new Set(allRecords.map(r => r.id));
               let edges = [];
-              if (includeEdges && memoryRecords.length > 0) {
-                const memoryIds = memoryRecords.map(r => r.id);
-                const relRecords = await prisma.relationship.findMany({
-                  where: {
-                    fromId: { in: memoryIds },
-                    toId: { in: memoryIds }
-                  },
-                  orderBy: { createdAt: 'desc' }
-                });
-
-                edges = relRecords.map(r => ({
-                  source: r.fromId,
-                  target: r.toId,
-                  type: r.type,
-                  confidence: r.confidence
-                }));
+              if (includeEdges) {
+                edges = allRelationships
+                  .filter(r => nodeIdSet.has(r.fromId) && nodeIdSet.has(r.toId))
+                  .map(r => ({
+                    source: r.fromId,
+                    target: r.toId,
+                    type: r.type,
+                    confidence: r.confidence,
+                    createdBy: r.createdBy || null, // 'turing' | 'memory_processor' | 'system'
+                  }));
               }
+
+              // ── Resident overlay data ──
+              let residentActivity = null;
+              const obsStore = trailExecutor?._store || null;
+              if (includeResidents && obsStore?.listObservations) {
+                try {
+                  const recentObs = await obsStore.listObservations({
+                    limit: 50,
+                  });
+                  // Group observations by agent
+                  const byAgent = { faraday: [], feynman: [], turing: [] };
+                  for (const obs of recentObs) {
+                    const agent = obs.agent_id || 'unknown';
+                    if (byAgent[agent]) byAgent[agent].push(obs);
+                  }
+
+                  // Extract node IDs touched by residents
+                  const residentTouchedIds = new Set();
+                  const hypotheses = [];
+                  const verifications = [];
+                  const graphActions = [];
+
+                  for (const obs of recentObs) {
+                    const content = obs.content || {};
+                    const relIds = content.related_memory_ids || content.evidence_refs || [];
+                    const targetIds = content.target_memory_ids || [];
+                    for (const id of [...relIds, ...targetIds]) residentTouchedIds.add(id);
+
+                    if (obs.kind === 'hypothesis') {
+                      hypotheses.push({
+                        id: obs.id,
+                        summary: content.summary || '',
+                        type: content.hypothesis_type || 'unknown',
+                        confidence: obs.certainty || 0,
+                        relatedNodeIds: relIds,
+                      });
+                    }
+                    if (obs.kind === 'verification') {
+                      verifications.push({
+                        id: obs.id,
+                        verdict: content.verdict || 'unknown',
+                        summary: content.summary || '',
+                        confidence: obs.certainty || 0,
+                        relatedNodeIds: content.related_memory_ids || [],
+                        graphActions: content.graph_actions || [],
+                      });
+                    }
+                    if (['merge_candidate', 'promotion_candidate', 'relationship_candidate', 'noise_reduction_candidate'].includes(obs.kind)) {
+                      graphActions.push({
+                        id: obs.id,
+                        kind: obs.kind,
+                        recommendation: content.recommendation || obs.kind,
+                        summary: content.summary || '',
+                        confidence: obs.certainty || 0,
+                        targetNodeIds: content.target_memory_ids || [],
+                      });
+                    }
+                  }
+
+                  residentActivity = {
+                    touchedNodeIds: [...residentTouchedIds],
+                    observations: { faraday: byAgent.faraday.length, feynman: byAgent.feynman.length, turing: byAgent.turing.length },
+                    hypotheses,
+                    verifications,
+                    graphActions,
+                  };
+                } catch (resErr) {
+                  console.warn('[graph] Resident overlay failed:', resErr.message);
+                }
+              }
+
+              // Count total memories for context
+              const totalCount = await prisma.memory.count({ where: scopeWhere });
 
               return jsonResponse(res, {
                 nodes,
                 edges,
+                residentActivity,
                 meta: {
                   nodeCount: nodes.length,
                   edgeCount: edges.length,
+                  totalMemories: totalCount,
+                  loadedLayers: {
+                    highValue: highValueNodes.length,
+                    connected: connectedNodes.length,
+                    recent: recentNodes.length,
+                  },
                   projects: Array.from(projectSet).sort(),
-                  tags: Array.from(tagSet).sort()
-                }
+                  tags: Array.from(tagSet).sort(),
+                },
               });
             } catch (error) {
               console.error('Graph endpoint failed:', error);

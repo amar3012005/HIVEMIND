@@ -417,7 +417,10 @@ export class FeynmanAgent {
         hypothesis_type: hypothesis.content.hypothesis_type,
         why_now: hypothesis.content.why_now,
         supporting_evidence_summary: hypothesis.content.supporting_evidence_summary,
-        verification_checks: hypothesis.content.verification_checks,
+        evidence_refs: hypothesis.content.evidence_refs || [],
+        related_files: hypothesis.content.related_files || [],
+        related_memory_ids: hypothesis.content.related_memory_ids || hypothesis.content.evidence_refs || [],
+        verification_checks: hypothesis.content.verification_checks || [],
         novelty_score: hypothesis.content.novelty_score,
       })),
       summary: {

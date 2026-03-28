@@ -360,7 +360,7 @@ export class FaradayAgent {
     if (memories.length < 2) return null;
 
     const memoryList = memories
-      .map((m) => `[${m.id}] (${m.date ? new Date(m.date).toISOString().slice(0, 10) : '?'}): ${m.content}`)
+      .map((m) => `[${m.id}] (${m.date ? new Date(m.date).toISOString().slice(0, 10) : '?'}) [project:${m.project || 'none'}]: ${m.content}`)
       .join('\n\n');
 
     try {
@@ -375,20 +375,24 @@ export class FaradayAgent {
           messages: [
             {
               role: 'system',
-              content: `You analyze clusters of related memories. For each cluster, determine:
-1. DUPLICATES: Which memories say the same thing? List their IDs.
-2. UPDATE_CHAIN: Which memories supersede older versions? List old→new pairs.
+              content: `You analyze clusters of related memories. Each memory has a [project:xxx] tag showing which project it belongs to.
+
+For each cluster, determine:
+1. DUPLICATES: Which memories say the same thing? List their full IDs.
+2. UPDATE_CHAIN: Which memories supersede older versions? List old→new pairs with full IDs.
 3. CONFLICTS: Are there contradicting facts? List the conflicting IDs and what conflicts.
-4. MERGE_RECOMMENDATION: Should any be merged? Which ID is canonical?
+4. MERGE: Should any be merged? Which ID is canonical? List IDs to absorb.
+5. CROSS_PROJECT: Are there memories from DIFFERENT projects about the same topic? These should be linked.
 
 Output format (one per line):
-DUPLICATES: [id1, id2] — reason
-UPDATE_CHAIN: old_id → new_id — reason
-CONFLICT: [id1, id2] — what conflicts
-MERGE: canonical_id absorbs [id1, id2] — reason
+DUPLICATES: [full-uuid-1, full-uuid-2] — reason
+UPDATE_CHAIN: full-uuid-old → full-uuid-new — reason
+CONFLICT: [full-uuid-1, full-uuid-2] — what conflicts
+MERGE: full-canonical-uuid absorbs [full-uuid-1, full-uuid-2] — reason
+CROSS_PROJECT: [full-uuid-1, full-uuid-2] — same topic across projects, should be linked
 NONE — if the cluster has no issues
 
-IMPORTANT: Use the FULL memory IDs exactly as shown in brackets (they are UUIDs like abc12345-6789-...). Do not truncate.`,
+CRITICAL: Use the COMPLETE memory IDs exactly as shown in brackets. They are full UUIDs. Never shorten them.`,
             },
             {
               role: 'user',
@@ -439,6 +443,14 @@ IMPORTANT: Use the FULL memory IDs exactly as shown in brackets (they are UUIDs 
               ?.split(',')
               .map((s) => s.trim()) || [];
           if (canonical && absorbs.length) actions.push({ type: 'merge', canonical_id: canonical, absorb_ids: absorbs, reason: line });
+        }
+        if (line.startsWith('CROSS_PROJECT:')) {
+          const ids =
+            line
+              .match(/\[([^\]]+)\]/)?.[1]
+              ?.split(',')
+              .map((s) => s.trim()) || [];
+          if (ids.length >= 2) actions.push({ type: 'cross_project_link', memory_ids: ids, reason: line });
         }
       }
 

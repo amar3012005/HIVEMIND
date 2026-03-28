@@ -520,6 +520,12 @@ export class ResidentRunManager {
               if (a.type === 'link_update') {
                 actions.push({ recommendation: 'link_update_chain', confidence: 0.88, target_memory_ids: [a.old_id, a.new_id].filter(Boolean) });
               }
+              if (a.type === 'cross_project_link') {
+                const ids = a.memory_ids || [];
+                if (ids.length >= 2) {
+                  actions.push({ recommendation: 'relationship_candidate', confidence: 0.85, target_memory_ids: ids });
+                }
+              }
             }
           }
 

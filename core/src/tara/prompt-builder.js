@@ -36,6 +36,7 @@ export function buildPrompt({
   voiceOptimized = true,
   interruptedText = null,
   interruptionType = null,
+  clinicalInsights = null,
 }) {
   // 1. System prompt
   let system = systemPrompt || DEFAULT_SYSTEM_PROMPT;
@@ -86,6 +87,50 @@ export function buildPrompt({
       return `• ${content.slice(0, 300)}${dateStr}`;
     });
     contextParts.push(`## Relevant Knowledge (from memory)\n${memLines.join('\n')}`);
+  }
+
+  // Clinical reasoning insights (from background analysis of previous turns)
+  if (clinicalInsights && typeof clinicalInsights === 'object') {
+    const clinicalLines = [];
+
+    // Hypotheses — support both string[] and object[] formats
+    if (clinicalInsights.hypotheses?.length) {
+      const hyps = clinicalInsights.hypotheses.map(h =>
+        typeof h === 'string' ? h : `${h.text} (${Math.round((h.probability || 0) * 100)}%, ${h.status || 'active'})`
+      );
+      clinicalLines.push(`Hypotheses: ${hyps.join('; ')}`);
+    }
+
+    // SPICED progress
+    if (clinicalInsights.spiced_progress) {
+      const sp = clinicalInsights.spiced_progress;
+      const spicedParts = [];
+      if (sp.situation) spicedParts.push(`Situation: ${sp.situation}`);
+      if (sp.pain) spicedParts.push(`Pain: ${sp.pain}`);
+      if (sp.impact) spicedParts.push(`Impact: ${sp.impact}`);
+      if (sp.critical_event) spicedParts.push(`Critical Event: ${sp.critical_event}`);
+      if (sp.decision) spicedParts.push(`Decision: ${sp.decision}`);
+      if (spicedParts.length > 0) clinicalLines.push(`SPICED: ${spicedParts.join(' | ')}`);
+    }
+
+    if (clinicalInsights.missing_info?.length) {
+      clinicalLines.push(`Missing information: ${clinicalInsights.missing_info.join('; ')}`);
+    }
+    if (clinicalInsights.suggested_question) {
+      clinicalLines.push(`Suggested next question: ${clinicalInsights.suggested_question}`);
+    }
+    if (clinicalInsights.psychological_notes) {
+      clinicalLines.push(`Psychological notes: ${clinicalInsights.psychological_notes}`);
+    }
+    if (clinicalInsights.red_flags?.length) {
+      clinicalLines.push(`Red flags: ${clinicalInsights.red_flags.join('; ')}`);
+    }
+    if (clinicalInsights.strategy) {
+      clinicalLines.push(`Recommended strategy: ${clinicalInsights.strategy}`);
+    }
+    if (clinicalLines.length > 0) {
+      contextParts.push(`## Clinical Reasoning Insights\n${clinicalLines.join('\n')}`);
+    }
   }
 
   // Interruption context

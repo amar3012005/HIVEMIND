@@ -19,6 +19,7 @@ import crypto from 'node:crypto';
 import { SessionManager } from './session-manager.js';
 import { TaraConfigStore } from './config-store.js';
 import { buildPrompt } from './prompt-builder.js';
+import { ClinicalReasoningEngine } from './clinical-reasoning.js';
 
 export class TaraStreamHandler {
   constructor({ memoryStore, recallFn, llmBaseUrl, llmApiKey, defaultModel }) {
@@ -29,6 +30,12 @@ export class TaraStreamHandler {
     this.llmBaseUrl = llmBaseUrl || process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1';
     this.llmApiKey = llmApiKey || process.env.GROQ_API_KEY || '';
     this.defaultModel = defaultModel || process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+
+    this.clinicalEngine = new ClinicalReasoningEngine({
+      llmBaseUrl: this.llmBaseUrl,
+      llmApiKey: this.llmApiKey,
+      model: process.env.CLINICAL_MODEL || 'openai/gpt-oss-120b',
+    });
 
     // ── Config cache (avoids DB read every turn) ──
     this._configCache = new Map();  // key: tenant:agent → { config, cachedAt }
@@ -96,6 +103,14 @@ export class TaraStreamHandler {
 
       // ── STEP 2: Build prompt (< 5ms) ──
       const model = config.model || this.defaultModel;
+      const hasClinical = !!config.clinical_prompt;
+
+      // Store clinical config in session state for post-turn use
+      if (hasClinical) {
+        sessionState._clinical_prompt = config.clinical_prompt;
+        sessionState._clinical_model = config.clinical_model || null;
+      }
+
       const { messages, tokenEstimate } = buildPrompt({
         query,
         systemPrompt: config.system_prompt,
@@ -105,6 +120,7 @@ export class TaraStreamHandler {
         voiceOptimized: config.voice_optimized !== false,
         interruptedText,
         interruptionType,
+        clinicalInsights: sessionState.clinical_insights || null,
       });
 
       this._writeLine(res, {
@@ -141,6 +157,7 @@ export class TaraStreamHandler {
       }
 
       let ttfb = null;
+      let mainUsage = null; // { prompt_tokens, completion_tokens, total_tokens }
       const reader = llmResp.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
@@ -160,6 +177,9 @@ export class TaraStreamHandler {
 
           try {
             const chunk = JSON.parse(data);
+            // Capture usage from final chunk (Groq/OpenAI include it)
+            if (chunk.usage) mainUsage = chunk.usage;
+            if (chunk.x_groq?.usage) mainUsage = chunk.x_groq.usage;
             const delta = chunk.choices?.[0]?.delta?.content;
             if (delta) {
               if (ttfb === null) {
@@ -171,13 +191,20 @@ export class TaraStreamHandler {
                 });
               }
               fullResponse += delta;
-              // Emit both `text` and `content` for client compatibility
               this._writeLine(res, { type: 'text', text: delta, content: delta, is_final: false });
             }
           } catch {
             // Skip malformed chunks
           }
         }
+      }
+      // Estimate tokens if usage not returned by model
+      if (!mainUsage) {
+        mainUsage = {
+          prompt_tokens: tokenEstimate,
+          completion_tokens: Math.ceil(fullResponse.length / 4),
+          total_tokens: tokenEstimate + Math.ceil(fullResponse.length / 4),
+        };
       }
 
       // ── STEP 4: Done event ──
@@ -194,12 +221,13 @@ export class TaraStreamHandler {
         session_turns: sessionState.turn_count + 1,
         model,
         response_length: fullResponse.length,
+        usage: mainUsage,
       });
       res.end();
 
       // ── STEP 5: Async post-turn update (NEVER blocks the stream) ──
       this._postTurnUpdate(sessionId, {
-        userId, orgId, tenantId,
+        userId, orgId, tenantId, mainUsage,
         sessionState, query, response: fullResponse,
       }).catch(err => console.warn('[tara/stream] Post-turn update failed:', err.message));
 
@@ -235,7 +263,7 @@ export class TaraStreamHandler {
   // ── Post-turn update (async, non-blocking) ──
   // Saves session state + creates a turn memory in the graph (purple, chained)
 
-  async _postTurnUpdate(sessionId, { userId, orgId, tenantId, sessionState, query, response }) {
+  async _postTurnUpdate(sessionId, { userId, orgId, tenantId, mainUsage, sessionState, query, response }) {
     if (!sessionId) return;
 
     const userSummary = query.length > 100 ? query.slice(0, 97) + '...' : query;
@@ -261,14 +289,20 @@ export class TaraStreamHandler {
         project: `tara/${tenantId || 'default'}`,
         content: turnContent,
         title: `TARA Turn ${turnNumber} — ${sessionId.slice(0, 12)}`,
-        tags: ['tara-turn', `sid:${sessionId}`, `turn:${turnNumber}`],
+        tags: [
+          'tara-turn', `sid:${sessionId}`, `turn:${turnNumber}`,
+          `in:${mainUsage?.prompt_tokens || 0}`,
+          `out:${mainUsage?.completion_tokens || 0}`,
+          `tokens:${mainUsage?.total_tokens || 0}`,
+        ],
         memory_type: 'event',
         document_date: new Date().toISOString(),
         metadata: {
           session_id: sessionId,
           turn_number: turnNumber,
           tenant_id: tenantId,
-          node_color: 'purple',  // Signal for MemoryGraph visualization
+          node_color: 'purple',
+          usage: mainUsage || null,
         },
       });
 
@@ -297,6 +331,107 @@ export class TaraStreamHandler {
     } catch (err) {
       console.warn('[tara/stream] Turn memory save failed:', err.message);
       // Never fail the turn because of graph persistence
+    }
+
+    // 3. Run clinical reasoning (async background — never blocks)
+    //    Try clinical_model first, fall back to main model if it fails
+    if (sessionState._clinical_prompt) {
+      try {
+        const clinicalModel = sessionState._clinical_model || this.clinicalEngine.model;
+        const mainModel = this.defaultModel;
+
+        // Try clinical model first
+        this.clinicalEngine.model = clinicalModel;
+        let insights = await this.clinicalEngine.analyze({
+          clinicalPrompt: sessionState._clinical_prompt,
+          sessionState, lastQuery: query, lastResponse: response,
+          previousInsights: sessionState.clinical_insights || null,
+        });
+
+        // Fallback to main model if clinical model failed
+        if (!insights && clinicalModel !== mainModel) {
+          console.warn(`[tara/clinical] ${clinicalModel} failed, falling back to ${mainModel}`);
+          this.clinicalEngine.model = mainModel;
+          insights = await this.clinicalEngine.analyze({
+            clinicalPrompt: sessionState._clinical_prompt,
+            sessionState, lastQuery: query, lastResponse: response,
+            previousInsights: sessionState.clinical_insights || null,
+          });
+        }
+
+        if (insights) {
+          sessionState.clinical_insights = insights;
+          // Update session manager cache so next turn sees these insights immediately
+          this.sessionManager._cache.set(sessionId, { state: { ...sessionState }, updatedAt: Date.now() });
+
+          // 4. Save insight as a visible memory (orange diamond in MemoryGraph)
+          try {
+            const insightId = crypto.randomUUID();
+            const insightLines = [];
+            if (insights.hypotheses?.length) {
+              const hyps = insights.hypotheses.map(h => typeof h === 'string' ? h : `${h.text} (${Math.round((h.probability||0)*100)}%)`);
+              insightLines.push(`Hypotheses: ${hyps.join('; ')}`);
+            }
+            if (insights.suggested_question) insightLines.push(`Next question: ${insights.suggested_question}`);
+            if (insights.strategy) insightLines.push(`Strategy: ${insights.strategy}`);
+            if (insights.psychological_notes) insightLines.push(`Notes: ${insights.psychological_notes}`);
+            if (insights.red_flags?.length) insightLines.push(`Red flags: ${insights.red_flags.join('; ')}`);
+            if (insights.spiced_progress) {
+              const sp = insights.spiced_progress;
+              insightLines.push(`SPICED: S=${sp.situation||'?'} P=${sp.pain||'?'} I=${sp.impact||'?'} C=${sp.critical_event||'?'} D=${sp.decision||'?'}`);
+            }
+
+            await this.memoryStore.createMemory({
+              id: insightId,
+              user_id: userId,
+              org_id: orgId,
+              project: `tara/${tenantId || 'default'}`,
+              content: insightLines.join('\n'),
+              title: `Clinical Insight — Turn ${turnNumber} — ${sessionId.slice(0, 12)}`,
+              tags: [
+                'tara-insight', `sid:${sessionId}`, `turn:${turnNumber}`,
+                `clinical-in:${insights._usage?.prompt_tokens || 0}`,
+                `clinical-out:${insights._usage?.completion_tokens || 0}`,
+                `clinical-tokens:${insights._usage?.total_tokens || 0}`,
+                `clinical-model:${insights._model || 'unknown'}`,
+              ],
+              memory_type: 'fact',
+              document_date: new Date().toISOString(),
+              metadata: {
+                session_id: sessionId,
+                turn_number: turnNumber,
+                confidence: insights.confidence,
+                strategy: insights.strategy,
+                node_color: 'orange',
+                clinical_usage: insights._usage || null,
+                clinical_model: insights._model || null,
+              },
+            });
+
+            // Link insight to the turn memory it analyzed
+            const { memories: turnMems } = await this.memoryStore.listMemories({
+              user_id: userId, org_id: orgId,
+              tags: ['tara-turn', `sid:${sessionId}`, `turn:${turnNumber}`],
+              limit: 1,
+            });
+            if (turnMems?.length > 0) {
+              await this.memoryStore.createRelationship({
+                id: crypto.randomUUID(),
+                from_id: insightId,
+                to_id: turnMems[0].id,
+                type: 'Derives',
+                confidence: insights.confidence || 0.7,
+                metadata: { source: 'tara_clinical_reasoning', session_id: sessionId },
+                created_by: 'tara-clinical',
+              }).catch(() => {});
+            }
+          } catch (err) {
+            console.warn('[tara/clinical] Insight memory save failed:', err.message);
+          }
+        }
+      } catch (err) {
+        console.warn('[tara/clinical] Background analysis failed:', err.message);
+      }
     }
   }
 

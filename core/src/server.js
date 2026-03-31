@@ -5104,7 +5104,8 @@ a{color:#a78bfa}</style></head><body>
                 const isPromotedRisk = (r.tags || []).includes('promoted-risk');
                 const isTuringVerified = (r.tags || []).includes('turing-verified');
                 const isTaraTurn = (r.tags || []).includes('tara-turn');
-                const nodeLayer = isTaraTurn ? 'tara' : isPromotedRisk ? 'promoted' : isTuringVerified ? 'verified' : isFact ? 'fact' : isObservation ? 'observation' : 'memory';
+                const isTaraInsight = (r.tags || []).includes('tara-insight');
+                const nodeLayer = isTaraInsight ? 'tara-insight' : isTaraTurn ? 'tara' : isPromotedRisk ? 'promoted' : isTuringVerified ? 'verified' : isFact ? 'fact' : isObservation ? 'observation' : 'memory';
 
                 return {
                   id: r.id,

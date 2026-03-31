@@ -575,6 +575,65 @@ export async function queryPersistedMemories(store, { pattern, user_id, org_id, 
  * @param {number} params.depth - Graph traversal depth (default: 2)
  * @returns {Array} Expanded candidate memories with graph_expanded flag
  */
+// Boost fact-memories (extracted-fact tags) — they have focused, precise embeddings
+function boostFactMemories(memories) {
+  return memories.map(mem => {
+    const tags = mem.tags || mem.payload?.tags || [];
+    const isFactMemory = Array.isArray(tags) && tags.includes('extracted-fact');
+    if (isFactMemory) {
+      return { ...mem, score: (mem.score || 0) * 1.15 };
+    }
+    return mem;
+  }).sort((a, b) => (b.score || 0) - (a.score || 0));
+}
+
+function boostPreferenceMemories(memories, options = {}) {
+  if (!options.preference_boost) return memories;
+
+  return memories.map(mem => {
+    const type = mem.memory_type || mem.payload?.memory_type || '';
+    const tags = mem.tags || mem.payload?.tags || [];
+
+    const isPreference = type === 'preference'
+      || (Array.isArray(tags) && tags.some(t => ['preference', 'personal', 'opinion'].includes(t)));
+    const isObservation = type === 'observation';
+
+    if (isPreference) return { ...mem, score: (mem.score || 0) * 1.6 };
+    if (isObservation) return { ...mem, score: (mem.score || 0) * 1.25 };
+    return mem;
+  }).sort((a, b) => (b.score || 0) - (a.score || 0));
+}
+
+async function traverseUpdateChain(memories, store, { maxDepth = 3 } = {}) {
+  if (!store || !memories?.length) return memories;
+
+  const expanded = [...memories];
+  const seen = new Set(memories.map(m => m.id || m.memory_id));
+
+  for (const mem of memories) {
+    try {
+      const memId = mem.id || mem.memory_id;
+      if (!memId) continue;
+
+      // Find memories linked via Updates relationship (older versions)
+      const related = await store.getRelatedMemories?.(memId, { type: 'Updates', depth: maxDepth });
+      if (!related?.length) continue;
+
+      for (const rel of related) {
+        const relId = rel.id || rel.memory_id;
+        if (relId && !seen.has(relId)) {
+          seen.add(relId);
+          expanded.push({ ...rel, score: (rel.score || 0) * 0.7 }); // lower score for old versions
+        }
+      }
+    } catch (_) {
+      // skip on error
+    }
+  }
+
+  return expanded;
+}
+
 async function expandCandidatesViaGraph(store, {
   initialCandidates,
   relationships,
@@ -711,6 +770,8 @@ export async function recallPersistedMemories(store, {
   is_latest,           // boolean — undefined = default (true), false = include superseded
   include_expired,     // boolean — include expired memories
   sort,                // 'score' | 'date_asc' | 'date_desc'
+  preference_boost,    // boolean — boost preference/personal/opinion memories
+  include_superseded,  // boolean — include older update-chain versions via traverseUpdateChain
 }) {
   const temporalExpansion = expandTemporalQuery(query_context);
   const effectiveDateRange = date_range || temporalExpansion.dateRange || null;
@@ -783,6 +844,7 @@ export async function recallPersistedMemories(store, {
     const created = new Date(memory.created_at).getTime();
     const daysAgo = Number.isFinite(created) ? (now - created) / (1000 * 60 * 60 * 24) : 365;
     const recencyScore = Math.exp(-daysAgo / 30);
+    // Base importance = 1 for scoring formula; actual importance_score applied later in boost phase
     const importanceScore = 1;
     const vectorScore = 0;
     const graphScore = Math.min((relationshipCounts.get(memory.id) || 0) * 0.03, 0.12);
@@ -823,6 +885,7 @@ export async function recallPersistedMemories(store, {
     const created = new Date(candidate.memory.created_at).getTime();
     const daysAgo = Number.isFinite(created) ? (now - created) / (1000 * 60 * 60 * 24) : 365;
     const recencyScore = Math.exp(-daysAgo / 30);
+    // Base importance = 1 for scoring formula; actual importance_score applied later in boost phase
     const importanceScore = 1;
     const graphScore = Math.min((relationshipCounts.get(candidate.memory.id) || 0) * 0.03, 0.12);
     const policyScore = policyBoost(candidate.memory, {
@@ -855,7 +918,50 @@ export async function recallPersistedMemories(store, {
   const ranked = mergeCandidateLists(scoredLexical, enrichedVector, expandedCandidates).sort((a, b) => b.score - a.score);
   const filtered = applyRecallRelevanceFloor(ranked, { temporalComparison });
   const deduped = collapseNearDuplicates(filtered, { preserveTemporalDistinctness: temporalComparison });
-  const top = deduped
+
+  // Apply fact-memory boost before slicing to contextLimit
+  // Items have shape { memory, score, vectorScore, ... }
+  const applyItemBoosts = (items) => {
+    let result = items.map(item => {
+      const tags = item.memory?.tags || item.tags || [];
+      const isFactMemory = Array.isArray(tags) && tags.includes('extracted-fact');
+      if (isFactMemory) return { ...item, score: (item.score || 0) * 1.15 };
+      return item;
+    });
+
+    if (preference_boost) {
+      result = result.map(item => {
+        const type = item.memory?.memory_type || item.memory_type || '';
+        const tags = item.memory?.tags || item.tags || [];
+        const isPreference = type === 'preference'
+          || (Array.isArray(tags) && tags.some(t => ['preference', 'personal', 'opinion'].includes(t)));
+        const isObservation = type === 'observation';
+        if (isPreference) return { ...item, score: (item.score || 0) * 1.6 };
+        if (isObservation) return { ...item, score: (item.score || 0) * 1.25 };
+        return item;
+      });
+    }
+
+    return result.sort((a, b) => (b.score || 0) - (a.score || 0));
+  };
+
+  const boostedItems = applyItemBoosts(deduped);
+
+  // Update chain traversal: include older versions when include_superseded is requested
+  let finalItems = boostedItems;
+  if (include_superseded) {
+    const rawMemories = boostedItems.map(item => item.memory || item);
+    const withSuperseded = await traverseUpdateChain(rawMemories, store);
+    // Merge any newly added superseded memories back as scored items
+    const existingIds = new Set(boostedItems.map(item => (item.memory || item).id));
+    for (const mem of withSuperseded) {
+      if (!existingIds.has(mem.id || mem.memory_id)) {
+        finalItems = [...finalItems, { memory: mem, score: mem.score || 0 }];
+      }
+    }
+  }
+
+  const top = finalItems
     .filter(item => {
       // Exclude benchmark data from production recall
       const tags = (item.memory || item).tags || [];

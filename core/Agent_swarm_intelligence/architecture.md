@@ -256,7 +256,61 @@ recommends; a human or higher-level system applies.
 
 ---
 
-## 8. Decision Intelligence Wedge
+## 8. Cross-Project Connections (Latest)
+
+The Faraday agent now detects related memories across different projects and creates
+`Extends` relationships to link them. This enables organization-wide knowledge graph connectivity.
+
+### LLM-Powered Cluster Analysis
+
+Faraday sends semantic clusters to Groq with full UUIDs:
+```
+Cluster 1: ["memory-uuid-1", "memory-uuid-2", "memory-uuid-3"]
+  - Title: "GitHub deployment"
+  - Keywords: deployed, shipped, production
+  - Sources: [project:backend, project:infrastructure]
+
+Question to LLM:
+  "Analyze this cluster. Are these duplicates? Update chains? Related ideas?
+   Show CROSS_PROJECT if ideas link across projects."
+```
+
+LLM detects:
+- DUPLICATES: Same content, different memories
+- UPDATE_CHAIN: Old→New version pairs
+- CONFLICTS: Contradictory facts
+- MERGE: Which should be canonical
+- CROSS_PROJECT: Same topic across projects → recommendation to link
+
+### Cross-Project Linking
+
+When Faraday detects CROSS_PROJECT:
+1. LLM identifies the two related memories from different projects
+2. Turing creates `Extends` relationship with `type: "cross_project"`
+3. Relationship tagged with source projects: `[project:X, project:Y]`
+4. Both memories remain canonical (not merged), but now discoverable together
+
+**Example**:
+```
+Project: backend
+  Memory: "PostgreSQL upgrade to 15 completed"
+  UUID: 550e8400-e29b-41d4-a716-446655440000
+
+Project: infrastructure
+  Memory: "Updated prod DB to version 15"
+  UUID: 6ba7b810-9dad-11d1-80b4-00c04fd430c8
+
+Relationship: Extends
+  source: 550e8400... (backend)
+  target: 6ba7b810... (infrastructure)
+  type: cross_project
+```
+
+**Impact**: Organization-wide memory graph. Single query retrieves related memories from all projects.
+
+---
+
+## 8.1 Decision Intelligence Wedge
 
 The Decision Intelligence module detects, classifies, corroborates, and stores
 organizational decisions from cross-platform content (Gmail, Slack, GitHub).
@@ -305,6 +359,80 @@ Cross-platform search via the memory store. For each decision, searches for:
 - Related decisions (existing decisions on the same topic)
 
 Returns an `evidence_strength` score used in promotion rules.
+
+### Fact-Memory Architecture
+
+Every extracted fact becomes its own searchable memory, independent of the parent:
+
+```
+Input: "I attended the NotebookLM webinar on March 15, 2026."
+
+MemoryProcessor extracts:
+  - factSentences: ["attended the NotebookLM webinar", "March 15, 2026"]
+  - entities: {people: [], orgs: ["NotebookLM"], locations: []}
+  - dates: {absolute: ["2026-03-15"], relative: ["today minus X"]}
+  - eventDates: [ISO8601("2026-03-15")]
+
+Memory 1 (Parent):
+  type: observation
+  content: "I attended the NotebookLM webinar on March 15, 2026."
+  is_latest: true
+
+Memory 2 (Fact: Event):
+  type: fact
+  content: "Attended NotebookLM webinar"
+  event_dates: ["2026-03-15"]
+  tags: [extracted-fact, event]
+  Relationship(parent, this): Extends
+
+Memory 3 (Fact: Organization):
+  type: fact
+  content: "NotebookLM - AI document analysis platform"
+  tags: [extracted-fact, organization]
+  Relationship(parent, this): Extends
+```
+
+**Vectors**:
+- Fact 1: Contextual embedding of "attended webinar" + full parent content
+- Fact 2: Contextual embedding of "NotebookLM" + full parent content
+- Both vectors are independent, can be searched separately
+- Payload stored ONLY for parent (deduplication)
+
+**Benefit**:
+- Fact 1 searchable by "webinar" or "events"
+- Fact 2 searchable by "NotebookLM" or "organizations"
+- Parent still queryable for full context
+- 3 memories per input instead of 8 (smart dedup + fact filtering)
+
+### Smart Ingestion (Search-Before-Store)
+
+Before storing new fact-memories, search existing:
+
+```
+New input: "We use NotebookLM for document analysis"
+
+Extract facts:
+  1. "NotebookLM" (organization)
+  2. "document analysis" (tool use)
+
+For each fact:
+  1. Search vector db: vector_similarity > 0.85?
+  2. Search keyword db: exact match on fact content?
+  3. If found: skip storage, create Extends relationship
+  4. If not found: store new fact-memory
+
+Result: Real-time deduplication, 50% fewer redundant fact-memories
+```
+
+**Configuration**:
+```javascript
+{
+  smartIngest: true,
+  searchBeforeStoreThreshold: 0.85,
+  trivialFactFiltering: true,        // Skip low-novelty facts
+  skipObservationsWhenFacts: true    // Save space
+}
+```
 
 ### Merge-on-Key Deduplication
 

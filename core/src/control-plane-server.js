@@ -68,7 +68,7 @@ const CONFIG = {
   postLoginRedirect: process.env.HIVEMIND_CONTROL_PLANE_POST_LOGIN_REDIRECT || '/',
   allowedOrigins: (process.env.HIVEMIND_CONTROL_PLANE_ALLOWED_ORIGINS
     || process.env.HIVEMIND_ALLOWED_ORIGINS
-    || 'https://hivemind.davinciai.eu')
+    || 'https://hivemind.davinciai.eu,https://www.davinciai.eu,https://davinciai.eu')
     .split(',')
     .map(o => o.trim())
     .filter(Boolean)

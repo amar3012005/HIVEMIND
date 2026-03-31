@@ -36,6 +36,19 @@ function resolveCollectionName(collectionName) {
   return collectionName || COLLECTION_NAME;
 }
 
+// Boost extracted-fact memories — they have precise, focused embeddings
+function applyFactMemoryBoost(results) {
+  if (!results?.length) return results;
+  return results.map(point => {
+    const tags = point.payload?.tags || [];
+    const isFactMemory = Array.isArray(tags) && tags.includes('extracted-fact');
+    if (isFactMemory) {
+      return { ...point, score: (point.score || 0) * 1.12 };
+    }
+    return point;
+  }).sort((a, b) => (b.score || 0) - (a.score || 0));
+}
+
 export class QdrantClient {
   constructor() {
     this.collectionName = COLLECTION_NAME;

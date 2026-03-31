@@ -43,11 +43,19 @@ const EXPLORATORY_PATTERNS = [
   /\b(analyze|why|how|relationship|pattern|insight|compare|explore|investigate|understand)\b/i
 ];
 
+const PREFERENCE_PATTERNS = [
+  /\b(prefer|like|love|enjoy|favor|choose|rather|instead|better|best|favourite|favorite|dislike|hate|avoid)\b/i,
+  /\b(usually|typically|always|often|tend to|tend towards|default to|go for|lean towards)\b/i,
+  /\b(my\s+(?:choice|style|way|approach|preference|opinion|view|take|pick))\b/i,
+  /\b(I\s+(?:prefer|like|love|enjoy|want|need|think|believe|feel))\b/i,
+  /\b(what\s+do\s+I|what\s+(?:did|does)\s+I|my\s+(?:go-to|top|first))\b/i,
+];
+
 /**
  * Detect the intent behind a query to route retrieval and adjust weights.
  *
  * @param {string} query
- * @returns {{ type: 'temporal'|'factual'|'action'|'emotional'|'exploratory', confidence: number, entities: string[], timeReferences: string[] }}
+ * @returns {{ type: 'temporal'|'factual'|'action'|'emotional'|'exploratory'|'preference', confidence: number, entities: string[], timeReferences: string[] }}
  */
 export function detectQueryIntent(query) {
   if (!query || typeof query !== 'string') {
@@ -76,7 +84,8 @@ export function detectQueryIntent(query) {
     action: ACTION_PATTERNS.reduce((s, p) => s + (p.test(q) ? 1 : 0), 0),
     factual: FACTUAL_PATTERNS.reduce((s, p) => s + (p.test(q) ? 1 : 0), 0),
     emotional: EMOTIONAL_PATTERNS.reduce((s, p) => s + (p.test(q) ? 1 : 0), 0),
-    exploratory: EXPLORATORY_PATTERNS.reduce((s, p) => s + (p.test(q) ? 1 : 0), 0)
+    exploratory: EXPLORATORY_PATTERNS.reduce((s, p) => s + (p.test(q) ? 1 : 0), 0),
+    preference: PREFERENCE_PATTERNS.reduce((s, p) => s + (p.test(q) ? 1 : 0), 0)
   };
 
   // Find the dominant intent
@@ -93,6 +102,18 @@ export function detectQueryIntent(query) {
   const confidence = totalSignals > 0 ? maxScore / totalSignals : 0.3;
 
   return { type: maxType, confidence: Math.min(confidence, 1.0), entities, timeReferences };
+}
+
+/**
+ * Determine whether a text string expresses a user preference.
+ * Useful for tagging incoming memories as type 'preference' during ingestion.
+ *
+ * @param {string} text
+ * @returns {boolean}
+ */
+export function isPreferenceStatement(text) {
+  if (!text || typeof text !== 'string') return false;
+  return PREFERENCE_PATTERNS.some(p => p.test(text));
 }
 
 // ---------------------------------------------------------------------------
@@ -113,11 +134,12 @@ const BASE_WEIGHTS = {
  * These shift the scorer's attention based on what the user needs.
  */
 const INTENT_WEIGHT_MODIFIERS = {
-  temporal: { vector: 0.8, recency: 1.6, importance: 0.8, ebbinghaus: 0.8, matchBonus: 1.0 },
-  action:   { vector: 1.0, recency: 1.2, importance: 1.3, ebbinghaus: 0.6, matchBonus: 1.0 },
-  factual:  { vector: 1.2, recency: 0.8, importance: 1.0, ebbinghaus: 1.0, matchBonus: 1.2 },
-  emotional:{ vector: 0.9, recency: 1.3, importance: 1.4, ebbinghaus: 0.5, matchBonus: 0.9 },
-  exploratory: { vector: 1.1, recency: 0.7, importance: 1.0, ebbinghaus: 1.0, matchBonus: 1.2 }
+  temporal:   { vector: 0.8, recency: 1.6, importance: 0.8, ebbinghaus: 0.8, matchBonus: 1.0 },
+  action:     { vector: 1.0, recency: 1.2, importance: 1.3, ebbinghaus: 0.6, matchBonus: 1.0 },
+  factual:    { vector: 1.2, recency: 0.8, importance: 1.0, ebbinghaus: 1.0, matchBonus: 1.2 },
+  emotional:  { vector: 0.9, recency: 1.3, importance: 1.4, ebbinghaus: 0.5, matchBonus: 0.9 },
+  exploratory:{ vector: 1.1, recency: 0.7, importance: 1.0, ebbinghaus: 1.0, matchBonus: 1.2 },
+  preference: { vector: 1.1, recency: 0.9, importance: 1.4, ebbinghaus: 0.6, matchBonus: 1.1 }
 };
 
 /**
@@ -125,22 +147,24 @@ const INTENT_WEIGHT_MODIFIERS = {
  * Applied as a post-score multiplier to favor relevant memory types.
  */
 const MEMORY_TYPE_BOOSTS = {
-  temporal:    { event: 1.4, goal: 1.1, fact: 0.9, preference: 0.8, decision: 0.9, lesson: 0.8, relationship: 0.9 },
-  action:      { lesson: 1.5, decision: 1.4, goal: 1.2, fact: 1.0, event: 0.8, preference: 0.9, relationship: 0.8 },
-  factual:     { fact: 1.3, preference: 1.2, relationship: 1.1, event: 0.9, goal: 0.9, decision: 0.9, lesson: 0.9 },
-  emotional:   { preference: 1.5, event: 1.3, goal: 1.1, lesson: 1.0, fact: 0.8, decision: 0.8, relationship: 0.7 },
-  exploratory: { relationship: 1.4, lesson: 1.2, decision: 1.1, fact: 1.0, event: 1.0, goal: 0.9, preference: 0.8 }
+  temporal:    { event: 1.4, goal: 1.1, fact: 0.9, preference: 0.8, decision: 0.9, lesson: 0.8, relationship: 0.9, observation: 1.0 },
+  action:      { lesson: 1.5, decision: 1.4, goal: 1.2, fact: 1.0, event: 0.8, preference: 0.9, relationship: 0.8, observation: 0.9 },
+  factual:     { fact: 1.3, preference: 1.2, relationship: 1.1, event: 0.9, goal: 0.9, decision: 0.9, lesson: 0.9, observation: 1.1 },
+  emotional:   { preference: 1.5, event: 1.3, goal: 1.1, lesson: 1.0, fact: 0.8, decision: 0.8, relationship: 0.7, observation: 1.3 },
+  exploratory: { relationship: 1.4, lesson: 1.2, decision: 1.1, fact: 1.0, event: 1.0, goal: 0.9, preference: 0.8, observation: 1.2 },
+  preference:  { preference: 1.8, observation: 1.4, fact: 1.0, event: 0.8, decision: 0.9, goal: 0.9, lesson: 0.9, relationship: 0.8 }
 };
 
 /**
  * Compute dynamic scorer weights adjusted for the detected intent.
+ * Returns normalized scorer weights plus optional intent-specific boost fields.
  *
  * @param {{ type: string, confidence: number }} intent
- * @returns {{ vector: number, recency: number, importance: number, ebbinghaus: number, matchBonus: number }}
+ * @returns {{ vector: number, recency: number, importance: number, ebbinghaus: number, matchBonus: number, preferenceBoost?: number, observationBoost?: number, dateBoost?: number, decisionBoost?: number }}
  */
 export function computeDynamicWeights(intent) {
-  const modifiers = INTENT_WEIGHT_MODIFIERS[intent.type] || INTENT_WEIGHT_MODIFIERS.factual;
-  const blendFactor = intent.confidence;
+  const modifiers = INTENT_WEIGHT_MODIFIERS[intent?.type] || INTENT_WEIGHT_MODIFIERS.factual;
+  const blendFactor = intent?.confidence ?? 0.5;
 
   // Blend between base weights and intent-modified weights
   const adjusted = {};
@@ -155,6 +179,22 @@ export function computeDynamicWeights(intent) {
     adjusted[key] /= total;
   }
 
+  // Append intent-specific boost fields for consumers that need them
+  switch (intent?.type) {
+    case 'temporal':
+      adjusted.dateBoost = 1.5;
+      break;
+    case 'preference':
+      adjusted.preferenceBoost = 1.4;
+      adjusted.observationBoost = 1.3;
+      break;
+    case 'action':
+      adjusted.decisionBoost = 1.3;
+      break;
+    default:
+      break;
+  }
+
   return adjusted;
 }
 
@@ -163,11 +203,12 @@ export function computeDynamicWeights(intent) {
  *
  * @param {{ type: string }} intent
  * @param {string} memoryType
- * @returns {number} Multiplier (typically 0.7–1.5)
+ * @returns {number} Multiplier (typically 0.7–1.8)
  */
 export function getMemoryTypeBoost(intent, memoryType) {
+  if (!intent || !memoryType) return 1.0;
   const boosts = MEMORY_TYPE_BOOSTS[intent.type] || MEMORY_TYPE_BOOSTS.factual;
-  return boosts[memoryType] || 1.0;
+  return boosts[memoryType] ?? 1.0;
 }
 
 // ---------------------------------------------------------------------------

@@ -129,6 +129,12 @@ const { InMemoryStore } = await import('./executor/stores/in-memory-store.js');
 const { ResidentRunManager } = await import('./resident/run-manager.js');
 const { createResidentRoutes } = await import('./resident/routes.js');
 
+// TARA Voice Agent imports
+const { TaraStreamHandler } = await import('./tara/stream-handler.js');
+const { TaraConfigStore } = await import('./tara/config-store.js');
+const { SessionManager } = await import('./tara/session-manager.js');
+const { isTaraRoute } = await import('./tara/routes.js');
+
 // Evaluation imports
 const { RetrievalEvaluator } = await import('./external/evaluation/retrieval-evaluator.js');
 const { TEST_QUERIES, getSampleQueries, getQueriesByCategory, getQueriesByDifficulty, getQueriesForDataset } = await import('./external/evaluation/test-dataset.js');
@@ -588,6 +594,13 @@ residentRunManager.seedAgents().catch((error) => {
   console.warn('[Resident] Failed to seed resident agents:', error.message);
 });
 const residentRoutes = createResidentRoutes(residentRunManager);
+const taraHandler = persistentMemoryStore ? new TaraStreamHandler({
+  memoryStore: persistentMemoryStore,
+  recallFn: recallPersistedMemories,
+  llmBaseUrl: process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1',
+  llmApiKey: process.env.GROQ_API_KEY || '',
+  defaultModel: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+}) : null;
 const contextAutopilot = persistentMemoryStore ? new ContextAutopilot({
   store: persistentMemoryStore,
   maxContextTokens: 128_000,
@@ -645,7 +658,7 @@ function cleanExpiredOAuthCodes() {
 }
 setInterval(cleanExpiredOAuthCodes, 60_000);
 
-const ALLOWED_ORIGINS = (process.env.HIVEMIND_ALLOWED_ORIGINS || 'https://hivemind.davinciai.eu')
+const ALLOWED_ORIGINS = (process.env.HIVEMIND_ALLOWED_ORIGINS || 'https://hivemind.davinciai.eu,https://www.davinciai.eu,https://davinciai.eu')
   .split(',')
   .map(origin => origin.trim())
   .filter(Boolean);
@@ -927,10 +940,15 @@ async function buildProfileSummary({ userId, orgId, project = null }) {
         select: { id: true, title: true, tags: true, sourcePlatform: true, memoryType: true, content: true, createdAt: true },
       }).catch(() => []),
     ]);
-    // Relationship count — use raw query since model name may vary
+    // Relationship count — use raw query against mapped table name, scoped to user
     let relationships = 0;
     try {
-      const relRows = await prisma.$queryRawUnsafe('SELECT COUNT(*)::int as c FROM "MemoryRelationship"');
+      const relRows = await prisma.$queryRawUnsafe(
+        `SELECT COUNT(*)::int as c FROM "relationships" r
+         JOIN "memories" m ON r."from_id" = m."id"
+         WHERE m."user_id" = $1::uuid AND m."deleted_at" IS NULL`,
+        userId
+      );
       relationships = relRows?.[0]?.c || 0;
     } catch { relationships = 0; }
 
@@ -971,10 +989,18 @@ async function buildProfileSummary({ userId, orgId, project = null }) {
       .filter(Boolean)
       .slice(0, 10);
 
+    // Fetch org plan
+    let orgPlan = 'free';
+    try {
+      const org = await prisma.organization.findUnique({ where: { id: orgId }, select: { plan: true } });
+      orgPlan = org?.plan || 'free';
+    } catch {}
+
     const summary = {
       user_id: userId,
       org_id: orgId,
       project,
+      plan: orgPlan,
       memory_count: memoryCount,
       observation_count: observationCount,
       relationship_count: typeof relationships === 'number' ? relationships : 0,
@@ -3823,6 +3849,7 @@ a{color:#a78bfa}</style></head><body>
                   user_id: profile.user_id,
                   org_id: profile.org_id,
                   project: profile.project,
+                  plan: profile.plan,
                   memory_count: profile.memory_count,
                   observation_count: profile.observation_count,
                   relationship_count: profile.relationship_count,
@@ -4937,6 +4964,8 @@ a{color:#a78bfa}</style></head><body>
                 is_latest: body.is_latest,              // boolean — filter to latest versions only
                 include_expired: body.include_expired,  // boolean — include expired memories
                 sort: body.sort,                        // 'score' | 'date_asc' | 'date_desc'
+                preference_boost: body.preference_boost,      // boolean — boost preference/opinion memories
+                include_superseded: body.include_superseded,  // boolean — traverse Updates chain for version history
               });
 
               // Apply memory type boosts from Operator Layer
@@ -5074,7 +5103,8 @@ a{color:#a78bfa}</style></head><body>
                 const isObservation = (r.tags || []).includes('observation') || r.memoryType === 'observation';
                 const isPromotedRisk = (r.tags || []).includes('promoted-risk');
                 const isTuringVerified = (r.tags || []).includes('turing-verified');
-                const nodeLayer = isPromotedRisk ? 'promoted' : isTuringVerified ? 'verified' : isFact ? 'fact' : isObservation ? 'observation' : 'memory';
+                const isTaraTurn = (r.tags || []).includes('tara-turn');
+                const nodeLayer = isTaraTurn ? 'tara' : isPromotedRisk ? 'promoted' : isTuringVerified ? 'verified' : isFact ? 'fact' : isObservation ? 'observation' : 'memory';
 
                 return {
                   id: r.id,
@@ -5705,6 +5735,69 @@ a{color:#a78bfa}</style></head><body>
           if (req.method === 'GET') {
             const { getAllPlans } = await import('./billing/plans.js');
             return jsonResponse(res, { plans: getAllPlans() });
+          }
+          break;
+
+        case '/api/billing/upgrade':
+          if (req.method === 'POST') {
+            const { plan } = body;
+            const validPlans = ['free', 'pro', 'team', 'enterprise'];
+            if (!plan || !validPlans.includes(plan)) {
+              return jsonResponse(res, { error: 'Invalid plan', valid: validPlans }, 400);
+            }
+            try {
+              await prisma.organization.update({
+                where: { id: orgId },
+                data: { plan },
+              });
+              invalidateAggregateCache({ userId, orgId });
+              return jsonResponse(res, { success: true, plan, message: `Upgraded to ${plan}` });
+            } catch (err) {
+              return jsonResponse(res, { error: 'Upgrade failed', message: err.message }, 500);
+            }
+          }
+          break;
+
+        // ── TARA Voice Agent Routes ──
+        case '/api/tara/stream':
+          if (req.method === 'POST') {
+            if (!taraHandler) return jsonResponse(res, { error: 'TARA not available' }, 503);
+            // Don't use jsonResponse — stream handler writes NDJSON directly
+            await taraHandler.handleStream(body, { userId, orgId, res });
+            return; // Response already ended by stream handler
+          }
+          break;
+
+        case '/api/tara/config':
+          if (req.method === 'GET') {
+            if (!taraHandler) return jsonResponse(res, { error: 'TARA not available' }, 503);
+            const tenantId = url.searchParams.get('tenant_id') || body.tenant_id || 'default';
+            const agentName = url.searchParams.get('agent_name') || body.agent_name || 'default';
+            const taraConfig = await taraHandler.configStore.getConfig(
+              tenantId,
+              agentName,
+              { userId, orgId }
+            );
+            return jsonResponse(res, { config: taraConfig });
+          }
+          if (req.method === 'POST') {
+            if (!taraHandler) return jsonResponse(res, { error: 'TARA not available' }, 503);
+            const cfgTenantId = body.tenant_id || 'default';
+            const cfgAgentName = body.agent_name || 'default';
+            const configId = await taraHandler.configStore.saveConfig(
+              cfgTenantId, cfgAgentName, body, { userId, orgId }
+            );
+            // Invalidate config cache so next stream_tara call picks up new config
+            taraHandler.invalidateConfigCache(cfgTenantId, cfgAgentName);
+            return jsonResponse(res, { success: true, config_id: configId });
+          }
+          break;
+
+        case '/api/tara/sessions':
+          if (req.method === 'GET') {
+            if (!taraHandler) return jsonResponse(res, { error: 'TARA not available' }, 503);
+            const sessions = await taraHandler.sessionManager.listSessions({ userId, orgId });
+            return jsonResponse(res, { sessions });
           }
           break;
 

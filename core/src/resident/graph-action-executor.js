@@ -116,9 +116,10 @@ export class GraphActionExecutor {
         metadata: { source: 'turing_graph_action', action: 'link_update_chain' },
         created_by: 'turing',
       });
-      // Mark old memory as superseded — annotate metadata so user understands why
+      // Mark old memory as superseded — set both Prisma column AND metadata
       await this._safeUpdate(memories[i - 1].id, {
-        is_latest: false,
+        isLatest: false,               // Prisma camelCase field
+        supersedesId: memories[i].id,  // Prisma FK column for chain traversal
         metadata: {
           ...(memories[i - 1].metadata || {}),
           superseded_by: memories[i].id,
@@ -162,7 +163,8 @@ export class GraphActionExecutor {
         created_by: 'turing',
       });
       await this._safeUpdate(dup.id, {
-        is_latest: false,
+        isLatest: false,               // Prisma camelCase field
+        supersedesId: canonical.id,  // Prisma FK column for chain traversal
         metadata: {
           ...(dup.metadata || {}),
           merged_into: canonical.id,
@@ -172,9 +174,12 @@ export class GraphActionExecutor {
       });
       merged++;
     }
-    // Boost canonical memory importance
+    // Boost canonical memory importance + tag as turing-verified
+    const canonicalTags = canonical.tags || [];
+    if (!canonicalTags.includes('turing-verified')) canonicalTags.push('turing-verified');
     await this._safeUpdate(canonical.id, {
       importanceScore: Math.min(1.0, (canonical.importanceScore || 0.5) + 0.2),
+      tags: canonicalTags,
     });
     return { status: 'executed', canonical: canonical.id, merged, duplicates: duplicates.map((m) => m.id) };
   }
@@ -187,7 +192,7 @@ export class GraphActionExecutor {
 
     let suppressed = 0;
     for (const id of memoryIds) {
-      const ok = await this._safeUpdate(id, { importance_score: 0.1 });
+      const ok = await this._safeUpdate(id, { importanceScore: 0.1 });  // Prisma camelCase field
       if (ok) suppressed++;
     }
     return { status: 'executed', suppressed };
@@ -220,9 +225,9 @@ export class GraphActionExecutor {
       title: `Risk: ${summary.slice(0, 60)}`,
       tags: ['promoted-risk', 'turing-verified'],
       memory_type: 'fact',  // valid Prisma enum value
-      is_latest: true,
+      isLatest: true,
       version: 1,
-      importance_score: 0.95,
+      importanceScore: 0.95,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
       metadata: {

@@ -24,6 +24,8 @@ function mapMemoryRecord(record) {
     content: record.content,
     tags: record.tags || [],
     is_latest: record.isLatest,
+    importance_score: record.importanceScore,
+    supersedes_id: record.supersedesId,
     version: record.versions?.[0]?.version || 1,
     created_at: record.createdAt instanceof Date ? record.createdAt.toISOString() : record.createdAt,
     updated_at: record.updatedAt instanceof Date ? record.updatedAt.toISOString() : record.updatedAt,
@@ -143,17 +145,25 @@ export class PrismaGraphStore {
   }
 
   async updateMemory(id, patch) {
+    // Build update data, accepting both camelCase (Prisma) and snake_case (legacy) field names
+    const data = {};
+    // isLatest: accept both patch.isLatest and patch.is_latest
+    const isLatestVal = patch.isLatest ?? patch.is_latest;
+    if (isLatestVal !== undefined) data.isLatest = isLatestVal;
+    if (patch.updated_at) data.updatedAt = new Date(patch.updated_at);
+    if (patch.project !== undefined) data.project = patch.project;
+    if (patch.content !== undefined) data.content = patch.content;
+    if (patch.tags !== undefined) data.tags = patch.tags;
+    if (patch.source_metadata?.source_platform) data.sourcePlatform = patch.source_metadata.source_platform;
+    if (patch.source_metadata?.source_id) data.sourceMessageId = patch.source_metadata.source_id;
+    // CSI graph action fields — Turing uses these
+    if (patch.importanceScore !== undefined) data.importanceScore = patch.importanceScore;
+    if (patch.supersedesId !== undefined) data.supersedesId = patch.supersedesId;
+    if (patch.memoryType !== undefined) data.memoryType = patch.memoryType;
+
     await this.client.memory.update({
       where: { id },
-      data: {
-        isLatest: patch.is_latest,
-        updatedAt: patch.updated_at ? new Date(patch.updated_at) : undefined,
-        project: patch.project,
-        content: patch.content,
-        tags: patch.tags,
-        sourcePlatform: patch.source_metadata?.source_platform,
-        sourceMessageId: patch.source_metadata?.source_id
-      },
+      data,
     });
 
     if (patch.source_metadata || patch.metadata) {
@@ -234,7 +244,7 @@ export class PrismaGraphStore {
         ...scopedMemoryWhere({ user_id, org_id, project }),
         memoryType: memory_type || undefined,
         isLatest: typeof is_latest === 'boolean' ? is_latest : undefined,
-        tags: tags?.length ? { hasSome: tags } : undefined,
+        tags: tags?.length ? { hasEvery: tags } : undefined,
       },
       include: {
         sourceMetadata: true,
@@ -271,7 +281,7 @@ export class PrismaGraphStore {
         memoryType: memory_type || undefined,
         sourcePlatform: source_platform || undefined,
         isLatest: typeof is_latest === 'boolean' ? is_latest : undefined,
-        tags: tags?.length ? { hasSome: tags } : undefined,
+        tags: tags?.length ? { hasEvery: tags } : undefined,
         createdAt: {
           gte: created_after ? new Date(created_after) : undefined,
           lte: created_before ? new Date(created_before) : undefined

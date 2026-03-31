@@ -125,7 +125,7 @@ function buildContextSnippet(item = {}) {
   return `${header}${content}`;
 }
 
-export function buildBenchmarkContext(searchResults, { maxItems = 15, maxChars = 12000, sortMode = 'score' } = {}) {
+export function buildBenchmarkContext(searchResults, { maxItems = 25, maxChars = 16000, sortMode = 'score' } = {}) {
   const deduped = uniqueByContent(extractItems(searchResults));
   const items = sortMode === 'date_asc'
     ? sortSearchItemsChronologically(deduped, 'asc')
@@ -163,8 +163,9 @@ export function getLongMemEvalRetrievalPlan({ question, questionType } = {}) {
           sort: 'date_asc',  // chronological ordering helps temporal reasoning
         },
         searchLimit: 20,
-        contextLimit: 15,
+        contextLimit: 18,
         contextSortMode: 'date_asc',
+        maxChars: 14000,
         systemHint: 'Calculate dates precisely. Show your arithmetic. Use the exact dates from the context. If asked "how many days/weeks/months", count from the specific dates mentioned.',
       };
 
@@ -175,14 +176,16 @@ export function getLongMemEvalRetrievalPlan({ question, questionType } = {}) {
           query_context: question,
           max_memories: 20,
           is_latest: true,  // only latest versions of facts
-          sort: 'date_desc',  // most recent first
+          sort: 'date_asc',  // chronological update chain
+          include_superseded: true,  // show version history
         },
         mergeWithPanorama: true,  // also fetch panorama for version chain
         searchLimit: 20,
-        contextLimit: 15,
-        contextSortMode: 'date_desc',
+        contextLimit: 20,
+        contextSortMode: 'date_asc',
+        maxChars: 14000,
         enablePredictCalibrate: true,  // enable Updates relationship + is_latest marking
-        systemHint: 'Give the MOST RECENT version of the fact. If information was updated or changed, use the latest version ONLY. Look for the newest date.',
+        systemHint: 'IMPORTANT: Show the EVOLUTION of this information. The user is asking about an update or change. Present the history chronologically — what was the old value, what is the new value. Give the MOST RECENT answer but acknowledge the update chain.',
       };
 
     case 'multi-session':
@@ -190,12 +193,14 @@ export function getLongMemEvalRetrievalPlan({ question, questionType } = {}) {
         route: 'recall',
         body: {
           query_context: question,
-          max_memories: 30,  // need more — facts scattered across sessions
+          max_memories: 40,  // need more — facts scattered across sessions
+          inject_parent_chunks: true,
         },
-        searchLimit: 30,
-        contextLimit: 20,
-        contextSortMode: 'score',
-        systemHint: 'Synthesize ALL information across ALL sessions. When asked to count, enumerate EACH item from EVERY session. Do not miss any.',
+        searchLimit: 40,
+        contextLimit: 30,
+        contextSortMode: 'date_asc',
+        maxChars: 16000,
+        systemHint: 'IMPORTANT: Synthesize ALL information across ALL sessions. This question spans multiple separate conversation sessions. Count EACH item from EVERY session. Present all instances chronologically. Do NOT stop after finding one answer.',
       };
 
     case 'single-session-user':
@@ -203,12 +208,13 @@ export function getLongMemEvalRetrievalPlan({ question, questionType } = {}) {
         route: 'quick',
         body: {
           query: question,
-          limit: 20,
+          limit: 25,
         },
-        searchLimit: 20,
-        contextLimit: 15,
+        searchLimit: 25,
+        contextLimit: 20,
         contextSortMode: 'score',
-        systemHint: 'Answer with the specific detail the user mentioned in conversation. Be precise and exact.',
+        maxChars: 14000,
+        systemHint: 'Answer with the SPECIFIC detail the user mentioned. The user is asking about something they themselves said or did. Find the exact statement or fact from the memories. Be precise and literal — use the exact words from the context.',
       };
 
     case 'single-session-assistant':
@@ -229,12 +235,15 @@ export function getLongMemEvalRetrievalPlan({ question, questionType } = {}) {
         route: 'recall',  // Operator Layer for preference intent detection
         body: {
           query_context: question,
-          max_memories: 20,
+          max_memories: 25,
+          memory_types: ['observation', 'fact', 'preference'],
+          preference_boost: true,
         },
-        searchLimit: 20,
-        contextLimit: 15,
+        searchLimit: 25,
+        contextLimit: 20,
         contextSortMode: 'score',
-        systemHint: 'Focus on the user\'s personal preferences, opinions, and choices. What did the user specifically prefer, like, or choose? Use their stated preferences to personalize the response.',
+        maxChars: 14000,
+        systemHint: 'IMPORTANT: This question asks about personal preferences, opinions, tastes, or choices. Look carefully through the memories for: what the user said they like/prefer/enjoy, their stated opinions, their explicit choices. The answer is always something the user PERSONALLY expressed. Be specific about what they said they preferred.',
       };
 
     default:

@@ -48,7 +48,7 @@ start_core() {
     -e "QDRANT_COLLECTION=BUNDB AGENT" \
     -e "DATABASE_URL=postgresql://hivemind_user:hivemind_secure_pwd_2026@${COOLIFY_PG}:5432/hivemind?schema=hivemind&connection_limit=20&pool_timeout=30" \
     -e "REDIS_URL=redis://:redis_secure_vault_7711@${COOLIFY_REDIS}:6379/0" \
-    -e "HIVEMIND_ALLOWED_ORIGINS=https://hivemind.davinciai.eu" \
+    -e "HIVEMIND_ALLOWED_ORIGINS=https://hivemind.davinciai.eu,https://www.davinciai.eu,https://davinciai.eu" \
     node:20 \
     sh -c "npx prisma generate 2>/dev/null; npx prisma migrate deploy 2>&1 || echo '[migrate] skipped'; node src/server.js"
 
@@ -122,13 +122,53 @@ logs() {
   docker logs -f --tail 50 "${1:-hm-core}"
 }
 
+start_core_benchmark() {
+  log "Starting hm-core in BENCHMARK mode (bge-m3 + BENCHMARK collection)..."
+  docker stop hm-core 2>/dev/null || true
+  docker rm hm-core 2>/dev/null || true
+  ensure_networks
+
+  docker run -d \
+    --name hm-core \
+    --network $NETWORK \
+    --restart unless-stopped \
+    -p 3001:3000 \
+    -v /opt/HIVEMIND/core:/app \
+    -v /etc/localtime:/etc/localtime:ro \
+    -w /app \
+    --env-file "$COOLIFY_ENV" \
+    -e NODE_ENV=production \
+    -e "QDRANT_COLLECTION=BENCHMARK" \
+    -e "EMBEDDING_PROVIDER=litellm" \
+    -e "EMBEDDING_DIMENSION=1024" \
+    -e "DATABASE_URL=postgresql://hivemind_user:hivemind_secure_pwd_2026@${COOLIFY_PG}:5432/hivemind?schema=hivemind&connection_limit=20&pool_timeout=30" \
+    -e "REDIS_URL=redis://:redis_secure_vault_7711@${COOLIFY_REDIS}:6379/0" \
+    -e "HIVEMIND_ALLOWED_ORIGINS=https://hivemind.davinciai.eu,https://www.davinciai.eu,https://davinciai.eu" \
+    node:20 \
+    sh -c "npx prisma generate 2>/dev/null; npx prisma migrate deploy 2>&1 || echo '[migrate] skipped'; node src/server.js"
+
+  log "Waiting for health..."
+  for i in $(seq 1 30); do
+    sleep 2
+    if curl -sf http://localhost:3001/health >/dev/null 2>&1; then
+      log "hm-core is ${GREEN}healthy${NC} (BENCHMARK mode: bge-m3 1024d)"
+      return 0
+    fi
+    echo -n "."
+  done
+  err "hm-core not healthy after 60s"
+  docker logs hm-core --tail 20
+  return 1
+}
+
 case "${1:-all}" in
-  core)    start_core && verify ;;
-  control) start_control ;;
-  restart) start_core && start_control && verify ;;
-  status)  status ;;
-  logs)    logs "${2:-hm-core}" ;;
-  verify)  verify ;;
-  all)     start_core && start_control && verify ;;
-  *)       echo "Usage: $0 {all|core|control|restart|status|logs [name]|verify}"; exit 1 ;;
+  core)      start_core && verify ;;
+  benchmark) start_core_benchmark && verify ;;
+  control)   start_control ;;
+  restart)   start_core && start_control && verify ;;
+  status)    status ;;
+  logs)      logs "${2:-hm-core}" ;;
+  verify)    verify ;;
+  all)       start_core && start_control && verify ;;
+  *)         echo "Usage: $0 {all|core|benchmark|control|restart|status|logs [name]|verify}"; exit 1 ;;
 esac

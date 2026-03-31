@@ -140,6 +140,9 @@ model Organization {
   hsmProvider String  @default("ovhcloud") @map("hsm_provider")
   hsmKeyArn   String? @map("hsm_key_arn")
 
+  // Billing
+  plan String @default("free") @map("plan")
+
   // Relations
   users     UserOrganization[] @relation("OrgUserOrganizations")
   memories  Memory[]           @relation("OrgMemories")

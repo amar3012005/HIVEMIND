@@ -148,6 +148,8 @@ model Organization {
   memories  Memory[]           @relation("OrgMemories")
   auditLogs AuditLog[]         @relation("OrgAuditLogs")
   apiKeys   ApiKey[]           @relation("OrgApiKeys")
+  invites   OrgInvite[]
+  projects  Project[]
 
   // Timestamps
   createdAt DateTime @default(now()) @map("created_at")
@@ -173,6 +175,43 @@ model UserOrganization {
   @@map("user_organizations")
 }
 
+model OrgInvite {
+  id        String    @id @default(uuid()) @db.Uuid
+  orgId     String    @map("org_id") @db.Uuid
+  email     String?
+  role      String    @default("member")
+  token     String    @unique
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  usedBy    String?   @map("used_by") @db.Uuid
+  createdBy String    @map("created_by") @db.Uuid
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@index([orgId])
+  @@index([email])
+  @@index([expiresAt])
+  @@map("org_invites")
+}
+
+model Project {
+  id          String   @id @default(uuid()) @db.Uuid
+  orgId       String   @map("org_id") @db.Uuid
+  name        String
+  slug        String
+  description String?  @db.Text
+  createdBy   String   @map("created_by") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, slug])
+  @@index([orgId])
+  @@map("projects")
+}
+
 // ==========================================
 // PLATFORM INTEGRATIONS
 // OAuth2, API keys, webhooks for AI platforms
@@ -184,6 +223,7 @@ model PlatformIntegration {
   id                  String  @id @default(uuid()) @map("id") @db.Uuid
   userId              String  @map("user_id") @db.Uuid
   platformType        String  @map("platform_type")
+  targetScope         String  @default("personal") @map("target_scope")
   platformUserId      String? @map("platform_user_id")
   platformDisplayName String? @map("platform_display_name")
   connectorMetadata   Json    @default("{}") @map("connector_metadata")

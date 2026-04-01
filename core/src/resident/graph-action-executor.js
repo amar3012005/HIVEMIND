@@ -31,10 +31,11 @@ export class GraphActionExecutor {
    * @param {boolean} [options.dryRun=false]  — preview without mutating
    * @param {number}  [options.minConfidence=0.6] — skip actions below this threshold
    * @param {string}  [options.project]       — optional project scope
+   * @param {string}  [options.duplicateMode='merge'] — 'merge' (soft: mark not-latest) or 'delete' (hard: remove from DB)
    * @returns {Promise<{ executed: number, skipped: number, failed: number, results: Array }>}
    */
   async executeActions(actions, options = {}) {
-    const { dryRun = false, minConfidence = 0.6 } = options;
+    const { dryRun = false, minConfidence = 0.6, duplicateMode = 'merge' } = options;
     const results = [];
 
     for (const action of actions) {
@@ -52,7 +53,7 @@ export class GraphActionExecutor {
       const targetIds = action.target_memory_ids || action.content?.target_memory_ids || [];
 
       try {
-        const result = await this._dispatch(recommendation, targetIds, action.content, confidence, dryRun);
+        const result = await this._dispatch(recommendation, targetIds, action.content, confidence, dryRun, duplicateMode);
         results.push({ action: recommendation, ...result });
       } catch (err) {
         this.logger.error(`[graph-actions] ${recommendation} failed:`, err.message);
@@ -71,12 +72,12 @@ export class GraphActionExecutor {
   // ── internal dispatch ────────────────────────────────────────────
 
   /** @private */
-  async _dispatch(recommendation, targetIds, content, confidence, dryRun) {
+  async _dispatch(recommendation, targetIds, content, confidence, dryRun, duplicateMode = 'merge') {
     switch (recommendation) {
       case 'link_update_chain':
         return this._linkUpdateChain(targetIds, confidence, dryRun);
       case 'merge_duplicate_cluster':
-        return this._mergeDuplicates(targetIds, confidence, dryRun);
+        return this._mergeDuplicates(targetIds, confidence, dryRun, duplicateMode);
       case 'suppress_noise_cluster':
         return this._suppressNoise(targetIds, confidence, dryRun);
       case 'promote_known_risk':
@@ -136,7 +137,7 @@ export class GraphActionExecutor {
    * Merge duplicates: keep the richest memory as canonical, mark others not-latest,
    * and link them to the canonical via Extends relationships.
    */
-  async _mergeDuplicates(memoryIds, confidence, dryRun) {
+  async _mergeDuplicates(memoryIds, confidence, dryRun, duplicateMode = 'merge') {
     if (memoryIds.length < 2) return { status: 'skipped', reason: 'need_at_least_2_memories' };
 
     const memories = await this._fetchMemories(memoryIds);
@@ -148,32 +149,60 @@ export class GraphActionExecutor {
     const duplicates = memories.slice(1);
 
     if (dryRun) {
-      return { status: 'dry_run', canonical: canonical.id, duplicates: duplicates.map((m) => m.id) };
+      return {
+        status: 'dry_run',
+        mode: duplicateMode,
+        canonical: canonical.id,
+        canonical_content: (canonical.content || '').slice(0, 100),
+        duplicates: duplicates.map((m) => ({
+          id: m.id,
+          content: (m.content || '').slice(0, 100),
+        })),
+      };
     }
 
     let merged = 0;
-    for (const dup of duplicates) {
-      await this._safeCreateRelationship({
-        id: randomUUID(),
-        from_id: dup.id,
-        to_id: canonical.id,
-        type: 'Extends',
-        confidence,
-        metadata: { source: 'turing_graph_action', action: 'merge_duplicate_cluster' },
-        created_by: 'turing',
-      });
-      await this._safeUpdate(dup.id, {
-        isLatest: false,               // Prisma camelCase field
-        supersedesId: canonical.id,  // Prisma FK column for chain traversal
-        metadata: {
-          ...(dup.metadata || {}),
-          merged_into: canonical.id,
-          merge_reason: 'Turing agent identified as duplicate — canonical version preserved',
-          merged_at: new Date().toISOString(),
-        },
-      });
-      merged++;
+    let deleted = 0;
+
+    if (duplicateMode === 'delete') {
+      // HARD DELETE: remove duplicates entirely from database
+      for (const dup of duplicates) {
+        try {
+          await this.store.deleteMemory(dup.id);
+          deleted++;
+        } catch (err) {
+          this.logger.warn(`[graph-actions] Hard delete ${dup.id} failed:`, err.message);
+          // Fallback to soft merge
+          await this._safeUpdate(dup.id, { isLatest: false, supersedesId: canonical.id });
+          merged++;
+        }
+      }
+    } else {
+      // SOFT MERGE: mark as not-latest, link to canonical
+      for (const dup of duplicates) {
+        await this._safeCreateRelationship({
+          id: randomUUID(),
+          from_id: dup.id,
+          to_id: canonical.id,
+          type: 'Extends',
+          confidence,
+          metadata: { source: 'turing_graph_action', action: 'merge_duplicate_cluster' },
+          created_by: 'turing',
+        });
+        await this._safeUpdate(dup.id, {
+          isLatest: false,
+          supersedesId: canonical.id,
+          metadata: {
+            ...(dup.metadata || {}),
+            merged_into: canonical.id,
+            merge_reason: 'Turing agent identified as duplicate — canonical version preserved',
+            merged_at: new Date().toISOString(),
+          },
+        });
+        merged++;
+      }
     }
+
     // Boost canonical memory importance + tag as turing-verified
     const canonicalTags = canonical.tags || [];
     if (!canonicalTags.includes('turing-verified')) canonicalTags.push('turing-verified');
@@ -181,7 +210,15 @@ export class GraphActionExecutor {
       importanceScore: Math.min(1.0, (canonical.importanceScore || 0.5) + 0.2),
       tags: canonicalTags,
     });
-    return { status: 'executed', canonical: canonical.id, merged, duplicates: duplicates.map((m) => m.id) };
+
+    return {
+      status: 'executed',
+      mode: duplicateMode,
+      canonical: canonical.id,
+      merged,
+      deleted,
+      duplicates: duplicates.map((m) => m.id),
+    };
   }
 
   /**

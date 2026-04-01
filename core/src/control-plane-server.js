@@ -13,6 +13,7 @@ import { buildAllClientDescriptors, buildClientDescriptor } from './control-plan
 import { ControlPlaneSessionStore, buildSessionCookie, verifySessionCookie } from './control-plane/session-store.js';
 import { ZitadelOidcClient } from './control-plane/zitadel.js';
 import { ConnectorStore } from './connectors/framework/connector-store.js';
+import { PLANS } from './billing/plans.js';
 import {
   installConsoleCapture,
   getRecentLogs,
@@ -47,6 +48,17 @@ function loadLocalEnv(envPath) {
 loadLocalEnv(path.join(PROJECT_ROOT, '.env'));
 installConsoleCapture('control-plane');
 
+const defaultAllowedOrigins = (process.env.HIVEMIND_CONTROL_PLANE_ALLOWED_ORIGINS
+  || process.env.HIVEMIND_ALLOWED_ORIGINS
+  || 'https://hivemind.davinciai.eu,https://www.davinciai.eu,https://davinciai.eu')
+  .split(',')
+  .map(o => o.trim())
+  .filter(Boolean);
+
+const defaultFrontendBaseUrl = process.env.HIVEMIND_FRONTEND_URL
+  || defaultAllowedOrigins[0]
+  || 'https://hivemind.davinciai.eu';
+
 const CONFIG = {
   port: Number(process.env.CONTROL_PLANE_PORT || process.env.PORT || 3010),
   publicBaseUrl: process.env.HIVEMIND_CONTROL_PLANE_PUBLIC_URL || `http://localhost:${process.env.CONTROL_PLANE_PORT || process.env.PORT || 3010}`,
@@ -65,13 +77,8 @@ const CONFIG = {
   zitadelClientId: process.env.ZITADEL_CLIENT_ID || null,
   zitadelClientSecret: process.env.ZITADEL_CLIENT_SECRET || null,
   zitadelRedirectUri: process.env.ZITADEL_REDIRECT_URI || null,
-  postLoginRedirect: process.env.HIVEMIND_CONTROL_PLANE_POST_LOGIN_REDIRECT || '/',
-  allowedOrigins: (process.env.HIVEMIND_CONTROL_PLANE_ALLOWED_ORIGINS
-    || process.env.HIVEMIND_ALLOWED_ORIGINS
-    || 'https://hivemind.davinciai.eu,https://www.davinciai.eu,https://davinciai.eu')
-    .split(',')
-    .map(o => o.trim())
-    .filter(Boolean)
+  postLoginRedirect: process.env.HIVEMIND_CONTROL_PLANE_POST_LOGIN_REDIRECT || `${defaultFrontendBaseUrl}/hivemind/login`,
+  allowedOrigins: defaultAllowedOrigins
 };
 
 const prisma = getPrismaClient();
@@ -317,7 +324,7 @@ function applyCorsHeaders(req, res) {
     res.setHeader('Vary', 'Origin');
   }
 
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 }
 
@@ -347,6 +354,42 @@ async function requireSession(req, res) {
     return null;
   }
   return current;
+}
+
+async function getOrgMembership(userId, orgId) {
+  if (!prisma || !userId || !orgId) return null;
+  return prisma.userOrganization.findUnique({
+    where: { userId_orgId: { userId, orgId } },
+    include: {
+      org: true,
+      user: {
+        select: {
+          id: true,
+          email: true,
+          displayName: true,
+          avatarUrl: true,
+          lastActiveAt: true,
+        },
+      },
+    },
+  });
+}
+
+function canManageOrg(role) {
+  return role === 'owner' || role === 'admin';
+}
+
+async function requireOrgAdmin(req, res, userId, orgId) {
+  const membership = await getOrgMembership(userId, orgId);
+  if (!membership) {
+    jsonResponse(res, { error: 'Organization membership not found' }, 404);
+    return null;
+  }
+  if (!canManageOrg(membership.role)) {
+    jsonResponse(res, { error: 'Forbidden' }, 403);
+    return null;
+  }
+  return membership;
 }
 
 async function resolveCurrentOrg(userId) {
@@ -428,7 +471,8 @@ async function buildBootstrapPayload(user) {
     organization: org ? {
       id: org.id,
       name: org.name,
-      slug: org.slug
+      slug: org.slug,
+      plan: org.plan || 'free'
     } : null,
     onboarding: {
       needs_org_setup: !org,
@@ -439,11 +483,157 @@ async function buildBootstrapPayload(user) {
       core_api_base_url: CONFIG.coreApiBaseUrl,
       core_health: coreHealth
     },
-    client_support: ['claude', 'antigravity', 'vscode', 'remote-mcp'],
+    client_support: ['claude', 'antigravity', 'vscode', 'remote-mcp', 'notebooklm'],
     // Session key: frontend uses this to call core API without manual key setup.
     // Auto-creates one if user has an org but no keys yet.
     session_api_key: org ? await getOrCreateSessionKey(user.id, org.id) : null,
   };
+}
+
+async function purgeUserVectors(userId) {
+  try {
+    const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
+    const qdrantCollection = process.env.QDRANT_COLLECTION || 'hivemind_memories';
+    const qdrantKey = process.env.QDRANT_API_KEY || '';
+    if (!qdrantUrl || !userId) return;
+
+    await fetch(`${qdrantUrl}/collections/${qdrantCollection}/points/delete`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(qdrantKey ? { 'api-key': qdrantKey } : {}),
+      },
+      body: JSON.stringify({
+        filter: {
+          must: [{ key: 'user_id', match: { value: userId } }],
+        },
+        wait: true,
+      }),
+    });
+  } catch (error) {
+    console.warn('[account-delete] Qdrant delete failed:', error.message);
+  }
+}
+
+async function performAccountDeletion({ userId, orgIdsToDelete = [] }) {
+  try {
+    const memoryIds = (
+      await prisma.memory.findMany({
+        where: { userId },
+        select: { id: true },
+      })
+    ).map((memory) => memory.id);
+
+    if (memoryIds.length) {
+      await prisma.auditLog.updateMany({
+        where: { resourceId: { in: memoryIds } },
+        data: { resourceId: null },
+      });
+
+      await prisma.sourceMetadata.deleteMany({
+        where: { memoryId: { in: memoryIds } },
+      });
+      await prisma.codeMemoryMetadata.deleteMany({
+        where: { memoryId: { in: memoryIds } },
+      });
+      await prisma.vectorEmbedding.deleteMany({
+        where: { memoryId: { in: memoryIds } },
+      });
+      await prisma.memoryVersion.deleteMany({
+        where: { memoryId: { in: memoryIds } },
+      });
+      await prisma.relationship.deleteMany({
+        where: {
+          OR: [
+            { fromId: { in: memoryIds } },
+            { toId: { in: memoryIds } },
+          ],
+        },
+      });
+      await prisma.derivationJob.deleteMany({
+        where: {
+          OR: [
+            { sourceMemoryId: { in: memoryIds } },
+            { targetMemoryId: { in: memoryIds } },
+          ],
+        },
+      });
+      await prisma.memory.deleteMany({
+        where: { id: { in: memoryIds } },
+      });
+    }
+
+    await prisma.platformIntegration.deleteMany({ where: { userId } });
+    await prisma.apiKey.deleteMany({ where: { userId } });
+    await prisma.dataExportRequest.deleteMany({ where: { userId } });
+    await prisma.syncLog.deleteMany({ where: { userId } });
+    await prisma.session.deleteMany({ where: { userId } });
+    await prisma.userOrganization.deleteMany({ where: { userId } });
+    await prisma.auditLog.updateMany({
+      where: { userId },
+      data: { userId: null },
+    });
+    await prisma.user.delete({ where: { id: userId } });
+
+    await purgeUserVectors(userId);
+
+    if (Array.isArray(orgIdsToDelete) && orgIdsToDelete.length) {
+      try {
+        await prisma.organization.deleteMany({
+          where: { id: { in: orgIdsToDelete } },
+        });
+      } catch (error) {
+        console.warn('[account-delete] Orphan org cleanup skipped:', error.message);
+      }
+    }
+  } catch (error) {
+    console.error('[account-delete] Background deletion failed:', error.message);
+  }
+}
+
+async function validateAccountDeletion(userId) {
+  const ownerMemberships = await prisma.userOrganization.findMany({
+    where: { userId, role: 'owner' },
+    include: { org: true },
+  });
+
+  const orgIdsToDelete = [];
+
+  for (const membership of ownerMemberships) {
+    const otherOwners = await prisma.userOrganization.count({
+      where: {
+        orgId: membership.orgId,
+        role: 'owner',
+        userId: { not: userId },
+      },
+    });
+
+    const otherMembers = await prisma.userOrganization.count({
+      where: {
+        orgId: membership.orgId,
+        userId: { not: userId },
+      },
+    });
+
+    if (otherOwners === 0 && otherMembers > 0) {
+      return {
+        ok: false,
+        status: 409,
+        error: 'Transfer ownership or remove other members before deleting this account.',
+        org: {
+          id: membership.org.id,
+          name: membership.org.name,
+          slug: membership.org.slug,
+        },
+      };
+    }
+
+    if (otherOwners === 0 && otherMembers === 0) {
+      orgIdsToDelete.push(membership.orgId);
+    }
+  }
+
+  return { ok: true, orgIdsToDelete };
 }
 
 /**
@@ -728,6 +918,10 @@ const server = http.createServer(async (req, res) => {
     if (!body.name) {
       return jsonResponse(res, { error: 'name is required' }, 400);
     }
+    const requestedPlan = typeof body.plan === 'string' ? body.plan.trim().toLowerCase() : 'free';
+    if (!PLANS[requestedPlan]) {
+      return jsonResponse(res, { error: 'invalid plan', valid: Object.keys(PLANS) }, 400);
+    }
 
     const slugBase = sanitizeSlug(body.slug || body.name);
     const existing = await prisma.organization.findUnique({ where: { slug: slugBase } });
@@ -736,7 +930,8 @@ const server = http.createServer(async (req, res) => {
       data: {
         zitadelOrgId: `cp-org-${crypto.randomUUID()}`,
         name: body.name,
-        slug
+        slug,
+        plan: requestedPlan
       }
     });
 
@@ -760,11 +955,419 @@ const server = http.createServer(async (req, res) => {
       organization: {
         id: org.id,
         name: org.name,
-        slug: org.slug
+        slug: org.slug,
+        plan: org.plan || requestedPlan
       }
     }, 201, {
       'Set-Cookie': makeSessionCookie(sessionId)
     });
+  }
+
+  const inviteCollectionMatch = pathname.match(/^\/v1\/orgs\/([^/]+)\/invites$/);
+  if (inviteCollectionMatch && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const orgId = inviteCollectionMatch[1];
+    const membership = await requireOrgAdmin(req, res, current.session.userId, orgId);
+    if (!membership) return;
+
+    const body = await parseBody(req);
+    const role = typeof body.role === 'string' && body.role.trim() ? body.role.trim().toLowerCase() : 'member';
+    if (!['member', 'viewer', 'developer', 'admin'].includes(role)) {
+      return jsonResponse(res, { error: 'invalid role' }, 400);
+    }
+
+    const token = crypto.randomBytes(24).toString('hex');
+    const invite = await prisma.orgInvite.create({
+      data: {
+        orgId,
+        email: typeof body.email === 'string' && body.email.trim() ? body.email.trim().toLowerCase() : null,
+        role,
+        token,
+        expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 7),
+        createdBy: current.session.userId,
+      },
+    });
+
+    const joinUrl = `${CONFIG.publicBaseUrl.replace(/\/$/, '')}/hivemind/join/${membership.org.slug}/${invite.token}`;
+    return jsonResponse(res, {
+      success: true,
+      invite: {
+        id: invite.id,
+        email: invite.email,
+        role: invite.role,
+        token: invite.token,
+        expires_at: invite.expiresAt,
+        created_at: invite.createdAt,
+        join_url: joinUrl,
+      },
+    }, 201);
+  }
+
+  if (inviteCollectionMatch && req.method === 'GET') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const orgId = inviteCollectionMatch[1];
+    const membership = await requireOrgAdmin(req, res, current.session.userId, orgId);
+    if (!membership) return;
+
+    const invites = await prisma.orgInvite.findMany({
+      where: { orgId, usedAt: null },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    return jsonResponse(res, {
+      invites: invites.map((invite) => ({
+        id: invite.id,
+        email: invite.email,
+        role: invite.role,
+        token: invite.token,
+        expires_at: invite.expiresAt,
+        created_at: invite.createdAt,
+        join_url: `${CONFIG.publicBaseUrl.replace(/\/$/, '')}/hivemind/join/${membership.org.slug}/${invite.token}`,
+      })),
+    });
+  }
+
+  const inviteDetailMatch = pathname.match(/^\/v1\/orgs\/([^/]+)\/invites\/([^/]+)$/);
+  if (inviteDetailMatch && req.method === 'DELETE') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const orgId = inviteDetailMatch[1];
+    const inviteId = inviteDetailMatch[2];
+    const membership = await requireOrgAdmin(req, res, current.session.userId, orgId);
+    if (!membership) return;
+
+    const deleted = await prisma.orgInvite.deleteMany({
+      where: { id: inviteId, orgId, usedAt: null },
+    });
+
+    if (!deleted.count) {
+      return jsonResponse(res, { error: 'Invite not found' }, 404);
+    }
+
+    return jsonResponse(res, { success: true, invite_id: inviteId });
+  }
+
+  const joinMatch = pathname.match(/^\/v1\/join\/([^/]+)$/);
+  if (joinMatch && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const token = joinMatch[1];
+
+    const invite = await prisma.orgInvite.findUnique({
+      where: { token },
+      include: { org: true },
+    });
+
+    if (!invite || invite.usedAt) {
+      return jsonResponse(res, { error: 'Invite not found' }, 404);
+    }
+    if (invite.expiresAt.getTime() < Date.now()) {
+      return jsonResponse(res, { error: 'Invite expired' }, 410);
+    }
+    if (invite.email && invite.email !== (current.session.email || '').toLowerCase()) {
+      return jsonResponse(res, { error: 'Invite email does not match current account' }, 403);
+    }
+
+    await prisma.userOrganization.upsert({
+      where: { userId_orgId: { userId: current.session.userId, orgId: invite.orgId } },
+      update: {
+        role: invite.role,
+        joinedAt: new Date(),
+      },
+      create: {
+        userId: current.session.userId,
+        orgId: invite.orgId,
+        role: invite.role,
+        invitedAt: invite.createdAt,
+        joinedAt: new Date(),
+      },
+    });
+
+    await prisma.orgInvite.update({
+      where: { id: invite.id },
+      data: {
+        usedAt: new Date(),
+        usedBy: current.session.userId,
+      },
+    });
+
+    await sessionStore.destroySession(current.sessionId);
+    const sessionId = await sessionStore.createSession({
+      ...current.session,
+      orgId: invite.orgId,
+    });
+
+    return jsonResponse(res, {
+      success: true,
+      organization: {
+        id: invite.org.id,
+        name: invite.org.name,
+        slug: invite.org.slug,
+        plan: invite.org.plan || 'free',
+      },
+    }, 200, {
+      'Set-Cookie': makeSessionCookie(sessionId),
+    });
+  }
+
+  const membersMatch = pathname.match(/^\/v1\/orgs\/([^/]+)\/members$/);
+  if (membersMatch && req.method === 'GET') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const orgId = membersMatch[1];
+    const membership = await getOrgMembership(current.session.userId, orgId);
+    if (!membership) {
+      return jsonResponse(res, { error: 'Organization membership not found' }, 404);
+    }
+
+    const members = await prisma.userOrganization.findMany({
+      where: { orgId },
+      include: {
+        user: {
+          select: {
+            id: true,
+            email: true,
+            displayName: true,
+            avatarUrl: true,
+            lastActiveAt: true,
+          },
+        },
+      },
+      orderBy: [
+        { role: 'asc' },
+        { joinedAt: 'asc' },
+      ],
+    });
+
+    return jsonResponse(res, {
+      members: members.map((entry) => ({
+        user_id: entry.userId,
+        role: entry.role,
+        invited_at: entry.invitedAt,
+        joined_at: entry.joinedAt,
+        email: entry.user?.email || null,
+        display_name: entry.user?.displayName || null,
+        avatar_url: entry.user?.avatarUrl || null,
+        last_active_at: entry.user?.lastActiveAt || null,
+      })),
+    });
+  }
+
+  const projectsMatch = pathname.match(/^\/v1\/orgs\/([^/]+)\/projects$/);
+  if (projectsMatch && req.method === 'GET') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const orgId = projectsMatch[1];
+    const membership = await getOrgMembership(current.session.userId, orgId);
+    if (!membership) {
+      return jsonResponse(res, { error: 'Organization membership not found' }, 404);
+    }
+    if (membership.org?.plan !== 'enterprise') {
+      return jsonResponse(res, { error: 'Projects require an enterprise workspace' }, 403);
+    }
+
+    const projects = await prisma.project.findMany({
+      where: { orgId },
+      orderBy: { updatedAt: 'desc' },
+    });
+
+    return jsonResponse(res, {
+      projects: projects.map((project) => ({
+        id: project.id,
+        org_id: project.orgId,
+        name: project.name,
+        slug: project.slug,
+        description: project.description,
+        created_by: project.createdBy,
+        created_at: project.createdAt,
+        updated_at: project.updatedAt,
+      })),
+    });
+  }
+
+  if (projectsMatch && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const orgId = projectsMatch[1];
+    const membership = await requireOrgAdmin(req, res, current.session.userId, orgId);
+    if (!membership) return;
+    if (membership.org?.plan !== 'enterprise') {
+      return jsonResponse(res, { error: 'Projects require an enterprise workspace' }, 403);
+    }
+
+    const body = await parseBody(req);
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    if (!name) {
+      return jsonResponse(res, { error: 'name is required' }, 400);
+    }
+    const slugBase = sanitizeSlug(body.slug || name);
+    const existing = await prisma.project.findFirst({ where: { orgId, slug: slugBase } });
+    const slug = existing ? `${slugBase}-${crypto.randomUUID().slice(0, 6)}` : slugBase;
+
+    const project = await prisma.project.create({
+      data: {
+        orgId,
+        name,
+        slug,
+        description: typeof body.description === 'string' && body.description.trim() ? body.description.trim() : null,
+        createdBy: current.session.userId,
+      },
+    });
+
+    return jsonResponse(res, {
+      success: true,
+      project: {
+        id: project.id,
+        org_id: project.orgId,
+        name: project.name,
+        slug: project.slug,
+        description: project.description,
+        created_by: project.createdBy,
+        created_at: project.createdAt,
+        updated_at: project.updatedAt,
+      },
+    }, 201);
+  }
+
+  const memberDetailMatch = pathname.match(/^\/v1\/orgs\/([^/]+)\/members\/([^/]+)$/);
+  if (memberDetailMatch && req.method === 'PATCH') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const orgId = memberDetailMatch[1];
+    const targetUserId = memberDetailMatch[2];
+    const membership = await requireOrgAdmin(req, res, current.session.userId, orgId);
+    if (!membership) return;
+
+    const body = await parseBody(req);
+    const role = typeof body.role === 'string' ? body.role.trim().toLowerCase() : '';
+    if (!['member', 'viewer', 'developer', 'admin'].includes(role)) {
+      return jsonResponse(res, { error: 'invalid role' }, 400);
+    }
+
+    const targetMembership = await getOrgMembership(targetUserId, orgId);
+    if (!targetMembership) {
+      return jsonResponse(res, { error: 'Member not found' }, 404);
+    }
+    if (targetMembership.role === 'owner') {
+      return jsonResponse(res, { error: 'Owner role cannot be changed here' }, 400);
+    }
+
+    const updated = await prisma.userOrganization.update({
+      where: { userId_orgId: { userId: targetUserId, orgId } },
+      data: { role },
+    });
+
+    return jsonResponse(res, { success: true, member: { user_id: updated.userId, role: updated.role } });
+  }
+
+  const projectDetailMatch = pathname.match(/^\/v1\/orgs\/([^/]+)\/projects\/([^/]+)$/);
+  if (projectDetailMatch && req.method === 'PATCH') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const orgId = projectDetailMatch[1];
+    const projectId = projectDetailMatch[2];
+    const membership = await requireOrgAdmin(req, res, current.session.userId, orgId);
+    if (!membership) return;
+    if (membership.org?.plan !== 'enterprise') {
+      return jsonResponse(res, { error: 'Projects require an enterprise workspace' }, 403);
+    }
+
+    const body = await parseBody(req);
+    const updateData = {};
+    if (typeof body.name === 'string' && body.name.trim()) {
+      updateData.name = body.name.trim();
+    }
+    if (typeof body.description === 'string') {
+      updateData.description = body.description.trim() || null;
+    }
+    if (typeof body.slug === 'string' && body.slug.trim()) {
+      const slugBase = sanitizeSlug(body.slug);
+      const conflict = await prisma.project.findFirst({
+        where: {
+          orgId,
+          slug: slugBase,
+          id: { not: projectId },
+        },
+      });
+      updateData.slug = conflict ? `${slugBase}-${crypto.randomUUID().slice(0, 6)}` : slugBase;
+    }
+
+    if (!Object.keys(updateData).length) {
+      return jsonResponse(res, { error: 'No valid fields to update' }, 400);
+    }
+
+    const existingProject = await prisma.project.findFirst({
+      where: { id: projectId, orgId },
+    });
+    if (!existingProject) {
+      return jsonResponse(res, { error: 'Project not found' }, 404);
+    }
+
+    const project = await prisma.project.update({
+      where: { id: projectId },
+      data: updateData,
+    });
+
+    return jsonResponse(res, {
+      success: true,
+      project: {
+        id: project.id,
+        org_id: project.orgId,
+        name: project.name,
+        slug: project.slug,
+        description: project.description,
+        created_by: project.createdBy,
+        created_at: project.createdAt,
+        updated_at: project.updatedAt,
+      },
+    });
+  }
+
+  if (memberDetailMatch && req.method === 'DELETE') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const orgId = memberDetailMatch[1];
+    const targetUserId = memberDetailMatch[2];
+    const membership = await requireOrgAdmin(req, res, current.session.userId, orgId);
+    if (!membership) return;
+
+    const targetMembership = await getOrgMembership(targetUserId, orgId);
+    if (!targetMembership) {
+      return jsonResponse(res, { error: 'Member not found' }, 404);
+    }
+    if (targetMembership.role === 'owner') {
+      return jsonResponse(res, { error: 'Owner cannot be removed' }, 400);
+    }
+
+    await prisma.userOrganization.delete({
+      where: { userId_orgId: { userId: targetUserId, orgId } },
+    });
+
+    return jsonResponse(res, { success: true, user_id: targetUserId });
+  }
+
+  if (projectDetailMatch && req.method === 'DELETE') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const orgId = projectDetailMatch[1];
+    const projectId = projectDetailMatch[2];
+    const membership = await requireOrgAdmin(req, res, current.session.userId, orgId);
+    if (!membership) return;
+    if (membership.org?.plan !== 'enterprise') {
+      return jsonResponse(res, { error: 'Projects require an enterprise workspace' }, 403);
+    }
+
+    const deleted = await prisma.project.deleteMany({
+      where: { id: projectId, orgId },
+    });
+
+    if (!deleted.count) {
+      return jsonResponse(res, { error: 'Project not found' }, 404);
+    }
+
+    return jsonResponse(res, { success: true, project_id: projectId });
   }
 
   if (pathname === '/v1/api-keys' && req.method === 'GET') {
@@ -818,6 +1421,51 @@ const server = http.createServer(async (req, res) => {
         apiKey: rawKey
       })
     }, 201);
+  }
+
+  if ((pathname === '/v1/account' && req.method === 'DELETE') || (pathname === '/v1/account/delete' && req.method === 'POST')) {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    if (!prisma) {
+      return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    }
+
+    const body = await parseBody(req);
+    if ((body.confirm || '').trim().toUpperCase() !== 'DELETE') {
+      return jsonResponse(res, { error: 'Confirmation text must be DELETE' }, 400);
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: current.session.userId },
+      select: { id: true, email: true },
+    });
+    if (!user) {
+      await sessionStore.destroySession(current.sessionId);
+      return jsonResponse(res, { success: true }, 200, {
+        'Set-Cookie': clearSessionCookie(),
+      });
+    }
+
+    const deletionCheck = await validateAccountDeletion(user.id);
+    if (!deletionCheck.ok) {
+      return jsonResponse(res, deletionCheck, deletionCheck.status || 409);
+    }
+
+    await sessionStore.destroySession(current.sessionId);
+    void performAccountDeletion({
+      userId: user.id,
+      orgIdsToDelete: deletionCheck.orgIdsToDelete || [],
+    });
+
+    return jsonResponse(res, {
+      success: true,
+      status: 'scheduled',
+      deleted_user_id: user.id,
+      deleted_email: user.email,
+      deleted_org_ids: deletionCheck.orgIdsToDelete || [],
+    }, 200, {
+      'Set-Cookie': clearSessionCookie(),
+    });
   }
 
   const revokeMatch = pathname.match(/^\/v1\/api-keys\/([^/]+)\/revoke$/);
@@ -884,6 +1532,7 @@ const server = http.createServer(async (req, res) => {
         label: meta.label,
         status,
         account_ref: connector?.account_ref || null,
+        target_scope: connector?.target_scope || 'personal',
         last_sync_at: connector?.last_sync_at || null,
         last_error: connector?.last_error || null,
         is_active: connector?.is_active || false,
@@ -926,6 +1575,7 @@ const server = http.createServer(async (req, res) => {
       const { buildAuthUrl } = oauthModule;
       const body = await parseBody(req);
       const returnTo = body.return_to || '/hivemind/app/connectors';
+      const targetScope = body.target_scope === 'organization' ? 'organization' : 'personal';
 
       // Create CSRF-safe stateless state bound to user/org
       const stateId = encodeConnectorState({
@@ -933,6 +1583,7 @@ const server = http.createServer(async (req, res) => {
         orgId: current.session.orgId,
         provider,
         returnTo,
+        targetScope,
       });
 
       const authUrl = buildAuthUrl({
@@ -984,6 +1635,7 @@ const server = http.createServer(async (req, res) => {
       await connectorStore.upsertConnector({
         userId: authState.userId,
         provider,
+        targetScope: authState.targetScope || 'personal',
         accountRef: tokens.email || tokens.account_ref || null,
         accessToken: tokens.access_token,
         refreshToken: tokens.refresh_token,
@@ -1011,6 +1663,7 @@ const server = http.createServer(async (req, res) => {
               provider,
               user_id: authState.userId,
               org_id: authState.orgId,
+              target_scope: authState.targetScope || 'personal',
               incremental: false,
             }),
           });
@@ -1082,6 +1735,7 @@ const server = http.createServer(async (req, res) => {
           provider,
           user_id: current.session.userId,
           org_id: current.session.orgId,
+          target_scope: connector.target_scope || 'personal',
           incremental: body.incremental !== false,
         }),
       });

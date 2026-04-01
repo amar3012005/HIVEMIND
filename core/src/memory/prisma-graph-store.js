@@ -21,6 +21,7 @@ function mapMemoryRecord(record) {
     user_id: record.userId,
     org_id: record.orgId,
     project: record.project,
+    visibility: record.visibility,
     content: record.content,
     tags: record.tags || [],
     is_latest: record.isLatest,
@@ -67,12 +68,33 @@ function mapRelationshipRecord(record) {
   };
 }
 
-function scopedMemoryWhere({ user_id, org_id, project }) {
-  return {
-    userId: user_id,
+function scopedMemoryWhere({ user_id, org_id, project, scope = 'personal' }) {
+  const base = {
     orgId: org_id,
     project: project || undefined,
-    deletedAt: null
+    deletedAt: null,
+  };
+
+  if (scope === 'organization') {
+    return {
+      ...base,
+      visibility: 'organization',
+    };
+  }
+
+  if (scope === 'all') {
+    return {
+      ...base,
+      OR: [
+        { userId: user_id, visibility: 'private' },
+        { visibility: 'organization' },
+      ],
+    };
+  }
+
+  return {
+    ...base,
+    userId: user_id,
   };
 }
 
@@ -111,6 +133,7 @@ export class PrismaGraphStore {
         id: memory.id,
         userId: memory.user_id,
         orgId: memory.org_id,
+        visibility: memory.visibility || 'private',
         project: memory.project,
         content: memory.content,
         tags: memory.tags,
@@ -221,9 +244,9 @@ export class PrismaGraphStore {
     return mapMemoryRecord(deleted);
   }
 
-  async listLatestMemories({ user_id, org_id, project }) {
+  async listLatestMemories({ user_id, org_id, project, scope = 'personal' }) {
     const records = await this.client.memory.findMany({
-      where: { ...scopedMemoryWhere({ user_id, org_id, project }), isLatest: true },
+      where: { ...scopedMemoryWhere({ user_id, org_id, project, scope }), isLatest: true },
       include: {
         sourceMetadata: true,
         codeMetadata: true,
@@ -238,10 +261,10 @@ export class PrismaGraphStore {
     return records.map(mapMemoryRecord);
   }
 
-  async listMemories({ user_id, org_id, project, memory_type, tags, is_latest, limit = 50, offset = 0 }) {
+  async listMemories({ user_id, org_id, project, memory_type, tags, is_latest, limit = 50, offset = 0, scope = 'personal' }) {
     const records = await this.client.memory.findMany({
       where: {
-        ...scopedMemoryWhere({ user_id, org_id, project }),
+        ...scopedMemoryWhere({ user_id, org_id, project, scope }),
         memoryType: memory_type || undefined,
         isLatest: typeof is_latest === 'boolean' ? is_latest : undefined,
         tags: tags?.length ? { hasEvery: tags } : undefined,
@@ -274,10 +297,10 @@ export class PrismaGraphStore {
     };
   }
 
-  async searchMemories({ query, user_id, org_id, project, memory_type, tags, is_latest, n_results = 10, created_after, created_before, source_platform }) {
+  async searchMemories({ query, user_id, org_id, project, memory_type, tags, is_latest, n_results = 10, created_after, created_before, source_platform, scope = 'personal' }) {
     const records = await this.client.memory.findMany({
       where: {
-        ...scopedMemoryWhere({ user_id, org_id, project }),
+        ...scopedMemoryWhere({ user_id, org_id, project, scope }),
         memoryType: memory_type || undefined,
         sourcePlatform: source_platform || undefined,
         isLatest: typeof is_latest === 'boolean' ? is_latest : undefined,
@@ -312,12 +335,12 @@ export class PrismaGraphStore {
       .slice(0, n_results);
   }
 
-  async listRelationships({ user_id, org_id, project, relationship_types, limit = 2000 }) {
+  async listRelationships({ user_id, org_id, project, relationship_types, limit = 2000, scope = 'personal' }) {
     const records = await this.client.relationship.findMany({
       where: {
         type: relationship_types?.length ? { in: relationship_types } : undefined,
-        fromMemory: scopedMemoryWhere({ user_id, org_id, project }),
-        toMemory: scopedMemoryWhere({ user_id, org_id, project })
+        fromMemory: scopedMemoryWhere({ user_id, org_id, project, scope }),
+        toMemory: scopedMemoryWhere({ user_id, org_id, project, scope })
       },
       orderBy: { createdAt: 'desc' },
       take: limit
@@ -326,7 +349,7 @@ export class PrismaGraphStore {
     return records.map(mapRelationshipRecord);
   }
 
-  async getRelatedMemories(memoryId, { maxDepth = 2, minConfidence = 0, user_id, org_id, project } = {}) {
+  async getRelatedMemories(memoryId, { maxDepth = 2, minConfidence = 0, user_id, org_id, project, scope = 'personal' } = {}) {
     const visitedMemoryIds = new Set([memoryId]);
     const visitedEdgeIds = new Set();
     const collected = [];
@@ -342,8 +365,8 @@ export class PrismaGraphStore {
             { fromId: { in: frontierIds } },
             { toId: { in: frontierIds } }
           ],
-          fromMemory: scopedMemoryWhere({ user_id, org_id, project }),
-          toMemory: scopedMemoryWhere({ user_id, org_id, project })
+          fromMemory: scopedMemoryWhere({ user_id, org_id, project, scope }),
+          toMemory: scopedMemoryWhere({ user_id, org_id, project, scope })
         },
         orderBy: { createdAt: 'desc' }
       });

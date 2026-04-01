@@ -122,6 +122,7 @@ open_ssh() {
   log "Opening SSH session to ${SERVER_HOST}..."
   ssh $SSH_OPTS "${SERVER_USER}@${SERVER_HOST}" -t "cd ${SERVER_PATH} && bash"
 }
+#intercewpt
 
 # ── Git Operations ──────────────────────────────────────────────────────────
 

@@ -2,7 +2,8 @@
  * Plan Store
  *
  * Stores the active plan for each organization.
- * Uses the Organization's metadata JSON field.
+ * Uses the Organization.plan column as the source of truth and
+ * falls back to legacy metadata.planId if present.
  */
 
 import { getPlan } from './plans.js';
@@ -26,9 +27,9 @@ export class PlanStore {
     try {
       const org = await this.prisma.organization.findUnique({
         where: { id: orgId },
-        select: { metadata: true },
+        select: { plan: true },
       });
-      const planId = (org?.metadata && typeof org.metadata === 'object') ? org.metadata.planId : 'free';
+      const planId = org?.plan || 'free';
       const plan = getPlan(planId || 'free');
       this._cache.set(orgId, { plan, ts: Date.now() });
       return plan;
@@ -44,14 +45,9 @@ export class PlanStore {
     if (!this.prisma || !orgId) return;
     const plan = getPlan(planId);
     try {
-      const org = await this.prisma.organization.findUnique({
-        where: { id: orgId },
-        select: { metadata: true },
-      });
-      const existing = (org?.metadata && typeof org.metadata === 'object') ? org.metadata : {};
       await this.prisma.organization.update({
         where: { id: orgId },
-        data: { metadata: { ...existing, planId: plan.id, planUpdatedAt: new Date().toISOString() } },
+        data: { plan: plan.id },
       });
       this._cache.set(orgId, { plan, ts: Date.now() });
     } catch (err) {

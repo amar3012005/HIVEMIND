@@ -94,6 +94,7 @@ export class ConnectorStore {
   async upsertConnector({
     userId,
     provider,
+    targetScope = 'personal',
     accountRef,
     accessToken,
     refreshToken,
@@ -104,6 +105,7 @@ export class ConnectorStore {
   }) {
     const data = {
       authType: 'oauth2',
+      targetScope,
       platformUserId: accountRef,
       accessTokenEncrypted: encryptToken(accessToken),
       refreshTokenEncrypted: encryptToken(refreshToken),
@@ -325,6 +327,7 @@ export class ConnectorStore {
       id: record.id,
       provider: record.platformType,
       account_ref: record.platformUserId,
+      target_scope: record.targetScope || 'personal',
       status: this._mapStatus(record),
       scopes: record.oauthScopes,
       is_active: record.isActive,

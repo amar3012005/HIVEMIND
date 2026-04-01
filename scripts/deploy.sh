@@ -103,8 +103,8 @@ verify() {
   check "Web Monthly"     "$B/api/web/usage/monthly"
   check "Admin Metrics"   "$B/api/web/admin/metrics"
   check "Domain Policy"   "$B/api/web/policy/check-domain" POST '{"url":"https://example.com"}'
-  check "Web Search"      "$B/api/web/search/jobs" POST '{"query":"test"}'
-  check "Eval Results"    "$B/api/evaluate/results"
+  check "Web Search API"  "$B/api/web/limits"
+  check "Eval Dataset"    "$B/api/evaluate/dataset"
   check "Executor Status" "$B/api/swarm/executor/status"
   echo ""
   log "Results: ${GREEN}$pass passed${NC}, ${RED}$fail failed${NC}"

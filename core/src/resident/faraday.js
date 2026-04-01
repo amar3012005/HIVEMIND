@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { FARADAY_OBSERVATION_KINDS } from './contract.js';
+import { computeTokenSimilarity } from '../memory/conflict-detector.js';
 
 const SEMANTIC_STOPWORDS = new Set([
   'the', 'and', 'for', 'with', 'that', 'this', 'from', 'into', 'your', 'our', 'you', 'are', 'was', 'were',
@@ -121,8 +122,204 @@ function expandProbeFromCluster(cluster = {}) {
 function scanBudgetForScope({ scope = 'project', project = null, region = null }) {
   if (region) return 400;
   if (project) return 900;
+  if (isOrgWideScope(scope)) return 1400;
   if (scope === 'workspace') return 600;
   return 900;
+}
+
+function isOrgWideScope(scope = '') {
+  return ['organization', 'org', 'all'].includes(String(scope).toLowerCase());
+}
+
+function getRawPrismaClient(memoryStore) {
+  return memoryStore?.client || memoryStore?.prisma || memoryStore?.db || null;
+}
+
+function mapRawMemoryRecord(record = {}) {
+  if (!record) return null;
+  const latestVersionMetadata = record.versions?.[0]?.metadata || {};
+  const sourceMetadata = record.sourceMetadata || null;
+  const sourceMetadataPayload = sourceMetadata?.metadata || {};
+  const codeMetadataPayload = record.codeMetadata ? {
+    ast_metadata: {
+      scopeChain: record.codeMetadata.scopeChain,
+      signature: record.codeMetadata.signatures?.[0] || null,
+      imports: record.codeMetadata.imports || []
+    },
+    filepath: record.codeMetadata.filepath,
+    language: record.codeMetadata.language
+  } : {};
+
+  return {
+    id: record.id,
+    user_id: record.userId,
+    org_id: record.orgId,
+    visibility: record.visibility || 'private',
+    project: record.project || null,
+    content: record.content || '',
+    tags: record.tags || [],
+    is_latest: record.isLatest,
+    importance_score: record.importanceScore,
+    supersedes_id: record.supersedesId,
+    version: record.versions?.[0]?.version || 1,
+    created_at: record.createdAt instanceof Date ? record.createdAt.toISOString() : record.createdAt,
+    updated_at: record.updatedAt instanceof Date ? record.updatedAt.toISOString() : record.updatedAt,
+    document_date: record.documentDate instanceof Date ? record.documentDate.toISOString() : record.documentDate,
+    event_dates: (record.eventDates || []).map((value) => value instanceof Date ? value.toISOString() : value),
+    memory_type: record.memoryType,
+    title: record.title,
+    source: record.sourcePlatform,
+    source_metadata: sourceMetadata ? {
+      source_type: sourceMetadata.sourceType,
+      source_id: sourceMetadata.sourceId,
+      source_platform: sourceMetadata.sourcePlatform,
+      source_url: sourceMetadata.sourceUrl,
+      thread_id: sourceMetadata.threadId,
+      parent_message_id: sourceMetadata.parentMessageId
+    } : {
+      source_type: record.sourcePlatform || 'manual',
+      source_id: record.sourceMessageId || record.sourceSessionId || null,
+      source_platform: record.sourcePlatform || null,
+      source_url: record.sourceUrl || null
+    },
+    metadata: {
+      ...latestVersionMetadata,
+      ...sourceMetadataPayload,
+      ...codeMetadataPayload
+    }
+  };
+}
+
+async function loadOrgScopedMemories(memoryStore, { userId, orgId, project, limit = 100 } = {}) {
+  const client = getRawPrismaClient(memoryStore);
+  if (!client?.memory?.findMany) return [];
+
+  const records = await client.memory.findMany({
+    where: {
+      orgId,
+      deletedAt: null,
+      visibility: 'organization',
+      ...(project ? { project } : {}),
+    },
+    include: {
+      sourceMetadata: true,
+      codeMetadata: true,
+      versions: {
+        orderBy: { createdAt: 'desc' },
+        take: 1,
+      },
+    },
+    orderBy: { updatedAt: 'desc' },
+    take: limit,
+  });
+
+  return records.map(mapRawMemoryRecord).filter(Boolean);
+}
+
+async function searchOrgScopedMemories(memoryStore, { query = '', orgId, project, n_results = 12, memory_type, tags, source_platform, created_after, created_before, is_latest } = {}) {
+  const client = getRawPrismaClient(memoryStore);
+  if (!client?.memory?.findMany) return [];
+
+  const records = await client.memory.findMany({
+    where: {
+      orgId,
+      deletedAt: null,
+      visibility: 'organization',
+      ...(project ? { project } : {}),
+      memoryType: memory_type || undefined,
+      sourcePlatform: source_platform || undefined,
+      isLatest: typeof is_latest === 'boolean' ? is_latest : undefined,
+      tags: tags?.length ? { hasEvery: tags } : undefined,
+      createdAt: {
+        gte: created_after ? new Date(created_after) : undefined,
+        lte: created_before ? new Date(created_before) : undefined
+      }
+    },
+    include: {
+      sourceMetadata: true,
+      codeMetadata: true,
+      versions: {
+        orderBy: { createdAt: 'desc' },
+        take: 1,
+      },
+    },
+    take: Math.max(n_results * 10, 50),
+    orderBy: { updatedAt: 'desc' },
+  });
+
+  return records
+    .map((record) => {
+      const memory = mapRawMemoryRecord(record);
+      return {
+        ...memory,
+        score: query ? computeTokenSimilarity(query, [memory.title, memory.content].filter(Boolean).join(' ')) : 1,
+      };
+    })
+    .filter((result) => !query || result.score > 0)
+    .sort((left, right) => right.score - left.score)
+    .slice(0, n_results);
+}
+
+async function listOrgRelationships(memoryStore, { orgId, project, relationship_types, limit = 2000 } = {}) {
+  const client = getRawPrismaClient(memoryStore);
+  if (!client?.relationship?.findMany) return [];
+
+  const records = await client.relationship.findMany({
+    where: {
+      type: relationship_types?.length ? { in: relationship_types } : undefined,
+      fromMemory: {
+        orgId,
+        deletedAt: null,
+        visibility: 'organization',
+        ...(project ? { project } : {}),
+      },
+      toMemory: {
+        orgId,
+        deletedAt: null,
+        visibility: 'organization',
+        ...(project ? { project } : {}),
+      },
+    },
+    orderBy: { createdAt: 'desc' },
+    take: limit,
+  });
+
+  return records;
+}
+
+async function collectOrgRelatedMemoryIds(memoryStore, seedMemory, { orgId, project } = {}) {
+  const client = getRawPrismaClient(memoryStore);
+  if (!client?.relationship?.findMany || !seedMemory?.id) return [];
+
+  const relationships = await client.relationship.findMany({
+    where: {
+      confidence: { gte: 0.35 },
+      OR: [
+        { fromId: seedMemory.id },
+        { toId: seedMemory.id },
+      ],
+      fromMemory: {
+        orgId,
+        deletedAt: null,
+        visibility: 'organization',
+        ...(project ? { project } : {}),
+      },
+      toMemory: {
+        orgId,
+        deletedAt: null,
+        visibility: 'organization',
+        ...(project ? { project } : {}),
+      },
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  const ids = [];
+  for (const relationship of relationships || []) {
+    if (relationship.fromId && relationship.fromId !== seedMemory.id) ids.push(relationship.fromId);
+    if (relationship.toId && relationship.toId !== seedMemory.id) ids.push(relationship.toId);
+  }
+  return ids;
 }
 
 function sortNewestFirst(memories = []) {
@@ -189,6 +386,9 @@ async function clusterSemanticMemories(memories = []) {
 }
 
 async function collectRelatedMemoryIds(memoryStore, seedMemory, scopeFilter) {
+  if (isOrgWideScope(scopeFilter?.scope)) {
+    return collectOrgRelatedMemoryIds(memoryStore, seedMemory, scopeFilter);
+  }
   if (!memoryStore?.getRelatedMemories || !seedMemory?.id) return [];
   const relationships = await memoryStore.getRelatedMemories(seedMemory.id, {
     maxDepth: 1,
@@ -475,6 +675,7 @@ CRITICAL: Use the COMPLETE memory IDs exactly as shown in brackets. They are ful
   } = {}) {
     const observations = [];
     const scanBudget = scanBudgetForScope({ scope, project, region });
+    const orgWideScope = isOrgWideScope(scope);
 
     const updateProgress = async (step, totalSteps, currentStep) => {
       await onProgress({
@@ -507,7 +708,22 @@ CRITICAL: Use the COMPLETE memory IDs exactly as shown in brackets. They are ful
     let newAnomalyCount = 0;
 
     let memories = [];
-    if (this.memoryStore?.listLatestMemories) {
+    if (orgWideScope) {
+      memories = await loadOrgScopedMemories(this.memoryStore, {
+        userId,
+        orgId,
+        project,
+        limit: Math.min(Math.max(scanBudget * 2, 600), 2000),
+      });
+      if (memories.length === 0) {
+        memories = await searchOrgScopedMemories(this.memoryStore, {
+          query: goal || region || project || '',
+          orgId,
+          project,
+          n_results: 150,
+        });
+      }
+    } else if (this.memoryStore?.listLatestMemories) {
       memories = await this.memoryStore.listLatestMemories({
         user_id: userId,
         org_id: orgId,
@@ -551,7 +767,38 @@ CRITICAL: Use the COMPLETE memory IDs exactly as shown in brackets. They are ful
     const semanticSeedMap = new Map();
     const probeHitMap = new Map();
 
-    if (this.memoryStore?.searchMemories) {
+    if (orgWideScope) {
+      for (const [probeIndex, probe] of semanticProbes.entries()) {
+        if (isCancelled()) {
+          return { status: 'cancelled', observations: [], observations_count: 0, current_step: 'cancelled_before_probe_scan' };
+        }
+
+        const probeResults = await searchOrgScopedMemories(this.memoryStore, {
+          query: probe,
+          orgId,
+          project,
+          is_latest: true,
+          n_results: 12,
+        });
+
+        for (const result of probeResults || []) {
+          if (!result?.id) continue;
+          const existing = semanticSeedMap.get(result.id);
+          const score = Number(result.score || 0);
+          const weightedScore = score + Math.max(0, (semanticProbes.length - probeIndex) * 0.05);
+          if (!existing || weightedScore > existing.score) {
+            semanticSeedMap.set(result.id, {
+              ...result,
+              score: weightedScore,
+              semantic_probes: existing?.semantic_probes ? Array.from(new Set([...existing.semantic_probes, probe])) : [probe],
+            });
+          } else {
+            existing.semantic_probes = Array.from(new Set([...(existing.semantic_probes || []), probe]));
+          }
+          probeHitMap.set(probe, (probeHitMap.get(probe) || 0) + 1);
+        }
+      }
+    } else if (this.memoryStore?.searchMemories) {
       for (const [probeIndex, probe] of semanticProbes.entries()) {
         if (isCancelled()) {
           return { status: 'cancelled', observations: [], observations_count: 0, current_step: 'cancelled_before_probe_scan' };
@@ -590,6 +837,7 @@ CRITICAL: Use the COMPLETE memory IDs exactly as shown in brackets. They are ful
     for (const [index, seed] of semanticSeeds.slice(0, 5).entries()) {
       await yieldEvery(index, 2);
       const relatedIds = await collectRelatedMemoryIds(this.memoryStore, seed, {
+        scope,
         user_id: userId,
         org_id: orgId,
         project,
@@ -632,13 +880,19 @@ CRITICAL: Use the COMPLETE memory IDs exactly as shown in brackets. They are ful
     }
 
     const memoryCount = memories.length;
-    const relationshipCount = this.memoryStore?.listRelationships
-      ? (await this.memoryStore.listRelationships({
-          user_id: userId,
-          org_id: orgId,
+    const relationshipCount = orgWideScope
+      ? (await listOrgRelationships(this.memoryStore, {
+          orgId,
           project,
           limit: 500,
         })).length
+      : this.memoryStore?.listRelationships
+        ? (await this.memoryStore.listRelationships({
+            user_id: userId,
+            org_id: orgId,
+            project,
+            limit: 500,
+          })).length
       : 0;
 
     const topFiles = [...files.entries()]

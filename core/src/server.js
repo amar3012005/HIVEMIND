@@ -2486,6 +2486,7 @@ a{color:#a78bfa}</style></head><body>
           const provider = body.provider;
           const syncUserId = body.user_id || userId;
           const syncOrgId = body.org_id || orgId;
+          const targetScope = body.target_scope === 'organization' ? 'organization' : null;
 
           const adapterModules = {
             gmail: './connectors/providers/gmail/adapter.js',
@@ -2522,6 +2523,7 @@ a{color:#a78bfa}</style></head><body>
                 provider,
                 cursor,
                 incremental,
+                targetScope,
               });
               console.log(`[connector-sync] ${provider}:${syncUserId} → ${result.status} (imported: ${result.imported}, skipped: ${result.skipped})`);
             } catch (syncErr) {
@@ -2840,7 +2842,8 @@ a{color:#a78bfa}</style></head><body>
           if (req.method === 'GET') {
             const { buildAuthUrl } = await import('./connectors/providers/gmail/oauth.js');
             const gmailRedirectUri = `${process.env.HIVEMIND_BASE_URL || getHostedApiBaseUrl(req)}/api/connectors/gmail/callback`;
-            const gmailState = Buffer.from(JSON.stringify({ userId, orgId })).toString('base64url');
+            const targetScope = url.searchParams.get('target_scope') === 'organization' ? 'organization' : 'personal';
+            const gmailState = Buffer.from(JSON.stringify({ userId, orgId, targetScope })).toString('base64url');
             const authorizationUrl = buildAuthUrl({ redirectUri: gmailRedirectUri, state: gmailState });
             return jsonResponse(res, { url: authorizationUrl, redirect_uri: gmailRedirectUri });
           }
@@ -2864,12 +2867,13 @@ a{color:#a78bfa}</style></head><body>
 
             try {
               // Parse state to get userId/orgId
-              let stateUserId = userId, stateOrgId = orgId;
+              let stateUserId = userId, stateOrgId = orgId, stateTargetScope = 'personal';
               if (callbackState) {
                 try {
                   const parsed = JSON.parse(Buffer.from(callbackState, 'base64url').toString());
                   stateUserId = parsed.userId || stateUserId;
                   stateOrgId = parsed.orgId || stateOrgId;
+                  stateTargetScope = parsed.targetScope === 'organization' ? 'organization' : 'personal';
                 } catch {}
               }
 
@@ -2888,6 +2892,7 @@ a{color:#a78bfa}</style></head><body>
               await connStore.upsertConnector({
                 userId: stateUserId,
                 provider: 'gmail',
+                targetScope: stateTargetScope,
                 accountRef: tokens.email || null,
                 accessToken: tokens.access_token,
                 refreshToken: tokens.refresh_token,
@@ -2901,7 +2906,7 @@ a{color:#a78bfa}</style></head><body>
               // Do NOT auto-sync — redirect to frontend with needs_config flag
               // User will configure filters (labels, date range, exclusions) before sync starts
               const frontendUrl = process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu';
-              res.writeHead(302, { Location: `${frontendUrl}/hivemind/app/connectors?connected=gmail&needs_config=true&email=${encodeURIComponent(tokens.email || '')}` });
+              res.writeHead(302, { Location: `${frontendUrl}/hivemind/app/connectors?connected=gmail&needs_config=true&email=${encodeURIComponent(tokens.email || '')}&target_scope=${encodeURIComponent(stateTargetScope)}` });
               res.end();
               return;
             } catch (err) {
@@ -2972,6 +2977,9 @@ a{color:#a78bfa}</style></head><body>
               if (!connector) {
                 return jsonResponse(res, { error: 'Gmail not connected. Complete OAuth first.' }, 400);
               }
+              const targetScope = body.target_scope === 'organization'
+                ? 'organization'
+                : connector.target_scope || 'personal';
 
               // Build Gmail API query from user settings
               const queryParts = [];
@@ -3133,6 +3141,7 @@ a{color:#a78bfa}</style></head><body>
                             title: subject,
                             tags,
                             memory_type: 'event',
+                            visibility: targetScope === 'organization' ? 'organization' : 'private',
                             document_date: firstDate ? new Date(firstDate).toISOString() : null,
                             source: 'gmail',
                             source_metadata: {
@@ -5064,16 +5073,32 @@ a{color:#a78bfa}</style></head><body>
             }
             try {
               const graphProject = url.searchParams.get('project') || null;
+              const graphScope = url.searchParams.get('scope') || 'personal';
               const graphLimit = Math.min(parseInt(url.searchParams.get('limit')) || 300, 1000);
               const includeEdges = url.searchParams.get('include_edges') !== 'false';
               const includeResidents = url.searchParams.get('include_residents') !== 'false';
-
-              const scopeWhere = {
-                userId: userId,
+              const baseWhere = {
                 orgId: orgId,
                 deletedAt: null,
-                ...(graphProject ? { project: graphProject } : {})
+                ...(graphProject ? { project: graphProject } : {}),
               };
+              const scopeWhere = graphScope === 'team'
+                ? {
+                    ...baseWhere,
+                    visibility: 'organization',
+                  }
+                : graphScope === 'all'
+                  ? {
+                      ...baseWhere,
+                      OR: [
+                        { userId, visibility: 'private' },
+                        { visibility: 'organization' },
+                      ],
+                    }
+                  : {
+                      ...baseWhere,
+                      userId,
+                    };
 
               // ── Smart priority-based node selection ──
               // Layer 1: High-value nodes (facts, observations, promoted-risks) — always shown
@@ -5089,11 +5114,16 @@ a{color:#a78bfa}</style></head><body>
               const seenIds = new Set(highValueNodes.map(r => r.id));
 
               // Layer 2: Connected nodes (have relationships) — show the graph structure
+              const relationshipScope = graphScope === 'all'
+                ? { orgId, deletedAt: null, OR: [{ userId, visibility: 'private' }, { visibility: 'organization' }] }
+                : graphScope === 'team'
+                  ? { orgId, deletedAt: null, visibility: 'organization' }
+                  : { userId, orgId, deletedAt: null };
               const allRelationships = await prisma.relationship.findMany({
                 where: {
                   OR: [
-                    { fromMemory: { userId, orgId, deletedAt: null } },
-                    { toMemory: { userId, orgId, deletedAt: null } },
+                    { fromMemory: relationshipScope },
+                    { toMemory: relationshipScope },
                   ],
                 },
                 select: { fromId: true, toId: true, type: true, confidence: true, createdBy: true },
@@ -5159,6 +5189,8 @@ a{color:#a78bfa}</style></head><body>
                   memoryType: r.memoryType || null,
                   tags: r.tags || [],
                   project: r.project || null,
+                  userId: r.userId,
+                  visibility: r.visibility,
                   sourcePlatform: r.sourceMetadata?.sourcePlatform || r.sourcePlatform || null,
                   importanceScore: r.importanceScore,
                   strength: r.strength,
@@ -5268,6 +5300,7 @@ a{color:#a78bfa}</style></head><body>
                   nodeCount: nodes.length,
                   edgeCount: edges.length,
                   totalMemories: totalCount,
+                  scope: graphScope,
                   loadedLayers: {
                     highValue: highValueNodes.length,
                     connected: connectedNodes.length,
@@ -5792,10 +5825,8 @@ a{color:#a78bfa}</style></head><body>
               return jsonResponse(res, { error: 'Invalid plan', valid: validPlans }, 400);
             }
             try {
-              await prisma.organization.update({
-                where: { id: orgId },
-                data: { plan },
-              });
+              await planStore.setOrgPlan(orgId, plan);
+              planStore.invalidate(orgId);
               invalidateAggregateCache({ userId, orgId });
               return jsonResponse(res, { success: true, plan, message: `Upgraded to ${plan}` });
             } catch (err) {

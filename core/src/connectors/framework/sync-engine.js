@@ -35,7 +35,7 @@ export class SyncEngine {
    * @param {boolean} params.incremental - true for delta sync
    * @returns {Promise<SyncResult>}
    */
-  async runSync({ adapter, userId, orgId, provider, cursor = null, incremental = false }) {
+  async runSync({ adapter, userId, orgId, provider, cursor = null, incremental = false, targetScope = null }) {
     const telemetry = {
       provider,
       user_id: userId,
@@ -52,10 +52,16 @@ export class SyncEngine {
       // Mark as syncing
       await this.connectorStore.updateStatus(userId, provider, { status: 'syncing' });
 
-      if (incremental && cursor == null && this.connectorStore?.getConnector) {
-        const existingConnector = await this.connectorStore.getConnector(userId, provider);
+      let existingConnector = null;
+      if (this.connectorStore?.getConnector) {
+        existingConnector = await this.connectorStore.getConnector(userId, provider);
+      }
+
+      if (incremental && cursor == null) {
         cursor = existingConnector?.cursor || null;
       }
+
+      const effectiveTargetScope = targetScope || existingConnector?.target_scope || 'personal';
 
       // Get access token
       let accessToken = await this.connectorStore.getAccessToken(userId, provider);
@@ -116,6 +122,9 @@ export class SyncEngine {
 
             // Ingest each payload
             for (const payload of payloads) {
+              payload.user_id = userId;
+              payload.org_id = orgId;
+              payload.visibility = effectiveTargetScope === 'organization' ? 'organization' : 'private';
               const sourceId = payload?.source_metadata?.source_id || adapter.dedupeKey(record);
               if (await this._isDuplicate(sourceId, userId, provider)) {
                 telemetry.skipped++;

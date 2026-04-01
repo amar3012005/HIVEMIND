@@ -530,7 +530,7 @@ export class ResidentRunManager {
           }
 
           if (actions.length > 0) {
-            const actionResult = await executor.executeActions(actions, { minConfidence: 0.7, project: run.project });
+            const actionResult = await executor.executeActions(actions, { minConfidence: 0.7, project: run.project, duplicateMode: run.duplicate_mode || 'merge' });
             run.graph_actions_result = actionResult;
             this.logger?.log?.(`[run-manager] Faraday direct actions: ${actionResult.executed} executed, ${actionResult.skipped} skipped, ${actionResult.failed} failed`);
           }
@@ -548,6 +548,7 @@ export class ResidentRunManager {
         const actionResult = await executor.executeActions(result.action_candidates, {
           minConfidence: 0.65,
           project: run.project,
+          duplicateMode: run.duplicate_mode || 'merge',
         });
         run.graph_actions_result = actionResult;
         this.logger.log(`[run-manager] Turing graph actions: ${actionResult.executed} executed, ${actionResult.skipped} skipped`);
@@ -699,6 +700,7 @@ export class ResidentRunManager {
       project: payload.project || null,
       region: payload.region || null,
       dry_run: payload.dry_run === true,
+      duplicate_mode: payload.duplicate_mode || 'merge',  // 'merge' (soft) or 'delete' (hard)
       started_at: null,
       updated_at: createdAt,
       finished_at: null,

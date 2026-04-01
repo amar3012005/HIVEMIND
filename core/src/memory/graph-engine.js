@@ -656,7 +656,7 @@ export class MemoryGraphEngine {
         });
         const factMemoryIds = [];
         if (factSentences.length > 0) {
-          for (const fact of factSentences.slice(0, 25)) { // Up to 25 facts per parent (was 8)
+          for (const fact of factSentences.slice(0, 5)) { // Max 5 facts per parent (production: quality over quantity)
             const factId = crypto.randomUUID ? crypto.randomUUID() : `fact-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
             await store.createMemory({
               id: factId,
@@ -951,6 +951,7 @@ export class MemoryGraphEngine {
       id: input.id || uuidv4(),
       user_id: input.user_id,
       org_id: input.org_id,
+      visibility: input.visibility || 'private',
       project: input.project || null,
       content: input.content,
       memory_type: input.memory_type || 'fact',

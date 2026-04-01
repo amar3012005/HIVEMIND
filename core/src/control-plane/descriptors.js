@@ -79,6 +79,29 @@ export function buildClientDescriptor(client, {
         }
       };
 
+    case 'notebooklm':
+      return {
+        client: 'notebooklm',
+        config: {
+          mcpServers: {
+            notebooklm: {
+              command: 'node',
+              args: ['/path/to/HIVE-MIND/mcp-server/notebooklm-mcp-server.js'],
+              cwd: '/path/to/HIVE-MIND',
+              env: {
+                NOTEBOOKLM_BIN: 'notebooklm',
+                NOTEBOOKLM_HOME: '/path/to/.notebooklm',
+                NOTEBOOKLM_PROFILE: 'default',
+                NOTEBOOKLM_DEFAULT_NOTEBOOK_TITLE: 'Second Mind',
+                NOTEBOOKLM_AUTO_CREATE_DEFAULT_NOTEBOOK: '1',
+                NOTEBOOKLM_TIMEOUT_MS: '120000',
+                NOTEBOOKLM_RESEARCH_TIMEOUT_MS: '600000'
+              }
+            }
+          }
+        }
+      };
+
     default:
       throw new Error(`Unsupported client: ${client}`);
   }
@@ -89,6 +112,7 @@ export function buildAllClientDescriptors(options) {
     buildClientDescriptor('claude', options),
     buildClientDescriptor('antigravity', options),
     buildClientDescriptor('vscode', options),
-    buildClientDescriptor('remote-mcp', options)
+    buildClientDescriptor('remote-mcp', options),
+    buildClientDescriptor('notebooklm', options)
   ];
 }

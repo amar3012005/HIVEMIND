@@ -58,4 +58,8 @@ key-rotation-report-*.json
 # Secret scanning and replacements
 replacements.txt
 MiroFish
-benchmarks/
+
+benchmarks
+
+# Benchmark results may contain API keys
+benchmarks/results/*.md

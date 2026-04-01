@@ -364,14 +364,20 @@ async function upsertUserFromZitadel(userInfo) {
     throw new Error('Database unavailable');
   }
 
-  const existing = await prisma.user.findUnique({
+  let existing = await prisma.user.findUnique({
     where: { zitadelUserId: userInfo.sub }
   });
+
+  // Fallback: find by email (handles re-auth or manual user creation)
+  if (!existing && userInfo.email) {
+    existing = await prisma.user.findUnique({ where: { email: userInfo.email } });
+  }
 
   if (existing) {
     return prisma.user.update({
       where: { id: existing.id },
       data: {
+        zitadelUserId: userInfo.sub,
         email: userInfo.email,
         displayName: userInfo.name,
         avatarUrl: userInfo.picture,
@@ -627,6 +633,7 @@ const server = http.createServer(async (req, res) => {
       // Upsert user — use Google sub as zitadel user id (with prefix to avoid collision)
       const user = await upsertUserFromZitadel({
         sub: `google:${userInfo.id}`,
+        zitadelUserId: userInfo.sub,
         email: userInfo.email,
         name: userInfo.name,
         picture: userInfo.picture,

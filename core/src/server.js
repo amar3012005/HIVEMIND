@@ -3154,6 +3154,15 @@ a{color:#a78bfa}</style></head><body>
                               if (gmailMem) await qdrantClient.storeMemory(gmailMem, { collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT' });
                             } catch {}
                           }
+                          // Embed fact-memories in Qdrant
+                          if (gmailResult?.factMemoryIds?.length > 0 && qdrantClient) {
+                            for (const factId of gmailResult.factMemoryIds) {
+                              try {
+                                const factMem = await persistentMemoryStore.getMemory(factId);
+                                if (factMem) await qdrantClient.storeMemory(factMem, { collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT' });
+                              } catch {}
+                            }
+                          }
                           totalImported++;
                         } catch (ingestErr) {
                           console.warn(`[gmail-sync] Ingest failed for thread ${thread.id}:`, ingestErr.message);
@@ -3282,6 +3291,17 @@ a{color:#a78bfa}</style></head><body>
                       }
                     } catch (embedErr) {
                       console.warn(`[knowledge] Qdrant embed failed for ${result.memoryId}:`, embedErr.message);
+                    }
+                  }
+                  // Embed fact-memories in Qdrant
+                  if (result?.factMemoryIds?.length > 0 && qdrantClient) {
+                    for (const factId of result.factMemoryIds) {
+                      try {
+                        const factMem = await persistentMemoryStore.getMemory(factId);
+                        if (factMem) await qdrantClient.storeMemory(factMem, { collectionName });
+                      } catch (factErr) {
+                        console.warn(`[knowledge] Fact Qdrant embed failed for ${factId}:`, factErr.message);
+                      }
                     }
                   }
                 };
@@ -3916,6 +3936,18 @@ a{color:#a78bfa}</style></head><body>
                 invalidateAggregateCache({ userId, orgId, project: null });
               }
 
+              // Embed fact-memories in Qdrant (they only exist in Prisma after graph-engine creates them)
+              if (result.factMemoryIds?.length > 0 && qdrantClient) {
+                for (const factId of result.factMemoryIds) {
+                  try {
+                    const factMem = await persistentMemoryStore.getMemory(factId);
+                    if (factMem) await qdrantClient.storeMemory(factMem, { collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT' });
+                  } catch (factErr) {
+                    console.warn(`[webapp] Fact Qdrant embed failed for ${factId}:`, factErr.message);
+                  }
+                }
+              }
+
               return jsonResponse(res, {
                 success: true,
                 memory,
@@ -4148,6 +4180,19 @@ a{color:#a78bfa}</style></head><body>
                 invalidateAggregateCache({ userId, orgId, project: memory.project || null });
                 invalidateAggregateCache({ userId, orgId, project: null });
               }
+
+              // Embed fact-memories in Qdrant (they only exist in Prisma after graph-engine creates them)
+              if (result.factMemoryIds?.length > 0 && qdrantClient) {
+                for (const factId of result.factMemoryIds) {
+                  try {
+                    const factMem = await persistentMemoryStore.getMemory(factId);
+                    if (factMem) await qdrantClient.storeMemory(factMem, { collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT' });
+                  } catch (factErr) {
+                    console.warn(`[memories] Fact Qdrant embed failed for ${factId}:`, factErr.message);
+                  }
+                }
+              }
+
               return jsonResponse(res, {
                 success: true,
                 memory,

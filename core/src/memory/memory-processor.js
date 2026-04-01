@@ -35,7 +35,7 @@ export class MemoryProcessor {
     const contentLength = (newMemory.content || '').length;
     const inputTokens = Math.ceil(contentLength / 4);
     // Scale output tokens with input — longer content needs more facts extracted
-    const maxTokens = Math.max(300, Math.min(inputTokens + 500, 2000));
+    const maxTokens = Math.max(300, Math.min(inputTokens + 500, 4000));
 
     try {
       const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -69,7 +69,7 @@ Rules:
 - OBSERVATION: One sentence summary with 🔴/🟡/🟢. Write TRIVIAL if nothing.
 - ENTITIES: Names, places, orgs, events from user's words. Write NONE if empty.
 - DATES: ALL dates/times/durations the user mentioned (keep exact wording like "two months ago", "last Saturday", "October 15th", "for about two weeks"). Write NONE if empty.
-- FACT_SENTENCES: Copy the user's EXACT sentences that contain personal facts. Keep their original wording — do NOT rephrase. Include dates, durations, event names exactly as the user wrote them. Only extract from "User:" parts, NEVER from "Assistant:" parts. Extract ALL personal facts — for long conversations, extract up to 15 facts. Write NONE if no personal facts.
+- FACT_SENTENCES: Copy the user's EXACT sentences that contain personal facts. Keep their original wording — do NOT rephrase. Include dates, durations, event names exactly as the user wrote them. Only extract from "User:" parts, NEVER from "Assistant:" parts. Extract ALL factual statements the user made — do not limit or summarize, include every personal fact from every turn. Write NONE if no personal facts.
 
 CRITICAL RULES:
 1. QUOTE the user's exact words. "I've been a member for two weeks" stays as-is.
@@ -82,8 +82,8 @@ CRITICAL RULES:
               role: 'user',
               // Scale content limit with input size — don't truncate short content, allow more for long sessions
               content: hasSimilar
-                ? `EXISTING MEMORIES:\n${existingContext}\n\nNEW MEMORY:\n${(newMemory.content || '').slice(0, 6000)}`
-                : `NEW MEMORY:\n${(newMemory.content || '').slice(0, 8000)}`
+                ? `EXISTING MEMORIES:\n${existingContext}\n\nNEW MEMORY:\n${(newMemory.content || '').slice(0, 16000)}`
+                : `NEW MEMORY:\n${(newMemory.content || '').slice(0, 16000)}`
             }
           ],
           max_tokens: maxTokens,
@@ -263,7 +263,7 @@ CRITICAL RULES:
       }
     }
     // Scale max facts with content length — longer content gets more facts
-    const maxFacts = Math.max(5, Math.min(Math.ceil(rawContent.length / 500), 20));
+    const maxFacts = Math.max(5, Math.min(Math.ceil(rawContent.length / 500), 50));
     factSentences = factSentences.slice(0, maxFacts);
 
     return { relationship, observation: null, facts: { entities, dates }, factSentences, priority };

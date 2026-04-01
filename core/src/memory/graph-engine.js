@@ -13,6 +13,32 @@ function nowIso() {
 }
 
 /**
+ * Heuristic fact extraction fallback — used when LLM extraction returns too few facts.
+ * Extracts personal-statement sentences from user-side content.
+ */
+function heuristicFactExtraction(content) {
+  // Extract user statements only (not assistant recommendations)
+  const userPart = content.split(/\nAssistant:/i)[0] || content;
+
+  const facts = [];
+  const sentences = userPart.split(/[.!?\n]+/)
+    .map(s => s.replace(/^User:\s*/i, '').trim())
+    .filter(s => s.length > 15 && s.length < 300);
+
+  for (const sent of sentences) {
+    // Skip questions
+    if (sent.includes('?')) continue;
+    if (/^(can|could|do|does|would|should|what|how|where|when|why|is|are)\b/i.test(sent)) continue;
+    // Keep statements with personal facts
+    if (/\b(I|my|me|we|I'm|I've|I'll|I'd)\b/i.test(sent)) {
+      facts.push(sent);
+    }
+  }
+
+  return facts.slice(0, 20);
+}
+
+/**
  * Parse extracted date strings into ISO event dates.
  * Handles both absolute dates ("October 15th", "March 3") and
  * relative dates ("two months ago", "last Saturday") anchored to documentDate.
@@ -607,7 +633,20 @@ export class MemoryGraphEngine {
         // --- Create fact-memories (separate searchable memories per extracted fact) ---
         // Filter out trivial/noise sentences before creating fact-memories
         const TRIVIAL_PATTERNS = /^(thanks|thank you|that sounds|great|okay|sure|yes|no|I see|I agree|I understand|wow|cool|nice|oh|hmm|interesting|exactly|right|got it|I am (so )?(excited|happy|glad|sorry))/i;
-        const rawFactSentences = processorResult?.factSentences || [];
+        let rawFactSentences = processorResult?.factSentences || [];
+
+        // Heuristic fallback: if LLM extraction returned too few facts, augment with heuristic extraction
+        if (rawFactSentences.length < 3 && baseMemory.content.length > 100) {
+          const heuristicFacts = heuristicFactExtraction(baseMemory.content);
+          const existing = new Set(rawFactSentences.map(f => f.toLowerCase().slice(0, 50)));
+          for (const hf of heuristicFacts) {
+            if (!existing.has(hf.toLowerCase().slice(0, 50))) {
+              rawFactSentences.push(hf);
+              existing.add(hf.toLowerCase().slice(0, 50));
+            }
+          }
+        }
+
         const factSentences = rawFactSentences.filter(f => {
           if (f.length < 20) return false; // too short to be useful
           if (TRIVIAL_PATTERNS.test(f)) return false; // sentiment, not fact
@@ -617,7 +656,7 @@ export class MemoryGraphEngine {
         });
         const factMemoryIds = [];
         if (factSentences.length > 0) {
-          for (const fact of factSentences.slice(0, 8)) { // Max 8 meaningful facts per parent
+          for (const fact of factSentences.slice(0, 25)) { // Up to 25 facts per parent (was 8)
             const factId = crypto.randomUUID ? crypto.randomUUID() : `fact-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
             await store.createMemory({
               id: factId,
@@ -667,6 +706,7 @@ export class MemoryGraphEngine {
 
         const result = {
           memoryId: baseMemory.id,
+          factMemoryIds,
           operation: classification.operation,
           deprecatedIds: [],
           edgesCreated: [],

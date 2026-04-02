@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import type {
   Provider,
   ProviderConfig,
@@ -31,6 +32,7 @@ export class HIVEMINDProvider implements Provider {
 
   private apiKey: string | null = null
   private baseUrl = "http://localhost:3001/api"
+  private benchmarkOrgId = deterministicUuid("memorybench-hivemind-org")
 
   async initialize(config: ProviderConfig): Promise<void> {
     if (!config.apiKey) {
@@ -64,7 +66,12 @@ export class HIVEMINDProvider implements Provider {
         benchmarkEnrichment: true,
       }
 
-      const created = await this.request<HivemindCreateMemoryResponse>("POST", "/memories", payload)
+      const created = await this.request<HivemindCreateMemoryResponse>(
+        "POST",
+        "/memories",
+        payload,
+        options.containerTag
+      )
       const id = created?.memory?.id || `${session.sessionId}-${Date.now()}`
       documentIds.push(id)
     }
@@ -87,13 +94,18 @@ export class HIVEMINDProvider implements Provider {
       project: options.containerTag,
       limit: options.limit || 15,
       score_threshold: options.threshold ?? 0.15,
-    })
+    }, options.containerTag)
 
     return response?.results || response?.memories || []
   }
 
   async clear(containerTag: string): Promise<void> {
-    await this.request("DELETE", `/memories/delete-all?project=${encodeURIComponent(containerTag)}`)
+    await this.request(
+      "DELETE",
+      `/memories/delete-all?project=${encodeURIComponent(containerTag)}`,
+      undefined,
+      containerTag
+    )
   }
 
   private buildSessionContent(session: UnifiedSession): string {
@@ -117,11 +129,16 @@ export class HIVEMINDProvider implements Provider {
   private async request<T = unknown>(
     method: "GET" | "POST" | "DELETE",
     path: string,
-    body?: unknown
+    body?: unknown,
+    containerTag?: string
   ): Promise<T> {
     if (!this.apiKey) {
       throw new Error("HIVEMIND provider not initialized")
     }
+
+    const benchmarkUserId = containerTag
+      ? deterministicUuid(`memorybench-hivemind-user:${containerTag}`)
+      : deterministicUuid("memorybench-hivemind-user:default")
 
     const response = await fetch(`${this.baseUrl}${path}`, {
       method,
@@ -129,6 +146,8 @@ export class HIVEMINDProvider implements Provider {
         "Content-Type": "application/json",
         "X-API-Key": this.apiKey,
         Authorization: `Bearer ${this.apiKey}`,
+        "X-HM-User-Id": benchmarkUserId,
+        "X-HM-Org-Id": this.benchmarkOrgId,
       },
       body: body ? JSON.stringify(body) : undefined,
     })
@@ -147,5 +166,15 @@ export class HIVEMINDProvider implements Provider {
   }
 }
 
-export default HIVEMINDProvider
+function deterministicUuid(seed: string): string {
+  const hex = createHash("sha256").update(seed).digest("hex")
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    `4${hex.slice(13, 16)}`,
+    `${["8", "9", "a", "b"][parseInt(hex.slice(16, 17), 16) % 4]}${hex.slice(17, 20)}`,
+    hex.slice(20, 32),
+  ].join("-")
+}
 
+export default HIVEMINDProvider

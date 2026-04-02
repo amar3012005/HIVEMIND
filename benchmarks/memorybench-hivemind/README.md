@@ -9,6 +9,7 @@ This folder is a ready-to-run MemoryBench integration against the HIVEMIND memor
 3. A memory provider adapter implementing the MemoryBench `Provider` interface.
 4. At least one judge API key (`OPENAI_API_KEY` or `ANTHROPIC_API_KEY` or `GOOGLE_API_KEY`).
 5. Provider API key and base URL (`HIVEMIND_API_KEY`, optional `HIVEMIND_BASE_URL`).
+6. `GROQ_API_KEY` if you want to use Groq-hosted models such as `llama-3.3-70b`.
 
 Docs reviewed:
 - https://supermemory.ai/docs/memorybench/overview
@@ -45,8 +46,10 @@ cp .env.memorybench-hivemind.example memorybench/.env.local
 
 Then edit `memorybench/.env.local`:
 - set `HIVEMIND_API_KEY`
+  - for real benchmark throughput, this should be the HIVEMIND master key so the provider can shard each question into its own benchmark tenant via `X-HM-User-Id` / `X-HM-Org-Id`
 - set `HIVEMIND_BASE_URL` (default expected: `http://localhost:3001`)
 - set one judge key, usually `OPENAI_API_KEY`
+- set `GROQ_API_KEY` if using `llama-3.3-70b` or other Groq models
 
 ## Run benchmark when ready
 
@@ -60,8 +63,8 @@ Optional controls:
 ```bash
 RUN_ID=hivemind-longmemeval-01 \
 BENCHMARK=longmemeval \
-JUDGE_MODEL=gpt-4o \
-ANSWER_MODEL=gpt-4o-mini \
+JUDGE_MODEL=llama-3.3-70b \
+ANSWER_MODEL=llama-3.3-70b \
 SAMPLE=3 \
 ./run-memorybench-hivemind.sh
 ```
@@ -79,4 +82,3 @@ To inspect with UI:
 cd /Users/amar/HIVE-MIND/benchmarks/memorybench-hivemind/memorybench
 bun run src/index.ts serve
 ```
-

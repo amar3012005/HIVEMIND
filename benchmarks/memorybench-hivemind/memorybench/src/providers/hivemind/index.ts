@@ -32,8 +32,6 @@ export class HIVEMINDProvider implements Provider {
 
   private apiKey: string | null = null
   private baseUrl = "http://localhost:3001/api"
-  private benchmarkOrgId = deterministicUuid("memorybench-hivemind-org")
-
   async initialize(config: ProviderConfig): Promise<void> {
     if (!config.apiKey) {
       throw new Error("HIVEMIND provider requires HIVEMIND_API_KEY")
@@ -139,6 +137,9 @@ export class HIVEMINDProvider implements Provider {
     const benchmarkUserId = containerTag
       ? deterministicUuid(`memorybench-hivemind-user:${containerTag}`)
       : deterministicUuid("memorybench-hivemind-user:default")
+    const benchmarkOrgId = containerTag
+      ? deterministicUuid(`memorybench-hivemind-org:${containerTag}`)
+      : deterministicUuid("memorybench-hivemind-org:default")
 
     const response = await fetch(`${this.baseUrl}${path}`, {
       method,
@@ -147,7 +148,7 @@ export class HIVEMINDProvider implements Provider {
         "X-API-Key": this.apiKey,
         Authorization: `Bearer ${this.apiKey}`,
         "X-HM-User-Id": benchmarkUserId,
-        "X-HM-Org-Id": this.benchmarkOrgId,
+        "X-HM-Org-Id": benchmarkOrgId,
       },
       body: body ? JSON.stringify(body) : undefined,
     })

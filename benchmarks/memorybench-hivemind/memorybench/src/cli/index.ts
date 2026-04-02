@@ -97,6 +97,7 @@ function printModelsHelp(): void {
   const openaiModels = listModelsByProvider("openai")
   const anthropicModels = listModelsByProvider("anthropic")
   const googleModels = listModelsByProvider("google")
+  const groqModels = listModelsByProvider("groq")
 
   console.log(`
 Available Models
@@ -129,11 +130,21 @@ Google Models:
   }
 
   console.log(`
+Groq Models:
+  Requires: GROQ_API_KEY
+`)
+  for (const alias of groqModels) {
+    const info = MODEL_ALIASES[alias]
+    console.log(`  ${alias.padEnd(20)} ${info.displayName} (${info.id})`)
+  }
+
+  console.log(`
 Examples:
   -j gpt-4o              Use GPT-4o as judge
   -j sonnet-4.5          Use Claude Sonnet 4.5 as judge
+  -j llama-3.3-70b       Use Llama 3.3 70B via Groq as judge
   -m gemini-2.5-flash    Use Gemini 2.5 Flash for answering
-  -m opus-4.5            Use Claude Opus 4.5 for answering
+  -m llama-3.3-70b       Use Llama 3.3 70B via Groq for answering
 
 Default answering model: ${DEFAULT_ANSWERING_MODEL}
 `)

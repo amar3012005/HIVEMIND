@@ -43,6 +43,13 @@ function getAnsweringModel(modelAlias: string): {
         client: createGoogleGenerativeAI({ apiKey: config.googleApiKey }),
         modelConfig,
       }
+    case "groq":
+      return {
+        client: createOpenAI({ apiKey: config.groqApiKey, baseURL: "https://api.groq.com/openai/v1" }),
+        modelConfig,
+      }
+    default:
+      throw new Error(`Unsupported model provider: ${(modelConfig as ModelConfig).provider}`)
   }
 }
 

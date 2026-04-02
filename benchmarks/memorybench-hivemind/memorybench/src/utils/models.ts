@@ -1,6 +1,6 @@
 export interface ModelConfig {
   id: string
-  provider: "openai" | "anthropic" | "google"
+  provider: "openai" | "anthropic" | "google" | "groq"
   displayName: string
   supportsTemperature: boolean
   defaultTemperature: number
@@ -227,11 +227,45 @@ export const MODEL_CONFIGS: Record<string, ModelConfig> = {
   },
 }
 
+// Groq Models
+const GROQ_MODELS: Record<string, ModelConfig> = {
+  "llama-3.3-70b": {
+    id: "llama-3.3-70b-versatile",
+    provider: "groq",
+    displayName: "Llama 3.3 70B (Groq)",
+    supportsTemperature: true,
+    defaultTemperature: 0,
+    maxTokensParam: "maxTokens",
+    defaultMaxTokens: 1000,
+  },
+  "llama-3.1-8b": {
+    id: "llama-3.1-8b-instant",
+    provider: "groq",
+    displayName: "Llama 3.1 8B Instant (Groq)",
+    supportsTemperature: true,
+    defaultTemperature: 0,
+    maxTokensParam: "maxTokens",
+    defaultMaxTokens: 1000,
+  },
+  "mixtral-8x7b": {
+    id: "mixtral-8x7b-32768",
+    provider: "groq",
+    displayName: "Mixtral 8x7B (Groq)",
+    supportsTemperature: true,
+    defaultTemperature: 0,
+    maxTokensParam: "maxTokens",
+    defaultMaxTokens: 1000,
+  },
+}
+
+Object.assign(MODEL_CONFIGS, GROQ_MODELS)
+
 export const DEFAULT_ANSWERING_MODEL = "gpt-4o"
 export const DEFAULT_JUDGE_MODELS: Record<string, string> = {
   openai: "gpt-4o",
   anthropic: "sonnet-4",
   google: "gemini-2.5-flash",
+  groq: "llama-3.3-70b",
 }
 
 export function getModelConfig(alias: string): ModelConfig {
@@ -326,7 +360,7 @@ export function getModelId(alias: string): string {
   return getModelConfig(alias).id
 }
 
-export function getModelProvider(alias: string): "openai" | "anthropic" | "google" {
+export function getModelProvider(alias: string): "openai" | "anthropic" | "google" | "groq" {
   return getModelConfig(alias).provider
 }
 
@@ -334,7 +368,7 @@ export function listAvailableModels(): string[] {
   return Object.keys(MODEL_CONFIGS)
 }
 
-export function listModelsByProvider(provider: "openai" | "anthropic" | "google"): string[] {
+export function listModelsByProvider(provider: "openai" | "anthropic" | "google" | "groq"): string[] {
   return Object.entries(MODEL_CONFIGS)
     .filter(([_, config]) => config.provider === provider)
     .map(([alias]) => alias)

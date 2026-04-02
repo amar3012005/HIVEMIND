@@ -1,5 +1,10 @@
 import type { ProviderPrompts } from "../../types/prompts"
 
+// Rough char-to-token ratio. 1 token ≈ 4 chars for English text.
+const CHARS_PER_TOKEN = 4
+// Max tokens to include per memory result (keep total context under 30K tokens)
+const MAX_CONTENT_CHARS = 6000 * CHARS_PER_TOKEN // 6K tokens per memory
+
 interface HivemindResult {
   id?: string
   title?: string
@@ -10,18 +15,24 @@ interface HivemindResult {
   metadata?: Record<string, unknown>
 }
 
-function toContextLine(result: unknown): string {
+function toContextLine(result: unknown, index: number): string {
   const r = result as HivemindResult
   const title = r.title || "untitled"
-  const content =
+  let content =
     typeof r.content === "string"
       ? r.content
       : typeof r.metadata?.summary === "string"
         ? String(r.metadata.summary)
         : JSON.stringify(result)
+
+  // Truncate very long session content to keep context manageable
+  if (content.length > MAX_CONTENT_CHARS) {
+    content = content.slice(0, MAX_CONTENT_CHARS) + "\n... [truncated]"
+  }
+
   const date = r.document_date || r.created_at || "unknown"
   const score = typeof r.score === "number" ? r.score.toFixed(3) : "n/a"
-  return `- [${date}] (${score}) ${title}: ${content}`
+  return `[Memory ${index + 1}] Date: ${date} | Score: ${score} | ${title}\n${content}`
 }
 
 export function buildHivemindAnswerPrompt(
@@ -29,21 +40,26 @@ export function buildHivemindAnswerPrompt(
   context: unknown[],
   questionDate?: string
 ): string {
-  const lines = context.length > 0 ? context.map(toContextLine).join("\n") : "- No memories found."
+  const lines =
+    context.length > 0
+      ? context.map((r, i) => toContextLine(r, i)).join("\n\n---\n\n")
+      : "No memories found."
 
-  return `You are a question-answering system. Answer using only the retrieved memories.
+  return `You are a precise question-answering assistant. Your task is to answer the question using ONLY the conversation memories provided below.
 
-Question: ${question}
 Question Date: ${questionDate || "Not specified"}
+Question: ${question}
 
-Retrieved Memory Context:
+=== RETRIEVED MEMORIES ===
 ${lines}
+=== END MEMORIES ===
 
-Rules:
-- Use only evidence in the memory context above
-- Prioritize newer or higher-scored entries when information conflicts
-- If information is insufficient, respond exactly: I don't know
-- Keep the answer concise and factual
+Instructions:
+- Answer using only the memories above — do not guess or use outside knowledge
+- Give a direct, concise answer (a few words or a short sentence)
+- For dates/times, give the exact value from the memories
+- For facts about people, quote what was stated in the conversations
+- If the memories do not contain enough information to answer, respond exactly: I don't know
 
 Answer:`
 }
@@ -51,4 +67,3 @@ Answer:`
 export const HIVEMIND_PROMPTS: ProviderPrompts = {
   answerPrompt: buildHivemindAnswerPrompt,
 }
-

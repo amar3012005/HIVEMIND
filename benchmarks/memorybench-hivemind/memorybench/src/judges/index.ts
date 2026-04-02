@@ -2,11 +2,13 @@ import type { Judge, JudgeName } from "../types/judge"
 import { OpenAIJudge } from "./openai"
 import { AnthropicJudge } from "./anthropic"
 import { GoogleJudge } from "./google"
+import { GroqJudge } from "./groq"
 
 const judges: Record<JudgeName, new () => Judge> = {
   openai: OpenAIJudge,
   anthropic: AnthropicJudge,
   google: GoogleJudge,
+  groq: GroqJudge,
 }
 
 export function createJudge(name: JudgeName): Judge {
@@ -21,5 +23,5 @@ export function getAvailableJudges(): JudgeName[] {
   return Object.keys(judges) as JudgeName[]
 }
 
-export { OpenAIJudge, AnthropicJudge, GoogleJudge }
+export { OpenAIJudge, AnthropicJudge, GoogleJudge, GroqJudge }
 export { buildJudgePrompt, parseJudgeResponse, getJudgePrompt } from "./base"

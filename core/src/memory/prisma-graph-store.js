@@ -114,7 +114,7 @@ export class PrismaGraphStore {
       await tx.$executeRawUnsafe('SELECT acquire_memory_user_lock($1::uuid)', userId);
       const scopedStore = new PrismaGraphStore(tx, { inTransaction: true });
       return fn(scopedStore);
-    });
+    }, { timeout: 60000 });
   }
 
   async transaction(fn) {
@@ -124,7 +124,7 @@ export class PrismaGraphStore {
 
     return this.client.$transaction(async tx => {
       return fn(new PrismaGraphStore(tx, { inTransaction: true }));
-    });
+    }, { timeout: 60000 });
   }
 
   async createMemory(memory) {

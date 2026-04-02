@@ -59,6 +59,8 @@ export class HIVEMINDProvider implements Provider {
           ...(session.metadata || {}),
         },
         skipPredictCalibrate: true,
+        skipProcessing: true,
+        smartIngest: false,
         benchmarkEnrichment: true,
       }
 
@@ -83,8 +85,8 @@ export class HIVEMINDProvider implements Provider {
     const response = await this.request<HivemindSearchResponse>("POST", "/search/quick", {
       query,
       project: options.containerTag,
-      limit: options.limit || 10,
-      score_threshold: options.threshold ?? 0.3,
+      limit: options.limit || 15,
+      score_threshold: options.threshold ?? 0.15,
     })
 
     return response?.results || response?.memories || []

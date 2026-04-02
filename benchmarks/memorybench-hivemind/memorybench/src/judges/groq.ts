@@ -1,0 +1,55 @@
+import { createOpenAI } from "@ai-sdk/openai"
+import { generateText } from "ai"
+import type { Judge, JudgeConfig, JudgeInput, JudgeResult } from "../types/judge"
+import type { ProviderPrompts } from "../types/prompts"
+import { buildJudgePrompt, parseJudgeResponse, getJudgePrompt } from "./base"
+import { logger } from "../utils/logger"
+import { getModelConfig, ModelConfig, DEFAULT_JUDGE_MODELS } from "../utils/models"
+
+const GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+
+export class GroqJudge implements Judge {
+  name = "groq"
+  private modelConfig: ModelConfig | null = null
+  private client: ReturnType<typeof createOpenAI> | null = null
+
+  async initialize(config: JudgeConfig): Promise<void> {
+    this.client = createOpenAI({
+      apiKey: config.apiKey,
+      baseURL: GROQ_BASE_URL,
+    })
+    const modelAlias = config.model || DEFAULT_JUDGE_MODELS.groq
+    this.modelConfig = getModelConfig(modelAlias)
+    logger.info(
+      `Initialized Groq judge with model: ${this.modelConfig.displayName} (${this.modelConfig.id})`
+    )
+  }
+
+  async evaluate(input: JudgeInput): Promise<JudgeResult> {
+    if (!this.client || !this.modelConfig) throw new Error("Judge not initialized")
+
+    const prompt = buildJudgePrompt(input)
+
+    const params: Record<string, unknown> = {
+      model: this.client(this.modelConfig.id),
+      prompt,
+      temperature: 0,
+    }
+    params.maxTokens = this.modelConfig.defaultMaxTokens
+
+    const { text } = await generateText(params as Parameters<typeof generateText>[0])
+
+    return parseJudgeResponse(text)
+  }
+
+  getPromptForQuestionType(questionType: string, providerPrompts?: ProviderPrompts): string {
+    return getJudgePrompt(questionType, providerPrompts)
+  }
+
+  getModel() {
+    if (!this.client || !this.modelConfig) throw new Error("Judge not initialized")
+    return this.client(this.modelConfig.id)
+  }
+}
+
+export default GroqJudge

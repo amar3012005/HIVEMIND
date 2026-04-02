@@ -59,7 +59,16 @@ key-rotation-report-*.json
 replacements.txt
 MiroFish
 
-benchmarks
+# Benchmarks are ignored by default, except the MemoryBench+HIVEMIND integration scaffold.
+benchmarks/*
+!benchmarks/memorybench-hivemind/
+!benchmarks/memorybench-hivemind/**
+
+# Never commit local benchmark secrets/runtime artifacts.
+benchmarks/memorybench-hivemind/memorybench/.env.local
+benchmarks/memorybench-hivemind/memorybench/data/
+benchmarks/memorybench-hivemind/memorybench/node_modules/
+benchmarks/memorybench-hivemind/memorybench/.git/
 
 # Benchmark results may contain API keys
 benchmarks/results/*.md

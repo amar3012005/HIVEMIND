@@ -65,8 +65,15 @@ export class QdrantClient {
     }
 
     try {
-      const response = await fetch(`${QDRANT_URL}/collections/${resolveCollectionName(collectionName)}`, { headers });
+      const resolvedCollectionName = resolveCollectionName(collectionName);
+      const response = await fetch(`${QDRANT_URL}/collections/${resolvedCollectionName}`, { headers });
+      const collections = getQdrantCollections({
+        url: QDRANT_URL,
+        apiKey: API_KEY
+      });
+
       if (response.ok) {
+        await collections.ensureMemoriesCollectionIndexes(resolvedCollectionName);
         this.collectionReady = collectionName;
         return true;
       }
@@ -75,13 +82,8 @@ export class QdrantClient {
         return false;
       }
 
-      const collections = getQdrantCollections({
-        url: QDRANT_URL,
-        apiKey: API_KEY
-      });
-
       await collections.createMemoriesCollection();
-      await collections.ensureMemoriesCollectionIndexes(resolveCollectionName(collectionName));
+      await collections.ensureMemoriesCollectionIndexes(resolvedCollectionName);
       this.collectionReady = collectionName;
       return true;
     } catch (error) {

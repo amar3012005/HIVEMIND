@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "notebooklm": {
+      "command": "node",
+      "args": ["mcp-server/notebooklm-mcp-server.js"],
+      "cwd": "/Users/amar/HIVE-MIND",
+      "env": {
+        "NOTEBOOKLM_BIN": "notebooklm",
+        "NOTEBOOKLM_HOME": "/Users/amar/.notebooklm",
+        "NOTEBOOKLM_PROFILE": "default",
+        "NOTEBOOKLM_DEFAULT_NOTEBOOK_TITLE": "Second Mind",
+        "NOTEBOOKLM_AUTO_CREATE_DEFAULT_NOTEBOOK": "1"
+      },
+      "disabled": false
+    }
+  }
+}
+

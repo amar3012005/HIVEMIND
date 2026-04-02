@@ -1,0 +1,42 @@
+{
+  "name": "hivemind-codex",
+  "version": "1.0.0",
+  "description": "Codex plugin for the live HIVE-MIND MCP bridge",
+  "author": {
+    "name": "HIVE-MIND",
+    "email": "amar@davinciai.eu",
+    "url": "https://github.com/teng-lin/notebooklm-py"
+  },
+  "homepage": "/Users/amar/HIVE-MIND/docs/mcp-client-configuration.md",
+  "repository": "/Users/amar/HIVE-MIND",
+  "license": "MIT",
+  "keywords": [
+    "hivemind",
+    "mcp",
+    "memory",
+    "search",
+    "research"
+  ],
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "HIVE-MIND Codex",
+    "shortDescription": "Live HIVE-MIND memory and research tools for Codex",
+    "longDescription": "Connect Codex to the live HIVE-MIND MCP bridge so it can search web intelligence, recall memories, save facts, inspect stored memories, and run research workflows from the same shared intelligence layer used by the app.",
+    "developerName": "HIVE-MIND",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "/Users/amar/HIVE-MIND/docs/mcp-client-configuration.md",
+    "privacyPolicyURL": "/Users/amar/HIVE-MIND/docs/mcp-client-configuration.md",
+    "termsOfServiceURL": "/Users/amar/HIVE-MIND/docs/mcp-client-configuration.md",
+    "defaultPrompt": [
+      "Recall what we already know about this project.",
+      "Search the web for current research context.",
+      "Save the key findings back into HIVE-MIND."
+    ],
+    "brandColor": "#117dff"
+  }
+}

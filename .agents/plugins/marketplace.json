@@ -1,0 +1,20 @@
+{
+  "name": "hivemind",
+  "interface": {
+    "displayName": "HIVE-MIND Plugins"
+  },
+  "plugins": [
+    {
+      "name": "hivemind-codex",
+      "source": {
+        "source": "local",
+        "path": "./plugins/hivemind-codex"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

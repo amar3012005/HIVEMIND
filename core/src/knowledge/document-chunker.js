@@ -258,7 +258,7 @@ export function generateDocumentSummary(text, metadata) {
  * @param {Buffer} buffer - File content
  * @param {string} mimeType - MIME type
  * @param {string} filename - Original filename
- * @param {object} context - { user_id, org_id, project, tags }
+ * @param {object} context - { user_id, org_id, project, tags, visibility }
  * @returns {Promise<{ summary: object, chunks: object[] }>}
  */
 export async function processDocument(buffer, mimeType, filename, context = {}) {
@@ -299,6 +299,7 @@ export async function processDocument(buffer, mimeType, filename, context = {}) 
       sections: sections.map(s => s.title),
     },
     project: context.project || null,
+    visibility: context.visibility || 'private',
     user_id: context.user_id,
     org_id: context.org_id,
   };
@@ -332,6 +333,7 @@ export async function processDocument(buffer, mimeType, filename, context = {}) 
         section_level: section?.level || null,
       },
       project: context.project || null,
+      visibility: context.visibility || 'private',
       user_id: context.user_id,
       org_id: context.org_id,
     };

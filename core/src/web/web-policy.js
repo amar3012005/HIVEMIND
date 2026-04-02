@@ -53,6 +53,22 @@ export const BLOCKED_DOMAINS = [
   'alphabaymarket',
 ];
 
+function parseWebUrl(input) {
+  if (!input || typeof input !== 'string') {
+    return null;
+  }
+  const trimmed = input.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  try {
+    return new URL(withScheme);
+  } catch {
+    return null;
+  }
+}
+
 /** Maximum raw text size we will retain per page (bytes). */
 const MAX_CONTENT_BYTES = 500 * 1024; // 500 KB
 
@@ -101,10 +117,8 @@ const RESTRICTED_DOMAIN_ADVISORIES = new Map([
  * @returns {{ allowed: boolean, reason?: string }}
  */
 export function validateDomain(url, userPolicy = {}) {
-  let parsed;
-  try {
-    parsed = new URL(url);
-  } catch {
+  const parsed = parseWebUrl(url);
+  if (!parsed) {
     return { allowed: false, reason: 'Malformed URL.' };
   }
 
@@ -395,12 +409,11 @@ export function detectAbuse(params) {
  * @returns {{ warning?: string, advisory: boolean }}
  */
 export function getRobotsWarning(url) {
-  let hostname;
-  try {
-    hostname = new URL(url).hostname.toLowerCase();
-  } catch {
+  const parsed = parseWebUrl(url);
+  if (!parsed) {
     return { advisory: false };
   }
+  const hostname = parsed.hostname.toLowerCase();
 
   // Strip leading "www."
   const bare = hostname.replace(/^www\./, '');
@@ -418,4 +431,8 @@ export function getRobotsWarning(url) {
   }
 
   return { advisory: false };
+}
+
+export function normalizeWebUrl(url) {
+  return parseWebUrl(url)?.href || null;
 }

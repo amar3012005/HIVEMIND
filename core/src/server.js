@@ -61,7 +61,7 @@ const { expandTemporalQuery } = await import('./search/time-aware-expander.js');
 const { authenticatePersistedApiKey, hasEntitlement, hashApiKey: hashPersistedApiKey } = await import('./auth/api-keys.js');
 const { WebJobStore } = await import('./web/web-job-store.js');
 const { BrowserRuntime, getTelemetry } = await import('./web/browser-runtime.js');
-const { validateDomain, filterContent, UserRateLimiter, detectAbuse, getRobotsWarning } = await import('./web/web-policy.js');
+const { validateDomain, filterContent, UserRateLimiter, detectAbuse, getRobotsWarning, normalizeWebUrl } = await import('./web/web-policy.js');
 const webRateLimiter = new UserRateLimiter({ maxPerMinute: 10, maxPerHour: 60 });
 const { getQdrantClient } = await import('./vector/qdrant-client.js');
 const { getQdrantCollections } = await import('./vector/collections.js');
@@ -3255,6 +3255,9 @@ a{color:#a78bfa}</style></head><body>
 
               // Extract optional form fields
               const containerTag = parts.find(p => p.name === 'containerTag')?.value || null;
+              const targetScope = parts.find(p => p.name === 'targetScope')?.value === 'organization'
+                ? 'organization'
+                : 'personal';
               const customTags = parts.find(p => p.name === 'tags')?.value || '';
               const userTags = customTags ? customTags.split(',').map(t => t.trim()).filter(Boolean) : [];
 
@@ -3276,7 +3279,13 @@ a{color:#a78bfa}</style></head><body>
                 filePart.data,
                 filePart.contentType || `text/${ext}`,
                 filePart.filename,
-                { user_id: userId, org_id: orgId, project: containerTag, tags: userTags }
+                {
+                  user_id: userId,
+                  org_id: orgId,
+                  project: containerTag,
+                  tags: userTags,
+                  visibility: targetScope === 'organization' ? 'organization' : 'private',
+                }
               );
 
               // Ingest summary + chunks in background, return immediately
@@ -3504,13 +3513,14 @@ a{color:#a78bfa}</style></head><body>
               if (!urls || !Array.isArray(urls) || urls.length === 0) {
                 return jsonResponse(res, { error: 'urls array is required' }, 400);
               }
+              const normalizedInputUrls = urls.map((u) => normalizeWebUrl(u) || u);
               // Domain policy validation
               const domainErrors = [];
-              for (const u of urls) {
+              for (const u of normalizedInputUrls) {
                 const domainCheck = validateDomain(u);
                 if (!domainCheck.allowed) domainErrors.push({ url: u, reason: domainCheck.reason });
               }
-              if (domainErrors.length === urls.length) {
+              if (domainErrors.length === normalizedInputUrls.length) {
                 return jsonResponse(res, { error: 'All URLs blocked by policy', code: 'domain_blocked', details: domainErrors }, 403);
               }
               // Abuse detection
@@ -3520,7 +3530,9 @@ a{color:#a78bfa}</style></head><body>
               }
               webRateLimiter.record(userId);
               // Filter allowed URLs
-              const allowedUrls = domainErrors.length > 0 ? urls.filter(u => !domainErrors.find(e => e.url === u)) : urls;
+              const allowedUrls = domainErrors.length > 0
+                ? normalizedInputUrls.filter(u => !domainErrors.find(e => e.url === u))
+                : normalizedInputUrls;
               const requestedPageLimit = Number(pageLimit ?? 50);
               const normalizedPageLimit = Number.isFinite(requestedPageLimit) && requestedPageLimit > 0 ? requestedPageLimit : 50;
               const effectiveDepth = Number.isFinite(Number(depth)) ? Number(depth) : 1;
@@ -3761,9 +3773,16 @@ a{color:#a78bfa}</style></head><body>
             try {
               const { url: checkUrl } = body;
               if (!checkUrl) return jsonResponse(res, { error: 'url is required' }, 400);
-              const domainResult = validateDomain(checkUrl);
-              const robotsResult = getRobotsWarning(checkUrl);
-              return jsonResponse(res, { ...domainResult, ...robotsResult });
+              const normalizedUrl = normalizeWebUrl(checkUrl) || checkUrl;
+              const domainResult = validateDomain(normalizedUrl);
+              const robotsResult = getRobotsWarning(normalizedUrl);
+              return jsonResponse(res, {
+                ...domainResult,
+                ...robotsResult,
+                normalized_url: normalizedUrl,
+                blocked: !domainResult.allowed,
+                warnings: robotsResult.warning ? [robotsResult.warning] : [],
+              });
             } catch (error) {
               return jsonResponse(res, { error: error.message }, 500);
             }
@@ -5883,7 +5902,7 @@ a{color:#a78bfa}</style></head><body>
         // ==========================================
         case '/api/chat':
           if (req.method === 'POST') {
-            const { message, model = 'llama-3.3-70b-versatile', history = [] } = body;
+            const { message, model = 'gpt-oss-120b', history = [] } = body;
             if (!message || typeof message !== 'string') {
               return jsonResponse(res, { error: 'message is required' }, 400);
             }
@@ -5897,11 +5916,14 @@ a{color:#a78bfa}</style></head><body>
               // Step 1: Recall memories for context
               let memories = [];
               let injectionText = '';
-              let userProfileText = '';
               const isRecencyQuery = /\b(latest|newest|most recent|last message|last email|just now|right now|current)\b/i.test(message);
+              const toneGuidance = inferChatToneGuidance(message);
 
               if (persistentMemoryStore) {
                 try {
+                  // Detect query intent for better recall
+                  const chatIntent = detectQueryIntent(message);
+                  const chatWeights = computeDynamicWeights(chatIntent);
 
                   const recallResult = await recallPersistedMemories(persistentMemoryStore, {
                     query_context: message,
@@ -5909,6 +5931,8 @@ a{color:#a78bfa}</style></head><body>
                     org_id: orgId,
                     max_memories: isRecencyQuery ? 15 : 10,
                     inject_parent_chunks: true,
+                    weights: chatWeights,
+                    preference_boost: chatIntent.type === 'preference',
                   });
                   let recalledMemories = recallResult.memories || [];
 
@@ -5970,19 +5994,19 @@ a{color:#a78bfa}</style></head><body>
 
               // Step 2: Build system prompt with user profile + memories
               const recencyHint = isRecencyQuery ? '\n\nIMPORTANT: The user is asking about their MOST RECENT activity. The memories below are sorted newest-first. Focus on the FIRST memory — that is the most recent one. Include its date/time.' : '';
-              const systemPrompt = `You are HIVE, a personal AI assistant with persistent memory. You remember everything the user has shared with you.
+              const systemPrompt = `You are HIVEMIND, a personal memory assistant. You have access to the user's stored memories below.
 ${recencyHint}
-${injectionText ? `Here is what you know about the user:\n\n${injectionText}` : ''}
+Rules:
+- Answer the user's question DIRECTLY using the memories provided
+- Be concise — 1-3 sentences for simple questions, more for complex ones
+- If memories contain the answer, give it confidently
+- If memories conflict, use the most recent one
+- If no memories are relevant, say "I don't have that in my memory"
+- Do NOT list or evaluate each memory — just answer naturally
+- Do NOT say "Based on my memories" or "According to my records" — just answer
+- ${toneGuidance}
 
-RULES:
-- Answer DIRECTLY. No listing memories, no "Let me check", no "Based on my notes". Just answer like a friend who remembers.
-- Be concise. One clear answer, then stop. Add detail only if the user asks for it.
-- When the user tells you something new: acknowledge briefly ("Got it", "Noted"). The memory system saves it automatically.
-- When the user corrects something: confirm the update naturally ("Updated — your new address is...").
-- If you genuinely don't know, say "I don't have that in my memory" — don't guess.
-- Never list which memories you used or say "Relevant/Not relevant".
-- Never start with "Based on my memories" or "Let me check my records".
-- Talk like a knowledgeable friend, not a database query tool.`;
+${injectionText}`;
 
               // Step 3: Build memory context for the LLM
               let memoryContext = '';
@@ -6023,12 +6047,12 @@ RULES:
               const groqParams = {
                 model: groqModel,
                 messages: groqMessages,
-                max_tokens: 1000,
-                temperature: 0.7,
+                max_tokens: 700,
+                temperature: 0.25,
               };
               if (groqModel.includes('gpt-oss')) {
                 groqParams.include_reasoning = false;
-                groqParams.max_tokens = 1500; // extra headroom for reasoning
+                groqParams.max_tokens = 900;
               }
 
               const groqResp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -6101,6 +6125,29 @@ function jsonResponse(res, data, status = 200) {
   res.setHeader('Content-Type', 'application/json');
   res.writeHead(status);
   res.end(JSON.stringify(data));
+}
+
+function inferChatToneGuidance(text = '') {
+  const input = String(text || '').trim();
+  if (!input) {
+    return 'Match the user tone: direct, natural, and concise.';
+  }
+
+  const lower = input.toLowerCase();
+  const terse = input.length < 80 || /(?:^|\s)(pls|plz|quick|just|now|fix|do it)(?:\s|$)/i.test(lower);
+  const casual = /\b(hey|yo|bro|lol|wtf|pls|gonna|wanna|u|ur)\b/i.test(lower);
+  const formal = /\b(please|could you|would you|kindly)\b/i.test(lower);
+
+  if (formal) {
+    return 'Match the user tone: calm, clear, and professional.';
+  }
+  if (casual) {
+    return 'Match the user tone: casual and natural, without sounding forced.';
+  }
+  if (terse) {
+    return 'Match the user tone: highly direct and compact.';
+  }
+  return 'Match the user tone: direct, natural, and concise.';
 }
 
 function parseBody(req) {

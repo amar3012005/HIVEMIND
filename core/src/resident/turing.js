@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 
 function confidenceToVerdict(confidence) {
-  if (confidence >= 0.85) return 'likely_true';
-  if (confidence >= 0.65) return 'uncertain';
+  if (confidence >= 0.70) return 'likely_true';
+  if (confidence >= 0.50) return 'uncertain';
   return 'weak';
 }
 
@@ -61,7 +61,7 @@ function buildGraphActions(hypothesis, evaluation) {
     });
   }
 
-  if (evaluation.verdict === 'likely_true' && evidenceRefs.length >= 3 && relatedMemoryIds.length >= 2) {
+  if (evaluation.verdict === 'likely_true' && evidenceRefs.length >= 2 && relatedMemoryIds.length >= 1) {
     actions.push({
       action: 'merge_duplicate_cluster',
       confidence: evaluation.confidence,
@@ -71,7 +71,7 @@ function buildGraphActions(hypothesis, evaluation) {
     });
   }
 
-  if (!actions.length && (relatedMemoryIds.length >= 2 || relatedFiles.length >= 2)) {
+  if (!actions.length && (relatedMemoryIds.length >= 1 || relatedFiles.length >= 1)) {
     actions.push({
       action: 'relationship_candidate',
       confidence: Math.max(0.52, evaluation.confidence - 0.1),

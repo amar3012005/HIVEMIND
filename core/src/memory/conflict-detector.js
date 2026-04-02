@@ -59,13 +59,32 @@ export class ConflictDetector {
   }
 
   detectCandidates(newMemory, existingMemories = []) {
-    return existingMemories
-      .map(existing => ({
-        memory: existing,
-        similarity: computeTokenSimilarity(newMemory.content, existing.content)
-      }))
-      .filter(candidate => candidate.similarity >= this.threshold)
-      .sort((left, right) => right.similarity - left.similarity);
+    const candidates = [];
+    const newContent = newMemory.content || '';
+    const newTokens = new Set(tokenize(newContent).map(normalizeToken));
+
+    for (const existing of existingMemories) {
+      const existingContent = existing.content || '';
+      const similarity = computeTokenSimilarity(newContent, existingContent);
+
+      if (similarity >= this.threshold) {
+        candidates.push({ memory: existing, similarity });
+      } else if (similarity >= 0.30 && similarity < this.threshold) {
+        // Secondary check: if similarity is borderline (0.30-0.45),
+        // check for shared topic keywords (nouns, names)
+        const existingTokens = new Set(tokenize(existingContent).map(normalizeToken));
+        const topicWords = [...newTokens].filter(t =>
+          t.length > 4 && existingTokens.has(t) &&
+          !/^(about|would|could|should|their|there|which|these|those)$/i.test(t)
+        );
+        if (topicWords.length >= 2) {
+          // Borderline match with shared topics — include as candidate
+          candidates.push({ memory: existing, similarity, borderline: true });
+        }
+      }
+    }
+
+    return candidates.sort((left, right) => right.similarity - left.similarity);
   }
 
   contentHash(content = '') {

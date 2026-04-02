@@ -10,7 +10,7 @@ const DEFAULT_CONFIG = {
   system_prompt: 'You are a helpful AI assistant. Answer concisely and accurately. This is a voice conversation — keep responses under 3 sentences unless the user asks for detail.',
   clinical_prompt: '',  // empty means clinical reasoning disabled
   clinical_model: '',   // empty means use main model; set for dedicated reasoning model
-  model: 'llama-3.3-70b-versatile',
+  model: 'openai/gpt-oss-120b',
   temperature: 0.7,
   max_tokens: 300,
   voice_optimized: true,

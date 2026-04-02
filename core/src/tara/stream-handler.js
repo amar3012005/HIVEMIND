@@ -145,6 +145,7 @@ export class TaraStreamHandler {
           temperature: config.temperature ?? 0.7,
           max_tokens: config.max_tokens ?? 300,
           stream: true,
+          ...(model.includes('gpt-oss') ? { include_reasoning: false } : {}),
         }),
       });
 
@@ -269,6 +270,27 @@ export class TaraStreamHandler {
     const userSummary = query.length > 100 ? query.slice(0, 97) + '...' : query;
     const assistantSummary = response.length > 100 ? response.slice(0, 97) + '...' : response;
     const turnNumber = (sessionState.turn_count || 0) + 1;
+
+    // Extract user profile info from the query (lightweight, no LLM)
+    const q = query.toLowerCase();
+    // Name detection: "my name is X", "I'm X", "ich bin X", "ich heiße X"
+    const nameMatch = query.match(/(?:my name is|i'm|i am|ich bin|ich heiße|this is)\s+([A-Z][a-zäöü]+)/i);
+    if (nameMatch && !sessionState.user_profile.name) {
+      sessionState.user_profile.name = nameMatch[1];
+    }
+    // Company detection: "my company is X", "I work at X", "founder of X", "CEO of X"
+    const companyMatch = query.match(/(?:my company|i work at|founder of|ceo of|from|bei|von|mein unternehmen)\s+([A-Z][A-Za-zäöü\s.]+?)(?:\.|,|$)/i);
+    if (companyMatch) {
+      const company = companyMatch[1].trim();
+      if (company.length > 2 && !sessionState.user_profile.preferences.includes(`company:${company}`)) {
+        sessionState.user_profile.preferences.push(`company:${company}`);
+      }
+    }
+    // Goal detection: "looking for", "I need", "I want to", "ich suche", "ich brauche"
+    const goalMatch = query.match(/(?:looking for|i need|i want to|ich suche|ich brauche|ich möchte)\s+(.{10,60})/i);
+    if (goalMatch && !sessionState.conversation.current_goal) {
+      sessionState.conversation.current_goal = goalMatch[1].replace(/[.!?]$/, '').trim();
+    }
 
     // 1. Update session state memory
     await this.sessionManager.update(sessionId, {

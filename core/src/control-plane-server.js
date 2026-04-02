@@ -643,17 +643,59 @@ async function validateAccountDeletion(userId) {
  */
 async function getOrCreateSessionKey(userId, orgId) {
   try {
-    // Check for existing auto-session key
+    // Only reuse an auto-session key if it is scoped to the active org.
     const existing = await prisma.apiKey.findFirst({
-      where: { userId, name: 'auto-session', revokedAt: null },
+      where: {
+        userId,
+        orgId,
+        name: 'auto-session',
+        revokedAt: null,
+      },
+      orderBy: { createdAt: 'desc' },
     });
     if (existing) {
-      // Return the raw key from description (stored at creation time)
       try {
         const meta = JSON.parse(existing.description || '{}');
         if (meta.rawKey) return meta.rawKey;
       } catch {}
-      // If no raw key stored, create a new one
+    }
+
+    // Revoke stale auto-session keys for other orgs so bootstrap can rotate cleanly.
+    await prisma.apiKey.updateMany({
+      where: {
+        userId,
+        name: 'auto-session',
+        revokedAt: null,
+        OR: [
+          { orgId: null },
+          { orgId: { not: orgId } },
+        ],
+      },
+      data: { revokedAt: new Date() },
+    }).catch(() => {});
+
+    // Also revoke malformed duplicates for the same org that no longer expose a raw key.
+    await prisma.apiKey.updateMany({
+      where: {
+        userId,
+        orgId,
+        name: 'auto-session',
+        revokedAt: null,
+      },
+      data: { revokedAt: new Date() },
+    }).catch(() => {});
+
+    if (existing) {
+      try {
+        const meta = JSON.parse(existing.description || '{}');
+        if (meta.rawKey) {
+          await prisma.apiKey.update({
+            where: { id: existing.id },
+            data: { revokedAt: null },
+          }).catch(() => {});
+          return meta.rawKey;
+        }
+      } catch {}
     }
 
     // Create a new session key

@@ -583,6 +583,7 @@ For each cluster, determine:
 3. CONFLICTS: Are there contradicting facts? List the conflicting IDs and what conflicts.
 4. MERGE: Should any be merged? Which ID is canonical? List IDs to absorb.
 5. CROSS_PROJECT: Are there memories from DIFFERENT projects about the same topic? These should be linked.
+6. RELATED: Which memories in this cluster are about related topics and should be linked for better context? These are NOT duplicates or conflicts — they're conceptually connected memories. List pairs with full IDs.
 
 Output format (one per line):
 DUPLICATES: [full-uuid-1, full-uuid-2] — reason
@@ -590,6 +591,7 @@ UPDATE_CHAIN: full-uuid-old → full-uuid-new — reason
 CONFLICT: [full-uuid-1, full-uuid-2] — what conflicts
 MERGE: full-canonical-uuid absorbs [full-uuid-1, full-uuid-2] — reason
 CROSS_PROJECT: [full-uuid-1, full-uuid-2] — same topic across projects, should be linked
+RELATED: [full-uuid-1, full-uuid-2] — why they should be linked
 NONE — if the cluster has no issues
 
 CRITICAL: Use the COMPLETE memory IDs exactly as shown in brackets. They are full UUIDs. Never shorten them.`,
@@ -651,6 +653,14 @@ CRITICAL: Use the COMPLETE memory IDs exactly as shown in brackets. They are ful
               ?.split(',')
               .map((s) => s.trim()) || [];
           if (ids.length >= 2) actions.push({ type: 'cross_project_link', memory_ids: ids, reason: line });
+        }
+        if (line.startsWith('RELATED:')) {
+          const ids =
+            line
+              .match(/\[([^\]]+)\]/)?.[1]
+              ?.split(',')
+              .map((s) => s.trim()) || [];
+          if (ids.length >= 2) actions.push({ type: 'relationship_candidate', memory_ids: ids, reason: line });
         }
       }
 

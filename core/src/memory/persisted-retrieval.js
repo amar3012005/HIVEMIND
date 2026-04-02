@@ -415,6 +415,7 @@ function traversal(startId, relationships, depth = 2, types = ['Derives', 'Exten
 
     for (const edge of relationships) {
       if (!types.includes(edge.type)) continue;
+      // Bidirectional: follow edges both outgoing (current → target) and incoming (source → current)
       if (edge.from_id !== current.id && edge.to_id !== current.id) continue;
       const next = edge.from_id === current.id ? edge.to_id : edge.from_id;
       if (!visited.has(next)) queue.push({ id: next, level: current.level + 1 });
@@ -715,8 +716,12 @@ async function expandCandidatesViaGraph(store, {
           preferred_tags
         });
 
-        // Calculate final score with slight penalty for being expanded (not direct match)
-        const expansionPenalty = 0.15; // Slight penalty for indirect matches
+        // Calculate final score with penalty based on relationship type
+        const edgeType = edge?.type || 'Unknown';
+        const expansionPenalty = edgeType === 'Updates' ? 0.05
+          : edgeType === 'Extends' ? 0.10
+          : edgeType === 'Derives' ? 0.15
+          : 0.15; // Default for unknown types
         const score = (
           (weights.similarity ?? 0.45) * similarityScore +
           (weights.recency ?? 0.15) * recencyScore +

@@ -37,6 +37,8 @@ function buildGraphActions(hypothesis, evaluation) {
       confidence: evaluation.confidence,
       reason: 'This cluster looks like stale truth versus newer truth and should be linked as an update chain rather than left disconnected.',
       target_memory_ids: relatedMemoryIds.slice(0, 6),
+      evidence_memory_ids: evidenceRefs.slice(0, 6),
+      relationship_type: verdict === 'likely_true' ? 'Updates' : 'Derives',
       expected_impact: 'Increase temporal coherence and reduce contradictory retrieval.',
     });
   }
@@ -47,6 +49,8 @@ function buildGraphActions(hypothesis, evaluation) {
       confidence: Math.max(0.55, evaluation.confidence - 0.03),
       reason: 'Repeated operational issue evidence should be linked into a canonical risk pattern rather than remaining isolated reports.',
       target_memory_ids: relatedMemoryIds.slice(0, 6),
+      evidence_memory_ids: evidenceRefs.slice(0, 6),
+      relationship_type: 'Derives',
       expected_impact: 'Increase graph connectivity across repeated incidents.',
     });
   }
@@ -67,8 +71,25 @@ function buildGraphActions(hypothesis, evaluation) {
       confidence: evaluation.confidence,
       reason: 'The evidence is strong enough to recommend a canonical merge or cluster promotion review.',
       target_memory_ids: relatedMemoryIds.slice(0, 6),
+      evidence_memory_ids: evidenceRefs.slice(0, 6),
       expected_impact: 'Create a cleaner canonical node and reduce fragmented duplicate state.',
     });
+  }
+
+  // When multiple memories together imply a new conclusion, create a Derives relationship
+  if (evaluation.verdict === 'likely_true' && relatedMemoryIds.length >= 3 && evidenceRefs.length >= 2) {
+    const alreadyHasDerivesAction = actions.some((a) => a.relationship_type === 'Derives');
+    if (!alreadyHasDerivesAction) {
+      actions.push({
+        action: 'relationship_candidate',
+        confidence: Math.max(0.6, evaluation.confidence - 0.05),
+        reason: 'Multiple memories together imply a synthesized conclusion — linking them with Derives edges to capture the inferential relationship.',
+        target_memory_ids: relatedMemoryIds.slice(0, 6),
+        evidence_memory_ids: evidenceRefs.slice(0, 6),
+        relationship_type: 'Derives',
+        expected_impact: 'Capture inferential provenance so downstream agents can trace how conclusions were derived.',
+      });
+    }
   }
 
   if (!actions.length && (relatedMemoryIds.length >= 1 || relatedFiles.length >= 1)) {
@@ -77,6 +98,8 @@ function buildGraphActions(hypothesis, evaluation) {
       confidence: Math.max(0.52, evaluation.confidence - 0.1),
       reason: 'This cluster spans multiple linked memories or files and should at least be connected explicitly for future reasoning.',
       target_memory_ids: relatedMemoryIds.slice(0, 6),
+      evidence_memory_ids: evidenceRefs.slice(0, 6),
+      relationship_type: relatedMemoryIds.length >= 3 ? 'Derives' : 'Extends',
       expected_impact: 'Improve graph connectivity and reduce isolated duplicate reasoning paths.',
     });
   }
@@ -157,8 +180,10 @@ function candidateObservation({
       rationale: graphAction.reason,
       expected_impact: graphAction.expected_impact,
       target_memory_ids: graphAction.target_memory_ids || [],
+      evidence_memory_ids: graphAction.evidence_memory_ids || [],
       source_hypothesis_id: hypothesis.id,
       confidence: graphAction.confidence,
+      ...(graphAction.relationship_type ? { relationship_type: graphAction.relationship_type } : {}),
     },
     source_event_id: runId,
     related_to_trail: runId,

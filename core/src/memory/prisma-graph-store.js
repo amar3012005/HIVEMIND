@@ -399,6 +399,15 @@ export class PrismaGraphStore {
     return collected;
   }
 
+  async getRelationships(memoryId, type = null) {
+    const where = {
+      OR: [{ fromId: memoryId }, { toId: memoryId }],
+    };
+    if (type) where.type = type;
+    const records = await this.client.relationship.findMany({ where });
+    return records.map(mapRelationshipRecord);
+  }
+
   async createRelationship(edge) {
     const created = await this.client.relationship.create({
       data: {

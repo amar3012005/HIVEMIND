@@ -56,6 +56,9 @@ const { ContextAutopilot, scoreForRetention } = await import('./memory/context-a
 const { BiTemporalEngine } = await import('./memory/bi-temporal.js');
 const { StigmergicCoT } = await import('./memory/stigmergic-cot.js');
 const { ByzantineConsensus } = await import('./memory/byzantine-consensus.js');
+const { IngestTracker } = await import('./memory/ingest-tracker.js');
+const { rewriteQuery } = await import('./search/query-rewriter.js');
+const { deduplicateResults } = await import('./search/result-dedup.js');
 const { queryPersistedMemories, recallPersistedMemories } = await import('./memory/persisted-retrieval.js');
 const { expandTemporalQuery } = await import('./search/time-aware-expander.js');
 const { authenticatePersistedApiKey, hasEntitlement, hashApiKey: hashPersistedApiKey } = await import('./auth/api-keys.js');
@@ -88,6 +91,16 @@ const { renderAdminLogsPage } = await import('./admin/logs-dashboard.js');
 // Billing / usage tracking
 const { UsageTracker } = await import('./billing/usage-tracker.js');
 const { PlanStore } = await import('./billing/plan-store.js');
+const { PlanEnforcer } = await import('./billing/plan-enforcer.js');
+
+// Audit logging (Scale / Enterprise plans)
+const { AuditLogger } = await import('./audit/audit-logger.js');
+
+// Webhook notification system (Scale / Enterprise plans)
+const { WebhookManager } = await import('./webhooks/webhook-manager.js');
+
+// Smart type-aware ingest routing
+const { SmartIngestRouter } = await import('./memory/smart-ingest-router.js');
 
 // Three-Tier Retrieval imports
 const { ThreeTierRetrieval } = await import('./external/search/three-tier-retrieval.js');
@@ -189,6 +202,10 @@ const engine = new MemoryEngine('./hivemind.db');
 const prisma = getPrismaClient();
 const usageTracker = prisma ? new UsageTracker(prisma) : null;
 const planStore = prisma ? new PlanStore(prisma) : null;
+const planEnforcer = (prisma && planStore && usageTracker) ? new PlanEnforcer(prisma, planStore, usageTracker) : null;
+const auditLogger = prisma ? new AuditLogger(prisma) : null;
+const webhookManager = prisma ? new WebhookManager(prisma) : null;
+const ingestTracker = new IngestTracker();
 const persistentMemoryStore = prisma ? new PrismaGraphStore(prisma) : null;
 const persistentMemoryEngine = persistentMemoryStore ? new MemoryGraphEngine({
   store: persistentMemoryStore,
@@ -205,6 +222,32 @@ const cognitiveOperator = persistentMemoryStore ? new CognitiveOperator({ store:
 const biTemporalEngine = persistentMemoryStore ? new BiTemporalEngine({ store: persistentMemoryStore, prisma }) : null;
 const stigmergicCoT = persistentMemoryStore ? new StigmergicCoT({ store: persistentMemoryStore, traceTTLMinutes: 30 }) : null;
 const byzantineConsensus = new ByzantineConsensus({ commitThreshold: 80 });
+
+// Profile store
+const { ProfileStore } = await import('./memory/profile-store.js');
+const profileStore = prisma ? new ProfileStore(prisma) : null;
+
+// Smart ingest router (type-aware preprocessing + triple operator annotation)
+let smartIngestRouter = null;
+if (persistentMemoryStore) {
+  smartIngestRouter = new SmartIngestRouter({ memoryStore: persistentMemoryStore });
+}
+
+// ─── Audit logging helper (Scale / Enterprise only) ─────────────────────────
+async function auditLog(event) {
+  if (!auditLogger) return;
+  try {
+    const org = await prisma.organization.findUnique({
+      where: { id: event.organizationId },
+      select: { plan: true },
+    });
+    if (org && (org.plan === 'scale' || org.plan === 'enterprise')) {
+      await auditLogger.log(event);
+    }
+  } catch {
+    // Never let audit checks break the main flow
+  }
+}
 
 // ─── Trail Executor Runtime ───────────────────────────────────────────────────
 // Uses PrismaStore when available, falls back to InMemoryStore for dev/testing
@@ -2338,6 +2381,29 @@ a{color:#a78bfa}</style></head><body>
         });
       }
 
+      // Handle /api/webhooks/:id routes (dynamic webhook deletion)
+      if (pathname.startsWith('/api/webhooks/') && req.method === 'DELETE') {
+        if (!webhookManager) {
+          return jsonResponse(res, { error: 'Webhook system unavailable' }, 503);
+        }
+        // Plan gate
+        try {
+          const org = await prisma.organization.findUnique({ where: { id: orgId }, select: { plan: true } });
+          if (!org || (org.plan !== 'scale' && org.plan !== 'enterprise')) {
+            return jsonResponse(res, { error: 'Webhooks require Scale or Enterprise plan' }, 403);
+          }
+        } catch {
+          return jsonResponse(res, { error: 'Plan check failed' }, 500);
+        }
+        const webhookId = pathname.split('/api/webhooks/')[1];
+        try {
+          const result = await webhookManager.delete(webhookId, orgId);
+          return jsonResponse(res, result);
+        } catch (err) {
+          return jsonResponse(res, { error: err.message }, 404);
+        }
+      }
+
       // Handle /api/memories/:id routes (dynamic ID matching)
       if (pathname.startsWith('/api/memories/') && pathname !== '/api/memories/search' && pathname !== '/api/memories/query' && pathname !== '/api/memories/code/ingest' && pathname !== '/api/memories/traverse' && pathname !== '/api/memories/decay' && pathname !== '/api/memories/reinforce' && pathname !== '/api/memories/delete-all') {
         if (req.method === 'GET') {
@@ -2371,6 +2437,20 @@ a{color:#a78bfa}</style></head><body>
               invalidateAggregateCache({ userId, orgId, project: existing.project || null });
               invalidateAggregateCache({ userId, orgId, project: null });
             }
+            // Audit: memory deleted
+            auditLog({
+              userId,
+              organizationId: orgId,
+              eventType: 'memory.delete',
+              eventCategory: 'data_modification',
+              action: 'delete',
+              resourceType: 'memory',
+              resourceId: memoryId || null,
+              ipAddress: req.headers['x-forwarded-for'] || req.socket?.remoteAddress || null,
+              userAgent: req.headers['user-agent'] || null,
+            });
+            // Dispatch webhook event
+            webhookManager?.dispatch('memory.deleted', { memoryId, userId, orgId }, { userId, orgId }).catch(() => {});
             return jsonResponse(res, { success: true });
           } catch (error) {
             return jsonResponse(res, { error: error.message }, 500);
@@ -2442,6 +2522,28 @@ a{color:#a78bfa}</style></head><body>
           });
         } catch (error) {
           return jsonResponse(res, { error: error.message }, 400);
+        }
+      }
+
+      // PATCH /api/connectors/:provider/scope — change sync target scope
+      const connectorScopeMatch = pathname.match(/^\/api\/connectors\/(\w+)\/scope$/);
+      if (connectorScopeMatch && req.method === 'PATCH') {
+        const provider = connectorScopeMatch[1];
+        const { target_scope } = body;
+        if (!['personal', 'organization'].includes(target_scope)) {
+          return jsonResponse(res, { error: 'Invalid scope. Must be "personal" or "organization".' }, 400);
+        }
+        try {
+          const updated = await prisma.platformIntegration.updateMany({
+            where: { userId, platformType: provider },
+            data: { targetScope: target_scope },
+          });
+          if (updated.count === 0) {
+            return jsonResponse(res, { error: `No connector found for provider: ${provider}` }, 404);
+          }
+          return jsonResponse(res, { success: true, provider, target_scope });
+        } catch (err) {
+          return jsonResponse(res, { error: err.message }, 500);
         }
       }
 
@@ -2537,44 +2639,58 @@ a{color:#a78bfa}</style></head><body>
         }
       }
 
-      // ── Usage tracking + plan enforcement ──
-      if (usageTracker && planStore && orgId) {
-        const orgPlan = await planStore.getOrgPlan(orgId);
-        const limits = await usageTracker.checkLimits(orgId, orgPlan.id);
+      // ── Usage tracking + plan enforcement (PlanEnforcer) ──
+      if (planEnforcer && orgId) {
+        // Pre-flight: check the relevant limit type for this request
+        let enforcementType = null;
+        let enforcementAmount = 1;
 
-        // Enforce hard limits for free tier
-        if (!limits.allowed) {
-          return jsonResponse(res, {
-            error: 'Usage limit exceeded',
-            exceeded: limits.exceeded,
-            usage: limits.usage,
-            plan: orgPlan.id,
-            upgrade_url: 'https://hivemind.davinciai.eu/hivemind/app/billing',
-          }, 429);
+        if (req.method === 'POST' && (pathname === '/api/memories')) {
+          enforcementType = 'tokens';
+          enforcementAmount = body?.content ? Math.ceil(body.content.length / 4) : 100;
+        } else if (pathname.includes('/search') || pathname.includes('/recall')) {
+          enforcementType = 'searches';
+        } else if (body?.content) {
+          enforcementType = 'tokens';
+          enforcementAmount = Math.ceil((body.content.length || 0) / 4);
         }
 
-        // Set warning headers
-        if (limits.warnings.length > 0) {
-          res.setHeader('X-HiveMind-Usage-Warning', limits.warnings[0]);
+        if (enforcementType) {
+          const check = await planEnforcer.checkLimit(orgId, enforcementType, enforcementAmount);
+          if (!check.allowed) {
+            return jsonResponse(res, {
+              error: 'Plan limit exceeded',
+              reason: check.reason,
+              limit: check.limit,
+              current: check.current,
+              plan: check.plan,
+              upgrade_url: 'https://hivemind.davinciai.eu/hivemind/app/billing',
+            }, 429);
+          }
+          // Set warning header for overage plans
+          if (check.overage) {
+            res.setHeader('X-HiveMind-Usage-Warning', 'Overage billing active — usage exceeds plan allocation');
+          }
         }
 
-        // Track search queries
-        if (pathname.includes('/search') || pathname.includes('/recall')) {
-          usageTracker.recordQuery(orgId).catch(() => {});
-        }
-
-        // Track token usage (estimate from request body)
-        if (body?.content) {
-          const estimatedTokens = Math.ceil((body.content.length || 0) / 4);
-          usageTracker.recordTokens(orgId, estimatedTokens).catch(() => {});
+        // Legacy warning headers from UsageTracker
+        if (usageTracker && planStore) {
+          const orgPlan = await planStore.getOrgPlan(orgId);
+          const limits = await usageTracker.checkLimits(orgId, orgPlan.id);
+          if (limits.warnings.length > 0) {
+            res.setHeader('X-HiveMind-Usage-Warning', limits.warnings[0]);
+          }
         }
 
         // Feature gating — only gate web search/crawl creation, not status/admin endpoints
-        if (!orgPlan.features.webIntelligence && req.method === 'POST' && (pathname === '/api/web/search/jobs' || pathname === '/api/web/crawl/jobs')) {
-          return jsonResponse(res, { error: 'Web Intelligence requires Pro plan or higher', upgrade_url: 'https://hivemind.davinciai.eu/hivemind/app/billing' }, 403);
-        }
-        if (pathname.includes('/swarm') && !orgPlan.features.agentSwarm) {
-          return jsonResponse(res, { error: 'Agent Swarm requires Scale plan or higher', upgrade_url: 'https://hivemind.davinciai.eu/hivemind/app/billing' }, 403);
+        if (planStore) {
+          const orgPlan = await planStore.getOrgPlan(orgId);
+          if (!orgPlan.features.webIntelligence && req.method === 'POST' && (pathname === '/api/web/search/jobs' || pathname === '/api/web/crawl/jobs')) {
+            return jsonResponse(res, { error: 'Web Intelligence requires Pro plan or higher', upgrade_url: 'https://hivemind.davinciai.eu/hivemind/app/billing' }, 403);
+          }
+          if (pathname.includes('/swarm') && !orgPlan.features.agentSwarm) {
+            return jsonResponse(res, { error: 'Agent Swarm requires Scale plan or higher', upgrade_url: 'https://hivemind.davinciai.eu/hivemind/app/billing' }, 403);
+          }
         }
       }
 
@@ -2670,6 +2786,112 @@ a{color:#a78bfa}</style></head><body>
               return jsonResponse(res, { error: 'Update agent failed', message: error.message }, 500);
             }
           }
+        }
+      }
+
+      // ── Team: dynamic routes (invite accept, member PATCH/DELETE, project PATCH/DELETE) ──
+
+      // POST /api/team/invites/:token/accept
+      if (pathname.startsWith('/api/team/invites/') && pathname.endsWith('/accept') && req.method === 'POST') {
+        if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+        const token = pathname.split('/api/team/invites/')[1].replace('/accept', '');
+        try {
+          const invite = await prisma.orgInvite.findUnique({ where: { token } });
+          if (!invite) return jsonResponse(res, { error: 'Invite not found' }, 404);
+          if (invite.usedAt) return jsonResponse(res, { error: 'Invite already used' }, 410);
+          if (invite.expiresAt < new Date()) return jsonResponse(res, { error: 'Invite expired' }, 410);
+          const existing = await prisma.userOrganization.findFirst({ where: { userId, orgId: invite.orgId } });
+          if (existing) return jsonResponse(res, { error: 'Already a member of this organization' }, 409);
+          await prisma.userOrganization.create({
+            data: { userId, orgId: invite.orgId, role: invite.role, joinedAt: new Date() }
+          });
+          await prisma.orgInvite.update({ where: { id: invite.id }, data: { usedAt: new Date(), usedBy: userId } });
+          return jsonResponse(res, { success: true, orgId: invite.orgId, role: invite.role });
+        } catch (err) {
+          console.error('[team] accept invite failed:', err.message);
+          return jsonResponse(res, { error: err.message }, 500);
+        }
+      }
+
+      // DELETE /api/team/invites/:id
+      if (pathname.startsWith('/api/team/invites/') && !pathname.endsWith('/accept') && req.method === 'DELETE') {
+        if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+        const inviteId = pathname.split('/api/team/invites/')[1];
+        try {
+          const membership = await prisma.userOrganization.findFirst({ where: { userId, orgId } });
+          if (!membership || membership.role !== 'admin') return jsonResponse(res, { error: 'Admin access required' }, 403);
+          const invite = await prisma.orgInvite.findFirst({ where: { id: inviteId, orgId } });
+          if (!invite) return jsonResponse(res, { error: 'Invite not found' }, 404);
+          await prisma.orgInvite.delete({ where: { id: inviteId } });
+          return jsonResponse(res, { success: true });
+        } catch (err) {
+          console.error('[team] revoke invite failed:', err.message);
+          return jsonResponse(res, { error: err.message }, 500);
+        }
+      }
+
+      // PATCH /api/team/members/:memberId — change role
+      if (pathname.startsWith('/api/team/members/') && req.method === 'PATCH') {
+        if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+        const memberId = pathname.split('/api/team/members/')[1];
+        try {
+          const membership = await prisma.userOrganization.findFirst({ where: { userId, orgId } });
+          if (!membership || membership.role !== 'admin') return jsonResponse(res, { error: 'Admin access required' }, 403);
+          const { role } = body;
+          if (!role || !['member', 'admin'].includes(role)) return jsonResponse(res, { error: 'Valid role required: member or admin' }, 400);
+          await prisma.userOrganization.updateMany({ where: { userId: memberId, orgId }, data: { role } });
+          return jsonResponse(res, { success: true, userId: memberId, role });
+        } catch (err) {
+          console.error('[team] change role failed:', err.message);
+          return jsonResponse(res, { error: err.message }, 500);
+        }
+      }
+
+      // DELETE /api/team/members/:memberId — remove member
+      if (pathname.startsWith('/api/team/members/') && req.method === 'DELETE') {
+        if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+        const memberId = pathname.split('/api/team/members/')[1];
+        try {
+          const membership = await prisma.userOrganization.findFirst({ where: { userId, orgId } });
+          if (!membership || membership.role !== 'admin') return jsonResponse(res, { error: 'Admin access required' }, 403);
+          if (memberId === userId) return jsonResponse(res, { error: 'Cannot remove yourself from the organization' }, 400);
+          await prisma.userOrganization.deleteMany({ where: { userId: memberId, orgId } });
+          return jsonResponse(res, { success: true });
+        } catch (err) {
+          console.error('[team] remove member failed:', err.message);
+          return jsonResponse(res, { error: err.message }, 500);
+        }
+      }
+
+      // PATCH /api/team/projects/:id — update project
+      if (pathname.startsWith('/api/team/projects/') && req.method === 'PATCH') {
+        if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+        const projectId = pathname.split('/api/team/projects/')[1];
+        try {
+          const { name, description } = body;
+          const updated = await prisma.project.update({
+            where: { id: projectId },
+            data: { ...(name && { name }), ...(description !== undefined && { description }) }
+          });
+          return jsonResponse(res, { project: updated });
+        } catch (err) {
+          console.error('[team] update project failed:', err.message);
+          return jsonResponse(res, { error: err.message }, 500);
+        }
+      }
+
+      // DELETE /api/team/projects/:id — delete project
+      if (pathname.startsWith('/api/team/projects/') && req.method === 'DELETE') {
+        if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+        const projectId = pathname.split('/api/team/projects/')[1];
+        try {
+          const membership = await prisma.userOrganization.findFirst({ where: { userId, orgId } });
+          if (!membership || membership.role !== 'admin') return jsonResponse(res, { error: 'Admin access required' }, 403);
+          await prisma.project.delete({ where: { id: projectId } });
+          return jsonResponse(res, { success: true });
+        } catch (err) {
+          console.error('[team] delete project failed:', err.message);
+          return jsonResponse(res, { error: err.message }, 500);
         }
       }
 
@@ -2930,10 +3152,11 @@ a{color:#a78bfa}</style></head><body>
               }
               return jsonResponse(res, {
                 connected: true,
-                email: connection.platformUserId,
-                status: connection.syncStatus,
-                last_synced: connection.lastSyncedAt,
-                last_error: connection.lastErrorMessage,
+                email: connection.account_ref,
+                status: connection.status,
+                target_scope: connection.target_scope,
+                last_synced: connection.last_sync_at,
+                last_error: connection.last_error,
               });
             } catch (err) {
               return jsonResponse(res, { connected: false, error: err.message });
@@ -3881,6 +4104,217 @@ a{color:#a78bfa}</style></head><body>
           }
           break;
 
+        case '/api/profiles':
+          if (req.method === 'GET') {
+            // GET /api/profiles — get all profile facts for authenticated user
+            // Supports ?category=static&key=name filters
+            if (!profileStore) return jsonResponse(res, { error: 'Profile store unavailable' }, 503);
+            try {
+              let facts = await profileStore.getProfile(userId, orgId);
+              const categoryFilter = url.searchParams.get('category');
+              const keyFilter = url.searchParams.get('key');
+              if (categoryFilter) facts = facts.filter(f => f.category === categoryFilter);
+              if (keyFilter) facts = facts.filter(f => f.key === keyFilter.toLowerCase().trim());
+              const contextString = await profileStore.buildProfileContext(userId, orgId);
+              return jsonResponse(res, { facts, context: contextString });
+            } catch (err) {
+              console.error('[profiles] GET failed:', err.message);
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          if (req.method === 'POST') {
+            // POST /api/profiles — upsert a profile fact (or batch of facts if body is array)
+            if (!profileStore) return jsonResponse(res, { error: 'Profile store unavailable' }, 503);
+            try {
+              const items = Array.isArray(body) ? body : [body];
+              const results = [];
+              for (const item of items) {
+                const { category, key, value, confidence } = item;
+                if (!key || !value) {
+                  results.push({ error: 'key and value are required', key: key || null });
+                  continue;
+                }
+                const result = await profileStore.upsertFact({ userId, orgId, category, key, value, confidence });
+                auditLog({
+                  userId,
+                  organizationId: orgId,
+                  eventType: 'profile.upsert',
+                  eventCategory: 'data_modification',
+                  action: result._wasUpdate ? 'update' : 'create',
+                  resourceType: 'profile',
+                  resourceId: result?.id || null,
+                  newValue: { category, key, value },
+                  previousValue: result._previousValue ? { value: result._previousValue } : undefined,
+                  ipAddress: req.headers['x-forwarded-for'] || req.socket?.remoteAddress || null,
+                  userAgent: req.headers['user-agent'] || null,
+                });
+                results.push({
+                  success: true,
+                  fact: result,
+                  _previousValue: result._previousValue,
+                  _wasUpdate: result._wasUpdate,
+                  _wasContradiction: result._wasContradiction,
+                });
+              }
+              // Single object for single input, array for batch
+              return jsonResponse(res, Array.isArray(body) ? { results } : results[0]);
+            } catch (err) {
+              console.error('[profiles] POST failed:', err.message);
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          if (req.method === 'DELETE') {
+            // DELETE /api/profiles?id=<factId>
+            if (!profileStore) return jsonResponse(res, { error: 'Profile store unavailable' }, 503);
+            const factId = url.searchParams.get('id') || body.id;
+            if (!factId) return jsonResponse(res, { error: 'id is required' }, 400);
+            try {
+              await profileStore.deleteFact(factId, userId);
+              return jsonResponse(res, { success: true });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/profiles/context':
+          if (req.method === 'GET') {
+            // GET /api/profiles/context — lightweight endpoint for LLM context injection
+            if (!profileStore) return jsonResponse(res, { error: 'Profile store unavailable' }, 503);
+            try {
+              const contextString = await profileStore.buildProfileContext(userId, orgId);
+              return jsonResponse(res, { context: contextString });
+            } catch (err) {
+              console.error('[profiles/context] GET failed:', err.message);
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/profiles/extract':
+          if (req.method === 'POST') {
+            // POST /api/profiles/extract — trigger auto-extraction from text content
+            if (!profileStore) return jsonResponse(res, { error: 'Profile store unavailable' }, 503);
+            const { content: extractContent } = body;
+            if (!extractContent || typeof extractContent !== 'string') return jsonResponse(res, { error: 'content string is required' }, 400);
+            try {
+              const extracted = await profileStore.extractAndStore(extractContent, { userId, orgId, memoryId: null });
+              return jsonResponse(res, { extracted, count: extracted.length });
+            } catch (err) {
+              console.error('[profiles/extract] POST failed:', err.message);
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/profiles/history':
+          if (req.method === 'GET') {
+            // GET /api/profiles/history?key=name — get version history for a profile fact
+            if (!profileStore) return jsonResponse(res, { error: 'Profile store unavailable' }, 503);
+            const historyKey = url.searchParams.get('key');
+            if (!historyKey) return jsonResponse(res, { error: 'key query parameter is required' }, 400);
+            try {
+              const history = await profileStore.getFactHistory(userId, historyKey);
+              return jsonResponse(res, { key: historyKey, history });
+            } catch (err) {
+              console.error('[profiles/history] GET failed:', err.message);
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/team/invites':
+          if (!prisma) { jsonResponse(res, { error: 'Database unavailable' }, 503); break; }
+          if (req.method === 'POST') {
+            // POST /api/team/invites — create invite link (admin only)
+            try {
+              const membership = await prisma.userOrganization.findFirst({ where: { userId, orgId } });
+              if (!membership || membership.role !== 'admin') return jsonResponse(res, { error: 'Admin access required' }, 403);
+              const { email, role = 'member', expiresInDays = 7 } = body;
+              if (!['member', 'admin'].includes(role)) return jsonResponse(res, { error: 'Valid role required: member or admin' }, 400);
+              const token = crypto.randomUUID().replace(/-/g, '');
+              const expiresAt = new Date(Date.now() + expiresInDays * 24 * 3600 * 1000);
+              const org = await prisma.organization.findUnique({ where: { id: orgId }, select: { slug: true } });
+              const invite = await prisma.orgInvite.create({
+                data: { orgId, email: email || null, role, token, expiresAt, createdBy: userId }
+              });
+              return jsonResponse(res, {
+                id: invite.id,
+                token: invite.token,
+                url: `/join/${org?.slug || orgId}/${token}`,
+                expiresAt: invite.expiresAt
+              });
+            } catch (err) {
+              console.error('[team] create invite failed:', err.message);
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          if (req.method === 'GET') {
+            // GET /api/team/invites — list pending invites
+            try {
+              const membership = await prisma.userOrganization.findFirst({ where: { userId, orgId } });
+              if (!membership || membership.role !== 'admin') return jsonResponse(res, { error: 'Admin access required' }, 403);
+              const invites = await prisma.orgInvite.findMany({
+                where: { orgId, usedAt: null, expiresAt: { gt: new Date() } },
+                orderBy: { createdAt: 'desc' }
+              });
+              return jsonResponse(res, { invites });
+            } catch (err) {
+              console.error('[team] list invites failed:', err.message);
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/team/members':
+          if (!prisma) { jsonResponse(res, { error: 'Database unavailable' }, 503); break; }
+          if (req.method === 'GET') {
+            // GET /api/team/members — list org members with roles
+            try {
+              const members = await prisma.userOrganization.findMany({
+                where: { orgId },
+                include: { user: { select: { id: true, email: true, displayName: true } } },
+                orderBy: { invitedAt: 'asc' }
+              });
+              return jsonResponse(res, { members });
+            } catch (err) {
+              console.error('[team] list members failed:', err.message);
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/team/projects':
+          if (!prisma) { jsonResponse(res, { error: 'Database unavailable' }, 503); break; }
+          if (req.method === 'GET') {
+            // GET /api/team/projects — list projects in org
+            try {
+              const projects = await prisma.project.findMany({
+                where: { orgId },
+                orderBy: { createdAt: 'desc' }
+              });
+              return jsonResponse(res, { projects });
+            } catch (err) {
+              console.error('[team] list projects failed:', err.message);
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          if (req.method === 'POST') {
+            // POST /api/team/projects — create project
+            try {
+              const { name, slug, description } = body;
+              if (!name || !slug) return jsonResponse(res, { error: 'name and slug are required' }, 400);
+              const project = await prisma.project.create({
+                data: { orgId, name, slug, description: description || null, createdBy: userId }
+              });
+              return jsonResponse(res, { project });
+            } catch (err) {
+              console.error('[team] create project failed:', err.message);
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
         case '/api/profile':
           if (req.method === 'GET' || req.method === 'POST') {
             if (!ensurePersistedMemoryOrFail(res, '/api/profile')) {
@@ -4154,7 +4588,7 @@ a{color:#a78bfa}</style></head><body>
                   }
                 : undefined;
 
-              const result = await persistentMemoryEngine.ingestMemory({
+              const ingestPayload = {
                 user_id: validation.data.user_id,
                 org_id: validation.data.org_id,
                 project: validation.data.project,
@@ -4183,54 +4617,202 @@ a{color:#a78bfa}</style></head><body>
                   source_platform: source?.platform || null,
                   source_url: source?.url || null
                 }
-              });
+              };
 
-              // Handle predict-calibrate skipped memories
-              if (result.operation === 'skipped_redundant') {
+              // Smart type-aware routing: enrich payload with triple operator
+              let ingestPayloads = [ingestPayload];
+              if (smartIngestRouter && body.smartIngest !== false && !body.skipProcessing) {
+                try {
+                  ingestPayloads = await smartIngestRouter.route(ingestPayload);
+                } catch (routerErr) {
+                  console.warn('[smart-ingest-router] Routing failed, using raw payload:', routerErr.message);
+                }
+              }
+
+              // Determine sync vs async mode
+              const syncMode = url.searchParams.get('sync') === 'true' || body.sync === true;
+
+              if (!syncMode) {
+                // --- Async ingest: return job ID immediately ---
+                const jobId = crypto.randomUUID();
+                ingestTracker.createJob(jobId, { userId, orgId, title: validation.data.title });
+
+                res.setHeader('X-Job-Id', jobId);
+                jsonResponse(res, { success: true, job_id: jobId, status: 'queued' }, 202);
+
+                // Process in background
+                (async () => {
+                  try {
+                    ingestTracker.updateJob(jobId, { status: 'processing', progress: 10 });
+
+                    // Process all routed payloads (SmartIngestRouter may split docs into chunks)
+                    const results = [];
+                    for (const p of ingestPayloads) {
+                      const result = await persistentMemoryEngine.ingestMemory(p);
+
+                      // Handle predict-calibrate skipped memories
+                      if (result.operation === 'skipped_redundant') {
+                        continue;
+                      }
+
+                      results.push(result);
+
+                      ingestTracker.updateJob(jobId, { status: 'embedding', progress: 60, memoryId: result.memoryId });
+
+                      const memory = await persistentMemoryStore.getMemory(result.memoryId);
+                      if (memory) {
+                        await qdrantClient.storeMemory(memory, {
+                          collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT'
+                        });
+                        invalidateAggregateCache({ userId, orgId, project: memory.project || null });
+                        invalidateAggregateCache({ userId, orgId, project: null });
+                      }
+
+                      // Auto-extract profile facts from ingested content
+                      if (profileStore && p.content) {
+                        profileStore.extractAndStore(p.content, {
+                          userId, orgId, memoryId: result.memoryId,
+                        }).catch(err => console.warn('[profile-extract] Auto-extraction failed:', err.message));
+                      }
+
+                      // Embed fact-memories in Qdrant
+                      if (result.factMemoryIds?.length > 0 && qdrantClient) {
+                        for (const factId of result.factMemoryIds) {
+                          try {
+                            const factMem = await persistentMemoryStore.getMemory(factId);
+                            if (factMem) await qdrantClient.storeMemory(factMem, { collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT' });
+                          } catch (factErr) {
+                            console.warn(`[memories] Fact Qdrant embed failed for ${factId}:`, factErr.message);
+                          }
+                        }
+                      }
+                    }
+
+                    if (results.length === 0) {
+                      // All payloads were skipped as redundant
+                      ingestTracker.updateJob(jobId, {
+                        status: 'indexed',
+                        progress: 100,
+                        metadata: { userId, orgId, title: validation.data.title, skipped: true, operation: 'skipped_redundant' }
+                      });
+                      return;
+                    }
+
+                    ingestTracker.updateJob(jobId, { status: 'indexed', progress: 100, memoryId: results[0].memoryId, count: results.length });
+
+                    // Dispatch webhook event
+                    webhookManager?.dispatch('memory.created', { memoryId: results[0].memoryId, userId, orgId }, { userId, orgId }).catch(() => {});
+
+                    // Record token usage after successful ingest
+                    if (planEnforcer && orgId && validation.data.content) {
+                      const actualTokens = Math.ceil(validation.data.content.length / 4);
+                      planEnforcer.recordUsage(orgId, 'tokens', actualTokens);
+                    }
+                  } catch (err) {
+                    console.error('[async-ingest] Job failed:', jobId, err);
+                    ingestTracker.updateJob(jobId, { status: 'failed', error: err.message });
+                  }
+                })();
+
+                return;
+              }
+
+              // --- Synchronous ingest (backwards-compatible default with ?sync=true) ---
+              // Process all routed payloads (SmartIngestRouter may split docs into chunks)
+              const syncResults = [];
+              for (const p of ingestPayloads) {
+                const result = await persistentMemoryEngine.ingestMemory(p);
+
+                // Handle predict-calibrate skipped memories
+                if (result.operation === 'skipped_redundant') {
+                  syncResults.push({ skipped: true, ...result });
+                  continue;
+                }
+
+                syncResults.push(result);
+
+                const memory = await persistentMemoryStore.getMemory(result.memoryId);
+                if (memory) {
+                  await qdrantClient.storeMemory(memory, {
+                    collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT'
+                  });
+                  invalidateAggregateCache({ userId, orgId, project: memory.project || null });
+                  invalidateAggregateCache({ userId, orgId, project: null });
+                }
+
+                // Auto-extract profile facts from ingested content
+                if (profileStore && p.content) {
+                  profileStore.extractAndStore(p.content, {
+                    userId, orgId, memoryId: result.memoryId,
+                  }).catch(err => console.warn('[profile-extract] Auto-extraction failed:', err.message));
+                }
+
+                // Embed fact-memories in Qdrant (they only exist in Prisma after graph-engine creates them)
+                if (result.factMemoryIds?.length > 0 && qdrantClient) {
+                  for (const factId of result.factMemoryIds) {
+                    try {
+                      const factMem = await persistentMemoryStore.getMemory(factId);
+                      if (factMem) await qdrantClient.storeMemory(factMem, { collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT' });
+                    } catch (factErr) {
+                      console.warn(`[memories] Fact Qdrant embed failed for ${factId}:`, factErr.message);
+                    }
+                  }
+                }
+
+                // Audit: memory created
+                auditLog({
+                  userId,
+                  organizationId: orgId,
+                  eventType: 'memory.create',
+                  eventCategory: 'data_modification',
+                  action: 'create',
+                  resourceType: 'memory',
+                  resourceId: result.memoryId || null,
+                  ipAddress: req.headers['x-forwarded-for'] || req.socket?.remoteAddress || null,
+                  userAgent: req.headers['user-agent'] || null,
+                });
+
+                // Dispatch webhook event
+                webhookManager?.dispatch('memory.created', { memoryId: result.memoryId, userId, orgId }, { userId, orgId }).catch(() => {});
+              }
+
+              // Record token usage after successful sync ingest
+              if (planEnforcer && orgId && validation.data.content) {
+                const actualTokens = Math.ceil(validation.data.content.length / 4);
+                planEnforcer.recordUsage(orgId, 'tokens', actualTokens);
+              }
+
+              const firstSuccessResult = syncResults.find(r => !r.skipped);
+
+              // All payloads skipped as redundant
+              if (!firstSuccessResult) {
+                const skippedResult = syncResults[0] || {};
                 return jsonResponse(res, {
                   success: true,
                   skipped: true,
                   mutation: {
-                    operation: result.operation,
-                    reason: result.reason,
-                    novelty_score: result.noveltyScore,
-                    max_similarity: result.maxSimilarity,
-                    processing_ms: result.processingMs
+                    operation: skippedResult.operation,
+                    reason: skippedResult.reason,
+                    novelty_score: skippedResult.noveltyScore,
+                    max_similarity: skippedResult.maxSimilarity,
+                    processing_ms: skippedResult.processingMs
                   }
                 }, 200);
               }
 
-              const memory = await persistentMemoryStore.getMemory(result.memoryId);
-              if (memory) {
-                await qdrantClient.storeMemory(memory, {
-                  collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT'
-                });
-                invalidateAggregateCache({ userId, orgId, project: memory.project || null });
-                invalidateAggregateCache({ userId, orgId, project: null });
-              }
-
-              // Embed fact-memories in Qdrant (they only exist in Prisma after graph-engine creates them)
-              if (result.factMemoryIds?.length > 0 && qdrantClient) {
-                for (const factId of result.factMemoryIds) {
-                  try {
-                    const factMem = await persistentMemoryStore.getMemory(factId);
-                    if (factMem) await qdrantClient.storeMemory(factMem, { collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT' });
-                  } catch (factErr) {
-                    console.warn(`[memories] Fact Qdrant embed failed for ${factId}:`, factErr.message);
-                  }
-                }
-              }
+              const firstMemory = await persistentMemoryStore.getMemory(firstSuccessResult.memoryId);
 
               return jsonResponse(res, {
                 success: true,
-                memory,
-                relationships: result.edgesCreated,
+                memory: firstMemory,
+                relationships: firstSuccessResult.edgesCreated,
+                chunk_count: syncResults.filter(r => !r.skipped).length,
                 mutation: {
-                  operation: result.operation,
-                  deprecated_ids: result.deprecatedIds,
-                  processing_ms: result.processingMs,
-                  novelty_score: result.noveltyScore ?? null,
-                  delta_extracted: result.deltaExtracted ?? false
+                  operation: firstSuccessResult.operation,
+                  deprecated_ids: firstSuccessResult.deprecatedIds,
+                  processing_ms: firstSuccessResult.processingMs,
+                  novelty_score: firstSuccessResult.noveltyScore ?? null,
+                  delta_extracted: firstSuccessResult.deltaExtracted ?? false
                 }
               }, 201);
             } catch (error) {
@@ -4240,6 +4822,21 @@ a{color:#a78bfa}</style></head><body>
                 message: error.message
               }, 500);
             }
+          }
+          break;
+
+        case '/api/memories/ingest/status':
+          if (req.method === 'GET') {
+            const jobId = url.searchParams.get('job_id');
+            if (jobId) {
+              const job = ingestTracker.getJob(jobId);
+              if (!job) return jsonResponse(res, { error: 'Job not found' }, 404);
+              return jsonResponse(res, job);
+            }
+            // List recent jobs for this user
+            const limitParam = parseInt(url.searchParams.get('limit') || '20', 10);
+            const jobs = ingestTracker.getJobsByUser(userId, limitParam);
+            return jsonResponse(res, { jobs });
           }
           break;
 
@@ -5017,11 +5614,16 @@ a{color:#a78bfa}</style></head><body>
 
               const temporalExpansion = expandTemporalQuery(body.query_context || body.context || '');
 
+              // Rewrite query for better semantic coverage
+              const rewritten = rewriteQuery(body.query_context || body.context || '');
+              const effectiveRecallQuery = rewritten.expanded || body.query_context || body.context;
+
+
               // containerTag → project mapping for recall
               const recallProject = body.project || effectiveContainerTag || null;
 
               const result = await recallPersistedMemories(persistentMemoryStore, {
-                query_context: body.query_context || body.context,
+                query_context: effectiveRecallQuery,
                 user_id: userId,
                 org_id: orgId,
                 project: recallProject,
@@ -5072,6 +5674,50 @@ a{color:#a78bfa}</style></head><body>
                     } catch {}
                   }
                 }
+              }
+
+              // Deduplicate semantically similar memories
+              if (result.memories && result.memories.length > 1) {
+                const before = result.memories.length;
+                result.memories = deduplicateResults(result.memories);
+                result.dedup = { before, after: result.memories.length, collapsed: before - result.memories.length };
+              }
+
+              // Annotate memories that have known contradictions
+              if (persistentMemoryStore && result.memories) {
+                for (const mem of result.memories) {
+                  try {
+                    const contradictions = await persistentMemoryStore.getRelationships(mem.id, 'Contradicts');
+                    if (contradictions && contradictions.length > 0) {
+                      mem._contradictions = contradictions.map(c => ({
+                        contradicts_memory_id: c.from_id === mem.id ? c.to_id : c.from_id,
+                        confidence: c.confidence,
+                        type: c.metadata?.contradiction_type || 'unknown',
+                      }));
+                    }
+                  } catch {}
+                }
+              }
+
+              // Inject user profile context into recall result
+              if (profileStore) {
+                try {
+                  result.user_profile = await profileStore.buildProfileContext(userId, orgId);
+                } catch (profileErr) {
+                  console.warn('[recall] Profile injection failed:', profileErr.message);
+                }
+              }
+
+              // Attach query rewrite metadata for debugging/transparency
+              result.query_rewrite = {
+                expanded: rewritten.expanded,
+                entities: rewritten.entities,
+                stripped: rewritten.stripped,
+              };
+
+              // Record search usage after successful recall
+              if (planEnforcer && orgId) {
+                planEnforcer.recordUsage(orgId, 'searches', 1);
               }
 
               jsonResponse(res, result);
@@ -5387,6 +6033,11 @@ a{color:#a78bfa}</style></head><body>
                 limit: limit || 10,
                 scoreThreshold: score_threshold ?? parseFloat(process.env.HIVEMIND_VECTOR_SCORE_THRESHOLD || '0.15')
               });
+
+              // Record search usage after successful quick search
+              if (planEnforcer && orgId) {
+                planEnforcer.recordUsage(orgId, 'searches', 1);
+              }
 
               jsonResponse(res, result);
             } catch (error) {
@@ -5821,11 +6472,16 @@ a{color:#a78bfa}</style></head><body>
 
         case '/api/billing/usage':
           if (req.method === 'GET') {
-            if (!usageTracker || !planStore) return jsonResponse(res, { error: 'Billing not available' }, 503);
-            const billingPlan = await planStore.getOrgPlan(orgId);
-            const billingUsage = await usageTracker.getUsage(orgId);
-            const billingLimits = await usageTracker.checkLimits(orgId, billingPlan.id);
-            return jsonResponse(res, { plan: billingPlan.id, planName: billingPlan.name, usage: billingUsage, limits: billingPlan.limits, warnings: billingLimits.warnings });
+            if (!planEnforcer) {
+              // Fallback to legacy usage tracker if plan enforcer unavailable
+              if (!usageTracker || !planStore) return jsonResponse(res, { error: 'Billing not available' }, 503);
+              const billingPlan = await planStore.getOrgPlan(orgId);
+              const billingUsage = await usageTracker.getUsage(orgId);
+              const billingLimits = await usageTracker.checkLimits(orgId, billingPlan.id);
+              return jsonResponse(res, { plan: billingPlan.id, planName: billingPlan.name, usage: billingUsage, limits: billingPlan.limits, warnings: billingLimits.warnings });
+            }
+            const usageSummary = await planEnforcer.getUsageSummary(orgId);
+            return jsonResponse(res, usageSummary);
           }
           break;
 
@@ -5839,17 +6495,111 @@ a{color:#a78bfa}</style></head><body>
         case '/api/billing/upgrade':
           if (req.method === 'POST') {
             const { plan } = body;
-            const validPlans = ['free', 'pro', 'team', 'enterprise'];
+            const validPlans = ['free', 'pro', 'scale', 'enterprise'];
             if (!plan || !validPlans.includes(plan)) {
               return jsonResponse(res, { error: 'Invalid plan', valid: validPlans }, 400);
             }
             try {
+              const oldPlan = planStore ? (await prisma.organization.findUnique({ where: { id: orgId }, select: { plan: true } }))?.plan : null;
               await planStore.setOrgPlan(orgId, plan);
               planStore.invalidate(orgId);
               invalidateAggregateCache({ userId, orgId });
+              // Audit: plan upgrade (fire-and-forget, uses the NEW plan for the check
+              // so the first upgrade to scale/enterprise is still captured)
+              if (auditLogger && (plan === 'scale' || plan === 'enterprise')) {
+                auditLogger.log({
+                  userId,
+                  organizationId: orgId,
+                  eventType: 'billing.upgrade',
+                  eventCategory: 'system',
+                  action: 'update',
+                  resourceType: 'plan',
+                  oldValue: { plan: oldPlan },
+                  newValue: { plan },
+                  ipAddress: req.headers['x-forwarded-for'] || req.socket?.remoteAddress || null,
+                  userAgent: req.headers['user-agent'] || null,
+                });
+              }
               return jsonResponse(res, { success: true, plan, message: `Upgraded to ${plan}` });
             } catch (err) {
               return jsonResponse(res, { error: 'Upgrade failed', message: err.message }, 500);
+            }
+          }
+          break;
+
+        // ── Webhooks (Scale / Enterprise) ──
+        case '/api/webhooks':
+          if (!webhookManager) {
+            return jsonResponse(res, { error: 'Webhook system unavailable' }, 503);
+          }
+          if (req.method === 'GET') {
+            // Plan gate
+            try {
+              const org = await prisma.organization.findUnique({ where: { id: orgId }, select: { plan: true } });
+              if (!org || (org.plan !== 'scale' && org.plan !== 'enterprise')) {
+                return jsonResponse(res, { error: 'Webhooks require Scale or Enterprise plan' }, 403);
+              }
+            } catch {
+              return jsonResponse(res, { error: 'Plan check failed' }, 500);
+            }
+            try {
+              const webhooks = await webhookManager.list(orgId);
+              return jsonResponse(res, { webhooks });
+            } catch (err) {
+              return jsonResponse(res, { error: 'Failed to list webhooks', message: err.message }, 500);
+            }
+          }
+          if (req.method === 'POST') {
+            // Plan gate
+            try {
+              const org = await prisma.organization.findUnique({ where: { id: orgId }, select: { plan: true } });
+              if (!org || (org.plan !== 'scale' && org.plan !== 'enterprise')) {
+                return jsonResponse(res, { error: 'Webhooks require Scale or Enterprise plan' }, 403);
+              }
+            } catch {
+              return jsonResponse(res, { error: 'Plan check failed' }, 500);
+            }
+            const { url, events, secret } = body;
+            if (!url || !events) {
+              return jsonResponse(res, { error: 'url and events are required' }, 400);
+            }
+            try {
+              const webhook = await webhookManager.create({ orgId, userId, url, events, secret });
+              return jsonResponse(res, { webhook }, 201);
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 400);
+            }
+          }
+          break;
+
+        // ── Audit Logs (Scale / Enterprise) ──
+        case '/api/audit/logs':
+          if (req.method === 'GET') {
+            if (!auditLogger) return jsonResponse(res, { error: 'Audit logging unavailable' }, 503);
+            // Plan gate
+            try {
+              const org = await prisma.organization.findUnique({ where: { id: orgId }, select: { plan: true } });
+              if (!org || (org.plan !== 'scale' && org.plan !== 'enterprise')) {
+                return jsonResponse(res, { error: 'Audit logs require Scale or Enterprise plan' }, 403);
+              }
+            } catch {
+              return jsonResponse(res, { error: 'Plan check failed' }, 500);
+            }
+            try {
+              const result = await auditLogger.query({
+                organizationId: orgId,
+                userId: url.searchParams.get('user_id') || undefined,
+                eventCategory: url.searchParams.get('category') || undefined,
+                action: url.searchParams.get('action') || undefined,
+                resourceType: url.searchParams.get('resource_type') || undefined,
+                from: url.searchParams.get('from') || undefined,
+                to: url.searchParams.get('to') || undefined,
+                limit: parseInt(url.searchParams.get('limit') || '50'),
+                offset: parseInt(url.searchParams.get('offset') || '0'),
+              });
+              return jsonResponse(res, result);
+            } catch (err) {
+              return jsonResponse(res, { error: 'Audit query failed', message: err.message }, 500);
             }
           }
           break;
@@ -5992,10 +6742,19 @@ a{color:#a78bfa}</style></head><body>
                 }
               }
 
+              // Inject persistent user profile
+              let profileContext = '';
+              if (profileStore) {
+                try {
+                  profileContext = await profileStore.buildProfileContext(userId, orgId);
+                } catch {}
+              }
+
               // Step 2: Build system prompt with user profile + memories
               const recencyHint = isRecencyQuery ? '\n\nIMPORTANT: The user is asking about their MOST RECENT activity. The memories below are sorted newest-first. Focus on the FIRST memory — that is the most recent one. Include its date/time.' : '';
+              const profileSection = profileContext ? `\n\n${profileContext}\n` : '';
               const systemPrompt = `You are HIVEMIND, a personal memory assistant. You have access to the user's stored memories below.
-${recencyHint}
+${profileSection}${recencyHint}
 Rules:
 - Answer the user's question DIRECTLY using the memories provided
 - Be concise — 1-3 sentences for simple questions, more for complex ones

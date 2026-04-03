@@ -83,7 +83,7 @@ export class GraphActionExecutor {
       case 'promote_known_risk':
         return this._promoteRisk(targetIds, content, confidence, dryRun);
       case 'relationship_candidate':
-        return this._createRelationship(targetIds, confidence, dryRun);
+        return this._createRelationship(targetIds, confidence, dryRun, content);
       default:
         return { status: 'skipped', reason: `unknown_action: ${recommendation}` };
     }
@@ -189,6 +189,16 @@ export class GraphActionExecutor {
           metadata: { source: 'turing_graph_action', action: 'merge_duplicate_cluster' },
           created_by: 'turing',
         });
+        // Derives edge: canonical was derived from consolidating these sources
+        await this._safeCreateRelationship({
+          id: randomUUID(),
+          from_id: canonical.id,
+          to_id: dup.id,
+          type: 'Derives',
+          confidence,
+          metadata: { source: 'csi-turing', action_type: 'merge_duplicate_cluster' },
+          created_by: 'csi-turing',
+        });
         await this._safeUpdate(dup.id, {
           isLatest: false,
           supersedesId: canonical.id,
@@ -276,16 +286,37 @@ export class GraphActionExecutor {
     };
 
     await this.store.createMemory(riskMemory);
-    return { status: 'executed', promoted_memory_id: riskMemory.id, summary };
+
+    // Create Derives edges from the promoted risk memory to each evidence source
+    const evidenceIds = content?.evidence_memory_ids || memoryIds;
+    for (const evidenceId of evidenceIds) {
+      await this._safeCreateRelationship({
+        id: randomUUID(),
+        from_id: riskMemory.id,
+        to_id: evidenceId,
+        type: 'Derives',
+        confidence,
+        metadata: { source: 'csi-turing', action_type: 'promote_known_risk' },
+        created_by: 'csi-turing',
+      });
+    }
+
+    return { status: 'executed', promoted_memory_id: riskMemory.id, summary, derives_edges: evidenceIds.length };
   }
 
   /**
-   * Create Extends relationships between related memories.
-   * The first ID is treated as the anchor; all others extend it.
+   * Create relationships between related memories.
+   * The first ID is treated as the anchor; all others connect to it.
+   * Uses Extends for standard relationships, Derives for novel inferred connections.
    */
-  async _createRelationship(memoryIds, confidence, dryRun) {
+  async _createRelationship(memoryIds, confidence, dryRun, content) {
     if (memoryIds.length < 2) return { status: 'skipped', reason: 'need_at_least_2_memories' };
     if (dryRun) return { status: 'dry_run', would_link: memoryIds.length - 1 };
+
+    // Determine relationship type: use Derives for non-standard relationship types
+    const suggestedType = content?.relationship_type;
+    const useDerivesEdge = suggestedType && suggestedType !== 'Updates' && suggestedType !== 'Extends';
+    const edgeType = useDerivesEdge ? 'Derives' : 'Extends';
 
     let created = 0;
     for (let i = 1; i < memoryIds.length; i++) {
@@ -293,14 +324,18 @@ export class GraphActionExecutor {
         id: randomUUID(),
         from_id: memoryIds[i],
         to_id: memoryIds[0],
-        type: 'Extends',
+        type: edgeType,
         confidence,
-        metadata: { source: 'turing_graph_action', action: 'relationship_candidate' },
-        created_by: 'turing',
+        metadata: {
+          source: useDerivesEdge ? 'csi-turing' : 'turing_graph_action',
+          action_type: 'relationship_candidate',
+          ...(suggestedType ? { suggested_relationship_type: suggestedType } : {}),
+        },
+        created_by: useDerivesEdge ? 'csi-turing' : 'turing',
       });
       created++;
     }
-    return { status: 'executed', relationships_created: created };
+    return { status: 'executed', relationships_created: created, edge_type: edgeType };
   }
 
   // ── helpers ──────────────────────────────────────────────────────

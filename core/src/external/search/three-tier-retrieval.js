@@ -23,6 +23,9 @@ const { scoreAndRank, adjustWeightsForQuery } = scorer;
 import hybridSearch from './hybrid.js';
 import { PanoramaSearch } from './panorama-search.js';
 import { InsightForge } from './insight-forge.js';
+import { rewriteQuery } from '../../search/query-rewriter.js';
+import { deduplicateResults } from '../../search/result-dedup.js';
+import { ResultReranker } from '../../search/result-reranker.js';
 
 // ==========================================
 // Configuration
@@ -125,6 +128,8 @@ export class ThreeTierRetrieval {
       config: this.config
     });
 
+    this.reranker = new ResultReranker();
+
     this.insightEngine = new InsightForge({
       vectorStore: this.vectorStore,
       graphStore: this.graphStore,
@@ -193,9 +198,13 @@ export class ThreeTierRetrieval {
     }
 
     try {
+      // Rewrite query for better semantic coverage
+      const rewritten = rewriteQuery(query);
+      const effectiveQuery = rewritten.expanded || query;
+
       // Perform hybrid search with shallow depth
       const results = await hybridSearch.hybridSearch({
-        query,
+        query: effectiveQuery,
         userId,
         orgId,
         project,
@@ -224,26 +233,34 @@ export class ThreeTierRetrieval {
         recencyBias: 0.7
       });
 
+      // Deduplicate semantically similar results
+      const dedupedResults = deduplicateResults(rankedResults);
+
+      // Rerank using multi-signal scoring
+      const rerankedResults = this.reranker.rerank(query, dedupedResults);
+
       const duration = Date.now() - startTime;
 
       logger.info('QuickSearch completed', {
         requestId,
         durationMs: duration,
-        resultCount: rankedResults.length,
+        resultCount: rerankedResults.length,
         totalFound: results.results.length
       });
 
       return {
         tier: 'quick',
         query,
-        results: rankedResults.slice(0, limit),
+        results: rerankedResults.slice(0, limit),
         metadata: {
           requestId,
           durationMs: duration,
           totalFound: results.results.length,
-          returnedCount: Math.min(rankedResults.length, limit),
+          returnedCount: Math.min(dedupedResults.length, limit),
+          deduplicated: rankedResults.length - dedupedResults.length,
           scoreThreshold,
           fallbackApplied,
+          queryRewrite: { expanded: rewritten.expanded, entities: rewritten.entities },
           timestamp: new Date().toISOString()
         }
       };
@@ -308,8 +325,12 @@ export class ThreeTierRetrieval {
     }
 
     try {
+      // Rewrite query for better semantic coverage
+      const rewritten = rewriteQuery(query);
+      const effectiveQuery = rewritten.expanded || query;
+
       // Delegate to PanoramaSearch module
-      const results = await this.panoramaSearchEngine.search(query, {
+      const results = await this.panoramaSearchEngine.search(effectiveQuery, {
         userId,
         orgId,
         includeExpired,
@@ -318,6 +339,13 @@ export class ThreeTierRetrieval {
         limit,
         weights: this.config.weights.panoramaSearch
       });
+
+      // Deduplicate semantically similar results
+      const beforeCount = results.results.length;
+      results.results = deduplicateResults(results.results);
+
+      // Rerank using multi-signal scoring
+      results.results = this.reranker.rerank(query, results.results);
 
       const duration = Date.now() - startTime;
 
@@ -335,6 +363,8 @@ export class ThreeTierRetrieval {
         metadata: {
           requestId,
           durationMs: duration,
+          deduplicated: beforeCount - results.results.length,
+          queryRewrite: { expanded: rewritten.expanded, entities: rewritten.entities },
           timestamp: new Date().toISOString()
         }
       };

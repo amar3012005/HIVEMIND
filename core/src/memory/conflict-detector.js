@@ -87,6 +87,71 @@ export class ConflictDetector {
     return candidates.sort((left, right) => right.similarity - left.similarity);
   }
 
+  /**
+   * Detect contradictions between a new memory and candidate existing memories.
+   * Targets the similarity band 0.40-0.85 (same topic, different content).
+   * Returns an array of { memory, contradictionType, confidence } objects.
+   */
+  detectContradictions(newMemory, existingMemories = []) {
+    const NEGATION_PATTERNS = [
+      { pattern: /\b(not|no longer|stopped|quit|never|don't|doesn't|didn't|isn't|aren't|wasn't|weren't|can't|won't|haven't|hasn't)\b/i, type: 'negation', weight: 0.7 },
+      { pattern: /\b(changed|switched|moved|replaced|updated|corrected|revised)\b.*\b(from|to)\b/i, type: 'change', weight: 0.8 },
+      { pattern: /\b(used to|formerly|previously|before)\b/i, type: 'temporal_shift', weight: 0.75 },
+      { pattern: /\b(actually|in fact|correction|wrong|incorrect|mistake)\b/i, type: 'explicit_correction', weight: 0.9 },
+    ];
+
+    const newContent = newMemory.content || '';
+    const contradictions = [];
+
+    for (const existing of existingMemories) {
+      const existingContent = existing.content || '';
+      const similarity = computeTokenSimilarity(newContent, existingContent);
+
+      // Only consider the "same topic, different content" band
+      if (similarity < 0.40 || similarity > 0.85) continue;
+
+      let bestMatch = null;
+
+      for (const { pattern, type, weight } of NEGATION_PATTERNS) {
+        const newHas = pattern.test(newContent);
+        const existingHas = pattern.test(existingContent);
+
+        // Contradiction signal: one or both contain negation/change language
+        if (newHas || existingHas) {
+          // Higher confidence when both sides show contradictory language
+          const confidence = (newHas && existingHas) ? Math.min(weight + 0.1, 0.95) : weight;
+          if (!bestMatch || confidence > bestMatch.confidence) {
+            bestMatch = { type, confidence };
+          }
+        }
+      }
+
+      // Additional check: numeric/date value divergence on same topic
+      if (!bestMatch) {
+        const newNumbers = (newContent.match(/\b\d+(\.\d+)?\b/g) || []).map(Number);
+        const existingNumbers = (existingContent.match(/\b\d+(\.\d+)?\b/g) || []).map(Number);
+        if (newNumbers.length > 0 && existingNumbers.length > 0) {
+          // If there are numbers in both and they differ, flag as potential temporal contradiction
+          const sharedTopic = similarity >= 0.50;
+          const differentValues = newNumbers.some(n => existingNumbers.length > 0 && !existingNumbers.includes(n));
+          if (sharedTopic && differentValues) {
+            bestMatch = { type: 'value_divergence', confidence: 0.6 };
+          }
+        }
+      }
+
+      if (bestMatch) {
+        contradictions.push({
+          memory: existing,
+          contradictionType: bestMatch.type,
+          confidence: bestMatch.confidence,
+        });
+      }
+    }
+
+    return contradictions;
+  }
+
   contentHash(content = '') {
     return crypto.createHash('sha256').update(content).digest('hex');
   }

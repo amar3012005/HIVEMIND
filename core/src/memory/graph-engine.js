@@ -740,6 +740,92 @@ export class MemoryGraphEngine {
 
         await this._enqueueDeriveCandidates(store, baseMemory, latestMemories);
 
+        // Detect contradictions with existing memories
+        if (this.conflictDetector && latestMemories.length > 0) {
+          try {
+            const contradictions = this.conflictDetector.detectContradictions(baseMemory, latestMemories);
+            for (const c of contradictions) {
+              await store.createRelationship({
+                id: crypto.randomUUID ? crypto.randomUUID() : `crel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                from_id: baseMemory.id,
+                to_id: c.memory.id,
+                type: 'Contradicts',
+                confidence: c.confidence,
+                metadata: {
+                  contradiction_type: c.contradictionType,
+                  detected_at: new Date().toISOString(),
+                  source: 'auto-detection',
+                },
+                created_by: 'conflict-detector',
+              });
+            }
+            if (contradictions.length > 0) {
+              console.log(`[contradiction] Detected ${contradictions.length} contradictions for memory ${baseMemory.id}`);
+              result.contradictions = contradictions.map(c => ({
+                memory_id: c.memory.id,
+                type: c.contradictionType,
+                confidence: c.confidence,
+              }));
+            }
+          } catch (contradictionErr) {
+            console.warn('[contradiction] Detection failed:', contradictionErr.message);
+          }
+        }
+
+        // --- Auto-Derives from SmartIngestRouter ---
+        // When the router detected multiple moderately-similar source memories,
+        // create Derives edges: source → new memory (synthesis relationship).
+        if (input._derives_from && Array.isArray(input._derives_from)) {
+          for (const source of input._derives_from) {
+            try {
+              await store.createRelationship({
+                id: crypto.randomUUID ? crypto.randomUUID() : `drel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                from_id: source.id,
+                to_id: baseMemory.id,
+                type: 'Derives',
+                confidence: source.score || 0.6,
+                metadata: { auto_derived: true, source: 'smart_ingest_router' },
+                created_at: nowIso(),
+              });
+              result.edgesCreated.push({ type: 'Derives', from: source.id, to: baseMemory.id });
+            } catch (err) {
+              // Non-fatal: edge creation should never block ingest
+            }
+          }
+        }
+
+        // --- Auto-Derives from processor similarity ---
+        // When the MemoryProcessor was given 2+ similar memories for comparison
+        // and the relationship was not Updates/Extends (i.e. a new memory that
+        // synthesizes insights from multiple existing ones), create Derives edges.
+        if (processorResult && !input._derives_from
+            && classification.operation === 'created'
+            && processorResult.factSentences?.length > 0) {
+          // The similar memories that were passed to the processor
+          const candidates = pcResult?.needsConflictResolution && pcResult.matchedMemoryIds?.length > 0
+            ? latestMemories.filter(m => pcResult.matchedMemoryIds.includes(m.id))
+            : this.conflictDetector.detectCandidates(baseMemory, latestMemories).map(c => c.memory);
+
+          if (candidates.length >= 2) {
+            for (const cand of candidates.slice(0, 5)) {
+              try {
+                await store.createRelationship({
+                  id: crypto.randomUUID ? crypto.randomUUID() : `drel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                  from_id: cand.id,
+                  to_id: baseMemory.id,
+                  type: 'Derives',
+                  confidence: 0.7,
+                  metadata: { auto_derived: true, source: 'ingest_synthesis' },
+                  created_at: nowIso(),
+                });
+                result.edgesCreated.push({ type: 'Derives', from: cand.id, to: baseMemory.id });
+              } catch (err) {
+                // Non-fatal
+              }
+            }
+          }
+        }
+
         // Attach predict-calibrate metadata when available
         if (pcResult) {
           result.noveltyScore = pcResult.noveltyScore;

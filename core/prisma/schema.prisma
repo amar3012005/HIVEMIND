@@ -34,6 +34,7 @@ enum RelationshipType {
   Updates
   Extends
   Derives
+  Contradicts
 }
 
 enum VisibilityScope {
@@ -951,4 +952,32 @@ model MetaDecaySchedule {
   created_at     DateTime @default(now())
 
   @@map("meta_decay_schedules")
+}
+
+/// Persistent user profile facts — durable context layer
+/// Separates standing user knowledge from episodic memory search
+model UserProfile {
+  id        String   @id @default(uuid()) @map("id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  orgId     String?  @map("org_id") @db.Uuid
+
+  // Profile fact
+  category  String   @default("static") // "static" | "dynamic" | "preference" | "goal"
+  key       String   // e.g. "name", "company", "role", "preferred_language"
+  value     String   // e.g. "Amar", "DaVinci AI", "founder"
+  confidence Float   @default(1.0)
+  sourceMemoryId String? @map("source_memory_id") @db.Uuid
+
+  // Lifecycle
+  confirmedCount Int @default(1) @map("confirmed_count") // incremented when re-extracted
+  lastConfirmedAt DateTime @default(now()) @map("last_confirmed_at")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  @@unique([userId, key])
+  @@index([userId])
+  @@index([userId, category])
+  @@map("user_profiles")
 }

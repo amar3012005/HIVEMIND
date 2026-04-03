@@ -122,12 +122,21 @@ export class GmailAdapter extends BaseProviderAdapter {
     const subject = this._getHeader(firstMessage, 'Subject') || '(no subject)';
     const threadLabels = this._getThreadLabels(messages);
 
+    // Determine user's own email for content attribution
+    const userEmail = (context.user_account_ref || '').toLowerCase();
+
     for (let i = 0; i < messages.length; i++) {
       const msg = messages[i];
       const from = this._getHeader(msg, 'From') || '';
       const to = this._getHeader(msg, 'To') || '';
       const date = this._getHeader(msg, 'Date');
       const body = this._extractBody(msg);
+
+      // Determine content attribution: did the user send this or receive it?
+      const fromEmail = (from.match(/[\w.+-]+@[\w.-]+\.\w{2,}/) || [''])[0].toLowerCase();
+      const sentByUser = userEmail && fromEmail === userEmail;
+      const isNewsletter = /\b(newsletter|noreply|no-reply|unsubscribe|marketing|digest|updates@|info@|hello@)\b/i.test(from + ' ' + body.slice(0, 200));
+      const attribution = sentByUser ? 'first_person' : isNewsletter ? 'newsletter' : 'third_party';
 
       const content = [
         `Subject: ${subject}`,
@@ -143,6 +152,9 @@ export class GmailAdapter extends BaseProviderAdapter {
       if (participants.length) {
         tags.push(...participants.slice(0, 3).map(p => `from:${p}`));
       }
+      // Tag attribution for downstream filtering
+      if (attribution === 'newsletter') tags.push('newsletter');
+      if (sentByUser) tags.push('sent-by-user');
 
       const payload = {
         user_id: context.user_id,
@@ -168,6 +180,8 @@ export class GmailAdapter extends BaseProviderAdapter {
           labels: threadLabels,
           message_index: i,
           thread_length: messages.length,
+          content_attribution: attribution,
+          sent_by_user: sentByUser,
         },
       };
 

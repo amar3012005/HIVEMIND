@@ -215,19 +215,36 @@ function collapseNearDuplicates(scored, options = {}) {
 function applyRecallRelevanceFloor(scored, options = {}) {
   const { temporalComparison = false } = options;
   if (scored.length === 0) return [];
-  const topScore = scored[0].score;
-  const topSimilarity = scored[0].similarityScore ?? 0;
+
+  // Hard absolute minimum — never return results below these thresholds
+  const HARD_MIN_SCORE = 0.15;
+  const HARD_MIN_SIMILARITY = 0.10;
+
+  // First pass: enforce hard minimum (no exceptions)
+  const viable = scored.filter(item =>
+    item.score >= HARD_MIN_SCORE &&
+    (item.similarityScore ?? 0) >= HARD_MIN_SIMILARITY
+  );
+
+  // If nothing passes hard minimum, return empty — the LLM should say "I don't know"
+  if (viable.length === 0) return [];
+
+  // Second pass: relative floor based on top score (quality gradient)
+  const topScore = viable[0].score;
+  const topSimilarity = viable[0].similarityScore ?? 0;
   const minimumScore = temporalComparison
-    ? Math.max(topScore * 0.20, 0.08)
-    : Math.max(topScore * 0.30, 0.12);
+    ? Math.max(topScore * 0.20, HARD_MIN_SCORE)
+    : Math.max(topScore * 0.30, HARD_MIN_SCORE);
   const minimumSimilarity = temporalComparison
-    ? Math.max(topSimilarity * 0.25, 0.14)
-    : Math.max(topSimilarity * 0.40, 0.22);
-  const filtered = scored.filter(item =>
+    ? Math.max(topSimilarity * 0.25, HARD_MIN_SIMILARITY)
+    : Math.max(topSimilarity * 0.40, HARD_MIN_SIMILARITY);
+
+  const filtered = viable.filter(item =>
     item.score >= minimumScore &&
     (item.similarityScore ?? 0) >= minimumSimilarity
   );
-  return filtered.length > 0 ? filtered : scored.slice(0, temporalComparison ? 5 : 1);
+
+  return filtered.length > 0 ? filtered : viable.slice(0, temporalComparison ? 5 : 3);
 }
 
 function mergeCandidateLists(...lists) {
@@ -868,6 +885,11 @@ export async function recallPersistedMemories(store, {
         temporalBoost;
     // Superseded memory penalty
     if (memory.is_latest === false) score *= 0.55;
+    // Content attribution: mild deprioritization for third-party content
+    // Still findable when directly asked, but user's own content ranks higher
+    const attribution = memory.metadata?.content_attribution;
+    if (attribution === 'newsletter') score *= 0.5;
+    else if (attribution === 'third_party') score *= 0.8;
     return {
       memory,
       vectorScore,
@@ -909,6 +931,10 @@ export async function recallPersistedMemories(store, {
         temporalBoost;
     // Superseded memory penalty
     if (candidate.memory?.is_latest === false) score *= 0.55;
+    // Content attribution: mild deprioritization for third-party content
+    const attribution = candidate.memory?.metadata?.content_attribution;
+    if (attribution === 'newsletter') score *= 0.5;
+    else if (attribution === 'third_party') score *= 0.8;
     return {
       ...candidate,
       keywordScore: candidate.similarityScore || 0,

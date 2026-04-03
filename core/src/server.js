@@ -6716,13 +6716,23 @@ a{color:#a78bfa}</style></head><body>
                       const existingIds = new Set(recalledMemories.map(m => m.id));
                       for (const m of recentReal) {
                         if (!existingIds.has(m.id)) {
+                          m._recencyInjected = true;
                           recalledMemories.unshift(m);
                         }
                       }
                     } catch {}
                   }
 
-                  memories = recalledMemories.slice(0, 15).map(m => {
+                  // Filter out irrelevant results before LLM injection
+                  const CHAT_MIN_SCORE = 0.12;
+                  const relevantMemories = recalledMemories.filter(m => {
+                    const score = m.score || 0;
+                    // Recency-injected memories from listLatestMemories are tagged with _recencyInjected
+                    if (m._recencyInjected) return true;
+                    return score >= CHAT_MIN_SCORE;
+                  });
+
+                  memories = relevantMemories.slice(0, 15).map(m => {
                     const isFact = (m.tags || []).includes('extracted-fact');
                     return {
                       id: m.id,
@@ -6761,6 +6771,7 @@ Rules:
 - If memories contain the answer, give it confidently
 - If memories conflict, use the most recent one
 - If no memories are relevant, say "I don't have that in my memory"
+- CRITICAL: Distinguish between things the USER did/said/decided vs things they merely RECEIVED or READ. An email FROM someone else is NOT the user's project — it's information they received. When answering, make the source clear: "You mentioned..." for user-authored content, "From an email you received..." or "According to a newsletter..." for third-party content. You CAN still answer questions about received content — just don't attribute other people's actions/projects to the user.
 - Do NOT list or evaluate each memory — just answer naturally
 - Do NOT say "Based on my memories" or "According to my records" — just answer
 - ${toneGuidance}
@@ -6783,7 +6794,11 @@ ${injectionText}`;
                 }
                 for (const m of regularMems.slice(0, 5)) {
                   const date = m.document_date ? ` [${m.document_date.slice(0, 10)}]` : '';
-                  parts.push(`Memory${date}: ${m.content}`);
+                  // Add attribution hint so LLM knows if this is user's own content or received
+                  const sentByUser = (m.tags || []).includes('sent-by-user');
+                  const isNewsletter = (m.tags || []).includes('newsletter');
+                  const attrHint = sentByUser ? ' [sent by user]' : isNewsletter ? ' [newsletter/external]' : '';
+                  parts.push(`Memory${date}${attrHint}: ${m.content}`);
                   if (m.parent_chunk) parts.push(`Full context: ${m.parent_chunk}`);
                 }
                 memoryContext = '\n\nRetrieved Memories:\n' + parts.join('\n\n');

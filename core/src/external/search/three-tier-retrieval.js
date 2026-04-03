@@ -218,13 +218,16 @@ export class ThreeTierRetrieval {
         depth: this.config.depth.shallow
       });
 
-      // Apply score threshold, but don't discard all lexical/hybrid matches.
+      // Apply score threshold — never return results below minimum
+      const HARD_MIN_SCORE = 0.15;
+      const effectiveThreshold = Math.max(scoreThreshold, HARD_MIN_SCORE);
       const filteredResults = results.results.filter(
-        r => r.score >= scoreThreshold
+        r => r.score >= effectiveThreshold
       );
       const fallbackApplied = filteredResults.length === 0 && results.results.length > 0;
+      // Fallback: only include results above hard minimum (not ALL results)
       const candidateResults = fallbackApplied
-        ? results.results.slice(0, limit)
+        ? results.results.filter(r => r.score >= HARD_MIN_SCORE).slice(0, limit)
         : filteredResults;
 
       // Rank with recency bias for quick results

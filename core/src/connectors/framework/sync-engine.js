@@ -113,11 +113,13 @@ export class SyncEngine {
 
           try {
             // Dedupe check
-            // Normalize to memory payloads
+            // Normalize to memory payloads — pass user's account ref for attribution
+            const userAccountRef = existingConnector?.account_ref || existingConnector?.platformUserId || null;
             const payloads = adapter.normalize(record, {
               user_id: userId,
               org_id: orgId,
               connector_id: provider,
+              user_account_ref: userAccountRef,
             });
 
             // Ingest each payload

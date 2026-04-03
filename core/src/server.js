@@ -142,6 +142,9 @@ const { InMemoryStore } = await import('./executor/stores/in-memory-store.js');
 const { ResidentRunManager } = await import('./resident/run-manager.js');
 const { createResidentRoutes } = await import('./resident/routes.js');
 
+// Graph Hygiene Scanner
+const { GraphHygieneScanner } = await import('./resident/graph-hygiene-scanner.js');
+
 // TARA Voice Agent imports
 const { TaraStreamHandler } = await import('./tara/stream-handler.js');
 const { TaraConfigStore } = await import('./tara/config-store.js');
@@ -231,6 +234,12 @@ const profileStore = prisma ? new ProfileStore(prisma) : null;
 let smartIngestRouter = null;
 if (persistentMemoryStore) {
   smartIngestRouter = new SmartIngestRouter({ memoryStore: persistentMemoryStore });
+}
+
+// Graph Hygiene Scanner
+let hygieneScanner = null;
+if (persistentMemoryStore) {
+  hygieneScanner = new GraphHygieneScanner(persistentMemoryStore, prisma);
 }
 
 // ─── Audit logging helper (Scale / Enterprise only) ─────────────────────────
@@ -5981,6 +5990,134 @@ a{color:#a78bfa}</style></head><body>
                 error: 'Graph generation failed',
                 message: error.message
               }, 500);
+            }
+          }
+          break;
+
+        case '/api/graph/hygiene/scan':
+          if (req.method === 'POST') {
+            if (!ensurePersistedMemoryOrFail(res, '/api/graph/hygiene/scan')) {
+              return;
+            }
+            if (!hygieneScanner) {
+              return jsonResponse(res, { error: 'Graph hygiene scanner not available' }, 503);
+            }
+            try {
+              const categories = body.categories || ['duplicates', 'noise', 'stale', 'orphans', 'artifacts', 'contradictions'];
+              const limit = Math.min(parseInt(body.limit) || 100, 500);
+              const scanResult = await hygieneScanner.scan(userId, orgId, { categories, limit });
+              auditLog({
+                userId,
+                organizationId: orgId,
+                eventType: 'graph.hygiene.scan',
+                eventCategory: 'data_access',
+                action: 'scan',
+                resourceType: 'graph',
+                metadata: { categories, proposalCount: scanResult.proposals?.length || 0 },
+                ipAddress: req.headers['x-forwarded-for'] || req.socket?.remoteAddress || null,
+                userAgent: req.headers['user-agent'] || null,
+              });
+              jsonResponse(res, scanResult);
+            } catch (error) {
+              console.error('Graph hygiene scan failed:', error);
+              return jsonResponse(res, { error: 'Hygiene scan failed', message: error.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/graph/hygiene/execute':
+          if (req.method === 'POST') {
+            if (!ensurePersistedMemoryOrFail(res, '/api/graph/hygiene/execute')) {
+              return;
+            }
+            if (!hygieneScanner) {
+              return jsonResponse(res, { error: 'Graph hygiene scanner not available' }, 503);
+            }
+            try {
+              const { proposals, action } = body;
+              if (!proposals || !Array.isArray(proposals) || proposals.length === 0) {
+                return jsonResponse(res, { error: 'proposals array is required' }, 400);
+              }
+              if (!action || !['merge', 'delete', 'archive', 'suppress'].includes(action)) {
+                return jsonResponse(res, { error: 'action must be one of: merge, delete, archive, suppress' }, 400);
+              }
+              const results = await hygieneScanner.executeProposals(proposals, action);
+              auditLog({
+                userId,
+                organizationId: orgId,
+                eventType: 'graph.hygiene.execute',
+                eventCategory: 'data_modification',
+                action: action,
+                resourceType: 'graph',
+                metadata: { proposalCount: proposals.length, action, results },
+                ipAddress: req.headers['x-forwarded-for'] || req.socket?.remoteAddress || null,
+                userAgent: req.headers['user-agent'] || null,
+              });
+              jsonResponse(res, { results });
+            } catch (error) {
+              console.error('Graph hygiene execute failed:', error);
+              return jsonResponse(res, { error: 'Hygiene execute failed', message: error.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/graph/hygiene/stats':
+          if (req.method === 'GET') {
+            if (!ensurePersistedMemoryOrFail(res, '/api/graph/hygiene/stats')) {
+              return;
+            }
+            try {
+              const total_memories = await prisma.memory.count({ where: { userId, orgId, isLatest: true } });
+              const noise_estimate = await prisma.memory.count({ where: { userId, orgId, content: { contains: 'unsubscribe' } } });
+              const artifact_count = await prisma.memory.count({
+                where: {
+                  userId,
+                  orgId,
+                  OR: [
+                    { title: { startsWith: 'TARA Turn' } },
+                    { title: { startsWith: 'Clinical Insight' } },
+                    { title: { startsWith: 'Session:' } },
+                  ],
+                },
+              });
+
+              // Estimate duplicates: memories with identical titles
+              const userIdUuid = userId;
+              const orgIdUuid = orgId;
+              const duplicateGroups = await prisma.$queryRaw`
+                SELECT COUNT(*)::int as cnt FROM (
+                  SELECT title FROM memories
+                  WHERE user_id = ${userIdUuid}::uuid AND org_id = ${orgIdUuid}::uuid AND deleted_at IS NULL
+                  GROUP BY title HAVING COUNT(*) > 1
+                ) sub
+              `;
+              const duplicate_estimate = Number(duplicateGroups[0]?.cnt || 0);
+
+              // Orphan estimate: memories with no relationships
+              const connected = await prisma.$queryRaw`
+                SELECT COUNT(DISTINCT m.id)::int as cnt FROM memories m
+                INNER JOIN relationships r ON m.id = r.from_id OR m.id = r.to_id
+                WHERE m.user_id = ${userIdUuid}::uuid AND m.org_id = ${orgIdUuid}::uuid AND m.deleted_at IS NULL
+              `;
+              const orphan_estimate = Math.max(0, total_memories - Number(connected[0]?.cnt || 0));
+
+              // Stale estimate: memories not updated in 90+ days
+              const staleDate = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+              const stale_estimate = await prisma.memory.count({
+                where: { userId, orgId, deletedAt: null, updatedAt: { lt: staleDate } },
+              });
+
+              jsonResponse(res, {
+                total_memories,
+                noise_estimate,
+                duplicate_estimate,
+                orphan_estimate,
+                stale_estimate,
+                artifact_count,
+              });
+            } catch (error) {
+              console.error('Graph hygiene stats failed:', error);
+              return jsonResponse(res, { error: 'Hygiene stats failed', message: error.message }, 500);
             }
           }
           break;

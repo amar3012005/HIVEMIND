@@ -885,11 +885,18 @@ export async function recallPersistedMemories(store, {
         temporalBoost;
     // Superseded memory penalty
     if (memory.is_latest === false) score *= 0.55;
-    // Content attribution: mild deprioritization for third-party content
-    // Still findable when directly asked, but user's own content ranks higher
+    // Content attribution: deprioritize third-party/noise content
     const attribution = memory.metadata?.content_attribution;
     if (attribution === 'newsletter') score *= 0.5;
     else if (attribution === 'third_party') score *= 0.8;
+    // Retroactive detection for untagged existing memories
+    if (!attribution) {
+      const c = (memory.content || '').toLowerCase();
+      const t = (memory.title || '').toLowerCase();
+      if (c.includes('unsubscribe') || c.includes('noreply') || c.includes('no-reply') || c.includes('click here to unsub')) score *= 0.3;
+      else if (t.startsWith('clinical insight') || t.startsWith('tara turn')) score *= 0.4;
+      else if (t.startsWith('session:')) score *= 0.5;
+    }
     return {
       memory,
       vectorScore,
@@ -931,10 +938,18 @@ export async function recallPersistedMemories(store, {
         temporalBoost;
     // Superseded memory penalty
     if (candidate.memory?.is_latest === false) score *= 0.55;
-    // Content attribution: mild deprioritization for third-party content
+    // Content attribution: deprioritize third-party/noise content
     const attribution = candidate.memory?.metadata?.content_attribution;
     if (attribution === 'newsletter') score *= 0.5;
     else if (attribution === 'third_party') score *= 0.8;
+    // Retroactive detection for untagged existing memories
+    if (!attribution && candidate.memory) {
+      const c = (candidate.memory.content || '').toLowerCase();
+      const t = (candidate.memory.title || '').toLowerCase();
+      if (c.includes('unsubscribe') || c.includes('noreply') || c.includes('no-reply') || c.includes('click here to unsub')) score *= 0.3;
+      else if (t.startsWith('clinical insight') || t.startsWith('tara turn')) score *= 0.4;
+      else if (t.startsWith('session:')) score *= 0.5;
+    }
     return {
       ...candidate,
       keywordScore: candidate.similarityScore || 0,

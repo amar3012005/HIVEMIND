@@ -138,16 +138,22 @@ export class GmailAdapter extends BaseProviderAdapter {
       const isNewsletter = /\b(newsletter|noreply|no-reply|unsubscribe|marketing|digest|updates@|info@|hello@)\b/i.test(from + ' ' + body.slice(0, 200));
       const attribution = sentByUser ? 'first_person' : isNewsletter ? 'newsletter' : 'third_party';
 
+      const attachments = this._extractAttachments(msg);
+      const attachmentLine = attachments.length > 0
+        ? `\nAttachments: ${attachments.map(a => `${a.filename} (${a.mimeType})`).join(', ')}`
+        : '';
+
       const content = [
         `Subject: ${subject}`,
         `From: ${from}`,
         `To: ${to}`,
         date ? `Date: ${date}` : null,
         '',
-        body,
+        body + attachmentLine,
       ].filter(Boolean).join('\n');
 
       const tags = [...this.defaultTags, ...threadLabels];
+      if (attachments.length > 0) tags.push('has-attachments');
       const participants = this._extractParticipants(msg);
       if (participants.length) {
         tags.push(...participants.slice(0, 3).map(p => `from:${p}`));
@@ -182,6 +188,9 @@ export class GmailAdapter extends BaseProviderAdapter {
           thread_length: messages.length,
           content_attribution: attribution,
           sent_by_user: sentByUser,
+          attachments: attachments.length > 0 ? attachments : undefined,
+          attachment_count: attachments.length,
+          attachment_names: attachments.map(a => a.filename),
         },
       };
 
@@ -236,6 +245,27 @@ export class GmailAdapter extends BaseProviderAdapter {
   }
 
   // ─── Internal helpers ──────────────────────────────────────
+
+  _extractAttachments(msg) {
+    const attachments = [];
+    const parts = msg.payload?.parts || [];
+
+    const walk = (parts) => {
+      for (const part of parts) {
+        if (part.filename && part.filename.length > 0) {
+          attachments.push({
+            filename: part.filename,
+            mimeType: part.mimeType || 'application/octet-stream',
+            size: part.body?.size || 0,
+            attachmentId: part.body?.attachmentId || null,
+          });
+        }
+        if (part.parts) walk(part.parts); // recurse nested parts
+      }
+    };
+    walk(parts);
+    return attachments;
+  }
 
   async _gmailFetch(path, accessToken) {
     const url = `${GMAIL_API_BASE}${path}`;

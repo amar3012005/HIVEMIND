@@ -102,6 +102,9 @@ const { WebhookManager } = await import('./webhooks/webhook-manager.js');
 // Smart type-aware ingest routing
 const { SmartIngestRouter } = await import('./memory/smart-ingest-router.js');
 
+// Connector sync scheduler
+const { SyncScheduler } = await import('./connectors/framework/sync-scheduler.js');
+
 // Three-Tier Retrieval imports
 const { ThreeTierRetrieval } = await import('./external/search/three-tier-retrieval.js');
 
@@ -243,6 +246,27 @@ if (persistentMemoryStore) {
 let hygieneScanner = null;
 if (persistentMemoryStore) {
   hygieneScanner = new GraphHygieneScanner(persistentMemoryStore, prisma);
+}
+
+// Scheduled connector sync
+let syncScheduler = null;
+if (persistentMemoryEngine && persistentMemoryStore && prisma) {
+  const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
+  const { SyncEngine } = await import('./connectors/framework/sync-engine.js');
+  const schedulerConnStore = new ConnectorStore(prisma);
+  const schedulerSyncEngine = new SyncEngine({
+    connectorStore: schedulerConnStore,
+    memoryEngine: persistentMemoryEngine,
+    memoryStore: persistentMemoryStore,
+    prisma,
+  });
+  syncScheduler = new SyncScheduler({
+    connectorStore: schedulerConnStore,
+    syncEngine: schedulerSyncEngine,
+    prisma,
+    interval: Number(process.env.HIVEMIND_SYNC_INTERVAL_MS || 4 * 60 * 60 * 1000),
+  });
+  syncScheduler.start();
 }
 
 // Deep Research
@@ -3768,6 +3792,18 @@ a{color:#a78bfa}</style></head><body>
             } catch (error) {
               return jsonResponse(res, { error: error.message }, 500);
             }
+          }
+          break;
+
+        // ==========================================
+        // CONNECTOR SYNC SCHEDULE STATUS
+        // ==========================================
+        case '/api/connectors/sync/schedule':
+          if (req.method === 'GET') {
+            if (!syncScheduler) {
+              return jsonResponse(res, { error: 'Sync scheduler not initialized' }, 503);
+            }
+            return jsonResponse(res, syncScheduler.getStats());
           }
           break;
 

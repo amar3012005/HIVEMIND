@@ -100,7 +100,7 @@ const PROVIDER_REGISTRY = {
     adapterModule: './connectors/providers/slack/adapter.js',
     adapterClass: 'SlackAdapter',
     label: 'Slack',
-    scopes: ['channels:history', 'channels:read', 'users:read'],
+    scopes: ['channels:history', 'channels:read', 'groups:history', 'groups:read', 'im:history', 'mpim:history', 'users:read', 'team:read'],
   },
   github: {
     oauthModule: './connectors/providers/github/oauth.js',

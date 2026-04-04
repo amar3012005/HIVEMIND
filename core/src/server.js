@@ -3590,6 +3590,62 @@ a{color:#a78bfa}</style></head><body>
           break;
 
         // ==========================================
+        // SLACK CONNECTOR — Status & Sync
+        // ==========================================
+
+        case '/api/connectors/slack/status':
+          if (req.method === 'GET') {
+            try {
+              const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
+              const statusStore = new ConnectorStore(prisma);
+              const connection = await statusStore.getConnector(userId, 'slack');
+              if (!connection) return jsonResponse(res, { connected: false });
+              return jsonResponse(res, {
+                connected: true,
+                team: connection.account_ref,
+                status: connection.status,
+                target_scope: connection.target_scope,
+                last_synced: connection.last_sync_at,
+                last_error: connection.last_error,
+              });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/connectors/slack/sync':
+          if (req.method === 'POST') {
+            try {
+              const { SlackAdapter } = await import('./connectors/providers/slack/adapter.js');
+              const adapter = new SlackAdapter();
+              const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
+              const slackStore = new ConnectorStore(prisma);
+
+              // Run sync in background
+              const syncId = crypto.randomUUID();
+              setImmediate(async () => {
+                try {
+                  await syncEngine.runSync({
+                    adapter,
+                    userId,
+                    orgId,
+                    provider: 'slack',
+                    incremental: !!body.incremental,
+                    targetScope: body.target_scope || 'personal',
+                  });
+                } catch (err) {
+                  console.error('[slack-sync] Failed:', err.message);
+                }
+              });
+              return jsonResponse(res, { sync_id: syncId, status: 'started' }, 202);
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        // ==========================================
         // KNOWLEDGE BASE — Document Upload
         // ==========================================
 

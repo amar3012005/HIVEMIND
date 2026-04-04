@@ -5,7 +5,7 @@ export function getOAuthConfig() {
     clientSecret: process.env.SLACK_CLIENT_SECRET || '',
     authUrl: 'https://slack.com/oauth/v2/authorize',
     tokenUrl: 'https://slack.com/api/oauth.v2.access',
-    scopes: ['channels:history', 'channels:read', 'users:read', 'team:read'],
+    scopes: ['channels:history', 'channels:read', 'groups:history', 'groups:read', 'im:history', 'mpim:history', 'users:read', 'team:read'],
   };
 }
 
@@ -43,7 +43,9 @@ export async function exchangeCode({ code, redirectUri }) {
     access_token: data.access_token,
     refresh_token: data.refresh_token || null,
     expires_in: null,
-    email: data.authed_user?.id || null,
+    email: data.authed_user?.id || null,  // Slack user ID for attribution
     team: data.team?.name || null,
+    team_id: data.team?.id || null,
+    authed_user_id: data.authed_user?.id || null,
   };
 }

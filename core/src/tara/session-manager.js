@@ -12,11 +12,14 @@ import crypto from 'node:crypto';
 
 const MAX_TURN_HISTORY = 10;
 
+const MAX_PAST_INSIGHTS = 10;  // Keep last N clinical insights for accumulation
+
 function emptyState(sessionId, tenantId, language) {
   return {
     session_id: sessionId,
     tenant_id: tenantId,
     language: language || 'en',
+    language_code: null,       // STT-detected language (from Groq Whisper)
     turn_count: 0,
     user_profile: {
       name: null,
@@ -35,6 +38,9 @@ function emptyState(sessionId, tenantId, language) {
       tone: 'helpful, concise',
       last_commitment: null,
     },
+    // Accumulated clinical insights — each turn's analysis is appended here
+    // Clinical engine sees ALL past insights to build understanding over time
+    past_insights: [],
   };
 }
 
@@ -115,6 +121,11 @@ export class SessionManager {
       if (state.conversation.resolved_points.length > 20) {
         state.conversation.resolved_points = state.conversation.resolved_points.slice(-20);
       }
+    }
+
+    // Bound past insights
+    if (state.past_insights && state.past_insights.length > MAX_PAST_INSIGHTS) {
+      state.past_insights = state.past_insights.slice(-MAX_PAST_INSIGHTS);
     }
 
     // Update user profile from extracted facts

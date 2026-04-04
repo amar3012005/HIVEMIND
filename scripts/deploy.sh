@@ -67,10 +67,43 @@ start_core() {
 }
 
 start_control() {
-  log "Restarting control-plane..."
-  docker restart $COOLIFY_CONTROL 2>/dev/null || err "control-plane not found"
-  sleep 3
-  log "Control-plane restarted."
+  log "Starting control-plane (bind-mount /opt/HIVEMIND/core, port 3002)..."
+  docker stop hm-control 2>/dev/null || true
+  docker rm hm-control 2>/dev/null || true
+  ensure_networks
+
+  docker run -d \
+    --name hm-control \
+    --network $NETWORK \
+    --restart unless-stopped \
+    -p 3002:3000 \
+    -v /opt/HIVEMIND/core:/app \
+    -v /etc/localtime:/etc/localtime:ro \
+    -w /app \
+    --env-file "$COOLIFY_ENV" \
+    -e NODE_ENV=production \
+    -e PORT=3000 \
+    -e "HIVEMIND_API_URL=http://hm-core:3000" \
+    -e "HIVEMIND_CORE_API_BASE_URL=http://hm-core:3000" \
+    -e "HIVEMIND_CONTROL_PLANE_PUBLIC_URL=https://api.hivemind.davinciai.eu:8040" \
+    -e "DATABASE_URL=postgresql://hivemind_user:hivemind_secure_pwd_2026@${COOLIFY_PG}:5432/hivemind?schema=hivemind&connection_limit=20&pool_timeout=30" \
+    -e "REDIS_URL=redis://:redis_secure_vault_7711@${COOLIFY_REDIS}:6379/0" \
+    -e "HIVEMIND_ALLOWED_ORIGINS=https://hivemind.davinciai.eu,https://www.davinciai.eu,https://davinciai.eu" \
+    node:20 \
+    sh -c "npx prisma generate 2>/dev/null; node src/control-plane-server.js"
+
+  log "Waiting for control-plane health..."
+  for i in $(seq 1 20); do
+    sleep 2
+    if curl -sf http://localhost:3002/health >/dev/null 2>&1; then
+      log "control-plane is ${GREEN}healthy${NC} on port 3002"
+      return 0
+    fi
+    echo -n "."
+  done
+  err "control-plane not healthy after 40s"
+  docker logs hm-control --tail 20
+  return 1
 }
 
 verify() {

@@ -7,10 +7,10 @@
  */
 
 const DEFAULT_CONFIG = {
-  system_prompt: 'You are a helpful AI assistant. Answer concisely and accurately. This is a voice conversation — keep responses under 3 sentences unless the user asks for detail.',
-  clinical_prompt: '',  // empty means clinical reasoning disabled
-  clinical_model: '',   // empty means use main model; set for dedicated reasoning model
-  model: 'openai/gpt-oss-120b',
+  system_prompt: '',   // Empty = use TARA_SYSTEM_PROMPT from prompt-builder
+  clinical_prompt: '', // Empty = use CLINICAL_SYSTEM_PROMPT from clinical-reasoning
+  clinical_model: 'openai/gpt-oss-120b',   // Clinical reasoning model (with reasoning enabled)
+  model: 'openai/gpt-oss-20b',  // Normal conversation model (reasoning disabled for speed)
   temperature: 0.7,
   max_tokens: 300,
   voice_optimized: true,

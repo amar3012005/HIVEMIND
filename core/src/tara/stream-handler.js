@@ -49,6 +49,7 @@ export class TaraStreamHandler {
       tenant_id: tenantId,
       agent_name: agentName,
       language,
+      language_code: sttLanguageCode,  // From STT (Groq Whisper) — forwarded by orchestrator
       interrupted_text: interruptedText,
       interruption_type: interruptionType,
     } = params;
@@ -93,6 +94,16 @@ export class TaraStreamHandler {
       ]);
 
       const memories = recallResult.memories || [];
+
+      // Store STT language_code in session — this is the source of truth for language
+      // STT detection > explicit language param > session history > default 'en'
+      if (sttLanguageCode) {
+        sessionState.language_code = sttLanguageCode;
+      } else if (language && language !== 'en') {
+        sessionState.language_code = language;
+      }
+      // If neither provided, session keeps its existing language_code (or null)
+
       const fetchMs = Date.now() - startMs;
       this._writeLine(res, {
         type: 'status', step: 'context_ready',
@@ -120,7 +131,8 @@ export class TaraStreamHandler {
         voiceOptimized: config.voice_optimized !== false,
         interruptedText,
         interruptionType,
-        clinicalInsights: sessionState.clinical_insights || null,
+        // Pass the latest clinical insight (single directive, not the full history)
+        clinicalInsight: sessionState.clinical_insights || null,
       });
 
       this._writeLine(res, {
@@ -145,6 +157,7 @@ export class TaraStreamHandler {
           temperature: config.temperature ?? 0.7,
           max_tokens: config.max_tokens ?? 300,
           stream: true,
+          // Disable reasoning for normal fast conversations
           ...(model.includes('gpt-oss') ? { include_reasoning: false } : {}),
         }),
       });
@@ -162,6 +175,8 @@ export class TaraStreamHandler {
       const reader = llmResp.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      let chunkCount = 0;
+      let emptyChunkCount = 0;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -178,11 +193,19 @@ export class TaraStreamHandler {
 
           try {
             const chunk = JSON.parse(data);
+            chunkCount++;
+
             // Capture usage from final chunk (Groq/OpenAI include it)
             if (chunk.usage) mainUsage = chunk.usage;
             if (chunk.x_groq?.usage) mainUsage = chunk.x_groq.usage;
+
+            // Extract delta content — handle both standard and alternative formats
+            // Standard: chunk.choices[0].delta.content = "text"
+            // Alternative (gpt-oss): chunk.choices[0].delta.content = "" (empty) or missing
             const delta = chunk.choices?.[0]?.delta?.content;
-            if (delta) {
+
+            // Only process if delta is truthy (non-empty string)
+            if (delta && delta.length > 0) {
               if (ttfb === null) {
                 ttfb = Date.now() - llmStartMs;
                 this._writeLine(res, {
@@ -193,11 +216,26 @@ export class TaraStreamHandler {
               }
               fullResponse += delta;
               this._writeLine(res, { type: 'text', text: delta, content: delta, is_final: false });
+            } else {
+              emptyChunkCount++;
+              // Debug: log empty chunks for gpt-oss models (helps diagnose streaming issues)
+              if (model.includes('gpt-oss') && chunkCount <= 3) {
+                console.debug(`[tara/stream] ${model} chunk #${chunkCount} has no delta.content. Available keys:`,
+                  Object.keys(chunk.choices?.[0]?.delta || {}));
+              }
             }
-          } catch {
-            // Skip malformed chunks
+          } catch (err) {
+            // Skip malformed chunks but log for gpt-oss
+            if (model.includes('gpt-oss')) {
+              console.debug(`[tara/stream] ${model} malformed chunk: ${line.slice(0, 100)}`);
+            }
           }
         }
+      }
+
+      // Diagnostic log for empty responses
+      if (model.includes('gpt-oss') && (chunkCount === 0 || fullResponse.trim() === '')) {
+        console.warn(`[tara/stream] ${model} streaming diagnostic: chunkCount=${chunkCount}, emptyChunks=${emptyChunkCount}, responseLen=${fullResponse.length}`);
       }
       // Estimate tokens if usage not returned by model
       if (!mainUsage) {
@@ -206,6 +244,17 @@ export class TaraStreamHandler {
           completion_tokens: Math.ceil(fullResponse.length / 4),
           total_tokens: tokenEstimate + Math.ceil(fullResponse.length / 4),
         };
+      }
+
+      // Check for empty response (critical error for gpt-oss models)
+      if (!fullResponse || fullResponse.trim() === '') {
+        console.warn(`[tara/stream] WARNING: Empty response from ${model}. This usually indicates model streaming failure or malformed chunks.`);
+        this._writeLine(res, {
+          type: 'error',
+          message: `Model ${model} returned empty response`,
+          model,
+          latency_ms: Date.now() - startMs,
+        });
       }
 
       // ── STEP 4: Done event ──
@@ -299,6 +348,15 @@ export class TaraStreamHandler {
       userSummary, assistantSummary,
     });
 
+    // Pre-cache session with "analyzing" status if clinical reasoning is enabled
+    // This ensures rapid users can still reference turn metadata even if insights aren't ready yet
+    if (sessionState._clinical_prompt) {
+      sessionState._clinical_status = 'analyzing';
+      sessionState._clinical_started_at = Date.now();
+      this.sessionManager._cache.set(sessionId, { state: { ...sessionState }, updatedAt: Date.now() });
+      console.log(`[tara/session] Clinical reasoning pending for session ${sessionId.slice(0, 12)}`);
+    }
+
     // 2. Save this turn as a graph memory (visible in MemoryGraph as purple node)
     try {
       const turnId = crypto.randomUUID();
@@ -356,18 +414,21 @@ export class TaraStreamHandler {
     }
 
     // 3. Run clinical reasoning (async background — never blocks)
-    //    Try clinical_model first, fall back to main model if it fails
+    //    Passes FULL turn history + ALL past insights for accumulation
     if (sessionState._clinical_prompt) {
       try {
         const clinicalModel = sessionState._clinical_model || this.clinicalEngine.model;
         const mainModel = this.defaultModel;
+
+        // Accumulated past insights — clinical sees its entire analysis chain
+        const pastInsights = sessionState.past_insights || [];
 
         // Try clinical model first
         this.clinicalEngine.model = clinicalModel;
         let insights = await this.clinicalEngine.analyze({
           clinicalPrompt: sessionState._clinical_prompt,
           sessionState, lastQuery: query, lastResponse: response,
-          previousInsights: sessionState.clinical_insights || null,
+          pastInsights,
         });
 
         // Fallback to main model if clinical model failed
@@ -377,31 +438,45 @@ export class TaraStreamHandler {
           insights = await this.clinicalEngine.analyze({
             clinicalPrompt: sessionState._clinical_prompt,
             sessionState, lastQuery: query, lastResponse: response,
-            previousInsights: sessionState.clinical_insights || null,
+            pastInsights,
           });
         }
 
         if (insights) {
+          // Store as latest insight for TARA's next turn prompt
           sessionState.clinical_insights = insights;
-          // Update session manager cache so next turn sees these insights immediately
+          // ACCUMULATE: append to past_insights so future clinical runs see the full chain
+          if (!sessionState.past_insights) sessionState.past_insights = [];
+          sessionState.past_insights.push({
+            turn_number: insights.turn_number,
+            directive: insights.directive,
+            strategy: insights.strategy,
+            user_type: insights.user_type,
+            hypotheses: insights.hypotheses,
+            psychological_notes: insights.psychological_notes,
+            analyzed_at: insights.analyzed_at,
+          });
+          sessionState._clinical_status = 'ready';
+          sessionState._clinical_completed_at = Date.now();
+          // Update cache so next turn sees these insights immediately
           this.sessionManager._cache.set(sessionId, { state: { ...sessionState }, updatedAt: Date.now() });
+          const duration = Date.now() - (sessionState._clinical_started_at || 0);
+          console.log(`[tara/clinical] Insights ready in ${duration}ms for session ${sessionId.slice(0, 12)}`);
 
           // 4. Save insight as a visible memory (orange diamond in MemoryGraph)
           try {
             const insightId = crypto.randomUUID();
             const insightLines = [];
+            if (insights.directive) insightLines.push(`Directive: ${insights.directive}`);
             if (insights.hypotheses?.length) {
-              const hyps = insights.hypotheses.map(h => typeof h === 'string' ? h : `${h.text} (${Math.round((h.probability||0)*100)}%)`);
+              const hyps = insights.hypotheses.map(h => typeof h === 'string' ? h : `${h.text} (${Math.round((h.probability||0)*100)}%, ${h.status || 'active'})`);
               insightLines.push(`Hypotheses: ${hyps.join('; ')}`);
             }
-            if (insights.suggested_question) insightLines.push(`Next question: ${insights.suggested_question}`);
+            if (insights.user_type) insightLines.push(`User type: ${insights.user_type}`);
             if (insights.strategy) insightLines.push(`Strategy: ${insights.strategy}`);
+            if (insights.reasoning_summary) insightLines.push(`Reasoning: ${insights.reasoning_summary}`);
             if (insights.psychological_notes) insightLines.push(`Notes: ${insights.psychological_notes}`);
             if (insights.red_flags?.length) insightLines.push(`Red flags: ${insights.red_flags.join('; ')}`);
-            if (insights.spiced_progress) {
-              const sp = insights.spiced_progress;
-              insightLines.push(`SPICED: S=${sp.situation||'?'} P=${sp.pain||'?'} I=${sp.impact||'?'} C=${sp.critical_event||'?'} D=${sp.decision||'?'}`);
-            }
 
             await this.memoryStore.createMemory({
               id: insightId,

@@ -1,0 +1,11 @@
+{
+	email admin@davinciai.eu
+}
+
+api.hivemind.davinciai.eu:8040 {
+	reverse_proxy control-plane-s0k0s0k40wo44w4w8gcs8ow0:3000
+}
+
+core.hivemind.davinciai.eu:8050 {
+	reverse_proxy hm-core:3000
+}

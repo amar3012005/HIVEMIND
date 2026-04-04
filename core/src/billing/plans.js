@@ -2,8 +2,29 @@
  * HIVEMIND Subscription Plans
  *
  * Pricing: flat monthly + overage. EUR currency.
- * Limits: tokens processed/mo + search queries/mo.
+ * Philosophy: all features available on all plans — pay for volume, not capabilities.
+ * Limits: memories, LLM tokens/mo, deep research/mo, web intel/day, connectors, users, KB uploads/mo.
  */
+
+const BASE_FEATURES = {
+  webIntelligence: true,
+  deepResearch: true,
+  agentSwarm: true,
+  mcpProtocol: true,
+  graphVisualization: true,
+  talkToHive: true,
+  taraVoiceAgent: true,
+  llmObserver: true,
+  secondBrain: true,
+  // Plan-gated (not usage-gated):
+  ssoSaml: false,
+  auditLogs: false,
+  webhooks: false,
+  teamWorkspaces: false,
+  hyok: false,
+  dpa: false,
+  dedicatedInfra: false,
+};
 
 export const PLANS = {
   free: {
@@ -12,22 +33,17 @@ export const PLANS = {
     price: 0,
     currency: 'EUR',
     limits: {
-      tokensPerMonth: 1_000_000,
+      maxMemories: 1_000,
+      llmTokensPerMonth: 1_000_000,
+      deepResearchPerMonth: 3,
+      webIntelPerDay: 5,
       searchQueriesPerMonth: 10_000,
       maxUsers: 1,
-      maxConnectors: 1,
+      maxConnectors: 3,
       knowledgeBaseUploadsPerMonth: 10,
     },
     features: {
-      webIntelligence: false,
-      agentSwarm: true,
-      mcpProtocol: true,
-      graphVisualization: true,
-      llmObserver: false, // heuristic only
-      ssoSaml: false,
-      auditLogs: false,
-      hyok: false,
-      dpa: false,
+      ...BASE_FEATURES,
     },
     overage: null, // hard limit
     support: 'community',
@@ -39,22 +55,17 @@ export const PLANS = {
     price: 19,
     currency: 'EUR',
     limits: {
-      tokensPerMonth: 5_000_000,
+      maxMemories: 25_000,
+      llmTokensPerMonth: 10_000_000,
+      deepResearchPerMonth: 20,
+      webIntelPerDay: 50,
       searchQueriesPerMonth: 100_000,
       maxUsers: 5,
       maxConnectors: 10,
       knowledgeBaseUploadsPerMonth: -1, // unlimited
     },
     features: {
-      webIntelligence: true,
-      agentSwarm: true,
-      mcpProtocol: true,
-      graphVisualization: true,
-      llmObserver: true,
-      ssoSaml: false,
-      auditLogs: false,
-      hyok: false,
-      dpa: false,
+      ...BASE_FEATURES,
     },
     overage: { tokensPerThousand: 0.01, queriesPerThousand: 0.10 },
     support: 'email',
@@ -66,21 +77,21 @@ export const PLANS = {
     price: 199,
     currency: 'EUR',
     limits: {
-      tokensPerMonth: 80_000_000,
+      maxMemories: 250_000,
+      llmTokensPerMonth: 100_000_000,
+      deepResearchPerMonth: -1, // unlimited
+      webIntelPerDay: 500,
       searchQueriesPerMonth: 2_000_000,
       maxUsers: 25,
       maxConnectors: -1, // unlimited
       knowledgeBaseUploadsPerMonth: -1,
     },
     features: {
-      webIntelligence: true,
-      agentSwarm: true,
-      mcpProtocol: true,
-      graphVisualization: true,
-      llmObserver: true,
+      ...BASE_FEATURES,
       ssoSaml: true,
       auditLogs: true,
-      hyok: false,
+      webhooks: true,
+      teamWorkspaces: true,
       dpa: true,
     },
     overage: { tokensPerThousand: 0.008, queriesPerThousand: 0.08 },
@@ -93,22 +104,24 @@ export const PLANS = {
     price: null, // custom
     currency: 'EUR',
     limits: {
-      tokensPerMonth: -1,
+      maxMemories: -1,
+      llmTokensPerMonth: -1,
+      deepResearchPerMonth: -1,
+      webIntelPerDay: -1,
       searchQueriesPerMonth: -1,
       maxUsers: -1,
       maxConnectors: -1,
       knowledgeBaseUploadsPerMonth: -1,
     },
     features: {
-      webIntelligence: true,
-      agentSwarm: true,
-      mcpProtocol: true,
-      graphVisualization: true,
-      llmObserver: true,
+      ...BASE_FEATURES,
       ssoSaml: true,
       auditLogs: true,
+      webhooks: true,
+      teamWorkspaces: true,
       hyok: true,
       dpa: true,
+      dedicatedInfra: true,
     },
     overage: null,
     support: 'dedicated',

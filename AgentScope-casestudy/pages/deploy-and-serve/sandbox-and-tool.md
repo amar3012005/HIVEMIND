@@ -1,0 +1,685 @@
+---
+title: "Sandbox and Tool"
+url: "https://docs.agentscope.io/deploy-and-serve/sandbox-and-tool"
+path: "/deploy-and-serve/sandbox-and-tool"
+section: "deploy-and-serve"
+lastmod: "2026-03-30T04:05:56.977Z"
+---
+# Sandbox and Tool
+Source: https://agentscope-ai-786677c7.mintlify.app/deploy-and-serve/sandbox-and-tool
+
+The mechanisms for secure code execution and external tool integration
+
+In AgentScope Runtime, tools enable agents to deliver business capabilities. Whether you call model services directly, run browser automation, or integrate corporate APIs, the tool stack must be safe, controllable, and extensible. This chapter outlines the overall approach and links to the follow-up sections (Ready-to-use Tools, Sandbox Basics/Advanced, Training Sandbox, Sandbox Troubleshooting) so you can select the right path for your scenario.
+
+Runtime supports three common ways to connect tools:
+
+1. **Ready-to-use tools**: Vendor- or Runtime-provided capabilities (such as RAG retrieval) that require zero deployment.
+2. **Sandboxed tools**: Tools executed inside Browser/FileSystem or other sandboxes for controlled side effects.
+
+## Sandbox
+
+AgentScope Runtime's Sandbox is a versatile tool that provides a **secure** and **isolated** environment for a wide range of operations, including tool execution, browser automation, and file system operations. This tutorial will empower you to set up the tool sandbox dependency and run tools in an environment tailored to your specific needs.
+
+### Prerequisites
+
+<Note>
+  The current sandbox supports multiple backend isolation/runtime options. For local usage, you can use Docker (optionally with gVisor) or [BoxLite](https://github.com/boxlite-ai/boxlite). For large-scale remote/production deployments, we recommend Kubernetes (K8s), Function Compute (FC), or [Alibaba Cloud ACK](https://computenest.console.aliyun.com/service/instance/create/default?ServiceName=AgentScope%20Runtime%20%E6%B2%99%E7%AE%B1%E7%8E%AF%E5%A2%83). You can also switch the backend by setting the `CONTAINER_DEPLOYMENT` environment variable (default: `docker`).
+</Note>
+
+<Warning>
+  **Apple Silicon devices (M1/M2):** To run an x86 Docker environment for maximum compatibility, use one of:
+
+  * **Docker Desktop**: Enable Rosetta 2 via the [Docker Desktop installation guide](https://docs.docker.com/desktop/setup/install/mac-install/).
+  * **Colima**: Start with Rosetta support enabled: `colima start --vm-type=vz --vz-rosetta --memory 8 --cpu 1`
+</Warning>
+
+* Docker (optionally with gVisor) or [BoxLite](https://github.com/boxlite-ai/boxlite) (local)
+* (Optional,  remote/production, choose as needed) Kubernetes (K8s) / Function Compute (FC) / [Alibaba Cloud ACK](https://computenest.console.aliyun.com/service/instance/create/cn-hangzhou?ServiceName=AgentScope%20Runtime%20%E6%B2%99%E7%AE%B1%E7%8E%AF%E5%A2%83)
+
+### Setup
+
+#### Install Dependencies
+
+First, install AgentScope Runtime:
+
+```bash theme={null}
+pip install agentscope-runtime
+```
+
+#### Prepare the Docker Images
+
+The sandbox uses different Docker images for various functionalities. You can pull only the images you need or all of them for complete functionality:
+
+##### Option 1: Pull All Images (Recommended)
+
+To ensure a complete sandbox experience with all features enabled, follow the steps below to pull and tag the necessary Docker images from our repository:
+
+<Info>
+  All Docker images are hosted on Alibaba Cloud Container Registry (ACR) for optimal performance and reliability worldwide. Images are pulled from ACR and tagged with standard names for seamless integration with the AgentScope runtime environment.
+</Info>
+
+```bash theme={null}
+# Base image
+docker pull agentscope-registry.ap-southeast-1.cr.aliyuncs.com/agentscope/runtime-sandbox-base:latest && docker tag agentscope-registry.ap-southeast-1.cr.aliyuncs.com/agentscope/runtime-sandbox-base:latest agentscope/runtime-sandbox-base:latest
+
+# GUI image
+docker pull agentscope-registry.ap-southeast-1.cr.aliyuncs.com/agentscope/runtime-sandbox-gui:latest && docker tag agentscope-registry.ap-southeast-1.cr.aliyuncs.com/agentscope/runtime-sandbox-gui:latest agentscope/runtime-sandbox-gui:latest
+
+# Filesystem image
+docker pull agentscope-registry.ap-southeast-1.cr.aliyuncs.com/agentscope/runtime-sandbox-filesystem:latest && docker tag agentscope-registry.ap-southeast-1.cr.aliyuncs.com/agentscope/runtime-sandbox-filesystem:latest agentscope/runtime-sandbox-filesystem:latest
+
+# Browser image
+docker pull agentscope-registry.ap-southeast-1.cr.aliyuncs.com/agentscope/runtime-sandbox-browser:latest && docker tag agentscope-registry.ap-southeast-1.cr.aliyuncs.com/agentscope/runtime-sandbox-browser:latest agentscope/runtime-sandbox-browser:latest
+
+# Mobile image
+docker pull agentscope-registry.ap-southeast-1.cr.aliyuncs.com/agentscope/runtime-sandbox-mobile:latest && docker tag agentscope-registry.ap-southeast-1.cr.aliyuncs.com/agentscope/runtime-sandbox-mobile:latest agentscope/runtime-sandbox-mobile:latest
+```
+
+##### Option 2: Pull Specific Images
+
+Choose the images based on your specific needs:
+
+| Image                | Purpose                               | When to Use                                              |
+| -------------------- | ------------------------------------- | -------------------------------------------------------- |
+| **Base Image**       | Python code execution, shell commands | Essential for basic tool execution                       |
+| **GUI Image**        | Computer Use                          | When you need a graph UI                                 |
+| **Filesystem Image** | File system operations                | When you need file read/write/management                 |
+| **Browser Image**    | Web browser automation                | When you need web scraping or browser control            |
+| **Mobile Image**     | Mobile operations                     | When you need to operate a mobile device                 |
+| **Training Image**   | Training and evaluating agent         | Used for training and evaluating agent on some benchmark |
+
+#### Verify Installation
+
+You can verify that everything is set up correctly by calling `run_ipython_cell`:
+
+```python theme={null}
+import json
+from agentscope_runtime.sandbox import BaseSandbox
+
+with BaseSandbox() as sandbox:
+    # Model Context Protocol (MCP)-compatible tool call results
+    result = sandbox.run_ipython_cell(code="print('Setup successful!')")
+    print(json.dumps(result, indent=4, ensure_ascii=False))
+```
+
+#### (Optional) Build the Docker Images from Scratch
+
+If you prefer to build the Docker images yourself or need custom modifications, you can build them from scratch.
+
+### Sandbox Usage
+
+#### Create a Sandbox
+
+The previous section introduced tool-centred usage methods, while this section introduces sandbox-centred usage methods.
+
+You can create different types of sandboxes via the `sandbox` SDK. AgentScope Runtime provides **both synchronous** and **asynchronous** versions for each sandbox type:
+
+| Synchronous Class   | Asynchronous Class       |
+| ------------------- | ------------------------ |
+| `BaseSandbox`       | `BaseSandboxAsync`       |
+| `GuiSandbox`        | `GuiSandboxAsync`        |
+| `FilesystemSandbox` | `FilesystemSandboxAsync` |
+| `BrowserSandbox`    | `BrowserSandboxAsync`    |
+| `MobileSandbox`     | `MobileSandboxAsync`     |
+| `TrainingSandbox`   | -                        |
+| `AgentbaySandbox`   | -                        |
+
+* **Base Sandbox**: Use for running **Python code** or **shell commands** in an isolated environment.
+
+<CodeGroup>
+  ```python Synchronous theme={null}
+  from agentscope_runtime.sandbox import BaseSandbox
+
+  with BaseSandbox() as box:
+      # By default, pulls `agentscope/runtime-sandbox-base:latest` from DockerHub
+      print(box.list_tools())
+      print(box.run_ipython_cell(code="print('hi')"))
+      print(box.run_shell_command(command="echo hello"))
+  ```
+
+  ```python Asynchronous theme={null}
+  from agentscope_runtime.sandbox import BaseSandboxAsync
+
+  async with BaseSandboxAsync() as box:
+      print(await box.list_tools_async())
+      print(await box.run_ipython_cell(code="print('hi')"))
+      print(await box.run_shell_command(command="echo hello"))
+  ```
+</CodeGroup>
+
+* **GUI Sandbox**: Provides a **virtual desktop** environment for mouse, keyboard, and screen operations.
+
+<CodeGroup>
+  ```python Synchronous theme={null}
+  from agentscope_runtime.sandbox import GuiSandbox
+
+  with GuiSandbox() as box:
+      print(box.list_tools())
+      print(box.desktop_url)  # Web desktop access URL
+      print(box.computer_use(action="get_cursor_position"))
+      print(box.computer_use(action="get_screenshot"))
+  ```
+
+  ```python Asynchronous theme={null}
+  from agentscope_runtime.sandbox import GuiSandboxAsync
+
+  async with GuiSandboxAsync() as box:
+      print(await box.list_tools_async())
+      print(box.desktop_url)
+      print(await box.computer_use(action="get_cursor_position"))
+      print(await box.computer_use(action="get_screenshot"))
+  ```
+</CodeGroup>
+
+* **Filesystem Sandbox**: A GUI-based sandbox with **file system operations** such as creating, reading, and deleting files.
+
+<CodeGroup>
+  ```python Synchronous theme={null}
+  from agentscope_runtime.sandbox import FilesystemSandbox
+
+  with FilesystemSandbox() as box:
+      print(box.list_tools())
+      print(box.desktop_url)
+      box.create_directory("test")
+  ```
+
+  ```python Asynchronous theme={null}
+  from agentscope_runtime.sandbox import FilesystemSandboxAsync
+
+  async with FilesystemSandboxAsync() as box:
+      print(await box.list_tools_async())
+      print(box.desktop_url)
+      await box.create_directory("test")
+  ```
+</CodeGroup>
+
+* **Browser Sandbox**: A GUI-based sandbox with **browser operations** inside an isolated sandbox.
+
+<CodeGroup>
+  ```python Synchronous theme={null}
+  from agentscope_runtime.sandbox import BrowserSandbox
+
+  with BrowserSandbox() as box:
+      print(box.list_tools())
+      print(box.desktop_url)
+      box.browser_navigate("https://www.google.com/")
+  ```
+
+  ```python Asynchronous theme={null}
+  from agentscope_runtime.sandbox import BrowserSandboxAsync
+
+  async with BrowserSandboxAsync() as box:
+      print(await box.list_tools_async())
+      print(box.desktop_url)
+      await box.browser_navigate("https://www.google.com/")
+  ```
+</CodeGroup>
+
+* **Mobile Sandbox**: A sandbox based on an Android emulator, allowing for **mobile operations** such as tapping, swiping, inputting text, and taking screenshots.
+
+<Warning>
+  **Linux host required:** This sandbox requires `binder` and `ashmem` kernel modules. Run the following to install and load them:
+
+  ```bash theme={null}
+  sudo apt update && sudo apt install -y linux-modules-extra-`uname -r`
+  sudo modprobe binder_linux devices="binder,hwbinder,vndbinder"
+  sudo modprobe ashmem_linux
+  ```
+
+  **ARM64/Apple M-series:** You may encounter compatibility issues. Running on an x86\_64 host is recommended.
+</Warning>
+
+<CodeGroup>
+  ```python Synchronous theme={null}
+  from agentscope_runtime.sandbox import MobileSandbox
+
+  with MobileSandbox() as box:
+      print(box.list_tools())
+      print(box.mobile_get_screen_resolution())
+      print(box.mobile_tap([500, 1000]))
+      print(box.mobile_input_text("Hello from AgentScope!"))
+      print(box.mobile_key_event(3))  # HOME key event
+      print(box.mobile_get_screenshot())
+  ```
+
+  ```python Asynchronous theme={null}
+  from agentscope_runtime.sandbox import MobileSandboxAsync
+
+  async with MobileSandboxAsync() as box:
+      print(await box.list_tools_async())
+      print(await box.mobile_get_screen_resolution())
+      print(await box.mobile_tap([500, 1000]))
+      print(await box.mobile_input_text("Hello from AgentScope!"))
+      print(await box.mobile_key_event(3))
+      print(await box.mobile_get_screenshot())
+  ```
+</CodeGroup>
+
+* **TrainingSandbox**: Sandbox for training and evaluation.
+
+```python theme={null}
+from agentscope_runtime.sandbox import TrainingSandbox
+
+with TrainingSandbox() as box:
+    profile_list = box.get_env_profile(env_type="appworld", split="train")
+    print(profile_list)
+```
+
+* **AgentBay Sandbox (AgentbaySandbox)**: A cloud sandbox implementation based on AgentBay cloud service, supporting multiple image types (Linux, Windows, Browser, CodeSpace, Mobile, etc.).
+
+```python theme={null}
+from agentscope_runtime.sandbox import AgentbaySandbox
+
+with AgentbaySandbox(
+    api_key="your_agentbay_api_key",
+    image_id="linux_latest",  # Optional: specify image type
+) as box:
+    print(box.list_tools())
+    print(box.run_shell_command(command="echo hello from cloud"))
+    print(box.get_session_info())
+```
+
+<CardGroup>
+  <Card title="No Local Docker Required" icon="cloud">Fully cloud-based — no local Docker installation needed.</Card>
+  <Card title="Multiple Environment Types" icon="layer-group">Supports Linux, Windows, Browser, CodeSpace, Mobile, and more.</Card>
+  <Card title="Automatic Session Management" icon="rotate">Session lifecycle is managed automatically.</Card>
+  <Card title="Direct API Communication" icon="plug">Communicates directly with the AgentBay cloud service API.</Card>
+</CardGroup>
+
+<Info>
+  More sandbox types are under development — stay tuned!
+</Info>
+
+#### Add MCP Server to Sandbox
+
+MCP (Model Context Protocol) is a standardised protocol that enables AI applications to securely connect to external data sources and tools. By integrating MCP servers into your sandbox, you can extend the sandbox's capabilities with specialised tools and services without compromising security.
+
+The sandbox supports integrating MCP servers via the `add_mcp_servers` method. Once added, you can discover available tools using `list_tools` and execute them with `call_tool`. Here's an example of adding a time server that provides timezone-aware time functions:
+
+```python theme={null}
+with BaseSandbox() as sandbox:
+    mcp_server_configs = {
+        "mcpServers": {
+            "time": {
+                "command": "uvx",
+                "args": [
+                    "mcp-server-time",
+                    "--local-timezone=America/New_York",
+                ],
+            },
+        },
+    }
+
+    # Add the MCP server to the sandbox
+    sandbox.add_mcp_servers(server_configs=mcp_server_configs)
+
+    # List all available tools (now includes MCP tools)
+    print(sandbox.list_tools())
+
+    # Use the time tool provided by the MCP server
+    print(
+        sandbox.call_tool(
+            "get_current_time",
+            arguments={
+                "timezone": "America/New_York",
+            },
+        ),
+    )
+```
+
+#### Connect to Remote Sandbox
+
+<Note>
+  Remote deployment is beneficial for:
+
+  * Separating compute-intensive tasks to dedicated servers
+  * Multiple clients sharing the same sandbox environment
+  * Developing on resource-constrained local machines while executing on high-performance servers
+  * Deploying sandbox server with Kubernetes (K8s)
+</Note>
+
+You can start the sandbox server on your local machine or on different machines for convenient remote access. You should start a sandbox server via:
+
+```bash theme={null}
+runtime-sandbox-server
+```
+
+To connect to the remote sandbox service, pass in `base_url`:
+
+```python theme={null}
+# Connect to remote sandbox server (replace with actual server IP)
+with BaseSandbox(base_url="http://your_IP_address:8000") as box:
+    print(box.run_ipython_cell(code="print('hi')"))
+```
+
+#### Expose Sandbox as an MCP Server
+
+Configure the local Sandbox Runtime as an MCP server named `sandbox`, so it can be invoked by MCP-compatible clients to safely execute commands from the sandbox via a remote sandbox server `http://127.0.0.1:8000`.
+
+```json theme={null}
+{
+    "mcpServers": {
+        "sandbox": {
+            "command": "uvx",
+            "args": [
+                "--from",
+                "agentscope-runtime",
+                "runtime-sandbox-mcp",
+                "--type=base",
+                "--base_url=http://127.0.0.1:8000"
+            ]
+        }
+    }
+}
+```
+
+##### Command Arguments
+
+The `runtime-sandbox-mcp` command accepts the following arguments:
+
+| Argument         | Values                                 | Description                                                       |
+| ---------------- | -------------------------------------- | ----------------------------------------------------------------- |
+| `--type`         | `base`, `gui`, `browser`, `filesystem` | Type of sandbox                                                   |
+| `--base_url`     | URL string                             | Base URL of a remote sandbox service. Leave empty to run locally. |
+| `--bearer_token` | String token                           | Optional authentication token for secure access.                  |
+
+### Sandbox Service
+
+#### Managing Sandboxes with `SandboxService`
+
+`SandboxService` provides a unified sandbox management interface, enabling management of sandbox environments across different user sessions via `session_id` and `user_id`. Using `SandboxService` lets you better control a sandbox's lifecycle and enables sandbox reuse.
+
+```python theme={null}
+from agentscope_runtime.engine.services.sandbox import SandboxService
+
+async def main():
+    # Create and start the sandbox service
+    sandbox_service = SandboxService()
+    await sandbox_service.start()
+
+    session_id = "session_123"
+    user_id = "user_12345"
+
+    # Connect to the sandbox, specifying the required sandbox type
+    sandboxes = sandbox_service.connect(
+        session_id=session_id,
+        user_id=user_id,
+        sandbox_types=["base"],
+    )
+
+    base_sandbox = sandboxes[0]
+
+    # Call utility methods directly on the sandbox instance
+    result = base_sandbox.run_ipython_cell("print('Hello, World!')")
+    base_sandbox.run_ipython_cell("a=1")
+
+    print(result)
+
+    # Using the same session_id and user_id will reuse the same sandbox instance
+    new_sandboxes = sandbox_service.connect(
+        session_id=session_id,
+        user_id=user_id,
+        sandbox_types=["base"],
+    )
+
+    new_base_sandbox = new_sandboxes[0]
+    # Variable 'a' still exists because the same sandbox is reused
+    result = new_base_sandbox.run_ipython_cell("print(a)")
+    print(result)
+
+    # Stop the sandbox service
+    await sandbox_service.stop()
+
+await main()
+```
+
+#### Adding an MCP Server Using `SandboxService`
+
+```python theme={null}
+from agentscope_runtime.engine.services.sandbox import SandboxService
+
+async def main():
+    sandbox_service = SandboxService()
+    await sandbox_service.start()
+
+    session_id = "session_mcp"
+    user_id = "user_mcp"
+
+    sandboxes = sandbox_service.connect(
+        session_id=session_id,
+        user_id=user_id,
+        sandbox_types=["base"],
+    )
+
+    sandbox = sandboxes[0]
+
+    mcp_server_configs = {
+        "mcpServers": {
+            "time": {
+                "command": "uvx",
+                "args": [
+                    "mcp-server-time",
+                    "--local-timezone=America/New_York",
+                ],
+            },
+        },
+    }
+
+    # Add MCP server to the sandbox
+    sandbox.add_mcp_servers(server_configs=mcp_server_configs)
+
+    # List all available tools (now includes MCP tools)
+    print(sandbox.list_tools())
+
+    # Use the time tool from the MCP server
+    print(
+        sandbox.call_tool(
+            "get_current_time",
+            arguments={
+                "timezone": "America/New_York",
+            },
+        ),
+    )
+
+    await sandbox_service.stop()
+
+await main()
+```
+
+#### Connecting to a Remote Sandbox Using `SandboxService`
+
+```python theme={null}
+from agentscope_runtime.engine.services.sandbox import SandboxService
+
+async def main():
+    # Create SandboxService and specify the remote server address
+    sandbox_service = SandboxService(
+        base_url="http://your_IP_address:8000",  # Replace with actual server IP
+        bearer_token="your_token"  # Optional: if authentication is required
+    )
+    await sandbox_service.start()
+
+    session_id = "remote_session"
+    user_id = "remote_user"
+
+    # Connect to the remote sandbox
+    sandboxes = sandbox_service.connect(
+        session_id=session_id,
+        user_id=user_id,
+        sandbox_types=["base"],
+    )
+
+    base_sandbox = sandboxes[0]
+    print(base_sandbox.run_ipython_cell(code="print('hi')"))
+
+    await sandbox_service.stop()
+
+await main()
+```
+
+## Tools
+
+AgentScope Runtime embraces a componentized philosophy; instead of dropping you straight into API details, we start with the motivation. **Tools** give us a uniform, type-safe capsule for those accessories so they can plug into any orchestration framework without rewrites.
+
+Adding a tool is the recommended path whenever you need to expose a capability to multiple agents or execution engines. A tool carries its own IO schema, throttling policy, tracing hooks, and retry defaults, so you can register it as a tool for ReAct agents, feed it into LangGraph/MCP stacks, or publish it as an MCP server function. Teams typically introduce tools to solve recurring compliance constraints, encapsulate vendor APIs, or ship the same operation across on-call bots, copilots, and workflows.
+
+Once a capability is wrapped as a tool, you gain predictable behavior in a few common scenarios: orchestrators can reason about arguments up front, audit pipelines can log the same typed payloads, and platform teams can patch or swap implementations without touching agent prompts. In short, tools hide infrastructure churn while giving LLM-facing teams a clean interface.
+
+### Why Tools (Key Features)
+
+* **Modular architecture**: enterprise-grade functions stay decoupled, making it easy to compose or swap tools without touching the agent core.
+* **Framework integration**: the same tool instances feed AgentScope Runtime, LangGraph, AutoGen, MCP, or bespoke frameworks, thanks to uniform schemas.
+* **ModelStudio alignment**: tools wrap DashScope/ModelStudio services (Search, RAG, AIGC, Payments) with production-ready defaults, retries, and tracing.
+* **Type safety and observability**: Pydantic models, async execution, and centralized validation mirror the production focus described in the original README.
+* **Clear benefits**: consistent tool contracts, centralized governance, and faster onboarding for new agent teams because they reuse curated capabilities instead of reinventing integrations.
+
+To shorten the “first tool” journey, we pre-bundle several ModelStudio tools—Search, RAG, AIGC, and Payments—so you can start experimenting immediately before authoring custom ones.
+
+### Tool Design Principles
+
+* **Single responsibility**: each tool focuses on one enterprise capability (e.g., ModelStudio Search, Alipay refund) so it can be composed with other tools without hidden side effects.
+* **Typed boundaries**: tools declare Pydantic `*Input` and `*Output` models so arguments/results are validated before any network call and so function schemas can be generated automatically.
+* **Adapter friendly**: the shared `Tool` base emits OpenAI-compatible `function_schema`, allowing adapters (AgentScope, LangGraph, AutoGen, MCP, etc.) to expose tools with zero additional glue.
+* **Async-first, sync-friendly**: `_arun` is always async for throughput, while `run()` bridges into sync contexts, just like the examples demonstrate for components.
+* **Observability-ready**: because every invocation funnels through the base class, runtime tracing, retries, and logging can be added centrally without touching individual tools.
+
+These principles mirror the design motifs in the example README (modular bricks, framework adapters, production-grade behaviors) but use the current **Tool** naming and runtime packages.
+
+### Tool Class Essentials
+
+#### Core capabilities
+
+* **Input/output enforcement**: `Tool` captures the generic `ToolArgsT`/`ToolReturnT` types, validates runtime arguments, and ensures the return payload matches the declared schema.
+* **Automatic function schema**: the base class inspects the Pydantic model and publishes a `FunctionTool` schema so LLM tool-calling stacks know exactly how to call the tool.
+* **Async + sync execution**: call `await tool.arun(...)` inside async workflows or `tool.run(...)` when you only have a synchronous context; both paths share the same validation.
+* **Argument helpers**: `Tool.verify_args()` / `verify_list_args()` parse JSON strings or dicts into typed inputs, making it easy to deserialize persisted tool calls.
+* **Stringified outputs**: `return_value_as_string()` provides deterministic serialization for audit logs and adapters that require string outputs.
+
+#### Custom Tool Development Example
+
+```python theme={null}
+import asyncio
+from pydantic import BaseModel, Field
+from agentscope_runtime.tools import Tool
+
+
+class WeatherInput(BaseModel):
+    city: str = Field(..., description="City to check")
+    unit: str = Field(default="celsius", description="Temperature unit")
+
+
+class WeatherOutput(BaseModel):
+    summary: str
+    temperature: float
+
+
+class WeatherTool(Tool[WeatherInput, WeatherOutput]):
+    name = "weather_lookup"
+    description = "Fetches the current weather for a city"
+
+    async def _arun(self, args: WeatherInput, **kwargs) -> WeatherOutput:
+        # Replace with real API logic
+        return WeatherOutput(summary=f"Sunny in {args.city}", temperature=26.5)
+
+
+async def main():
+    tool = WeatherTool()
+    result = await tool.arun(WeatherInput(city="Hangzhou"))
+    print(result.summary)
+    print(tool.function_schema)  # ready for tool registration
+
+
+asyncio.run(main())
+```
+
+Use this pattern for every custom tool: define Pydantic models, extend `Tool`, implement `_arun`, instantiate once, and pass the instance into whichever agent framework you use.
+
+### AgentScope Integration Example
+
+We use `agentscope_tool_adapter` to add tools to AgentScope's `Toolkit`:
+
+```python theme={null}
+import asyncio
+import os
+
+from agentscope.agent import ReActAgent
+from agentscope.model import DashScopeChatModel
+from agentscope.formatter import DashScopeChatFormatter
+from agentscope.tool import Toolkit
+from agentscope.message import Msg
+
+from agentscope_runtime.tools.searches import (
+    ModelstudioSearchLite,
+    SearchInput,
+    SearchOptions,
+)
+from agentscope_runtime.adapters.agentscope.tool import agentscope_tool_adapter
+
+search_tool = ModelstudioSearchLite()
+search_tool = agentscope_tool_adapter(search_tool)
+
+
+toolkit = Toolkit()
+toolkit.tools[search_tool.name] = search_tool
+
+agent = ReActAgent(
+    name="Friday",
+    model=DashScopeChatModel(
+        "qwen-turbo",
+        api_key=os.getenv("DASHSCOPE_API_KEY"),
+        stream=True,
+    ),
+    sys_prompt="You're a helpful assistant named Friday.",
+    toolkit=toolkit,
+    formatter=DashScopeChatFormatter(),
+)
+
+if __name__ == "__main__":
+    asyncio.run(
+        agent(
+            Msg(
+                role="user",
+                name="user",
+                content="What is the weather like in Shenzhen?",
+            ),
+        ),
+    )
+```
+
+### Using Tools inside Agents
+
+1. **Configure credentials**: declare environment variables (DashScope keys, Alipay secrets, etc.) before running the agent process so tools can authenticate.
+2. **Instantiate once**: create tool objects during agent initialization; reuse them instead of re-instantiating per call to keep connections warm.
+3. **Prepare payloads**: build dictionaries or Pydantic instances that match the documented `*Input` model. When calling from LLM tool invocations, rely on the generated schema to keep arguments consistent.
+4. **Call asynchronously**: prefer `await tool.arun(input_model)`; only use `run()` in synchronous contexts.
+5. **Consume structured outputs**: each result is a typed model (e.g., `SearchOutput`, `RagOutput`, `PaymentOutput`)—store them directly or convert with `return_value_as_string()` for persistence.
+6. **Integrate via adapters**: the runtime already provides adapters for AgentScope, LangGraph, MCP, etc. Simply hand over `tool.function_schema` (or the tool instance itself, depending on the adapter) to wire the capability into your workflow.
+
+### Built-in Tool Families
+
+Each family bundles a set of related ModelStudio or partner services. Refer to the detailed cookbook pages for exhaustive parameter tables, examples, and operational notes.
+
+#### ModelStudio Search Tools
+
+* **Key tools**: `ModelstudioSearch`, `ModelstudioSearchLite` (`agentscope_runtime.tools.searches`).
+* **When to use**: semantic/metasearch across web, news, academic, product, multimedia sources, with advanced routing, filtering, and caching. The Lite version trades configurability for lower latency and resource savings.
+* **Usage highlights**: supply `messages` plus `search_options` dict (strategy, `max_results`, `time_range`, etc.), optionally add `search_output_rules` for citations/summaries, and read back `search_result` + `search_info`.
+
+#### ModelStudio RAG Tools
+
+* **Key tools**: `ModelstudioRag`, `ModelstudioRagLite` (`agentscope_runtime.common.tools.RAGs`).
+* **When to use**: ground answers in DashScope knowledge bases with dense/sparse/hybrid retrieval, multi-turn context fusion, multimodal inputs, and citation-friendly generation.
+* **Usage highlights**: pass the dialogue `messages`, `rag_options` (`knowledge_base_id`, `top_k`, `score_threshold`, `enable_citation`), plus authentication tokens; consume `rag_result.answer`, `references`, and `confidence`.
+
+#### ModelStudio AIGC (Generations) Tools
+
+* **Key tools**: `ImageGeneration`, `ImageEdit`, `ImageStyleRepaint` and the WAN/Qwen variants under `agentscope_runtime.tools.generations`.
+* **When to use**: text-to-image creation, image editing (in/out-painting, replacements), and portrait style transfer with DashScope WanXiang or Qwen media models.
+* **Usage highlights**: supply prompts plus optional `size`/`n`, or provide `base_image_url` + `mask_image_url` for edits; outputs are signed asset URLs—download or proxy them promptly.
+
+#### Alipay Payment & Subscription Tools
+
+* **Key tools** (from `agentscope_runtime.tools.alipay`): `MobileAlipayPayment`, `WebPageAlipayPayment`, `AlipayPaymentQuery`, `AlipayPaymentRefund`, `AlipayRefundQuery`, `AlipaySubscribeStatusCheck`, `AlipaySubscribePackageInitialize`, `AlipaySubscribeTimesSave`, `AlipaySubscribeCheckOrInitialize`.
+* **When to use**: orchestrate full payment lifecycles (link creation, status checks, refunds) and manage subscription entitlements or pay-per-use deductions inside enterprise agents.
+* **Usage highlights**: payment tools accept `out_trade_no`, `order_title`, `total_amount`; query/refund tools operate on order IDs plus optional `out_request_no`; subscription tools pivot on user `uuid` and return flags, packages, or subscription URLs.

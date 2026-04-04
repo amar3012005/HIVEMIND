@@ -1,0 +1,1303 @@
+---
+title: "Agent as Service"
+url: "https://docs.agentscope.io/deploy-and-serve/agent-as-service"
+path: "/deploy-and-serve/agent-as-service"
+section: "deploy-and-serve"
+lastmod: "2026-03-30T04:05:56.979Z"
+---
+# Agent as Service
+Source: https://agentscope-ai-786677c7.mintlify.app/deploy-and-serve/agent-as-service
+
+The core concepts and deployment strategies for transforming agents into scalable, production-ready services
+
+**Agent as Service (AaaS)** represents the core mission of **AgentScope Runtime**: transforming agent applications into deployable, scalable services that can be accessed through standardized APIs and interfaces, just like any other production service.
+
+## What is AgentScope Runtime?
+
+**AgentScope Runtime** is a full-stack runtime for AI agents designed to solve two core challenges: **efficient deployment & serving** and **secure sandboxed execution**.
+
+**In short:**
+
+$\begin{aligned}
+\textbf{AgentScope Runtime} =&\ \textbf{Tool Sandboxing}
++\ \textbf{AaaS APIs}
++\ \textbf{Scalable Deployment} \\
+&+\ \textbf{Full-stack Observability (Logs/Traces)}
++\ \textbf{Framework Compatibility}
+\end{aligned}$
+
+### Key Features
+
+<CardGroup>
+  <Card title="Deployment Infrastructure" icon="server">
+    Built-in services for agent state management, conversation history, long-term memory, and sandbox lifecycle control.
+  </Card>
+
+  <Card title="Framework-Agnostic" icon="puzzle-piece">
+    Not tied to any specific framework — seamlessly integrates with popular open-source and custom implementations.
+  </Card>
+
+  <Card title="Developer-Friendly" icon="code">
+    `AgentApp` provides easy deployment with powerful customization options and multiple endpoint types.
+  </Card>
+
+  <Card title="Full Observability" icon="eye">
+    Comprehensive tracking and monitoring of runtime operations, logs, and traces.
+  </Card>
+
+  <Card title="Sandboxed Tool Execution" icon="box">
+    Isolated sandbox ensures safe tool execution without affecting the host system.
+  </Card>
+
+  <Card title="Out-of-the-Box Tools" icon="toolbox">
+    Rich set of ready-to-use tools with adapters for quick integration into different frameworks.
+  </Card>
+</CardGroup>
+
+## Quick Start
+
+### Prerequisites
+
+* Python 3.10 or higher
+* pip or uv package manager
+
+### Installation
+
+From PyPI:
+
+```bash theme={null}
+# Install core dependencies
+pip install agentscope-runtime
+
+# Install extension
+pip install "agentscope-runtime[ext]"
+
+# Install preview version
+pip install --pre agentscope-runtime
+```
+
+(Optional) From source:
+
+```bash theme={null}
+# Pull the source code from GitHub
+git clone -b main https://github.com/agentscope-ai/agentscope-runtime.git
+cd agentscope-runtime
+
+# Install core dependencies
+pip install -e .
+```
+
+### Agent App Example
+
+This example demonstrates how to create an agent API server using agentscope `ReActAgent` and `AgentApp`.  To run a minimal `AgentScope` Agent with AgentScope Runtime, you generally need to implement:
+
+1. `Define lifespan` – Use `contextlib.asynccontextmanager` to manage resource initialization (e.g., state services) at startup and cleanup on exit.
+2. `@agent_app.query(framework="agentscope")` – Core logic for handling requests, **must use** `stream_printing_messages` to `yield msg, last` for streaming output
+
+```python agent_app.py theme={null}
+# Shared configuration for all deployment methods
+# -*- coding: utf-8 -*-
+import asyncio
+import os
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from agentscope.agent import ReActAgent
+from agentscope.formatter import DashScopeChatFormatter
+from agentscope.model import DashScopeChatModel
+from agentscope.pipeline import stream_printing_messages
+from agentscope.tool import Toolkit, execute_python_code
+from agentscope.memory import InMemoryMemory
+from agentscope.session import RedisSession
+
+from agentscope_runtime.engine.app import AgentApp
+from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
+
+# Define Lifecycle
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup Phase
+    import fakeredis
+
+    fake_redis = fakeredis.aioredis.FakeRedis(
+        decode_responses=True
+    )
+    # NOTE: This FakeRedis instance is for development/testing only.
+    # In production, replace it with your own Redis client/connection
+    # (e.g., aioredis.Redis)
+    app.state.session = RedisSession(
+        connection_pool=fake_redis.connection_pool
+    )
+    try:
+        yield
+    finally:
+        print("AgentApp is shutting down...")
+
+# Pass the defined lifespan to AgentApp
+app = AgentApp(
+    app_name="Friday",
+    app_description="A helpful assistant",
+    lifespan=lifespan,
+)
+
+# Define Request Handling Logic
+@app.query(framework="agentscope")
+async def query_func(
+    self,
+    msgs,
+    request: AgentRequest = None,
+    **kwargs,
+):
+    assert kwargs is not None, "kwargs is Required for query_func"
+    session_id = request.session_id
+    user_id = request.user_id
+
+    toolkit = Toolkit()
+    toolkit.register_tool_function(execute_python_code)
+
+    agent = ReActAgent(
+        name="Friday",
+        model=DashScopeChatModel(
+            "qwen-turbo",
+            api_key=os.getenv("DASHSCOPE_API_KEY"),
+            enable_thinking=True,
+            stream=True,
+        ),
+        sys_prompt="You're a helpful assistant named Friday.",
+        toolkit=toolkit,
+        memory=InMemoryMemory(),
+        formatter=DashScopeChatFormatter(),
+    )
+
+    # Load agent state
+    await app.state.session.load_session_state(
+        session_id=session_id,
+        user_id=user_id,
+        agent=agent,
+    )
+
+    try:
+        async for msg, last in stream_printing_messages(
+            agents=[agent],
+            coroutine_task=agent(msgs),
+        ):
+            yield msg, last
+
+    except asyncio.CancelledError:
+        # Interruption logic
+        print(f"Task {session_id} was manually interrupted.")
+        await agent.interrupt()
+        raise
+
+    finally:
+        # Save agent state
+        await app.state.session.save_session_state(
+            session_id=session_id,
+            user_id=user_id,
+            agent=agent,
+        )
+
+# Create AgentApp with multiple endpoints
+@app.post("/stop")
+async def stop_task(request: AgentRequest): # Endpoint to trigger task interruption
+    await app.stop_chat(
+        user_id=request.user_id,
+        session_id=request.session_id,
+    )
+    return {
+        "status": "success",
+        "message": "Interrupt signal broadcasted.",
+    }
+
+@app.endpoint("/sync")
+def sync_handler(request: AgentRequest):
+    return {"status": "ok", "payload": request}
+
+@app.endpoint("/async")
+async def async_handler(request: AgentRequest):
+    return {"status": "ok", "payload": request}
+
+@app.endpoint("/stream_async")
+async def stream_async_handler(request: AgentRequest):
+    for i in range(5):
+        yield f"async chunk {i}, with request payload {request}\n"
+
+@app.endpoint("/stream_sync")
+def stream_sync_handler(request: AgentRequest):
+    for i in range(5):
+        yield f"sync chunk {i}, with request payload {request}\n"
+
+@app.task("/task", queue="celery1")
+def task_handler(request: AgentRequest):
+    import time
+    time.sleep(30)
+    return {"status": "ok", "payload": request}
+
+@app.task("/atask")
+async def atask_handler(request: AgentRequest):
+    import asyncio
+    await asyncio.sleep(15)
+    return {"status": "ok", "payload": request}
+
+print("✅ Agent and endpoints configured successfully")
+```
+
+<Note>
+  The above configuration is shared across all deployment methods below. Each method will show only the deployment-specific code.
+</Note>
+
+## Deployment
+
+After grasping the concepts and completing the quickstart, deployment is the bridge that turns experimental prototypes into reliable services. Its significance is underpinned by three core pillars:
+
+* **Connect to real workloads**: Moving agents from notebooks or scripts into a continuously running environment is the only way to serve real users, tools, and data.
+* **Gain operational stability**: Runtime offers standardized lifecycles, health checks, and scaling hooks that simplify monitoring and rollback.
+* **Reuse the ecosystem**: A unified deployment approach lets you reuse memory, sandbox, state, and other foundational services instead of rebuilding them per project.
+
+### Overview of Deployment Methods
+
+AgentScope Runtime offers multiple distinct deployment approaches, each tailored for specific use cases:
+
+| Deployment Type           | Use Case                   | Scalability                             | Management       | Resource Isolation              |
+| ------------------------- | -------------------------- | --------------------------------------- | ---------------- | ------------------------------- |
+| **Local Daemon**          | Development & Testing      | Single Process                          | Manual           | Process-level                   |
+| **Detached Process**      | Production Services        | Single Node                             | Automated        | Process-level                   |
+| **Kubernetes**            | Enterprise & Cloud         | Single-node (multi-node support coming) | Orchestrated     | Container-level                 |
+| **ModelStudio**           | Alibaba Cloud Platform     | Cloud-managed                           | Platform-managed | Container-level                 |
+| **AgentRun**              | AgentRun Platform          | Cloud-managed                           | Platform-managed | Container-level                 |
+| **PAI**                   | Alibaba Cloud PAI Platform | Cloud-managed                           | Platform-managed | Container-level                 |
+| **Knative**               | Enterprise & Cloud         | Single-node (multi-node support coming) | Orchestrated     | Container-level                 |
+| **Kruise**                | Enterprise & Cloud         | Single-node                             | Orchestrated     | Container-level / MicroVM-level |
+| **Function Compute (FC)** | Alibaba Cloud Serverless   | Cloud-managed                           | Platform-managed | MicroVM-level                   |
+
+### Prerequisites
+
+#### Installation Requirements
+
+Install AgentScope Runtime with all deployment dependencies:
+
+```bash theme={null}
+# Basic installation
+pip install agentscope-runtime>=1.0.0
+
+# For Kubernetes deployment
+pip install "agentscope-runtime[ext]>=1.0.0"
+```
+
+#### Environment Setup
+
+Configure your API keys and environment variables:
+
+```bash theme={null}
+# Required for LLM functionality
+export DASHSCOPE_API_KEY="your_qwen_api_key"
+
+# Optional for cloud deployments
+export DOCKER_REGISTRY="your_registry_url"
+export KUBECONFIG="/path/to/your/kubeconfig"
+```
+
+#### Prerequisites by Deployment Type
+
+##### For All Deployments
+
+* Python 3.10+
+* AgentScope Runtime installed
+
+##### For Kubernetes Deployment
+
+* Docker installed and configured
+* Kubernetes cluster access
+* kubectl configured
+* Container registry access (for image pushing)
+
+##### For ModelStudio Deployment
+
+* Alibaba Cloud account with ModelStudio access
+* DashScope API key for LLM services
+* OSS (Object Storage Service) access
+* ModelStudio workspace configured
+
+### Method 1: Local Daemon Deployment
+
+**Best for**: Development, testing, and single-user scenarios where you need persistent service with manual control.
+
+#### Features
+
+* Persistent service in main process
+* Manual lifecycle management
+* Interactive control and monitoring
+* Direct resource sharing
+
+#### Implementation
+
+```python theme={null}
+# daemon_deploy.py
+import asyncio
+from agentscope_runtime.engine.deployers.local_deployer import LocalDeployManager
+from agent_app import app  # Import the configured app
+
+# Deploy in daemon mode
+async def main():
+    await app.deploy(LocalDeployManager())
+
+if __name__ == "__main__":
+    asyncio.run(main())
+    input("Press Enter to stop the server...")
+```
+
+**Key Points**:
+
+* Service runs in the main process (blocking)
+* Manually stopped with Ctrl+C or by ending the script
+* Best for development and testing
+
+#### Testing the Deployed Service
+
+Once deployed, you can test the endpoints using curl or Python:
+
+**Using curl:**
+
+```bash theme={null}
+# Test health endpoint
+curl http://localhost:8080/health
+
+# Call sync endpoint
+curl -X POST http://localhost:8080/sync \
+  -H "Content-Type: application/json" \
+  -d '{"input": [{"role": "user", "content": [{"type": "text", "text": "What is the weather in Beijing?"}]}], "session_id": "123"}'
+
+# Call streaming endpoint
+curl -X POST http://localhost:8080/stream_sync \
+  -H "Content-Type: application/json" \
+  -d '{"input": [{"role": "user", "content": [{"type": "text", "text": "What is the weather in Beijing?"}]}], "session_id": "123"}'
+
+# Submit a task
+curl -X POST http://localhost:8080/task \
+  -H "Content-Type: application/json" \
+  -d '{"input": [{"role": "user", "content": [{"type": "text", "text": "What is the weather in Beijing?"}]}], "session_id": "123"}'
+```
+
+**Using OpenAI SDK:**
+
+```python theme={null}
+from openai import OpenAI
+
+client = OpenAI(base_url="http://0.0.0.0:8080/compatible-mode/v1")
+
+response = client.responses.create(
+  model="any_name",
+  input="What is the weather in Beijing?"
+)
+
+print(response)
+```
+
+### Method 2: Detached Process Deployment
+
+**Best for**: Production services requiring process isolation, automated management, and independent lifecycle.
+
+#### Features
+
+* Independent process execution
+* Automated lifecycle management
+* Remote shutdown capabilities
+* Service persistence after main script exit
+
+#### Implementation
+
+```python theme={null}
+# detached_deploy.py
+import asyncio
+from agentscope_runtime.engine.deployers.local_deployer import LocalDeployManager
+from agentscope_runtime.engine.deployers.utils.deployment_modes import DeploymentMode
+from agent_app import app  # Import the configured app
+
+async def main():
+    """Deploy app in detached process mode"""
+    print("🚀 Deploying AgentApp in detached process mode...")
+
+    # Deploy in detached mode
+    deployment_info = await app.deploy(
+        LocalDeployManager(host="127.0.0.1", port=8080),
+        mode=DeploymentMode.DETACHED_PROCESS,
+    )
+
+    print(f"✅ Deployment successful: {deployment_info['url']}")
+    print(f"📍 Deployment ID: {deployment_info['deploy_id']}")
+    print(f"""
+🎯 Service started, test with:
+curl {deployment_info['url']}/health
+curl -X POST {deployment_info['url']}/admin/shutdown  # To stop
+
+⚠️ Note: Service runs independently until stopped.
+""")
+    return deployment_info
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+**Key Points**:
+
+* Service runs in a separate detached process
+* Script exits after deployment, service continues
+* Remote shutdown via `/admin/shutdown` endpoint
+
+### Method 3: Kubernetes Deployment
+
+**Best for**: Enterprise production environments requiring scalability, high availability, and cloud-native orchestration.
+
+#### Features
+
+* Container-based deployment
+* Horizontal scaling support
+* Cloud-native orchestration
+* Resource management and limits
+* Health checks and auto-recovery
+
+#### Prerequisites for Kubernetes Deployment
+
+```bash theme={null}
+# Ensure Docker is running
+docker --version
+
+# Verify Kubernetes access
+kubectl cluster-info
+
+# Check registry access (example with Aliyun)
+docker login  your-registry
+```
+
+#### Implementation
+
+```python theme={null}
+# k8s_deploy.py
+import asyncio
+import os
+from agentscope_runtime.engine.deployers.kubernetes_deployer import (
+    KubernetesDeployManager,
+    RegistryConfig,
+    K8sConfig,
+)
+from agent_app import app  # Import the configured app
+
+async def deploy_to_k8s():
+    """Deploy AgentApp to Kubernetes"""
+
+    # Configure registry and K8s connection
+    deployer = KubernetesDeployManager(
+        kube_config=K8sConfig(
+            k8s_namespace="agentscope-runtime",
+            kubeconfig_path=None,
+        ),
+        registry_config=RegistryConfig(
+            registry_url="your-registry-url",
+            namespace="agentscope-runtime",
+        ),
+        use_deployment=True,
+    )
+
+    # Deploy with configuration
+    result = await app.deploy(
+        deployer,
+        port="8080",
+        replicas=1,
+        image_name="agent_app",
+        image_tag="v1.0",
+        requirements=["agentscope", "fastapi", "uvicorn"],
+        base_image="python:3.10-slim-bookworm",
+        environment={
+            "PYTHONPATH": "/app",
+            "DASHSCOPE_API_KEY": os.environ.get("DASHSCOPE_API_KEY"),
+        },
+        runtime_config={
+            "resources": {
+                "requests": {"cpu": "200m", "memory": "512Mi"},
+                "limits": {"cpu": "1000m", "memory": "2Gi"},
+            },
+        },
+        platform="linux/amd64",
+        push_to_registry=True,
+    )
+
+    print(f"✅ Deployed to: {result['url']}")
+    return result, deployer
+
+if __name__ == "__main__":
+    asyncio.run(deploy_to_k8s())
+```
+
+**Key Points**:
+
+* Containerized deployment with auto-scaling support
+* Resource limits and health checks configured
+* Can be scaled with `kubectl scale deployment`
+
+### Method 4: Serverless Deployment: ModelStudio
+
+**Best for**: Alibaba Cloud users requiring managed cloud deployment with built-in monitoring, scaling, and integration with Alibaba Cloud ecosystem.
+
+#### Features
+
+* Managed cloud deployment on Alibaba Cloud
+* Integrated with DashScope LLM services
+* Built-in monitoring and analytics
+* Automatic scaling and resource management
+* OSS integration for artifact storage
+* Web console for deployment management
+* **Supports STS (Security Token Service) temporary credential authentication.**
+
+#### Prerequisites for ModelStudio Deployment
+
+```bash theme={null}
+# Ensure environment variables are set
+export DASHSCOPE_API_KEY="your-dashscope-api-key"
+export ALIBABA_CLOUD_ACCESS_KEY_ID="your-access-key-id"
+export ALIBABA_CLOUD_ACCESS_KEY_SECRET="your-access-key-secret"
+export MODELSTUDIO_WORKSPACE_ID="your-workspace-id"
+
+# Optional: Set this if you are using STS temporary credentials (Recommended)
+export ALIBABA_CLOUD_SECURITY_TOKEN="your-sts-token"
+
+# Optional OSS-specific credentials
+export OSS_ACCESS_KEY_ID="your-oss-access-key-id"
+export OSS_ACCESS_KEY_SECRET="your-oss-access-key-secret"
+export OSS_SESSION_TOKEN="your-oss-sts-token"
+```
+
+#### Implementation
+
+```python theme={null}
+# modelstudio_deploy.py
+import asyncio
+import os
+from agentscope_runtime.engine.deployers.modelstudio_deployer import (
+    ModelstudioDeployManager,
+    OSSConfig,
+    ModelstudioConfig,
+)
+from agent_app import app  # Import the configured app
+
+async def deploy_to_modelstudio():
+    """Deploy AgentApp to Alibaba Cloud ModelStudio"""
+
+    # Configure OSS and ModelStudio
+    deployer = ModelstudioDeployManager(
+        oss_config=OSSConfig(
+            access_key_id=os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_ID"),
+            access_key_secret=os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_SECRET"),
+            security_token=os.environ.get("ALIBABA_CLOUD_SECURITY_TOKEN"),
+        ),
+        modelstudio_config=ModelstudioConfig(
+            workspace_id=os.environ.get("MODELSTUDIO_WORKSPACE_ID"),
+            access_key_id=os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_ID"),
+            access_key_secret=os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_SECRET"),
+            security_token=os.environ.get("ALIBABA_CLOUD_SECURITY_TOKEN"),
+            dashscope_api_key=os.environ.get("DASHSCOPE_API_KEY"),
+        ),
+    )
+
+    # Deploy to ModelStudio
+    result = await app.deploy(
+        deployer,
+        deploy_name="agent-app-example",
+        telemetry_enabled=True,
+        requirements=["agentscope", "fastapi", "uvicorn"],
+        environment={
+            "PYTHONPATH": "/app",
+            "DASHSCOPE_API_KEY": os.environ.get("DASHSCOPE_API_KEY"),
+        },
+    )
+
+    print(f"✅ Deployed to ModelStudio: {result['url']}")
+    print(f"📦 Artifact: {result['artifact_url']}")
+    return result
+
+if __name__ == "__main__":
+    asyncio.run(deploy_to_modelstudio())
+```
+
+**Key Points**:
+
+* Fully managed cloud deployment on Alibaba Cloud
+* Built-in monitoring and auto-scaling
+* Integrated with DashScope LLM services
+* **Enhanced security with STS Token-based authentication support.**
+
+### Method 5: Serverless Deployment: AgentRun
+
+**Best For**: Alibaba Cloud users who need to deploy agents to AgentRun service with automated build, upload, and deployment workflows.
+
+#### Features
+
+* Managed deployment on Alibaba Cloud AgentRun service
+* Automatic project building and packaging
+* OSS integration for artifact storage
+* Complete lifecycle management
+* Automatic runtime endpoint creation and management
+
+#### AgentRun Deployment Prerequisites
+
+```bash theme={null}
+# Ensure environment variables are set
+# More env settings, please refer to the table below
+export ALIBABA_CLOUD_ACCESS_KEY_ID="your-access-key-id"
+export ALIBABA_CLOUD_ACCESS_KEY_SECRET="your-access-key-secret"
+export AGENT_RUN_REGION_ID="cn-hangzhou"  # or other regions
+
+# OSS configuration (for storing build artifacts)
+export OSS_ACCESS_KEY_ID="your-oss-access-key-id"
+export OSS_ACCESS_KEY_SECRET="your-oss-access-key-secret"
+export OSS_REGION="cn-hangzhou"
+export OSS_BUCKET_NAME="your-bucket-name"
+```
+
+#### Implementation
+
+```python theme={null}
+# agentrun_deploy.py
+import asyncio
+import os
+from agentscope_runtime.engine.deployers.agentrun_deployer import (
+    AgentRunDeployManager,
+    OSSConfig,
+    AgentRunConfig,
+)
+from agent_app import app  # Import configured app
+
+async def deploy_to_agentrun():
+    """Deploy AgentApp to Alibaba Cloud AgentRun service"""
+
+    # Configure OSS and AgentRun
+    deployer = AgentRunDeployManager(
+        oss_config=OSSConfig(
+            access_key_id=os.environ.get("OSS_ACCESS_KEY_ID"),
+            access_key_secret=os.environ.get("OSS_ACCESS_KEY_SECRET"),
+            region=os.environ.get("OSS_REGION"),
+            bucket_name=os.environ.get("OSS_BUCKET_NAME"),
+        ),
+        agentrun_config=AgentRunConfig(
+            access_key_id=os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_ID"),
+            access_key_secret=os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_SECRET"),
+            region_id=os.environ.get("ALIBABA_CLOUD_REGION_ID", "cn-hangzhou"),
+        ),
+    )
+
+    # Execute deployment
+    result = await app.deploy(
+        deployer,
+        endpoint_path="/process",
+        requirements=["agentscope", "fastapi", "uvicorn"],
+        environment={
+            "PYTHONPATH": "/app",
+            "DASHSCOPE_API_KEY": os.environ.get("DASHSCOPE_API_KEY"),
+        },
+        deploy_name="agent-app-example",
+        project_dir=".",  # Current project directory
+        cmd="python -m uvicorn app:app --host 0.0.0.0 --port 8080",
+    )
+
+    print(f"✅ Deployed to AgentRun: {result['url']}")
+    print(f"📍 AgentRun ID: {result.get('agentrun_id', 'N/A')}")
+    print(f"📦 Artifact URL: {result.get('artifact_url', 'N/A')}")
+    return result
+
+if __name__ == "__main__":
+    asyncio.run(deploy_to_agentrun())
+```
+
+**Key Points**:
+
+* Automatically builds and packages the project as a wheel file
+* Uploads artifacts to OSS
+* Creates and manages runtime in the AgentRun service
+* Automatically creates public access endpoints
+* Supports updating existing deployments (via `agentrun_id` parameter)
+
+#### Configuration
+
+##### OSSConfig
+
+OSS configuration for storing build artifacts:
+
+```python theme={null}
+OSSConfig(
+    access_key_id="your-access-key-id",
+    access_key_secret="your-access-key-secret",
+    region="cn-hangzhou",
+    bucket_name="your-bucket-name",
+)
+```
+
+##### AgentRunConfig
+
+AgentRun service configuration:
+
+```python theme={null}
+AgentRunConfig(
+    access_key_id="your-access-key-id",
+    access_key_secret="your-access-key-secret",
+    region_id="cn-hangzhou",  # Supported regions: cn-hangzhou, cn-beijing, etc.
+)
+```
+
+### Method 6: PAI Deployment (Platform for AI)
+
+**Best for**: Enterprise users who need to deploy on Alibaba Cloud PAI platform, leveraging LangStudio for project management and EAS (Elastic Algorithm Service) for service deployment.
+
+#### Features
+
+* Fully managed deployment on Alibaba Cloud PAI platform
+* Integrated LangStudio project and snapshot management
+* EAS (Elastic Algorithm Service) service deployment
+* Three resource types: Public Resource Pool, Dedicated Resource Group, Quota
+* VPC network configuration support
+* RAM role and permission configuration
+* Tracing support
+* Automatic/manual approval workflow
+* Auto-generated deployment tags
+
+#### Prerequisites for PAI Deployment
+
+```bash theme={null}
+# Set required environment variables
+export ALIBABA_CLOUD_ACCESS_KEY_ID="your-access-key-id"
+export ALIBABA_CLOUD_ACCESS_KEY_SECRET="your-access-key-secret"
+
+# Optional configuration
+export PAI_WORKSPACE_ID="your-workspace-id"
+export REGION_ID="cn-hangzhou"  # or ALIBABA_CLOUD_REGION_ID
+```
+
+#### PAI Workspace Requirements
+
+* If using a RAM user account, PAI Developer Role must be assigned
+* OSS bucket must be configured for storing build artifacts
+* (Optional) VPC with public network access if using DashScope models
+
+<Warning>
+  Services deployed to PAI EAS have no public network access by default. If using DashScope models, configure a VPC with public network access. Reference: [Configure Network Connectivity](https://help.aliyun.com/zh/pai/user-guide/configure-network-connectivity)
+</Warning>
+
+#### Implementation (SDK)
+
+```python theme={null}
+# pai_deploy.py
+import asyncio
+import os
+from agentscope_runtime.engine.deployers.pai_deployer import (
+    PAIDeployManager,
+)
+from agent_app import app  # Import configured app
+
+async def deploy_to_pai():
+    """Deploy AgentApp to Alibaba Cloud PAI"""
+
+    # Create PAI deploy manager
+    deployer = PAIDeployManager(
+        workspace_id=os.environ.get("PAI_WORKSPACE_ID"),
+        region_id=os.environ.get("REGION_ID", "cn-hangzhou"),
+    )
+
+    # Execute deployment
+    result = await app.deploy(
+        deployer,
+        service_name="my-agent-service",
+        project_dir="./my_agent",
+        entrypoint="agent.py",
+        resource_type="public",
+        instance_type="ecs.c6.large",
+        instance_count=1,
+        environment={
+            "DASHSCOPE_API_KEY": os.environ.get("DASHSCOPE_API_KEY"),
+        },
+        enable_trace=True,
+        wait=True,
+    )
+
+    print(f"✅ Deployment successful: {result['url']}")
+    print(f"📍 Deployment ID: {result['deploy_id']}")
+    print(f"📦 Project ID: {result['flow_id']}")
+    return result
+
+if __name__ == "__main__":
+    asyncio.run(deploy_to_pai())
+```
+
+**Key Points**:
+
+* Automatically packages project and uploads to OSS
+* Creates LangStudio project and snapshot
+* Deploys as EAS service
+* Supports multiple resource type configurations
+
+#### Implementation (CLI)
+
+PAI deployment recommends using configuration files for clarity and maintainability:
+
+**Method 1: Using Configuration File (Recommended)**
+
+```bash theme={null}
+# Navigate to example directory
+cd examples/deployments/pai_deploy
+
+# Deploy using config file
+agentscope deploy pai --config deploy_config.yaml
+
+# Deploy with CLI overrides
+agentscope deploy pai --config deploy_config.yaml --name new-service-name
+```
+
+**Method 2: Using CLI Only**
+
+```bash theme={null}
+agentscope deploy pai ./my_agent \
+  --name my-service \
+  --workspace-id 12345 \
+  --region cn-hangzhou \
+  --instance-type ecs.c6.large \
+  --env DASHSCOPE_API_KEY=your-key
+```
+
+#### Configuration
+
+##### PAIDeployConfig Structure
+
+PAI deployment uses YAML configuration files with the following structure:
+
+```yaml theme={null}
+# deploy_config.yaml
+context:
+  # PAI workspace ID (required)
+  workspace_id: "your-workspace-id"
+  # Region (e.g., cn-hangzhou, cn-shanghai)
+  region: "cn-hangzhou"
+
+spec:
+  # Service name (required, unique within region)
+  name: "my_agent_service"
+
+  code:
+    # Source directory (relative to config file location)
+    source_dir: "my_agent"
+    # Entrypoint file
+    entrypoint: "agent.py"
+
+  resources:
+    # Resource type: public, resource, quota
+    type: "public"
+    # Instance type (required for public mode)
+    instance_type: "ecs.c6.large"
+    # Number of instances
+    instance_count: 1
+
+  # VPC configuration (optional)
+  vpc_config:
+    vpc_id: "vpc-xxxxx"
+    vswitch_id: "vsw-xxxxx"
+    security_group_id: "sg-xxxxx"
+
+  # RAM role configuration (optional)
+  identity:
+    ram_role_arn: "acs:ram::xxx:role/xxx"
+
+  # Observability configuration
+  observability:
+    enable_trace: true
+
+  # Environment variables
+  env:
+    DASHSCOPE_API_KEY: "your-dashscope-api-key"
+
+  # Tags
+  tags:
+    team: "ai-team"
+    project: "agent-demo"
+```
+
+<Note>
+  `code.source_dir` is resolved relative to the config file location.
+</Note>
+
+##### Configuration Structure Reference
+
+| Section              | Description                                    |
+| -------------------- | ---------------------------------------------- |
+| `context`            | Deployment target (workspace, region, storage) |
+| `spec.name`          | Service name (required)                        |
+| `spec.code`          | Source directory and entrypoint                |
+| `spec.resources`     | Resource allocation settings                   |
+| `spec.vpc_config`    | VPC network configuration (optional)           |
+| `spec.identity`      | RAM role configuration (optional)              |
+| `spec.observability` | Tracing settings                               |
+| `spec.env`           | Environment variables                          |
+| `spec.tags`          | Deployment tags                                |
+
+#### Resource Types
+
+PAI supports three resource types:
+
+##### 1. Public Resource Pool (`type: "public"`)
+
+Deploy on shared ECS instances, suitable for development/testing and small-scale deployments:
+
+```yaml theme={null}
+spec:
+  resources:
+    type: "public"
+    instance_type: "ecs.c6.large"  # Required
+    instance_count: 1
+```
+
+##### 2. Dedicated Resource Group (`type: "resource"`)
+
+Deploy on dedicated EAS resource group, suitable for production environments requiring resource isolation:
+
+```yaml theme={null}
+spec:
+  resources:
+    type: "resource"
+    resource_id: "eas-r-xxxxx"  # Required
+    cpu: 2
+    memory: 4096
+```
+
+##### 3. Quota-based (`type: "quota"`)
+
+Deploy using PAI quota, suitable for enterprise-level resource management:
+
+```yaml theme={null}
+spec:
+  resources:
+    type: "quota"
+    quota_id: "quota-xxxxxxxx"  # Required
+    cpu: 2
+    memory: 4096
+```
+
+#### VPC Configuration
+
+Private network deployment configuration for scenarios requiring access to public or internal resources:
+
+```yaml theme={null}
+spec:
+  vpc_config:
+    vpc_id: "vpc-xxxxx"
+    vswitch_id: "vsw-xxxxx"
+    security_group_id: "sg-xxxxx"
+```
+
+### Method 7: Knative Deployment
+
+**Best for**: Enterprise production environments requiring scalability, high availability, and cloud-native serverless container orchestration.
+
+#### Features
+
+* Container-based Serverless deployment
+* Provides automatic scaling from zero to thousands of instances, intelligent traffic routing
+* Cloud-native orchestration
+* Resource management and limits
+* Health checks and auto-recovery
+
+#### Prerequisites for Kubernetes Deployment
+
+```bash theme={null}
+# Ensure Docker is running
+docker --version
+
+# Verify Kubernetes access
+kubectl cluster-info
+
+# Check registry access (example with Aliyun)
+docker login  your-registry
+
+# Check Knative Serving installed
+kubectl auth can-i create ksvc
+```
+
+#### Implementation
+
+```python theme={null}
+# knative_deploy.py
+import asyncio
+import os
+from agentscope_runtime.engine.deployers.knative_deployer import (
+    KnativeDeployManager,
+    RegistryConfig,
+    K8sConfig,
+)
+from agent_app import app  # Import the configured app
+
+async def deploy_to_knative():
+    """Deploy AgentApp to Knative"""
+
+    # Configure registry and K8s connection
+    deployer = KnativeDeployManager(
+        kube_config=K8sConfig(
+            k8s_namespace="agentscope-runtime",
+            kubeconfig_path=None,
+        ),
+        registry_config=RegistryConfig(
+            registry_url="your-registry-url",
+            namespace="agentscope-runtime",
+        ),
+    )
+
+    # Deploy with configuration
+    result = await app.deploy(
+        deployer,
+        port="8080",
+        image_name="agent_app",
+        image_tag="v1.0",
+        requirements=["agentscope", "fastapi", "uvicorn"],
+        base_image="python:3.10-slim-bookworm",
+        environment={
+            "PYTHONPATH": "/app",
+            "DASHSCOPE_API_KEY": os.environ.get("DASHSCOPE_API_KEY"),
+        },
+        labels={
+            "app": "agent-ksvc",
+        },
+        runtime_config={
+            "resources": {
+                "requests": {"cpu": "200m", "memory": "512Mi"},
+                "limits": {"cpu": "1000m", "memory": "2Gi"},
+            },
+        },
+        platform="linux/amd64",
+        push_to_registry=True,
+    )
+
+    print(f"✅ Deployed to: {result['url']}")
+    return result, deployer
+
+if __name__ == "__main__":
+    asyncio.run(deploy_to_knative())
+```
+
+**Key Points**:
+
+* Containerized Serverless deployment
+* Provides automatic scaling from zero to thousands of instances, intelligent traffic routing
+* Resource limits and health checks configured
+
+### Method 8: Kruise Deployment
+
+**Best For**: Scenarios requiring instance-level isolation, pause/resume capabilities, and secure multi-tenant runtime environments.
+
+#### Features
+
+* Custom resource deployment based on Kruise Sandbox CRD (`agents.kruise.io/v1alpha1`)
+* Instance-level isolation, ensuring secure runtime environments across different agents
+* Supports pausing and resuming, effectively saving resource consumption
+* Automatically creates LoadBalancer Service for external access
+* Deployment state persistence management
+
+#### Kruise Deployment Prerequisites
+
+```bash theme={null}
+# Ensure Docker is running
+docker --version
+
+# Verify Kubernetes access
+kubectl cluster-info
+
+# Check registry access (e.g., Alibaba Cloud)
+docker login your-registry
+
+# Check Kruise Sandbox is installed
+# Installation guide: https://github.com/openkruise/agents
+kubectl get crd sandboxes.agents.kruise.io
+```
+
+#### Implementation
+
+```python theme={null}
+# kruise_deploy.py
+import asyncio
+import os
+from agentscope_runtime.engine.deployers.kruise_deployer import (
+    KruiseDeployManager,
+    K8sConfig,
+)
+from agentscope_runtime.engine.deployers.utils.docker_image_utils import (
+    RegistryConfig,
+)
+from agent_app import app  # Import the configured app
+
+async def deploy_to_kruise():
+    """Deploy AgentApp to Kruise Sandbox"""
+
+    # Configure registry and K8s connection
+    deployer = KruiseDeployManager(
+        kube_config=K8sConfig(
+            k8s_namespace="agentscope-runtime",
+            kubeconfig_path=None,
+        ),
+        registry_config=RegistryConfig(
+            registry_url="your-registry-url",
+            namespace="agentscope-runtime",
+        ),
+    )
+
+    # Execute deployment
+    result = await app.deploy(
+        deployer,
+        port="8090",
+        image_name="agent_app",
+        image_tag="v1.0",
+        requirements=["agentscope", "fastapi", "uvicorn"],
+        base_image="python:3.10-slim-bookworm",
+        environment={
+            "PYTHONPATH": "/app",
+            "DASHSCOPE_API_KEY": os.environ.get("DASHSCOPE_API_KEY"),
+        },
+        labels={
+            "app": "agent-kruise",
+        },
+        runtime_config={
+            "resources": {
+                "requests": {"cpu": "200m", "memory": "512Mi"},
+                "limits": {"cpu": "1000m", "memory": "2Gi"},
+            },
+        },
+        platform="linux/amd64",
+        push_to_registry=True,
+    )
+
+    print(f"Deployment successful: {result['url']}")
+    return result, deployer
+
+if __name__ == "__main__":
+    asyncio.run(deploy_to_kruise())
+```
+
+**Key Points**:
+
+* Isolated deployment based on Kruise Sandbox CRD, each agent runs in an independent environment
+* Automatically creates LoadBalancer Service, supports automatic switching between local and cloud environments
+* Deployment state is automatically persisted, supports lifecycle management via CLI
+
+### Method 9: Serverless Deployment: Function Compute (FC)
+
+**Best For**: Alibaba Cloud users who need to deploy agents to Function Compute (FC) service with automated build, upload, and deployment workflows. FC provides a true serverless experience with pay-per-use pricing and automatic scaling.
+
+#### Features
+
+* Serverless deployment on Alibaba Cloud Function Compute
+* Automatic project building and packaging with Docker
+* OSS integration for artifact storage
+* HTTP trigger for public access
+* Session affinity support for stateful applications
+* VPC and logging configuration support
+* Pay-per-use pricing model
+
+#### FC Deployment Prerequisites
+
+```bash theme={null}
+# Ensure environment variables are set
+# More env settings, please refer to the table below
+export ALIBABA_CLOUD_ACCESS_KEY_ID="your-access-key-id"
+export ALIBABA_CLOUD_ACCESS_KEY_SECRET="your-access-key-secret"
+export FC_ACCOUNT_ID="your-fc-account-id"
+export FC_REGION_ID="cn-hangzhou"  # or other regions
+
+# OSS configuration (for storing build artifacts)
+export OSS_ACCESS_KEY_ID="your-oss-access-key-id"
+export OSS_ACCESS_KEY_SECRET="your-oss-access-key-secret"
+export OSS_REGION="cn-hangzhou"
+export OSS_BUCKET_NAME="your-bucket-name"
+```
+
+#### Implementation
+
+```python theme={null}
+# fc_deploy.py
+import asyncio
+import os
+from agentscope_runtime.engine.deployers.fc_deployer import (
+    FCDeployManager,
+    OSSConfig,
+    FCConfig,
+)
+from agent_app import app  # Import configured app
+
+async def deploy_to_fc():
+    """Deploy AgentApp to Alibaba Cloud Function Compute (FC)"""
+
+    # Configure OSS and FC
+    deployer = FCDeployManager(
+        oss_config=OSSConfig(
+            access_key_id=os.environ.get("OSS_ACCESS_KEY_ID"),
+            access_key_secret=os.environ.get("OSS_ACCESS_KEY_SECRET"),
+            region=os.environ.get("OSS_REGION", "cn-hangzhou"),
+            bucket_name=os.environ.get("OSS_BUCKET_NAME"),
+        ),
+        fc_config=FCConfig(
+            access_key_id=os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_ID"),
+            access_key_secret=os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_SECRET"),
+            account_id=os.environ.get("FC_ACCOUNT_ID"),
+            region_id=os.environ.get("FC_REGION_ID", "cn-hangzhou"),
+        ),
+    )
+
+    # Execute deployment
+    result = await app.deploy(
+        deployer,
+        deploy_name="agent-app-example",
+        requirements=["agentscope", "fastapi", "uvicorn"],
+        environment={
+            "PYTHONPATH": "/code",
+            "DASHSCOPE_API_KEY": os.environ.get("DASHSCOPE_API_KEY"),
+        },
+    )
+
+    print(f"✅ Deployed to FC: {result['url']}")
+    print(f"📍 Function Name: {result['function_name']}")
+    print(f"🔗 Endpoint URL: {result['endpoint_url']}")
+    print(f"📦 Artifact URL: {result['artifact_url']}")
+    return result
+
+if __name__ == "__main__":
+    asyncio.run(deploy_to_fc())
+```
+
+**Key Points**:
+
+* Automatically builds project with Docker and creates a deployable zip package
+* Uploads artifacts to OSS for FC to pull
+* Creates FC function with HTTP trigger for public access
+* Supports session affinity via `x-agentscope-runtime-session-id` header
+* Supports updating existing deployments (via `function_name` parameter)
+
+#### Configuration
+
+##### OSSConfig
+
+OSS configuration for storing build artifacts:
+
+```python theme={null}
+OSSConfig(
+    access_key_id="your-access-key-id",
+    access_key_secret="your-access-key-secret",
+    region="cn-hangzhou",
+    bucket_name="your-bucket-name",
+)
+```
+
+##### FCConfig
+
+Function Compute service configuration:
+
+```python theme={null}
+FCConfig(
+    access_key_id="your-access-key-id",
+    access_key_secret="your-access-key-secret",
+    account_id="your-account-id",
+    region_id="cn-hangzhou",  # Supported regions: cn-hangzhou, cn-beijing, etc.
+    cpu=2.0,  # CPU cores
+    memory=2048,  # Memory in MB
+    disk=512,  # Disk in MB
+)
+```

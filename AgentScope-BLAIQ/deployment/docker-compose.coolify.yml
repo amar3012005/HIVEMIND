@@ -1,0 +1,97 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      APP_HOST: ${APP_HOST:-0.0.0.0}
+      APP_PORT: ${APP_PORT:-8090}
+      DATABASE_URL: ${APP_DATABASE_URL:-postgresql+asyncpg://agentscope_blaiq:agentscope_blaiq@postgres:5432/agentscope_blaiq}
+      REDIS_URL: ${APP_REDIS_URL:-redis://redis:6379/0}
+      UPLOAD_DIR: /app/data/uploads
+      ARTIFACT_DIR: /app/data/artifacts
+      LOG_DIR: /app/logs
+      DEFAULT_TENANT: ${DEFAULT_TENANT:-default}
+      DEFAULT_SOURCE_SCOPE: ${DEFAULT_SOURCE_SCOPE:-web}
+      DEFAULT_ARTIFACT_TYPE: ${DEFAULT_ARTIFACT_TYPE:-visual_html}
+      LITELLM_PLANNER_MODEL: ${LITELLM_PLANNER_MODEL:-gemini-2.5-pro}
+      LITELLM_PRE_MODEL: ${LITELLM_PRE_MODEL:-gemini-2.5-pro}
+      LITELLM_POST_MODEL: ${LITELLM_POST_MODEL:-gemini-2.5-pro}
+      LITELLM_REFORMAT_MODEL: ${LITELLM_REFORMAT_MODEL:-gemini-2.5-pro}
+      LITELLM_TIMEOUT_SECONDS: ${LITELLM_TIMEOUT_SECONDS:-25}
+      LITELLM_MAX_OUTPUT_TOKENS: ${LITELLM_MAX_OUTPUT_TOKENS:-1200}
+      LITELLM_API_BASE_URL: ${LITELLM_API_BASE_URL:-}
+      LITELLM_API_KEY: ${LITELLM_API_KEY:-}
+      MODEL_REASONING_EFFORT: ${MODEL_REASONING_EFFORT:-}
+      STRATEGIC_MODEL: ${STRATEGIC_MODEL:-gemini-2.5-pro}
+      RESEARCH_MODEL: ${RESEARCH_MODEL:-gemini-2.5-pro}
+      VANGOGH_MODEL: ${VANGOGH_MODEL:-vertex_ai/claude-sonnet-4-6@default}
+      GOVERNANCE_MODEL: ${GOVERNANCE_MODEL:-gemini-2.5-pro}
+      OPENAI_FALLBACK_MODEL: ${OPENAI_FALLBACK_MODEL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-https://api.openai.com/v1}
+      HIVEMIND_MCP_RPC_URL: ${HIVEMIND_MCP_RPC_URL:-}
+      HIVEMIND_API_KEY: ${HIVEMIND_API_KEY:-}
+      HIVEMIND_TIMEOUT_SECONDS: ${HIVEMIND_TIMEOUT_SECONDS:-20}
+      HIVEMIND_WEB_POLL_INTERVAL_SECONDS: ${HIVEMIND_WEB_POLL_INTERVAL_SECONDS:-1.0}
+      HIVEMIND_WEB_POLL_ATTEMPTS: ${HIVEMIND_WEB_POLL_ATTEMPTS:-10}
+      ENABLE_GRAPH_AGENT: ${ENABLE_GRAPH_AGENT:-false}
+    command: >
+      sh -c "python /app/deployment/bootstrap.py --migrate &&
+      exec python -m uvicorn agentscope_blaiq.app.main:app
+      --host ${APP_HOST:-0.0.0.0}
+      --port ${APP_PORT:-8090}"
+    ports:
+      - "${HOST_PORT:-8090}:8090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - agentscope_blaiq_uploads:/app/data/uploads
+      - agentscope_blaiq_artifacts:/app/data/artifacts
+      - agentscope_blaiq_logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090/readyz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-agentscope_blaiq}
+      POSTGRES_USER: ${POSTGRES_USER:-agentscope_blaiq}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agentscope_blaiq}
+    volumes:
+      - agentscope_blaiq_postgres:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-agentscope_blaiq} -d ${POSTGRES_DB:-agentscope_blaiq}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --bind 0.0.0.0
+    volumes:
+      - agentscope_blaiq_redis:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+volumes:
+  agentscope_blaiq_postgres:
+  agentscope_blaiq_redis:
+  agentscope_blaiq_uploads:
+  agentscope_blaiq_artifacts:
+  agentscope_blaiq_logs:

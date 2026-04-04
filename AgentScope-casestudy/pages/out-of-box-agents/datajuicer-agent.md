@@ -1,0 +1,356 @@
+---
+title: "DataJuicer Agent"
+url: "https://docs.agentscope.io/out-of-box-agents/datajuicer-agent"
+path: "/out-of-box-agents/datajuicer-agent"
+section: "out-of-box-agents"
+lastmod: "2026-03-30T04:06:01.135Z"
+---
+# DataJuicer Agent
+Source: https://agentscope-ai-786677c7.mintlify.app/out-of-box-agents/datajuicer-agent
+
+An intelligent multi-agent system for automated data processing using natural language
+
+## DataJuicer Agent
+
+A multi-agent data processing system built on [AgentScope](https://github.com/agentscope-ai/agentscope) and [Data-Juicer (DJ)](https://github.com/datajuicer/data-juicer), enabling non-experts to harness Data-Juicer via natural language.
+
+## Why DataJuicer Agent?
+
+Data processing in LLM R\&D is often **high-cost, low-efficiency, and hard to reproduce**. Data quality, diversity, and task matching directly define model ceiling—optimizing data is optimizing the model. DataJuicer Agent supports **data-model co-optimization** through agent technology, moving from "script assembly" to a "think and get" workflow.
+
+## What Does This Agent Do?
+
+Data-Juicer provides the full lifecycle stack: **DJ-OP** (≈200 multimodal operators), **DJ-Core** (Ray-based, TB-scale), **DJ-Sandbox** (A/B test & scaling law), and **DJ-Agents** (conversational interface). DataJuicer Agent is an **intelligent data collaborator** that:
+
+* **Intelligent Query**: Match operators from \~200 options via natural language
+* **Automated Pipeline**: Generate and run Data-Juicer YAML from descriptions
+* **Custom Extension**: Develop and integrate custom operators locally
+
+*Goal: focus on "what to do" rather than "how to do it".*
+
+## Architecture
+
+### Multi-Agent Routing Architecture
+
+A **Router Agent** triages user requests into standard data processing (→ DJ Agent) or custom development (→ DJ Dev Agent).
+
+```
+User Query
+    ↓
+Router Agent (Task Triage)
+    ├── Standard Data Processing Task → Data Processing Agent (DJ Agent)
+    │   ├── Preview data samples (confirm field names and data format)
+    │   ├── query_dj_operators (semantic matching of operators)
+    │   ├── Generate YAML configuration file
+    │   └── execute_safe_command (execute dj-process, dj-analyze)
+    │
+    └── Custom Operator Development → Code Development Agent (DJ Dev Agent)
+        ├── `get_basic_files` (get base classes and registration mechanism)
+        ├── `get_operator_example` (get similar operator examples)
+        ├── Generate code compliant with specifications
+        └── Local integration (register to user-specified path)
+```
+
+### Two Integration Modes
+
+* **Tool Binding**: Calls CLI (`dj-analyze`, `dj-process`); low migration cost.
+* **MCP Binding**: Calls Data-Juicer MCP directly; no intermediate YAML, better performance.
+
+The Agent selects mode by task complexity and performance needs.
+
+## Quick Start
+
+<Steps>
+  <Step title="System Requirements">
+    Python 3.10+, DashScope API key; optionally Data-Juicer source for custom operators.
+  </Step>
+
+  <Step title="Installation">
+    ```bash theme={null}
+    uv pip install -r requirements.txt   # or: pip install -r requirements.txt
+    ```
+  </Step>
+
+  <Step title="Configuration">
+    ```bash theme={null}
+    export DASHSCOPE_API_KEY="your-dashscope-key"
+    export DATA_JUICER_PATH="your-data-juicer-path"   # optional, for custom ops
+    ```
+
+    You can also set the Data-Juicer path at runtime via chat (e.g. "Help me set the DataJuicer path: /path/to/data-juicer").
+  </Step>
+
+  <Step title="Usage">
+    ```bash theme={null}
+    # Use AgentScope Studio's interactive interface (please install and start AgentScope Studio first)
+    python main.py --use_studio True
+
+    # Or use command line mode directly (default)
+    python main.py
+    ```
+
+    <Note>
+      Install AgentScope Studio via npm first, then start it:
+
+      ```bash theme={null}
+      npm install -g @agentscope/studio
+      as_studio
+      ```
+    </Note>
+  </Step>
+</Steps>
+
+## Agent Introduction
+
+### Data Processing Agent
+
+Handles Data-Juicer interaction: operator recommendation from natural language, config generation, and execution.
+
+**Workflow:**
+
+When a user says: "My data is saved in xxx, please clean entries with text length less than 5 and image size less than 10MB", the Agent doesn't blindly execute, but proceeds step by step:
+
+1. **Data Preview**: Preview the first 5–10 data samples to confirm field names and data format—this is a crucial step to avoid configuration errors
+2. **Operator Retrieval**: Call the `query_dj_operators` tool to semantically match suitable operators
+3. **Parameter Decision**: LLM autonomously decides global parameters (such as `dataset_path`, `export_path`) and specific operator configurations
+4. **Configuration Generation**: Generate standard YAML configuration files
+5. **Execute Processing**: Call the `dj-process` command to execute actual processing
+
+The entire process is both automated and explainable. Users can intervene at any stage to ensure results meet expectations.
+
+**Typical Use Cases:**
+
+* **Data Cleaning**: Deduplication, removal of low-quality samples, format standardization
+* **Multimodal Processing**: Process text, image, and video data simultaneously
+* **Batch Conversion**: Format conversion, data augmentation, feature extraction
+
+<Accordion title="View Complete Example Log (from AgentScope Studio)">
+  <Frame>
+    <img alt="Data Processing Agent example log in AgentScope Studio" />
+  </Frame>
+</Accordion>
+
+**Example Execution Flow:**
+
+User input: "The data in ./data/demo-dataset-images.jsonl, remove samples with text field length less than 5 and image size less than 100Kb..."
+
+Agent execution steps:
+
+1. Call `query_dj_operators`, accurately returning two operators: `text_length_filter` and `image_size_filter`
+2. Use `view_text_file` tool to preview raw data, confirming fields are indeed 'text' and 'image'
+3. Generate YAML configuration and save to temporary path via `write_text_file`
+4. Call `execute_safe_command` to execute `dj-process`, returning result path
+
+The entire process requires no manual intervention, but every step is traceable and verifiable. **This is exactly the "automated but not out of control" data processing experience we pursue**.
+
+### Code Development Agent (DJ Dev Agent)
+
+When built-in operators are insufficient, the DJ Dev Agent (default model: `qwen3-coder-480b-a35b-instruct`) compresses "docs → copy → tweak → test" from hours to minutes.
+
+The goal of Operator Development Agent is to compress this process to minutes while ensuring code quality. Powered by the `qwen3-coder-480b-a35b-instruct` model by default.
+
+**Workflow:**
+
+When a user requests: "Help me create an operator that reverses word order and generate unit test files", the `Router` routes it to DJ Dev Agent.
+
+The Agent's execution process consists of four steps:
+
+1. **Operator Retrieval**: Find existing operators with similar functionality as references
+2. **Get Templates**: Pull base class files and typical examples to ensure consistent code style
+3. **Generate Code**: Based on the function prototype provided by the user, generate operator classes compliant with DataJuicer specifications
+4. **Local Integration**: Register the new operator to the user-specified local codebase path
+
+The entire process transforms vague requirements into runnable, testable, and reusable modules.
+
+**Generated Content:**
+
+* **Implement Operator**: Create operator class file, inherit from `Mapper`/`Filter` base class, register using `@OPERATORS.register_module` decorator
+* **Update Registration**: Modify `__init__.py`, add new class to `__all__` list
+* **Write Tests**: Generate unit tests covering multiple scenarios, including edge cases, ensuring robustness
+
+**Typical Use Cases:**
+
+* **Develop domain-specific filter or transformation operators**
+* **Integrate proprietary data processing logic**
+* **Extend Data-Juicer capabilities for specific scenarios**
+
+<Accordion title="View Complete Example Log (from AgentScope Studio)">
+  <Frame>
+    <img alt="DJ Dev Agent example log in AgentScope Studio" />
+  </Frame>
+</Accordion>
+
+## Advanced Features
+
+### Operator Retrieval
+
+The agent matches user intent to \~200 operators via a dedicated retrieval step. Choose mode with `-r` / `--retrieve_mode`:
+
+* **LLM (default)**: `Qwen-Turbo` semantic match; best accuracy, higher tokens.
+* **Vector (`vector`)**: DashScope embedding + `FAISS`; fast, lower cost.
+* **Auto (`auto`)**: LLM first, fallback to vector.
+
+```bash theme={null}
+python main.py --retrieve_mode vector
+```
+
+### MCP Agent
+
+In addition to command-line tools, DataJuicer also natively supports MCP services, which is an important means to improve performance. MCP services can directly obtain operator information and execute data processing through native interfaces, making it easy to migrate and integrate without separate LLM queries and command-line calls.
+
+#### MCP Server Types
+
+Data-Juicer provides two types of MCP:
+
+**Recipe-Flow MCP (Data Recipe)**
+
+* Provides two tools: `get_data_processing_ops` and `run_data_recipe`
+* Retrieves by operator type, applicable modalities, and other tags, **no need to call LLM or vector models**
+* Suitable for standardized, high-frequency scenarios with better performance
+
+**Granular-Operators MCP (Fine-grained Operators)**
+
+* Wraps each built-in operator as an independent tool, runs on call
+* Returns all operators by default, but can control visible scope through environment variables
+* Suitable for fine-grained control, building fully customized data processing pipelines
+
+This means that in some scenarios, the Agent's call path can be *shorter, faster, and more direct* than manually writing YAML.
+
+For detailed information, please refer to: [Data-Juicer MCP Service Documentation](https://datajuicer.github.io/data-juicer/en/main/docs/DJ_service.html#mcp-server)
+
+<Note>
+  The Data-Juicer MCP server is currently in early development, and features and tools may change with ongoing development.
+</Note>
+
+#### Configuration
+
+Configure the service address in `configs/mcp_config.json`:
+
+```json theme={null}
+{
+    "mcpServers": {
+        "DJ_recipe_flow": {
+            "url": "http://127.0.0.1:8080/sse"
+        }
+    }
+}
+```
+
+#### Usage Methods
+
+Enable MCP Agent to replace DJ Agent:
+
+```bash theme={null}
+# Enable MCP Agent and Dev Agent
+python main.py --available_agents [dj_mcp,dj_dev]
+
+# Or use shorthand
+python main.py -a [dj_mcp,dj_dev]
+```
+
+## Customization and Extension
+
+### Custom Prompts
+
+All Agent system prompts are defined in the `prompts.py` file.
+
+### Model Replacement
+
+You can specify different models for different Agents in `main.py`. For example:
+
+* Main Agent uses `qwen-max` for complex reasoning
+* Development Agent uses `qwen3-coder-480b-a35b-instruct` to optimize code generation quality
+
+At the same time, `Formatter` and `Memory` can also be replaced. This design allows the system to be both out-of-the-box and adaptable to enterprise-level requirements.
+
+### Extending New Agents
+
+DataJuicer Agent is an open framework. The core is the `agents2toolkit` function—it can automatically wrap any Agent as a tool callable by the `Router`.
+
+Simply add your Agent instance to the `agents` list, and the `Router` will dynamically generate corresponding tools at runtime and automatically route based on task semantics.
+
+This means you can quickly build domain-specific data agents based on this framework.
+
+*Extensibility is an important design principle*.
+
+## Roadmap
+
+The Data-Juicer agent ecosystem is rapidly expanding. Here are the new agents currently in development or planned:
+
+### Data-Juicer Q\&A Agent
+
+Provides users with detailed answers about Data-Juicer operators, concepts, and best practices.
+
+<Frame>
+  <img alt="Data-Juicer Q&A Agent example" />
+</Frame>
+
+### Interactive Data Analysis and Visualization Agent (In Development)
+
+We are building a more advanced **human-machine collaborative data optimization workflow** that introduces human feedback:
+
+* Users can view statistics, attribution analysis, and visualization results
+* Dynamically edit recipes, approve or reject suggestions
+* Underpinned by `dj.analyzer` (data analysis), `dj.attributor` (effect attribution), and `dj.sandbox` (experiment management)
+* Supports closed-loop optimization based on validation tasks
+
+### Other Directions
+
+* **Data Processing Agent Benchmarking**: Quantify the performance of different Agents in terms of accuracy, efficiency, and robustness
+* **Data "Health Check Report" & Data Intelligent Recommendation**: Automatically diagnose data problems and recommend optimization solutions
+* **Router Agent Enhancement**: More seamless, e.g., when operators are lacking → Code Development Agent → Data Processing Agent
+* **MCP Further Optimization**: Embedded LLM, users can directly use MCP connected to their local environment (e.g., IDE) to get an experience similar to current data processing agents
+* **Knowledge Base and RAG-oriented Data Agents**
+* **Better Automatic Processing Solution Generation**: Less token usage, more efficient, higher quality processing results
+* **Data Workflow Template Reuse and Automatic Tuning**: Based on DataJuicer community data recipes
+* ......
+
+### Common Issues
+
+<AccordionGroup>
+  <Accordion title="How do I get a DashScope API key?">
+    Visit the [DashScope official website](https://dashscope.aliyun.com/) to register an account and apply for an API key.
+  </Accordion>
+
+  <Accordion title="Why does operator retrieval fail?">
+    Check your network connection and API key configuration, or try switching to vector retrieval mode with `--retrieve_mode vector`.
+  </Accordion>
+
+  <Accordion title="How do I debug custom operators?">
+    Ensure the Data-Juicer path is configured correctly and review the example code generated by the code development agent.
+  </Accordion>
+
+  <Accordion title="What should I do if the MCP service connection fails?">
+    Check whether the MCP server is running and confirm the URL address in `configs/mcp_config.json` is correct.
+  </Accordion>
+
+  <Accordion title="Error: &#x22;400 Client Error: Bad Request for url: http://localhost:3000/trpc/pushMessage&#x22;">
+    Check if AgentScope Studio has been successfully started. Install it first with `npm install -g @agentscope/studio`, then start it with `as_studio`.
+  </Accordion>
+</AccordionGroup>
+
+### Optimization Recommendations
+
+* For large-scale data processing, it is recommended to use DataJuicer's distributed mode
+* Set batch size appropriately to balance memory usage and processing speed
+* For more advanced data processing features (synthesis, Data-Model Co-Development), please refer to DataJuicer [documentation](https://datajuicer.github.io/data-juicer/en/main/index.html)
+
+***
+
+## Related Resources
+
+<CardGroup>
+  <Card title="AgentScope" icon="github" href="https://github.com/agentscope-ai/agentscope">
+    The multi-agent framework powering DataJuicer Agent.
+  </Card>
+
+  <Card title="DataJuicer" icon="github" href="https://github.com/datajuicer/data-juicer">
+    The data processing engine with 200+ multimodal operators.
+  </Card>
+</CardGroup>
+
+<Note>
+  This documentation is based on the [codebase](https://github.com/agentscope-ai/agentscope-samples/tree/main/data_juicer_agent) at commit `dba3b86`, tested with `agentscope==1.0.5` and `py-data-juicer==1.4.2`. For more features and beta version features (such as DJ-QA agents, interactive recipe), see [https://datajuicer.github.io/data-juicer-agent](https://datajuicer.github.io/data-juicer-agent).
+</Note>
+
+**Contributing**: Welcome to submit Issues and Pull Requests to improve AgentScope, DataJuicer Agent, and DataJuicer. If you encounter problems during use or have feature suggestions, please feel free to contact us.

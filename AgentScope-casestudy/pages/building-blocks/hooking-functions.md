@@ -1,0 +1,147 @@
+---
+title: "Hooking Functions"
+url: "https://docs.agentscope.io/building-blocks/hooking-functions"
+path: "/building-blocks/hooking-functions"
+section: "building-blocks"
+lastmod: "2026-03-30T04:05:56.972Z"
+---
+# Hooking Functions
+Source: https://agentscope-ai-786677c7.mintlify.app/building-blocks/hooking-functions
+
+Customize agent behaviors at specific execution points using pre/post hooks
+
+Hooking functions are extension points that let you customize agent behavior at specific execution points without modifying the agent's core code.
+
+<CardGroup>
+  <Card title="Logging and Monitoring" icon="magnifying-glass-chart">
+    Log the agent's internal state, reasoning process, and actions for debugging and analysis.
+  </Card>
+
+  <Card title="Customizing Behavior" icon="sliders">
+    Modify or intercept the input/output of core functions to extend or override agent behavior.
+  </Card>
+</CardGroup>
+
+In AgentScope, hooking functions attach to the following core agent functions:
+
+| Core function | Hook points                       | Description                                                                   |
+| ------------- | --------------------------------- | ----------------------------------------------------------------------------- |
+| `reply`       | `pre_reply`, `post_reply`         | Before/after the agent replies to a message                                   |
+| `observe`     | `pre_observe`, `post_observe`     | Before/after the agent observes external information                          |
+| `print`       | `pre_print`, `post_print`         | Before/after printing a message to the output (terminal, web interface, etc.) |
+| `_reasoning`  | `pre_reasoning`, `post_reasoning` | Before/after the agent performs reasoning (thinking, tool use)                |
+| `_acting`     | `pre_acting`, `post_acting`       | Before/after the agent takes actions (calling tools)                          |
+
+## Hooking Signature
+
+To simplify the usage, AgentScope provides unified signatures for all hooks.
+
+### Pre-hooks
+
+All the pre-hooks have the same signature:
+
+|           | Name                     | Description                                                                             |
+| --------- | ------------------------ | --------------------------------------------------------------------------------------- |
+| Arguments | `self`                   | The agent instance, which can be used to access the agent's internal state and methods. |
+|           | `kwargs`                 | The input keyword arguments.                                                            |
+| Returns   | `dict[str, Any] \| None` | The modified keyword arguments to be passed to the core function or the next hook.      |
+
+A pre-hook template looks like this:
+
+```python theme={null}
+def pre_hook_template(
+    self: AgentBase | ReActAgentBase,
+    kwargs: dict[str, Any],
+) -> dict[str, Any] | None:  # The modified displayed message
+    """Pre hook template."""
+    pass
+```
+
+### Post-hooks
+
+All post-hooks have an additional `output` argument, which is the output of the core function or the previous hook. If the core function has no output, the `output` will be `None`.
+
+|           | Name     | Description                                                                                                     |
+| --------- | -------- | --------------------------------------------------------------------------------------------------------------- |
+| Arguments | `self`   | The agent instance, which can be used to access the agent's internal state and methods.                         |
+|           | `kwargs` | The input keyword arguments.                                                                                    |
+|           | `output` | The output of the target function or the most recent non-None return value from previous hooks                  |
+| Returns   | `Any`    | The modified output to be returned to the next hook or the caller. If `None`, the original output will be used. |
+
+The post-hook template looks like this:
+
+```python theme={null}
+def post_hook_template(
+    self: AgentBase | ReActAgentBase,
+    kwargs: dict[str, Any],
+    output: Any,  # The output of the target function
+) -> Any:  # The modified output
+    """Post hook template."""
+    pass
+```
+
+## Hook Management
+
+### Registration and Execution
+
+AgentScope provides the following APIs to manage the hooking functions:
+
+| API                      | Description                                              |
+| ------------------------ | -------------------------------------------------------- |
+| `register_instance_hook` | Register a hook function to a specific agent instance.   |
+| `remove_instance_hook`   | Remove a hook function from a specific agent instance.   |
+| `clear_instance_hooks`   | Clear all hook functions from a specific agent instance. |
+
+Once registered, the hooks will be executed automatically at the corresponding execution points of the core functions.
+
+**Execution order**:
+
+* Hooks are executed in registration order.
+* Multiple hooks can be chained together.
+
+**Return value handling**:
+
+* For pre-hooks, non-None return values are passed to the next hook or core function, that is
+  * When a hook returns `None`, the next hook will use the most recent non-None return value from previous hooks
+  * If all previous hooks return `None`, the next hook receives a copy of the original arguments
+  * The final non-None return value (or original arguments if all hooks return `None`) is passed to the core function
+* The post-hooks works similarly as the pre-hooks.
+
+<Warning>
+  Never call a core function (`reply`, `observe`, `_reasoning`, `_acting`) from within a hook — doing so creates an infinite loop.
+</Warning>
+
+### Example
+
+Tasking the pre-reply hook as an example, we first create a hook function that modifies the input messages before replying:
+
+```python theme={null}
+def instance_pre_reply_hook(
+    self: AgentBase,
+    kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    """A pre-reply hook that modifies the message content."""
+    msg = kwargs["msg"]
+    msg.content += "[instance-pre-reply]"
+    # return modified kwargs
+    return {
+        **kwargs,
+        "msg": msg,
+    }
+```
+
+Then we can register the hook function to a specific agent instance:
+
+```python theme={null}
+from agentscope.agent import ReActAgent
+
+agent = ReActAgent(...)
+agent.register_instance_hook(
+    hook_type="pre_reply",
+    hook_name="test_pre_reply",
+    hook=instance_pre_reply_hook
+)
+```
+
+Now, when the agent is called to reply a message, the `instance_pre_reply_hook` will be executed before the reply, and
+the message content will be modified accordingly.

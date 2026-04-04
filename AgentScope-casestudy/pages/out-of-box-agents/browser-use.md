@@ -1,0 +1,274 @@
+---
+title: "Browser-use Agent"
+url: "https://docs.agentscope.io/out-of-box-agents/browser-use"
+path: "/out-of-box-agents/browser-use"
+section: "out-of-box-agents"
+lastmod: "2026-03-30T04:06:01.144Z"
+---
+# Browser-use Agent
+Source: https://agentscope-ai-786677c7.mintlify.app/out-of-box-agents/browser-use
+
+An intelligent web automation agent for browser control and task completion
+
+A browser automation agent built on [AgentScope](https://github.com/agentscope-ai/agentscope) and the [Playwright MCP](https://github.com/microsoft/playwright-mcp) server. This project demonstrates how to leverage large language models and the Model Context Protocol (MCP) to control a real browser—enabling natural language-driven web navigation, form filling, file downloads, and visual understanding without writing scripts.
+
+## Why Browser-use Agent?
+
+In practice, web automation is often brittle and script-heavy: developers maintain selectors, handle dynamic content, and debug timing issues. Non-technical users rarely get to automate repetitive browsing tasks.
+
+We aim to make web automation think-and-act: you describe what you want in natural language, and the agent plans, navigates, observes, and completes the task step by step.
+
+The browser is the primary interface to information and services. What determines success is reliability of actions, correct interpretation of page content, and adaptability when pages change. Browser-use Agent is designed to support this through task decomposition, chunk-based observation, and built-in skill helpers for forms, downloads, and multimodal understanding.
+
+## Architecture
+
+### Task Decomposition and Subtask Execution
+
+When you submit a task, the agent first decomposes it into a sequence of clear, atomic subtasks (e.g., via the task decomposition prompt). Each subtask is a description of what should be achieved, not *how*. A reflection step can revise the subtask list if the initial decomposition is incomplete or incorrect. The agent then works through subtasks one by one, using the subtask manager tool to check completion and advance to the next.
+
+```
+User task
+    ↓
+Task decomposition (LLM) → Subtask 1, Subtask 2, ...
+    ↓
+Reasoning–acting loop (per iteration):
+    ├── Pure reasoning (no screenshot): choose next action or tool
+    ├── If browser_snapshot chosen → chunk-based observation (snapshot + optional screenshot)
+    ├── Acting: execute browser / skill tools (click, type, navigate, form_filling, etc.)
+    └── Subtask manager: validate current subtask done → advance or revise subtasks
+    ↓
+browser_generate_final_response → structured summary and task_done
+```
+
+### Reasoning Loop and Observation
+
+The agent follows a ReAct-style loop:
+
+1. **Pure reasoning**: The model sees the system prompt, memory, and current subtask, and chooses the next tool call(s). The list of tools excludes `browser_take_screenshot` to avoid unnecessary captures until observation is needed.
+2. **Observation when needed**: If the model calls `browser_snapshot`, the agent performs chunk-based observation: the page snapshot is split into chunks (by character length); for each chunk, the model receives the chunk text and optionally a screenshot (for multimodal models), and can output structured status (e.g. `REASONING_FINISHED`) or request the next chunk. This keeps context within limits while still allowing full-page reasoning.
+3. **Acting**: Tool calls (browser or skill tools) are executed; results are cleaned (e.g. trimming verbose YAML) and added to memory.
+4. **Structured finish**: When the model calls `browser_generate_final_response`, the agent summarizes the trace and validates whether the task is finished; if so, it returns a structured result (e.g. `task_done`, `subtask_progress_summary`).
+
+### MCP and Browser Tools
+
+Browser control is provided by the Playwright MCP server, launched via:
+
+```bash theme={null}
+npx @playwright/mcp@latest
+```
+
+The agent uses AgentScope's `StdIOStatefulClient` to connect to this MCP server and registers its tools in the agent's toolkit. Typical tools include:
+
+* `browser_navigate`, `browser_tabs` (list/close)
+* `browser_snapshot`, `browser_take_screenshot`
+* `browser_click`, `browser_type`, `browser_fill`, `browser_scroll`
+* `browser_handle_dialog`, etc.
+
+All interactions use refs from the latest snapshot (e.g. `ref=e36`); the system prompt instructs the agent to re-snapshot after navigation and to avoid using stale refs or CSS selectors from previous pages.
+
+### Built-in Skill Helpers
+
+In addition to MCP browser tools, the agent registers skill helpers that wrap sub-agents or helpers:
+
+* **Form filling** (`_form_filling`): A small ReAct sub-agent with a form-filling system prompt; the main agent calls it when it needs to fill multi-field forms.
+* **File download** (`_file_download`): A sub-agent that finds download links on the page and downloads files according to the user's intent.
+* **Image understanding** (`_image_understanding`): Locates an element by description, takes a focused screenshot, and uses a vision model to answer a question about that element.
+* **Video understanding** (`_video_understanding`): Extracts frames from a local video and uses a vision model to answer questions about the video. Only registered when the model supports multimodal input.
+
+These are implemented in `build_in_helper/` and wired via `_register_skill_tool` so the main agent can invoke them by name.
+
+## Quick Start
+
+<Steps>
+  <Step title="System Requirements">
+    * Python 3.10+
+    * Node.js and npm (for running the Playwright MCP server)
+    * Valid DashScope API key (for the default model)
+  </Step>
+
+  <Step title="Installation">
+    Install AgentScope from source or PyPI:
+
+    ```bash theme={null}
+    # From source
+    cd {PATH_TO_AGENTSCOPE}
+    pip install -e .
+    ```
+
+    Ensure Playwright MCP is runnable (no separate install needed; the agent starts it via `npx`):
+
+    ```bash theme={null}
+    npx @playwright/mcp@latest
+    ```
+
+    If this runs without error, the MCP server is available.
+  </Step>
+
+  <Step title="Configuration">
+    Set your API key:
+
+    ```bash theme={null}
+    export DASHSCOPE_API_KEY="your_dashscope_api_key_here"
+    ```
+
+    You can obtain a key from the [DashScope Console](https://dashscope.console.aliyun.com/).
+  </Step>
+
+  <Step title="Usage">
+    Run the agent from the `browser_agent` directory:
+
+    ```bash theme={null}
+    cd out-of-box-agents/browser_agent
+    python main.py
+    ```
+
+    Optional arguments:
+
+    ```bash theme={null}
+    # Custom start URL and max iterations
+    python main.py --start-url https://example.com --max-iters 100
+
+    # Show all options
+    python main.py --help
+    ```
+
+    * **`--start-url`**: Initial URL to open (default: `https://www.google.com`).
+    * **`--max-iters`**: Maximum reasoning–acting iterations per user turn (default: 50).
+
+    After startup, the agent opens the browser, navigates to the start URL, and waits for your input. Type your task in natural language; when done, type `exit` to quit. The agent returns a structured result when it calls `browser_generate_final_response` (e.g. a summary and `task_done`).
+  </Step>
+</Steps>
+
+## Agent Workflow
+
+### Core Loop
+
+1. **Initial navigation**: On first message, the agent ensures the browser is on `start_url` (closes extra tabs, then navigates).
+2. **Task decomposition**: The user message is reformatted into "original task" + "decomposed subtasks"; the agent uses this for all subsequent reasoning.
+3. **Iteration**:
+   * Summarize memory if it exceeds `max_memory_length`.
+   * **Pure reasoning**: Model selects tools (no screenshot in this step).
+   * If the chosen tool is `browser_snapshot`, run observation: get snapshot chunks, and for each chunk (with optional screenshot) get the model’s next action or continuation status.
+   * **Acting**: Execute all tool calls (possibly in parallel if supported), clean tool outputs, add results to memory.
+   * If a tool was `browser_generate_final_response` and it succeeded, return the structured output and exit.
+   * If structured output is required but not yet produced, a system hint can be added to force the model to continue or call the finish tool.
+4. **After max iterations**: If no reply was produced, the agent runs a summarizing step and returns that as the reply.
+
+### Subtask Manager
+
+The browser\_subtask\_manager tool is called by the model to validate whether the current subtask is fully completed. It uses the agent’s recent memory (and optionally the current page snapshot) and asks the model to respond with either `SUBTASK_COMPLETED` or `SUBTASK_NOT_COMPLETED`. On completion, the current subtask index advances; otherwise, a subtask revision step can run (using a dedicated prompt) to update the subtask list (e.g. split or reorder) based on what has been learned.
+
+### Structured Output and Task Completion
+
+When you pass a structured model (e.g. a Pydantic model with a `result` field) to `agent(msg, structured_model=FinalResult)`, the agent registers the `browser_generate_final_response` tool with that schema and sets `tool_choice="required"` so the model must eventually call it. The finish tool:
+
+1. Asks the model to summarize the execution trace (using the summarize-task prompt).
+2. Validates the summary with `_validate_finish_status` (finished vs. remaining steps).
+3. If the task is deemed finished, returns a structured payload (e.g. `task_done`, `subtask_progress_summary`, `generated_files`); otherwise returns a message asking the agent to continue.
+
+## Built-in Skill Helpers
+
+### Form Filling
+
+**When to use**: The system prompt tells the agent to call `_form_filling` when it needs to fill out online forms. The form-filling skill uses a dedicated ReAct sub-agent with a form-oriented system prompt; it shares the same model and toolkit (browser tools) as the main agent but has its own memory and a "form\_filling\_final\_response" finish function.
+
+### File Download
+
+**When to use**: The agent calls `_file_download` when the user wants to download a file from the current page. The file-download helper agent uses the same browser toolkit to find links and trigger downloads, then returns a structured result (e.g. saved paths).
+
+### Image Understanding
+
+**When to use**: For locating a specific visual element and answering a question about it. The helper:
+
+1. Takes a text snapshot of the page.
+2. Asks the model to identify the element and its `ref` from the snapshot given an object description.
+3. Takes a focused screenshot of that element (via `browser_take_screenshot` with element/ref).
+4. Sends the screenshot plus the task to the model and returns the answer.
+
+Available only when the main model is multimodal (e.g. vision-capable).
+
+### Video Understanding
+
+**When to use**: For analyzing a local video file. The skill extracts frames from the video, optionally runs a vision model over the frames, and returns an answer. Also registered only when the model supports multimodal input.
+
+## Advanced Features
+
+### Chunk-based Page Observation
+
+Long pages are split into snapshot chunks (configurable max length, default 80k characters). The agent iterates over chunks and, for each chunk, builds an observation message (chunk text + optional screenshot) and runs the model. The model can output JSON with `STATUS: REASONING_FINISHED` to stop observation or continue to the next chunk. This avoids token overflow while still allowing full-page reasoning.
+
+### Memory Summarization
+
+When memory length exceeds `max_memory_length` (default 20 messages), the agent runs memory summarization: it asks the model to summarize progress and next steps, then replaces the conversation history with the initial user message and this summary. This keeps the context window usable for long tasks.
+
+### Multimodal Support
+
+If the model is vision-capable, the agent:
+
+* Includes screenshots in observation messages during chunk-based observation.
+* Registers image\_understanding and video\_understanding skill tools.
+
+Otherwise, observation is text-only (snapshot chunks) and the image/video skill helpers are not registered.
+
+## Customization
+
+### Custom Prompts
+
+All prompts are under `build_in_prompt/`:
+
+* `browser_agent_sys_prompt.md`: Main agent system prompt (browsing guidelines, when to use which tool).
+* `browser_agent_pure_reasoning_prompt.md`: Prompt for the pure-reasoning step (no screenshot).
+* `browser_agent_observe_reasoning_prompt.md`: Prompt for each chunk during observation.
+* `browser_agent_task_decomposition_prompt.md`: Task decomposition.
+* `browser_agent_decompose_reflection_prompt.md`: Reflection for revising subtasks.
+* `browser_agent_subtask_revise_prompt.md`: Revise subtasks when current one is not completed.
+* `browser_agent_summarize_task.md`: Instruction for the final summary in `browser_generate_final_response`.
+* `browser_agent_form_filling_sys_prompt.md`, `browser_agent_file_download_sys_prompt.md`: Prompts for form and file-download sub-agents.
+
+Edit these files to change behavior without changing code.
+
+### Model and Parameters
+
+In `main.py` you can change:
+
+* **Model**: `DashScopeChatModel(..., model_name="qwen3-max")` — switch to another DashScope or compatible model.
+* **Formatter / memory**: e.g. different formatter or memory implementation.
+* **Agent constructor**: `max_iters`, `start_url`, `max_mem_length`, `token_counter`, or inject custom `sys_prompt` / `task_decomposition_prompt` / `observe_reasoning_prompt` / `pure_reasoning_prompt`.
+
+## Common Issues
+
+<AccordionGroup>
+  <Accordion title="Playwright MCP fails to start or connect">
+    Ensure Node.js/npm are installed and run `npx @playwright/mcp@latest` manually to confirm it starts. The agent launches it via `StdIOStatefulClient` with `command="npx"`, `args=["@playwright/mcp@latest"]`.
+  </Accordion>
+
+  <Accordion title="&#x22;Ref not found in the current page snapshot&#x22;">
+    The page changed or you are using a ref from an old snapshot. The agent should call `browser_snapshot` after every `browser_navigate` and use only refs from the latest snapshot. If the issue persists, check that the system prompt and observation flow are not altered in a way that skips re-snapshot.
+  </Accordion>
+
+  <Accordion title="Agent does not finish or keeps iterating">
+    Ensure the model eventually calls `browser_generate_final_response`. When using a structured model, `tool_choice="required"` is set so the model must call that tool. Check `max_iters` and memory summarization so the context does not overflow.
+  </Accordion>
+
+  <Accordion title="Form filling or file download does not run">
+    The main agent must decide to call `_form_filling` or `_file_download` from the system prompt. Verify that the system prompt mentions these tools and that the model sees them in the tool list.
+  </Accordion>
+
+  <Accordion title="Image or video understanding not available">
+    These skill helpers are registered only when `_supports_multimodal()` is true. Use a vision-capable model if you need these tools.
+  </Accordion>
+</AccordionGroup>
+
+***
+
+## Related Resources
+
+<CardGroup>
+  <Card title="AgentScope" icon="github" href="https://github.com/agentscope-ai/agentscope">
+    The core framework powering the browser-use agent.
+  </Card>
+
+  <Card title="Playwright MCP" icon="github" href="https://github.com/microsoft/playwright-mcp">
+    The MCP server providing browser control capabilities.
+  </Card>
+</CardGroup>

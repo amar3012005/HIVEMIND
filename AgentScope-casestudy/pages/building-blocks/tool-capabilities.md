@@ -1,0 +1,552 @@
+---
+title: "Tool Capabilities"
+url: "https://docs.agentscope.io/building-blocks/tool-capabilities"
+path: "/building-blocks/tool-capabilities"
+section: "building-blocks"
+lastmod: "2026-03-30T04:05:56.976Z"
+---
+# Tool Capabilities
+Source: https://agentscope-ai-786677c7.mintlify.app/building-blocks/tool-capabilities
+
+Manage tool functions, middleware, MCP integration, and agent skills with the Toolkit class
+
+AgentScope provides a unified `Toolkit` class to manage all tool-related capabilities, including:
+
+* Registering and executing **Python tool functions** (sync, async, and streaming)
+* Extending tool schemas dynamically and **interrupting** tool execution
+* **Automatic tool management** via tool groups
+* **Middleware** for pre/post-processing tool calls
+* **MCP (Model Context Protocol)** integration
+* **Agent Skills** for task-specific knowledge injection
+
+## Tool Functions
+
+A tool function is a Python function that:
+
+* Returns a `ToolResponse` object, or a generator that yields `ToolResponse` objects
+* Has a docstring describing its functionality and parameters
+
+```python theme={null}
+def tool_function(a: int, b: str) -> ToolResponse:
+    """{function description}
+
+    Args:
+        a (int):
+            {description of the first parameter}
+        b (str):
+            {description of the second parameter}
+    """
+```
+
+<Tip>
+  Instance methods and class methods can also be used as tool functions. The `self` and `cls` parameters are automatically ignored during schema extraction.
+</Tip>
+
+AgentScope provides several built-in tool functions under `agentscope.tool`, including `execute_python_code`, `execute_shell_command`, and text file read/write utilities.
+
+Tool functions can be synchronous, asynchronous, or streaming (async generators):
+
+```python theme={null}
+import asyncio
+from typing import AsyncGenerator
+from agentscope.tool import ToolResponse
+from agentscope.message import TextBlock
+
+# Synchronous
+def sync_tool(query: str) -> ToolResponse:
+    """A synchronous tool.
+
+    Args:
+        query (str): The search query.
+    """
+    return ToolResponse(content=[TextBlock(type="text", text=f"Result: {query}")])
+
+# Asynchronous
+async def async_tool(query: str) -> ToolResponse:
+    """An asynchronous tool.
+
+    Args:
+        query (str): The search query.
+    """
+    return ToolResponse(content=[TextBlock(type="text", text=f"Result: {query}")])
+
+# Streaming (async generator)
+async def streaming_tool(query: str) -> AsyncGenerator[ToolResponse, None]:
+    """A streaming tool.
+
+    Args:
+        query (str): The search query.
+    """
+    yield ToolResponse(content=[TextBlock(type="text", text="chunk 1")], stream=True)
+    yield ToolResponse(content=[TextBlock(type="text", text="chunk 2")])
+```
+
+## Toolkit
+
+The `Toolkit` class manages tool functions, extracts their JSON Schema from docstrings, and provides a unified interface for execution.
+
+### Basic Usage
+
+```python theme={null}
+from agentscope.tool import Toolkit
+
+async def my_search(query: str, api_key: str) -> ToolResponse:
+    """A simple search tool.
+
+    Args:
+        query (str):
+            The search query.
+        api_key (str):
+            The API key for authentication.
+    """
+    return ToolResponse(
+        content=[TextBlock(type="text", text=f"Results for '{query}'")],
+    )
+
+toolkit = Toolkit()
+toolkit.register_tool_function(my_search)
+```
+
+After registration, retrieve the JSON Schema with `get_json_schemas()`:
+
+```python theme={null}
+import json
+print(json.dumps(toolkit.get_json_schemas(), indent=4))
+```
+
+To preset arguments (e.g., API keys) so they are hidden from the model:
+
+```python theme={null}
+toolkit.register_tool_function(my_search, preset_kwargs={"api_key": "your-key"})
+```
+
+The `api_key` field will be excluded from the JSON Schema exposed to the model.
+
+To execute a tool call, use `call_tool_function`, which accepts a `ToolUseBlock` and returns an async generator:
+
+```python theme={null}
+from agentscope.message import ToolUseBlock
+
+res = await toolkit.call_tool_function(
+    ToolUseBlock(
+        type="tool_use",
+        id="123",
+        name="my_search",
+        input={"query": "AgentScope"},
+    ),
+)
+
+async for tool_response in res:
+    print(tool_response)
+```
+
+### Extending JSON Schema Dynamically
+
+`Toolkit` allows you to extend the JSON Schema of a tool function at runtime using a Pydantic model. This is useful for adding fields like Chain-of-Thought reasoning without modifying the original function.
+
+<Note>
+  The function to be extended must accept variable keyword arguments (`**kwargs`) so that the additional fields can be passed through.
+</Note>
+
+```python theme={null}
+from typing import Any
+from pydantic import BaseModel, Field
+
+def tool_function(**kwargs: Any) -> ToolResponse:
+    """A tool function."""
+    return ToolResponse(
+        content=[TextBlock(type="text", text=f"Received: {kwargs}")],
+    )
+
+class ThinkingModel(BaseModel):
+    thinking: str = Field(
+        description="Summarize the current state and decide what to do next.",
+    )
+
+toolkit.set_extended_model("tool_function", ThinkingModel)
+```
+
+The `thinking` field will now appear in the tool's JSON Schema, prompting the model to reason before acting.
+
+### Interrupting Tool Execution
+
+`Toolkit` supports **execution interruption** for async tool functions via asyncio cancellation. When interrupted, a `ToolResponse` with `is_interrupted=True` is yielded so the agent can handle it gracefully.
+
+<Note>
+  Synchronous tool functions cannot be interrupted via asyncio cancellation. Interruption for sync tools is handled at the agent level.
+</Note>
+
+**Non-streaming interruption** — the toolkit yields a predefined interrupted response:
+
+```python theme={null}
+async def long_running_tool() -> ToolResponse:
+    """A tool that may be interrupted.
+
+    """
+    await asyncio.sleep(10)  # Long-running task
+    return ToolResponse(content=[TextBlock(type="text", text="Done")])
+
+# When cancelled, toolkit yields:
+# ToolResponse(is_interrupted=True, ...)
+```
+
+**Streaming interruption** — the interrupted message is attached to the last yielded chunk:
+
+```python theme={null}
+async def streaming_tool() -> AsyncGenerator[ToolResponse, None]:
+    """A streaming tool that may be interrupted.
+
+    """
+    yield ToolResponse(
+        content=[TextBlock(type="text", text="partial result")],
+        stream=True,
+    )
+    await asyncio.sleep(10)  # Interrupted here
+    yield ToolResponse(content=[TextBlock(type="text", text="never reached")])
+```
+
+The agent can check `tool_response.is_interrupted` to decide whether to propagate the `CancelledError`.
+
+### Automatic Tool Management
+
+For agents that need to work with large or dynamic tool sets, `Toolkit` supports **tool groups** — named collections of related tools that can be activated or deactivated at runtime.
+
+<Tip>
+  Tools registered without a group name are placed in the `basic` group, which is always active. This ensures backward compatibility if you don't need group features.
+</Tip>
+
+```python theme={null}
+from agentscope.tool import execute_python_code
+
+toolkit = Toolkit()
+
+# Create a group (inactive by default)
+toolkit.create_tool_group(
+    group_name="browser_use",
+    description="Tools for web browsing.",
+    active=False,
+    notes="""1. Use `navigate` to open a web page.
+2. When requiring user authentication, ask the user for credentials.""",
+)
+
+toolkit.register_tool_function(navigate, group_name="browser_use")
+toolkit.register_tool_function(click_element, group_name="browser_use")
+
+# Always-active basic tool
+toolkit.register_tool_function(execute_python_code)
+```
+
+Only tools in active groups are visible to the model via `get_json_schemas()`. Activate or deactivate groups with:
+
+```python theme={null}
+toolkit.update_tool_groups(group_names=["browser_use"], active=True)
+```
+
+**Meta tool: `reset_equipped_tools`**
+
+`Toolkit` provides a built-in meta tool that lets the agent itself decide which tool groups to activate:
+
+```python theme={null}
+toolkit.register_tool_function(toolkit.reset_equipped_tools)
+```
+
+When the agent calls `reset_equipped_tools`, the specified groups are activated and the toolkit returns their usage notes as a tool response — giving the agent the context it needs to use the new tools correctly.
+
+<Note>
+  In `ReActAgent`, you can enable this meta tool by setting `enable_meta_tool=True` in the constructor.
+</Note>
+
+You can also retrieve the notes of all currently active groups to inject into the system prompt:
+
+```python theme={null}
+print(toolkit.get_activated_notes())
+```
+
+## Middleware
+
+`Toolkit` supports a middleware system for intercepting and modifying tool execution. Middleware follows an **onion model**: pre-processing runs in registration order, post-processing runs in reverse.
+
+### Middleware Signature
+
+```python theme={null}
+from typing import AsyncGenerator, Callable
+from agentscope.tool import ToolResponse
+
+async def my_middleware(
+    kwargs: dict,
+    next_handler: Callable,
+) -> AsyncGenerator[ToolResponse, None]:
+    tool_call = kwargs["tool_call"]
+
+    # Pre-processing
+    # ...
+
+    async for response in await next_handler(**kwargs):
+        # Post-processing
+        yield response
+```
+
+| Parameter      | Type                                 | Description                                            |
+| -------------- | ------------------------------------ | ------------------------------------------------------ |
+| `kwargs`       | `dict`                               | Context dict containing `tool_call` (a `ToolUseBlock`) |
+| `next_handler` | `Callable`                           | The next middleware or the actual tool function        |
+| Returns        | `AsyncGenerator[ToolResponse, None]` | Yields `ToolResponse` objects                          |
+
+### Logging Middleware
+
+```python theme={null}
+async def logging_middleware(
+    kwargs: dict,
+    next_handler: Callable,
+) -> AsyncGenerator[ToolResponse, None]:
+    tool_call = kwargs["tool_call"]
+    print(f"[Log] Calling: {tool_call['name']} with {tool_call['input']}")
+
+    async for response in await next_handler(**kwargs):
+        print(f"[Log] Response: {response.content[0]['text']}")
+        yield response
+
+    print(f"[Log] {tool_call['name']} completed")
+
+toolkit.register_middleware(logging_middleware)
+```
+
+### Input/Output Transformation
+
+Middleware can modify both the tool input and the response:
+
+```python theme={null}
+async def transform_middleware(
+    kwargs: dict,
+    next_handler: Callable,
+) -> AsyncGenerator[ToolResponse, None]:
+    # Modify input
+    kwargs["tool_call"]["input"]["query"] = "[TRANSFORMED] " + kwargs["tool_call"]["input"]["query"]
+
+    async for response in await next_handler(**kwargs):
+        # Modify output
+        response.content[0]["text"] += " [MODIFIED]"
+        yield response
+```
+
+### Authorization Middleware
+
+Middleware can skip tool execution entirely by not calling `next_handler`:
+
+```python theme={null}
+async def authorization_middleware(
+    kwargs: dict,
+    next_handler: Callable,
+) -> AsyncGenerator[ToolResponse, None]:
+    tool_call = kwargs["tool_call"]
+    authorized_tools = {"search_tool"}
+
+    if tool_call["name"] not in authorized_tools:
+        yield ToolResponse(
+            content=[TextBlock(
+                type="text",
+                text=f"Error: Tool '{tool_call['name']}' is not authorized",
+            )],
+        )
+        return  # Skip next_handler entirely
+
+    async for response in await next_handler(**kwargs):
+        yield response
+```
+
+### Multiple Middleware (Onion Model)
+
+When multiple middleware are registered, execution follows this order:
+
+```
+M1 Pre → M2 Pre → Tool → M2 Post → M1 Post
+```
+
+```python theme={null}
+toolkit.register_middleware(middleware_1)
+toolkit.register_middleware(middleware_2)
+```
+
+<Note>
+  The same `ToolResponse` object is passed through the chain and modified in place. Middleware are applied in registration order for pre-processing, and in reverse for post-processing.
+</Note>
+
+### Common Use Cases
+
+Middleware is well-suited for:
+
+* **Logging & Monitoring** — track tool usage and latency
+* **Authorization** — gate access to specific tools
+* **Rate Limiting** — throttle tool call frequency
+* **Caching** — return cached responses for repeated calls
+* **Error Handling** — add retry logic or graceful degradation
+* **Input Validation** — sanitize tool inputs before execution
+* **Output Transformation** — reformat or filter tool outputs
+* **Metrics Collection** — gather statistics on tool usage
+
+## MCP Integration
+
+AgentScope supports the [Model Context Protocol (MCP)](https://modelcontextprotocol.io), allowing agents to use tools hosted on external MCP servers.
+
+### Client Types
+
+AgentScope provides two client types across two transport protocols:
+
+| Client Type | HTTP (Streamable HTTP / SSE) | StdIO                 |
+| ----------- | ---------------------------- | --------------------- |
+| Stateful    | `HttpStatefulClient`         | `StdIOStatefulClient` |
+| Stateless   | `HttpStatelessClient`        | —                     |
+
+* **Stateful**: Maintains a persistent session. You must call `connect()` and `close()` explicitly.
+* **Stateless**: Creates a new session per tool call — more lightweight, no lifecycle management needed.
+
+<Note>
+  - The StdIO stateful client starts the MCP server locally when `connect()` is called.
+  - When multiple stateful clients are connected, close them in **LIFO** (Last In First Out) order to avoid errors.
+</Note>
+
+```python theme={null}
+from agentscope.mcp import HttpStatefulClient, HttpStatelessClient
+import os
+
+stateful_client = HttpStatefulClient(
+    name="map_stateful",
+    transport="streamable_http",
+    url=f"https://mcp.amap.com/mcp?key={os.environ['GAODE_API_KEY']}",
+)
+
+stateless_client = HttpStatelessClient(
+    name="map_stateless",
+    transport="streamable_http",
+    url=f"https://mcp.amap.com/mcp?key={os.environ['GAODE_API_KEY']}",
+)
+```
+
+Both client types expose `list_tools()` and `get_callable_function()`.
+
+### Server-Level Management
+
+Register all tools from an MCP server into a `Toolkit` at once:
+
+```python theme={null}
+toolkit = Toolkit()
+
+await toolkit.register_mcp_client(
+    stateless_client,
+    # group_name="map_services",  # Optional: assign to a tool group
+)
+
+print(f"Registered {len(toolkit.get_json_schemas())} tools")
+```
+
+To remove tools:
+
+```python theme={null}
+# Remove a single tool by name
+toolkit.remove_tool_function("maps_geo")
+
+# Remove all tools from a specific MCP client
+await toolkit.remove_mcp_clients(client_names=["map_stateless"])
+```
+
+### Function-Level Management
+
+For fine-grained control, retrieve a specific MCP tool as a callable Python object:
+
+```python theme={null}
+func_obj = await stateless_client.get_callable_function(
+    func_name="maps_geo",
+    wrap_tool_result=True,  # Wrap result into ToolResponse; False returns raw mcp.types.CallToolResult
+)
+
+print(func_obj.name)
+print(func_obj.description)
+print(func_obj.json_schema)
+
+# Call it directly
+result = await func_obj(address="Tiananmen Square", city="Beijing")
+```
+
+This lets you wrap MCP tools in your own functions, add post-processing, or compose them with other tools.
+
+## Agent Skills
+
+[Agent Skills](https://claude.com/blog/skills) is an approach proposed by Anthropic to improve agent capabilities on specific tasks. AgentScope provides built-in support through the `Toolkit` class.
+
+| API                      | Description                              |
+| ------------------------ | ---------------------------------------- |
+| `register_agent_skill`   | Register skills from a directory         |
+| `remove_agent_skill`     | Remove a registered skill by name        |
+| `get_agent_skill_prompt` | Get the prompt for all registered skills |
+
+### SKILL.md Format
+
+Each skill lives in its own directory and must contain a `SKILL.md` file with YAML frontmatter:
+
+```markdown theme={null}
+---
+name: sample_skill
+description: A sample agent skill for demonstration.
+---
+
+# Sample Skill
+
+Instructions for the agent on how to use this skill...
+```
+
+### Registering Skills
+
+```python theme={null}
+from agentscope.tool import Toolkit
+
+toolkit = Toolkit()
+toolkit.register_agent_skill("path/to/sample_skill")
+
+print(toolkit.get_agent_skill_prompt())
+```
+
+### Customizing the Prompt Template
+
+You can customize how skills are presented to the model:
+
+```python theme={null}
+toolkit = Toolkit(
+    agent_skill_instruction=(
+        "<system-info>You're provided a collection of skills, "
+        "each in a directory and described by a SKILL.md file.</system-info>\n"
+    ),
+    # Must contain {name}, {description}, and {dir} fields
+    agent_skill_template="- {name}({dir}): {description}",
+)
+
+toolkit.register_agent_skill("path/to/sample_skill")
+print(toolkit.get_agent_skill_prompt())
+```
+
+### Integration with ReActAgent
+
+`ReActAgent` automatically appends the agent skill prompt to the system prompt when a toolkit with registered skills is provided:
+
+```python theme={null}
+from agentscope.agent import ReActAgent
+from agentscope.formatter import DashScopeChatFormatter
+from agentscope.memory import InMemoryMemory
+from agentscope.model import DashScopeChatModel
+import os
+
+agent = ReActAgent(
+    name="Friday",
+    sys_prompt="You are a helpful assistant named Friday.",
+    model=DashScopeChatModel(
+        model_name="qwen3-max",
+        api_key=os.environ["DASHSCOPE_API_KEY"],
+    ),
+    memory=InMemoryMemory(),
+    formatter=DashScopeChatFormatter(),
+    toolkit=toolkit,
+)
+```
+
+<Warning>
+  When using agent skills, the agent must be equipped with file reading or shell command tools so it can access the `SKILL.md` instructions at runtime.
+</Warning>

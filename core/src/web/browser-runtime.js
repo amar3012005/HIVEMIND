@@ -233,16 +233,33 @@ function extractTitle(html) {
   return match ? match[1].replace(/\s+/g, ' ').trim() : '';
 }
 
+// Static asset extensions to skip during crawl link extraction
+const SKIP_EXTENSIONS = new Set([
+  '.ico', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.avif', '.bmp',
+  '.css', '.js', '.mjs', '.woff', '.woff2', '.ttf', '.eot', '.otf',
+  '.pdf', '.zip', '.tar', '.gz', '.mp3', '.mp4', '.avi', '.mov', '.webm',
+  '.json', '.xml', '.rss', '.atom', '.map', '.wasm',
+]);
+
 function extractLinksFromHtml(html, baseUrl) {
   const links = [];
-  const regex = /href=["']([^"']+)["']/gi;
+  // Only extract from <a> tags, not <link>, <script>, etc.
+  const regex = /<a\s[^>]*href=["']([^"'#]+)["'][^>]*>/gi;
   let match;
   while ((match = regex.exec(html)) !== null) {
     try {
-      const resolved = new URL(match[1], baseUrl).href;
-      if (resolved.startsWith('http')) {
-        links.push(resolved);
-      }
+      const href = match[1].trim();
+      // Skip mailto, tel, javascript
+      if (/^(mailto:|tel:|javascript:)/i.test(href)) continue;
+      const resolved = new URL(href, baseUrl).href;
+      if (!resolved.startsWith('http')) continue;
+      // Skip static assets
+      const pathname = new URL(resolved).pathname.toLowerCase();
+      const ext = pathname.includes('.') ? pathname.slice(pathname.lastIndexOf('.')) : '';
+      if (SKIP_EXTENSIONS.has(ext)) continue;
+      // Skip common non-content paths
+      if (/\/(manifest|favicon|robots|sitemap|feed|rss|atom|wp-json|api\/|_next\/|static\/)/i.test(pathname)) continue;
+      links.push(resolved);
     } catch {
       // skip invalid URLs
     }

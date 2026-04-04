@@ -36,6 +36,10 @@ export class ZitadelOidcClient {
     if (options.loginHint) {
       params.set('login_hint', options.loginHint);
     }
+    // prompt=create shows Zitadel's registration screen instead of login
+    if (options.prompt) {
+      params.set('prompt', options.prompt);
+    }
 
     return `${this.issuer}/oauth/v2/authorize?${params.toString()}`;
   }

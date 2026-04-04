@@ -901,6 +901,21 @@ const server = http.createServer(async (req, res) => {
     return redirect(res, zitadelClient.buildAuthorizeUrl(state, authorizeOptions));
   }
 
+  // ─── Zitadel Registration (prompt=create) ────────────────────
+  if (pathname === '/auth/register' && req.method === 'GET') {
+    if (!zitadelClient) {
+      return jsonResponse(res, { error: 'ZITADEL not configured' }, 503);
+    }
+    const state = await sessionStore.createAuthState({
+      returnTo: url.searchParams.get('return_to') || CONFIG.postLoginRedirect
+    });
+    const authorizeOptions = { prompt: 'create' };
+    if (url.searchParams.get('login_hint')) {
+      authorizeOptions.loginHint = url.searchParams.get('login_hint');
+    }
+    return redirect(res, zitadelClient.buildAuthorizeUrl(state, authorizeOptions));
+  }
+
   if (pathname === '/auth/callback' && req.method === 'GET') {
     if (!zitadelClient) {
       return jsonResponse(res, { error: 'ZITADEL not configured' }, 503);

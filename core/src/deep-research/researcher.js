@@ -7,12 +7,11 @@
  * Flow:
  *   1. Create research project in CSI graph
  *   2. Decompose query → TaskStack (depth-first, 8 dimensions)
- *   3. For each task:
- *      a. Check CSI memory (prior research?)
- *      b. Web search if gaps remain
- *      c. Follow-up: read top URLs deeply
- *      d. Extract claims, save as research-finding
- *      e. Identify remaining gaps → push subtasks
+ *   3. For each task, run a ReAct (Reason → Act → Observe) loop:
+ *      a. REASON: LLM decides next action (SEARCH_WEB, SEARCH_MEMORY, READ_URL, SYNTHESIZE, FINISH)
+ *      b. ACT: Execute the chosen action with LLM-generated queries
+ *      c. OBSERVE: Add results to findings, loop back to REASON
+ *      d. Up to 6 steps per task for iterative refinement
  *   4. Reflect: sufficient confidence? If not, rephrase & retry
  *   5. Synthesize final report from all findings
  *   6. Save trail + report to CSI graph
@@ -34,13 +33,17 @@ export class DeepResearcher {
    * @param {Function} deps.recallFn - recallPersistedMemories function
    * @param {Object} deps.prisma - Prisma client for direct queries
    * @param {string} deps.groqApiKey
+   * @param {Object} [deps.browserRuntime] - HIVEMIND BrowserRuntime for web search/crawl
+   * @param {Object} [deps.webJobStore] - Web job store for tracking
    * @param {Function} [deps.onEvent] - callback for live progress events
    */
-  constructor({ memoryStore, recallFn, prisma, groqApiKey, onEvent }) {
+  constructor({ memoryStore, recallFn, prisma, groqApiKey, browserRuntime, webJobStore, onEvent }) {
     this.memoryStore = memoryStore;
     this.recallFn = recallFn;
     this.prisma = prisma;
     this.groqApiKey = groqApiKey || process.env.GROQ_API_KEY;
+    this.browserRuntime = browserRuntime || null;
+    this.webJobStore = webJobStore || null;
     this.onEvent = onEvent || (() => {});
   }
 
@@ -206,82 +209,176 @@ export class DeepResearcher {
   async _executeTask(task, userId, orgId, projectId) {
     const findings = [];
     const sources = [];
-    let confidence = 0;
-    const gaps = [];
+    const maxSteps = 6;  // max reasoning steps per task
+    let step = 0;
 
-    // Phase 1: Check CSI memory
-    const memoryResults = await this._recallFromCSI(task.query, userId, orgId, projectId);
-    for (const mem of memoryResults) {
-      findings.push({
-        id: randomUUID(),
-        type: 'memory',
-        title: mem.title || task.query,
-        content: mem.content,
-        source: mem.source || 'hivemind_memory',
-        sourceId: mem.id,
-        confidence: mem.score || 0.7,
-        taskQuery: task.query,
-      });
-      sources.push({ type: 'memory', id: mem.id, title: mem.title });
-    }
+    while (step < maxSteps) {
+      step++;
 
-    if (memoryResults.length > 0) {
-      confidence = Math.min(0.85, memoryResults.reduce((s, m) => s + (m.score || 0.6), 0) / memoryResults.length);
-    }
+      // REASON: Ask LLM what to do next
+      const reasoning = await this._reason(task.query, findings, step);
+      this._emit('task.reasoning', { taskId: task.id, step, action: reasoning.action, thought: reasoning.thought });
 
-    // Phase 2: Web search if memory insufficient
-    if (confidence < 0.70) {
-      const webResults = await this._webSearch(task.query);
-      for (const result of webResults) {
+      // Check if task is complete
+      if (reasoning.action === 'FINISH') break;
+
+      // ACT: Execute the chosen action
+      let result;
+      switch (reasoning.action) {
+        case 'SEARCH_MEMORY':
+          result = await this._actSearchMemory(reasoning.query || task.query, userId, orgId, projectId);
+          break;
+        case 'SEARCH_WEB':
+          result = await this._actSearchWeb(reasoning.query || task.query);
+          break;
+        case 'READ_URL':
+          result = await this._actReadUrl(reasoning.url);
+          break;
+        case 'SYNTHESIZE':
+          result = await this._actSynthesize(task.query, findings);
+          break;
+        default:
+          result = { type: 'error', content: 'Unknown action' };
+      }
+
+      // OBSERVE: Add result to findings
+      if (result && result.content) {
         findings.push({
           id: randomUUID(),
-          type: 'web',
-          title: result.title || task.query,
-          content: result.snippet || result.summary || '',
-          source: result.url || 'web',
-          sourceId: result.url,
-          confidence: 0.65,
+          type: result.type || reasoning.action.toLowerCase(),
+          title: result.title || reasoning.query || task.query,
+          content: result.content,
+          source: result.source || 'unknown',
+          sourceId: result.sourceId || null,
+          confidence: result.confidence || 0.6,
           taskQuery: task.query,
         });
-        sources.push({ type: 'web', id: result.url, title: result.title });
+        if (result.source) sources.push({ type: result.type, id: result.sourceId, title: result.title });
       }
 
-      // Phase 3: Follow-up reads on top URLs
-      if (webResults.length > 0) {
-        const topUrls = webResults.slice(0, 2).map(r => r.url).filter(Boolean);
-        for (const url of topUrls) {
-          try {
-            const deepContent = await this._followUpRead(url);
-            if (deepContent) {
-              findings.push({
-                id: randomUUID(),
-                type: 'follow_up',
-                title: `Deep read: ${url}`,
-                content: deepContent.slice(0, 2000),
-                source: url,
-                sourceId: url,
-                confidence: 0.72,
-                taskQuery: task.query,
-              });
-            }
-          } catch {
-            // Non-fatal: follow-up reads can fail
-          }
-        }
-      }
-
-      confidence = Math.min(0.90, findings.length > 0
-        ? findings.reduce((s, f) => s + f.confidence, 0) / findings.length
-        : 0.2);
+      this._emit('task.observation', { taskId: task.id, step, type: result?.type, title: result?.title });
     }
 
-    // Phase 4: Gap detection via LLM
-    if (findings.length > 0 && confidence < 0.85) {
-      const detectedGaps = await this._detectGaps(task.query, findings);
-      gaps.push(...detectedGaps);
-    }
+    // Calculate confidence from findings
+    const webFindings = findings.filter(f => f.type === 'web' || f.type === 'follow_up');
+    const confidence = webFindings.length > 0
+      ? Math.min(0.90, 0.5 + webFindings.length * 0.1)
+      : findings.length > 0 ? 0.4 : 0.1;
+
+    // Detect remaining gaps
+    const gaps = await this._detectGaps(task.query, findings);
 
     return { findings, sources, confidence, gaps };
+  }
+
+  async _reason(query, findings, step) {
+    const findingsSummary = findings.length > 0
+      ? findings.slice(-5).map(f => `[${f.type}] ${f.title}: ${f.content?.slice(0, 150)}`).join('\n')
+      : '(none yet)';
+
+    const response = await this._llm(`You are a research agent working on this question:
+"${query}"
+
+Step ${step}. Findings so far:
+${findingsSummary}
+
+Choose your NEXT ACTION. Return JSON:
+{
+  "thought": "brief reasoning about what to do next",
+  "action": "SEARCH_WEB" | "SEARCH_MEMORY" | "READ_URL" | "SYNTHESIZE" | "FINISH",
+  "query": "search query if action is SEARCH_WEB or SEARCH_MEMORY",
+  "url": "url to read if action is READ_URL"
+}
+
+Rules:
+- Start with SEARCH_WEB for factual questions about the world
+- Use SEARCH_MEMORY only when the question is about the user's own data
+- Use READ_URL after finding promising URLs from web search
+- Use SYNTHESIZE when you have enough findings to combine
+- Use FINISH when the question is well-answered
+- Generate specific, focused search queries — not the full research question`, { temperature: 0.3 });
+
+    try {
+      const parsed = JSON.parse(response.match(/\{[\s\S]*\}/)?.[0] || '{}');
+      return {
+        thought: parsed.thought || '',
+        action: ['SEARCH_WEB', 'SEARCH_MEMORY', 'READ_URL', 'SYNTHESIZE', 'FINISH'].includes(parsed.action)
+          ? parsed.action : 'SEARCH_WEB',
+        query: parsed.query || query,
+        url: parsed.url || null,
+      };
+    } catch {
+      return { thought: 'Fallback to web search', action: step === 1 ? 'SEARCH_WEB' : 'FINISH', query, url: null };
+    }
+  }
+
+  async _actSearchMemory(query, userId, orgId, projectId) {
+    const memories = await this._recallFromCSI(query, userId, orgId, projectId);
+    // Only return memories that are ACTUALLY relevant (score > 0.6)
+    const relevant = memories.filter(m => (m.score || 0) > 0.6);
+    if (relevant.length === 0) return { type: 'memory', content: null };
+
+    const combined = relevant.slice(0, 5).map(m => `- ${m.title || ''}: ${(m.content || '').slice(0, 200)}`).join('\n');
+    return {
+      type: 'memory',
+      title: `Memory recall: ${query.slice(0, 50)}`,
+      content: combined,
+      source: 'hivemind_memory',
+      sourceId: relevant[0]?.id,
+      confidence: relevant[0]?.score || 0.6,
+    };
+  }
+
+  async _actSearchWeb(query) {
+    const results = await this._webSearch(query);
+    if (results.length === 0) return { type: 'web', content: null };
+
+    const combined = results.slice(0, 5).map(r =>
+      `[${r.title || 'Untitled'}](${r.url || ''}): ${(r.snippet || r.summary || r.content || '').slice(0, 300)}`
+    ).join('\n\n');
+
+    return {
+      type: 'web',
+      title: `Web: ${query.slice(0, 50)}`,
+      content: combined,
+      source: results[0]?.url || 'web',
+      sourceId: results[0]?.url,
+      confidence: 0.7,
+      _urls: results.map(r => r.url).filter(Boolean), // pass URLs for potential follow-up
+    };
+  }
+
+  async _actReadUrl(url) {
+    if (!url) return { type: 'follow_up', content: null };
+    const content = await this._followUpRead(url);
+    if (!content) return { type: 'follow_up', content: null };
+
+    return {
+      type: 'follow_up',
+      title: `Deep read: ${url}`,
+      content: content.slice(0, 3000),
+      source: url,
+      sourceId: url,
+      confidence: 0.75,
+    };
+  }
+
+  async _actSynthesize(query, findings) {
+    if (findings.length === 0) return { type: 'synthesis', content: null };
+
+    const material = findings.slice(0, 10).map(f => f.content?.slice(0, 300) || '').join('\n---\n');
+    const synthesis = await this._llm(
+      `Synthesize these research findings into a concise summary answering: "${query}"\n\nFindings:\n${material}\n\nWrite a clear, factual summary:`,
+      { temperature: 0.4 }
+    );
+
+    return {
+      type: 'synthesis',
+      title: `Synthesis: ${query.slice(0, 50)}`,
+      content: synthesis,
+      source: 'llm_synthesis',
+      confidence: 0.8,
+    };
   }
 
   async _checkPriorResearch(query, userId, orgId, projectId) {
@@ -302,46 +399,142 @@ export class DeepResearcher {
 
   async _recallFromCSI(query, userId, orgId, projectId) {
     try {
-      const result = await this.recallFn(this.memoryStore, {
+      // First check project-specific research findings (prior research)
+      const projectResults = await this.recallFn(this.memoryStore, {
         query_context: query,
         user_id: userId,
         org_id: orgId,
-        max_memories: 8,
+        project: projectId,
+        max_memories: 5,
       });
-      return (result.memories || []).filter(m => (m.score || 0) > 0.3);
+      const projectMemories = (projectResults.memories || []).filter(m => (m.score || 0) > 0.5);
+
+      // Then check main memory but with HIGH threshold — only borrow if truly relevant
+      const mainResults = await this.recallFn(this.memoryStore, {
+        query_context: query,
+        user_id: userId,
+        org_id: orgId,
+        max_memories: 5,
+      });
+      // Very strict: only borrow from main memory if score > 0.75
+      const mainMemories = (mainResults.memories || []).filter(m => (m.score || 0) > 0.75);
+
+      // Deduplicate
+      const seen = new Set(projectMemories.map(m => m.id));
+      const combined = [...projectMemories];
+      for (const m of mainMemories) {
+        if (!seen.has(m.id)) combined.push(m);
+      }
+      return combined.slice(0, 8);
     } catch {
       return [];
     }
   }
 
   async _webSearch(query) {
+    this._emit('web.searching', { query });
+
+    // Try browserRuntime first (LightPanda)
+    if (this.browserRuntime) {
+      try {
+        const result = await this.browserRuntime.search({ query, domains: [], limit: 5 });
+        const results = Array.isArray(result.results) ? result.results : [];
+        if (results.length > 0) {
+          this._emit('web.results', { query, count: results.length, via: 'lightpanda' });
+          return results;
+        }
+      } catch {}
+    }
+
+    // Fallback: DuckDuckGo HTML scrape (no browser needed)
     try {
-      const res = await fetch(`http://localhost:3001/api/web/search`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Internal': 'true' },
-        body: JSON.stringify({ query, limit: 5 }),
+      const encoded = encodeURIComponent(query);
+      const res = await fetch(`https://html.duckduckgo.com/html/?q=${encoded}`, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; HivemindResearch/1.0)',
+          'Accept': 'text/html',
+        },
       });
-      if (!res.ok) return [];
-      const data = await res.json();
-      return data.results || data.items || [];
-    } catch {
+      if (!res.ok) throw new Error(`DDG ${res.status}`);
+      const html = await res.text();
+
+      // Parse results from DDG HTML
+      const results = [];
+      const resultPattern = /<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi;
+      let match;
+      while ((match = resultPattern.exec(html)) !== null && results.length < 5) {
+        const url = decodeURIComponent((match[1].match(/uddg=([^&]+)/) || [])[1] || match[1]);
+        const title = match[2].replace(/<[^>]+>/g, '').trim();
+        const snippet = match[3].replace(/<[^>]+>/g, '').trim();
+        if (url && title && url.startsWith('http')) {
+          results.push({ url, title, snippet, summary: snippet });
+        }
+      }
+
+      // Simpler fallback pattern if the above doesn't match
+      if (results.length === 0) {
+        const linkPattern = /<a[^>]*rel="nofollow"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
+        while ((match = linkPattern.exec(html)) !== null && results.length < 5) {
+          const url = decodeURIComponent((match[1].match(/uddg=([^&]+)/) || [])[1] || match[1]);
+          const title = match[2].replace(/<[^>]+>/g, '').trim();
+          if (url && title && url.startsWith('http') && !url.includes('duckduckgo.com')) {
+            results.push({ url, title, snippet: title, summary: title });
+          }
+        }
+      }
+
+      this._emit('web.results', { query, count: results.length, via: 'duckduckgo' });
+      return results;
+    } catch (err) {
+      this._emit('web.error', { query, error: err.message });
       return [];
     }
   }
 
   async _followUpRead(url) {
+    if (!url) return null;
+    this._emit('web.reading', { url });
+
+    // Try browserRuntime first
+    if (this.browserRuntime) {
+      try {
+        const result = await this.browserRuntime.crawl({ urls: [url], depth: 0, pageLimit: 1 });
+        const pages = Array.isArray(result.results) ? result.results : [];
+        const content = pages[0]?.text || pages[0]?.content || pages[0]?.markdown || null;
+        if (content) {
+          this._emit('web.read_complete', { url, length: content.length, via: 'lightpanda' });
+          return content;
+        }
+      } catch {}
+    }
+
+    // Fallback: direct fetch + HTML strip
     try {
-      const res = await fetch(`http://localhost:3001/api/web/crawl`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Internal': 'true' },
-        body: JSON.stringify({ urls: [url], depth: 0, page_limit: 1 }),
+      const res = await fetch(url, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; HivemindResearch/1.0)', 'Accept': 'text/html' },
+        signal: AbortSignal.timeout(10000),
       });
       if (!res.ok) return null;
-      const data = await res.json();
-      // Extract text content from crawl result
-      const pages = data.results || data.pages || [];
-      return pages[0]?.text || pages[0]?.content || null;
-    } catch {
+      const html = await res.text();
+      // Strip HTML tags, scripts, styles
+      let text = html
+        .replace(/<script[\s\S]*?<\/script>/gi, '')
+        .replace(/<style[\s\S]*?<\/style>/gi, '')
+        .replace(/<nav[\s\S]*?<\/nav>/gi, '')
+        .replace(/<footer[\s\S]*?<\/footer>/gi, '')
+        .replace(/<header[\s\S]*?<\/header>/gi, '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      // Take meaningful content (skip first 200 chars likely nav/header)
+      text = text.slice(200, 5000).trim();
+      if (text.length > 100) {
+        this._emit('web.read_complete', { url, length: text.length, via: 'fetch' });
+        return text;
+      }
+      return null;
+    } catch (err) {
+      this._emit('web.read_error', { url, error: err.message });
       return null;
     }
   }
@@ -362,13 +555,23 @@ export class DeepResearcher {
 
   async _detectGaps(query, findings) {
     try {
-      const findingSummaries = findings.slice(0, 8).map(f => f.content.slice(0, 200)).join('\n- ');
+      // Only include genuinely relevant findings (not random memory noise)
+      const relevant = findings.filter(f => f.confidence > 0.5 && f.type !== 'memory');
+      const findingSummaries = relevant.length > 0
+        ? relevant.slice(0, 8).map(f => f.content.slice(0, 200)).join('\n- ')
+        : '(No relevant findings yet)';
       const response = await this._llm(
-        `Given this research query and current findings, what important gaps remain?\n\nQuery: ${query}\n\nFindings so far:\n- ${findingSummaries}\n\nList 1-3 specific gaps as a JSON array of strings. If well-covered, return [].`,
+        `You are identifying research gaps. Given the original research question and findings so far, output specific SUB-QUESTIONS that still need answering.\n\n` +
+        `Original question: ${query}\n\n` +
+        `Findings so far:\n- ${findingSummaries}\n\n` +
+        `Output 1-3 specific, searchable sub-questions as a JSON array of strings. ` +
+        `Each sub-question should be a concrete, web-searchable query (not meta-commentary). ` +
+        `Example: ["EU AI Act compliance requirements for SaaS 2026", "German data protection GDPR AI Act overlap"]\n` +
+        `If the question is well-covered, return [].`,
         { temperature: 0.3 }
       );
       const parsed = JSON.parse(response.match(/\[.*\]/s)?.[0] || '[]');
-      return Array.isArray(parsed) ? parsed.filter(g => typeof g === 'string').slice(0, 3) : [];
+      return Array.isArray(parsed) ? parsed.filter(g => typeof g === 'string' && g.length > 10).slice(0, 3) : [];
     } catch {
       return [];
     }

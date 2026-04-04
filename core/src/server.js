@@ -198,8 +198,8 @@ const EVALUATION_REPORTS_DIR = path.join(DATA_DIR, 'evaluation-reports');
 const WEB_JOBS_FILE = path.join(DATA_DIR, 'web-jobs.json');
 const webJobStore = new WebJobStore(WEB_JOBS_FILE);
 const browserRuntime = new BrowserRuntime();
-const WEB_SEARCH_DAILY_LIMIT = Number(process.env.HIVEMIND_WEB_SEARCH_DAILY_LIMIT || 100);
-const WEB_CRAWL_DAILY_LIMIT = Number(process.env.HIVEMIND_WEB_CRAWL_DAILY_LIMIT || 500);
+const WEB_SEARCH_DAILY_LIMIT = Number(process.env.HIVEMIND_WEB_SEARCH_DAILY_LIMIT || 50);
+const WEB_CRAWL_DAILY_LIMIT = Number(process.env.HIVEMIND_WEB_CRAWL_DAILY_LIMIT || 100);
 
 installConsoleCapture('core');
 
@@ -2708,9 +2708,10 @@ a{color:#a78bfa}</style></head><body>
         // Feature gating — only gate web search/crawl creation, not status/admin endpoints
         if (planStore) {
           const orgPlan = await planStore.getOrgPlan(orgId);
-          if (!orgPlan.features.webIntelligence && req.method === 'POST' && (pathname === '/api/web/search/jobs' || pathname === '/api/web/crawl/jobs')) {
-            return jsonResponse(res, { error: 'Web Intelligence requires Pro plan or higher', upgrade_url: 'https://hivemind.davinciai.eu/hivemind/app/billing' }, 403);
-          }
+          // Web Intelligence is now available on all plans (free included)
+          // if (!orgPlan.features.webIntelligence && req.method === 'POST' && (pathname === '/api/web/search/jobs' || pathname === '/api/web/crawl/jobs')) {
+          //   return jsonResponse(res, { error: 'Web Intelligence requires Pro plan or higher', upgrade_url: 'https://hivemind.davinciai.eu/hivemind/app/billing' }, 403);
+          // }
           if (pathname.includes('/swarm') && !orgPlan.features.agentSwarm) {
             return jsonResponse(res, { error: 'Agent Swarm requires Scale plan or higher', upgrade_url: 'https://hivemind.davinciai.eu/hivemind/app/billing' }, 403);
           }
@@ -2986,6 +2987,8 @@ a{color:#a78bfa}</style></head><body>
               recallFn: recallPersistedMemories,
               prisma,
               groqApiKey: process.env.GROQ_API_KEY,
+              browserRuntime,
+              webJobStore,
               onEvent: (event) => { session.events.push(event); },
             });
 

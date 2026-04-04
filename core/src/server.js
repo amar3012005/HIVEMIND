@@ -145,6 +145,9 @@ const { createResidentRoutes } = await import('./resident/routes.js');
 // Graph Hygiene Scanner
 const { GraphHygieneScanner } = await import('./resident/graph-hygiene-scanner.js');
 
+// Deep Research
+const { DeepResearcher } = await import('./deep-research/researcher.js');
+
 // TARA Voice Agent imports
 const { TaraStreamHandler } = await import('./tara/stream-handler.js');
 const { TaraConfigStore } = await import('./tara/config-store.js');
@@ -241,6 +244,17 @@ let hygieneScanner = null;
 if (persistentMemoryStore) {
   hygieneScanner = new GraphHygieneScanner(persistentMemoryStore, prisma);
 }
+
+// Deep Research
+const researchSessions = new Map(); // sessionId → { status, events, result }
+
+// Cleanup old research sessions every 10 minutes (sessions older than 1 hour)
+setInterval(() => {
+  const cutoff = Date.now() - 3600000;
+  for (const [id, session] of researchSessions) {
+    if (new Date(session.createdAt).getTime() < cutoff) researchSessions.delete(id);
+  }
+}, 600000);
 
 // ─── Audit logging helper (Scale / Enterprise only) ─────────────────────────
 async function auditLog(event) {
@@ -2904,7 +2918,107 @@ a{color:#a78bfa}</style></head><body>
         }
       }
 
+      // ─── Deep Research dynamic routes (/api/research/:sessionId/...) ────────
+      if (pathname.startsWith('/api/research/') && pathname !== '/api/research/start' && pathname !== '/api/research/sessions') {
+        const parts = pathname.split('/');
+        const sessionId = parts[3];
+        const action = parts[4]; // 'status' or 'report'
+        const session = researchSessions.get(sessionId);
+        if (!session) return jsonResponse(res, { error: 'Session not found' }, 404);
+
+        if (action === 'status' || !action) {
+          return jsonResponse(res, {
+            status: session.status,
+            query: session.query,
+            progress: session.result?.taskProgress || null,
+            events: session.events.slice(-20),
+            error: session.error || null,
+          });
+        }
+
+        if (action === 'report') {
+          if (session.status !== 'completed') {
+            return jsonResponse(res, { error: 'Research not yet complete', status: session.status }, 202);
+          }
+          return jsonResponse(res, {
+            report: session.result.report,
+            findings: session.result.findings,
+            sources: session.result.sources,
+            gaps: session.result.gaps,
+            durationMs: session.result.durationMs,
+            taskProgress: session.result.taskProgress,
+            fromCache: session.result.fromCache,
+            projectId: session.result.projectId,
+          });
+        }
+
+        return jsonResponse(res, { error: 'Unknown research action' }, 400);
+      }
+
       switch (pathname) {
+        case '/api/research/start':
+          if (req.method === 'POST') {
+            if (!persistentMemoryStore) {
+              return jsonResponse(res, { error: 'Memory store unavailable' }, 503);
+            }
+            const query = body.query;
+            if (!query || typeof query !== 'string' || query.length < 5 || query.length > 1000) {
+              return jsonResponse(res, { error: 'query must be a string between 5 and 1000 characters' }, 400);
+            }
+
+            const sessionId = crypto.randomUUID();
+            const session = {
+              id: sessionId,
+              query,
+              userId,
+              orgId,
+              status: 'running',
+              events: [],
+              result: null,
+              error: null,
+              createdAt: new Date().toISOString(),
+            };
+            researchSessions.set(sessionId, session);
+
+            // Create a per-session researcher to avoid race conditions
+            const researcher = new DeepResearcher({
+              memoryStore: persistentMemoryStore,
+              recallFn: recallPersistedMemories,
+              prisma,
+              groqApiKey: process.env.GROQ_API_KEY,
+              onEvent: (event) => { session.events.push(event); },
+            });
+
+            // Run in background (non-blocking)
+            researcher.research(query, userId, orgId, { forceRefresh: body.forceRefresh })
+              .then(result => { session.status = 'completed'; session.result = result; })
+              .catch(err => { session.status = 'failed'; session.error = err.message; });
+
+            const slug = query.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 60);
+            return jsonResponse(res, { session_id: sessionId, project_id: `research/${slug}`, status: 'started' }, 202);
+          }
+          break;
+
+        case '/api/research/sessions':
+          if (req.method === 'GET') {
+            const sessions = [];
+            for (const [id, session] of researchSessions) {
+              if (session.userId === userId) {
+                sessions.push({
+                  id: session.id,
+                  query: session.query,
+                  status: session.status,
+                  createdAt: session.createdAt,
+                  confidence: session.result?.taskProgress?.confidence || null,
+                });
+              }
+            }
+            // Most recent first
+            sessions.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+            return jsonResponse(res, { sessions });
+          }
+          break;
+
         case '/api/generate':
           if (req.method === 'POST') {
             if (!groqClient.isAvailable()) {

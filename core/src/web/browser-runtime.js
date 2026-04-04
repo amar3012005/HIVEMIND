@@ -215,16 +215,27 @@ async function fetchFallbackPage(url, timeoutMs = 15000) {
 }
 
 function stripHtmlToText(html) {
-  let text = html.replace(/<script[\s\S]*?<\/script>/gi, ' ');
+  let text = html;
+  // Remove non-content sections first
+  text = text.replace(/<script[\s\S]*?<\/script>/gi, ' ');
   text = text.replace(/<style[\s\S]*?<\/style>/gi, ' ');
+  text = text.replace(/<nav[\s\S]*?<\/nav>/gi, ' ');
+  text = text.replace(/<footer[\s\S]*?<\/footer>/gi, ' ');
+  text = text.replace(/<header[\s\S]*?<\/header>/gi, ' ');
+  text = text.replace(/<aside[\s\S]*?<\/aside>/gi, ' ');
+  text = text.replace(/<!--[\s\S]*?-->/g, ' ');
+  // Strip remaining tags
   text = text.replace(/<[^>]+>/g, ' ');
+  // Decode entities
   text = text
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&#039;/g, "'")
-    .replace(/&nbsp;/g, ' ');
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&#\d+;/g, ' ');
+  // Clean whitespace
   return text.replace(/\s+/g, ' ').trim();
 }
 
@@ -600,32 +611,79 @@ class FetchFallbackRuntime {
       ? domains.map(normalizeUrl).filter(Boolean)
       : [];
 
-    if (normalizedDomains.length === 0) {
-      errors.push({ target: 'search', error: 'domains_required_in_fallback_mode' });
+    // If specific domains given, fetch and check each
+    if (normalizedDomains.length > 0) {
+      for (const url of normalizedDomains) {
+        if (results.length >= safeLimit) break;
+        try {
+          const html = await fetchFallbackPage(url);
+          const title = extractTitle(html);
+          const text = stripHtmlToText(html);
+          const includeRow = !query || text.toLowerCase().includes(String(query).toLowerCase());
+          if (includeRow) {
+            results.push({
+              title: title || new URL(url).hostname,
+              url,
+              snippet: extractSnippet(text)
+            });
+          }
+        } catch (error) {
+          const classified = classifyError(error);
+          errors.push({ target: url, type: classified.type, error: classified.message });
+        }
+      }
+      return { results, runtime_used: this.name, errors };
+    }
+
+    // No domains: use DuckDuckGo HTML search
+    if (!query) {
+      errors.push({ target: 'search', error: 'query_required' });
       return { results: [], runtime_used: this.name, errors };
     }
 
-    for (const url of normalizedDomains) {
-      if (results.length >= safeLimit) break;
-      try {
-        const html = await fetchFallbackPage(url);
-        const title = extractTitle(html);
-        const text = stripHtmlToText(html);
-        const includeRow = !query || text.toLowerCase().includes(String(query).toLowerCase());
-        if (includeRow) {
-          results.push({
-            title: title || new URL(url).hostname,
-            url,
-            snippet: extractSnippet(text)
-          });
+    try {
+      const encoded = encodeURIComponent(query);
+      const res = await fetch(`https://html.duckduckgo.com/html/?q=${encoded}`, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!res.ok) throw new Error(`DuckDuckGo returned ${res.status}`);
+      const html = await res.text();
+
+      // Parse DDG results: <a class="result__a"> for title+url, <a class="result__snippet"> for snippet
+      const resultPattern = /<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi;
+      let match;
+      while ((match = resultPattern.exec(html)) !== null && results.length < safeLimit) {
+        const rawUrl = match[1];
+        const url = decodeURIComponent((rawUrl.match(/uddg=([^&]+)/) || [])[1] || rawUrl);
+        const title = match[2].replace(/<[^>]+>/g, '').trim();
+        const snippet = match[3].replace(/<[^>]+>/g, '').trim();
+        if (url && title && url.startsWith('http') && !url.includes('duckduckgo.com')) {
+          results.push({ url, title, snippet });
         }
-      } catch (error) {
-        const classified = classifyError(error);
-        errors.push({ target: url, type: classified.type, error: classified.message });
       }
+
+      // Simpler fallback pattern
+      if (results.length === 0) {
+        const linkPattern = /<a[^>]*rel="nofollow"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
+        while ((match = linkPattern.exec(html)) !== null && results.length < safeLimit) {
+          const rawUrl = match[1];
+          const url = decodeURIComponent((rawUrl.match(/uddg=([^&]+)/) || [])[1] || rawUrl);
+          const title = match[2].replace(/<[^>]+>/g, '').trim();
+          if (url && title && url.startsWith('http') && !url.includes('duckduckgo.com')) {
+            results.push({ url, title, snippet: title });
+          }
+        }
+      }
+    } catch (error) {
+      errors.push({ target: 'duckduckgo', error: error.message });
     }
 
-    return { results, runtime_used: this.name, errors };
+    return { results, runtime_used: `${this.name}+duckduckgo`, errors };
   }
 
   async crawl({ urls, depth = 1, pageLimit = 50, include, exclude }) {
@@ -650,8 +708,9 @@ class FetchFallbackRuntime {
       try {
         const html = await fetchFallbackPage(url);
         const title = extractTitle(html);
-        const content = stripHtmlToText(html);
-        pages.push({ url, title: title || url, content });
+        const text = stripHtmlToText(html);
+        const wordCount = text.split(/\s+/).filter(w => w.length > 1).length;
+        pages.push({ url, title: title || url, text, content: text, word_count: wordCount });
 
         if (currentDepth < safeDepth) {
           const links = extractLinksFromHtml(html, url);

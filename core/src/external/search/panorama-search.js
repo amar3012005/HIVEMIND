@@ -253,18 +253,23 @@ export class PanoramaSearch {
       dateRange
     });
 
-    // Perform hybrid search
-    const results = await hybridSearch.hybridSearch({
+    // Perform hybrid search — panorama uses a lower threshold for broader coverage
+    const searchOpts = {
       query,
       userId,
       orgId,
       limit,
+      scoreThreshold: 0.08, // Low threshold for comprehensive historical coverage
       includeExpired,
       includeHistorical,
-      filter: temporalFilter,
       weights,
       depth: 'full'
-    });
+    };
+    // Only apply temporal filter if it has conditions
+    if (temporalFilter.must && temporalFilter.must.length > 0) {
+      searchOpts.filter = temporalFilter;
+    }
+    const results = await hybridSearch.hybridSearch(searchOpts);
 
     // If graph store is available, enhance with graph traversal
     if (this.graphStore) {

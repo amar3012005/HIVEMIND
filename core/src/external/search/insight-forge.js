@@ -492,11 +492,13 @@ export class InsightForge {
       const startTime = Date.now();
 
       try {
+        // Use lower threshold for insight sub-queries — they're more abstract
         const results = await hybridSearch.hybridSearch({
           query: subQuery.query,
           userId,
           orgId,
           limit,
+          scoreThreshold: 0.08, // Lower than default — insight queries are abstract
           weights: {
             vector: 0.6,
             keyword: 0.3,
@@ -504,9 +506,29 @@ export class InsightForge {
           }
         });
 
+        let allResults = results.results || [];
+
+        // Fallback: if hybrid search returns empty, try the graph store directly
+        if (allResults.length === 0 && this.graphStore) {
+          try {
+            const graphResults = await this.graphStore.searchMemories({
+              query: subQuery.query,
+              user_id: userId,
+              org_id: orgId,
+              n_results: limit,
+              is_latest: true,
+            });
+            allResults = (graphResults || []).map(m => ({
+              ...m,
+              score: m.score || 0.3,
+              _source: 'graph_fallback',
+            }));
+          } catch {}
+        }
+
         return {
           subQuery,
-          results: results.results || [],
+          results: allResults,
           durationMs: Date.now() - startTime,
           success: true
         };

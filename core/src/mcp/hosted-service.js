@@ -1622,12 +1622,11 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
 
       case 'hivemind_recall':
         {
-          // ALL modes use /api/recall — includes user profile, injection_text,
-          // attribution scoring, deduplication, and all recall quality fixes.
-          // Mode adjusts result count: panorama=15, insight=10, quick=5
-          const recallLimit = args.mode === 'panorama' ? Math.max(args.limit || 15, 15)
-            : args.mode === 'insight' ? Math.max(args.limit || 10, 10)
+          // Base: all modes use /api/recall for profile + injection + quality fixes
+          const recallLimit = args.mode === 'panorama' ? 15
+            : args.mode === 'insight' ? 10
             : args.limit || 5;
+
           const recallResult = await apiClient.post('/api/recall', {
             query_context: args.query,
             tags: args.tags || [],
@@ -1635,14 +1634,144 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
             source_platforms: args.source_type ? [args.source_type] : [],
             max_memories: recallLimit,
           });
-          return formatToolContent({
+
+          const base = {
             memories: recallResult.memories || [],
             injection_text: recallResult.injectionText || recallResult.injection_text || null,
             user_profile: recallResult.user_profile || null,
             search_method: recallResult.search_method || 'persisted-recall',
-            expansion_stats: recallResult.expansion_stats || null,
             mode: args.mode || 'quick',
-          });
+          };
+
+          // Quick: return base as-is
+          if (!args.mode || args.mode === 'quick') {
+            return formatToolContent(base);
+          }
+
+          // Insight: add entity extraction + relationship chains (deterministic, no LLM)
+          if (args.mode === 'insight') {
+            const memories = base.memories;
+
+            const entityMap = new Map();
+            const entityPatterns = {
+              person: /\b([A-Z][a-z]+(?:\s[A-Z][a-z]+)+)\b/g,
+              organization: /\b([A-Z][A-Z0-9]{2,}(?:\s[A-Z][a-z]+)*)\b/g,
+              technology: /\b(Python|JavaScript|TypeScript|Rust|Go|Java|Kotlin|Swift|React|Vue|Angular|PostgreSQL|MongoDB|Redis|Docker|Kubernetes|AWS|Azure|GCP|Qdrant|Prisma|Node\.js)\b/gi,
+            };
+
+            for (const mem of memories) {
+              const content = mem.content || '';
+              for (const [type, pattern] of Object.entries(entityPatterns)) {
+                const cloned = new RegExp(pattern.source, pattern.flags);
+                let match;
+                while ((match = cloned.exec(content)) !== null) {
+                  const name = match[1] || match[0];
+                  if (name.length < 3) continue;
+                  const key = name.toLowerCase();
+                  if (!entityMap.has(key)) {
+                    entityMap.set(key, { name, type, mentions: 0, sources: [] });
+                  }
+                  const entity = entityMap.get(key);
+                  entity.mentions++;
+                  if (!entity.sources.includes(mem.id)) entity.sources.push(mem.id);
+                }
+              }
+            }
+
+            const entities = [...entityMap.values()]
+              .filter(e => e.mentions >= 1 && e.name.length >= 3)
+              .sort((a, b) => b.mentions - a.mentions)
+              .slice(0, 20);
+
+            // Build relationship chains from shared entities between memory pairs
+            const chains = [];
+            for (let i = 0; i < memories.length; i++) {
+              for (let j = i + 1; j < memories.length; j++) {
+                const iContent = (memories[i].content || '').toLowerCase();
+                const jContent = (memories[j].content || '').toLowerCase();
+                const sharedEntities = entities.filter(e =>
+                  iContent.includes(e.name.toLowerCase()) && jContent.includes(e.name.toLowerCase())
+                );
+                if (sharedEntities.length > 0) {
+                  chains.push({
+                    from: memories[i].id,
+                    to: memories[j].id,
+                    shared_entities: sharedEntities.map(e => e.name),
+                    strength: sharedEntities.length,
+                  });
+                }
+              }
+            }
+
+            return formatToolContent({
+              ...base,
+              entities,
+              relationship_chains: chains.slice(0, 10),
+              insight_metadata: {
+                entity_count: entities.length,
+                chain_count: chains.length,
+                memory_count: memories.length,
+              },
+            });
+          }
+
+          // Panorama: add temporal categorization + timeline
+          if (args.mode === 'panorama') {
+            const memories = base.memories;
+
+            const now = Date.now();
+            const DAY = 86400000;
+
+            const categorized = {
+              recent: [],     // 0-30 days
+              medium: [],     // 30-90 days
+              old: [],        // 90-365 days
+              historical: [], // 365+ days
+            };
+
+            const timeline = {};
+
+            for (const mem of memories) {
+              const date = new Date(mem.document_date || mem.created_at || 0);
+              const age = now - date.getTime();
+
+              if (age < 30 * DAY) categorized.recent.push(mem);
+              else if (age < 90 * DAY) categorized.medium.push(mem);
+              else if (age < 365 * DAY) categorized.old.push(mem);
+              else categorized.historical.push(mem);
+
+              // Group by month for timeline
+              const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+              if (!timeline[monthKey]) timeline[monthKey] = [];
+              timeline[monthKey].push({
+                id: mem.id,
+                title: mem.title || (mem.content || '').slice(0, 60),
+                date: date.toISOString(),
+                memory_type: mem.memory_type,
+              });
+            }
+
+            return formatToolContent({
+              ...base,
+              categories: {
+                recent: categorized.recent.length,
+                medium: categorized.medium.length,
+                old: categorized.old.length,
+                historical: categorized.historical.length,
+              },
+              timeline,
+              panorama_metadata: {
+                date_range: {
+                  oldest: memories.length > 0 ? new Date(Math.min(...memories.map(m => new Date(m.document_date || m.created_at || 0)))).toISOString() : null,
+                  newest: memories.length > 0 ? new Date(Math.max(...memories.map(m => new Date(m.document_date || m.created_at || 0)))).toISOString() : null,
+                },
+                memory_count: memories.length,
+              },
+            });
+          }
+
+          // Fallback
+          return formatToolContent(base);
         }
 
       case 'hivemind_get_memory':

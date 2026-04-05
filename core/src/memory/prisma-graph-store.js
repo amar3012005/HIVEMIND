@@ -298,8 +298,9 @@ export class PrismaGraphStore {
   }
 
   async searchMemories({ query, user_id, org_id, project, memory_type, tags, is_latest, n_results = 10, created_after, created_before, source_platform, scope = 'personal' }) {
-    // Try PostgreSQL full-text search with stemming first (like code-review-graph's FTS5 + Porter)
-    if (query && this.client.$queryRawUnsafe) {
+    // Try PostgreSQL full-text search with stemming (like code-review-graph's FTS5 + Porter)
+    // Only run outside transactions — $queryRawUnsafe corrupts Prisma interactive transactions
+    if (query && this.client.$queryRawUnsafe && !this.inTransaction) {
       try {
         const tsQuery = query.trim().split(/\s+/).filter(w => w.length > 1).map(w => w + ':*').join(' & ');
         if (tsQuery) {

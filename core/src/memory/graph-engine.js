@@ -743,33 +743,76 @@ export class MemoryGraphEngine {
 
         await this._enqueueDeriveCandidates(store, baseMemory, latestMemories);
 
-        // Detect contradictions with existing memories
+        // Detect contradictions and reconcile: determine correct edge type BEFORE creating
         if (this.conflictDetector && latestMemories.length > 0) {
           try {
+            const EVOLUTION_RE = /\b(now|switched|changed|moved to|migrating|replaced|updated|corrected|actually|no longer|stopped|used to|formerly|previously|instead)\b/i;
+            const ADDITIVE_RE = /\b(also|additionally|furthermore|plus|as well|on top of|in addition|moreover|and also)\b/i;
+
             const contradictions = this.conflictDetector.detectContradictions(baseMemory, latestMemories);
             for (const c of contradictions) {
+              // Reconcile: is this a real contradiction, or an evolution/extension?
+              const newContent = (baseMemory.content || '').toLowerCase();
+              let edgeType = 'Contradicts';
+              let reasoning = '';
+
+              if (EVOLUTION_RE.test(newContent) && (c.contradictionType === 'temporal_shift' || c.contradictionType === 'change' || c.contradictionType === 'explicit_correction')) {
+                edgeType = 'Updates';
+                reasoning = `Belief evolved: ${c.contradictionType} with evolution language`;
+              } else if (EVOLUTION_RE.test(newContent) && c.contradictionType === 'negation') {
+                edgeType = 'Updates';
+                reasoning = 'Negation with evolution language: belief changed over time';
+              } else if (ADDITIVE_RE.test(newContent)) {
+                edgeType = 'Extends';
+                reasoning = 'Additive language: new memory adds nuance';
+              } else if (c.confidence >= 0.7 && baseMemory.memory_type === c.memory.memory_type && c.contradictionType === 'value_divergence') {
+                edgeType = 'Updates';
+                reasoning = 'Same type with different values: factual update';
+              }
+
+              const isReconciled = edgeType !== 'Contradicts';
+
               await store.createRelationship({
                 id: crypto.randomUUID ? crypto.randomUUID() : `crel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
                 from_id: baseMemory.id,
                 to_id: c.memory.id,
-                type: 'Contradicts',
+                type: edgeType,
                 confidence: c.confidence,
                 metadata: {
                   contradiction_type: c.contradictionType,
                   detected_at: new Date().toISOString(),
-                  source: 'auto-detection',
+                  source: isReconciled ? 'deterministic-reconciliation' : 'auto-detection',
+                  ...(isReconciled ? { reconciled: true, original_type: 'Contradicts', reconciled_to: edgeType, reasoning } : {}),
                 },
-                created_by: 'conflict-detector',
+                created_by: isReconciled ? 'turing-reconciliation' : 'conflict-detector',
               });
+
+              // If reconciled to Updates: mark old memory as superseded
+              if (edgeType === 'Updates') {
+                try { await store.updateMemory(c.memory.id, { is_latest: false }); } catch {}
+              }
+
+              if (isReconciled) {
+                result.edgesCreated.push({ type: edgeType, from: baseMemory.id, to: c.memory.id, reconciled: true, reasoning });
+                console.log(`[conflict-reconciliation] ${baseMemory.id} → ${c.memory.id}: Contradicts → ${edgeType} (${reasoning})`);
+              }
             }
             if (contradictions.length > 0) {
               console.log(`[contradiction] Detected ${contradictions.length} contradictions for memory ${baseMemory.id}`);
-              result.contradictions = contradictions.map(c => ({
-                memory_id: c.memory.id,
-                type: c.contradictionType,
-                confidence: c.confidence,
-              }));
+              result.contradictions = contradictions.map(c => {
+                const newContent = (baseMemory.content || '').toLowerCase();
+                const EVOLUTION_RE = /\b(now|switched|changed|moved to|migrating|replaced|updated|corrected|actually|no longer|stopped|used to|formerly|previously|instead)\b/i;
+                const isEvolution = EVOLUTION_RE.test(newContent) && (c.contradictionType === 'temporal_shift' || c.contradictionType === 'change' || c.contradictionType === 'explicit_correction' || c.contradictionType === 'negation');
+                return {
+                  memory_id: c.memory.id,
+                  type: c.contradictionType,
+                  confidence: c.confidence,
+                  reconciled_to: isEvolution ? 'Updates' : undefined,
+                };
+              });
             }
+
+            // Old reconciliation block removed — reconciliation now happens BEFORE edge creation above
           } catch (contradictionErr) {
             console.warn('[contradiction] Detection failed:', contradictionErr.message);
           }

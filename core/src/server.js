@@ -2451,6 +2451,75 @@ a{color:#a78bfa}</style></head><body>
         }
       }
 
+      // GET /api/memories/:memoryId/evolution — traverse Updates/Extends chain
+      if (pathname.match(/^\/api\/memories\/[^/]+\/evolution$/) && req.method === 'GET') {
+        const memoryId = pathname.split('/')[3];
+        try {
+          const memory = await persistentMemoryStore.getMemory(memoryId);
+          if (!memory) return jsonResponse(res, { error: 'Memory not found' }, 404);
+
+          // BFS traverse all connected memories via relationship edges
+          const visited = new Set([memoryId]);
+          const queue = [memoryId];
+          const timeline = [{ ...memory, _role: 'current' }];
+          const edges = [];
+
+          while (queue.length > 0 && visited.size < 20) {
+            const currentId = queue.shift();
+
+            const rels = await prisma.relationship.findMany({
+              where: {
+                OR: [{ fromId: currentId }, { toId: currentId }],
+                type: { in: ['Updates', 'Extends', 'Derives', 'Contradicts'] },
+              },
+              take: 50,
+            });
+
+            for (const rel of rels) {
+              edges.push({
+                from: rel.fromId,
+                to: rel.toId,
+                type: rel.type,
+                confidence: rel.confidence,
+                metadata: rel.metadata,
+                created_at: rel.createdAt?.toISOString(),
+              });
+
+              const otherId = rel.fromId === currentId ? rel.toId : rel.fromId;
+              if (!visited.has(otherId)) {
+                visited.add(otherId);
+                queue.push(otherId);
+                try {
+                  const other = await persistentMemoryStore.getMemory(otherId);
+                  if (other) {
+                    timeline.push({
+                      ...other,
+                      _role: rel.type === 'Updates' ? 'superseded' : 'related',
+                    });
+                  }
+                } catch {}
+              }
+            }
+          }
+
+          // Sort timeline by document_date or created_at
+          timeline.sort((a, b) => {
+            const da = new Date(a.document_date || a.created_at || 0);
+            const db = new Date(b.document_date || b.created_at || 0);
+            return da - db;
+          });
+
+          return jsonResponse(res, {
+            memory,
+            timeline,
+            edges,
+            chain_length: timeline.length,
+          });
+        } catch (err) {
+          return jsonResponse(res, { error: err.message }, 500);
+        }
+      }
+
       // Handle /api/memories/:id routes (dynamic ID matching)
       if (pathname.startsWith('/api/memories/') && pathname !== '/api/memories/search' && pathname !== '/api/memories/query' && pathname !== '/api/memories/code/ingest' && pathname !== '/api/memories/traverse' && pathname !== '/api/memories/decay' && pathname !== '/api/memories/reinforce' && pathname !== '/api/memories/delete-all') {
         if (req.method === 'GET') {

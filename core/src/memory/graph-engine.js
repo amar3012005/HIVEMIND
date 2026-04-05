@@ -772,20 +772,22 @@ export class MemoryGraphEngine {
 
               const isReconciled = edgeType !== 'Contradicts';
 
-              await store.createRelationship({
-                id: crypto.randomUUID ? crypto.randomUUID() : `crel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                from_id: baseMemory.id,
-                to_id: c.memory.id,
-                type: edgeType,
-                confidence: c.confidence,
-                metadata: {
-                  contradiction_type: c.contradictionType,
-                  detected_at: new Date().toISOString(),
-                  source: isReconciled ? 'deterministic-reconciliation' : 'auto-detection',
-                  ...(isReconciled ? { reconciled: true, original_type: 'Contradicts', reconciled_to: edgeType, reasoning } : {}),
-                },
-                created_by: isReconciled ? 'turing-reconciliation' : 'conflict-detector',
-              });
+              try {
+                await store.createRelationship({
+                  id: crypto.randomUUID ? crypto.randomUUID() : `crel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                  from_id: baseMemory.id,
+                  to_id: c.memory.id,
+                  type: edgeType,
+                  confidence: c.confidence,
+                  metadata: {
+                    contradiction_type: c.contradictionType,
+                    detected_at: new Date().toISOString(),
+                    source: isReconciled ? 'deterministic-reconciliation' : 'auto-detection',
+                    ...(isReconciled ? { reconciled: true, original_type: 'Contradicts', reconciled_to: edgeType, reasoning } : {}),
+                  },
+                  created_by: isReconciled ? 'turing-reconciliation' : 'conflict-detector',
+                });
+              } catch { /* Edge already exists — skip duplicate */ }
 
               // If reconciled to Updates: mark old memory as superseded
               if (edgeType === 'Updates') {

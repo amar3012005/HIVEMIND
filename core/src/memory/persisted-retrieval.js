@@ -216,64 +216,111 @@ function applyRecallRelevanceFloor(scored, options = {}) {
   const { temporalComparison = false } = options;
   if (scored.length === 0) return [];
 
-  // Hard absolute minimum — never return results below these thresholds
-  const HARD_MIN_SCORE = 0.15;
-  const HARD_MIN_SIMILARITY = 0.10;
+  // Detect if scores are RRF-scale (very small, ~0.001-0.03) vs raw scale (0-1)
+  const topScore = scored[0]?.score || 0;
+  const isRRFScale = topScore < 0.1;
+
+  // Hard absolute minimum — adapted to score scale
+  const HARD_MIN_SCORE = isRRFScale ? 0.001 : 0.15;
+  const HARD_MIN_SIMILARITY = 0.08;
 
   // First pass: enforce hard minimum (no exceptions)
   const viable = scored.filter(item =>
     item.score >= HARD_MIN_SCORE &&
-    (item.similarityScore ?? 0) >= HARD_MIN_SIMILARITY
+    (item.similarityScore ?? item.keywordScore ?? 0) >= HARD_MIN_SIMILARITY
   );
 
   // If nothing passes hard minimum, return empty — the LLM should say "I don't know"
   if (viable.length === 0) return [];
 
   // Second pass: relative floor based on top score (quality gradient)
-  const topScore = viable[0].score;
-  const topSimilarity = viable[0].similarityScore ?? 0;
+  const viableTopScore = viable[0].score;
+  const topSimilarity = viable[0].similarityScore ?? viable[0].keywordScore ?? 0;
   const minimumScore = temporalComparison
-    ? Math.max(topScore * 0.20, HARD_MIN_SCORE)
-    : Math.max(topScore * 0.30, HARD_MIN_SCORE);
+    ? Math.max(viableTopScore * 0.20, HARD_MIN_SCORE)
+    : Math.max(viableTopScore * 0.30, HARD_MIN_SCORE);
   const minimumSimilarity = temporalComparison
     ? Math.max(topSimilarity * 0.25, HARD_MIN_SIMILARITY)
     : Math.max(topSimilarity * 0.40, HARD_MIN_SIMILARITY);
 
   const filtered = viable.filter(item =>
     item.score >= minimumScore &&
-    (item.similarityScore ?? 0) >= minimumSimilarity
+    (item.similarityScore ?? item.keywordScore ?? 0) >= minimumSimilarity
   );
 
   return filtered.length > 0 ? filtered : viable.slice(0, temporalComparison ? 5 : 3);
 }
 
-function mergeCandidateLists(...lists) {
-  const merged = new Map();
+/**
+ * Reciprocal Rank Fusion (RRF) — merges multiple ranked lists by rank position,
+ * not raw scores. This handles the problem of different score scales across
+ * vector, lexical, and graph results. Borrowed from code-review-graph's approach.
+ *
+ * RRF score = sum(1 / (k + rank + 1)) across all lists an item appears in.
+ */
+function rrfMerge(lists, k = 60) {
+  const scores = new Map();
+  const items = new Map();
 
   for (const list of lists) {
-    for (const item of list || []) {
+    if (!list) continue;
+    for (let rank = 0; rank < list.length; rank++) {
+      const item = list[rank];
       if (!item?.memory?.id) continue;
-      const existing = merged.get(item.memory.id);
-      if (!existing) {
-        merged.set(item.memory.id, { ...item });
-        continue;
+      const id = item.memory.id;
+      scores.set(id, (scores.get(id) || 0) + 1.0 / (k + rank + 1));
+      if (!items.has(id)) {
+        items.set(id, { ...item });
+      } else {
+        // Merge metadata: keep the richer version
+        const existing = items.get(id);
+        items.set(id, {
+          ...existing,
+          memory: existing.memory || item.memory,
+          vectorScore: Math.max(existing.vectorScore || 0, item.vectorScore || 0),
+          keywordScore: Math.max(existing.keywordScore || 0, item.keywordScore || 0),
+          graphScore: Math.max(existing.graphScore || 0, item.graphScore || 0),
+          similarityScore: Math.max(existing.similarityScore || 0, item.similarityScore || 0),
+          recencyScore: Math.max(existing.recencyScore || 0, item.recencyScore || 0),
+        });
       }
-
-      merged.set(item.memory.id, {
-        ...existing,
-        memory: existing.memory || item.memory,
-        vectorScore: Math.max(existing.vectorScore || 0, item.vectorScore || 0),
-        keywordScore: Math.max(existing.keywordScore || 0, item.keywordScore || 0),
-        graphScore: Math.max(existing.graphScore || 0, item.graphScore || 0),
-        policyScore: Math.max(existing.policyScore || 0, item.policyScore || 0),
-        similarityScore: Math.max(existing.similarityScore || 0, item.similarityScore || 0),
-        recencyScore: Math.max(existing.recencyScore || 0, item.recencyScore || 0),
-        score: Math.max(existing.score || 0, item.score || 0)
-      });
     }
   }
 
-  return Array.from(merged.values());
+  // Apply RRF scores
+  const merged = [];
+  for (const [id, rrfScore] of scores) {
+    const item = items.get(id);
+    if (item) {
+      merged.push({ ...item, score: rrfScore, _rrfScore: rrfScore });
+    }
+  }
+
+  return merged.sort((a, b) => b.score - a.score);
+}
+
+/**
+ * Memory type boosting based on query intent.
+ * Inspired by code-review-graph's kind boosting (PascalCase → Class, snake_case → Function).
+ * "what did I decide" → boost decision memories. "my preference" → boost preference memories.
+ */
+function detectMemoryTypeBoost(query) {
+  const q = (query || '').toLowerCase();
+  const boosts = {};
+
+  if (/\b(decid|decision|chose|chose|agreed|approved)\b/.test(q)) boosts.decision = 1.6;
+  if (/\b(prefer|preference|like|dislike|favorite|rather)\b/.test(q)) boosts.preference = 1.6;
+  if (/\b(learn|lesson|mistake|takeaway|insight)\b/.test(q)) boosts.lesson = 1.5;
+  if (/\b(goal|plan|target|objective|aim|ambition)\b/.test(q)) boosts.goal = 1.5;
+  if (/\b(event|meeting|call|conference|happened|attended)\b/.test(q)) boosts.event = 1.4;
+  if (/\b(fact|know|information|detail|data)\b/.test(q)) boosts.fact = 1.3;
+
+  return boosts;
+}
+
+function mergeCandidateLists(...lists) {
+  // Use RRF for merging — rank-based fusion handles different score scales
+  return rrfMerge(lists);
 }
 
 function buildRelationshipIndex(relationships) {
@@ -962,6 +1009,19 @@ export async function recallPersistedMemories(store, {
   }).filter(Boolean);
 
   const ranked = mergeCandidateLists(scoredLexical, enrichedVector, expandedCandidates).sort((a, b) => b.score - a.score);
+
+  // Apply memory_type boosting based on query intent (from code-review-graph's kind boosting)
+  const typeBoosts = detectMemoryTypeBoost(query_context);
+  if (Object.keys(typeBoosts).length > 0) {
+    for (const item of ranked) {
+      const memType = item.memory?.memory_type || '';
+      if (typeBoosts[memType]) {
+        item.score = (item.score || 0) * typeBoosts[memType];
+      }
+    }
+    ranked.sort((a, b) => b.score - a.score);
+  }
+
   const filtered = applyRecallRelevanceFloor(ranked, { temporalComparison });
   const deduped = collapseNearDuplicates(filtered, { preserveTemporalDistinctness: temporalComparison });
 

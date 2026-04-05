@@ -298,6 +298,60 @@ export class PrismaGraphStore {
   }
 
   async searchMemories({ query, user_id, org_id, project, memory_type, tags, is_latest, n_results = 10, created_after, created_before, source_platform, scope = 'personal' }) {
+    // Try PostgreSQL full-text search with stemming first (like code-review-graph's FTS5 + Porter)
+    if (query && this.client.$queryRawUnsafe) {
+      try {
+        const tsQuery = query.trim().split(/\s+/).filter(w => w.length > 1).map(w => w + ':*').join(' & ');
+        if (tsQuery) {
+          const scopeWhere = scope === 'personal'
+            ? `AND m.user_id = '${user_id}'::uuid`
+            : `AND m.org_id = '${org_id}'::uuid`;
+          const projectWhere = project ? `AND m.project = '${project}'` : '';
+          const latestWhere = typeof is_latest === 'boolean' ? `AND m.is_latest = ${is_latest}` : '';
+          const dateAfterWhere = created_after ? `AND m.created_at >= '${new Date(created_after).toISOString()}'` : '';
+          const dateBeforeWhere = created_before ? `AND m.created_at <= '${new Date(created_before).toISOString()}'` : '';
+
+          const ftsResults = await this.client.$queryRawUnsafe(`
+            SELECT m.id, m.content, m.title, m.tags, m.memory_type, m.project,
+                   m.importance_score, m.is_latest, m.created_at, m.updated_at,
+                   m.document_date, m.event_dates, m.source, m.visibility,
+                   ts_rank(to_tsvector('english', COALESCE(m.content, '') || ' ' || COALESCE(m.title, '')),
+                           to_tsquery('english', $1)) as fts_score
+            FROM memories m
+            WHERE m.deleted_at IS NULL
+              ${scopeWhere} ${projectWhere} ${latestWhere} ${dateAfterWhere} ${dateBeforeWhere}
+              AND to_tsvector('english', COALESCE(m.content, '') || ' ' || COALESCE(m.title, ''))
+                  @@ to_tsquery('english', $1)
+            ORDER BY fts_score DESC
+            LIMIT $2
+          `, tsQuery, n_results * 3);
+
+          if (ftsResults.length > 0) {
+            return ftsResults.map(r => ({
+              id: r.id,
+              content: r.content,
+              title: r.title,
+              tags: r.tags || [],
+              memory_type: r.memory_type,
+              project: r.project,
+              importance_score: Number(r.importance_score) || 0.5,
+              is_latest: r.is_latest,
+              created_at: r.created_at?.toISOString?.() || r.created_at,
+              updated_at: r.updated_at?.toISOString?.() || r.updated_at,
+              document_date: r.document_date?.toISOString?.() || r.document_date,
+              source: r.source,
+              visibility: r.visibility,
+              score: Number(r.fts_score) || 0,
+              _searchMethod: 'fts_tsvector',
+            })).slice(0, n_results);
+          }
+        }
+      } catch (ftsErr) {
+        // FTS failed (query syntax, missing extension, etc.) — fall through to token similarity
+      }
+    }
+
+    // Fallback: Prisma query + token similarity scoring
     const records = await this.client.memory.findMany({
       where: {
         ...scopedMemoryWhere({ user_id, org_id, project, scope }),
@@ -327,7 +381,8 @@ export class PrismaGraphStore {
         const memory = mapMemoryRecord(record);
         return {
           ...memory,
-          score: query ? computeTokenSimilarity(query, memory.content) : 1
+          score: query ? computeTokenSimilarity(query, memory.content) : 1,
+          _searchMethod: 'token_similarity',
         };
       })
       .filter(result => !query || result.score > 0)

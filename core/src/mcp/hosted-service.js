@@ -1621,34 +1621,27 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
       }
 
       case 'hivemind_recall':
-        if (args.mode === 'panorama') {
-          return formatToolContent(await apiClient.post('/api/search/panorama', {
-            query: args.query,
-            limit: args.limit || 5
-          }));
-        }
-        if (args.mode === 'insight') {
-          return formatToolContent(await apiClient.post('/api/search/insight', {
-            query: args.query,
-            limit: args.limit || 5
-          }));
-        }
         {
-          // Default mode: use /api/recall so the response includes the
-          // user-profile + observation prefix in injection_text (Problem 2 fix)
+          // ALL modes use /api/recall — includes user profile, injection_text,
+          // attribution scoring, deduplication, and all recall quality fixes.
+          // Mode adjusts result count: panorama=15, insight=10, quick=5
+          const recallLimit = args.mode === 'panorama' ? Math.max(args.limit || 15, 15)
+            : args.mode === 'insight' ? Math.max(args.limit || 10, 10)
+            : args.limit || 5;
           const recallResult = await apiClient.post('/api/recall', {
             query_context: args.query,
             tags: args.tags || [],
             project: args.project || null,
             source_platforms: args.source_type ? [args.source_type] : [],
-            max_memories: args.limit || 5
+            max_memories: recallLimit,
           });
-          // Expose injection_text so the LLM receives full context (profile + chain-of-note)
           return formatToolContent({
             memories: recallResult.memories || [],
             injection_text: recallResult.injectionText || recallResult.injection_text || null,
+            user_profile: recallResult.user_profile || null,
             search_method: recallResult.search_method || 'persisted-recall',
-            expansion_stats: recallResult.expansion_stats || null
+            expansion_stats: recallResult.expansion_stats || null,
+            mode: args.mode || 'quick',
           });
         }
 

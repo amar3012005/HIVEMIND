@@ -253,26 +253,43 @@ export class PanoramaSearch {
       dateRange
     });
 
-    // Perform hybrid search — panorama uses a lower threshold for broader coverage
+    // Perform hybrid search — panorama uses slightly lower threshold for breadth
     const searchOpts = {
       query,
       userId,
       orgId,
       limit,
-      scoreThreshold: 0.08, // Low threshold for comprehensive historical coverage
+      scoreThreshold: 0.15,
       includeExpired,
       includeHistorical,
       weights,
       depth: 'full'
     };
-    // Only apply temporal filter if it has conditions
+    // Only apply temporal filter if it has actual conditions
     if (temporalFilter.must && temporalFilter.must.length > 0) {
       searchOpts.filter = temporalFilter;
     }
-    const results = await hybridSearch.hybridSearch(searchOpts);
+    let results = await hybridSearch.hybridSearch(searchOpts);
+
+    // Fallback: if hybrid search returns empty, try graph store directly
+    if ((!results.results || results.results.length === 0) && this.graphStore) {
+      try {
+        const graphResults = await this.graphStore.searchMemories({
+          query,
+          user_id: userId,
+          org_id: orgId,
+          n_results: limit,
+          is_latest: true,
+        });
+        const filtered = (graphResults || []).filter(m => (m.score || 0) >= 0.25);
+        if (filtered.length > 0) {
+          results = { ...results, results: filtered };
+        }
+      } catch {}
+    }
 
     // If graph store is available, enhance with graph traversal
-    if (this.graphStore) {
+    if (this.graphStore && results.results && results.results.length > 0) {
       const enhancedResults = await this.enhanceWithGraph(results.results, {
         userId,
         orgId,

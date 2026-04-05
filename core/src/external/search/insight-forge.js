@@ -492,23 +492,24 @@ export class InsightForge {
       const startTime = Date.now();
 
       try {
-        // Use lower threshold for insight sub-queries — they're more abstract
+        let allResults = [];
+
+        // Primary: hybrid search with standard threshold
         const results = await hybridSearch.hybridSearch({
           query: subQuery.query,
           userId,
           orgId,
           limit,
-          scoreThreshold: 0.08, // Lower than default — insight queries are abstract
           weights: {
             vector: 0.6,
             keyword: 0.3,
             graph: 0.1
           }
         });
+        allResults = (results.results || []).filter(r => (r.score || 0) >= 0.15);
 
-        let allResults = results.results || [];
-
-        // Fallback: if hybrid search returns empty, try the graph store directly
+        // If hybrid returns empty (sub-query too abstract), use graph store
+        // which does Qdrant vector search directly with its own threshold
         if (allResults.length === 0 && this.graphStore) {
           try {
             const graphResults = await this.graphStore.searchMemories({
@@ -518,11 +519,7 @@ export class InsightForge {
               n_results: limit,
               is_latest: true,
             });
-            allResults = (graphResults || []).map(m => ({
-              ...m,
-              score: m.score || 0.3,
-              _source: 'graph_fallback',
-            }));
+            allResults = (graphResults || []).filter(m => (m.score || 0) >= 0.25);
           } catch {}
         }
 

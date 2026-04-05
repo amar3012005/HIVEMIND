@@ -129,7 +129,9 @@ function deriveDocumentDate(input = {}) {
     input.metadata?.session_date,
     input.metadata?.document_date,
     input.metadata?.question_date,
-    input.metadata?.observation_date
+    input.metadata?.observation_date,
+    input.metadata?.email_date,
+    input.metadata?.created_at,
   ].filter(Boolean);
 
   for (const candidate of candidates) {
@@ -139,7 +141,8 @@ function deriveDocumentDate(input = {}) {
     }
   }
 
-  return null;
+  // Fallback: use current time so every memory has a temporal anchor
+  return new Date().toISOString();
 }
 
 function parseFlexibleDate(value) {

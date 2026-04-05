@@ -3759,9 +3759,9 @@ a{color:#a78bfa}</style></head><body>
               const customTags = parts.find(p => p.name === 'tags')?.value || '';
               const userTags = customTags ? customTags.split(',').map(t => t.trim()).filter(Boolean) : [];
 
-              // Validate file size (max 10MB)
-              if (filePart.data.length > 10 * 1024 * 1024) {
-                return jsonResponse(res, { error: 'File too large. Maximum 10MB.' }, 413);
+              // Validate file size (max 100MB)
+              if (filePart.data.length > 100 * 1024 * 1024) {
+                return jsonResponse(res, { error: 'File too large. Maximum 100MB.' }, 413);
               }
 
               // Validate file type

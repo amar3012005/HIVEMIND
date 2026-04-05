@@ -13,8 +13,9 @@ function keywordScore(memory, query = '') {
   const lowered = query.toLowerCase();
   const tokens = lowered.split(/\s+/).filter(Boolean);
   const ast = memory.metadata?.ast_metadata || {};
+  const content = memory.content || '';
   const haystack = [
-    memory.content || '',
+    content,
     memory.project || '',
     memory.source || '',
     ...(memory.tags || []),
@@ -25,7 +26,17 @@ function keywordScore(memory, query = '') {
 
   const direct = haystack.includes(lowered) ? 2 : 0;
   const tokenHits = tokens.filter(token => haystack.includes(token)).length;
-  return direct + tokenHits;
+
+  // Proper noun boost: if query has capitalized words (entities like "SOLVIS", "DaVinci"),
+  // check if the memory contains that exact entity (case-sensitive).
+  // This prevents "SOLVIS owner" from returning generic heating content.
+  let entityBoost = 0;
+  const entityWords = query.split(/\s+/).filter(w => w.length > 2 && (w === w.toUpperCase() || /^[A-Z][a-z]/.test(w)));
+  for (const entity of entityWords) {
+    if (content.includes(entity)) entityBoost += 3;
+  }
+
+  return direct + tokenHits + entityBoost;
 }
 
 function sortByRelevance(memories, query) {
@@ -87,6 +98,14 @@ function tagOverlapRatio(leftTags = [], rightTags = []) {
 function isNearDuplicate(left, right) {
   const similarity = computeTokenSimilarity(left.memory.content || '', right.memory.content || '');
   if (similarity >= 0.85) return true;
+
+  // Extracted facts with same title prefix are likely duplicates from chunked documents
+  const leftTitle = (left.memory.title || '').slice(0, 40);
+  const rightTitle = (right.memory.title || '').slice(0, 40);
+  if (leftTitle && leftTitle === rightTitle && similarity >= 0.60) return true;
+
+  // Same score AND similar content = likely duplicate from same source
+  if (Math.abs((left.score || 0) - (right.score || 0)) < 0.01 && similarity >= 0.70) return true;
 
   const sameSourcePlatform = (left.memory.source_metadata?.source_platform || left.memory.source)
     && (left.memory.source_metadata?.source_platform || left.memory.source) === (right.memory.source_metadata?.source_platform || right.memory.source);

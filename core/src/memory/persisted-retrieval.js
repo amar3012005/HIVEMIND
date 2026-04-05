@@ -216,13 +216,9 @@ function applyRecallRelevanceFloor(scored, options = {}) {
   const { temporalComparison = false } = options;
   if (scored.length === 0) return [];
 
-  // Detect if scores are RRF-scale (very small, ~0.001-0.03) vs raw scale (0-1)
-  const topScore = scored[0]?.score || 0;
-  const isRRFScale = topScore < 0.1;
-
-  // Hard absolute minimum — adapted to score scale
-  const HARD_MIN_SCORE = isRRFScale ? 0.001 : 0.15;
-  const HARD_MIN_SIMILARITY = 0.08;
+  // Hard absolute minimum — never return results below these thresholds
+  const HARD_MIN_SCORE = 0.15;
+  const HARD_MIN_SIMILARITY = 0.10;
 
   // First pass: enforce hard minimum (no exceptions)
   const viable = scored.filter(item =>
@@ -234,18 +230,18 @@ function applyRecallRelevanceFloor(scored, options = {}) {
   if (viable.length === 0) return [];
 
   // Second pass: relative floor based on top score (quality gradient)
-  const viableTopScore = viable[0].score;
-  const topSimilarity = viable[0].similarityScore ?? viable[0].keywordScore ?? 0;
+  const topScore = viable[0].score;
+  const topSimilarity = viable[0].similarityScore ?? 0;
   const minimumScore = temporalComparison
-    ? Math.max(viableTopScore * 0.20, HARD_MIN_SCORE)
-    : Math.max(viableTopScore * 0.30, HARD_MIN_SCORE);
+    ? Math.max(topScore * 0.20, HARD_MIN_SCORE)
+    : Math.max(topScore * 0.30, HARD_MIN_SCORE);
   const minimumSimilarity = temporalComparison
     ? Math.max(topSimilarity * 0.25, HARD_MIN_SIMILARITY)
     : Math.max(topSimilarity * 0.40, HARD_MIN_SIMILARITY);
 
   const filtered = viable.filter(item =>
     item.score >= minimumScore &&
-    (item.similarityScore ?? item.keywordScore ?? 0) >= minimumSimilarity
+    (item.similarityScore ?? 0) >= minimumSimilarity
   );
 
   return filtered.length > 0 ? filtered : viable.slice(0, temporalComparison ? 5 : 3);
@@ -319,8 +315,35 @@ function detectMemoryTypeBoost(query) {
 }
 
 function mergeCandidateLists(...lists) {
-  // Use RRF for merging — rank-based fusion handles different score scales
-  return rrfMerge(lists);
+  // Weighted max-score merge: for each memory, keep the highest score from any list.
+  // RRF was tested but performed worse on freeform text memories — rank-based fusion
+  // discards semantic signal from vector scores that matters for long-form content.
+  const merged = new Map();
+
+  for (const list of lists) {
+    for (const item of list || []) {
+      if (!item?.memory?.id) continue;
+      const existing = merged.get(item.memory.id);
+      if (!existing) {
+        merged.set(item.memory.id, { ...item });
+        continue;
+      }
+
+      merged.set(item.memory.id, {
+        ...existing,
+        memory: existing.memory || item.memory,
+        vectorScore: Math.max(existing.vectorScore || 0, item.vectorScore || 0),
+        keywordScore: Math.max(existing.keywordScore || 0, item.keywordScore || 0),
+        graphScore: Math.max(existing.graphScore || 0, item.graphScore || 0),
+        policyScore: Math.max(existing.policyScore || 0, item.policyScore || 0),
+        similarityScore: Math.max(existing.similarityScore || 0, item.similarityScore || 0),
+        recencyScore: Math.max(existing.recencyScore || 0, item.recencyScore || 0),
+        score: Math.max(existing.score || 0, item.score || 0)
+      });
+    }
+  }
+
+  return Array.from(merged.values());
 }
 
 function buildRelationshipIndex(relationships) {

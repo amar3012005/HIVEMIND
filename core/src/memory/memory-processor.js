@@ -49,34 +49,37 @@ export class MemoryProcessor {
           messages: [
             {
               role: 'system',
-              content: `You are a memory engine. Quote the user's EXACT words as fact sentences. Do NOT paraphrase or summarize.
+              content: `You are a memory engine that extracts factual information from content. Extract key facts as standalone sentences.
 
 Output EXACTLY 6 sections:
 
 RELATIONSHIP: ADD: new topic
 PRIORITY: MEDIUM
-OBSERVATION: 🟡 [one sentence about what user said]
+OBSERVATION: 🟡 [one sentence summary of the content]
 ENTITIES: entity1, entity2
 DATES: date1, date2
 FACT_SENTENCES:
-- I participated in a webinar on "Data Analysis using Python" two months ago
-- I've been a member of 'Book Lovers Unite' for about two weeks now
-- I just got back from the "Run for the Cure" event on October 15th
+- SolvisLino is a pellet heating system manufactured by SOLVIS
+- Gabriele Münzer is the Geschäftsführerin (managing director) of SOLVIS
+- The system supports temperatures up to 85°C
 
 Rules:
 - RELATIONSHIP: ADD/UPDATE/EXTEND/NOOP
 - PRIORITY: HIGH/MEDIUM/LOW
-- OBSERVATION: One sentence summary with 🔴/🟡/🟢. Write TRIVIAL if nothing.
-- ENTITIES: Names, places, orgs, events from user's words. Write NONE if empty.
-- DATES: ALL dates/times/durations the user mentioned (keep exact wording like "two months ago", "last Saturday", "October 15th", "for about two weeks"). Write NONE if empty.
-- FACT_SENTENCES: Copy the user's EXACT sentences that contain personal facts. Keep their original wording — do NOT rephrase. Include dates, durations, event names exactly as the user wrote them. Only extract from "User:" parts, NEVER from "Assistant:" parts. Extract ALL factual statements the user made — do not limit or summarize, include every personal fact from every turn. Write NONE if no personal facts.
+- OBSERVATION: One sentence summary with 🔴/🟡/🟢. Write TRIVIAL if nothing noteworthy.
+- ENTITIES: Names of people, companies, products, places, technologies. Write NONE if empty.
+- DATES: ALL dates/times/durations mentioned. Write NONE if empty.
+- FACT_SENTENCES: Extract specific, standalone facts from the content. Each fact should be a complete sentence that makes sense on its own.
 
 CRITICAL RULES:
-1. QUOTE the user's exact words. "I've been a member for two weeks" stays as-is.
-2. Only extract STATEMENTS, never questions. "Can you suggest ways to minimize distractions?" is a QUESTION — skip it.
-3. Look for: "I did X", "I attended X", "I've been X", "I got X", "I just came back from X", "I booked X", "I participated in X".
-4. Skip turns where the user only asks questions with no personal facts.
-5. If a turn has no personal statements, write FACT_SENTENCES: NONE.`
+1. Extract FACTS from the content — product names, people's names/roles, specifications, decisions, events.
+2. For documents/PDFs: extract the actual information (product specs, company info, people mentioned), NOT meta-commentary about the document.
+3. NEVER write "The user provided/discussed/shared/mentioned..." — these are useless meta-observations. Extract the ACTUAL facts instead.
+4. NEVER write "no personal facts were found" or similar — just write NONE.
+5. For conversations with "User:" turns: quote the user's exact factual statements.
+6. For documents without "User:" turns: extract key facts, names, products, specifications, and relationships from the document content.
+7. Skip questions — only extract statements and facts.
+8. If the content has no extractable facts, write FACT_SENTENCES: NONE. Do NOT invent meta-commentary.`
             },
             {
               role: 'user',

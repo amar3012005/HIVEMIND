@@ -53,6 +53,9 @@ export class SmartIngestRouter {
       case 'slack':
         payloads = await this._routeSlack(payload);
         break;
+      case 'chat':
+        payloads = await this._routeChat(payload);
+        break;
       default:
         payloads = [payload];
     }
@@ -76,6 +79,7 @@ export class SmartIngestRouter {
     if (platform.includes('notion') || platform.includes('obsidian') || platform.includes('document') || platform.includes('pdf') || platform.includes('knowledge')) return 'knowledge_base';
     if (platform.includes('github') || platform.includes('gitlab') || platform.includes('code')) return 'github';
     if (platform.includes('slack') || platform.includes('teams') || platform.includes('discord')) return 'slack';
+    if (platform.includes('chat') || platform.includes('talk-to-hive') || platform.includes('conversation')) return 'chat';
     return 'manual';
   }
 
@@ -186,6 +190,20 @@ export class SmartIngestRouter {
       metadata: {
         ...payload.metadata,
         source_type_normalized: 'github',
+      }
+    }];
+  }
+
+  // --- Chat (Talk to HIVE) ---
+  async _routeChat(payload) {
+    // Chat facts are already clean statements from the user
+    // Mark as fact type and ensure proper metadata for triple operator matching
+    return [{
+      ...payload,
+      memory_type: payload.memory_type || 'fact',
+      metadata: {
+        ...payload.metadata,
+        source_type_normalized: 'chat',
       }
     }];
   }

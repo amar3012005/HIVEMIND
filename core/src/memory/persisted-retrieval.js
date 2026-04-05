@@ -1065,7 +1065,23 @@ export async function recallPersistedMemories(store, {
   }
 
   const filtered = applyRecallRelevanceFloor(ranked, { temporalComparison });
-  const deduped = collapseNearDuplicates(filtered, { preserveTemporalDistinctness: temporalComparison });
+
+  // Filter out meta-facts from LLM extraction that describe the extraction process, not actual user facts
+  const META_FACT_RE = /\b(the user (did not|provided|shared|mentioned|gave|is discussing|discussed|started a new topic|gave a|uploaded))\b/i;
+  // Also filter garbage facts that are just file references or empty content
+  const GARBAGE_FACT_RE = /^(pdf"|Fact:|-- \d+ of \d+ --|\s*$)/i;
+  const cleanFiltered = filtered.filter(item => {
+    const content = item.content || item.memory?.content || '';
+    const title = item.title || item.memory?.title || '';
+    if (META_FACT_RE.test(content)) return false;
+    // Filter facts that are just file/document references with no real content
+    if (content.length < 40 && /\.(pdf|doc|txt|csv|xls)/i.test(content)) return false;
+    // Filter facts that start with "pdf" or are page markers
+    if (GARBAGE_FACT_RE.test(content.trim())) return false;
+    return true;
+  });
+
+  const deduped = collapseNearDuplicates(cleanFiltered, { preserveTemporalDistinctness: temporalComparison });
 
   // Apply fact-memory boost before slicing to contextLimit
   // Items have shape { memory, score, vectorScore, ... }

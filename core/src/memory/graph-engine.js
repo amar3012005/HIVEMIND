@@ -636,6 +636,8 @@ export class MemoryGraphEngine {
         // --- Create fact-memories (separate searchable memories per extracted fact) ---
         // Filter out trivial/noise sentences before creating fact-memories
         const TRIVIAL_PATTERNS = /^(thanks|thank you|that sounds|great|okay|sure|yes|no|I see|I agree|I understand|wow|cool|nice|oh|hmm|interesting|exactly|right|got it|I am (so )?(excited|happy|glad|sorry))/i;
+        // Filter out meta-facts from LLM extraction — these are about the extraction process, not actual facts
+        const META_FACT_PATTERNS = /\b(the user (did not|provided|shared|mentioned|gave|is discussing|discussed|started a new topic|gave a|uploaded))\b/i;
         let rawFactSentences = processorResult?.factSentences || [];
 
         // Heuristic fallback: if LLM extraction returned too few facts, augment with heuristic extraction
@@ -653,6 +655,7 @@ export class MemoryGraphEngine {
         const factSentences = rawFactSentences.filter(f => {
           if (f.length < 20) return false; // too short to be useful
           if (TRIVIAL_PATTERNS.test(f)) return false; // sentiment, not fact
+          if (META_FACT_PATTERNS.test(f)) return false; // meta-observation about extraction, not actual fact
           // Skip if it's essentially the same as the parent title
           if (baseMemory.title && f.toLowerCase().includes(baseMemory.title.toLowerCase().slice(0, 30))) return false;
           return true;

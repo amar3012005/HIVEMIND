@@ -3823,7 +3823,7 @@ a{color:#a78bfa}</style></head><body>
                 };
 
                 try {
-                  await ingestAndEmbed(summary);
+                  await ingestAndEmbed({ ...summary, skipProcessing: true });
                   ingested++;
 
                   for (const chunk of chunks) {
@@ -4796,12 +4796,18 @@ a{color:#a78bfa}</style></head><body>
             const offset = filters.offset || 0;
             const limit = filters.limit || 50;
 
+            // Parse tags: support comma-separated string or array
+            let parsedTags = filters.tags;
+            if (typeof parsedTags === 'string') {
+              parsedTags = parsedTags.split(',').map(t => t.trim()).filter(Boolean);
+            }
+
             const { memories, total } = await persistentMemoryStore.listMemories({
               user_id: userId,
               org_id: orgId,
               project,
               memory_type: filters.memory_type,
-              tags: filters.tags,
+              tags: parsedTags,
               is_latest: filters.is_latest,
               offset,
               limit
@@ -7078,28 +7084,60 @@ a{color:#a78bfa}</style></head><body>
             }
 
             try {
-              // Step 1: Recall memories for context
-              let memories = [];
-              let injectionText = '';
+              // --- Classify user intent ---
+              const msgTrimmed = message.trim();
+              const isQuestion = /^(what|when|where|who|how|why|do |does |did |is |are |can |could |tell me|show me|list |describe )/i.test(msgTrimmed);
+              const isMetaQuery = /\b(what do you know|what have (i|you)|tell me about me|who am i|my profile|summarize my|everything about me|about myself)\b/i.test(msgTrimmed);
+              const isAggregateQuery = /\b(what products|what services|list all|everything about|all .{0,20} (we|I|you) (have|know|sell|offer|make))\b/i.test(msgTrimmed);
+              const isDeclarative = !isQuestion && msgTrimmed.length > 5 && !/^(hi|hey|hello|yo|thanks|ok|okay|yes|no|sure)\b/i.test(msgTrimmed);
+              const isUpdateStatement = /\b(no longer|not anymore|changed|updated|now (is|uses|works)|switched to|replaced|resigned|quit|left|moved to|new |instead of)\b/i.test(msgTrimmed);
+              const hasMemoryKeywords = /\b(remember|save|don't forget|note that|update|my new|i just|i got|i moved|i changed|i bought|i sold|i started|i stopped|i am|i'm)\b/i.test(msgTrimmed);
               const isRecencyQuery = /\b(latest|newest|most recent|last message|last email|just now|right now|current)\b/i.test(message);
               const toneGuidance = inferChatToneGuidance(message);
 
+              // Step 1: Recall memories for context
+              let memories = [];
+              let injectionText = '';
+
               if (persistentMemoryStore) {
                 try {
-                  // Detect query intent for better recall
                   const chatIntent = detectQueryIntent(message);
                   const chatWeights = computeDynamicWeights(chatIntent);
 
-                  const recallResult = await recallPersistedMemories(persistentMemoryStore, {
-                    query_context: message,
-                    user_id: userId,
-                    org_id: orgId,
-                    max_memories: isRecencyQuery ? 15 : 10,
-                    inject_parent_chunks: true,
-                    weights: chatWeights,
-                    preference_boost: chatIntent.type === 'preference',
-                  });
-                  let recalledMemories = recallResult.memories || [];
+                  // For meta-queries ("what do you know about me"), broaden the search
+                  const recallQueries = isMetaQuery
+                    ? [message, 'personal facts about user', 'user preferences decisions']
+                    : isAggregateQuery
+                    ? [message, message.replace(/\b(what|list|all|everything)\b/gi, '').trim()]
+                    : [message];
+
+                  let allRecalled = [];
+                  for (const q of recallQueries) {
+                    if (!q || q.length < 3) continue;
+                    try {
+                      const recallResult = await recallPersistedMemories(persistentMemoryStore, {
+                        query_context: q,
+                        user_id: userId,
+                        org_id: orgId,
+                        max_memories: isMetaQuery ? 20 : isAggregateQuery ? 15 : isRecencyQuery ? 15 : 10,
+                        inject_parent_chunks: true,
+                        weights: chatWeights,
+                        preference_boost: chatIntent.type === 'preference',
+                      });
+                      const recalled = recallResult.memories || [];
+                      injectionText = injectionText || recallResult.injectionText || '';
+                      // Merge, dedup by id
+                      const existingIds = new Set(allRecalled.map(m => m.id));
+                      for (const m of recalled) {
+                        if (!existingIds.has(m.id)) {
+                          existingIds.add(m.id);
+                          allRecalled.push(m);
+                        }
+                      }
+                    } catch {}
+                  }
+
+                  let recalledMemories = allRecalled;
 
                   // Inject parent chunks for fact-memories (richer context)
                   for (const mem of recalledMemories) {
@@ -7111,6 +7149,17 @@ a{color:#a78bfa}</style></head><body>
                     }
                   }
 
+                  // For meta-queries, prioritize facts and personal content
+                  if (isMetaQuery) {
+                    recalledMemories.sort((a, b) => {
+                      const aIsFact = (a.memory_type === 'fact' || (a.tags || []).includes('extracted-fact')) ? 1 : 0;
+                      const bIsFact = (b.memory_type === 'fact' || (b.tags || []).includes('extracted-fact')) ? 1 : 0;
+                      const aIsPersonal = (a.tags || []).includes('sent-by-user') ? 1 : 0;
+                      const bIsPersonal = (b.tags || []).includes('sent-by-user') ? 1 : 0;
+                      return (bIsFact + bIsPersonal) - (aIsFact + aIsPersonal) || (b.score || 0) - (a.score || 0);
+                    });
+                  }
+
                   // For recency queries, re-sort by created_at descending
                   if (isRecencyQuery && recalledMemories.length > 0) {
                     recalledMemories.sort((a, b) => {
@@ -7118,16 +7167,13 @@ a{color:#a78bfa}</style></head><body>
                       const dateB = new Date(b.created_at || b.document_date || 0);
                       return dateB - dateA;
                     });
-                    // Also fetch the absolutely newest memories directly from store
                     try {
                       const newest = await persistentMemoryStore.listLatestMemories({
                         user_id: userId, org_id: orgId,
                       });
-                      // Get top 5 newest non-observation, non-longmemeval memories
                       const recentReal = newest
                         .filter(m => !(m.tags || []).includes('observation') && !(m.tags || []).includes('longmemeval'))
                         .slice(0, 5);
-                      // Prepend to recall results (dedup by id)
                       const existingIds = new Set(recalledMemories.map(m => m.id));
                       for (const m of recentReal) {
                         if (!existingIds.has(m.id)) {
@@ -7138,16 +7184,14 @@ a{color:#a78bfa}</style></head><body>
                     } catch {}
                   }
 
-                  // Filter out irrelevant results before LLM injection
+                  // Filter out irrelevant results
                   const CHAT_MIN_SCORE = 0.12;
                   const relevantMemories = recalledMemories.filter(m => {
-                    const score = m.score || 0;
-                    // Recency-injected memories from listLatestMemories are tagged with _recencyInjected
                     if (m._recencyInjected) return true;
-                    return score >= CHAT_MIN_SCORE;
+                    return (m.score || 0) >= CHAT_MIN_SCORE;
                   });
 
-                  memories = relevantMemories.slice(0, 15).map(m => {
+                  memories = relevantMemories.slice(0, isMetaQuery ? 20 : 15).map(m => {
                     const isFact = (m.tags || []).includes('extracted-fact');
                     return {
                       id: m.id,
@@ -7161,7 +7205,6 @@ a{color:#a78bfa}</style></head><body>
                       document_date: m.document_date,
                     };
                   });
-                  injectionText = recallResult.injectionText || '';
                 } catch (recallErr) {
                   console.warn('[chat] Recall failed:', recallErr.message);
                 }
@@ -7175,19 +7218,25 @@ a{color:#a78bfa}</style></head><body>
                 } catch {}
               }
 
-              // Step 2: Build system prompt with user profile + memories
-              const recencyHint = isRecencyQuery ? '\n\nIMPORTANT: The user is asking about their MOST RECENT activity. The memories below are sorted newest-first. Focus on the FIRST memory — that is the most recent one. Include its date/time.' : '';
-              const profileSection = profileContext ? `\n\n${profileContext}\n` : '';
-              const systemPrompt = `You are HIVEMIND, a personal memory assistant. You have access to the user's stored memories below.
-${profileSection}${recencyHint}
+              // Step 2: Build system prompt — second-brain aware
+              const recencyHint = isRecencyQuery ? '\n\nIMPORTANT: The user is asking about their MOST RECENT activity. Memories are sorted newest-first. Focus on the FIRST memory.' : '';
+              const metaHint = isMetaQuery ? '\n\nIMPORTANT: The user is asking what you know ABOUT THEM. Summarize key personal facts, preferences, decisions, and topics from ALL memories below. Group by topic. Include names, companies, roles, and key decisions.' : '';
+              const aggregateHint = isAggregateQuery ? '\n\nIMPORTANT: The user wants a COMPREHENSIVE list. Go through ALL memories below and extract every relevant item. Do not stop at the first one you find.' : '';
+              const declarativeHint = (isDeclarative && !isQuestion) ? '\n\nIMPORTANT: The user may be TELLING you a new fact, not asking a question. If they are stating something new (e.g. "X is Y", "I started Z"), acknowledge it naturally: "Got it — [fact]." or "Noted, [fact]." Do NOT say "I don\'t have that in my memory" when the user is clearly informing you of something new.' : '';
+              const updateHint = isUpdateStatement ? '\n\nIMPORTANT: The user is UPDATING a previous fact. Acknowledge the change and confirm what the new state is. Example: "Updated — [new fact]. Previously it was [old fact]."' : '';
+              const profileSection = profileContext ? `\n\nUser Profile:\n${profileContext}\n` : '';
+              const systemPrompt = `You are HIVEMIND, the user's second brain and personal knowledge engine. You store, connect, and recall everything the user tells you.
+${profileSection}${recencyHint}${metaHint}${aggregateHint}${declarativeHint}${updateHint}
 Rules:
-- Answer the user's question DIRECTLY using the memories provided
+- Answer questions DIRECTLY using the memories provided
 - Be concise — 1-3 sentences for simple questions, more for complex ones
-- If memories contain the answer, give it confidently
-- If memories conflict, use the most recent one
-- If no memories are relevant, say "I don't have that in my memory"
-- CRITICAL: Distinguish between things the USER did/said/decided vs things they merely RECEIVED or READ. An email FROM someone else is NOT the user's project — it's information they received. When answering, make the source clear: "You mentioned..." for user-authored content, "From an email you received..." or "According to a newsletter..." for third-party content. You CAN still answer questions about received content — just don't attribute other people's actions/projects to the user.
-- Do NOT list or evaluate each memory — just answer naturally
+- If memories contain the answer, give it confidently — even if wording differs. "CEO" = "managing director" = "Geschäftsführer" = "head of company". Make reasonable semantic connections between synonyms, translations, and equivalent roles/concepts.
+- If memories conflict, prefer the most recent one and note the change
+- If user is TELLING you something new (a statement, not a question), acknowledge it: "Got it" or "Noted" and confirm the fact. You are their second brain — everything they tell you is worth remembering.
+- If user is UPDATING a fact ("no longer", "changed", "resigned", "switched to"), confirm the update and reference what changed
+- Only say "I don't have that in my memory" when NONE of the memories below are even remotely related to the question. If ANY memory is relevant, use it.
+- CRITICAL: Distinguish between things the USER did/said/decided vs things they merely RECEIVED or READ. An email FROM someone else is NOT the user's project.
+- NEVER list memories one by one, evaluate them, or show reasoning about each memory. NEVER output "Memory 1:", "Memory notes", "Notes on each memory", "Not relevant", etc. Go straight to the answer.
 - Do NOT say "Based on my memories" or "According to my records" — just answer
 - ${toneGuidance}
 
@@ -7196,20 +7245,22 @@ ${injectionText}`;
               // Step 3: Build memory context for the LLM
               let memoryContext = '';
               if (memories.length > 0) {
-                const factMems = memories.filter(m => (m.tags || []).includes('extracted-fact'));
-                const regularMems = memories.filter(m => !(m.tags || []).includes('extracted-fact') && !(m.tags || []).includes('observation'));
+                const factMems = memories.filter(m => (m.tags || []).includes('extracted-fact') || m.memory_type === 'fact');
+                const regularMems = memories.filter(m => !(m.tags || []).includes('extracted-fact') && m.memory_type !== 'fact' && !(m.tags || []).includes('observation'));
                 const obsMems = memories.filter(m => (m.tags || []).includes('observation'));
 
                 const parts = [];
                 if (factMems.length > 0) {
-                  parts.push('Key Facts:\n' + factMems.map(m => `• ${m.content}`).join('\n'));
+                  parts.push('Key Facts:\n' + factMems.map(m => {
+                    const date = m.document_date ? ` [${String(m.document_date).slice(0, 10)}]` : '';
+                    return `• ${m.content}${date}`;
+                  }).join('\n'));
                 }
                 if (obsMems.length > 0) {
                   parts.push('Observations:\n' + obsMems.map(m => `• ${m.content}`).join('\n'));
                 }
-                for (const m of regularMems.slice(0, 5)) {
-                  const date = m.document_date ? ` [${m.document_date.slice(0, 10)}]` : '';
-                  // Add attribution hint so LLM knows if this is user's own content or received
+                for (const m of regularMems.slice(0, 8)) {
+                  const date = m.document_date ? ` [${String(m.document_date).slice(0, 10)}]` : '';
                   const sentByUser = (m.tags || []).includes('sent-by-user');
                   const isNewsletter = (m.tags || []).includes('newsletter');
                   const attrHint = sentByUser ? ' [sent by user]' : isNewsletter ? ' [newsletter/external]' : '';
@@ -7226,7 +7277,6 @@ ${injectionText}`;
                 { role: 'user', content: message },
               ];
 
-              // Step 4: Call Groq
               const modelMap = {
                 'llama-3.3-70b-versatile': 'llama-3.3-70b-versatile',
                 'gpt-oss-120b': 'openai/gpt-oss-120b',
@@ -7259,21 +7309,25 @@ ${injectionText}`;
               const response = (groqData.choices[0]?.message?.content || '')
                 .replace(/[\uD800-\uDFFF]/g, '').trim();
 
-              // Step 5: Save this conversation turn as a memory (observation)
-              // Only save when the user is TELLING something new, not asking a question
+              // Step 5: Smart fact ingestion — extract clean facts, route through SmartIngestRouter
               if (persistentMemoryEngine && response.length > 20) {
-                const isQuestion = /^(what|when|where|who|how|why|do |does |did |is |are |can |could |tell me|show me)/i.test(message.trim());
-                const hasMemoryKeywords = /\b(remember|save|don't forget|note that|update|my new|i just|i got|i moved|i changed|i bought|i sold)\b/i.test(message.trim());
+                const shouldIngest = isDeclarative || hasMemoryKeywords || isUpdateStatement;
 
-                if (!isQuestion || hasMemoryKeywords) {
+                if (shouldIngest) {
+                  // Extract the core fact from user's statement (not the full turn)
+                  const factContent = msgTrimmed;
+                  const factTitle = `Fact: ${msgTrimmed.slice(0, 80)}`;
+
                   persistentMemoryEngine.ingestMemory({
-                    content: `User: ${message}\nAssistant: ${response}`,
-                    title: `Chat: ${message.slice(0, 50)}`,
-                    tags: ['chat', 'talk-to-hive'],
-                    memory_type: 'event',
+                    content: factContent,
+                    title: factTitle,
+                    tags: ['chat', 'talk-to-hive', 'extracted-fact'],
+                    memory_type: 'fact',
                     user_id: userId,
                     org_id: orgId,
-                  }).catch(() => {}); // fire and forget
+                    source_metadata: { source_platform: 'chat' },
+                    skipProcessing: true, // Already a clean fact — skip LLM re-extraction
+                  }).catch(err => console.warn('[chat] Fact ingest failed:', err.message));
                 }
               }
 

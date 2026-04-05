@@ -25,7 +25,7 @@ export class UsageTracker {
     try {
       await this.prisma.$executeRawUnsafe(
         `INSERT INTO "OrgUsage" ("orgId", "month", "tokensProcessed", "searchQueries", "knowledgeBaseUploads", "updatedAt")
-         VALUES ($1, $2, $3, 0, 0, NOW())
+         VALUES ($1::uuid, $2, $3, 0, 0, NOW())
          ON CONFLICT ("orgId", "month")
          DO UPDATE SET "tokensProcessed" = "OrgUsage"."tokensProcessed" + $3, "updatedAt" = NOW()`,
         orgId, month, tokenCount
@@ -45,7 +45,7 @@ export class UsageTracker {
     try {
       await this.prisma.$executeRawUnsafe(
         `INSERT INTO "OrgUsage" ("orgId", "month", "tokensProcessed", "searchQueries", "knowledgeBaseUploads", "updatedAt")
-         VALUES ($1, $2, 0, 1, 0, NOW())
+         VALUES ($1::uuid, $2, 0, 1, 0, NOW())
          ON CONFLICT ("orgId", "month")
          DO UPDATE SET "searchQueries" = "OrgUsage"."searchQueries" + 1, "updatedAt" = NOW()`,
         orgId, month
@@ -65,7 +65,7 @@ export class UsageTracker {
     try {
       await this.prisma.$executeRawUnsafe(
         `INSERT INTO "OrgUsage" ("orgId", "month", "tokensProcessed", "searchQueries", "knowledgeBaseUploads", "updatedAt")
-         VALUES ($1, $2, 0, 0, 1, NOW())
+         VALUES ($1::uuid, $2, 0, 0, 1, NOW())
          ON CONFLICT ("orgId", "month")
          DO UPDATE SET "knowledgeBaseUploads" = "OrgUsage"."knowledgeBaseUploads" + 1, "updatedAt" = NOW()`,
         orgId, month
@@ -90,7 +90,7 @@ export class UsageTracker {
     try {
       const rows = await this.prisma.$queryRawUnsafe(
         `SELECT "tokensProcessed", "searchQueries", "knowledgeBaseUploads"
-         FROM "OrgUsage" WHERE "orgId" = $1 AND "month" = $2 LIMIT 1`,
+         FROM "OrgUsage" WHERE "orgId" = $1::uuid AND "month" = $2 LIMIT 1`,
         orgId, month
       );
       const usage = rows[0] || this._emptyUsage();

@@ -85,3 +85,4 @@ node src/evaluation/run-evaluation.js --method hybrid
 - Security vulnerabilities fixed (Cypher injection)
 - EU sovereign deployment ready
 - Comprehensive documentation available
+- April 2026: TARA voice agent with session analytics (first-person narrated reflections)

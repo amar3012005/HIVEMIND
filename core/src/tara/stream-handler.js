@@ -22,14 +22,15 @@ import { buildPrompt } from './prompt-builder.js';
 import { ClinicalReasoningEngine } from './clinical-reasoning.js';
 
 export class TaraStreamHandler {
-  constructor({ memoryStore, recallFn, llmBaseUrl, llmApiKey, defaultModel }) {
+  constructor({ memoryStore, recallFn, llmBaseUrl, llmApiKey, defaultModel, qdrantClient }) {
     this.sessionManager = new SessionManager({ memoryStore });
     this.configStore = new TaraConfigStore({ memoryStore });
     this.memoryStore = memoryStore;
     this.recallFn = recallFn;
+    this.qdrantClient = qdrantClient || null;
     this.llmBaseUrl = llmBaseUrl || process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1';
     this.llmApiKey = llmApiKey || process.env.GROQ_API_KEY || '';
-    this.defaultModel = defaultModel || process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+    this.defaultModel = defaultModel || process.env.TARA_MODEL || 'openai/gpt-oss-20b';
 
     this.clinicalEngine = new ClinicalReasoningEngine({
       llmBaseUrl: this.llmBaseUrl,
@@ -40,6 +41,9 @@ export class TaraStreamHandler {
     // ── Config cache (avoids DB read every turn) ──
     this._configCache = new Map();  // key: tenant:agent → { config, cachedAt }
     this._configCacheTTL = 60_000;  // 60s — config rarely changes mid-call
+
+    // ── Memory stats tracking per session ──
+    this._sessionMemoryStats = new Map();  // session_id → { chunks_saved, chunks_candidates, chunks_skipped, turns }
   }
 
   async handleStream(params, { userId, orgId, res }) {
@@ -77,14 +81,10 @@ export class TaraStreamHandler {
       // Config is cached — avoids DB hit on every turn
       const configPromise = this._getCachedConfig(tenantId, agentName, { userId, orgId });
 
-      // Recall with tight limits — voice needs speed, not exhaustive search
-      const recallPromise = this.recallFn(this.memoryStore, {
-        query_context: query,
-        user_id: userId,
-        org_id: orgId,
-        max_memories: 5,   // Reduced from 8 — fewer memories = faster prompt = faster TTFT
-        project: null,
-      }).catch(() => ({ memories: [] }));
+      // Fast KB-only recall — skip tsvector/vector/scoring pipeline entirely
+      // Voice needs speed (<100ms), not exhaustive search
+      const recallPromise = this._fastKBRecall(query, { userId, orgId })
+        .catch(() => []);
 
       const sessionPromise = this.sessionManager.load(sessionId, { tenantId, userId, orgId, language });
 
@@ -93,16 +93,18 @@ export class TaraStreamHandler {
         configPromise, recallPromise, sessionPromise,
       ]);
 
-      const memories = recallResult.memories || [];
+      const memories = recallResult;
 
-      // Store STT language_code in session — this is the source of truth for language
-      // STT detection > explicit language param > session history > default 'en'
-      if (sttLanguageCode) {
+      // Language priority: current text > session history > orchestrator hint
+      const detectedLang = this._detectLanguage(query);
+      if (detectedLang) {
+        sessionState.language_code = detectedLang;
+      } else if (sessionState.language_code) {
+        // Ambiguous text ("ja", "ok") — keep previous session language
+      } else if (sttLanguageCode) {
+        // Last resort: orchestrator hint (often wrong)
         sessionState.language_code = sttLanguageCode;
-      } else if (language && language !== 'en') {
-        sessionState.language_code = language;
       }
-      // If neither provided, session keeps its existing language_code (or null)
 
       const fetchMs = Date.now() - startMs;
       this._writeLine(res, {
@@ -155,10 +157,8 @@ export class TaraStreamHandler {
           model,
           messages,
           temperature: config.temperature ?? 0.7,
-          max_tokens: config.max_tokens ?? 300,
+          max_tokens: config.max_tokens ?? 2048,  // gpt-oss reasoning models need headroom
           stream: true,
-          // Disable reasoning for normal fast conversations
-          ...(model.includes('gpt-oss') ? { include_reasoning: false } : {}),
         }),
       });
 
@@ -291,6 +291,87 @@ export class TaraStreamHandler {
     }
   }
 
+  // ── Fast KB-only recall — stripped for voice latency ──
+  // Vector search only (Qdrant ~30ms) + KB tag filter, no tsvector/scoring pipeline
+  // Target: <100ms total recall vs 850ms full pipeline
+
+  async _fastKBRecall(query, { userId, orgId }) {
+    if (!query || query.length < 5) return [];
+
+    // Skip recall entirely for greetings / trivial turns
+    const trivial = /^(hi|hey|hello|thanks|ok|yes|no|sure|bye|good|great)\b/i.test(query.trim());
+    if (trivial) return [];
+
+    try {
+      // Path 1: Qdrant vector search with KB filter (fast: embed ~30ms + search ~20ms)
+      if (this.qdrantClient) {
+        const results = await this.qdrantClient.searchMemories({
+          query,
+          limit: 5,
+          score_threshold: 0.25,
+          filter: {
+            must: [
+              { key: 'user_id', match: { value: userId } },
+              { key: 'tags', match: { any: ['knowledge-base'] } },
+              { key: 'is_latest', match: { value: true } },
+            ],
+          },
+        });
+
+        return results.map(r => ({
+          id: r.id,
+          content: r.payload?.content || '',
+          title: r.payload?.title || '',
+          tags: r.payload?.tags || [],
+          memory_type: r.payload?.memory_type || 'fact',
+          document_date: r.payload?.document_date,
+          created_at: r.payload?.created_at,
+          score: r.score,
+        }));
+      }
+
+      // Path 2: Fallback to Prisma ILIKE if Qdrant unavailable
+      if (this.memoryStore?.client) {
+        const tokens = query.toLowerCase()
+          .replace(/[^a-z0-9äöüß\s]/g, ' ')
+          .split(/\s+/)
+          .filter(t => t.length >= 3);
+
+        if (tokens.length === 0) return [];
+        const searchTerms = tokens.slice(0, 3);
+        const ilikeConditions = searchTerms.map(t => `(m.content ILIKE '%${t}%' OR m.title ILIKE '%${t}%')`).join(' OR ');
+
+        const results = await this.memoryStore.client.$queryRawUnsafe(`
+          SELECT m.id, m.content, m.title, m.tags, m.memory_type,
+                 m.document_date, m.created_at
+          FROM memories m
+          WHERE m.deleted_at IS NULL
+            AND m.user_id = $1::uuid
+            AND m.is_latest = true
+            AND 'knowledge-base' = ANY(m.tags)
+            AND (${ilikeConditions})
+          ORDER BY m.created_at DESC
+          LIMIT 5
+        `, userId);
+
+        return results.map(r => ({
+          id: r.id,
+          content: r.content,
+          title: r.title,
+          tags: r.tags,
+          memory_type: r.memory_type || 'fact',
+          document_date: r.document_date,
+          created_at: r.created_at,
+        }));
+      }
+
+      return [];
+    } catch (err) {
+      console.warn('[tara/fast-recall] KB search failed:', err.message);
+      return [];
+    }
+  }
+
   // ── Config cache — avoid DB hit every turn ──
 
   async _getCachedConfig(tenantId, agentName, { userId, orgId }) {
@@ -371,6 +452,7 @@ export class TaraStreamHandler {
         title: `TARA Turn ${turnNumber} — ${sessionId.slice(0, 12)}`,
         tags: [
           'tara-turn', `sid:${sessionId}`, `turn:${turnNumber}`,
+          `lang:${sessionState.language_code || 'en'}`,
           `in:${mainUsage?.prompt_tokens || 0}`,
           `out:${mainUsage?.completion_tokens || 0}`,
           `tokens:${mainUsage?.total_tokens || 0}`,
@@ -386,13 +468,15 @@ export class TaraStreamHandler {
         },
       });
 
-      // 3. Chain turns: link this turn to the previous one via Extends
+      // Track successful save
+      this._trackMemoryOperation(sessionId, 'saved');
+
+      // 3. Chain turns: link this turn to the previous TURN (not insight)
       if (turnNumber > 1) {
-        // Find the previous turn memory
         const { memories: prevTurns } = await this.memoryStore.listMemories({
           user_id: userId,
           org_id: orgId,
-          tags: [`sid:${sessionId}`, `turn:${turnNumber - 1}`],
+          tags: ['tara-turn', `sid:${sessionId}`, `turn:${turnNumber - 1}`],
           limit: 1,
         });
 
@@ -405,7 +489,7 @@ export class TaraStreamHandler {
             confidence: 1.0,
             metadata: { source: 'tara_conversation_chain', session_id: sessionId },
             created_by: 'tara',
-          }).catch(() => {}); // Skip if relationship already exists
+          }).catch(() => {});
         }
       }
     } catch (err) {
@@ -522,6 +606,26 @@ export class TaraStreamHandler {
                 created_by: 'tara-clinical',
               }).catch(() => {});
             }
+
+            // Chain insight to previous insight (insight → insight chain in graph)
+            if (turnNumber > 1) {
+              const { memories: prevInsights } = await this.memoryStore.listMemories({
+                user_id: userId, org_id: orgId,
+                tags: ['tara-insight', `sid:${sessionId}`, `turn:${turnNumber - 1}`],
+                limit: 1,
+              });
+              if (prevInsights?.length > 0) {
+                await this.memoryStore.createRelationship({
+                  id: crypto.randomUUID(),
+                  from_id: insightId,
+                  to_id: prevInsights[0].id,
+                  type: 'Extends',
+                  confidence: 1.0,
+                  metadata: { source: 'tara_clinical_chain', session_id: sessionId },
+                  created_by: 'tara-clinical',
+                }).catch(() => {});
+              }
+            }
           } catch (err) {
             console.warn('[tara/clinical] Insight memory save failed:', err.message);
           }
@@ -532,6 +636,48 @@ export class TaraStreamHandler {
     }
   }
 
+  // ── Language detection from transcription text ──
+  // Detects language directly from user's words, no external dependency
+
+  _detectLanguage(text) {
+    if (!text || text.length < 5) return null;
+    const lower = text.toLowerCase();
+
+    // Score each language by keyword matches — highest wins
+    const langs = {
+      en: /\b(the|and|is|are|my|name|looking|for|some|advice|want|need|help|please|would|could|should|about|have|this|that|with|from|what|where|when|how|just|like|also|been|will|your|their|more|very|know|think|work|make|because|really|going|actually|something|anything|everything)\b/g,
+      de: /\b(ich|und|der|die|das|ein|eine|nicht|auf|mit|für|ist|sind|wir|haben|werden|auch|kann|über|nach|bei|mein|dein|heiße|brauche|suche|möchte|bitte|danke|warum|wenn|aber|oder|schon|noch|jetzt|hier|dort|ganz|sehr|immer)\b/g,
+      fr: /\b(je|tu|nous|vous|les|des|une|est|sont|avec|pour|dans|cette|mais|aussi|peut|bonjour|merci|comment|quoi|parce|très|bien|faire|avoir|être|tout|rien|jamais|toujours|encore)\b/g,
+      es: /\b(hola|estoy|tengo|quiero|necesito|puedo|como|donde|cuando|porque|también|pero|esta|este|hacer|puede|somos|soy|todo|nada|siempre|nunca|mucho|bien|gracias)\b/g,
+      it: /\b(sono|voglio|posso|come|dove|quando|perché|anche|questo|questa|fare|buongiorno|grazie|ciao|tutto|niente|sempre|molto|bene|essere|avere)\b/g,
+      pt: /\b(estou|tenho|quero|preciso|posso|como|onde|quando|porque|também|este|esta|fazer|obrigado|tudo|nada|sempre|muito|bem)\b/g,
+      nl: /\b(ik|ben|het|een|van|voor|met|niet|ook|deze|zijn|hebben|kunnen|willen|hallo|dank|goed|alles|niets|altijd|nooit)\b/g,
+      tr: /\b(ben|sen|bir|için|ile|ama|bu|ne|nasıl|merhaba|teşekkür|istiyorum|lazım|çok|iyi|her|hiç)\b/g,
+    };
+
+    // Script-based detection (unambiguous)
+    if (/[\u0600-\u06FF]/.test(text)) return 'ar';
+    if (/[\u0900-\u097F]/.test(text)) return 'hi';
+    if (/[\u4e00-\u9fff]/.test(text)) return 'zh';
+    if (/[\uAC00-\uD7AF]/.test(text)) return 'ko';
+    if (/[\u3040-\u309F\u30A0-\u30FF]/.test(text)) return 'ja';
+
+    // Count keyword matches per language
+    let bestLang = null;
+    let bestCount = 0;
+    for (const [lang, regex] of Object.entries(langs)) {
+      const matches = lower.match(regex);
+      const count = matches ? matches.length : 0;
+      if (count > bestCount) {
+        bestCount = count;
+        bestLang = lang;
+      }
+    }
+
+    // Need at least 2 keyword matches to be confident
+    return bestCount >= 2 ? bestLang : null;
+  }
+
   // ── NDJSON line writer — flush immediately ──
 
   _writeLine(res, obj) {
@@ -540,5 +686,83 @@ export class TaraStreamHandler {
       // Force flush if available (Node.js writable stream)
       if (typeof res.flush === 'function') res.flush();
     } catch { /* Response may be closed */ }
+  }
+
+  // ── Memory stats tracking — called after successful turn save ──
+
+  _trackMemoryOperation(sessionId, operation) {
+    if (!sessionId) return;
+    let stats = this._sessionMemoryStats.get(sessionId);
+    if (!stats) {
+      stats = { chunks_saved: 0, chunks_candidates: 0, chunks_skipped: 0, turns: [], started_at: Date.now() };
+      this._sessionMemoryStats.set(sessionId, stats);
+    }
+    if (operation === 'saved') stats.chunks_saved++;
+    if (operation === 'candidate') stats.chunks_candidates++;
+    if (operation === 'skipped') stats.chunks_skipped++;
+  }
+
+  // ── Get session data for analytics ──
+
+  async getSessionAnalyticsData(sessionId, { userId, orgId }) {
+    if (!sessionId) return null;
+
+    // Get memory stats
+    const stats = this._sessionMemoryStats.get(sessionId) || { chunks_saved: 0, chunks_candidates: 0, chunks_skipped: 0 };
+
+    // Fetch turn history from memory
+    let turns = [];
+    try {
+      const { memories } = await this.memoryStore.listMemories({
+        user_id: userId,
+        org_id: orgId,
+        tags: ['tara-turn', `sid:${sessionId}`],
+        limit: 50,
+      });
+      turns = (memories || []).map(m => {
+        const content = m.content || '';
+        const userMatch = content.match(/User: ([\s\S]*?)(?:\n|$)/);
+        const assistantMatch = content.match(/Assistant: ([\s\S]*?)(?:\n|$)/);
+        return [
+          userMatch ? { role: 'user', content: userMatch[1].trim(), timestamp: m.created_at } : null,
+          assistantMatch ? { role: 'assistant', content: assistantMatch[1].trim(), timestamp: m.created_at } : null,
+        ].filter(Boolean);
+      }).flat();
+    } catch (err) {
+      console.warn('[tara/analytics] Failed to fetch turns:', err.message);
+    }
+
+    // Get session state for metadata
+    const sessionState = await this.sessionManager.load(sessionId, { userId, orgId });
+
+    // Build metadata
+    const metadata = {
+      total_turns: sessionState?.turn_count || Math.floor(turns.length / 2),
+      duration_seconds: Math.floor((Date.now() - (stats.started_at || Date.now())) / 1000),
+      total_llm_tokens: turns.reduce((sum, t) => {
+        // Token estimates from turn content length
+        return sum + Math.ceil((t.content?.length || 0) / 4);
+      }, 0),
+    };
+
+    return {
+      session_id: sessionId,
+      userId,
+      orgId,
+      tenantId: sessionState?.tenant_id || 'default',
+      turns,
+      metadata,
+      memory_stats: {
+        chunks_saved: stats.chunks_saved,
+        chunks_candidates: stats.chunks_candidates,
+        chunks_skipped: stats.chunks_skipped,
+      },
+    };
+  }
+
+  // ── Cleanup stats after session ends ──
+
+  cleanupSessionStats(sessionId) {
+    this._sessionMemoryStats.delete(sessionId);
   }
 }

@@ -2,7 +2,7 @@
  * Prompt Builder — Assemble the full LLM prompt for stream_tara
  *
  * Combines:
- *   1. System prompt (natural conversational agent — no rigid frameworks)
+ *   1. System prompt (from config-store — Davinci AI prompt by default)
  *   2. Session state (goals, open questions, last turns)
  *   3. Recalled long-term memories from HIVEMIND
  *   4. Clinical insight (single prioritized directive from background analysis)
@@ -12,33 +12,16 @@
  * Language: Determined by STT language_code → session history → config fallback
  */
 
-const TARA_SYSTEM_PROMPT = `You are TARA — a sharp, warm, and genuinely curious conversational partner.
+import { DEFAULT_SYSTEM_PROMPT } from './config-store.js';
 
-## How you talk
-- You sound like a real person. No scripts, no corporate tone, no filler phrases.
-- You NEVER re-introduce yourself. If the conversation is already going, jump right in.
-- You NEVER repeat a question you already asked. If it was answered, move on.
-- You match the user's energy: casual if they're casual, serious if they're serious.
-- 1-3 sentences max. This is voice — short and punchy wins.
-- No markdown, no bullet points, no numbered lists. Speak naturally.
-- Use contractions (I'm, you're, that's). Avoid stiff phrasing.
+const VOICE_SUFFIX = `
 
-## How you think
-- You have ONE job each turn: move the conversation forward meaningfully.
-- If clinical guidance says "ask about X" — weave it in naturally, don't interrogate.
-- If you already know something about the user, reference it. Show you remember.
-- If the user is vague, gently probe. If they're specific, go deeper on what matters.
-- Never summarize what the user just said back to them unless clarifying ambiguity.
-- When you commit to something ("I'll look into that"), track it.
-
-## What you never do
-- Never say "Great question!" or "That's a really good point!" — just answer.
-- Never start with "So," or "Well," repeatedly.
-- Never ask more than one question per turn.
-- Never use the user's name in every response — only when it matters.
-- Never give generic advice. Be specific to what you know about this user.`;
-
-const VOICE_SUFFIX = `\n\nIMPORTANT: This is a VOICE conversation. Keep responses short (1-3 sentences). Be natural and conversational. Do not use markdown, bullet points, or formatting — speak plainly.`;
+VOICE RULES (critical):
+- Keep responses under 3 sentences for simple answers, 5 for complex ones
+- NEVER start with the same phrase twice in a conversation. Banned openers: "Ah, that makes sense", "Ah okay", "That's a great question", "Great question", "Hmm, interesting", "Got it". Vary your openings EVERY turn — use completely different sentence structures. Start with the user's topic, a direct answer, a question, or a brief insight.
+- Sound human — use the user's name occasionally but not every turn
+- Ask ONE focused question per turn, not multiple
+- When clinical guidance says "close" or "pivot" — follow it, don't keep probing`;
 
 /**
  * Build the messages array for LLM chat completion.
@@ -66,17 +49,17 @@ export function buildPrompt({
   interruptionType = null,
   clinicalInsight = null,
 }) {
-  // 1. System prompt — use config override if set, otherwise default TARA prompt
-  let system = systemPrompt || TARA_SYSTEM_PROMPT;
-  if (voiceOptimized && !system.includes('voice') && !system.includes('VOICE')) {
+  // 1. System prompt — always comes from config-store (Davinci AI prompt by default)
+  let system = systemPrompt || DEFAULT_SYSTEM_PROMPT;
+  // Always append voice rules — these are pipeline constraints, not optional
+  if (voiceOptimized) {
     system += VOICE_SUFFIX;
   }
 
-  // Language: resolve from STT detection → session tracking → config param
+  // Language: always inject detected language — overrides any "default: German" in system prompt
   const effectiveLang = sessionState?.language_code || language || sessionState?.language || 'en';
-  if (effectiveLang && effectiveLang !== 'en') {
-    system += `\n\nIMPORTANT: Respond in ${getLanguageName(effectiveLang)}. Match the user's language naturally.`;
-  }
+  const langName = getLanguageName(effectiveLang) || 'English';
+  system += `\n\nIMPORTANT: The user is speaking ${langName}. You MUST respond in ${langName}. Do not switch languages unless the user switches first.`;
 
   // 2. Context sections — kept minimal for TTFB
   const contextParts = [];
@@ -106,6 +89,16 @@ export function buildPrompt({
         `${t.role === 'user' ? 'User' : 'You'}: ${t.summary}`
       );
       contextParts.push(`## Recent conversation\n${turnLines.join('\n')}`);
+
+      // Extract your last response openings so you DON'T repeat them
+      const yourOpenings = conv.last_turns
+        .filter(t => t.role === 'assistant')
+        .map(t => (t.summary || '').split(/[.!?]/)[0].trim())
+        .filter(o => o.length > 3)
+        .slice(-3);
+      if (yourOpenings.length > 0) {
+        contextParts.push(`## DO NOT start your response with any of these (you already used them):\n${yourOpenings.map(o => `- "${o}"`).join('\n')}`);
+      }
     }
   }
 
@@ -200,4 +193,3 @@ function getLanguageName(code) {
   return map[code] || code;
 }
 
-export { TARA_SYSTEM_PROMPT };

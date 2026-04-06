@@ -44,7 +44,17 @@ export class PlanEnforcer {
     if (c && c.month === month) return c;
 
     // Seed from DB
-    let dbUsage = { tokensProcessed: 0, searchQueries: 0, knowledgeBaseUploads: 0 };
+    let dbUsage = {
+      tokensProcessed: 0,
+      searchQueries: 0,
+      knowledgeBaseUploads: 0,
+      memoriesIngested: 0,
+      deepResearchJobs: 0,
+      webIntelJobs: 0,
+      graphQueries: 0,
+      taraUsage: 0,
+      connectorCount: 0,
+    };
     if (this.usageTracker) {
       try { dbUsage = await this.usageTracker.getUsage(orgId); } catch {}
     }
@@ -53,6 +63,12 @@ export class PlanEnforcer {
       tokens: dbUsage.tokensProcessed || 0,
       searches: dbUsage.searchQueries || 0,
       uploads: dbUsage.knowledgeBaseUploads || 0,
+      memories: dbUsage.memoriesIngested || 0,
+      deepResearch: dbUsage.deepResearchJobs || 0,
+      webIntel: dbUsage.webIntelJobs || 0,
+      graphQueries: dbUsage.graphQueries || 0,
+      tara: dbUsage.taraUsage || 0,
+      connectors: dbUsage.connectorCount || 0,
       month,
     };
     this._counters.set(orgId, c);
@@ -65,7 +81,7 @@ export class PlanEnforcer {
    * Check whether an operation is allowed under the org's plan limits.
    *
    * @param {string} orgId
-   * @param {'tokens'|'searches'|'connectors'|'uploads'} type
+   * @param {'tokens'|'searches'|'connectors'|'uploads'|'memories'|'deepResearch'|'webIntel'|'graphQueries'|'tara'} type
    * @param {number} amount  How many units to consume (default 1).
    * @returns {{ allowed: boolean, reason?: string, limit?: number, current?: number, plan?: string }}
    */
@@ -80,7 +96,7 @@ export class PlanEnforcer {
     const counters = await this._getCounters(orgId);
 
     if (type === 'tokens') {
-      const limit = limits.tokensPerMonth;
+      const limit = limits.llmTokensPerMonth;
       if (!limit || limit === -1) return { allowed: true }; // unlimited
       if (counters.tokens + amount > limit) {
         if (hasOverage) return { allowed: true, overage: true }; // overage plan — allow but flag
@@ -121,6 +137,70 @@ export class PlanEnforcer {
           plan: planDef.id,
         };
       }
+    }
+
+    if (type === 'memories') {
+      const limit = limits.maxMemories;
+      if (!limit || limit === -1) return { allowed: true };
+      if (counters.memories + amount > limit) {
+        return {
+          allowed: false,
+          reason: `Memory limit exceeded (${planDef.name} plan: ${limit.toLocaleString()} memories)`,
+          limit,
+          current: counters.memories,
+          plan: planDef.id,
+        };
+      }
+    }
+
+    if (type === 'deepResearch') {
+      const limit = limits.deepResearchPerMonth;
+      if (!limit || limit === -1) return { allowed: true };
+      if (counters.deepResearch + amount > limit) {
+        return {
+          allowed: false,
+          reason: `Deep research limit exceeded (${planDef.name} plan: ${limit} jobs/month)`,
+          limit,
+          current: counters.deepResearch,
+          plan: planDef.id,
+        };
+      }
+    }
+
+    if (type === 'webIntel') {
+      const limit = limits.webIntelPerDay;
+      if (!limit || limit === -1) return { allowed: true };
+      // Web intel is tracked daily, so we need to check today's usage
+      const todayUsage = await this.usageTracker?.getWebIntelToday(orgId) || 0;
+      if (todayUsage + amount > limit) {
+        return {
+          allowed: false,
+          reason: `Daily web intel limit exceeded (${planDef.name} plan: ${limit} jobs/day)`,
+          limit,
+          current: todayUsage,
+          plan: planDef.id,
+        };
+      }
+    }
+
+    if (type === 'graphQueries') {
+      const limit = limits.searchQueriesPerMonth;
+      if (!limit || limit === -1) return { allowed: true };
+      if (counters.graphQueries + amount > limit) {
+        if (hasOverage) return { allowed: true, overage: true };
+        return {
+          allowed: false,
+          reason: `Monthly graph query limit exceeded (${planDef.name} plan: ${limit.toLocaleString()} queries/month)`,
+          limit,
+          current: counters.graphQueries,
+          plan: planDef.id,
+        };
+      }
+    }
+
+    if (type === 'tara') {
+      // TARA usage is tracked but not limited (uses token budget)
+      return { allowed: true };
     }
 
     if (type === 'connectors') {
@@ -166,6 +246,12 @@ export class PlanEnforcer {
       if (type === 'tokens') c.tokens += amount;
       if (type === 'searches') c.searches += amount;
       if (type === 'uploads') c.uploads += amount;
+      if (type === 'memories') c.memories += amount;
+      if (type === 'deepResearch') c.deepResearch += amount;
+      if (type === 'webIntel') c.webIntel += amount;
+      if (type === 'graphQueries') c.graphQueries += amount;
+      if (type === 'tara') c.tara += amount;
+      if (type === 'connectors') c.connectors += amount;
     }
 
     // Durable recording via UsageTracker (async — fire-and-forget)
@@ -173,6 +259,11 @@ export class PlanEnforcer {
       if (type === 'tokens') this.usageTracker.recordTokens(orgId, amount).catch(() => {});
       if (type === 'searches') this.usageTracker.recordQuery(orgId).catch(() => {});
       if (type === 'uploads') this.usageTracker.recordUpload(orgId).catch(() => {});
+      if (type === 'memories') this.usageTracker.recordMemory(orgId).catch(() => {});
+      if (type === 'deepResearch') this.usageTracker.recordDeepResearch(orgId).catch(() => {});
+      if (type === 'webIntel') this.usageTracker.recordWebIntel(orgId).catch(() => {});
+      if (type === 'graphQueries') this.usageTracker.recordGraphQuery(orgId).catch(() => {});
+      if (type === 'tara') this.usageTracker.recordTara(orgId).catch(() => {});
     }
   }
 
@@ -188,9 +279,14 @@ export class PlanEnforcer {
       plan: planDef?.id || 'free',
       planName: planDef?.name || 'Free',
       period: { month: counters.month },
-      tokens: { used: counters.tokens, limit: limits.tokensPerMonth ?? -1 },
+      tokens: { used: counters.tokens, limit: limits.llmTokensPerMonth ?? -1 },
       searches: { used: counters.searches, limit: limits.searchQueriesPerMonth ?? -1 },
       uploads: { used: counters.uploads, limit: limits.knowledgeBaseUploadsPerMonth ?? -1 },
+      memories: { used: counters.memories, limit: limits.maxMemories ?? -1 },
+      deepResearch: { used: counters.deepResearch, limit: limits.deepResearchPerMonth ?? -1 },
+      webIntel: { used: counters.webIntel, limit: limits.webIntelPerDay ?? -1, isDaily: true },
+      graphQueries: { used: counters.graphQueries, limit: limits.searchQueriesPerMonth ?? -1 },
+      tara: { used: counters.tara, limit: -1 }, // Not limited, tracked for analytics
       connectors: { limit: limits.maxConnectors ?? -1 },
       users: { limit: limits.maxUsers ?? -1 },
     };

@@ -45,6 +45,7 @@ start_core() {
     -w /app \
     --env-file "$COOLIFY_ENV" \
     -e NODE_ENV=production \
+    -e NODE_TLS_REJECT_UNAUTHORIZED=0 \
     -e "QDRANT_COLLECTION=BUNDB AGENT" \
     -e "DATABASE_URL=postgresql://hivemind_user:hivemind_secure_pwd_2026@${COOLIFY_PG}:5432/hivemind?schema=hivemind&connection_limit=20&pool_timeout=30" \
     -e "REDIS_URL=redis://:redis_secure_vault_7711@${COOLIFY_REDIS}:6379/0" \

@@ -155,7 +155,11 @@ const { DeepResearcher } = await import('./deep-research/researcher.js');
 const { TaraStreamHandler } = await import('./tara/stream-handler.js');
 const { TaraConfigStore } = await import('./tara/config-store.js');
 const { SessionManager } = await import('./tara/session-manager.js');
+const { SessionAnalytics } = await import('./tara/session-analytics.js');
 const { isTaraRoute } = await import('./tara/routes.js');
+
+// Session analytics instance (lazy init)
+let taraAnalytics = null;
 
 // Evaluation imports
 const { RetrievalEvaluator } = await import('./external/evaluation/retrieval-evaluator.js');
@@ -687,6 +691,7 @@ const residentRoutes = createResidentRoutes(residentRunManager);
 const taraHandler = persistentMemoryStore ? new TaraStreamHandler({
   memoryStore: persistentMemoryStore,
   recallFn: recallPersistedMemories,
+  qdrantClient: null, // Set after qdrantClient init
   llmBaseUrl: process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1',
   llmApiKey: process.env.GROQ_API_KEY || '',
   defaultModel: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
@@ -700,6 +705,9 @@ const contextAutopilot = persistentMemoryStore ? new ContextAutopilot({
 const qdrantClient = getQdrantClient();
 const qdrantCollections = getQdrantCollections();
 const groqClient = getGroqClient();
+
+// Inject qdrantClient into TARA handler (created before qdrantClient was available)
+if (taraHandler) taraHandler.qdrantClient = qdrantClient;
 
 // Initialize Three-Tier Retrieval
 const threeTierRetrieval = new ThreeTierRetrieval({
@@ -2262,6 +2270,17 @@ a{color:#a78bfa}</style></head><body>
           const connStore = new ConnectorStore(prisma);
           const tokenExpiresAt = tokens.expires_in ? new Date(Date.now() + tokens.expires_in * 1000) : null;
 
+          // Plan enforcement: check connector limit before creating
+          if (planEnforcer && stateOrgId) {
+            const connectorCheck = await planEnforcer.checkLimit(stateOrgId, 'connectors', 1);
+            if (!connectorCheck.allowed) {
+              const frontendUrl = process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu';
+              res.writeHead(302, { Location: `${frontendUrl}/hivemind/app/connectors?error=${encodeURIComponent(connectorCheck.reason)}` });
+              res.end();
+              return;
+            }
+          }
+
           await connStore.upsertConnector({
             userId: stateUserId,
             provider: 'gmail',
@@ -3060,6 +3079,20 @@ a{color:#a78bfa}</style></head><body>
               return jsonResponse(res, { error: 'query must be a string between 5 and 1000 characters' }, 400);
             }
 
+            // Plan enforcement: check deep research limit
+            if (planEnforcer && orgId) {
+              const researchLimitCheck = await planEnforcer.checkLimit(orgId, 'deepResearch', 1);
+              if (!researchLimitCheck.allowed) {
+                return jsonResponse(res, {
+                  error: 'Plan limit exceeded',
+                  message: researchLimitCheck.reason,
+                  limit: researchLimitCheck.limit,
+                  current: researchLimitCheck.current,
+                  plan: researchLimitCheck.plan
+                }, 403);
+              }
+            }
+
             const sessionId = crypto.randomUUID();
             const session = {
               id: sessionId,
@@ -3087,7 +3120,14 @@ a{color:#a78bfa}</style></head><body>
 
             // Run in background (non-blocking)
             researcher.research(query, userId, orgId, { forceRefresh: body.forceRefresh })
-              .then(result => { session.status = 'completed'; session.result = result; })
+              .then(result => {
+                session.status = 'completed';
+                session.result = result;
+                // Record deep research usage
+                if (planEnforcer && orgId) {
+                  planEnforcer.recordUsage(orgId, 'deepResearch', 1);
+                }
+              })
               .catch(err => { session.status = 'failed'; session.error = err.message; });
 
             const slug = query.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 60);
@@ -3944,6 +3984,21 @@ a{color:#a78bfa}</style></head><body>
               if (!rlCheck.allowed) {
                 return jsonResponse(res, { error: 'Rate limit exceeded', code: 'rate_limited', retry_after_ms: rlCheck.retryAfterMs }, 429);
               }
+
+              // Plan enforcement: check daily web intel limit
+              if (planEnforcer && orgId) {
+                const webIntelCheck = await planEnforcer.checkLimit(orgId, 'webIntel', 1);
+                if (!webIntelCheck.allowed) {
+                  return jsonResponse(res, {
+                    error: 'Plan limit exceeded',
+                    message: webIntelCheck.reason,
+                    limit: webIntelCheck.limit,
+                    current: webIntelCheck.current,
+                    plan: webIntelCheck.plan
+                  }, 403);
+                }
+              }
+
               const usage = await webJobStore.getUsage(userId);
               if (usage.web_search_requests >= WEB_SEARCH_DAILY_LIMIT) {
                 return jsonResponse(res, { error: 'Daily search quota exceeded', code: 'quota_exceeded', limit: WEB_SEARCH_DAILY_LIMIT, used: usage.web_search_requests }, 429);
@@ -3989,6 +4044,11 @@ a{color:#a78bfa}</style></head><body>
                     fallback_applied: result.fallback_applied,
                     duration_ms: result.duration_ms,
                   });
+
+                  // Record web intel usage
+                  if (planEnforcer && orgId) {
+                    planEnforcer.recordUsage(orgId, 'webIntel', 1);
+                  }
                 } catch (err) {
                   await webJobStore.update(job.id, { status: 'failed', error: err.message });
                   console.error(`[web-search] job ${job.id} failed:`, err.message);
@@ -4010,6 +4070,21 @@ a{color:#a78bfa}</style></head><body>
               if (!rlCheck.allowed) {
                 return jsonResponse(res, { error: 'Rate limit exceeded', code: 'rate_limited', retry_after_ms: rlCheck.retryAfterMs }, 429);
               }
+
+              // Plan enforcement: check daily web intel limit
+              if (planEnforcer && orgId) {
+                const webIntelCheck = await planEnforcer.checkLimit(orgId, 'webIntel', 1);
+                if (!webIntelCheck.allowed) {
+                  return jsonResponse(res, {
+                    error: 'Plan limit exceeded',
+                    message: webIntelCheck.reason,
+                    limit: webIntelCheck.limit,
+                    current: webIntelCheck.current,
+                    plan: webIntelCheck.plan
+                  }, 403);
+                }
+              }
+
               const usage = await webJobStore.getUsage(userId);
               if (usage.web_crawl_pages >= WEB_CRAWL_DAILY_LIMIT) {
                 return jsonResponse(res, { error: 'Daily crawl quota exceeded', code: 'quota_exceeded', limit: WEB_CRAWL_DAILY_LIMIT, used: usage.web_crawl_pages }, 429);
@@ -4155,6 +4230,11 @@ a{color:#a78bfa}</style></head><body>
                     await webJobStore.update(newJob.id, { status: 'failed', error: errors[0]?.error || `${newJob.type}_failed`, runtime_used: result.runtime_used, fallback_applied: result.fallback_applied, duration_ms: result.duration_ms, pages_processed: 0, results: [] });
                   } else {
                     await webJobStore.update(newJob.id, { status: 'succeeded', results: items, runtime_used: result.runtime_used, fallback_applied: result.fallback_applied, duration_ms: result.duration_ms, pages_processed: newJob.type === 'crawl' ? count : undefined });
+
+                    // Record web intel usage
+                    if (planEnforcer && orgId) {
+                      planEnforcer.recordUsage(orgId, 'webIntel', 1);
+                    }
                   }
                 } catch (err) {
                   await webJobStore.update(newJob.id, { status: 'failed', error: err.message });
@@ -4838,14 +4918,28 @@ a{color:#a78bfa}</style></head><body>
             if (!scopedBody.project && effectiveContainerTag) {
               scopedBody.project = effectiveContainerTag;
             }
-            
+
             const validation = validateCreateMemory(scopedBody);
             if (!validation.success) {
-              return jsonResponse(res, { 
+              return jsonResponse(res, {
                 error: 'Validation failed',
                 message: 'Request body failed validation',
-                details: validation.error.details 
+                details: validation.error.details
               }, 400);
+            }
+
+            // Plan enforcement: check memory limit before ingest
+            if (planEnforcer && orgId) {
+              const memoryLimitCheck = await planEnforcer.checkLimit(orgId, 'memories', 1);
+              if (!memoryLimitCheck.allowed) {
+                return jsonResponse(res, {
+                  error: 'Plan limit exceeded',
+                  message: memoryLimitCheck.reason,
+                  limit: memoryLimitCheck.limit,
+                  current: memoryLimitCheck.current,
+                  plan: memoryLimitCheck.plan
+                }, 403);
+              }
             }
             
             try {
@@ -5001,6 +5095,11 @@ a{color:#a78bfa}</style></head><body>
                       const actualTokens = Math.ceil(validation.data.content.length / 4);
                       planEnforcer.recordUsage(orgId, 'tokens', actualTokens);
                     }
+
+                    // Record memory ingestion
+                    if (planEnforcer && orgId) {
+                      planEnforcer.recordUsage(orgId, 'memories', results.filter(r => !r.skipped).length);
+                    }
                   } catch (err) {
                     console.error('[async-ingest] Job failed:', jobId, err);
                     ingestTracker.updateJob(jobId, { status: 'failed', error: err.message });
@@ -5073,6 +5172,11 @@ a{color:#a78bfa}</style></head><body>
               if (planEnforcer && orgId && validation.data.content) {
                 const actualTokens = Math.ceil(validation.data.content.length / 4);
                 planEnforcer.recordUsage(orgId, 'tokens', actualTokens);
+              }
+
+              // Record memory ingestion
+              if (planEnforcer && orgId) {
+                planEnforcer.recordUsage(orgId, 'memories', syncResults.filter(r => !r.skipped).length);
               }
 
               const firstSuccessResult = syncResults.find(r => !r.skipped);
@@ -6077,16 +6181,34 @@ a{color:#a78bfa}</style></head><body>
                 : graphScope === 'team'
                   ? { orgId, deletedAt: null, visibility: 'organization' }
                   : { userId, orgId, deletedAt: null };
-              const allRelationships = await prisma.relationship.findMany({
-                where: {
-                  OR: [
-                    { fromMemory: relationshipScope },
-                    { toMemory: relationshipScope },
-                  ],
-                },
-                select: { fromId: true, toId: true, type: true, confidence: true, createdBy: true },
-                take: 2000,
-              });
+              // Fetch relationships in priority order — TARA chains and curated edges first, bulk last
+              const [priorityRels, bulkRels] = await Promise.all([
+                // Priority: TARA chains, turing, memory_processor (meaningful edges)
+                prisma.relationship.findMany({
+                  where: {
+                    createdBy: { in: ['tara', 'tara-clinical', 'turing-reconciliation', 'memory_processor'] },
+                    OR: [
+                      { fromMemory: relationshipScope },
+                      { toMemory: relationshipScope },
+                    ],
+                  },
+                  select: { fromId: true, toId: true, type: true, confidence: true, createdBy: true },
+                  take: 500,
+                }),
+                // Bulk: everything else (conflict-detector, system)
+                prisma.relationship.findMany({
+                  where: {
+                    createdBy: { notIn: ['tara', 'tara-clinical', 'turing-reconciliation', 'memory_processor'] },
+                    OR: [
+                      { fromMemory: relationshipScope },
+                      { toMemory: relationshipScope },
+                    ],
+                  },
+                  select: { fromId: true, toId: true, type: true, confidence: true, createdBy: true },
+                  take: 1500,
+                }),
+              ]);
+              const allRelationships = [...priorityRels, ...bulkRels];
               const connectedNodeIds = new Set();
               for (const rel of allRelationships) {
                 connectedNodeIds.add(rel.fromId);
@@ -6249,6 +6371,11 @@ a{color:#a78bfa}</style></head><body>
 
               // Count total memories for context
               const totalCount = await prisma.memory.count({ where: scopeWhere });
+
+              // Record graph query usage
+              if (planEnforcer && orgId) {
+                planEnforcer.recordUsage(orgId, 'graphQueries', 1);
+              }
 
               return jsonResponse(res, {
                 nodes,
@@ -7065,6 +7192,138 @@ a{color:#a78bfa}</style></head><body>
             if (!taraHandler) return jsonResponse(res, { error: 'TARA not available' }, 503);
             const sessions = await taraHandler.sessionManager.listSessions({ userId, orgId });
             return jsonResponse(res, { sessions });
+          }
+          break;
+
+        case '/api/tara/analyze_session':
+          if (req.method === 'POST') {
+            if (!persistentMemoryStore) return jsonResponse(res, { error: 'Persistent memory not available' }, 503);
+
+            // Lazy init analytics engine
+            if (!taraAnalytics) {
+              taraAnalytics = new SessionAnalytics({
+                llmBaseUrl: process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1',
+                llmApiKey: process.env.GROQ_API_KEY || '',
+                model: process.env.ANALYTICS_MODEL || 'openai/gpt-oss-120b',
+              });
+            }
+
+            const { session_id, user_id, org_id, tenant_id, turns, metadata, memory_stats } = body;
+
+            if (!session_id || !turns || !Array.isArray(turns)) {
+              return jsonResponse(res, { error: 'session_id and turns array are required' }, 400);
+            }
+
+            // Fetch full turn history from memory if not provided
+            let fullTurns = turns;
+            if (turns.length === 0 && session_id) {
+              try {
+                const { memories } = await persistentMemoryStore.listMemories({
+                  user_id: user_id || userId,
+                  org_id: org_id || orgId,
+                  tags: ['tara-turn', `sid:${session_id}`],
+                  limit: 50,
+                });
+                fullTurns = (memories || []).map(m => {
+                  const content = m.content || '';
+                  const userMatch = content.match(/User: ([\s\S]*?)(?:\n|$)/);
+                  const assistantMatch = content.match(/Assistant: ([\s\S]*?)(?:\n|$)/);
+                  return [
+                    userMatch ? { role: 'user', content: userMatch[1].trim(), timestamp: m.created_at } : null,
+                    assistantMatch ? { role: 'assistant', content: assistantMatch[1].trim(), timestamp: m.created_at } : null,
+                  ].filter(Boolean);
+                }).flat();
+              } catch (err) {
+                console.warn('[tara/analyze] Failed to fetch turn history:', err.message);
+              }
+            }
+
+            // Run analytics
+            const analytics = await taraAnalytics.analyze({
+              sessionId: session_id,
+              userId: user_id || userId,
+              orgId: org_id || orgId,
+              tenantId: tenant_id || 'default',
+              turns: fullTurns,
+              metadata: metadata || {},
+              memoryStats: memory_stats || {},
+            });
+
+            if (!analytics) {
+              return jsonResponse(res, { error: 'Analytics failed' }, 500);
+            }
+
+            // Format for orchestrator contract
+            const orchestratorReport = {
+              brief_context: analytics.brief_context,
+              analysis: analytics.analysis,
+              business_signals: analytics.business_signals,
+              metrics: analytics.metrics,
+              hivemind_updates: analytics.hivemind_updates,
+            };
+
+            return jsonResponse(res, { report: orchestratorReport });
+          }
+          break;
+
+        case '/api/tara/end_session':
+          if (req.method === 'POST') {
+            if (!taraHandler) return jsonResponse(res, { error: 'TARA not available' }, 503);
+            if (!persistentMemoryStore) return jsonResponse(res, { error: 'Persistent memory not available' }, 503);
+
+            const { session_id, user_id, org_id, tenant_id } = body;
+
+            if (!session_id) {
+              return jsonResponse(res, { error: 'session_id is required' }, 400);
+            }
+
+            // Lazy init analytics engine
+            if (!taraAnalytics) {
+              taraAnalytics = new SessionAnalytics({
+                llmBaseUrl: process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1',
+                llmApiKey: process.env.GROQ_API_KEY || '',
+                model: process.env.ANALYTICS_MODEL || 'openai/gpt-oss-120b',
+              });
+            }
+
+            // Get session data from handler (includes memory stats)
+            const sessionData = await taraHandler.getSessionAnalyticsData(session_id, {
+              userId: user_id || userId,
+              orgId: org_id || orgId,
+            });
+
+            if (!sessionData) {
+              return jsonResponse(res, { error: 'Session not found' }, 404);
+            }
+
+            // Run analytics
+            const analytics = await taraAnalytics.analyze({
+              sessionId: session_id,
+              userId: sessionData.userId,
+              orgId: sessionData.orgId,
+              tenantId: sessionData.tenantId,
+              turns: sessionData.turns,
+              metadata: sessionData.metadata,
+              memoryStats: sessionData.memory_stats,
+            });
+
+            // Cleanup session stats
+            taraHandler.cleanupSessionStats(session_id);
+
+            if (!analytics) {
+              return jsonResponse(res, { error: 'Analytics failed' }, 500);
+            }
+
+            // Format for orchestrator contract
+            const orchestratorReport = {
+              brief_context: analytics.brief_context,
+              analysis: analytics.analysis,
+              business_signals: analytics.business_signals,
+              metrics: analytics.metrics,
+              hivemind_updates: analytics.hivemind_updates,
+            };
+
+            return jsonResponse(res, { report: orchestratorReport });
           }
           break;
 

@@ -4,6 +4,9 @@
  * Tracks tokens processed and search queries per org per month.
  * Lightweight — single table, no external billing system needed.
  * Enforces soft (80%) and hard limits.
+ *
+ * Tracks: tokens, searches, KB uploads, memories, deep research, web intel,
+ *         connectors, graph queries, TARA usage
  */
 
 import { getPlan } from './plans.js';
@@ -24,8 +27,8 @@ export class UsageTracker {
     const month = this._currentMonth();
     try {
       await this.prisma.$executeRawUnsafe(
-        `INSERT INTO "OrgUsage" ("orgId", "month", "tokensProcessed", "searchQueries", "knowledgeBaseUploads", "updatedAt")
-         VALUES ($1::uuid, $2, $3, 0, 0, NOW())
+        `INSERT INTO "OrgUsage" ("orgId", "month", "tokensProcessed", "searchQueries", "knowledgeBaseUploads", "memoriesIngested", "deepResearchJobs", "webIntelJobs", "graphQueries", "taraUsage", "updatedAt")
+         VALUES ($1::uuid, $2, $3, 0, 0, 0, 0, 0, 0, 0, NOW())
          ON CONFLICT ("orgId", "month")
          DO UPDATE SET "tokensProcessed" = "OrgUsage"."tokensProcessed" + $3, "updatedAt" = NOW()`,
         orgId, month, tokenCount
@@ -44,8 +47,8 @@ export class UsageTracker {
     const month = this._currentMonth();
     try {
       await this.prisma.$executeRawUnsafe(
-        `INSERT INTO "OrgUsage" ("orgId", "month", "tokensProcessed", "searchQueries", "knowledgeBaseUploads", "updatedAt")
-         VALUES ($1::uuid, $2, 0, 1, 0, NOW())
+        `INSERT INTO "OrgUsage" ("orgId", "month", "tokensProcessed", "searchQueries", "knowledgeBaseUploads", "memoriesIngested", "deepResearchJobs", "webIntelJobs", "graphQueries", "taraUsage", "updatedAt")
+         VALUES ($1::uuid, $2, 0, 1, 0, 0, 0, 0, 0, 0, NOW())
          ON CONFLICT ("orgId", "month")
          DO UPDATE SET "searchQueries" = "OrgUsage"."searchQueries" + 1, "updatedAt" = NOW()`,
         orgId, month
@@ -64,8 +67,8 @@ export class UsageTracker {
     const month = this._currentMonth();
     try {
       await this.prisma.$executeRawUnsafe(
-        `INSERT INTO "OrgUsage" ("orgId", "month", "tokensProcessed", "searchQueries", "knowledgeBaseUploads", "updatedAt")
-         VALUES ($1::uuid, $2, 0, 0, 1, NOW())
+        `INSERT INTO "OrgUsage" ("orgId", "month", "tokensProcessed", "searchQueries", "knowledgeBaseUploads", "memoriesIngested", "deepResearchJobs", "webIntelJobs", "graphQueries", "taraUsage", "updatedAt")
+         VALUES ($1::uuid, $2, 0, 0, 1, 0, 0, 0, 0, 0, NOW())
          ON CONFLICT ("orgId", "month")
          DO UPDATE SET "knowledgeBaseUploads" = "OrgUsage"."knowledgeBaseUploads" + 1, "updatedAt" = NOW()`,
         orgId, month
@@ -73,6 +76,106 @@ export class UsageTracker {
       this._invalidateCache(orgId);
     } catch (err) {
       console.warn('[usage-tracker] Record upload failed:', err.message);
+    }
+  }
+
+  /**
+   * Record a memory ingestion.
+   */
+  async recordMemory(orgId) {
+    if (!this.prisma || !orgId) return;
+    const month = this._currentMonth();
+    try {
+      await this.prisma.$executeRawUnsafe(
+        `INSERT INTO "OrgUsage" ("orgId", "month", "tokensProcessed", "searchQueries", "knowledgeBaseUploads", "memoriesIngested", "deepResearchJobs", "webIntelJobs", "graphQueries", "taraUsage", "updatedAt")
+         VALUES ($1::uuid, $2, 0, 0, 0, 1, 0, 0, 0, 0, NOW())
+         ON CONFLICT ("orgId", "month")
+         DO UPDATE SET "memoriesIngested" = "OrgUsage"."memoriesIngested" + 1, "updatedAt" = NOW()`,
+        orgId, month
+      );
+      this._invalidateCache(orgId);
+    } catch (err) {
+      console.warn('[usage-tracker] Record memory failed:', err.message);
+    }
+  }
+
+  /**
+   * Record a deep research job.
+   */
+  async recordDeepResearch(orgId) {
+    if (!this.prisma || !orgId) return;
+    const month = this._currentMonth();
+    try {
+      await this.prisma.$executeRawUnsafe(
+        `INSERT INTO "OrgUsage" ("orgId", "month", "tokensProcessed", "searchQueries", "knowledgeBaseUploads", "memoriesIngested", "deepResearchJobs", "webIntelJobs", "graphQueries", "taraUsage", "updatedAt")
+         VALUES ($1::uuid, $2, 0, 0, 0, 0, 1, 0, 0, 0, NOW())
+         ON CONFLICT ("orgId", "month")
+         DO UPDATE SET "deepResearchJobs" = "OrgUsage"."deepResearchJobs" + 1, "updatedAt" = NOW()`,
+        orgId, month
+      );
+      this._invalidateCache(orgId);
+    } catch (err) {
+      console.warn('[usage-tracker] Record deep research failed:', err.message);
+    }
+  }
+
+  /**
+   * Record a web intel job (daily tracking).
+   */
+  async recordWebIntel(orgId) {
+    if (!this.prisma || !orgId) return;
+    const today = this._currentDay();
+    try {
+      await this.prisma.$executeRawUnsafe(
+        `INSERT INTO "OrgUsage" ("orgId", "month", "tokensProcessed", "searchQueries", "knowledgeBaseUploads", "memoriesIngested", "deepResearchJobs", "webIntelJobs", "graphQueries", "taraUsage", "webIntelDay", "updatedAt")
+         VALUES ($1::uuid, $2, 0, 0, 0, 0, 0, 1, 0, 0, $3, NOW())
+         ON CONFLICT ("orgId", "webIntelDay")
+         DO UPDATE SET "webIntelJobs" = "OrgUsage"."webIntelJobs" + 1, "updatedAt" = NOW()`,
+        orgId, this._currentMonth(), today
+      );
+      this._invalidateCache(orgId);
+    } catch (err) {
+      console.warn('[usage-tracker] Record web intel failed:', err.message);
+    }
+  }
+
+  /**
+   * Record a graph query.
+   */
+  async recordGraphQuery(orgId) {
+    if (!this.prisma || !orgId) return;
+    const month = this._currentMonth();
+    try {
+      await this.prisma.$executeRawUnsafe(
+        `INSERT INTO "OrgUsage" ("orgId", "month", "tokensProcessed", "searchQueries", "knowledgeBaseUploads", "memoriesIngested", "deepResearchJobs", "webIntelJobs", "graphQueries", "taraUsage", "updatedAt")
+         VALUES ($1::uuid, $2, 0, 0, 0, 0, 0, 0, 1, 0, NOW())
+         ON CONFLICT ("orgId", "month")
+         DO UPDATE SET "graphQueries" = "OrgUsage"."graphQueries" + 1, "updatedAt" = NOW()`,
+        orgId, month
+      );
+      this._invalidateCache(orgId);
+    } catch (err) {
+      console.warn('[usage-tracker] Record graph query failed:', err.message);
+    }
+  }
+
+  /**
+   * Record TARA voice agent usage.
+   */
+  async recordTara(orgId) {
+    if (!this.prisma || !orgId) return;
+    const month = this._currentMonth();
+    try {
+      await this.prisma.$executeRawUnsafe(
+        `INSERT INTO "OrgUsage" ("orgId", "month", "tokensProcessed", "searchQueries", "knowledgeBaseUploads", "memoriesIngested", "deepResearchJobs", "webIntelJobs", "graphQueries", "taraUsage", "updatedAt")
+         VALUES ($1::uuid, $2, 0, 0, 0, 0, 0, 0, 0, 1, NOW())
+         ON CONFLICT ("orgId", "month")
+         DO UPDATE SET "taraUsage" = "OrgUsage"."taraUsage" + 1, "updatedAt" = NOW()`,
+        orgId, month
+      );
+      this._invalidateCache(orgId);
+    } catch (err) {
+      console.warn('[usage-tracker] Record TARA failed:', err.message);
     }
   }
 
@@ -89,7 +192,7 @@ export class UsageTracker {
     const month = this._currentMonth();
     try {
       const rows = await this.prisma.$queryRawUnsafe(
-        `SELECT "tokensProcessed", "searchQueries", "knowledgeBaseUploads"
+        `SELECT "tokensProcessed", "searchQueries", "knowledgeBaseUploads", "memoriesIngested", "deepResearchJobs", "webIntelJobs", "graphQueries", "taraUsage", "connectorCount"
          FROM "OrgUsage" WHERE "orgId" = $1::uuid AND "month" = $2 LIMIT 1`,
         orgId, month
       );
@@ -98,6 +201,12 @@ export class UsageTracker {
         tokensProcessed: Number(usage.tokensProcessed || 0),
         searchQueries: Number(usage.searchQueries || 0),
         knowledgeBaseUploads: Number(usage.knowledgeBaseUploads || 0),
+        memoriesIngested: Number(usage.memoriesIngested || 0),
+        deepResearchJobs: Number(usage.deepResearchJobs || 0),
+        webIntelJobs: Number(usage.webIntelJobs || 0),
+        graphQueries: Number(usage.graphQueries || 0),
+        taraUsage: Number(usage.taraUsage || 0),
+        connectorCount: Number(usage.connectorCount || 0),
         month,
       };
       this._cache.set(cacheKey, { data, ts: Date.now() });
@@ -109,6 +218,24 @@ export class UsageTracker {
   }
 
   /**
+   * Get web intel usage for today (daily limit tracking).
+   */
+  async getWebIntelToday(orgId) {
+    if (!this.prisma || !orgId) return 0;
+    const today = this._currentDay();
+    try {
+      const rows = await this.prisma.$queryRawUnsafe(
+        `SELECT "webIntelJobs" FROM "OrgUsage" WHERE "orgId" = $1::uuid AND "webIntelDay" = $2 LIMIT 1`,
+        orgId, today
+      );
+      return rows[0]?.webIntelJobs || 0;
+    } catch (err) {
+      console.warn('[usage-tracker] Get web intel today failed:', err.message);
+      return 0;
+    }
+  }
+
+  /**
    * Check if an org has exceeded their plan limits.
    * Returns { allowed, warnings, exceeded }
    */
@@ -116,9 +243,12 @@ export class UsageTracker {
     const usage = await this.getUsage(orgId);
     const plan = getPlan(planId);
 
-    const tokenLimit = plan.limits.tokensPerMonth;
+    const tokenLimit = plan.limits.llmTokensPerMonth;
     const queryLimit = plan.limits.searchQueriesPerMonth;
     const uploadLimit = plan.limits.knowledgeBaseUploadsPerMonth;
+    const memoryLimit = plan.limits.maxMemories;
+    const deepResearchLimit = plan.limits.deepResearchPerMonth;
+    const webIntelDayLimit = plan.limits.webIntelPerDay;
 
     const result = { allowed: true, warnings: [], exceeded: [] };
 
@@ -130,7 +260,7 @@ export class UsageTracker {
           result.warnings.push(`Token limit reached (${usage.tokensProcessed.toLocaleString()}/${tokenLimit.toLocaleString()}). Overage billing active.`);
         } else {
           result.allowed = false;
-          result.exceeded.push('tokensPerMonth');
+          result.exceeded.push('llmTokensPerMonth');
         }
       } else if (pct >= 0.8) {
         result.warnings.push(`80% of token budget used (${usage.tokensProcessed.toLocaleString()}/${tokenLimit.toLocaleString()}).`);
@@ -160,6 +290,37 @@ export class UsageTracker {
       }
     }
 
+    // Check memories
+    if (memoryLimit > 0) {
+      if (usage.memoriesIngested >= memoryLimit) {
+        result.allowed = false;
+        result.exceeded.push('maxMemories');
+      } else if (usage.memoriesIngested / memoryLimit >= 0.8) {
+        result.warnings.push(`80% of memory limit used (${usage.memoriesIngested}/${memoryLimit}).`);
+      }
+    }
+
+    // Check deep research
+    if (deepResearchLimit > 0) {
+      if (usage.deepResearchJobs >= deepResearchLimit) {
+        result.allowed = false;
+        result.exceeded.push('deepResearchPerMonth');
+      } else if (usage.deepResearchJobs / deepResearchLimit >= 0.8) {
+        result.warnings.push(`80% of deep research limit used (${usage.deepResearchJobs}/${deepResearchLimit}).`);
+      }
+    }
+
+    // Check web intel (daily)
+    if (webIntelDayLimit > 0) {
+      const todayCount = await this.getWebIntelToday(orgId);
+      if (todayCount >= webIntelDayLimit) {
+        result.allowed = false;
+        result.exceeded.push('webIntelPerDay');
+      } else if (todayCount / webIntelDayLimit >= 0.8) {
+        result.warnings.push(`80% of daily web intel limit used (${todayCount}/${webIntelDayLimit}).`);
+      }
+    }
+
     return { ...result, usage, plan: plan.id };
   }
 
@@ -168,8 +329,24 @@ export class UsageTracker {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
   }
 
+  _currentDay() {
+    const d = new Date();
+    return d.toISOString().split('T')[0]; // YYYY-MM-DD
+  }
+
   _emptyUsage() {
-    return { tokensProcessed: 0, searchQueries: 0, knowledgeBaseUploads: 0, month: this._currentMonth() };
+    return {
+      tokensProcessed: 0,
+      searchQueries: 0,
+      knowledgeBaseUploads: 0,
+      memoriesIngested: 0,
+      deepResearchJobs: 0,
+      webIntelJobs: 0,
+      graphQueries: 0,
+      taraUsage: 0,
+      connectorCount: 0,
+      month: this._currentMonth(),
+    };
   }
 
   _invalidateCache(orgId) {

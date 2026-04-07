@@ -1,0 +1,454 @@
+/**
+ * TrailStore - Persistent research trail storage for CSI graph.
+ *
+ * Stores complete research processes including:
+ * - Step-by-step actions taken by each agent
+ * - Contradictions detected between sources
+ * - Blueprint usage and formation metadata
+ * - Agent states and observations
+ *
+ * Uses CSI memory types:
+ * - op/research-trail: Main trail node with all steps
+ * - op/research-contradiction: Contradiction records (linked)
+ * - kg/research-{agent}: Agent state snapshots
+ */
+
+import { randomUUID } from 'node:crypto';
+
+const AGENT_TYPES = ['explorer', 'analyst', 'verifier', 'synthesizer'];
+const ACTION_TYPES = ['search_web', 'search_memory', 'read_url', 'extract_claims', 'synthesize'];
+
+export class TrailStore {
+  /**
+   * @param {Object} deps
+   * @param {import('../memory/prisma-graph-store.js').PrismaGraphStore} deps.memoryStore
+   * @param {string} deps.userId
+   * @param {string} deps.orgId
+   */
+  constructor({ memoryStore, userId, orgId }) {
+    this.memoryStore = memoryStore;
+    this.userId = userId;
+    this.orgId = orgId;
+
+    // In-memory buffer for building trail before persistence
+    this.trails = new Map(); // sessionId → trail buffer
+    this.contradictions = new Map(); // sessionId → contradiction list
+  }
+
+  /**
+   * Initialize a new research trail.
+   * @param {string} sessionId
+   * @param {string} query
+   * @param {string} projectId
+   * @param {Object} options
+   * @param {string} options.blueprintUsed - blueprint ID if used
+   * @param {boolean} options.blueprintCandidate - is this forming a new pattern?
+   * @param {Object} options.agentStates - initial agent states
+   */
+  async initTrail(sessionId, query, projectId, options = {}) {
+    const trail = {
+      id: randomUUID(),
+      type: 'op/research-trail',
+      sessionId,
+      projectId,
+      query,
+      tags: ['research-trail', `session:${sessionId}`, `project:${projectId}`],
+      metadata: {
+        blueprintUsed: options.blueprintUsed || null,
+        blueprintCandidate: options.blueprintCandidate || false,
+        agentStates: options.agentStates || {
+          explorer: 'active',
+          analyst: 'idle',
+          verifier: 'idle',
+          synthesizer: 'idle',
+        },
+        startedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+      steps: [],
+      contradictions: [],
+    };
+
+    this.trails.set(sessionId, trail);
+    this.contradictions.set(sessionId, []);
+
+    // Persist initial trail state
+    await this._persistTrail(sessionId);
+
+    return trail.id;
+  }
+
+  /**
+   * Record a research step.
+   * @param {string} sessionId
+   * @param {Object} step
+   * @param {number} step.stepIndex
+   * @param {string} step.agent - explorer | analyst | verifier | synthesizer
+   * @param {string} step.action - search_web | search_memory | read_url | extract_claims | synthesize
+   * @param {string} step.input - input to the action
+   * @param {string} step.output - output from the action
+   * @param {number} step.confidence - confidence score 0-1
+   * @param {boolean} step.rejected - was this branch abandoned?
+   * @param {string} step.reason - why rejected (if applicable)
+   */
+  async recordStep(sessionId, step) {
+    const trail = this.trails.get(sessionId);
+    if (!trail) {
+      // Trail not initialized - create minimal record
+      await this.initTrail(sessionId, 'Unknown', `research/unknown`);
+    }
+
+    const trailBuffer = this.trails.get(sessionId);
+    const stepRecord = {
+      stepIndex: step.stepIndex ?? trailBuffer.steps.length,
+      agent: step.agent || 'explorer',
+      action: step.action || 'search_web',
+      input: step.input || '',
+      output: step.output || '',
+      confidence: step.confidence ?? 0.5,
+      rejected: step.rejected || false,
+      reason: step.reason || '',
+      timestamp: new Date().toISOString(),
+    };
+
+    trailBuffer.steps.push(stepRecord);
+    trailBuffer.metadata.updatedAt = new Date().toISOString();
+
+    // Update agent state
+    if (step.agent && trailBuffer.metadata.agentStates) {
+      trailBuffer.metadata.agentStates[step.agent] = step.rejected ? 'blocked' : 'active';
+    }
+
+    // Persist incrementally (non-blocking)
+    this._persistTrail(sessionId).catch(() => {});
+
+    return stepRecord;
+  }
+
+  /**
+   * Record a contradiction between two claims.
+   * @param {string} sessionId
+   * @param {Object} contradiction
+   * @param {Object} contradiction.claimA - { source, content, memoryId }
+   * @param {Object} contradiction.claimB - { source, content, memoryId }
+   * @param {string} contradiction.dimension - what dimension they conflict on
+   * @param {boolean} contradiction.unresolved - is this still debated?
+   */
+  async recordContradiction(sessionId, contradiction) {
+    const trail = this.trails.get(sessionId);
+    if (!trail) return null;
+
+    const contradictionRecord = {
+      id: randomUUID(),
+      claimA: {
+        source: contradiction.claimA?.source || 'unknown',
+        content: contradiction.claimA?.content || '',
+        memoryId: contradiction.claimA?.memoryId || null,
+      },
+      claimB: {
+        source: contradiction.claimB?.source || 'unknown',
+        content: contradiction.claimB?.content || '',
+        memoryId: contradiction.claimB?.memoryId || null,
+      },
+      dimension: contradiction.dimension || 'factual',
+      unresolved: contradiction.unresolved ?? true,
+      detectedAt: new Date().toISOString(),
+    };
+
+    trail.contradictions.push(contradictionRecord);
+
+    // Also persist as separate CSI node for queryability
+    await this._persistContradiction(contradictionRecord, trail.projectId);
+
+    // Update main trail
+    await this._persistTrail(sessionId);
+
+    return contradictionRecord.id;
+  }
+
+  /**
+   * Get trail for a session.
+   * @param {string} sessionId
+   * @returns {Object|null}
+   */
+  getTrail(sessionId) {
+    return this.trails.get(sessionId) || null;
+  }
+
+  /**
+   * Get contradictions for a session.
+   * @param {string} sessionId
+   * @returns {Array}
+   */
+  getContradictions(sessionId) {
+    return this.contradictions.get(sessionId) || [];
+  }
+
+  /**
+   * Finalize and persist complete trail.
+   * @param {string} sessionId
+   * @param {Object} report - final research report
+   */
+  async finalizeTrail(sessionId, report) {
+    const trail = this.trails.get(sessionId);
+    if (!trail) return null;
+
+    trail.metadata.completedAt = new Date().toISOString();
+    trail.metadata.report = report;
+    trail.metadata.status = 'completed';
+
+    await this._persistTrail(sessionId);
+
+    // Clean up in-memory buffer after persistence
+    setTimeout(() => this.trails.delete(sessionId), 60000);
+
+    return trail;
+  }
+
+  /**
+   * Detect contradictions between findings.
+   * Compares new finding against existing findings for same session.
+   * @param {string} sessionId
+   * @param {Object} newFinding - { content, source, memoryId }
+   * @param {string} dimension - optional dimension to check
+   * @returns {Promise<Object|null>} detected contradiction or null
+   */
+  async detectContradiction(sessionId, newFinding, dimension = null) {
+    const trail = this.trails.get(sessionId);
+    if (!trail) return null;
+
+    // Get existing findings from steps
+    const existingClaims = trail.steps
+      .filter(s => s.action === 'search_web' || s.action === 'search_memory')
+      .map(s => ({
+        content: s.output,
+        source: s.action === 'search_web' ? 'web' : 'memory',
+        memoryId: s.memoryId,
+      }));
+
+    // Check for contradictions with existing claims
+    for (const existing of existingClaims) {
+      const contradiction = this._analyzeContradiction(existing, newFinding, dimension);
+      if (contradiction) {
+        await this.recordContradiction(sessionId, contradiction);
+        return contradiction;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Analyze if two claims contradict.
+   * Simple heuristic: check for opposing language patterns.
+   * @private
+   */
+  _analyzeContradiction(claimA, claimB, dimension) {
+    const textA = (claimA.content || '').toLowerCase();
+    const textB = (claimB.content || '').toLowerCase();
+
+    // Opposition patterns
+    const oppositionPairs = [
+      ['increases', 'decreases'],
+      ['supports', 'contradicts'],
+      ['proves', 'disproves'],
+      ['confirms', 'denies'],
+      ['shows', 'refutes'],
+      ['effective', 'ineffective'],
+      ['safe', 'unsafe'],
+      ['recommended', 'not recommended'],
+    ];
+
+    for (const [posA, negA] of oppositionPairs) {
+      const aHasPos = textA.includes(posA);
+      const aHasNeg = textA.includes(negA);
+      const bHasPos = textB.includes(posA);
+      const bHasNeg = textB.includes(negA);
+
+      // Check if they oppose
+      if ((aHasPos && bHasNeg) || (aHasNeg && bHasPos)) {
+        return {
+          claimA,
+          claimB,
+          dimension: dimension || `semantic:${posA}/${negA}`,
+          unresolved: true,
+        };
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Persist trail to CSI as memory node.
+   * @private
+   */
+  async _persistTrail(sessionId) {
+    const trail = this.trails.get(sessionId);
+    if (!trail) return;
+
+    try {
+      await this.memoryStore.createMemory({
+        id: trail.id,
+        user_id: this.userId,
+        org_id: this.orgId,
+        project: trail.projectId,
+        content: this._serializeTrail(trail),
+        title: `Research Trail: ${trail.query.slice(0, 80)}`,
+        memory_type: 'decision',
+        tags: trail.tags,
+        is_latest: true,
+        importance_score: 0.95,
+        metadata: {
+          ...trail.metadata,
+          stepCount: trail.steps.length,
+          contradictionCount: trail.contradictions.length,
+          trailType: 'op/research-trail',
+        },
+        created_at: trail.metadata.startedAt,
+        updated_at: trail.metadata.updatedAt,
+      });
+    } catch (err) {
+      // Non-failing: trail persistence should not block research
+      console.error('[TrailStore] Failed to persist trail:', err.message);
+    }
+  }
+
+  /**
+   * Persist contradiction as separate CSI node.
+   * @private
+   */
+  async _persistContradiction(contradiction, projectId) {
+    try {
+      await this.memoryStore.createMemory({
+        id: contradiction.id,
+        user_id: this.userId,
+        org_id: this.orgId,
+        project: projectId,
+        content: this._serializeContradiction(contradiction),
+        title: `Contradiction: ${contradiction.dimension}`,
+        memory_type: 'fact',
+        tags: ['research-contradiction', `session:${this._sessionIdFromTrail(contradiction)}`, `dimension:${contradiction.dimension}`],
+        is_latest: true,
+        importance_score: 0.8,
+        metadata: {
+          contradictionType: 'op/research-contradiction',
+          claimA: contradiction.claimA,
+          claimB: contradiction.claimB,
+          unresolved: contradiction.unresolved,
+        },
+        created_at: contradiction.detectedAt,
+        updated_at: contradiction.detectedAt,
+      });
+    } catch (err) {
+      console.error('[TrailStore] Failed to persist contradiction:', err.message);
+    }
+  }
+
+  /**
+   * Serialize trail for storage.
+   * @private
+   */
+  _serializeTrail(trail) {
+    const lines = [
+      `# Research Trail: ${trail.query}`,
+      ``,
+      `**Session:** ${trail.sessionId}`,
+      `**Project:** ${trail.projectId}`,
+      `**Started:** ${trail.metadata.startedAt}`,
+      `**Blueprint:** ${trail.metadata.blueprintUsed || 'none'}`,
+      `**Blueprint Candidate:** ${trail.metadata.blueprintCandidate}`,
+      ``,
+      `## Steps (${trail.steps.length})`,
+      ``,
+    ];
+
+    for (const step of trail.steps.slice(0, 20)) {
+      lines.push(
+        `### Step ${step.stepIndex}: ${step.agent}/${step.action}`,
+        `- Confidence: ${step.confidence}`,
+        `- Rejected: ${step.rejected}${step.reason ? ` (${step.reason})` : ''}`,
+        `- Input: ${step.input.slice(0, 200)}`,
+        `- Output: ${step.output.slice(0, 200)}`,
+        ``,
+      );
+    }
+
+    if (trail.contradictions.length > 0) {
+      lines.push(`## Contradictions (${trail.contradictions.length})`, ``);
+      for (const c of trail.contradictions) {
+        lines.push(
+          `### ${c.dimension}`,
+          `- Claim A (${c.claimA.source}): ${c.claimA.content.slice(0, 150)}`,
+          `- Claim B (${c.claimB.source}): ${c.claimB.content.slice(0, 150)}`,
+          `- Unresolved: ${c.unresolved}`,
+          ``,
+        );
+      }
+    }
+
+    return lines.join('\n');
+  }
+
+  /**
+   * Serialize contradiction for storage.
+   * @private
+   */
+  _serializeContradiction(contradiction) {
+    return [
+      `# Research Contradiction`,
+      ``,
+      `**Dimension:** ${contradiction.dimension}`,
+      `**Unresolved:** ${contradiction.unresolved}`,
+      ``,
+      `## Claim A`,
+      `- Source: ${contradiction.claimA.source}`,
+      `- Content: ${contradiction.claimA.content.slice(0, 300)}`,
+      ``,
+      `## Claim B`,
+      `- Source: ${contradiction.claimB.source}`,
+      `- Content: ${contradiction.claimB.content.slice(0, 300)}`,
+      ``,
+    ].join('\n');
+  }
+
+  /**
+   * Extract sessionId from trail (helper).
+   * @private
+   */
+  _sessionIdFromTrail(contradiction) {
+    // Try to get from in-memory trail
+    for (const [sessionId, trail] of this.trails) {
+      if (trail.contradictions.includes(contradiction)) {
+        return sessionId;
+      }
+    }
+    return 'unknown';
+  }
+
+  /**
+   * Query trails by project.
+   * @param {string} projectId
+   * @returns {Promise<Array>}
+   */
+  async queryByProject(projectId) {
+    try {
+      // This would use memoryStore.searchMemories in a real implementation
+      // For now, return in-memory trails
+      return [...this.trails.values()].filter(t => t.projectId === projectId);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Query trails by session.
+   * @param {string} sessionId
+   * @returns {Promise<Object|null>}
+   */
+  async queryBySession(sessionId) {
+    return this.getTrail(sessionId);
+  }
+}
+
+export { AGENT_TYPES, ACTION_TYPES };

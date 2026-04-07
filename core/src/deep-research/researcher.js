@@ -21,6 +21,8 @@
 
 import { randomUUID } from 'node:crypto';
 import { TaskStack, DIMENSIONS } from './task-stack.js';
+import { TrailStore } from './trail-store.js';
+import { BlueprintMiner } from './blueprint-miner.js';
 
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_MODEL = 'llama-3.3-70b-versatile';
@@ -36,8 +38,10 @@ export class DeepResearcher {
    * @param {Object} [deps.browserRuntime] - HIVEMIND BrowserRuntime for web search/crawl
    * @param {Object} [deps.webJobStore] - Web job store for tracking
    * @param {Function} [deps.onEvent] - callback for live progress events
+   * @param {TrailStore} [deps.trailStore] - optional trail store for persistence
+   * @param {boolean} [deps.autoMineBlueprints] - automatically mine blueprints after completion
    */
-  constructor({ memoryStore, recallFn, prisma, groqApiKey, browserRuntime, webJobStore, onEvent }) {
+  constructor({ memoryStore, recallFn, prisma, groqApiKey, browserRuntime, webJobStore, onEvent, trailStore, autoMineBlueprints = true }) {
     this.memoryStore = memoryStore;
     this.recallFn = recallFn;
     this.prisma = prisma;
@@ -45,6 +49,9 @@ export class DeepResearcher {
     this.browserRuntime = browserRuntime || null;
     this.webJobStore = webJobStore || null;
     this.onEvent = onEvent || (() => {});
+    this.trailStore = trailStore || null;
+    this.autoMineBlueprints = autoMineBlueprints;
+    this.blueprintMiner = new BlueprintMiner({ memoryStore, prisma });
   }
 
   /**
@@ -62,11 +69,39 @@ export class DeepResearcher {
 
     this._emit('research.started', { sessionId, query, projectId });
 
-    // Step 0: Check for prior research on this topic
+    // Step 0: Check for matching blueprints (unless already specified)
+    let blueprintUsed = options.blueprintId || null;
+    if (!blueprintUsed && options.useBlueprints !== false) {
+      const suggestions = await this._suggestBlueprint(query);
+      if (suggestions.length > 0 && suggestions[0].relevanceScore > 0.6) {
+        blueprintUsed = suggestions[0].blueprintId;
+        this._emit('research.blueprint_suggested', {
+          sessionId,
+          blueprintId: blueprintUsed,
+          blueprintName: suggestions[0].name,
+          relevanceScore: suggestions[0].relevanceScore,
+        });
+      }
+    }
+
+    // Initialize trail store for this session
+    const trailStore = this.trailStore || new TrailStore({ memoryStore: this.memoryStore, userId, orgId });
+    await trailStore.initTrail(sessionId, query, projectId, {
+      blueprintUsed,
+      blueprintCandidate: options.blueprintCandidate || false,
+    });
+
+    // Track blueprint usage if one was used
+    if (blueprintUsed) {
+      await this._recordBlueprintUse(blueprintUsed);
+    }
+
+    // Check for prior research on this topic
     const priorFindings = await this._checkPriorResearch(query, userId, orgId, projectId);
     if (priorFindings.length >= 5 && !options.forceRefresh) {
       this._emit('research.cached', { sessionId, findingCount: priorFindings.length });
       const report = await this._synthesizeReport(query, priorFindings, []);
+      await trailStore.finalizeTrail(sessionId, report);
       return {
         sessionId,
         projectId,
@@ -110,7 +145,7 @@ export class DeepResearcher {
       });
 
       try {
-        const result = await this._executeTask(task, userId, orgId, projectId);
+        const result = await this._executeTask(task, userId, orgId, projectId, sessionId, trailStore);
 
         stack.complete(task.id, {
           findings: result.findings,
@@ -159,7 +194,7 @@ export class DeepResearcher {
         const task = stack.next();
         if (!task) break;
         try {
-          const result = await this._executeTask(task, userId, orgId, projectId);
+          const result = await this._executeTask(task, userId, orgId, projectId, sessionId, trailStore);
           stack.complete(task.id, result);
           allFindings.push(...result.findings);
           allSources.push(...result.sources);
@@ -178,8 +213,15 @@ export class DeepResearcher {
 
     const report = await this._synthesizeReport(query, allFindings, stack.getRemainingGaps());
 
-    // Step 5: Save trail to CSI
-    await this._saveTrailToCSI(sessionId, query, stack, report, userId, orgId, projectId);
+    // Step 5: Finalize trail in CSI via trailStore
+    await trailStore.finalizeTrail(sessionId, report);
+
+    // Step 6: Trigger blueprint mining (non-blocking, after research completes)
+    if (this.autoMineBlueprints) {
+      this._mineBlueprints(userId, orgId, query, stack).catch(err => {
+        console.error('[DeepResearcher] Blueprint mining failed:', err.message);
+      });
+    }
 
     this._emit('research.completed', {
       sessionId,
@@ -187,6 +229,7 @@ export class DeepResearcher {
       durationMs: Date.now() - startTime,
       findingCount: allFindings.length,
       taskProgress: stack.getProgress(),
+      blueprintMined: this.autoMineBlueprints,
     });
 
     return {
@@ -206,11 +249,12 @@ export class DeepResearcher {
 
   // ─── Internal Methods ──────────────────────────────────────
 
-  async _executeTask(task, userId, orgId, projectId) {
+  async _executeTask(task, userId, orgId, projectId, sessionId, trailStore) {
     const findings = [];
     const sources = [];
     const maxSteps = 6;  // max reasoning steps per task
     let step = 0;
+    let stepIndex = 0;
 
     while (step < maxSteps) {
       step++;
@@ -218,6 +262,19 @@ export class DeepResearcher {
       // REASON: Ask LLM what to do next
       const reasoning = await this._reason(task.query, findings, step);
       this._emit('task.reasoning', { taskId: task.id, step, action: reasoning.action, thought: reasoning.thought });
+
+      // Record reasoning step to trail
+      if (trailStore) {
+        await trailStore.recordStep(sessionId, {
+          stepIndex: stepIndex++,
+          agent: this._mapActionToAgent(reasoning.action),
+          action: reasoning.action.toLowerCase(),
+          input: reasoning.query || task.query,
+          output: reasoning.thought,
+          confidence: 0.5,
+          rejected: false,
+        });
+      }
 
       // Check if task is complete
       if (reasoning.action === 'FINISH') break;
@@ -243,7 +300,7 @@ export class DeepResearcher {
 
       // OBSERVE: Add result to findings
       if (result && result.content) {
-        findings.push({
+        const finding = {
           id: randomUUID(),
           type: result.type || reasoning.action.toLowerCase(),
           title: result.title || reasoning.query || task.query,
@@ -252,7 +309,29 @@ export class DeepResearcher {
           sourceId: result.sourceId || null,
           confidence: result.confidence || 0.6,
           taskQuery: task.query,
-        });
+        };
+        findings.push(finding);
+
+        // Record action result to trail
+        if (trailStore) {
+          await trailStore.recordStep(sessionId, {
+            stepIndex: stepIndex++,
+            agent: this._mapActionToAgent(reasoning.action),
+            action: reasoning.action.toLowerCase(),
+            input: reasoning.query || task.query,
+            output: result.content.slice(0, 500),
+            confidence: result.confidence || 0.6,
+            rejected: false,
+          });
+
+          // Check for contradictions
+          await trailStore.detectContradiction(sessionId, {
+            content: result.content,
+            source: result.source || 'unknown',
+            memoryId: finding.id,
+          });
+        }
+
         if (result.source) sources.push({ type: result.type, id: result.sourceId, title: result.title });
       }
 
@@ -698,5 +777,96 @@ Rules:
 
   _slugify(text) {
     return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 60).replace(/-$/, '');
+  }
+
+  /**
+   * Map action type to agent role.
+   * @private
+   */
+  _mapActionToAgent(action) {
+    const mapping = {
+      'SEARCH_WEB': 'explorer',
+      'SEARCH_MEMORY': 'analyst',
+      'READ_URL': 'explorer',
+      'SYNTHESIZE': 'synthesizer',
+      'FINISH': 'synthesizer',
+    };
+    return mapping[action] || 'explorer';
+  }
+
+  /**
+   * Record a contradiction between findings.
+   * @param {string} sessionId
+   * @param {Object} contradiction
+   * @param {Object} contradiction.claimA - { source, content, memoryId }
+   * @param {Object} contradiction.claimB - { source, content, memoryId }
+   * @param {string} contradiction.dimension - what dimension they conflict on
+   * @param {boolean} contradiction.unresolved - is this still debated?
+   */
+  async _recordContradiction(sessionId, contradiction) {
+    if (!this.trailStore) return null;
+    return await this.trailStore.recordContradiction(sessionId, contradiction);
+  }
+
+  /**
+   * Suggest blueprints for a query.
+   * @param {string} query
+   * @returns {Promise<Array>}
+   * @private
+   */
+  async _suggestBlueprint(query) {
+    try {
+      const userId = this.trailStore?.userId || 'system';
+      const orgId = this.trailStore?.orgId || 'system';
+
+      const suggestions = await this.blueprintMiner.suggestBlueprints(userId, orgId, query);
+      return suggestions || [];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Record blueprint usage for calibration.
+   * @param {string} blueprintId
+   * @private
+   */
+  async _recordBlueprintUse(blueprintId) {
+    try {
+      const userId = this.trailStore?.userId || 'system';
+      const orgId = this.trailStore?.orgId || 'system';
+
+      await this.blueprintMiner.incrementReuseCount(userId, orgId, blueprintId);
+    } catch {
+      // Non-fatal
+    }
+  }
+
+  /**
+   * Mine blueprints from completed research.
+   * @param {string} userId
+   * @param {string} orgId
+   * @param {string} query
+   * @param {TaskStack} stack
+   * @private
+   */
+  async _mineBlueprints(userId, orgId, query, stack) {
+    try {
+      await new Promise(resolve => setTimeout(resolve, 2000));
+
+      const blueprints = await this.blueprintMiner.mine(userId, orgId, {
+        minConfidence: stack.getProgress().confidence,
+        limit: 5,
+      });
+
+      if (blueprints.length > 0) {
+        this._emit('research.blueprints_mined', {
+          blueprintCount: blueprints.length,
+          blueprintIds: blueprints.map(b => b.blueprintId),
+        });
+      }
+    } catch (err) {
+      console.error('[DeepResearcher] Blueprint mining error:', err.message);
+    }
   }
 }

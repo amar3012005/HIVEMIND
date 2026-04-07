@@ -3123,6 +3123,147 @@ a{color:#a78bfa}</style></head><body>
         return jsonResponse(res, { error: 'Unknown research action' }, 400);
       }
 
+      // ==========================================
+      // PageIndex Dynamic Routes (before switch)
+      // ==========================================
+
+      // Get all memories for a PageIndex node
+      if (pathname.startsWith('/api/pageindex/node/') && pathname.endsWith('/memories')) {
+        if (req.method === 'GET') {
+          if (!ensurePersistedMemoryOrFail(res, pathname)) {
+            return;
+          }
+          try {
+            const parts = pathname.split('/').filter(Boolean);
+            const nodeIdIndex = parts.indexOf('node');
+            const nodeId = nodeIdIndex >= 0 ? parts[nodeIdIndex + 1] : null;
+
+            if (!nodeId) {
+              return jsonResponse(res, { error: 'nodeId required' }, 400);
+            }
+
+            const includeChildren = url.searchParams.get('includeChildren') !== 'false';
+
+            const { PageIndexService } = await import('./services/pageindex-service.js');
+            const pageindexService = new PageIndexService({ prisma });
+            const result = await pageindexService.getMemoriesForNode(nodeId, includeChildren);
+
+            const memories = result.memoryIds.length > 0
+              ? await prisma.memory.findMany({
+                  where: { id: { in: result.memoryIds }, deletedAt: null },
+                  select: {
+                    id: true, title: true, content: true, memoryType: true,
+                    tags: true, createdAt: true, project: true,
+                  },
+                })
+              : [];
+
+            jsonResponse(res, { memories, count: result.count });
+          } catch (error) {
+            console.error('PageIndex node memories fetch failed:', error);
+            jsonResponse(res, { memories: [], count: 0 });
+          }
+        }
+        return;
+      }
+
+      // Generate summary for a node
+      if (pathname.startsWith('/api/pageindex/node/') && pathname.endsWith('/summary')) {
+        if (req.method === 'POST') {
+          if (!ensurePersistedMemoryOrFail(res, pathname)) {
+            return;
+          }
+          try {
+            const parts = pathname.split('/').filter(Boolean);
+            const nodeIdIndex = parts.indexOf('node');
+            const nodeId = nodeIdIndex >= 0 ? parts[nodeIdIndex + 1] : null;
+
+            if (!nodeId) {
+              return jsonResponse(res, { error: 'nodeId required' }, 400);
+            }
+
+            const { PageIndexService } = await import('./services/pageindex-service.js');
+            const pageindexService = new PageIndexService({ prisma });
+            const result = await pageindexService.generateNodeSummary(nodeId);
+
+            jsonResponse(res, result);
+          } catch (error) {
+            console.error('PageIndex node summary generation failed:', error);
+            jsonResponse(res, { success: false, error: error.message }, 500);
+          }
+        }
+        return;
+      }
+
+      // Move memory to a node
+      if (pathname.startsWith('/api/pageindex/memory/') && pathname.endsWith('/move')) {
+        if (req.method === 'POST') {
+          if (!ensurePersistedMemoryOrFail(res, pathname)) {
+            return;
+          }
+          try {
+            const parts = pathname.split('/').filter(Boolean);
+            const memoryIdIndex = parts.indexOf('memory');
+            const memoryId = memoryIdIndex >= 0 ? parts[memoryIdIndex + 1] : null;
+
+            if (!memoryId) {
+              return jsonResponse(res, { error: 'memoryId required' }, 400);
+            }
+
+            const body = await parseBody(req);
+            const { nodeId, action = 'add' } = body;
+
+            if (!nodeId) {
+              return jsonResponse(res, { error: 'nodeId required' }, 400);
+            }
+
+            const { PageIndexService } = await import('./services/pageindex-service.js');
+            const pageindexService = new PageIndexService({ prisma });
+
+            let success;
+            if (action === 'remove') {
+              success = await pageindexService.removeMemoryFromNode(nodeId, memoryId);
+            } else {
+              success = await pageindexService.assignMemoryToNode(nodeId, memoryId);
+            }
+
+            jsonResponse(res, { success });
+          } catch (error) {
+            console.error('PageIndex memory move failed:', error);
+            jsonResponse(res, { error: error.message }, 500);
+          }
+        }
+        return;
+      }
+
+      // Get nodes for a memory
+      if (pathname.startsWith('/api/pageindex/memory/') && pathname.endsWith('/nodes')) {
+        if (req.method === 'GET') {
+          if (!ensurePersistedMemoryOrFail(res, pathname)) {
+            return;
+          }
+          try {
+            const parts = pathname.split('/').filter(Boolean);
+            const memoryIdIndex = parts.indexOf('memory');
+            const memoryId = memoryIdIndex >= 0 ? parts[memoryIdIndex + 1] : null;
+
+            if (!memoryId) {
+              return jsonResponse(res, { error: 'memoryId required' }, 400);
+            }
+
+            const { PageIndexService } = await import('./services/pageindex-service.js');
+            const pageindexService = new PageIndexService({ prisma });
+            const nodes = await pageindexService.findNodesForMemory(memoryId);
+
+            jsonResponse(res, { nodes: nodes || [] });
+          } catch (error) {
+            console.error('PageIndex memory nodes fetch failed:', error);
+            jsonResponse(res, { nodes: [] });
+          }
+        }
+        return;
+      }
+
       switch (pathname) {
         case '/api/research/start':
           if (req.method === 'POST') {
@@ -3331,38 +3472,121 @@ a{color:#a78bfa}</style></head><body>
                 user_id: session.userId || userId,
                 org_id: session.orgId || orgId,
                 project: projectId,
-                n_results: 100,
+                n_results: 200,
               });
 
-              // Build subgraph with nodes and edges
-              const nodes = (memories || []).map(m => ({
-                id: m.id,
-                type: m.memory_type,
-                title: m.title,
-                tags: m.tags,
-                importance: m.importance_score,
-                createdAt: m.created_at,
-              }));
+              // Build layered graph structure
+              const layers = {
+                sources: [],
+                claims: [],
+                trails: [],
+                blueprints: [],
+                weights: { edges: [] },
+              };
 
-              // Get relationships between these memories
-              const memoryIds = nodes.map(n => n.id);
-              const relationships = await Promise.all(
-                memoryIds.map(id => persistentMemoryStore.getRelationships(id))
-              );
-              const edges = relationships.flat().map(r => ({
-                id: r.id,
-                from: r.from_id,
-                to: r.to_id,
-                type: r.type,
-                confidence: r.confidence,
-              }));
+              // Categorize memories into layers
+              (memories || []).forEach(m => {
+                const tags = m.tags || [];
+                const metadata = m.metadata || {};
+
+                // Layer 1: Sources (web pages, docs)
+                if (tags.includes('research-finding') || metadata.trailType === 'source') {
+                  layers.sources.push({
+                    id: m.id,
+                    title: m.title,
+                    url: metadata.url || metadata.source_url,
+                    type: m.memory_type,
+                    score: m.importance_score,
+                  });
+                }
+
+                // Layer 2: Claims (extracted findings)
+                if (metadata.trailType === 'claim' || m.memory_type === 'fact') {
+                  layers.claims.push({
+                    id: m.id,
+                    content: m.content?.slice(0, 500),
+                    confidence: metadata.confidence || m.importance_score,
+                    source: metadata.source,
+                  });
+                }
+
+                // Layer 3: Trails (research steps)
+                if (tags.includes('research-trail') || metadata.trailType === 'op/research-trail') {
+                  const steps = metadata.steps || [];
+                  steps.forEach((step, idx) => {
+                    layers.trails.push({
+                      id: `step-${m.id}-${idx}`,
+                      agent: step.agent || 'explorer',
+                      action: step.action || 'search_web',
+                      input: step.input?.slice(0, 200),
+                      output: step.output?.slice(0, 200),
+                      confidence: step.confidence,
+                      rejected: step.rejected,
+                    });
+                  });
+                }
+
+                // Layer 4: Blueprints
+                if (tags.includes('kg/blueprint') || metadata.blueprint_id) {
+                  layers.blueprints.push({
+                    blueprintId: metadata.blueprint_id,
+                    name: metadata.blueprint_name || m.title,
+                    domain: metadata.blueprint_domain,
+                    timesReused: metadata.blueprint_times_reused || 0,
+                    successRate: metadata.blueprint_success_rate,
+                  });
+                }
+              });
+
+              // Also get trail from session result if available
+              if (session.result?.trail) {
+                const trail = session.result.trail;
+                if (trail.steps && layers.trails.length === 0) {
+                  trail.steps.forEach((step, idx) => {
+                    layers.trails.push({
+                      id: `trail-step-${idx}`,
+                      agent: step.agent || 'explorer',
+                      action: step.action || 'search_web',
+                      input: step.input?.slice(0, 200),
+                      output: step.output?.slice(0, 200),
+                      confidence: step.confidence,
+                      rejected: step.rejected,
+                    });
+                  });
+                }
+              }
+
+              // Build edges based on relationships and provenance
+              (memories || []).forEach(m => {
+                const metadata = m.metadata || {};
+
+                // Link claims to their sources
+                if (metadata.sourceId) {
+                  layers.weights.edges.push({
+                    from: `claim-${m.id}`,
+                    to: `source-${metadata.sourceId}`,
+                    type: 'derived_from',
+                    confidence: m.importance_score,
+                  });
+                }
+
+                // Link trails to blueprints if used
+                if (metadata.blueprintUsed) {
+                  layers.weights.edges.push({
+                    from: `trail-${m.id}`,
+                    to: `blueprint-${metadata.blueprintUsed}`,
+                    type: 'used_blueprint',
+                    confidence: 0.9,
+                  });
+                }
+              });
 
               return jsonResponse(res, {
-                graph: { nodes, edges },
                 sessionId,
                 projectId,
-                nodeCount: nodes.length,
-                edgeCount: edges.length,
+                layers,
+                nodeCount: layers.sources.length + layers.claims.length + layers.trails.length + layers.blueprints.length,
+                edgeCount: layers.weights.edges.length,
               });
             } catch (err) {
               console.error('[research] graph lookup failed:', err.message);
@@ -6829,9 +7053,10 @@ a{color:#a78bfa}</style></head><body>
           break;
 
         // ==========================================
-        // PageIndex API Endpoints
+        // PageIndex API Endpoints (dynamic routes)
         // ==========================================
 
+        // Get tree (static route)
         case '/api/pageindex/tree':
           if (req.method === 'GET') {
             if (!ensurePersistedMemoryOrFail(res, '/api/pageindex/tree')) {
@@ -6848,27 +7073,7 @@ a{color:#a78bfa}</style></head><body>
               jsonResponse(res, { tree: tree || [] });
             } catch (error) {
               console.error('PageIndex tree fetch failed:', error);
-              jsonResponse(res, { tree: [] }); // Return empty tree on error
-            }
-          }
-          break;
-
-        case '/api/pageindex/memory/:id/nodes':
-          if (req.method === 'GET') {
-            if (!ensurePersistedMemoryOrFail(res, '/api/pageindex/memory/:id/nodes')) {
-              return;
-            }
-            try {
-              const memoryId = pathname.split('/').pop();
-
-              const { PageIndexService } = await import('./services/pageindex-service.js');
-              const pageindexService = new PageIndexService({ prisma });
-              const nodes = await pageindexService.findNodesForMemory(memoryId);
-
-              jsonResponse(res, { nodes: nodes || [] });
-            } catch (error) {
-              console.error('PageIndex memory nodes fetch failed:', error);
-              jsonResponse(res, { nodes: [] });
+              jsonResponse(res, { tree: [] });
             }
           }
           break;
@@ -6877,7 +7082,7 @@ a{color:#a78bfa}</style></head><body>
         // Three-Tier Retrieval API Endpoints
         // ==========================================
 
-        // ─── PageIndex-Powered Hybrid Search ─────────────────────────────────
+        // PageIndex-Powered Hybrid Search
         case '/api/search/pageindex':
           if (req.method === 'POST') {
             if (!ensurePersistedMemoryOrFail(res, '/api/search/pageindex')) {

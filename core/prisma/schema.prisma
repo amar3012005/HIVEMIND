@@ -1,24 +1,721 @@
-// ==========================================
-// HIVE-MIND Prisma Schema
-// PostgreSQL 15+ with Apache AGE extension
-// EU Sovereign: GDPR, NIS2, DORA compliant
-// Data Residency: DE/FR/FI regions only
-// ==========================================
-
 generator client {
   provider        = "prisma-client-js"
-  previewFeatures = ["postgresqlExtensions"]
   output          = "../node_modules/.prisma/client"
+  previewFeatures = ["postgresqlExtensions"]
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [uuid_ossp(map: "uuid-ossp", schema: "public")]
 }
 
-// ==========================================
-// ENUMS
-// ==========================================
+/// User accounts with ZITADEL IAM integration and HYOK encryption keys
+/// GDPR-ready with soft delete (deleted_at) for right to erasure
+model User {
+  id                   String                @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
+  zitadelUserId        String                @unique @map("zitadel_user_id") @db.VarChar(255)
+  email                String                @unique @db.VarChar(255)
+  displayName          String?               @map("display_name") @db.VarChar(255)
+  avatarUrl            String?               @map("avatar_url")
+  timezone             String?               @default("UTC") @db.VarChar(50)
+  locale               String?               @default("en") @db.VarChar(10)
+  encryptionKeyId      String                @default(dbgenerated("gen_random_uuid()")) @map("encryption_key_id") @db.Uuid
+  encryptionKeyVersion Int?                  @default(1) @map("encryption_key_version")
+  createdAt            DateTime?             @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime?             @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  lastActiveAt         DateTime?             @map("last_active_at") @db.Timestamptz(6)
+  deletedAt            DateTime?             @map("deleted_at") @db.Timestamptz(6)
+  apiKeys              ApiKey[]              @relation("UserApiKeys")
+  auditLogs            AuditLog[]            @relation("UserAuditLogs")
+  exportRequests       DataExportRequest[]   @relation("UserExportRequests")
+  memories             Memory[]              @relation("UserMemories")
+  platformIntegrations PlatformIntegration[] @relation("UserPlatformIntegrations")
+  sessions             Session[]             @relation("UserSessions")
+  syncLogs             SyncLog[]             @relation("UserSyncLogs")
+  organizations        UserOrganization[]    @relation("UserOrganizations")
+  pageIndexNodes       PageIndexNode[]       @relation("UserPageIndexNodes")
+
+  @@map("users")
+}
+
+/// Multi-tenant organizations with EU data residency settings
+/// Supports GDPR, NIS2, DORA compliance flags
+model Organization {
+  id                  String             @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
+  zitadelOrgId        String             @unique @map("zitadel_org_id") @db.VarChar(255)
+  name                String             @db.VarChar(255)
+  slug                String             @unique @db.VarChar(100)
+  dataResidencyRegion String?            @default("eu-central") @map("data_residency_region") @db.VarChar(50)
+  complianceFlags     String[]           @default(["GDPR", "NIS2", "DORA"]) @map("compliance_flags")
+  hsmProvider         String?            @default("ovhcloud") @map("hsm_provider") @db.VarChar(50)
+  hsmKeyArn           String?            @map("hsm_key_arn") @db.VarChar(255)
+  createdAt           DateTime?          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime?          @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  plan                String?            @default("free") @map("plan") @db.VarChar(50)
+  apiKeys             ApiKey[]           @relation("OrgApiKeys")
+  auditLogs           AuditLog[]         @relation("OrgAuditLogs")
+  memories            Memory[]           @relation("OrgMemories")
+  invites             OrgInvite[]
+  projects            Project[]
+  users               UserOrganization[] @relation("OrgUserOrganizations")
+  pageIndexNodes      PageIndexNode[]    @relation("OrgPageIndexNodes")
+
+  @@map("organizations")
+}
+
+/// Junction table for user-organization many-to-many relationship
+model UserOrganization {
+  userId    String       @map("user_id") @db.Uuid
+  orgId     String       @map("org_id") @db.Uuid
+  role      String       @default("member") @db.VarChar(50)
+  invitedAt DateTime?    @default(now()) @map("invited_at") @db.Timestamptz(6)
+  joinedAt  DateTime?    @map("joined_at") @db.Timestamptz(6)
+  org       Organization @relation("OrgUserOrganizations", fields: [orgId], references: [id], onDelete: Cascade)
+  user      User         @relation("UserOrganizations", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, orgId])
+  @@index([userId])
+  @@index([orgId])
+  @@map("user_organizations")
+}
+
+model OrgInvite {
+  id        String       @id @default(uuid()) @db.Uuid
+  orgId     String       @map("org_id") @db.Uuid
+  email     String?
+  role      String       @default("member")
+  token     String       @unique
+  expiresAt DateTime     @map("expires_at") @db.Timestamptz(6)
+  usedAt    DateTime?    @map("used_at") @db.Timestamptz(6)
+  usedBy    String?      @map("used_by") @db.Uuid
+  createdBy String       @map("created_by") @db.Uuid
+  createdAt DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  org       Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@index([orgId])
+  @@index([email])
+  @@index([expiresAt])
+  @@map("org_invites")
+}
+
+model Project {
+  id          String       @id @default(uuid()) @db.Uuid
+  orgId       String       @map("org_id") @db.Uuid
+  name        String
+  slug        String
+  description String?
+  createdBy   String       @map("created_by") @db.Uuid
+  createdAt   DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  org         Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, slug])
+  @@index([orgId])
+  @@map("projects")
+}
+
+/// Cross-platform authentication with AI platforms (ChatGPT, Claude, etc.)
+/// Encrypted tokens using HYOK pattern for EU sovereignty
+model PlatformIntegration {
+  id                     String    @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
+  userId                 String    @map("user_id") @db.Uuid
+  platformType           String    @map("platform_type") @db.VarChar(50)
+  platformUserId         String?   @map("platform_user_id") @db.VarChar(255)
+  platformDisplayName    String?   @map("platform_display_name") @db.VarChar(255)
+  authType               String    @map("auth_type") @db.VarChar(50)
+  accessTokenEncrypted   String?   @map("access_token_encrypted")
+  refreshTokenEncrypted  String?   @map("refresh_token_encrypted")
+  tokenExpiresAt         DateTime? @map("token_expires_at") @db.Timestamptz(6)
+  apiKeyHash             String?   @map("api_key_hash") @db.VarChar(255)
+  webhookSecretEncrypted String?   @map("webhook_secret_encrypted")
+  oauthScopes            String[]  @map("oauth_scopes")
+  oauthGrantedAt         DateTime? @map("oauth_granted_at") @db.Timestamptz(6)
+  oauthLastRefreshed     DateTime? @map("oauth_last_refreshed") @db.Timestamptz(6)
+  isActive               Boolean?  @default(true) @map("is_active")
+  lastSyncedAt           DateTime? @map("last_synced_at") @db.Timestamptz(6)
+  syncStatus             String?   @default("idle") @map("sync_status") @db.VarChar(50)
+  lastErrorMessage       String?   @map("last_error_message")
+  lastErrorAt            DateTime? @map("last_error_at") @db.Timestamptz(6)
+  consecutiveFailures    Int?      @default(0) @map("consecutive_failures")
+  createdAt              DateTime? @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt              DateTime? @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  connectorMetadata      Json      @default("{}") @map("connector_metadata")
+  targetScope            String    @default("personal") @map("target_scope")
+  user                   User      @relation("UserPlatformIntegrations", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, platformType])
+  @@index([userId])
+  @@index([platformType])
+  @@index([isActive, syncStatus])
+  @@map("platform_integrations")
+}
+
+/// Core memory storage with triple-operator versioning (Updates, Extends, Derives)
+/// Supports cognitive scoring for spaced repetition and Ebbinghaus forgetting curve
+/// This model contains an expression index which requires additional setup for migrations. Visit https://pris.ly/d/expression-indexes for more info.
+model Memory {
+  id                                                          String              @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
+  userId                                                      String              @map("user_id") @db.Uuid
+  orgId                                                       String?             @map("org_id") @db.Uuid
+  content                                                     String
+  memoryType                                                  MemoryType?         @default(fact) @map("memory_type")
+  title                                                       String?             @db.VarChar(500)
+  tags                                                        String[]
+  sourcePlatform                                              String?             @map("source_platform") @db.VarChar(50)
+  sourceSessionId                                             String?             @map("source_session_id") @db.VarChar(255)
+  sourceMessageId                                             String?             @map("source_message_id") @db.VarChar(255)
+  sourceUrl                                                   String?             @map("source_url")
+  isLatest                                                    Boolean?            @default(true) @map("is_latest")
+  supersedesId                                                String?             @map("supersedes_id") @db.Uuid
+  strength                                                    Float?              @default(1.0) @db.Real
+  recallCount                                                 Int?                @default(0) @map("recall_count")
+  importanceScore                                             Float?              @default(0.5) @map("importance_score") @db.Real
+  lastConfirmedAt                                             DateTime?           @default(now()) @map("last_confirmed_at") @db.Timestamptz(6)
+  documentDate                                                DateTime?           @map("document_date") @db.Timestamptz(6)
+  eventDates                                                  DateTime[]          @map("event_dates") @db.Timestamptz
+  visibility                                                  VisibilityScope?    @default(private)
+  sharedWithOrgs                                              String[]            @map("shared_with_orgs") @db.Uuid
+  embeddingModel                                              String?             @default("mistral-embed") @map("embedding_model") @db.VarChar(100)
+  embeddingDimension                                          Int?                @default(1024) @map("embedding_dimension")
+  embeddingVersion                                            Int?                @default(1) @map("embedding_version")
+  processingBasis                                             String?             @default("consent") @map("processing_basis") @db.VarChar(100)
+  retentionUntil                                              DateTime?           @map("retention_until") @db.Timestamptz(6)
+  exportBlocked                                               Boolean?            @default(false) @map("export_blocked")
+  createdAt                                                   DateTime?           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                                                   DateTime?           @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt                                                   DateTime?           @map("deleted_at") @db.Timestamptz(6)
+  project                                                     String?             @map("project")
+  version                                                     Int                 @default(1)
+  auditLogs                                                   AuditLog[]          @relation("MemoryAuditLogs")
+  codeMetadata                                                CodeMemoryMetadata?
+  derivationSources                                           DerivationJob[]     @relation("DerivationSourceMemory")
+  derivationTargets                                           DerivationJob[]     @relation("DerivationTargetMemory")
+  organization                                                Organization?       @relation("OrgMemories", fields: [orgId], references: [id], onDelete: Cascade)
+  supersedes                                                  Memory?             @relation("MemorySupersedes", fields: [supersedesId], references: [id], onDelete: Cascade)
+  supersededBy                                                Memory[]            @relation("MemorySupersedes")
+  user                                                        User                @relation("UserMemories", fields: [userId], references: [id], onDelete: Cascade)
+  versions                                                    MemoryVersion[]
+  memory_versions_memory_versions_related_memory_idTomemories MemoryVersion[]     @relation("memory_versions_related_memory_idTomemories")
+  relationshipsFrom                                           Relationship[]      @relation("RelationshipFromMemory")
+  relationshipsTo                                             Relationship[]      @relation("RelationshipToMemory")
+  sourceMetadata                                              SourceMetadata?
+  vectorEmbedding                                             VectorEmbedding?    @relation("MemoryVectorEmbedding")
+
+  @@index([userId])
+  @@index([orgId])
+  @@index([project])
+  @@index([memoryType])
+  @@index([sourcePlatform])
+  @@index([documentDate(sort: Desc)])
+  @@index([strength(sort: Desc)])
+  @@index([tags], type: Gin)
+  @@index([version])
+  @@map("memories")
+}
+
+/// Persisted version history for state transitions and temporal audits
+model MemoryVersion {
+  id                                                   String    @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
+  memoryId                                             String    @map("memory_id") @db.Uuid
+  contentHash                                          String    @map("content_hash") @db.VarChar(64)
+  version                                              Int       @default(1)
+  isLatest                                             Boolean   @default(false) @map("is_latest")
+  reason                                               String    @db.VarChar(50)
+  metadata                                             Json?     @default("{}")
+  createdAt                                            DateTime? @default(now()) @map("created_at") @db.Timestamptz(6)
+  relatedMemoryId                                      String?   @map("related_memory_id") @db.Uuid
+  memory                                               Memory    @relation(fields: [memoryId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  memories_memory_versions_related_memory_idTomemories Memory?   @relation("memory_versions_related_memory_idTomemories", fields: [relatedMemoryId], references: [id], onUpdate: NoAction)
+
+  @@index([createdAt], map: "idx_memory_versions_created")
+  @@index([isLatest], map: "idx_memory_versions_is_latest")
+  @@index([memoryId], map: "idx_memory_versions_memory")
+  @@index([memoryId, createdAt(sort: Desc)], map: "idx_memory_versions_memory_created")
+  @@index([memoryId, isLatest], map: "idx_memory_versions_memory_latest")
+  @@index([reason], map: "idx_memory_versions_reason")
+  @@index([relatedMemoryId], map: "idx_memory_versions_related_memory")
+  @@index([version], map: "idx_memory_versions_version")
+  @@map("memory_versions")
+}
+
+/// Normalized source provenance for any memory ingest
+model SourceMetadata {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
+  memoryId        String   @unique @map("memory_id") @db.Uuid
+  sourceType      String   @map("source_type")
+  sourceId        String?  @map("source_id")
+  sourcePlatform  String?  @map("source_platform")
+  sourceUrl       String?  @map("source_url")
+  threadId        String?  @map("thread_id")
+  parentMessageId String?  @map("parent_message_id")
+  ingestedAt      DateTime @default(now()) @map("ingested_at") @db.Timestamptz(6)
+  metadata        Json     @default("{}")
+  memory          Memory   @relation(fields: [memoryId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([sourcePlatform], map: "idx_source_metadata_platform")
+  @@index([sourceType, sourceId], map: "idx_source_metadata_type_id")
+  @@map("source_metadata")
+}
+
+/// AST and scope metadata for code memories
+model CodeMemoryMetadata {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
+  memoryId     String   @unique @map("memory_id") @db.Uuid
+  filepath     String
+  language     String
+  entityType   String?  @map("entity_type")
+  entityName   String?  @map("entity_name")
+  startLine    Int?     @map("start_line")
+  endLine      Int?     @map("end_line")
+  scopeChain   String[] @default([]) @map("scope_chain")
+  signatures   String[] @default([])
+  imports      String[] @default([])
+  dependencies String[] @default([])
+  nwsCount     Int      @default(0) @map("nws_count")
+  metadata     Json     @default("{}")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  memory       Memory   @relation(fields: [memoryId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([filepath], map: "idx_code_memory_metadata_filepath")
+  @@index([language], map: "idx_code_memory_metadata_language")
+  @@map("code_memory_metadata")
+}
+
+/// Async queue for deferred DERIVES evaluation
+model DerivationJob {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
+  sourceMemoryId String    @map("source_memory_id") @db.Uuid
+  targetMemoryId String    @map("target_memory_id") @db.Uuid
+  confidence     Float
+  status         String    @default("queued")
+  metadata       Json      @default("{}")
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  processedAt    DateTime? @map("processed_at") @db.Timestamptz(6)
+  sourceMemory   Memory    @relation("DerivationSourceMemory", fields: [sourceMemoryId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  targetMemory   Memory    @relation("DerivationTargetMemory", fields: [targetMemoryId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([sourceMemoryId], map: "idx_derivation_jobs_source")
+  @@index([status, createdAt], map: "idx_derivation_jobs_status_created")
+  @@index([targetMemoryId], map: "idx_derivation_jobs_target")
+  @@map("derivation_jobs")
+}
+
+/// Graph edges between memories (Updates, Extends, Derives)
+/// Enables complex relationship traversal via Apache AGE
+model Relationship {
+  id                  String           @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
+  fromId              String           @map("from_id") @db.Uuid
+  toId                String           @map("to_id") @db.Uuid
+  type                RelationshipType
+  confidence          Float?           @default(1.0) @db.Real
+  inferenceModel      String?          @map("inference_model") @db.VarChar(100)
+  inferencePromptHash String?          @map("inference_prompt_hash") @db.VarChar(64)
+  metadata            Json?            @default("{}")
+  createdBy           String?          @default("system") @map("created_by") @db.VarChar(50)
+  createdAt           DateTime?        @default(now()) @map("created_at") @db.Timestamptz(6)
+  fromMemory          Memory           @relation("RelationshipFromMemory", fields: [fromId], references: [id], onDelete: Cascade)
+  toMemory            Memory           @relation("RelationshipToMemory", fields: [toId], references: [id], onDelete: Cascade)
+
+  @@unique([fromId, toId, type])
+  @@index([fromId])
+  @@index([toId])
+  @@index([type])
+  @@index([fromId, type])
+  @@index([toId, type])
+  @@map("relationships")
+}
+
+/// Tracks synchronization between PostgreSQL and Qdrant vector database
+/// Ensures consistency for hybrid search (vector + keyword)
+model VectorEmbedding {
+  memoryId         String    @id @map("memory_id") @db.Uuid
+  qdrantCollection String    @map("qdrant_collection") @db.VarChar(100)
+  qdrantPointId    String    @map("qdrant_point_id") @db.Uuid
+  embeddingVersion Int?      @default(1) @map("embedding_version")
+  lastReembeddedAt DateTime? @map("last_reembedded_at") @db.Timestamptz(6)
+  syncStatus       String?   @default("synced") @map("sync_status") @db.VarChar(50)
+  lastSyncAttempt  DateTime? @map("last_sync_attempt") @db.Timestamptz(6)
+  syncErrorMessage String?   @map("sync_error_message")
+  createdAt        DateTime? @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime? @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  memory           Memory    @relation("MemoryVectorEmbedding", fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@index([syncStatus, lastSyncAttempt])
+  @@map("vector_embeddings")
+}
+
+/// Tracks user sessions across all AI platforms for context preservation
+/// Supports automatic context injection and compaction
+model Session {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
+  userId              String?   @map("user_id") @db.Uuid
+  platformType        String    @map("platform_type") @db.VarChar(50)
+  platformSessionId   String?   @map("platform_session_id") @db.VarChar(255)
+  title               String?   @db.VarChar(500)
+  messageCount        Int?      @default(0) @map("message_count")
+  tokenCount          Int?      @default(0) @map("token_count")
+  memoriesInjected    String[]  @map("memories_injected") @db.Uuid
+  contextWindowUsed   Int?      @default(0) @map("context_window_used")
+  compactionTriggered Boolean?  @default(false) @map("compaction_triggered")
+  startedAt           DateTime? @default(now()) @map("started_at") @db.Timestamptz(6)
+  lastActivityAt      DateTime? @map("last_activity_at") @db.Timestamptz(6)
+  endedAt             DateTime? @map("ended_at") @db.Timestamptz(6)
+  endReason           String?   @map("end_reason") @db.VarChar(50)
+  autoCapturedCount   Int?      @default(0) @map("auto_captured_count")
+  createdAt           DateTime? @default(now()) @map("created_at") @db.Timestamptz(6)
+  user                User?     @relation("UserSessions", fields: [userId], references: [id], onDelete: Cascade)
+  syncLogs            SyncLog[] @relation("SessionSyncLogs")
+
+  @@index([userId])
+  @@index([platformType])
+  @@map("sessions")
+}
+
+/// NIS2/DORA compliance: track all sync events with 7-year retention
+/// Enables incident reporting and audit trail reconstruction
+model SyncLog {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
+  userId         String?   @map("user_id") @db.Uuid
+  eventType      String    @map("event_type") @db.VarChar(50)
+  sourcePlatform String?   @map("source_platform") @db.VarChar(50)
+  targetPlatform String?   @map("target_platform") @db.VarChar(50)
+  memoryIds      String[]  @map("memory_ids") @db.Uuid
+  sessionId      String?   @map("session_id") @db.Uuid
+  payloadHash    String?   @map("payload_hash") @db.VarChar(64)
+  status         String?   @default("success") @db.VarChar(50)
+  errorMessage   String?   @map("error_message")
+  retryCount     Int?      @default(0) @map("retry_count")
+  startedAt      DateTime? @default(now()) @map("started_at") @db.Timestamptz(6)
+  completedAt    DateTime? @map("completed_at") @db.Timestamptz(6)
+  latencyMs      Int?      @map("latency_ms")
+  session        Session?  @relation("SessionSyncLogs", fields: [sessionId], references: [id])
+  user           User?     @relation("UserSyncLogs", fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([eventType])
+  @@index([startedAt(sort: Desc)])
+  @@map("sync_logs")
+}
+
+/// Comprehensive audit trail for GDPR, NIS2, DORA compliance
+/// 7-year retention for regulatory requirements
+model AuditLog {
+  id              String        @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
+  userId          String?       @map("user_id") @db.Uuid
+  organizationId  String?       @map("organization_id") @db.Uuid
+  eventType       String        @map("event_type") @db.VarChar(100)
+  eventCategory   String?       @map("event_category") @db.VarChar(50)
+  resourceType    String?       @map("resource_type") @db.VarChar(50)
+  resourceId      String?       @map("resource_id") @db.Uuid
+  action          String        @map("action") @db.VarChar(50)
+  oldValue        Json?         @map("old_value")
+  newValue        Json?         @map("new_value")
+  ipAddress       String?       @map("ip_address") @db.Inet
+  userAgent       String?       @map("user_agent")
+  platformType    String?       @map("platform_type") @db.VarChar(50)
+  sessionId       String?       @map("session_id") @db.Uuid
+  processingBasis String?       @map("processing_basis") @db.VarChar(100)
+  legalBasisNote  String?       @map("legal_basis_note")
+  createdAt       DateTime?     @default(now()) @map("created_at") @db.Timestamptz(6)
+  organization    Organization? @relation("OrgAuditLogs", fields: [organizationId], references: [id])
+  memory          Memory?       @relation("MemoryAuditLogs", fields: [resourceId], references: [id])
+  user            User?         @relation("UserAuditLogs", fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([organizationId])
+  @@index([eventType])
+  @@index([createdAt(sort: Desc)])
+  @@index([resourceType, resourceId])
+  @@index([action])
+  @@map("audit_logs")
+}
+
+/// GDPR right to portability and erasure requests
+/// Supports JSON, CSV, Parquet export formats
+model DataExportRequest {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
+  userId        String    @map("user_id") @db.Uuid
+  request_type  String    @db.VarChar(50)
+  status        String?   @default("pending") @db.VarChar(50)
+  export_format String?   @default("json") @db.VarChar(20)
+  exportUrl     String?   @map("export_url")
+  requestedAt   DateTime? @default(now()) @map("requested_at") @db.Timestamptz(6)
+  completedAt   DateTime? @map("completed_at") @db.Timestamptz(6)
+  errorMessage  String?   @map("error_message")
+  user          User      @relation("UserExportRequests", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([status])
+  @@map("data_export_requests")
+}
+
+/// API keys for server-to-server authentication with lifecycle management
+/// GDPR, NIS2, DORA compliant with audit logging and rate limiting
+model ApiKey {
+  id                 String        @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
+  userId             String        @map("user_id") @db.Uuid
+  orgId              String?       @map("org_id") @db.Uuid
+  name               String        @map("name") @db.VarChar(255)
+  keyHash            String        @unique @map("key_hash") @db.VarChar(255)
+  keyPrefix          String        @map("key_prefix") @db.VarChar(20)
+  expiresAt          DateTime?     @map("expires_at") @db.Timestamptz(6)
+  revokedAt          DateTime?     @map("revoked_at") @db.Timestamptz(6)
+  revokedReason      String?       @map("revoked_reason") @db.VarChar(255)
+  lastUsedAt         DateTime?     @map("last_used_at") @db.Timestamptz(6)
+  usageCount         Int?          @default(0) @map("usage_count")
+  scopes             String[]      @default(["read", "write"])
+  rateLimitPerMinute Int?          @default(60) @map("rate_limit_per_minute")
+  description        String?
+  createdByIp        String?       @map("created_by_ip") @db.Inet
+  userAgent          String?       @map("user_agent")
+  createdAt          DateTime?     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime?     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  organization       Organization? @relation("OrgApiKeys", fields: [orgId], references: [id], onUpdate: NoAction)
+  user               User          @relation("UserApiKeys", fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([expiresAt], map: "idx_api_keys_expires_at")
+  @@index([keyHash], map: "idx_api_keys_key_hash")
+  @@index([keyPrefix], map: "idx_api_keys_key_prefix")
+  @@index([orgId], map: "idx_api_keys_org")
+  @@index([userId], map: "idx_api_keys_user")
+  @@map("api_keys")
+}
+
+/// Registered agents with role, model version, and skill manifest
+model OpAgent {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  agent_id      String    @unique
+  role          String
+  model_version String
+  skills        Json      @default("[]")
+  status        String    @default("active")
+  created_at    DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at    DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
+  source        String    @default("implicit")
+  last_seen_at  DateTime? @db.Timestamptz(6)
+
+  @@map("op_agents")
+}
+
+/// Goals assigned to agents, supporting hierarchical decomposition
+model OpGoal {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  goal_text      String
+  context        Json     @default("{}")
+  priority       Int      @default(0)
+  agent_id       String
+  parent_goal_id String?
+  status         String   @default("open")
+  created_at     DateTime @default(now()) @db.Timestamptz(6)
+  updated_at     DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  @@map("op_goals")
+}
+
+/// Executable trails: weighted plans attached to a goal, with decay and confidence
+model OpTrail {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  goal_id             String
+  agent_id            String
+  status              String    @default("active")
+  next_action         Json?
+  steps               Json      @default("[]")
+  execution_event_ids Json      @default("[]")
+  success_score       Float     @default(0)
+  confidence          Float     @default(0)
+  weight              Float     @default(0.5)
+  decay_rate          Float     @default(0.05)
+  tags                Json      @default("[]")
+  created_at          DateTime  @default(now()) @db.Timestamptz(6)
+  last_executed_at    DateTime? @db.Timestamptz(6)
+  updated_at          DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
+  kind                String    @default("raw")
+  blueprint_meta      Json?
+
+  @@index([goal_id])
+  @@index([agent_id])
+  @@index([weight])
+  @@index([status])
+  @@index([kind])
+  @@map("op_trails")
+}
+
+/// Immutable execution events recording each step outcome
+model OpExecutionEvent {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  trail_id           String
+  agent_id           String
+  step_index         Int
+  action_name        String
+  bound_params       Json     @default("{}")
+  result             Json?
+  error              String?
+  latency_ms         Int
+  success            Boolean
+  tokens_used        Int?
+  estimated_cost_usd Float?
+  routing            Json?
+  timestamp          DateTime @default(now()) @db.Timestamptz(6)
+  created_at         DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([trail_id])
+  @@index([agent_id])
+  @@index([created_at])
+  @@map("op_execution_events")
+}
+
+/// Distributed lease for exclusive trail execution (prevents double-work)
+model OpTrailLease {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  trail_id     String   @unique
+  agent_id     String
+  acquired_at  DateTime @default(now()) @db.Timestamptz(6)
+  expires_at   DateTime @db.Timestamptz(6)
+  heartbeat_at DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([expires_at])
+  @@map("op_trail_leases")
+}
+
+/// Agent observations: sensory inputs, inferences, environment signals
+model OpObservation {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  agent_id         String
+  kind             String
+  content          Json
+  certainty        Float    @default(0.5)
+  source_event_id  String?
+  related_to_trail String?
+  timestamp        DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([agent_id])
+  @@map("op_observations")
+}
+
+/// Post-execution evaluations by meta-evaluator agents
+model MetaEvaluation {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  trail_id          String
+  evaluator_id      String
+  correctness_score Float
+  efficiency_score  Float
+  reasoning         String
+  confidence        Float
+  timestamp         DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([trail_id])
+  @@map("meta_evaluations")
+}
+
+/// Materialized composite weight for each trail (precomputed for routing)
+model MetaTrailWeight {
+  trail_id      String   @id
+  weight        Float
+  components    Json
+  updated_at    DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+  next_decay_at DateTime @db.Timestamptz(6)
+
+  @@map("meta_trail_weights")
+}
+
+/// Per-agent reputation scores for trust-weighted routing
+model MetaReputation {
+  agent_id        String   @id
+  success_rate    Float    @default(0)
+  avg_confidence  Float    @default(0)
+  skill_scores    Json     @default("{}")
+  recent_attempts Int      @default(0)
+  updated_at      DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  @@map("meta_reputation")
+}
+
+/// Candidates for observation-to-memory promotion (gated pipeline)
+model MetaPromotionCandidate {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  source_event_id   String
+  trail_id          String
+  promotion_rule_id String
+  observations      Json      @default("[]")
+  confidence        Float
+  status            String    @default("pending")
+  dedupe_key        String    @unique
+  created_at        DateTime  @default(now()) @db.Timestamptz(6)
+  decided_at        DateTime? @db.Timestamptz(6)
+
+  @@index([status])
+  @@index([created_at])
+  @@map("meta_promotion_candidates")
+}
+
+/// Centralized runtime configuration parameters with audit trail
+model MetaParameter {
+  key            String   @id
+  value          Json
+  updated_at     DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+  updated_by     String   @default("system")
+  previous_value Json?
+
+  @@map("meta_parameters")
+}
+
+/// Configurable decay schedules for trails and observations
+model MetaDecaySchedule {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  target_type    String
+  half_life_days Int
+  min_weight     Float
+  applies_to     Json
+  created_at     DateTime @default(now()) @db.Timestamptz(6)
+
+  @@map("meta_decay_schedules")
+}
+
+/// Persistent user profile facts — durable context layer
+/// Separates standing user knowledge from episodic memory search
+model UserProfile {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
+  userId          String    @map("user_id") @db.Uuid
+  orgId           String?   @map("org_id") @db.Uuid
+  category        String    @default("static")
+  key             String
+  value           String
+  confidence      Float     @default(1.0)
+  sourceMemoryId  String?   @map("source_memory_id") @db.Uuid
+  confirmedCount  Int       @default(1) @map("confirmed_count")
+  lastConfirmedAt DateTime  @default(now()) @map("last_confirmed_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at")
+  deletedAt       DateTime? @map("deleted_at")
+
+  @@unique([userId, key])
+  @@index([userId])
+  @@index([userId, category])
+  @@map("user_profiles")
+}
+
+model OrgUsage {
+  id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId                String   @db.Uuid
+  month                String   @db.VarChar(7)
+  tokensProcessed      BigInt   @default(0)
+  searchQueries        BigInt   @default(0)
+  knowledgeBaseUploads Int      @default(0)
+  memoriesIngested     Int      @default(0)
+  deepResearchJobs     Int      @default(0)
+  webIntelJobs         Int      @default(0)
+  graphQueries         Int      @default(0)
+  taraUsage            Int      @default(0)
+  connectorCount       Int      @default(0)
+  webIntelDay          DateTime @default(now()) @db.Date
+  updatedAt            DateTime @default(now()) @db.Timestamptz(6)
+
+  @@unique([orgId, month])
+  @@unique([orgId, webIntelDay])
+  @@index([orgId, month], map: "idx_org_usage_org_month")
+  @@index([webIntelDay], map: "idx_org_usage_webIntelDay")
+}
 
 enum MemoryType {
   fact
@@ -43,994 +740,38 @@ enum VisibilityScope {
   public
 }
 
-enum PlatformType {
-  chatgpt
-  claude
-  perplexity
-  gemini
-  gmail
-  other
-}
-
-enum AuditEventCategory {
-  auth
-  data_access
-  data_modification
-  system
-}
-
-enum AuditAction {
-  create
-  read
-  update
-  delete
-  export
-  erase
-}
-
-enum ExportRequestType {
-  export
-  erasure
-  portability
-}
-
-enum ExportStatus {
-  pending
-  processing
-  completed
-  failed
-}
-
-enum ExportFormat {
-  json
-  csv
-  parquet
-}
-
-// ==========================================
-// MULTI-TENANT FOUNDATION MODELS
-// ==========================================
-
-/// User accounts with ZITADEL IAM integration and HYOK encryption keys
-/// GDPR-ready with soft delete (deleted_at) for right to erasure
-model User {
-  id            String  @id @default(uuid()) @map("id") @db.Uuid
-  zitadelUserId String  @unique @map("zitadel_user_id")
-  email         String  @unique
-  displayName   String? @map("display_name")
-  avatarUrl     String? @map("avatar_url") @db.Text
-  timezone      String  @default("UTC")
-  locale        String  @default("en")
-
-  // HYOK encryption keys (user-specific)
-  encryptionKeyId      String @default(uuid()) @map("encryption_key_id") @db.Uuid
-  encryptionKeyVersion Int    @default(1) @map("encryption_key_version")
-
-  // Relations
-  organizations        UserOrganization[]    @relation("UserOrganizations")
-  memories             Memory[]              @relation("UserMemories")
-  platformIntegrations PlatformIntegration[] @relation("UserPlatformIntegrations")
-  sessions             Session[]             @relation("UserSessions")
-  syncLogs             SyncLog[]             @relation("UserSyncLogs")
-  auditLogs            AuditLog[]            @relation("UserAuditLogs")
-  exportRequests       DataExportRequest[]   @relation("UserExportRequests")
-  apiKeys              ApiKey[]              @relation("UserApiKeys")
-  pageIndexNodes       PageIndexNode[]       @relation("UserPageIndexNodes")
-
-  // Timestamps
-  createdAt    DateTime  @default(now()) @map("created_at")
-  updatedAt    DateTime  @updatedAt @map("updated_at")
-  lastActiveAt DateTime? @map("last_active_at")
-  deletedAt    DateTime? @map("deleted_at")
-
-  @@map("users")
-}
-
-/// Multi-tenant organizations with EU data residency settings
-/// Supports GDPR, NIS2, DORA compliance flags
-model Organization {
-  id           String @id @default(uuid()) @map("id") @db.Uuid
-  zitadelOrgId String @unique @map("zitadel_org_id")
-  name         String
-  slug         String @unique
-
-  // Compliance
-  dataResidencyRegion String   @default("eu-central") @map("data_residency_region")
-  complianceFlags     String[] @default(["GDPR", "NIS2", "DORA"]) @map("compliance_flags")
-
-  // HYOK configuration
-  hsmProvider String  @default("ovhcloud") @map("hsm_provider")
-  hsmKeyArn   String? @map("hsm_key_arn")
-
-  // Billing
-  plan String @default("free") @map("plan")
-
-  // Relations
-  users          UserOrganization[] @relation("OrgUserOrganizations")
-  memories       Memory[]           @relation("OrgMemories")
-  auditLogs      AuditLog[]         @relation("OrgAuditLogs")
-  apiKeys        ApiKey[]           @relation("OrgApiKeys")
-  invites        OrgInvite[]
-  projects       Project[]
-  pageIndexNodes PageIndexNode[]    @relation("OrgPageIndexNodes")
-
-  // Timestamps
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
-
-  @@map("organizations")
-}
-
-/// Junction table for user-organization many-to-many relationship
-model UserOrganization {
-  userId    String    @map("user_id") @db.Uuid
-  orgId     String    @map("org_id") @db.Uuid
-  role      String    @default("member")
-  invitedAt DateTime  @default(now()) @map("invited_at")
-  joinedAt  DateTime? @map("joined_at")
-
-  user User         @relation(fields: [userId], references: [id], onDelete: Cascade, name: "UserOrganizations")
-  org  Organization @relation(fields: [orgId], references: [id], onDelete: Cascade, name: "OrgUserOrganizations")
-
-  @@id([userId, orgId])
-  @@index([userId])
-  @@index([orgId])
-  @@map("user_organizations")
-}
-
-model OrgInvite {
-  id        String    @id @default(uuid()) @db.Uuid
-  orgId     String    @map("org_id") @db.Uuid
-  email     String?
-  role      String    @default("member")
-  token     String    @unique
-  expiresAt DateTime  @map("expires_at")
-  usedAt    DateTime? @map("used_at")
-  usedBy    String?   @map("used_by") @db.Uuid
-  createdBy String    @map("created_by") @db.Uuid
-  createdAt DateTime  @default(now()) @map("created_at")
-
-  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
-
-  @@index([orgId])
-  @@index([email])
-  @@index([expiresAt])
-  @@map("org_invites")
-}
-
-model Project {
-  id          String   @id @default(uuid()) @db.Uuid
-  orgId       String   @map("org_id") @db.Uuid
-  name        String
-  slug        String
-  description String?  @db.Text
-  createdBy   String   @map("created_by") @db.Uuid
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
-
-  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
-
-  @@unique([orgId, slug])
-  @@index([orgId])
-  @@map("projects")
-}
-
-// ==========================================
-// PLATFORM INTEGRATIONS
-// OAuth2, API keys, webhooks for AI platforms
-// ==========================================
-
-/// Cross-platform authentication with AI platforms (ChatGPT, Claude, etc.)
-/// Encrypted tokens using HYOK pattern for EU sovereignty
-model PlatformIntegration {
-  id                  String  @id @default(uuid()) @map("id") @db.Uuid
-  userId              String  @map("user_id") @db.Uuid
-  platformType        String  @map("platform_type")
-  targetScope         String  @default("personal") @map("target_scope")
-  platformUserId      String? @map("platform_user_id")
-  platformDisplayName String? @map("platform_display_name")
-  connectorMetadata   Json    @default("{}") @map("connector_metadata")
-
-  // Authentication (encrypted fields)
-  authType               String    @map("auth_type")
-  accessTokenEncrypted   String?   @map("access_token_encrypted") @db.Text
-  refreshTokenEncrypted  String?   @map("refresh_token_encrypted") @db.Text
-  tokenExpiresAt         DateTime? @map("token_expires_at")
-  apiKeyHash             String?   @map("api_key_hash")
-  webhookSecretEncrypted String?   @map("webhook_secret_encrypted") @db.Text
-
-  // OAuth metadata
-  oauthScopes        String[]  @map("oauth_scopes")
-  oauthGrantedAt     DateTime? @map("oauth_granted_at")
-  oauthLastRefreshed DateTime? @map("oauth_last_refreshed")
-
-  // Status tracking
-  isActive     Boolean   @default(true) @map("is_active")
-  lastSyncedAt DateTime? @map("last_synced_at")
-  syncStatus   String    @default("idle") @map("sync_status")
-
-  // Error tracking
-  lastErrorMessage    String?   @map("last_error_message") @db.Text
-  lastErrorAt         DateTime? @map("last_error_at")
-  consecutiveFailures Int       @default(0) @map("consecutive_failures")
-
-  // Relations
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade, name: "UserPlatformIntegrations")
-
-  // Timestamps
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
-
-  @@unique([userId, platformType])
-  @@index([userId])
-  @@index([platformType])
-  @@index([isActive, syncStatus])
-  @@map("platform_integrations")
-}
-
-// ==========================================
-// MEMORIES (Core table)
-// Graph-based memory with versioning and cognitive scoring
-// ==========================================
-
-/// Core memory storage with triple-operator versioning (Updates, Extends, Derives)
-/// Supports cognitive scoring for spaced repetition and Ebbinghaus forgetting curve
-model Memory {
-  id      String  @id @default(uuid()) @map("id") @db.Uuid
-  userId  String  @map("user_id") @db.Uuid
-  orgId   String? @map("org_id") @db.Uuid
-  project String? @map("project")
-
-  // Content
-  content    String
-  memoryType MemoryType @default(fact) @map("memory_type")
-  title      String?
-  tags       String[]
-
-  // Source tracking (cross-platform origin)
-  sourcePlatform  String? @map("source_platform")
-  sourceSessionId String? @map("source_session_id")
-  sourceMessageId String? @map("source_message_id")
-  sourceUrl       String? @map("source_url") @db.Text
-
-  // Triple-operator relationships (versioning)
-  isLatest     Boolean  @default(true) @map("is_latest")
-  supersedesId String?  @map("supersedes_id") @db.Uuid
-  supersedes   Memory?  @relation("MemorySupersedes", fields: [supersedesId], references: [id])
-  supersededBy Memory[] @relation("MemorySupersedes")
-
-  // Cognitive scoring
-  strength        Float    @default(1.0)
-  recallCount     Int      @default(0) @map("recall_count")
-  importanceScore Float    @default(0.5) @map("importance_score")
-  lastConfirmedAt DateTime @default(now()) @map("last_confirmed_at")
-
-  // Temporal grounding
-  documentDate DateTime?  @map("document_date")
-  eventDates   DateTime[] @map("event_dates")
-
-  // Visibility & sharing
-  visibility     VisibilityScope @default(private)
-  sharedWithOrgs String[]        @map("shared_with_orgs") @db.Uuid
-
-  // Vector search metadata
-  embeddingModel     String @default("mistral-embed") @map("embedding_model")
-  embeddingDimension Int    @default(1024) @map("embedding_dimension")
-  embeddingVersion   Int    @default(1) @map("embedding_version")
-
-  // GDPR compliance
-  processingBasis String    @default("consent") @map("processing_basis")
-  retentionUntil  DateTime? @map("retention_until")
-  exportBlocked   Boolean   @default(false) @map("export_blocked")
-
-  // Relations
-  user              User                @relation(fields: [userId], references: [id], onDelete: Cascade, name: "UserMemories")
-  organization      Organization?       @relation(fields: [orgId], references: [id], onDelete: Cascade, name: "OrgMemories")
-  relationshipsFrom Relationship[]      @relation("RelationshipFromMemory")
-  relationshipsTo   Relationship[]      @relation("RelationshipToMemory")
-  vectorEmbedding   VectorEmbedding?    @relation("MemoryVectorEmbedding")
-  auditLogs         AuditLog[]          @relation("MemoryAuditLogs")
-  versions          MemoryVersion[]
-  sourceMetadata    SourceMetadata?
-  codeMetadata      CodeMemoryMetadata?
-  derivationSources DerivationJob[]     @relation("DerivationSourceMemory")
-  derivationTargets DerivationJob[]     @relation("DerivationTargetMemory")
-
-  // Timestamps
-  createdAt DateTime  @default(now()) @map("created_at")
-  updatedAt DateTime  @updatedAt @map("updated_at")
-  deletedAt DateTime? @map("deleted_at")
-
-  @@index([userId])
-  @@index([orgId])
-  @@index([project])
-  @@index([memoryType])
-  @@index([isLatest])
-  @@index([sourcePlatform])
-  @@index([documentDate])
-  @@index([strength])
-  @@index([deletedAt])
-  @@index([tags])
-  @@map("memories")
-}
-
-/// Persisted version history for state transitions and temporal audits
-model MemoryVersion {
-  id              String   @id @default(uuid()) @map("id") @db.Uuid
-  memoryId        String   @map("memory_id") @db.Uuid
-  version         Int      @default(1)
-  contentHash     String   @map("content_hash")
-  isLatest        Boolean  @default(true) @map("is_latest")
-  reason          String
-  relatedMemoryId String?  @map("related_memory_id") @db.Uuid
-  metadata        Json     @default("{}")
-  createdAt       DateTime @default(now()) @map("created_at")
-
-  memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
-
-  @@index([memoryId, createdAt])
-  @@index([memoryId, isLatest])
-  @@map("memory_versions")
-}
-
-/// Normalized source provenance for any memory ingest
-model SourceMetadata {
-  id              String   @id @default(uuid()) @map("id") @db.Uuid
-  memoryId        String   @unique @map("memory_id") @db.Uuid
-  sourceType      String   @map("source_type")
-  sourceId        String?  @map("source_id")
-  sourcePlatform  String?  @map("source_platform")
-  sourceUrl       String?  @map("source_url") @db.Text
-  threadId        String?  @map("thread_id")
-  parentMessageId String?  @map("parent_message_id")
-  ingestedAt      DateTime @default(now()) @map("ingested_at")
-  metadata        Json     @default("{}")
-
-  memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
-
-  @@index([sourceType, sourceId])
-  @@index([sourcePlatform])
-  @@map("source_metadata")
-}
-
-/// AST and scope metadata for code memories
-model CodeMemoryMetadata {
-  id           String   @id @default(uuid()) @map("id") @db.Uuid
-  memoryId     String   @unique @map("memory_id") @db.Uuid
-  filepath     String
-  language     String
-  entityType   String?  @map("entity_type")
-  entityName   String?  @map("entity_name")
-  startLine    Int?     @map("start_line")
-  endLine      Int?     @map("end_line")
-  scopeChain   String[] @default([]) @map("scope_chain")
-  signatures   String[] @default([])
-  imports      String[] @default([])
-  dependencies String[] @default([])
-  nwsCount     Int      @default(0) @map("nws_count")
-  metadata     Json     @default("{}")
-  createdAt    DateTime @default(now()) @map("created_at")
-
-  memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
-
-  @@index([filepath])
-  @@index([language])
-  @@map("code_memory_metadata")
-}
-
-/// Async queue for deferred DERIVES evaluation
-model DerivationJob {
-  id             String    @id @default(uuid()) @map("id") @db.Uuid
-  sourceMemoryId String    @map("source_memory_id") @db.Uuid
-  targetMemoryId String    @map("target_memory_id") @db.Uuid
-  confidence     Float
-  status         String    @default("queued")
-  metadata       Json      @default("{}")
-  createdAt      DateTime  @default(now()) @map("created_at")
-  processedAt    DateTime? @map("processed_at")
-
-  sourceMemory Memory @relation("DerivationSourceMemory", fields: [sourceMemoryId], references: [id], onDelete: Cascade)
-  targetMemory Memory @relation("DerivationTargetMemory", fields: [targetMemoryId], references: [id], onDelete: Cascade)
-
-  @@index([status, createdAt])
-  @@index([sourceMemoryId])
-  @@index([targetMemoryId])
-  @@map("derivation_jobs")
-}
-
-/// Graph edges between memories (Updates, Extends, Derives)
-/// Enables complex relationship traversal via Apache AGE
-model Relationship {
-  id     String           @id @default(uuid()) @map("id") @db.Uuid
-  fromId String           @map("from_id") @db.Uuid
-  toId   String           @map("to_id") @db.Uuid
-  type   RelationshipType
-
-  // Confidence scoring
-  confidence          Float   @default(1.0)
-  inferenceModel      String? @map("inference_model")
-  inferencePromptHash String? @map("inference_prompt_hash")
-
-  // Metadata (flexible JSONB)
-  metadata  Json   @default("{}")
-  createdBy String @default("system") @map("created_by")
-
-  // Relations
-  fromMemory Memory @relation(fields: [fromId], references: [id], onDelete: Cascade, name: "RelationshipFromMemory")
-  toMemory   Memory @relation(fields: [toId], references: [id], onDelete: Cascade, name: "RelationshipToMemory")
-
-  // Timestamps
-  createdAt DateTime @default(now()) @map("created_at")
-
-  @@unique([fromId, toId, type])
-  @@index([fromId])
-  @@index([toId])
-  @@index([type])
-  @@index([fromId, type])
-  @@index([toId, type])
-  @@map("relationships")
-}
-
-// ==========================================
-// VECTOR EMBEDDINGS
-// Qdrant sync metadata for semantic search
-// ==========================================
-
-/// Tracks synchronization between PostgreSQL and Qdrant vector database
-/// Ensures consistency for hybrid search (vector + keyword)
-model VectorEmbedding {
-  memoryId         String @id @map("memory_id") @db.Uuid
-  qdrantCollection String @map("qdrant_collection")
-  qdrantPointId    String @map("qdrant_point_id") @db.Uuid
-
-  // Versioning for re-embedding
-  embeddingVersion Int       @default(1) @map("embedding_version")
-  lastReembeddedAt DateTime? @map("last_reembedded_at")
-
-  // Sync status tracking
-  syncStatus       String    @default("synced") @map("sync_status")
-  lastSyncAttempt  DateTime? @map("last_sync_attempt")
-  syncErrorMessage String?   @map("sync_error_message")
-
-  // Relations
-  memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade, name: "MemoryVectorEmbedding")
-
-  // Timestamps
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
-
-  @@index([syncStatus, lastSyncAttempt])
-  @@map("vector_embeddings")
-}
-
-// ==========================================
-// SESSIONS
-// Cross-platform session tracking
-// ==========================================
-
-/// Tracks user sessions across all AI platforms for context preservation
-/// Supports automatic context injection and compaction
-model Session {
-  id     String @id @default(uuid()) @map("id") @db.Uuid
-  userId String @map("user_id") @db.Uuid
-
-  // Platform context
-  platformType      String  @map("platform_type")
-  platformSessionId String? @map("platform_session_id")
-
-  // Session metadata
-  title        String?
-  messageCount Int     @default(0) @map("message_count")
-  tokenCount   Int     @default(0) @map("token_count")
-
-  // Context injection tracking
-  memoriesInjected    String[] @map("memories_injected") @db.Uuid
-  contextWindowUsed   Int      @default(0) @map("context_window_used")
-  compactionTriggered Boolean  @default(false) @map("compaction_triggered")
-
-  // Lifecycle
-  startedAt      DateTime  @default(now()) @map("started_at")
-  lastActivityAt DateTime? @map("last_activity_at")
-  endedAt        DateTime? @map("ended_at")
-  endReason      String?   @map("end_reason")
-
-  // Auto-captured decisions/lessons
-  autoCapturedCount Int @default(0) @map("auto_captured_count")
-
-  // Relations
-  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade, name: "UserSessions")
-  syncLogs SyncLog[] @relation("SessionSyncLogs")
-
-  // Timestamps
-  createdAt DateTime @default(now()) @map("created_at")
-
-  @@index([userId])
-  @@index([platformType])
-  @@index([userId, endedAt])
-  @@map("sessions")
-}
-
-// ==========================================
-// SYNC LOGS
-// Audit trail for cross-platform sync (NIS2/DORA)
-// ==========================================
-
-/// NIS2/DORA compliance: track all sync events with 7-year retention
-/// Enables incident reporting and audit trail reconstruction
-model SyncLog {
-  id     String  @id @default(uuid()) @map("id") @db.Uuid
-  userId String? @map("user_id") @db.Uuid
-
-  // Sync event details
-  eventType      String  @map("event_type")
-  sourcePlatform String? @map("source_platform")
-  targetPlatform String? @map("target_platform")
-
-  // Payload reference
-  memoryIds   String[] @map("memory_ids") @db.Uuid
-  sessionId   String?  @map("session_id") @db.Uuid
-  payloadHash String?  @map("payload_hash")
-
-  // Result tracking
-  status       String  @default("success")
-  errorMessage String? @map("error_message") @db.Text
-  retryCount   Int     @default(0) @map("retry_count")
-
-  // Timing
-  startedAt   DateTime  @default(now()) @map("started_at")
-  completedAt DateTime? @map("completed_at")
-  latencyMs   Int?      @map("latency_ms")
-
-  // Relations
-  user    User?    @relation(fields: [userId], references: [id], onDelete: SetNull, name: "UserSyncLogs")
-  session Session? @relation(fields: [sessionId], references: [id], onDelete: SetNull, name: "SessionSyncLogs")
-
-  @@index([userId])
-  @@index([eventType])
-  @@index([startedAt])
-  @@map("sync_logs")
-}
-
-// ==========================================
-// AUDIT LOGS
-// Comprehensive audit trail (NIS2/DORA: 7-year retention)
-// ==========================================
-
-/// Comprehensive audit trail for GDPR, NIS2, DORA compliance
-/// 7-year retention for regulatory requirements
-model AuditLog {
-  id             String  @id @default(uuid()) @map("id") @db.Uuid
-  userId         String? @map("user_id") @db.Uuid
-  organizationId String? @map("organization_id") @db.Uuid
-
-  // Event details
-  eventType     String              @map("event_type")
-  eventCategory AuditEventCategory? @map("event_category")
-  resourceType  String?             @map("resource_type")
-  resourceId    String?             @map("resource_id") @db.Uuid
-
-  // Action details
-  action   AuditAction @map("action")
-  oldValue Json?       @map("old_value")
-  newValue Json?       @map("new_value")
-
-  // Context
-  ipAddress    String? @map("ip_address") @db.Inet
-  userAgent    String? @map("user_agent") @db.Text
-  platformType String? @map("platform_type")
-  sessionId    String? @map("session_id") @db.Uuid
-
-  // Compliance
-  processingBasis String? @map("processing_basis")
-  legalBasisNote  String? @map("legal_basis_note") @db.Text
-
-  // Relations
-  user         User?         @relation(fields: [userId], references: [id], onDelete: SetNull, name: "UserAuditLogs")
-  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull, name: "OrgAuditLogs")
-  memory       Memory?       @relation(fields: [resourceId], references: [id], onDelete: SetNull, name: "MemoryAuditLogs")
-
-  // Timestamps
-  createdAt DateTime @default(now()) @map("created_at")
-
-  @@index([userId])
-  @@index([organizationId])
-  @@index([eventType])
-  @@index([createdAt])
-  @@index([resourceType, resourceId])
-  @@index([action])
-  @@map("audit_logs")
-}
-
-// ==========================================
-// DATA EXPORT/ERASURE (GDPR)
-// ==========================================
-
-/// GDPR right to portability and erasure requests
-/// Supports JSON, CSV, Parquet export formats
-model DataExportRequest {
-  id           String            @id @default(uuid()) @map("id") @db.Uuid
-  userId       String            @map("user_id") @db.Uuid
-  requestType  ExportRequestType
-  status       ExportStatus      @default(pending)
-  exportFormat ExportFormat      @default(json)
-  exportUrl    String?           @map("export_url") @db.Text
-  requestedAt  DateTime          @default(now()) @map("requested_at")
-  completedAt  DateTime?         @map("completed_at")
-  errorMessage String?           @map("error_message") @db.Text
-
-  // Relations
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade, name: "UserExportRequests")
-
-  @@index([userId])
-  @@index([status])
-  @@map("data_export_requests")
-}
-
-// ==========================================
-// API KEYS (Server-to-Server Authentication)
-// Supports expiry, revocation, and last-used tracking
-// ==========================================
-
-/// API keys for server-to-server authentication with lifecycle management
-/// GDPR, NIS2, DORA compliant with audit logging and rate limiting
-model ApiKey {
-  id     String  @id @default(uuid()) @map("id") @db.Uuid
-  userId String  @map("user_id") @db.Uuid
-  orgId  String? @map("org_id") @db.Uuid
-
-  // Key identification
-  name      String @map("name")
-  keyHash   String @unique @map("key_hash")
-  keyPrefix String @map("key_prefix")
-
-  // Key lifecycle
-  expiresAt     DateTime? @map("expires_at")
-  revokedAt     DateTime? @map("revoked_at")
-  revokedReason String?   @map("revoked_reason")
-
-  // Usage tracking
-  lastUsedAt DateTime? @map("last_used_at")
-  usageCount Int       @default(0) @map("usage_count")
-
-  // Permissions & scopes
-  scopes             String[] @default(["read", "write"])
-  rateLimitPerMinute Int      @default(60) @map("rate_limit_per_minute")
-
-  // Metadata
-  description String? @db.Text
-  createdByIp String? @map("created_by_ip") @db.Inet
-  userAgent   String? @map("user_agent") @db.Text
-
-  // Relations
-  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade, name: "UserApiKeys")
-  organization Organization? @relation(fields: [orgId], references: [id], onDelete: SetNull, name: "OrgApiKeys")
-
-  // Timestamps
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
-
-  @@index([userId])
-  @@index([orgId])
-  @@index([keyHash])
-  @@index([keyPrefix])
-  @@index([userId, revokedAt, expiresAt])
-  @@map("api_keys")
-}
-
-// ==========================================
-// ENCRYPTION SCHEMA MODELS
-// HYOK encryption audit trail
-// ==========================================
-
-/// Audit log for encryption operations (HYOK pattern)
-/// Tracks all encrypt/decrypt/key_rotation events
-model EncryptionAuditLog {
-  id         String   @id @default(uuid()) @map("id") @db.Uuid
-  operation  String   @map("operation")
-  keyId      String   @map("key_id") @db.Uuid
-  keyVersion Int      @map("key_version")
-  createdAt  DateTime @default(now()) @map("created_at")
-
-  @@index([keyId])
-  @@index([createdAt])
-  @@map("audit_log")
-}
-
-// ==========================================
-// CUSTOM QUERIES (Prisma Client Extensions)
-// Graph traversal and cognitive scoring
-// ==========================================
-
-// Note: Custom queries are implemented via Prisma Client Extensions
-// Example usage in TypeScript:
-//
-// const prisma = new PrismaClient().$extends({
-//   query: {
-//     memory: {
-//       async findRelevant({ args, query }) {
-//         // Custom query for cognitive scoring with recency bias
-//         return query(args);
-//       }
-//     }
-//   }
-// });
-
-// ==========================================
-// TRAIL EXECUTOR — OPERATIONAL COGNITION (op/*)
-// Agents, goals, trails, execution events, leases, observations
-// ==========================================
-
-/// Registered agents with role, model version, and skill manifest
-model OpAgent {
-  id            String    @id @default(uuid())
-  agent_id      String    @unique
-  role          String
-  model_version String
-  skills        Json      @default("[]")
-  status        String    @default("active") // active, idle, error
-  source        String    @default("implicit") // implicit, explicit
-  last_seen_at  DateTime?
-  created_at    DateTime  @default(now())
-  updated_at    DateTime  @updatedAt
-
-  @@map("op_agents")
-}
-
-/// Goals assigned to agents, supporting hierarchical decomposition
-model OpGoal {
-  id             String   @id @default(uuid())
-  goal_text      String
-  context        Json     @default("{}")
-  priority       Int      @default(0)
-  agent_id       String
-  parent_goal_id String?
-  status         String   @default("open") // open, in_progress, resolved
-  created_at     DateTime @default(now())
-  updated_at     DateTime @updatedAt
-
-  @@map("op_goals")
-}
-
-/// Executable trails: weighted plans attached to a goal, with decay and confidence
-model OpTrail {
-  id                  String    @id @default(uuid())
-  goal_id             String
-  agent_id            String
-  status              String    @default("active") // active, blocked, decayed, archived
-  next_action         Json? // ActionRef: { tool, paramsTemplate, version }
-  steps               Json      @default("[]") // compact summary only
-  execution_event_ids Json      @default("[]")
-  success_score       Float     @default(0)
-  confidence          Float     @default(0)
-  weight              Float     @default(0.5)
-  decay_rate          Float     @default(0.05)
-  tags                Json      @default("[]")
-  kind                String    @default("raw") // raw, blueprint
-  blueprint_meta      Json? // BlueprintMeta object for kind="blueprint"
-  created_at          DateTime  @default(now())
-  last_executed_at    DateTime?
-  updated_at          DateTime  @updatedAt
-
-  @@index([goal_id])
-  @@index([agent_id])
-  @@index([weight])
-  @@index([status])
-  @@index([kind])
-  @@map("op_trails")
-}
-
-/// Immutable execution events recording each step outcome
-model OpExecutionEvent {
-  id                 String   @id @default(uuid())
-  trail_id           String
-  agent_id           String
-  step_index         Int
-  action_name        String
-  bound_params       Json     @default("{}")
-  result             Json?
-  error              String?
-  latency_ms         Int
-  success            Boolean
-  tokens_used        Int?
-  estimated_cost_usd Float?
-  routing            Json? // RoutingDecision: { selectedTrailId, candidateTrailIds, forceVector, temperature, strategy }
-  timestamp          DateTime @default(now())
-  created_at         DateTime @default(now())
-
-  @@index([trail_id])
-  @@index([agent_id])
-  @@index([created_at])
-  @@map("op_execution_events")
-}
-
-/// Distributed lease for exclusive trail execution (prevents double-work)
-model OpTrailLease {
-  id           String   @id @default(uuid())
-  trail_id     String   @unique
-  agent_id     String
-  acquired_at  DateTime @default(now())
-  expires_at   DateTime
-  heartbeat_at DateTime @default(now())
-
-  @@index([trail_id])
-  @@index([expires_at])
-  @@map("op_trail_leases")
-}
-
-/// Agent observations: sensory inputs, inferences, environment signals
-model OpObservation {
-  id               String   @id @default(uuid())
-  agent_id         String
-  kind             String
-  content          Json
-  certainty        Float    @default(0.5)
-  source_event_id  String?
-  related_to_trail String?
-  timestamp        DateTime @default(now())
-
-  @@index([agent_id])
-  @@map("op_observations")
-}
-
-// ==========================================
-// TRAIL EXECUTOR — CONTROL & LEARNING (meta/*)
-// Evaluations, trail weights, reputation, promotions, decay schedules
-// ==========================================
-
-/// Post-execution evaluations by meta-evaluator agents
-model MetaEvaluation {
-  id                String   @id @default(uuid())
-  trail_id          String
-  evaluator_id      String
-  correctness_score Float
-  efficiency_score  Float
-  reasoning         String
-  confidence        Float
-  timestamp         DateTime @default(now())
-
-  @@index([trail_id])
-  @@map("meta_evaluations")
-}
-
-/// Materialized composite weight for each trail (precomputed for routing)
-model MetaTrailWeight {
-  trail_id      String   @id @unique
-  weight        Float
-  components    Json // { base_confidence, failure_penalty, agent_reputation_boost, novelty_discount, downstream_success_factor }
-  updated_at    DateTime @updatedAt
-  next_decay_at DateTime
-
-  @@map("meta_trail_weights")
-}
-
-/// Per-agent reputation scores for trust-weighted routing
-model MetaReputation {
-  agent_id        String   @id @unique
-  success_rate    Float    @default(0)
-  avg_confidence  Float    @default(0)
-  skill_scores    Json     @default("{}")
-  recent_attempts Int      @default(0)
-  updated_at      DateTime @updatedAt
-
-  @@map("meta_reputation")
-}
-
-/// Candidates for observation-to-memory promotion (gated pipeline)
-model MetaPromotionCandidate {
-  id                String    @id @default(uuid())
-  source_event_id   String
-  trail_id          String
-  promotion_rule_id String
-  observations      Json      @default("[]")
-  confidence        Float
-  status            String    @default("pending") // pending, approved, rejected, deferred
-  dedupe_key        String    @unique // idempotency: (source_event_id + promotion_rule_id + target_fact_kind)
-  created_at        DateTime  @default(now())
-  decided_at        DateTime?
-
-  @@index([status])
-  @@index([created_at])
-  @@map("meta_promotion_candidates")
-}
-
-/// Centralized runtime configuration parameters with audit trail
-model MetaParameter {
-  key            String   @id
-  value          Json
-  updated_at     DateTime @default(now()) @updatedAt
-  updated_by     String   @default("system")
-  previous_value Json?
-
-  @@map("meta_parameters")
-}
-
-/// Configurable decay schedules for trails and observations
-model MetaDecaySchedule {
-  id             String   @id @default(uuid())
-  target_type    String // trail, observation
-  half_life_days Int
-  min_weight     Float
-  applies_to     Json // { namespace, kind }
-  created_at     DateTime @default(now())
-
-  @@map("meta_decay_schedules")
-}
-
-/// Persistent user profile facts — durable context layer
-/// Separates standing user knowledge from episodic memory search
-model UserProfile {
-  id     String  @id @default(uuid()) @map("id") @db.Uuid
-  userId String  @map("user_id") @db.Uuid
-  orgId  String? @map("org_id") @db.Uuid
-
-  // Profile fact
-  category       String  @default("static") // "static" | "dynamic" | "preference" | "goal"
-  key            String // e.g. "name", "company", "role", "preferred_language"
-  value          String // e.g. "Amar", "DaVinci AI", "founder"
-  confidence     Float   @default(1.0)
-  sourceMemoryId String? @map("source_memory_id") @db.Uuid
-
-  // Lifecycle
-  confirmedCount  Int      @default(1) @map("confirmed_count") // incremented when re-extracted
-  lastConfirmedAt DateTime @default(now()) @map("last_confirmed_at")
-
-  createdAt DateTime  @default(now()) @map("created_at")
-  updatedAt DateTime  @updatedAt @map("updated_at")
-  deletedAt DateTime? @map("deleted_at")
-
-  @@unique([userId, key])
-  @@index([userId])
-  @@index([userId, category])
-  @@map("user_profiles")
-}
-
-/// Hierarchical memory index (OPTIONAL optimization layer)
-/// Stores memory IDs organized by topic/project — never content duplication
-/// Max depth: 4 levels, auto-pruned if <5 memories after 30 days
+/// PageIndex hierarchical memory index nodes (optional optimization layer)
+/// Stores memory IDs organized by topic/project tree (max 4 levels)
 model PageIndexNode {
-  id     String  @id @default(uuid()) @map("id") @db.Uuid
-  userId String  @map("user_id") @db.Uuid
-  orgId  String? @map("org_id") @db.Uuid
+  id               String       @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
+  userId           String       @map("user_id") @db.Uuid
+  orgId            String?      @map("org_id") @db.Uuid
+  user             User         @relation("UserPageIndexNodes", fields: [userId], references: [id], onDelete: Cascade)
+  org              Organization? @relation("OrgPageIndexNodes", fields: [orgId], references: [id], onDelete: Cascade)
+  parentId         String?      @map("parent_id") @db.Uuid
+  parent           PageIndexNode? @relation("PageIndexHierarchy", fields: [parentId], references: [id])
+  children         PageIndexNode[] @relation("PageIndexHierarchy")
+  label            String
+  path             String       @unique
+  nodeType         String       @default("topic") @map("node_type")
+  depth            Int          @default(1)
+  memoryIds        String[]     @default([]) @map("memory_ids")
+  memoryCount      Int          @default(0) @map("memory_count")
+  summary          String?      @db.Text @map("summary") // LLM-generated summary of memories in this node
+  summaryUpdatedAt DateTime?    @map("summary_updated_at")
+  autoGenerated    Boolean      @default(true) @map("auto_generated")
+  customBranch     Boolean      @default(false) @map("custom_branch")
+  lastPrunedAt     DateTime?    @map("last_pruned_at")
+  crossRefs        String[]     @default([]) @map("cross_refs")
+  cachedChildPaths String[]     @default([]) @map("cached_child_paths")
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime     @default(now()) @updatedAt @map("updated_at")
+  deletedAt        DateTime?    @map("deleted_at")
 
-  // Hierarchy
-  parentId String?         @map("parent_id") @db.Uuid
-  parent   PageIndexNode?  @relation("PageIndexHierarchy", fields: [parentId], references: [id])
-  children PageIndexNode[] @relation("PageIndexHierarchy")
-
-  // Node metadata
-  label    String // Human-readable name (e.g., "DaVinci AI", "Clinical Reasoning")
-  path     String @unique // Full path: "/hivemind/projects/davinci/tech"
-  nodeType String @default("topic") // root, category, topic, subtopic, person
-  depth    Int    @default(1) // 1=root, 2=category, 3=topic, 4=subtopic
-
-  // Memory assignment (IDs only, no content duplication)
-  memoryIds   String[] @default([]) @map("memory_ids") @db.Uuid
-  memoryCount Int      @default(0) @map("memory_count")
-
-  // Auto-evolution metadata
-  autoGenerated Boolean   @default(true) @map("auto_generated")
-  customBranch  Boolean   @default(false) // User-created branch (protected from pruning)
-  lastPrunedAt  DateTime? @map("last_pruned_at")
-
-  // Cross-references (secondary topic tags for discoverability)
-  crossRefs String[] @default([]) @map("cross_refs") // ["/ai-ml/reasoning", "/tara/clinical"]
-
-  // Performance optimization
-  cachedChildPaths String[] @default([]) @map("cached_child_paths") // Precomputed for fast traversal
-
-  // Lifecycle
-  createdAt DateTime  @default(now()) @map("created_at")
-  updatedAt DateTime  @updatedAt @map("updated_at")
-  deletedAt DateTime? @map("deleted_at")
-
-  // Relations
-  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade, name: "UserPageIndexNodes")
-  organization Organization? @relation(fields: [orgId], references: [id], onDelete: Cascade, name: "OrgPageIndexNodes")
-
+  @@unique([userId, path])
   @@index([userId])
   @@index([userId, depth])
-  @@index([path])
   @@index([parentId])
   @@index([nodeType])
-  @@map("page_index_nodes")
+  @@map("PageIndexNode")
 }

@@ -786,7 +786,10 @@ function loadIngestionPipeline() {
     }
 
     const { createIngestionPipeline } = require(candidate);
-    return createIngestionPipeline();
+    return createIngestionPipeline({
+      prisma,
+      logger: console,
+    });
   }
 
   return null;
@@ -3591,6 +3594,63 @@ a{color:#a78bfa}</style></head><body>
             } catch (err) {
               console.error('[research] graph lookup failed:', err.message);
               return jsonResponse(res, { error: 'Failed to retrieve graph' }, 500);
+            }
+          }
+          break;
+
+        // POST /api/research/:sessionId/save-memory — save a source to memory
+        case (pathname.match(/^\/api\/research\/[^/]+\/save-memory$/) || {}).input:
+          if (req.method === 'POST') {
+            const sessionId = pathname.split('/')[3];
+            const session = researchSessions.get(sessionId);
+            if (!session) {
+              return jsonResponse(res, { error: 'Session not found' }, 404);
+            }
+
+            const { sourceId, title, url, tags = [] } = body;
+            if (!url) {
+              return jsonResponse(res, { error: 'url is required' }, 400);
+            }
+
+            try {
+              const projectId = session.result?.projectId || `research/${sessionId.slice(0, 8)}`;
+
+              // Save to memory using ingestion pipeline or direct store
+              const memoryPayload = {
+                user_id: session.userId || userId,
+                org_id: session.orgId || orgId,
+                project: projectId,
+                title: title || url,
+                content: `Web source from deep research: ${url}`,
+                memory_type: 'source',
+                source_type: 'web',
+                metadata: {
+                  url,
+                  sourceId,
+                  researchSession: sessionId,
+                  saved_at: new Date().toISOString(),
+                },
+                tags: [...tags, 'web-search', 'deep-research'],
+              };
+
+              let savedMemory;
+
+              if (ingestionPipeline) {
+                // Use ingestion pipeline
+                const result = await ingestionPipeline.ingest(memoryPayload);
+                savedMemory = result.memories?.[0];
+              } else {
+                // Direct store fallback
+                savedMemory = await persistentMemoryStore.createMemory(memoryPayload);
+              }
+
+              return jsonResponse(res, {
+                success: true,
+                memory: savedMemory,
+              });
+            } catch (err) {
+              console.error('[research] save-memory failed:', err.message);
+              return jsonResponse(res, { error: 'Failed to save to memory' }, 500);
             }
           }
           break;
@@ -7155,23 +7215,44 @@ a{color:#a78bfa}</style></head><body>
               // containerTag → project mapping for search
               const searchProject = project || effectiveContainerTag || null;
 
-              const result = await threeTierRetrieval.quickSearch(query, {
-                userId,
-                orgId,
-                project: searchProject,
-                memoryType: memory_type,
-                tags,
-                sourcePlatform: source_platform,
-                limit: limit || 10,
-                scoreThreshold: score_threshold ?? parseFloat(process.env.HIVEMIND_VECTOR_SCORE_THRESHOLD || '0.15')
-              });
+              // Use PageIndex first if available (complete topic retrieval), then fall back to three-tier
+              if (pageindexSearcher) {
+                const results = await pageindexSearcher.search(query, {
+                  userId,
+                  orgId,
+                  limit: limit || 10,
+                });
 
-              // Record search usage after successful quick search
-              if (planEnforcer && orgId) {
-                planEnforcer.recordUsage(orgId, 'searches', 1);
+                // Record search usage
+                if (planEnforcer && orgId) {
+                  planEnforcer.recordUsage(orgId, 'searches', 1);
+                }
+
+                jsonResponse(res, {
+                  results,
+                  source: 'pageindex-hybrid',
+                  count: results.length,
+                });
+              } else {
+                // Fallback to three-tier quick search
+                const result = await threeTierRetrieval.quickSearch(query, {
+                  userId,
+                  orgId,
+                  project: searchProject,
+                  memoryType: memory_type,
+                  tags,
+                  sourcePlatform: source_platform,
+                  limit: limit || 10,
+                  scoreThreshold: score_threshold ?? parseFloat(process.env.HIVEMIND_VECTOR_SCORE_THRESHOLD || '0.15')
+                });
+
+                // Record search usage after successful quick search
+                if (planEnforcer && orgId) {
+                  planEnforcer.recordUsage(orgId, 'searches', 1);
+                }
+
+                jsonResponse(res, result);
               }
-
-              jsonResponse(res, result);
             } catch (error) {
               console.error('QuickSearch failed:', error);
               return jsonResponse(res, {

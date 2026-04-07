@@ -150,6 +150,11 @@ const { GraphHygieneScanner } = await import('./resident/graph-hygiene-scanner.j
 
 // Deep Research
 const { DeepResearcher } = await import('./deep-research/researcher.js');
+const { BlueprintMiner } = await import('./deep-research/blueprint-miner.js');
+const { TrailStore } = await import('./deep-research/trail-store.js');
+
+// Blueprint Miner instance (lazy init)
+let blueprintMiner = null;
 
 // TARA Voice Agent imports
 const { TaraStreamHandler } = await import('./tara/stream-handler.js');
@@ -715,6 +720,19 @@ const threeTierRetrieval = new ThreeTierRetrieval({
   graphStore: persistentMemoryStore,
   llmClient: groqClient.isAvailable() ? groqClient : null
 });
+
+// Initialize PageIndex Searcher (optional optimization layer)
+let pageindexSearcher = null;
+try {
+  const { PageIndexSearcher } = await import('./search/pageindex-searcher.js');
+  pageindexSearcher = new PageIndexSearcher({
+    prisma: getPrismaClient(),
+    vectorDB: qdrantClient,
+  });
+  console.log('[server] PageIndexSearcher initialized');
+} catch (err) {
+  console.log('[server] PageIndexSearcher not available, using fallback search:', err.message);
+}
 
 // Initialize Retrieval Evaluator
 const retrievalEvaluator = new RetrievalEvaluator({
@@ -3033,6 +3051,43 @@ a{color:#a78bfa}</style></head><body>
 
       // ─── Deep Research dynamic routes (/api/research/:sessionId/...) ────────
       if (pathname.startsWith('/api/research/') && pathname !== '/api/research/start' && pathname !== '/api/research/sessions') {
+        // Check for blueprint routes first
+        if (pathname.startsWith('/api/research/blueprints/')) {
+          // Initialize blueprint miner if needed
+          if (!blueprintMiner) {
+            blueprintMiner = new BlueprintMiner({
+              memoryStore: persistentMemoryStore,
+              prisma,
+            });
+          }
+
+          const parts = pathname.split('/');
+          const blueprintId = parts[4];
+          const action = parts[5];
+
+          if (blueprintId && blueprintId !== 'suggest' && blueprintId !== 'mine') {
+            if (req.method === 'GET' && !action) {
+              const blueprint = await blueprintMiner.getBlueprintById(userId, orgId, blueprintId);
+              if (!blueprint) {
+                return jsonResponse(res, { error: 'Blueprint not found' }, 404);
+              }
+              return jsonResponse(res, { blueprint });
+            }
+
+            if (req.method === 'POST' && action === 'reuse') {
+              const result = await blueprintMiner.incrementReuseCount(userId, orgId, blueprintId);
+              if (!result) {
+                return jsonResponse(res, { error: 'Blueprint not found' }, 404);
+              }
+              return jsonResponse(res, {
+                blueprint: result,
+                message: 'Reuse count incremented',
+              });
+            }
+          }
+        }
+
+        // Existing session routes
         const parts = pathname.split('/');
         const sessionId = parts[3];
         const action = parts[4]; // 'status' or 'report'
@@ -3107,6 +3162,13 @@ a{color:#a78bfa}</style></head><body>
             };
             researchSessions.set(sessionId, session);
 
+            // Create trail store for this session
+            const trailStore = new TrailStore({
+              memoryStore: persistentMemoryStore,
+              userId,
+              orgId,
+            });
+
             // Create a per-session researcher to avoid race conditions
             const researcher = new DeepResearcher({
               memoryStore: persistentMemoryStore,
@@ -3116,6 +3178,7 @@ a{color:#a78bfa}</style></head><body>
               browserRuntime,
               webJobStore,
               onEvent: (event) => { session.events.push(event); },
+              trailStore,
             });
 
             // Run in background (non-blocking)
@@ -3152,6 +3215,222 @@ a{color:#a78bfa}</style></head><body>
             // Most recent first
             sessions.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
             return jsonResponse(res, { sessions });
+          }
+          break;
+
+        // ─── Research Trail Endpoints ──────────────────────────────────────
+        // GET /api/research/:sessionId/trail — get trail for a session
+        case (pathname.match(/^\/api\/research\/[^/]+\/trail$/) || {}).input:
+          if (req.method === 'GET') {
+            const sessionId = pathname.split('/')[3];
+            const session = researchSessions.get(sessionId);
+            if (!session) {
+              return jsonResponse(res, { error: 'Session not found' }, 404);
+            }
+
+            // Try to get trail from session result first
+            if (session.result?.trail) {
+              return jsonResponse(res, {
+                trail: session.result.trail,
+                sessionId,
+                query: session.query,
+                status: session.status,
+              });
+            }
+
+            // Fall back to CSI graph lookup via TrailStore
+            const trailStore = new TrailStore({
+              memoryStore: persistentMemoryStore,
+              userId: session.userId || userId,
+              orgId: session.orgId || orgId,
+            });
+
+            try {
+              // Search for trail memory in CSI
+              const trailMemories = await persistentMemoryStore.searchMemories({
+                query: sessionId,
+                user_id: session.userId || userId,
+                org_id: session.orgId || orgId,
+                tags: ['research-trail'],
+                n_results: 1,
+              });
+
+              if (trailMemories && trailMemories.length > 0) {
+                const trailMemory = trailMemories[0];
+                return jsonResponse(res, {
+                  trail: trailMemory.metadata?.trail || null,
+                  sessionId,
+                  query: session.query,
+                  status: session.status,
+                  fromCSI: true,
+                });
+              }
+
+              return jsonResponse(res, { error: 'Trail not found', status: session.status }, 404);
+            } catch (err) {
+              console.error('[research] trail lookup failed:', err.message);
+              return jsonResponse(res, { error: 'Failed to retrieve trail' }, 500);
+            }
+          }
+          break;
+
+        // GET /api/research/:sessionId/contradictions — get detected contradictions
+        case (pathname.match(/^\/api\/research\/[^/]+\/contradictions$/) || {}).input:
+          if (req.method === 'GET') {
+            const sessionId = pathname.split('/')[3];
+            const session = researchSessions.get(sessionId);
+            if (!session) {
+              return jsonResponse(res, { error: 'Session not found' }, 404);
+            }
+
+            // Search for contradiction memories in CSI
+            try {
+              const contradictionMemories = await persistentMemoryStore.searchMemories({
+                query: sessionId,
+                user_id: session.userId || userId,
+                org_id: session.orgId || orgId,
+                tags: ['research-contradiction'],
+                n_results: 50,
+              });
+
+              const contradictions = (contradictionMemories || []).map(m => ({
+                id: m.id,
+                dimension: m.metadata?.contradictionType?.split('/')?.[1] || m.tags?.find(t => t.startsWith('dimension:'))?.split(':')[1],
+                claimA: m.metadata?.claimA,
+                claimB: m.metadata?.claimB,
+                unresolved: m.metadata?.unresolved ?? true,
+                detectedAt: m.created_at,
+              }));
+
+              return jsonResponse(res, {
+                contradictions,
+                count: contradictions.length,
+                sessionId,
+              });
+            } catch (err) {
+              console.error('[research] contradictions lookup failed:', err.message);
+              return jsonResponse(res, { error: 'Failed to retrieve contradictions' }, 500);
+            }
+          }
+          break;
+
+        // GET /api/research/:sessionId/graph — get research subgraph
+        case (pathname.match(/^\/api\/research\/[^/]+\/graph$/) || {}).input:
+          if (req.method === 'GET') {
+            const sessionId = pathname.split('/')[3];
+            const session = researchSessions.get(sessionId);
+            if (!session) {
+              return jsonResponse(res, { error: 'Session not found' }, 404);
+            }
+
+            try {
+              // Get all memories for this research project
+              const projectId = session.result?.projectId || `research/${sessionId.slice(0, 8)}`;
+              const memories = await persistentMemoryStore.searchMemories({
+                query: '',
+                user_id: session.userId || userId,
+                org_id: session.orgId || orgId,
+                project: projectId,
+                n_results: 100,
+              });
+
+              // Build subgraph with nodes and edges
+              const nodes = (memories || []).map(m => ({
+                id: m.id,
+                type: m.memory_type,
+                title: m.title,
+                tags: m.tags,
+                importance: m.importance_score,
+                createdAt: m.created_at,
+              }));
+
+              // Get relationships between these memories
+              const memoryIds = nodes.map(n => n.id);
+              const relationships = await Promise.all(
+                memoryIds.map(id => persistentMemoryStore.getRelationships(id))
+              );
+              const edges = relationships.flat().map(r => ({
+                id: r.id,
+                from: r.from_id,
+                to: r.to_id,
+                type: r.type,
+                confidence: r.confidence,
+              }));
+
+              return jsonResponse(res, {
+                graph: { nodes, edges },
+                sessionId,
+                projectId,
+                nodeCount: nodes.length,
+                edgeCount: edges.length,
+              });
+            } catch (err) {
+              console.error('[research] graph lookup failed:', err.message);
+              return jsonResponse(res, { error: 'Failed to retrieve graph' }, 500);
+            }
+          }
+          break;
+
+        // ─── Blueprint API Endpoints ─────────────────────────────────────
+        case '/api/research/blueprints':
+          if (req.method === 'GET') {
+            // Initialize blueprint miner if not already done
+            if (!blueprintMiner) {
+              blueprintMiner = new BlueprintMiner({
+                memoryStore: persistentMemoryStore,
+                prisma,
+              });
+            }
+
+            const url = new URL(req.url, `http://${req.headers.host}`);
+            const domain = url.searchParams.get('domain') || null;
+
+            const blueprints = await blueprintMiner.getBlueprints(userId, orgId, domain);
+            return jsonResponse(res, { blueprints, count: blueprints.length });
+          }
+          break;
+
+        case '/api/research/blueprints/suggest':
+          if (req.method === 'GET') {
+            if (!blueprintMiner) {
+              blueprintMiner = new BlueprintMiner({
+                memoryStore: persistentMemoryStore,
+                prisma,
+              });
+            }
+
+            const url = new URL(req.url, `http://${req.headers.host}`);
+            const query = url.searchParams.get('query');
+
+            if (!query || query.length < 5) {
+              return jsonResponse(res, { error: 'query parameter is required (min 5 chars)' }, 400);
+            }
+
+            const suggestions = await blueprintMiner.suggestBlueprints(userId, orgId, query);
+            return jsonResponse(res, { suggestions, count: suggestions.length });
+          }
+          break;
+
+        case '/api/research/blueprints/mine':
+          if (req.method === 'POST') {
+            if (!blueprintMiner) {
+              blueprintMiner = new BlueprintMiner({
+                memoryStore: persistentMemoryStore,
+                prisma,
+              });
+            }
+
+            // Trigger blueprint mining from completed trails
+            const blueprints = await blueprintMiner.mine(userId, orgId, {
+              minConfidence: body.minConfidence || 0.7,
+              limit: body.limit || 10,
+            });
+
+            return jsonResponse(res, {
+              blueprints,
+              count: blueprints.length,
+              message: `Mined ${blueprints.length} blueprints from completed research trails`,
+            });
           }
           break;
 
@@ -6550,8 +6829,108 @@ a{color:#a78bfa}</style></head><body>
           break;
 
         // ==========================================
+        // PageIndex API Endpoints
+        // ==========================================
+
+        case '/api/pageindex/tree':
+          if (req.method === 'GET') {
+            if (!ensurePersistedMemoryOrFail(res, '/api/pageindex/tree')) {
+              return;
+            }
+            try {
+              const depth = parseInt(url.searchParams.get('depth')) || 4;
+              const rootPath = url.searchParams.get('rootPath') || '/hivemind';
+
+              const { PageIndexService } = await import('./services/pageindex-service.js');
+              const pageindexService = new PageIndexService({ prisma });
+              const tree = await pageindexService.getTree(userId, { depth, rootPath });
+
+              jsonResponse(res, { tree: tree || [] });
+            } catch (error) {
+              console.error('PageIndex tree fetch failed:', error);
+              jsonResponse(res, { tree: [] }); // Return empty tree on error
+            }
+          }
+          break;
+
+        case '/api/pageindex/memory/:id/nodes':
+          if (req.method === 'GET') {
+            if (!ensurePersistedMemoryOrFail(res, '/api/pageindex/memory/:id/nodes')) {
+              return;
+            }
+            try {
+              const memoryId = pathname.split('/').pop();
+
+              const { PageIndexService } = await import('./services/pageindex-service.js');
+              const pageindexService = new PageIndexService({ prisma });
+              const nodes = await pageindexService.findNodesForMemory(memoryId);
+
+              jsonResponse(res, { nodes: nodes || [] });
+            } catch (error) {
+              console.error('PageIndex memory nodes fetch failed:', error);
+              jsonResponse(res, { nodes: [] });
+            }
+          }
+          break;
+
+        // ==========================================
         // Three-Tier Retrieval API Endpoints
         // ==========================================
+
+        // ─── PageIndex-Powered Hybrid Search ─────────────────────────────────
+        case '/api/search/pageindex':
+          if (req.method === 'POST') {
+            if (!ensurePersistedMemoryOrFail(res, '/api/search/pageindex')) {
+              return;
+            }
+            try {
+              const { query, limit = 20 } = body;
+
+              if (!query || typeof query !== 'string') {
+                return jsonResponse(res, {
+                  error: 'Validation failed',
+                  message: 'query is required and must be a string'
+                }, 400);
+              }
+
+              // Use PageIndexSearcher if available, else fall back to quick search
+              if (pageindexSearcher) {
+                const results = await pageindexSearcher.search(query, {
+                  userId,
+                  orgId,
+                  limit,
+                });
+
+                // Record search usage
+                if (planEnforcer && orgId) {
+                  planEnforcer.recordUsage(orgId, 'searches', 1);
+                }
+
+                jsonResponse(res, {
+                  results,
+                  source: 'pageindex-hybrid',
+                  count: results.length,
+                });
+              } else {
+                // Fallback to three-tier quick search
+                const result = await threeTierRetrieval.quickSearch(query, {
+                  userId,
+                  orgId,
+                  limit,
+                });
+
+                jsonResponse(res, result);
+              }
+            } catch (error) {
+              console.error('PageIndex search failed:', error);
+              return jsonResponse(res, {
+                error: 'PageIndex search failed',
+                message: error.message,
+                requestId: crypto.randomUUID()
+              }, 500);
+            }
+          }
+          break;
 
         case '/api/search/quick':
           if (req.method === 'POST') {

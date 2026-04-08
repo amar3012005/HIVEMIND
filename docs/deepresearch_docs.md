@@ -503,6 +503,165 @@ MIN_PATTERN_CONFIDENCE = 0.6
 
 ---
 
+## Critical Fixes & Schema Requirements
+
+### MemoryType Enum Values
+
+**Valid values for `memoryType` field:**
+- `fact` - General facts and findings (use for web sources)
+- `preference` - User preferences
+- `decision` - Research trails, decisions made
+- `lesson` - Learned lessons
+- `goal` - Goals and objectives
+- `event` - Events with temporal data
+- `relationship` - Relationships between entities
+
+**⚠️ IMPORTANT:** Do NOT use `source` - this is NOT a valid MemoryType enum value. Use `fact` instead.
+
+### UUID Generation
+
+**Rule:** Use `randomUUID()` from `node:crypto` WITHOUT prefixes.
+
+```javascript
+// ✅ CORRECT
+import { randomUUID } from 'node:crypto';
+const id = randomUUID(); // "550e8400-e29b-41d4-a716-446655440000"
+
+// ❌ WRONG - causes Prisma UUID validation error
+const id = `source-${randomUUID()}`; // "source-550e8400-..."
+```
+
+**Files affected:**
+- `core/src/deep-research/researcher.js` (line 756)
+- `core/src/server.js` (line 3644)
+
+### TrailStore Persistence Pattern
+
+**Problem:** Duplicate ID errors when persisting trails incrementally.
+
+**Solution:** Upsert pattern - create if new, update if exists.
+
+```javascript
+// In TrailStore._persistTrail()
+try {
+  await this.memoryStore.createMemory({ id: trail.id, ... });
+} catch (err) {
+  if (err.message?.includes('Unique constraint') || err.code === 'P2002') {
+    await this.memoryStore.updateMemory(trail.id, { ... });
+  }
+}
+```
+
+### Event Types (Frontend Handling)
+
+**Complete list of event types emitted by DeepResearcher:**
+
+| Event Type | Required Fields | Display |
+|------------|-----------------|---------|
+| `research.started` | `sessionId`, `query`, `projectId` | Sparkles icon |
+| `web.searching` | `query` | Loader + "Searching: {query}" |
+| `web.results` | `query`, `count`, `via` | Check + "{count} results via {via}" |
+| `web.reading` | `url` | Loader + "Reading: {url}" |
+| `web.read_complete` | `url`, `length`, `via` | Book + "Read {length} chars via {via}" |
+| `web.error` | `query`, `error` | Alert + error message |
+| `web` | `taskId`, `step`, `title` | Generic web action |
+| `follow_up` | `taskId`, `step`, `title` | Branch icon + title |
+| `task.reasoning` | `taskId`, `step`, `action`, `thought` | Brain + thought |
+| `task.observation` | `taskId`, `step`, `type`, `title` | Observation note |
+| `task.completed` | `taskId`, `findingCount`, `confidence` | Zap + findings count |
+| `task.failed` | `taskId`, `error` | Error indicator |
+| `research.reflecting` | `sessionId`, `round`, `confidence` | Reflection state |
+| `research.synthesizing` | `sessionId`, `findingCount` | Spinner + "Synthesizing..." |
+| `research.completed` | `sessionId`, `findingCount`, `durationMs` | Check + completion stats |
+| `research.blueprint_suggested` | `blueprintId`, `name`, `relevanceScore` | Blueprint badge |
+| `research.blueprints_mined` | `count` | Mining results |
+| `research.cached` | `sessionId`, `findingCount` | Cache indicator |
+| `research.decomposed` | `sessionId`, `dimensions` | Task decomposition |
+
+**Frontend EventCard Component:** Must handle ALL these types in `getContent()` switch statement.
+
+### API Endpoints Schema
+
+**POST /api/research/start**
+```javascript
+// Request
+{
+  query: string (5-1000 chars),
+  forceRefresh?: boolean
+}
+
+// Response 202
+{
+  session_id: string (UUID),
+  project_id: string (format: "research/{slug}"),
+  status: "started"
+}
+```
+
+**GET /api/research/:sessionId/status**
+```javascript
+// Response
+{
+  status: "running" | "completed" | "failed",
+  query: string,
+  progress: { total: number, completed: number, confidence: number } | null,
+  events: Array<Event>,  // Last 20 events
+  error: string | null
+}
+```
+
+**GET /api/research/:sessionId/report**
+```javascript
+// Response (only when status === "completed")
+{
+  report: string (markdown),
+  findings: Array<{
+    content: string,
+    confidence: number,
+    source: string,
+    sourceUrl: string
+  }>,
+  sources: Array<Source>,
+  gaps: Array<string>,
+  durationMs: number,
+  taskProgress: { confidence: number },
+  fromCache: boolean,
+  projectId: string
+}
+```
+
+### Research Session State Flow
+
+```
+"idle" → handleSubmit() → "running" → polling → "completed" | "failed"
+              ↓                                    ↓
+        POST /api/research/start           GET /api/research/:id/report
+```
+
+**State variables:**
+- `status` - "idle" | "running" | "completed" | "failed"
+- `sessionId` - UUID from start response
+- `projectId` - "research/{query-slug}"
+- `events` - Array of event objects (real-time updates)
+- `report` - Final markdown report
+- `findings` - Structured findings array
+
+### Log Streaming
+
+**Endpoint:** `GET /api/logs?container={hm-core|hm-control}`
+
+**Response:**
+```javascript
+{
+  container: string,
+  logs: Array<string>  // Format: "[timestamp] [TYPE] message"
+}
+```
+
+**Usage:** Real-time log viewer at `/logs` path on core API.
+
+---
+
 ## Error Handling
 
 ### Silent Failure Points

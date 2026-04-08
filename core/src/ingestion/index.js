@@ -1,6 +1,7 @@
 const { createIngestionQueue, ingest, validatePayload } = require('./queue');
 const { IngestionPipelineOrchestrator } = require('./pipeline-orchestrator');
 const { IngestionAuditLogger } = require('./audit-logger');
+const { PageIndexIntegration, setupIngestionEventListener } = require('./pageindex-hook');
 
 function createIngestionPipeline(options = {}) {
   const queueSystem = createIngestionQueue(options.queue || {});
@@ -12,6 +13,14 @@ function createIngestionPipeline(options = {}) {
     summaryModel: options.summaryModel,
     relationshipClassifier: options.relationshipClassifier,
   });
+
+  // Setup PageIndex integration (auto-classification during ingestion)
+  const pageindexHook = new PageIndexIntegration({
+    prisma: options.prisma,
+    logger: options.logger || console,
+  });
+  orchestrator.pageindexHook = pageindexHook;
+  setupIngestionEventListener(orchestrator.eventBus, pageindexHook);
 
   if (queueSystem.mode === 'in-memory') {
     queueSystem.queue.process(async (job) => orchestrator.process(job));

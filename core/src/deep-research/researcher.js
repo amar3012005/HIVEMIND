@@ -286,10 +286,10 @@ export class DeepResearcher {
           result = await this._actSearchMemory(reasoning.query || task.query, userId, orgId, projectId);
           break;
         case 'SEARCH_WEB':
-          result = await this._actSearchWeb(reasoning.query || task.query);
+          result = await this._actSearchWeb(reasoning.query || task.query, userId, orgId, projectId, sessionId, trailStore);
           break;
         case 'READ_URL':
-          result = await this._actReadUrl(reasoning.url);
+          result = await this._actReadUrl(reasoning.url, userId, orgId, projectId, sessionId, trailStore);
           break;
         case 'SYNTHESIZE':
           result = await this._actSynthesize(task.query, findings);
@@ -408,9 +408,12 @@ Rules:
     };
   }
 
-  async _actSearchWeb(query) {
+  async _actSearchWeb(query, userId, orgId, projectId, sessionId, trailStore) {
     const results = await this._webSearch(query);
     if (results.length === 0) return { type: 'web', content: null };
+
+    // Save individual sources to CSI graph (Layer 1: Sources)
+    const savedSources = await this._saveWebSourcesToCSI(results, userId, orgId, projectId, sessionId, trailStore);
 
     const combined = results.slice(0, 5).map(r =>
       `[${r.title || 'Untitled'}](${r.url || ''}): ${(r.snippet || r.summary || r.content || '').slice(0, 300)}`
@@ -423,12 +426,20 @@ Rules:
       source: results[0]?.url || 'web',
       sourceId: results[0]?.url,
       confidence: 0.7,
-      _urls: results.map(r => r.url).filter(Boolean), // pass URLs for potential follow-up
+      _urls: results.map(r => r.url).filter(Boolean),
+      _savedSources: savedSources,  // Track saved source IDs
     };
   }
 
-  async _actReadUrl(url) {
+  async _actReadUrl(url, userId, orgId, projectId, sessionId, trailStore) {
     if (!url) return { type: 'follow_up', content: null };
+
+    // Save the URL as a source
+    const savedSources = await this._saveWebSourcesToCSI(
+      [{ url, title: `Deep read: ${url}`, snippet: '' }],
+      userId, orgId, projectId, sessionId, trailStore
+    );
+
     const content = await this._followUpRead(url);
     if (!content) return { type: 'follow_up', content: null };
 
@@ -439,6 +450,7 @@ Rules:
       source: url,
       sourceId: url,
       confidence: 0.75,
+      _savedSources: savedSources,
     };
   }
 
@@ -722,6 +734,67 @@ Rules:
     } catch {
       // Non-fatal
     }
+  }
+
+  /**
+   * Save web sources as separate graph nodes (Layer 1: Sources).
+   * Called during web search to persist individual URLs before they're combined into findings.
+   * @param {Array} sources - Array of { url, title, snippet } from web search
+   * @param {string} userId
+   * @param {string} orgId
+   * @param {string} projectId
+   * @param {string} sessionId
+   * @param {TrailStore} trailStore
+   */
+  async _saveWebSourcesToCSI(sources, userId, orgId, projectId, sessionId, trailStore) {
+    if (!sources || sources.length === 0) return [];
+
+    const savedSources = [];
+    for (const src of sources.slice(0, 10)) {  // Limit to 10 sources per search
+      if (!src.url) continue;
+
+      const sourceId = `source-${randomUUID()}`;
+      try {
+        await this.memoryStore.createMemory({
+          id: sourceId,
+          user_id: userId,
+          org_id: orgId,
+          project: projectId,
+          content: `${src.title || 'Untitled'}\n\n${src.snippet || src.summary || src.content || ''}`,
+          title: src.title || src.url,
+          memory_type: 'source',
+          tags: ['research-source', 'web-source', `session:${sessionId}`],
+          is_latest: true,
+          importance_score: 0.8,
+          metadata: {
+            source_type: 'web',
+            url: src.url,
+            snippet: src.snippet,
+            research_source: 'tavily',
+            saved_at: new Date().toISOString(),
+          },
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        });
+        savedSources.push({ id: sourceId, url: src.url, title: src.title });
+
+        // Record to trail
+        if (trailStore) {
+          await trailStore.recordStep(sessionId, {
+            stepIndex: -1,
+            agent: 'explorer',
+            action: 'search_web',
+            input: src.url,
+            output: src.title || src.url,
+            confidence: 0.7,
+            rejected: false,
+          });
+        }
+      } catch (err) {
+        console.error('[DeepResearcher] Failed to save source:', err.message);
+      }
+    }
+    return savedSources;
   }
 
   async _saveTrailToCSI(sessionId, query, stack, report, userId, orgId, projectId) {

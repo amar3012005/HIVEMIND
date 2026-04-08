@@ -1,34 +1,20 @@
 #!/usr/bin/env node
 /**
- * PageIndex Backfill Script
+ * PageIndex Backfill Script — Classify existing memories with embeddings
  *
- * Classifies existing memories and populates PageIndex hierarchy.
- * Safe to re-run (idempotent) — uses checkpoint-based resume.
+ * Processes existing memories and assigns them to PageIndex nodes
+ * using embedding similarity.
  *
  * Usage:
  *   node core/scripts/pageindex-backfill.js [--concurrency=10] [--dry-run]
- *
- * Features:
- * - Checkpoint-based resume (survives crashes)
- * - Rate-limited (doesn't overwhelm DB/API)
- * - Dry-run mode (preview without writing)
- * - Progress logging
  */
 
 import { PrismaClient } from '@prisma/client';
 import { PageIndexService } from '../src/services/pageindex-service.js';
 import { PageIndexClassifier } from '../src/services/pageindex-classifier.js';
-import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { join } from 'path';
 
-const CHECKPOINT_FILE = join(process.cwd(), '.pageindex-backfill-checkpoint.json');
-const DEFAULT_CONCURRENCY = 10;
-const BATCH_SIZE = 100;
-const DELAY_BETWEEN_BATCHES_MS = 200;
-
-// Parse arguments
 const args = process.argv.slice(2);
-const concurrency = parseInt(args.find(a => a.startsWith('--concurrency='))?.split('=')[1]) || DEFAULT_CONCURRENCY;
+const concurrency = parseInt(args.find(a => a.startsWith('--concurrency='))?.split('=')[1]) || 10;
 const dryRun = args.includes('--dry-run');
 
 const prisma = new PrismaClient();
@@ -51,34 +37,46 @@ async function main() {
     process.exit(0);
   }
 
-  // Load checkpoint
-  let checkpoint = loadCheckpoint();
-  logger.log(`Resuming from checkpoint: ${checkpoint.lastMemoryId || 'start'}`);
-
-  // Get total count
-  const totalMemories = await prisma.memory.count({
+  // Get memories with embeddings (sample 1000 for backfill)
+  const allMemories = await prisma.memory.findMany({
     where: { deletedAt: null },
+    select: {
+      id: true,
+      embedding: true,
+    },
   });
-  logger.log(`Total memories to process: ${totalMemories}`);
 
+  const memoriesWithEmbeddings = allMemories.filter(m => m.embedding !== null);
+  const totalMemories = memoriesWithEmbeddings.length;
+
+  logger.log(`Found ${totalMemories} memories with embeddings`);
+
+  if (totalMemories === 0) {
+    logger.log('No memories with embeddings found. Nothing to backfill.');
+    process.exit(0);
+  }
+
+  let assigned = 0;
   let processed = 0;
-  let classified = 0;
   let errors = 0;
 
   // Process in batches
-  while (true) {
+  const BATCH_SIZE = 50;
+  let index = 0;
+
+  while (index < totalMemories) {
+    const batchIds = memoriesWithEmbeddings.slice(index, index + BATCH_SIZE).map(m => m.id);
+
     const memories = await prisma.memory.findMany({
-      where: { deletedAt: null },
-      select: { id: true, content: true, title: true, tags: true, userId: true, orgId: true },
-      skip: checkpoint.lastIndex || 0,
-      take: BATCH_SIZE,
-      orderBy: { createdAt: 'asc' },
+      where: { id: { in: batchIds } },
+      select: {
+        id: true, userId: true, orgId: true,
+        content: true, title: true, tags: true,
+        embedding: true, embeddingModel: true,
+      },
     });
 
-    if (memories.length === 0) {
-      logger.log('Backfill complete!');
-      break;
-    }
+    if (memories.length === 0) break;
 
     logger.log(`Processing batch of ${memories.length} memories...`);
 
@@ -86,10 +84,10 @@ async function main() {
     const batchPromises = [];
     for (const memory of memories) {
       batchPromises.push(
-        processMemory(memory, pageindexService, classifier)
+        classifier.classifyAndAssign(memory)
           .then(result => {
             processed++;
-            if (result.success) classified++;
+            if (result.assigned) assigned++;
             else errors++;
           })
           .catch(err => {
@@ -102,120 +100,30 @@ async function main() {
       // Limit concurrency
       if (batchPromises.length >= concurrency) {
         await Promise.all(batchPromises);
-        batchPromises.length = 0; // Clear array
-        await sleep(50); // Small delay between sub-batches
+        batchPromises.length = 0;
       }
     }
 
     // Wait for remaining
     await Promise.all(batchPromises);
 
-    // Update checkpoint
-    checkpoint.lastIndex = (checkpoint.lastIndex || 0) + memories.length;
-    checkpoint.lastMemoryId = memories[memories.length - 1]?.id;
-    checkpoint.processed = processed;
-    checkpoint.classified = classified;
-    checkpoint.errors = errors;
-    saveCheckpoint(checkpoint);
+    logger.log(`Progress: ${processed}/${totalMemories} (${assigned} assigned, ${errors} errors)`);
 
-    logger.log(`Progress: ${processed}/${totalMemories} (${classified} classified, ${errors} errors)`);
+    index += memories.length;
 
-    // Rate limit
-    await sleep(DELAY_BETWEEN_BATCHES_MS);
+    // Small delay between batches
+    await new Promise(resolve => setTimeout(resolve, 100));
   }
 
-  // Clean up checkpoint on success
-  if (existsSync(CHECKPOINT_FILE)) {
-    writeFileSync(CHECKPOINT_FILE, JSON.stringify({ completed: true, completedAt: new Date().toISOString() }));
-  }
-
-  logger.log(`Final: ${processed} processed, ${classified} classified, ${errors} errors`);
+  logger.log(`Backfill complete!`);
+  logger.log(`Final: ${processed} processed, ${assigned} assigned, ${errors} errors`);
 }
 
-async function processMemory(memory, pageindexService, classifier) {
-  // Ensure root node exists
-  await pageindexService.ensureRootNode(memory.userId, memory.orgId);
-
-  // Classify memory
-  const classification = await classifier.classify(memory);
-
-  if (!classification.paths || classification.paths.length === 0) {
-    return { success: false, reason: 'no_classification' };
-  }
-
-  // Create nodes and assign memory
-  const nodeIds = [];
-  for (const path of classification.paths) {
-    // Parse path and create nodes as needed
-    const parts = path.split('/').filter(Boolean);
-    let currentParentId = null;
-    let currentPath = '/hivemind';
-
-    for (const part of parts) {
-      currentPath = `${currentPath}/${part}`;
-
-      // Check if node exists
-      let node = await pageindexService.findNodeByPath(memory.userId, currentPath);
-
-      if (!node) {
-        // Create node
-        node = await pageindexService.createNode({
-          userId: memory.userId,
-          orgId: memory.orgId,
-          parentId: currentParentId,
-          label: capitalize(part),
-          nodeType: parts.indexOf(part) === 0 ? 'category' :
-                    parts.indexOf(part) === parts.length - 1 ? 'subtopic' : 'topic',
-        });
-      }
-
-      if (node) {
-        nodeIds.push(node.id);
-        currentParentId = node.id;
-      }
-    }
-  }
-
-  // Assign memory to all nodes
-  if (nodeIds.length > 0) {
-    const assigned = await pageindexService.assignMemoryToNodes(nodeIds, memory.id);
-    return { success: assigned > 0, assigned };
-  }
-
-  return { success: false, reason: 'no_nodes_created' };
-}
-
-function loadCheckpoint() {
-  if (existsSync(CHECKPOINT_FILE)) {
-    try {
-      return JSON.parse(readFileSync(CHECKPOINT_FILE, 'utf-8'));
-    } catch {
-      return { lastIndex: 0, processed: 0, classified: 0, errors: 0 };
-    }
-  }
-  return { lastIndex: 0, processed: 0, classified: 0, errors: 0 };
-}
-
-function saveCheckpoint(checkpoint) {
-  writeFileSync(CHECKPOINT_FILE, JSON.stringify(checkpoint, null, 2));
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function capitalize(str) {
-  return str.charAt(0).toUpperCase() + str.slice(1);
-}
-
-// Run
 main()
-  .then(() => {
-    logger.log('Backfill finished');
-    process.exit(0);
-  })
   .catch(err => {
-    logger.error(`Backfill failed: ${err.message}`);
-    console.error(err);
+    logger.error(err);
     process.exit(1);
+  })
+  .finally(async () => {
+    await prisma.$disconnect();
   });

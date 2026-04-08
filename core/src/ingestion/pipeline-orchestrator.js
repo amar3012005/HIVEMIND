@@ -151,6 +151,29 @@ class IngestionPipelineOrchestrator {
       relationshipClassifier: this.relationshipClassifier,
     });
 
+    // PageIndex: Auto-classify memories to nodes after indexing
+    if (this.pageindexHook && indexing.memory_ids && indexing.memory_ids.length > 0) {
+      for (let i = 0; i < indexing.memory_ids.length; i++) {
+        const memoryId = indexing.memory_ids[i];
+        const chunk = embedded[i];
+        if (chunk && chunk.embedding) {
+          const memoryForClassification = {
+            id: memoryId,
+            userId: job.data.user_id,
+            orgId: job.data.org_id,
+            content: chunk.content,
+            title: job.data.title || extracted.title,
+            tags: job.data.tags || [],
+            embedding: chunk.embedding,
+            embeddingModel: chunk.embedding_model,
+          };
+          this.pageindexHook.onMemoryIngested(memoryForClassification).catch(err => {
+            this.logger.warn('[pipeline] PageIndex classification failed:', err.message);
+          });
+        }
+      }
+    }
+
     await this.transition(job, STAGES.DONE);
 
     const durationMs = Date.now() - startedAt;

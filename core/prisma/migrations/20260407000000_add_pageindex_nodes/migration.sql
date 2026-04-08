@@ -38,10 +38,10 @@ CREATE INDEX "PageIndexNode_parent_id_idx" ON "PageIndexNode"("parent_id");
 CREATE INDEX "PageIndexNode_node_type_idx" ON "PageIndexNode"("node_type");
 
 -- AddForeignKey
-ALTER TABLE "PageIndexNode" ADD CONSTRAINT "PageIndexNode_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "User"("id") ON DELETE CASCADE DO NOT UPDATE ACTION;
+ALTER TABLE "PageIndexNode" ADD CONSTRAINT "PageIndexNode_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "PageIndexNode" ADD CONSTRAINT "PageIndexNode_org_id_fkey" FOREIGN KEY ("org_id") REFERENCES "Organization"("id") ON DELETE CASCADE DO NOT UPDATE ACTION;
+ALTER TABLE "PageIndexNode" ADD CONSTRAINT "PageIndexNode_org_id_fkey" FOREIGN KEY ("org_id") REFERENCES "organizations"("id") ON DELETE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "PageIndexNode" ADD CONSTRAINT "PageIndexNode_parent_id_fkey" FOREIGN KEY ("parent_id") REFERENCES "PageIndexNode"("id") ON DELETE CASCADE DO NOT UPDATE ACTION;
+ALTER TABLE "PageIndexNode" ADD CONSTRAINT "PageIndexNode_parent_id_fkey" FOREIGN KEY ("parent_id") REFERENCES "PageIndexNode"("id") ON DELETE CASCADE;

@@ -363,6 +363,162 @@ export class PageIndexService {
   }
 
   /**
+   * Get all memory IDs for a node (including children).
+   * @param {string} nodeId - Node ID
+   * @param {boolean} includeChildren - Include child node memories (default: true)
+   * @returns {Promise<{ memoryIds: string[], count: number }>}
+   */
+  async getMemoriesForNode(nodeId, includeChildren = true) {
+    try {
+      const node = await this.prisma.pageIndexNode.findUnique({
+        where: { id: nodeId },
+        select: { memoryIds: true, children: includeChildren ? { select: { id: true, memoryIds: true } } : false },
+      });
+
+      if (!node) return { memoryIds: [], count: 0 };
+
+      // Collect all memory IDs
+      const allMemoryIds = new Set(node.memoryIds || []);
+
+      if (includeChildren && node.children) {
+        for (const child of node.children) {
+          for (const id of child.memoryIds || []) {
+            allMemoryIds.add(id);
+          }
+        }
+      }
+
+      return {
+        memoryIds: Array.from(allMemoryIds),
+        count: allMemoryIds.size,
+      };
+    } catch (err) {
+      this.logger.warn('[PageIndexService] getMemoriesForNode failed:', err.message);
+      return { memoryIds: [], count: 0 };
+    }
+  }
+
+  /**
+   * Generate summary for a node using LLM.
+   * Summarizes all memories in the node.
+   * @param {string} nodeId - Node ID
+   * @returns {Promise<{ success: boolean }>}
+   */
+  async generateNodeSummary(nodeId) {
+    try {
+      const node = await this.prisma.pageIndexNode.findUnique({
+        where: { id: nodeId },
+        select: {
+          id: true,
+          userId: true,
+          label: true,
+          path: true,
+          memoryIds: true,
+          summary: true,
+        },
+      });
+
+      if (!node || node.memoryIds.length === 0) {
+        return { success: false, reason: 'no_memories' };
+      }
+
+      // Fetch memory content (limit to first 10 for context window)
+      const memories = await this.prisma.memory.findMany({
+        where: {
+          id: { in: node.memoryIds.slice(0, 10) },
+          deletedAt: null,
+        },
+        select: {
+          id: true,
+          title: true,
+          content: true,
+          tags: true,
+          memoryType: true,
+        },
+        take: 10,
+      });
+
+      if (memories.length === 0) {
+        return { success: false, reason: 'no_content' };
+      }
+
+      // Build context for LLM
+      const memorySummaries = memories.map(m =>
+        `- [${m.title || 'Untitled'}] (${m.memoryType}): ${truncate(m.content, 300)}`
+      ).join('\n');
+
+      const prompt = `Summarize this collection of ${node.memoryIds.length} memories (showing ${memories.length} samples) in the "${node.label}" topic.
+
+${memorySummaries}
+
+Write a 2-3 sentence summary describing what topics/themes this collection covers. Be specific and useful for retrieval.`;
+
+      // Call LLM (using Groq if available, otherwise skip)
+      const groqApiKey = process.env.GROQ_API_KEY;
+      let summary = null;
+
+      if (groqApiKey) {
+        try {
+          const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${groqApiKey}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              model: 'llama-3.1-8b-instant',
+              messages: [
+                { role: 'system', content: 'You are a summarization engine. Summarize memory collections concisely.' },
+                { role: 'user', content: prompt },
+              ],
+              max_tokens: 200,
+              temperature: 0.3,
+            }),
+          });
+
+          if (response.ok) {
+            const data = await response.json();
+            summary = data.choices[0]?.message?.content || null;
+          }
+        } catch (err) {
+          this.logger.warn('[PageIndexService] LLM summary failed, using fallback:', err.message);
+        }
+      }
+
+      // Fallback: generate keyword-based summary
+      if (!summary) {
+        const allTags = memories.flatMap(m => m.tags || []);
+        const tagCounts = {};
+        for (const tag of allTags) {
+          tagCounts[tag] = (tagCounts[tag] || 0) + 1;
+        }
+        const topTags = Object.entries(tagCounts)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 5)
+          .map(([tag]) => tag)
+          .join(', ');
+
+        summary = `Collection of ${node.memoryIds.length} memories covering: ${topTags || node.label}`;
+      }
+
+      // Update node
+      await this.prisma.pageIndexNode.update({
+        where: { id: nodeId },
+        data: {
+          summary,
+          summaryUpdatedAt: new Date(),
+        },
+      });
+
+      this.logger.log(`[PageIndexService] Generated summary for node ${nodeId.slice(0, 8)}`);
+      return { success: true };
+    } catch (err) {
+      this.logger.warn('[PageIndexService] generateNodeSummary failed:', err.message);
+      return { success: false, error: err.message };
+    }
+  }
+
+  /**
    * Build nested tree from flat node array.
    * @private
    */
@@ -406,4 +562,9 @@ export class PageIndexService {
   _computeMemoryCount(node) {
     return node.memoryIds?.length || 0;
   }
+}
+
+function truncate(str, len = 300) {
+  if (!str) return '';
+  return str.length > len ? str.slice(0, len) + '...' : str;
 }

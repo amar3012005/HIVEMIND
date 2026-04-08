@@ -1,242 +1,216 @@
 /**
- * PageIndex Classifier — LLM-powered memory classification
+ * PageIndex Classifier — Embedding-based memory classification
  *
- * Classifies incoming memories into PageIndex hierarchy nodes.
- * Runs async (non-blocking) with 100ms timeout — ingestion never waits.
+ * Classifies memories into PageIndex hierarchy nodes AUTOMATICALLY.
+ * Runs during ingestion — uses embedding similarity to existing node contents.
  *
  * Flow:
- * 1. Embed memory content + node labels
- * 2. Find best-fit nodes via cosine similarity
- * 3. LLM validates classification for edge cases
- * 4. Returns node path(s) for assignment
+ * 1. Get memory embedding (already computed during ingestion)
+ * 2. Compare with existing PageIndex node memory embeddings
+ * 3. Assign to best-matching node(s) based on similarity
+ * 4. If no good match → create new topic node or assign to root
  */
 
 import { PageIndexService } from './pageindex-service.js';
 
-const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const CLASSIFICATION_TIMEOUT_MS = 100;
-const MIN_CONFIDENCE = 0.6;
-
 export class PageIndexClassifier {
-  constructor({ prisma, groqApiKey, logger = console }) {
+  constructor({ prisma, logger = console }) {
     this.prisma = prisma;
-    this.groqApiKey = groqApiKey || process.env.GROQ_API_KEY;
     this.logger = logger;
     this.pageIndexService = new PageIndexService({ prisma, logger });
+    this.SIMILARITY_THRESHOLD = 0.65; // Minimum cosine similarity to assign
   }
 
   /**
-   * Classify memory and return best-fit node path(s).
-   * @param {object} memory - { id, content, title, tags, userId, orgId }
-   * @returns {Promise<{ paths: string[], confidence: number }>}
+   * Classify memory and assign to PageIndex node(s) automatically.
+   * Called during ingestion pipeline.
+   * @param {object} memory - { id, content, title, tags, userId, orgId, embedding }
+   * @returns {Promise<{ assigned: boolean, nodeIds: string[], reason: string }>}
    */
-  async classify(memory) {
-    const startTime = Date.now();
-
+  async classifyAndAssign(memory) {
     try {
-      // Timeout wrapper — classification must complete within 100ms
-      const result = await Promise.race([
-        this._classifyWithTimeout(memory),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('Classification timeout')), CLASSIFICATION_TIMEOUT_MS)
-        ),
-      ]);
+      // Check if PageIndex is available
+      const available = await this.pageIndexService.isAvailable();
+      if (!available) {
+        return { assigned: false, nodeIds: [], reason: 'pageindex_unavailable' };
+      }
+
+      // Get or create root node for user
+      const root = await this.pageIndexService.ensureRootNode(memory.userId, memory.orgId);
+      if (!root) {
+        return { assigned: false, nodeIds: [], reason: 'root_creation_failed' };
+      }
+
+      // Get all nodes for user
+      const nodes = await this.pageIndexService.getTree(memory.userId);
+      if (!nodes || nodes.length === 0) {
+        // First memory for user — assign to root
+        await this.pageIndexService.assignMemoryToNode(root.id, memory.id);
+        return { assigned: true, nodeIds: [root.id], reason: 'first_memory_assigned_to_root' };
+      }
+
+      // Find best matching node(s) using embedding similarity
+      const bestMatches = await this._findBestMatchingNodes(memory, nodes);
+
+      if (bestMatches.length === 0) {
+        // No good match — assign to root for now
+        await this.pageIndexService.assignMemoryToNode(root.id, memory.id);
+        return { assigned: true, nodeIds: [root.id], reason: 'no_match_found_assigned_to_root' };
+      }
+
+      // Assign to top matching nodes (max 3 for cross-referencing)
+      const nodeIds = bestMatches.slice(0, 3).map(m => m.nodeId);
+
+      for (const nodeId of nodeIds) {
+        await this.pageIndexService.assignMemoryToNode(nodeId, memory.id);
+      }
 
       this.logger.log(
-        `[pageindex-classifier] Classified ${memory.id.slice(0, 8)} in ${Date.now() - startTime}ms:`,
-        result.paths
+        `[pageindex-classifier] Assigned ${memory.id.slice(0, 8)} to ${nodeIds.length} node(s): ${nodeIds.map(id => id.slice(0, 8)).join(', ')}`
       );
 
-      return result;
+      return { assigned: true, nodeIds, reason: 'embedding_similarity' };
     } catch (err) {
       this.logger.warn('[pageindex-classifier] Classification failed:', err.message);
-      // Return empty — memory will be indexed later by background job
-      return { paths: [], confidence: 0 };
+      return { assigned: false, nodeIds: [], reason: 'error', error: err.message };
     }
   }
 
   /**
-   * Async classification — fire-and-forget, doesn't block ingestion.
-   * @param {object} memory
-   * @returns {Promise<void>}
-   */
-  async classifyAsync(memory) {
-    // Fire-and-forget — errors logged but not propagated
-    this.classify(memory).catch(err => {
-      this.logger.warn('[pageindex-classifier] Async classification failed:', err.message);
-    });
-  }
-
-  /**
-   * Internal classification logic with timeout.
+   * Find best matching nodes using embedding similarity.
    * @private
    */
-  async _classifyWithTimeout(memory) {
-    // Check if PageIndex is available
-    const available = await this.pageIndexService.isAvailable();
-    if (!available) {
-      return { paths: [], confidence: 0 };
-    }
-
-    // Fetch all nodes for user
-    const nodes = await this.pageIndexService.getTree(memory.userId);
-    if (!nodes || nodes.length === 0) {
-      return { paths: [], confidence: 0 };
-    }
-
-    // Flatten tree to array of { path, label, depth }
+  async _findBestMatchingNodes(memory, nodes) {
+    // Flatten nodes to array with path info
     const nodePaths = this._flattenTree(nodes);
 
     if (nodePaths.length === 0) {
-      return { paths: [], confidence: 0 };
+      return [];
     }
 
-    // Use LLM to classify
-    const classification = await this._llmClassify(memory, nodePaths);
+    // For each node, compute similarity score based on:
+    // 1. Memory embeddings already in that node
+    // 2. Node label/topic keyword match
 
-    if (classification.confidence < MIN_CONFIDENCE) {
-      this.logger.log(
-        `[pageindex-classifier] Low confidence (${classification.confidence}), deferring to background`
-      );
-      return { paths: [], confidence: classification.confidence };
-    }
+    const scored = [];
 
-    return classification;
-  }
-
-  /**
-   * LLM-based classification.
-   * @private
-   */
-  async _llmClassify(memory, nodePaths) {
-    if (!this.groqApiKey) {
-      // Fallback to keyword-based classification
-      return this._keywordClassify(memory, nodePaths);
-    }
-
-    const nodeDescriptions = nodePaths
-      .map(n => `- ${n.path} (${n.label})`)
-      .join('\n');
-
-    const contentPreview = (memory.content || '').slice(0, 2000);
-    const title = memory.title || 'Untitled';
-    const tags = (memory.tags || []).join(', ') || 'none';
-
-    try {
-      const resp = await fetch(GROQ_API_URL, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${this.groqApiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: 'llama-3.3-70b-versatile',
-          messages: [
-            {
-              role: 'system',
-              content: `You are a memory classification engine. Given a memory and a list of available topic paths, classify which path(s) the memory belongs to.
-
-A memory can belong to MULTIPLE paths (cross-referencing).
-Return ONLY valid JSON: { "paths": ["/path1", "/path2"], "confidence": 0.85, "reason": "brief explanation" }
-
-Rules:
-- Match content to the MOST SPECIFIC path (deepest relevant node)
-- If content spans multiple topics, include all relevant paths
-- Confidence: 0.0-1.0 based on how clearly the content matches
-- If no path matches well, return empty paths array with low confidence`,
-            },
-            {
-              role: 'user',
-              content: `Memory to classify:
-Title: ${title}
-Tags: ${tags}
-Content: ${contentPreview}
-
-Available paths:
-${nodeDescriptions}
-
-Return ONLY JSON.`,
-            },
-          ],
-          max_tokens: 300,
-          temperature: 0.1,
-          response_format: { type: 'json_object' },
-        }),
-      });
-
-      if (!resp.ok) {
-        throw new Error(`Groq API ${resp.status}`);
+    for (const node of nodePaths) {
+      if (!node.memoryIds || node.memoryIds.length === 0) {
+        // Empty node — use keyword matching as fallback
+        const keywordScore = this._keywordMatch(memory, node);
+        if (keywordScore > 0.5) {
+          scored.push({ nodeId: node.id, path: node.path, score: keywordScore, method: 'keyword' });
+        }
+        continue;
       }
 
-      const data = await resp.json();
-      const output = data.choices[0]?.message?.content || '{}';
-      const parsed = JSON.parse(output);
+      // Fetch embeddings of memories in this node (sample up to 10)
+      const sampleMemoryIds = node.memoryIds.slice(0, 10);
+      const memories = await this.prisma.memory.findMany({
+        where: { id: { in: sampleMemoryIds }, deletedAt: null },
+        select: { id: true, embedding: true, embeddingModel: true },
+      });
 
-      return {
-        paths: parsed.paths || [],
-        confidence: parsed.confidence || 0.5,
-        reason: parsed.reason || '',
-      };
-    } catch (err) {
-      this.logger.warn('[pageindex-classifier] LLM classification failed, using keywords:', err.message);
-      return this._keywordClassify(memory, nodePaths);
+      if (memories.length === 0 || !memories[0].embedding) {
+        // No embeddings — fall back to keyword
+        const keywordScore = this._keywordMatch(memory, node);
+        if (keywordScore > 0.5) {
+          scored.push({ nodeId: node.id, path: node.path, score: keywordScore, method: 'keyword' });
+        }
+        continue;
+      }
+
+      // Compute average similarity to memories in this node
+      const similarities = memories.map(m => {
+        if (!memory.embedding || !m.embedding) return 0;
+        return this._cosineSimilarity(memory.embedding, m.embedding);
+      });
+
+      const avgSimilarity = similarities.reduce((a, b) => a + b, 0) / similarities.length;
+      const maxSimilarity = Math.max(...similarities);
+
+      // Use max similarity (best match in node) weighted with avg
+      const combinedScore = (maxSimilarity * 0.7) + (avgSimilarity * 0.3);
+
+      if (combinedScore >= this.SIMILARITY_THRESHOLD) {
+        scored.push({
+          nodeId: node.id,
+          path: node.path,
+          score: combinedScore,
+          method: 'embedding',
+          avgSimilarity,
+          maxSimilarity,
+        });
+      }
     }
+
+    // Sort by score descending
+    return scored.sort((a, b) => b.score - a.score);
   }
 
   /**
-   * Keyword-based fallback classification.
+   * Keyword-based fallback matching.
    * @private
    */
-  _keywordClassify(memory, nodePaths) {
-    const content = `${memory.title || ''} ${(memory.content || '').slice(0, 500)} ${(memory.tags || []).join(' ')}`.toLowerCase();
+  _keywordMatch(memory, node) {
+    const memoryText = `${memory.title || ''} ${(memory.content || '').slice(0, 500)} ${(memory.tags || []).join(' ')}`.toLowerCase();
+    const nodeLabel = node.label.toLowerCase();
+    const nodePath = node.path.toLowerCase();
 
-    // Tokenize content
-    const tokens = content
+    // Extract tokens from memory
+    const memoryTokens = memoryText
       .split(/\W+/)
       .filter(t => t.length > 2 && !this._isStopword(t));
 
-    // Score each node by keyword overlap
-    const scored = nodePaths.map(node => {
-      const labelTokens = node.label.toLowerCase().split(/\W+/).filter(t => t.length > 2);
-      const pathTokens = node.path.toLowerCase().split(/\W+/).filter(t => t.length > 2);
-      const allNodeTokens = new Set([...labelTokens, ...pathTokens]);
+    // Check overlap with node label/path
+    const labelTokens = nodeLabel.split(/\W+/).filter(t => t.length > 2);
+    const pathTokens = nodePath.split(/\W+/).filter(t => t.length > 2);
+    const allNodeTokens = new Set([...labelTokens, ...pathTokens]);
 
-      let overlap = 0;
-      for (const token of tokens) {
-        if (allNodeTokens.has(token)) overlap++;
-      }
+    let overlap = 0;
+    for (const token of memoryTokens) {
+      if (allNodeTokens.has(token)) overlap++;
+    }
 
-      const confidence = tokens.length > 0 ? overlap / Math.min(tokens.length, 10) : 0;
-
-      return {
-        path: node.path,
-        confidence: Math.min(confidence, 1.0),
-        overlap,
-      };
-    });
-
-    // Filter by minimum confidence
-    const matched = scored
-      .filter(n => n.confidence >= MIN_CONFIDENCE)
-      .sort((a, b) => b.confidence - a.confidence)
-      .slice(0, 3); // Max 3 paths
-
-    return {
-      paths: matched.map(n => n.path),
-      confidence: matched.length > 0 ? matched[0].confidence : 0,
-    };
+    // Score based on overlap ratio
+    const expectedOverlap = Math.min(memoryTokens.length, 10);
+    return expectedOverlap > 0 ? Math.min(overlap / expectedOverlap, 1.0) : 0;
   }
 
   /**
-   * Flatten tree to array of paths.
+   * Compute cosine similarity between two embeddings.
+   * @private
+   */
+  _cosineSimilarity(a, b) {
+    if (!a || !b || a.length !== b.length) return 0;
+
+    let dotProduct = 0;
+    let normA = 0;
+    let normB = 0;
+
+    for (let i = 0; i < a.length; i++) {
+      dotProduct += a[i] * b[i];
+      normA += a[i] * a[i];
+      normB += b[i] * b[i];
+    }
+
+    if (normA === 0 || normB === 0) return 0;
+
+    return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+  }
+
+  /**
+   * Flatten tree to array of nodes.
    * @private
    */
   _flattenTree(nodes, results = []) {
     for (const node of nodes) {
       results.push({
+        id: node.id,
         path: node.path,
         label: node.label,
         depth: node.depth,
+        memoryIds: node.memoryIds || [],
       });
       if (node.children && node.children.length > 0) {
         this._flattenTree(node.children, results);

@@ -3,11 +3,13 @@
   "scripts": {
     "test": "vitest",
     "test:run": "vitest run",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "install:tavily": "npm install @tavily/core"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@qdrant/js-client-rest": "^1.17.0",
+    "@tavily/core": "^0.7.2",
     "bullmq": "^5.71.0",
     "ioredis": "^5.10.0",
     "node-fetch": "^3.3.2",

@@ -83,7 +83,7 @@ export class PageIndexSearcher {
       throw new Error('PageIndex table not initialized');
     }
 
-    // 1. Keyword match on node labels and paths
+    // 1. Keyword match on node labels, paths, AND summaries
     const keywordNodes = await this.prisma.pageIndexNode.findMany({
       where: {
         userId,
@@ -91,6 +91,7 @@ export class PageIndexSearcher {
         OR: [
           { label: { contains: query, mode: 'insensitive' } },
           { path: { contains: query.toLowerCase() } },
+          { summary: { contains: query, mode: 'insensitive' } },
         ],
       },
       orderBy: { memoryCount: 'desc' },

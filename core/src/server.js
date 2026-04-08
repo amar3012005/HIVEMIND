@@ -3493,28 +3493,31 @@ a{color:#a78bfa}</style></head><body>
                 const metadata = m.metadata || {};
 
                 // Layer 1: Sources (web pages, docs)
-                if (tags.includes('research-finding') || metadata.trailType === 'source') {
+                if (tags.includes('research-source') || tags.includes('web-source') ||
+                    m.memory_type === 'source' || metadata.source_type === 'web') {
                   layers.sources.push({
                     id: m.id,
                     title: m.title,
                     url: metadata.url || metadata.source_url,
-                    type: m.memory_type,
+                    runtime: metadata.research_source || 'tavily',
                     score: m.importance_score,
+                    favicon: metadata.favicon,
                   });
                 }
 
                 // Layer 2: Claims (extracted findings)
-                if (metadata.trailType === 'claim' || m.memory_type === 'fact') {
+                if (tags.includes('research-finding') || m.memory_type === 'fact') {
                   layers.claims.push({
                     id: m.id,
                     content: m.content?.slice(0, 500),
                     confidence: metadata.confidence || m.importance_score,
-                    source: metadata.source,
+                    source: metadata.source_url || metadata.source_id,
                   });
                 }
 
                 // Layer 3: Trails (research steps)
-                if (tags.includes('research-trail') || metadata.trailType === 'op/research-trail') {
+                if (tags.includes('research-trail') || tags.includes('csi-trail') ||
+                    metadata.trailType === 'op/research-trail' || metadata.trailType === 'decision') {
                   const steps = metadata.steps || [];
                   steps.forEach((step, idx) => {
                     layers.trails.push({

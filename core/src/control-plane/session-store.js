@@ -4,13 +4,14 @@ import Redis from 'ioredis';
 const sessions = new Map();
 const states = new Map();
 let redisClientPromise = null;
+let redisConnectionAttempted = false;
 
 function buildRedisConfig(config) {
   if (config.redisUrl) {
     return [config.redisUrl, {
-      lazyConnect: true,
       maxRetriesPerRequest: 1,
-      enableOfflineQueue: false
+      enableOfflineQueue: false,
+      connectTimeout: 2000
     }];
   }
 
@@ -22,28 +23,31 @@ function buildRedisConfig(config) {
     host: config.redisHost,
     port: config.redisPort,
     password: config.redisPassword || undefined,
-    lazyConnect: true,
     maxRetriesPerRequest: 1,
-    enableOfflineQueue: false
+    enableOfflineQueue: false,
+    connectTimeout: 2000
   }];
 }
 
 async function getRedisClient(config) {
+  if (redisConnectionAttempted && !redisClientPromise) {
+    return null;
+  }
+
   const redisConfig = buildRedisConfig(config);
   if (!redisConfig) {
     return null;
   }
 
   if (!redisClientPromise) {
+    redisConnectionAttempted = true;
     redisClientPromise = (async () => {
       const client = Array.isArray(redisConfig)
         ? new Redis(...redisConfig)
         : new Redis(redisConfig);
 
       client.on('error', () => {});
-      if (client.status === 'wait') {
-        await client.connect();
-      }
+      await client.connect();
       await client.ping();
       return client;
     })().catch(() => {

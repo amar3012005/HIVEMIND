@@ -3293,11 +3293,14 @@ a{color:#a78bfa}</style></head><body>
             }
 
             const sessionId = crypto.randomUUID();
+            const slug = query.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 60);
+            const projectId = `research/${slug}`;
             const session = {
               id: sessionId,
               query,
               userId,
               orgId,
+              projectId,
               status: 'running',
               events: [],
               result: null,
@@ -3337,8 +3340,7 @@ a{color:#a78bfa}</style></head><body>
               })
               .catch(err => { session.status = 'failed'; session.error = err.message; });
 
-            const slug = query.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 60);
-            return jsonResponse(res, { session_id: sessionId, project_id: `research/${slug}`, status: 'started' }, 202);
+            return jsonResponse(res, { session_id: sessionId, project_id: projectId, status: 'started' }, 202);
           }
           break;
 
@@ -3469,7 +3471,7 @@ a{color:#a78bfa}</style></head><body>
 
             try {
               // Get all memories for this research project
-              const projectId = session.result?.projectId || `research/${sessionId.slice(0, 8)}`;
+              const projectId = session.projectId || `research/${sessionId.slice(0, 8)}`;
               const memories = await persistentMemoryStore.searchMemories({
                 query: '',
                 user_id: session.userId || userId,

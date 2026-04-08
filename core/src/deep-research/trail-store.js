@@ -54,6 +54,7 @@ export class TrailStore {
       query,
       tags: ['research-trail', `session:${sessionId}`, `project:${projectId}`],
       metadata: {
+        query,
         blueprintUsed: options.blueprintUsed || null,
         blueprintCandidate: options.blueprintCandidate || false,
         agentStates: options.agentStates || {
@@ -301,6 +302,7 @@ export class TrailStore {
         importance_score: 0.95,
         metadata: {
           ...trail.metadata,
+          steps: trail.steps,
           stepCount: trail.steps.length,
           contradictionCount: trail.contradictions.length,
           trailType: 'op/research-trail',

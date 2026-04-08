@@ -49,6 +49,11 @@ loadLocalEnv(path.join(PROJECT_ROOT, '.env'));
 const { MemoryEngine } = await import('./engine.local.js');
 const { getGroqClient } = await import('../config/groq.js');
 const { getPrismaClient, ensureTenantContext } = await import('./db/prisma.js');
+const { captureLogs, streamDockerLogs, getLogBuffer } = await import('./log-streamer.js');
+
+// Start capturing logs for this container (hm-core)
+captureLogs('hm-core');
+
 const { MemoryGraphEngine } = await import('./memory/graph-engine.js');
 const { PrismaGraphStore } = await import('./memory/prisma-graph-store.js');
 const { CognitiveOperator, detectQueryIntent, computeDynamicWeights, getMemoryTypeBoost } = await import('./memory/operator-layer.js');
@@ -184,7 +189,16 @@ const { assembleAnswer } = await import('./executor/decision/assemble-answer.js'
 
 const CLIENT_HTML_CANDIDATES = [
   path.join(REPO_ROOT, 'client.html'),
-  path.join(PROJECT_ROOT, 'client.html')
+  path.join(PROJECT_ROOT, 'client.html'),
+  // Log streamer
+  path.join(REPO_ROOT, 'log-streamer.html'),
+  path.join(PROJECT_ROOT, 'log-streamer.html'),
+];
+
+const LOG_STREAMER_HTML_CANDIDATES = [
+  path.join(PROJECT_ROOT, 'src', 'log-streamer.html'),
+  path.join(REPO_ROOT, 'log-streamer.html'),
+  path.join(PROJECT_ROOT, 'log-streamer.html'),
 ];
 const UX_TEST_HTML_CANDIDATES = [
   path.join(REPO_ROOT, 'ui-testing.html'),
@@ -1592,6 +1606,38 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
+  // Live log streamer endpoint
+  if (pathname === '/api/logs' && req.method === 'GET') {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const container = url.searchParams.get('container') || 'hm-core';
+
+    if (!['hm-control', 'hm-core'].includes(container)) {
+      return jsonResponse(res, { error: 'Invalid container. Use hm-control or hm-core' }, 400);
+    }
+
+    // For hm-core, return our captured logs
+    if (container === 'hm-core') {
+      const logs = getLogBuffer(container).map(e => `[${e.timestamp}] [${e.type.toUpperCase()}] ${e.line}`);
+      return jsonResponse(res, { container, logs });
+    }
+
+    // For hm-control, fetch from control plane container via internal network
+    try {
+      const cpResp = await fetch('http://hm-control:3000/api/logs?container=hm-control', {
+        timeout: 5000,
+      });
+      if (cpResp.ok) {
+        const data = await cpResp.json();
+        return jsonResponse(res, { container, logs: data.logs || [] });
+      }
+    } catch (err) {
+      console.log('[logs] Failed to fetch control plane logs:', err.message);
+    }
+
+    // Fallback: return empty if control plane doesn't have the endpoint
+    return jsonResponse(res, { container, logs: [], note: 'Control plane log endpoint not available' });
+  }
+
   if (pathname === '/health') {
     return jsonResponse(res, {
       ok: true,
@@ -1653,6 +1699,21 @@ const server = http.createServer(async (req, res) => {
     } catch (e) {
       res.writeHead(500);
       res.end('Error loading hivemind-web-sdk.js: ' + e.message);
+      return;
+    }
+  }
+
+  // Serve log streamer HTML
+  if (pathname === '/logs' || pathname === '/log-streamer' || pathname === '/log-streamer.html') {
+    try {
+      const content = fs.readFileSync(findExistingFile(LOG_STREAMER_HTML_CANDIDATES), 'utf-8');
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.writeHead(200);
+      res.end(content);
+      return;
+    } catch (e) {
+      res.writeHead(500);
+      res.end('Error loading log-streamer.html: ' + e.message);
       return;
     }
   }
@@ -3117,6 +3178,7 @@ a{color:#a78bfa}</style></head><body>
             sources: session.result.sources,
             gaps: session.result.gaps,
             durationMs: session.result.durationMs,
+            confidence: session.result.taskProgress?.confidence ?? session.result.taskProgress?.overallConfidence ?? 0,
             taskProgress: session.result.taskProgress,
             fromCache: session.result.fromCache,
             projectId: session.result.projectId,
@@ -3280,15 +3342,20 @@ a{color:#a78bfa}</style></head><body>
 
             // Plan enforcement: check deep research limit
             if (planEnforcer && orgId) {
-              const researchLimitCheck = await planEnforcer.checkLimit(orgId, 'deepResearch', 1);
-              if (!researchLimitCheck.allowed) {
-                return jsonResponse(res, {
-                  error: 'Plan limit exceeded',
-                  message: researchLimitCheck.reason,
-                  limit: researchLimitCheck.limit,
-                  current: researchLimitCheck.current,
-                  plan: researchLimitCheck.plan
-                }, 403);
+              try {
+                const researchLimitCheck = await planEnforcer.checkLimit(orgId, 'deepResearch', 1);
+                console.log('[research] plan check for orgId=%s: %o', orgId, researchLimitCheck);
+                if (!researchLimitCheck.allowed) {
+                  return jsonResponse(res, {
+                    error: 'Plan limit exceeded',
+                    message: researchLimitCheck.reason,
+                    limit: researchLimitCheck.limit,
+                    current: researchLimitCheck.current,
+                    plan: researchLimitCheck.plan
+                  }, 403);
+                }
+              } catch (err) {
+                console.log('[research] plan check error, allowing request:', err.message);
               }
             }
 
@@ -3505,7 +3572,7 @@ a{color:#a78bfa}</style></head><body>
 
                 // Layer 1: Sources (web pages, docs)
                 if (tags.includes('research-source') || tags.includes('web-source') ||
-                    memoryType === 'source' || metadata.source_type === 'web') {
+                    metadata.source_type === 'web') {
                   layers.sources.push({
                     id: m.id,
                     title: m.title,
@@ -3636,7 +3703,7 @@ a{color:#a78bfa}</style></head><body>
                 project: projectId,
                 title: title || url,
                 content: `Web source from deep research: ${url}`,
-                memory_type: 'source',
+                memory_type: 'fact',
                 source_type: 'web',
                 metadata: {
                   url,
@@ -8122,12 +8189,16 @@ a{color:#a78bfa}</style></head><body>
                     } catch {}
                   }
 
-                  // Filter out irrelevant results
-                  const CHAT_MIN_SCORE = 0.12;
+                  // Filter out irrelevant results - lower threshold for better recall
+                  const CHAT_MIN_SCORE = 0.05; // Lowered from 0.12 to allow more relevant memories
                   const relevantMemories = recalledMemories.filter(m => {
                     if (m._recencyInjected) return true;
-                    return (m.score || 0) >= CHAT_MIN_SCORE;
+                    // Always include high confidence memories, lower threshold for others
+                    return (m.score || 0) >= CHAT_MIN_SCORE || (m.vectorScore || 0) >= 0.3;
                   });
+
+                  // Debug logging for chat recall
+                  console.log('[chat] Recall stats: %d total, %d relevant, scores:', recalledMemories.length, relevantMemories.length, relevantMemories.slice(0, 3).map(m => ({ score: m.score, vectorScore: m.vectorScore, content: (m.content||'').slice(0,50) })));
 
                   memories = relevantMemories.slice(0, isMetaQuery ? 20 : 15).map(m => {
                     const isFact = (m.tags || []).includes('extracted-fact');
@@ -8166,13 +8237,14 @@ a{color:#a78bfa}</style></head><body>
               const systemPrompt = `You are HIVEMIND, the user's second brain and personal knowledge engine. You store, connect, and recall everything the user tells you.
 ${profileSection}${recencyHint}${metaHint}${aggregateHint}${declarativeHint}${updateHint}
 Rules:
-- Answer questions DIRECTLY using the memories provided
+- BELOW is a section called "Retrieved Memories" — ALWAYS read and use it to answer the user's question
+- Answer questions DIRECTLY using the memories provided — look at the Retrieved Memories section first
 - Be concise — 1-3 sentences for simple questions, more for complex ones
 - If memories contain the answer, give it confidently — even if wording differs. "CEO" = "managing director" = "Geschäftsführer" = "head of company". Make reasonable semantic connections between synonyms, translations, and equivalent roles/concepts.
 - If memories conflict, prefer the most recent one and note the change
 - If user is TELLING you something new (a statement, not a question), acknowledge it: "Got it" or "Noted" and confirm the fact. You are their second brain — everything they tell you is worth remembering.
 - If user is UPDATING a fact ("no longer", "changed", "resigned", "switched to"), confirm the update and reference what changed
-- Only say "I don't have that in my memory" when NONE of the memories below are even remotely related to the question. If ANY memory is relevant, use it.
+- Only say "I don't have that in my memory" when the Retrieved Memories section is completely empty or shows "No specific memories found"
 - CRITICAL: Distinguish between things the USER did/said/decided vs things they merely RECEIVED or READ. An email FROM someone else is NOT the user's project.
 - NEVER list memories one by one, evaluate them, or show reasoning about each memory. NEVER output "Memory 1:", "Memory notes", "Notes on each memory", "Not relevant", etc. Go straight to the answer.
 - Do NOT say "Based on my memories" or "According to my records" — just answer
@@ -8206,6 +8278,11 @@ ${injectionText}`;
                   if (m.parent_chunk) parts.push(`Full context: ${m.parent_chunk}`);
                 }
                 memoryContext = '\n\nRetrieved Memories:\n' + parts.join('\n\n');
+                console.log('[chat] Sent %d memories to LLM (%d facts, %d regular, %d obs)', memories.length, factMems.length, regularMems.length, obsMems.length);
+              } else {
+                console.log('[chat] No memories found for query:', message.slice(0, 100));
+                // Add a hint to the system prompt when no memories found
+                memoryContext = '\n\nRetrieved Memories:\nNo specific memories found about this topic. Respond naturally based on general knowledge.';
               }
 
               // Step 4: Build message history for Groq
@@ -8228,8 +8305,13 @@ ${injectionText}`;
                 temperature: 0.25,
               };
               if (groqModel.includes('gpt-oss')) {
-                groqParams.include_reasoning = false;
-                groqParams.max_tokens = 900;
+                // GPT-OSS models: enable reasoning for better performance
+                // reasoning_effort: low/medium/high controls reasoning depth
+                groqParams.reasoning_effort = 'medium';
+                groqParams.max_completion_tokens = 1024;
+                groqParams.temperature = 0.6; // Recommended 0.5-0.7 for reasoning models
+                groqParams.top_p = 0.95;
+                delete groqParams.max_tokens; // Use max_completion_tokens instead
               }
 
               const groqResp = await fetch('https://api.groq.com/openai/v1/chat/completions', {

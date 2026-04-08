@@ -3397,16 +3397,24 @@ a{color:#a78bfa}</style></head><body>
                 query: sessionId,
                 user_id: session.userId || userId,
                 org_id: session.orgId || orgId,
+                project: session.projectId || `research/${sessionId.slice(0, 8)}`,
                 tags: ['research-trail'],
                 n_results: 1,
               });
 
               if (trailMemories && trailMemories.length > 0) {
                 const trailMemory = trailMemories[0];
+                const metadata = trailMemory.metadata || {};
                 return jsonResponse(res, {
-                  trail: trailMemory.metadata?.trail || null,
+                  trail: {
+                    steps: metadata.steps || [],
+                    query: metadata.query || session.query,
+                    startedAt: metadata.startedAt,
+                    completedAt: metadata.completedAt,
+                    status: metadata.status || session.status,
+                  },
                   sessionId,
-                  query: session.query,
+                  query: metadata.query || session.query,
                   status: session.status,
                   fromCSI: true,
                 });
@@ -3493,10 +3501,11 @@ a{color:#a78bfa}</style></head><body>
               (memories || []).forEach(m => {
                 const tags = m.tags || [];
                 const metadata = m.metadata || {};
+                const memoryType = m.memoryType || m.memory_type;
 
                 // Layer 1: Sources (web pages, docs)
                 if (tags.includes('research-source') || tags.includes('web-source') ||
-                    m.memory_type === 'source' || metadata.source_type === 'web') {
+                    memoryType === 'source' || metadata.source_type === 'web') {
                   layers.sources.push({
                     id: m.id,
                     title: m.title,
@@ -3508,7 +3517,7 @@ a{color:#a78bfa}</style></head><body>
                 }
 
                 // Layer 2: Claims (extracted findings)
-                if (tags.includes('research-finding') || m.memory_type === 'fact') {
+                if (tags.includes('research-finding') || memoryType === 'fact') {
                   layers.claims.push({
                     id: m.id,
                     content: m.content?.slice(0, 500),

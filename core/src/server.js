@@ -3618,7 +3618,7 @@ a{color:#a78bfa}</style></head><body>
             }
 
             try {
-              const projectId = session.result?.projectId || `research/${sessionId.slice(0, 8)}`;
+              const projectId = session.projectId || `research/${sessionId.slice(0, 8)}`;
 
               // Save to memory using ingestion pipeline or direct store
               const memoryPayload = {

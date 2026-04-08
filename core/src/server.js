@@ -3185,6 +3185,152 @@ a{color:#a78bfa}</style></head><body>
           });
         }
 
+        // GET /api/research/:sessionId/graph — get research subgraph
+        if (action === 'graph') {
+          if (req.method !== 'GET') {
+            return jsonResponse(res, { error: 'Method not allowed' }, 405);
+          }
+          try {
+            // Get all memories for this research project
+            const projectId = session.projectId || `research/${sessionId.slice(0, 8)}`;
+            console.log('[research/graph] Fetching graph for session:', sessionId, 'projectId:', projectId, 'userId:', session.userId || userId, 'orgId:', session.orgId || orgId);
+
+            const memories = await persistentMemoryStore.searchMemories({
+              query: '',
+              user_id: session.userId || userId,
+              org_id: session.orgId || orgId,
+              project: projectId,
+              n_results: 200,
+            });
+
+            console.log('[research/graph] Found', memories?.length || 0, 'memories for project:', projectId);
+            if (memories?.length > 0) {
+              console.log('[research/graph] Sample memory tags:', memories[0]?.tags, 'memory_type:', memories[0]?.memory_type);
+            }
+
+            // Build layered graph structure
+            const layers = {
+              sources: [],
+              claims: [],
+              trails: [],
+              blueprints: [],
+              weights: { edges: [] },
+            };
+
+            // Categorize memories into layers
+            (memories || []).forEach(m => {
+              const tags = m.tags || [];
+              const metadata = m.metadata || {};
+              const memoryType = m.memoryType || m.memory_type;
+
+              // Layer 1: Sources (web pages, docs) - memory_type 'fact' with web source tags
+              if (tags.includes('research-source') || tags.includes('web-source') ||
+                  metadata.source_type === 'web' || (memoryType === 'fact' && tags.includes('web')) || (m.memory_type === 'fact' && tags.includes('web'))) {
+                layers.sources.push({
+                  id: m.id,
+                  title: m.title,
+                  url: metadata.url || metadata.source_url,
+                  runtime: metadata.research_source || 'tavily',
+                  score: m.importance_score,
+                  favicon: metadata.favicon,
+                });
+              }
+
+              // Layer 2: Claims (extracted findings) - memory_type 'fact' for web sources and research findings
+              if (tags.includes('research-finding') || memoryType === 'fact' || m.memory_type === 'fact') {
+                layers.claims.push({
+                  id: m.id,
+                  content: m.content?.slice(0, 500),
+                  confidence: metadata.confidence || m.importance_score,
+                  source: metadata.source_url || metadata.source_id,
+                });
+              }
+
+              // Layer 3: Trails (research steps) - includes both decision (trails) and event (session steps)
+              if (tags.includes('research-trail') || tags.includes('csi-trail') ||
+                  metadata.trailType === 'op/research-trail' || memoryType === 'decision' || m.memory_type === 'decision') {
+                const steps = metadata.steps || [];
+                steps.forEach((step, idx) => {
+                  layers.trails.push({
+                    id: `step-${m.id}-${idx}`,
+                    agent: step.agent || 'explorer',
+                    action: step.action || 'search_web',
+                    input: step.input?.slice(0, 200),
+                    output: step.output?.slice(0, 200),
+                    confidence: step.confidence,
+                    rejected: step.rejected,
+                  });
+                });
+              }
+
+              // Layer 4: Blueprints
+              if (tags.includes('kg/blueprint') || metadata.blueprint_id) {
+                layers.blueprints.push({
+                  blueprintId: metadata.blueprint_id,
+                  name: metadata.blueprint_name || m.title,
+                  domain: metadata.blueprint_domain,
+                  timesReused: metadata.blueprint_times_reused || 0,
+                  successRate: metadata.blueprint_success_rate,
+                });
+              }
+            });
+
+            // Also get trail from session result if available
+            if (session.result?.trail) {
+              const trail = session.result.trail;
+              if (trail.steps && layers.trails.length === 0) {
+                trail.steps.forEach((step, idx) => {
+                  layers.trails.push({
+                    id: `trail-step-${idx}`,
+                    agent: step.agent || 'explorer',
+                    action: step.action || 'search_web',
+                    input: step.input?.slice(0, 200),
+                    output: step.output?.slice(0, 200),
+                    confidence: step.confidence,
+                    rejected: step.rejected,
+                  });
+                });
+              }
+            }
+
+            // Build edges based on relationships and provenance
+            (memories || []).forEach(m => {
+              const metadata = m.metadata || {};
+
+              // Link claims to their sources
+              if (metadata.sourceId) {
+                layers.weights.edges.push({
+                  from: `claim-${m.id}`,
+                  to: `source-${metadata.sourceId}`,
+                  type: 'derived_from',
+                  confidence: m.importance_score,
+                });
+              }
+
+              // Link trails to blueprints if used
+              if (metadata.blueprintUsed) {
+                layers.weights.edges.push({
+                  from: `trail-${m.id}`,
+                  to: `blueprint-${metadata.blueprintUsed}`,
+                  type: 'used_blueprint',
+                  confidence: 0.9,
+                });
+              }
+            });
+
+            return jsonResponse(res, {
+              sessionId,
+              projectId,
+              layers,
+              nodeCount: layers.sources.length + layers.claims.length + layers.trails.length + layers.blueprints.length,
+              edgeCount: layers.weights.edges.length,
+            });
+          } catch (err) {
+            console.error('[research] graph lookup failed:', err.message);
+            return jsonResponse(res, { error: 'Failed to retrieve graph' }, 500);
+          }
+        }
+
         return jsonResponse(res, { error: 'Unknown research action' }, 400);
       }
 
@@ -3535,157 +3681,6 @@ a{color:#a78bfa}</style></head><body>
             } catch (err) {
               console.error('[research] contradictions lookup failed:', err.message);
               return jsonResponse(res, { error: 'Failed to retrieve contradictions' }, 500);
-            }
-          }
-          break;
-
-        // GET /api/research/:sessionId/graph — get research subgraph
-        case (pathname.match(/^\/api\/research\/[^/]+\/graph$/) || {}).input:
-          if (req.method === 'GET') {
-            const sessionId = pathname.split('/')[3];
-            const session = researchSessions.get(sessionId);
-            if (!session) {
-              return jsonResponse(res, { error: 'Session not found' }, 404);
-            }
-
-            try {
-              // Get all memories for this research project
-              const projectId = session.projectId || `research/${sessionId.slice(0, 8)}`;
-              console.log('[research/graph] Fetching graph for session:', sessionId, 'projectId:', projectId, 'userId:', session.userId || userId, 'orgId:', session.orgId || orgId);
-
-              const memories = await persistentMemoryStore.searchMemories({
-                query: '',
-                user_id: session.userId || userId,
-                org_id: session.orgId || orgId,
-                project: projectId,
-                n_results: 200,
-              });
-
-              console.log('[research/graph] Found', memories?.length || 0, 'memories for project:', projectId);
-              if (memories?.length > 0) {
-                console.log('[research/graph] Sample memory tags:', memories[0]?.tags, 'memory_type:', memories[0]?.memory_type);
-              }
-
-              // Build layered graph structure
-              const layers = {
-                sources: [],
-                claims: [],
-                trails: [],
-                blueprints: [],
-                weights: { edges: [] },
-              };
-
-              // Categorize memories into layers
-              (memories || []).forEach(m => {
-                const tags = m.tags || [];
-                const metadata = m.metadata || {};
-                const memoryType = m.memoryType || m.memory_type;
-
-                // Layer 1: Sources (web pages, docs) - memory_type 'fact' with web source tags
-                if (tags.includes('research-source') || tags.includes('web-source') ||
-                    metadata.source_type === 'web' || (memoryType === 'fact' && tags.includes('web')) || (memory_type === 'fact' && tags.includes('web'))) {
-                  layers.sources.push({
-                    id: m.id,
-                    title: m.title,
-                    url: metadata.url || metadata.source_url,
-                    runtime: metadata.research_source || 'tavily',
-                    score: m.importance_score,
-                    favicon: metadata.favicon,
-                  });
-                }
-
-                // Layer 2: Claims (extracted findings) - memory_type 'fact' for web sources and research findings
-                if (tags.includes('research-finding') || memoryType === 'fact' || memory_type === 'fact') {
-                  layers.claims.push({
-                    id: m.id,
-                    content: m.content?.slice(0, 500),
-                    confidence: metadata.confidence || m.importance_score,
-                    source: metadata.source_url || metadata.source_id,
-                  });
-                }
-
-                // Layer 3: Trails (research steps) - includes both decision (trails) and event (session steps)
-                if (tags.includes('research-trail') || tags.includes('csi-trail') ||
-                    metadata.trailType === 'op/research-trail' || memoryType === 'decision' || memory_type === 'decision') {
-                  const steps = metadata.steps || [];
-                  steps.forEach((step, idx) => {
-                    layers.trails.push({
-                      id: `step-${m.id}-${idx}`,
-                      agent: step.agent || 'explorer',
-                      action: step.action || 'search_web',
-                      input: step.input?.slice(0, 200),
-                      output: step.output?.slice(0, 200),
-                      confidence: step.confidence,
-                      rejected: step.rejected,
-                    });
-                  });
-                }
-
-                // Layer 4: Blueprints
-                if (tags.includes('kg/blueprint') || metadata.blueprint_id) {
-                  layers.blueprints.push({
-                    blueprintId: metadata.blueprint_id,
-                    name: metadata.blueprint_name || m.title,
-                    domain: metadata.blueprint_domain,
-                    timesReused: metadata.blueprint_times_reused || 0,
-                    successRate: metadata.blueprint_success_rate,
-                  });
-                }
-              });
-
-              // Also get trail from session result if available
-              if (session.result?.trail) {
-                const trail = session.result.trail;
-                if (trail.steps && layers.trails.length === 0) {
-                  trail.steps.forEach((step, idx) => {
-                    layers.trails.push({
-                      id: `trail-step-${idx}`,
-                      agent: step.agent || 'explorer',
-                      action: step.action || 'search_web',
-                      input: step.input?.slice(0, 200),
-                      output: step.output?.slice(0, 200),
-                      confidence: step.confidence,
-                      rejected: step.rejected,
-                    });
-                  });
-                }
-              }
-
-              // Build edges based on relationships and provenance
-              (memories || []).forEach(m => {
-                const metadata = m.metadata || {};
-
-                // Link claims to their sources
-                if (metadata.sourceId) {
-                  layers.weights.edges.push({
-                    from: `claim-${m.id}`,
-                    to: `source-${metadata.sourceId}`,
-                    type: 'derived_from',
-                    confidence: m.importance_score,
-                  });
-                }
-
-                // Link trails to blueprints if used
-                if (metadata.blueprintUsed) {
-                  layers.weights.edges.push({
-                    from: `trail-${m.id}`,
-                    to: `blueprint-${metadata.blueprintUsed}`,
-                    type: 'used_blueprint',
-                    confidence: 0.9,
-                  });
-                }
-              });
-
-              return jsonResponse(res, {
-                sessionId,
-                projectId,
-                layers,
-                nodeCount: layers.sources.length + layers.claims.length + layers.trails.length + layers.blueprints.length,
-                edgeCount: layers.weights.edges.length,
-              });
-            } catch (err) {
-              console.error('[research] graph lookup failed:', err.message);
-              return jsonResponse(res, { error: 'Failed to retrieve graph' }, 500);
             }
           }
           break;

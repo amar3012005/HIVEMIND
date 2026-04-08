@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HIVEMIND Live Log Streamer</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+      background: #0a0a0a;
+      color: #e5e5e5;
+      padding: 20px;
+    }
+    h1 {
+      font-size: 18px;
+      font-weight: 600;
+      color: #117dff;
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 500;
+    }
+    .status.connected { background: rgba(22,163,74,0.15); color: #16a34a; }
+    .status.disconnected { background: rgba(220,38,38,0.15); color: #dc2626; }
+    .status.connecting { background: rgba(217,119,6,0.15); color: #d97706; }
+    .container {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+      max-width: 1600px;
+      margin: 0 auto;
+    }
+    .panel {
+      background: #111;
+      border: 1px solid #333;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .panel-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 16px;
+      background: #1a1a1a;
+      border-bottom: 1px solid #333;
+    }
+    .panel-title {
+      font-size: 13px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .panel-title.control-plane { color: #0ea5e9; }
+    .panel-title.core { color: #8b5cf6; }
+    .panel-actions {
+      display: flex;
+      gap: 8px;
+    }
+    .btn {
+      padding: 4px 10px;
+      font-size: 11px;
+      font-family: inherit;
+      border: 1px solid #444;
+      background: #222;
+      color: #ccc;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .btn:hover { background: #333; border-color: #555; }
+    .btn.active { background: #117dff; border-color: #117dff; color: white; }
+    .log-container {
+      height: 70vh;
+      overflow-y: auto;
+      padding: 12px;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+    .log-container::-webkit-scrollbar { width: 8px; }
+    .log-container::-webkit-scrollbar-track { background: #1a1a1a; }
+    .log-container::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
+    .log-container::-webkit-scrollbar-thumb:hover { background: #444; }
+    .log-entry {
+      padding: 4px 8px;
+      border-bottom: 1px solid #1a1a1a;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .log-entry:hover { background: #1a1a1a; }
+    .log-entry.error { color: #f87171; }
+    .log-entry.warn { color: #fbbf24; }
+    .log-entry.info { color: #60a5fa; }
+    .log-entry.success { color: #34d399; }
+    .log-entry.research { color: #a78bfa; }
+    .timestamp { color: #666; margin-right: 8px; }
+    .empty-state {
+      color: #444;
+      text-align: center;
+      padding: 40px 20px;
+      font-size: 13px;
+    }
+    .controls {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .filter-input {
+      flex: 1;
+      min-width: 200px;
+      padding: 8px 12px;
+      font-family: inherit;
+      font-size: 12px;
+      background: #111;
+      border: 1px solid #333;
+      border-radius: 6px;
+      color: #e5e5e5;
+    }
+    .filter-input:focus { outline: none; border-color: #117dff; }
+    .stats {
+      display: flex;
+      gap: 20px;
+      margin-left: auto;
+      font-size: 12px;
+      color: #666;
+    }
+    .stats span { color: #888; }
+  </style>
+</head>
+<body>
+  <h1>
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M12 2v20M2 12h20M12 2l10 10-10 10M12 2L2 12l10 10"/>
+    </svg>
+    HIVEMIND Live Log Streamer
+  </h1>
+
+  <div class="controls">
+    <input type="text" class="filter-input" id="filterInput" placeholder="Filter logs (e.g., 'research', 'error', '400')...">
+    <button class="btn" id="clearBtn">Clear Logs</button>
+    <button class="btn" id="downloadBtn">Download Logs</button>
+    <div class="stats">
+      <span>Control Plane: <strong id="cpCount">0</strong> lines</span>
+      <span>Core API: <strong id="coreCount">0</strong> lines</span>
+    </div>
+  </div>
+
+  <div class="container">
+    <!-- Control Plane Panel -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title control-plane">
+          <span class="status connecting" id="cpStatus">Connecting...</span>
+          Control Plane (api.hivemind.davinciai.eu:8040)
+        </span>
+        <div class="panel-actions">
+          <button class="btn active" data-panel="control">Auto-scroll</button>
+        </div>
+      </div>
+      <div class="log-container" id="cpLogs">
+        <div class="empty-state">Connecting to control plane...</div>
+      </div>
+    </div>
+
+    <!-- Core API Panel -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title core">
+          <span class="status connecting" id="coreStatus">Connecting...</span>
+          Core API (core.hivemind.davinciai.eu:8050)
+        </span>
+        <div class="panel-actions">
+          <button class="btn active" data-panel="core">Auto-scroll</button>
+        </div>
+      </div>
+      <div class="log-container" id="coreLogs">
+        <div class="empty-state">Connecting to core API...</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const cpLogs = document.getElementById('cpLogs');
+    const coreLogs = document.getElementById('coreLogs');
+    const cpStatus = document.getElementById('cpStatus');
+    const coreStatus = document.getElementById('coreStatus');
+    const filterInput = document.getElementById('filterInput');
+    const clearBtn = document.getElementById('clearBtn');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const cpCount = document.getElementById('cpCount');
+    const coreCount = document.getElementById('coreCount');
+
+    let cpLines = [];
+    let coreLines = [];
+    let cpAutoScroll = true;
+    let coreAutoScroll = true;
+    let filterText = '';
+    let cpLastTs = null;
+    let coreLastTs = null;
+
+    // WebSocket-like polling for logs
+    async function streamLogs(containerName, targetElement, statusElement, linesArray, countElement) {
+      const updateStatus = (state) => {
+        statusElement.className = `status ${state}`;
+        statusElement.textContent = state === 'connected' ? '● Connected' : state === 'connecting' ? '○ Connecting...' : '● Disconnected';
+      };
+
+      const addLog = (line) => {
+        if (filterText && !line.toLowerCase().includes(filterText.toLowerCase())) return;
+
+        linesArray.push(line);
+        countElement.textContent = linesArray.length;
+
+        // Remove empty state
+        const emptyState = targetElement.querySelector('.empty-state');
+        if (emptyState) emptyState.remove();
+
+        const entry = document.createElement('div');
+        entry.className = 'log-entry';
+
+        // Add timestamp
+        const now = new Date();
+        const ts = now.toISOString().replace('T', ' ').substr(0, 19);
+
+        // Colorize based on content
+        if (line.includes('error') || line.includes('Error') || line.includes('failed') || line.includes('Failed')) {
+          entry.classList.add('error');
+        } else if (line.includes('warn') || line.includes('Warn')) {
+          entry.classList.add('warn');
+        } else if (line.includes('research') || line.includes('Research')) {
+          entry.classList.add('research');
+        } else if (line.includes('✓') || line.includes('success') || line.includes('completed') || line.includes('plan check')) {
+          entry.classList.add('success');
+        } else if (line.includes('[INFO]') || line.includes('Proxy')) {
+          entry.classList.add('info');
+        }
+
+        entry.innerHTML = `<span class="timestamp">[${ts}]</span>${escapeHtml(line)}`;
+        targetElement.appendChild(entry);
+
+        // Auto-scroll
+        const panel = targetElement.closest('.panel');
+        const autoScrollBtn = panel.querySelector('[data-panel="' + (targetElement.id === 'cpLogs' ? 'control' : 'core') + '"]');
+        const shouldScroll = targetElement.id === 'cpLogs' ? cpAutoScroll : coreAutoScroll;
+        if (shouldScroll) {
+          targetElement.scrollTop = targetElement.scrollHeight;
+        }
+      };
+
+      const fetchLogs = async () => {
+        try {
+          const resp = await fetch(`/api/logs?container=${containerName}&since=1m`);
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+          const data = await resp.json();
+          if (data.logs && data.logs.length > 0) {
+            data.logs.forEach(addLog);
+          }
+          updateStatus('connected');
+        } catch (err) {
+          updateStatus('disconnected');
+          console.error(`[${containerName}] Error:`, err.message);
+        }
+      };
+
+      // Initial fetch
+      updateStatus('connecting');
+      await fetchLogs();
+
+      // Poll every 2 seconds
+      setInterval(fetchLogs, 2000);
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    // Auto-scroll toggle
+    document.querySelectorAll('[data-panel]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const panel = btn.dataset.panel;
+        if (panel === 'control') {
+          cpAutoScroll = !cpAutoScroll;
+          btn.classList.toggle('active');
+        } else {
+          coreAutoScroll = !coreAutoScroll;
+          btn.classList.toggle('active');
+        }
+      });
+    });
+
+    // Clear logs
+    clearBtn.addEventListener('click', () => {
+      cpLines = [];
+      coreLines = [];
+      cpLogs.innerHTML = '<div class="empty-state">Logs cleared. Waiting for new entries...</div>';
+      coreLogs.innerHTML = '<div class="empty-state">Logs cleared. Waiting for new entries...</div>';
+      cpCount.textContent = '0';
+      coreCount.textContent = '0';
+    });
+
+    // Filter
+    filterInput.addEventListener('input', (e) => {
+      filterText = e.target.value.trim();
+      // Re-render visible logs
+      cpLogs.innerHTML = '';
+      coreLogs.innerHTML = '';
+      cpLines.forEach(line => {
+        if (!filterText || line.toLowerCase().includes(filterText.toLowerCase())) {
+          const entry = document.createElement('div');
+          entry.className = 'log-entry';
+          const now = new Date();
+          const ts = now.toISOString().replace('T', ' ').substr(0, 19);
+          entry.innerHTML = `<span class="timestamp">[${ts}]</span>${escapeHtml(line)}`;
+          cpLogs.appendChild(entry);
+        }
+      });
+      coreLines.forEach(line => {
+        if (!filterText || line.toLowerCase().includes(filterText.toLowerCase())) {
+          const entry = document.createElement('div');
+          entry.className = 'log-entry';
+          const now = new Date();
+          const ts = now.toISOString().replace('T', ' ').substr(0, 19);
+          entry.innerHTML = `<span class="timestamp">[${ts}]</span>${escapeHtml(line)}`;
+          coreLogs.appendChild(entry);
+        }
+      });
+    });
+
+    // Download logs
+    downloadBtn.addEventListener('click', () => {
+      const content = `=== CONTROL PLANE LOGS ===\n\n${cpLines.join('\n')}\n\n=== CORE API LOGS ===\n\n${coreLines.join('\n')}`;
+      const blob = new Blob([content], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `hivemind-logs-${new Date().toISOString().slice(0,19)}.txt`;
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+
+    // Start streaming
+    streamLogs('hm-control', cpLogs, cpStatus, cpLines, cpCount);
+    streamLogs('hm-core', coreLogs, coreStatus, coreLines, coreCount);
+  </script>
+</body>
+</html>    // Also add direct Docker log tail endpoint for debugging
+    async function tailLogs(container, lines = 50) {
+      try {
+        const resp = await fetch(`/api/logs?container=${container}&tail=${lines}`);
+        const data = await resp.json();
+        return data.logs || [];
+      } catch {
+        return [];
+      }
+    }
+  </script>
+</body>
+</html>

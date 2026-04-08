@@ -46,7 +46,11 @@ function loadLocalEnv(envPath) {
 }
 
 loadLocalEnv(path.join(PROJECT_ROOT, '.env'));
+
+// Import log capture for control plane
+const { captureLogs: captureControlPlaneLogs, getLogBuffer: getControlPlaneLogBuffer } = await import('./log-streamer.js');
 installConsoleCapture('control-plane');
+captureControlPlaneLogs('hm-control');
 
 const defaultAllowedOrigins = (process.env.HIVEMIND_CONTROL_PLANE_ALLOWED_ORIGINS
   || process.env.HIVEMIND_ALLOWED_ORIGINS
@@ -778,6 +782,13 @@ const server = http.createServer(async (req, res) => {
 
   const url = new URL(req.url, `http://${req.headers.host}`);
   const pathname = url.pathname;
+
+  // API endpoint for log streaming
+  if (pathname === '/api/logs' && req.method === 'GET') {
+    const container = url.searchParams.get('container') || 'hm-control';
+    const logs = getControlPlaneLogBuffer(container).map(e => `[${e.timestamp}] [${e.type.toUpperCase()}] ${e.line}`);
+    return jsonResponse(res, { container, logs });
+  }
 
   if (pathname === '/admin/api/logs' && req.method === 'GET') {
     if (!isAdminAuthorized(req, url)) {

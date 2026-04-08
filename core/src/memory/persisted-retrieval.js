@@ -890,7 +890,7 @@ export async function recallPersistedMemories(store, {
   const candidatePoolSize = temporalComparison
     ? Math.max(max_memories * 8, 40)
     : Math.max(max_memories * 4, 20);
-  const vectorScoreThreshold = temporalComparison ? 0.18 : 0.25;
+  const vectorScoreThreshold = temporalComparison ? 0.15 : 0.20; // Lowered from 0.18/0.25 for better recall
 
   // is_latest: undefined = default true, false = include superseded versions
   const effectiveIsLatest = is_latest !== undefined ? is_latest : true;
@@ -906,6 +906,7 @@ export async function recallPersistedMemories(store, {
     created_after: effectiveDateRange?.start,
     created_before: effectiveDateRange?.end
   });
+  console.log('[recall] PostgreSQL FTS found %d candidates for query: %s', lexicalCandidates.length, query_context.slice(0, 50));
 
   const filteredLexical = lexicalCandidates.filter(memory => {
     // Exclude benchmark data from production recall when no specific project is set
@@ -915,6 +916,7 @@ export async function recallPersistedMemories(store, {
     const sourcePlatform = memory.source_metadata?.source_platform || memory.source || null;
     return source_platforms.includes(sourcePlatform);
   });
+  console.log('[recall] After filtering: %d lexical candidates', filteredLexical.length);
 
   const vectorCandidates = await vectorCandidatesForRecall(store, {
     query_context,
@@ -929,6 +931,7 @@ export async function recallPersistedMemories(store, {
     candidatePoolSize,
     is_latest: effectiveIsLatest,
   });
+  console.log('[recall] Qdrant vector search found %d candidates', vectorCandidates.length);
   const relationships = await store.listRelationships({ user_id, org_id, project, limit: 1000 });
   const relationshipCounts = buildRelationshipIndex(relationships);
 

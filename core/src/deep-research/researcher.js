@@ -252,102 +252,145 @@ export class DeepResearcher {
   async _executeTask(task, userId, orgId, projectId, sessionId, trailStore) {
     const findings = [];
     const sources = [];
-    const maxSteps = 6;  // max reasoning steps per task
+    const maxSteps = 8;
     let step = 0;
     let stepIndex = 0;
+
+    // Track agent states for real-time visibility
+    const agentStates = { explorer: 'idle', analyst: 'idle', verifier: 'idle', synthesizer: 'idle' };
+    const updateAgentState = (agent, state, detail = '') => {
+      agentStates[agent] = state;
+      this._emit('agent.state', { taskId: task.id, agent, state, detail, timestamp: new Date().toISOString() });
+    };
+    this._emit('agent.states', { taskId: task.id, states: { ...agentStates } });
 
     while (step < maxSteps) {
       step++;
 
-      // REASON: Ask LLM what to do next
-      const reasoning = await this._reason(task.query, findings, step);
-      this._emit('task.reasoning', { taskId: task.id, step, action: reasoning.action, thought: reasoning.thought });
+      // PHASE 1-3: EXPLORATION (Explorer Agent)
+      if (step <= 3) {
+        updateAgentState('explorer', 'active', 'Searching for sources');
+        const reasoning = await this._reasonExplore(task.query, findings, step);
+        this._emit('task.reasoning', { taskId: task.id, step, agent: 'explorer', action: reasoning.action, thought: reasoning.thought });
 
-      // Record reasoning step to trail
-      if (trailStore) {
-        await trailStore.recordStep(sessionId, {
-          stepIndex: stepIndex++,
-          agent: this._mapActionToAgent(reasoning.action),
-          action: reasoning.action.toLowerCase(),
-          input: reasoning.query || task.query,
-          output: reasoning.thought,
-          confidence: 0.5,
-          rejected: false,
-        });
-      }
+        if (reasoning.action === 'FINISH') break;
 
-      // Check if task is complete
-      if (reasoning.action === 'FINISH') break;
-
-      // ACT: Execute the chosen action
-      let result;
-      switch (reasoning.action) {
-        case 'SEARCH_MEMORY':
-          result = await this._actSearchMemory(reasoning.query || task.query, userId, orgId, projectId);
-          break;
-        case 'SEARCH_WEB':
-          result = await this._actSearchWeb(reasoning.query || task.query, userId, orgId, projectId, sessionId, trailStore);
-          break;
-        case 'READ_URL':
+        let result;
+        if (reasoning.action === 'READ_URL') {
           result = await this._actReadUrl(reasoning.url, userId, orgId, projectId, sessionId, trailStore);
-          break;
-        case 'SYNTHESIZE':
-          result = await this._actSynthesize(task.query, findings);
-          break;
-        default:
-          result = { type: 'error', content: 'Unknown action' };
-      }
-
-      // OBSERVE: Add result to findings
-      if (result && result.content) {
-        const finding = {
-          id: randomUUID(),
-          type: result.type || reasoning.action.toLowerCase(),
-          title: result.title || reasoning.query || task.query,
-          content: result.content,
-          source: result.source || 'unknown',
-          sourceId: result.sourceId || null,
-          confidence: result.confidence || 0.6,
-          taskQuery: task.query,
-        };
-        findings.push(finding);
-
-        // Record action result to trail
-        if (trailStore) {
-          await trailStore.recordStep(sessionId, {
-            stepIndex: stepIndex++,
-            agent: this._mapActionToAgent(reasoning.action),
-            action: reasoning.action.toLowerCase(),
-            input: reasoning.query || task.query,
-            output: result.content.slice(0, 500),
-            confidence: result.confidence || 0.6,
-            rejected: false,
-          });
-
-          // Check for contradictions
-          await trailStore.detectContradiction(sessionId, {
-            content: result.content,
-            source: result.source || 'unknown',
-            memoryId: finding.id,
-          });
+        } else {
+          result = await this._actSearchWeb(reasoning.query || task.query, userId, orgId, projectId, sessionId, trailStore);
         }
 
-        if (result.source) sources.push({ type: result.type, id: result.sourceId, title: result.title });
+        if (result?.content) {
+          const finding = { id: randomUUID(), type: result.type || 'web', title: result.title || reasoning.query, content: result.content, source: result.source || 'web', sourceId: result.sourceId, confidence: result.confidence || 0.6, taskQuery: task.query, agent: 'explorer' };
+          findings.push(finding);
+          sources.push({ type: result.type, id: result.sourceId, title: result.title });
+          await this._recordFinding(trailStore, sessionId, stepIndex++, 'explorer', reasoning.action, finding);
+        }
+        updateAgentState('explorer', findings.length > 0 ? 'completed' : 'idle');
+        continue;
       }
 
-      this._emit('task.observation', { taskId: task.id, step, type: result?.type, title: result?.title });
+      // PHASE 4: ANALYSIS (Analyst Agent)
+      if (step === 4 && findings.length > 0) {
+        updateAgentState('analyst', 'active', 'Analyzing findings');
+        const analysis = await this._actAnalyze(task.query, findings, userId, orgId, projectId);
+        if (analysis?.claims?.length > 0) {
+          for (const claim of analysis.claims) {
+            const finding = { id: randomUUID(), type: 'claim', title: `Claim: ${claim.slice(0, 50)}`, content: claim, source: 'analyst_extraction', confidence: 0.75, taskQuery: task.query, agent: 'analyst' };
+            findings.push(finding);
+            await this._recordFinding(trailStore, sessionId, stepIndex++, 'analyst', 'EXTRACT_CLAIM', finding);
+          }
+        }
+        const memoryFindings = await this._actSearchMemory(task.query, userId, orgId, projectId);
+        if (memoryFindings?.content) {
+          const finding = { id: randomUUID(), type: 'memory', title: memoryFindings.title, content: memoryFindings.content, source: 'hivemind_memory', sourceId: memoryFindings.sourceId, confidence: memoryFindings.confidence || 0.6, taskQuery: task.query, agent: 'analyst' };
+          findings.push(finding);
+          await this._recordFinding(trailStore, sessionId, stepIndex++, 'analyst', 'SEARCH_MEMORY', finding);
+        }
+        updateAgentState('analyst', 'completed');
+        this._emit('task.observation', { taskId: task.id, step, agent: 'analyst', type: 'analysis_complete', title: `Extracted ${analysis?.claims?.length || 0} claims` });
+        continue;
+      }
+
+      // PHASE 5: VERIFICATION (Verifier Agent)
+      if (step === 5 && findings.length > 0) {
+        updateAgentState('verifier', 'active', 'Verifying findings');
+        const verification = await this._actVerify(task.query, findings, trailStore, sessionId);
+        await trailStore?.recordStep(sessionId, { stepIndex: stepIndex++, agent: 'verifier', action: 'verify_findings', input: task.query, output: `Verified ${verification.verified?.length || 0}, rejected ${verification.rejected?.length || 0}`, confidence: verification.overallConfidence || 0.7, rejected: false });
+        if (verification.contradictions?.length > 0) {
+          for (const contradiction of verification.contradictions) await trailStore?.recordContradiction(sessionId, contradiction);
+          this._emit('verifier.contradiction', { taskId: task.id, count: verification.contradictions.length, details: verification.contradictions });
+        }
+        updateAgentState('verifier', 'completed', `${verification.verified?.length || 0} verified, ${verification.rejected?.length || 0} rejected`);
+        this._emit('task.observation', { taskId: task.id, step, agent: 'verifier', type: 'verification_complete', title: `Found ${verification.contradictions?.length || 0} contradictions` });
+        continue;
+      }
+
+      // PHASE 6: SYNTHESIS (Synthesizer Agent)
+      if (step === 6 && findings.length > 0) {
+        updateAgentState('synthesizer', 'active', 'Synthesizing answer');
+        const synthesis = await this._actSynthesize(task.query, findings);
+        if (synthesis?.content) {
+          const finding = { id: randomUUID(), type: 'synthesis', title: `Synthesis: ${task.query.slice(0, 50)}`, content: synthesis.content, source: 'synthesizer', confidence: synthesis.confidence || 0.8, taskQuery: task.query, agent: 'synthesizer' };
+          findings.push(finding);
+          await this._recordFinding(trailStore, sessionId, stepIndex++, 'synthesizer', 'SYNTHESIZE', finding);
+        }
+        updateAgentState('synthesizer', 'completed');
+        this._emit('task.observation', { taskId: task.id, step, agent: 'synthesizer', type: 'synthesis_complete', title: 'Synthesis complete' });
+        break;
+      }
+
+      if (step >= maxSteps - 1) break;
     }
 
-    // Calculate confidence from findings
-    const webFindings = findings.filter(f => f.type === 'web' || f.type === 'follow_up');
-    const confidence = webFindings.length > 0
-      ? Math.min(0.90, 0.5 + webFindings.length * 0.1)
-      : findings.length > 0 ? 0.4 : 0.1;
+    Object.keys(agentStates).forEach(agent => { if (agentStates[agent] === 'idle') agentStates[agent] = 'not_used'; });
+    this._emit('agent.states', { taskId: task.id, states: agentStates, final: true });
 
-    // Detect remaining gaps
+    const verifiedFindings = findings.filter(f => f.confidence >= 0.6);
+    const confidence = verifiedFindings.length > 0 ? Math.min(0.95, verifiedFindings.reduce((sum, f) => sum + f.confidence, 0) / verifiedFindings.length) : (findings.length > 0 ? 0.5 : 0.1);
     const gaps = await this._detectGaps(task.query, findings);
 
-    return { findings, sources, confidence, gaps };
+    return { findings, sources, confidence, gaps, agentStates };
+  }
+
+  async _recordFinding(trailStore, sessionId, stepIndex, agent, action, finding) {
+    if (!trailStore) return;
+    await trailStore.recordStep(sessionId, { stepIndex, agent, action: action.toLowerCase(), input: finding.taskQuery, output: finding.content.slice(0, 500), confidence: finding.confidence, rejected: false });
+    await trailStore.detectContradiction(sessionId, { content: finding.content, source: finding.source, memoryId: finding.id });
+  }
+
+  async _reasonExplore(query, findings, step) {
+    const findingsSummary = findings.length > 0 ? findings.slice(-3).map(f => `[${f.type}] ${f.title}`).join('\n') : '(none yet)';
+    const response = await this._llm(`You are the EXPLORER agent. Your job is to gather sources and raw information.\n\nResearch question: "${query}"\n\nCurrent findings: ${findingsSummary}\n\nChoose your NEXT ACTION to gather more sources:\n{\n  "thought": "brief reasoning",\n  "action": "SEARCH_WEB" | "READ_URL" | "FINISH",\n  "query": "specific search query if SEARCH_WEB",\n  "url": "specific URL if READ_URL"\n}\n\nRules:\n- SEARCH_WEB: Use for gathering new web sources\n- READ_URL: Use when you have a specific URL to deep-read\n- FINISH: Use when you have gathered sufficient sources (3-5 good sources)`, { temperature: 0.3 });
+    try {
+      const parsed = JSON.parse(response.match(/\{[\s\S]*\}/)?.[0] || '{}');
+      return { thought: parsed.thought || '', action: ['SEARCH_WEB', 'READ_URL', 'FINISH'].includes(parsed.action) ? parsed.action : 'SEARCH_WEB', query: parsed.query || query, url: parsed.url || null };
+    } catch { return { thought: 'Exploring web', action: 'SEARCH_WEB', query, url: null }; }
+  }
+
+  async _actAnalyze(query, findings, userId, orgId, projectId) {
+    const webFindings = findings.filter(f => f.type === 'web' || f.type === 'follow_up');
+    if (webFindings.length === 0) return { claims: [] };
+    const contentToAnalyze = webFindings.map(f => f.content).join('\n\n').slice(0, 4000);
+    const response = await this._llm(`You are the ANALYST agent. Extract key claims and facts from these sources.\n\nResearch question: "${query}"\n\nSource content:\n${contentToAnalyze}\n\nExtract 3-5 key claims as a JSON array of strings:\n["claim 1", "claim 2", "claim 3"]`, { temperature: 0.2 });
+    try { const claims = JSON.parse(response.match(/\[[\s\S]*\]/)?.[0] || '[]'); return { claims: Array.isArray(claims) ? claims.slice(0, 5) : [] }; }
+    catch { return { claims: [] }; }
+  }
+
+  async _actVerify(query, findings, trailStore, sessionId) {
+    const claims = findings.filter(f => f.type === 'claim' || f.confidence >= 0.6);
+    if (claims.length < 2) return { verified: claims, rejected: [], contradictions: [], overallConfidence: 0.7 };
+    const claimsText = claims.map((f, i) => `[${i + 1}] ${f.content.slice(0, 200)} (source: ${f.source})`).join('\n');
+    const response = await this._llm(`You are the VERIFIER agent. Check these claims for quality and contradictions.\n\nResearch question: "${query}"\n\nClaims to verify:\n${claimsText}\n\nReturn JSON:\n{\n  "verifiedIndices": [1, 3],\n  "rejectedIndices": [2],\n  "contradictions": [{"claimAIndex": 1, "claimBIndex": 3, "reason": "they disagree"}],\n  "overallConfidence": 0.75\n}`, { temperature: 0.2 });
+    try {
+      const result = JSON.parse(response.match(/\{[\s\S]*\}/)?.[0] || '{}');
+      const verified = (result.verifiedIndices || []).map(i => claims[i - 1]).filter(Boolean);
+      const rejected = (result.rejectedIndices || []).map(i => claims[i - 1]).filter(Boolean);
+      const contradictions = (result.contradictions || []).map(c => ({ claimA: { source: claims[c.claimAIndex - 1]?.source, content: claims[c.claimAIndex - 1]?.content, memoryId: claims[c.claimAIndex - 1]?.id }, claimB: { source: claims[c.claimBIndex - 1]?.source, content: claims[c.claimBIndex - 1]?.content, memoryId: claims[c.claimBIndex - 1]?.id }, dimension: 'factual', unresolved: true })).filter(c => c.claimA.content && c.claimB.content);
+      return { verified, rejected, contradictions, overallConfidence: result.overallConfidence || 0.7 };
+    } catch { return { verified: claims, rejected: [], contradictions: [], overallConfidence: 0.7 }; }
   }
 
   async _reason(query, findings, step) {
@@ -534,7 +577,9 @@ Rules:
           this._emit('web.results', { query, count: results.length, via: 'lightpanda' });
           return results;
         }
-      } catch {}
+      } catch (err) {
+        console.error('[DeepResearcher] Browser search failed:', err.message);
+      }
     }
 
     // Fallback: DuckDuckGo HTML scrape (no browser needed)
@@ -596,7 +641,9 @@ Rules:
           this._emit('web.read_complete', { url, length: content.length, via: 'lightpanda' });
           return content;
         }
-      } catch {}
+      } catch (err) {
+        console.error('[DeepResearcher] Browser search failed:', err.message);
+      }
     }
 
     // Fallback: direct fetch + HTML strip
@@ -753,7 +800,7 @@ Rules:
     for (const src of sources.slice(0, 10)) {  // Limit to 10 sources per search
       if (!src.url) continue;
 
-      const sourceId = `source-${randomUUID()}`;
+      const sourceId = randomUUID();
       try {
         await this.memoryStore.createMemory({
           id: sourceId,
@@ -762,7 +809,7 @@ Rules:
           project: projectId,
           content: `${src.title || 'Untitled'}\n\n${src.snippet || src.summary || src.content || ''}`,
           title: src.title || src.url,
-          memory_type: 'source',
+          memory_type: 'fact',
           tags: ['research-source', 'web-source', `session:${sessionId}`],
           is_latest: true,
           importance_score: 0.8,
@@ -845,7 +892,9 @@ Rules:
   }
 
   _emit(type, data) {
-    try { this.onEvent({ type, timestamp: new Date().toISOString(), ...data }); } catch {}
+    try { this.onEvent({ type, timestamp: new Date().toISOString(), ...data }); } catch (err) {
+      console.error('[DeepResearcher] Event emission failed:', err.message);
+    }
   }
 
   _slugify(text) {

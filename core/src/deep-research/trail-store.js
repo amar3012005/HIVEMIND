@@ -121,7 +121,9 @@ export class TrailStore {
     }
 
     // Persist incrementally (non-blocking)
-    this._persistTrail(sessionId).catch(() => {});
+    this._persistTrail(sessionId).catch((err) => {
+      console.error('[TrailStore] Failed to persist step:', err.message);
+    });
 
     return stepRecord;
   }
@@ -282,6 +284,7 @@ export class TrailStore {
 
   /**
    * Persist trail to CSI as memory node.
+   * Uses upsert pattern - creates if new, updates if exists.
    * @private
    */
   async _persistTrail(sessionId) {
@@ -289,6 +292,7 @@ export class TrailStore {
     if (!trail) return;
 
     try {
+      // Try to create first
       await this.memoryStore.createMemory({
         id: trail.id,
         user_id: this.userId,
@@ -311,17 +315,38 @@ export class TrailStore {
         updated_at: trail.metadata.updatedAt,
       });
     } catch (err) {
-      // Non-failing: trail persistence should not block research
-      console.error('[TrailStore] Failed to persist trail:', err.message);
+      // If unique constraint violation, update instead
+      if (err.message?.includes('Unique constraint') || err.code === 'P2002') {
+        try {
+          await this.memoryStore.updateMemory(trail.id, {
+            content: this._serializeTrail(trail),
+            updated_at: new Date().toISOString(),
+            metadata: {
+              ...trail.metadata,
+              steps: trail.steps,
+              stepCount: trail.steps.length,
+              contradictionCount: trail.contradictions.length,
+              trailType: 'op/research-trail',
+            },
+          });
+        } catch (updateErr) {
+          console.error('[TrailStore] Failed to update trail:', updateErr.message);
+        }
+      } else {
+        // Non-failing: trail persistence should not block research
+        console.error('[TrailStore] Failed to persist trail:', err.message);
+      }
     }
   }
 
   /**
    * Persist contradiction as separate CSI node.
+   * Uses upsert pattern - creates if new, updates if exists.
    * @private
    */
   async _persistContradiction(contradiction, projectId) {
     try {
+      // Try to create first
       await this.memoryStore.createMemory({
         id: contradiction.id,
         user_id: this.userId,
@@ -343,7 +368,25 @@ export class TrailStore {
         updated_at: contradiction.detectedAt,
       });
     } catch (err) {
-      console.error('[TrailStore] Failed to persist contradiction:', err.message);
+      // If unique constraint violation, update instead
+      if (err.message?.includes('Unique constraint') || err.code === 'P2002') {
+        try {
+          await this.memoryStore.updateMemory(contradiction.id, {
+            content: this._serializeContradiction(contradiction),
+            updated_at: new Date().toISOString(),
+            metadata: {
+              contradictionType: 'op/research-contradiction',
+              claimA: contradiction.claimA,
+              claimB: contradiction.claimB,
+              unresolved: contradiction.unresolved,
+            },
+          });
+        } catch (updateErr) {
+          console.error('[TrailStore] Failed to update contradiction:', updateErr.message);
+        }
+      } else {
+        console.error('[TrailStore] Failed to persist contradiction:', err.message);
+      }
     }
   }
 
@@ -435,11 +478,34 @@ export class TrailStore {
    */
   async queryByProject(projectId) {
     try {
-      // This would use memoryStore.searchMemories in a real implementation
-      // For now, return in-memory trails
+      // Query database for research trails in this project
+      const { memories } = await this.memoryStore.listMemories({
+        user_id: this.userId,
+        org_id: this.orgId,
+        tags: ['research-trail', `project:${projectId}`],
+        limit: 100,
+      });
+
+      if (memories?.length > 0) {
+        return memories.map(m => ({
+          id: m.id,
+          sessionId: m.metadata?.sessionId || m.id,
+          projectId: m.metadata?.projectId || projectId,
+          query: m.metadata?.query || m.content,
+          status: m.metadata?.status || 'completed',
+          startedAt: m.created_at,
+          completedAt: m.metadata?.completedAt,
+          steps: m.metadata?.steps || [],
+          contradictions: m.metadata?.contradictions || [],
+          metadata: m.metadata,
+        }));
+      }
+
+      // Fallback to in-memory if no DB results
       return [...this.trails.values()].filter(t => t.projectId === projectId);
-    } catch {
-      return [];
+    } catch (err) {
+      console.error('[TrailStore] Failed to query trails by project:', err.message);
+      return [...this.trails.values()].filter(t => t.projectId === projectId);
     }
   }
 

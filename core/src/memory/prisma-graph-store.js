@@ -145,7 +145,14 @@ export class PrismaGraphStore {
         documentDate: memory.document_date ? new Date(memory.document_date) : null,
         eventDates: (memory.event_dates || []).map(value => new Date(value)),
         memoryType: memory.memory_type || 'fact',
-        title: memory.title || null
+        title: memory.title || null,
+        importanceScore: memory.importance_score ?? 0.5,
+        strength: memory.strength ?? 1.0,
+        recallCount: memory.recall_count ?? 0,
+        embeddingModel: memory.embedding_model || 'mistral-embed',
+        embeddingVersion: memory.embedding_version ?? 1,
+        processingBasis: memory.processing_basis || 'consent',
+        sharedWithOrgs: memory.shared_with_orgs || [],
       },
     });
 
@@ -159,7 +166,7 @@ export class PrismaGraphStore {
         source_url: memory.source_metadata?.source_url || null,
         thread_id: memory.source_metadata?.thread_id || null,
         parent_message_id: memory.source_metadata?.parent_message_id || null,
-        ingested_at: memory.created_at,
+        ingested_at: memory.created_at ? new Date(memory.created_at) : new Date(),
         metadata: memory.metadata || {}
       });
     }

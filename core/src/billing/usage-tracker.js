@@ -128,7 +128,7 @@ export class UsageTracker {
     try {
       await this.prisma.$executeRawUnsafe(
         `INSERT INTO "OrgUsage" ("orgId", "month", "tokensProcessed", "searchQueries", "knowledgeBaseUploads", "memoriesIngested", "deepResearchJobs", "webIntelJobs", "graphQueries", "taraUsage", "webIntelDay", "updatedAt")
-         VALUES ($1::uuid, $2, 0, 0, 0, 0, 0, 1, 0, 0, $3, NOW())
+         VALUES ($1::uuid, $2, 0, 0, 0, 0, 0, 1, 0, 0, $3::date, NOW())
          ON CONFLICT ("orgId", "webIntelDay")
          DO UPDATE SET "webIntelJobs" = "OrgUsage"."webIntelJobs" + 1, "updatedAt" = NOW()`,
         orgId, this._currentMonth(), today
@@ -225,7 +225,7 @@ export class UsageTracker {
     const today = this._currentDay();
     try {
       const rows = await this.prisma.$queryRawUnsafe(
-        `SELECT "webIntelJobs" FROM "OrgUsage" WHERE "orgId" = $1::uuid AND "webIntelDay" = $2 LIMIT 1`,
+        `SELECT "webIntelJobs" FROM "OrgUsage" WHERE "orgId" = $1::uuid AND "webIntelDay" = $2::date LIMIT 1`,
         orgId, today
       );
       return rows[0]?.webIntelJobs || 0;

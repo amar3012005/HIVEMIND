@@ -3396,7 +3396,11 @@ a{color:#a78bfa}</style></head><body>
             });
 
             // Run in background (non-blocking)
-            researcher.research(query, userId, orgId, { forceRefresh: body.forceRefresh })
+            researcher.research(query, userId, orgId, {
+              forceRefresh: body.forceRefresh,
+              sessionId,
+              projectId,
+            })
               .then(result => {
                 session.status = 'completed';
                 session.result = result;
@@ -3547,6 +3551,8 @@ a{color:#a78bfa}</style></head><body>
             try {
               // Get all memories for this research project
               const projectId = session.projectId || `research/${sessionId.slice(0, 8)}`;
+              console.log('[research/graph] Fetching graph for session:', sessionId, 'projectId:', projectId, 'userId:', session.userId || userId, 'orgId:', session.orgId || orgId);
+
               const memories = await persistentMemoryStore.searchMemories({
                 query: '',
                 user_id: session.userId || userId,
@@ -3554,6 +3560,11 @@ a{color:#a78bfa}</style></head><body>
                 project: projectId,
                 n_results: 200,
               });
+
+              console.log('[research/graph] Found', memories?.length || 0, 'memories for project:', projectId);
+              if (memories?.length > 0) {
+                console.log('[research/graph] Sample memory tags:', memories[0]?.tags, 'memory_type:', memories[0]?.memory_type);
+              }
 
               // Build layered graph structure
               const layers = {
@@ -3570,9 +3581,9 @@ a{color:#a78bfa}</style></head><body>
                 const metadata = m.metadata || {};
                 const memoryType = m.memoryType || m.memory_type;
 
-                // Layer 1: Sources (web pages, docs)
+                // Layer 1: Sources (web pages, docs) - memory_type 'fact' with web source tags
                 if (tags.includes('research-source') || tags.includes('web-source') ||
-                    metadata.source_type === 'web') {
+                    metadata.source_type === 'web' || (memoryType === 'fact' && tags.includes('web')) || (memory_type === 'fact' && tags.includes('web'))) {
                   layers.sources.push({
                     id: m.id,
                     title: m.title,
@@ -3583,8 +3594,8 @@ a{color:#a78bfa}</style></head><body>
                   });
                 }
 
-                // Layer 2: Claims (extracted findings)
-                if (tags.includes('research-finding') || memoryType === 'fact') {
+                // Layer 2: Claims (extracted findings) - memory_type 'fact' for web sources and research findings
+                if (tags.includes('research-finding') || memoryType === 'fact' || memory_type === 'fact') {
                   layers.claims.push({
                     id: m.id,
                     content: m.content?.slice(0, 500),
@@ -3593,9 +3604,9 @@ a{color:#a78bfa}</style></head><body>
                   });
                 }
 
-                // Layer 3: Trails (research steps)
+                // Layer 3: Trails (research steps) - includes both decision (trails) and event (session steps)
                 if (tags.includes('research-trail') || tags.includes('csi-trail') ||
-                    metadata.trailType === 'op/research-trail' || metadata.trailType === 'decision') {
+                    metadata.trailType === 'op/research-trail' || memoryType === 'decision' || memory_type === 'decision') {
                   const steps = metadata.steps || [];
                   steps.forEach((step, idx) => {
                     layers.trails.push({

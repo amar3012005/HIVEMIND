@@ -60,11 +60,13 @@ export class DeepResearcher {
    * @param {string} userId
    * @param {string} orgId
    * @param {Object} [options]
+   * @param {string} [options.projectId] - optional project ID (uses generated one if not provided)
+   * @param {string} [options.sessionId] - optional session ID for event emission
    * @returns {Promise<Object>} ResearchResult
    */
   async research(query, userId, orgId, options = {}) {
-    const sessionId = randomUUID();
-    const projectId = `research/${this._slugify(query)}`;
+    const sessionId = options.sessionId || randomUUID();
+    const projectId = options.projectId || `research/${this._slugify(query)}`;
     const startTime = Date.now();
 
     this._emit('research.started', { sessionId, query, projectId });
@@ -778,8 +780,9 @@ Rules:
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       });
-    } catch {
-      // Non-fatal
+      console.log('[DeepResearcher] Saved finding to CSI:', finding.title?.slice(0, 50), 'project:', projectId);
+    } catch (err) {
+      console.error('[DeepResearcher] Failed to save finding:', err.message, 'finding:', finding.title?.slice(0, 50));
     }
   }
 
@@ -824,6 +827,7 @@ Rules:
           updated_at: new Date().toISOString(),
         });
         savedSources.push({ id: sourceId, url: src.url, title: src.title });
+        console.log('[DeepResearcher] Saved web source to CSI:', src.title?.slice(0, 50), 'url:', src.url?.slice(0, 80));
 
         // Record to trail
         if (trailStore) {

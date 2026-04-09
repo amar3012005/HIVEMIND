@@ -759,11 +759,32 @@ async function proxyToCore(req, res, { session, method, path, body, query, rawBo
     }
 
     const coreResp = await fetch(coreUrl.toString(), fetchOpts);
-    const respBody = await coreResp.text();
+    const contentType = coreResp.headers.get('content-type') || 'application/json';
 
-    res.writeHead(coreResp.status, {
-      'Content-Type': coreResp.headers.get('content-type') || 'application/json',
-    });
+    // SSE streaming: pipe through without buffering
+    if (contentType.includes('text/event-stream') && coreResp.body) {
+      res.writeHead(coreResp.status, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      });
+      const reader = coreResp.body.getReader();
+      const pump = async () => {
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) { res.end(); return; }
+            res.write(value);
+          }
+        } catch { res.end(); }
+      };
+      req.on('close', () => { try { reader.cancel(); } catch {} });
+      return pump();
+    }
+
+    const respBody = await coreResp.text();
+    res.writeHead(coreResp.status, { 'Content-Type': contentType });
     res.end(respBody);
   } catch (err) {
     console.error('[proxy] Error forwarding to core:', err.message);

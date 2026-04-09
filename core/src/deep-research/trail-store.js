@@ -31,8 +31,12 @@ export class TrailStore {
     this.orgId = orgId;
 
     // In-memory buffer for building trail before persistence
-    this.trails = new Map(); // sessionId → trail buffer
-    this.contradictions = new Map(); // sessionId → contradiction list
+    this.trails = new Map();
+    this.contradictions = new Map();
+
+    // Thread-safe step recording for parallel task execution
+    this._stepCounter = 0;
+    this._persistTimers = new Map(); // sessionId → debounce timer
   }
 
   /**
@@ -91,17 +95,19 @@ export class TrailStore {
    * @param {number} step.confidence - confidence score 0-1
    * @param {boolean} step.rejected - was this branch abandoned?
    * @param {string} step.reason - why rejected (if applicable)
+   * @param {string} step.thought - reasoning/thought behind the action
+   * @param {string} step.why - why this action was chosen
+   * @param {string|null} step.alternativeConsidered - alternative action that was considered
    */
   async recordStep(sessionId, step) {
     const trail = this.trails.get(sessionId);
     if (!trail) {
-      // Trail not initialized - create minimal record
       await this.initTrail(sessionId, 'Unknown', `research/unknown`);
     }
 
     const trailBuffer = this.trails.get(sessionId);
     const stepRecord = {
-      stepIndex: step.stepIndex ?? trailBuffer.steps.length,
+      stepIndex: this._stepCounter++,
       agent: step.agent || 'explorer',
       action: step.action || 'search_web',
       input: step.input || '',
@@ -109,21 +115,31 @@ export class TrailStore {
       confidence: step.confidence ?? 0.5,
       rejected: step.rejected || false,
       reason: step.reason || '',
+      thought: step.thought || '',
+      why: step.why || '',
+      alternativeConsidered: step.alternativeConsidered || null,
       timestamp: new Date().toISOString(),
     };
 
     trailBuffer.steps.push(stepRecord);
     trailBuffer.metadata.updatedAt = new Date().toISOString();
 
-    // Update agent state
     if (step.agent && trailBuffer.metadata.agentStates) {
       trailBuffer.metadata.agentStates[step.agent] = step.rejected ? 'blocked' : 'active';
     }
 
-    // Persist incrementally (non-blocking)
-    this._persistTrail(sessionId).catch((err) => {
-      console.error('[TrailStore] Failed to persist step:', err.message);
-    });
+    // Debounced persist — coalesces concurrent writes within 500ms
+    if (this._persistTimers.has(sessionId)) {
+      clearTimeout(this._persistTimers.get(sessionId));
+    }
+    this._persistTimers.set(sessionId, setTimeout(async () => {
+      this._persistTimers.delete(sessionId);
+      try {
+        await this._persistTrail(sessionId);
+      } catch (err) {
+        console.error('[TrailStore] Debounced persist failed:', err.message);
+      }
+    }, 500));
 
     return stepRecord;
   }
@@ -195,6 +211,12 @@ export class TrailStore {
   async finalizeTrail(sessionId, report) {
     const trail = this.trails.get(sessionId);
     if (!trail) return null;
+
+    // Flush any pending debounced persist
+    if (this._persistTimers.has(sessionId)) {
+      clearTimeout(this._persistTimers.get(sessionId));
+      this._persistTimers.delete(sessionId);
+    }
 
     trail.metadata.completedAt = new Date().toISOString();
     trail.metadata.report = report;
@@ -415,6 +437,9 @@ export class TrailStore {
         `- Rejected: ${step.rejected}${step.reason ? ` (${step.reason})` : ''}`,
         `- Input: ${step.input.slice(0, 200)}`,
         `- Output: ${step.output.slice(0, 200)}`,
+        step.thought ? `- Thought: ${step.thought}` : '',
+        step.why ? `- Why: ${step.why}` : '',
+        step.alternativeConsidered ? `- Alternative Considered: ${step.alternativeConsidered}` : '',
         ``,
       );
     }

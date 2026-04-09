@@ -149,50 +149,73 @@ export class DeepResearcher {
       stack.decompose(root.id, dimensions);
     }
 
-    // Step 2: Process each task (depth-first)
+    // Step 2: Execute tasks in parallel waves
     let reflectionRound = 0;
     const allFindings = [...priorFindings];
     const allSources = [];
+    const waves = stack.getTasksByWave();
 
+    for (const waveNum of [1, 2, 3]) {
+      const waveTasks = waves[waveNum];
+      if (!waveTasks || waveTasks.length === 0) continue;
+
+      this._emit('research.wave_started', { sessionId, wave: waveNum, taskCount: waveTasks.length });
+
+      for (const task of waveTasks) {
+        this._emit('task.started', {
+          sessionId, taskId: task.id, query: task.query,
+          depth: task.depth, dimension: task.dimension, wave: waveNum,
+          progress: stack.getProgress(),
+        });
+      }
+
+      const results = await Promise.allSettled(
+        waveTasks.map(async (task) => {
+          try {
+            const result = await this._executeTask(task, userId, orgId, projectId, sessionId, trailStore);
+            stack.complete(task.id, { findings: result.findings, confidence: result.confidence, gaps: result.gaps });
+            for (const finding of result.findings) {
+              await this._saveFindingToCSI(finding, userId, orgId, projectId);
+            }
+            this._emit('task.completed', {
+              sessionId, taskId: task.id, findingCount: result.findings.length,
+              confidence: result.confidence, gaps: result.gaps, wave: waveNum,
+              progress: stack.getProgress(),
+            });
+            return result;
+          } catch (err) {
+            stack.fail(task.id, err.message);
+            this._emit('task.failed', { sessionId, taskId: task.id, error: err.message, wave: waveNum });
+            return { findings: [], sources: [], confidence: 0, gaps: [err.message] };
+          }
+        })
+      );
+
+      for (const r of results) {
+        if (r.status === 'fulfilled' && r.value) {
+          allFindings.push(...r.value.findings);
+          allSources.push(...(r.value.sources || []));
+        }
+      }
+
+      this._emit('research.wave_completed', {
+        sessionId, wave: waveNum, findingCount: allFindings.length,
+        confidence: stack.getAggregateConfidence(),
+      });
+    }
+
+    // Process any remaining non-dimension tasks (gap subtasks etc.)
     while (true) {
       const task = stack.next();
       if (!task) break;
-
-      this._emit('task.started', {
-        sessionId,
-        taskId: task.id,
-        query: task.query,
-        depth: task.depth,
-        dimension: task.dimension,
-        progress: stack.getProgress(),
-      });
-
+      this._emit('task.started', { sessionId, taskId: task.id, query: task.query, depth: task.depth, dimension: task.dimension, progress: stack.getProgress() });
       try {
         const result = await this._executeTask(task, userId, orgId, projectId, sessionId, trailStore);
-
-        stack.complete(task.id, {
-          findings: result.findings,
-          confidence: result.confidence,
-          gaps: result.gaps,
-        });
-
+        stack.complete(task.id, { findings: result.findings, confidence: result.confidence, gaps: result.gaps });
         allFindings.push(...result.findings);
-        allSources.push(...result.sources);
-
-        // Save findings to CSI graph
-        for (const finding of result.findings) {
-          await this._saveFindingToCSI(finding, userId, orgId, projectId);
-        }
-
-        this._emit('task.completed', {
-          sessionId,
-          taskId: task.id,
-          findingCount: result.findings.length,
-          confidence: result.confidence,
-          gaps: result.gaps,
-          progress: stack.getProgress(),
-        });
-
+        allSources.push(...(result.sources || []));
+        for (const finding of result.findings) await this._saveFindingToCSI(finding, userId, orgId, projectId);
+        this._emit('task.completed', { sessionId, taskId: task.id, findingCount: result.findings.length, confidence: result.confidence, progress: stack.getProgress() });
       } catch (err) {
         stack.fail(task.id, err.message);
         this._emit('task.failed', { sessionId, taskId: task.id, error: err.message });
@@ -273,6 +296,7 @@ export class DeepResearcher {
   // ─── Internal Methods ──────────────────────────────────────
 
   async _executeTask(task, userId, orgId, projectId, sessionId, trailStore) {
+    task.status = 'active';
     const findings = [];
     const sources = [];
     const maxSteps = 8;

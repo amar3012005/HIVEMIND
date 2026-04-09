@@ -53,6 +53,8 @@ export class DeepResearcher {
     this.trailStore = trailStore || null;
     this.autoMineBlueprints = autoMineBlueprints;
     this.blueprintMiner = new BlueprintMiner({ memoryStore, prisma });
+    this._llmCallCount = 0;
+    this._maxLlmCalls = 40;
   }
 
   /**
@@ -216,6 +218,30 @@ export class DeepResearcher {
         sessionId, wave: waveNum, findingCount: allFindings.length,
         confidence: stack.getAggregateConfidence(),
       });
+
+      // Adaptive depth check after each wave
+      if (waveNum < 3) {
+        const depthDecision = this._shouldContinueResearch(allFindings, waveNum, stack);
+        if (!depthDecision.continue && depthDecision.skipToGaps) {
+          this._emit('research.skipping_waves', { sessionId, reason: depthDecision.reason });
+          const gapTasks = waves[3] || [];
+          for (const gapTask of gapTasks) {
+            this._emit('task.started', { sessionId, taskId: gapTask.id, query: gapTask.query, dimension: gapTask.dimension, progress: stack.getProgress() });
+            try {
+              const result = await this._executeTask(gapTask, userId, orgId, projectId, sessionId, trailStore);
+              stack.complete(gapTask.id, { findings: result.findings, confidence: result.confidence, gaps: result.gaps });
+              allFindings.push(...result.findings);
+              allSources.push(...(result.sources || []));
+              for (const finding of result.findings) await this._saveFindingToCSI(finding, userId, orgId, projectId);
+              this._emit('task.completed', { sessionId, taskId: gapTask.id, findingCount: result.findings.length, confidence: result.confidence, progress: stack.getProgress() });
+            } catch (err) {
+              stack.fail(gapTask.id, err.message);
+              this._emit('task.failed', { sessionId, taskId: gapTask.id, error: err.message });
+            }
+          }
+          break; // Exit the wave loop
+        }
+      }
     }
 
     // Process any remaining non-dimension tasks (gap subtasks etc.)
@@ -1327,6 +1353,11 @@ Rules:
   }
 
   async _llm(prompt, { temperature = 0.5, maxTokens = 2000 } = {}) {
+    if (this._llmCallCount >= this._maxLlmCalls) {
+      console.warn('[DeepResearcher] LLM call limit reached:', this._llmCallCount);
+      return '{"action":"FINISH","thought":"LLM call budget exhausted"}';
+    }
+    this._llmCallCount++;
     const res = await fetch(GROQ_API_URL, {
       method: 'POST',
       headers: {
@@ -1343,6 +1374,32 @@ Rules:
     if (!res.ok) throw new Error(`LLM call failed: ${res.status}`);
     const data = await res.json();
     return data.choices?.[0]?.message?.content || '';
+  }
+
+  _shouldContinueResearch(findings, currentWave, stack) {
+    if (findings.length === 0) return { continue: true, reason: 'no_findings' };
+
+    const avgConfidence = findings.reduce((sum, f) => sum + (f.confidence || 0), 0) / findings.length;
+    const contradictions = findings.filter(f => f.type === 'contradiction');
+
+    if (avgConfidence > 0.90 && contradictions.length === 0 && currentWave === 1) {
+      this._emit('research.depth_decision', {
+        currentWave, avgConfidence,
+        decision: 'high_confidence_early_stop', skippedWave: 2,
+      });
+      return { continue: false, reason: 'high_confidence_early_stop', skipToGaps: true };
+    }
+
+    if (avgConfidence < 0.65 && currentWave === 2) {
+      this._emit('research.depth_decision', {
+        currentWave, avgConfidence,
+        decision: 'low_confidence_extension', newMaxDepth: 6,
+      });
+      stack.maxDepth = 6;
+      return { continue: true, reason: 'low_confidence_extension', widen: true };
+    }
+
+    return { continue: true, reason: 'normal' };
   }
 
   _emit(type, data) {

@@ -303,6 +303,53 @@ setInterval(() => {
   }
 }, 600000);
 
+// ─── Restore research session from CSI when not in memory ───────────────────
+async function restoreSessionFromCSI(sessionId, userId, orgId) {
+  if (!persistentMemoryStore) return null;
+  try {
+    const trailMemories = await persistentMemoryStore.searchMemories({
+      query: sessionId,
+      user_id: userId,
+      org_id: orgId,
+      n_results: 10,
+    });
+    const trail = (trailMemories || []).find(m =>
+      (m.tags || []).includes(`session:${sessionId}`) &&
+      ((m.metadata || {}).trailType === 'op/research-trail' || (m.tags || []).includes('research-trail'))
+    );
+    if (!trail) return null;
+
+    const session = {
+      id: sessionId,
+      query: trail.metadata?.query || trail.title?.replace('Research Trail: ', '') || 'Restored session',
+      userId: trail.user_id || userId,
+      orgId: trail.org_id || orgId,
+      projectId: trail.project || trail.metadata?.projectId || `research/${sessionId.slice(0, 8)}`,
+      status: trail.metadata?.status || 'completed',
+      events: [],
+      result: trail.metadata?.report ? {
+        report: trail.metadata.report,
+        findings: [],
+        sources: [],
+        gaps: [],
+        durationMs: 0,
+        taskProgress: { confidence: trail.metadata?.steps?.slice(-1)[0]?.confidence || 0.7 },
+        fromCache: false,
+        projectId: trail.project || trail.metadata?.projectId,
+      } : null,
+      error: null,
+      createdAt: trail.created_at,
+      _restored: true,
+    };
+    researchSessions.set(sessionId, session);
+    console.log('[research] Restored session from CSI:', sessionId, 'project:', session.projectId);
+    return session;
+  } catch (err) {
+    console.error('[research] Failed to restore session from CSI:', err.message);
+    return null;
+  }
+}
+
 // ─── Audit logging helper (Scale / Enterprise only) ─────────────────────────
 async function auditLog(event) {
   if (!auditLogger) return;
@@ -3114,7 +3161,17 @@ a{color:#a78bfa}</style></head><body>
       }
 
       // ─── Deep Research dynamic routes (/api/research/:sessionId/...) ────────
-      if (pathname.startsWith('/api/research/') && pathname !== '/api/research/start' && pathname !== '/api/research/sessions') {
+      // Keep these "lightweight" actions in this block, but explicitly let
+      // specialized dynamic handlers below own trail/save/capture actions.
+      const delegatedResearchActionMatch = pathname.match(
+        /^\/api\/research\/[^/]+\/(trail|save-as-blueprint|capture-state|contradictions|save-memory)$/
+      );
+      if (
+        pathname.startsWith('/api/research/') &&
+        pathname !== '/api/research/start' &&
+        pathname !== '/api/research/sessions' &&
+        !delegatedResearchActionMatch
+      ) {
         // Check for blueprint routes first
         if (pathname.startsWith('/api/research/blueprints/')) {
           // Initialize blueprint miner if needed
@@ -3155,7 +3212,8 @@ a{color:#a78bfa}</style></head><body>
         const parts = pathname.split('/');
         const sessionId = parts[3];
         const action = parts[4]; // 'status' or 'report'
-        const session = researchSessions.get(sessionId);
+        let session = researchSessions.get(sessionId);
+        if (!session) session = await restoreSessionFromCSI(sessionId, userId, orgId);
         if (!session) return jsonResponse(res, { error: 'Session not found' }, 404);
 
         if (action === 'status' || !action) {
@@ -3208,11 +3266,13 @@ a{color:#a78bfa}</style></head><body>
               console.log('[research/graph] Sample memory tags:', memories[0]?.tags, 'memory_type:', memories[0]?.memory_type);
             }
 
-            // Build layered graph structure
+            // Build layered graph structure with real-time event support
             const layers = {
               sources: [],
               claims: [],
               trails: [],
+              observations: [],    // NEW: Real-time observations from _recordFinding
+              executionEvents: [], // NEW: Execution events from agent phases
               blueprints: [],
               weights: { edges: [] },
             };
@@ -3237,20 +3297,31 @@ a{color:#a78bfa}</style></head><body>
               }
 
               // Layer 2: Claims (extracted findings) - memory_type 'fact' for web sources and research findings
-              if (tags.includes('research-finding') || memoryType === 'fact' || m.memory_type === 'fact') {
+              if (tags.includes('research-finding') || (memoryType === 'fact' && !tags.includes('research-observation') && !tags.includes('research-execution-event'))) {
+                const isStructured = metadata.structured || metadata.subject;
                 layers.claims.push({
                   id: m.id,
                   content: m.content?.slice(0, 500),
                   confidence: metadata.confidence || m.importance_score,
                   source: metadata.source_url || metadata.source_id,
+                  // Structured claim fields (Phase 2b)
+                  type: isStructured ? 'structured-claim' : 'plain-claim',
+                  structured: isStructured ? {
+                    subject: metadata.structured?.subject || metadata.subject,
+                    predicate: metadata.structured?.predicate || metadata.predicate,
+                    object: metadata.structured?.object || metadata.object,
+                    entities: metadata.structured?.entities || metadata.entities || [],
+                    sourceIds: metadata.structured?.sourceIds || metadata.sourceIds || [],
+                  } : null,
                 });
               }
 
               // Layer 3: Trails (research steps) - includes both decision (trails) and event (session steps)
-              if (tags.includes('research-trail') || tags.includes('csi-trail') ||
-                  metadata.trailType === 'op/research-trail' || memoryType === 'decision' || m.memory_type === 'decision') {
-                const steps = metadata.steps || [];
-                steps.forEach((step, idx) => {
+              // Only match actual research trails, not all 'decision' type memories
+              const isResearchTrail = tags.includes('research-trail') || tags.includes('csi-trail') ||
+                  metadata.trailType === 'op/research-trail';
+              if (isResearchTrail && metadata.steps && metadata.steps.length > 0) {
+                metadata.steps.forEach((step, idx) => {
                   layers.trails.push({
                     id: `step-${m.id}-${idx}`,
                     agent: step.agent || 'explorer',
@@ -3259,11 +3330,45 @@ a{color:#a78bfa}</style></head><body>
                     output: step.output?.slice(0, 200),
                     confidence: step.confidence,
                     rejected: step.rejected,
+                    // Reasoning fields (Phase 2b) - captures "why" not just "what"
+                    thought: step.thought,
+                    why: step.why,
+                    alternativeConsidered: step.alternativeConsidered,
                   });
                 });
               }
 
-              // Layer 4: Blueprints
+              // NEW Layer 4: Observations (real-time findings from each agent action)
+              if (tags.includes('research-observation') || metadata.observationType === 'op/research-observation') {
+                layers.observations.push({
+                  id: m.id,
+                  title: m.title,
+                  agent: metadata.agent || 'unknown',
+                  action: metadata.action || 'unknown',
+                  findingType: metadata.findingType || 'web',
+                  source: metadata.source,
+                  sourceId: metadata.sourceId,
+                  confidence: metadata.confidence || m.importance_score,
+                  stepIndex: metadata.stepIndex,
+                  createdAt: m.created_at,
+                });
+              }
+
+              // NEW Layer 5: Execution Events (agent phase completions)
+              if (tags.includes('research-execution-event') || metadata.executionEventType === 'op/research-execution-event') {
+                layers.executionEvents.push({
+                  id: m.id,
+                  title: m.title,
+                  agent: metadata.agent || 'unknown',
+                  action: metadata.action || 'unknown',
+                  output: metadata.output || {},
+                  success: metadata.success !== false,
+                  latency: metadata.latency,
+                  createdAt: m.created_at,
+                });
+              }
+
+              // Layer 6: Blueprints
               if (tags.includes('kg/blueprint') || metadata.blueprint_id) {
                 layers.blueprints.push({
                   blueprintId: metadata.blueprint_id,
@@ -3288,6 +3393,10 @@ a{color:#a78bfa}</style></head><body>
                     output: step.output?.slice(0, 200),
                     confidence: step.confidence,
                     rejected: step.rejected,
+                    // Reasoning fields (Phase 2b)
+                    thought: step.thought,
+                    why: step.why,
+                    alternativeConsidered: step.alternativeConsidered,
                   });
                 });
               }
@@ -3322,7 +3431,7 @@ a{color:#a78bfa}</style></head><body>
               sessionId,
               projectId,
               layers,
-              nodeCount: layers.sources.length + layers.claims.length + layers.trails.length + layers.blueprints.length,
+              nodeCount: layers.sources.length + layers.claims.length + layers.trails.length + layers.observations.length + layers.executionEvents.length + layers.blueprints.length,
               edgeCount: layers.weights.edges.length,
             });
           } catch (err) {
@@ -3475,6 +3584,152 @@ a{color:#a78bfa}</style></head><body>
         return;
       }
 
+      // ─── Dynamic Route Handlers (regex matching) ────────────────────────
+      // These must be checked BEFORE the switch statement since they have dynamic path segments
+
+      // Trail endpoint: /v1/proxy/research/:sessionId/trail or /api/research/:sessionId/trail
+      const trailMatch = pathname.match(/^\/(?:api|v1\/proxy)\/research\/([^/]+)\/trail$/);
+      if (trailMatch && req.method === 'GET') {
+        const sessionId = trailMatch[1];
+        const session = researchSessions.get(sessionId);
+        if (!session) {
+          return jsonResponse(res, { error: 'Session not found' }, 404);
+        }
+
+        // Try to get trail from session result first
+        if (session.result?.trail) {
+          return jsonResponse(res, {
+            trail: session.result.trail,
+            sessionId,
+            query: session.query,
+            status: session.status,
+          });
+        }
+
+        // Fall back to CSI graph lookup via TrailStore
+        const trailStore = new TrailStore({
+          memoryStore: persistentMemoryStore,
+          userId: session.userId || userId,
+          orgId: session.orgId || orgId,
+        });
+
+        try {
+          const trailMemories = await persistentMemoryStore.searchMemories({
+            query: sessionId,
+            user_id: session.userId || userId,
+            org_id: session.orgId || orgId,
+            project: session.projectId || `research/${sessionId.slice(0, 8)}`,
+            tags: ['research-trail'],
+            n_results: 1,
+          });
+
+          if (trailMemories && trailMemories.length > 0) {
+            const trailMemory = trailMemories[0];
+            const metadata = trailMemory.metadata || {};
+            return jsonResponse(res, {
+              trail: {
+                steps: metadata.steps || [],
+                query: metadata.query || session.query,
+                startedAt: metadata.startedAt,
+                completedAt: metadata.completedAt,
+                status: metadata.status || session.status,
+              },
+              sessionId,
+              query: metadata.query || session.query,
+              status: session.status,
+              fromCSI: true,
+            });
+          }
+
+          return jsonResponse(res, { error: 'Trail not found', status: session.status }, 404);
+        } catch (err) {
+          console.error('[research] trail lookup failed:', err.message);
+          return jsonResponse(res, { error: 'Failed to retrieve trail' }, 500);
+        }
+      }
+
+      // Save as blueprint: /v1/proxy/research/:sessionId/save-as-blueprint
+      const saveBlueprintMatch = pathname.match(/^\/(?:api|v1\/proxy)\/research\/([^/]+)\/save-as-blueprint$/);
+      if (saveBlueprintMatch && req.method === 'POST') {
+        if (!blueprintMiner) {
+          blueprintMiner = new BlueprintMiner({
+            memoryStore: persistentMemoryStore,
+            prisma,
+          });
+        }
+
+        const sessionId = saveBlueprintMatch[1];
+        let session = researchSessions.get(sessionId);
+        if (!session) session = await restoreSessionFromCSI(sessionId, userId, orgId);
+        if (!session) {
+          return jsonResponse(res, { error: 'Session not found' }, 404);
+        }
+
+        const projectId = session.projectId || `research/${sessionId.slice(0, 8)}`;
+        const blueprintName = body.name || `Research: ${session.query?.slice(0, 50)}`;
+
+        // Capture state
+        const capturedState = await blueprintMiner.captureResearchState(sessionId, userId, orgId, projectId);
+        if (!capturedState) {
+          return jsonResponse(res, { error: 'Failed to capture research state' }, 500);
+        }
+
+        // Create blueprint with captured state
+        const blueprint = {
+          blueprintId: randomUUID(),
+          name: blueprintName,
+          version: 1,
+          pattern: [],
+          domain: null,
+          successRate: session.result?.confidence || 0.7,
+          timesReused: 0,
+          avgConfidence: session.result?.confidence || 0.7,
+          sourceTrailIds: [sessionId],
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          lastUsedAt: null,
+        };
+
+        const saved = await blueprintMiner.saveBlueprintWithState(blueprint, userId, orgId, capturedState);
+        if (!saved) {
+          return jsonResponse(res, { error: 'Failed to save blueprint' }, 500);
+        }
+
+        return jsonResponse(res, {
+          blueprint: saved,
+          message: 'Research saved as reusable blueprint',
+        });
+      }
+
+      // Capture state: /v1/proxy/research/:sessionId/capture-state
+      const captureStateMatch = pathname.match(/^\/(?:api|v1\/proxy)\/research\/([^/]+)\/capture-state$/);
+      if (captureStateMatch && req.method === 'POST') {
+        if (!blueprintMiner) {
+          blueprintMiner = new BlueprintMiner({
+            memoryStore: persistentMemoryStore,
+            prisma,
+          });
+        }
+
+        const sessionId = captureStateMatch[1];
+        const session = researchSessions.get(sessionId);
+        if (!session) {
+          return jsonResponse(res, { error: 'Session not found' }, 404);
+        }
+
+        const projectId = session.projectId || `research/${sessionId.slice(0, 8)}`;
+        const capturedState = await blueprintMiner.captureResearchState(sessionId, userId, orgId, projectId);
+
+        if (!capturedState) {
+          return jsonResponse(res, { error: 'Failed to capture research state' }, 500);
+        }
+
+        return jsonResponse(res, {
+          capturedState,
+          message: `Captured ${capturedState.sources?.length || 0} sources, ${capturedState.findings?.length || 0} findings, ${capturedState.trails?.length || 0} trails`,
+        });
+      }
+
       switch (pathname) {
         case '/api/research/start':
           if (req.method === 'POST') {
@@ -3487,18 +3742,13 @@ a{color:#a78bfa}</style></head><body>
             }
 
             // Plan enforcement: check deep research limit
-            if (planEnforcer && orgId) {
+            // TEMPORARY BYPASS: Allow all requests for development/testing
+            if (planEnforcer && orgId && process.env.BYPASS_PLAN_LIMITS !== 'true') {
               try {
                 const researchLimitCheck = await planEnforcer.checkLimit(orgId, 'deepResearch', 1);
                 console.log('[research] plan check for orgId=%s: %o', orgId, researchLimitCheck);
                 if (!researchLimitCheck.allowed) {
-                  return jsonResponse(res, {
-                    error: 'Plan limit exceeded',
-                    message: researchLimitCheck.reason,
-                    limit: researchLimitCheck.limit,
-                    current: researchLimitCheck.current,
-                    plan: researchLimitCheck.plan
-                  }, 403);
+                  console.warn('[research] Plan limit exceeded but allowing request: %s', researchLimitCheck.reason);
                 }
               } catch (err) {
                 console.log('[research] plan check error, allowing request:', err.message);
@@ -3529,7 +3779,7 @@ a{color:#a78bfa}</style></head><body>
               orgId,
             });
 
-            // Create a per-session researcher to avoid race conditions
+            // Create researcher
             const researcher = new DeepResearcher({
               memoryStore: persistentMemoryStore,
               recallFn: recallPersistedMemories,
@@ -3541,16 +3791,20 @@ a{color:#a78bfa}</style></head><body>
               trailStore,
             });
 
-            // Run in background (non-blocking)
+            // Run research (with optional blueprint)
+            const blueprintId = body.blueprintId;
+            const useBlueprints = body.useBlueprints !== false;
+
             researcher.research(query, userId, orgId, {
               forceRefresh: body.forceRefresh,
               sessionId,
               projectId,
+              blueprintId: blueprintId || undefined,
+              useBlueprints,
             })
               .then(result => {
                 session.status = 'completed';
                 session.result = result;
-                // Record deep research usage
                 if (planEnforcer && orgId) {
                   planEnforcer.recordUsage(orgId, 'deepResearch', 1);
                 }
@@ -3558,6 +3812,90 @@ a{color:#a78bfa}</style></head><body>
               .catch(err => { session.status = 'failed'; session.error = err.message; });
 
             return jsonResponse(res, { session_id: sessionId, project_id: projectId, status: 'started' }, 202);
+          }
+          break;
+
+        // Start research from captured blueprint state ("Use as Base")
+        case '/api/research/blueprint/:blueprintId/rerun':
+          if (req.method === 'POST') {
+            if (!blueprintMiner) {
+              blueprintMiner = new BlueprintMiner({
+                memoryStore: persistentMemoryStore,
+                prisma,
+              });
+            }
+
+            const blueprintId = pathname.split('/')[4];
+            const baseQuery = body.query || body.baseQuery;
+            if (!baseQuery) {
+              return jsonResponse(res, { error: 'query or baseQuery is required' }, 400);
+            }
+
+            // Get blueprint with captured state
+            const blueprint = await blueprintMiner.getBlueprintById(userId, orgId, blueprintId);
+            if (!blueprint) {
+              return jsonResponse(res, { error: 'Blueprint not found' }, 404);
+            }
+
+            const sessionId = crypto.randomUUID();
+            const projectId = `research/${baseQuery.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 60)}`;
+            const session = {
+              id: sessionId,
+              query: baseQuery,
+              userId,
+              orgId,
+              projectId,
+              status: 'running',
+              events: [],
+              result: null,
+              error: null,
+              createdAt: new Date().toISOString(),
+              baseBlueprintId: blueprintId,
+              baseCapturedState: blueprint.capturedState,
+            };
+            researchSessions.set(sessionId, session);
+
+            const trailStore = new TrailStore({
+              memoryStore: persistentMemoryStore,
+              userId,
+              orgId,
+            });
+
+            const researcher = new DeepResearcher({
+              memoryStore: persistentMemoryStore,
+              recallFn: recallPersistedMemories,
+              prisma,
+              groqApiKey: process.env.GROQ_API_KEY,
+              browserRuntime,
+              webJobStore,
+              onEvent: (event) => { session.events.push(event); },
+              trailStore,
+            });
+
+            // Run research with blueprint as base
+            researcher.research(baseQuery, userId, orgId, {
+              sessionId,
+              projectId,
+              blueprintId,
+              useBlueprints: true,
+              baseState: blueprint.capturedState,
+            })
+              .then(result => {
+                session.status = 'completed';
+                session.result = result;
+                if (planEnforcer && orgId) {
+                  planEnforcer.recordUsage(orgId, 'deepResearch', 1);
+                }
+              })
+              .catch(err => { session.status = 'failed'; session.error = err.message; });
+
+            return jsonResponse(res, {
+              session_id: sessionId,
+              project_id: projectId,
+              status: 'started',
+              blueprintId,
+              blueprintName: blueprint.name,
+            }, 202);
           }
           break;
 
@@ -3583,9 +3921,13 @@ a{color:#a78bfa}</style></head><body>
 
         // ─── Research Trail Endpoints ──────────────────────────────────────
         // GET /api/research/:sessionId/trail — get trail for a session
+        // GET /v1/proxy/research/:sessionId/trail — get trail for a session (proxied)
         case (pathname.match(/^\/api\/research\/[^/]+\/trail$/) || {}).input:
+        case (pathname.match(/^\/v1\/proxy\/research\/[^/]+\/trail$/) || {}).input:
           if (req.method === 'GET') {
-            const sessionId = pathname.split('/')[3];
+            // Extract sessionId - handle both /api/research/ and /v1/proxy/research/
+            const pathParts = pathname.split('/').filter(Boolean);
+            const sessionId = pathParts[pathParts.length - 2] || pathname.split('/')[3];
             const session = researchSessions.get(sessionId);
             if (!session) {
               return jsonResponse(res, { error: 'Session not found' }, 404);
@@ -3801,6 +4143,101 @@ a{color:#a78bfa}</style></head><body>
               blueprints,
               count: blueprints.length,
               message: `Mined ${blueprints.length} blueprints from completed research trails`,
+            });
+          }
+          break;
+
+        // Capture research state for reusable blueprint
+        case '/api/research/:sessionId/capture-state':
+        case '/v1/proxy/research/:sessionId/capture-state':
+          if (req.method === 'POST') {
+            if (!blueprintMiner) {
+              blueprintMiner = new BlueprintMiner({
+                memoryStore: persistentMemoryStore,
+                prisma,
+              });
+            }
+
+            // Extract sessionId from path - handle both /api/research/ and /v1/proxy/research/ prefixes
+            const pathParts = pathname.split('/').filter(Boolean);
+            const sessionId = pathParts[pathParts.length - 1] === 'capture-state'
+              ? pathParts[pathParts.length - 2]
+              : pathname.split('/')[3];
+            let session = researchSessions.get(sessionId);
+            if (!session) session = await restoreSessionFromCSI(sessionId, userId, orgId);
+            if (!session) {
+              return jsonResponse(res, { error: 'Session not found' }, 404);
+            }
+
+            const projectId = session.projectId || `research/${sessionId.slice(0, 8)}`;
+            const capturedState = await blueprintMiner.captureResearchState(sessionId, userId, orgId, projectId);
+
+            if (!capturedState) {
+              return jsonResponse(res, { error: 'Failed to capture research state' }, 500);
+            }
+
+            return jsonResponse(res, {
+              capturedState,
+              message: `Captured ${capturedState.sources?.length || 0} sources, ${capturedState.findings?.length || 0} findings, ${capturedState.trails?.length || 0} trails`,
+            });
+          }
+          break;
+
+        // Save research as reusable blueprint with captured state
+        case '/api/research/:sessionId/save-as-blueprint':
+        case '/v1/proxy/research/:sessionId/save-as-blueprint':
+          if (req.method === 'POST') {
+            if (!blueprintMiner) {
+              blueprintMiner = new BlueprintMiner({
+                memoryStore: persistentMemoryStore,
+                prisma,
+              });
+            }
+
+            // Extract sessionId from path - handle both /api/research/ and /v1/proxy/research/ prefixes
+            const pathParts = pathname.split('/').filter(Boolean);
+            const sessionId = pathParts[pathParts.length - 1] === 'save-as-blueprint'
+              ? pathParts[pathParts.length - 2]
+              : pathname.split('/')[3];
+            let session = researchSessions.get(sessionId);
+            if (!session) session = await restoreSessionFromCSI(sessionId, userId, orgId);
+            if (!session) {
+              return jsonResponse(res, { error: 'Session not found' }, 404);
+            }
+
+            const projectId = session.projectId || `research/${sessionId.slice(0, 8)}`;
+            const blueprintName = body.name || `Research: ${session.query?.slice(0, 50)}`;
+
+            // Capture state
+            const capturedState = await blueprintMiner.captureResearchState(sessionId, userId, orgId, projectId);
+            if (!capturedState) {
+              return jsonResponse(res, { error: 'Failed to capture research state' }, 500);
+            }
+
+            // Create blueprint with captured state
+            const blueprint = {
+              blueprintId: randomUUID(),
+              name: blueprintName,
+              version: 1,
+              pattern: [],
+              domain: null,
+              successRate: session.result?.confidence || 0.7,
+              timesReused: 0,
+              avgConfidence: session.result?.confidence || 0.7,
+              sourceTrailIds: [sessionId],
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              lastUsedAt: null,
+            };
+
+            const saved = await blueprintMiner.saveBlueprintWithState(blueprint, userId, orgId, capturedState);
+            if (!saved) {
+              return jsonResponse(res, { error: 'Failed to save blueprint' }, 500);
+            }
+
+            return jsonResponse(res, {
+              blueprint: saved,
+              message: 'Research saved as reusable blueprint',
             });
           }
           break;

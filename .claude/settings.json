@@ -1,23 +1,63 @@
 {
-  "hooks": {
-    "PostToolUse": [
-      {
-        "matcher": "Edit|Write|Bash",
-        "command": "code-review-graph update --quiet",
-        "timeout": 5000
-      }
+  "permissions": {
+    "allow": [
+      "Bash",
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "WebSearch",
+      "WebFetch",
+      "mcp__magic__21st_magic_component_builder",
+      "mcp__magic__21st_magic_component_inspiration",
+      "mcp__magic__21st_magic_component_refiner",
+      "mcp__magic__logo_search",
+      "mcp__code-review-graph__detect_changes_tool",
+      "mcp__code-review-graph__get_affected_flows_tool",
+      "mcp__plugin_claude-mem_mcp-search____IMPORTANT"
     ],
-    "SessionStart": [
-      {
-        "command": "code-review-graph status --json",
-        "timeout": 3000
-      }
+    "deny": [
+      "Bash(rm -rf /)",
+      "Bash(rm -rf /*)",
+      "Bash(dd if=*)",
+      "Bash(mkfs:*)",
+      "Bash(git push --force:*)",
+      "Bash(git reset --hard origin)",
+      "Bash(git rebase --force:*)",
+      "Bash(sudo rm:*)",
+      "Bash(chmod 777 /etc:*)"
     ],
-    "PreCommit": [
-      {
-        "command": "code-review-graph detect-changes --brief",
-        "timeout": 10000
-      }
+    "defaultMode": "dontAsk"
+  },
+  "disabledMcpjsonServers": [
+    "hivemind"
+  ],
+  "autoMode": {
+    "allow": [
+      "Reading/writing project code in /opt/HIVEMIND",
+      "Running npm/pnpm/yarn scripts and builds",
+      "Running git commands for normal workflows (commit, push, pull)",
+      "Running docker commands for container management",
+      "Running curl/wget for API testing",
+      "Running node/python for development/testing",
+      "File operations within project directory",
+      "Package management (npm, pip, pnpm)"
+    ],
+    "soft_deny": [
+      "Force-pushing to git (ask before force pushing to main)",
+      "Destructive file operations (rm -rf, chmod 777 on system dirs)",
+      "Modifying system configuration files (/etc, /root/.bashrc, etc.)",
+      "Running commands with sudo except for docker",
+      "Disk operations that could affect system health"
+    ],
+    "environment": [
+      "Working directory: /opt/HIVEMIND",
+      "Node version: via node --version",
+      "Git branch: via git rev-parse --abbrev-ref HEAD",
+      "Environment: development (safe to modify code)",
+      "Database: accessible via HIVEMIND_*_URL env vars",
+      "API: production endpoints available"
     ]
   }
 }

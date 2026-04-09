@@ -23,6 +23,7 @@ import { randomUUID } from 'node:crypto';
 import { TaskStack, DIMENSIONS } from './task-stack.js';
 import { TrailStore } from './trail-store.js';
 import { BlueprintMiner } from './blueprint-miner.js';
+import { extractFacts } from '../memory/fact-extractor.js';
 
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_MODEL = 'llama-3.3-70b-versatile';
@@ -73,6 +74,8 @@ export class DeepResearcher {
 
     // Step 0: Check for matching blueprints (unless already specified)
     let blueprintUsed = options.blueprintId || null;
+    let baseState = options.baseState || null;  // Captured state from "Use as Base"
+
     if (!blueprintUsed && options.useBlueprints !== false) {
       const suggestions = await this._suggestBlueprint(query);
       if (suggestions.length > 0 && suggestions[0].relevanceScore > 0.6) {
@@ -91,6 +94,12 @@ export class DeepResearcher {
     await trailStore.initTrail(sessionId, query, projectId, {
       blueprintUsed,
       blueprintCandidate: options.blueprintCandidate || false,
+      baseState: baseState ? {
+        sessionId: baseState.sessionId,
+        capturedAt: baseState.capturedAt,
+        sourceCount: baseState.sources?.length || 0,
+        findingCount: baseState.findings?.length || 0,
+      } : null,
     });
 
     // Track blueprint usage if one was used
@@ -98,8 +107,20 @@ export class DeepResearcher {
       await this._recordBlueprintUse(blueprintUsed);
     }
 
-    // Check for prior research on this topic
-    const priorFindings = await this._checkPriorResearch(query, userId, orgId, projectId);
+    // If we have a base state, pre-load the captured findings as starting point
+    const priorFindings = baseState?.findings?.length > 0
+      ? baseState.findings.map(f => ({
+          id: f.id,
+          type: f.type || 'web',
+          title: f.title,
+          content: f.content,
+          source: f.source || 'captured_base',
+          sourceId: f.sourceId,
+          confidence: f.confidence || 0.7,
+          taskQuery: query,
+          agent: 'base_state',
+        }))
+      : await this._checkPriorResearch(query, userId, orgId, projectId);
     if (priorFindings.length >= 5 && !options.forceRefresh) {
       this._emit('research.cached', { sessionId, findingCount: priorFindings.length });
       const report = await this._synthesizeReport(query, priorFindings, []);
@@ -288,7 +309,13 @@ export class DeepResearcher {
           const finding = { id: randomUUID(), type: result.type || 'web', title: result.title || reasoning.query, content: result.content, source: result.source || 'web', sourceId: result.sourceId, confidence: result.confidence || 0.6, taskQuery: task.query, agent: 'explorer' };
           findings.push(finding);
           sources.push({ type: result.type, id: result.sourceId, title: result.title });
-          await this._recordFinding(trailStore, sessionId, stepIndex++, 'explorer', reasoning.action, finding);
+          await this._recordFinding(trailStore, sessionId, stepIndex++, 'explorer', reasoning.action, finding, projectId, {
+            thought: reasoning.thought,
+            why: reasoning.thought,
+          });
+
+          // Write execution event for real-time graph
+          await this._writeExecutionEvent(sessionId, projectId, trailStore, 'explorer', 'search_web', { findingsCount: findings.length, source: result.type });
         }
         updateAgentState('explorer', findings.length > 0 ? 'completed' : 'idle');
         continue;
@@ -299,17 +326,51 @@ export class DeepResearcher {
         updateAgentState('analyst', 'active', 'Analyzing findings');
         const analysis = await this._actAnalyze(task.query, findings, userId, orgId, projectId);
         if (analysis?.claims?.length > 0) {
-          for (const claim of analysis.claims) {
-            const finding = { id: randomUUID(), type: 'claim', title: `Claim: ${claim.slice(0, 50)}`, content: claim, source: 'analyst_extraction', confidence: 0.75, taskQuery: task.query, agent: 'analyst' };
+          // Build mapping from analysis sourceIndices back to actual sourceIds from webFindings
+          const webFindings = findings.filter(f => f.type === 'web' || f.type === 'follow_up');
+
+          for (const structuredClaim of analysis.claims) {
+            // Map sourceIndices to actual sourceIds
+            const sourceIds = (structuredClaim.sourceIndices || [])
+              .map(i => webFindings[i]?.sourceId || webFindings[i]?.id)
+              .filter(Boolean);
+
+            const finding = {
+              id: randomUUID(),
+              type: structuredClaim.isLegacy ? 'claim' : 'structured-claim',
+              title: `Claim: ${(structuredClaim.claim || structuredClaim).slice(0, 80)}`,
+              content: structuredClaim.claim || structuredClaim,
+              source: 'analyst_extraction',
+              confidence: structuredClaim.confidence || 0.75,
+              taskQuery: task.query,
+              agent: 'analyst',
+              // Store structured data in metadata for CSI persistence
+              structured: structuredClaim.isLegacy ? null : {
+                subject: structuredClaim.subject,
+                predicate: structuredClaim.predicate,
+                object: structuredClaim.object,
+                entities: structuredClaim.entities,
+                sourceIds,
+                evidenceSnippets: structuredClaim.evidenceSnippets,
+              },
+            };
             findings.push(finding);
-            await this._recordFinding(trailStore, sessionId, stepIndex++, 'analyst', 'EXTRACT_CLAIM', finding);
+            await this._recordFinding(trailStore, sessionId, stepIndex++, 'analyst', 'EXTRACT_CLAIM', finding, projectId, {
+              thought: structuredClaim.extractionThought || `Extracting structured claims from gathered sources`,
+              why: 'Sources have been gathered and now need to be distilled into key claims',
+            });
           }
+          await this._writeExecutionEvent(sessionId, projectId, trailStore, 'analyst', 'extract_claims', { claimsCount: analysis.claims.length });
         }
         const memoryFindings = await this._actSearchMemory(task.query, userId, orgId, projectId);
         if (memoryFindings?.content) {
           const finding = { id: randomUUID(), type: 'memory', title: memoryFindings.title, content: memoryFindings.content, source: 'hivemind_memory', sourceId: memoryFindings.sourceId, confidence: memoryFindings.confidence || 0.6, taskQuery: task.query, agent: 'analyst' };
           findings.push(finding);
-          await this._recordFinding(trailStore, sessionId, stepIndex++, 'analyst', 'SEARCH_MEMORY', finding);
+          await this._recordFinding(trailStore, sessionId, stepIndex++, 'analyst', 'SEARCH_MEMORY', finding, projectId, {
+            thought: `Checking existing memory for relevant context`,
+            why: 'Prior research in memory may provide additional context or validation',
+          });
+          await this._writeExecutionEvent(sessionId, projectId, trailStore, 'analyst', 'search_memory', { hasMemoryContent: true });
         }
         updateAgentState('analyst', 'completed');
         this._emit('task.observation', { taskId: task.id, step, agent: 'analyst', type: 'analysis_complete', title: `Extracted ${analysis?.claims?.length || 0} claims` });
@@ -320,7 +381,18 @@ export class DeepResearcher {
       if (step === 5 && findings.length > 0) {
         updateAgentState('verifier', 'active', 'Verifying findings');
         const verification = await this._actVerify(task.query, findings, trailStore, sessionId);
-        await trailStore?.recordStep(sessionId, { stepIndex: stepIndex++, agent: 'verifier', action: 'verify_findings', input: task.query, output: `Verified ${verification.verified?.length || 0}, rejected ${verification.rejected?.length || 0}`, confidence: verification.overallConfidence || 0.7, rejected: false });
+        await trailStore?.recordStep(sessionId, {
+          stepIndex: stepIndex++,
+          agent: 'verifier',
+          action: 'verify_findings',
+          input: task.query,
+          output: `Verified ${verification.verified?.length || 0}, rejected ${verification.rejected?.length || 0}`,
+          confidence: verification.overallConfidence || 0.7,
+          rejected: false,
+          thought: `Checking claims for quality and contradictions`,
+          why: 'Claims need verification to ensure reliability before synthesis',
+        });
+        await this._writeExecutionEvent(sessionId, projectId, trailStore, 'verifier', 'verify_findings', { verified: verification.verified?.length || 0, rejected: verification.rejected?.length || 0, contradictions: verification.contradictions?.length || 0 });
         if (verification.contradictions?.length > 0) {
           for (const contradiction of verification.contradictions) await trailStore?.recordContradiction(sessionId, contradiction);
           this._emit('verifier.contradiction', { taskId: task.id, count: verification.contradictions.length, details: verification.contradictions });
@@ -337,7 +409,11 @@ export class DeepResearcher {
         if (synthesis?.content) {
           const finding = { id: randomUUID(), type: 'synthesis', title: `Synthesis: ${task.query.slice(0, 50)}`, content: synthesis.content, source: 'synthesizer', confidence: synthesis.confidence || 0.8, taskQuery: task.query, agent: 'synthesizer' };
           findings.push(finding);
-          await this._recordFinding(trailStore, sessionId, stepIndex++, 'synthesizer', 'SYNTHESIZE', finding);
+          await this._recordFinding(trailStore, sessionId, stepIndex++, 'synthesizer', 'SYNTHESIZE', finding, projectId, {
+            thought: `Combining all gathered findings into a cohesive answer`,
+            why: 'All sources and claims have been gathered and verified - now need to produce final synthesis',
+          });
+          await this._writeExecutionEvent(sessionId, projectId, trailStore, 'synthesizer', 'synthesize', { synthesisLength: synthesis.content?.length || 0, confidence: synthesis.confidence });
         }
         updateAgentState('synthesizer', 'completed');
         this._emit('task.observation', { taskId: task.id, step, agent: 'synthesizer', type: 'synthesis_complete', title: 'Synthesis complete' });
@@ -350,17 +426,111 @@ export class DeepResearcher {
     Object.keys(agentStates).forEach(agent => { if (agentStates[agent] === 'idle') agentStates[agent] = 'not_used'; });
     this._emit('agent.states', { taskId: task.id, states: agentStates, final: true });
 
+    // Extract synthesis as report (final finding from synthesizer agent)
+    const synthesisFinding = findings.find(f => f.type === 'synthesis' || f.agent === 'synthesizer');
+    const report = synthesisFinding?.content || null;
+
     const verifiedFindings = findings.filter(f => f.confidence >= 0.6);
     const confidence = verifiedFindings.length > 0 ? Math.min(0.95, verifiedFindings.reduce((sum, f) => sum + f.confidence, 0) / verifiedFindings.length) : (findings.length > 0 ? 0.5 : 0.1);
     const gaps = await this._detectGaps(task.query, findings);
 
-    return { findings, sources, confidence, gaps, agentStates };
+    return { findings, sources, confidence, gaps, agentStates, report };
   }
 
-  async _recordFinding(trailStore, sessionId, stepIndex, agent, action, finding) {
+  async _recordFinding(trailStore, sessionId, stepIndex, agent, action, finding, projectId, reasoning = null) {
     if (!trailStore) return;
-    await trailStore.recordStep(sessionId, { stepIndex, agent, action: action.toLowerCase(), input: finding.taskQuery, output: finding.content.slice(0, 500), confidence: finding.confidence, rejected: false });
+
+    // Build step record with reasoning fields if provided
+    const stepRecord = {
+      stepIndex,
+      agent,
+      action: action.toLowerCase(),
+      input: finding.taskQuery,
+      output: finding.content.slice(0, 500),
+      confidence: finding.confidence,
+      rejected: false,
+    };
+
+    // Add reasoning fields if provided
+    if (reasoning) {
+      if (reasoning.thought) stepRecord.thought = reasoning.thought;
+      if (reasoning.why) stepRecord.why = reasoning.why;
+      if (reasoning.alternativeConsidered) stepRecord.alternativeConsidered = reasoning.alternativeConsidered;
+    }
+
+    // Write step to trail
+    await trailStore.recordStep(sessionId, stepRecord);
     await trailStore.detectContradiction(sessionId, { content: finding.content, source: finding.source, memoryId: finding.id });
+
+    // NEW: Write individual observation to CSI for real-time graph updates
+    // This ensures graph has data during research, not just after completion
+    try {
+      const observationId = randomUUID();
+      await this.memoryStore.createMemory({
+        id: observationId,
+        user_id: trailStore.userId,
+        org_id: trailStore.orgId,
+        project: projectId,
+        content: finding.content.slice(0, 1000),
+        title: `${action}: ${finding.title?.slice(0, 50) || 'Finding'}`,
+        memory_type: 'event',
+        tags: ['research-observation', `agent:${agent}`, `action:${action.toLowerCase()}`, `session:${sessionId}`],
+        is_latest: true,
+        importance_score: finding.confidence || 0.7,
+        metadata: {
+          observationType: 'op/research-observation',
+          sessionId,
+          stepIndex,
+          agent,
+          action,
+          findingType: finding.type || 'web',
+          source: finding.source,
+          sourceId: finding.sourceId,
+          taskQuery: finding.taskQuery,
+        },
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+      console.log('[DeepResearcher] Saved observation to CSI:', observationId.slice(0, 20), 'agent:', agent, 'action:', action);
+    } catch (err) {
+      console.error('[DeepResearcher] Failed to save observation:', err.message);
+    }
+  }
+
+  /**
+   * Write execution event to CSI for real-time graph tracking.
+   * Tracks agent phase completions with latency and outcomes.
+   */
+  async _writeExecutionEvent(sessionId, projectId, trailStore, agent, action, output) {
+    try {
+      const eventId = randomUUID();
+      await this.memoryStore.createMemory({
+        id: eventId,
+        user_id: trailStore.userId,
+        org_id: trailStore.orgId,
+        project: projectId,
+        content: `${agent}/${action}: ${JSON.stringify(output)}`,
+        title: `Execution: ${agent}/${action}`,
+        memory_type: 'event',
+        tags: ['research-execution-event', `agent:${agent}`, `action:${action}`, `session:${sessionId}`],
+        is_latest: true,
+        importance_score: 0.5,
+        metadata: {
+          executionEventType: 'op/research-execution-event',
+          sessionId,
+          agent,
+          action,
+          output,
+          latency: output.latency || null,
+          success: output.success !== false,
+        },
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+    } catch (err) {
+      // Non-critical: execution events are nice-to-have for graph visualization
+      console.debug('[DeepResearcher] Failed to save execution event:', err.message);
+    }
   }
 
   async _reasonExplore(query, findings, step) {
@@ -375,10 +545,124 @@ export class DeepResearcher {
   async _actAnalyze(query, findings, userId, orgId, projectId) {
     const webFindings = findings.filter(f => f.type === 'web' || f.type === 'follow_up');
     if (webFindings.length === 0) return { claims: [] };
-    const contentToAnalyze = webFindings.map(f => f.content).join('\n\n').slice(0, 4000);
-    const response = await this._llm(`You are the ANALYST agent. Extract key claims and facts from these sources.\n\nResearch question: "${query}"\n\nSource content:\n${contentToAnalyze}\n\nExtract 3-5 key claims as a JSON array of strings:\n["claim 1", "claim 2", "claim 3"]`, { temperature: 0.2 });
-    try { const claims = JSON.parse(response.match(/\[[\s\S]*\]/)?.[0] || '[]'); return { claims: Array.isArray(claims) ? claims.slice(0, 5) : [] }; }
-    catch { return { claims: [] }; }
+
+    // Build source content with indices for attribution
+    const sourcesWithContext = webFindings.map((f, i) => `[${i}] ${f.title}: ${f.content?.slice(0, 800) || ''}`).join('\n\n');
+
+    const response = await this._llm(`You are the ANALYST agent. Extract key claims from these sources with structured format and source attribution.
+
+Research question: "${query}"
+
+Sources (with indices):
+${sourcesWithContext}
+
+First, provide your reasoning:
+- thought: Brief explanation of your analysis approach
+- why: Why this approach is appropriate for this query
+
+Then extract 3-5 key claims. For each claim, provide:
+- claim: The claim statement (subject-predicate-object format preferred)
+- subject: Main subject/entity
+- predicate: Action/relationship
+- object: Target/outcome
+- entities: Array of {name, type} for named entities mentioned (person|org|system|concept)
+- sourceIndices: Array of source indices (0-based) that support this claim
+- evidenceSnippets: Short quotes from each source supporting the claim
+- confidence: 0.0-1.0 confidence score
+
+Return JSON:
+{
+  "thought": "your reasoning about the analysis approach",
+  "why": "why this approach fits the query",
+  "claims": [
+    {
+      "claim": "...",
+      "subject": "...",
+      "predicate": "...",
+      "object": "...",
+      "entities": [{"name": "Entity", "type": "person|org|system|concept"}],
+      "sourceIndices": [0, 2],
+      "evidenceSnippets": ["quote1", "quote2"],
+      "confidence": 0.8
+    }
+  ]
+}
+
+If you cannot extract structured data, return a simple array of claim strings: ["claim 1", "claim 2"]`, { temperature: 0.2 });
+
+    try {
+      const raw = response.match(/\{[\s\S]*\}/)?.[0] || response.match(/\[[\s\S]*\]/)?.[0] || '[]';
+      const parsed = JSON.parse(raw);
+
+      // Handle legacy format: simple array of strings
+      if (Array.isArray(parsed)) {
+        return { claims: parsed.slice(0, 5), isLegacy: true };
+      }
+
+      // Handle new structured format
+      if (parsed.claims && Array.isArray(parsed.claims)) {
+        const analysisThought = parsed.thought || 'Extracting structured claims from gathered sources';
+        const analysisWhy = parsed.why || 'Sources have been gathered and need to be distilled into key claims';
+
+        const structuredClaims = parsed.claims.slice(0, 5).map(claim => {
+          // Backward compatibility: if claim is a string, convert to minimal structured format
+          if (typeof claim === 'string') {
+            return {
+              claim,
+              subject: '',
+              predicate: '',
+              object: '',
+              entities: [],
+              sourceIndices: [],
+              evidenceSnippets: [],
+              confidence: 0.75,
+              isLegacy: true,
+              extractionThought: analysisThought,
+            };
+          }
+
+          // Enrich entities with fact-extractor fallback
+          const llmEntities = claim.entities || [];
+          const heuristicEntities = extractFacts(claim.claim || '').entities || [];
+
+          // Merge entities, prioritizing LLM-extracted with types
+          const mergedEntities = [...llmEntities];
+          const seenEntities = new Set(llmEntities.map(e => e.name?.toLowerCase()));
+
+          for (const entity of heuristicEntities) {
+            if (!seenEntities.has(entity.toLowerCase()) && mergedEntities.length < 10) {
+              mergedEntities.push({ name: entity, type: 'unknown' });
+              seenEntities.add(entity.toLowerCase());
+            }
+          }
+
+          return {
+            claim: claim.claim || '',
+            subject: claim.subject || '',
+            predicate: claim.predicate || '',
+            object: claim.object || '',
+            entities: mergedEntities,
+            sourceIndices: claim.sourceIndices || [],
+            evidenceSnippets: claim.evidenceSnippets || [],
+            confidence: claim.confidence || 0.75,
+            isLegacy: false,
+            extractionThought: analysisThought,
+          };
+        });
+
+        return { claims: structuredClaims, thought: analysisThought, why: analysisWhy };
+      }
+
+      return { claims: [] };
+    } catch (parseErr) {
+      // Fallback: try to parse as simple array
+      try {
+        const simpleClaims = JSON.parse(response.match(/\[[\s\S]*\]/)?.[0] || '[]');
+        return { claims: simpleClaims.slice(0, 5), isLegacy: true };
+      } catch {
+        return { claims: [] };
+      }
+    }
   }
 
   async _actVerify(query, findings, trailStore, sessionId) {

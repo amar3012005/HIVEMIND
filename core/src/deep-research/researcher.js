@@ -325,11 +325,39 @@ export class DeepResearcher {
     };
     this._emit('agent.states', { taskId: task.id, states: { ...agentStates } });
 
+    // Memory-first retrieval: check CSI before web search
+    let maxExplorationSteps = 3;
+    const memoryResult = await this._actSearchMemory(task.query, userId, orgId, projectId);
+    if (memoryResult?.content && (memoryResult.confidence || 0.5) > 0.80) {
+      const finding = {
+        id: randomUUID(),
+        type: 'memory',
+        title: memoryResult.title || `Memory: ${task.query.slice(0, 50)}`,
+        content: memoryResult.content,
+        source: 'hivemind_memory',
+        sourceId: memoryResult.sourceId,
+        confidence: memoryResult.confidence || 0.8,
+        taskQuery: task.query,
+        agent: 'explorer',
+      };
+      findings.push(finding);
+      await this._recordFinding(trailStore, sessionId, stepIndex++, 'explorer', 'SEARCH_MEMORY', finding, projectId, {
+        thought: 'Found high-confidence memory match — using as foundation, reducing web exploration',
+        why: 'Memory-first retrieval: existing knowledge compounds across research sessions',
+      });
+      this._emit('memory.cache_hit', {
+        taskId: task.id,
+        title: memoryResult.title,
+        confidence: memoryResult.confidence,
+      });
+      maxExplorationSteps = 2;
+    }
+
     while (step < maxSteps) {
       step++;
 
       // PHASE 1-3: EXPLORATION (Explorer Agent)
-      if (step <= 3) {
+      if (step <= maxExplorationSteps) {
         updateAgentState('explorer', 'active', 'Searching for sources');
         const reasoning = await this._reasonExplore(task.query, findings, step);
         this._emit('task.reasoning', { taskId: task.id, step, agent: 'explorer', action: reasoning.action, thought: reasoning.thought });
@@ -830,20 +858,49 @@ Rules:
   }
 
   async _actSearchMemory(query, userId, orgId, projectId) {
-    const memories = await this._recallFromCSI(query, userId, orgId, projectId);
-    // Only return memories that are ACTUALLY relevant (score > 0.6)
-    const relevant = memories.filter(m => (m.score || 0) > 0.6);
-    if (relevant.length === 0) return { type: 'memory', content: null };
+    try {
+      // Search current project first (most relevant)
+      const projectResults = await this.recallFn(this.memoryStore, {
+        query_context: query,
+        user_id: userId,
+        org_id: orgId,
+        project: projectId,
+        max_memories: 5,
+      });
 
-    const combined = relevant.slice(0, 5).map(m => `- ${m.title || ''}: ${(m.content || '').slice(0, 200)}`).join('\n');
-    return {
-      type: 'memory',
-      title: `Memory recall: ${query.slice(0, 50)}`,
-      content: combined,
-      source: 'hivemind_memory',
-      sourceId: relevant[0]?.id,
-      confidence: relevant[0]?.score || 0.6,
-    };
+      // Also search globally across all projects
+      const globalResults = await this.recallFn(this.memoryStore, {
+        query_context: query,
+        user_id: userId,
+        org_id: orgId,
+        max_memories: 10,
+      });
+
+      // Merge, deduplicate by ID, apply recency decay
+      const seen = new Set();
+      const merged = [];
+      for (const r of [...(projectResults.memories || []), ...(globalResults.memories || [])]) {
+        const id = r.id || r.sourceId;
+        if (id && seen.has(id)) continue;
+        if (id) seen.add(id);
+        const age = (Date.now() - new Date(r.created_at || 0).getTime()) / (1000 * 60 * 60 * 24);
+        const recencyFactor = age > 30 ? Math.max(0.5, 1 - (age - 30) / 365) : 1;
+        merged.push({ ...r, confidence: (r.confidence || r.importance_score || r.score || 0.5) * recencyFactor });
+      }
+
+      if (merged.length === 0) return null;
+      merged.sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+      const best = merged[0];
+      return {
+        content: best.content,
+        title: best.title,
+        sourceId: best.id,
+        confidence: best.confidence,
+      };
+    } catch (err) {
+      console.error('[DeepResearcher] Memory search failed:', err.message);
+      return null;
+    }
   }
 
   async _actSearchWeb(query, userId, orgId, projectId, sessionId, trailStore) {

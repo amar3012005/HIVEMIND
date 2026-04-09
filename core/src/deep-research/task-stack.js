@@ -9,7 +9,7 @@
 
 import { randomUUID } from 'node:crypto';
 
-const MAX_DEPTH = 4;
+let DEFAULT_MAX_DEPTH = 4;
 const MAX_TASKS = 20;
 const CONFIDENCE_THRESHOLD = 0.80;
 
@@ -25,12 +25,19 @@ const DIMENSIONS = [
   'gaps',            // What is unknown about X?
 ];
 
+const WAVE_GROUPS = {
+  1: ['definition', 'mechanism', 'evidence', 'timeline'],
+  2: ['stakeholders', 'comparison', 'implications'],
+  3: ['gaps'],
+};
+
 export class TaskStack {
-  constructor() {
+  constructor({ maxDepth } = {}) {
     this.tasks = new Map();    // id → task
     this.stack = [];           // ids in execution order (LIFO)
     this.completed = [];       // completed task ids
     this.rootId = null;
+    this.maxDepth = maxDepth || DEFAULT_MAX_DEPTH;
   }
 
   /**
@@ -92,7 +99,7 @@ export class TaskStack {
     this.completed.push(taskId);
 
     // If gaps remain and we haven't hit limits, decompose further
-    if (gaps.length > 0 && task.depth < MAX_DEPTH && this.tasks.size < MAX_TASKS) {
+    if (gaps.length > 0 && task.depth < this.maxDepth && this.tasks.size < MAX_TASKS) {
       for (const gap of gaps.slice(0, 3)) {
         this.addSubtask(taskId, gap);
       }
@@ -161,6 +168,26 @@ export class TaskStack {
   }
 
   /**
+   * Group pending dimension tasks into execution waves.
+   * Wave 1: Independent foundation dimensions (parallel)
+   * Wave 2: Contextual dimensions (need wave 1 results, parallel)
+   * Wave 3: Gap analysis (needs everything, sequential)
+   */
+  getTasksByWave() {
+    const waves = { 1: [], 2: [], 3: [] };
+    for (const [, task] of this.tasks) {
+      if (task.status !== 'pending' || !task.dimension) continue;
+      for (const [wave, dims] of Object.entries(WAVE_GROUPS)) {
+        if (dims.includes(task.dimension)) {
+          waves[wave].push(task);
+          break;
+        }
+      }
+    }
+    return waves;
+  }
+
+  /**
    * Generate a dimension-specific sub-query.
    */
   _dimensionQuery(query, dimension) {
@@ -226,7 +253,7 @@ export class TaskStack {
   getRemainingGaps() {
     const gaps = [];
     for (const [, task] of this.tasks) {
-      if (task.status === 'completed' && task.gaps.length > 0 && task.depth >= MAX_DEPTH) {
+      if (task.status === 'completed' && task.gaps.length > 0 && task.depth >= this.maxDepth) {
         gaps.push(...task.gaps.map(g => ({ gap: g, taskId: task.id, query: task.query })));
       }
     }
@@ -268,4 +295,4 @@ export class TaskStack {
   }
 }
 
-export { DIMENSIONS, MAX_DEPTH, MAX_TASKS, CONFIDENCE_THRESHOLD };
+export { DIMENSIONS, WAVE_GROUPS, DEFAULT_MAX_DEPTH as MAX_DEPTH, MAX_TASKS, CONFIDENCE_THRESHOLD };

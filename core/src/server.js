@@ -3216,6 +3216,28 @@ a{color:#a78bfa}</style></head><body>
         if (!session) session = await restoreSessionFromCSI(sessionId, userId, orgId);
         if (!session) return jsonResponse(res, { error: 'Session not found' }, 404);
 
+        if (action === 'stream') {
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no',
+          });
+          for (const event of session.events) {
+            res.write(`data: ${JSON.stringify(event)}\n\n`);
+          }
+          if (session.status === 'completed' || session.status === 'failed') {
+            res.write(`event: done\ndata: ${JSON.stringify({ status: session.status, error: session.error || null })}\n\n`);
+            res.end();
+            return;
+          }
+          session.sseClients.push(res);
+          req.on('close', () => {
+            session.sseClients = session.sseClients.filter(c => c !== res);
+          });
+          return;
+        }
+
         if (action === 'status' || !action) {
           return jsonResponse(res, {
             status: session.status,
@@ -3766,6 +3788,7 @@ a{color:#a78bfa}</style></head><body>
               projectId,
               status: 'running',
               events: [],
+              sseClients: [],
               result: null,
               error: null,
               createdAt: new Date().toISOString(),
@@ -3787,7 +3810,13 @@ a{color:#a78bfa}</style></head><body>
               groqApiKey: process.env.GROQ_API_KEY,
               browserRuntime,
               webJobStore,
-              onEvent: (event) => { session.events.push(event); },
+              onEvent: (event) => {
+                session.events.push(event);
+                const payload = `data: ${JSON.stringify(event)}\n\n`;
+                session.sseClients = session.sseClients.filter(client => {
+                  try { client.write(payload); return true; } catch { return false; }
+                });
+              },
               trailStore,
             });
 
@@ -3805,11 +3834,20 @@ a{color:#a78bfa}</style></head><body>
               .then(result => {
                 session.status = 'completed';
                 session.result = result;
+                const donePayload = `event: done\ndata: ${JSON.stringify({ status: 'completed' })}\n\n`;
+                session.sseClients.forEach(c => { try { c.write(donePayload); c.end(); } catch {} });
+                session.sseClients = [];
                 if (planEnforcer && orgId) {
                   planEnforcer.recordUsage(orgId, 'deepResearch', 1);
                 }
               })
-              .catch(err => { session.status = 'failed'; session.error = err.message; });
+              .catch(err => {
+                session.status = 'failed';
+                session.error = err.message;
+                const donePayload = `event: done\ndata: ${JSON.stringify({ status: 'failed', error: err.message })}\n\n`;
+                session.sseClients.forEach(c => { try { c.write(donePayload); c.end(); } catch {} });
+                session.sseClients = [];
+              });
 
             return jsonResponse(res, { session_id: sessionId, project_id: projectId, status: 'started' }, 202);
           }
@@ -3847,6 +3885,7 @@ a{color:#a78bfa}</style></head><body>
               projectId,
               status: 'running',
               events: [],
+              sseClients: [],
               result: null,
               error: null,
               createdAt: new Date().toISOString(),
@@ -3868,7 +3907,13 @@ a{color:#a78bfa}</style></head><body>
               groqApiKey: process.env.GROQ_API_KEY,
               browserRuntime,
               webJobStore,
-              onEvent: (event) => { session.events.push(event); },
+              onEvent: (event) => {
+                session.events.push(event);
+                const payload = `data: ${JSON.stringify(event)}\n\n`;
+                session.sseClients = session.sseClients.filter(client => {
+                  try { client.write(payload); return true; } catch { return false; }
+                });
+              },
               trailStore,
             });
 
@@ -3883,11 +3928,20 @@ a{color:#a78bfa}</style></head><body>
               .then(result => {
                 session.status = 'completed';
                 session.result = result;
+                const donePayload = `event: done\ndata: ${JSON.stringify({ status: 'completed' })}\n\n`;
+                session.sseClients.forEach(c => { try { c.write(donePayload); c.end(); } catch {} });
+                session.sseClients = [];
                 if (planEnforcer && orgId) {
                   planEnforcer.recordUsage(orgId, 'deepResearch', 1);
                 }
               })
-              .catch(err => { session.status = 'failed'; session.error = err.message; });
+              .catch(err => {
+                session.status = 'failed';
+                session.error = err.message;
+                const donePayload = `event: done\ndata: ${JSON.stringify({ status: 'failed', error: err.message })}\n\n`;
+                session.sseClients.forEach(c => { try { c.write(donePayload); c.end(); } catch {} });
+                session.sseClients = [];
+              });
 
             return jsonResponse(res, {
               session_id: sessionId,

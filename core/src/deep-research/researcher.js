@@ -432,8 +432,23 @@ export class DeepResearcher {
         });
         await this._writeExecutionEvent(sessionId, projectId, trailStore, 'verifier', 'verify_findings', { verified: verification.verified?.length || 0, rejected: verification.rejected?.length || 0, contradictions: verification.contradictions?.length || 0 });
         if (verification.contradictions?.length > 0) {
-          for (const contradiction of verification.contradictions) await trailStore?.recordContradiction(sessionId, contradiction);
           this._emit('verifier.contradiction', { taskId: task.id, count: verification.contradictions.length, details: verification.contradictions });
+          let resolved = 0;
+          for (const contradiction of verification.contradictions) {
+            if (resolved >= 3) break;
+            await trailStore?.recordContradiction(sessionId, contradiction);
+            const resolution = await this._resolveContradiction(
+              contradiction, userId, orgId, projectId, sessionId, trailStore
+            );
+            if (resolution.resolved) {
+              resolved++;
+              await trailStore?.recordContradiction(sessionId, contradiction);
+            }
+          }
+          this._emit('verifier.contradictions_summary', {
+            sessionId, total: verification.contradictions.length,
+            resolved, unresolved: verification.contradictions.length - resolved,
+          });
         }
         updateAgentState('verifier', 'completed', `${verification.verified?.length || 0} verified, ${verification.rejected?.length || 0} rejected`);
         this._emit('task.observation', { taskId: task.id, step, agent: 'verifier', type: 'verification_complete', title: `Found ${verification.contradictions?.length || 0} contradictions` });
@@ -715,6 +730,62 @@ If you cannot extract structured data, return a simple array of claim strings: [
       const contradictions = (result.contradictions || []).map(c => ({ claimA: { source: claims[c.claimAIndex - 1]?.source, content: claims[c.claimAIndex - 1]?.content, memoryId: claims[c.claimAIndex - 1]?.id }, claimB: { source: claims[c.claimBIndex - 1]?.source, content: claims[c.claimBIndex - 1]?.content, memoryId: claims[c.claimBIndex - 1]?.id }, dimension: 'factual', unresolved: true })).filter(c => c.claimA.content && c.claimB.content);
       return { verified, rejected, contradictions, overallConfidence: result.overallConfidence || 0.7 };
     } catch { return { verified: claims, rejected: [], contradictions: [], overallConfidence: 0.7 }; }
+  }
+
+  /**
+   * Resolve a contradiction by searching for a tiebreaker source.
+   * Cap: 3 resolutions per session.
+   */
+  async _resolveContradiction(contradiction, userId, orgId, projectId, sessionId, trailStore) {
+    try {
+      const searchQuery = await this._llm(
+        `Two sources disagree:\n` +
+        `Claim A (${contradiction.claimA?.source || 'unknown'}): ${(contradiction.claimA?.content || '').slice(0, 300)}\n` +
+        `Claim B (${contradiction.claimB?.source || 'unknown'}): ${(contradiction.claimB?.content || '').slice(0, 300)}\n\n` +
+        `Write a specific web search query to find an authoritative tiebreaker source. Return ONLY the search query.`,
+        { temperature: 0.3, maxTokens: 200 }
+      );
+      if (!searchQuery?.trim()) return { resolved: false, reason: 'Empty tiebreaker query' };
+
+      const tiebreaker = await this._actSearchWeb(searchQuery.trim(), userId, orgId, projectId, sessionId, trailStore);
+      if (!tiebreaker?.content) {
+        contradiction.investigated = true;
+        return { resolved: false, reason: 'No tiebreaker source found' };
+      }
+
+      const verdictRaw = await this._llm(
+        `A factual disagreement exists:\n` +
+        `Claim A: ${(contradiction.claimA?.content || '').slice(0, 300)}\n` +
+        `Claim B: ${(contradiction.claimB?.content || '').slice(0, 300)}\n\n` +
+        `Tiebreaker source says: ${tiebreaker.content.slice(0, 500)}\n\n` +
+        `Which claim does the tiebreaker support? Return JSON:\n` +
+        `{ "supports": "A" or "B" or "neither", "confidence": 0.0-1.0, "reasoning": "one sentence" }`,
+        { temperature: 0.2, maxTokens: 300 }
+      );
+
+      const verdict = JSON.parse(verdictRaw);
+      contradiction.unresolved = false;
+      contradiction.resolution = {
+        supports: verdict.supports,
+        confidence: verdict.confidence,
+        reasoning: verdict.reasoning,
+        tiebreakerSource: tiebreaker.source,
+        resolvedAt: new Date().toISOString(),
+      };
+
+      this._emit('verifier.contradiction_resolved', {
+        sessionId,
+        dimension: contradiction.dimension,
+        supports: verdict.supports,
+        confidence: verdict.confidence,
+        reasoning: verdict.reasoning,
+      });
+
+      return { resolved: true, ...verdict };
+    } catch (err) {
+      console.error('[DeepResearcher] Contradiction resolution failed:', err.message);
+      return { resolved: false, reason: err.message };
+    }
   }
 
   async _reason(query, findings, step) {

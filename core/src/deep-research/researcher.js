@@ -78,7 +78,7 @@ export class DeepResearcher {
 
     if (!blueprintUsed && options.useBlueprints !== false) {
       const suggestions = await this._suggestBlueprint(query);
-      if (suggestions.length > 0 && suggestions[0].relevanceScore > 0.6) {
+      if (suggestions.length > 0 && suggestions[0].relevanceScore > 0.85) {
         blueprintUsed = suggestions[0].blueprintId;
         this._emit('research.blueprint_suggested', {
           sessionId,
@@ -141,13 +141,27 @@ export class DeepResearcher {
     const stack = new TaskStack();
     const root = stack.createRoot(query);
 
-    // Use LLM to pick relevant dimensions
-    const dimensions = await this._selectDimensions(query);
-    this._emit('research.decomposed', { sessionId, dimensions, taskCount: dimensions.length + 1 });
-
-    if (dimensions.length > 0) {
+    // If a high-relevance blueprint was found, use its pattern
+    let dimensions;
+    if (blueprintUsed) {
+      const blueprint = await this._loadBlueprint(blueprintUsed);
+      if (blueprint?.pattern?.length > 0) {
+        for (const phase of blueprint.pattern) {
+          const subQuery = (phase.queryTemplate || `${phase.actionType}: ${query}`).replace('{query}', query);
+          stack.addSubtask(root.id, subQuery, phase.actionType);
+        }
+        dimensions = blueprint.pattern.map(p => p.actionType);
+        this._emit('research.using_blueprint', { sessionId, blueprintId: blueprintUsed, taskCount: dimensions.length });
+      } else {
+        dimensions = await this._selectDimensions(query);
+        stack.decompose(root.id, dimensions);
+      }
+    } else {
+      dimensions = await this._selectDimensions(query);
       stack.decompose(root.id, dimensions);
     }
+
+    this._emit('research.decomposed', { sessionId, dimensions, taskCount: dimensions.length + 1 });
 
     // Step 2: Execute tasks in parallel waves
     let reflectionRound = 0;
@@ -1274,6 +1288,23 @@ Rules:
     } catch {
       // Non-fatal
     }
+  }
+
+  /**
+   * Load a blueprint by ID.
+   * @param {string} blueprintId
+   * @returns {Promise<Object|null>}
+   * @private
+   */
+  async _loadBlueprint(blueprintId) {
+    try {
+      const results = await this.memoryStore.searchMemories({
+        query: blueprintId,
+        tags: ['blueprint'],
+        n_results: 1,
+      });
+      return results?.[0]?.metadata || null;
+    } catch { return null; }
   }
 
   /**

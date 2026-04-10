@@ -4930,8 +4930,9 @@ a{color:#a78bfa}</style></head><body>
                 // Find the document memory first to get its source info
                 const docMemory = await prisma.memory.findFirst({
                   where: { id: deleteMemoryId, userId, deletedAt: null },
-                  select: { id: true, tags: true, metadata: true, title: true },
+                  select: { id: true, tags: true, title: true, sourceMetadata: { select: { sourceId: true, metadata: true } }, versions: { orderBy: { createdAt: 'desc' }, take: 1, select: { metadata: true } } },
                 });
+                const docMeta = docMemory?.versions?.[0]?.metadata || docMemory?.sourceMetadata?.metadata || {};
 
                 if (!docMemory) {
                   return jsonResponse(res, { error: 'Document not found' }, 404);
@@ -4948,8 +4949,8 @@ a{color:#a78bfa}</style></head><body>
                 }
 
                 // Strategy 2: Check metadata.source_upload_id (enterprise)
-                if (memoryIds.length === 0 && docMemory.metadata?.source_upload_id) {
-                  const uploadId = docMemory.metadata.source_upload_id;
+                if (memoryIds.length === 0 && docMeta?.source_upload_id) {
+                  const uploadId = docMeta.source_upload_id;
                   const tagged = await prisma.memory.findMany({
                     where: { userId, tags: { has: `upload:${uploadId}` }, deletedAt: null },
                     select: { id: true },
@@ -4959,7 +4960,7 @@ a{color:#a78bfa}</style></head><body>
 
                 // Strategy 3: Match by source_id pattern (regular KB uploads - doc:{filename}:*)
                 if (memoryIds.length === 0) {
-                  const filename = docMemory.metadata?.filename || docMemory.metadata?.document_title;
+                  const filename = docMeta?.filename || docMeta?.document_title;
                   if (filename) {
                     const sourcePattern = `doc:${filename}`;
                     const related = await prisma.memory.findMany({
@@ -4977,12 +4978,12 @@ a{color:#a78bfa}</style></head><body>
                 // Strategy 4: If still nothing, at minimum delete this memory + children with parent_schema_id
                 if (memoryIds.length === 0) {
                   memoryIds = [deleteMemoryId];
-                  // Find children that reference this as parent
+                  // Find children that reference this as parent via versions metadata
                   const children = await prisma.memory.findMany({
                     where: {
                       userId,
                       deletedAt: null,
-                      metadata: { path: ['parent_schema_id'], equals: deleteMemoryId },
+                      versions: { some: { metadata: { path: ['parent_schema_id'], equals: deleteMemoryId } } },
                     },
                     select: { id: true },
                   });

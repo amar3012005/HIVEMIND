@@ -502,6 +502,201 @@ export class BlueprintMiner {
   }
 
   /**
+   * Capture full research state for reusable blueprint.
+   * Captures trails, memories, sources, findings, and graph structure.
+   * @param {string} sessionId - Research session ID
+   * @param {string} userId
+   * @param {string} orgId
+   * @param {string} projectId
+   * @returns {Promise<Object|null>} Captured state or null
+   */
+  async captureResearchState(sessionId, userId, orgId, projectId) {
+    try {
+      // Fetch all memories for this research project
+      const memories = await this.memoryStore.searchMemories({
+        query: '',
+        user_id: userId,
+        org_id: orgId,
+        project: projectId,
+        n_results: 500,
+      });
+
+      // Categorize memories
+      const state = {
+        sessionId,
+        projectId,
+        capturedAt: new Date().toISOString(),
+        sources: [],
+        findings: [],
+        trails: [],
+        observations: [],
+        executionEvents: [],
+        contradictions: [],
+        blueprints: [],
+        graph: { nodes: [], edges: [] },
+      };
+
+      (memories || []).forEach(m => {
+        const tags = m.tags || [];
+        const metadata = m.metadata || {};
+
+        // Sources
+        if (tags.includes('research-source') || tags.includes('web-source') ||
+            metadata.source_type === 'web' || m.memory_type === 'fact' && tags.includes('web')) {
+          state.sources.push({
+            id: m.id,
+            title: m.title,
+            url: metadata.url || metadata.source_url,
+            content: m.content,
+            score: m.importance_score,
+          });
+        }
+
+        // Findings
+        if (tags.includes('research-finding') || m.memory_type === 'fact') {
+          state.findings.push({
+            id: m.id,
+            title: m.title,
+            content: m.content,
+            confidence: metadata.confidence || m.importance_score,
+            source: metadata.source_url,
+            type: metadata.research_type,
+          });
+        }
+
+        // Trails
+        if (tags.includes('research-trail') || metadata.trailType === 'op/research-trail' || m.memory_type === 'decision') {
+          state.trails.push({
+            id: m.id,
+            query: metadata.query || m.content?.split('\n')[0],
+            steps: metadata.steps || [],
+            confidence: metadata.progress?.confidence,
+            status: metadata.status,
+          });
+        }
+
+        // Observations
+        if (tags.includes('research-observation') || metadata.observationType === 'op/research-observation') {
+          state.observations.push({
+            id: m.id,
+            agent: metadata.agent,
+            action: metadata.action,
+            findingType: metadata.findingType,
+            source: metadata.source,
+            sourceId: metadata.sourceId,
+            confidence: metadata.confidence,
+            stepIndex: metadata.stepIndex,
+          });
+        }
+
+        // Execution Events
+        if (tags.includes('research-execution-event') || metadata.executionEventType === 'op/research-execution-event') {
+          state.executionEvents.push({
+            id: m.id,
+            agent: metadata.agent,
+            action: metadata.action,
+            output: metadata.output,
+            success: metadata.success,
+          });
+        }
+
+        // Contradictions
+        if (tags.includes('research-contradiction') || metadata.contradictionType === 'op/research-contradiction') {
+          state.contradictions.push({
+            id: m.id,
+            claimA: metadata.claimA,
+            claimB: metadata.claimB,
+            dimension: metadata.dimension,
+            unresolved: metadata.unresolved,
+          });
+        }
+
+        // Blueprints
+        if (tags.includes('kg/blueprint') || metadata.blueprint_id) {
+          state.blueprints.push({
+            blueprintId: metadata.blueprint_id,
+            name: metadata.blueprint_name,
+            domain: metadata.blueprint_domain,
+            timesReused: metadata.blueprint_times_reused,
+          });
+        }
+      });
+
+      // Build graph structure
+      state.graph.nodes = [
+        ...state.sources.map(s => ({ id: s.id, type: 'source', ...s })),
+        ...state.findings.map(f => ({ id: f.id, type: 'finding', ...f })),
+        ...state.trails.map(t => ({ id: t.id, type: 'trail', ...t })),
+      ];
+
+      return state;
+    } catch (err) {
+      console.error('[BlueprintMiner] Failed to capture research state:', err.message);
+      return null;
+    }
+  }
+
+  /**
+   * Save blueprint with captured research state.
+   * @param {Object} blueprint
+   * @param {string} userId
+   * @param {string} orgId
+   * @param {Object} capturedState - Optional captured research state
+   */
+  async saveBlueprintWithState(blueprint, userId, orgId, capturedState) {
+    try {
+      const memoryId = randomUUID();
+      const tags = ['kg/blueprint', 'research-blueprint'];
+      if (blueprint.domain) tags.push(`domain:${blueprint.domain}`);
+
+      await this.memoryStore.createMemory({
+        id: memoryId,
+        user_id: userId,
+        org_id: orgId,
+        content: JSON.stringify(blueprint.pattern, null, 2),
+        title: `Blueprint: ${blueprint.name}`,
+        memory_type: 'lesson',
+        tags,
+        is_latest: true,
+        importance_score: blueprint.successRate,
+        metadata: {
+          blueprint_id: blueprint.blueprintId,
+          blueprint_name: blueprint.name,
+          blueprint_version: blueprint.version,
+          blueprint_domain: blueprint.domain,
+          blueprint_success_rate: blueprint.successRate,
+          blueprint_times_reused: blueprint.timesReused,
+          blueprint_avg_confidence: blueprint.avgConfidence,
+          blueprint_pattern: blueprint.pattern,
+          blueprint_source_trails: blueprint.sourceTrailIds,
+          blueprint_created_at: blueprint.createdAt,
+          blueprint_updated_at: blueprint.updatedAt,
+          blueprint_last_used_at: blueprint.lastUsedAt,
+          // Captured research state for reusability
+          blueprint_has_captured_state: !!capturedState,
+          blueprint_captured_state: capturedState ? {
+            sessionId: capturedState.sessionId,
+            projectId: capturedState.projectId,
+            capturedAt: capturedState.capturedAt,
+            sourceCount: capturedState.sources?.length || 0,
+            findingCount: capturedState.findings?.length || 0,
+            trailCount: capturedState.trails?.length || 0,
+            observationCount: capturedState.observations?.length || 0,
+            graphNodeCount: capturedState.graph?.nodes?.length || 0,
+          } : null,
+        },
+        created_at: blueprint.createdAt,
+        updated_at: blueprint.updatedAt,
+      });
+
+      return { ...blueprint, _memoryId: memoryId, capturedState };
+    } catch (err) {
+      console.error('[BlueprintMiner] Failed to save blueprint with state:', err.message);
+      return null;
+    }
+  }
+
+  /**
    * Get blueprints by domain or all.
    */
   async getBlueprints(userId, orgId, domain = null) {

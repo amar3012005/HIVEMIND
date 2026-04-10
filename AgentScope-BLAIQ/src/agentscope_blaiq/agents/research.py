@@ -24,6 +24,7 @@ from agentscope_blaiq.runtime.agent_base import BaseAgent
 from agentscope_blaiq.runtime.config import settings
 from agentscope_blaiq.runtime.hivemind_mcp import HivemindMCPClient, HivemindMCPError
 from agentscope_blaiq.tools.docs import load_uploaded_doc_findings, validate_uploaded_document
+from agentscope_blaiq.tools.deduplication import deduplicate_sources_and_findings
 from agentscope_blaiq.tools.web import fetch_url_summary
 
 
@@ -579,6 +580,47 @@ class ResearchAgent(BaseAgent):
         return contradictions
 
     @staticmethod
+    def _classify_deduplicated_findings(
+        deduplicated_findings: list[EvidenceFinding],
+        original_memory_findings: list[EvidenceFinding],
+        original_web_findings: list[EvidenceFinding],
+        original_doc_findings: list[EvidenceFinding],
+    ) -> tuple[list[EvidenceFinding], list[EvidenceFinding], list[EvidenceFinding]]:
+        """
+        Classify deduplicated findings back to their original types based on
+        which original findings they most closely match.
+        """
+        memory_findings = []
+        web_findings = []
+        doc_findings = []
+
+        for dedup_finding in deduplicated_findings:
+            # Find the original finding this mostly came from
+            # by matching on source_ids
+            memory_score = sum(
+                1 for orig in original_memory_findings
+                if any(sid in dedup_finding.source_ids for sid in orig.source_ids)
+            )
+            web_score = sum(
+                1 for orig in original_web_findings
+                if any(sid in dedup_finding.source_ids for sid in orig.source_ids)
+            )
+            doc_score = sum(
+                1 for orig in original_doc_findings
+                if any(sid in dedup_finding.source_ids for sid in orig.source_ids)
+            )
+
+            # Classify to the source type with highest overlap
+            if memory_score >= web_score and memory_score >= doc_score:
+                memory_findings.append(dedup_finding)
+            elif web_score >= doc_score:
+                web_findings.append(dedup_finding)
+            else:
+                doc_findings.append(dedup_finding)
+
+        return memory_findings, web_findings, doc_findings
+
+    @staticmethod
     def _build_digest(
         query: str,
         *,
@@ -784,6 +826,41 @@ class ResearchAgent(BaseAgent):
             else:
                 await self.log("No uploaded documents found for this tenant.", kind="status")
 
+        # Deduplicate sources and findings across all sources
+        all_sources = [*memory_sources, *web_sources, *doc_sources]
+        all_findings = [*memory_findings, *web_findings, *doc_findings]
+        all_citations = [*memory_citations, *web_citations, *doc_citations]
+
+        # Store original findings for classification after dedup
+        original_memory_findings = memory_findings.copy()
+        original_web_findings = web_findings.copy()
+        original_doc_findings = doc_findings.copy()
+        original_source_count = len(all_sources)
+
+        # Apply deduplication
+        if all_sources and all_findings:
+            try:
+                dedup_sources, dedup_findings, dedup_citations = deduplicate_sources_and_findings(
+                    all_sources, all_findings, all_citations
+                )
+                dedup_count = original_source_count - len(dedup_sources)
+                if dedup_count > 0:
+                    await self.log(
+                        f"Source deduplication reduced sources from {original_source_count} to {len(dedup_sources)} "
+                        f"({dedup_count} merged, confidence scores boosted).",
+                        kind="decision",
+                        detail={"sources_merged": dedup_count, "final_sources": len(dedup_sources)},
+                    )
+
+                # Reclassify findings back to their source types
+                memory_findings, web_findings, doc_findings = self._classify_deduplicated_findings(
+                    dedup_findings, original_memory_findings, original_web_findings, original_doc_findings
+                )
+                all_sources = dedup_sources
+                all_citations = dedup_citations
+            except Exception as e:
+                await self.log(f"Deduplication encountered an error (proceeding without it): {e}", kind="decision")
+
         contradictions = self._detect_contradictions(memory_findings, web_findings)
         if contradictions:
             await self.log("Contradictions detected between enterprise memory and live web evidence.", kind="review")
@@ -794,9 +871,6 @@ class ResearchAgent(BaseAgent):
             doc_findings=doc_findings,
             contradictions=contradictions,
         )
-
-        all_sources = [*memory_sources, *web_sources, *doc_sources]
-        all_citations = [*memory_citations, *web_citations, *doc_citations]
         freshness = EvidenceFreshness(
             memory_is_fresh=bool(memory_findings),
             web_verified=used_web,

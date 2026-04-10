@@ -4896,6 +4896,148 @@ a{color:#a78bfa}</style></head><body>
           break;
 
         // ==========================================
+        // KNOWLEDGE BASE — Document Delete (cascading)
+        // ==========================================
+        case '/api/knowledge/document':
+          if (req.method === 'DELETE') {
+            if (!persistentMemoryEngine || !persistentMemoryStore) {
+              return jsonResponse(res, { error: 'Memory engine unavailable' }, 503);
+            }
+
+            // Accept either memory_id (the document summary/schema memory) or upload_id
+            const deleteMemoryId = body.memory_id || url.searchParams.get('memory_id');
+            const deleteUploadId = body.upload_id || url.searchParams.get('upload_id');
+
+            if (!deleteMemoryId && !deleteUploadId) {
+              return jsonResponse(res, { error: 'memory_id or upload_id is required' }, 400);
+            }
+
+            try {
+              let memoryIds = [];
+
+              if (deleteUploadId) {
+                // Find all memories with upload:{id} tag
+                const tagged = await prisma.memory.findMany({
+                  where: {
+                    userId,
+                    tags: { has: `upload:${deleteUploadId}` },
+                    deletedAt: null,
+                  },
+                  select: { id: true },
+                });
+                memoryIds = tagged.map(m => m.id);
+              } else {
+                // Find the document memory first to get its source info
+                const docMemory = await prisma.memory.findFirst({
+                  where: { id: deleteMemoryId, userId, deletedAt: null },
+                  select: { id: true, tags: true, metadata: true, title: true },
+                });
+
+                if (!docMemory) {
+                  return jsonResponse(res, { error: 'Document not found' }, 404);
+                }
+
+                // Strategy 1: Check for upload:{id} tag (enterprise uploads)
+                const uploadTag = (docMemory.tags || []).find(t => t.startsWith('upload:'));
+                if (uploadTag) {
+                  const tagged = await prisma.memory.findMany({
+                    where: { userId, tags: { has: uploadTag }, deletedAt: null },
+                    select: { id: true },
+                  });
+                  memoryIds = tagged.map(m => m.id);
+                }
+
+                // Strategy 2: Check metadata.source_upload_id (enterprise)
+                if (memoryIds.length === 0 && docMemory.metadata?.source_upload_id) {
+                  const uploadId = docMemory.metadata.source_upload_id;
+                  const tagged = await prisma.memory.findMany({
+                    where: { userId, tags: { has: `upload:${uploadId}` }, deletedAt: null },
+                    select: { id: true },
+                  });
+                  memoryIds = tagged.map(m => m.id);
+                }
+
+                // Strategy 3: Match by source_id pattern (regular KB uploads - doc:{filename}:*)
+                if (memoryIds.length === 0) {
+                  const filename = docMemory.metadata?.filename || docMemory.metadata?.document_title;
+                  if (filename) {
+                    const sourcePattern = `doc:${filename}`;
+                    const related = await prisma.memory.findMany({
+                      where: {
+                        userId,
+                        deletedAt: null,
+                        sourceMetadata: { sourceId: { startsWith: sourcePattern } },
+                      },
+                      select: { id: true },
+                    });
+                    memoryIds = related.map(m => m.id);
+                  }
+                }
+
+                // Strategy 4: If still nothing, at minimum delete this memory + children with parent_schema_id
+                if (memoryIds.length === 0) {
+                  memoryIds = [deleteMemoryId];
+                  // Find children that reference this as parent
+                  const children = await prisma.memory.findMany({
+                    where: {
+                      userId,
+                      deletedAt: null,
+                      metadata: { path: ['parent_schema_id'], equals: deleteMemoryId },
+                    },
+                    select: { id: true },
+                  });
+                  memoryIds.push(...children.map(c => c.id));
+                }
+
+                // Ensure the clicked document is included
+                if (!memoryIds.includes(deleteMemoryId)) {
+                  memoryIds.push(deleteMemoryId);
+                }
+              }
+
+              if (memoryIds.length === 0) {
+                return jsonResponse(res, { error: 'No memories found for this document' }, 404);
+              }
+
+              // Cascade hard delete (same pattern as delete-all)
+              await prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: memoryIds } } });
+              await prisma.memoryVersion.deleteMany({ where: { memoryId: { in: memoryIds } } });
+              await prisma.relationship.deleteMany({ where: { OR: [{ fromId: { in: memoryIds } }, { toId: { in: memoryIds } }] } });
+              await prisma.memory.deleteMany({ where: { id: { in: memoryIds } } });
+
+              // Delete from Qdrant
+              try {
+                const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
+                const qdrantCollection = process.env.QDRANT_COLLECTION || 'hivemind_memories';
+                const qdrantKey = process.env.QDRANT_API_KEY || '';
+                if (qdrantUrl && memoryIds.length > 0) {
+                  await fetch(`${qdrantUrl}/collections/${qdrantCollection}/points/delete`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', ...(qdrantKey ? { 'api-key': qdrantKey } : {}) },
+                    body: JSON.stringify({ points: memoryIds, wait: true }),
+                  });
+                }
+              } catch (qdrantErr) {
+                console.warn('[knowledge-delete] Qdrant delete failed:', qdrantErr.message);
+              }
+
+              invalidateAggregateCache({ userId, orgId, project: null });
+
+              console.log(`[knowledge-delete] Deleted ${memoryIds.length} memories for document ${deleteMemoryId || deleteUploadId}`);
+
+              return jsonResponse(res, {
+                success: true,
+                deleted: memoryIds.length,
+                memory_ids: memoryIds,
+              });
+            } catch (err) {
+              console.error('[knowledge-delete] Failed:', err.message);
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        // ==========================================
         // ENTERPRISE UPLOAD — Schema-First Extraction
         // ==========================================
 

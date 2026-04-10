@@ -4896,6 +4896,293 @@ a{color:#a78bfa}</style></head><body>
           break;
 
         // ==========================================
+        // ENTERPRISE UPLOAD — Schema-First Extraction
+        // ==========================================
+
+        case '/api/enterprise/upload/detect':
+          if (req.method === 'POST') {
+            // Requires persistent memory (same check as knowledge upload)
+            if (!persistentMemoryEngine) {
+              return jsonResponse(res, { error: 'Memory engine unavailable' }, 503);
+            }
+
+            try {
+              // Parse multipart (same pattern as /api/knowledge/upload)
+              const contentType = req.headers['content-type'] || '';
+              if (!contentType.includes('multipart/form-data')) {
+                return jsonResponse(res, { error: 'Content-Type must be multipart/form-data' }, 400);
+              }
+              const boundaryMatch = contentType.match(/boundary=(.+)/);
+              if (!boundaryMatch) {
+                return jsonResponse(res, { error: 'Missing boundary' }, 400);
+              }
+              const rawBody = await new Promise((resolve) => {
+                const chunks = [];
+                req.on('data', (c) => chunks.push(c));
+                req.on('end', () => resolve(Buffer.concat(chunks)));
+              });
+              const boundary = boundaryMatch[1].trim();
+              const parts = parseMultipart(rawBody, boundary);
+              const filePart = parts.find(p => p.filename);
+              if (!filePart) {
+                return jsonResponse(res, { error: 'No file uploaded' }, 400);
+              }
+
+              // Validate size
+              if (filePart.data.length > 100 * 1024 * 1024) {
+                return jsonResponse(res, { error: 'File too large. Maximum 100MB.' }, 413);
+              }
+
+              // Validate file type (add xlsx/xls to existing types)
+              const ext = (filePart.filename || '').split('.').pop()?.toLowerCase();
+              const allowedExts = ['pdf', 'docx', 'txt', 'md', 'csv', 'xlsx', 'xls'];
+              if (!allowedExts.includes(ext)) {
+                return jsonResponse(res, { error: `Unsupported: ${ext}. Allowed: PDF, DOCX, TXT, MD, CSV, XLSX, XLS` }, 415);
+              }
+
+              const uploadId = crypto.randomUUID();
+              let parsedText = '';
+              let sheets = null;
+
+              // Excel: parse sheets for detection
+              if (ext === 'xlsx' || ext === 'xls') {
+                const { parseExcelSheets } = await import('./knowledge/enterprise/excel-parser.js');
+                sheets = parseExcelSheets(filePart.data);
+                // Use all sheet previews combined for type detection
+                parsedText = sheets.filter(s => !s.empty).map(s => `Sheet: ${s.name}\n${s.preview}`).join('\n\n');
+              } else {
+                // Non-Excel: extract text using existing document chunker's logic
+                const { processDocument } = await import('./knowledge/document-chunker.js');
+                const result = await processDocument(filePart.data, filePart.contentType || `text/${ext}`, filePart.filename, { user_id: userId, org_id: orgId });
+                // Get raw text from summary content
+                parsedText = result.summary?.content || result.chunks?.map(c => c.content).join('\n\n') || '';
+              }
+
+              // Run type detection
+              const { detectDocumentType, detectExcelSheetTypes } = await import('./knowledge/enterprise/detector.js');
+              const { getDefaultModel } = await import('./knowledge/enterprise/litellm-client.js');
+
+              let detected;
+              let sheetDetections = null;
+
+              if (sheets) {
+                // Excel: detect per-sheet
+                sheetDetections = await detectExcelSheetTypes(sheets);
+                // Overall type = most common detected type
+                const typeCounts = {};
+                sheetDetections.forEach(s => { typeCounts[s.detected_type] = (typeCounts[s.detected_type] || 0) + 1; });
+                const topType = Object.entries(typeCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || 'spreadsheet';
+                detected = { type: topType, confidence: sheetDetections[0]?.confidence || 0.5, reasoning: 'Excel workbook — per-sheet detection' };
+              } else {
+                detected = await detectDocumentType(parsedText, { filename: filePart.filename });
+              }
+
+              // Store in pending uploads map (10 min TTL)
+              if (!global._enterprisePendingUploads) {
+                global._enterprisePendingUploads = new Map();
+                // Sweep expired entries every minute
+                setInterval(() => {
+                  const now = Date.now();
+                  for (const [id, entry] of global._enterprisePendingUploads) {
+                    if (now - entry.createdAt > 10 * 60 * 1000) global._enterprisePendingUploads.delete(id);
+                  }
+                }, 60_000).unref();
+              }
+
+              global._enterprisePendingUploads.set(uploadId, {
+                buffer: filePart.data,
+                filename: filePart.filename,
+                mimeType: filePart.contentType || `application/${ext}`,
+                ext,
+                sheets,
+                parsedText,
+                detectedType: detected.type,
+                confidence: detected.confidence,
+                createdAt: Date.now(),
+              });
+
+              console.log(`[enterprise] Detect id=${uploadId} file=${filePart.filename} type=${detected.type} confidence=${detected.confidence}`);
+
+              return jsonResponse(res, {
+                upload_id: uploadId,
+                detected_type: detected.type,
+                confidence: detected.confidence,
+                reasoning: detected.reasoning,
+                filename: filePart.filename,
+                size_bytes: filePart.data.length,
+                sheets: sheetDetections || null,
+                model: getDefaultModel(),
+                available_types: (await import('./knowledge/enterprise/schemas/index.js')).DOCUMENT_TYPES,
+              });
+            } catch (err) {
+              console.error('[enterprise] Detect failed:', err.message);
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/enterprise/upload/ingest':
+          if (req.method === 'POST') {
+            if (!persistentMemoryEngine) {
+              return jsonResponse(res, { error: 'Memory engine unavailable' }, 503);
+            }
+
+            const { upload_id, confirmed_type, sheet_configs, tags: ingestTags, targetScope, containerTag, model } = body;
+
+            if (!upload_id) return jsonResponse(res, { error: 'upload_id is required' }, 400);
+            if (!confirmed_type) return jsonResponse(res, { error: 'confirmed_type is required' }, 400);
+
+            const pending = global._enterprisePendingUploads?.get(upload_id);
+            if (!pending) {
+              return jsonResponse(res, { error: 'Upload not found or expired. Please re-upload.' }, 404);
+            }
+
+            // Remove from pending
+            global._enterprisePendingUploads.delete(upload_id);
+
+            const userTags = ingestTags ? (Array.isArray(ingestTags) ? ingestTags : ingestTags.split(',').map(t => t.trim()).filter(Boolean)) : [];
+            const visibility = targetScope === 'organization' ? 'organization' : 'private';
+            const project = containerTag || null;
+
+            try {
+              const { extractSchema } = await import('./knowledge/enterprise/extractor.js');
+              const { createEnterpriseMemories } = await import('./knowledge/enterprise/enterprise-chunker.js');
+              const { parseSheet } = await import('./knowledge/enterprise/excel-parser.js');
+
+              const isExcel = pending.ext === 'xlsx' || pending.ext === 'xls';
+              const results = [];
+
+              if (isExcel && sheet_configs && sheet_configs.length > 0) {
+                // Process each selected sheet
+                for (const sheetConfig of sheet_configs) {
+                  if (sheetConfig.include === false) continue;
+                  const sheetType = sheetConfig.confirmed_type || confirmed_type;
+                  const sheetData = parseSheet(pending.buffer, sheetConfig.sheet_name);
+
+                  const extracted = await extractSchema(sheetData.raw_text, sheetType, { model, filename: `${pending.filename} — ${sheetConfig.sheet_name}` });
+                  // For spreadsheets, inject sheet metadata
+                  if (sheetType === 'spreadsheet') {
+                    extracted.fields.sheet_name = extracted.fields.sheet_name || sheetConfig.sheet_name;
+                    extracted.fields.headers = extracted.fields.headers || sheetData.headers;
+                    extracted.fields.row_count = extracted.fields.row_count || sheetData.row_count;
+                  }
+
+                  const memories = createEnterpriseMemories({
+                    documentType: sheetType,
+                    extractedSchema: extracted,
+                    rawText: sheetData.raw_text,
+                    filename: pending.filename,
+                    uploadId: upload_id,
+                    userId, orgId, project, visibility, userTags,
+                    sheetData,
+                  });
+
+                  memories.parent.metadata.detection_confidence = pending.confidence;
+                  results.push({ sheet: sheetConfig.sheet_name, type: sheetType, ...memories });
+                }
+              } else {
+                // Single document processing
+                const extracted = await extractSchema(pending.parsedText, confirmed_type, { model, filename: pending.filename });
+                const memories = createEnterpriseMemories({
+                  documentType: confirmed_type,
+                  extractedSchema: extracted,
+                  rawText: pending.parsedText,
+                  filename: pending.filename,
+                  uploadId: upload_id,
+                  userId, orgId, project, visibility, userTags,
+                });
+                memories.parent.metadata.detection_confidence = pending.confidence;
+                results.push({ type: confirmed_type, ...memories });
+              }
+
+              // Background ingestion
+              const jobId = crypto.randomUUID();
+              let totalMemories = 0;
+
+              console.log(`[enterprise] Ingest job=${jobId} upload=${upload_id} type=${confirmed_type} sheets=${results.length}`);
+
+              (async () => {
+                const collectionName = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
+                let ingested = 0;
+                let failed = 0;
+
+                for (const result of results) {
+                  try {
+                    // Ingest parent schema memory
+                    const parentResult = await persistentMemoryEngine.ingestMemory({ ...result.parent, skipProcessing: true });
+                    const parentId = parentResult?.memoryId;
+
+                    // Embed parent in Qdrant
+                    if (parentId && qdrantClient) {
+                      try {
+                        const mem = await persistentMemoryStore.getMemory(parentId);
+                        if (mem) await qdrantClient.storeMemory(mem, { collectionName });
+                      } catch (e) { console.warn(`[enterprise] Parent embed failed:`, e.message); }
+                    }
+                    ingested++;
+
+                    // Ingest child chunks
+                    for (const chunk of result.chunks) {
+                      try {
+                        chunk.metadata.parent_schema_id = parentId || null;
+                        const chunkResult = await persistentMemoryEngine.ingestMemory(chunk);
+                        if (chunkResult?.memoryId && qdrantClient) {
+                          try {
+                            const mem = await persistentMemoryStore.getMemory(chunkResult.memoryId);
+                            if (mem) await qdrantClient.storeMemory(mem, { collectionName });
+                          } catch (e) { console.warn(`[enterprise] Chunk embed failed:`, e.message); }
+                        }
+                        ingested++;
+                      } catch (e) {
+                        console.warn(`[enterprise] Chunk failed:`, e.message);
+                        failed++;
+                      }
+                    }
+                  } catch (err) {
+                    console.error(`[enterprise] Sheet processing failed:`, err.message);
+                    failed += 1 + result.chunks.length;
+                  }
+                }
+
+                console.log(`[enterprise] Job ${jobId} complete: ingested=${ingested} failed=${failed}`);
+              })();
+
+              for (const r of results) totalMemories += 1 + r.chunks.length;
+
+              return jsonResponse(res, {
+                job_id: jobId,
+                upload_id,
+                status: 'processing',
+                confirmed_type,
+                memories_queued: totalMemories,
+                sheets_processed: results.length,
+                schema_fields: results.map(r => ({
+                  type: r.type,
+                  sheet: r.sheet || null,
+                  fields: r.parent.metadata.extracted_schema,
+                  summary: r.parent.content,
+                })),
+              }, 202);
+            } catch (err) {
+              console.error('[enterprise] Ingest failed:', err.message);
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/enterprise/model':
+          if (req.method === 'GET') {
+            try {
+              const { getDefaultModel } = await import('./knowledge/enterprise/litellm-client.js');
+              const { DOCUMENT_TYPES } = await import('./knowledge/enterprise/schemas/index.js');
+              return jsonResponse(res, { model: getDefaultModel(), available_types: DOCUMENT_TYPES });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        // ==========================================
         // KNOWLEDGE BASE — Document Upload
         // ==========================================
 

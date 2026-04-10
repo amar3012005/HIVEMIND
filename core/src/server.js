@@ -5254,13 +5254,20 @@ a{color:#a78bfa}</style></head><body>
                     // Ingest parent schema memory
                     const parentResult = await persistentMemoryEngine.ingestMemory({ ...result.parent, skipProcessing: true });
                     const parentId = parentResult?.memoryId;
+                    console.log(`[enterprise] Parent ingested: id=${parentId} operation=${parentResult?.operation}`);
 
                     // Embed parent in Qdrant
                     if (parentId && qdrantClient) {
                       try {
                         const mem = await persistentMemoryStore.getMemory(parentId);
-                        if (mem) await qdrantClient.storeMemory(mem, { collectionName });
+                        console.log(`[enterprise] Parent getMemory: found=${!!mem} content_len=${mem?.content?.length} user_id=${mem?.user_id}`);
+                        if (mem) {
+                          await qdrantClient.storeMemory(mem, { collectionName });
+                          console.log(`[enterprise] Parent Qdrant stored: id=${parentId}`);
+                        }
                       } catch (e) { console.warn(`[enterprise] Parent embed failed:`, e.message); }
+                    } else {
+                      console.warn(`[enterprise] Parent Qdrant SKIPPED: parentId=${parentId} qdrantClient=${!!qdrantClient}`);
                     }
                     ingested++;
 
@@ -5269,10 +5276,15 @@ a{color:#a78bfa}</style></head><body>
                       try {
                         chunk.metadata.parent_schema_id = parentId || null;
                         const chunkResult = await persistentMemoryEngine.ingestMemory(chunk);
+                        console.log(`[enterprise] Chunk ingested: id=${chunkResult?.memoryId} operation=${chunkResult?.operation}`);
                         if (chunkResult?.memoryId && qdrantClient) {
                           try {
                             const mem = await persistentMemoryStore.getMemory(chunkResult.memoryId);
-                            if (mem) await qdrantClient.storeMemory(mem, { collectionName });
+                            console.log(`[enterprise] Chunk getMemory: found=${!!mem} content_len=${mem?.content?.length}`);
+                            if (mem) {
+                              await qdrantClient.storeMemory(mem, { collectionName });
+                              console.log(`[enterprise] Chunk Qdrant stored: id=${chunkResult.memoryId}`);
+                            }
                           } catch (e) { console.warn(`[enterprise] Chunk embed failed:`, e.message); }
                         }
                         ingested++;

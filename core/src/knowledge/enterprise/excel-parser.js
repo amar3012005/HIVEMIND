@@ -179,19 +179,18 @@ export function parseSheet(buffer, sheetName) {
  */
 export function groupRows(rows, headers, groupSize = 30) {
   const groups = [];
-  const headerLine = `Headers: ${headers.join(' | ')}`;
 
   for (let i = 0; i < rows.length; i += groupSize) {
     const slice = rows.slice(i, i + groupSize);
-    const lines = [headerLine];
+    const lines = [];
 
     for (let j = 0; j < slice.length; j++) {
-      const rowNum = i + j + 1;
-      const vals = headers.map(h => {
+      // Format each row as "Column: Value, Column: Value" for natural language search
+      const parts = headers.map(h => {
         const v = slice[j][h];
-        return v == null ? '' : String(v);
-      });
-      lines.push(`Row ${rowNum}: ${vals.join(' | ')}`);
+        return v == null || v === '' ? null : `${h}: ${v}`;
+      }).filter(Boolean);
+      lines.push(parts.join(', '));
     }
 
     groups.push({

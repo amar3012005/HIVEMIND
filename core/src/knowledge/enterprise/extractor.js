@@ -171,8 +171,15 @@ function summarySop(f) {
 function summarySpreadsheet(f) {
   const parts = [f.sheet_name ? `Sheet: ${f.sheet_name}` : 'Spreadsheet'];
   if (f.row_count != null) parts.push(`${f.row_count} rows`);
-  if (safeLen(f.headers)) parts.push(`${f.headers.length} columns`);
-  if (f.data_type) parts.push(`Type: ${f.data_type}`);
+  if (safeLen(f.headers)) parts.push(`Columns: ${f.headers.join(', ')}`);
+  if (f.data_type) parts.push(`Data type: ${f.data_type}`);
+  if (f.date_range) parts.push(`Date range: ${f.date_range}`);
+  if (f.summary_statistics) {
+    const stats = typeof f.summary_statistics === 'string' ? f.summary_statistics : JSON.stringify(f.summary_statistics);
+    parts.push(`Summary: ${stats}`);
+  }
+  if (f.notable_patterns) parts.push(`Patterns: ${f.notable_patterns}`);
+  if (safeLen(f.key_columns)) parts.push(`Key columns: ${f.key_columns.join(', ')}`);
   return parts.join('. ') + '.';
 }
 

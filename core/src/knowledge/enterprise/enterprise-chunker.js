@@ -341,9 +341,15 @@ export function createEnterpriseMemories(options) {
 
   const totalChunks = rawChunks.length;
 
-  // Parent schema memory
+  // Parent schema memory — include data preview for better search/embedding quality
+  let parentContent = extractedSchema.summary;
+  if (rawText && rawText.length > 0) {
+    const preview = rawText.slice(0, 1500);
+    parentContent += '\n\n' + preview;
+  }
+
   const parent = {
-    content: extractedSchema.summary,
+    content: parentContent,
     title: parentTitle,
     memory_type: 'fact',
     tags: parentTags,

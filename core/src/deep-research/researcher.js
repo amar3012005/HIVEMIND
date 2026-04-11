@@ -367,6 +367,8 @@ export class DeepResearcher {
         general: this._maxLlmCalls,
       };
     }
+    // maxTasks: cap number of research tasks for testing (e.g. N=5)
+    this._maxTasks = Number.isInteger(options.maxTasks) && options.maxTasks > 0 ? options.maxTasks : null;
     this._llmCallCount = 0;
     this._workerLlmCalls = { faraday: 0, feynmann: 0, turing: 0, synthesis: 0, general: 0 };
     this._emitLlmBudget({ sessionId, reason: 'research_start' });
@@ -1992,16 +1994,17 @@ Rules:
   }
 
   async _selectDimensions(query) {
+    // maxTasks caps total task count — derive max dimensions from it (root task = 1)
+    const maxDims = this._maxTasks ? Math.max(1, this._maxTasks - 1) : 5;
     try {
       const response = await this._llm(
         `Given this research question, select which research dimensions are most relevant. Return ONLY a JSON array of dimension names.\n\nDimensions: ${DIMENSIONS.join(', ')}\n\nQuestion: ${query}\n\nReturn 3-5 most relevant dimensions as JSON array:`,
         { temperature: 0.3, worker: 'general' }
       );
       const parsed = JSON.parse(response.match(/\[.*\]/s)?.[0] || '[]');
-      return parsed.filter(d => DIMENSIONS.includes(d)).slice(0, 5);
+      return parsed.filter(d => DIMENSIONS.includes(d)).slice(0, maxDims);
     } catch {
-      // Fallback: pick first 4 dimensions
-      return DIMENSIONS.slice(0, 4);
+      return DIMENSIONS.slice(0, Math.min(4, maxDims));
     }
   }
 

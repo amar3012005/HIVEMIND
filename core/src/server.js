@@ -4481,6 +4481,7 @@ a{color:#a78bfa}</style></head><body>
               blueprintId: blueprintId || undefined,
               useBlueprints,
               maxLlmCalls: Number.isInteger(body.maxLlmCalls) ? body.maxLlmCalls : undefined,
+              maxTasks: Number.isInteger(body.maxTasks) && body.maxTasks > 0 ? body.maxTasks : undefined,
             })
               .then(result => {
                 session.status = 'completed';

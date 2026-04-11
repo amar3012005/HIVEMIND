@@ -1,4 +1,5 @@
 import { ConflictDetector } from './conflict-detector.js';
+import { normalizeRelationshipDescriptor } from './relationship-semantics.js';
 
 const REPLACEMENT_SIGNALS = [
   'now',
@@ -9,6 +10,20 @@ const REPLACEMENT_SIGNALS = [
   'moved',
   'deprecated',
   'no longer'
+];
+
+const SYNTHESIS_SIGNALS = [
+  'based on',
+  'combining',
+  'combined',
+  'from multiple sources',
+  'overall',
+  'in summary',
+  'therefore',
+  'thus',
+  'together',
+  'synthes',
+  'cross-reference',
 ];
 
 export class RelationshipClassifier {
@@ -29,14 +44,38 @@ export class RelationshipClassifier {
     }
 
     const best = candidates[0];
-    const relationshipType = this._isReplacement(newMemory.content, best.memory.content) ? 'Updates' : 'Extends';
+    const shouldDerive = candidates.length >= 2 && this._looksLikeSynthesis(newMemory.content);
+    const relationshipType = shouldDerive
+      ? 'Derives'
+      : this._isReplacement(newMemory.content, best.memory.content)
+        ? 'Updates'
+        : 'Extends';
 
-    return {
-      operation: relationshipType === 'Updates' ? 'updated' : 'extended',
-      relationship: {
+    const relationship = relationshipType === 'Derives'
+      ? normalizeRelationshipDescriptor({
+        type: 'Derives',
+        sourceIds: candidates.slice(0, 3).map(candidate => candidate.memory.id),
+        confidence: best.similarity,
+        reason: 'synthesis_signals',
+      })
+      : normalizeRelationshipDescriptor({
         type: relationshipType,
         targetId: best.memory.id,
-        confidence: best.similarity
+        confidence: best.similarity,
+        reason: relationshipType === 'Updates' ? 'replacement_signals' : 'augmentation',
+      });
+
+    return {
+      operation: relationshipType === 'Updates'
+        ? 'updated'
+        : relationshipType === 'Derives'
+          ? 'derived'
+          : 'extended',
+      relationship: {
+        type: relationship.type,
+        targetId: relationship.targetId,
+        sourceIds: relationship.sourceIds,
+        confidence: relationship.confidence,
       },
       similarity: best.similarity
     };
@@ -57,5 +96,10 @@ export class RelationshipClassifier {
     const previousNumberMatch = [...previous.matchAll(/\b\d+\b/g)].map(match => match[0]).join(',');
 
     return numberMatch !== previousNumberMatch && previousNumberMatch.length > 0;
+  }
+
+  _looksLikeSynthesis(content = '') {
+    const next = content.toLowerCase();
+    return SYNTHESIS_SIGNALS.some(signal => next.includes(signal));
   }
 }

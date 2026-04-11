@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { computeTokenSimilarity } from './conflict-detector.js';
+import { normalizeRelationshipType } from './relationship-semantics.js';
 
 function mapMemoryRecord(record) {
   if (!record) return null;
@@ -61,7 +62,7 @@ function mapRelationshipRecord(record) {
     id: record.id,
     from_id: record.fromId,
     to_id: record.toId,
-    type: record.type,
+    type: normalizeRelationshipType(record.type) || record.type,
     confidence: record.confidence,
     created_at: record.createdAt instanceof Date ? record.createdAt.toISOString() : record.createdAt,
     metadata: record.metadata || {}
@@ -399,9 +400,12 @@ export class PrismaGraphStore {
   }
 
   async listRelationships({ user_id, org_id, project, relationship_types, limit = 2000, scope = 'personal' }) {
+    const normalizedTypes = relationship_types?.length
+      ? relationship_types.map(type => normalizeRelationshipType(type) || type)
+      : null;
     const records = await this.client.relationship.findMany({
       where: {
-        type: relationship_types?.length ? { in: relationship_types } : undefined,
+        type: normalizedTypes?.length ? { in: normalizedTypes } : undefined,
         fromMemory: scopedMemoryWhere({ user_id, org_id, project, scope }),
         toMemory: scopedMemoryWhere({ user_id, org_id, project, scope })
       },
@@ -466,7 +470,7 @@ export class PrismaGraphStore {
     const where = {
       OR: [{ fromId: memoryId }, { toId: memoryId }],
     };
-    if (type) where.type = type;
+    if (type) where.type = normalizeRelationshipType(type) || type;
     const records = await this.client.relationship.findMany({ where });
     return records.map(mapRelationshipRecord);
   }
@@ -477,7 +481,7 @@ export class PrismaGraphStore {
         id: edge.id,
         fromId: edge.from_id,
         toId: edge.to_id,
-        type: edge.type,
+        type: normalizeRelationshipType(edge.type) || edge.type,
         confidence: edge.confidence,
         metadata: edge.metadata || {},
         createdBy: edge.created_by || 'system'

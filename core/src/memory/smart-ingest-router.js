@@ -11,6 +11,7 @@
 
 import { deduplicateResults } from '../search/result-dedup.js';
 import { ContentNormalizer } from './content-normalizer.js';
+import { buildSemanticMetadata, inferMemorySemanticRole, normalizeRelationshipDescriptor } from './relationship-semantics.js';
 
 const SIMILARITY_UPDATE_THRESHOLD = 0.88;   // >this → Updates (supersede)
 const SIMILARITY_EXTEND_THRESHOLD = 0.65;   // >this → Extends (augment)
@@ -227,7 +228,20 @@ export class SmartIngestRouter {
     if (!this.memoryStore || !payload.content) return payload;
 
     // Skip if caller already set an explicit relationship
-    if (payload.relationship) return payload;
+    if (payload.relationship) {
+      const relationship = normalizeRelationshipDescriptor(payload.relationship, { sourceMemory: payload });
+      return {
+        ...payload,
+        metadata: {
+          ...(payload.metadata || {}),
+          ...buildSemanticMetadata({
+            semanticRole: inferMemorySemanticRole(payload),
+            relationship,
+            sourceMetadata: payload.source_metadata,
+          }),
+        },
+      };
+    }
 
     // Skip for very short content
     if (payload.content.length < 30) return payload;
@@ -255,8 +269,22 @@ export class SmartIngestRouter {
           m.metadata?.thread_id === threadId || m.metadata?.email_thread_id === threadId
         );
         if (threadMatch) {
+          const relationship = normalizeRelationshipDescriptor({
+            type: 'Extends',
+            targetId: threadMatch.id,
+            confidence: 0.95,
+            reason: 'thread_match',
+          });
           return {
             ...payload,
+            metadata: {
+              ...(payload.metadata || {}),
+              ...buildSemanticMetadata({
+                semanticRole: inferMemorySemanticRole(payload),
+                relationship,
+                sourceMetadata: payload.source_metadata,
+              }),
+            },
             relationship: { type: 'Extends', target_id: threadMatch.id, confidence: 0.95 }
           };
         }
@@ -270,8 +298,22 @@ export class SmartIngestRouter {
           m.source_metadata?.source_id === sessionId
         );
         if (sessionMatch && sessionMatch.score > 0.5) {
+          const relationship = normalizeRelationshipDescriptor({
+            type: 'Updates',
+            targetId: sessionMatch.id,
+            confidence: 0.9,
+            reason: 'session_match',
+          });
           return {
             ...payload,
+            metadata: {
+              ...(payload.metadata || {}),
+              ...buildSemanticMetadata({
+                semanticRole: inferMemorySemanticRole(payload),
+                relationship,
+                sourceMetadata: payload.source_metadata,
+              }),
+            },
             relationship: { type: 'Updates', target_id: sessionMatch.id, confidence: 0.9 }
           };
         }
@@ -282,16 +324,44 @@ export class SmartIngestRouter {
 
       if (topMatch.score >= SIMILARITY_UPDATE_THRESHOLD) {
         // Very similar → supersede
+        const relationship = normalizeRelationshipDescriptor({
+          type: 'Updates',
+          targetId: topMatch.id,
+          confidence: topMatch.score,
+          reason: 'high_similarity',
+        });
         return {
           ...payload,
+          metadata: {
+            ...(payload.metadata || {}),
+            ...buildSemanticMetadata({
+              semanticRole: inferMemorySemanticRole(payload),
+              relationship,
+              sourceMetadata: payload.source_metadata,
+            }),
+          },
           relationship: { type: 'Updates', target_id: topMatch.id, confidence: topMatch.score }
         };
       }
 
       if (topMatch.score >= SIMILARITY_EXTEND_THRESHOLD) {
         // Moderately similar → extend/augment
+        const relationship = normalizeRelationshipDescriptor({
+          type: 'Extends',
+          targetId: topMatch.id,
+          confidence: topMatch.score,
+          reason: 'moderate_similarity',
+        });
         return {
           ...payload,
+          metadata: {
+            ...(payload.metadata || {}),
+            ...buildSemanticMetadata({
+              semanticRole: inferMemorySemanticRole(payload),
+              relationship,
+              sourceMetadata: payload.source_metadata,
+            }),
+          },
           relationship: { type: 'Extends', target_id: topMatch.id, confidence: topMatch.score }
         };
       }
@@ -302,8 +372,25 @@ export class SmartIngestRouter {
         const base = this._hasContradictionSignal(payload.content, topMatch.content)
           ? { ...payload, _contradicts_hint: topMatch.id }
           : payload;
+        const relationship = normalizeRelationshipDescriptor({
+          type: 'Derives',
+          sourceIds: deriveSources.slice(0, 5).map(m => m.id),
+          confidence: deriveSources[0]?.score ?? topMatch.score ?? 0.6,
+          reason: 'multi_source_synthesis',
+        });
         return {
           ...base,
+          metadata: {
+            ...(base.metadata || {}),
+            ...buildSemanticMetadata({
+              semanticRole: inferMemorySemanticRole(base),
+              relationship,
+              sourceIds: deriveSources.slice(0, 5).map(m => m.id),
+              sourceRefs: deriveSources.slice(0, 5),
+              sourceMetadata: base.source_metadata,
+            }),
+          },
+          relationship: { type: 'Derives', sourceIds: deriveSources.slice(0, 5).map(m => m.id), confidence: deriveSources[0]?.score ?? topMatch.score ?? 0.6 },
           _derives_from: deriveSources.slice(0, 5).map(m => ({ id: m.id, score: m.score })),
         };
       }

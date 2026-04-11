@@ -28,6 +28,217 @@ import { extractFacts } from '../memory/fact-extractor.js';
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_MODEL = 'llama-3.3-70b-versatile';
 const MAX_REFLECTION_ROUNDS = 2;
+export const DEFAULT_REPORT_SECTION_SCHEMA = Object.freeze([
+  { key: 'executive_summary', title: 'Executive Summary', purpose: 'Restate the question and deliver the highest-confidence conclusions in 1-2 short paragraphs.' },
+  { key: 'definition_and_scope', title: 'Definition and Scope', purpose: 'Define the topic and clarify what is in scope, out of scope, and assumed.' },
+  { key: 'mechanism', title: 'Mechanism: How It Works', purpose: 'Explain the core mechanism first in plain language, then in more technical detail.' },
+  { key: 'evidence_and_data', title: 'Evidence and Data', purpose: 'Summarize the strongest empirical evidence, group it by theme, and note data quality or gaps.' },
+  { key: 'stakeholders_and_incentives', title: 'Stakeholders and Incentives', purpose: 'Identify the major stakeholder groups and their incentives, fears, and conflicts.' },
+  { key: 'timeline_and_trajectory', title: 'Timeline and Trajectory', purpose: 'Describe the past evolution, current state, and short- and medium-term scenarios.' },
+  { key: 'comparison_to_alternatives', title: 'Comparison to Alternatives', purpose: 'Compare the topic against relevant alternatives, including the status quo, and explain trade-offs.' },
+  { key: 'implications_and_strategy', title: 'Implications and Strategy', purpose: 'Translate the findings into practical recommendations, separating low-regret moves from high-beta bets.' },
+  { key: 'contradictions_and_open_questions', title: 'Contradictions and Open Questions', purpose: 'List unresolved contradictions, explain why they matter, and identify the remaining gaps.' },
+  { key: 'methodological_notes', title: 'Methodological Notes', purpose: 'Optionally explain how the research was done and what limitations or biases remain.' },
+]);
+
+export const DEFAULT_REPORT_SYNTHESIS_PROFILE = Object.freeze({
+  domain: 'AI infra / agentic platforms',
+  audience: 'principal research analyst',
+  role: 'principal research analyst in a top global think tank',
+  reportGoal: 'Produce a clear, deeply reasoned, fully cited report that a senior decision-maker can use directly.',
+  tone: 'decision-ready, rigorous, concise',
+  behaviorConstraints: Object.freeze([
+    'Use the provided findings as primary ground truth.',
+    'Never hide uncertainty; move weak or conflicting evidence into the contradictions/open questions section.',
+    'Always include inline citations right after factual sentences that rely on provided evidence or specific sources.',
+    'Do not re-do the research loop; synthesize only from the supplied findings, recalled memories, blueprint context, and trail provenance.',
+    'Aim for decision-ready clarity with short paragraphs and at most one key table.',
+  ]),
+  sectionSchema: DEFAULT_REPORT_SECTION_SCHEMA,
+});
+
+function summarizeReportFindingForPrompt(finding, index = 0) {
+  const sourceIds = Array.isArray(finding?.sourceIds)
+    ? finding.sourceIds.filter(Boolean)
+    : finding?.sourceId
+      ? [finding.sourceId]
+      : [];
+
+  const claimId = finding?.id || `finding-${index + 1}`;
+  return [
+    `[${index + 1}] ${claimId} (${finding?.type || 'unknown'}) ${finding?.title || 'Untitled'}`,
+    `- Sources: ${sourceIds.join(', ') || 'none'}`,
+    `- Confidence: ${finding?.confidence ?? 'n/a'}`,
+    `- Content: ${(finding?.content || '').slice(0, 320) || 'No content'}`,
+  ].join('\n');
+}
+
+function summarizeRecalledMemoryForPrompt(memory, index = 0) {
+  return [
+    `R${index + 1}: ${memory?.id || memory?.sourceId || 'unknown'}`,
+    `- Title: ${memory?.title || 'Untitled'}`,
+    `- Score: ${memory?.score ?? memory?.confidence ?? 'n/a'}`,
+    `- Content: ${(memory?.content || '').slice(0, 260) || 'No content'}`,
+  ].join('\n');
+}
+
+function buildLegacyReportPrompt(query, findings, gaps, reportGate = null) {
+  const sectionSchema = Array.isArray(reportGate?.sectionSchema) && reportGate.sectionSchema.length > 0
+    ? reportGate.sectionSchema
+    : DEFAULT_REPORT_SECTION_SCHEMA.slice(0, 6);
+  const findingTexts = findings.slice(0, 20).map((finding, index) => summarizeReportFindingForPrompt(finding, index)).join('\n\n');
+  const recalledMemories = Array.isArray(reportGate?.recalledMemories) ? reportGate.recalledMemories : [];
+  const recalledMemoryTexts = recalledMemories.length > 0
+    ? recalledMemories.slice(0, 6).map((memory, index) => summarizeRecalledMemoryForPrompt(memory, index)).join('\n\n')
+    : '(No recalled memories)';
+  const gapTexts = gaps.length > 0
+    ? gaps.map(gap => `- ${gap?.gap || gap}`).join('\n')
+    : '(No remaining gaps)';
+
+  return [
+    `Synthesize a concise research report from the evidence below.`,
+    '',
+    `Research Question: ${query}`,
+    '',
+    `Report Sections:`,
+    sectionSchema.map((section, index) => `${index + 1}. ${section.title} — ${section.purpose}`).join('\n'),
+    '',
+    `Blueprint Context:`,
+    reportGate?.blueprintSummary || '(No blueprint)',
+    '',
+    `Findings:`,
+    findingTexts || '(No findings provided)',
+    '',
+    `Recalled Memories:`,
+    recalledMemoryTexts,
+    '',
+    `Remaining Gaps:`,
+    gapTexts,
+    '',
+    `Write markdown with the exact section order above. Use stable ids when referring to evidence. Do not invent evidence. Finish with a concise conclusion and confidence statement.`,
+  ].join('\n');
+}
+
+export function buildFinalReportSynthesisSpec({
+  query,
+  findings = [],
+  gaps = [],
+  reportGate = null,
+  synthesisProfile = null,
+} = {}) {
+  const overrideSectionSchema = Array.isArray(synthesisProfile?.sectionSchema) && synthesisProfile.sectionSchema.length > 0
+    ? synthesisProfile.sectionSchema
+    : null;
+  const overrideBehaviorConstraints = Array.isArray(synthesisProfile?.behaviorConstraints) && synthesisProfile.behaviorConstraints.length > 0
+    ? synthesisProfile.behaviorConstraints
+    : null;
+  const profile = {
+    ...DEFAULT_REPORT_SYNTHESIS_PROFILE,
+    ...(synthesisProfile || {}),
+  };
+  profile.sectionSchema = overrideSectionSchema || DEFAULT_REPORT_SYNTHESIS_PROFILE.sectionSchema;
+  profile.behaviorConstraints = overrideBehaviorConstraints || DEFAULT_REPORT_SYNTHESIS_PROFILE.behaviorConstraints;
+  const sectionSchema = Array.isArray(reportGate?.sectionSchema) && reportGate.sectionSchema.length > 0
+    ? reportGate.sectionSchema
+    : Array.isArray(profile.sectionSchema) && profile.sectionSchema.length > 0
+      ? profile.sectionSchema
+      : DEFAULT_REPORT_SECTION_SCHEMA;
+
+  const findingsSummary = findings.slice(0, 20).map((finding, index) => summarizeReportFindingForPrompt(finding, index));
+  const recalledMemories = Array.isArray(reportGate?.recalledMemories) ? reportGate.recalledMemories : [];
+  const recalledMemorySummary = recalledMemories.slice(0, 10).map((memory, index) => summarizeRecalledMemoryForPrompt(memory, index));
+  const gapSummary = gaps.length > 0
+    ? gaps.map(gap => `- ${gap?.gap || gap}`).join('\n')
+    : '(No remaining gaps)';
+
+  const blueprintSummary = reportGate?.blueprintSummary || '(No blueprint)';
+  const trailSummary = [
+    `Trail ID: ${reportGate?.trail?.id || 'unknown'}`,
+    `Trail Step IDs: ${(reportGate?.trail?.steps || []).map(step => step?.id).filter(Boolean).join(', ') || 'none'}`,
+    `Golden Line: ${reportGate?.goldenLine || 'none'}`,
+  ].join('\n');
+
+  const systemPrompt = [
+    `You are a ${profile.role}.`,
+    `Domain: ${profile.domain}`,
+    `Audience: ${profile.audience}`,
+    `Goal: ${profile.reportGoal}`,
+    `Tone: ${profile.tone}`,
+  ].join('\n');
+
+  const developerPrompt = [
+    `Required sections and order:`,
+    sectionSchema.map((section, index) => `${index + 1}. ${section.title} — ${section.purpose}`).join('\n'),
+    '',
+    `Behavior constraints:`,
+    profile.behaviorConstraints.map(rule => `- ${rule}`).join('\n'),
+    '',
+    'Output rules:',
+    '- Use markdown.',
+    '- Preserve the exact section order above.',
+    '- Use inline citations after factual sentences that rely on the provided evidence.',
+    '- Do not add new research, browse, or ask for more information.',
+    '- Prefer concise paragraphs over long blocks of prose.',
+  ].join('\n');
+
+  const userPrompt = [
+    `Research question: ${query}`,
+    '',
+    `Blueprint context:`,
+    blueprintSummary,
+    '',
+    `Trail provenance:`,
+    trailSummary,
+    '',
+    `Findings:`,
+    findingsSummary.length > 0 ? findingsSummary.join('\n\n') : '(No findings provided)',
+    '',
+    `Recalled memories:`,
+    recalledMemorySummary.length > 0 ? recalledMemorySummary.join('\n\n') : '(No recalled memories)',
+    '',
+    `Remaining gaps:`,
+    gapSummary,
+    '',
+    `Write the final report as a synthesis only. Do not continue the research loop.`,
+  ].join('\n');
+
+  return {
+    version: '1.0',
+    kind: 'deepresearch.final_report_synthesis',
+    profile,
+    domain: profile.domain,
+    audience: profile.audience,
+    sectionSchema,
+    behaviorConstraints: profile.behaviorConstraints,
+    inputs: {
+      query,
+      findings: findingsSummary,
+      recalledMemories: recalledMemorySummary,
+      gaps: gaps.map(gap => gap?.gap || gap),
+      blueprintSummary,
+      trailSummary,
+    },
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'developer', content: developerPrompt },
+      { role: 'user', content: userPrompt },
+    ],
+    systemPrompt,
+    developerPrompt,
+    userPrompt,
+  };
+}
+
+export function renderFinalReportSynthesisPrompt(spec) {
+  if (!spec?.messages?.length) {
+    return '';
+  }
+
+  return spec.messages.map((message) => {
+    const role = String(message.role || 'message').toUpperCase();
+    return `[${role}]\n${message.content || ''}`;
+  }).join('\n\n');
+}
 
 export class DeepResearcher {
   /**
@@ -41,8 +252,9 @@ export class DeepResearcher {
    * @param {Function} [deps.onEvent] - callback for live progress events
    * @param {TrailStore} [deps.trailStore] - optional trail store for persistence
    * @param {boolean} [deps.autoMineBlueprints] - automatically mine blueprints after completion
+   * @param {Object} [deps.reportSynthesisProfile] - default final-report synthesis profile
    */
-  constructor({ memoryStore, recallFn, prisma, groqApiKey, browserRuntime, webJobStore, onEvent, trailStore, autoMineBlueprints = true }) {
+  constructor({ memoryStore, recallFn, prisma, groqApiKey, browserRuntime, webJobStore, onEvent, trailStore, autoMineBlueprints = true, reportSynthesisProfile = null }) {
     this.memoryStore = memoryStore;
     this.recallFn = recallFn;
     this.prisma = prisma;
@@ -52,6 +264,7 @@ export class DeepResearcher {
     this.onEvent = onEvent || (() => {});
     this.trailStore = trailStore || null;
     this.autoMineBlueprints = autoMineBlueprints;
+    this.reportSynthesisProfile = reportSynthesisProfile || null;
     this.blueprintMiner = new BlueprintMiner({ memoryStore, prisma });
     this._llmCallCount = 0;
     this._maxLlmCalls = 40;
@@ -86,6 +299,7 @@ export class DeepResearcher {
    * @param {Object} [options]
    * @param {string} [options.projectId] - optional project ID (uses generated one if not provided)
    * @param {string} [options.sessionId] - optional session ID for event emission
+   * @param {Object} [options.reportSynthesisProfile] - overrides the final synthesis prompt profile
    * @returns {Promise<Object>} ResearchResult
    */
   async research(query, userId, orgId, options = {}) {
@@ -168,13 +382,36 @@ export class DeepResearcher {
       : await this._checkPriorResearch(query, userId, orgId, projectId);
     if (priorFindings.length >= 5 && !options.forceRefresh) {
       this._emit('research.cached', { sessionId, findingCount: priorFindings.length });
-      const report = await this._synthesizeReport(query, priorFindings, []);
-      await trailStore.finalizeTrail(sessionId, report);
+      const reportGate = await this._prepareReportGate({
+        sessionId,
+        query,
+        findings: priorFindings,
+        gaps: [],
+        trailStore,
+        blueprintUsed,
+        userId,
+        orgId,
+        projectId,
+      });
+      const reportSynthesisProfile = options.reportSynthesisProfile || (baseState ? this.reportSynthesisProfile || DEFAULT_REPORT_SYNTHESIS_PROFILE : null);
+      const report = await this._synthesizeReport(query, priorFindings, [], reportGate, reportSynthesisProfile);
+      const reportProvenance = this._buildReportProvenance({
+        sessionId,
+        query,
+        report,
+        findings: priorFindings,
+        sources: [],
+        trailStore,
+        reportGate,
+        blueprintUsed,
+      });
+      await trailStore.finalizeTrail(sessionId, report, reportProvenance);
       return {
         sessionId,
         projectId,
         query,
         report,
+        reportProvenance,
         findings: priorFindings,
         fromCache: true,
         durationMs: Date.now() - startTime,
@@ -376,11 +613,47 @@ export class DeepResearcher {
 
     // Step 4: Synthesize final report
     this._emit('research.synthesizing', { sessionId, findingCount: allFindings.length });
+    this._emit('research.report_gate_started', {
+      sessionId,
+      findingCount: allFindings.length,
+      gapCount: stack.getRemainingGaps().length,
+      blueprintUsed: blueprintUsed || null,
+    });
 
-    const report = await this._synthesizeReport(query, allFindings, stack.getRemainingGaps());
+    const reportGate = await this._prepareReportGate({
+      sessionId,
+      query,
+      findings: allFindings,
+      gaps: stack.getRemainingGaps(),
+      trailStore,
+      blueprintUsed,
+      userId,
+      orgId,
+      projectId,
+    });
+
+    this._emit('research.report_gate_completed', {
+      sessionId,
+      recallCount: reportGate.recalledMemories.length,
+      provenanceCount: reportGate.provenanceNodes.length,
+      blueprintUsed: reportGate.blueprint?.blueprintId || null,
+    });
+
+    const reportSynthesisProfile = options.reportSynthesisProfile || (baseState ? this.reportSynthesisProfile || DEFAULT_REPORT_SYNTHESIS_PROFILE : null);
+    const report = await this._synthesizeReport(query, allFindings, stack.getRemainingGaps(), reportGate, reportSynthesisProfile);
+    const reportProvenance = this._buildReportProvenance({
+      sessionId,
+      query,
+      report,
+      findings: allFindings,
+      sources: allSources,
+      trailStore,
+      reportGate,
+      blueprintUsed,
+    });
 
     // Step 5: Finalize trail in CSI via trailStore
-    await trailStore.finalizeTrail(sessionId, report);
+    await trailStore.finalizeTrail(sessionId, report, reportProvenance);
 
     // Step 6: Trigger blueprint mining (non-blocking, after research completes)
     if (this.autoMineBlueprints) {
@@ -406,6 +679,7 @@ export class DeepResearcher {
       findings: allFindings,
       sources: allSources,
       gaps: stack.getRemainingGaps(),
+      reportProvenance,
       fromCache: false,
       durationMs: Date.now() - startTime,
       taskProgress: stack.getProgress(),
@@ -1454,41 +1728,349 @@ Rules:
     }
   }
 
-  async _synthesizeReport(query, findings, gaps) {
-    const findingTexts = findings.slice(0, 20).map((f, i) =>
-      `[${i + 1}] (${f.type || 'unknown'}) ${f.title}: ${f.content?.slice(0, 300) || 'No content'}`
-    ).join('\n\n');
-
-    const gapTexts = gaps.length > 0
-      ? `\n\nRemaining gaps:\n${gaps.map(g => `- ${g.gap || g}`).join('\n')}`
-      : '';
-
-    const report = await this._llm(
-      `Synthesize a comprehensive research report from the findings below.\n\n` +
-      `Research Question: ${query}\n\n` +
-      `Findings:\n${findingTexts}${gapTexts}\n\n` +
-      `Write a well-structured report with:\n` +
-      `1. Executive Summary (2-3 sentences)\n` +
-      `2. Key Findings (organized by theme)\n` +
-      `3. Evidence & Sources (reference finding numbers [1], [2], etc.)\n` +
-      `4. Gaps & Limitations\n` +
-      `5. Conclusion\n\n` +
-      `Use markdown formatting. Be thorough but concise.`,
-      { temperature: 0.5, maxTokens: 4000 }
-    );
+  async _synthesizeReport(query, findings, gaps, reportGate = null, synthesisProfile = null) {
+    const useWorldClassPrompt = Boolean(synthesisProfile);
+    const prompt = useWorldClassPrompt
+      ? renderFinalReportSynthesisPrompt(buildFinalReportSynthesisSpec({
+          query,
+          findings,
+          gaps,
+          reportGate,
+          synthesisProfile,
+        }))
+      : buildLegacyReportPrompt(query, findings, gaps, reportGate);
+    const report = await this._llm(prompt, { temperature: useWorldClassPrompt ? 0.35 : 0.45, maxTokens: 4500 });
 
     return report;
+  }
+
+  async _prepareReportGate({ sessionId, query, findings = [], gaps = [], trailStore, blueprintUsed = null, userId, orgId, projectId }) {
+    const trail = trailStore?.getTrail(sessionId) || null;
+    const blueprint = blueprintUsed ? await this._loadBlueprint(blueprintUsed) : null;
+    const blueprintPattern = Array.isArray(blueprint?.pattern) ? blueprint.pattern : [];
+    const blueprintSummary = this._buildBlueprintSummary({ blueprintUsed, blueprint, blueprintPattern, query });
+    const sectionSchema = this._buildReportSectionSchema(blueprint, trail);
+    const recallQueries = this._buildReportRecallQueries({ query, findings, gaps, blueprint, trail, blueprintPattern });
+    const recalledMemories = [];
+
+    this._emit('research.report_gate_recall_started', {
+      sessionId,
+      queryCount: recallQueries.length,
+      blueprintUsed: blueprintUsed || null,
+      trailId: trail?.id || null,
+    });
+
+    for (const recallQuery of recallQueries) {
+      const memories = await this._recallFromCSI(recallQuery, userId, orgId, projectId);
+      for (const memory of memories || []) {
+        recalledMemories.push({
+          ...memory,
+          recallQuery,
+        });
+      }
+    }
+
+    if (blueprint?.blueprintId || blueprintUsed) {
+      try {
+        const blueprintResults = await this.recallFn(this.memoryStore, {
+          query_context: blueprintSummary,
+          user_id: userId,
+          org_id: orgId,
+          project: projectId,
+          tags: ['blueprint'],
+          max_memories: 8,
+        });
+        for (const memory of blueprintResults?.memories || []) {
+          recalledMemories.push({
+            ...memory,
+            recallQuery: `blueprint:${blueprintUsed || blueprint?.blueprintId}`,
+          });
+        }
+      } catch (err) {
+        console.error('[DeepResearcher] Blueprint recall failed:', err.message);
+      }
+    }
+
+    const dedupedMemories = this._dedupeEvidence(recalledMemories).slice(0, 16);
+    const reportId = randomUUID();
+    const provenanceNodes = this._buildReportProvenanceNodes({
+      reportId,
+      sessionId,
+      query,
+      findings,
+      trail,
+      blueprint,
+      recalledMemories: dedupedMemories,
+    });
+    const goldenLine = this._buildGoldenLine({
+      reportId,
+      trail,
+      blueprint,
+      findings,
+      recalledMemories: dedupedMemories,
+      provenanceNodes,
+    });
+
+    return {
+      reportId,
+      sessionId,
+      query,
+      trail,
+      blueprint,
+      blueprintSummary,
+      sectionSchema,
+      recallQueries,
+      recalledMemories: dedupedMemories,
+      provenanceNodes,
+      goldenLine,
+    };
+  }
+
+  _buildBlueprintSummary({ blueprintUsed, blueprint, blueprintPattern, query }) {
+    if (!blueprint && !blueprintUsed) {
+      return `Query: ${query}`;
+    }
+
+    const patternSummary = blueprintPattern.length > 0
+      ? blueprintPattern.map((phase, index) => `${index + 1}. ${phase.actionType || 'step'}${phase.queryTemplate ? ` → ${phase.queryTemplate}` : ''}`).join('\n')
+      : '(No explicit pattern)';
+
+    return [
+      `Blueprint: ${blueprint?.name || blueprintUsed || 'unknown'}`,
+      `Domain: ${blueprint?.domain || 'research'}`,
+      `Query: ${query}`,
+      `Pattern:`,
+      patternSummary,
+    ].join('\n');
+  }
+
+  _buildReportSectionSchema(blueprint, trail) {
+    const blueprintSections = blueprint?.reportSections || blueprint?.sections || blueprint?.reportSchema;
+    if (Array.isArray(blueprintSections) && blueprintSections.length > 0) {
+      return blueprintSections.map((section, index) => ({
+        key: section.key || `section_${index + 1}`,
+        title: section.title || section.name || `Section ${index + 1}`,
+        purpose: section.purpose || section.description || '',
+      }));
+    }
+
+    if (trail?.metadata?.reportSchema?.length > 0) {
+      return trail.metadata.reportSchema.map((section, index) => ({
+        key: section.key || `trail_section_${index + 1}`,
+        title: section.title || `Section ${index + 1}`,
+        purpose: section.purpose || section.description || '',
+      }));
+    }
+
+    return DEFAULT_REPORT_SECTION_SCHEMA;
+  }
+
+  _buildReportRecallQueries({ query, findings, gaps, blueprint, trail, blueprintPattern }) {
+    const queries = [query];
+
+    if (blueprint?.name) queries.push(`${query} ${blueprint.name}`);
+    if (blueprint?.domain) queries.push(`${query} ${blueprint.domain}`);
+    for (const phase of blueprintPattern.slice(0, 4)) {
+      if (phase?.queryTemplate) queries.push(phase.queryTemplate.replace('{query}', query));
+      else if (phase?.actionType) queries.push(`${phase.actionType} ${query}`);
+    }
+
+    for (const finding of findings.slice(-4)) {
+      const text = [finding.title, finding.content?.slice(0, 160)].filter(Boolean).join(' ');
+      if (text) queries.push(text);
+    }
+
+    for (const gap of gaps.slice(0, 3)) {
+      const text = gap?.gap || gap;
+      if (text) queries.push(String(text));
+    }
+
+    if (trail?.steps?.length > 0) {
+      const trailFocus = trail.steps.slice(-4).map(step => [step.agent, step.action, step.output].filter(Boolean).join(' ')).join(' | ');
+      if (trailFocus) queries.push(trailFocus);
+    }
+
+    return [...new Set(queries.map(q => String(q).trim()).filter(Boolean))].slice(0, 10);
+  }
+
+  _dedupeEvidence(items) {
+    const seen = new Set();
+    const deduped = [];
+    for (const item of items || []) {
+      const id = item?.id || item?.sourceId || item?.memoryId || item?.source_id;
+      const key = id || `${item?.title || ''}:${(item?.content || '').slice(0, 80)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(item);
+    }
+    return deduped;
+  }
+
+  _buildReportProvenanceNodes({ reportId, sessionId, query, findings, trail, blueprint, recalledMemories }) {
+    const trailId = trail?.id || `trail-${sessionId}`;
+    const claimIds = findings.map(finding => finding.id).filter(Boolean);
+    const sourceIds = [...new Set(findings.flatMap(finding => this._collectSourceIds(finding)))];
+    const trailStepIds = (trail?.steps || []).map(step => step.id).filter(Boolean);
+    const recalledMemoryIds = (recalledMemories || []).map(memory => memory.id || memory.sourceId).filter(Boolean);
+    const nodeIds = [
+      `report:${reportId}`,
+      `trail:${trailId}`,
+      ...claimIds.map(id => `claim:${id}`),
+      ...sourceIds.map(id => `source:${id}`),
+      ...trailStepIds.map(id => `trail-step:${id}`),
+      ...recalledMemoryIds.map(id => `memory:${id}`),
+      blueprint?.blueprintId ? `blueprint:${blueprint.blueprintId}` : null,
+    ].filter(Boolean);
+
+    const edges = [];
+    trailStepIds.forEach((stepId, index) => {
+      edges.push({
+        id: `edge-trail-${trailId}-${stepId}`,
+        from: `trail:${trailId}`,
+        to: `trail-step:${stepId}`,
+        type: 'contains',
+        order: index,
+      });
+    });
+    claimIds.forEach((claimId) => {
+      edges.push({
+        id: `edge-report-claim-${claimId}`,
+        from: `report:${reportId}`,
+        to: `claim:${claimId}`,
+        type: 'uses',
+      });
+    });
+    sourceIds.forEach((sourceId) => {
+      edges.push({
+        id: `edge-report-source-${sourceId}`,
+        from: `report:${reportId}`,
+        to: `source:${sourceId}`,
+        type: 'uses',
+      });
+    });
+    recalledMemoryIds.forEach((memoryId) => {
+      edges.push({
+        id: `edge-report-memory-${memoryId}`,
+        from: `report:${reportId}`,
+        to: `memory:${memoryId}`,
+        type: 'recalls',
+      });
+    });
+    if (blueprint?.blueprintId) {
+      edges.push({
+        id: `edge-report-blueprint-${blueprint.blueprintId}`,
+        from: `report:${reportId}`,
+        to: `blueprint:${blueprint.blueprintId}`,
+        type: 'follows',
+      });
+    }
+
+    return {
+      reportId,
+      reportNodeId: `report:${reportId}`,
+      sessionId,
+      query,
+      trailId,
+      blueprintId: blueprint?.blueprintId || null,
+      claimIds,
+      sourceIds,
+      trailStepIds,
+      recalledMemoryIds,
+      nodeIds,
+      edgeIds: edges.map(edge => edge.id),
+      edges,
+      trails: [trailId],
+      sources: sourceIds,
+      reportNodes: nodeIds,
+    };
+  }
+
+  _buildGoldenLine({ reportId, trail, blueprint, findings, recalledMemories, provenanceNodes }) {
+    const parts = [];
+    parts.push(`report:${reportId}`);
+    parts.push(`trail:${trail?.id || 'unknown'}`);
+    if (blueprint?.blueprintId) parts.push(`blueprint:${blueprint.blueprintId}`);
+    for (const claimId of findings.map(f => f.id).filter(Boolean).slice(0, 20)) {
+      parts.push(`claim:${claimId}`);
+    }
+    for (const sourceId of [...new Set(findings.flatMap(f => this._collectSourceIds(f)))].slice(0, 20)) {
+      parts.push(`source:${sourceId}`);
+    }
+    for (const memoryId of (recalledMemories || []).map(m => m.id || m.sourceId).filter(Boolean).slice(0, 20)) {
+      parts.push(`memory:${memoryId}`);
+    }
+    for (const stepId of (trail?.steps || []).map(step => step.id).filter(Boolean).slice(0, 20)) {
+      parts.push(`trail-step:${stepId}`);
+    }
+    for (const edge of provenanceNodes?.edges || []) {
+      parts.push(`${edge.from} -[${edge.type}]-> ${edge.to}`);
+    }
+    return parts.join('\n');
+  }
+
+  _buildReportProvenance({ sessionId, query, report, findings, sources = [], trailStore, reportGate = null, blueprintUsed = null }) {
+    const trail = reportGate?.trail || trailStore?.getTrail(sessionId) || null;
+    const blueprint = reportGate?.blueprint || (blueprintUsed ? { blueprintId: blueprintUsed } : null);
+    const reportId = reportGate?.reportId || randomUUID();
+    const provenanceNodes = reportGate?.provenanceNodes || this._buildReportProvenanceNodes({
+      reportId,
+      sessionId,
+      query,
+      findings,
+      trail,
+      blueprint,
+      recalledMemories: reportGate?.recalledMemories || [],
+    });
+    const goldenLine = reportGate?.goldenLine || this._buildGoldenLine({
+      reportId,
+      trail,
+      blueprint,
+      findings,
+      recalledMemories: reportGate?.recalledMemories || [],
+      provenanceNodes,
+    });
+    const sourceIds = [...new Set([
+      ...(provenanceNodes.sourceIds || []),
+      ...sources.flatMap(source => this._normalizeArray(source?.id || source?.sourceId || source?.url)),
+    ])].filter(Boolean);
+
+    return {
+      reportId,
+      reportNodeId: provenanceNodes.reportNodeId || `report:${reportId}`,
+      sessionId,
+      query,
+      trailId: provenanceNodes.trailId || trail?.id || null,
+      blueprintId: provenanceNodes.blueprintId || blueprint?.blueprintId || null,
+      sectionSchema: reportGate?.sectionSchema || DEFAULT_REPORT_SECTION_SCHEMA,
+      recallQueries: reportGate?.recallQueries || [],
+      recalledMemoryIds: (reportGate?.recalledMemories || []).map(memory => memory.id || memory.sourceId).filter(Boolean),
+      recalledMemories: reportGate?.recalledMemories || [],
+      claimIds: provenanceNodes.claimIds || findings.map(finding => finding.id).filter(Boolean),
+      sourceIds,
+      trailStepIds: provenanceNodes.trailStepIds || [],
+      nodeIds: provenanceNodes.nodeIds || [],
+      edgeIds: provenanceNodes.edgeIds || [],
+      edges: provenanceNodes.edges || [],
+      trails: provenanceNodes.trails || [],
+      sources: sourceIds,
+      reportNodes: provenanceNodes.reportNodes || [],
+      goldenLine,
+      reportSummary: typeof report === 'string' ? report.slice(0, 2000) : JSON.stringify(report).slice(0, 2000),
+    };
   }
 
   async _saveFindingToCSI(finding, userId, orgId, projectId, context = {}) {
     try {
       const createdAt = new Date().toISOString();
       const sourceIds = this._collectSourceIds(finding);
+      const claimIds = [...new Set([finding.id, ...this._collectClaimIds(finding)].filter(Boolean))];
+      const provenance = this._inferClaimProvenance(finding, context);
       const metadata = {
         research_type: finding.type,
         source_url: finding.source,
         source_id: finding.sourceId,
         sourceIds,
+        claimIds,
         confidence: finding.confidence,
         structured: finding.structured || null,
         taskId: context.taskId || finding.taskId || null,
@@ -1496,6 +2078,9 @@ Rules:
         wave: context.wave ?? finding.wave ?? null,
         dimension: context.dimension || finding.dimension || null,
         agent: finding.agent || null,
+        relationType: provenance.operation,
+        relationEdgeType: provenance.edgeType,
+        relationTargetClaimIds: provenance.targetClaimIds,
         createdAt,
       };
       await this.memoryStore.createMemory({
@@ -1524,6 +2109,10 @@ Rules:
           confidence: finding.confidence,
           source: finding.source,
           sourceIds,
+          claimIds,
+          relationType: provenance.operation,
+          relationEdgeType: provenance.edgeType,
+          relationTargetClaimIds: provenance.targetClaimIds,
           taskId: metadata.taskId,
           wave: metadata.wave,
           dimension: metadata.dimension,
@@ -1539,7 +2128,18 @@ Rules:
           edge: {
             from: `claim-${finding.id}`,
             to: `source-${sourceId}`,
-            type: 'derived_from',
+            type: provenance.edgeType,
+            confidence: finding.confidence || 0.7,
+          },
+        });
+      });
+      (provenance.targetClaimIds || []).forEach((targetClaimId) => {
+        this._emit('graph.edge_upsert', {
+          sessionId: context.sessionId || finding.sessionId || null,
+          edge: {
+            from: `claim-${finding.id}`,
+            to: `claim-${targetClaimId}`,
+            type: provenance.edgeType === 'updates' ? 'updates' : 'extends',
             confidence: finding.confidence || 0.7,
           },
         });
@@ -1787,6 +2387,40 @@ Rules:
       return finding.id ? [finding.id] : [];
     }
     return this._normalizeArray(finding.claimIds);
+  }
+
+  _inferClaimProvenance(finding = {}) {
+    const targetClaimIds = this._normalizeArray(finding.updatesClaimIds || finding.updatesClaimId || finding.extendsClaimIds || finding.extendsClaimId);
+    const sourceIds = this._collectSourceIds(finding);
+    const claimIds = this._collectClaimIds(finding);
+
+    if (targetClaimIds.length > 0) {
+      return {
+        operation: finding.relationType || 'Update',
+        edgeType: 'updates',
+        targetClaimIds,
+        sourceIds,
+        claimIds,
+      };
+    }
+
+    if (finding.type === 'memory' || finding.type === 'web' || finding.type === 'follow_up' || sourceIds.length > 0) {
+      return {
+        operation: finding.relationType || 'Derive',
+        edgeType: 'derived_from',
+        targetClaimIds: claimIds,
+        sourceIds,
+        claimIds,
+      };
+    }
+
+    return {
+      operation: finding.relationType || 'Derive',
+      edgeType: 'derived_from',
+      targetClaimIds: claimIds,
+      sourceIds,
+      claimIds,
+    };
   }
 
   _inferCsiStage(agent, action, finding = {}) {

@@ -307,51 +307,36 @@ setInterval(() => {
 async function restoreSessionFromCSI(sessionId, userId, orgId) {
   if (!persistentMemoryStore) return null;
   try {
-    const trailMemories = await persistentMemoryStore.searchMemories({
-      query: sessionId,
-      user_id: userId,
-      org_id: orgId,
-      n_results: 20,
-    });
-
-    // Priority 1: Find finalized trail (completed research)
-    const trail = (trailMemories || []).find(m =>
-      (m.tags || []).includes(`session:${sessionId}`) &&
-      ((m.metadata || {}).trailType === 'op/research-trail' || (m.tags || []).includes('research-trail'))
-    );
-
-    // Priority 2: Find checkpoint (interrupted research)
-    const checkpoint = !trail ? (trailMemories || []).find(m =>
-      (m.tags || []).includes(`session:${sessionId}`) &&
-      (m.tags || []).includes('research-checkpoint')
-    ) : null;
-
-    const source = trail || checkpoint;
+    const sessionContext = { id: sessionId, userId, orgId };
+    const trailMemories = await fetchSessionTrailMemories(sessionId, sessionContext, userId, orgId, { includeCheckpoints: true, limit: 20 });
+    const source = selectPrimaryTrailMemory(trailMemories);
     if (!source) return null;
 
     const meta = source.metadata || {};
-    const isCheckpoint = !trail && !!checkpoint;
-    const status = isCheckpoint ? 'interrupted' : (meta.status || 'completed');
+    const normalizedTrail = normalizeResearchTrailMemory(source, sessionContext, null);
+    const isCheckpoint = normalizedTrail?.trailType === 'op/research-checkpoint';
+    const status = normalizedTrail?.status || (isCheckpoint ? 'interrupted' : 'completed');
 
     const session = {
       id: sessionId,
       query: meta.query || source.title?.replace(/^(Research Trail|Checkpoint): /, '') || 'Restored session',
       userId: source.user_id || userId,
       orgId: source.org_id || orgId,
-      projectId: source.project || meta.projectId || `research/${sessionId.slice(0, 8)}`,
+      projectId: normalizedTrail?.projectId || source.project || meta.projectId || `research/${sessionId.slice(0, 8)}`,
       status,
       events: [],
       graphEvents: [],
       sseClients: [],
-      result: trail?.metadata?.report ? {
-        report: trail.metadata.report,
+      result: normalizedTrail ? {
+        report: normalizedTrail.report || null,
         findings: [],
         sources: [],
         gaps: [],
         durationMs: 0,
-        taskProgress: { confidence: meta.steps?.slice(-1)[0]?.confidence || meta.confidence || 0.7 },
+        taskProgress: { confidence: normalizedTrail.steps?.slice(-1)[0]?.confidence || meta.confidence || 0.7 },
         fromCache: false,
-        projectId: source.project || meta.projectId,
+        projectId: normalizedTrail?.projectId || source.project || meta.projectId,
+        trail: normalizedTrail,
       } : null,
       error: isCheckpoint ? 'Research was interrupted. Partial results available.' : null,
       createdAt: source.created_at,
@@ -504,6 +489,302 @@ function deriveResearchSourceIds(metadata = {}) {
     metadata.relatedSourceIds ||
     directSourceId
   );
+}
+
+function getResearchProjectId(sessionId, session = {}) {
+  return session.projectId || `research/${sessionId.slice(0, 8)}`;
+}
+
+function coerceTrailSnippet(value, limit = 200) {
+  if (value === undefined || value === null) return '';
+  if (typeof value === 'string') return value.slice(0, limit);
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value).slice(0, limit);
+  try {
+    return JSON.stringify(value).slice(0, limit);
+  } catch {
+    return String(value).slice(0, limit);
+  }
+}
+
+function getTrailMemoryCreatedAt(memory) {
+  const metadata = memory?.metadata || {};
+  return new Date(
+    metadata.completedAt ||
+    metadata.updatedAt ||
+    memory?.updated_at ||
+    metadata.startedAt ||
+    memory?.created_at ||
+    0,
+  ).getTime();
+}
+
+function isSessionScopedResearchMemory(memory, sessionId, projectId, sessionStartTime) {
+  if (!memory) return false;
+  const tags = memory.tags || [];
+  const metadata = memory.metadata || {};
+  const createdAt = new Date(memory.created_at || metadata.createdAt || metadata.updatedAt || 0).getTime();
+  const sessionTags = new Set([
+    `session:${sessionId}`,
+    `research-session:${sessionId}`,
+  ]);
+  const scopedSessionId = metadata.sessionId || metadata.session_id || metadata.research_session_id || null;
+  const scopedProject = memory.project || metadata.projectId || metadata.project_id || null;
+  const matchesSession = tags.some(tag => sessionTags.has(tag)) || scopedSessionId === sessionId;
+  const matchesProject = !projectId || scopedProject === projectId;
+  const matchesTime = !sessionStartTime || createdAt >= new Date(sessionStartTime).getTime();
+  return matchesProject && matchesTime && (matchesSession || tags.includes('research-trail') || tags.includes('research-checkpoint'));
+}
+
+function normalizeTrailStep(step, {
+  trailId,
+  sessionId,
+  projectId,
+  sourceMemoryId = null,
+  fallbackIndex = 0,
+  synthetic = false,
+} = {}) {
+  const stepIndex = Number.isInteger(step?.stepIndex) ? step.stepIndex : fallbackIndex;
+  const provenance = step?.provenance && typeof step.provenance === 'object' ? step.provenance : {};
+  return {
+    id: `trail-step-${trailId}-${stepIndex}`,
+    trailId: `trail-${trailId}`,
+    sessionId,
+    projectId,
+    stepIndex,
+    agent: step?.agent || 'explorer',
+    action: step?.action || step?.kind || 'research_task',
+    input: coerceTrailSnippet(step?.input || step?.query || step?.description || step?.prompt || ''),
+    output: coerceTrailSnippet(step?.output || step?.result?.summary || step?.summary || step?.answer || step?.response || ''),
+    confidence: step?.confidence ?? step?.result?.confidence ?? step?.progress?.confidence ?? null,
+    rejected: step?.rejected ?? (step?.status === 'failed' || step?.status === 'blocked'),
+    reason: coerceTrailSnippet(step?.reason || step?.error || ''),
+    thought: coerceTrailSnippet(step?.thought || step?.reasoning || ''),
+    why: coerceTrailSnippet(step?.why || ''),
+    alternativeConsidered: coerceTrailSnippet(step?.alternativeConsidered || ''),
+    sourceMemoryId,
+    synthetic,
+    provenance: {
+      ...provenance,
+      sourceMemoryId,
+      synthetic,
+      taskId: step?.taskId || step?.id || provenance.taskId || null,
+      trailTaskStatus: step?.status || provenance.trailTaskStatus || null,
+    },
+  };
+}
+
+function expandTrailLikeSteps(trailLike = {}, metadata = {}, fallbackTrailId, sessionId, projectId, sourceMemoryId = null) {
+  const explicitSteps = Array.isArray(metadata.steps) && metadata.steps.length > 0
+    ? metadata.steps
+    : Array.isArray(trailLike.steps) && trailLike.steps.length > 0
+      ? trailLike.steps
+      : [];
+
+  if (explicitSteps.length > 0) {
+    return explicitSteps.map((step, idx) => normalizeTrailStep(step, {
+      trailId: fallbackTrailId,
+      sessionId,
+      projectId,
+      sourceMemoryId,
+      fallbackIndex: Number.isInteger(step?.stepIndex) ? step.stepIndex : idx,
+      synthetic: false,
+    }));
+  }
+
+  const completed = Array.isArray(trailLike.completed) && trailLike.completed.length > 0
+    ? trailLike.completed
+    : [];
+  const taskMap = trailLike.tasks && typeof trailLike.tasks === 'object' ? trailLike.tasks : {};
+  const completedTasks = completed.map((entry) => {
+    if (entry && typeof entry === 'object') return entry;
+    return taskMap[entry] || null;
+  }).filter(Boolean);
+
+  if (completedTasks.length > 0) {
+    return completedTasks.map((task, idx) => normalizeTrailStep(task, {
+      trailId: fallbackTrailId,
+      sessionId,
+      projectId,
+      sourceMemoryId,
+      fallbackIndex: Number.isInteger(task?.stepIndex) ? task.stepIndex : idx,
+      synthetic: true,
+    }));
+  }
+
+  const stackEntries = Array.isArray(trailLike.stack) ? trailLike.stack : [];
+  if (stackEntries.length > 0) {
+    return stackEntries.map((task, idx) => normalizeTrailStep(task, {
+      trailId: fallbackTrailId,
+      sessionId,
+      projectId,
+      sourceMemoryId,
+      fallbackIndex: Number.isInteger(task?.stepIndex) ? task.stepIndex : idx,
+      synthetic: true,
+    }));
+  }
+
+  return [];
+}
+
+function normalizeResearchTrailMemory(memory, session = {}, fallbackTrail = null) {
+  if (!memory) return null;
+  const metadata = memory.metadata || {};
+  const sessionId = metadata.sessionId || metadata.session_id || metadata.research_session_id || session.id || fallbackTrail?.sessionId || null;
+  const projectId = memory.project || metadata.projectId || metadata.project_id || getResearchProjectId(sessionId || session.id || 'unknown', session);
+  const trailId = metadata.trailId || metadata.trail_id || memory.id || fallbackTrail?.trailId || `trail-${sessionId || 'unknown'}`;
+  const trailNodeId = trailId.startsWith('trail-') ? trailId : `trail-${trailId}`;
+  const trailLike = metadata.trail || fallbackTrail?.trail || memory.result?.trail || memory.trail || {};
+  const steps = expandTrailLikeSteps(trailLike, metadata, trailId, sessionId || session.id || 'unknown', projectId, memory.id);
+  const isCheckpointTrail = (memory.tags || []).includes('research-checkpoint') || metadata.trailType === 'op/research-checkpoint';
+  const status = metadata.status || (metadata.completedAt ? 'completed' : fallbackTrail?.status || (isCheckpointTrail ? 'interrupted' : 'completed'));
+  const query = metadata.query || session.query || fallbackTrail?.query || memory.title?.replace(/^(Research Trail|Checkpoint): /, '') || '';
+
+  return {
+    id: trailId,
+    nodeId: trailNodeId,
+    sessionId: sessionId || session.id || null,
+    projectId,
+    query,
+    status,
+    startedAt: metadata.startedAt || memory.created_at || fallbackTrail?.startedAt || null,
+    completedAt: metadata.completedAt || fallbackTrail?.completedAt || null,
+    report: metadata.report || fallbackTrail?.report || null,
+    trailType: metadata.trailType || metadata.contradictionType || ((memory.tags || []).includes('research-checkpoint') ? 'op/research-checkpoint' : 'op/research-trail'),
+    sourceMemoryId: memory.id,
+    tags: memory.tags || [],
+    confidence: metadata.confidence || fallbackTrail?.confidence || memory.importance_score || null,
+    blueprintUsed: metadata.blueprintUsed || fallbackTrail?.blueprintUsed || null,
+    blueprintCandidate: metadata.blueprintCandidate || fallbackTrail?.blueprintCandidate || false,
+    stepCount: steps.length,
+    contradictionCount: metadata.contradictionCount || fallbackTrail?.contradictionCount || 0,
+    steps,
+    metadata,
+  };
+}
+
+async function fetchSessionTrailMemories(sessionId, session = {}, userId, orgId, { includeCheckpoints = true, limit = 20 } = {}) {
+  if (!persistentMemoryStore) return [];
+  const projectId = getResearchProjectId(sessionId, session);
+  const createdAfter = session.startedAt ? new Date(session.startedAt).toISOString() : session.createdAt;
+  const userScope = session.userId || userId;
+  const orgScope = session.orgId || orgId;
+  const plans = [
+    {
+      query: '',
+      user_id: userScope,
+      org_id: orgScope,
+      project: projectId,
+      memory_type: 'decision',
+      tags: ['research-trail', `session:${sessionId}`],
+      is_latest: true,
+      created_after: createdAfter,
+      n_results: limit,
+    },
+    {
+      query: '',
+      user_id: userScope,
+      org_id: orgScope,
+      project: projectId,
+      memory_type: 'decision',
+      tags: ['research-trail'],
+      is_latest: true,
+      created_after: createdAfter,
+      n_results: limit,
+    },
+    {
+      query: '',
+      user_id: userScope,
+      org_id: orgScope,
+      project: projectId,
+      tags: ['research-trail'],
+      is_latest: true,
+      created_after: createdAfter,
+      n_results: limit,
+    },
+    {
+      query: '',
+      user_id: userScope,
+      org_id: orgScope,
+      project: projectId,
+      memory_type: 'decision',
+      tags: ['csi-trail', `session:${sessionId}`],
+      is_latest: true,
+      created_after: createdAfter,
+      n_results: limit,
+    },
+  ];
+
+  if (includeCheckpoints) {
+    plans.push(
+      {
+        query: '',
+        user_id: userScope,
+        org_id: orgScope,
+        project: projectId,
+        memory_type: 'decision',
+        tags: ['research-checkpoint', `session:${sessionId}`],
+        is_latest: true,
+        created_after: createdAfter,
+        n_results: limit,
+      },
+      {
+        query: '',
+        user_id: userScope,
+        org_id: orgScope,
+        project: projectId,
+        tags: ['research-checkpoint', `session:${sessionId}`],
+        is_latest: true,
+        created_after: createdAfter,
+        n_results: limit,
+      },
+      {
+        query: '',
+        user_id: userScope,
+        org_id: orgScope,
+        project: projectId,
+        memory_type: 'decision',
+        tags: ['research-checkpoint'],
+        is_latest: true,
+        created_after: createdAfter,
+        n_results: limit,
+      },
+      {
+        query: '',
+        user_id: userScope,
+        org_id: orgScope,
+        project: projectId,
+        tags: ['research-checkpoint'],
+        is_latest: true,
+        created_after: createdAfter,
+        n_results: limit,
+      },
+    );
+  }
+
+  const seen = new Map();
+  for (const plan of plans) {
+    try {
+      const memories = await persistentMemoryStore.searchMemories(plan);
+      for (const memory of memories || []) {
+        if (!memory || !isSessionScopedResearchMemory(memory, sessionId, projectId, createdAfter)) continue;
+        if (!seen.has(memory.id)) seen.set(memory.id, memory);
+      }
+    } catch (err) {
+      console.error('[research] failed to load trail memories:', err.message);
+    }
+  }
+
+  return [...seen.values()].sort((left, right) => {
+    const delta = getTrailMemoryCreatedAt(right) - getTrailMemoryCreatedAt(left);
+    if (delta !== 0) return delta;
+    return String(right.id).localeCompare(String(left.id));
+  });
+}
+
+function selectPrimaryTrailMemory(memories = []) {
+  if (!memories.length) return null;
+  const completed = memories.find(memory => (memory.metadata || {}).status === 'completed' || (memory.metadata || {}).completedAt);
+  return completed || memories[0];
 }
 
 // ─── Audit logging helper (Scale / Enterprise only) ─────────────────────────
@@ -3439,6 +3720,7 @@ a{color:#a78bfa}</style></head><body>
               user_id: session.userId || userId,
               org_id: session.orgId || orgId,
               project: projectId,
+              created_after: session.startedAt || session.createdAt,
               n_results: 100, // Reduced from 200 to avoid overwhelming graphs
             });
 
@@ -3493,6 +3775,8 @@ a{color:#a78bfa}</style></head><body>
               const verdict = metadata.verdict || metadata.output?.verdict || null;
               const csiStage = inferCsiStage(metadata);
               const csiNodeType = metadata.csiNodeType || inferCsiNodeType(csiStage);
+              const isResearchTrail = tags.includes('research-trail') || tags.includes('csi-trail') ||
+                  metadata.trailType === 'op/research-trail';
 
               // Layer 1: Sources (web pages, docs) - memory_type 'fact' with web source tags
               if (tags.includes('research-source') || tags.includes('web-source') ||
@@ -3538,91 +3822,103 @@ a{color:#a78bfa}</style></head><body>
 
               // Layer 3: Trails (research steps) - includes both decision (trails) and event (session steps)
               // Only match actual research trails, not all 'decision' type memories
-              const isResearchTrail = tags.includes('research-trail') || tags.includes('csi-trail') ||
-                  metadata.trailType === 'op/research-trail';
-              if (isResearchTrail && metadata.steps && metadata.steps.length > 0) {
-                metadata.steps.forEach((step, idx) => {
-                  layers.trails.push({
-                    id: `step-${m.id}-${idx}`,
-                    agent: step.agent || 'explorer',
-                    action: step.action || 'search_web',
-                    input: step.input?.slice(0, 200),
-                    output: step.output?.slice(0, 200),
-                    confidence: step.confidence,
-                    rejected: step.rejected,
-                    // Reasoning fields (Phase 2b) - captures "why" not just "what"
-                    thought: step.thought,
-                    why: step.why,
-                    alternativeConsidered: step.alternativeConsidered,
+              if (!isResearchTrail) {
+                const trailSteps = Array.isArray(metadata.steps) && metadata.steps.length > 0
+                  ? metadata.steps
+                  : Array.isArray(metadata.trail?.steps) ? metadata.trail.steps : [];
+                if (trailSteps.length > 0) {
+                  trailSteps.forEach((step, idx) => {
+                    layers.trails.push({
+                      id: `step-${m.id}-${idx}`,
+                      stepIndex: idx,
+                      agent: step.agent || 'explorer',
+                      action: step.action || 'search_web',
+                      input: step.input?.slice(0, 200),
+                      output: step.output?.slice(0, 200),
+                      confidence: step.confidence,
+                      rejected: step.rejected,
+                      // Reasoning fields (Phase 2b) - captures "why" not just "what"
+                      thought: step.thought,
+                      why: step.why,
+                      alternativeConsidered: step.alternativeConsidered,
+                    });
                   });
-                });
-              }
+                  trailSteps.slice(1).forEach((step, idx) => {
+                    pushEdge(
+                      `step-${m.id}-${idx}`,
+                      `step-${m.id}-${idx + 1}`,
+                      'sequence',
+                      Math.max(0.55, step.confidence ?? 0.7),
+                    );
+                  });
+                }
 
-              // NEW Layer 4: Observations (real-time findings from each agent action)
-              if (tags.includes('research-observation') || metadata.observationType === 'op/research-observation') {
-                layers.observations.push({
-                  id: m.id,
-                  title: m.title,
-                  agent: metadata.agent || 'unknown',
-                  action: metadata.action || 'unknown',
-                  findingType: metadata.findingType || 'web',
-                  source: metadata.source,
-                  sourceId: metadata.sourceId,
-                  sourceIds,
-                  claimIds,
-                  confidence: metadata.confidence || m.importance_score,
-                  stepIndex: metadata.stepIndex,
-                  taskId: metadata.taskId || null,
-                  wave: metadata.wave ?? null,
-                  dimension: metadata.dimension || null,
-                  csiStage,
-                  verdict,
-                  createdAt,
-                });
-              }
+                // NEW Layer 4: Observations (real-time findings from each agent action)
+                if (tags.includes('research-observation') || metadata.observationType === 'op/research-observation') {
+                  layers.observations.push({
+                    id: m.id,
+                    title: m.title,
+                    agent: metadata.agent || 'unknown',
+                    action: metadata.action || 'unknown',
+                    findingType: metadata.findingType || 'web',
+                    source: metadata.source,
+                    sourceId: metadata.sourceId,
+                    sourceIds,
+                    claimIds,
+                    confidence: metadata.confidence || m.importance_score,
+                    stepIndex: metadata.stepIndex,
+                    taskId: metadata.taskId || null,
+                    wave: metadata.wave ?? null,
+                    dimension: metadata.dimension || null,
+                    csiStage,
+                    verdict,
+                    createdAt,
+                  });
+                }
 
-              // NEW Layer 5: Execution Events (agent phase completions)
-              if (tags.includes('research-execution-event') || metadata.executionEventType === 'op/research-execution-event') {
-                layers.executionEvents.push({
-                  id: m.id,
-                  title: m.title,
-                  agent: metadata.agent || 'unknown',
-                  action: metadata.action || 'unknown',
-                  output: metadata.output || {},
-                  success: metadata.success !== false,
-                  latency: metadata.latency,
-                  taskId: metadata.taskId || null,
-                  wave: metadata.wave ?? null,
-                  phase: metadata.phase || null,
-                  sourceIds,
-                  claimIds,
-                  observationIds,
-                  csiStage,
-                  verdict,
-                  confidence: metadata.confidence || metadata.output?.confidence || m.importance_score,
-                  createdAt,
-                });
-              }
+                // NEW Layer 5: Execution Events (agent phase completions)
+                if (tags.includes('research-execution-event') || metadata.executionEventType === 'op/research-execution-event') {
+                  layers.executionEvents.push({
+                    id: m.id,
+                    title: m.title,
+                    agent: metadata.agent || 'unknown',
+                    action: metadata.action || 'unknown',
+                    output: metadata.output || {},
+                    success: metadata.success !== false,
+                    latency: metadata.latency,
+                    taskId: metadata.taskId || null,
+                    wave: metadata.wave ?? null,
+                    phase: metadata.phase || null,
+                    sourceIds,
+                    claimIds,
+                    observationIds,
+                    csiStage,
+                    verdict,
+                    confidence: metadata.confidence || metadata.output?.confidence || m.importance_score,
+                    createdAt,
+                  });
+                }
 
-              if (csiStage) {
-                layers.csi.push({
-                  id: m.id,
-                  type: csiNodeType,
-                  stage: csiStage,
-                  title: metadata.csiTitle || m.title,
-                  summary: metadata.summary || m.content?.slice(0, 280) || '',
-                  kind: metadata.findingType || metadata.action || metadata.phase || 'analysis',
-                  verdict,
-                  confidence: metadata.confidence || metadata.output?.confidence || m.importance_score,
-                  claimIds,
-                  sourceIds,
-                  observationIds,
-                  taskId: metadata.taskId || null,
-                  wave: metadata.wave ?? null,
-                  agent: metadata.agent || 'unknown',
-                  action: metadata.action || 'unknown',
-                  createdAt,
-                });
+                if (csiStage) {
+                  layers.csi.push({
+                    id: m.id,
+                    type: csiNodeType,
+                    stage: csiStage,
+                    title: metadata.csiTitle || m.title,
+                    summary: metadata.summary || m.content?.slice(0, 280) || '',
+                    kind: metadata.findingType || metadata.action || metadata.phase || 'analysis',
+                    verdict,
+                    confidence: metadata.confidence || metadata.output?.confidence || m.importance_score,
+                    claimIds,
+                    sourceIds,
+                    observationIds,
+                    taskId: metadata.taskId || null,
+                    wave: metadata.wave ?? null,
+                    agent: metadata.agent || 'unknown',
+                    action: metadata.action || 'unknown',
+                    createdAt,
+                  });
+                }
               }
 
               // Layer 6: Blueprints
@@ -3633,31 +3929,91 @@ a{color:#a78bfa}</style></head><body>
                   domain: metadata.blueprint_domain,
                   timesReused: metadata.blueprint_times_reused || 0,
                   successRate: metadata.blueprint_success_rate,
+                  pattern: metadata.blueprint_pattern || [],
+                  patternCount: Array.isArray(metadata.blueprint_pattern) ? metadata.blueprint_pattern.length : 0,
+                  hasCapturedState: !!metadata.blueprint_captured_state || !!metadata.blueprint_has_captured_state,
+                  capturedStateSummary: metadata.blueprint_captured_state_summary || null,
                 });
               }
             });
 
-            // Also get trail from session result if available
-            if (session.result?.trail) {
-              const trail = session.result.trail;
-              if (trail.steps && layers.trails.length === 0) {
-                trail.steps.forEach((step, idx) => {
-                  layers.trails.push({
-                    id: `trail-step-${idx}`,
-                    agent: step.agent || 'explorer',
-                    action: step.action || 'search_web',
-                    input: step.input?.slice(0, 200),
-                    output: step.output?.slice(0, 200),
-                    confidence: step.confidence,
-                    rejected: step.rejected,
-                    // Reasoning fields (Phase 2b)
-                    thought: step.thought,
-                    why: step.why,
-                    alternativeConsidered: step.alternativeConsidered,
-                  });
+            const trailMemories = await fetchSessionTrailMemories(sessionId, session, session.userId || userId, session.orgId || orgId, {
+              includeCheckpoints: true,
+              limit: 20,
+            });
+
+            const normalizedTrails = trailMemories
+              .map(memory => normalizeResearchTrailMemory(memory, session))
+              .filter(Boolean);
+
+            const fallbackTrail = !normalizedTrails.length && session.result?.trail
+              ? normalizeResearchTrailMemory({
+                  id: `session-${sessionId}`,
+                  project: projectId,
+                  tags: ['research-trail', `session:${sessionId}`],
+                  metadata: {
+                    query: session.query,
+                    status: session.status,
+                    startedAt: session.createdAt,
+                  },
+                }, session, session.result.trail)
+              : null;
+
+            const activeTrails = normalizedTrails.length > 0 ? normalizedTrails : fallbackTrail ? [fallbackTrail] : [];
+
+              activeTrails.forEach((trail) => {
+                layers.csi.push({
+                  id: trail.nodeId,
+                  type: trail.trailType === 'op/research-checkpoint' ? 'csi-checkpoint' : 'csi-trail',
+                stage: 'trail',
+                title: trail.trailType === 'op/research-checkpoint' ? `Checkpoint: ${trail.query || session.query || 'Research'}` : `Trail: ${trail.query || session.query || 'Research'}`,
+                summary: trail.report || trail.metadata?.summary || trail.steps?.slice(-1)[0]?.output || '',
+                kind: 'provenance',
+                verdict: trail.status === 'completed' ? 'verified' : 'uncertain',
+                confidence: trail.confidence,
+                claimIds: [],
+                sourceIds: [],
+                observationIds: [],
+                taskId: null,
+                wave: null,
+                agent: 'trail-store',
+                action: 'research_trail',
+                createdAt: trail.startedAt || session.createdAt || new Date().toISOString(),
+                stepCount: trail.stepCount,
+                sourceMemoryId: trail.sourceMemoryId,
+                  trailId: trail.id,
                 });
-              }
-            }
+
+                if (trail.blueprintUsed) {
+                  pushEdge(trail.nodeId, `blueprint-${trail.blueprintUsed}`, 'used_blueprint', 0.9);
+                }
+
+                trail.steps.forEach((step, idx) => {
+                  const stepNodeId = step.id || `trail-step-${trail.id}-${idx}`;
+                layers.trails.push({
+                  id: stepNodeId,
+                  trailId: trail.nodeId,
+                  stepIndex: step.stepIndex ?? idx,
+                  agent: step.agent || 'explorer',
+                  action: step.action || 'search_web',
+                  input: step.input,
+                  output: step.output,
+                  confidence: step.confidence,
+                  rejected: step.rejected,
+                  thought: step.thought,
+                  why: step.why,
+                  alternativeConsidered: step.alternativeConsidered,
+                  sourceMemoryId: trail.sourceMemoryId,
+                  provenance: step.provenance,
+                  synthetic: step.synthetic,
+                });
+                pushEdge(trail.nodeId, stepNodeId, 'contains', Math.max(0.55, step.confidence ?? trail.confidence ?? 0.7));
+                if (idx > 0) {
+                  const prevStep = trail.steps[idx - 1];
+                  pushEdge(prevStep.id || `trail-step-${trail.id}-${idx - 1}`, stepNodeId, 'sequence', Math.max(0.55, step.confidence ?? prevStep.confidence ?? 0.7));
+                }
+              });
+            });
 
             // Build edges based on relationships and provenance - only from current session
             (filteredMemories || []).forEach(m => {
@@ -3667,6 +4023,12 @@ a{color:#a78bfa}</style></head><body>
               const observationIds = uniqueValues(metadata.observationIds || metadata.output?.observationIds);
               const csiStage = inferCsiStage(metadata);
               const verdict = metadata.verdict || metadata.output?.verdict || null;
+              const isResearchTrail = (m.tags || []).includes('research-trail') || (m.tags || []).includes('csi-trail') ||
+                  metadata.trailType === 'op/research-trail' || metadata.trailType === 'op/research-checkpoint';
+
+              if (isResearchTrail) {
+                return;
+              }
 
               // Link claims to their sources
               if (metadata.sourceId) {
@@ -3897,48 +4259,34 @@ a{color:#a78bfa}</style></head><body>
           return jsonResponse(res, { error: 'Session not found' }, 404);
         }
 
-        // Try to get trail from session result first
-        if (session.result?.trail) {
-          return jsonResponse(res, {
-            trail: session.result.trail,
-            sessionId,
-            query: session.query,
-            status: session.status,
-          });
-        }
-
-        // Fall back to CSI graph lookup via TrailStore
-        const trailStore = new TrailStore({
-          memoryStore: persistentMemoryStore,
-          userId: session.userId || userId,
-          orgId: session.orgId || orgId,
-        });
-
         try {
-          const trailMemories = await persistentMemoryStore.searchMemories({
-            query: sessionId,
-            user_id: session.userId || userId,
-            org_id: session.orgId || orgId,
-            project: session.projectId || `research/${sessionId.slice(0, 8)}`,
-            tags: ['research-trail'],
-            n_results: 1,
+          const trailMemories = await fetchSessionTrailMemories(sessionId, session, session.userId || userId, session.orgId || orgId, {
+            includeCheckpoints: true,
+            limit: 20,
           });
+          const trailMemory = selectPrimaryTrailMemory(trailMemories);
+          const normalizedTrail = trailMemory
+            ? normalizeResearchTrailMemory(trailMemory, session)
+            : session.result?.trail
+              ? normalizeResearchTrailMemory({
+                  id: `session-${sessionId}`,
+                  project: session.projectId || `research/${sessionId.slice(0, 8)}`,
+                  tags: ['research-trail', `session:${sessionId}`],
+                  metadata: {
+                    query: session.query,
+                    status: session.status,
+                    startedAt: session.createdAt,
+                  },
+                }, session, session.result.trail)
+              : null;
 
-          if (trailMemories && trailMemories.length > 0) {
-            const trailMemory = trailMemories[0];
-            const metadata = trailMemory.metadata || {};
+          if (normalizedTrail) {
             return jsonResponse(res, {
-              trail: {
-                steps: metadata.steps || [],
-                query: metadata.query || session.query,
-                startedAt: metadata.startedAt,
-                completedAt: metadata.completedAt,
-                status: metadata.status || session.status,
-              },
+              trail: normalizedTrail,
               sessionId,
-              query: metadata.query || session.query,
-              status: session.status,
-              fromCSI: true,
+              query: normalizedTrail.query || session.query,
+              status: normalizedTrail.status || session.status,
+              fromCSI: !!trailMemory,
             });
           }
 
@@ -4273,49 +4621,34 @@ a{color:#a78bfa}</style></head><body>
               return jsonResponse(res, { error: 'Session not found' }, 404);
             }
 
-            // Try to get trail from session result first
-            if (session.result?.trail) {
-              return jsonResponse(res, {
-                trail: session.result.trail,
-                sessionId,
-                query: session.query,
-                status: session.status,
-              });
-            }
-
-            // Fall back to CSI graph lookup via TrailStore
-            const trailStore = new TrailStore({
-              memoryStore: persistentMemoryStore,
-              userId: session.userId || userId,
-              orgId: session.orgId || orgId,
-            });
-
             try {
-              // Search for trail memory in CSI
-              const trailMemories = await persistentMemoryStore.searchMemories({
-                query: sessionId,
-                user_id: session.userId || userId,
-                org_id: session.orgId || orgId,
-                project: session.projectId || `research/${sessionId.slice(0, 8)}`,
-                tags: ['research-trail'],
-                n_results: 1,
+              const trailMemories = await fetchSessionTrailMemories(sessionId, session, session.userId || userId, session.orgId || orgId, {
+                includeCheckpoints: true,
+                limit: 20,
               });
+              const trailMemory = selectPrimaryTrailMemory(trailMemories);
+              const normalizedTrail = trailMemory
+                ? normalizeResearchTrailMemory(trailMemory, session)
+                : session.result?.trail
+                  ? normalizeResearchTrailMemory({
+                      id: `session-${sessionId}`,
+                      project: session.projectId || `research/${sessionId.slice(0, 8)}`,
+                      tags: ['research-trail', `session:${sessionId}`],
+                      metadata: {
+                        query: session.query,
+                        status: session.status,
+                        startedAt: session.createdAt,
+                      },
+                    }, session, session.result.trail)
+                  : null;
 
-              if (trailMemories && trailMemories.length > 0) {
-                const trailMemory = trailMemories[0];
-                const metadata = trailMemory.metadata || {};
+              if (normalizedTrail) {
                 return jsonResponse(res, {
-                  trail: {
-                    steps: metadata.steps || [],
-                    query: metadata.query || session.query,
-                    startedAt: metadata.startedAt,
-                    completedAt: metadata.completedAt,
-                    status: metadata.status || session.status,
-                  },
+                  trail: normalizedTrail,
                   sessionId,
-                  query: metadata.query || session.query,
-                  status: session.status,
-                  fromCSI: true,
+                  query: normalizedTrail.query || session.query,
+                  status: normalizedTrail.status || session.status,
+                  fromCSI: !!trailMemory,
                 });
               }
 

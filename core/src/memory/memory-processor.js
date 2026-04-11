@@ -2,7 +2,7 @@
  * Unified Memory Processor
  *
  * Single LLM call that outputs:
- * 1. Relationship classification (ADD/UPDATE/EXTEND/NOOP)
+ * 1. Relationship classification (ADD/UPDATE/EXTEND/DERIVE/NOOP)
  * 2. Compressed observation
  * 3. Extracted facts (entities, dates, preferences)
  *
@@ -64,7 +64,7 @@ FACT_SENTENCES:
 - The system supports temperatures up to 85°C
 
 Rules:
-- RELATIONSHIP: ADD/UPDATE/EXTEND/NOOP
+- RELATIONSHIP: ADD/UPDATE/EXTEND/DERIVE/NOOP
 - PRIORITY: HIGH/MEDIUM/LOW
 - OBSERVATION: One sentence summary with 🔴/🟡/🟢. Write TRIVIAL if nothing noteworthy.
 - ENTITIES: Names of people, companies, products, places, technologies. Write NONE if empty.
@@ -111,10 +111,10 @@ CRITICAL RULES:
     const lines = output.split('\n').map(l => l.trim()).filter(Boolean);
 
     // Parse RELATIONSHIP
-    let relationship = { action: 'ADD', targetId: null, reason: 'default' };
-    const relLine = lines.find(l => /^(ADD|UPDATE|EXTEND|NOOP)[:\s]/i.test(l));
+    let relationship = { action: 'ADD', targetId: null, sourceIds: [], reason: 'default' };
+    const relLine = lines.find(l => /^(ADD|UPDATE|EXTEND|DERIVE|NOOP)[:\s]/i.test(l));
     if (relLine) {
-      const match = relLine.match(/^(ADD|UPDATE|EXTEND|NOOP)[:\s]+(?:\[?([^\]]*)\]?)?\s*(.*)/i);
+      const match = relLine.match(/^(ADD|UPDATE|EXTEND|DERIVE|NOOP)[:\s]+(?:\[?([^\]]*)\]?)?\s*(.*)/i);
       if (match) {
         relationship.action = match[1].toUpperCase();
         const idOrReason = (match[2] || '').trim();
@@ -123,6 +123,14 @@ CRITICAL RULES:
         if (relationship.action === 'UPDATE' || relationship.action === 'EXTEND') {
           const target = similarMemories.find(m => idOrReason.includes(m.id));
           relationship.targetId = target?.id || similarMemories[0]?.id || null;
+        } else if (relationship.action === 'DERIVE') {
+          const idMatches = [...new Set([
+            ...similarMemories
+              .filter(m => idOrReason.includes(m.id))
+              .map(m => m.id),
+            ...similarMemories.slice(0, 3).map(m => m.id),
+          ])];
+          relationship.sourceIds = idMatches.length > 0 ? idMatches : similarMemories.slice(0, 2).map(m => m.id);
         }
       }
     }
@@ -219,10 +227,17 @@ CRITICAL RULES:
   _heuristicProcess(newMemory, similarMemories) {
     const content = (newMemory.content || '').toLowerCase();
     const changeWords = /\b(changed|updated|now|new|switched|moved|no longer|instead|replaced|actually)\b/i;
+    const synthesisWords = /\b(based on|combining|combined|synthes(?:e|is|ized)|from (?:multiple )?sources?|overall|in summary|therefore|thus|together|cross[- ]reference|synthesizing)\b/i;
 
-    let relationship = { action: 'ADD', targetId: null, reason: 'heuristic' };
+    let relationship = { action: 'ADD', targetId: null, sourceIds: [], reason: 'heuristic' };
     if (similarMemories.length > 0 && changeWords.test(content)) {
       relationship = { action: 'UPDATE', targetId: similarMemories[0].id, reason: 'change_words' };
+    } else if (similarMemories.length >= 2 && synthesisWords.test(content)) {
+      relationship = {
+        action: 'DERIVE',
+        sourceIds: similarMemories.slice(0, 3).map(memory => memory.id),
+        reason: 'synthesis_words',
+      };
     }
 
     let priority = 'medium';

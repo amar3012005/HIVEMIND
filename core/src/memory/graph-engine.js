@@ -7,6 +7,12 @@ import { PredictCalibrateFilter } from './predict-calibrate.js';
 import { Observer } from './observer.js'; // kept for backward compat, not initialized
 import { buildObservationPayload, formatObservation } from './observation-store.js';
 import { extractFacts } from './fact-extractor.js';
+import {
+  buildSemanticMetadata,
+  inferMemorySemanticRole,
+  normalizeRelationshipDescriptor,
+  normalizeRelationshipType,
+} from './relationship-semantics.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -254,6 +260,9 @@ export class InMemoryGraphStore {
   }
 
   async listRelationships({ user_id, org_id, project, relationship_types, limit = 2000 } = {}) {
+    const normalizedTypes = relationship_types?.length
+      ? relationship_types.map(type => normalizeRelationshipType(type) || type)
+      : null;
     const scopedIds = new Set(
       Array.from(this.memories.values())
         .filter(memory => memory.user_id === user_id && memory.org_id === org_id)
@@ -263,7 +272,7 @@ export class InMemoryGraphStore {
 
     return this.relationships
       .filter(edge => scopedIds.has(edge.from_id) && scopedIds.has(edge.to_id))
-      .filter(edge => !relationship_types?.length || relationship_types.includes(edge.type))
+      .filter(edge => !normalizedTypes?.length || normalizedTypes.includes(normalizeRelationshipType(edge.type) || edge.type))
       .slice(0, limit)
       .map(edge => ({ ...edge }));
   }
@@ -280,12 +289,18 @@ export class InMemoryGraphStore {
     return this.relationships
       .filter(edge => edge.from_id === memoryId || edge.to_id === memoryId)
       .filter(edge => scopedIds.size === 0 || (scopedIds.has(edge.from_id) && scopedIds.has(edge.to_id)))
-      .map(edge => ({ ...edge }));
+      .map(edge => ({ ...edge, type: normalizeRelationshipType(edge.type) || edge.type }));
   }
 
   async createRelationship(edge) {
-    this.relationships.push({ ...edge });
-    return { ...edge };
+    const normalized = {
+      ...edge,
+      type: normalizeRelationshipType(edge.type) || edge.type,
+      confidence: Number.isFinite(edge.confidence) ? edge.confidence : 1,
+      metadata: edge.metadata || {},
+    };
+    this.relationships.push({ ...normalized });
+    return { ...normalized };
   }
 
   async createMemoryVersion(version) {
@@ -337,6 +352,13 @@ export class MemoryGraphEngine {
   async ingestMemory(input) {
     const startedAt = Date.now();
     const baseMemory = this._buildMemoryRecord(input);
+    baseMemory.metadata = {
+      ...(baseMemory.metadata || {}),
+      ...buildSemanticMetadata({
+        semanticRole: inferMemorySemanticRole(baseMemory),
+        sourceMetadata: baseMemory.source_metadata,
+      }),
+    };
 
     return this.store.advisoryLock(baseMemory.user_id, async lockedStore => {
       const transactionalStore = lockedStore || this.store;
@@ -377,6 +399,12 @@ export class MemoryGraphEngine {
                   type: 'Updates',
                   target_id: topMatch.id,
                   confidence: 0.9,
+                };
+              } else if (result.relationship.action === 'DERIVE' && result.relationship.sourceIds?.length > 0) {
+                input.relationship = {
+                  type: 'Derives',
+                  sourceIds: result.relationship.sourceIds,
+                  confidence: 0.8,
                 };
               }
             }
@@ -505,6 +533,16 @@ export class MemoryGraphEngine {
                   observationDate: baseMemory.document_date || baseMemory.created_at,
                   project: baseMemory.project,
                   sourceTags: baseMemory.tags || [],
+                  semanticRole: 'finding',
+                  relationship: {
+                    type: 'Derives',
+                    sourceIds: [baseMemory.id],
+                    confidence: 0.85,
+                    reason: 'observation_extraction',
+                  },
+                  sourceIds: [baseMemory.id],
+                  sourceRefs: [{ id: baseMemory.id, title: baseMemory.title || null }],
+                  sourceMetadata: baseMemory.source_metadata,
                 });
                 const obsId = crypto.randomUUID ? crypto.randomUUID() : `obs-${Date.now()}`;
                 await store.createMemory({
@@ -568,6 +606,9 @@ export class MemoryGraphEngine {
             if (result.relationship.action === 'UPDATE' && result.relationship.targetId) {
               input.relationship = { type: 'Updates', target_id: result.relationship.targetId, confidence: 0.9 };
             }
+            if (result.relationship.action === 'DERIVE' && result.relationship.sourceIds?.length > 0) {
+              input.relationship = { type: 'Derives', sourceIds: result.relationship.sourceIds, confidence: 0.8 };
+            }
             if (result.relationship.action === 'EXTEND' && result.relationship.targetId) {
               input.relationship = { type: 'Extends', target_id: result.relationship.targetId, confidence: 0.8 };
             }
@@ -597,6 +638,16 @@ export class MemoryGraphEngine {
                   observationDate: baseMemory.document_date || baseMemory.created_at,
                   project: baseMemory.project,
                   sourceTags: baseMemory.tags || [],
+                  semanticRole: 'finding',
+                  relationship: {
+                    type: 'Derives',
+                    sourceIds: [baseMemory.id],
+                    confidence: 0.85,
+                    reason: 'observation_extraction',
+                  },
+                  sourceIds: [baseMemory.id],
+                  sourceRefs: [{ id: baseMemory.id, title: baseMemory.title || null }],
+                  sourceMetadata: baseMemory.source_metadata,
                 });
                 const obsId = crypto.randomUUID ? crypto.randomUUID() : `obs-${Date.now()}`;
                 await store.createMemory({
@@ -624,12 +675,41 @@ export class MemoryGraphEngine {
           }
         }
 
-        const shouldSkipRelationshipClassification = input.skip_relationship_classification || input.skipProcessing === true;
+        const shouldSkipRelationshipClassification = (input.skip_relationship_classification || input.skipProcessing === true) && !input.relationship;
         const classification = shouldSkipRelationshipClassification
           ? { operation: 'created', relationship: null }
           : input.relationship
           ? this._explicitClassification(input.relationship)
           : this.relationshipClassifier.classifyRelationship(baseMemory, latestMemories);
+
+        const deriveSources = classification.relationship?.sourceIds?.length
+          ? classification.relationship.sourceIds
+          : Array.isArray(input._derives_from)
+            ? input._derives_from.map(source => source?.id || source?.sourceId || source).filter(Boolean)
+            : [];
+        const deriveSourceRefs = Array.isArray(input._derives_from) ? input._derives_from.filter(Boolean) : [];
+
+        const semanticRelationship = (classification.relationship || deriveSources.length > 0)
+          ? normalizeRelationshipDescriptor({
+            ...(classification.relationship || { type: 'Derives' }),
+            sourceIds: classification.relationship?.sourceIds?.length ? classification.relationship.sourceIds : deriveSources,
+          }, {
+            sourceMemory: baseMemory,
+            confidence: classification.relationship?.confidence ?? deriveSourceRefs[0]?.score ?? deriveSourceRefs[0]?.confidence,
+          })
+          : null;
+        const effectiveRelationshipType = semanticRelationship?.type || classification.relationship?.type || null;
+
+        baseMemory.metadata = {
+          ...(baseMemory.metadata || {}),
+          ...buildSemanticMetadata({
+            semanticRole: inferMemorySemanticRole(baseMemory),
+            relationship: semanticRelationship,
+            sourceIds: deriveSources,
+            sourceRefs: deriveSourceRefs,
+            sourceMetadata: baseMemory.source_metadata,
+          }),
+        };
 
         await store.createMemory(baseMemory);
 
@@ -683,6 +763,18 @@ export class MemoryGraphEngine {
                 parent_memory_id: baseMemory.id,
                 extraction_source: 'memory_processor',
                 extracted_at: new Date().toISOString(),
+                ...buildSemanticMetadata({
+                  semanticRole: 'claim',
+                  relationship: {
+                    type: 'Derives',
+                    sourceIds: [baseMemory.id],
+                    confidence: 0.9,
+                    reason: 'fact_extraction',
+                  },
+                  sourceIds: [baseMemory.id],
+                  sourceRefs: [{ id: baseMemory.id, title: baseMemory.title || null }],
+                  sourceMetadata: baseMemory.source_metadata,
+                }),
               },
             });
             // Create Extends relationship: fact → parent
@@ -692,7 +784,22 @@ export class MemoryGraphEngine {
               to_id: baseMemory.id,
               type: 'Extends',
               confidence: 0.9,
-              metadata: { source: 'fact_extraction' },
+              metadata: buildSemanticMetadata({
+                semanticRole: 'relationship',
+                relationship: {
+                  type: 'Extends',
+                  sourceId: factId,
+                  targetId: baseMemory.id,
+                  confidence: 0.9,
+                  reason: 'fact_extraction',
+                },
+                sourceIds: [factId],
+                sourceRefs: [{ id: factId, title: `Fact: ${fact.slice(0, 60)}` }],
+                targetMemory: baseMemory,
+                sourceMetadata: baseMemory.source_metadata || null,
+                reason: 'fact_extraction',
+                confidence: 0.9,
+              }),
               created_by: 'memory_processor',
             });
             factMemoryIds.push(factId);
@@ -713,28 +820,55 @@ export class MemoryGraphEngine {
         const result = {
           memoryId: baseMemory.id,
           factMemoryIds,
-          operation: classification.operation,
+          operation: effectiveRelationshipType === 'Updates'
+            ? 'updated'
+            : effectiveRelationshipType === 'Extends'
+              ? 'extended'
+              : effectiveRelationshipType === 'Derives'
+                ? 'derived'
+                : classification.operation,
           deprecatedIds: [],
           edgesCreated: [],
           processingMs: 0
         };
 
-        if (classification.relationship?.type === 'Updates') {
+        if (effectiveRelationshipType === 'Updates') {
           Object.assign(result, await this.applyUpdate(baseMemory.id, classification.relationship.targetId, {
             store,
             user_id: baseMemory.user_id,
             org_id: baseMemory.org_id,
-            confidence: classification.relationship.confidence,
+            confidence: classification.relationship?.confidence ?? semanticRelationship?.confidence,
             startedAt
           }));
-        } else if (classification.relationship?.type === 'Extends') {
+        } else if (effectiveRelationshipType === 'Extends') {
           Object.assign(result, await this.applyExtends(baseMemory.id, classification.relationship.targetId, {
             store,
             user_id: baseMemory.user_id,
             org_id: baseMemory.org_id,
-            confidence: classification.relationship.confidence,
+            confidence: classification.relationship?.confidence ?? semanticRelationship?.confidence,
             startedAt
           }));
+        } else if (effectiveRelationshipType === 'Derives') {
+          const sourceIds = semanticRelationship?.sourceIds?.length
+            ? semanticRelationship.sourceIds
+            : deriveSources;
+
+          if (sourceIds.length > 0) {
+            Object.assign(result, await this.applyDerivesFromSources(sourceIds, baseMemory.id, {
+              store,
+              user_id: baseMemory.user_id,
+              org_id: baseMemory.org_id,
+              confidence: classification.relationship?.confidence ?? semanticRelationship?.confidence,
+              startedAt,
+            }));
+          } else {
+            await this._recordVersionSnapshot(store, baseMemory, {
+              reason: 'Derives',
+              is_latest: true,
+              related_memory_id: null
+            });
+            result.processingMs = Date.now() - startedAt;
+          }
         } else {
           await this._recordVersionSnapshot(store, baseMemory, {
             reason: 'created',
@@ -782,12 +916,22 @@ export class MemoryGraphEngine {
                   to_id: c.memory.id,
                   type: edgeType,
                   confidence: c.confidence,
-                  metadata: {
-                    contradiction_type: c.contradictionType,
-                    detected_at: new Date().toISOString(),
-                    source: isReconciled ? 'deterministic-reconciliation' : 'auto-detection',
-                    ...(isReconciled ? { reconciled: true, original_type: 'Contradicts', reconciled_to: edgeType, reasoning } : {}),
-                  },
+                  metadata: buildSemanticMetadata({
+                    semanticRole: 'relationship',
+                    relationship: {
+                      type: edgeType,
+                      sourceId: baseMemory.id,
+                      targetId: c.memory.id,
+                      confidence: c.confidence,
+                      reason: reasoning || 'contradiction_detection',
+                    },
+                    sourceIds: [baseMemory.id],
+                    sourceRefs: [{ id: baseMemory.id, title: baseMemory.title || null }],
+                    targetMemory: c.memory,
+                    sourceMetadata: baseMemory.source_metadata || null,
+                    reason: reasoning || 'contradiction_detection',
+                    confidence: c.confidence,
+                  }),
                   created_by: isReconciled ? 'turing-reconciliation' : 'conflict-detector',
                 });
               } catch { /* Edge already exists — skip duplicate */ }
@@ -964,7 +1108,22 @@ export class MemoryGraphEngine {
         type: 'Updates',
         confidence,
         created_at: nowIso(),
-        metadata: {}
+        metadata: buildSemanticMetadata({
+          semanticRole: 'relationship',
+          relationship: {
+            type: 'Updates',
+            sourceId,
+            targetId,
+            confidence,
+            reason: 'Updates',
+          },
+          sourceIds: [sourceId],
+          targetMemory: target,
+          sourceMemory: source,
+          sourceMetadata: source.source_metadata || null,
+          reason: 'Updates',
+          confidence,
+        })
       });
 
       await this._recordVersionSnapshot(store, target, {
@@ -1010,7 +1169,22 @@ export class MemoryGraphEngine {
         type: 'Extends',
         confidence,
         created_at: nowIso(),
-        metadata: {}
+        metadata: buildSemanticMetadata({
+          semanticRole: 'relationship',
+          relationship: {
+            type: 'Extends',
+            sourceId,
+            targetId,
+            confidence,
+            reason: 'Extends',
+          },
+          sourceIds: [sourceId],
+          targetMemory: target,
+          sourceMemory: source,
+          sourceMetadata: source.source_metadata || null,
+          reason: 'Extends',
+          confidence,
+        })
       });
 
       await this._recordVersionSnapshot(store, source, {
@@ -1030,10 +1204,15 @@ export class MemoryGraphEngine {
     });
   }
 
-  async applyDerives(sourceId, targetId, { store: storeOverride, user_id, org_id, confidence, startedAt = Date.now() } = {}) {
+  async applyDerives(sourceId, targetId, options = {}) {
+    return this.applyDerivesFromSources([sourceId], targetId, options);
+  }
+
+  async applyDerivesFromSources(sourceIds, targetId, { store: storeOverride, user_id, org_id, confidence, startedAt = Date.now(), reason = 'Derives' } = {}) {
+    const uniqueSourceIds = [...new Set((sourceIds || []).filter(Boolean))];
     if (confidence < this.deriveThreshold) {
       return {
-        memoryId: sourceId,
+        memoryId: targetId,
         operation: 'derived',
         deprecatedIds: [],
         edgesCreated: [],
@@ -1043,39 +1222,63 @@ export class MemoryGraphEngine {
 
     const activeStore = storeOverride || this.store;
     return activeStore.transaction(async store => {
-      const source = await store.getMemory(sourceId);
       const target = await store.getMemory(targetId);
+      const sources = await Promise.all(uniqueSourceIds.map(id => store.getMemory(id)));
 
-      if (!source || !target) {
+      if (!target || sources.some(source => !source)) {
         throw new Error('applyDerives requires source and target memories');
       }
-      if (source.user_id !== user_id || target.user_id !== user_id || source.org_id !== org_id || target.org_id !== org_id) {
-        throw new Error('Tenant scope violation in applyDerives');
+      for (const source of sources) {
+        if (source.user_id !== user_id || target.user_id !== user_id || source.org_id !== org_id || target.org_id !== org_id) {
+          throw new Error('Tenant scope violation in applyDerives');
+        }
       }
 
-      const nextVersion = (target.version || 1) + 1;
-      const edge = await store.createRelationship({
-        id: uuidv4(),
-        from_id: sourceId,
-        to_id: targetId,
-        type: 'Derives',
-        confidence,
-        created_at: nowIso(),
-        metadata: {}
-      });
+      const edges = [];
+      for (const sourceIdValue of uniqueSourceIds) {
+        const edge = await store.createRelationship({
+          id: uuidv4(),
+          from_id: sourceIdValue,
+          to_id: targetId,
+          type: 'Derives',
+          confidence,
+          created_at: nowIso(),
+          metadata: buildSemanticMetadata({
+            semanticRole: 'relationship',
+            relationship: {
+              type: 'Derives',
+              sourceIds: [sourceIdValue],
+              targetId,
+              confidence,
+              reason,
+            },
+            sourceIds: [sourceIdValue],
+            sourceRefs: sources.filter(source => source.id === sourceIdValue).map(source => ({
+              id: source.id,
+              title: source.title || null,
+              memory_type: source.memory_type || null,
+            })),
+            targetMemory: target,
+            sourceMetadata: sources.find(source => source.id === sourceIdValue)?.source_metadata || null,
+            reason,
+            confidence,
+          }),
+        });
+        edges.push(edge);
+      }
 
-      await this._recordVersionSnapshot(store, source, {
+      await this._recordVersionSnapshot(store, target, {
         reason: 'Derives',
         is_latest: true,
-        related_memory_id: targetId,
-        version: nextVersion
+        related_memory_id: uniqueSourceIds[0] || null,
+        version: (target.version || 1) + 1
       });
 
       return {
-        memoryId: sourceId,
+        memoryId: targetId,
         operation: 'derived',
         deprecatedIds: [],
-        edgesCreated: [edge],
+        edgesCreated: edges,
         processingMs: Date.now() - startedAt
       };
     });
@@ -1112,13 +1315,19 @@ export class MemoryGraphEngine {
   }
 
   _explicitClassification(relationship) {
-    const type = relationship.type;
+    const type = normalizeRelationshipType(relationship.type) || relationship.type;
     const operation = type === 'Updates' ? 'updated' : type === 'Extends' ? 'extended' : 'derived';
+    const sourceIds = Array.isArray(relationship.sourceIds)
+      ? relationship.sourceIds.filter(Boolean)
+      : Array.isArray(relationship.source_ids)
+        ? relationship.source_ids.filter(Boolean)
+        : [];
     return {
       operation,
       relationship: {
         type,
         targetId: relationship.target_id || relationship.targetId,
+        sourceIds,
         confidence: relationship.confidence ?? 1.0
       }
     };

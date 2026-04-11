@@ -39,6 +39,65 @@ export class TrailStore {
     this._persistTimers = new Map(); // sessionId → debounce timer
   }
 
+  _normalizeRefs(value) {
+    if (Array.isArray(value)) return value.filter(Boolean);
+    if (value === undefined || value === null || value === '') return [];
+    return [value];
+  }
+
+  _cloneStep(step) {
+    return {
+      ...step,
+      claimIds: this._normalizeRefs(step?.claimIds),
+      sourceIds: this._normalizeRefs(step?.sourceIds),
+      observationIds: this._normalizeRefs(step?.observationIds),
+      relatedNodeIds: this._normalizeRefs(step?.relatedNodeIds),
+      parentStepId: step?.parentStepId || null,
+      relationType: step?.relationType || null,
+      reportId: step?.reportId || null,
+    };
+  }
+
+  _buildTrailMetadataSnapshot(trail) {
+    const steps = trail.steps.map(step => this._cloneStep(step));
+    const contradictions = trail.contradictions.map(contradiction => ({
+      ...contradiction,
+      claimA: contradiction.claimA ? { ...contradiction.claimA } : contradiction.claimA,
+      claimB: contradiction.claimB ? { ...contradiction.claimB } : contradiction.claimB,
+    }));
+    const reportProvenance = trail.metadata.reportProvenance || null;
+    const goldenLine = trail.metadata.goldenLine || reportProvenance?.goldenLine || null;
+
+    return {
+      ...trail.metadata,
+      steps,
+      stepIds: steps.map(step => step.id).filter(Boolean),
+      contradictionCount: contradictions.length,
+      trailType: 'op/research-trail',
+      reportProvenance,
+      goldenLine,
+      trail: {
+        id: trail.id,
+        sessionId: trail.sessionId,
+        projectId: trail.projectId,
+        query: trail.query,
+        steps,
+        stepIds: steps.map(step => step.id).filter(Boolean),
+        contradictions,
+        reportProvenance,
+        goldenLine,
+      },
+    };
+  }
+
+  _inferStepRelationType(step) {
+    if (step?.relationType) return step.relationType;
+    if (step?.action === 'verify_findings') return 'Update';
+    if (step?.action === 'synthesize') return 'Derive';
+    if (step?.rejected) return 'Update';
+    return 'Derive';
+  }
+
   /**
    * Initialize a new research trail.
    * @param {string} sessionId
@@ -69,6 +128,19 @@ export class TrailStore {
         },
         startedAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
+        reportProvenance: null,
+        goldenLine: null,
+        trail: {
+          id: null,
+          sessionId,
+          projectId,
+          query,
+          steps: [],
+          stepIds: [],
+          contradictions: [],
+          reportProvenance: null,
+          goldenLine: null,
+        },
       },
       steps: [],
       contradictions: [],
@@ -76,6 +148,8 @@ export class TrailStore {
 
     this.trails.set(sessionId, trail);
     this.contradictions.set(sessionId, []);
+    trail.metadata.trail.id = trail.id;
+    trail.metadata.trail.trailId = trail.id;
 
     // Persist initial trail state
     await this._persistTrail(sessionId);
@@ -106,8 +180,13 @@ export class TrailStore {
     }
 
     const trailBuffer = this.trails.get(sessionId);
+    const stepId = step.id || randomUUID();
+    const stepIndex = typeof step.stepIndex === 'number' ? step.stepIndex : this._stepCounter++;
     const stepRecord = {
-      stepIndex: this._stepCounter++,
+      id: stepId,
+      stepIndex,
+      sessionId,
+      trailId: trailBuffer.id,
       agent: step.agent || 'explorer',
       action: step.action || 'search_web',
       input: step.input || '',
@@ -118,6 +197,13 @@ export class TrailStore {
       thought: step.thought || '',
       why: step.why || '',
       alternativeConsidered: step.alternativeConsidered || null,
+      claimIds: this._normalizeRefs(step.claimIds),
+      sourceIds: this._normalizeRefs(step.sourceIds),
+      observationIds: this._normalizeRefs(step.observationIds),
+      relatedNodeIds: this._normalizeRefs(step.relatedNodeIds),
+      parentStepId: step.parentStepId || null,
+      relationType: this._inferStepRelationType(step),
+      reportId: step.reportId || null,
       timestamp: new Date().toISOString(),
     };
 
@@ -208,7 +294,7 @@ export class TrailStore {
    * @param {string} sessionId
    * @param {Object} report - final research report
    */
-  async finalizeTrail(sessionId, report) {
+  async finalizeTrail(sessionId, report, provenance = null) {
     const trail = this.trails.get(sessionId);
     if (!trail) return null;
 
@@ -220,7 +306,37 @@ export class TrailStore {
 
     trail.metadata.completedAt = new Date().toISOString();
     trail.metadata.report = report;
+    trail.metadata.reportProvenance = provenance ? {
+      ...provenance,
+      claimIds: this._normalizeRefs(provenance.claimIds),
+      sourceIds: this._normalizeRefs(provenance.sourceIds),
+      trailStepIds: this._normalizeRefs(provenance.trailStepIds),
+      recalledMemoryIds: this._normalizeRefs(provenance.recalledMemoryIds),
+      nodeIds: this._normalizeRefs(provenance.nodeIds),
+      edgeIds: this._normalizeRefs(provenance.edgeIds),
+      trails: this._normalizeRefs(provenance.trails),
+      sources: this._normalizeRefs(provenance.sources),
+    } : trail.metadata.reportProvenance || null;
+    trail.metadata.goldenLine = provenance?.goldenLine || trail.metadata.goldenLine || null;
+    trail.metadata.reportId = provenance?.reportId || trail.metadata.reportId || null;
+    trail.metadata.reportBlueprintId = provenance?.blueprintId || trail.metadata.reportBlueprintId || null;
+    trail.metadata.reportSchema = provenance?.sectionSchema || trail.metadata.reportSchema || null;
     trail.metadata.status = 'completed';
+    trail.metadata.trail = {
+      id: trail.id,
+      sessionId: trail.sessionId,
+      projectId: trail.projectId,
+      query: trail.query,
+      steps: trail.steps.map(step => this._cloneStep(step)),
+      stepIds: trail.steps.map(step => step.id).filter(Boolean),
+      contradictions: trail.contradictions.map(contradiction => ({
+        ...contradiction,
+        claimA: contradiction.claimA ? { ...contradiction.claimA } : contradiction.claimA,
+        claimB: contradiction.claimB ? { ...contradiction.claimB } : contradiction.claimB,
+      })),
+      reportProvenance: trail.metadata.reportProvenance,
+      goldenLine: trail.metadata.goldenLine,
+    };
 
     await this._persistTrail(sessionId);
 
@@ -312,6 +428,7 @@ export class TrailStore {
   async _persistTrail(sessionId) {
     const trail = this.trails.get(sessionId);
     if (!trail) return;
+    const metadata = this._buildTrailMetadataSnapshot(trail);
 
     try {
       // Try to create first
@@ -327,11 +444,8 @@ export class TrailStore {
         is_latest: true,
         importance_score: 0.95,
         metadata: {
-          ...trail.metadata,
-          steps: trail.steps,
+          ...metadata,
           stepCount: trail.steps.length,
-          contradictionCount: trail.contradictions.length,
-          trailType: 'op/research-trail',
         },
         created_at: trail.metadata.startedAt,
         updated_at: trail.metadata.updatedAt,
@@ -344,11 +458,8 @@ export class TrailStore {
             content: this._serializeTrail(trail),
             updated_at: new Date().toISOString(),
             metadata: {
-              ...trail.metadata,
-              steps: trail.steps,
+              ...metadata,
               stepCount: trail.steps.length,
-              contradictionCount: trail.contradictions.length,
-              trailType: 'op/research-trail',
             },
           });
         } catch (updateErr) {
@@ -417,6 +528,18 @@ export class TrailStore {
    * @private
    */
   _serializeTrail(trail) {
+    const provenance = trail.metadata.reportProvenance || null;
+    const trailSnapshot = trail.metadata.trail || {
+      id: trail.id,
+      sessionId: trail.sessionId,
+      projectId: trail.projectId,
+      query: trail.query,
+      steps: trail.steps,
+      stepIds: trail.steps.map(step => step.id).filter(Boolean),
+      contradictions: trail.contradictions,
+      reportProvenance: provenance,
+      goldenLine: trail.metadata.goldenLine || null,
+    };
     const lines = [
       `# Research Trail: ${trail.query}`,
       ``,
@@ -425,6 +548,7 @@ export class TrailStore {
       `**Started:** ${trail.metadata.startedAt}`,
       `**Blueprint:** ${trail.metadata.blueprintUsed || 'none'}`,
       `**Blueprint Candidate:** ${trail.metadata.blueprintCandidate}`,
+      `**Report ID:** ${trail.metadata.reportId || provenance?.reportId || 'none'}`,
       ``,
       `## Steps (${trail.steps.length})`,
       ``,
@@ -455,6 +579,18 @@ export class TrailStore {
           ``,
         );
       }
+    }
+
+    if (provenance) {
+      lines.push(`## Report Provenance`, ``);
+      lines.push(`- Report: ${provenance.reportId || 'none'}`);
+      lines.push(`- Blueprint: ${provenance.blueprintId || 'none'}`);
+      lines.push(`- Trail: ${provenance.trailId || trail.id}`);
+      lines.push(`- Claims: ${(provenance.claimIds || []).join(', ') || 'none'}`);
+      lines.push(`- Sources: ${(provenance.sourceIds || []).join(', ') || 'none'}`);
+      lines.push(`- Recalled Memories: ${(provenance.recalledMemoryIds || []).join(', ') || 'none'}`);
+      lines.push(`- Golden Line: ${provenance.goldenLine || 'none'}`);
+      lines.push(``, `## Trail Snapshot`, `- Steps: ${(trailSnapshot.stepIds || []).length}`, `- Contradictions: ${(trailSnapshot.contradictions || []).length}`, ``);
     }
 
     return lines.join('\n');
@@ -520,8 +656,11 @@ export class TrailStore {
           status: m.metadata?.status || 'completed',
           startedAt: m.created_at,
           completedAt: m.metadata?.completedAt,
-          steps: m.metadata?.steps || [],
+          steps: m.metadata?.trail?.steps || m.metadata?.steps || [],
           contradictions: m.metadata?.contradictions || [],
+          reportProvenance: m.metadata?.reportProvenance || m.metadata?.trail?.reportProvenance || null,
+          goldenLine: m.metadata?.goldenLine || m.metadata?.trail?.goldenLine || null,
+          trail: m.metadata?.trail || null,
           metadata: m.metadata,
         }));
       }

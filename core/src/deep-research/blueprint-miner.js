@@ -30,6 +30,15 @@ const ACTION_TYPE_MAP = {
   'finish': 'finish',
 };
 
+const BLUEPRINT_OUTPUT_HINTS = {
+  search_web: 'relevant sources and search results',
+  search_memory: 'high-confidence memory matches',
+  read_url: 'extracted source content',
+  extract_claims: 'structured claims with supporting source ids',
+  synthesize: 'a concise synthesized answer',
+  finish: 'a finalized research report',
+};
+
 // Phase detection based on task dimension and depth
 function detectPhase(task, taskIndex, totalTasks) {
   if (taskIndex === 0 && task.depth === 0) return 'exploration';
@@ -109,6 +118,117 @@ function generateQueryTemplate(queries) {
 
   // Create template with placeholder
   return `${commonWords.join(' ')} {topic}`;
+}
+
+function normalizeCapturedActionType(step = {}) {
+  const raw = String(step.action || step.kind || step.relationType || '').toLowerCase();
+  if (ACTION_TYPE_MAP[raw]) return ACTION_TYPE_MAP[raw];
+  if (raw.includes('search_memory') || raw.includes('memory')) return 'search_memory';
+  if (raw.includes('read') || raw.includes('crawl') || raw.includes('fetch') || raw.includes('open')) return 'read_url';
+  if (raw.includes('extract') || raw.includes('claim')) return 'extract_claims';
+  if (raw.includes('synth')) return 'synthesize';
+  if (raw.includes('finish') || raw.includes('complete')) return 'finish';
+  return 'search_web';
+}
+
+function inferCapturedPhase(stepIndex, totalSteps, actionType, step = {}) {
+  if (actionType === 'synthesize' || actionType === 'finish') return 'synthesis';
+  if (step.rejected || step.relationType === 'Update') return 'verification';
+  if (stepIndex === 0) return 'exploration';
+  if (stepIndex >= Math.max(1, totalSteps - 1)) return 'synthesis';
+  if (stepIndex >= Math.max(1, Math.floor(totalSteps * 0.75))) return 'verification';
+  if (stepIndex >= Math.max(1, Math.floor(totalSteps * 0.4))) return 'analysis';
+  return 'exploration';
+}
+
+function inferBlueprintExpectedOutput(actionType, step = {}) {
+  return (
+    step.expectedOutput ||
+    step.outputType ||
+    BLUEPRINT_OUTPUT_HINTS[actionType] ||
+    'research findings'
+  );
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function buildCapturedQueryTemplate(step = {}, actionType = 'search_web', fallbackQuery = '') {
+  const explicitTemplate = typeof step.queryTemplate === 'string' && step.queryTemplate.trim() ? step.queryTemplate.trim() : '';
+  if (explicitTemplate.includes('{query}')) return explicitTemplate;
+
+  const baseQuery = (step.input || step.query || step.prompt || fallbackQuery || '').toString().trim();
+  if (baseQuery) {
+    const sanitized = baseQuery.replace(/\s+/g, ' ').slice(0, 140);
+    if (sanitized.length > 0) {
+      if (fallbackQuery) {
+        const replaced = sanitized.replace(new RegExp(escapeRegExp(fallbackQuery), 'ig'), '{query}');
+        if (replaced.includes('{query}')) return replaced;
+      }
+      return `${actionType} {query}`;
+    }
+  }
+
+  return `${actionType} {query}`;
+}
+
+function derivePatternFromCapturedState(capturedState) {
+  const trails = Array.isArray(capturedState?.trails) ? capturedState.trails : [];
+  const seedTrail = trails.find(trail => Array.isArray(trail.steps) && trail.steps.length > 0);
+  const steps = Array.isArray(seedTrail?.steps) ? seedTrail.steps : [];
+  if (steps.length === 0) return [];
+
+  const fallbackQuery = capturedState?.query || seedTrail?.query || '';
+  const pattern = [];
+  const seenSignatures = new Set();
+
+  steps.forEach((step, index) => {
+    const actionType = normalizeCapturedActionType(step);
+    const phase = inferCapturedPhase(index, steps.length, actionType, step);
+    const queryTemplate = buildCapturedQueryTemplate(step, actionType, fallbackQuery);
+    const signature = `${phase}:${actionType}:${queryTemplate}`;
+    if (seenSignatures.has(signature) && actionType !== 'synthesize') return;
+    seenSignatures.add(signature);
+
+    pattern.push({
+      phase,
+      agent: step.agent || detectAgent(phase, step.dimension),
+      actionType,
+      queryTemplate,
+      expectedOutput: inferBlueprintExpectedOutput(actionType, step),
+      minConfidence: step.confidence || step.progress?.confidence || MIN_PATTERN_CONFIDENCE,
+    });
+  });
+
+  if (!pattern.some(step => step.actionType === 'synthesize')) {
+    pattern.push({
+      phase: 'synthesis',
+      agent: 'synthesizer',
+      actionType: 'synthesize',
+      queryTemplate: 'synthesize {query}',
+      expectedOutput: BLUEPRINT_OUTPUT_HINTS.synthesize,
+      minConfidence: MIN_PATTERN_CONFIDENCE,
+    });
+  }
+
+  return pattern.slice(0, 12);
+}
+
+function summarizeCapturedState(capturedState) {
+  if (!capturedState) return null;
+  return {
+    sessionId: capturedState.sessionId || null,
+    projectId: capturedState.projectId || null,
+    capturedAt: capturedState.capturedAt || null,
+    sourceCount: capturedState.sources?.length || 0,
+    findingCount: capturedState.findings?.length || 0,
+    trailCount: capturedState.trails?.length || 0,
+    observationCount: capturedState.observations?.length || 0,
+    executionEventCount: capturedState.executionEvents?.length || 0,
+    contradictionCount: capturedState.contradictions?.length || 0,
+    graphNodeCount: capturedState.graph?.nodes?.length || 0,
+  };
 }
 
 // Find longest common subsequence of action patterns
@@ -569,9 +689,9 @@ export class BlueprintMiner {
           state.trails.push({
             id: m.id,
             query: metadata.query || m.content?.split('\n')[0],
-            steps: metadata.steps || [],
-            confidence: metadata.progress?.confidence,
-            status: metadata.status,
+            steps: metadata.steps || metadata.trail?.steps || [],
+            confidence: metadata.progress?.confidence || metadata.trail?.progress?.confidence,
+            status: metadata.status || metadata.trail?.status,
           });
         }
 
@@ -648,12 +768,20 @@ export class BlueprintMiner {
       const memoryId = randomUUID();
       const tags = ['kg/blueprint', 'research-blueprint'];
       if (blueprint.domain) tags.push(`domain:${blueprint.domain}`);
+      const derivedPattern = Array.isArray(blueprint.pattern) && blueprint.pattern.length > 0
+        ? blueprint.pattern
+        : derivePatternFromCapturedState(capturedState);
+      const capturedStatePayload = capturedState ? {
+        ...capturedState,
+        pattern: derivedPattern,
+      } : null;
+      const capturedStateSummary = summarizeCapturedState(capturedStatePayload);
 
       await this.memoryStore.createMemory({
         id: memoryId,
         user_id: userId,
         org_id: orgId,
-        content: JSON.stringify(blueprint.pattern, null, 2),
+        content: JSON.stringify(derivedPattern, null, 2),
         title: `Blueprint: ${blueprint.name}`,
         memory_type: 'lesson',
         tags,
@@ -667,29 +795,27 @@ export class BlueprintMiner {
           blueprint_success_rate: blueprint.successRate,
           blueprint_times_reused: blueprint.timesReused,
           blueprint_avg_confidence: blueprint.avgConfidence,
-          blueprint_pattern: blueprint.pattern,
+          blueprint_pattern: derivedPattern,
           blueprint_source_trails: blueprint.sourceTrailIds,
           blueprint_created_at: blueprint.createdAt,
           blueprint_updated_at: blueprint.updatedAt,
           blueprint_last_used_at: blueprint.lastUsedAt,
           // Captured research state for reusability
-          blueprint_has_captured_state: !!capturedState,
-          blueprint_captured_state: capturedState ? {
-            sessionId: capturedState.sessionId,
-            projectId: capturedState.projectId,
-            capturedAt: capturedState.capturedAt,
-            sourceCount: capturedState.sources?.length || 0,
-            findingCount: capturedState.findings?.length || 0,
-            trailCount: capturedState.trails?.length || 0,
-            observationCount: capturedState.observations?.length || 0,
-            graphNodeCount: capturedState.graph?.nodes?.length || 0,
-          } : null,
+          blueprint_has_captured_state: !!capturedStatePayload,
+          blueprint_captured_state: capturedStatePayload,
+          blueprint_captured_state_summary: capturedStateSummary,
         },
         created_at: blueprint.createdAt,
         updated_at: blueprint.updatedAt,
       });
 
-      return { ...blueprint, _memoryId: memoryId, capturedState };
+      return {
+        ...blueprint,
+        pattern: derivedPattern,
+        _memoryId: memoryId,
+        capturedState: capturedStatePayload,
+        capturedStateSummary,
+      };
     } catch (err) {
       console.error('[BlueprintMiner] Failed to save blueprint with state:', err.message);
       return null;
@@ -714,10 +840,21 @@ export class BlueprintMiner {
 
       const result = await this.prisma.memory.findMany({
         where,
+        include: {
+          sourceMetadata: true,
+          versions: {
+            orderBy: { createdAt: 'desc' },
+            take: 1,
+          },
+        },
         orderBy: { createdAt: 'desc' },
       });
 
-      return result.map(m => this._memoryToBlueprint(m));
+      const blueprints = [];
+      for (const record of result) {
+        blueprints.push(await this._hydrateBlueprintRecord(record, userId, orgId));
+      }
+      return blueprints;
     } catch (err) {
       console.error('[BlueprintMiner] Failed to get blueprints:', err.message);
       return [];
@@ -739,10 +876,17 @@ export class BlueprintMiner {
           },
           deletedAt: null,
         },
+        include: {
+          sourceMetadata: true,
+          versions: {
+            orderBy: { createdAt: 'desc' },
+            take: 1,
+          },
+        },
       });
 
       if (!result) return null;
-      return this._memoryToBlueprint(result);
+      return await this._hydrateBlueprintRecord(result, userId, orgId);
     } catch (err) {
       console.error('[BlueprintMiner] Failed to get blueprint:', err.message);
       return null;
@@ -785,6 +929,98 @@ export class BlueprintMiner {
       console.error('[BlueprintMiner] Failed to increment reuse count:', err.message);
       return null;
     }
+  }
+
+  async _hydrateBlueprintRecord(record, userId, orgId) {
+    if (!record) return null;
+
+    const blueprint = this._memoryToBlueprint(record);
+    const currentPattern = Array.isArray(blueprint.pattern) ? blueprint.pattern : [];
+    const currentCapturedState = blueprint.capturedState;
+    const currentSummary = blueprint.capturedStateSummary || summarizeCapturedState(currentCapturedState);
+
+    let replayCapturedState = currentCapturedState;
+    let replayPattern = currentPattern;
+
+    if ((replayPattern.length === 0 || !replayCapturedState) && (blueprint.sourceTrailIds?.length > 0 || currentSummary?.projectId)) {
+      const sourceSessionId = blueprint.sourceTrailIds?.[0] || currentSummary?.sessionId || record.id;
+      const projectId = currentSummary?.projectId || record.project;
+      if (sourceSessionId && projectId) {
+        const restoredState = await this.captureResearchState(sourceSessionId, userId, orgId, projectId);
+        if (restoredState) {
+          replayCapturedState = restoredState;
+          replayPattern = replayPattern.length > 0 ? replayPattern : derivePatternFromCapturedState(restoredState);
+        }
+      }
+    }
+
+    const replayCapturedStateSummary = summarizeCapturedState(replayCapturedState) || currentSummary;
+
+    if ((replayPattern.length > 0 && currentPattern.length === 0) || (replayCapturedState && !currentCapturedState)) {
+      try {
+        const metadata = {
+          ...(record.sourceMetadata?.metadata || {}),
+          blueprint_id: blueprint.blueprintId,
+          blueprint_name: blueprint.name,
+          blueprint_version: blueprint.version,
+          blueprint_domain: blueprint.domain,
+          blueprint_success_rate: blueprint.successRate,
+          blueprint_times_reused: blueprint.timesReused,
+          blueprint_avg_confidence: blueprint.avgConfidence,
+          blueprint_pattern: replayPattern,
+          blueprint_source_trails: blueprint.sourceTrailIds,
+          blueprint_created_at: blueprint.createdAt,
+          blueprint_updated_at: blueprint.updatedAt,
+          blueprint_last_used_at: blueprint.lastUsedAt,
+          blueprint_has_captured_state: !!replayCapturedState,
+          blueprint_captured_state: replayCapturedState,
+          blueprint_captured_state_summary: replayCapturedStateSummary,
+        };
+
+        await this.prisma.memory.update({
+          where: { id: record.id },
+          data: {
+            content: JSON.stringify(replayPattern, null, 2),
+            updatedAt: new Date(),
+          },
+        });
+
+        await this.prisma.sourceMetadata.upsert({
+          where: { memoryId: record.id },
+          update: {
+            sourceType: record.sourceMetadata?.sourceType || 'manual',
+            sourceId: record.sourceMetadata?.sourceId || null,
+            sourcePlatform: record.sourceMetadata?.sourcePlatform || null,
+            sourceUrl: record.sourceMetadata?.sourceUrl || null,
+            threadId: record.sourceMetadata?.threadId || null,
+            parentMessageId: record.sourceMetadata?.parentMessageId || null,
+            metadata,
+          },
+          create: {
+            id: record.sourceMetadata?.id || randomUUID(),
+            memoryId: record.id,
+            sourceType: record.sourceMetadata?.sourceType || 'manual',
+            sourceId: record.sourceMetadata?.sourceId || null,
+            sourcePlatform: record.sourceMetadata?.sourcePlatform || null,
+            sourceUrl: record.sourceMetadata?.sourceUrl || null,
+            threadId: record.sourceMetadata?.threadId || null,
+            parentMessageId: record.sourceMetadata?.parentMessageId || null,
+            metadata,
+            ingestedAt: record.createdAt || new Date(),
+          },
+        });
+      } catch (err) {
+        console.error('[BlueprintMiner] Failed to backfill blueprint replay state:', err.message);
+      }
+    }
+
+    return {
+      ...blueprint,
+      pattern: replayPattern,
+      capturedState: replayCapturedState,
+      capturedStateSummary: replayCapturedStateSummary,
+      replayReady: replayPattern.length > 0,
+    };
   }
 
   /**
@@ -893,6 +1129,8 @@ export class BlueprintMiner {
       createdAt: m.blueprint_created_at || memory.createdAt,
       updatedAt: m.blueprint_updated_at || memory.updatedAt,
       lastUsedAt: m.blueprint_last_used_at,
+      capturedState: m.blueprint_captured_state || null,
+      capturedStateSummary: m.blueprint_captured_state_summary || null,
       _memoryId: memory.id,
     };
   }

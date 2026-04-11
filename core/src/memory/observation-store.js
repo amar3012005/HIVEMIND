@@ -4,6 +4,8 @@
  * in the Observer-Reflector pipeline.
  */
 
+import { buildSemanticMetadata, inferMemorySemanticRole } from './relationship-semantics.js';
+
 const PRIORITY_EMOJI = {
   high: '🔴',
   medium: '🟡',
@@ -117,7 +119,36 @@ export function buildObservationPayload({
   referencedDate,
   project,
   sourceTags,
+  semanticRole,
+  relationship,
+  sourceIds = [],
+  claimIds = [],
+  findingIds = [],
+  observationIds = [],
+  sourceRefs = [],
+  claimRefs = [],
+  findingRefs = [],
+  observationRefs = [],
+  sourceMetadata = null,
 }) {
+  const semanticMetadata = buildSemanticMetadata({
+    semanticRole: semanticRole || inferMemorySemanticRole({
+      memory_type: 'fact',
+      tags: ['observation', ...(sourceTags || []).filter(t => t !== 'observation')],
+      source_metadata: sourceMetadata || { source_type: 'observation' }
+    }),
+    relationship,
+    sourceIds,
+    claimIds,
+    findingIds,
+    observationIds,
+    sourceRefs,
+    claimRefs,
+    findingRefs,
+    observationRefs,
+    sourceMetadata,
+  });
+
   return {
     memory_type: 'fact',  // Prisma enum doesn't have 'observation', use 'fact' + tag 'observation' to identify
     user_id: userId,
@@ -134,6 +165,7 @@ export function buildObservationPayload({
       observation_date: observationDate || null,
       referenced_date: referencedDate || null,
       pipeline: 'observer-reflector',
+      ...semanticMetadata,
     },
     project: project || null,
   };

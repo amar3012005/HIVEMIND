@@ -71,3 +71,22 @@ test('_parseOutput: handles missing lines gracefully', () => {
   assert.deepEqual(result.facts.entities, []);
   assert.deepEqual(result.facts.dates, []);
 });
+
+test('_parseOutput: parses DERIVE output with source ids', () => {
+  const processor = new MemoryProcessor({ groqApiKey: null });
+  const similarMemories = [{ id: 'src-a', content: 'source a' }, { id: 'src-b', content: 'source b' }];
+  const output = [
+    'DERIVE: src-a, src-b synthesis from multiple sources',
+    'MEDIUM',
+    '🟡 Synthesized claim.',
+    'ENTITIES: NONE',
+    'DATES: NONE',
+    'FACT_SENTENCES:',
+    '- Synthesized claim.',
+  ].join('\n');
+
+  const result = processor._parseOutput(output, similarMemories);
+
+  assert.equal(result.relationship.action, 'DERIVE');
+  assert.deepEqual(result.relationship.sourceIds, ['src-a', 'src-b']);
+});

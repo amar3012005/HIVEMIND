@@ -3617,6 +3617,9 @@ a{color:#a78bfa}</style></head><body>
                 if ((m.tags || []).includes('research-observation')) {
                   pushEdge(`obs-${m.id}`, `source-${sourceId}`, 'observed_from', metadata.confidence || m.importance_score);
                 }
+                if ((m.tags || []).includes('research-trail')) {
+                  pushEdge(`trail-${m.id}`, `source-${sourceId}`, 'explored', 0.7);
+                }
                 if (csiStage) {
                   pushEdge(`csi-${m.id}`, `source-${sourceId}`, csiStage === 'faraday' ? 'found_source' : edgeTypeForCsiStage(csiStage, verdict), metadata.confidence || m.importance_score);
                 }
@@ -3624,6 +3627,9 @@ a{color:#a78bfa}</style></head><body>
               claimIds.forEach((claimId) => {
                 if ((m.tags || []).includes('research-observation')) {
                   pushEdge(`obs-${m.id}`, `claim-${claimId}`, 'about_claim', metadata.confidence || m.importance_score);
+                }
+                if ((m.tags || []).includes('research-trail')) {
+                  pushEdge(`trail-${m.id}`, `claim-${claimId}`, 'discovered', 0.8);
                 }
                 if ((m.tags || []).includes('research-execution-event')) {
                   pushEdge(`exec-${m.id}`, `claim-${claimId}`, edgeTypeForCsiStage(csiStage, verdict), metadata.confidence || metadata.output?.confidence || m.importance_score);
@@ -3636,6 +3642,9 @@ a{color:#a78bfa}</style></head><body>
                 if ((m.tags || []).includes('research-execution-event')) {
                   pushEdge(`exec-${m.id}`, `obs-${observationId}`, csiStage === 'turing' ? 'verifies' : 'analyzes', metadata.confidence || metadata.output?.confidence || m.importance_score);
                 }
+                if ((m.tags || []).includes('research-trail')) {
+                  pushEdge(`trail-${m.id}`, `obs-${observationId}`, 'found', 0.75);
+                }
                 if (csiStage) {
                   pushEdge(`csi-${m.id}`, `obs-${observationId}`, csiStage === 'turing' ? 'verifies' : 'analyzes', metadata.confidence || metadata.output?.confidence || m.importance_score);
                 }
@@ -3644,6 +3653,16 @@ a{color:#a78bfa}</style></head><body>
               // Link trails to blueprints if used
               if (metadata.blueprintUsed) {
                 pushEdge(`trail-${m.id}`, `blueprint-${metadata.blueprintUsed}`, 'used_blueprint', 0.9);
+              }
+
+              // Link blueprints to related entities (sources, claims, observations)
+              if ((m.tags || []).includes('blueprint')) {
+                sourceIds.forEach((sourceId) => {
+                  pushEdge(`blueprint-${m.blueprintId}`, `source-${sourceId}`, 'targets', 0.6);
+                });
+                claimIds.forEach((claimId) => {
+                  pushEdge(`blueprint-${m.blueprintId}`, `claim-${claimId}`, 'validates', 0.7);
+                });
               }
             });
 

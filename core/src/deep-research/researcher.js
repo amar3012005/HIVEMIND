@@ -472,6 +472,10 @@ export class DeepResearcher {
         blueprintUsed,
       });
       await trailStore.finalizeTrail(sessionId, report, reportProvenance);
+      // Promote high-confidence claims to kg layer for future run compounding
+      await this._promoteClaimsToKg(priorFindings, userId, orgId, projectId, sessionId).catch(err => {
+        console.error('[DeepResearcher] Claim promotion failed:', err.message);
+      });
       return {
         sessionId,
         projectId,
@@ -720,6 +724,10 @@ export class DeepResearcher {
 
     // Step 5: Finalize trail in CSI via trailStore
     await trailStore.finalizeTrail(sessionId, report, reportProvenance);
+    // Promote high-confidence claims to kg layer for future run compounding
+    await this._promoteClaimsToKg(allFindings, userId, orgId, projectId, sessionId).catch(err => {
+      console.error('[DeepResearcher] Claim promotion failed:', err.message);
+    });
 
     // Step 6: Trigger blueprint mining (non-blocking, after research completes)
     if (this.autoMineBlueprints) {
@@ -1479,14 +1487,36 @@ export class DeepResearcher {
     const webFindings = findings.filter(f => f.type === 'web' || f.type === 'follow_up');
     if (webFindings.length === 0) return { claims: [] };
 
+    // Recall promoted claims from prior sessions — feed established knowledge to Feynman
+    let priorKnowledgeSection = '';
+    try {
+      const priorMemories = await this.recallFn(this.memoryStore, {
+        query_context: query,
+        user_id: userId,
+        org_id: orgId,
+        project: projectId,
+        tags: ['promoted-claim', 'deep-research'],
+        max_memories: 6,
+      });
+      const priorClaims = (priorMemories?.memories || [])
+        .filter(m => (m.score || 0) > 0.5)
+        .slice(0, 6);
+      if (priorClaims.length > 0) {
+        priorKnowledgeSection = `\n\nPrior established knowledge (from previous research — use as foundation, not repetition):\n${
+          priorClaims.map((m, i) => `[P${i}] ${m.title}: ${m.content?.slice(0, 300) || ''}`).join('\n')
+        }\n`;
+      }
+    } catch {
+      // Non-fatal — proceed without prior knowledge
+    }
+
     // Build source content with indices for attribution
     const sourcesWithContext = webFindings.map((f, i) => `[${i}] ${f.title}: ${f.content?.slice(0, 800) || ''}`).join('\n\n');
 
     const response = await this._llm(`You are the FEYNMANN agent. Extract key claims from these sources with structured format and source attribution.
 
 Research question: "${query}"
-
-Sources (with indices):
+${priorKnowledgeSection}Sources (with indices):
 ${sourcesWithContext}
 
 First, provide your reasoning:
@@ -1806,7 +1836,11 @@ Rules:
   async _actSynthesize(query, findings) {
     if (findings.length === 0) return { type: 'synthesis', content: null };
 
-    const material = findings.slice(0, 10).map(f => f.content?.slice(0, 300) || '').join('\n---\n');
+    const material = [...findings]
+      .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))
+      .slice(0, 10)
+      .map(f => f.content?.slice(0, 300) || '')
+      .join('\n---\n');
     const synthesis = await this._llm(
       `Synthesize these research findings into a concise summary answering: "${query}"\n\nFindings:\n${material}\n\nWrite a clear, factual summary:`,
       { temperature: 0.4, worker: 'synthesis' }
@@ -2703,6 +2737,62 @@ Rules:
       console.log(`[DeepResearcher] Checkpoint saved: wave=${waveNum}, findings=${findings.length}, confidence=${(progress.confidence * 100).toFixed(0)}%`);
     } catch (err) {
       console.error('[DeepResearcher] Checkpoint save failed:', err.message);
+    }
+  }
+
+  /**
+   * Promote high-confidence claims from op layer to kg layer.
+   * These become the promoted-claim memories that future runs recall via _checkPriorResearch().
+   * This closes the compounding loop: op → kg → future op.
+   */
+  async _promoteClaimsToKg(findings, userId, orgId, projectId, sessionId) {
+    const highConfidence = (findings || []).filter(f =>
+      (f.confidence || 0) >= 0.8 &&
+      (f.type === 'claim' || f.type === 'structured-claim' || f.type === 'web' || f.type === 'memory') &&
+      f.content?.length > 20
+    );
+
+    if (highConfidence.length === 0) return;
+
+    const { randomUUID } = await import('node:crypto');
+    const promoted = [];
+
+    for (const finding of highConfidence.slice(0, 20)) { // cap at 20 per session
+      try {
+        const id = randomUUID();
+        await this.memoryStore.createMemory({
+          id,
+          user_id: userId,
+          org_id: orgId,
+          project: projectId,
+          content: finding.content.slice(0, 800),
+          title: finding.title || `Promoted: ${finding.content.slice(0, 60)}`,
+          memory_type: 'fact',
+          tags: ['promoted-claim', 'deep-research', `session:${sessionId}`],
+          is_latest: true,
+          importance_score: Math.min(1, (finding.confidence || 0.8) + 0.05),
+          metadata: {
+            originalFindingId: finding.id,
+            confidence: finding.confidence,
+            sourceIds: finding.sourceIds || [],
+            agent: finding.agent || 'unknown',
+            promotedAt: new Date().toISOString(),
+            sessionId,
+            projectId,
+            structured: finding.structured || null,
+          },
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        });
+        promoted.push(id);
+      } catch (err) {
+        console.error('[DeepResearcher] Failed to promote claim:', err.message);
+      }
+    }
+
+    if (promoted.length > 0) {
+      console.log(`[DeepResearcher] Promoted ${promoted.length} claims to kg layer for session:`, sessionId);
+      this._emit('research.claims_promoted', { sessionId, count: promoted.length, projectId });
     }
   }
 

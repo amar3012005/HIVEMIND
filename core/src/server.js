@@ -4101,6 +4101,41 @@ a{color:#a78bfa}</style></head><body>
               }
             });
 
+            // Cross-claim edges: link new claims to promoted claims they derive from or update
+            // Build index of promoted claims by content fingerprint for fast matching
+            const promotedClaims = (filteredMemories || []).filter(m =>
+              (m.tags || []).includes('promoted-claim')
+            );
+            const newClaims = (filteredMemories || []).filter(m =>
+              (m.tags || []).includes('research-finding') && !(m.tags || []).includes('promoted-claim')
+            );
+
+            if (promotedClaims.length > 0 && newClaims.length > 0) {
+              for (const newClaim of newClaims) {
+                const newWords = new Set(
+                  (newClaim.content || '').toLowerCase().split(/\W+/).filter(w => w.length > 4)
+                );
+                for (const promoted of promotedClaims) {
+                  const promotedWords = new Set(
+                    (promoted.content || '').toLowerCase().split(/\W+/).filter(w => w.length > 4)
+                  );
+                  // Count shared significant words
+                  let shared = 0;
+                  for (const word of newWords) {
+                    if (promotedWords.has(word)) shared++;
+                  }
+                  const union = new Set([...newWords, ...promotedWords]).size;
+                  const jaccard = union > 0 ? shared / union : 0;
+
+                  if (jaccard >= 0.25) {
+                    // High overlap → this new claim likely UPDATES the promoted one
+                    const edgeType = jaccard >= 0.5 ? 'updates' : 'derives_from';
+                    pushEdge(`claim-${newClaim.id}`, `claim-${promoted.id}`, edgeType, Math.min(0.95, jaccard + 0.3));
+                  }
+                }
+              }
+            }
+
             return jsonResponse(res, {
               sessionId,
               projectId,

@@ -178,6 +178,7 @@ export class DeepResearcher {
       this._emit('research.wave_started', { sessionId, wave: waveNum, taskCount: waveTasks.length });
 
       for (const task of waveTasks) {
+        task.wave = waveNum;
         this._emit('task.started', {
           sessionId, taskId: task.id, query: task.query,
           depth: task.depth, dimension: task.dimension, wave: waveNum,
@@ -191,7 +192,12 @@ export class DeepResearcher {
             const result = await this._executeTask(task, userId, orgId, projectId, sessionId, trailStore);
             stack.complete(task.id, { findings: result.findings, confidence: result.confidence, gaps: result.gaps });
             for (const finding of result.findings) {
-              await this._saveFindingToCSI(finding, userId, orgId, projectId);
+              await this._saveFindingToCSI(finding, userId, orgId, projectId, {
+                sessionId,
+                taskId: task.id,
+                wave: task.wave ?? waveNum,
+                dimension: task.dimension,
+              });
             }
             this._emit('task.completed', {
               sessionId, taskId: task.id, findingCount: result.findings.length,
@@ -226,13 +232,21 @@ export class DeepResearcher {
           this._emit('research.skipping_waves', { sessionId, reason: depthDecision.reason });
           const gapTasks = waves[3] || [];
           for (const gapTask of gapTasks) {
+            gapTask.wave = 3;
             this._emit('task.started', { sessionId, taskId: gapTask.id, query: gapTask.query, dimension: gapTask.dimension, progress: stack.getProgress() });
             try {
               const result = await this._executeTask(gapTask, userId, orgId, projectId, sessionId, trailStore);
               stack.complete(gapTask.id, { findings: result.findings, confidence: result.confidence, gaps: result.gaps });
               allFindings.push(...result.findings);
               allSources.push(...(result.sources || []));
-              for (const finding of result.findings) await this._saveFindingToCSI(finding, userId, orgId, projectId);
+              for (const finding of result.findings) {
+                await this._saveFindingToCSI(finding, userId, orgId, projectId, {
+                  sessionId,
+                  taskId: gapTask.id,
+                  wave: gapTask.wave ?? 3,
+                  dimension: gapTask.dimension,
+                });
+              }
               this._emit('task.completed', { sessionId, taskId: gapTask.id, findingCount: result.findings.length, confidence: result.confidence, progress: stack.getProgress() });
             } catch (err) {
               stack.fail(gapTask.id, err.message);
@@ -248,13 +262,21 @@ export class DeepResearcher {
     while (true) {
       const task = stack.next();
       if (!task) break;
+      task.wave = task.wave ?? null;
       this._emit('task.started', { sessionId, taskId: task.id, query: task.query, depth: task.depth, dimension: task.dimension, progress: stack.getProgress() });
       try {
         const result = await this._executeTask(task, userId, orgId, projectId, sessionId, trailStore);
         stack.complete(task.id, { findings: result.findings, confidence: result.confidence, gaps: result.gaps });
         allFindings.push(...result.findings);
         allSources.push(...(result.sources || []));
-        for (const finding of result.findings) await this._saveFindingToCSI(finding, userId, orgId, projectId);
+        for (const finding of result.findings) {
+          await this._saveFindingToCSI(finding, userId, orgId, projectId, {
+            sessionId,
+            taskId: task.id,
+            wave: task.wave,
+            dimension: task.dimension,
+          });
+        }
         this._emit('task.completed', { sessionId, taskId: task.id, findingCount: result.findings.length, confidence: result.confidence, progress: stack.getProgress() });
       } catch (err) {
         stack.fail(task.id, err.message);
@@ -279,13 +301,19 @@ export class DeepResearcher {
       while (true) {
         const task = stack.next();
         if (!task) break;
+        task.wave = task.wave ?? null;
         try {
           const result = await this._executeTask(task, userId, orgId, projectId, sessionId, trailStore);
           stack.complete(task.id, result);
           allFindings.push(...result.findings);
           allSources.push(...result.sources);
           for (const finding of result.findings) {
-            await this._saveFindingToCSI(finding, userId, orgId, projectId);
+            await this._saveFindingToCSI(finding, userId, orgId, projectId, {
+              sessionId,
+              taskId: task.id,
+              wave: task.wave,
+              dimension: task.dimension,
+            });
           }
           this._emit('task.completed', { sessionId, taskId: task.id, ...result, progress: stack.getProgress() });
         } catch (err) {
@@ -342,6 +370,13 @@ export class DeepResearcher {
     const maxSteps = 8;
     let step = 0;
     let stepIndex = 0;
+    const attachTaskContext = (finding, extra = {}) => ({
+      ...finding,
+      taskId: task.id,
+      wave: task.wave ?? null,
+      dimension: task.dimension || null,
+      ...extra,
+    });
 
     // Track agent states for real-time visibility
     const agentStates = { explorer: 'idle', analyst: 'idle', verifier: 'idle', synthesizer: 'idle' };
@@ -355,7 +390,7 @@ export class DeepResearcher {
     let maxExplorationSteps = 3;
     const memoryResult = await this._actSearchMemory(task.query, userId, orgId, projectId);
     if (memoryResult?.content && (memoryResult.confidence || 0.5) > 0.80) {
-      const finding = {
+      const finding = attachTaskContext({
         id: randomUUID(),
         type: 'memory',
         title: memoryResult.title || `Memory: ${task.query.slice(0, 50)}`,
@@ -365,7 +400,7 @@ export class DeepResearcher {
         confidence: memoryResult.confidence || 0.8,
         taskQuery: task.query,
         agent: 'explorer',
-      };
+      });
       findings.push(finding);
       await this._recordFinding(trailStore, sessionId, stepIndex++, 'explorer', 'SEARCH_MEMORY', finding, projectId, {
         thought: 'Found high-confidence memory match — using as foundation, reducing web exploration',
@@ -398,7 +433,18 @@ export class DeepResearcher {
         }
 
         if (result?.content) {
-          const finding = { id: randomUUID(), type: result.type || 'web', title: result.title || reasoning.query, content: result.content, source: result.source || 'web', sourceId: result.sourceId, confidence: result.confidence || 0.6, taskQuery: task.query, agent: 'explorer' };
+          const finding = attachTaskContext({
+            id: randomUUID(),
+            type: result.type || 'web',
+            title: result.title || reasoning.query,
+            content: result.content,
+            source: result.source || 'web',
+            sourceId: result.sourceId,
+            sourceIds: result.sourceIds || [],
+            confidence: result.confidence || 0.6,
+            taskQuery: task.query,
+            agent: 'explorer',
+          });
           findings.push(finding);
           sources.push({ type: result.type, id: result.sourceId, title: result.title });
           await this._recordFinding(trailStore, sessionId, stepIndex++, 'explorer', reasoning.action, finding, projectId, {
@@ -407,7 +453,14 @@ export class DeepResearcher {
           });
 
           // Write execution event for real-time graph
-          await this._writeExecutionEvent(sessionId, projectId, trailStore, 'explorer', 'search_web', { findingsCount: findings.length, source: result.type });
+          await this._writeExecutionEvent(sessionId, projectId, trailStore, 'explorer', 'search_web', {
+            findingsCount: findings.length,
+            source: result.type,
+            sourceIds: result.sourceIds || [],
+            taskId: task.id,
+            wave: task.wave ?? null,
+            phase: 'explore',
+          });
         }
         updateAgentState('explorer', findings.length > 0 ? 'completed' : 'idle');
         continue;
@@ -420,14 +473,17 @@ export class DeepResearcher {
         if (analysis?.claims?.length > 0) {
           // Build mapping from analysis sourceIndices back to actual sourceIds from webFindings
           const webFindings = findings.filter(f => f.type === 'web' || f.type === 'follow_up');
+          const extractedClaimIds = [];
 
           for (const structuredClaim of analysis.claims) {
             // Map sourceIndices to actual sourceIds
-            const sourceIds = (structuredClaim.sourceIndices || [])
-              .map(i => webFindings[i]?.sourceId || webFindings[i]?.id)
-              .filter(Boolean);
+            const sourceIds = [...new Set(
+              (structuredClaim.sourceIndices || [])
+                .flatMap(i => webFindings[i]?.sourceIds?.length ? webFindings[i].sourceIds : [webFindings[i]?.sourceId || webFindings[i]?.id])
+                .filter(Boolean)
+            )];
 
-            const finding = {
+            const finding = attachTaskContext({
               id: randomUUID(),
               type: structuredClaim.isLegacy ? 'claim' : 'structured-claim',
               title: `Claim: ${(structuredClaim.claim || structuredClaim).slice(0, 80)}`,
@@ -436,6 +492,7 @@ export class DeepResearcher {
               confidence: structuredClaim.confidence || 0.75,
               taskQuery: task.query,
               agent: 'analyst',
+              sourceIds,
               // Store structured data in metadata for CSI persistence
               structured: structuredClaim.isLegacy ? null : {
                 subject: structuredClaim.subject,
@@ -445,24 +502,46 @@ export class DeepResearcher {
                 sourceIds,
                 evidenceSnippets: structuredClaim.evidenceSnippets,
               },
-            };
+            });
             findings.push(finding);
+            extractedClaimIds.push(finding.id);
             await this._recordFinding(trailStore, sessionId, stepIndex++, 'analyst', 'EXTRACT_CLAIM', finding, projectId, {
               thought: structuredClaim.extractionThought || `Extracting structured claims from gathered sources`,
               why: 'Sources have been gathered and now need to be distilled into key claims',
             });
           }
-          await this._writeExecutionEvent(sessionId, projectId, trailStore, 'analyst', 'extract_claims', { claimsCount: analysis.claims.length });
+          await this._writeExecutionEvent(sessionId, projectId, trailStore, 'analyst', 'extract_claims', {
+            claimsCount: analysis.claims.length,
+            claimIds: extractedClaimIds,
+            taskId: task.id,
+            wave: task.wave ?? null,
+            phase: 'analysis',
+          });
         }
         const memoryFindings = await this._actSearchMemory(task.query, userId, orgId, projectId);
         if (memoryFindings?.content) {
-          const finding = { id: randomUUID(), type: 'memory', title: memoryFindings.title, content: memoryFindings.content, source: 'hivemind_memory', sourceId: memoryFindings.sourceId, confidence: memoryFindings.confidence || 0.6, taskQuery: task.query, agent: 'analyst' };
+          const finding = attachTaskContext({
+            id: randomUUID(),
+            type: 'memory',
+            title: memoryFindings.title,
+            content: memoryFindings.content,
+            source: 'hivemind_memory',
+            sourceId: memoryFindings.sourceId,
+            confidence: memoryFindings.confidence || 0.6,
+            taskQuery: task.query,
+            agent: 'analyst',
+          });
           findings.push(finding);
           await this._recordFinding(trailStore, sessionId, stepIndex++, 'analyst', 'SEARCH_MEMORY', finding, projectId, {
             thought: `Checking existing memory for relevant context`,
             why: 'Prior research in memory may provide additional context or validation',
           });
-          await this._writeExecutionEvent(sessionId, projectId, trailStore, 'analyst', 'search_memory', { hasMemoryContent: true });
+          await this._writeExecutionEvent(sessionId, projectId, trailStore, 'analyst', 'search_memory', {
+            hasMemoryContent: true,
+            taskId: task.id,
+            wave: task.wave ?? null,
+            phase: 'analysis',
+          });
         }
         updateAgentState('analyst', 'completed');
         this._emit('task.observation', { taskId: task.id, step, agent: 'analyst', type: 'analysis_complete', title: `Extracted ${analysis?.claims?.length || 0} claims` });
@@ -473,6 +552,13 @@ export class DeepResearcher {
       if (step === 5 && findings.length > 0) {
         updateAgentState('verifier', 'active', 'Verifying findings');
         const verification = await this._actVerify(task.query, findings, trailStore, sessionId);
+        const verifiedClaimIds = [...new Set([...(verification.verified || []), ...(verification.rejected || [])].map(f => f?.id).filter(Boolean))];
+        const verifierVerdict =
+          (verification.contradictions?.length || 0) > 0
+            ? 'disputed'
+            : (verification.verified?.length || 0) > 0
+              ? 'verified'
+              : 'uncertain';
         await trailStore?.recordStep(sessionId, {
           stepIndex: stepIndex++,
           agent: 'verifier',
@@ -484,7 +570,19 @@ export class DeepResearcher {
           thought: `Checking claims for quality and contradictions`,
           why: 'Claims need verification to ensure reliability before synthesis',
         });
-        await this._writeExecutionEvent(sessionId, projectId, trailStore, 'verifier', 'verify_findings', { verified: verification.verified?.length || 0, rejected: verification.rejected?.length || 0, contradictions: verification.contradictions?.length || 0 });
+        await this._writeExecutionEvent(sessionId, projectId, trailStore, 'verifier', 'verify_findings', {
+          verified: verification.verified?.length || 0,
+          rejected: verification.rejected?.length || 0,
+          contradictions: verification.contradictions?.length || 0,
+          claimIds: verifiedClaimIds,
+          confidence: verification.overallConfidence || 0.7,
+          csiStage: 'turing',
+          verdict: verifierVerdict,
+          summary: `Verified ${verification.verified?.length || 0}, rejected ${verification.rejected?.length || 0}, contradictions ${verification.contradictions?.length || 0}`,
+          taskId: task.id,
+          wave: task.wave ?? null,
+          phase: 'verification',
+        });
         if (verification.contradictions?.length > 0) {
           this._emit('verifier.contradiction', { taskId: task.id, count: verification.contradictions.length, details: verification.contradictions });
           let resolved = 0;
@@ -514,13 +612,28 @@ export class DeepResearcher {
         updateAgentState('synthesizer', 'active', 'Synthesizing answer');
         const synthesis = await this._actSynthesize(task.query, findings);
         if (synthesis?.content) {
-          const finding = { id: randomUUID(), type: 'synthesis', title: `Synthesis: ${task.query.slice(0, 50)}`, content: synthesis.content, source: 'synthesizer', confidence: synthesis.confidence || 0.8, taskQuery: task.query, agent: 'synthesizer' };
+          const finding = attachTaskContext({
+            id: randomUUID(),
+            type: 'synthesis',
+            title: `Synthesis: ${task.query.slice(0, 50)}`,
+            content: synthesis.content,
+            source: 'synthesizer',
+            confidence: synthesis.confidence || 0.8,
+            taskQuery: task.query,
+            agent: 'synthesizer',
+          });
           findings.push(finding);
           await this._recordFinding(trailStore, sessionId, stepIndex++, 'synthesizer', 'SYNTHESIZE', finding, projectId, {
             thought: `Combining all gathered findings into a cohesive answer`,
             why: 'All sources and claims have been gathered and verified - now need to produce final synthesis',
           });
-          await this._writeExecutionEvent(sessionId, projectId, trailStore, 'synthesizer', 'synthesize', { synthesisLength: synthesis.content?.length || 0, confidence: synthesis.confidence });
+          await this._writeExecutionEvent(sessionId, projectId, trailStore, 'synthesizer', 'synthesize', {
+            synthesisLength: synthesis.content?.length || 0,
+            confidence: synthesis.confidence,
+            taskId: task.id,
+            wave: task.wave ?? null,
+            phase: 'synthesis',
+          });
         }
         updateAgentState('synthesizer', 'completed');
         this._emit('task.observation', { taskId: task.id, step, agent: 'synthesizer', type: 'synthesis_complete', title: 'Synthesis complete' });
@@ -573,6 +686,34 @@ export class DeepResearcher {
     // This ensures graph has data during research, not just after completion
     try {
       const observationId = randomUUID();
+      const createdAt = new Date().toISOString();
+      const sourceIds = this._collectSourceIds(finding);
+      const claimIds = this._collectClaimIds(finding);
+      const csiStage = this._inferCsiStage(agent, action, finding);
+      const metadata = {
+        observationType: 'op/research-observation',
+        sessionId,
+        stepIndex,
+        agent,
+        action,
+        findingType: finding.type || 'web',
+        source: finding.source,
+        sourceId: finding.sourceId,
+        sourceIds,
+        claimIds,
+        taskQuery: finding.taskQuery,
+        taskId: finding.taskId || null,
+        wave: finding.wave ?? null,
+        dimension: finding.dimension || null,
+        confidence: finding.confidence || 0.7,
+        createdAt,
+      };
+      if (csiStage) {
+        metadata.csiStage = csiStage;
+        metadata.csiNodeType = csiStage === 'faraday' ? 'csi-observation' : 'csi-hypothesis';
+        metadata.csiTitle = `${agent}/${action}: ${finding.title?.slice(0, 80) || 'Observation'}`;
+        metadata.summary = finding.content?.slice(0, 280) || '';
+      }
       await this.memoryStore.createMemory({
         id: observationId,
         user_id: trailStore.userId,
@@ -584,21 +725,23 @@ export class DeepResearcher {
         tags: ['research-observation', `agent:${agent}`, `action:${action.toLowerCase()}`, `session:${sessionId}`],
         is_latest: true,
         importance_score: finding.confidence || 0.7,
-        metadata: {
-          observationType: 'op/research-observation',
-          sessionId,
-          stepIndex,
-          agent,
-          action,
-          findingType: finding.type || 'web',
-          source: finding.source,
-          sourceId: finding.sourceId,
-          taskQuery: finding.taskQuery,
-        },
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
+        metadata,
+        created_at: createdAt,
+        updated_at: createdAt,
       });
       console.log('[DeepResearcher] Saved observation to CSI:', observationId.slice(0, 20), 'agent:', agent, 'action:', action);
+      this._emitObservationGraphEvents({
+        sessionId,
+        observationId,
+        createdAt,
+        stepIndex,
+        agent,
+        action,
+        finding,
+        sourceIds,
+        claimIds,
+        csiStage,
+      });
     } catch (err) {
       console.error('[DeepResearcher] Failed to save observation:', err.message);
     }
@@ -611,6 +754,35 @@ export class DeepResearcher {
   async _writeExecutionEvent(sessionId, projectId, trailStore, agent, action, output) {
     try {
       const eventId = randomUUID();
+      const createdAt = new Date().toISOString();
+      const stage = output.csiStage || this._inferExecutionStage(agent, action);
+      const claimIds = this._normalizeArray(output.claimIds);
+      const sourceIds = this._normalizeArray(output.sourceIds);
+      const observationIds = this._normalizeArray(output.observationIds);
+      const metadata = {
+        executionEventType: 'op/research-execution-event',
+        sessionId,
+        agent,
+        action,
+        output,
+        latency: output.latency || null,
+        success: output.success !== false,
+        taskId: output.taskId || null,
+        wave: output.wave ?? null,
+        phase: output.phase || null,
+        claimIds,
+        sourceIds,
+        observationIds,
+        confidence: output.confidence ?? null,
+        createdAt,
+      };
+      if (stage) {
+        metadata.csiStage = stage;
+        metadata.csiNodeType = stage === 'turing' ? 'csi-verdict' : stage === 'feynman' ? 'csi-hypothesis' : 'csi-observation';
+      }
+      if (output.verdict) metadata.verdict = output.verdict;
+      if (output.summary) metadata.summary = output.summary;
+      if (output.csiTitle) metadata.csiTitle = output.csiTitle;
       await this.memoryStore.createMemory({
         id: eventId,
         user_id: trailStore.userId,
@@ -622,17 +794,21 @@ export class DeepResearcher {
         tags: ['research-execution-event', `agent:${agent}`, `action:${action}`, `session:${sessionId}`],
         is_latest: true,
         importance_score: 0.5,
-        metadata: {
-          executionEventType: 'op/research-execution-event',
-          sessionId,
-          agent,
-          action,
-          output,
-          latency: output.latency || null,
-          success: output.success !== false,
-        },
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
+        metadata,
+        created_at: createdAt,
+        updated_at: createdAt,
+      });
+      this._emitExecutionGraphEvents({
+        sessionId,
+        eventId,
+        createdAt,
+        agent,
+        action,
+        output,
+        stage,
+        claimIds,
+        sourceIds,
+        observationIds,
       });
     } catch (err) {
       // Non-critical: execution events are nice-to-have for graph visualization
@@ -945,7 +1121,8 @@ Rules:
       title: `Web: ${query.slice(0, 50)}`,
       content: combined,
       source: results[0]?.url || 'web',
-      sourceId: results[0]?.url,
+      sourceId: savedSources[0]?.id || results[0]?.url,
+      sourceIds: savedSources.map(source => source.id).filter(Boolean),
       confidence: 0.7,
       _urls: results.map(r => r.url).filter(Boolean),
       _savedSources: savedSources,  // Track saved source IDs
@@ -969,7 +1146,8 @@ Rules:
       title: `Deep read: ${url}`,
       content: content.slice(0, 3000),
       source: url,
-      sourceId: url,
+      sourceId: savedSources[0]?.id || url,
+      sourceIds: savedSources.map(source => source.id).filter(Boolean),
       confidence: 0.75,
       _savedSources: savedSources,
     };
@@ -1234,8 +1412,24 @@ Rules:
     return report;
   }
 
-  async _saveFindingToCSI(finding, userId, orgId, projectId) {
+  async _saveFindingToCSI(finding, userId, orgId, projectId, context = {}) {
     try {
+      const createdAt = new Date().toISOString();
+      const sourceIds = this._collectSourceIds(finding);
+      const metadata = {
+        research_type: finding.type,
+        source_url: finding.source,
+        source_id: finding.sourceId,
+        sourceIds,
+        confidence: finding.confidence,
+        structured: finding.structured || null,
+        taskId: context.taskId || finding.taskId || null,
+        sessionId: context.sessionId || finding.sessionId || null,
+        wave: context.wave ?? finding.wave ?? null,
+        dimension: context.dimension || finding.dimension || null,
+        agent: finding.agent || null,
+        createdAt,
+      };
       await this.memoryStore.createMemory({
         id: finding.id,
         user_id: userId,
@@ -1247,16 +1441,41 @@ Rules:
         tags: ['research-finding', `source:${finding.type}`, `query:${finding.taskQuery?.slice(0, 50) || 'unknown'}`],
         is_latest: true,
         importance_score: finding.confidence || 0.7,
-        metadata: {
-          research_type: finding.type,
-          source_url: finding.source,
-          source_id: finding.sourceId,
-          confidence: finding.confidence,
-        },
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
+        metadata,
+        created_at: createdAt,
+        updated_at: createdAt,
       });
       console.log('[DeepResearcher] Saved finding to CSI:', finding.title?.slice(0, 50), 'project:', projectId);
+      this._emit('graph.node_upsert', {
+        sessionId: context.sessionId || finding.sessionId || null,
+        layer: 'claims',
+        nodeId: finding.id,
+        node: {
+          id: finding.id,
+          content: `${finding.title}\n\n${finding.content}`.slice(0, 500),
+          confidence: finding.confidence,
+          source: finding.source,
+          sourceIds,
+          taskId: metadata.taskId,
+          wave: metadata.wave,
+          dimension: metadata.dimension,
+          agent: finding.agent || null,
+          createdAt,
+          type: finding.structured ? 'structured-claim' : 'plain-claim',
+          structured: finding.structured || null,
+        },
+      });
+      sourceIds.forEach((sourceId) => {
+        this._emit('graph.edge_upsert', {
+          sessionId: context.sessionId || finding.sessionId || null,
+          edge: {
+            from: `claim-${finding.id}`,
+            to: `source-${sourceId}`,
+            type: 'derived_from',
+            confidence: finding.confidence || 0.7,
+          },
+        });
+      });
     } catch (err) {
       console.error('[DeepResearcher] Failed to save finding:', err.message, 'finding:', finding.title?.slice(0, 50));
     }
@@ -1281,6 +1500,7 @@ Rules:
 
       const sourceId = randomUUID();
       try {
+        const createdAt = new Date().toISOString();
         await this.memoryStore.createMemory({
           id: sourceId,
           user_id: userId,
@@ -1297,13 +1517,26 @@ Rules:
             url: src.url,
             snippet: src.snippet,
             research_source: 'tavily',
-            saved_at: new Date().toISOString(),
+            saved_at: createdAt,
           },
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
+          created_at: createdAt,
+          updated_at: createdAt,
         });
         savedSources.push({ id: sourceId, url: src.url, title: src.title });
         console.log('[DeepResearcher] Saved web source to CSI:', src.title?.slice(0, 50), 'url:', src.url?.slice(0, 80));
+        this._emit('graph.node_upsert', {
+          sessionId,
+          layer: 'sources',
+          nodeId: sourceId,
+          node: {
+            id: sourceId,
+            title: src.title || src.url,
+            url: src.url,
+            runtime: 'tavily',
+            score: 0.8,
+            createdAt,
+          },
+        });
 
         // Record to trail
         if (trailStore) {
@@ -1400,6 +1633,255 @@ Rules:
     }
 
     return { continue: true, reason: 'normal' };
+  }
+
+  _normalizeArray(value) {
+    if (Array.isArray(value)) return value.filter(Boolean);
+    if (value === undefined || value === null || value === '') return [];
+    return [value];
+  }
+
+  _collectSourceIds(finding = {}) {
+    const directSourceIds =
+      finding.type === 'web' || finding.type === 'follow_up' || String(finding.source || '').startsWith('http')
+        ? this._normalizeArray(finding.sourceId)
+        : [];
+    return [...new Set(
+      [
+        ...this._normalizeArray(finding.sourceIds),
+        ...this._normalizeArray(finding.structured?.sourceIds),
+        ...this._normalizeArray(finding._savedSources?.map(source => source?.id)),
+        ...directSourceIds,
+      ].filter(Boolean)
+    )];
+  }
+
+  _collectClaimIds(finding = {}) {
+    if (finding.type === 'claim' || finding.type === 'structured-claim') {
+      return finding.id ? [finding.id] : [];
+    }
+    return this._normalizeArray(finding.claimIds);
+  }
+
+  _inferCsiStage(agent, action, finding = {}) {
+    if (finding.csiStage) return finding.csiStage;
+    if (agent === 'explorer') return 'faraday';
+    if (agent === 'analyst' && action === 'EXTRACT_CLAIM') return 'feynman';
+    return null;
+  }
+
+  _inferExecutionStage(agent, action) {
+    if (agent === 'verifier' || action === 'verify_findings') return 'turing';
+    return null;
+  }
+
+  _emitObservationGraphEvents({ sessionId, observationId, createdAt, stepIndex, agent, action, finding, sourceIds, claimIds, csiStage }) {
+    const observationNode = {
+      id: observationId,
+      title: `${action}: ${finding.title?.slice(0, 50) || 'Finding'}`,
+      agent,
+      action,
+      findingType: finding.type || 'web',
+      source: finding.source,
+      sourceId: finding.sourceId,
+      sourceIds,
+      claimIds,
+      confidence: finding.confidence || 0.7,
+      stepIndex,
+      taskId: finding.taskId || null,
+      wave: finding.wave ?? null,
+      dimension: finding.dimension || null,
+      csiStage: csiStage || null,
+      createdAt,
+    };
+    this._emit('graph.node_upsert', {
+      sessionId,
+      layer: 'observations',
+      nodeId: observationId,
+      node: observationNode,
+    });
+    sourceIds.forEach((sourceId) => {
+      this._emit('graph.edge_upsert', {
+        sessionId,
+        edge: {
+          from: `obs-${observationId}`,
+          to: `source-${sourceId}`,
+          type: 'observed_from',
+          confidence: finding.confidence || 0.7,
+        },
+      });
+    });
+    claimIds.forEach((claimId) => {
+      this._emit('graph.edge_upsert', {
+        sessionId,
+        edge: {
+          from: `obs-${observationId}`,
+          to: `claim-${claimId}`,
+          type: 'about_claim',
+          confidence: finding.confidence || 0.7,
+        },
+      });
+    });
+    if (csiStage) {
+      const csiNode = {
+        id: observationId,
+        type: csiStage === 'faraday' ? 'csi-observation' : 'csi-hypothesis',
+        stage: csiStage,
+        title: `${agent}/${action}: ${finding.title?.slice(0, 80) || 'Observation'}`,
+        summary: finding.content?.slice(0, 280) || '',
+        kind: finding.type || action.toLowerCase(),
+        verdict: null,
+        confidence: finding.confidence || 0.7,
+        claimIds,
+        sourceIds,
+        observationIds: [],
+        taskId: finding.taskId || null,
+        wave: finding.wave ?? null,
+        agent,
+        action,
+        createdAt,
+      };
+      this._emit('graph.node_upsert', {
+        sessionId,
+        layer: 'csi',
+        nodeId: observationId,
+        node: csiNode,
+      });
+      sourceIds.forEach((sourceId) => {
+        this._emit('graph.edge_upsert', {
+          sessionId,
+          edge: {
+            from: `csi-${observationId}`,
+            to: `source-${sourceId}`,
+            type: csiStage === 'faraday' ? 'found_source' : 'analyzes',
+            confidence: finding.confidence || 0.7,
+          },
+        });
+      });
+      claimIds.forEach((claimId) => {
+        this._emit('graph.edge_upsert', {
+          sessionId,
+          edge: {
+            from: `csi-${observationId}`,
+            to: `claim-${claimId}`,
+            type: csiStage === 'faraday' ? 'observes' : 'analyzes',
+            confidence: finding.confidence || 0.7,
+          },
+        });
+      });
+      this._emit(csiStage === 'faraday' ? 'csi.faraday_observation' : 'csi.feynman_hypothesis', {
+        sessionId,
+        layer: 'csi',
+        nodeId: observationId,
+        node: csiNode,
+      });
+    }
+  }
+
+  _emitExecutionGraphEvents({ sessionId, eventId, createdAt, agent, action, output, stage, claimIds, sourceIds, observationIds }) {
+    const executionNode = {
+      id: eventId,
+      title: `Execution: ${agent}/${action}`,
+      agent,
+      action,
+      output,
+      success: output.success !== false,
+      latency: output.latency || null,
+      taskId: output.taskId || null,
+      wave: output.wave ?? null,
+      phase: output.phase || null,
+      sourceIds,
+      claimIds,
+      observationIds,
+      csiStage: stage || null,
+      verdict: output.verdict || null,
+      confidence: output.confidence ?? null,
+      createdAt,
+    };
+    this._emit('graph.node_upsert', {
+      sessionId,
+      layer: 'executionEvents',
+      nodeId: eventId,
+      node: executionNode,
+    });
+    claimIds.forEach((claimId) => {
+      this._emit('graph.edge_upsert', {
+        sessionId,
+        edge: {
+          from: `exec-${eventId}`,
+          to: `claim-${claimId}`,
+          type: stage === 'turing' ? (output.verdict === 'disputed' ? 'disputes' : output.verdict === 'verified' ? 'supports' : 'reviews') : 'related',
+          confidence: output.confidence ?? 0.7,
+        },
+      });
+    });
+    observationIds.forEach((observationId) => {
+      this._emit('graph.edge_upsert', {
+        sessionId,
+        edge: {
+          from: `exec-${eventId}`,
+          to: `obs-${observationId}`,
+          type: stage === 'turing' ? 'verifies' : 'analyzes',
+          confidence: output.confidence ?? 0.7,
+        },
+      });
+    });
+    if (stage) {
+      const csiNode = {
+        id: eventId,
+        type: stage === 'turing' ? 'csi-verdict' : stage === 'feynman' ? 'csi-hypothesis' : 'csi-observation',
+        stage,
+        title: output.csiTitle || `CSI ${stage}: ${agent}/${action}`,
+        summary: output.summary || `${agent}/${action}: ${JSON.stringify(output).slice(0, 240)}`,
+        kind: action,
+        verdict: output.verdict || null,
+        confidence: output.confidence ?? null,
+        claimIds,
+        sourceIds,
+        observationIds,
+        taskId: output.taskId || null,
+        wave: output.wave ?? null,
+        agent,
+        action,
+        createdAt,
+      };
+      this._emit('graph.node_upsert', {
+        sessionId,
+        layer: 'csi',
+        nodeId: eventId,
+        node: csiNode,
+      });
+      claimIds.forEach((claimId) => {
+        this._emit('graph.edge_upsert', {
+          sessionId,
+          edge: {
+            from: `csi-${eventId}`,
+            to: `claim-${claimId}`,
+            type: output.verdict === 'disputed' ? 'disputes' : output.verdict === 'verified' ? 'supports' : 'reviews',
+            confidence: output.confidence ?? 0.7,
+          },
+        });
+      });
+      observationIds.forEach((observationId) => {
+        this._emit('graph.edge_upsert', {
+          sessionId,
+          edge: {
+            from: `csi-${eventId}`,
+            to: `obs-${observationId}`,
+            type: stage === 'turing' ? 'verifies' : 'analyzes',
+            confidence: output.confidence ?? 0.7,
+          },
+        });
+      });
+      if (stage === 'turing') {
+        this._emit('csi.turing_verdict', {
+          sessionId,
+          layer: 'csi',
+          nodeId: eventId,
+          node: csiNode,
+        });
+      }
+    }
   }
 
   _emit(type, data) {

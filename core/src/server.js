@@ -327,6 +327,7 @@ async function restoreSessionFromCSI(sessionId, userId, orgId) {
       projectId: trail.project || trail.metadata?.projectId || `research/${sessionId.slice(0, 8)}`,
       status: trail.metadata?.status || 'completed',
       events: [],
+      graphEvents: [],
       result: trail.metadata?.report ? {
         report: trail.metadata.report,
         findings: [],
@@ -348,6 +349,100 @@ async function restoreSessionFromCSI(sessionId, userId, orgId) {
     console.error('[research] Failed to restore session from CSI:', err.message);
     return null;
   }
+}
+
+function isResearchGraphEvent(event) {
+  const type = event?.type || '';
+  return type.startsWith('graph.') || type.startsWith('csi.');
+}
+
+function sortResearchEvents(events) {
+  return [...events].sort((a, b) => {
+    const left = new Date(a?.timestamp || 0).getTime();
+    const right = new Date(b?.timestamp || 0).getTime();
+    return left - right;
+  });
+}
+
+function replayResearchEvents(res, session) {
+  const replay = sortResearchEvents([...(session.events || []), ...(session.graphEvents || [])]);
+  for (const event of replay) {
+    res.write(`data: ${JSON.stringify(event)}\n\n`);
+  }
+}
+
+function broadcastResearchEvent(session, event) {
+  if (isResearchGraphEvent(event)) {
+    if (!Array.isArray(session.graphEvents)) session.graphEvents = [];
+    session.graphEvents.push(event);
+  } else {
+    session.events.push(event);
+  }
+
+  const payload = `data: ${JSON.stringify(event)}\n\n`;
+  session.sseClients = session.sseClients.filter(client => {
+    try {
+      client.write(payload);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
+function asArray(value) {
+  if (Array.isArray(value)) return value.filter(Boolean);
+  if (value === undefined || value === null || value === '') return [];
+  return [value];
+}
+
+function uniqueValues(values) {
+  return [...new Set(asArray(values).filter(Boolean))];
+}
+
+function inferCsiStage(metadata = {}) {
+  if (metadata.csiStage) return metadata.csiStage;
+  if (metadata.agent === 'explorer') return 'faraday';
+  if (metadata.agent === 'analyst') return 'feynman';
+  if (metadata.agent === 'verifier') return 'turing';
+  if (metadata.action === 'verify_findings') return 'turing';
+  return null;
+}
+
+function inferCsiNodeType(stage) {
+  if (stage === 'faraday') return 'csi-observation';
+  if (stage === 'feynman') return 'csi-hypothesis';
+  if (stage === 'turing') return 'csi-verdict';
+  return 'csi-observation';
+}
+
+function edgeTypeForCsiStage(stage, verdict) {
+  if (stage === 'faraday') return 'observes';
+  if (stage === 'feynman') return 'analyzes';
+  if (stage === 'turing') {
+    if (verdict === 'disputed') return 'disputes';
+    if (verdict === 'verified') return 'supports';
+    return 'reviews';
+  }
+  return 'related';
+}
+
+function deriveResearchSourceIds(metadata = {}) {
+  const directSourceId =
+    metadata.findingType === 'web' ||
+    metadata.findingType === 'follow_up' ||
+    metadata.research_type === 'web' ||
+    metadata.research_type === 'follow_up' ||
+    String(metadata.source || metadata.source_url || '').startsWith('http')
+      ? metadata.sourceId || metadata.source_id
+      : null;
+  return uniqueValues(
+    metadata.sourceIds ||
+    metadata.structured?.sourceIds ||
+    metadata.output?.sourceIds ||
+    metadata.relatedSourceIds ||
+    directSourceId
+  );
 }
 
 // ─── Audit logging helper (Scale / Enterprise only) ─────────────────────────
@@ -3223,9 +3318,7 @@ a{color:#a78bfa}</style></head><body>
             'Connection': 'keep-alive',
             'X-Accel-Buffering': 'no',
           });
-          for (const event of session.events) {
-            res.write(`data: ${JSON.stringify(event)}\n\n`);
-          }
+          replayResearchEvents(res, session);
           if (session.status === 'completed' || session.status === 'failed') {
             res.write(`event: done\ndata: ${JSON.stringify({ status: session.status, error: session.error || null })}\n\n`);
             res.end();
@@ -3295,8 +3388,23 @@ a{color:#a78bfa}</style></head><body>
               trails: [],
               observations: [],    // NEW: Real-time observations from _recordFinding
               executionEvents: [], // NEW: Execution events from agent phases
+              csi: [],
               blueprints: [],
               weights: { edges: [] },
+            };
+            const seenEdges = new Set();
+            const pushEdge = (from, to, type = 'related', confidence = null, extra = {}) => {
+              if (!from || !to) return;
+              const key = `${from}|${to}|${type}`;
+              if (seenEdges.has(key)) return;
+              seenEdges.add(key);
+              layers.weights.edges.push({
+                from,
+                to,
+                type,
+                confidence,
+                ...extra,
+              });
             };
 
             // Categorize memories into layers
@@ -3304,6 +3412,13 @@ a{color:#a78bfa}</style></head><body>
               const tags = m.tags || [];
               const metadata = m.metadata || {};
               const memoryType = m.memoryType || m.memory_type;
+              const createdAt = m.created_at || metadata.createdAt || metadata.saved_at || new Date().toISOString();
+              const sourceIds = deriveResearchSourceIds(metadata);
+              const claimIds = uniqueValues(metadata.claimIds || metadata.output?.claimIds || metadata.relatedClaimIds);
+              const observationIds = uniqueValues(metadata.observationIds || metadata.output?.observationIds);
+              const verdict = metadata.verdict || metadata.output?.verdict || null;
+              const csiStage = inferCsiStage(metadata);
+              const csiNodeType = metadata.csiNodeType || inferCsiNodeType(csiStage);
 
               // Layer 1: Sources (web pages, docs) - memory_type 'fact' with web source tags
               if (tags.includes('research-source') || tags.includes('web-source') ||
@@ -3315,6 +3430,9 @@ a{color:#a78bfa}</style></head><body>
                   runtime: metadata.research_source || 'tavily',
                   score: m.importance_score,
                   favicon: metadata.favicon,
+                  taskId: metadata.taskId || null,
+                  wave: metadata.wave ?? null,
+                  createdAt,
                 });
               }
 
@@ -3326,6 +3444,12 @@ a{color:#a78bfa}</style></head><body>
                   content: m.content?.slice(0, 500),
                   confidence: metadata.confidence || m.importance_score,
                   source: metadata.source_url || metadata.source_id,
+                  sourceIds,
+                  taskId: metadata.taskId || null,
+                  wave: metadata.wave ?? null,
+                  dimension: metadata.dimension || null,
+                  agent: metadata.agent || null,
+                  createdAt,
                   // Structured claim fields (Phase 2b)
                   type: isStructured ? 'structured-claim' : 'plain-claim',
                   structured: isStructured ? {
@@ -3370,9 +3494,16 @@ a{color:#a78bfa}</style></head><body>
                   findingType: metadata.findingType || 'web',
                   source: metadata.source,
                   sourceId: metadata.sourceId,
+                  sourceIds,
+                  claimIds,
                   confidence: metadata.confidence || m.importance_score,
                   stepIndex: metadata.stepIndex,
-                  createdAt: m.created_at,
+                  taskId: metadata.taskId || null,
+                  wave: metadata.wave ?? null,
+                  dimension: metadata.dimension || null,
+                  csiStage,
+                  verdict,
+                  createdAt,
                 });
               }
 
@@ -3386,7 +3517,37 @@ a{color:#a78bfa}</style></head><body>
                   output: metadata.output || {},
                   success: metadata.success !== false,
                   latency: metadata.latency,
-                  createdAt: m.created_at,
+                  taskId: metadata.taskId || null,
+                  wave: metadata.wave ?? null,
+                  phase: metadata.phase || null,
+                  sourceIds,
+                  claimIds,
+                  observationIds,
+                  csiStage,
+                  verdict,
+                  confidence: metadata.confidence || metadata.output?.confidence || m.importance_score,
+                  createdAt,
+                });
+              }
+
+              if (csiStage) {
+                layers.csi.push({
+                  id: m.id,
+                  type: csiNodeType,
+                  stage: csiStage,
+                  title: metadata.csiTitle || m.title,
+                  summary: metadata.summary || m.content?.slice(0, 280) || '',
+                  kind: metadata.findingType || metadata.action || metadata.phase || 'analysis',
+                  verdict,
+                  confidence: metadata.confidence || metadata.output?.confidence || m.importance_score,
+                  claimIds,
+                  sourceIds,
+                  observationIds,
+                  taskId: metadata.taskId || null,
+                  wave: metadata.wave ?? null,
+                  agent: metadata.agent || 'unknown',
+                  action: metadata.action || 'unknown',
+                  createdAt,
                 });
               }
 
@@ -3427,25 +3588,50 @@ a{color:#a78bfa}</style></head><body>
             // Build edges based on relationships and provenance
             (memories || []).forEach(m => {
               const metadata = m.metadata || {};
+              const sourceIds = deriveResearchSourceIds(metadata);
+              const claimIds = uniqueValues(metadata.claimIds || metadata.output?.claimIds || metadata.relatedClaimIds);
+              const observationIds = uniqueValues(metadata.observationIds || metadata.output?.observationIds);
+              const csiStage = inferCsiStage(metadata);
+              const verdict = metadata.verdict || metadata.output?.verdict || null;
 
               // Link claims to their sources
               if (metadata.sourceId) {
-                layers.weights.edges.push({
-                  from: `claim-${m.id}`,
-                  to: `source-${metadata.sourceId}`,
-                  type: 'derived_from',
-                  confidence: m.importance_score,
-                });
+                pushEdge(`claim-${m.id}`, `source-${metadata.sourceId}`, 'derived_from', m.importance_score);
               }
+              sourceIds.forEach((sourceId) => {
+                if ((m.tags || []).includes('research-finding')) {
+                  pushEdge(`claim-${m.id}`, `source-${sourceId}`, 'derived_from', metadata.confidence || m.importance_score);
+                }
+                if ((m.tags || []).includes('research-observation')) {
+                  pushEdge(`obs-${m.id}`, `source-${sourceId}`, 'observed_from', metadata.confidence || m.importance_score);
+                }
+                if (csiStage) {
+                  pushEdge(`csi-${m.id}`, `source-${sourceId}`, csiStage === 'faraday' ? 'found_source' : edgeTypeForCsiStage(csiStage, verdict), metadata.confidence || m.importance_score);
+                }
+              });
+              claimIds.forEach((claimId) => {
+                if ((m.tags || []).includes('research-observation')) {
+                  pushEdge(`obs-${m.id}`, `claim-${claimId}`, 'about_claim', metadata.confidence || m.importance_score);
+                }
+                if ((m.tags || []).includes('research-execution-event')) {
+                  pushEdge(`exec-${m.id}`, `claim-${claimId}`, edgeTypeForCsiStage(csiStage, verdict), metadata.confidence || metadata.output?.confidence || m.importance_score);
+                }
+                if (csiStage) {
+                  pushEdge(`csi-${m.id}`, `claim-${claimId}`, edgeTypeForCsiStage(csiStage, verdict), metadata.confidence || metadata.output?.confidence || m.importance_score);
+                }
+              });
+              observationIds.forEach((observationId) => {
+                if ((m.tags || []).includes('research-execution-event')) {
+                  pushEdge(`exec-${m.id}`, `obs-${observationId}`, csiStage === 'turing' ? 'verifies' : 'analyzes', metadata.confidence || metadata.output?.confidence || m.importance_score);
+                }
+                if (csiStage) {
+                  pushEdge(`csi-${m.id}`, `obs-${observationId}`, csiStage === 'turing' ? 'verifies' : 'analyzes', metadata.confidence || metadata.output?.confidence || m.importance_score);
+                }
+              });
 
               // Link trails to blueprints if used
               if (metadata.blueprintUsed) {
-                layers.weights.edges.push({
-                  from: `trail-${m.id}`,
-                  to: `blueprint-${metadata.blueprintUsed}`,
-                  type: 'used_blueprint',
-                  confidence: 0.9,
-                });
+                pushEdge(`trail-${m.id}`, `blueprint-${metadata.blueprintUsed}`, 'used_blueprint', 0.9);
               }
             });
 
@@ -3453,7 +3639,7 @@ a{color:#a78bfa}</style></head><body>
               sessionId,
               projectId,
               layers,
-              nodeCount: layers.sources.length + layers.claims.length + layers.trails.length + layers.observations.length + layers.executionEvents.length + layers.blueprints.length,
+              nodeCount: layers.sources.length + layers.claims.length + layers.trails.length + layers.observations.length + layers.executionEvents.length + layers.csi.length + layers.blueprints.length,
               edgeCount: layers.weights.edges.length,
             });
           } catch (err) {
@@ -3788,6 +3974,7 @@ a{color:#a78bfa}</style></head><body>
               projectId,
               status: 'running',
               events: [],
+              graphEvents: [],
               sseClients: [],
               result: null,
               error: null,
@@ -3811,11 +3998,7 @@ a{color:#a78bfa}</style></head><body>
               browserRuntime,
               webJobStore,
               onEvent: (event) => {
-                session.events.push(event);
-                const payload = `data: ${JSON.stringify(event)}\n\n`;
-                session.sseClients = session.sseClients.filter(client => {
-                  try { client.write(payload); return true; } catch { return false; }
-                });
+                broadcastResearchEvent(session, event);
               },
               trailStore,
             });
@@ -3885,6 +4068,7 @@ a{color:#a78bfa}</style></head><body>
               projectId,
               status: 'running',
               events: [],
+              graphEvents: [],
               sseClients: [],
               result: null,
               error: null,
@@ -3908,11 +4092,7 @@ a{color:#a78bfa}</style></head><body>
               browserRuntime,
               webJobStore,
               onEvent: (event) => {
-                session.events.push(event);
-                const payload = `data: ${JSON.stringify(event)}\n\n`;
-                session.sseClients = session.sseClients.filter(client => {
-                  try { client.write(payload); return true; } catch { return false; }
-                });
+                broadcastResearchEvent(session, event);
               },
               trailStore,
             });

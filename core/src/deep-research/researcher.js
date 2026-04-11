@@ -2063,6 +2063,106 @@ Rules:
     return report;
   }
 
+  /**
+   * Synthesize a final report directly from blueprint recall — no new web search.
+   * Recalls claims, sources, trails from CSI for this session's projectId,
+   * then synthesizes a report purely from stored knowledge.
+   *
+   * Used by the "Resume" flow: research already ran, blueprint was mined,
+   * now generate the definitive report from what was captured.
+   */
+  async synthesizeFromBlueprint({ sessionId, query, projectId, blueprintId, userId, orgId, onEvent }) {
+    const emit = onEvent || this._emit.bind(this);
+    const startTime = Date.now();
+
+    emit('research.blueprint_recall_started', { sessionId, blueprintId, projectId });
+
+    // 1. Load blueprint
+    const blueprint = blueprintId ? await this._loadBlueprint(blueprintId) : null;
+
+    // 2. Recall all memories for this project (sources, claims, observations)
+    const allMemories = await this.memoryStore.searchMemories({
+      query: query || '',
+      user_id: userId,
+      org_id: orgId,
+      project: projectId,
+      n_results: 150,
+    });
+    const memories = allMemories || [];
+
+    // 3. Categorize into findings for synthesis
+    const findings = [];
+    const sources = [];
+
+    memories.forEach(m => {
+      const tags = m.tags || [];
+      const meta = m.metadata || {};
+
+      // Sources
+      if (tags.includes('research-source') || tags.includes('web-source') || meta.source_type === 'web') {
+        sources.push({ id: m.id, title: m.title, url: meta.url || meta.source_url, content: m.content });
+        return;
+      }
+      // Claims / findings
+      if (tags.includes('research-finding') || tags.includes('research-observation') || m.memory_type === 'fact') {
+        findings.push({
+          id: m.id,
+          type: meta.research_type || m.memory_type || 'fact',
+          title: m.title,
+          content: m.content,
+          confidence: meta.confidence || m.importance_score || 0.7,
+          source: meta.source_url || meta.url,
+          sourceIds: meta.sourceIds || (meta.sourceId ? [meta.sourceId] : []),
+          agent: meta.agent || 'faraday',
+        });
+      }
+    });
+
+    emit('research.blueprint_recall_loaded', {
+      sessionId, blueprintId,
+      findingCount: findings.length,
+      sourceCount: sources.length,
+    });
+
+    if (findings.length === 0) {
+      return { report: 'No recalled findings available for this session.', findings: [], sources: [], fromBlueprint: true };
+    }
+
+    // 4. Sort by confidence — best evidence first
+    const sortedFindings = [...findings].sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+
+    // 5. Build a minimal report gate from recalled data (no new web search)
+    const reportGate = {
+      recalledMemories: sortedFindings.slice(0, 30),
+      provenanceNodes: sources.map(s => ({ id: s.id, title: s.title, url: s.url })),
+      blueprint: blueprint || null,
+      sectionSchema: null,
+      blueprintSummary: blueprint ? `Blueprint: ${blueprint.name}` : null,
+    };
+
+    emit('research.synthesizing', { sessionId, findingCount: sortedFindings.length, fromBlueprint: true });
+
+    // 6. Synthesize from recalled findings
+    const report = await this._synthesizeReport(query, sortedFindings, [], reportGate);
+
+    emit('research.completed', {
+      sessionId,
+      fromBlueprint: true,
+      blueprintId,
+      durationMs: Date.now() - startTime,
+      findingCount: sortedFindings.length,
+    });
+
+    return {
+      report,
+      findings: sortedFindings,
+      sources,
+      fromBlueprint: true,
+      blueprintId,
+      durationMs: Date.now() - startTime,
+    };
+  }
+
   async _prepareReportGate({ sessionId, query, findings = [], gaps = [], trailStore, blueprintUsed = null, userId, orgId, projectId }) {
     const trail = trailStore?.getTrail(sessionId) || null;
     const blueprint = blueprintUsed ? await this._loadBlueprint(blueprintUsed) : null;

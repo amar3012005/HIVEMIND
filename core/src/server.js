@@ -4512,6 +4512,90 @@ a{color:#a78bfa}</style></head><body>
           }
           break;
 
+        // Synthesize final report from blueprint recall (no new web search)
+        // Used by the Resume button: takes completed session + mined blueprint,
+        // recalls all stored claims/sources/trails, synthesizes definitive report
+        case '/api/research/:sessionId/synthesize-from-blueprint':
+        case '/v1/proxy/research/:sessionId/synthesize-from-blueprint':
+          if (req.method === 'POST') {
+            const pathParts = pathname.split('/').filter(Boolean);
+            const sessionId = pathParts[pathParts.length - 1] === 'synthesize-from-blueprint'
+              ? pathParts[pathParts.length - 2]
+              : null;
+
+            if (!sessionId) return jsonResponse(res, { error: 'sessionId required' }, 400);
+
+            let session = researchSessions.get(sessionId);
+            if (!session) session = await restoreSessionFromCSI(sessionId, userId, orgId);
+            if (!session) return jsonResponse(res, { error: 'Session not found' }, 404);
+
+            if (session.status === 'running' || session.status === 'cancelling') {
+              return jsonResponse(res, { error: 'Session still running — wait for completion or cancel first' }, 409);
+            }
+
+            // Get blueprintId from body or try to find the mined blueprint for this session
+            let blueprintId = body.blueprintId || null;
+            if (!blueprintId && blueprintMiner) {
+              // Try to find a blueprint associated with this session's projectId
+              try {
+                const sessionBlueprints = await persistentMemoryStore.searchMemories({
+                  query: session.query || '',
+                  user_id: userId,
+                  org_id: orgId,
+                  project: session.projectId,
+                  n_results: 5,
+                });
+                const bp = (sessionBlueprints || []).find(m => (m.tags || []).includes('blueprint'));
+                if (bp) blueprintId = bp.metadata?.blueprint_id || bp.id;
+              } catch {}
+            }
+
+            // Create a lightweight researcher just for synthesis
+            const synResearcher = new DeepResearcher({
+              memoryStore: persistentMemoryStore,
+              recallFn: recallPersistedMemories,
+              prisma,
+              groqApiKey: process.env.GROQ_API_KEY,
+              onEvent: (event) => broadcastResearchEvent(session, event),
+            });
+
+            try {
+              const result = await synResearcher.synthesizeFromBlueprint({
+                sessionId,
+                query: session.query,
+                projectId: session.projectId,
+                blueprintId,
+                userId,
+                orgId,
+              });
+
+              // Update session with the new report
+              if (!session.result) session.result = {};
+              session.result.report = result.report;
+              session.result.findings = result.findings;
+              session.result.sources = result.sources;
+              session.result.fromBlueprint = true;
+
+              // Persist updated status
+              persistSessionStatus(sessionId, session.status, userId, orgId, session.projectId).catch(() => {});
+
+              return jsonResponse(res, {
+                report: result.report,
+                findings: result.findings,
+                sources: result.sources,
+                fromBlueprint: true,
+                blueprintId: result.blueprintId || null,
+                durationMs: result.durationMs,
+                findingCount: result.findings.length,
+                sourceCount: result.sources.length,
+              });
+            } catch (err) {
+              console.error('[research] synthesize-from-blueprint failed:', err.message);
+              return jsonResponse(res, { error: 'Synthesis failed: ' + err.message }, 500);
+            }
+          }
+          break;
+
         // Start research from captured blueprint state ("Use as Base")
         case '/api/research/blueprint/:blueprintId/rerun':
           if (req.method === 'POST') {

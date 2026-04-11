@@ -311,44 +311,103 @@ async function restoreSessionFromCSI(sessionId, userId, orgId) {
       query: sessionId,
       user_id: userId,
       org_id: orgId,
-      n_results: 10,
+      n_results: 20,
     });
+
+    // Priority 1: Find finalized trail (completed research)
     const trail = (trailMemories || []).find(m =>
       (m.tags || []).includes(`session:${sessionId}`) &&
       ((m.metadata || {}).trailType === 'op/research-trail' || (m.tags || []).includes('research-trail'))
     );
-    if (!trail) return null;
+
+    // Priority 2: Find checkpoint (interrupted research)
+    const checkpoint = !trail ? (trailMemories || []).find(m =>
+      (m.tags || []).includes(`session:${sessionId}`) &&
+      (m.tags || []).includes('research-checkpoint')
+    ) : null;
+
+    const source = trail || checkpoint;
+    if (!source) return null;
+
+    const meta = source.metadata || {};
+    const isCheckpoint = !trail && !!checkpoint;
+    const status = isCheckpoint ? 'interrupted' : (meta.status || 'completed');
 
     const session = {
       id: sessionId,
-      query: trail.metadata?.query || trail.title?.replace('Research Trail: ', '') || 'Restored session',
-      userId: trail.user_id || userId,
-      orgId: trail.org_id || orgId,
-      projectId: trail.project || trail.metadata?.projectId || `research/${sessionId.slice(0, 8)}`,
-      status: trail.metadata?.status || 'completed',
+      query: meta.query || source.title?.replace(/^(Research Trail|Checkpoint): /, '') || 'Restored session',
+      userId: source.user_id || userId,
+      orgId: source.org_id || orgId,
+      projectId: source.project || meta.projectId || `research/${sessionId.slice(0, 8)}`,
+      status,
       events: [],
       graphEvents: [],
-      result: trail.metadata?.report ? {
+      sseClients: [],
+      result: trail?.metadata?.report ? {
         report: trail.metadata.report,
         findings: [],
         sources: [],
         gaps: [],
         durationMs: 0,
-        taskProgress: { confidence: trail.metadata?.steps?.slice(-1)[0]?.confidence || 0.7 },
+        taskProgress: { confidence: meta.steps?.slice(-1)[0]?.confidence || meta.confidence || 0.7 },
         fromCache: false,
-        projectId: trail.project || trail.metadata?.projectId,
+        projectId: source.project || meta.projectId,
       } : null,
-      error: null,
-      createdAt: trail.created_at,
-      startedAt: new Date(trail.created_at), // For filtering graph nodes
+      error: isCheckpoint ? 'Research was interrupted. Partial results available.' : null,
+      createdAt: source.created_at,
+      startedAt: new Date(source.created_at),
       _restored: true,
+      _interrupted: isCheckpoint,
+      _checkpointWave: isCheckpoint ? meta.waveCompleted : null,
+      _checkpointConfidence: isCheckpoint ? meta.confidence : null,
     };
     researchSessions.set(sessionId, session);
-    console.log('[research] Restored session from CSI:', sessionId, 'project:', session.projectId);
+    console.log('[research] Restored session from CSI:', sessionId, 'status:', status, 'project:', session.projectId,
+      isCheckpoint ? `(interrupted at wave ${meta.waveCompleted})` : '');
     return session;
   } catch (err) {
     console.error('[research] Failed to restore session from CSI:', err.message);
     return null;
+  }
+}
+
+/**
+ * Persist session status to DB so it survives server restarts.
+ * Updates the checkpoint memory with final status.
+ */
+async function persistSessionStatus(sessionId, status, userId, orgId, projectId) {
+  if (!persistentMemoryStore) return;
+  try {
+    const checkpointId = `checkpoint-${sessionId}`;
+    await persistentMemoryStore.createMemory({
+      id: checkpointId,
+      user_id: userId,
+      org_id: orgId,
+      project: projectId,
+      content: `Research session ${status}: ${sessionId}`,
+      title: `Session ${status}`,
+      memory_type: 'event',
+      tags: ['research-checkpoint', `session:${sessionId}`, `status:${status}`],
+      is_latest: true,
+      importance_score: 0.3,
+      metadata: { sessionId, status, projectId, updatedAt: new Date().toISOString() },
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }).catch(() => {
+      // Duplicate — update instead
+      if (prisma?.memory) {
+        return prisma.memory.update({
+          where: { id: checkpointId },
+          data: {
+            content: `Research session ${status}: ${sessionId}`,
+            metadata: { sessionId, status, projectId, updatedAt: new Date().toISOString() },
+            updatedAt: new Date(),
+          },
+        }).catch(() => {});
+      }
+    });
+  } catch {
+    // Non-fatal
   }
 }
 
@@ -3321,7 +3380,7 @@ a{color:#a78bfa}</style></head><body>
             'X-Accel-Buffering': 'no',
           });
           replayResearchEvents(res, session);
-          if (session.status === 'completed' || session.status === 'failed') {
+          if (session.status === 'completed' || session.status === 'failed' || session.status === 'cancelled' || session.status === 'interrupted') {
             res.write(`event: done\ndata: ${JSON.stringify({ status: session.status, error: session.error || null })}\n\n`);
             res.end();
             return;
@@ -3340,6 +3399,9 @@ a{color:#a78bfa}</style></head><body>
             progress: session.result?.taskProgress || null,
             events: session.events.slice(-20),
             error: session.error || null,
+            interrupted: session._interrupted || false,
+            checkpointWave: session._checkpointWave || null,
+            checkpointConfidence: session._checkpointConfidence || null,
           });
         }
 
@@ -4011,7 +4073,8 @@ a{color:#a78bfa}</style></head><body>
               result: null,
               error: null,
               createdAt: now.toISOString(),
-              startedAt: now, // For filtering graph nodes to only current session
+              startedAt: now,
+              _researcher: null, // Reference to researcher for cancel
             };
             researchSessions.set(sessionId, session);
 
@@ -4036,6 +4099,9 @@ a{color:#a78bfa}</style></head><body>
               trailStore,
             });
 
+            // Store researcher reference on session for cancel support
+            session._researcher = researcher;
+
             // Run research (with optional blueprint)
             const blueprintId = body.blueprintId;
             const useBlueprints = body.useBlueprints !== false;
@@ -4049,7 +4115,10 @@ a{color:#a78bfa}</style></head><body>
             })
               .then(result => {
                 session.status = 'completed';
+                session._researcher = null;
                 session.result = result;
+                // Persist completed status to DB
+                persistSessionStatus(sessionId, 'completed', userId, orgId, session.projectId).catch(() => {});
                 const donePayload = `event: done\ndata: ${JSON.stringify({ status: 'completed' })}\n\n`;
                 session.sseClients.forEach(c => { try { c.write(donePayload); c.end(); } catch {} });
                 session.sseClients = [];
@@ -4058,9 +4127,13 @@ a{color:#a78bfa}</style></head><body>
                 }
               })
               .catch(err => {
-                session.status = 'failed';
+                const isCancelled = err.message === 'Research cancelled by user';
+                session.status = isCancelled ? 'cancelled' : 'failed';
+                session._researcher = null;
                 session.error = err.message;
-                const donePayload = `event: done\ndata: ${JSON.stringify({ status: 'failed', error: err.message })}\n\n`;
+                // Persist failed/cancelled status to DB
+                persistSessionStatus(sessionId, session.status, userId, orgId, session.projectId).catch(() => {});
+                const donePayload = `event: done\ndata: ${JSON.stringify({ status: session.status, error: err.message })}\n\n`;
                 session.sseClients.forEach(c => { try { c.write(donePayload); c.end(); } catch {} });
                 session.sseClients = [];
               });
@@ -4414,7 +4487,33 @@ a{color:#a78bfa}</style></head><body>
           }
           break;
 
-        // Capture research state for reusable blueprint
+        // Cancel a running research session
+        case '/api/research/:sessionId/cancel':
+        case '/v1/proxy/research/:sessionId/cancel':
+          if (req.method === 'POST') {
+            const pathParts = pathname.split('/').filter(Boolean);
+            const sessionId = pathParts[pathParts.length - 1] === 'cancel'
+              ? pathParts[pathParts.length - 2]
+              : pathname.split('/')[3];
+            const session = researchSessions.get(sessionId);
+            if (!session) {
+              return jsonResponse(res, { error: 'Session not found' }, 404);
+            }
+            if (session.status !== 'running') {
+              return jsonResponse(res, { error: `Session is ${session.status}, not running`, status: session.status }, 400);
+            }
+
+            // Signal abort to researcher
+            if (session._researcher) {
+              session._researcher.cancel();
+              console.log('[research] Cancel requested for session:', sessionId);
+            }
+            session.status = 'cancelling';
+
+            return jsonResponse(res, { status: 'cancelling', sessionId });
+          }
+          break;
+
         case '/api/research/:sessionId/stream':
         case '/v1/proxy/research/:sessionId/stream':
           if (req.method === 'GET') {

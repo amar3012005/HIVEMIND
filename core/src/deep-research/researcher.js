@@ -55,6 +55,27 @@ export class DeepResearcher {
     this.blueprintMiner = new BlueprintMiner({ memoryStore, prisma });
     this._llmCallCount = 0;
     this._maxLlmCalls = 40;
+    this._abortController = null;
+  }
+
+  /**
+   * Cancel a running research session.
+   * Signals abort to all pending operations.
+   */
+  cancel() {
+    if (this._abortController) {
+      this._abortController.abort();
+    }
+  }
+
+  get aborted() {
+    return this._abortController?.signal?.aborted || false;
+  }
+
+  _checkAborted() {
+    if (this.aborted) {
+      throw new Error('Research cancelled by user');
+    }
   }
 
   /**
@@ -71,6 +92,9 @@ export class DeepResearcher {
     const sessionId = options.sessionId || randomUUID();
     const projectId = options.projectId || `research/${this._slugify(query)}`;
     const startTime = Date.now();
+
+    // Wire up AbortController for cancellation
+    this._abortController = new AbortController();
 
     this._emit('research.started', { sessionId, query, projectId });
 
@@ -191,6 +215,8 @@ export class DeepResearcher {
     const waves = stack.getTasksByWave();
 
     for (const waveNum of [1, 2, 3]) {
+      this._checkAborted();
+
       const waveTasks = waves[waveNum];
       if (!waveTasks || waveTasks.length === 0) continue;
 
@@ -244,6 +270,11 @@ export class DeepResearcher {
         confidence: stack.getAggregateConfidence(),
       });
 
+      // Checkpoint: save partial trail after each wave so interrupted research can be recovered
+      this._saveCheckpoint(sessionId, query, stack, allFindings, allSources, userId, orgId, projectId, waveNum).catch(err => {
+        console.error('[DeepResearcher] Checkpoint save failed:', err.message);
+      });
+
       // Adaptive depth check after each wave
       if (waveNum < 3) {
         const depthDecision = this._shouldContinueResearch(allFindings, waveNum, stack);
@@ -279,6 +310,7 @@ export class DeepResearcher {
 
     // Process any remaining non-dimension tasks (gap subtasks etc.)
     while (true) {
+      this._checkAborted();
       const task = stack.next();
       if (!task) break;
       task.wave = task.wave ?? null;
@@ -304,6 +336,7 @@ export class DeepResearcher {
     }
 
     // Step 3: Reflect — is confidence sufficient?
+    this._checkAborted();
     const progress = stack.getProgress();
     if (progress.confidence < 0.75 && reflectionRound < MAX_REFLECTION_ROUNDS) {
       reflectionRound++;
@@ -1590,6 +1623,64 @@ Rules:
       }
     }
     return savedSources;
+  }
+
+  /**
+   * Save a checkpoint of current research state after each wave.
+   * Enables recovery of interrupted research sessions.
+   */
+  async _saveCheckpoint(sessionId, query, stack, findings, sources, userId, orgId, projectId, waveNum) {
+    try {
+      const checkpointId = `checkpoint-${sessionId}`;
+      const progress = stack.getProgress();
+      const checkpoint = {
+        sessionId,
+        query,
+        projectId,
+        waveCompleted: waveNum,
+        findingCount: findings.length,
+        sourceCount: sources.length,
+        confidence: progress.confidence,
+        status: 'running',
+        lastCheckpoint: new Date().toISOString(),
+        taskProgress: progress,
+      };
+
+      // Upsert checkpoint memory — always overwrite with latest state
+      try {
+        await this.memoryStore.createMemory({
+          id: checkpointId,
+          user_id: userId,
+          org_id: orgId,
+          project: projectId,
+          content: `Research checkpoint: ${query}\nWave ${waveNum} completed. ${findings.length} findings, confidence ${(progress.confidence * 100).toFixed(0)}%`,
+          title: `Checkpoint: ${query.slice(0, 60)}`,
+          memory_type: 'event',
+          tags: ['research-checkpoint', `session:${sessionId}`, `wave:${waveNum}`],
+          is_latest: true,
+          importance_score: 0.5,
+          metadata: checkpoint,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        });
+      } catch (dupErr) {
+        // If duplicate, update existing
+        if (dupErr.code === 'P2002' || dupErr.message?.includes('unique')) {
+          await this.prisma?.memory?.update({
+            where: { id: checkpointId },
+            data: {
+              content: `Research checkpoint: ${query}\nWave ${waveNum} completed. ${findings.length} findings, confidence ${(progress.confidence * 100).toFixed(0)}%`,
+              metadata: checkpoint,
+              updatedAt: new Date(),
+            },
+          }).catch(() => {});
+        }
+      }
+
+      console.log(`[DeepResearcher] Checkpoint saved: wave=${waveNum}, findings=${findings.length}, confidence=${(progress.confidence * 100).toFixed(0)}%`);
+    } catch (err) {
+      console.error('[DeepResearcher] Checkpoint save failed:', err.message);
+    }
   }
 
   async _saveTrailToCSI(sessionId, query, stack, report, userId, orgId, projectId) {

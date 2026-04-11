@@ -88,6 +88,14 @@ export class DeepResearcher {
           blueprintName: suggestions[0].name,
           relevanceScore: suggestions[0].relevanceScore,
         });
+        // Emit blueprint node for graph visualization
+        this._emitBlueprintGraphEvent({
+          sessionId,
+          blueprintId: blueprintUsed,
+          blueprintName: suggestions[0].name,
+          blueprintDomain: suggestions[0].domain || 'research',
+          isUsed: false,
+        });
       }
     }
 
@@ -107,6 +115,17 @@ export class DeepResearcher {
     // Track blueprint usage if one was used
     if (blueprintUsed) {
       await this._recordBlueprintUse(blueprintUsed);
+      // Emit blueprint as used in graph visualization
+      const blueprint = await this._loadBlueprint(blueprintUsed);
+      if (blueprint) {
+        this._emitBlueprintGraphEvent({
+          sessionId,
+          blueprintId: blueprintUsed,
+          blueprintName: blueprint.name,
+          blueprintDomain: blueprint.domain || 'research',
+          isUsed: true,
+        });
+      }
     }
 
     // If we have a base state, pre-load the captured findings as starting point
@@ -332,7 +351,7 @@ export class DeepResearcher {
 
     // Step 6: Trigger blueprint mining (non-blocking, after research completes)
     if (this.autoMineBlueprints) {
-      this._mineBlueprints(userId, orgId, query, stack).catch(err => {
+      this._mineBlueprints(sessionId, userId, orgId, query, stack).catch(err => {
         console.error('[DeepResearcher] Blueprint mining failed:', err.message);
       });
     }
@@ -681,6 +700,22 @@ export class DeepResearcher {
     // Write step to trail
     await trailStore.recordStep(sessionId, stepRecord);
     await trailStore.detectContradiction(sessionId, { content: finding.content, source: finding.source, memoryId: finding.id });
+
+    // Emit trail graph event for real-time visualization
+    const sourceIds = this._collectSourceIds(finding);
+    const claimIds = this._collectClaimIds(finding);
+    console.log('[DeepResearcher] Emitting trail graph event:', { sessionId, stepIndex, agent, action, claimIds: claimIds?.length, sourceIds: sourceIds?.length });
+    this._emitTrailGraphEvent({
+      sessionId,
+      stepIndex,
+      agent,
+      action,
+      input: finding.taskQuery,
+      output: finding.content.slice(0, 100),
+      confidence: finding.confidence,
+      claimIds,
+      sourceIds,
+    });
 
     // NEW: Write individual observation to CSI for real-time graph updates
     // This ensures graph has data during research, not just after completion
@@ -1884,7 +1919,82 @@ Rules:
     }
   }
 
+  /** Emit trail node creation for real-time graph visualization */
+  _emitTrailGraphEvent({ sessionId, stepIndex, agent, action, input, output, confidence, claimIds, sourceIds }) {
+    const trailNodeId = `trail-${sessionId}-${stepIndex}`;
+    const trailNode = {
+      id: trailNodeId,
+      title: `${agent}/${action}`,
+      type: 'trail',
+      agent,
+      action,
+      input,
+      output: typeof output === 'string' ? output : JSON.stringify(output).slice(0, 100),
+      confidence,
+      claimIds: claimIds || [],
+      sourceIds: sourceIds || [],
+      step: stepIndex,
+      createdAt: new Date().toISOString(),
+    };
+    console.log('[DeepResearcher] Emitting graph.node.created for trail:', trailNodeId);
+    this._emit('graph.node.created', {
+      sessionId,
+      nodeId: trailNodeId,
+      title: trailNode.title,
+      nodeType: 'trail',
+      layer: 'trails',
+      content: `${agent}: ${action}`,
+      metadata: {
+        agentId: agent,
+        confidence,
+        step: stepIndex,
+        sourceIds,
+        claimIds,
+      },
+    });
+    // Link to related claims
+    (claimIds || []).forEach(claimId => {
+      this._emit('graph.edge.created', {
+        sessionId,
+        source: trailNodeId,
+        target: `claim-${claimId}`,
+        relationshipType: 'supports',
+        confidence: confidence || 0.7,
+      });
+    });
+  }
+
+  /** Emit blueprint node creation for real-time graph visualization */
+  _emitBlueprintGraphEvent({ sessionId, blueprintId, blueprintName, blueprintDomain, isUsed = false }) {
+    const blueprintNodeId = `blueprint-${blueprintId}`;
+    const blueprintNode = {
+      id: blueprintNodeId,
+      title: blueprintName,
+      type: 'blueprint',
+      blueprintId,
+      domain: blueprintDomain,
+      isUsed,
+      createdAt: new Date().toISOString(),
+    };
+    this._emit('graph.node.created', {
+      sessionId,
+      nodeId: blueprintNodeId,
+      title: blueprintNode.title,
+      nodeType: 'blueprint',
+      layer: 'blueprints',
+      content: `${blueprintDomain || 'general'} pattern`,
+      metadata: {
+        blueprintId,
+        domain: blueprintDomain,
+        isUsed,
+      },
+    });
+  }
+
   _emit(type, data) {
+    if (type.startsWith('graph.')) {
+      console.log('[DeepResearcher] Emitting event:', type, 'sessionId:', data?.sessionId, 'nodeId:', data?.nodeId);
+    }
     try { this.onEvent({ type, timestamp: new Date().toISOString(), ...data }); } catch (err) {
       console.error('[DeepResearcher] Event emission failed:', err.message);
     }
@@ -1976,13 +2086,14 @@ Rules:
 
   /**
    * Mine blueprints from completed research.
+   * @param {string} sessionId - current research session ID
    * @param {string} userId
    * @param {string} orgId
    * @param {string} query
    * @param {TaskStack} stack
    * @private
    */
-  async _mineBlueprints(userId, orgId, query, stack) {
+  async _mineBlueprints(sessionId, userId, orgId, query, stack) {
     try {
       await new Promise(resolve => setTimeout(resolve, 2000));
 
@@ -1995,6 +2106,16 @@ Rules:
         this._emit('research.blueprints_mined', {
           blueprintCount: blueprints.length,
           blueprintIds: blueprints.map(b => b.blueprintId),
+        });
+        // Emit each mined blueprint as a node in graph for discovery
+        blueprints.forEach(blueprint => {
+          this._emitBlueprintGraphEvent({
+            sessionId,
+            blueprintId: blueprint.blueprintId,
+            blueprintName: blueprint.name,
+            blueprintDomain: blueprint.domain || 'research',
+            isUsed: false,
+          });
         });
       }
     } catch (err) {

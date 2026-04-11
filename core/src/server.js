@@ -340,6 +340,7 @@ async function restoreSessionFromCSI(sessionId, userId, orgId) {
       } : null,
       error: null,
       createdAt: trail.created_at,
+      startedAt: new Date(trail.created_at), // For filtering graph nodes
       _restored: true,
     };
     researchSessions.set(sessionId, session);
@@ -375,6 +376,7 @@ function broadcastResearchEvent(session, event) {
   if (isResearchGraphEvent(event)) {
     if (!Array.isArray(session.graphEvents)) session.graphEvents = [];
     session.graphEvents.push(event);
+    console.log('[broadcastResearchEvent] Graph event:', event.type, 'sessionId:', event.sessionId, 'clients:', session.sseClients?.length || 0);
   } else {
     session.events.push(event);
   }
@@ -3368,17 +3370,27 @@ a{color:#a78bfa}</style></head><body>
             const projectId = session.projectId || `research/${sessionId.slice(0, 8)}`;
             console.log('[research/graph] Fetching graph for session:', sessionId, 'projectId:', projectId, 'userId:', session.userId || userId, 'orgId:', session.orgId || orgId);
 
+            // Fetch only memories for this research session (limit to 100 nodes max)
+            // Filter by project and optionally by research session timestamp
             const memories = await persistentMemoryStore.searchMemories({
               query: '',
               user_id: session.userId || userId,
               org_id: session.orgId || orgId,
               project: projectId,
-              n_results: 200,
+              n_results: 100, // Reduced from 200 to avoid overwhelming graphs
             });
 
-            console.log('[research/graph] Found', memories?.length || 0, 'memories for project:', projectId);
-            if (memories?.length > 0) {
-              console.log('[research/graph] Sample memory tags:', memories[0]?.tags, 'memory_type:', memories[0]?.memory_type);
+            // Further filter to only include memories from this research session
+            // by checking if they were created after the session started
+            const sessionStartTime = session.startedAt || new Date(Date.now() - 24 * 60 * 60 * 1000); // Default to 24h ago
+            const filteredMemories = (memories || []).filter(m => {
+              const memTime = new Date(m.created_at || m.metadata?.createdAt || 0);
+              return memTime >= sessionStartTime;
+            });
+
+            console.log('[research/graph] Found', filteredMemories?.length || 0, 'memories for this session (filtered from', memories?.length || 0, 'total for project:', projectId);
+            if (filteredMemories?.length > 0) {
+              console.log('[research/graph] Sample memory tags:', filteredMemories[0]?.tags, 'memory_type:', filteredMemories[0]?.memory_type);
             }
 
             // Build layered graph structure with real-time event support
@@ -3407,8 +3419,8 @@ a{color:#a78bfa}</style></head><body>
               });
             };
 
-            // Categorize memories into layers
-            (memories || []).forEach(m => {
+            // Categorize memories into layers - only from current session
+            (filteredMemories || []).forEach(m => {
               const tags = m.tags || [];
               const metadata = m.metadata || {};
               const memoryType = m.memoryType || m.memory_type;
@@ -3585,8 +3597,8 @@ a{color:#a78bfa}</style></head><body>
               }
             }
 
-            // Build edges based on relationships and provenance
-            (memories || []).forEach(m => {
+            // Build edges based on relationships and provenance - only from current session
+            (filteredMemories || []).forEach(m => {
               const metadata = m.metadata || {};
               const sourceIds = deriveResearchSourceIds(metadata);
               const claimIds = uniqueValues(metadata.claimIds || metadata.output?.claimIds || metadata.relatedClaimIds);
@@ -3966,6 +3978,7 @@ a{color:#a78bfa}</style></head><body>
             const sessionId = crypto.randomUUID();
             const slug = query.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 60);
             const projectId = `research/${slug}`;
+            const now = new Date();
             const session = {
               id: sessionId,
               query,
@@ -3978,7 +3991,8 @@ a{color:#a78bfa}</style></head><body>
               sseClients: [],
               result: null,
               error: null,
-              createdAt: new Date().toISOString(),
+              createdAt: now.toISOString(),
+              startedAt: now, // For filtering graph nodes to only current session
             };
             researchSessions.set(sessionId, session);
 
@@ -4382,6 +4396,57 @@ a{color:#a78bfa}</style></head><body>
           break;
 
         // Capture research state for reusable blueprint
+        case '/api/research/:sessionId/stream':
+        case '/v1/proxy/research/:sessionId/stream':
+          if (req.method === 'GET') {
+            // Extract sessionId from path - handle both /api/research/ and /v1/proxy/research/ prefixes
+            const pathParts = pathname.split('/').filter(Boolean);
+            const sessionId = pathParts[pathParts.length - 1] === 'stream'
+              ? pathParts[pathParts.length - 2]
+              : pathname.split('/')[3];
+            let session = researchSessions.get(sessionId);
+            if (!session) session = await restoreSessionFromCSI(sessionId, userId, orgId);
+            if (!session) {
+              return jsonResponse(res, { error: 'Session not found' }, 404);
+            }
+
+            // Set up SSE response headers
+            res.writeHead(200, {
+              'Content-Type': 'text/event-stream',
+              'Cache-Control': 'no-cache',
+              'Connection': 'keep-alive',
+              'Access-Control-Allow-Origin': '*',
+              'Access-Control-Allow-Credentials': 'true',
+            });
+
+            // Replay all previous events (both regular and graph events)
+            replayResearchEvents(res, session);
+
+            // Add client to sseClients so future events are broadcast
+            if (!Array.isArray(session.sseClients)) {
+              session.sseClients = [];
+            }
+            session.sseClients.push(res);
+            console.log('[stream] SSE client connected for session:', sessionId, 'total clients:', session.sseClients.length);
+
+            // Send keepalive ping every 30s
+            const pingInterval = setInterval(() => {
+              try {
+                res.write(`:keepalive\n\n`);
+              } catch {
+                clearInterval(pingInterval);
+              }
+            }, 30000);
+
+            // Cleanup on close
+            req.on('close', () => {
+              clearInterval(pingInterval);
+              session.sseClients = session.sseClients.filter(c => c !== res);
+            });
+            return;
+          }
+          break;
+
         case '/api/research/:sessionId/capture-state':
         case '/v1/proxy/research/:sessionId/capture-state':
           if (req.method === 'POST') {

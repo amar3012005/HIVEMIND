@@ -3760,6 +3760,7 @@ a{color:#a78bfa}</style></head><body>
               executionEvents: [], // NEW: Execution events from agent phases
               csi: [],
               blueprints: [],
+              promotedClaims: [],
               weights: { edges: [] },
             };
             const seenEdges = new Set();
@@ -3792,6 +3793,23 @@ a{color:#a78bfa}</style></head><body>
               const isPromotedMemory = tags.includes('promoted-claim') || tags.includes('report') || metadata.promotedAt || metadata.source_type === 'deep_research_report' || memoryType === 'decision';
               const isResearchTrail = tags.includes('research-trail') || tags.includes('csi-trail') ||
                   metadata.trailType === 'op/research-trail';
+
+              // Layer 0: Promoted claims (kg layer — knowledge from prior sessions)
+              if ((tags || []).includes('promoted-claim')) {
+                layers.promotedClaims.push({
+                  id: m.id,
+                  content: m.content?.slice(0, 300),
+                  title: m.title,
+                  confidence: m.metadata?.confidence || m.importance_score,
+                  sourceIds: m.metadata?.sourceIds || [],
+                  agent: m.metadata?.agent || 'unknown',
+                  sessionId: m.metadata?.sessionId,
+                  promotedAt: m.metadata?.promotedAt,
+                  structured: m.metadata?.structured || null,
+                  createdAt: m.created_at,
+                });
+                return; // Don't double-count as claim
+              }
 
               // Layer 1: Sources (web pages, docs) - memory_type 'fact' with web source tags
               if (tags.includes('research-source') || tags.includes('web-source') ||
@@ -4147,7 +4165,7 @@ a{color:#a78bfa}</style></head><body>
                 verifier: 'turing',
                 synthesizer: 'synthesis',
               },
-              nodeCount: layers.sources.length + layers.claims.length + layers.trails.length + layers.observations.length + layers.executionEvents.length + layers.csi.length + layers.blueprints.length + (layers.promoted?.length || 0),
+              nodeCount: layers.sources.length + layers.claims.length + layers.trails.length + layers.observations.length + layers.executionEvents.length + layers.csi.length + layers.blueprints.length + (layers.promoted?.length || 0) + layers.promotedClaims.length,
               edgeCount: layers.weights.edges.length,
             });
           } catch (err) {
@@ -4536,8 +4554,17 @@ a{color:#a78bfa}</style></head><body>
                 session.status = isCancelled ? 'cancelled' : 'failed';
                 session._researcher = null;
                 session.error = err.message;
-                // Persist failed/cancelled status to DB
+                // Save partial checkpoint with final status so session is recoverable
                 persistSessionStatus(sessionId, session.status, userId, orgId, session.projectId).catch(() => {});
+                // Save partial trail to CSI so interrupted sessions have a recovery anchor
+                // and graph data collected so far is not lost
+                try {
+                  const partialTrailStore = new TrailStore({ memoryStore: persistentMemoryStore, userId, orgId });
+                  const partialReport = isCancelled
+                    ? `Research ${session.status}: ${session.query}`
+                    : `Research failed: ${err.message}`;
+                  partialTrailStore.finalizeTrail(sessionId, partialReport, null).catch(() => {});
+                } catch {}
                 const donePayload = `event: done\ndata: ${JSON.stringify({ status: session.status, error: err.message })}\n\n`;
                 session.sseClients.forEach(c => { try { c.write(donePayload); c.end(); } catch {} });
                 session.sseClients = [];

@@ -520,6 +520,10 @@ export class DeepResearcher {
     const allFindings = [...priorFindings];
     const allSources = [];
     const waves = stack.getTasksByWave();
+    let report = '';
+    let reportProvenance = null;
+    let researchError = null;
+    try {
 
     for (const waveNum of [1, 2, 3]) {
       this._checkAborted();
@@ -709,25 +713,49 @@ export class DeepResearcher {
       blueprintUsed: reportGate.blueprint?.blueprintId || null,
     });
 
-    const reportSynthesisProfile = options.reportSynthesisProfile || (baseState ? this.reportSynthesisProfile || DEFAULT_REPORT_SYNTHESIS_PROFILE : null);
-    const report = await this._synthesizeReport(query, allFindings, stack.getRemainingGaps(), reportGate, reportSynthesisProfile);
-    const reportProvenance = this._buildReportProvenance({
-      sessionId,
-      query,
-      report,
-      findings: allFindings,
-      sources: allSources,
-      trailStore,
-      reportGate,
-      blueprintUsed,
-    });
+      const reportSynthesisProfile = options.reportSynthesisProfile || (baseState ? this.reportSynthesisProfile || DEFAULT_REPORT_SYNTHESIS_PROFILE : null);
+      report = await this._synthesizeReport(query, allFindings, stack.getRemainingGaps(), reportGate, reportSynthesisProfile);
+      reportProvenance = this._buildReportProvenance({
+        sessionId,
+        query,
+        report,
+        findings: allFindings,
+        sources: allSources,
+        trailStore,
+        reportGate,
+        blueprintUsed,
+      });
+    } catch (err) {
+      researchError = err;
+      // Build a minimal partial report so the trail is still meaningful
+      if (err.message === 'Research cancelled by user') {
+        report = allFindings.length > 0
+          ? `Research was cancelled after collecting ${allFindings.length} findings.\n\n` +
+            allFindings
+              .filter(f => f.confidence >= 0.7)
+              .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))
+              .slice(0, 5)
+              .map(f => `• ${f.title}: ${f.content?.slice(0, 200)}`)
+              .join('\n')
+          : 'Research was cancelled before findings were collected.';
+      } else {
+        report = `Research encountered an error: ${err.message}`;
+      }
+    } finally {
+      // Step 5: Finalize trail in CSI via trailStore — always fires, even on cancel/error
+      try {
+        await trailStore.finalizeTrail(sessionId, report || '', reportProvenance);
+        // Promote high-confidence claims to kg layer for future run compounding
+        await this._promoteClaimsToKg(allFindings, userId, orgId, projectId, sessionId).catch(err => {
+          console.error('[DeepResearcher] Claim promotion failed:', err.message);
+        });
+      } catch (finalizeErr) {
+        console.error('[DeepResearcher] finalizeTrail failed:', finalizeErr.message);
+      }
+    }
 
-    // Step 5: Finalize trail in CSI via trailStore
-    await trailStore.finalizeTrail(sessionId, report, reportProvenance);
-    // Promote high-confidence claims to kg layer for future run compounding
-    await this._promoteClaimsToKg(allFindings, userId, orgId, projectId, sessionId).catch(err => {
-      console.error('[DeepResearcher] Claim promotion failed:', err.message);
-    });
+    // Re-throw after finalization so server.js catch handler sets correct status
+    if (researchError) throw researchError;
 
     // Step 6: Trigger blueprint mining (non-blocking, after research completes)
     if (this.autoMineBlueprints) {
@@ -942,6 +970,43 @@ export class DeepResearcher {
           } : null;
         } else {
           result = await this._actSearchWeb(reasoning.query || task.query, userId, orgId, projectId, sessionId, trailStore);
+        }
+
+        // Auto deep-read: fetch full content from top 2 URLs for higher-fidelity claims
+        // Only on steps 1-2 (early exploration) to avoid budget blowout
+        if (result?._urls?.length > 0 && step <= 2) {
+          const urlsToRead = result._urls.slice(0, 2);
+          for (const url of urlsToRead) {
+            try {
+              const deepResult = await this._actReadUrl(url, userId, orgId, projectId, sessionId, trailStore);
+              if (deepResult?.content) {
+                const deepFinding = attachTaskContext({
+                  id: randomUUID(),
+                  type: 'follow_up',
+                  title: `Deep read: ${url.slice(0, 60)}`,
+                  content: deepResult.content,
+                  source: url,
+                  sourceId: deepResult.sourceId,
+                  sourceIds: deepResult.sourceIds || [],
+                  confidence: 0.75,
+                  taskQuery: task.query,
+                  agent: 'faraday',
+                });
+                findings.push(deepFinding);
+                await this._recordFinding(trailStore, sessionId, stepIndex++, 'faraday', 'READ_URL', deepFinding, projectId, {
+                  thought: `Auto deep-read top source for higher fidelity content`,
+                  why: 'Snippet content is too short for reliable claim extraction',
+                });
+                this._emit('task.observation', {
+                  taskId: task.id, step, agent: 'Faraday', agent_id: 'faraday',
+                  legacy_agent_id: 'explorer', type: 'deep_read', title: `Deep read: ${url.slice(0, 60)}`,
+                });
+              }
+            } catch (deepErr) {
+              // Non-fatal — skip this URL if it fails
+              console.warn('[DeepResearcher] Auto deep-read failed for', url, ':', deepErr.message);
+            }
+          }
         }
 
         if (result?.content) {

@@ -21,13 +21,29 @@
 
 import { randomUUID } from 'node:crypto';
 import { TaskStack, DIMENSIONS } from './task-stack.js';
-import { TrailStore } from './trail-store.js';
+import { TrailStore, AGENT_ALIASES } from './trail-store.js';
 import { BlueprintMiner } from './blueprint-miner.js';
 import { extractFacts } from '../memory/fact-extractor.js';
 
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_MODEL = 'llama-3.3-70b-versatile';
 const MAX_REFLECTION_ROUNDS = 2;
+const AGENT_ID_MAP = Object.freeze({
+  faraday: 'faraday',
+  explorer: 'faraday',
+  feynmann: 'feynmann',
+  analyst: 'feynmann',
+  turing: 'turing',
+  verifier: 'turing',
+  synthesis: 'synthesis',
+  synthesizer: 'synthesis',
+});
+const AGENT_DISPLAY_MAP = Object.freeze({
+  faraday: 'Faraday',
+  feynmann: 'Feynmann',
+  turing: 'Turing',
+  synthesis: 'Synthesis',
+});
 export const DEFAULT_REPORT_SECTION_SCHEMA = Object.freeze([
   { key: 'executive_summary', title: 'Executive Summary', purpose: 'Restate the question and deliver the highest-confidence conclusions in 1-2 short paragraphs.' },
   { key: 'definition_and_scope', title: 'Definition and Scope', purpose: 'Define the topic and clarify what is in scope, out of scope, and assumed.' },
@@ -253,8 +269,23 @@ export class DeepResearcher {
    * @param {TrailStore} [deps.trailStore] - optional trail store for persistence
    * @param {boolean} [deps.autoMineBlueprints] - automatically mine blueprints after completion
    * @param {Object} [deps.reportSynthesisProfile] - default final-report synthesis profile
+   * @param {import('../memory/stigmergic-cot.js').StigmergicCoT} [deps.stigmergicCoT] - swarm trace substrate
+   * @param {number} [deps.maxLlmCalls] - hard session budget
    */
-  constructor({ memoryStore, recallFn, prisma, groqApiKey, browserRuntime, webJobStore, onEvent, trailStore, autoMineBlueprints = true, reportSynthesisProfile = null }) {
+  constructor({
+    memoryStore,
+    recallFn,
+    prisma,
+    groqApiKey,
+    browserRuntime,
+    webJobStore,
+    onEvent,
+    trailStore,
+    autoMineBlueprints = true,
+    reportSynthesisProfile = null,
+    stigmergicCoT = null,
+    maxLlmCalls = null,
+  }) {
     this.memoryStore = memoryStore;
     this.recallFn = recallFn;
     this.prisma = prisma;
@@ -265,9 +296,29 @@ export class DeepResearcher {
     this.trailStore = trailStore || null;
     this.autoMineBlueprints = autoMineBlueprints;
     this.reportSynthesisProfile = reportSynthesisProfile || null;
+    this.stigmergicCoT = stigmergicCoT || null;
     this.blueprintMiner = new BlueprintMiner({ memoryStore, prisma });
     this._llmCallCount = 0;
-    this._maxLlmCalls = 40;
+    const envBudget = Number.parseInt(process.env.DEEP_RESEARCH_MAX_LLM_CALLS || '', 10);
+    this._maxLlmCalls = Number.isInteger(maxLlmCalls) && maxLlmCalls > 0
+      ? maxLlmCalls
+      : Number.isInteger(envBudget) && envBudget > 0
+        ? envBudget
+        : 100;
+    this._workerLlmCalls = {
+      faraday: 0,
+      feynmann: 0,
+      turing: 0,
+      synthesis: 0,
+      general: 0,
+    };
+    this._workerSoftBudgets = {
+      faraday: Math.floor(this._maxLlmCalls * 0.35),
+      feynmann: Math.floor(this._maxLlmCalls * 0.3),
+      turing: Math.floor(this._maxLlmCalls * 0.25),
+      synthesis: Math.floor(this._maxLlmCalls * 0.2),
+      general: this._maxLlmCalls,
+    };
     this._abortController = null;
   }
 
@@ -306,6 +357,19 @@ export class DeepResearcher {
     const sessionId = options.sessionId || randomUUID();
     const projectId = options.projectId || `research/${this._slugify(query)}`;
     const startTime = Date.now();
+    if (Number.isInteger(options.maxLlmCalls) && options.maxLlmCalls > 0) {
+      this._maxLlmCalls = options.maxLlmCalls;
+      this._workerSoftBudgets = {
+        faraday: Math.floor(this._maxLlmCalls * 0.35),
+        feynmann: Math.floor(this._maxLlmCalls * 0.3),
+        turing: Math.floor(this._maxLlmCalls * 0.25),
+        synthesis: Math.floor(this._maxLlmCalls * 0.2),
+        general: this._maxLlmCalls,
+      };
+    }
+    this._llmCallCount = 0;
+    this._workerLlmCalls = { faraday: 0, feynmann: 0, turing: 0, synthesis: 0, general: 0 };
+    this._emitLlmBudget({ sessionId, reason: 'research_start' });
 
     // Wire up AbortController for cancellation
     this._abortController = new AbortController();
@@ -689,6 +753,62 @@ export class DeepResearcher {
 
   // ─── Internal Methods ──────────────────────────────────────
 
+  _normalizeAgentId(agent) {
+    const key = String(agent || 'faraday').toLowerCase();
+    return AGENT_ID_MAP[key] || AGENT_ALIASES[key] || key;
+  }
+
+  _displayAgentName(agent) {
+    return AGENT_DISPLAY_MAP[this._normalizeAgentId(agent)] || String(agent || 'Faraday');
+  }
+
+  _emitLlmBudget(context = {}) {
+    this._emit('research.llm_budget', {
+      used: this._llmCallCount,
+      remaining: Math.max(0, this._maxLlmCalls - this._llmCallCount),
+      max: this._maxLlmCalls,
+      worker_used: { ...this._workerLlmCalls },
+      worker_soft_budget: { ...this._workerSoftBudgets },
+      ...context,
+    });
+  }
+
+  _normalizeAgentEventName(agent) {
+    const id = this._normalizeAgentId(agent);
+    return {
+      agentId: id,
+      displayName: this._displayAgentName(id),
+    };
+  }
+
+  _traceSignal(traces = {}, action = '', query = '') {
+    const actionKey = String(action || '').toLowerCase();
+    const queryKey = String(query || '').toLowerCase();
+    const affordances = Array.isArray(traces.affordances) ? traces.affordances : [];
+    const disturbances = Array.isArray(traces.disturbances) ? traces.disturbances : [];
+    const preferred = new Set();
+    const penalized = new Set();
+    for (const memory of affordances) {
+      const mAction = String(memory?.metadata?.action || '').toLowerCase();
+      if (mAction) preferred.add(mAction);
+    }
+    for (const memory of disturbances) {
+      const mAction = String(memory?.metadata?.action || '').toLowerCase();
+      if (mAction) penalized.add(mAction);
+      const content = String(memory?.content || '').toLowerCase();
+      if (queryKey && content.includes(queryKey.slice(0, 40))) penalized.add(actionKey);
+    }
+    const disturbancePenalty = penalized.has(actionKey) ? 0.25 : 0;
+    const affordanceBoost = preferred.has(actionKey) ? 0.2 : 0;
+    return {
+      disturbancePenalty,
+      affordanceBoost,
+      preferredActions: [...preferred],
+      penalizedActions: [...penalized],
+      retryBudget: penalized.has(actionKey) ? 1 : 2,
+    };
+  }
+
   async _executeTask(task, userId, orgId, projectId, sessionId, trailStore) {
     task.status = 'active';
     const findings = [];
@@ -704,11 +824,29 @@ export class DeepResearcher {
       ...extra,
     });
 
-    // Track agent states for real-time visibility
-    const agentStates = { explorer: 'idle', analyst: 'idle', verifier: 'idle', synthesizer: 'idle' };
+    // Track agent states for real-time visibility (canonical ids + legacy alias metadata)
+    const agentStates = { faraday: 'idle', feynmann: 'idle', turing: 'idle', synthesis: 'idle' };
+    let lastThoughtId = null;
     const updateAgentState = (agent, state, detail = '') => {
-      agentStates[agent] = state;
-      this._emit('agent.state', { taskId: task.id, agent, state, detail, timestamp: new Date().toISOString() });
+      const normalized = this._normalizeAgentId(agent);
+      const displayName = this._displayAgentName(normalized);
+      const legacyAgentId = normalized === 'faraday'
+        ? 'explorer'
+        : normalized === 'feynmann'
+          ? 'analyst'
+          : normalized === 'turing'
+            ? 'verifier'
+            : 'synthesizer';
+      agentStates[normalized] = state;
+      this._emit('agent.state', {
+        taskId: task.id,
+        agent: displayName,
+        agent_id: normalized,
+        legacy_agent_id: legacyAgentId,
+        state,
+        detail,
+        timestamp: new Date().toISOString(),
+      });
     };
     this._emit('agent.states', { taskId: task.id, states: { ...agentStates } });
 
@@ -725,10 +863,10 @@ export class DeepResearcher {
         sourceId: memoryResult.sourceId,
         confidence: memoryResult.confidence || 0.8,
         taskQuery: task.query,
-        agent: 'explorer',
+        agent: 'faraday',
       });
       findings.push(finding);
-      await this._recordFinding(trailStore, sessionId, stepIndex++, 'explorer', 'SEARCH_MEMORY', finding, projectId, {
+      await this._recordFinding(trailStore, sessionId, stepIndex++, 'faraday', 'SEARCH_MEMORY', finding, projectId, {
         thought: 'Found high-confidence memory match — using as foundation, reducing web exploration',
         why: 'Memory-first retrieval: existing knowledge compounds across research sessions',
       });
@@ -743,17 +881,55 @@ export class DeepResearcher {
     while (step < maxSteps) {
       step++;
 
-      // PHASE 1-3: EXPLORATION (Explorer Agent)
+      // PHASE 1-3: EXPLORATION (Faraday worker)
       if (step <= maxExplorationSteps) {
-        updateAgentState('explorer', 'active', 'Searching for sources');
+        updateAgentState('faraday', 'active', 'Searching for sources');
+        const traceContext = await this._followSwarmTraces('faraday', { task, userId, orgId, action: 'search_web' });
         const reasoning = await this._reasonExplore(task.query, findings, step);
-        this._emit('task.reasoning', { taskId: task.id, step, agent: 'explorer', action: reasoning.action, thought: reasoning.thought });
+        const traceSignal = this._traceSignal(traceContext, reasoning.action, reasoning.query || task.query);
+        const actionLower = String(reasoning.action || '').toLowerCase();
+        if (traceSignal.penalizedActions.includes(actionLower) && traceSignal.preferredActions.length > 0) {
+          const preferred = traceSignal.preferredActions[0];
+          if (preferred === 'search_web') reasoning.action = 'SEARCH_WEB';
+          if (preferred === 'read_url') reasoning.action = 'READ_URL';
+          if (preferred === 'search_memory') reasoning.action = 'SEARCH_MEMORY';
+        }
+        const thoughtRecord = await this._recordSwarmThought('faraday', {
+          userId,
+          orgId,
+          task,
+          reasoning,
+          parentThoughtId: lastThoughtId,
+          traceSignal,
+        });
+        if (thoughtRecord?.thoughtId) lastThoughtId = thoughtRecord.thoughtId;
+        this._emit('task.reasoning', {
+          taskId: task.id,
+          step,
+          agent: 'Faraday',
+          agent_id: 'faraday',
+          legacy_agent_id: 'explorer',
+          action: reasoning.action,
+          thought: reasoning.thought,
+          traceSignal,
+        });
 
         if (reasoning.action === 'FINISH') break;
 
         let result;
         if (reasoning.action === 'READ_URL') {
           result = await this._actReadUrl(reasoning.url, userId, orgId, projectId, sessionId, trailStore);
+        } else if (reasoning.action === 'SEARCH_MEMORY') {
+          const memoryHit = await this._actSearchMemory(reasoning.query || task.query, userId, orgId, projectId);
+          result = memoryHit?.content ? {
+            type: 'memory',
+            title: memoryHit.title,
+            content: memoryHit.content,
+            source: 'hivemind_memory',
+            sourceId: memoryHit.sourceId,
+            sourceIds: memoryHit.sourceId ? [memoryHit.sourceId] : [],
+            confidence: memoryHit.confidence || 0.7,
+          } : null;
         } else {
           result = await this._actSearchWeb(reasoning.query || task.query, userId, orgId, projectId, sessionId, trailStore);
         }
@@ -769,17 +945,31 @@ export class DeepResearcher {
             sourceIds: result.sourceIds || [],
             confidence: result.confidence || 0.6,
             taskQuery: task.query,
-            agent: 'explorer',
+            agent: 'faraday',
           });
           findings.push(finding);
           sources.push({ type: result.type, id: result.sourceId, title: result.title });
-          await this._recordFinding(trailStore, sessionId, stepIndex++, 'explorer', reasoning.action, finding, projectId, {
+          const traceRecord = await this._depositSwarmTrace('faraday', {
+            userId,
+            orgId,
+            task,
+            action: reasoning.action,
+            success: true,
+            result: finding.title || finding.content?.slice(0, 180) || 'result',
+            targetMemoryId: finding.sourceId || finding.id,
+            traceSignal,
+          });
+          await this._recordFinding(trailStore, sessionId, stepIndex++, 'faraday', reasoning.action, finding, projectId, {
             thought: reasoning.thought,
             why: reasoning.thought,
+            cotThoughtId: thoughtRecord?.thoughtId || null,
+            cotTraceId: traceRecord?.traceId || null,
+            cotParentThoughtId: thoughtRecord?.parentThoughtId || null,
+            traceSignal,
           });
 
           // Write execution event for real-time graph
-          await this._writeExecutionEvent(sessionId, projectId, trailStore, 'explorer', 'search_web', {
+          await this._writeExecutionEvent(sessionId, projectId, trailStore, 'faraday', 'search_web', {
             findingsCount: findings.length,
             source: result.type,
             sourceIds: result.sourceIds || [],
@@ -788,13 +978,36 @@ export class DeepResearcher {
             phase: 'explore',
           });
         }
-        updateAgentState('explorer', findings.length > 0 ? 'completed' : 'idle');
+        if (!result?.content && traceSignal.retryBudget > 1 && reasoning.action !== 'READ_URL') {
+          // bounded retry: one adaptive retry only when traces indicate recoverable path
+          result = await this._actSearchWeb(
+            `${task.query} ${task.dimension || ''}`.trim(),
+            userId,
+            orgId,
+            projectId,
+            sessionId,
+            trailStore
+          );
+        }
+
+        if (!result?.content) {
+          await this._depositSwarmTrace('faraday', {
+            userId,
+            orgId,
+            task,
+            action: reasoning.action,
+            success: false,
+            result: 'No usable result',
+            traceSignal,
+          });
+        }
+        updateAgentState('faraday', findings.length > 0 ? 'completed' : 'idle');
         continue;
       }
 
-      // PHASE 4: ANALYSIS (Analyst Agent)
+      // PHASE 4: ANALYSIS (Feynmann worker)
       if (step === 4 && findings.length > 0) {
-        updateAgentState('analyst', 'active', 'Analyzing findings');
+        updateAgentState('feynmann', 'active', 'Analyzing findings');
         const analysis = await this._actAnalyze(task.query, findings, userId, orgId, projectId);
         if (analysis?.claims?.length > 0) {
           // Build mapping from analysis sourceIndices back to actual sourceIds from webFindings
@@ -814,10 +1027,10 @@ export class DeepResearcher {
               type: structuredClaim.isLegacy ? 'claim' : 'structured-claim',
               title: `Claim: ${(structuredClaim.claim || structuredClaim).slice(0, 80)}`,
               content: structuredClaim.claim || structuredClaim,
-              source: 'analyst_extraction',
+              source: 'feynmann_extraction',
               confidence: structuredClaim.confidence || 0.75,
               taskQuery: task.query,
-              agent: 'analyst',
+              agent: 'feynmann',
               sourceIds,
               // Store structured data in metadata for CSI persistence
               structured: structuredClaim.isLegacy ? null : {
@@ -831,12 +1044,32 @@ export class DeepResearcher {
             });
             findings.push(finding);
             extractedClaimIds.push(finding.id);
-            await this._recordFinding(trailStore, sessionId, stepIndex++, 'analyst', 'EXTRACT_CLAIM', finding, projectId, {
+            const thoughtRecord = await this._recordSwarmThought('feynmann', {
+              userId,
+              orgId,
+              task,
+              reasoning: { action: 'EXTRACT_CLAIM', thought: structuredClaim.extractionThought || 'Extracting structured claims' },
+              parentThoughtId: lastThoughtId,
+            });
+            if (thoughtRecord?.thoughtId) lastThoughtId = thoughtRecord.thoughtId;
+            const traceRecord = await this._depositSwarmTrace('feynmann', {
+              userId,
+              orgId,
+              task,
+              action: 'extract_claims',
+              success: true,
+              result: structuredClaim.claim || 'claim extracted',
+              targetMemoryId: finding.id,
+            });
+            await this._recordFinding(trailStore, sessionId, stepIndex++, 'feynmann', 'EXTRACT_CLAIM', finding, projectId, {
               thought: structuredClaim.extractionThought || `Extracting structured claims from gathered sources`,
               why: 'Sources have been gathered and now need to be distilled into key claims',
+              cotThoughtId: thoughtRecord?.thoughtId || null,
+              cotTraceId: traceRecord?.traceId || null,
+              cotParentThoughtId: thoughtRecord?.parentThoughtId || null,
             });
           }
-          await this._writeExecutionEvent(sessionId, projectId, trailStore, 'analyst', 'extract_claims', {
+          await this._writeExecutionEvent(sessionId, projectId, trailStore, 'feynmann', 'extract_claims', {
             claimsCount: analysis.claims.length,
             claimIds: extractedClaimIds,
             taskId: task.id,
@@ -855,28 +1088,28 @@ export class DeepResearcher {
             sourceId: memoryFindings.sourceId,
             confidence: memoryFindings.confidence || 0.6,
             taskQuery: task.query,
-            agent: 'analyst',
+            agent: 'feynmann',
           });
           findings.push(finding);
-          await this._recordFinding(trailStore, sessionId, stepIndex++, 'analyst', 'SEARCH_MEMORY', finding, projectId, {
+          await this._recordFinding(trailStore, sessionId, stepIndex++, 'feynmann', 'SEARCH_MEMORY', finding, projectId, {
             thought: `Checking existing memory for relevant context`,
             why: 'Prior research in memory may provide additional context or validation',
           });
-          await this._writeExecutionEvent(sessionId, projectId, trailStore, 'analyst', 'search_memory', {
+          await this._writeExecutionEvent(sessionId, projectId, trailStore, 'feynmann', 'search_memory', {
             hasMemoryContent: true,
             taskId: task.id,
             wave: task.wave ?? null,
             phase: 'analysis',
           });
         }
-        updateAgentState('analyst', 'completed');
-        this._emit('task.observation', { taskId: task.id, step, agent: 'analyst', type: 'analysis_complete', title: `Extracted ${analysis?.claims?.length || 0} claims` });
+        updateAgentState('feynmann', 'completed');
+        this._emit('task.observation', { taskId: task.id, step, agent: 'Feynmann', agent_id: 'feynmann', legacy_agent_id: 'analyst', type: 'analysis_complete', title: `Extracted ${analysis?.claims?.length || 0} claims` });
         continue;
       }
 
-      // PHASE 5: VERIFICATION (Verifier Agent)
+      // PHASE 5: VERIFICATION (Turing worker)
       if (step === 5 && findings.length > 0) {
-        updateAgentState('verifier', 'active', 'Verifying findings');
+        updateAgentState('turing', 'active', 'Verifying findings');
         const verification = await this._actVerify(task.query, findings, trailStore, sessionId);
         const verifiedClaimIds = [...new Set([...(verification.verified || []), ...(verification.rejected || [])].map(f => f?.id).filter(Boolean))];
         const verifierVerdict =
@@ -887,7 +1120,7 @@ export class DeepResearcher {
               : 'uncertain';
         await trailStore?.recordStep(sessionId, {
           stepIndex: stepIndex++,
-          agent: 'verifier',
+          agent: 'turing',
           action: 'verify_findings',
           input: task.query,
           output: `Verified ${verification.verified?.length || 0}, rejected ${verification.rejected?.length || 0}`,
@@ -896,7 +1129,7 @@ export class DeepResearcher {
           thought: `Checking claims for quality and contradictions`,
           why: 'Claims need verification to ensure reliability before synthesis',
         });
-        await this._writeExecutionEvent(sessionId, projectId, trailStore, 'verifier', 'verify_findings', {
+        await this._writeExecutionEvent(sessionId, projectId, trailStore, 'turing', 'verify_findings', {
           verified: verification.verified?.length || 0,
           rejected: verification.rejected?.length || 0,
           contradictions: verification.contradictions?.length || 0,
@@ -910,7 +1143,7 @@ export class DeepResearcher {
           phase: 'verification',
         });
         if (verification.contradictions?.length > 0) {
-          this._emit('verifier.contradiction', { taskId: task.id, count: verification.contradictions.length, details: verification.contradictions });
+          this._emit('verifier.contradiction', { taskId: task.id, agent_id: 'turing', count: verification.contradictions.length, details: verification.contradictions });
           let resolved = 0;
           for (const contradiction of verification.contradictions) {
             if (resolved >= 3) break;
@@ -928,14 +1161,14 @@ export class DeepResearcher {
             resolved, unresolved: verification.contradictions.length - resolved,
           });
         }
-        updateAgentState('verifier', 'completed', `${verification.verified?.length || 0} verified, ${verification.rejected?.length || 0} rejected`);
-        this._emit('task.observation', { taskId: task.id, step, agent: 'verifier', type: 'verification_complete', title: `Found ${verification.contradictions?.length || 0} contradictions` });
+        updateAgentState('turing', 'completed', `${verification.verified?.length || 0} verified, ${verification.rejected?.length || 0} rejected`);
+        this._emit('task.observation', { taskId: task.id, step, agent: 'Turing', agent_id: 'turing', legacy_agent_id: 'verifier', type: 'verification_complete', title: `Found ${verification.contradictions?.length || 0} contradictions` });
         continue;
       }
 
-      // PHASE 6: SYNTHESIS (Synthesizer Agent)
+      // PHASE 6: SYNTHESIS (final stage, not CSI agent)
       if (step === 6 && findings.length > 0) {
-        updateAgentState('synthesizer', 'active', 'Synthesizing answer');
+        updateAgentState('synthesis', 'active', 'Synthesizing answer');
         const synthesis = await this._actSynthesize(task.query, findings);
         if (synthesis?.content) {
           const finding = attachTaskContext({
@@ -943,17 +1176,17 @@ export class DeepResearcher {
             type: 'synthesis',
             title: `Synthesis: ${task.query.slice(0, 50)}`,
             content: synthesis.content,
-            source: 'synthesizer',
+            source: 'synthesis',
             confidence: synthesis.confidence || 0.8,
             taskQuery: task.query,
-            agent: 'synthesizer',
+            agent: 'synthesis',
           });
           findings.push(finding);
-          await this._recordFinding(trailStore, sessionId, stepIndex++, 'synthesizer', 'SYNTHESIZE', finding, projectId, {
+          await this._recordFinding(trailStore, sessionId, stepIndex++, 'synthesis', 'SYNTHESIZE', finding, projectId, {
             thought: `Combining all gathered findings into a cohesive answer`,
             why: 'All sources and claims have been gathered and verified - now need to produce final synthesis',
           });
-          await this._writeExecutionEvent(sessionId, projectId, trailStore, 'synthesizer', 'synthesize', {
+          await this._writeExecutionEvent(sessionId, projectId, trailStore, 'synthesis', 'synthesize', {
             synthesisLength: synthesis.content?.length || 0,
             confidence: synthesis.confidence,
             taskId: task.id,
@@ -961,8 +1194,8 @@ export class DeepResearcher {
             phase: 'synthesis',
           });
         }
-        updateAgentState('synthesizer', 'completed');
-        this._emit('task.observation', { taskId: task.id, step, agent: 'synthesizer', type: 'synthesis_complete', title: 'Synthesis complete' });
+        updateAgentState('synthesis', 'completed');
+        this._emit('task.observation', { taskId: task.id, step, agent: 'Synthesis', agent_id: 'synthesis', legacy_agent_id: 'synthesizer', type: 'synthesis_complete', title: 'Synthesis complete' });
         break;
       }
 
@@ -973,14 +1206,83 @@ export class DeepResearcher {
     this._emit('agent.states', { taskId: task.id, states: agentStates, final: true });
 
     // Extract synthesis as report (final finding from synthesizer agent)
-    const synthesisFinding = findings.find(f => f.type === 'synthesis' || f.agent === 'synthesizer');
+    const synthesisFinding = findings.find(f => f.type === 'synthesis' || f.agent === 'synthesis' || f.agent === 'synthesizer');
     const report = synthesisFinding?.content || null;
 
     const verifiedFindings = findings.filter(f => f.confidence >= 0.6);
     const confidence = verifiedFindings.length > 0 ? Math.min(0.95, verifiedFindings.reduce((sum, f) => sum + f.confidence, 0) / verifiedFindings.length) : (findings.length > 0 ? 0.5 : 0.1);
     const gaps = await this._detectGaps(task.query, findings);
+    await trailStore?.flushTrail?.(sessionId);
 
     return { findings, sources, confidence, gaps, agentStates, report };
+  }
+
+  async _followSwarmTraces(agentId, { task, userId, orgId, action }) {
+    if (!this.stigmergicCoT) return { affordances: [], disturbances: [], fullChain: [], totalTraces: 0 };
+    try {
+      return await this.stigmergicCoT.followTraces(userId, orgId, {
+        taskId: task?.id,
+        action: String(action || '').toLowerCase(),
+        limit: 24,
+      });
+    } catch (err) {
+      console.debug('[DeepResearcher] followTraces failed:', err.message);
+      return { affordances: [], disturbances: [], fullChain: [], totalTraces: 0 };
+    }
+  }
+
+  async _recordSwarmThought(agentId, { userId, orgId, task, reasoning, parentThoughtId = null, traceSignal = null }) {
+    if (!this.stigmergicCoT) return null;
+    try {
+      const normalizedAgent = this._normalizeAgentId(agentId);
+      const result = await this.stigmergicCoT.recordThought(normalizedAgent, {
+        userId,
+        orgId,
+        taskId: task?.id,
+        parentThoughtId,
+        reasoning_type: 'step',
+        confidence: 0.75,
+        content: `${normalizedAgent} decided ${reasoning?.action || 'unknown'}: ${reasoning?.thought || ''}`.trim(),
+        metadata: {
+          query: task?.query || '',
+          dimension: task?.dimension || null,
+          wave: task?.wave ?? null,
+          action: String(reasoning?.action || '').toLowerCase(),
+          traceSignal,
+        },
+      });
+      return {
+        ...result,
+        parentThoughtId,
+      };
+    } catch (err) {
+      console.debug('[DeepResearcher] recordThought failed:', err.message);
+      return null;
+    }
+  }
+
+  async _depositSwarmTrace(agentId, { userId, orgId, task, action, success, result, targetMemoryId = null, traceSignal = null }) {
+    if (!this.stigmergicCoT) return null;
+    try {
+      return await this.stigmergicCoT.depositTrace(this._normalizeAgentId(agentId), {
+        userId,
+        orgId,
+        taskId: task?.id,
+        action: String(action || '').toLowerCase(),
+        result: String(result || '').slice(0, 280),
+        success: Boolean(success),
+        targetMemoryId,
+        metadata: {
+          query: task?.query || '',
+          dimension: task?.dimension || null,
+          wave: task?.wave ?? null,
+          traceSignal,
+        },
+      });
+    } catch (err) {
+      console.debug('[DeepResearcher] depositTrace failed:', err.message);
+      return null;
+    }
   }
 
   async _recordFinding(trailStore, sessionId, stepIndex, agent, action, finding, projectId, reasoning = null) {
@@ -1002,6 +1304,10 @@ export class DeepResearcher {
       if (reasoning.thought) stepRecord.thought = reasoning.thought;
       if (reasoning.why) stepRecord.why = reasoning.why;
       if (reasoning.alternativeConsidered) stepRecord.alternativeConsidered = reasoning.alternativeConsidered;
+      if (reasoning.cotThoughtId) stepRecord.cotThoughtId = reasoning.cotThoughtId;
+      if (reasoning.cotTraceId) stepRecord.cotTraceId = reasoning.cotTraceId;
+      if (reasoning.cotParentThoughtId) stepRecord.cotParentThoughtId = reasoning.cotParentThoughtId;
+      if (reasoning.traceSignal) stepRecord.traceSignal = reasoning.traceSignal;
     }
 
     // Write step to trail
@@ -1160,10 +1466,10 @@ export class DeepResearcher {
 
   async _reasonExplore(query, findings, step) {
     const findingsSummary = findings.length > 0 ? findings.slice(-3).map(f => `[${f.type}] ${f.title}`).join('\n') : '(none yet)';
-    const response = await this._llm(`You are the EXPLORER agent. Your job is to gather sources and raw information.\n\nResearch question: "${query}"\n\nCurrent findings: ${findingsSummary}\n\nChoose your NEXT ACTION to gather more sources:\n{\n  "thought": "brief reasoning",\n  "action": "SEARCH_WEB" | "READ_URL" | "FINISH",\n  "query": "specific search query if SEARCH_WEB",\n  "url": "specific URL if READ_URL"\n}\n\nRules:\n- SEARCH_WEB: Use for gathering new web sources\n- READ_URL: Use when you have a specific URL to deep-read\n- FINISH: Use when you have gathered sufficient sources (3-5 good sources)`, { temperature: 0.3 });
+    const response = await this._llm(`You are the FARADAY agent. Your job is to gather sources and raw information.\n\nResearch question: "${query}"\n\nCurrent findings: ${findingsSummary}\n\nChoose your NEXT ACTION to gather more sources:\n{\n  "thought": "brief reasoning",\n  "action": "SEARCH_WEB" | "READ_URL" | "SEARCH_MEMORY" | "FINISH",\n  "query": "specific search query if SEARCH_WEB or SEARCH_MEMORY",\n  "url": "specific URL if READ_URL"\n}\n\nRules:\n- SEARCH_WEB: Use for gathering new web sources\n- READ_URL: Use when you have a specific URL to deep-read\n- SEARCH_MEMORY: Use when prior CSI memory is likely useful\n- FINISH: Use when you have gathered sufficient sources (3-5 good sources)`, { temperature: 0.3, worker: 'faraday' });
     try {
       const parsed = JSON.parse(response.match(/\{[\s\S]*\}/)?.[0] || '{}');
-      return { thought: parsed.thought || '', action: ['SEARCH_WEB', 'READ_URL', 'FINISH'].includes(parsed.action) ? parsed.action : 'SEARCH_WEB', query: parsed.query || query, url: parsed.url || null };
+      return { thought: parsed.thought || '', action: ['SEARCH_WEB', 'READ_URL', 'SEARCH_MEMORY', 'FINISH'].includes(parsed.action) ? parsed.action : 'SEARCH_WEB', query: parsed.query || query, url: parsed.url || null };
     } catch { return { thought: 'Exploring web', action: 'SEARCH_WEB', query, url: null }; }
   }
 
@@ -1174,7 +1480,7 @@ export class DeepResearcher {
     // Build source content with indices for attribution
     const sourcesWithContext = webFindings.map((f, i) => `[${i}] ${f.title}: ${f.content?.slice(0, 800) || ''}`).join('\n\n');
 
-    const response = await this._llm(`You are the ANALYST agent. Extract key claims from these sources with structured format and source attribution.
+    const response = await this._llm(`You are the FEYNMANN agent. Extract key claims from these sources with structured format and source attribution.
 
 Research question: "${query}"
 
@@ -1213,7 +1519,7 @@ Return JSON:
   ]
 }
 
-If you cannot extract structured data, return a simple array of claim strings: ["claim 1", "claim 2"]`, { temperature: 0.2 });
+If you cannot extract structured data, return a simple array of claim strings: ["claim 1", "claim 2"]`, { temperature: 0.2, worker: 'feynmann' });
 
     try {
       const raw = response.match(/\{[\s\S]*\}/)?.[0] || response.match(/\[[\s\S]*\]/)?.[0] || '[]';
@@ -1294,7 +1600,7 @@ If you cannot extract structured data, return a simple array of claim strings: [
     const claims = findings.filter(f => f.type === 'claim' || f.confidence >= 0.6);
     if (claims.length < 2) return { verified: claims, rejected: [], contradictions: [], overallConfidence: 0.7 };
     const claimsText = claims.map((f, i) => `[${i + 1}] ${f.content.slice(0, 200)} (source: ${f.source})`).join('\n');
-    const response = await this._llm(`You are the VERIFIER agent. Check these claims for quality and contradictions.\n\nResearch question: "${query}"\n\nClaims to verify:\n${claimsText}\n\nReturn JSON:\n{\n  "verifiedIndices": [1, 3],\n  "rejectedIndices": [2],\n  "contradictions": [{"claimAIndex": 1, "claimBIndex": 3, "reason": "they disagree"}],\n  "overallConfidence": 0.75\n}`, { temperature: 0.2 });
+    const response = await this._llm(`You are the TURING agent. Check these claims for quality and contradictions.\n\nResearch question: "${query}"\n\nClaims to verify:\n${claimsText}\n\nReturn JSON:\n{\n  "verifiedIndices": [1, 3],\n  "rejectedIndices": [2],\n  "contradictions": [{"claimAIndex": 1, "claimBIndex": 3, "reason": "they disagree"}],\n  "overallConfidence": 0.75\n}`, { temperature: 0.2, worker: 'turing' });
     try {
       const result = JSON.parse(response.match(/\{[\s\S]*\}/)?.[0] || '{}');
       const verified = (result.verifiedIndices || []).map(i => claims[i - 1]).filter(Boolean);
@@ -1315,7 +1621,7 @@ If you cannot extract structured data, return a simple array of claim strings: [
         `Claim A (${contradiction.claimA?.source || 'unknown'}): ${(contradiction.claimA?.content || '').slice(0, 300)}\n` +
         `Claim B (${contradiction.claimB?.source || 'unknown'}): ${(contradiction.claimB?.content || '').slice(0, 300)}\n\n` +
         `Write a specific web search query to find an authoritative tiebreaker source. Return ONLY the search query.`,
-        { temperature: 0.3, maxTokens: 200 }
+        { temperature: 0.3, maxTokens: 200, worker: 'turing' }
       );
       if (!searchQuery?.trim()) return { resolved: false, reason: 'Empty tiebreaker query' };
 
@@ -1332,7 +1638,7 @@ If you cannot extract structured data, return a simple array of claim strings: [
         `Tiebreaker source says: ${tiebreaker.content.slice(0, 500)}\n\n` +
         `Which claim does the tiebreaker support? Return JSON:\n` +
         `{ "supports": "A" or "B" or "neither", "confidence": 0.0-1.0, "reasoning": "one sentence" }`,
-        { temperature: 0.2, maxTokens: 300 }
+        { temperature: 0.2, maxTokens: 300, worker: 'turing' }
       );
 
       const verdict = JSON.parse(verdictRaw);
@@ -1365,7 +1671,7 @@ If you cannot extract structured data, return a simple array of claim strings: [
       ? findings.slice(-5).map(f => `[${f.type}] ${f.title}: ${f.content?.slice(0, 150)}`).join('\n')
       : '(none yet)';
 
-    const response = await this._llm(`You are a research agent working on this question:
+    const response = await this._llm(`You are a synthesis stage in a research pipeline working on this question:
 "${query}"
 
 Step ${step}. Findings so far:
@@ -1385,7 +1691,7 @@ Rules:
 - Use READ_URL after finding promising URLs from web search
 - Use SYNTHESIZE when you have enough findings to combine
 - Use FINISH when the question is well-answered
-- Generate specific, focused search queries — not the full research question`, { temperature: 0.3 });
+- Generate specific, focused search queries — not the full research question`, { temperature: 0.3, worker: 'general' });
 
     try {
       const parsed = JSON.parse(response.match(/\{[\s\S]*\}/)?.[0] || '{}');
@@ -1501,7 +1807,7 @@ Rules:
     const material = findings.slice(0, 10).map(f => f.content?.slice(0, 300) || '').join('\n---\n');
     const synthesis = await this._llm(
       `Synthesize these research findings into a concise summary answering: "${query}"\n\nFindings:\n${material}\n\nWrite a clear, factual summary:`,
-      { temperature: 0.4 }
+      { temperature: 0.4, worker: 'synthesis' }
     );
 
     return {
@@ -1531,6 +1837,16 @@ Rules:
 
   async _recallFromCSI(query, userId, orgId, projectId) {
     try {
+      const promotedResults = await this.recallFn(this.memoryStore, {
+        query_context: query,
+        user_id: userId,
+        org_id: orgId,
+        project: projectId,
+        tags: ['promoted-claim', 'report', 'deep-research'],
+        max_memories: 4,
+      });
+      const promotedMemories = (promotedResults.memories || []).filter(m => (m.score || 0) > 0.4);
+
       // First check project-specific research findings (prior research)
       const projectResults = await this.recallFn(this.memoryStore, {
         query_context: query,
@@ -1552,8 +1868,8 @@ Rules:
       const mainMemories = (mainResults.memories || []).filter(m => (m.score || 0) > 0.75);
 
       // Deduplicate
-      const seen = new Set(projectMemories.map(m => m.id));
-      const combined = [...projectMemories];
+      const seen = new Set([...promotedMemories, ...projectMemories].map(m => m.id));
+      const combined = [...promotedMemories, ...projectMemories];
       for (const m of mainMemories) {
         if (!seen.has(m.id)) combined.push(m);
       }
@@ -1679,7 +1995,7 @@ Rules:
     try {
       const response = await this._llm(
         `Given this research question, select which research dimensions are most relevant. Return ONLY a JSON array of dimension names.\n\nDimensions: ${DIMENSIONS.join(', ')}\n\nQuestion: ${query}\n\nReturn 3-5 most relevant dimensions as JSON array:`,
-        { temperature: 0.3 }
+        { temperature: 0.3, worker: 'general' }
       );
       const parsed = JSON.parse(response.match(/\[.*\]/s)?.[0] || '[]');
       return parsed.filter(d => DIMENSIONS.includes(d)).slice(0, 5);
@@ -1704,7 +2020,7 @@ Rules:
         `Each sub-question should be a concrete, web-searchable query (not meta-commentary). ` +
         `Example: ["EU AI Act compliance requirements for SaaS 2026", "German data protection GDPR AI Act overlap"]\n` +
         `If the question is well-covered, return [].`,
-        { temperature: 0.3 }
+        { temperature: 0.3, worker: 'general' }
       );
       const parsed = JSON.parse(response.match(/\[.*\]/s)?.[0] || '[]');
       return Array.isArray(parsed) ? parsed.filter(g => typeof g === 'string' && g.length > 10).slice(0, 3) : [];
@@ -1719,7 +2035,7 @@ Rules:
       const gapList = gaps.map(g => g.gap || g).join('\n- ');
       const response = await this._llm(
         `The research on "${query}" has gaps:\n- ${gapList}\n\nRephrase each gap as a specific, searchable sub-question. Return a JSON array of strings.`,
-        { temperature: 0.4 }
+        { temperature: 0.4, worker: 'general' }
       );
       const parsed = JSON.parse(response.match(/\[.*\]/s)?.[0] || '[]');
       return Array.isArray(parsed) ? parsed.filter(q => typeof q === 'string').slice(0, 3) : [];
@@ -1739,7 +2055,7 @@ Rules:
           synthesisProfile,
         }))
       : buildLegacyReportPrompt(query, findings, gaps, reportGate);
-    const report = await this._llm(prompt, { temperature: useWorldClassPrompt ? 0.35 : 0.45, maxTokens: 4500 });
+    const report = await this._llm(prompt, { temperature: useWorldClassPrompt ? 0.35 : 0.45, maxTokens: 4500, worker: 'synthesis' });
 
     return report;
   }
@@ -1865,7 +2181,7 @@ Rules:
     return DEFAULT_REPORT_SECTION_SCHEMA;
   }
 
-  _buildReportRecallQueries({ query, findings, gaps, blueprint, trail, blueprintPattern }) {
+  _buildReportRecallQueries({ query, findings, gaps, blueprint, trail, blueprintPattern, reportProvenance = null }) {
     const queries = [query];
 
     if (blueprint?.name) queries.push(`${query} ${blueprint.name}`);
@@ -1888,6 +2204,10 @@ Rules:
     if (trail?.steps?.length > 0) {
       const trailFocus = trail.steps.slice(-4).map(step => [step.agent, step.action, step.output].filter(Boolean).join(' ')).join(' | ');
       if (trailFocus) queries.push(trailFocus);
+    }
+
+    if (reportProvenance?.goldenLine) {
+      queries.push(reportProvenance.goldenLine);
     }
 
     return [...new Set(queries.map(q => String(q).trim()).filter(Boolean))].slice(0, 10);
@@ -2210,7 +2530,7 @@ Rules:
         if (trailStore) {
           await trailStore.recordStep(sessionId, {
             stepIndex: -1,
-            agent: 'explorer',
+            agent: 'faraday',
             action: 'search_web',
             input: src.url,
             output: src.title || src.url,
@@ -2311,12 +2631,24 @@ Rules:
     }
   }
 
-  async _llm(prompt, { temperature = 0.5, maxTokens = 2000 } = {}) {
+  async _llm(prompt, { temperature = 0.5, maxTokens = 2000, worker = 'general' } = {}) {
+    const normalizedWorker = this._normalizeAgentId(worker);
+    const workerKey = this._workerLlmCalls[normalizedWorker] !== undefined ? normalizedWorker : 'general';
+    if (
+      workerKey !== 'general' &&
+      this._workerLlmCalls[workerKey] >= (this._workerSoftBudgets[workerKey] || this._maxLlmCalls)
+    ) {
+      this._emitLlmBudget({ worker: workerKey, exhausted: true, reason: 'worker_soft_budget_exceeded' });
+      return '{"action":"FINISH","thought":"LLM worker budget exhausted"}';
+    }
     if (this._llmCallCount >= this._maxLlmCalls) {
       console.warn('[DeepResearcher] LLM call limit reached:', this._llmCallCount);
+      this._emitLlmBudget({ worker: workerKey, exhausted: true, reason: 'hard_budget_exceeded' });
       return '{"action":"FINISH","thought":"LLM call budget exhausted"}';
     }
     this._llmCallCount++;
+    this._workerLlmCalls[workerKey] = (this._workerLlmCalls[workerKey] || 0) + 1;
+    this._emitLlmBudget({ worker: workerKey, exhausted: false });
     const res = await fetch(GROQ_API_URL, {
       method: 'POST',
       headers: {
@@ -2425,13 +2757,15 @@ Rules:
 
   _inferCsiStage(agent, action, finding = {}) {
     if (finding.csiStage) return finding.csiStage;
-    if (agent === 'explorer') return 'faraday';
-    if (agent === 'analyst' && action === 'EXTRACT_CLAIM') return 'feynman';
+    const normalized = this._normalizeAgentId(agent);
+    if (normalized === 'faraday') return 'faraday';
+    if (normalized === 'feynmann' && action === 'EXTRACT_CLAIM') return 'feynman';
     return null;
   }
 
   _inferExecutionStage(agent, action) {
-    if (agent === 'verifier' || action === 'verify_findings') return 'turing';
+    const normalized = this._normalizeAgentId(agent);
+    if (normalized === 'turing' || action === 'verify_findings') return 'turing';
     return null;
   }
 
@@ -2735,13 +3069,13 @@ Rules:
    */
   _mapActionToAgent(action) {
     const mapping = {
-      'SEARCH_WEB': 'explorer',
-      'SEARCH_MEMORY': 'analyst',
-      'READ_URL': 'explorer',
-      'SYNTHESIZE': 'synthesizer',
-      'FINISH': 'synthesizer',
+      'SEARCH_WEB': 'faraday',
+      'SEARCH_MEMORY': 'feynmann',
+      'READ_URL': 'faraday',
+      'SYNTHESIZE': 'synthesis',
+      'FINISH': 'synthesis',
     };
-    return mapping[action] || 'explorer';
+    return mapping[action] || 'faraday';
   }
 
   /**
@@ -2768,8 +3102,23 @@ Rules:
     try {
       const userId = this.trailStore?.userId || 'system';
       const orgId = this.trailStore?.orgId || 'system';
+      const promotedContext = await this.recallFn(this.memoryStore, {
+        query_context: query,
+        user_id: userId,
+        org_id: orgId,
+        tags: ['promoted-claim', 'report', 'deep-research'],
+        max_memories: 6,
+      });
+      const promotedSummary = (promotedContext.memories || [])
+        .slice(0, 6)
+        .map(memory => [memory.title, memory.content?.slice(0, 120)].filter(Boolean).join(' — '))
+        .filter(Boolean)
+        .join('\n');
+      const enrichedQuery = promotedSummary
+        ? `${query}\n\nPromoted context:\n${promotedSummary}`
+        : query;
 
-      const suggestions = await this.blueprintMiner.suggestBlueprints(userId, orgId, query);
+      const suggestions = await this.blueprintMiner.suggestBlueprints(userId, orgId, enrichedQuery);
       return suggestions || [];
     } catch {
       return [];

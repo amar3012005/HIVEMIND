@@ -67,12 +67,16 @@ test('TrailStore - persist and retrieve research trails with steps', { skip: !pr
 
   await trailStore.recordStep(sessionId, {
     stepIndex: 2,
-    agent: 'analyst',
+    agent: 'feynmann',
     action: 'extract_claims',
     input: 'Extract claims from read results',
     output: 'Claim: RAG improves long-context retention by 40%',
     confidence: 0.88,
     rejected: false,
+    cotThoughtId: randomId(),
+    cotTraceId: randomId(),
+    cotParentThoughtId: randomId(),
+    traceSignal: { affordanceBoost: 0.2, disturbancePenalty: 0, retryBudget: 2 },
   });
 
   // Wait for async persistence
@@ -86,9 +90,14 @@ test('TrailStore - persist and retrieve research trails with steps', { skip: !pr
 
   // Verify step structure
   const step0 = trail.steps[0];
-  assert.equal(step0.agent, 'explorer');
+  assert.equal(step0.agent, 'faraday');
   assert.equal(step0.action, 'search_web');
   assert.ok(step0.output.includes('10 relevant sources'));
+  const step2 = trail.steps[2];
+  assert.ok(step2.cotThoughtId, 'Step should include cotThoughtId');
+  assert.ok(step2.cotTraceId, 'Step should include cotTraceId');
+  assert.ok(step2.cotParentThoughtId, 'Step should include cotParentThoughtId');
+  assert.equal(step2.traceSignal.retryBudget, 2, 'Step should include trace signal payload');
 
   // Verify trail has steps array (separate from metadata)
   assert.ok(Array.isArray(trail.steps), 'Trail should have steps array');
@@ -245,10 +254,10 @@ test('TrailStore - query by project', { skip: !prisma }, async () => {
 
 test('Agent Types and Action Types constants', () => {
   assert.ok(Array.isArray(AGENT_TYPES), 'AGENT_TYPES should be an array');
-  assert.ok(AGENT_TYPES.includes('explorer'), 'Should include explorer agent');
-  assert.ok(AGENT_TYPES.includes('analyst'), 'Should include analyst agent');
-  assert.ok(AGENT_TYPES.includes('verifier'), 'Should include verifier agent');
-  assert.ok(AGENT_TYPES.includes('synthesizer'), 'Should include synthesizer agent');
+  assert.ok(AGENT_TYPES.includes('faraday'), 'Should include faraday agent');
+  assert.ok(AGENT_TYPES.includes('feynmann'), 'Should include feynmann agent');
+  assert.ok(AGENT_TYPES.includes('turing'), 'Should include turing agent');
+  assert.ok(AGENT_TYPES.includes('synthesis'), 'Should include synthesis stage');
 
   assert.ok(Array.isArray(ACTION_TYPES), 'ACTION_TYPES should be an array');
   assert.ok(ACTION_TYPES.includes('search_web'), 'Should include search_web action');

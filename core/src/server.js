@@ -446,11 +446,21 @@ function uniqueValues(values) {
   return [...new Set(asArray(values).filter(Boolean))];
 }
 
+function normalizeResearchAgentId(agent = '') {
+  const id = String(agent || '').toLowerCase();
+  if (id === 'explorer') return 'faraday';
+  if (id === 'analyst') return 'feynmann';
+  if (id === 'verifier') return 'turing';
+  if (id === 'synthesizer') return 'synthesis';
+  return id || 'faraday';
+}
+
 function inferCsiStage(metadata = {}) {
   if (metadata.csiStage) return metadata.csiStage;
-  if (metadata.agent === 'explorer') return 'faraday';
-  if (metadata.agent === 'analyst') return 'feynman';
-  if (metadata.agent === 'verifier') return 'turing';
+  const agent = normalizeResearchAgentId(metadata.agent);
+  if (agent === 'faraday') return 'faraday';
+  if (agent === 'feynmann') return 'feynman';
+  if (agent === 'turing') return 'turing';
   if (metadata.action === 'verify_findings') return 'turing';
   return null;
 }
@@ -546,12 +556,12 @@ function normalizeTrailStep(step, {
   const stepIndex = Number.isInteger(step?.stepIndex) ? step.stepIndex : fallbackIndex;
   const provenance = step?.provenance && typeof step.provenance === 'object' ? step.provenance : {};
   return {
-    id: `trail-step-${trailId}-${stepIndex}`,
+    id: step?.id || `trail-step-${trailId}-${stepIndex}`,
     trailId: `trail-${trailId}`,
     sessionId,
     projectId,
     stepIndex,
-    agent: step?.agent || 'explorer',
+    agent: normalizeResearchAgentId(step?.agent || 'faraday'),
     action: step?.action || step?.kind || 'research_task',
     input: coerceTrailSnippet(step?.input || step?.query || step?.description || step?.prompt || ''),
     output: coerceTrailSnippet(step?.output || step?.result?.summary || step?.summary || step?.answer || step?.response || ''),
@@ -561,6 +571,10 @@ function normalizeTrailStep(step, {
     thought: coerceTrailSnippet(step?.thought || step?.reasoning || ''),
     why: coerceTrailSnippet(step?.why || ''),
     alternativeConsidered: coerceTrailSnippet(step?.alternativeConsidered || ''),
+    cotThoughtId: step?.cotThoughtId || provenance?.cotThoughtId || null,
+    cotTraceId: step?.cotTraceId || provenance?.cotTraceId || null,
+    cotParentThoughtId: step?.cotParentThoughtId || provenance?.cotParentThoughtId || null,
+    traceSignal: step?.traceSignal || provenance?.traceSignal || null,
     sourceMemoryId,
     synthetic,
     provenance: {
@@ -3775,6 +3789,7 @@ a{color:#a78bfa}</style></head><body>
               const verdict = metadata.verdict || metadata.output?.verdict || null;
               const csiStage = inferCsiStage(metadata);
               const csiNodeType = metadata.csiNodeType || inferCsiNodeType(csiStage);
+              const isPromotedMemory = tags.includes('promoted-claim') || tags.includes('report') || metadata.promotedAt || metadata.source_type === 'deep_research_report' || memoryType === 'decision';
               const isResearchTrail = tags.includes('research-trail') || tags.includes('csi-trail') ||
                   metadata.trailType === 'op/research-trail';
 
@@ -3806,7 +3821,7 @@ a{color:#a78bfa}</style></head><body>
                   taskId: metadata.taskId || null,
                   wave: metadata.wave ?? null,
                   dimension: metadata.dimension || null,
-                  agent: metadata.agent || null,
+                  agent: normalizeResearchAgentId(metadata.agent || null),
                   createdAt,
                   // Structured claim fields (Phase 2b)
                   type: isStructured ? 'structured-claim' : 'plain-claim',
@@ -3823,42 +3838,12 @@ a{color:#a78bfa}</style></head><body>
               // Layer 3: Trails (research steps) - includes both decision (trails) and event (session steps)
               // Only match actual research trails, not all 'decision' type memories
               if (!isResearchTrail) {
-                const trailSteps = Array.isArray(metadata.steps) && metadata.steps.length > 0
-                  ? metadata.steps
-                  : Array.isArray(metadata.trail?.steps) ? metadata.trail.steps : [];
-                if (trailSteps.length > 0) {
-                  trailSteps.forEach((step, idx) => {
-                    layers.trails.push({
-                      id: `step-${m.id}-${idx}`,
-                      stepIndex: idx,
-                      agent: step.agent || 'explorer',
-                      action: step.action || 'search_web',
-                      input: step.input?.slice(0, 200),
-                      output: step.output?.slice(0, 200),
-                      confidence: step.confidence,
-                      rejected: step.rejected,
-                      // Reasoning fields (Phase 2b) - captures "why" not just "what"
-                      thought: step.thought,
-                      why: step.why,
-                      alternativeConsidered: step.alternativeConsidered,
-                    });
-                  });
-                  trailSteps.slice(1).forEach((step, idx) => {
-                    pushEdge(
-                      `step-${m.id}-${idx}`,
-                      `step-${m.id}-${idx + 1}`,
-                      'sequence',
-                      Math.max(0.55, step.confidence ?? 0.7),
-                    );
-                  });
-                }
-
                 // NEW Layer 4: Observations (real-time findings from each agent action)
                 if (tags.includes('research-observation') || metadata.observationType === 'op/research-observation') {
                   layers.observations.push({
                     id: m.id,
                     title: m.title,
-                    agent: metadata.agent || 'unknown',
+                    agent: normalizeResearchAgentId(metadata.agent || 'unknown'),
                     action: metadata.action || 'unknown',
                     findingType: metadata.findingType || 'web',
                     source: metadata.source,
@@ -3881,7 +3866,7 @@ a{color:#a78bfa}</style></head><body>
                   layers.executionEvents.push({
                     id: m.id,
                     title: m.title,
-                    agent: metadata.agent || 'unknown',
+                    agent: normalizeResearchAgentId(metadata.agent || 'unknown'),
                     action: metadata.action || 'unknown',
                     output: metadata.output || {},
                     success: metadata.success !== false,
@@ -3914,7 +3899,7 @@ a{color:#a78bfa}</style></head><body>
                     observationIds,
                     taskId: metadata.taskId || null,
                     wave: metadata.wave ?? null,
-                    agent: metadata.agent || 'unknown',
+                    agent: normalizeResearchAgentId(metadata.agent || 'unknown'),
                     action: metadata.action || 'unknown',
                     createdAt,
                   });
@@ -3933,6 +3918,25 @@ a{color:#a78bfa}</style></head><body>
                   patternCount: Array.isArray(metadata.blueprint_pattern) ? metadata.blueprint_pattern.length : 0,
                   hasCapturedState: !!metadata.blueprint_captured_state || !!metadata.blueprint_has_captured_state,
                   capturedStateSummary: metadata.blueprint_captured_state_summary || null,
+                });
+              }
+
+              if (isPromotedMemory) {
+                layers.promoted = layers.promoted || [];
+                layers.promoted.push({
+                  id: m.id,
+                  title: m.title,
+                  content: m.content?.slice(0, 500),
+                  memoryType,
+                  confidence: metadata.confidence || m.importance_score,
+                  sourceIds,
+                  claimIds,
+                  trailStepIds: uniqueValues(metadata.trailStepIds || metadata.reportProvenance?.trailStepIds),
+                  recalledMemoryIds: uniqueValues(metadata.recalledMemoryIds || metadata.reportProvenance?.recalledMemoryIds),
+                  reportId: metadata.reportId || metadata.reportProvenance?.reportId || null,
+                  goldenLine: metadata.goldenLine || metadata.reportProvenance?.goldenLine || null,
+                  promotedAt: metadata.promotedAt || createdAt,
+                  createdAt,
                 });
               }
             });
@@ -3960,6 +3964,13 @@ a{color:#a78bfa}</style></head><body>
               : null;
 
             const activeTrails = normalizedTrails.length > 0 ? normalizedTrails : fallbackTrail ? [fallbackTrail] : [];
+              const trailDiagnostics = {
+              trail_count: activeTrails.length,
+              trail_memory_ids: normalizedTrails.map(trail => trail.sourceMemoryId).filter(Boolean),
+              trail_node_ids: activeTrails.map(trail => trail.nodeId).filter(Boolean),
+              total_step_count: activeTrails.reduce((sum, trail) => sum + (trail.stepCount || trail.steps?.length || 0), 0),
+              source_path: normalizedTrails.length > 0 ? 'trail_store_memories' : fallbackTrail ? 'session_fallback' : 'none',
+            };
 
               activeTrails.forEach((trail) => {
                 layers.csi.push({
@@ -3994,7 +4005,7 @@ a{color:#a78bfa}</style></head><body>
                   id: stepNodeId,
                   trailId: trail.nodeId,
                   stepIndex: step.stepIndex ?? idx,
-                  agent: step.agent || 'explorer',
+                  agent: normalizeResearchAgentId(step.agent || 'faraday'),
                   action: step.action || 'search_web',
                   input: step.input,
                   output: step.output,
@@ -4094,7 +4105,14 @@ a{color:#a78bfa}</style></head><body>
               sessionId,
               projectId,
               layers,
-              nodeCount: layers.sources.length + layers.claims.length + layers.trails.length + layers.observations.length + layers.executionEvents.length + layers.csi.length + layers.blueprints.length,
+              trail_diagnostics: trailDiagnostics,
+              agent_alias_map: {
+                explorer: 'faraday',
+                analyst: 'feynmann',
+                verifier: 'turing',
+                synthesizer: 'synthesis',
+              },
+              nodeCount: layers.sources.length + layers.claims.length + layers.trails.length + layers.observations.length + layers.executionEvents.length + layers.csi.length + layers.blueprints.length + (layers.promoted?.length || 0),
               edgeCount: layers.weights.edges.length,
             });
           } catch (err) {
@@ -4441,6 +4459,8 @@ a{color:#a78bfa}</style></head><body>
               groqApiKey: process.env.GROQ_API_KEY,
               browserRuntime,
               webJobStore,
+              stigmergicCoT,
+              maxLlmCalls: Number.parseInt(process.env.DEEP_RESEARCH_MAX_LLM_CALLS || '100', 10),
               onEvent: (event) => {
                 broadcastResearchEvent(session, event);
               },
@@ -4460,6 +4480,7 @@ a{color:#a78bfa}</style></head><body>
               projectId,
               blueprintId: blueprintId || undefined,
               useBlueprints,
+              maxLlmCalls: Number.isInteger(body.maxLlmCalls) ? body.maxLlmCalls : undefined,
             })
               .then(result => {
                 session.status = 'completed';
@@ -4545,6 +4566,8 @@ a{color:#a78bfa}</style></head><body>
               groqApiKey: process.env.GROQ_API_KEY,
               browserRuntime,
               webJobStore,
+              stigmergicCoT,
+              maxLlmCalls: Number.parseInt(process.env.DEEP_RESEARCH_MAX_LLM_CALLS || '100', 10),
               onEvent: (event) => {
                 broadcastResearchEvent(session, event);
               },
@@ -4558,6 +4581,7 @@ a{color:#a78bfa}</style></head><body>
               blueprintId,
               useBlueprints: true,
               baseState: blueprint.capturedState,
+              maxLlmCalls: Number.isInteger(body.maxLlmCalls) ? body.maxLlmCalls : undefined,
             })
               .then(result => {
                 session.status = 'completed';
@@ -4753,6 +4777,114 @@ a{color:#a78bfa}</style></head><body>
             } catch (err) {
               console.error('[research] save-memory failed:', err.message);
               return jsonResponse(res, { error: 'Failed to save to memory' }, 500);
+            }
+          }
+          break;
+
+        // POST /api/research/:sessionId/promote-memory — promote top findings/report into durable memory
+        case (pathname.match(/^\/api\/research\/[^/]+\/promote-memory$/) || {}).input:
+          if (req.method === 'POST') {
+            const sessionId = pathname.split('/')[3];
+            const session = researchSessions.get(sessionId);
+            if (!session) {
+              return jsonResponse(res, { error: 'Session not found' }, 404);
+            }
+
+            try {
+              const projectId = session.projectId || `research/${sessionId.slice(0, 8)}`;
+              const reportData = session.result || {};
+              const findings = Array.isArray(reportData.findings) ? [...reportData.findings] : [];
+              findings.sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+              const topFindings = findings.slice(0, 5);
+              const promotedAt = new Date().toISOString();
+              const promotedMemories = [];
+
+              for (const finding of topFindings) {
+                const memoryPayload = {
+                  user_id: session.userId || userId,
+                  org_id: session.orgId || orgId,
+                  project: projectId,
+                  title: finding.title || 'Promoted claim',
+                  content: [
+                    finding.title || 'Promoted claim',
+                    finding.content || '',
+                    '',
+                    `Source: ${finding.source || finding.sourceId || 'unknown'}`,
+                    `Confidence: ${((finding.confidence || 0) * 100).toFixed(0)}%`,
+                    finding.id ? `Claim ID: ${finding.id}` : null,
+                    session.result?.reportProvenance?.goldenLine ? `Golden line: ${session.result.reportProvenance.goldenLine}` : null,
+                  ].filter(Boolean).join('\n'),
+                  memory_type: 'fact',
+                  source_type: 'deep_research',
+                  importance_score: finding.confidence || 0.7,
+                  tags: [
+                    'deep-research',
+                    'promoted-claim',
+                    `session:${sessionId}`,
+                    ...(finding.agent ? [`agent:${finding.agent}`] : []),
+                  ],
+                  metadata: {
+                    sessionId,
+                    reportId: reportData.reportProvenance?.reportId || null,
+                    claimId: finding.id || null,
+                    sourceIds: finding.sourceIds || [],
+                    trailStepIds: reportData.reportProvenance?.trailStepIds || [],
+                    recalledMemoryIds: reportData.reportProvenance?.recalledMemoryIds || [],
+                    promotedAt,
+                    goldenLine: reportData.reportProvenance?.goldenLine || null,
+                    reportProvenance: reportData.reportProvenance || null,
+                  },
+                };
+
+                let savedMemory;
+                if (ingestionPipeline) {
+                  const result = await ingestionPipeline.ingest(memoryPayload);
+                  savedMemory = result.memories?.[0];
+                } else {
+                  savedMemory = await persistentMemoryStore.createMemory(memoryPayload);
+                }
+                if (savedMemory) promotedMemories.push(savedMemory);
+              }
+
+              if (reportData.report) {
+                const reportMemoryPayload = {
+                  user_id: session.userId || userId,
+                  org_id: session.orgId || orgId,
+                  project: projectId,
+                  title: `Research report: ${session.query || sessionId}`,
+                  content: [
+                    reportData.report,
+                    '',
+                    'Golden line:',
+                    reportData.reportProvenance?.goldenLine || '',
+                  ].filter(Boolean).join('\n'),
+                  memory_type: 'decision',
+                  source_type: 'deep_research_report',
+                  importance_score: 0.85,
+                  tags: ['deep-research', 'report', `session:${sessionId}`],
+                  metadata: {
+                    sessionId,
+                    reportId: reportData.reportProvenance?.reportId || null,
+                    provenance: reportData.reportProvenance || null,
+                    promotedAt,
+                  },
+                };
+                if (ingestionPipeline) {
+                  await ingestionPipeline.ingest(reportMemoryPayload);
+                } else {
+                  await persistentMemoryStore.createMemory(reportMemoryPayload);
+                }
+              }
+
+              return jsonResponse(res, {
+                success: true,
+                promotedCount: promotedMemories.length,
+                promotedClaimIds: topFindings.map(f => f.id).filter(Boolean),
+                promotedAt,
+              });
+            } catch (err) {
+              console.error('[research] promote-memory failed:', err.message);
+              return jsonResponse(res, { error: 'Failed to promote memory' }, 500);
             }
           }
           break;

@@ -15,7 +15,18 @@
 
 import { randomUUID } from 'node:crypto';
 
-const AGENT_TYPES = ['explorer', 'analyst', 'verifier', 'synthesizer'];
+const AGENT_ALIASES = Object.freeze({
+  explorer: 'faraday',
+  analyst: 'feynmann',
+  verifier: 'turing',
+  synthesizer: 'synthesis',
+  faraday: 'faraday',
+  feynmann: 'feynmann',
+  turing: 'turing',
+  synthesis: 'synthesis',
+});
+
+const AGENT_TYPES = ['faraday', 'feynmann', 'turing', 'synthesis'];
 const ACTION_TYPES = ['search_web', 'search_memory', 'read_url', 'extract_claims', 'synthesize'];
 
 export class TrailStore {
@@ -55,7 +66,16 @@ export class TrailStore {
       parentStepId: step?.parentStepId || null,
       relationType: step?.relationType || null,
       reportId: step?.reportId || null,
+      cotThoughtId: step?.cotThoughtId || null,
+      cotTraceId: step?.cotTraceId || null,
+      cotParentThoughtId: step?.cotParentThoughtId || null,
+      traceSignal: step?.traceSignal || null,
     };
+  }
+
+  _normalizeAgentId(agent) {
+    const key = String(agent || 'faraday').toLowerCase();
+    return AGENT_ALIASES[key] || key;
   }
 
   _buildTrailMetadataSnapshot(trail) {
@@ -121,10 +141,10 @@ export class TrailStore {
         blueprintUsed: options.blueprintUsed || null,
         blueprintCandidate: options.blueprintCandidate || false,
         agentStates: options.agentStates || {
-          explorer: 'active',
-          analyst: 'idle',
-          verifier: 'idle',
-          synthesizer: 'idle',
+          faraday: 'active',
+          feynmann: 'idle',
+          turing: 'idle',
+          synthesis: 'idle',
         },
         startedAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
@@ -187,7 +207,7 @@ export class TrailStore {
       stepIndex,
       sessionId,
       trailId: trailBuffer.id,
-      agent: step.agent || 'explorer',
+      agent: this._normalizeAgentId(step.agent || 'faraday'),
       action: step.action || 'search_web',
       input: step.input || '',
       output: step.output || '',
@@ -204,6 +224,10 @@ export class TrailStore {
       parentStepId: step.parentStepId || null,
       relationType: this._inferStepRelationType(step),
       reportId: step.reportId || null,
+      cotThoughtId: step.cotThoughtId || null,
+      cotTraceId: step.cotTraceId || null,
+      cotParentThoughtId: step.cotParentThoughtId || null,
+      traceSignal: step.traceSignal || null,
       timestamp: new Date().toISOString(),
     };
 
@@ -298,11 +322,8 @@ export class TrailStore {
     const trail = this.trails.get(sessionId);
     if (!trail) return null;
 
-    // Flush any pending debounced persist
-    if (this._persistTimers.has(sessionId)) {
-      clearTimeout(this._persistTimers.get(sessionId));
-      this._persistTimers.delete(sessionId);
-    }
+    // Flush any pending debounced persist before final persist.
+    await this.flushTrail(sessionId);
 
     trail.metadata.completedAt = new Date().toISOString();
     trail.metadata.report = report;
@@ -344,6 +365,18 @@ export class TrailStore {
     setTimeout(() => this.trails.delete(sessionId), 60000);
 
     return trail;
+  }
+
+  /**
+   * Force flush pending debounced persistence for a session.
+   * Used by task/run completion paths to avoid losing tail steps.
+   */
+  async flushTrail(sessionId) {
+    if (this._persistTimers.has(sessionId)) {
+      clearTimeout(this._persistTimers.get(sessionId));
+      this._persistTimers.delete(sessionId);
+    }
+    await this._persistTrail(sessionId);
   }
 
   /**
@@ -683,4 +716,4 @@ export class TrailStore {
   }
 }
 
-export { AGENT_TYPES, ACTION_TYPES };
+export { AGENT_TYPES, ACTION_TYPES, AGENT_ALIASES };

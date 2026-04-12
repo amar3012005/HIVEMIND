@@ -2,6 +2,21 @@ import crypto from 'node:crypto';
 import { computeTokenSimilarity } from './conflict-detector.js';
 import { normalizeRelationshipType } from './relationship-semantics.js';
 
+/**
+ * Strip null bytes (\u0000) from strings — Postgres text columns reject them (code 22P05).
+ * Common in web-scraped content from DuckDuckGo, PDF extracts, and LLM outputs.
+ */
+function stripNullBytes(val) {
+  if (typeof val === 'string') return val.replace(/\u0000/g, '');
+  if (Array.isArray(val)) return val.map(stripNullBytes);
+  if (val && typeof val === 'object') {
+    const out = {};
+    for (const k of Object.keys(val)) out[k] = stripNullBytes(val[k]);
+    return out;
+  }
+  return val;
+}
+
 function mapMemoryRecord(record) {
   if (!record) return null;
 
@@ -129,6 +144,10 @@ export class PrismaGraphStore {
   }
 
   async createMemory(memory) {
+    // Strip null bytes (\u0000) — common in web-scraped content, rejected by Postgres text columns
+    const content = stripNullBytes(memory.content);
+    const title = stripNullBytes(memory.title) || null;
+    const metadata = stripNullBytes(memory.metadata);
     await this.client.memory.create({
       data: {
         id: memory.id,
@@ -136,7 +155,7 @@ export class PrismaGraphStore {
         orgId: memory.org_id,
         visibility: memory.visibility || 'private',
         project: memory.project,
-        content: memory.content,
+        content,
         tags: memory.tags,
         isLatest: memory.is_latest,
         sourcePlatform: memory.source_metadata?.source_platform || null,
@@ -146,7 +165,7 @@ export class PrismaGraphStore {
         documentDate: memory.document_date ? new Date(memory.document_date) : null,
         eventDates: (memory.event_dates || []).map(value => new Date(value)),
         memoryType: memory.memory_type || 'fact',
-        title: memory.title || null,
+        title,
         importanceScore: memory.importance_score ?? 0.5,
         strength: memory.strength ?? 1.0,
         recallCount: memory.recall_count ?? 0,
@@ -168,7 +187,7 @@ export class PrismaGraphStore {
         thread_id: memory.source_metadata?.thread_id || null,
         parent_message_id: memory.source_metadata?.parent_message_id || null,
         ingested_at: memory.created_at ? new Date(memory.created_at) : new Date(),
-        metadata: memory.metadata || {}
+        metadata: metadata || {}
       });
     }
 
@@ -508,28 +527,29 @@ export class PrismaGraphStore {
   }
 
   async createSourceMetadata(source) {
+    const s = stripNullBytes(source);
     return this.client.sourceMetadata.upsert({
-      where: { memoryId: source.memory_id },
+      where: { memoryId: s.memory_id },
       update: {
-        sourceType: source.source_type,
-        sourceId: source.source_id,
-        sourcePlatform: source.source_platform,
-        sourceUrl: source.source_url,
-        threadId: source.thread_id,
-        parentMessageId: source.parent_message_id,
-        metadata: source.metadata || {}
+        sourceType: s.source_type,
+        sourceId: s.source_id,
+        sourcePlatform: s.source_platform,
+        sourceUrl: s.source_url,
+        threadId: s.thread_id,
+        parentMessageId: s.parent_message_id,
+        metadata: s.metadata || {}
       },
       create: {
-        id: source.id,
-        memoryId: source.memory_id,
-        sourceType: source.source_type,
-        sourceId: source.source_id,
-        sourcePlatform: source.source_platform,
-        sourceUrl: source.source_url,
-        threadId: source.thread_id,
-        parentMessageId: source.parent_message_id,
-        metadata: source.metadata || {},
-        ingestedAt: source.ingested_at ? new Date(source.ingested_at) : undefined
+        id: s.id,
+        memoryId: s.memory_id,
+        sourceType: s.source_type,
+        sourceId: s.source_id,
+        sourcePlatform: s.source_platform,
+        sourceUrl: s.source_url,
+        threadId: s.thread_id,
+        parentMessageId: s.parent_message_id,
+        metadata: s.metadata || {},
+        ingestedAt: s.ingested_at ? new Date(s.ingested_at) : undefined
       }
     });
   }

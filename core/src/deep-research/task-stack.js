@@ -9,8 +9,8 @@
 
 import { randomUUID } from 'node:crypto';
 
-let DEFAULT_MAX_DEPTH = 4;
-const MAX_TASKS = 20;
+let DEFAULT_MAX_DEPTH = 2; // was 4 — deep recursion creates too many subtasks
+const MAX_TASKS = 7;    // was 20 — wave-1(3) + gaps(2) + buffer(2) = 7 max
 const CONFIDENCE_THRESHOLD = 0.80;
 
 // 8 research dimensions (from AgentScope)

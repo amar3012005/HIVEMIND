@@ -620,9 +620,15 @@ export class DeepResearcher {
       }
     }
 
-    // Process any remaining non-dimension tasks (gap subtasks etc.)
+    // Process gap subtasks — but bail early if confidence already sufficient
+    // This prevents the while loop from running 10+ sequential gap tasks
     while (true) {
       this._checkAborted();
+      // If we already have good confidence, skip remaining gap tasks
+      if (allFindings.length >= 20 && stack.getAggregateConfidence?.() >= 0.75) {
+        console.log(`[Research] Skipping remaining gap tasks — ${allFindings.length} findings at ${(stack.getAggregateConfidence() * 100).toFixed(0)}% confidence`);
+        break;
+      }
       const task = stack.next();
       if (!task) break;
       task.wave = task.wave ?? null;

@@ -2158,17 +2158,48 @@ Rules:
   async _synthesizeReport(query, findings, gaps, reportGate = null, synthesisProfile = null) {
     const useWorldClassPrompt = Boolean(synthesisProfile);
     const prompt = useWorldClassPrompt
-      ? renderFinalReportSynthesisPrompt(buildFinalReportSynthesisSpec({
-          query,
-          findings,
-          gaps,
-          reportGate,
-          synthesisProfile,
-        }))
+      ? renderFinalReportSynthesisPrompt(buildFinalReportSynthesisSpec({ query, findings, gaps, reportGate, synthesisProfile }))
       : buildLegacyReportPrompt(query, findings, gaps, reportGate);
-    const report = await this._llm(prompt, { temperature: useWorldClassPrompt ? 0.35 : 0.45, maxTokens: 4500, worker: 'synthesis' });
+    const temperature = useWorldClassPrompt ? 0.35 : 0.45;
 
-    return report;
+    // Stream report chunks via GROQ streaming API so frontend shows text as it arrives
+    try {
+      const res = await fetch(GROQ_API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.groqApiKey}` },
+        body: JSON.stringify({ model: GROQ_MODEL, messages: [{ role: 'user', content: prompt }], temperature, max_tokens: 4500, stream: true }),
+        signal: AbortSignal.timeout(90000),
+      });
+
+      if (!res.ok) throw new Error(`GROQ streaming failed: ${res.status}`);
+
+      let report = '';
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+        for (const line of chunk.split('\n')) {
+          if (!line.startsWith('data: ') || line === 'data: [DONE]') continue;
+          try {
+            const data = JSON.parse(line.slice(6));
+            const token = data.choices?.[0]?.delta?.content || '';
+            if (token) {
+              report += token;
+              this._emit('research.report_chunk', { chunk: token });
+            }
+          } catch { /* skip malformed SSE line */ }
+        }
+      }
+
+      return report;
+    } catch (err) {
+      // Fallback to non-streaming if streaming fails
+      console.error('[DeepResearcher] Report streaming failed, falling back:', err.message);
+      return this._llm(prompt, { temperature, maxTokens: 4500, worker: 'synthesis' });
+    }
   }
 
   /**
@@ -2287,13 +2318,18 @@ Rules:
       trailId: trail?.id || null,
     });
 
+    // Timeout each recall query — Qdrant can hang indefinitely
     for (const recallQuery of recallQueries) {
-      const memories = await this._recallFromCSI(recallQuery, userId, orgId, projectId);
-      for (const memory of memories || []) {
-        recalledMemories.push({
-          ...memory,
-          recallQuery,
-        });
+      try {
+        const memories = await Promise.race([
+          this._recallFromCSI(recallQuery, userId, orgId, projectId),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('recall timeout')), 4000)),
+        ]);
+        for (const memory of memories || []) {
+          recalledMemories.push({ ...memory, recallQuery });
+        }
+      } catch {
+        // Skip this recall query — non-fatal
       }
     }
 

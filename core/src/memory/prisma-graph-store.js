@@ -195,10 +195,10 @@ export class PrismaGraphStore {
     return this.getMemory(memory.id);
   }
 
-  async updateMemory(id, patch) {
-    // Build update data, accepting both camelCase (Prisma) and snake_case (legacy) field names
+  async updateMemory(id, rawPatch) {
+    // Strip null bytes from all string fields — web-scraped content contains \u0000
+    const patch = stripNullBytes(rawPatch);
     const data = {};
-    // isLatest: accept both patch.isLatest and patch.is_latest
     const isLatestVal = patch.isLatest ?? patch.is_latest;
     if (isLatestVal !== undefined) data.isLatest = isLatestVal;
     if (patch.updated_at) data.updatedAt = new Date(patch.updated_at);
@@ -207,7 +207,6 @@ export class PrismaGraphStore {
     if (patch.tags !== undefined) data.tags = patch.tags;
     if (patch.source_metadata?.source_platform) data.sourcePlatform = patch.source_metadata.source_platform;
     if (patch.source_metadata?.source_id) data.sourceMessageId = patch.source_metadata.source_id;
-    // CSI graph action fields — Turing uses these
     if (patch.importanceScore !== undefined) data.importanceScore = patch.importanceScore;
     if (patch.supersedesId !== undefined) data.supersedesId = patch.supersedesId;
     if (patch.memoryType !== undefined) data.memoryType = patch.memoryType;

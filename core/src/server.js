@@ -3613,6 +3613,34 @@ a{color:#a78bfa}</style></head><body>
       // ─── Deep Research dynamic routes (/api/research/:sessionId/...) ────────
       // Keep these "lightweight" actions in this block, but explicitly let
       // specialized dynamic handlers below own trail/save/capture actions.
+      // POST /api/research/:sessionId/cancel
+      const cancelMatch = pathname.match(/^\/(?:api|v1\/proxy)\/research\/([^/]+)\/cancel$/);
+      if (cancelMatch && req.method === 'POST') {
+        const sessionId = cancelMatch[1];
+        const session = researchSessions.get(sessionId);
+        if (!session) return jsonResponse(res, { error: 'Session not found' }, 404);
+        if (session.status !== 'running') return jsonResponse(res, { error: `Session is ${session.status}` }, 400);
+        if (session._researcher) session._researcher.cancel();
+        session.status = 'cancelling';
+        return jsonResponse(res, { status: 'cancelling', sessionId });
+      }
+
+      // POST /api/research/:sessionId/synthesize — user confirms report generation
+      const synthesizeMatch = pathname.match(/^\/(?:api|v1\/proxy)\/research\/([^/]+)\/synthesize$/);
+      if (synthesizeMatch && req.method === 'POST') {
+        const sessionId = synthesizeMatch[1];
+        const session = researchSessions.get(sessionId);
+        if (!session) return jsonResponse(res, { error: 'Session not found' }, 404);
+        const researcher = session._researcher;
+        if (researcher?._synthesizeResolve) {
+          researcher._synthesizeResolve();
+          researcher._synthesizeResolve = null;
+          broadcastResearchEvent(session, { type: 'research.synthesis_confirmed', sessionId, timestamp: new Date().toISOString() });
+          return jsonResponse(res, { status: 'synthesizing', message: 'Report generation started' });
+        }
+        return jsonResponse(res, { error: 'Session not awaiting synthesis', status: session.status }, 400);
+      }
+
       const delegatedResearchActionMatch = pathname.match(
         /^\/api\/research\/[^/]+\/(trail|save-as-blueprint|capture-state|contradictions|save-memory)$/
       );

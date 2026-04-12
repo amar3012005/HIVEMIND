@@ -4577,6 +4577,34 @@ a{color:#a78bfa}</style></head><body>
         // Synthesize final report from blueprint recall (no new web search)
         // Used by the Resume button: takes completed session + mined blueprint,
         // recalls all stored claims/sources/trails, synthesizes definitive report
+        // User confirms: proceed with final report synthesis
+        case '/api/research/:sessionId/synthesize':
+        case '/v1/proxy/research/:sessionId/synthesize':
+          if (req.method === 'POST') {
+            const pathParts = pathname.split('/').filter(Boolean);
+            const sessionId = pathParts[pathParts.length - 1] === 'synthesize'
+              ? pathParts[pathParts.length - 2]
+              : null;
+            if (!sessionId) return jsonResponse(res, { error: 'sessionId required' }, 400);
+
+            const session = researchSessions.get(sessionId);
+            if (!session) return jsonResponse(res, { error: 'Session not found' }, 404);
+
+            const researcher = session._researcher;
+            if (researcher?._synthesizeResolve) {
+              researcher._synthesizeResolve();
+              researcher._synthesizeResolve = null;
+              broadcastResearchEvent(session, {
+                type: 'research.synthesis_confirmed',
+                sessionId,
+                timestamp: new Date().toISOString(),
+              });
+              return jsonResponse(res, { status: 'synthesizing', message: 'Report generation started' });
+            }
+            return jsonResponse(res, { error: 'Session not awaiting synthesis confirmation', status: session.status }, 400);
+          }
+          break;
+
         case '/api/research/:sessionId/synthesize-from-blueprint':
         case '/v1/proxy/research/:sessionId/synthesize-from-blueprint':
           if (req.method === 'POST') {

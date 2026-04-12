@@ -320,6 +320,7 @@ export class DeepResearcher {
       general: this._maxLlmCalls,
     };
     this._abortController = null;
+    this._synthesizeResolve = null; // Unblocked by POST /synthesize endpoint
   }
 
   /**
@@ -685,7 +686,29 @@ export class DeepResearcher {
       }
     }
 
-    // Step 4: Synthesize final report
+    // Step 4: Pause before synthesis — emit event and wait for user confirmation
+    // User sees finding count + confidence and clicks "Generate Report" to proceed
+    const preConfidence = stack.getAggregateConfidence?.() || stack.getProgress().confidence;
+    this._emit('research.ready_to_synthesize', {
+      sessionId,
+      findingCount: allFindings.length,
+      sourceCount: allSources.length,
+      confidence: preConfidence,
+      gaps: stack.getRemainingGaps().slice(0, 3),
+      message: `Research complete: ${allFindings.length} findings across ${allSources.length} sources at ${(preConfidence * 100).toFixed(0)}% confidence. Click "Generate Report" to synthesize.`,
+    });
+
+    // Wait for user confirmation (session.synthesizeResolve set by POST /synthesize endpoint)
+    // Timeout after 10 minutes — auto-proceed if user doesn't respond
+    if (options.waitForSynthesisConfirmation !== false) {
+      await new Promise((resolve) => {
+        this._synthesizeResolve = resolve;
+        setTimeout(resolve, 10 * 60 * 1000); // 10 min auto-proceed
+      });
+      this._synthesizeResolve = null;
+    }
+
+    // Step 5: Synthesize final report
     this._emit('research.synthesizing', { sessionId, findingCount: allFindings.length });
     this._emit('research.report_gate_started', {
       sessionId,
@@ -1241,39 +1264,8 @@ export class DeepResearcher {
         continue;
       }
 
-      // PHASE 6: SYNTHESIS (final stage, not CSI agent)
-      if (step === 6 && findings.length > 0) {
-        updateAgentState('synthesis', 'active', 'Synthesizing answer');
-        const synthesis = await this._actSynthesize(task.query, findings);
-        if (synthesis?.content) {
-          const finding = attachTaskContext({
-            id: randomUUID(),
-            type: 'synthesis',
-            title: `Synthesis: ${task.query.slice(0, 50)}`,
-            content: synthesis.content,
-            source: 'synthesis',
-            confidence: synthesis.confidence || 0.8,
-            taskQuery: task.query,
-            agent: 'synthesis',
-          });
-          findings.push(finding);
-          await this._recordFinding(trailStore, sessionId, stepIndex++, 'synthesis', 'SYNTHESIZE', finding, projectId, {
-            thought: `Combining all gathered findings into a cohesive answer`,
-            why: 'All sources and claims have been gathered and verified - now need to produce final synthesis',
-          });
-          await this._writeExecutionEvent(sessionId, projectId, trailStore, 'synthesis', 'synthesize', {
-            synthesisLength: synthesis.content?.length || 0,
-            confidence: synthesis.confidence,
-            taskId: task.id,
-            wave: task.wave ?? null,
-            phase: 'synthesis',
-          });
-        }
-        updateAgentState('synthesis', 'completed');
-        this._emit('task.observation', { taskId: task.id, step, agent: 'Synthesis', agent_id: 'synthesis', legacy_agent_id: 'synthesizer', type: 'synthesis_complete', title: 'Synthesis complete' });
-        break;
-      }
-
+      // Step 6+: no per-task synthesis — final report is generated once at research() level
+      // after all tasks complete and user confirms. Stopping here avoids burning N LLM calls.
       if (step >= maxSteps - 1) break;
     }
 

@@ -906,7 +906,6 @@ export async function recallPersistedMemories(store, {
     created_after: effectiveDateRange?.start,
     created_before: effectiveDateRange?.end
   });
-  console.log('[recall] PostgreSQL FTS found %d candidates for query: %s', lexicalCandidates.length, query_context.slice(0, 50));
 
   const filteredLexical = lexicalCandidates.filter(memory => {
     // Exclude benchmark data from production recall when no specific project is set
@@ -916,7 +915,6 @@ export async function recallPersistedMemories(store, {
     const sourcePlatform = memory.source_metadata?.source_platform || memory.source || null;
     return source_platforms.includes(sourcePlatform);
   });
-  console.log('[recall] After filtering: %d lexical candidates', filteredLexical.length);
 
   const vectorCandidates = await vectorCandidatesForRecall(store, {
     query_context,
@@ -931,7 +929,6 @@ export async function recallPersistedMemories(store, {
     candidatePoolSize,
     is_latest: effectiveIsLatest,
   });
-  console.log('[recall] Qdrant vector search found %d candidates', vectorCandidates.length);
   const relationships = await store.listRelationships({ user_id, org_id, project, limit: 1000 });
   const relationshipCounts = buildRelationshipIndex(relationships);
 

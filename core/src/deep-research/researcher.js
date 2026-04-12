@@ -1384,7 +1384,6 @@ export class DeepResearcher {
     // Emit trail graph event for real-time visualization
     const sourceIds = this._collectSourceIds(finding);
     const claimIds = this._collectClaimIds(finding);
-    console.log('[DeepResearcher] Emitting trail graph event:', { sessionId, stepIndex, agent, action, claimIds: claimIds?.length, sourceIds: sourceIds?.length });
     this._emitTrailGraphEvent({
       sessionId,
       stepIndex,
@@ -1444,7 +1443,6 @@ export class DeepResearcher {
         created_at: createdAt,
         updated_at: createdAt,
       });
-      console.log('[DeepResearcher] Saved observation to CSI:', observationId.slice(0, 20), 'agent:', agent, 'action:', action);
       this._emitObservationGraphEvents({
         sessionId,
         observationId,
@@ -2616,7 +2614,6 @@ Rules:
         created_at: createdAt,
         updated_at: createdAt,
       });
-      console.log('[DeepResearcher] Saved finding to CSI:', finding.title?.slice(0, 50), 'project:', projectId);
       this._emit('graph.node_upsert', {
         sessionId: context.sessionId || finding.sessionId || null,
         layer: 'claims',
@@ -2709,7 +2706,6 @@ Rules:
           updated_at: createdAt,
         });
         savedSources.push({ id: sourceId, url: src.url, title: src.title });
-        console.log('[DeepResearcher] Saved web source to CSI:', src.title?.slice(0, 50), 'url:', src.url?.slice(0, 80));
         this._emit('graph.node_upsert', {
           sessionId,
           layer: 'sources',
@@ -2795,7 +2791,7 @@ Rules:
         }
       }
 
-      console.log(`[DeepResearcher] Checkpoint saved: wave=${waveNum}, findings=${findings.length}, confidence=${(progress.confidence * 100).toFixed(0)}%`);
+      console.log(`[Research] Wave ${waveNum} checkpoint: ${findings.length} findings`);
     } catch (err) {
       console.error('[DeepResearcher] Checkpoint save failed:', err.message);
     }
@@ -2852,7 +2848,7 @@ Rules:
     }
 
     if (promoted.length > 0) {
-      console.log(`[DeepResearcher] Promoted ${promoted.length} claims to kg layer for session:`, sessionId);
+      console.log(`[Research] Promoted ${promoted.length} claims to kg`);
       this._emit('research.claims_promoted', { sessionId, count: promoted.length, projectId });
     }
   }
@@ -3252,7 +3248,6 @@ Rules:
       step: stepIndex,
       createdAt: new Date().toISOString(),
     };
-    console.log('[DeepResearcher] Emitting graph.node.created for trail:', trailNodeId);
     this._emit('graph.node.created', {
       sessionId,
       nodeId: trailNodeId,
@@ -3308,9 +3303,6 @@ Rules:
   }
 
   _emit(type, data) {
-    if (type.startsWith('graph.')) {
-      console.log('[DeepResearcher] Emitting event:', type, 'sessionId:', data?.sessionId, 'nodeId:', data?.nodeId);
-    }
     try { this.onEvent({ type, timestamp: new Date().toISOString(), ...data }); } catch (err) {
       console.error('[DeepResearcher] Event emission failed:', err.message);
     }

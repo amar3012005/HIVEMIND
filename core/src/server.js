@@ -420,7 +420,6 @@ function broadcastResearchEvent(session, event) {
   if (isResearchGraphEvent(event)) {
     if (!Array.isArray(session.graphEvents)) session.graphEvents = [];
     session.graphEvents.push(event);
-    console.log('[broadcastResearchEvent] Graph event:', event.type, 'sessionId:', event.sessionId, 'clients:', session.sseClients?.length || 0);
   } else {
     session.events.push(event);
   }
@@ -3725,7 +3724,6 @@ a{color:#a78bfa}</style></head><body>
           try {
             // Get all memories for this research project
             const projectId = session.projectId || `research/${sessionId.slice(0, 8)}`;
-            console.log('[research/graph] Fetching graph for session:', sessionId, 'projectId:', projectId, 'userId:', session.userId || userId, 'orgId:', session.orgId || orgId);
 
             // Fetch only memories for this research session (limit to 100 nodes max)
             // Filter by project and optionally by research session timestamp
@@ -3746,10 +3744,6 @@ a{color:#a78bfa}</style></head><body>
               return memTime >= sessionStartTime;
             });
 
-            console.log('[research/graph] Found', filteredMemories?.length || 0, 'memories for this session (filtered from', memories?.length || 0, 'total for project:', projectId);
-            if (filteredMemories?.length > 0) {
-              console.log('[research/graph] Sample memory tags:', filteredMemories[0]?.tags, 'memory_type:', filteredMemories[0]?.memory_type);
-            }
 
             // Build layered graph structure with real-time event support
             const layers = {
@@ -4466,12 +4460,11 @@ a{color:#a78bfa}</style></head><body>
             if (planEnforcer && orgId && process.env.BYPASS_PLAN_LIMITS !== 'true') {
               try {
                 const researchLimitCheck = await planEnforcer.checkLimit(orgId, 'deepResearch', 1);
-                console.log('[research] plan check for orgId=%s: %o', orgId, researchLimitCheck);
                 if (!researchLimitCheck.allowed) {
-                  console.warn('[research] Plan limit exceeded but allowing request: %s', researchLimitCheck.reason);
+                  // limit exceeded but bypass active — no action needed
                 }
               } catch (err) {
-                console.log('[research] plan check error, allowing request:', err.message);
+                // plan check error, allowing request
               }
             }
 
@@ -5185,7 +5178,6 @@ a{color:#a78bfa}</style></head><body>
               session.sseClients = [];
             }
             session.sseClients.push(res);
-            console.log('[stream] SSE client connected for session:', sessionId, 'total clients:', session.sseClients.length);
 
             // Send keepalive ping every 30s
             const pingInterval = setInterval(() => {

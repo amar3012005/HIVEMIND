@@ -7,9 +7,12 @@ import { normalizeRelationshipType } from './relationship-semantics.js';
  * Common in web-scraped content from DuckDuckGo, PDF extracts, and LLM outputs.
  */
 function stripNullBytes(val) {
-  if (typeof val === 'string') return val.replace(/\u0000/g, '');
+  if (typeof val === 'string') {
+    // Strip null bytes AND other invalid UTF-8 sequences (cause 22021 Postgres errors + garbled streaming)
+    return val.replace(/\u0000/g, '').replace(/[\uFFFD]/g, '');
+  }
   if (Array.isArray(val)) return val.map(stripNullBytes);
-  if (val instanceof Date) return val; // preserve Date objects intact
+  if (val instanceof Date) return val;
   if (val && typeof val === 'object') {
     const out = {};
     for (const k of Object.keys(val)) out[k] = stripNullBytes(val[k]);

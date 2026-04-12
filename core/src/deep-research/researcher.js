@@ -2174,17 +2174,23 @@ Rules:
       if (!res.ok) throw new Error(`GROQ streaming failed: ${res.status}`);
 
       let report = '';
+      let lineBuffer = '';
       const reader = res.body.getReader();
-      const decoder = new TextDecoder();
+      const decoder = new TextDecoder('utf-8', { fatal: false });
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        for (const line of chunk.split('\n')) {
-          if (!line.startsWith('data: ') || line === 'data: [DONE]') continue;
+        // Accumulate in buffer — SSE lines can be split across read() chunks
+        lineBuffer += decoder.decode(value, { stream: true });
+        const lines = lineBuffer.split('\n');
+        // Keep last (possibly incomplete) line in buffer
+        lineBuffer = lines.pop() || '';
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data: ') || trimmed === 'data: [DONE]') continue;
           try {
-            const data = JSON.parse(line.slice(6));
+            const data = JSON.parse(trimmed.slice(6));
             const token = data.choices?.[0]?.delta?.content || '';
             if (token) {
               report += token;

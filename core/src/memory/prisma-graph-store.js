@@ -9,6 +9,7 @@ import { normalizeRelationshipType } from './relationship-semantics.js';
 function stripNullBytes(val) {
   if (typeof val === 'string') return val.replace(/\u0000/g, '');
   if (Array.isArray(val)) return val.map(stripNullBytes);
+  if (val instanceof Date) return val; // preserve Date objects intact
   if (val && typeof val === 'object') {
     const out = {};
     for (const k of Object.keys(val)) out[k] = stripNullBytes(val[k]);
@@ -549,7 +550,7 @@ export class PrismaGraphStore {
         threadId: s.thread_id,
         parentMessageId: s.parent_message_id,
         metadata: s.metadata || {},
-        ingestedAt: s.ingested_at ? new Date(s.ingested_at) : undefined
+        ingestedAt: s.ingested_at ? (() => { const d = new Date(s.ingested_at); return isNaN(d.getTime()) ? new Date() : d; })() : new Date()
       }
     });
   }

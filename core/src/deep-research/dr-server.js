@@ -1,132 +1,18 @@
 /**
- * dr-server.js — Standalone Deep Research HTTP server (port 8055)
+ * dr-server.js — Deep Research HTTP server (port 8055)
  *
- * Pure-compute: no direct Prisma/Qdrant access.
- * All storage goes via HttpMemoryStore → core:8050 REST API.
- * Auth is resolved by calling core's /api/auth/verify relay endpoint.
+ * Runs inside the same process as server.js.
+ * All dependencies (memoryStore, prisma, recallFn, browserRuntime, authenticateFn)
+ * are injected by server.js — no HTTP hop, no duplicate DB connections.
+ *
+ * Usage (from server.js):
+ *   import { startDRServer } from './deep-research/dr-server.js';
+ *   await startDRServer({ memoryStore, prisma, recallFn, browserRuntime, authenticateFn, port: 8055 });
  */
 
 import http from 'http';
 import crypto from 'crypto';
 import { randomUUID } from 'crypto';
-import path from 'path';
-import { fileURLToPath } from 'url';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-// ── Config ───────────────────────────────────────────────────────────────────
-const DR_PORT = parseInt(process.env.DR_PORT || '8055', 10);
-const CORE_BASE_URL = process.env.CORE_API_BASE_URL || 'http://localhost:8050';
-const MASTER_API_KEY = process.env.HIVEMIND_MASTER_API_KEY || '';
-
-// ── Deep Research module imports ─────────────────────────────────────────────
-const { DeepResearcher } = await import('./researcher.js');
-const { TrailStore } = await import('./trail-store.js');
-const { BlueprintMiner } = await import('./blueprint-miner.js');
-
-// ── In-memory session store ──────────────────────────────────────────────────
-const researchSessions = new Map(); // sessionId → session object
-
-// Cleanup sessions older than 1 hour every 10 minutes
-setInterval(() => {
-  const cutoff = Date.now() - 3600000;
-  for (const [id, session] of researchSessions) {
-    if (new Date(session.createdAt).getTime() < cutoff) researchSessions.delete(id);
-  }
-}, 600000);
-
-// ── HttpMemoryStore — proxies all storage calls to core:8050 ─────────────────
-class HttpMemoryStore {
-  constructor(coreBaseUrl, masterApiKey, userId, orgId) {
-    this.baseUrl = coreBaseUrl;
-    this.masterKey = masterApiKey;
-    this.userId = userId;
-    this.orgId = orgId;
-  }
-
-  _headers() {
-    return {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${this.masterKey}`,
-      'X-HM-User-Id': this.userId,
-      'X-HM-Org-Id': this.orgId,
-    };
-  }
-
-  async createMemory(memory) {
-    const res = await fetch(`${this.baseUrl}/api/memories`, {
-      method: 'POST',
-      headers: this._headers(),
-      body: JSON.stringify(memory),
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!res.ok) throw new Error(`createMemory failed: ${res.status}`);
-    return res.json();
-  }
-
-  async searchMemories({ query, user_id, org_id, project, n_results = 50, tags, memory_type, is_latest, created_after }) {
-    const res = await fetch(`${this.baseUrl}/api/search`, {
-      method: 'POST',
-      headers: this._headers(),
-      body: JSON.stringify({ query, project, n_results, tags, memory_type, is_latest, created_after }),
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!res.ok) return [];
-    const data = await res.json();
-    return data.memories || data || [];
-  }
-
-  async updateMemory(id, patch) {
-    const res = await fetch(`${this.baseUrl}/api/memories/${id}`, {
-      method: 'PATCH',
-      headers: this._headers(),
-      body: JSON.stringify(patch),
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!res.ok) throw new Error(`updateMemory failed: ${res.status}`);
-    return res.json();
-  }
-
-  async getMemory(id) {
-    const res = await fetch(`${this.baseUrl}/api/memories/${id}`, {
-      headers: this._headers(),
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!res.ok) return null;
-    return res.json();
-  }
-}
-
-// ── httpRecallFn — recall adapter for DeepResearcher ─────────────────────────
-async function httpRecallFn(memoryStore, { query_context, user_id, org_id, project, max_memories = 10, tags }) {
-  const res = await fetch(`${memoryStore.baseUrl}/api/recall`, {
-    method: 'POST',
-    headers: memoryStore._headers(),
-    body: JSON.stringify({ query: query_context, project, max_memories, tags }),
-    signal: AbortSignal.timeout(8000),
-  });
-  if (!res.ok) return { memories: [] };
-  return res.json();
-}
-
-// ── resolveApiKey — verify user API key via core's relay endpoint ─────────────
-async function resolveApiKey(apiKey, coreBaseUrl, masterKey) {
-  try {
-    const res = await fetch(`${coreBaseUrl}/api/auth/verify`, {
-      headers: {
-        'Authorization': `Bearer ${masterKey}`,
-        'X-HM-Api-Key': apiKey,
-      },
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    if (!data.valid) return null;
-    return { userId: data.userId, orgId: data.orgId };
-  } catch {
-    return null;
-  }
-}
 
 // ── Trail helpers (copied from server.js) ────────────────────────────────────
 
@@ -677,8 +563,37 @@ async function buildResearchGraph(session, sessionId, userId, orgId, memoryStore
 
 // ── Main HTTP server ─────────────────────────────────────────────────────────
 
-const server = http.createServer(async (req, res) => {
-  const urlObj = new URL(req.url, `http://localhost:${DR_PORT}`);
+/**
+ * Start the DR server. Called once from server.js at startup.
+ * @param {Object} deps
+ * @param {Object} deps.memoryStore - shared PrismaGraphStore instance
+ * @param {Object} deps.prisma - shared Prisma client
+ * @param {Function} deps.recallFn - recallPersistedMemories function
+ * @param {Object} [deps.browserRuntime] - optional BrowserRuntime for web scraping
+ * @param {Function} deps.authenticateFn - async (apiKey) => { userId, orgId } | null
+ * @param {number} [deps.port=8055]
+ */
+export async function startDRServer({ memoryStore, prisma, recallFn, browserRuntime = null, authenticateFn, port = 8055 }) {
+  // Deep Research module imports (lazy — only loaded when DR server starts)
+  const { DeepResearcher } = await import('./researcher.js');
+  const { TrailStore } = await import('./trail-store.js');
+  const { BlueprintMiner } = await import('./blueprint-miner.js');
+
+  // In-memory session store
+  const researchSessions = new Map();
+  setInterval(() => {
+    const cutoff = Date.now() - 3600000;
+    for (const [id, session] of researchSessions) {
+      if (new Date(session.createdAt).getTime() < cutoff) researchSessions.delete(id);
+    }
+  }, 600000);
+
+  // Shared blueprint miner instance (has access to prisma now)
+  const blueprintMiner = new BlueprintMiner({ memoryStore, prisma });
+  function getBlueprintMiner() { return blueprintMiner; }
+
+  const server = http.createServer(async (req, res) => {
+  const urlObj = new URL(req.url, `http://localhost:${port}`);
   const pathname = urlObj.pathname;
 
   // CORS preflight
@@ -689,7 +604,7 @@ const server = http.createServer(async (req, res) => {
 
   // Health check (no auth)
   if (pathname === '/health') {
-    return jsonResponse(res, { status: 'ok', service: 'dr-server', core: CORE_BASE_URL });
+    return jsonResponse(res, { status: 'ok', service: 'dr-server' });
   }
 
   // Parse body for POST/PATCH
@@ -698,22 +613,13 @@ const server = http.createServer(async (req, res) => {
     body = await parseBody(req);
   }
 
-  // Authenticate
-  const identity = await authenticate(req);
+  // Authenticate via injected function (reuses server.js auth — no HTTP hop)
+  const authHeader = req.headers['authorization'] || '';
+  const apiKey = authHeader.replace(/^Bearer\s+/i, '').trim();
+  if (!apiKey) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+  const identity = await authenticateFn(apiKey);
   if (!identity) return jsonResponse(res, { error: 'Unauthorized' }, 401);
   const { userId, orgId } = identity;
-
-  // Per-request memory store bound to this user
-  const memoryStore = new HttpMemoryStore(CORE_BASE_URL, MASTER_API_KEY, userId, orgId);
-  // recallFn adapter
-  const recallFn = (store, opts) => httpRecallFn(store, opts);
-
-  // Lazy-initialized blueprint miner
-  let blueprintMiner = null;
-  function getBlueprintMiner() {
-    if (!blueprintMiner) blueprintMiner = new BlueprintMiner({ memoryStore, prisma: null });
-    return blueprintMiner;
-  }
 
   // ── Routes ──────────────────────────────────────────────────────────────────
 
@@ -742,9 +648,9 @@ const server = http.createServer(async (req, res) => {
     const researcher = new DeepResearcher({
       memoryStore,
       recallFn,
-      prisma: null,
+      prisma,
       groqApiKey: process.env.GROQ_API_KEY,
-      browserRuntime: null,
+      browserRuntime,
       webJobStore: null,
       stigmergicCoT: null,
       maxLlmCalls: parseInt(process.env.DEEP_RESEARCH_MAX_LLM_CALLS || '100', 10),
@@ -1150,11 +1056,13 @@ const server = http.createServer(async (req, res) => {
   }
 
   return jsonResponse(res, { error: 'Not found' }, 404);
-});
+  }); // end http.createServer
 
-server.listen(DR_PORT, () => {
-  console.log(`[DR Server] Listening on port ${DR_PORT}`);
-  console.log(`[DR Server] Core API: ${CORE_BASE_URL}`);
-});
+  await new Promise((resolve, reject) => {
+    server.listen(port, (err) => err ? reject(err) : resolve());
+  });
+  console.log(`[DR Server] Listening on port ${port}`);
+  return server;
+} // end startDRServer
 
 export default server;

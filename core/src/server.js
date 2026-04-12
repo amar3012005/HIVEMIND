@@ -8437,4 +8437,28 @@ server.listen(PORT, () => {
 `);
 
   ensureQdrantSearchIndexes();
+
+  // Start DR server in same process — shared memoryStore, prisma, recallFn
+  (async () => {
+    try {
+      const { startDRServer } = await import('./deep-research/dr-server.js');
+      const drPort = parseInt(process.env.DR_PORT || '8055', 10);
+      await startDRServer({
+        memoryStore: persistentMemoryStore,
+        prisma,
+        recallFn: recallPersistedMemories,
+        browserRuntime,
+        authenticateFn: async (apiKey) => {
+          try {
+            const record = await authenticatePersistedApiKey(prisma, apiKey);
+            if (!record) return null;
+            return { userId: record.userId, orgId: record.orgId };
+          } catch { return null; }
+        },
+        port: drPort,
+      });
+    } catch (err) {
+      console.error('[DR Server] Failed to start:', err.message);
+    }
+  })();
 });

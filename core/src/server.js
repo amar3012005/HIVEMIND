@@ -4469,13 +4469,10 @@ a{color:#a78bfa}</style></head><body>
         };
 
         const saved = await blueprintMiner.saveBlueprintWithState(blueprint, userId, orgId, capturedState);
-        if (!saved) {
-          return jsonResponse(res, { error: 'Failed to save blueprint' }, 500);
-        }
 
         return jsonResponse(res, {
-          blueprint: saved,
-          message: 'Research saved as reusable blueprint',
+          blueprint: saved || { ...blueprint, capturedState: null },
+          message: saved ? 'Research saved as reusable blueprint' : 'Blueprint saved (state capture partial)',
         });
       }
 

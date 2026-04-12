@@ -777,11 +777,15 @@ export class BlueprintMiner {
       } : null;
       const capturedStateSummary = summarizeCapturedState(capturedStatePayload);
 
+      // Strip null bytes from pattern content — web-scraped queries can contain \u0000
+      const patternContent = JSON.stringify(derivedPattern, null, 2)
+        .replace(/\u0000/g, '').replace(/[\uFFFD]/g, '');
+
       await this.memoryStore.createMemory({
         id: memoryId,
         user_id: userId,
         org_id: orgId,
-        content: JSON.stringify(derivedPattern, null, 2),
+        content: patternContent,
         title: `Blueprint: ${blueprint.name}`,
         memory_type: 'lesson',
         tags,

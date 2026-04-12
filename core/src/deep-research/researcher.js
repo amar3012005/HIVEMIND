@@ -872,6 +872,7 @@ export class DeepResearcher {
 
   async _executeTask(task, userId, orgId, projectId, sessionId, trailStore) {
     task.status = 'active';
+    console.log(`[Task ${task.id.slice(0,8)}] START dim=${task.dimension || 'root'} wave=${task.wave ?? '-'} q="${task.query?.slice(0,60)}"`);
     const findings = [];
     const sources = [];
     const maxSteps = 8;
@@ -945,6 +946,7 @@ export class DeepResearcher {
       // PHASE 1-3: EXPLORATION (Faraday worker)
       if (step <= maxExplorationSteps) {
         updateAgentState('faraday', 'active', 'Searching for sources');
+        console.log(`[Task ${task.id.slice(0,8)}] step=${step} Faraday action=${task.dimension || 'explore'}`);
         const traceContext = await this._followSwarmTraces('faraday', { task, userId, orgId, action: 'search_web' });
         const reasoning = await this._reasonExplore(task.query, findings, step);
         const traceSignal = this._traceSignal(traceContext, reasoning.action, reasoning.query || task.query);
@@ -1106,6 +1108,7 @@ export class DeepResearcher {
       // PHASE 4: ANALYSIS (Feynmann worker)
       if (step === 4 && findings.length > 0) {
         updateAgentState('feynmann', 'active', 'Analyzing findings');
+        console.log(`[Task ${task.id.slice(0,8)}] step=4 Feynman analyzing ${findings.length} findings`);
         const analysis = await this._actAnalyze(task.query, findings, userId, orgId, projectId);
         if (analysis?.claims?.length > 0) {
           // Build mapping from analysis sourceIndices back to actual sourceIds from webFindings
@@ -1208,6 +1211,7 @@ export class DeepResearcher {
       // PHASE 5: VERIFICATION (Turing worker)
       if (step === 5 && findings.length > 0) {
         updateAgentState('turing', 'active', 'Verifying findings');
+        console.log(`[Task ${task.id.slice(0,8)}] step=5 Turing verifying ${findings.length} claims`);
         const verification = await this._actVerify(task.query, findings, trailStore, sessionId);
         const verifiedClaimIds = [...new Set([...(verification.verified || []), ...(verification.rejected || [])].map(f => f?.id).filter(Boolean))];
         const verifierVerdict =
@@ -1281,6 +1285,7 @@ export class DeepResearcher {
     const gaps = await this._detectGaps(task.query, findings);
     await trailStore?.flushTrail?.(sessionId);
 
+    console.log(`[Task ${task.id.slice(0,8)}] DONE dim=${task.dimension || 'root'} findings=${findings.length} confidence=${(confidence*100).toFixed(0)}%`);
     return { findings, sources, confidence, gaps, agentStates, report };
   }
 
@@ -1542,31 +1547,35 @@ export class DeepResearcher {
     const webFindings = findings.filter(f => f.type === 'web' || f.type === 'follow_up');
     if (webFindings.length === 0) return { claims: [] };
 
-    // Recall promoted claims from prior sessions — feed established knowledge to Feynman
+    // Recall promoted claims — 5s timeout so Qdrant slowness never blocks Feynman
     let priorKnowledgeSection = '';
     try {
-      const priorMemories = await this.recallFn(this.memoryStore, {
-        query_context: query,
-        user_id: userId,
-        org_id: orgId,
-        project: projectId,
-        tags: ['promoted-claim', 'deep-research'],
-        max_memories: 6,
-      });
+      const priorMemories = await Promise.race([
+        this.recallFn(this.memoryStore, {
+          query_context: query,
+          user_id: userId,
+          org_id: orgId,
+          project: projectId,
+          tags: ['promoted-claim', 'deep-research'],
+          max_memories: 6,
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('recall timeout')), 5000)),
+      ]);
       const priorClaims = (priorMemories?.memories || [])
         .filter(m => (m.score || 0) > 0.5)
-        .slice(0, 6);
+        .slice(0, 4);
       if (priorClaims.length > 0) {
-        priorKnowledgeSection = `\n\nPrior established knowledge (from previous research — use as foundation, not repetition):\n${
-          priorClaims.map((m, i) => `[P${i}] ${m.title}: ${m.content?.slice(0, 300) || ''}`).join('\n')
+        priorKnowledgeSection = `\n\nPrior knowledge:\n${
+          priorClaims.map((m, i) => `[P${i}] ${m.title}: ${m.content?.slice(0, 200) || ''}`).join('\n')
         }\n`;
       }
     } catch {
-      // Non-fatal — proceed without prior knowledge
+      // Non-fatal — Qdrant timeout or unavailable
     }
 
-    // Build source content with indices for attribution
-    const sourcesWithContext = webFindings.map((f, i) => `[${i}] ${f.title}: ${f.content?.slice(0, 800) || ''}`).join('\n\n');
+    // Build source content — cap per-source at 600 chars to keep prompt manageable
+    const sourcesWithContext = webFindings.slice(0, 6).map((f, i) => `[${i}] ${f.title}: ${f.content?.slice(0, 600) || ''}`).join('\n\n');
+    console.log(`[Task] Feynman LLM call: ${webFindings.length} sources, prior=${!!priorKnowledgeSection}`);
 
     const response = await this._llm(`You are the FEYNMANN agent. Extract key claims from these sources with structured format and source attribution.
 

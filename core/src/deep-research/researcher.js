@@ -27,7 +27,7 @@ import { extractFacts } from '../memory/fact-extractor.js';
 
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_MODEL = 'llama-3.3-70b-versatile';
-const MAX_REFLECTION_ROUNDS = 2;
+const MAX_REFLECTION_ROUNDS = 1; // was 2 — 1 round is enough, 2 adds 3+ extra tasks
 const AGENT_ID_MAP = Object.freeze({
   faraday: 'faraday',
   explorer: 'faraday',
@@ -657,7 +657,7 @@ export class DeepResearcher {
       const gaps = stack.getRemainingGaps();
       const rephrased = await this._reflectAndRephrase(query, gaps, allFindings);
 
-      for (const newQuery of rephrased.slice(0, 3)) {
+      for (const newQuery of rephrased.slice(0, 2)) { // max 2 gap tasks per reflection
         stack.addSubtask(root.id, newQuery, 'gaps');
       }
 
@@ -2890,6 +2890,13 @@ Rules:
     }
   }
 
+  async _llmWithTimeout(fn, ms) {
+    return Promise.race([
+      fn(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`LLM timeout after ${ms}ms`)), ms)),
+    ]);
+  }
+
   async _llm(prompt, { temperature = 0.5, maxTokens = 2000, worker = 'general' } = {}) {
     const normalizedWorker = this._normalizeAgentId(worker);
     const workerKey = this._workerLlmCalls[normalizedWorker] !== undefined ? normalizedWorker : 'general';
@@ -2908,25 +2915,28 @@ Rules:
     this._llmCallCount++;
     this._workerLlmCalls[workerKey] = (this._workerLlmCalls[workerKey] || 0) + 1;
     this._emitLlmBudget({ worker: workerKey, exhausted: false });
-    // Hard timeout: synthesis gets 90s, other calls 45s — prevents hanging forever
-    const timeoutMs = (worker === 'synthesis' || maxTokens > 2000) ? 90000 : 45000;
-    const res = await fetch(GROQ_API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.groqApiKey}`,
-      },
-      body: JSON.stringify({
-        model: GROQ_MODEL,
-        messages: [{ role: 'user', content: prompt }],
-        temperature,
-        max_tokens: maxTokens,
-      }),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    if (!res.ok) throw new Error(`LLM call failed: ${res.status}`);
-    const data = await res.json();
-    return data.choices?.[0]?.message?.content || '';
+    // Tight timeouts: feynmann/turing 25s, synthesis 75s, others 30s
+    const timeoutMs = worker === 'synthesis' ? 75000 : (worker === 'feynmann' || worker === 'turing') ? 25000 : 30000;
+
+    return this._llmWithTimeout(async () => {
+      const res = await fetch(GROQ_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.groqApiKey}`,
+        },
+        body: JSON.stringify({
+          model: GROQ_MODEL,
+          messages: [{ role: 'user', content: prompt }],
+          temperature,
+          max_tokens: maxTokens,
+        }),
+        signal: AbortSignal.timeout(timeoutMs - 2000),
+      });
+      if (!res.ok) throw new Error(`LLM call failed: ${res.status}`);
+      const data = await res.json();
+      return data.choices?.[0]?.message?.content || '';
+    }, timeoutMs);
   }
 
   _shouldContinueResearch(findings, currentWave, stack) {

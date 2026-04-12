@@ -2046,10 +2046,14 @@ Rules:
     if (!url) return null;
     this._emit('web.reading', { url });
 
-    // Try browserRuntime first
+    // Try browserRuntime first — with hard timeout to prevent hanging
     if (this.browserRuntime) {
       try {
-        const result = await this.browserRuntime.crawl({ urls: [url], depth: 0, pageLimit: 1 });
+        const crawlPromise = this.browserRuntime.crawl({ urls: [url], depth: 0, pageLimit: 1 });
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('browserRuntime.crawl timeout')), 8000)
+        );
+        const result = await Promise.race([crawlPromise, timeoutPromise]);
         const pages = Array.isArray(result.results) ? result.results : [];
         const content = pages[0]?.text || pages[0]?.content || pages[0]?.markdown || null;
         if (content) {
@@ -2057,7 +2061,7 @@ Rules:
           return content;
         }
       } catch (err) {
-        console.error('[DeepResearcher] Browser search failed:', err.message);
+        console.error('[DeepResearcher] Browser crawl failed/timed out:', err.message);
       }
     }
 
@@ -2907,6 +2911,8 @@ Rules:
     this._llmCallCount++;
     this._workerLlmCalls[workerKey] = (this._workerLlmCalls[workerKey] || 0) + 1;
     this._emitLlmBudget({ worker: workerKey, exhausted: false });
+    // Hard timeout: synthesis gets 90s, other calls 45s — prevents hanging forever
+    const timeoutMs = (worker === 'synthesis' || maxTokens > 2000) ? 90000 : 45000;
     const res = await fetch(GROQ_API_URL, {
       method: 'POST',
       headers: {
@@ -2919,6 +2925,7 @@ Rules:
         temperature,
         max_tokens: maxTokens,
       }),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) throw new Error(`LLM call failed: ${res.status}`);
     const data = await res.json();

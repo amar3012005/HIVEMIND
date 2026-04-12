@@ -3625,6 +3625,40 @@ a{color:#a78bfa}</style></head><body>
         return jsonResponse(res, { status: 'cancelling', sessionId });
       }
 
+      // POST /api/research/:sessionId/synthesize-from-blueprint
+      const synthBlueprintMatch = pathname.match(/^\/(?:api|v1\/proxy)\/research\/([^/]+)\/synthesize-from-blueprint$/);
+      if (synthBlueprintMatch && req.method === 'POST') {
+        const sessionId = synthBlueprintMatch[1];
+        let session = researchSessions.get(sessionId);
+        if (!session) session = await restoreSessionFromCSI(sessionId, userId, orgId);
+        if (!session) return jsonResponse(res, { error: 'Session not found' }, 404);
+        if (session.status === 'running' || session.status === 'cancelling') {
+          return jsonResponse(res, { error: 'Session still running' }, 409);
+        }
+        let blueprintId = body.blueprintId || null;
+        if (!blueprintId && blueprintMiner) {
+          try {
+            const bps = await persistentMemoryStore.searchMemories({ query: session.query || '', user_id: userId, org_id: orgId, project: session.projectId, n_results: 5 });
+            const bp = (bps || []).find(m => (m.tags || []).includes('blueprint'));
+            if (bp) blueprintId = bp.metadata?.blueprint_id || bp.id;
+          } catch {}
+        }
+        const synResearcher = new DeepResearcher({ memoryStore: persistentMemoryStore, recallFn: recallPersistedMemories, prisma, groqApiKey: process.env.GROQ_API_KEY, onEvent: (event) => broadcastResearchEvent(session, event) });
+        try {
+          const result = await synResearcher.synthesizeFromBlueprint({ sessionId, query: session.query, projectId: session.projectId, blueprintId, userId, orgId });
+          if (!session.result) session.result = {};
+          session.result.report = result.report;
+          session.result.findings = result.findings;
+          session.result.sources = result.sources;
+          session.result.fromBlueprint = true;
+          persistSessionStatus(sessionId, session.status, userId, orgId, session.projectId).catch(() => {});
+          return jsonResponse(res, { report: result.report, findings: result.findings, sources: result.sources, fromBlueprint: true, blueprintId: result.blueprintId || null, durationMs: result.durationMs, findingCount: result.findings.length, sourceCount: result.sources.length });
+        } catch (err) {
+          console.error('[research] synthesize-from-blueprint failed:', err.message);
+          return jsonResponse(res, { error: 'Synthesis failed: ' + err.message }, 500);
+        }
+      }
+
       // POST /api/research/:sessionId/synthesize — user confirms report generation
       const synthesizeMatch = pathname.match(/^\/(?:api|v1\/proxy)\/research\/([^/]+)\/synthesize$/);
       if (synthesizeMatch && req.method === 'POST') {
@@ -4410,10 +4444,12 @@ a{color:#a78bfa}</style></head><body>
         const projectId = session.projectId || `research/${sessionId.slice(0, 8)}`;
         const blueprintName = body.name || `Research: ${session.query?.slice(0, 50)}`;
 
-        // Capture state
-        const capturedState = await blueprintMiner.captureResearchState(sessionId, userId, orgId, projectId);
-        if (!capturedState) {
-          return jsonResponse(res, { error: 'Failed to capture research state' }, 500);
+        // Capture state — non-fatal if no memories found yet, blueprint still saved with empty state
+        let capturedState = null;
+        try {
+          capturedState = await blueprintMiner.captureResearchState(sessionId, userId, orgId, projectId);
+        } catch (captureErr) {
+          console.error('[research] captureResearchState error:', captureErr.message);
         }
 
         // Create blueprint with captured state

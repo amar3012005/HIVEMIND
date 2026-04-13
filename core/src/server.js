@@ -70,7 +70,7 @@ const { authenticatePersistedApiKey, hasEntitlement, hashApiKey: hashPersistedAp
 const { WebJobStore } = await import('./web/web-job-store.js');
 const { BrowserRuntime, getTelemetry } = await import('./web/browser-runtime.js');
 const { validateDomain, filterContent, UserRateLimiter, detectAbuse, getRobotsWarning, normalizeWebUrl } = await import('./web/web-policy.js');
-const webRateLimiter = new UserRateLimiter({ maxPerMinute: 10, maxPerHour: 60 });
+const webRateLimiter = new UserRateLimiter({ maxPerMinute: 60, maxPerHour: 500 });
 const { getQdrantClient } = await import('./vector/qdrant-client.js');
 const { getQdrantCollections } = await import('./vector/collections.js');
 const { MCPIngestionService } = await import('./connectors/mcp/service.js');

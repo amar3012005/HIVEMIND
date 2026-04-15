@@ -871,20 +871,26 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === '/auth/google/callback' && req.method === 'GET') {
-    console.log(`[google-auth] Callback received from Google`);
+    console.log(`[google-auth] Callback received from Google - URL: ${req.url}`);
     const code = url.searchParams.get('code');
     const state = url.searchParams.get('state');
     const error = url.searchParams.get('error');
 
+    console.log(`[google-auth] Callback params - code: ${code ? 'present' : 'missing'}, state: ${state ? 'present' : 'missing'}, error: ${error || 'none'}`);
+
     if (error) {
+      console.log(`[google-auth] OAuth error: ${error}`);
       return redirect(res, `${CONFIG.postLoginRedirect}?auth_error=${encodeURIComponent(error)}`);
     }
     if (!code || !state) {
+      console.log(`[google-auth] Missing code or state parameter`);
       return jsonResponse(res, { error: 'Missing code or state' }, 400);
     }
 
     const authState = await sessionStore.consumeAuthState(state);
+    console.log(`[google-auth] Auth state consumed - returnTo: ${authState?.returnTo}, provider: ${authState?.provider}`);
     if (!authState) {
+      console.log(`[google-auth] Invalid or expired auth state`);
       return jsonResponse(res, { error: 'Invalid login state' }, 400);
     }
 
@@ -905,18 +911,23 @@ const server = http.createServer(async (req, res) => {
 
       if (!tokenResp.ok) {
         const errText = await tokenResp.text();
+        console.log(`[google-auth] Token exchange failed: ${tokenResp.status} - ${errText}`);
         throw new Error(`Google token exchange failed: ${errText}`);
       }
 
       const tokens = await tokenResp.json();
+      console.log(`[google-auth] Token exchange successful - access_token: ${tokens.access_token ? 'present' : 'missing'}`);
 
       // Get user info
+      console.log(`[google-auth] Fetching user info from Google...`);
       const userInfoResp = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
         headers: { Authorization: `Bearer ${tokens.access_token}` },
       });
       const userInfo = await userInfoResp.json();
+      console.log(`[google-auth] User info retrieved - email: ${userInfo.email}, id: ${userInfo.id}`);
 
       // Upsert user — use Google sub as zitadel user id (with prefix to avoid collision)
+      console.log(`[google-auth] Upserting user...`);
       const user = await upsertUserFromZitadel({
         sub: `google:${userInfo.id}`,
         zitadelUserId: userInfo.sub,
@@ -925,27 +936,35 @@ const server = http.createServer(async (req, res) => {
         picture: userInfo.picture,
         locale: userInfo.locale,
       });
+      console.log(`[google-auth] User upserted - id: ${user.id}, email: ${user.email}`);
 
       const { org } = await resolveCurrentOrg(user.id);
+      console.log(`[google-auth] Organization resolved - orgId: ${org?.id || 'none'}`);
+
       const sessionId = await sessionStore.createSession({
         userId: user.id,
         email: user.email,
         orgId: org?.id || null,
       });
-
-      console.log(`[google-auth] Login successful for user: ${user.email}, session: ${sessionId}`);
+      console.log(`[google-auth] Session created - sessionId: ${sessionId}`);
 
       let finalRedirect = authState.returnTo || CONFIG.postLoginRedirect;
-      console.log(`[google-auth] Redirecting to: ${finalRedirect}`);
+      console.log(`[google-auth] Preparing redirect - initial finalRedirect: ${finalRedirect}`);
 
       // Cross-origin handshake support for external tools (MiroFish, VS Code, etc.)
-      if (finalRedirect.includes('localhost') || finalRedirect.includes('?hivemind_auth=callback')) {
-          console.log(`[google-auth] External tool callback detected, appending token`);
-          const separator = finalRedirect.includes('?') ? '&' : '?';
-          finalRedirect += `${separator}token=${sessionId}`;
+      const isExternalTool = finalRedirect.includes('localhost') || finalRedirect.includes('?hivemind_auth=callback');
+      console.log(`[google-auth] External tool check - includes localhost: ${finalRedirect.includes('localhost')}, includes hivemind_auth: ${finalRedirect.includes('?hivemind_auth=callback')}, isExternalTool: ${isExternalTool}`);
+
+      if (isExternalTool) {
+        console.log(`[google-auth] External tool callback detected, appending token`);
+        const separator = finalRedirect.includes('?') ? '&' : '?';
+        finalRedirect += `${separator}token=${sessionId}`;
+        console.log(`[google-auth] Token appended - separator: '${separator}', new finalRedirect: ${finalRedirect}`);
+      } else {
+        console.log(`[google-auth] Not an external tool callback, no token appended`);
       }
 
-      console.log(`[google-auth] Final Redirect: ${finalRedirect}`);
+      console.log(`[google-auth] Final redirect prepared: ${finalRedirect}`);
       return redirect(res, finalRedirect, [makeSessionCookie(sessionId)]);
     } catch (err) {
       console.error('[google-auth] Callback failed:', err.message);

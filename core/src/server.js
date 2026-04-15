@@ -2641,6 +2641,38 @@ a{color:#a78bfa}</style></head><body>
       }
 
       // Handle /api/memories/:id routes (dynamic ID matching)
+      // Handle /api/csi/bundle/:sim_id
+      if (pathname.startsWith('/api/csi/bundle/')) {
+        const simId = pathname.split('/api/csi/bundle/')[1];
+        const bundleDir = path.join(PROJECT_ROOT, 'data', 'csi_bundles');
+        const bundleFile = path.join(bundleDir, `${encodeURIComponent(simId)}.json`);
+
+        if (req.method === 'POST') {
+          try {
+            if (!fs.existsSync(bundleDir)) {
+              fs.mkdirSync(bundleDir, { recursive: true });
+            }
+            fs.writeFileSync(bundleFile, JSON.stringify(body), 'utf8');
+            return jsonResponse(res, { success: true, simulation_id: simId });
+          } catch (error) {
+            console.error('Save CSI bundle failed:', error);
+            return jsonResponse(res, { error: 'Failed to save', message: error.message }, 500);
+          }
+        }
+
+        if (req.method === 'GET') {
+          try {
+            if (!fs.existsSync(bundleFile)) {
+              return jsonResponse(res, { error: 'Not found' }, 404);
+            }
+            const data = fs.readFileSync(bundleFile, 'utf8');
+            return res.setHeader('Content-Type', 'application/json').writeHead(200).end(data);
+          } catch (error) {
+            console.error('Get CSI bundle failed:', error);
+            return jsonResponse(res, { error: 'Failed to load', message: error.message }, 500);
+          }
+        }
+      }
       if (pathname.startsWith('/api/memories/') && pathname !== '/api/memories/search' && pathname !== '/api/memories/query' && pathname !== '/api/memories/code/ingest' && pathname !== '/api/memories/traverse' && pathname !== '/api/memories/decay' && pathname !== '/api/memories/reinforce' && pathname !== '/api/memories/delete-all') {
         if (req.method === 'GET') {
           if (!ensurePersistedMemoryOrFail(res, '/api/memories/:id')) {

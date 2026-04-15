@@ -853,10 +853,15 @@ const server = http.createServer(async (req, res) => {
     if (!googleClientId) {
       return jsonResponse(res, { error: 'Google OAuth not configured' }, 503);
     }
+    const returnToValue = url.searchParams.get('return_to') || CONFIG.postLoginRedirect;
     const state = await sessionStore.createAuthState({
-      returnTo: url.searchParams.get('return_to') || CONFIG.postLoginRedirect,
+      returnTo: returnToValue,
       provider: 'google',
     });
+    // Encode return_to in the state itself as a fallback (base64 suffix after UUID)
+    // Format: <stateId>.<base64_return_to> — Google passes this back unchanged
+    const encodedReturnTo = Buffer.from(returnToValue).toString('base64url');
+    const compositeState = `${state}.${encodedReturnTo}`;
     const cpBase = `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers.host}`;
     const googleParams = new URLSearchParams({
       client_id: googleClientId,
@@ -865,7 +870,7 @@ const server = http.createServer(async (req, res) => {
       scope: 'openid email profile',
       access_type: 'offline',
       prompt: 'consent',
-      state,
+      state: compositeState,
     });
     return redirect(res, `https://accounts.google.com/o/oauth2/v2/auth?${googleParams}`);
   }
@@ -887,11 +892,24 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { error: 'Missing code or state' }, 400);
     }
 
-    const authState = await sessionStore.consumeAuthState(state);
+    // State format: <stateId>.<base64_return_to> or just <stateId>
+    const stateParts = state.split('.');
+    const stateId = stateParts[0];
+    const encodedFallbackReturnTo = stateParts[1] || null;
+
+    let authState = await sessionStore.consumeAuthState(stateId);
     console.log(`[google-auth] Auth state consumed - returnTo: ${authState?.returnTo}, provider: ${authState?.provider}`);
     if (!authState) {
-      console.log(`[google-auth] Invalid or expired auth state`);
-      return jsonResponse(res, { error: 'Invalid login state' }, 400);
+      // Fallback: decode return_to from the state parameter itself
+      let fallbackReturnTo = CONFIG.postLoginRedirect;
+      if (encodedFallbackReturnTo) {
+        try {
+          fallbackReturnTo = Buffer.from(encodedFallbackReturnTo, 'base64url').toString('utf8');
+          console.log(`[google-auth] Recovered returnTo from state param: ${fallbackReturnTo}`);
+        } catch {}
+      }
+      console.warn(`[google-auth] Auth state lost, using fallback returnTo: ${fallbackReturnTo}`);
+      authState = { returnTo: fallbackReturnTo, provider: 'google' };
     }
 
     try {

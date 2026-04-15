@@ -57,7 +57,17 @@ const defaultAllowedOrigins = (process.env.HIVEMIND_CONTROL_PLANE_ALLOWED_ORIGIN
   || 'https://hivemind.davinciai.eu,https://www.davinciai.eu,https://davinciai.eu')
   .split(',')
   .map(o => o.trim())
-  .filter(Boolean);
+  .filter(Boolean)
+  .concat([
+    'http://localhost:3000',
+    'http://localhost:3001',
+    'http://localhost:5000',
+    'http://localhost:5001',
+    'http://127.0.0.1:3000',
+    'http://127.0.0.1:3001',
+    'http://127.0.0.1:5000',
+    'http://127.0.0.1:5001'
+  ]);
 
 const defaultFrontendBaseUrl = process.env.HIVEMIND_FRONTEND_URL
   || defaultAllowedOrigins[0]

@@ -74,7 +74,7 @@ export const createMemorySchema = z.object({
   // Required content
   content: z.string()
     .min(1, 'content is required')
-    .max(100000, 'content must be less than 100,000 characters'),
+    .max(500000, 'content must be less than 500,000 characters'),
   
   // Optional metadata
   memory_type: memoryTypeEnum.optional().default('fact'),

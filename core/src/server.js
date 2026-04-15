@@ -2641,6 +2641,36 @@ a{color:#a78bfa}</style></head><body>
       }
 
       // Handle /api/memories/:id routes (dynamic ID matching)
+      // List all CSI bundles (metadata only — no content)
+      if (pathname === '/api/csi/bundles' && req.method === 'GET') {
+        const bundleDir = path.join(PROJECT_ROOT, 'data', 'csi_bundles');
+        try {
+          if (!fs.existsSync(bundleDir)) {
+            return jsonResponse(res, { success: true, sessions: [] });
+          }
+          const files = fs.readdirSync(bundleDir).filter(f => f.endsWith('.json'));
+          const sessions = files.map(f => {
+            try {
+              const raw = fs.readFileSync(path.join(bundleDir, f), 'utf8');
+              const data = JSON.parse(raw);
+              return {
+                simulation_id: data.simulation_id || f.replace('.json', ''),
+                query: data.title || data.metadata?.query || '',
+                timestamp: data.metadata?.timestamp || '',
+                claim_count: data.metadata?.claim_count || 0,
+                source_count: data.metadata?.source_count || 0,
+                agent_count: data.metadata?.agent_count || 0,
+              };
+            } catch {
+              return { simulation_id: f.replace('.json', ''), query: '', timestamp: '' };
+            }
+          }).sort((a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0));
+          return jsonResponse(res, { success: true, sessions });
+        } catch (error) {
+          return jsonResponse(res, { error: 'List bundles failed', message: error.message }, 500);
+        }
+      }
+
       // Handle /api/csi/bundle/:sim_id
       if (pathname.startsWith('/api/csi/bundle/')) {
         const simId = pathname.split('/api/csi/bundle/')[1];

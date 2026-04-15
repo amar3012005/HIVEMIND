@@ -837,6 +837,8 @@ const server = http.createServer(async (req, res) => {
 
   // ─── Direct Google OAuth (bypasses Zitadel) ──────────────────
   if (pathname === '/auth/google' && req.method === 'GET') {
+    const returnTo = url.searchParams.get('return_to') || CONFIG.postLoginRedirect;
+    console.log(`[google-auth] Login initiated, returnTo: ${returnTo}`);
     const googleClientId = process.env.GOOGLE_CLIENT_ID;
     if (!googleClientId) {
       return jsonResponse(res, { error: 'Google OAuth not configured' }, 503);
@@ -859,6 +861,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === '/auth/google/callback' && req.method === 'GET') {
+    console.log(`[google-auth] Callback received from Google`);
     const code = url.searchParams.get('code');
     const state = url.searchParams.get('state');
     const error = url.searchParams.get('error');
@@ -920,7 +923,20 @@ const server = http.createServer(async (req, res) => {
         orgId: org?.id || null,
       });
 
-      return redirect(res, authState.returnTo || CONFIG.postLoginRedirect, [makeSessionCookie(sessionId)]);
+      console.log(`[google-auth] Login successful for user: ${user.email}, session: ${sessionId}`);
+
+      let finalRedirect = authState.returnTo || CONFIG.postLoginRedirect;
+      console.log(`[google-auth] Redirecting to: ${finalRedirect}`);
+
+      // Cross-origin handshake support for external tools (MiroFish, VS Code, etc.)
+      if (finalRedirect.includes('localhost') || finalRedirect.includes('?hivemind_auth=callback')) {
+          console.log(`[google-auth] External tool callback detected, appending token`);
+          const separator = finalRedirect.includes('?') ? '&' : '?';
+          finalRedirect += `${separator}token=${sessionId}`;
+      }
+
+      console.log(`[google-auth] Final Redirect: ${finalRedirect}`);
+      return redirect(res, finalRedirect, [makeSessionCookie(sessionId)]);
     } catch (err) {
       console.error('[google-auth] Callback failed:', err.message);
       return redirect(res, `${CONFIG.postLoginRedirect}?auth_error=${encodeURIComponent(err.message)}`);

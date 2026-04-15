@@ -729,6 +729,18 @@ try {
   console.log('[server] PageIndexSearcher not available, using fallback search:', err.message);
 }
 
+// Initialize PageIndex ingestion hook (optional optimization layer)
+let pageindexHook = null;
+try {
+  // core/src/ingestion is CommonJS, so the module exports live under `.default`.
+  const mod = await import('./ingestion/pageindex-hook.js');
+  const { PageIndexIntegration } = mod.default || mod;
+  pageindexHook = PageIndexIntegration ? new PageIndexIntegration({ prisma: getPrismaClient() }) : null;
+  console.log('[server] PageIndexIntegration initialized');
+} catch (err) {
+  console.log('[server] PageIndexIntegration not available, skipping PageIndex ingestion:', err.message);
+}
+
 // Initialize Retrieval Evaluator
 const retrievalEvaluator = new RetrievalEvaluator({
   vectorStore: qdrantClient,
@@ -5602,6 +5614,11 @@ a{color:#a78bfa}</style></head><body>
                         });
                         invalidateAggregateCache({ userId, orgId, project: memory.project || null });
                         invalidateAggregateCache({ userId, orgId, project: null });
+
+                        // PageIndex assignment (project/halls/tags + keyword classification)
+                        pageindexHook?.onMemoryIngested(memory, {
+                          mutation: { operation: result.operation, deprecatedIds: result.deprecatedIds || [] }
+                        }).catch(err => console.warn('[pageindex-hook] onMemoryIngested failed:', err.message));
                       }
 
                       // Auto-extract profile facts from ingested content
@@ -5679,6 +5696,11 @@ a{color:#a78bfa}</style></head><body>
                   });
                   invalidateAggregateCache({ userId, orgId, project: memory.project || null });
                   invalidateAggregateCache({ userId, orgId, project: null });
+
+                  // PageIndex assignment (project/halls/tags + keyword classification)
+                  pageindexHook?.onMemoryIngested(memory, {
+                    mutation: { operation: result.operation, deprecatedIds: result.deprecatedIds || [] }
+                  }).catch(err => console.warn('[pageindex-hook] onMemoryIngested failed:', err.message));
                 }
 
                 // Auto-extract profile facts from ingested content

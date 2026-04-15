@@ -18,7 +18,8 @@ export class PageIndexClassifier {
     this.prisma = prisma;
     this.logger = logger;
     this.pageIndexService = new PageIndexService({ prisma, logger });
-    this.SIMILARITY_THRESHOLD = 0.65; // Minimum cosine similarity to assign
+    // Pure keyword-based assignment (Postgres does not store embeddings in `memories`).
+    this.KEYWORD_THRESHOLD = 0.35;
   }
 
   /**
@@ -27,7 +28,7 @@ export class PageIndexClassifier {
    * @param {object} memory - { id, content, title, tags, userId, orgId, embedding }
    * @returns {Promise<{ assigned: boolean, nodeIds: string[], reason: string }>}
    */
-  async classifyAndAssign(memory) {
+  async classifyAndAssign(memory, options = {}) {
     try {
       // Check if PageIndex is available
       const available = await this.pageIndexService.isAvailable();
@@ -35,27 +36,42 @@ export class PageIndexClassifier {
         return { assigned: false, nodeIds: [], reason: 'pageindex_unavailable' };
       }
 
-      // Get or create root node for user
-      const root = await this.pageIndexService.ensureRootNode(memory.userId, memory.orgId);
-      if (!root) {
+      const userId = memory.userId || memory.user_id;
+      const orgId = memory.orgId || memory.org_id || null;
+      const project = memory.project || null;
+
+      // Choose a project-scoped rootPath when possible.
+      const projectRoot = project
+        ? await this.pageIndexService.ensureProjectRootNode(userId, orgId, project)
+        : null;
+      const rootPath = options.rootPath || projectRoot?.path || this.pageIndexService.ROOT_PATH;
+      const fallbackNodeId = options.fallbackNodeId || projectRoot?.id || null;
+
+      // Get nodes under the scoped rootPath
+      const nodes = await this.pageIndexService.getTree(userId, { rootPath });
+      if (!nodes || nodes.length === 0) {
+        // No nodes under scope — assign to project root if present, else global root.
+        const globalRoot = await this.pageIndexService.ensureRootNode(userId, orgId);
+        const targetId = fallbackNodeId || globalRoot?.id;
+        if (targetId) {
+          await this.pageIndexService.assignMemoryToNode(targetId, memory.id);
+          return { assigned: true, nodeIds: [targetId], reason: 'no_nodes_in_scope_assigned_to_root' };
+        }
         return { assigned: false, nodeIds: [], reason: 'root_creation_failed' };
       }
 
-      // Get all nodes for user
-      const nodes = await this.pageIndexService.getTree(memory.userId);
-      if (!nodes || nodes.length === 0) {
-        // First memory for user — assign to root
-        await this.pageIndexService.assignMemoryToNode(root.id, memory.id);
-        return { assigned: true, nodeIds: [root.id], reason: 'first_memory_assigned_to_root' };
-      }
-
-      // Find best matching node(s) using embedding similarity
-      const bestMatches = await this._findBestMatchingNodes(memory, nodes);
+      // Find best matching node(s) using keyword matching
+      const bestMatches = this._findBestMatchingNodesKeyword(memory, nodes);
 
       if (bestMatches.length === 0) {
-        // No good match — assign to root for now
-        await this.pageIndexService.assignMemoryToNode(root.id, memory.id);
-        return { assigned: true, nodeIds: [root.id], reason: 'no_match_found_assigned_to_root' };
+        // No good match — assign to project root if available, else global root.
+        const globalRoot = await this.pageIndexService.ensureRootNode(userId, orgId);
+        const targetId = fallbackNodeId || globalRoot?.id;
+        if (targetId) {
+          await this.pageIndexService.assignMemoryToNode(targetId, memory.id);
+          return { assigned: true, nodeIds: [targetId], reason: 'no_match_assigned_to_root' };
+        }
+        return { assigned: false, nodeIds: [], reason: 'root_creation_failed' };
       }
 
       // Assign to top matching nodes (max 3 for cross-referencing)
@@ -69,7 +85,7 @@ export class PageIndexClassifier {
         `[pageindex-classifier] Assigned ${memory.id.slice(0, 8)} to ${nodeIds.length} node(s): ${nodeIds.map(id => id.slice(0, 8)).join(', ')}`
       );
 
-      return { assigned: true, nodeIds, reason: 'embedding_similarity' };
+      return { assigned: true, nodeIds, reason: 'keyword_similarity' };
     } catch (err) {
       this.logger.warn('[pageindex-classifier] Classification failed:', err.message);
       return { assigned: false, nodeIds: [], reason: 'error', error: err.message };
@@ -77,10 +93,10 @@ export class PageIndexClassifier {
   }
 
   /**
-   * Find best matching nodes using embedding similarity.
+   * Find best matching nodes using keyword similarity.
    * @private
    */
-  async _findBestMatchingNodes(memory, nodes) {
+  _findBestMatchingNodesKeyword(memory, nodes) {
     // Flatten nodes to array with path info
     const nodePaths = this._flattenTree(nodes);
 
@@ -88,59 +104,12 @@ export class PageIndexClassifier {
       return [];
     }
 
-    // For each node, compute similarity score based on:
-    // 1. Memory embeddings already in that node
-    // 2. Node label/topic keyword match
-
+    // Score each node via keyword overlap between memory snippet/tags and node label/path.
     const scored = [];
-
     for (const node of nodePaths) {
-      if (!node.memoryIds || node.memoryIds.length === 0) {
-        // Empty node — use keyword matching as fallback
-        const keywordScore = this._keywordMatch(memory, node);
-        if (keywordScore > 0.5) {
-          scored.push({ nodeId: node.id, path: node.path, score: keywordScore, method: 'keyword' });
-        }
-        continue;
-      }
-
-      // Fetch embeddings of memories in this node (sample up to 10)
-      const sampleMemoryIds = node.memoryIds.slice(0, 10);
-      const memories = await this.prisma.memory.findMany({
-        where: { id: { in: sampleMemoryIds }, deletedAt: null },
-        select: { id: true, embedding: true, embeddingModel: true },
-      });
-
-      if (memories.length === 0 || !memories[0].embedding) {
-        // No embeddings — fall back to keyword
-        const keywordScore = this._keywordMatch(memory, node);
-        if (keywordScore > 0.5) {
-          scored.push({ nodeId: node.id, path: node.path, score: keywordScore, method: 'keyword' });
-        }
-        continue;
-      }
-
-      // Compute average similarity to memories in this node
-      const similarities = memories.map(m => {
-        if (!memory.embedding || !m.embedding) return 0;
-        return this._cosineSimilarity(memory.embedding, m.embedding);
-      });
-
-      const avgSimilarity = similarities.reduce((a, b) => a + b, 0) / similarities.length;
-      const maxSimilarity = Math.max(...similarities);
-
-      // Use max similarity (best match in node) weighted with avg
-      const combinedScore = (maxSimilarity * 0.7) + (avgSimilarity * 0.3);
-
-      if (combinedScore >= this.SIMILARITY_THRESHOLD) {
-        scored.push({
-          nodeId: node.id,
-          path: node.path,
-          score: combinedScore,
-          method: 'embedding',
-          avgSimilarity,
-          maxSimilarity,
-        });
+      const keywordScore = this._keywordMatch(memory, node);
+      if (keywordScore >= this.KEYWORD_THRESHOLD) {
+        scored.push({ nodeId: node.id, path: node.path, score: keywordScore, method: 'keyword' });
       }
     }
 
@@ -175,28 +144,6 @@ export class PageIndexClassifier {
     // Score based on overlap ratio
     const expectedOverlap = Math.min(memoryTokens.length, 10);
     return expectedOverlap > 0 ? Math.min(overlap / expectedOverlap, 1.0) : 0;
-  }
-
-  /**
-   * Compute cosine similarity between two embeddings.
-   * @private
-   */
-  _cosineSimilarity(a, b) {
-    if (!a || !b || a.length !== b.length) return 0;
-
-    let dotProduct = 0;
-    let normA = 0;
-    let normB = 0;
-
-    for (let i = 0; i < a.length; i++) {
-      dotProduct += a[i] * b[i];
-      normA += a[i] * a[i];
-      normB += b[i] * b[i];
-    }
-
-    if (normA === 0 || normB === 0) return 0;
-
-    return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
   }
 
   /**

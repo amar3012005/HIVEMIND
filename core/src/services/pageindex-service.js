@@ -17,6 +17,7 @@ export class PageIndexService {
     this.logger = logger;
     this.MAX_DEPTH = 4;
     this.ROOT_PATH = '/hivemind';
+    this.PROJECTS_PATH = `${this.ROOT_PATH}/projects`;
   }
 
   /**
@@ -57,6 +58,48 @@ export class PageIndexService {
       this.logger.warn('[PageIndexService] ensureRootNode failed:', err.message);
       return null;
     }
+  }
+
+  /**
+   * Ensure a canonical project root exists under /hivemind/projects/<project-slug>.
+   * Returns the project node (depth 3) or null on failure.
+   */
+  async ensureProjectRootNode(userId, orgId, project) {
+    if (!project || typeof project !== 'string') return null;
+
+    const root = await this.ensureRootNode(userId, orgId);
+    if (!root) return null;
+
+    // 1) Ensure /hivemind/projects node exists
+    let projectsNode = await this.findNodeByPath(userId, this.PROJECTS_PATH);
+    if (!projectsNode) {
+      projectsNode = await this.createNode({
+        userId,
+        orgId,
+        parentId: root.id,
+        label: 'projects',
+        nodeType: 'category',
+      });
+    }
+    if (!projectsNode) return null;
+
+    // 2) Ensure /hivemind/projects/<project> exists
+    const projectSlug = this._slugify(project);
+    if (!projectSlug) return projectsNode;
+
+    const projectPath = `${this.PROJECTS_PATH}/${projectSlug}`;
+    let projectNode = await this.findNodeByPath(userId, projectPath);
+    if (!projectNode) {
+      projectNode = await this.createNode({
+        userId,
+        orgId,
+        parentId: projectsNode.id,
+        label: project,
+        nodeType: 'project',
+      });
+    }
+
+    return projectNode || projectsNode;
   }
 
   /**

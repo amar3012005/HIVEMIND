@@ -343,7 +343,16 @@ function sanitizeSlug(input) {
 async function getCurrentSession(req) {
   const cookies = parseCookies(req);
   const rawCookie = cookies[CONFIG.sessionCookieName];
-  const sessionId = verifySessionCookie(CONFIG.sessionSecret, rawCookie);
+  // Verify either cookie or Bearer token (for cross-origin sync)
+  let sessionId = verifySessionCookie(CONFIG.sessionSecret, rawCookie);
+  
+  if (!sessionId) {
+    const authHeader = req.headers['authorization'];
+    if (authHeader?.startsWith('Bearer ')) {
+      sessionId = authHeader.substring(7).trim();
+    }
+  }
+
   if (!sessionId) {
     return null;
   }
@@ -974,7 +983,14 @@ const server = http.createServer(async (req, res) => {
         orgId: org?.id || null
       });
 
-      return redirect(res, authState.returnTo || CONFIG.postLoginRedirect, [makeSessionCookie(sessionId)]);
+      let finalRedirect = authState.returnTo || CONFIG.postLoginRedirect;
+      // Cross-origin handshake support for external tools (MiroFish, VS Code, etc.)
+      if (finalRedirect.includes('localhost') || finalRedirect.includes('?hivemind_auth=callback')) {
+          const separator = finalRedirect.includes('?') ? '&' : '?';
+          finalRedirect += `${separator}token=${sessionId}`;
+      }
+
+      return redirect(res, finalRedirect, [makeSessionCookie(sessionId)]);
     } catch (error) {
       return jsonResponse(res, { error: error.message }, 500);
     }

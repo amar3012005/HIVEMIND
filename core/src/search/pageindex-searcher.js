@@ -22,15 +22,17 @@ export class PageIndexSearcher {
    * Never throws — always returns results (even if degraded).
    *
    * @param {string} query - User's search query
-   * @param {object} options - { userId, orgId, limit = 20 }
+   * @param {object} options - { userId, orgId, project?, rootPath?, limit = 20 }
    * @returns {Promise<Array>} Search results with full memory data
    */
   async search(query, options = {}) {
-    const { userId, orgId, limit = 20 } = options;
+    const { userId, orgId, project = null, rootPath = null, limit = 20 } = options;
     const startTime = Date.now();
 
+    const effectiveRootPath = await this._resolveRootPath({ userId, project, rootPath });
+
     // Try PageIndex first (with timeout)
-    const pageIndexPromise = this._searchPageIndex(query, { userId, orgId, limit })
+    const pageIndexPromise = this._searchPageIndex(query, { userId, orgId, project, rootPath: effectiveRootPath, limit })
       .then(results => ({ source: 'pageindex', results, error: null }))
       .catch(err => {
         this.logger.warn('[PageIndexSearcher] PageIndex failed, using fallback:', err.message);
@@ -46,7 +48,7 @@ export class PageIndexSearcher {
     ]);
 
     // Always run direct hybrid search in parallel (fallback)
-    const directPromise = this._directHybridSearch(query, { userId, orgId, limit })
+    const directPromise = this._directHybridSearch(query, { userId, orgId, project, limit })
       .then(results => ({ source: 'direct-hybrid', results, error: null }))
       .catch(err => {
         this.logger.error('[PageIndexSearcher] Direct hybrid failed:', err.message);
@@ -75,7 +77,7 @@ export class PageIndexSearcher {
    * @private
    */
   async _searchPageIndex(query, options) {
-    const { userId, orgId, limit } = options;
+    const { userId, orgId, project, rootPath, limit } = options;
 
     // Check if PageIndex table exists (first-run safety)
     const tableExists = await this._checkPageIndexTableExists();
@@ -84,14 +86,30 @@ export class PageIndexSearcher {
     }
 
     // 1. Keyword match on node labels, paths, AND summaries
+    const where = {
+      userId,
+      deletedAt: null,
+      ...(rootPath ? { path: { startsWith: rootPath } } : {}),
+    };
+    if (orgId) {
+      // Some nodes may have orgId null from older data; keep them visible to the same user.
+      where.OR = [
+        { orgId },
+        { orgId: null },
+      ];
+    }
+
     const keywordNodes = await this.prisma.pageIndexNode.findMany({
       where: {
-        userId,
-        deletedAt: null,
-        OR: [
-          { label: { contains: query, mode: 'insensitive' } },
-          { path: { contains: query.toLowerCase() } },
-          { summary: { contains: query, mode: 'insensitive' } },
+        ...where,
+        AND: [
+          {
+            OR: [
+              { label: { contains: query, mode: 'insensitive' } },
+              { path: { contains: query.toLowerCase() } },
+              { summary: { contains: query, mode: 'insensitive' } },
+            ],
+          },
         ],
       },
       orderBy: { memoryCount: 'desc' },
@@ -117,6 +135,8 @@ export class PageIndexSearcher {
       where: {
         id: { in: [...memoryIdsFromPageIndex] },
         userId,
+        ...(orgId ? { orgId } : {}),
+        ...(project ? { project } : {}),
         deletedAt: null,
       },
       take: limit,
@@ -137,12 +157,14 @@ export class PageIndexSearcher {
    * @private
    */
   async _directHybridSearch(query, options) {
-    const { userId, orgId, limit } = options;
+    const { userId, orgId, project, limit } = options;
 
     // 1. PostgreSQL lexical search
     const lexicalResults = await this.prisma.memory.findMany({
       where: {
         userId,
+        ...(orgId ? { orgId } : {}),
+        ...(project ? { project } : {}),
         deletedAt: null,
         OR: [
           { content: { contains: query, mode: 'insensitive' } },
@@ -157,10 +179,15 @@ export class PageIndexSearcher {
     // 2. VectorDB semantic search (Qdrant)
     let vectorResults = [];
     try {
-      const queryEmbedding = await this._embedQuery(query);
+      // Prefer the vector store's embedding pipeline to avoid dimension/provider mismatches.
+      const queryEmbedding = this.vectorDB?.generateEmbedding
+        ? await this.vectorDB.generateEmbedding(query)
+        : await this._embedQuery(query);
       if (queryEmbedding) {
-        vectorResults = await this.vectorDB.search(queryEmbedding, {
+        vectorResults = await this._vectorSearch(queryEmbedding, {
           userId,
+          orgId,
+          project,
           limit: Math.floor(limit / 2),
         });
       }
@@ -174,14 +201,23 @@ export class PageIndexSearcher {
 
     // Vector results first (higher priority for semantic match)
     for (const result of vectorResults) {
-      if (result.payload?.memory_id) {
-        seen.set(result.payload.memory_id, {
-          id: result.payload.memory_id,
-          ...result.payload,
-          _vectorScore: result.score || 0.5,
-          _source: 'vectordb',
-        });
-      }
+      const payload = result?.payload || null;
+      const memoryId = payload?.memory_id || result?.id || null;
+      if (!memoryId) continue;
+      seen.set(memoryId, {
+        id: memoryId,
+        ...(payload || {}),
+        // Keep these on the top-level for downstream compatibility.
+        content: payload?.content,
+        project: payload?.project,
+        tags: payload?.tags,
+        memoryType: payload?.memory_type,
+        userId: payload?.user_id,
+        orgId: payload?.org_id,
+        createdAt: payload?.created_at ? new Date(payload.created_at) : undefined,
+        _vectorScore: result.score || 0.5,
+        _source: 'vectordb',
+      });
     }
 
     // Lexical results (fill in gaps)
@@ -302,5 +338,72 @@ export class PageIndexSearcher {
       this.logger.warn('[PageIndexSearcher] Embedding failed:', err.message);
       return null;
     }
+  }
+
+  /**
+   * Vector search wrapper with multi-tenant + project scoping.
+   * Supports QdrantClient (searchMemories) and falls back gracefully.
+   * @private
+   */
+  async _vectorSearch(queryEmbedding, options) {
+    const { userId, orgId, project, limit } = options;
+
+    // Prefer QdrantClient API used by the rest of the codebase.
+    if (this.vectorDB?.searchMemories) {
+      const must = [];
+      if (userId) must.push({ key: 'user_id', match: { value: userId } });
+      if (orgId) must.push({ key: 'org_id', match: { value: orgId } });
+      if (project) must.push({ key: 'project', match: { value: project } });
+      const filter = must.length > 0 ? { must } : undefined;
+
+      return await this.vectorDB.searchMemories({
+        vector: queryEmbedding,
+        filter,
+        limit,
+      });
+    }
+
+    // Back-compat for older vector stores.
+    if (this.vectorDB?.search) {
+      return await this.vectorDB.search(queryEmbedding, { userId, orgId, project, limit });
+    }
+
+    return [];
+  }
+
+  /**
+   * Resolve a PageIndex rootPath for project-scoped search.
+   * Uses heuristics to support both current (`/hivemind/<slug(project)>`) and
+   * future (`/hivemind/projects/<slug(project)>`) layouts.
+   * @private
+   */
+  async _resolveRootPath({ userId, project, rootPath }) {
+    if (rootPath && typeof rootPath === 'string') return rootPath;
+    if (!project || typeof project !== 'string') return null;
+
+    const slug = project
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+    if (!slug) return null;
+
+    const candidates = [
+      `/hivemind/projects/${slug}`,
+      `/hivemind/${slug}`,
+    ];
+
+    for (const candidate of candidates) {
+      try {
+        const exists = await this.prisma.pageIndexNode.findFirst({
+          where: { userId, deletedAt: null, path: { startsWith: candidate } },
+          select: { id: true },
+        });
+        if (exists) return candidate;
+      } catch {
+        // ignore
+      }
+    }
+
+    return null;
   }
 }

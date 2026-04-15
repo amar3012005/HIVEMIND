@@ -173,6 +173,10 @@ export class PageIndexService {
    */
   async assignMemoryToNode(nodeId, memoryId) {
     try {
+      if (typeof memoryId !== 'string' || memoryId.length === 0) {
+        return false;
+      }
+
       const node = await this.prisma.pageIndexNode.findUnique({
         where: { id: nodeId },
         select: { memoryIds: true, memoryCount: true },
@@ -232,9 +236,13 @@ export class PageIndexService {
   /**
    * Assign memory to multiple nodes (cross-referencing).
    */
-  async assignMemoryToNodes(nodeIds, memoryId) {
+  async assignMemoryToNodes(nodeIds, memoryIdOrIds) {
+    const memoryIds = this._normalizeMemoryIds(memoryIdOrIds);
+    if (memoryIds.length === 0) return 0;
+
+    // Assign each memory id to each node id.
     const results = await Promise.all(
-      nodeIds.map(id => this.assignMemoryToNode(id, memoryId))
+      nodeIds.flatMap(nodeId => memoryIds.map(memoryId => this.assignMemoryToNode(nodeId, memoryId)))
     );
     return results.filter(r => r).length;
   }
@@ -561,6 +569,22 @@ Write a 2-3 sentence summary describing what topics/themes this collection cover
    */
   _computeMemoryCount(node) {
     return node.memoryIds?.length || 0;
+  }
+
+  /**
+   * Normalize a memory id (string) or list of ids into a flat string[].
+   * This makes the API resilient to callers accidentally passing an array.
+   * @private
+   */
+  _normalizeMemoryIds(memoryIdOrIds) {
+    if (!memoryIdOrIds) return [];
+    if (Array.isArray(memoryIdOrIds)) {
+      return memoryIdOrIds.flat(Infinity).filter(x => typeof x === 'string' && x.length > 0);
+    }
+    if (typeof memoryIdOrIds === 'string' && memoryIdOrIds.length > 0) {
+      return [memoryIdOrIds];
+    }
+    return [];
   }
 }
 

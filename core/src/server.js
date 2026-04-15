@@ -7135,7 +7135,7 @@ a{color:#a78bfa}</style></head><body>
               return;
             }
             try {
-              const { query, limit = 20 } = body;
+              const { query, limit = 20, project } = body;
 
               if (!query || typeof query !== 'string') {
                 return jsonResponse(res, {
@@ -7144,12 +7144,16 @@ a{color:#a78bfa}</style></head><body>
                 }, 400);
               }
 
+              // containerTag → project mapping for search
+              const searchProject = project || effectiveContainerTag || null;
+
               // Use PageIndexSearcher if available, else fall back to quick search
               if (pageindexSearcher) {
                 const results = await pageindexSearcher.search(query, {
                   userId,
                   orgId,
                   limit,
+                  project: searchProject,
                 });
 
                 // Record search usage
@@ -7168,6 +7172,7 @@ a{color:#a78bfa}</style></head><body>
                   userId,
                   orgId,
                   limit,
+                  project: searchProject,
                 });
 
                 jsonResponse(res, result);
@@ -7207,6 +7212,7 @@ a{color:#a78bfa}</style></head><body>
                   userId,
                   orgId,
                   limit: limit || 10,
+                  project: searchProject,
                 });
 
                 // Record search usage

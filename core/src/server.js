@@ -66,7 +66,19 @@ const { rewriteQuery } = await import('./search/query-rewriter.js');
 const { deduplicateResults } = await import('./search/result-dedup.js');
 const { queryPersistedMemories, recallPersistedMemories } = await import('./memory/persisted-retrieval.js');
 const { expandTemporalQuery } = await import('./search/time-aware-expander.js');
-const { authenticatePersistedApiKey, hasEntitlement, hashApiKey: hashPersistedApiKey } = await import('./auth/api-keys.js');
+const {
+  authenticatePersistedApiKey,
+  createPersistedApiKey,
+  hasEntitlement,
+  hashApiKey: hashPersistedApiKey
+} = await import('./auth/api-keys.js');
+const { encryptToken, decryptToken } = await import('./connectors/framework/connector-store.js');
+const {
+  ControlPlaneSessionStore,
+  buildSessionCookie,
+  verifySessionCookie
+} = await import('./control-plane/session-store.js');
+const { ZitadelOidcClient } = await import('./control-plane/zitadel.js');
 const { WebJobStore } = await import('./web/web-job-store.js');
 const { BrowserRuntime, getTelemetry } = await import('./web/browser-runtime.js');
 const { validateDomain, filterContent, UserRateLimiter, detectAbuse, getRobotsWarning, normalizeWebUrl } = await import('./web/web-policy.js');
@@ -152,6 +164,8 @@ const { createResidentRoutes } = await import('./resident/routes.js');
 
 // Graph Hygiene Scanner
 const { GraphHygieneScanner } = await import('./resident/graph-hygiene-scanner.js');
+const { EnterpriseChatService } = await import('./enterprise/chat/service.js');
+const { createEnterpriseChatRoutes } = await import('./enterprise/chat/routes.js');
 
 // TARA Voice Agent imports
 const { TaraStreamHandler } = await import('./tara/stream-handler.js');
@@ -211,6 +225,8 @@ const TAMPERMONKEY_USER_SCRIPT_CANDIDATES = [
 const DATA_DIR = path.join(PROJECT_ROOT, 'data');
 const API_KEYS_FILE_PATH = path.join(DATA_DIR, 'api-keys.json');
 const EVALUATION_REPORTS_DIR = path.join(DATA_DIR, 'evaluation-reports');
+const OAUTH_CLIENTS_FILE_PATH = path.join(DATA_DIR, 'oauth-clients.json');
+const OAUTH_REFRESH_TOKENS_FILE_PATH = path.join(DATA_DIR, 'oauth-refresh-tokens.json');
 
 // Web Intelligence
 const WEB_JOBS_FILE = path.join(DATA_DIR, 'web-jobs.json');
@@ -688,6 +704,10 @@ residentRunManager.seedAgents().catch((error) => {
   console.warn('[Resident] Failed to seed resident agents:', error.message);
 });
 const residentRoutes = createResidentRoutes(residentRunManager);
+const enterpriseChatService = persistentMemoryStore ? new EnterpriseChatService({
+  memoryStore: persistentMemoryStore,
+}) : null;
+const enterpriseChatRoutes = createEnterpriseChatRoutes(enterpriseChatService);
 const taraHandler = persistentMemoryStore ? new TaraStreamHandler({
   memoryStore: persistentMemoryStore,
   recallFn: recallPersistedMemories,
@@ -767,16 +787,74 @@ const INGESTION_MODULE_CANDIDATES = [
 const CONTEXT_CACHE_TTL_MS = Number(process.env.HIVEMIND_CONTEXT_CACHE_TTL_MS || 15000);
 const aggregateCache = new Map();
 
-// OAuth 2.0 authorization code store (in-memory, 5 min TTL)
+// OAuth 2.1 authorization code + refresh token stores
 const OAUTH_BASE_URL = process.env.HIVEMIND_OAUTH_BASE_URL || 'https://core.hivemind.davinciai.eu:8050';
-const OAUTH_SCOPES_SUPPORTED = ['memory:read', 'memory:write', 'mcp', 'web_search', 'web_crawl'];
-const oauthCodeStore = new Map(); // code -> { clientId, redirectUri, scope, codeChallenge, codeChallengeMethod, userId, orgId, expiresAt }
+const OAUTH_SCOPES_SUPPORTED = ['memory.read', 'memory.write', 'tools.invoke', 'workspace.connect', 'mcp.connect'];
+const OAUTH_SCOPE_TO_INTERNAL = {
+  'memory.read': 'memory:read',
+  'memory.write': 'memory:write',
+  'tools.invoke': 'mcp',
+  'workspace.connect': 'mcp',
+  'mcp.connect': 'mcp'
+};
+const OAUTH_SCOPE_ALIASES = {
+  'memory:read': 'memory.read',
+  'memory:write': 'memory.write',
+  mcp: 'mcp.connect'
+};
+const OAUTH_ACCESS_TOKEN_TTL_SECONDS = Number(process.env.HIVEMIND_OAUTH_ACCESS_TOKEN_TTL_SECONDS || 15 * 60);
+const OAUTH_REFRESH_TOKEN_TTL_SECONDS = Number(process.env.HIVEMIND_OAUTH_REFRESH_TOKEN_TTL_SECONDS || 30 * 24 * 60 * 60);
+const OAUTH_SESSION_COOKIE_NAME = process.env.HIVEMIND_OAUTH_SESSION_COOKIE || 'hm_oauth_session';
+const OAUTH_SESSION_SECRET = process.env.HIVEMIND_OAUTH_SESSION_SECRET || process.env.SESSION_SECRET || 'change-me';
+const OAUTH_AUTH_STATE_TTL_SECONDS = Number(process.env.HIVEMIND_OAUTH_AUTH_STATE_TTL_SECONDS || 10 * 60);
+const OAUTH_RESOURCE_DEFAULT = process.env.HIVEMIND_OAUTH_RESOURCE_DEFAULT || OAUTH_BASE_URL;
+const oauthCodeStore = new Map(); // code -> { clientId, redirectUri, scopes, codeChallenge, codeChallengeMethod, userId, orgId, workspaceId, resource, expiresAt, state }
+const oauthRefreshStore = new Map(); // refreshHash -> { ...metadata, expiresAt, revokedAt, rotatedFrom, accessTokenHash }
 const OAUTH_CODE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const oauthSessionStore = new ControlPlaneSessionStore({
+  sessionTtlSeconds: Number(process.env.HIVEMIND_OAUTH_SESSION_TTL_SECONDS || 60 * 60 * 8),
+  authStateTtlSeconds: OAUTH_AUTH_STATE_TTL_SECONDS,
+  redisUrl: process.env.HIVEMIND_OAUTH_REDIS_URL || process.env.REDIS_URL || null,
+  redisHost: process.env.REDIS_HOST || null,
+  redisPort: Number(process.env.REDIS_PORT || 6379),
+  redisPassword: process.env.REDIS_PASSWORD || null
+});
+const oauthZitadelClient = (
+  process.env.ZITADEL_ISSUER_URL
+  && process.env.ZITADEL_CLIENT_ID
+  && process.env.ZITADEL_CLIENT_SECRET
+  && process.env.ZITADEL_REDIRECT_URI
+)
+  ? new ZitadelOidcClient({
+      issuerUrl: process.env.ZITADEL_ISSUER_URL,
+      clientId: process.env.ZITADEL_CLIENT_ID,
+      clientSecret: process.env.ZITADEL_CLIENT_SECRET,
+      redirectUri: process.env.ZITADEL_REDIRECT_URI,
+      scope: process.env.ZITADEL_SCOPE || 'openid profile email offline_access'
+    })
+  : null;
+const LOCAL_DEFAULT_OAUTH_CLIENTS = [
+  {
+    client_id: 'hivemind-local-dev',
+    client_name: 'HiveMind Local Development Client',
+    redirect_uris: ['http://localhost:3000/api/hivemind/callback'],
+    allowed_scopes: OAUTH_SCOPES_SUPPORTED,
+    is_public: true,
+    status: 'active'
+  }
+];
+let oauthClientRegistryCache = {
+  expiresAt: 0,
+  clients: LOCAL_DEFAULT_OAUTH_CLIENTS
+};
 
 function cleanExpiredOAuthCodes() {
   const now = Date.now();
   for (const [code, entry] of oauthCodeStore) {
     if (now > entry.expiresAt) oauthCodeStore.delete(code);
+  }
+  for (const [refreshHash, entry] of oauthRefreshStore) {
+    if (entry.revokedAt || now > entry.expiresAt) oauthRefreshStore.delete(refreshHash);
   }
 }
 setInterval(cleanExpiredOAuthCodes, 60_000);
@@ -1266,6 +1344,339 @@ function saveApiKeyStore(store) {
   fs.writeFileSync(API_KEYS_FILE_PATH, JSON.stringify(store, null, 2), 'utf-8');
 }
 
+function ensureOAuthClientsStore() {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+  if (!fs.existsSync(OAUTH_CLIENTS_FILE_PATH)) {
+    fs.writeFileSync(
+      OAUTH_CLIENTS_FILE_PATH,
+      JSON.stringify({ clients: LOCAL_DEFAULT_OAUTH_CLIENTS }, null, 2),
+      'utf-8'
+    );
+  }
+}
+
+function loadOAuthClientsFromDisk() {
+  try {
+    ensureOAuthClientsStore();
+    const raw = fs.readFileSync(OAUTH_CLIENTS_FILE_PATH, 'utf-8');
+    const parsed = JSON.parse(raw || '{"clients":[]}');
+    return Array.isArray(parsed.clients) ? parsed.clients : [];
+  } catch {
+    return [];
+  }
+}
+
+function loadOAuthClientsFromEnv() {
+  try {
+    const raw = process.env.HIVEMIND_OAUTH_CLIENTS_JSON || '';
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed;
+  } catch {
+    return [];
+  }
+}
+
+function normalizeOAuthClientRecord(rawClient = {}) {
+  const clientId = String(rawClient.client_id || rawClient.clientId || '').trim();
+  if (!clientId) return null;
+  const redirectUris = Array.isArray(rawClient.redirect_uris)
+    ? rawClient.redirect_uris.map(uri => String(uri || '').trim()).filter(Boolean)
+    : [];
+  if (redirectUris.length === 0) return null;
+  const allowedScopesRaw = Array.isArray(rawClient.allowed_scopes) ? rawClient.allowed_scopes : OAUTH_SCOPES_SUPPORTED;
+  const allowedScopes = normalizeRequestedScopes(allowedScopesRaw.join(' '), OAUTH_SCOPES_SUPPORTED);
+  return {
+    client_id: clientId,
+    client_name: String(rawClient.client_name || rawClient.clientName || clientId),
+    redirect_uris: redirectUris,
+    allowed_scopes: allowedScopes,
+    is_public: rawClient.is_public !== false,
+    status: String(rawClient.status || 'active')
+  };
+}
+
+async function loadOAuthClientRegistry() {
+  const now = Date.now();
+  if (oauthClientRegistryCache.expiresAt > now) {
+    return oauthClientRegistryCache.clients;
+  }
+
+  const merged = new Map();
+  const upsert = (rawClient) => {
+    const normalized = normalizeOAuthClientRecord(rawClient);
+    if (!normalized) return;
+    merged.set(normalized.client_id, normalized);
+  };
+
+  for (const c of LOCAL_DEFAULT_OAUTH_CLIENTS) upsert(c);
+  for (const c of loadOAuthClientsFromDisk()) upsert(c);
+  for (const c of loadOAuthClientsFromEnv()) upsert(c);
+
+  if (prisma?.metaParameter) {
+    try {
+      const dbRegistry = await prisma.metaParameter.findUnique({
+        where: { key: 'oauth_client_registry' }
+      });
+      const value = Array.isArray(dbRegistry?.value) ? dbRegistry.value : [];
+      for (const c of value) upsert(c);
+    } catch {
+      // Optional DB-backed registry, file/env fallback remains valid.
+    }
+  }
+
+  const clients = Array.from(merged.values());
+  oauthClientRegistryCache = {
+    expiresAt: now + 60 * 1000,
+    clients
+  };
+  return clients;
+}
+
+async function getOAuthClientById(clientId) {
+  const clients = await loadOAuthClientRegistry();
+  return clients.find(c => c.client_id === clientId && c.status === 'active') || null;
+}
+
+function normalizeRequestedScopes(scopeInput, fallbackScopes = ['memory.read']) {
+  const rawScopes = Array.isArray(scopeInput)
+    ? scopeInput
+    : String(scopeInput || '')
+      .split(/[\s+]/)
+      .map(s => s.trim())
+      .filter(Boolean);
+
+  const normalized = rawScopes
+    .map(scope => OAUTH_SCOPE_ALIASES[scope] || scope)
+    .filter(scope => OAUTH_SCOPES_SUPPORTED.includes(scope));
+
+  if (normalized.length === 0) {
+    return Array.isArray(fallbackScopes) ? fallbackScopes : ['memory.read'];
+  }
+
+  return Array.from(new Set(normalized));
+}
+
+function mapOAuthScopesToInternalScopes(scopes) {
+  const requested = normalizeRequestedScopes(scopes, []);
+  const mapped = requested
+    .map(scope => OAUTH_SCOPE_TO_INTERNAL[scope])
+    .filter(Boolean);
+  return Array.from(new Set(mapped));
+}
+
+function parseCookies(req) {
+  return (req.headers.cookie || '').split(';').reduce((acc, c) => {
+    const [k, ...v] = c.trim().split('=');
+    if (k) acc[k.trim()] = decodeURIComponent(v.join('=').trim());
+    return acc;
+  }, {});
+}
+
+function sanitizeHtml(value) {
+  return String(value || '').replace(/[<>&"']/g, m => (
+    m === '<' ? '&lt;'
+      : m === '>' ? '&gt;'
+        : m === '&' ? '&amp;'
+          : m === '"' ? '&quot;'
+            : '&#39;'
+  ));
+}
+
+function buildOAuthWwwAuthenticate({ error = 'invalid_token', description = 'Bearer token missing or invalid', requiredScope = null } = {}) {
+  const pairs = [
+    `realm="hivemind"`,
+    `error="${error}"`,
+    `error_description="${description.replace(/"/g, "'")}"`,
+    `authorization_uri="${OAUTH_BASE_URL}/oauth/authorize"`,
+    `token_uri="${OAUTH_BASE_URL}/oauth/token"`,
+    `resource_metadata_uri="${OAUTH_BASE_URL}/.well-known/oauth-protected-resource"`
+  ];
+  if (requiredScope) {
+    pairs.push(`scope="${requiredScope}"`);
+  }
+  return `Bearer ${pairs.join(', ')}`;
+}
+
+function setOAuthUnauthorized(res, {
+  statusCode = 401,
+  error = 'unauthorized',
+  errorDescription = 'Unauthorized',
+  requiredScope = null
+} = {}) {
+  res.setHeader(
+    'WWW-Authenticate',
+    buildOAuthWwwAuthenticate({
+      error: statusCode === 403 ? 'insufficient_scope' : 'invalid_token',
+      description: errorDescription,
+      requiredScope
+    })
+  );
+  return jsonResponse(res, { error, error_description: errorDescription }, statusCode);
+}
+
+async function resolveOAuthSession(req) {
+  const cookies = parseCookies(req);
+  const cookieValue = cookies[OAUTH_SESSION_COOKIE_NAME];
+  if (!cookieValue) return null;
+  const sessionId = verifySessionCookie(OAUTH_SESSION_SECRET, cookieValue);
+  if (!sessionId) return null;
+  return oauthSessionStore.getSession(sessionId);
+}
+
+async function createOAuthSession(res, payload) {
+  const sessionId = await oauthSessionStore.createSession(payload);
+  const cookie = buildSessionCookie(OAUTH_SESSION_SECRET, sessionId);
+  res.setHeader(
+    'Set-Cookie',
+    `${OAUTH_SESSION_COOKIE_NAME}=${encodeURIComponent(cookie)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Number(process.env.HIVEMIND_OAUTH_SESSION_TTL_SECONDS || 60 * 60 * 8)}`
+  );
+}
+
+function ensureOAuthRefreshTokenStore() {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+  if (!fs.existsSync(OAUTH_REFRESH_TOKENS_FILE_PATH)) {
+    fs.writeFileSync(OAUTH_REFRESH_TOKENS_FILE_PATH, JSON.stringify({ tokens: [] }, null, 2), 'utf-8');
+  }
+}
+
+function loadOAuthRefreshTokenStore() {
+  ensureOAuthRefreshTokenStore();
+  const raw = fs.readFileSync(OAUTH_REFRESH_TOKENS_FILE_PATH, 'utf-8');
+  return JSON.parse(raw || '{"tokens":[]}');
+}
+
+function saveOAuthRefreshTokenStore(store) {
+  ensureOAuthRefreshTokenStore();
+  fs.writeFileSync(OAUTH_REFRESH_TOKENS_FILE_PATH, JSON.stringify(store, null, 2), 'utf-8');
+}
+
+function generateRawRefreshToken() {
+  return `hmr_live_${crypto.randomBytes(32).toString('hex')}`;
+}
+
+function hashRefreshToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+async function createOAuthAccessToken({
+  clientId,
+  userId,
+  orgId,
+  internalScopes,
+  oauthScopes,
+  workspaceId,
+  resource
+}) {
+  const expiresAt = new Date(Date.now() + OAUTH_ACCESS_TOKEN_TTL_SECONDS * 1000);
+  const descriptionPayload = JSON.stringify({
+    kind: 'oauth_access_token',
+    client_id: clientId,
+    workspace_id: workspaceId || null,
+    resource: resource || OAUTH_RESOURCE_DEFAULT,
+    oauth_scopes: oauthScopes,
+    issued_at: new Date().toISOString()
+  });
+
+  if (prisma) {
+    const { rawKey, record } = await createPersistedApiKey(prisma, {
+      userId: userId || DEFAULT_USER,
+      orgId: orgId || DEFAULT_ORG,
+      name: `oauth:${clientId}`,
+      description: descriptionPayload,
+      scopes: internalScopes,
+      expiresAt
+    });
+    return { accessToken: rawKey, accessTokenId: record.id, expiresAt };
+  }
+
+  const { rawKey, record } = generateApiKeyRecord({
+    label: `oauth-${clientId}`,
+    userId: userId || DEFAULT_USER,
+    orgId: orgId || DEFAULT_ORG,
+    scopes: internalScopes,
+    expiresAt,
+    description: descriptionPayload
+  });
+  const store = loadApiKeyStore();
+  store.keys.push(record);
+  saveApiKeyStore(store);
+  return { accessToken: rawKey, accessTokenId: record.id, expiresAt };
+}
+
+function persistRefreshTokenRecord(rawToken, record) {
+  oauthRefreshStore.set(record.refreshHash, record);
+  const store = loadOAuthRefreshTokenStore();
+  store.tokens = (Array.isArray(store.tokens) ? store.tokens : []).filter(t => t.refreshHash !== record.refreshHash);
+  store.tokens.push({
+    ...record,
+    refreshTokenEncrypted: encryptToken(rawToken)
+  });
+  saveOAuthRefreshTokenStore(store);
+}
+
+function loadRefreshTokenRecord(rawToken) {
+  if (!rawToken) return null;
+  const refreshHash = hashRefreshToken(rawToken);
+  const inMemory = oauthRefreshStore.get(refreshHash);
+  if (inMemory) return inMemory;
+
+  const store = loadOAuthRefreshTokenStore();
+  const found = (store.tokens || []).find(t => t.refreshHash === refreshHash);
+  if (!found) return null;
+  if (found.refreshTokenEncrypted && decryptToken(found.refreshTokenEncrypted) !== rawToken) {
+    return null;
+  }
+  oauthRefreshStore.set(refreshHash, found);
+  return found;
+}
+
+function markRefreshTokenRevoked(refreshHash) {
+  const now = new Date().toISOString();
+  const inMemory = oauthRefreshStore.get(refreshHash);
+  if (inMemory) {
+    inMemory.revokedAt = now;
+    oauthRefreshStore.set(refreshHash, inMemory);
+  }
+  const store = loadOAuthRefreshTokenStore();
+  store.tokens = (store.tokens || []).map(entry => (
+    entry.refreshHash === refreshHash
+      ? { ...entry, revokedAt: now }
+      : entry
+  ));
+  saveOAuthRefreshTokenStore(store);
+}
+
+async function revokeAccessTokenByHash(keyHash, reason = 'oauth_revoke') {
+  if (!keyHash) return false;
+  if (prisma) {
+    try {
+      const found = await prisma.apiKey.findUnique({ where: { keyHash } });
+      if (found && !found.revokedAt) {
+        await prisma.apiKey.update({
+          where: { id: found.id },
+          data: { revokedAt: new Date(), revokedReason: reason }
+        });
+        return true;
+      }
+    } catch {
+      // fallback to local store
+    }
+  }
+
+  const store = loadApiKeyStore();
+  const match = store.keys.find(k => k.keyHash === keyHash && !k.revokedAt);
+  if (!match) return false;
+  match.revokedAt = new Date().toISOString();
+  saveApiKeyStore(store);
+  return true;
+}
+
 function ensureEvaluationReportStore() {
   if (!fs.existsSync(EVALUATION_REPORTS_DIR)) {
     fs.mkdirSync(EVALUATION_REPORTS_DIR, { recursive: true });
@@ -1336,18 +1747,30 @@ function generateRawApiKey() {
   return `hmk_live_${crypto.randomBytes(24).toString('hex')}`;
 }
 
-function generateApiKeyRecord({ label, userId, orgId, scopes = ['memory:read', 'memory:write'], containerTags = null }) {
+function generateApiKeyRecord({
+  label,
+  userId,
+  orgId,
+  scopes = ['memory:read', 'memory:write'],
+  containerTags = null,
+  expiresAt = null,
+  description = null
+}) {
   const rawKey = generateRawApiKey();
   const now = new Date().toISOString();
   const record = {
     id: crypto.randomUUID(),
     label: label || 'ultimate-user-key',
+    name: label || 'ultimate-user-key',
     keyHash: hashApiKey(rawKey),
+    keyPrefix: rawKey.slice(0, 12),
     keyPreview: `${rawKey.slice(0, 12)}...${rawKey.slice(-6)}`,
     userId: userId || DEFAULT_USER,
     orgId: orgId || DEFAULT_ORG,
     scopes,
+    description,
     containerTags: Array.isArray(containerTags) && containerTags.length > 0 ? containerTags : null,
+    expiresAt: expiresAt ? new Date(expiresAt).toISOString() : null,
     createdAt: now,
     lastUsedAt: null,
     revokedAt: null
@@ -1477,11 +1900,15 @@ async function authenticateApiKey(req) {
   if (persistedRecord) {
     // Parse containerTags from description field (JSON-encoded) for persisted keys
     let persistedContainerTags = null;
+    let oauthMetadata = null;
     if (persistedRecord.description) {
       try {
         const meta = JSON.parse(persistedRecord.description);
         if (Array.isArray(meta.containerTags)) {
           persistedContainerTags = meta.containerTags;
+        }
+        if (meta && meta.kind === 'oauth_access_token') {
+          oauthMetadata = meta;
         }
       } catch {
         // description is plain text, not JSON — no containerTags
@@ -1495,6 +1922,7 @@ async function authenticateApiKey(req) {
         orgId: persistedRecord.orgId || DEFAULT_ORG,
         scopes: persistedRecord.scopes || [],
         containerTags: persistedContainerTags,
+        oauth: oauthMetadata,
         rawKey: apiKey,
         persisted: true
       }
@@ -1503,7 +1931,11 @@ async function authenticateApiKey(req) {
 
   const keyHash = hashApiKey(apiKey);
   const store = loadApiKeyStore();
-  const record = store.keys.find(k => k.keyHash === keyHash && !k.revokedAt);
+  const record = store.keys.find(k => {
+    if (k.keyHash !== keyHash || k.revokedAt) return false;
+    if (k.expiresAt && new Date(k.expiresAt).getTime() <= Date.now()) return false;
+    return true;
+  });
   if (!record) {
     return { ok: false, status: 401, error: 'Invalid or revoked API key.' };
   }
@@ -1519,6 +1951,13 @@ async function authenticateApiKey(req) {
       orgId: record.orgId || DEFAULT_ORG,
       scopes: record.scopes || [],
       containerTags: record.containerTags || null,
+      oauth: (() => {
+        try {
+          return record.description ? JSON.parse(record.description) : null;
+        } catch {
+          return null;
+        }
+      })(),
       rawKey: apiKey
     }
   };
@@ -1853,13 +2292,14 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
-  // ── OAuth 2.0 Discovery & Endpoints ──────────────────────────────────────
+  // ── OAuth 2.1 Discovery & Endpoints ──────────────────────────────────────
 
   if (pathname === '/.well-known/oauth-protected-resource' && req.method === 'GET') {
     return jsonResponse(res, {
-      resource: OAUTH_BASE_URL,
+      resource: OAUTH_RESOURCE_DEFAULT,
       authorization_servers: [OAUTH_BASE_URL],
-      scopes_supported: OAUTH_SCOPES_SUPPORTED
+      scopes_supported: OAUTH_SCOPES_SUPPORTED,
+      bearer_methods_supported: ['header']
     });
   }
 
@@ -1868,66 +2308,165 @@ const server = http.createServer(async (req, res) => {
       issuer: OAUTH_BASE_URL,
       authorization_endpoint: `${OAUTH_BASE_URL}/oauth/authorize`,
       token_endpoint: `${OAUTH_BASE_URL}/oauth/token`,
+      revocation_endpoint: `${OAUTH_BASE_URL}/oauth/revoke`,
       scopes_supported: OAUTH_SCOPES_SUPPORTED,
       response_types_supported: ['code'],
-      grant_types_supported: ['authorization_code'],
-      code_challenge_methods_supported: ['S256']
+      grant_types_supported: ['authorization_code', 'refresh_token'],
+      code_challenge_methods_supported: ['S256'],
+      token_endpoint_auth_methods_supported: ['none']
     });
   }
 
+  if (pathname === '/oauth/login/zitadel' && req.method === 'GET') {
+    if (!oauthZitadelClient) {
+      return jsonResponse(res, { error: 'service_unavailable', error_description: 'Zitadel login is not configured.' }, 503);
+    }
+    const payload = {
+      client_id: url.searchParams.get('client_id') || '',
+      redirect_uri: url.searchParams.get('redirect_uri') || '',
+      scope: url.searchParams.get('scope') || '',
+      state: url.searchParams.get('state') || '',
+      code_challenge: url.searchParams.get('code_challenge') || '',
+      code_challenge_method: url.searchParams.get('code_challenge_method') || '',
+      resource: url.searchParams.get('resource') || OAUTH_RESOURCE_DEFAULT,
+      response_type: url.searchParams.get('response_type') || 'code'
+    };
+    const authState = await oauthSessionStore.createAuthState({
+      kind: 'oauth_zitadel_login',
+      oauthParams: payload
+    });
+    const redirect = oauthZitadelClient.buildAuthorizeUrl(authState);
+    res.writeHead(302, { Location: redirect });
+    res.end();
+    return;
+  }
+
+  if (pathname === '/oauth/callback/zitadel' && req.method === 'GET') {
+    if (!oauthZitadelClient) {
+      return jsonResponse(res, { error: 'service_unavailable', error_description: 'Zitadel login is not configured.' }, 503);
+    }
+    const code = url.searchParams.get('code') || '';
+    const state = url.searchParams.get('state') || '';
+    if (!code || !state) {
+      return jsonResponse(res, { error: 'invalid_request', error_description: 'Missing code/state for callback.' }, 400);
+    }
+
+    const authState = await oauthSessionStore.consumeAuthState(state);
+    if (!authState || authState.kind !== 'oauth_zitadel_login' || !authState.oauthParams) {
+      return jsonResponse(res, { error: 'invalid_request', error_description: 'Invalid or expired login state.' }, 400);
+    }
+
+    let resolved;
+    try {
+      resolved = await oauthZitadelClient.exchangeAndResolveUser(code);
+    } catch (error) {
+      return jsonResponse(res, { error: 'access_denied', error_description: `Zitadel exchange failed: ${error.message}` }, 401);
+    }
+
+    await createOAuthSession(res, {
+      userId: resolved?.userInfo?.sub || DEFAULT_USER,
+      orgId: DEFAULT_ORG,
+      authProvider: 'zitadel',
+      email: resolved?.userInfo?.email || null
+    });
+
+    const next = new URLSearchParams(authState.oauthParams);
+    res.writeHead(302, { Location: `/oauth/authorize?${next.toString()}` });
+    res.end();
+    return;
+  }
+
   if (pathname === '/oauth/authorize' && req.method === 'GET') {
+    const responseType = url.searchParams.get('response_type') || 'code';
     const clientId = url.searchParams.get('client_id') || '';
     const redirectUri = url.searchParams.get('redirect_uri') || '';
     const scope = url.searchParams.get('scope') || '';
     const state = url.searchParams.get('state') || '';
+    const resource = url.searchParams.get('resource') || OAUTH_RESOURCE_DEFAULT;
     const codeChallenge = url.searchParams.get('code_challenge') || '';
     const codeChallengeMethod = url.searchParams.get('code_challenge_method') || '';
 
+    if (responseType !== 'code') {
+      return jsonResponse(res, { error: 'unsupported_response_type', error_description: 'Only response_type=code is supported.' }, 400);
+    }
     if (!clientId || !redirectUri) {
-      return jsonResponse(res, { error: 'invalid_request', error_description: 'client_id and redirect_uri are required' }, 400);
+      return jsonResponse(res, { error: 'invalid_request', error_description: 'client_id and redirect_uri are required.' }, 400);
     }
 
-    // Check for session cookie (simple cookie-based auth: hivemind_session=<admin_secret>)
-    const cookies = (req.headers.cookie || '').split(';').reduce((acc, c) => {
-      const [k, ...v] = c.trim().split('=');
-      if (k) acc[k.trim()] = v.join('=').trim();
-      return acc;
-    }, {});
-    const isLoggedIn = cookies['hivemind_session'] === ADMIN_SECRET;
+    const client = await getOAuthClientById(clientId);
+    if (!client) {
+      return jsonResponse(res, { error: 'unauthorized_client', error_description: 'Client is not registered or not active.' }, 401);
+    }
+    if (!client.redirect_uris.includes(redirectUri)) {
+      return jsonResponse(res, { error: 'invalid_request', error_description: 'redirect_uri is not allowed for this client.' }, 400);
+    }
 
-    if (isLoggedIn) {
-      // Show consent page
-      const requestedScopes = scope ? scope.split(/[\s+]/).filter(s => OAUTH_SCOPES_SUPPORTED.includes(s)) : ['memory:read'];
-      const scopeListHtml = requestedScopes.map(s => `<li><code>${s}</code></li>`).join('');
+    if (client.is_public) {
+      if (!codeChallenge || codeChallengeMethod !== 'S256') {
+        return jsonResponse(
+          res,
+          { error: 'invalid_request', error_description: 'Public clients must provide PKCE code_challenge with method S256.' },
+          400
+        );
+      }
+    }
+
+    const requestedScopes = normalizeRequestedScopes(scope, ['memory.read']);
+    const disallowed = requestedScopes.filter(s => !client.allowed_scopes.includes(s));
+    if (disallowed.length > 0) {
+      return jsonResponse(res, { error: 'invalid_scope', error_description: `Scopes not allowed for client: ${disallowed.join(', ')}` }, 400);
+    }
+
+    const session = await resolveOAuthSession(req);
+    if (session?.userId) {
+      const consentStateId = await oauthSessionStore.createAuthState({
+        kind: 'oauth_consent',
+        payload: {
+          clientId,
+          redirectUri,
+          scopes: requestedScopes,
+          state,
+          codeChallenge,
+          codeChallengeMethod,
+          resource,
+          responseType
+        }
+      });
+
+      const scopeListHtml = requestedScopes.map(s => `<li><code>${sanitizeHtml(s)}</code></li>`).join('');
       const consentHtml = `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>HIVEMIND - Authorize Application</title>
+<title>HiveMind Consent</title>
 <style>
-  body{font-family:system-ui,-apple-system,sans-serif;background:#0a0a0f;color:#e0e0e0;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}
-  .card{background:#16161e;border:1px solid #2a2a3a;border-radius:12px;padding:2rem;max-width:420px;width:90%}
-  h1{font-size:1.3rem;margin:0 0 0.5rem;color:#a78bfa}
-  h2{font-size:1rem;margin:0 0 1rem;color:#888}
-  .app-name{color:#60a5fa;font-weight:600}
-  ul{padding-left:1.2rem;margin:0.5rem 0 1.5rem}
-  li{margin:0.3rem 0}
-  code{background:#1e1e2e;padding:2px 6px;border-radius:4px;font-size:0.85rem}
-  .actions{display:flex;gap:0.75rem}
-  button{flex:1;padding:0.6rem;border:none;border-radius:8px;font-size:0.95rem;cursor:pointer;font-weight:500}
-  .approve{background:#22c55e;color:#000} .approve:hover{background:#16a34a}
-  .deny{background:#333;color:#ccc} .deny:hover{background:#444}
+  body{font-family:system-ui,-apple-system,sans-serif;background:#f6f8fb;color:#1e293b;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}
+  .card{background:#fff;border:1px solid #dbe4ee;border-radius:14px;padding:2rem;max-width:460px;width:92%;box-shadow:0 10px 30px rgba(15,23,42,.08)}
+  h1{font-size:1.25rem;margin:0 0 .5rem;color:#0f172a}
+  h2{font-size:.95rem;font-weight:500;color:#334155;margin:0 0 1rem}
+  .app{color:#0369a1;font-weight:700}
+  ul{padding-left:1.2rem;margin:.8rem 0 1.2rem}
+  li{margin:.35rem 0}
+  code{background:#eef6ff;padding:2px 6px;border-radius:5px}
+  .meta{font-size:.82rem;color:#64748b;margin-bottom:1rem}
+  .actions{display:flex;gap:.7rem}
+  button{flex:1;padding:.65rem;border:none;border-radius:10px;font-size:.95rem;cursor:pointer;font-weight:600}
+  .approve{background:#0ea5e9;color:#fff}
+  .deny{background:#e2e8f0;color:#334155}
 </style></head><body>
 <div class="card">
-  <h1>Authorize Application</h1>
-  <h2><span class="app-name">${clientId.replace(/[<>&"']/g, '')}</span> wants to access your HIVEMIND memories</h2>
-  <p>This application is requesting the following permissions:</p>
+  <h1>Connect ${sanitizeHtml(client.client_name)}</h1>
+  <h2><span class="app">${sanitizeHtml(client.client_name)}</span> wants access to your HiveMind workspace.</h2>
+  <div class="meta">Resource: <code>${sanitizeHtml(resource)}</code></div>
+  <p>Requested permissions:</p>
   <ul>${scopeListHtml}</ul>
   <form method="POST" action="/oauth/authorize">
-    <input type="hidden" name="client_id" value="${clientId.replace(/"/g, '&quot;')}">
-    <input type="hidden" name="redirect_uri" value="${redirectUri.replace(/"/g, '&quot;')}">
-    <input type="hidden" name="scope" value="${requestedScopes.join(' ')}">
-    <input type="hidden" name="state" value="${state.replace(/"/g, '&quot;')}">
-    <input type="hidden" name="code_challenge" value="${codeChallenge.replace(/"/g, '&quot;')}">
-    <input type="hidden" name="code_challenge_method" value="${codeChallengeMethod.replace(/"/g, '&quot;')}">
+    <input type="hidden" name="oauth_state_id" value="${sanitizeHtml(consentStateId)}">
+    <input type="hidden" name="client_id" value="${sanitizeHtml(clientId)}">
+    <input type="hidden" name="redirect_uri" value="${sanitizeHtml(redirectUri)}">
+    <input type="hidden" name="scope" value="${sanitizeHtml(requestedScopes.join(' '))}">
+    <input type="hidden" name="state" value="${sanitizeHtml(state)}">
+    <input type="hidden" name="code_challenge" value="${sanitizeHtml(codeChallenge)}">
+    <input type="hidden" name="code_challenge_method" value="${sanitizeHtml(codeChallengeMethod)}">
+    <input type="hidden" name="resource" value="${sanitizeHtml(resource)}">
     <div class="actions">
       <button type="submit" name="action" value="approve" class="approve">Approve</button>
       <button type="submit" name="action" value="deny" class="deny">Deny</button>
@@ -1940,30 +2479,44 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // Not logged in — show login form
+    const zitadelButton = oauthZitadelClient
+      ? `<a href="/oauth/login/zitadel?${new URLSearchParams({
+          client_id: clientId,
+          redirect_uri: redirectUri,
+          scope: requestedScopes.join(' '),
+          state,
+          code_challenge: codeChallenge,
+          code_challenge_method: codeChallengeMethod,
+          resource
+        }).toString()}" style="display:block;text-align:center;padding:.6rem .8rem;background:#0ea5e9;color:#fff;text-decoration:none;border-radius:10px;font-weight:600;margin-bottom:1rem">Continue with HiveMind Sign-In</a>`
+      : '';
+
     const loginHtml = `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>HIVEMIND - Sign In</title>
+<title>HiveMind Sign In</title>
 <style>
-  body{font-family:system-ui,-apple-system,sans-serif;background:#0a0a0f;color:#e0e0e0;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}
-  .card{background:#16161e;border:1px solid #2a2a3a;border-radius:12px;padding:2rem;max-width:380px;width:90%}
-  h1{font-size:1.3rem;margin:0 0 0.3rem;color:#a78bfa}
-  p{color:#888;font-size:0.9rem;margin:0 0 1.2rem}
-  label{display:block;font-size:0.85rem;color:#aaa;margin-bottom:0.3rem}
-  input[type=password]{width:100%;padding:0.55rem;border:1px solid #333;border-radius:6px;background:#1e1e2e;color:#e0e0e0;font-size:0.95rem;box-sizing:border-box;margin-bottom:1rem}
-  button{width:100%;padding:0.6rem;background:#a78bfa;color:#000;border:none;border-radius:8px;font-size:0.95rem;cursor:pointer;font-weight:500}
-  button:hover{background:#8b5cf6}
+  body{font-family:system-ui,-apple-system,sans-serif;background:#f6f8fb;color:#1e293b;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}
+  .card{background:#fff;border:1px solid #dbe4ee;border-radius:14px;padding:2rem;max-width:420px;width:92%;box-shadow:0 10px 30px rgba(15,23,42,.08)}
+  h1{font-size:1.2rem;margin:0 0 .4rem}
+  p{font-size:.9rem;color:#64748b;margin:0 0 1rem}
+  label{display:block;font-size:.85rem;color:#334155;margin-bottom:.3rem}
+  input[type=password]{width:100%;padding:.58rem;border:1px solid #cbd5e1;border-radius:8px;background:#fff;color:#0f172a;margin-bottom:.8rem;box-sizing:border-box}
+  button{width:100%;padding:.62rem;background:#0f172a;color:#fff;border:none;border-radius:10px;cursor:pointer;font-weight:600}
+  .divider{margin:.8rem 0;text-align:center;color:#94a3b8;font-size:.82rem}
 </style></head><body>
 <div class="card">
-  <h1>Sign in to HIVEMIND</h1>
-  <p>An application wants to connect to your memories.</p>
+  <h1>Sign in to HiveMind</h1>
+  <p>${sanitizeHtml(client.client_name)} needs your consent to connect.</p>
+  ${zitadelButton}
+  <div class="divider">${oauthZitadelClient ? 'or use local admin login' : 'local admin login'}</div>
   <form method="POST" action="/oauth/login">
-    <input type="hidden" name="client_id" value="${clientId.replace(/"/g, '&quot;')}">
-    <input type="hidden" name="redirect_uri" value="${redirectUri.replace(/"/g, '&quot;')}">
-    <input type="hidden" name="scope" value="${scope.replace(/"/g, '&quot;')}">
-    <input type="hidden" name="state" value="${state.replace(/"/g, '&quot;')}">
-    <input type="hidden" name="code_challenge" value="${codeChallenge.replace(/"/g, '&quot;')}">
-    <input type="hidden" name="code_challenge_method" value="${codeChallengeMethod.replace(/"/g, '&quot;')}">
+    <input type="hidden" name="client_id" value="${sanitizeHtml(clientId)}">
+    <input type="hidden" name="redirect_uri" value="${sanitizeHtml(redirectUri)}">
+    <input type="hidden" name="scope" value="${sanitizeHtml(requestedScopes.join(' '))}">
+    <input type="hidden" name="state" value="${sanitizeHtml(state)}">
+    <input type="hidden" name="code_challenge" value="${sanitizeHtml(codeChallenge)}">
+    <input type="hidden" name="code_challenge_method" value="${sanitizeHtml(codeChallengeMethod)}">
+    <input type="hidden" name="resource" value="${sanitizeHtml(resource)}">
     <label for="admin_secret">Admin Secret</label>
     <input type="password" id="admin_secret" name="admin_secret" required autofocus>
     <button type="submit">Sign In</button>
@@ -1975,7 +2528,6 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // OAuth login POST — validates admin secret, sets session cookie, redirects to consent
   if (pathname === '/oauth/login' && req.method === 'POST') {
     const rawBody = await new Promise((resolve) => {
       let data = '';
@@ -1986,31 +2538,32 @@ const server = http.createServer(async (req, res) => {
     const secret = params.get('admin_secret') || '';
 
     if (secret !== ADMIN_SECRET) {
-      res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.writeHead(401);
-      res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>HIVEMIND</title>
-<style>body{font-family:system-ui;background:#0a0a0f;color:#e0e0e0;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}
-.card{background:#16161e;border:1px solid #2a2a3a;border-radius:12px;padding:2rem;max-width:380px;width:90%;text-align:center}
-a{color:#a78bfa}</style></head><body>
-<div class="card"><h2 style="color:#f87171">Invalid credentials</h2><p><a href="javascript:history.back()">Try again</a></p></div></body></html>`);
-      return;
+      return jsonResponse(res, { error: 'access_denied', error_description: 'Invalid credentials.' }, 401);
     }
 
-    // Redirect back to /oauth/authorize with all params preserved
+    await createOAuthSession(res, {
+      userId: DEFAULT_USER,
+      orgId: DEFAULT_ORG,
+      authProvider: 'local_admin'
+    });
+
     const authorizeParams = new URLSearchParams();
-    for (const key of ['client_id', 'redirect_uri', 'scope', 'state', 'code_challenge', 'code_challenge_method']) {
+    for (const key of ['client_id', 'redirect_uri', 'scope', 'state', 'code_challenge', 'code_challenge_method', 'resource']) {
       const val = params.get(key);
       if (val) authorizeParams.set(key, val);
     }
-
-    res.setHeader('Set-Cookie', `hivemind_session=${ADMIN_SECRET}; Path=/; HttpOnly; SameSite=Lax; Max-Age=3600`);
+    authorizeParams.set('response_type', 'code');
     res.writeHead(302, { Location: `/oauth/authorize?${authorizeParams.toString()}` });
     res.end();
     return;
   }
 
-  // OAuth authorize POST — user approved or denied consent
   if (pathname === '/oauth/authorize' && req.method === 'POST') {
+    const session = await resolveOAuthSession(req);
+    if (!session?.userId) {
+      return jsonResponse(res, { error: 'access_denied', error_description: 'User session is not authenticated.' }, 401);
+    }
+
     const rawBody = await new Promise((resolve) => {
       let data = '';
       req.on('data', chunk => data += chunk);
@@ -2022,8 +2575,42 @@ a{color:#a78bfa}</style></head><body>
     const redirectUri = params.get('redirect_uri') || '';
     const scope = params.get('scope') || '';
     const state = params.get('state') || '';
+    const resource = params.get('resource') || OAUTH_RESOURCE_DEFAULT;
     const codeChallenge = params.get('code_challenge') || '';
     const codeChallengeMethod = params.get('code_challenge_method') || '';
+    const oauthStateId = params.get('oauth_state_id') || '';
+
+    const client = await getOAuthClientById(clientId);
+    if (!client) {
+      return jsonResponse(res, { error: 'unauthorized_client' }, 401);
+    }
+    if (!client.redirect_uris.includes(redirectUri)) {
+      return jsonResponse(res, { error: 'invalid_request', error_description: 'redirect_uri is not allowed for this client.' }, 400);
+    }
+
+    const requestedScopes = normalizeRequestedScopes(scope, ['memory.read']);
+    const disallowed = requestedScopes.filter(s => !client.allowed_scopes.includes(s));
+    if (disallowed.length > 0) {
+      return jsonResponse(res, { error: 'invalid_scope', error_description: `Scopes not allowed for client: ${disallowed.join(', ')}` }, 400);
+    }
+
+    const consentState = await oauthSessionStore.consumeAuthState(oauthStateId);
+    if (!consentState || consentState.kind !== 'oauth_consent' || !consentState.payload) {
+      return jsonResponse(res, { error: 'invalid_request', error_description: 'Consent state is invalid or expired.' }, 400);
+    }
+    const expected = consentState.payload;
+    const consentMatches = (
+      expected.clientId === clientId
+      && expected.redirectUri === redirectUri
+      && expected.state === state
+      && expected.codeChallenge === codeChallenge
+      && expected.codeChallengeMethod === codeChallengeMethod
+      && expected.resource === resource
+      && requestedScopes.join(' ') === (expected.scopes || []).join(' ')
+    );
+    if (!consentMatches) {
+      return jsonResponse(res, { error: 'invalid_request', error_description: 'Consent parameters mismatch.' }, 400);
+    }
 
     if (action === 'deny') {
       const denyUrl = new URL(redirectUri);
@@ -2034,16 +2621,18 @@ a{color:#a78bfa}</style></head><body>
       return;
     }
 
-    // Generate authorization code
     const code = crypto.randomBytes(32).toString('hex');
     oauthCodeStore.set(code, {
       clientId,
       redirectUri,
-      scope,
+      scopes: requestedScopes,
       codeChallenge,
       codeChallengeMethod,
-      userId: DEFAULT_USER,
-      orgId: DEFAULT_ORG,
+      userId: session.userId || DEFAULT_USER,
+      orgId: session.orgId || DEFAULT_ORG,
+      workspaceId: session.workspaceId || null,
+      resource,
+      state,
       expiresAt: Date.now() + OAUTH_CODE_TTL_MS
     });
 
@@ -2055,7 +2644,6 @@ a{color:#a78bfa}</style></head><body>
     return;
   }
 
-  // OAuth token endpoint
   if (pathname === '/oauth/token' && req.method === 'POST') {
     const rawBody = await new Promise((resolve) => {
       let data = '';
@@ -2063,79 +2651,221 @@ a{color:#a78bfa}</style></head><body>
       req.on('end', () => resolve(data));
     });
 
-    // Support both application/x-www-form-urlencoded and application/json
     let tokenParams;
     const contentType = (req.headers['content-type'] || '').toLowerCase();
     if (contentType.includes('application/json')) {
       try { tokenParams = JSON.parse(rawBody); } catch { tokenParams = {}; }
     } else {
-      const parsed = new URLSearchParams(rawBody);
-      tokenParams = Object.fromEntries(parsed.entries());
+      tokenParams = Object.fromEntries(new URLSearchParams(rawBody).entries());
     }
 
     const grantType = tokenParams.grant_type;
-    const code = tokenParams.code || '';
-    const redirectUri = tokenParams.redirect_uri || '';
-    const clientId = tokenParams.client_id || '';
-    const codeVerifier = tokenParams.code_verifier || '';
-
-    if (grantType !== 'authorization_code') {
-      return jsonResponse(res, { error: 'unsupported_grant_type' }, 400);
+    const clientId = String(tokenParams.client_id || '').trim();
+    const client = await getOAuthClientById(clientId);
+    if (!client) {
+      return jsonResponse(res, { error: 'unauthorized_client' }, 401);
     }
 
-    const entry = oauthCodeStore.get(code);
-    if (!entry) {
-      return jsonResponse(res, { error: 'invalid_grant', error_description: 'Authorization code is invalid or expired.' }, 400);
-    }
+    if (grantType === 'authorization_code') {
+      const code = tokenParams.code || '';
+      const redirectUri = tokenParams.redirect_uri || '';
+      const codeVerifier = tokenParams.code_verifier || '';
 
-    // Consume code immediately (one-time use)
-    oauthCodeStore.delete(code);
-
-    if (Date.now() > entry.expiresAt) {
-      return jsonResponse(res, { error: 'invalid_grant', error_description: 'Authorization code has expired.' }, 400);
-    }
-
-    if (entry.clientId !== clientId) {
-      return jsonResponse(res, { error: 'invalid_grant', error_description: 'client_id mismatch.' }, 400);
-    }
-
-    if (entry.redirectUri !== redirectUri) {
-      return jsonResponse(res, { error: 'invalid_grant', error_description: 'redirect_uri mismatch.' }, 400);
-    }
-
-    // PKCE validation (S256)
-    if (entry.codeChallenge) {
-      if (!codeVerifier) {
-        return jsonResponse(res, { error: 'invalid_grant', error_description: 'code_verifier is required for PKCE.' }, 400);
+      const entry = oauthCodeStore.get(code);
+      if (!entry) {
+        return jsonResponse(res, { error: 'invalid_grant', error_description: 'Authorization code is invalid or expired.' }, 400);
       }
-      const expectedChallenge = crypto
-        .createHash('sha256')
-        .update(codeVerifier)
-        .digest('base64url');
-      if (expectedChallenge !== entry.codeChallenge) {
-        return jsonResponse(res, { error: 'invalid_grant', error_description: 'PKCE code_verifier validation failed.' }, 400);
+      oauthCodeStore.delete(code);
+
+      if (Date.now() > entry.expiresAt) {
+        return jsonResponse(res, { error: 'invalid_grant', error_description: 'Authorization code has expired.' }, 400);
       }
+      if (entry.clientId !== clientId) {
+        return jsonResponse(res, { error: 'invalid_grant', error_description: 'client_id mismatch.' }, 400);
+      }
+      if (entry.redirectUri !== redirectUri || !client.redirect_uris.includes(redirectUri)) {
+        return jsonResponse(res, { error: 'invalid_grant', error_description: 'redirect_uri mismatch.' }, 400);
+      }
+      if (client.is_public) {
+        if (!entry.codeChallenge || entry.codeChallengeMethod !== 'S256') {
+          return jsonResponse(res, { error: 'invalid_grant', error_description: 'PKCE challenge missing on authorization request.' }, 400);
+        }
+        if (!codeVerifier) {
+          return jsonResponse(res, { error: 'invalid_grant', error_description: 'code_verifier is required for PKCE.' }, 400);
+        }
+        const expectedChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
+        if (expectedChallenge !== entry.codeChallenge) {
+          return jsonResponse(res, { error: 'invalid_grant', error_description: 'PKCE code_verifier validation failed.' }, 400);
+        }
+      }
+
+      const oauthScopes = normalizeRequestedScopes(entry.scopes, ['memory.read']);
+      const disallowed = oauthScopes.filter(s => !client.allowed_scopes.includes(s));
+      if (disallowed.length > 0) {
+        return jsonResponse(res, { error: 'invalid_scope', error_description: `Scopes not allowed for client: ${disallowed.join(', ')}` }, 400);
+      }
+      const internalScopes = mapOAuthScopesToInternalScopes(oauthScopes);
+      if (internalScopes.length === 0) {
+        return jsonResponse(res, { error: 'invalid_scope', error_description: 'No internal scopes resolved from requested scopes.' }, 400);
+      }
+
+      const { accessToken, accessTokenId, expiresAt } = await createOAuthAccessToken({
+        clientId,
+        userId: entry.userId,
+        orgId: entry.orgId,
+        internalScopes,
+        oauthScopes,
+        workspaceId: entry.workspaceId || null,
+        resource: entry.resource || OAUTH_RESOURCE_DEFAULT
+      });
+
+      const refreshToken = generateRawRefreshToken();
+      const refreshHash = hashRefreshToken(refreshToken);
+      const refreshRecord = {
+        refreshHash,
+        clientId,
+        userId: entry.userId,
+        orgId: entry.orgId,
+        workspaceId: entry.workspaceId || null,
+        resource: entry.resource || OAUTH_RESOURCE_DEFAULT,
+        scopes: oauthScopes,
+        internalScopes,
+        accessTokenHash: hashPersistedApiKey(accessToken),
+        accessTokenId,
+        createdAt: new Date().toISOString(),
+        expiresAt: Date.now() + OAUTH_REFRESH_TOKEN_TTL_SECONDS * 1000,
+        revokedAt: null,
+        rotatedFrom: null
+      };
+      persistRefreshTokenRecord(refreshToken, refreshRecord);
+
+      return jsonResponse(res, {
+        access_token: accessToken,
+        token_type: 'bearer',
+        expires_in: Math.max(1, Math.floor((new Date(expiresAt).getTime() - Date.now()) / 1000)),
+        refresh_token: refreshToken,
+        scope: oauthScopes.join(' '),
+        claims: {
+          iss: OAUTH_BASE_URL,
+          aud: entry.resource || OAUTH_RESOURCE_DEFAULT,
+          exp: Math.floor(new Date(expiresAt).getTime() / 1000),
+          sub: entry.userId,
+          org_id: entry.orgId,
+          workspace_id: entry.workspaceId || null,
+          scope: oauthScopes.join(' ')
+        }
+      });
     }
 
-    // Generate API key with requested scopes
-    const requestedScopes = entry.scope
-      ? entry.scope.split(/[\s+]/).filter(s => OAUTH_SCOPES_SUPPORTED.includes(s))
-      : ['memory:read'];
+    if (grantType === 'refresh_token') {
+      const refreshToken = String(tokenParams.refresh_token || '');
+      if (!refreshToken) {
+        return jsonResponse(res, { error: 'invalid_request', error_description: 'refresh_token is required.' }, 400);
+      }
+      const record = loadRefreshTokenRecord(refreshToken);
+      if (!record) {
+        return jsonResponse(res, { error: 'invalid_grant', error_description: 'Refresh token is invalid.' }, 400);
+      }
+      if (record.clientId !== clientId) {
+        return jsonResponse(res, { error: 'invalid_grant', error_description: 'client_id mismatch for refresh token.' }, 400);
+      }
+      if (record.revokedAt || Date.now() > Number(record.expiresAt || 0)) {
+        return jsonResponse(res, { error: 'invalid_grant', error_description: 'Refresh token expired or revoked.' }, 400);
+      }
 
-    const { rawKey, record } = generateApiKeyRecord({
-      label: `oauth-${clientId}`,
-      userId: entry.userId,
-      orgId: entry.orgId,
-      scopes: requestedScopes
+      markRefreshTokenRevoked(record.refreshHash);
+      await revokeAccessTokenByHash(record.accessTokenHash, 'oauth_refresh_rotation');
+
+      const { accessToken, accessTokenId, expiresAt } = await createOAuthAccessToken({
+        clientId,
+        userId: record.userId,
+        orgId: record.orgId,
+        internalScopes: Array.isArray(record.internalScopes) ? record.internalScopes : mapOAuthScopesToInternalScopes(record.scopes || []),
+        oauthScopes: normalizeRequestedScopes(record.scopes || [], ['memory.read']),
+        workspaceId: record.workspaceId || null,
+        resource: record.resource || OAUTH_RESOURCE_DEFAULT
+      });
+
+      const rotatedRefreshToken = generateRawRefreshToken();
+      const rotatedRecord = {
+        ...record,
+        refreshHash: hashRefreshToken(rotatedRefreshToken),
+        accessTokenHash: hashPersistedApiKey(accessToken),
+        accessTokenId,
+        createdAt: new Date().toISOString(),
+        expiresAt: Date.now() + OAUTH_REFRESH_TOKEN_TTL_SECONDS * 1000,
+        revokedAt: null,
+        rotatedFrom: record.refreshHash
+      };
+      persistRefreshTokenRecord(rotatedRefreshToken, rotatedRecord);
+
+      const oauthScopes = normalizeRequestedScopes(record.scopes || [], ['memory.read']);
+      return jsonResponse(res, {
+        access_token: accessToken,
+        token_type: 'bearer',
+        expires_in: Math.max(1, Math.floor((new Date(expiresAt).getTime() - Date.now()) / 1000)),
+        refresh_token: rotatedRefreshToken,
+        scope: oauthScopes.join(' '),
+        claims: {
+          iss: OAUTH_BASE_URL,
+          aud: record.resource || OAUTH_RESOURCE_DEFAULT,
+          exp: Math.floor(new Date(expiresAt).getTime() / 1000),
+          sub: record.userId,
+          org_id: record.orgId,
+          workspace_id: record.workspaceId || null,
+          scope: oauthScopes.join(' ')
+        }
+      });
+    }
+
+    return jsonResponse(res, { error: 'unsupported_grant_type' }, 400);
+  }
+
+  if (pathname === '/oauth/revoke' && req.method === 'POST') {
+    const rawBody = await new Promise((resolve) => {
+      let data = '';
+      req.on('data', chunk => data += chunk);
+      req.on('end', () => resolve(data));
     });
-    const store = loadApiKeyStore();
-    store.keys.push(record);
-    saveApiKeyStore(store);
+    const params = Object.fromEntries(new URLSearchParams(rawBody).entries());
+    const token = String(params.token || '').trim();
+    if (!token) {
+      return jsonResponse(res, { error: 'invalid_request', error_description: 'token is required' }, 400);
+    }
 
+    const refreshRecord = loadRefreshTokenRecord(token);
+    if (refreshRecord && !refreshRecord.revokedAt) {
+      markRefreshTokenRevoked(refreshRecord.refreshHash);
+      await revokeAccessTokenByHash(refreshRecord.accessTokenHash, 'oauth_revoke');
+      return jsonResponse(res, { revoked: true, token_type: 'refresh_token' });
+    }
+
+    const keyHash = hashPersistedApiKey(token);
+    const accessRevoked = await revokeAccessTokenByHash(keyHash, 'oauth_revoke');
+
+    return jsonResponse(res, { revoked: accessRevoked, token_type: 'access_token' });
+  }
+
+  if (pathname === '/oauth/connection-status' && req.method === 'GET') {
+    const authResult = await authenticateApiKey(req);
+    if (!authResult.ok) {
+      return setOAuthUnauthorized(res, {
+        statusCode: 401,
+        error: 'unauthorized',
+        errorDescription: authResult.error || 'Missing or invalid bearer token.'
+      });
+    }
+    const principal = authResult.principal;
+    const oauthMeta = principal.oauth || null;
     return jsonResponse(res, {
-      access_token: rawKey,
-      token_type: 'bearer',
-      scope: requestedScopes.join(' ')
+      connected: true,
+      client_id: oauthMeta?.client_id || null,
+      workspace_id: oauthMeta?.workspace_id || null,
+      resource: oauthMeta?.resource || OAUTH_RESOURCE_DEFAULT,
+      scopes: oauthMeta?.oauth_scopes || [],
+      user_id: principal.userId || null,
+      org_id: principal.orgId || null,
+      key_id: principal.keyId || null
     });
   }
 
@@ -2152,12 +2882,20 @@ a{color:#a78bfa}</style></head><body>
         const token = url.searchParams.get('token') || extractApiKey(req);
 
         if (!token || !(await validateConnectionToken(token, pathUserId))) {
-          return jsonResponse(res, { error: 'Unauthorized' }, 401);
+          return setOAuthUnauthorized(res, {
+            statusCode: 401,
+            error: 'unauthorized',
+            errorDescription: 'Invalid or expired connection token for hosted MCP descriptor.'
+          });
         }
 
         const serverConfig = await getHostedServerByToken(token, pathUserId);
         if (!serverConfig) {
-          return jsonResponse(res, { error: 'Unauthorized' }, 401);
+          return setOAuthUnauthorized(res, {
+            statusCode: 401,
+            error: 'unauthorized',
+            errorDescription: 'Hosted MCP descriptor not found for connection token.'
+          });
         }
 
         return jsonResponse(res, serverConfig);
@@ -2250,7 +2988,11 @@ a{color:#a78bfa}</style></head><body>
         const token = url.searchParams.get('token') || extractApiKey(req);
 
         if (!token || !(await validateConnectionToken(token, pathUserId))) {
-          return jsonResponse(res, { error: 'Unauthorized' }, 401);
+          return setOAuthUnauthorized(res, {
+            statusCode: 401,
+            error: 'unauthorized',
+            errorDescription: 'Invalid or expired connection token for hosted MCP SSE.'
+          });
         }
 
         res.setHeader('Content-Type', 'text/event-stream');
@@ -2411,7 +3153,11 @@ a{color:#a78bfa}</style></head><body>
       // Protect all non-key-management API endpoints
       const auth = await authenticateApiKey(req);
       if (!auth.ok) {
-        return jsonResponse(res, { error: auth.error }, auth.status || 401);
+        return setOAuthUnauthorized(res, {
+          statusCode: auth.status || 401,
+          error: 'unauthorized',
+          errorDescription: auth.error || 'Missing or invalid bearer token.'
+        });
       }
       const principal = auth.principal;
       const userId = principal.userId || DEFAULT_USER;
@@ -3049,6 +3795,19 @@ a{color:#a78bfa}</style></head><body>
         });
         if (residentResult) {
           return jsonResponse(res, residentResult.body, residentResult.statusCode);
+        }
+      }
+
+      if (enterpriseChatRoutes) {
+        const enterpriseChatResult = await enterpriseChatRoutes.dispatch({
+          pathname,
+          method: req.method,
+          body,
+          userId,
+          orgId,
+        });
+        if (enterpriseChatResult) {
+          return jsonResponse(res, enterpriseChatResult.body, enterpriseChatResult.statusCode);
         }
       }
 

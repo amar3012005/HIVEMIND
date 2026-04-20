@@ -1,0 +1,9 @@
+{
+  "/api/hivemind/callback/route": "app/api/hivemind/callback/route.js",
+  "/api/hivemind/disconnect/route": "app/api/hivemind/disconnect/route.js",
+  "/api/hivemind/start/route": "app/api/hivemind/start/route.js",
+  "/api/hivemind/status/route": "app/api/hivemind/status/route.js",
+  "/_not-found/page": "app/_not-found/page.js",
+  "/connection/page": "app/connection/page.js",
+  "/page": "app/page.js"
+}

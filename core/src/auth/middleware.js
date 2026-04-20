@@ -23,6 +23,16 @@ const AUTH_CONFIG = {
   tokenExpiryLeeway: 60, // seconds
   requiredClaims: ['sub', 'email', 'iat', 'exp'],
 };
+const OAUTH_SCOPE_MAP = {
+  'memory.read': 'memory:read',
+  'memory.write': 'memory:write',
+  'tools.invoke': 'mcp',
+  'workspace.connect': 'mcp',
+  'mcp.connect': 'mcp',
+  'memory:read': 'memory:read',
+  'memory:write': 'memory:write',
+  mcp: 'mcp'
+};
 
 // ==========================================
 // HELPER FUNCTIONS
@@ -67,6 +77,34 @@ function getPlatformType(req) {
   return req.headers['x-platform-type'] || null;
 }
 
+function normalizePrincipalScopes(rawScopes) {
+  const scopeList = Array.isArray(rawScopes)
+    ? rawScopes
+    : String(rawScopes || '')
+      .split(/\s+/)
+      .map(s => s.trim())
+      .filter(Boolean);
+  const normalized = scopeList.map(scope => OAUTH_SCOPE_MAP[scope] || scope);
+  return Array.from(new Set(normalized));
+}
+
+function setWwwAuthenticate(res, {
+  error = 'invalid_token',
+  description = 'Missing or invalid bearer token',
+  requiredScope = null
+} = {}) {
+  const params = [
+    'realm="hivemind"',
+    `error="${error}"`,
+    `error_description="${String(description).replace(/"/g, "'")}"`,
+    `authorization_uri="${process.env.HIVEMIND_OAUTH_BASE_URL || 'https://core.hivemind.davinciai.eu:8050'}/oauth/authorize"`,
+    `token_uri="${process.env.HIVEMIND_OAUTH_BASE_URL || 'https://core.hivemind.davinciai.eu:8050'}/oauth/token"`,
+    `resource_metadata_uri="${process.env.HIVEMIND_OAUTH_BASE_URL || 'https://core.hivemind.davinciai.eu:8050'}/.well-known/oauth-protected-resource"`
+  ];
+  if (requiredScope) params.push(`scope="${requiredScope}"`);
+  res.setHeader('WWW-Authenticate', `Bearer ${params.join(', ')}`);
+}
+
 // ==========================================
 // AUTHENTICATION MIDDLEWARE
 // ==========================================
@@ -107,6 +145,7 @@ export function jwtAuthMiddleware(options = {}) {
           },
         });
 
+        setWwwAuthenticate(res, { description: 'JWT authentication required' });
         return res.status(401).json({
           success: false,
           error: 'UNAUTHORIZED',
@@ -134,6 +173,7 @@ export function jwtAuthMiddleware(options = {}) {
           },
         });
 
+        setWwwAuthenticate(res, { description: error.message || 'Invalid token' });
         return res.status(401).json({
           success: false,
           error: 'UNAUTHORIZED',
@@ -155,6 +195,7 @@ export function jwtAuthMiddleware(options = {}) {
             },
           });
 
+          setWwwAuthenticate(res, { description: 'Invalid token structure' });
           return res.status(401).json({
             success: false,
             error: 'UNAUTHORIZED',
@@ -179,6 +220,7 @@ export function jwtAuthMiddleware(options = {}) {
           },
         });
 
+        setWwwAuthenticate(res, { description: 'Token expired' });
         return res.status(401).json({
           success: false,
           error: 'UNAUTHORIZED',
@@ -193,7 +235,7 @@ export function jwtAuthMiddleware(options = {}) {
         email: decoded.email,
         organizationId: decoded.organizationId || decoded.org_id,
         roles: decoded.roles || [],
-        scopes: decoded.scopes || ['read', 'write'],
+        scopes: normalizePrincipalScopes(decoded.scopes || decoded.scope || ['read', 'write']),
         tokenClaims: decoded,
       };
 
@@ -277,6 +319,7 @@ export function apiKeyAuthMiddleware(options = {}) {
           request: req,
         });
 
+        setWwwAuthenticate(res, { description: 'API key required. Use X-API-Key header or bearer token.' });
         return res.status(401).json({
           success: false,
           error: 'UNAUTHORIZED',
@@ -306,6 +349,7 @@ export function apiKeyAuthMiddleware(options = {}) {
           request: req,
         });
 
+        setWwwAuthenticate(res, { description: 'Invalid API key' });
         return res.status(401).json({
           success: false,
           error: 'UNAUTHORIZED',
@@ -333,6 +377,7 @@ export function apiKeyAuthMiddleware(options = {}) {
           request: req,
         });
 
+        setWwwAuthenticate(res, { description: 'API key has been revoked' });
         return res.status(401).json({
           success: false,
           error: 'UNAUTHORIZED',
@@ -360,6 +405,7 @@ export function apiKeyAuthMiddleware(options = {}) {
           request: req,
         });
 
+        setWwwAuthenticate(res, { description: 'API key has expired' });
         return res.status(401).json({
           success: false,
           error: 'UNAUTHORIZED',
@@ -374,7 +420,7 @@ export function apiKeyAuthMiddleware(options = {}) {
         email: keyData.email,
         organizationId: keyData.orgId,
         keyId: keyData.id,
-        scopes: keyData.scopes || ['read', 'write'],
+        scopes: normalizePrincipalScopes(keyData.scopes || ['read', 'write']),
         authMethod: 'api_key',
       };
 
@@ -467,7 +513,7 @@ export function optionalAuthMiddleware(options = {}) {
             email: decoded.email,
             organizationId: decoded.organizationId || decoded.org_id,
             roles: decoded.roles || [],
-            scopes: decoded.scopes || ['read', 'write'],
+            scopes: normalizePrincipalScopes(decoded.scopes || decoded.scope || ['read', 'write']),
           };
           return next();
         } catch (error) {
@@ -486,7 +532,7 @@ export function optionalAuthMiddleware(options = {}) {
               email: keyData.email,
               organizationId: keyData.orgId,
               keyId: keyData.id,
-              scopes: keyData.scopes || ['read', 'write'],
+              scopes: normalizePrincipalScopes(keyData.scopes || ['read', 'write']),
               authMethod: 'api_key',
             };
             return next();

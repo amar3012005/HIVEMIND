@@ -18,6 +18,7 @@
     "test:api": "node --test tests/api/",
     "test:unit": "node --test tests/unit/",
     "test:integration": "node --test tests/integration/",
+    "test:oauth-smoke": "node --test tests/integration/oauth-flow.test.js",
     "test:coverage": "node --test --experimental-test-coverage",
     "lint": "eslint src/**/*.ts || echo 'No ESLint configured'",
     "check": "find src -name '*.js' -exec node --check {} \\;",

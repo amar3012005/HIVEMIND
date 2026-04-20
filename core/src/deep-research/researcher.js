@@ -24,6 +24,7 @@ import { TaskStack, DIMENSIONS } from './task-stack.js';
 import { TrailStore, AGENT_ALIASES } from './trail-store.js';
 import { BlueprintMiner } from './blueprint-miner.js';
 import { extractFacts } from '../memory/fact-extractor.js';
+import { CSIAgentHarness } from './csi-harness.js';
 
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_MODEL = 'llama-3.3-70b-versatile';
@@ -298,6 +299,7 @@ export class DeepResearcher {
     this.reportSynthesisProfile = reportSynthesisProfile || null;
     this.stigmergicCoT = stigmergicCoT || null;
     this.blueprintMiner = new BlueprintMiner({ memoryStore, prisma });
+    this.csiHarness = new CSIAgentHarness({ apiKey: this.groqApiKey });
     this._llmCallCount = 0;
     const envBudget = Number.parseInt(process.env.DEEP_RESEARCH_MAX_LLM_CALLS || '', 10);
     this._maxLlmCalls = Number.isInteger(maxLlmCalls) && maxLlmCalls > 0
@@ -1542,11 +1544,29 @@ export class DeepResearcher {
 
   async _reasonExplore(query, findings, step) {
     const findingsSummary = findings.length > 0 ? findings.slice(-3).map(f => `[${f.type}] ${f.title}`).join('\n') : '(none yet)';
-    const response = await this._llm(`You are the FARADAY agent. Your job is to gather sources and raw information.\n\nResearch question: "${query}"\n\nCurrent findings: ${findingsSummary}\n\nChoose your NEXT ACTION to gather more sources:\n{\n  "thought": "brief reasoning",\n  "action": "SEARCH_WEB" | "READ_URL" | "SEARCH_MEMORY" | "FINISH",\n  "query": "specific search query if SEARCH_WEB or SEARCH_MEMORY",\n  "url": "specific URL if READ_URL"\n}\n\nRules:\n- SEARCH_WEB: Use for gathering new web sources\n- READ_URL: Use when you have a specific URL to deep-read\n- SEARCH_MEMORY: Use when prior CSI memory is likely useful\n- FINISH: Use when you have gathered sufficient sources (3-5 good sources)`, { temperature: 0.3, worker: 'faraday' });
+    
+    // Leverage Groq/Compound Harness for native Web Intel
     try {
+      const turn = await this.csiHarness.runAgentTurn('explorer', query, { context: { findings: findingsSummary, step } });
+      
+      // If the harness performed native tool calls, treat the summary as the observation
+      if (turn.tools_used && turn.tools_used.length > 0) {
+        return { 
+          thought: turn.reasoning, 
+          action: 'FINISH', // We can auto-finish if the harness already did the research
+          query: query,
+          observation: turn.content 
+        };
+      }
+
+      // Fallback to manual loop parsing if no tools were auto-triggered (unlikely with Compound)
+      const response = turn.content;
       const parsed = JSON.parse(response.match(/\{[\s\S]*\}/)?.[0] || '{}');
       return { thought: parsed.thought || '', action: ['SEARCH_WEB', 'READ_URL', 'SEARCH_MEMORY', 'FINISH'].includes(parsed.action) ? parsed.action : 'SEARCH_WEB', query: parsed.query || query, url: parsed.url || null };
-    } catch { return { thought: 'Exploring web', action: 'SEARCH_WEB', query, url: null }; }
+    } catch (err) {
+      console.error('[DeepResearcher] _reasonExplore Harness error:', err);
+      return { thought: 'Exploring web', action: 'SEARCH_WEB', query, url: null };
+    }
   }
 
   async _actAnalyze(query, findings, userId, orgId, projectId) {

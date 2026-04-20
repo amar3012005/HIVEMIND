@@ -80,6 +80,12 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
 
+      - name: Run OAuth one-click connect smoke test
+        working-directory: ./core
+        run: npm run test:oauth-smoke
+        env:
+          HIVEMIND_OAUTH_BASE_URL: http://127.0.0.1:37901
+
       - name: Upload test results
         uses: actions/upload-artifact@v4
         if: always()

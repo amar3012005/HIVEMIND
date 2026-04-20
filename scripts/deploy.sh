@@ -148,12 +148,59 @@ status() {
   echo -e "${CYAN}HIVEMIND:${NC}"
   docker ps --filter "name=hm-" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null
   echo ""
+  echo -e "${CYAN}MiroFish:${NC}"
+  docker ps --filter "name=mf-" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null
+  echo ""
   echo -e "${CYAN}Coolify:${NC}"
   docker ps --filter "name=s0k0s0k40wo44w4w8gcs8ow0" --format "table {{.Names}}\t{{.Status}}" 2>/dev/null
 }
 
 logs() {
   docker logs -f --tail 50 "${1:-hm-core}"
+}
+
+start_mirofish() {
+  log "Building mf-backend image from MiroFish/backend/Dockerfile..."
+  docker build -t mirofish-backend:latest /opt/HIVEMIND/MiroFish/backend
+
+  log "Starting mf-backend (port 5001, network $NETWORK)..."
+  docker stop mf-backend 2>/dev/null || true
+  docker rm   mf-backend 2>/dev/null || true
+  ensure_networks
+
+  # Persistent uploads volume — survives redeploys
+  docker volume create mirofish-uploads 2>/dev/null || true
+
+  docker run -d \
+    --name mf-backend \
+    --network $NETWORK \
+    --restart unless-stopped \
+    -p 5001:5001 \
+    -v mirofish-uploads:/app/uploads \
+    -v /etc/localtime:/etc/localtime:ro \
+    --env-file "$COOLIFY_ENV" \
+    -e FLASK_DEBUG=false \
+    -e FLASK_PORT=5001 \
+    -e GRAPH_PROVIDER=hivemind \
+    -e "HIVEMIND_API_URL=http://hm-core:3000" \
+    -e HIVEMIND_SYNC_EPISODES=false \
+    -e USE_ZEP=false \
+    -e "LLM_BASE_URL=https://api.groq.com/openai/v1" \
+    -e LLM_MODEL_NAME=groq/compound \
+    mirofish-backend:latest
+
+  log "Waiting for mf-backend health..."
+  for i in $(seq 1 30); do
+    sleep 2
+    if curl -sf http://localhost:5001/health >/dev/null 2>&1; then
+      log "mf-backend is ${GREEN}healthy${NC} on port 5001"
+      return 0
+    fi
+    echo -n "."
+  done
+  err "mf-backend not healthy after 60s"
+  docker logs mf-backend --tail 30
+  return 1
 }
 
 start_core_benchmark() {
@@ -199,10 +246,11 @@ case "${1:-all}" in
   core)      start_core && verify ;;
   benchmark) start_core_benchmark && verify ;;
   control)   start_control ;;
-  restart)   start_core && start_control && verify ;;
+  mirofish)  start_mirofish ;;
+  restart)   start_core && start_control && start_mirofish && verify ;;
   status)    status ;;
   logs)      logs "${2:-hm-core}" ;;
   verify)    verify ;;
-  all)       start_core && start_control && verify ;;
-  *)         echo "Usage: $0 {all|core|benchmark|control|restart|status|logs [name]|verify}"; exit 1 ;;
+  all)       start_core && start_control && start_mirofish && verify ;;
+  *)         echo "Usage: $0 {all|core|benchmark|control|mirofish|restart|status|logs [name]|verify}"; exit 1 ;;
 esac

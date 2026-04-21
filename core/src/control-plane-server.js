@@ -465,25 +465,43 @@ async function upsertUserFromZitadel(userInfo) {
   });
 }
 
-async function buildBootstrapPayload(user) {
-  const { org, role } = await resolveCurrentOrg(user.id);
-  const apiKeys = await listPersistedApiKeys(prisma, user.id, org?.id || null);
-  let coreHealth = null;
-
+async function getCoreHealth() {
   try {
     const healthResponse = await fetch(`${CONFIG.coreApiBaseUrl}/health`);
-    coreHealth = {
+    return {
       ok: healthResponse.ok,
       status: healthResponse.status
     };
   } catch {
-    coreHealth = {
+    return {
       ok: false,
       status: null
     };
   }
+}
+
+async function buildAnonymousBootstrapPayload() {
+  return {
+    authenticated: false,
+    user: null,
+    organization: null,
+    onboarding: null,
+    connectivity: {
+      core_api_base_url: CONFIG.coreApiBaseUrl,
+      core_health: await getCoreHealth()
+    },
+    client_support: ['claude', 'antigravity', 'vscode', 'remote-mcp', 'notebooklm'],
+    session_api_key: null,
+  };
+}
+
+async function buildBootstrapPayload(user) {
+  const { org, role } = await resolveCurrentOrg(user.id);
+  const apiKeys = await listPersistedApiKeys(prisma, user.id, org?.id || null);
+  const coreHealth = await getCoreHealth();
 
   return {
+    authenticated: true,
     user: {
       id: user.id,
       email: user.email,
@@ -1070,8 +1088,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === '/v1/bootstrap' && req.method === 'GET') {
-    const current = await requireSession(req, res);
-    if (!current) return;
+    const current = await getCurrentSession(req);
+    if (!current) {
+      return jsonResponse(res, await buildAnonymousBootstrapPayload());
+    }
     const user = await prisma?.user.findUnique({ where: { id: current.session.userId } });
     if (!user) {
       return jsonResponse(res, { error: 'User not found' }, 404);

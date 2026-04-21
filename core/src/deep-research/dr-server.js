@@ -1065,4 +1065,4 @@ export async function startDRServer({ memoryStore, prisma, recallFn, browserRunt
   return server;
 } // end startDRServer
 
-export default server;
+export default startDRServer;

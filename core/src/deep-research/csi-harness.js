@@ -1,4 +1,4 @@
-import { GROQ_MODELS } from '../config/groq.js';
+import { GROQ_MODELS } from '../../config/groq.js';
 import fs from 'fs';
 
 /**

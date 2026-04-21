@@ -51,7 +51,7 @@ start_core() {
     -e "REDIS_URL=redis://:redis_secure_vault_7711@${COOLIFY_REDIS}:6379/0" \
     -e "HIVEMIND_ALLOWED_ORIGINS=https://hivemind.davinciai.eu,https://www.davinciai.eu,https://davinciai.eu" \
     node:20 \
-    sh -c "npx prisma generate 2>/dev/null; npx prisma migrate deploy 2>&1 || echo '[migrate] skipped'; node src/server.js"
+    sh -c "npx prisma generate 2>/dev/null && npx prisma migrate deploy && node src/server.js"
 
   log "Waiting for health..."
   for i in $(seq 1 30); do
@@ -108,8 +108,17 @@ start_control() {
 }
 
 verify() {
-  local KEY="hmk_live_24c848dbef0e152cf6d47bcb1413d9eb85de48c1e0fb436d"
-  local B="https://core.hivemind.davinciai.eu:8050"
+  local KEY
+  KEY=$(grep '^HIVEMIND_MASTER_API_KEY=' "$COOLIFY_ENV" 2>/dev/null | tail -1 | cut -d= -f2-)
+  if [ -z "$KEY" ]; then
+    KEY=$(grep '^HIVEMIND_API_KEY=' "$COOLIFY_ENV" 2>/dev/null | tail -1 | cut -d= -f2-)
+  fi
+  if [ -z "$KEY" ]; then
+    err "No HIVEMIND_MASTER_API_KEY or HIVEMIND_API_KEY found in $COOLIFY_ENV"
+    return 1
+  fi
+
+  local B="${HIVEMIND_VERIFY_BASE_URL:-http://localhost:3001}"
   local pass=0 fail=0
 
   check() {
@@ -179,7 +188,7 @@ start_core_benchmark() {
     -e "REDIS_URL=redis://:redis_secure_vault_7711@${COOLIFY_REDIS}:6379/0" \
     -e "HIVEMIND_ALLOWED_ORIGINS=https://hivemind.davinciai.eu,https://www.davinciai.eu,https://davinciai.eu" \
     node:20 \
-    sh -c "npx prisma generate 2>/dev/null; npx prisma migrate deploy 2>&1 || echo '[migrate] skipped'; node src/server.js"
+    sh -c "npx prisma generate 2>/dev/null && npx prisma migrate deploy && node src/server.js"
 
   log "Waiting for health..."
   for i in $(seq 1 30); do

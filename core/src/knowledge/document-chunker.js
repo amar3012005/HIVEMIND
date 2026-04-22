@@ -456,7 +456,10 @@ export async function processDocument(buffer, mimeType, filename, context = {}) 
   // Ensure text is always a string
   const docText = typeof text === 'string' ? text : String(text?.text || text || '');
 
-  if (!docText || docText.trim().length < 10) {
+  // If the document is truly empty (0 characters), we still fail as it's invalid.
+  // But we lower the threshold from 10 to 0 characters to allow sparse documents
+  // to be detected as "general" instead of 500ing.
+  if (!docText) {
     throw new Error('Document appears to be empty or could not be parsed');
   }
 

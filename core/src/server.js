@@ -4893,11 +4893,18 @@ const server = http.createServer(async (req, res) => {
                 // Use all sheet previews combined for type detection
                 parsedText = sheets.filter(s => !s.empty).map(s => `Sheet: ${s.name}\n${s.preview}`).join('\n\n');
               } else {
-                // Non-Excel: extract text using existing document chunker's logic
-                const { processDocument } = await import('./knowledge/document-chunker.js');
-                const result = await processDocument(filePart.data, filePart.contentType || `text/${ext}`, filePart.filename, { user_id: userId, org_id: orgId });
-                // Get raw text from summary content
-                parsedText = result.summary?.content || result.chunks?.map(c => c.content).join('\n\n') || '';
+                // Non-Excel: extract raw text without requiring successful chunk creation.
+                // Enterprise detection should still classify sparse / OCR-less documents
+                // as low-confidence "general" instead of failing the whole request.
+                const { parseFile } = await import('./knowledge/document-chunker.js');
+                const parsed = await parseFile(
+                  filePart.data,
+                  filePart.contentType || `text/${ext}`,
+                  filePart.filename
+                );
+                parsedText = typeof parsed?.text === 'string'
+                  ? parsed.text
+                  : String(parsed?.text || '');
               }
 
               // Run type detection

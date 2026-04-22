@@ -300,6 +300,7 @@ export function createEnterpriseMemories(options) {
   // Generate tags: schema tags + schema-record + upload tag + user tags (deduplicated)
   const schemaTags = generateTags(documentType, fields);
   const parentTags = dedupeTags([
+    'knowledge-base',
     ...schemaTags,
     'schema-record',
     `upload:${uploadId}`,
@@ -308,6 +309,7 @@ export function createEnterpriseMemories(options) {
 
   // Child tags: same but without 'schema-record'
   const childTags = dedupeTags([
+    'knowledge-base',
     ...schemaTags,
     `upload:${uploadId}`,
     ...userTags,

@@ -38,6 +38,7 @@
     "pdf-parse": "^2.4.5",
     "playwright-core": "^1.54.2",
     "prisma": "^5.22.0",
+    "tesseract.js": "^6.0.1",
     "tree-sitter": "^0.21.1",
     "tree-sitter-javascript": "^0.21.0",
     "tree-sitter-python": "^0.21.0",

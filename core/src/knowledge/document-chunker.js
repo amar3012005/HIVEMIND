@@ -115,8 +115,26 @@ function mergePdfPageContent(pageText, tables = []) {
 async function ocrPdfPages(parser, pageNumbers, filename) {
   if (!pageNumbers.length) return new Map();
 
-  const { createWorker } = await import('tesseract.js');
-  const worker = await createWorker('eng');
+  let createWorker;
+  try {
+    ({ createWorker } = await import('tesseract.js'));
+  } catch (err) {
+    console.warn(
+      `[knowledge] OCR dependency unavailable for ${filename || 'document'}: ${err.message}`
+    );
+    return new Map();
+  }
+
+  let worker;
+  try {
+    worker = await createWorker('eng');
+  } catch (err) {
+    console.warn(
+      `[knowledge] OCR worker initialization failed for ${filename || 'document'}: ${err.message}`
+    );
+    return new Map();
+  }
+
   const ocrPages = new Map();
 
   try {

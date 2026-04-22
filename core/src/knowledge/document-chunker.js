@@ -4,6 +4,9 @@
  * Parses uploaded files (PDF, DOCX, TXT, MD, CSV) and splits them into
  * structured memory chunks using recursive semantic splitting.
  *
+ * PDFs use a layout-aware extraction pass with OCR fallback for sparse
+ * or image-only pages before chunking.
+ *
  * Architecture per NotebookLM:
  *   - Recursive split-then-merge with semantic boundaries
  *   - 512-1024 token chunks (default 800 chars ≈ ~200 tokens)
@@ -32,22 +35,7 @@ export async function parseFile(buffer, mimeType, filename) {
 
   // PDF
   if (mimeType === 'application/pdf' || ext === 'pdf') {
-    const { PDFParse } = await import('pdf-parse');
-    const parser = new PDFParse({ data: buffer });
-    await parser.load();
-    const textResult = await parser.getText();
-    // getText() returns { pages: [...], text: string, total: number }
-    const text = typeof textResult === 'string' ? textResult : (textResult?.text || '');
-    const info = await parser.getInfo().catch(() => ({}));
-    // getInfo() returns { total, info: { PDFFormatVersion, ... }, metadata, ... }
-    return {
-      text: String(text),
-      metadata: {
-        pages: info?.total || textResult?.total || null,
-        title: info?.info?.Title || filename,
-        author: info?.info?.Author || null,
-      },
-    };
+    return extractPdfDocument(buffer, filename);
   }
 
   // DOCX
@@ -82,6 +70,189 @@ export async function parseFile(buffer, mimeType, filename) {
     text: String(text),
     metadata: { title: filename },
   };
+}
+
+function normalizeExtractedText(text) {
+  return String(text || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function formatPdfTable(table, tableIndex = 0) {
+  if (!Array.isArray(table) || table.length === 0) return '';
+
+  const rows = table
+    .map((row) => (Array.isArray(row) ? row.map((cell) => normalizeExtractedText(cell)).filter(Boolean) : []))
+    .filter((row) => row.length > 0);
+
+  if (rows.length === 0) return '';
+
+  return [`Table ${tableIndex + 1}`, ...rows.map((row) => row.join(' | '))].join('\n');
+}
+
+function mergePdfPageContent(pageText, tables = []) {
+  const parts = [];
+  const normalizedText = normalizeExtractedText(pageText);
+
+  if (normalizedText) {
+    parts.push(normalizedText);
+  }
+
+  const formattedTables = tables
+    .map((table, index) => formatPdfTable(table, index))
+    .filter(Boolean);
+
+  if (formattedTables.length > 0) {
+    parts.push(['Tables', ...formattedTables].join('\n\n'));
+  }
+
+  return parts.join('\n\n').trim();
+}
+
+async function ocrPdfPages(parser, pageNumbers, filename) {
+  if (!pageNumbers.length) return new Map();
+
+  const { createWorker } = await import('tesseract.js');
+  const worker = await createWorker('eng');
+  const ocrPages = new Map();
+
+  try {
+    const screenshot = await parser.getScreenshot({
+      partial: pageNumbers,
+      scale: 3,
+      imageDataUrl: false,
+      imageBuffer: true,
+    });
+
+    for (const page of screenshot.pages || []) {
+      const image = page.data || page.image || page.bitmap;
+      if (!image) continue;
+
+      const bufferImage = Buffer.isBuffer(image) ? image : Buffer.from(image);
+      const result = await worker.recognize(bufferImage, { rotateAuto: true });
+      const text = normalizeExtractedText(result?.data?.text || '');
+      if (text) {
+        ocrPages.set(page.pageNumber || page.num, text);
+      }
+    }
+  } catch (err) {
+    console.warn(`[knowledge] OCR fallback failed for ${filename || 'document'}: ${err.message}`);
+  } finally {
+    await worker.terminate().catch(() => {});
+  }
+
+  return ocrPages;
+}
+
+function chunkPdfPages(pages) {
+  const chunks = [];
+  for (const page of pages) {
+    const pageChunks = chunkText(page.content);
+    for (const chunk of pageChunks) {
+      chunks.push({
+        text: chunk.text,
+        index: chunks.length,
+        page_number: page.page_number,
+        page_label: page.page_label || null,
+        table_count: page.table_count || 0,
+      });
+    }
+  }
+  return chunks;
+}
+
+async function extractPdfDocument(buffer, filename) {
+  const { PDFParse } = await import('pdf-parse');
+  const parser = new PDFParse({ data: buffer });
+
+  try {
+    const [info, textResult, tableResult] = await Promise.all([
+      parser.getInfo({ parsePageInfo: true }).catch(() => null),
+      parser.getText({
+        parsePageInfo: true,
+        parseHyperlinks: true,
+        lineEnforce: true,
+        cellSeparator: ' | ',
+        itemJoiner: ' ',
+      }).catch(() => null),
+      parser.getTable().catch(() => null),
+    ]);
+
+    const textPages = new Map((textResult?.pages || []).map((page) => [page.num, normalizeExtractedText(page.text)]));
+    const tablePages = new Map((tableResult?.pages || []).map((page) => [page.num, page.tables || []]));
+    const totalPages = info?.total || textResult?.total || tableResult?.total || Math.max(
+      0,
+      ...(textResult?.pages || []).map((page) => page.num),
+      ...(tableResult?.pages || []).map((page) => page.num),
+    );
+    const infoPages = info?.pages || [];
+
+    const lowTextPages = [];
+    for (let pageNumber = 1; pageNumber <= totalPages; pageNumber += 1) {
+      const existing = textPages.get(pageNumber) || '';
+      if (existing.length < 40) {
+        lowTextPages.push(pageNumber);
+      }
+    }
+
+    const ocrPages = lowTextPages.length > 0
+      ? await ocrPdfPages(parser, lowTextPages, filename)
+      : new Map();
+
+    const pages = [];
+    for (let pageNumber = 1; pageNumber <= totalPages; pageNumber += 1) {
+      const pageText = textPages.get(pageNumber) || '';
+      const tables = tablePages.get(pageNumber) || [];
+      const ocrText = ocrPages.get(pageNumber) || '';
+      const content = mergePdfPageContent([pageText, ocrText].filter(Boolean).join('\n\n'), tables);
+      const pageInfo = infoPages.find((page) => page.pageNumber === pageNumber);
+
+      pages.push({
+        page_number: pageNumber,
+        page_label: pageInfo?.pageLabel || null,
+        content,
+        text: pageText,
+        ocr_text: ocrText,
+        tables,
+        table_count: tables.length,
+        text_length: (pageText + ocrText).length,
+      });
+    }
+
+    const text = pages.map((page) => page.content).filter(Boolean).join('\n\n');
+    const totalTables = pages.reduce((sum, page) => sum + (page.table_count || 0), 0);
+    const totalTextChars = pages.reduce((sum, page) => sum + (page.text_length || 0), 0);
+    const ocrPageCount = pages.filter((page) => page.ocr_text && page.ocr_text.length > 0).length;
+
+    return {
+      text,
+      pages,
+      metadata: {
+        title: info?.info?.Title || filename,
+        author: info?.info?.Author || null,
+        pages: totalPages || null,
+        page_labels: infoPages.map((page) => page.pageLabel || null).filter(Boolean),
+        links: infoPages.flatMap((page) => (page.links || []).map((link) => ({
+          page_number: page.pageNumber,
+          text: link.text,
+          url: link.url,
+        }))),
+        outline: info?.outline || null,
+        extraction_method: 'pdf-parse-layout',
+        ocr_fallback_pages: ocrPageCount,
+        page_count: totalPages || null,
+        table_count: totalTables,
+        text_char_count: totalTextChars,
+      },
+    };
+  } catch (err) {
+    throw new Error(`PDF extraction failed for ${filename || 'document'}: ${err.message}`);
+  } finally {
+    await parser.destroy().catch(() => {});
+  }
 }
 
 // ── Semantic splitting ───────────────────────────────────
@@ -262,7 +433,7 @@ export function generateDocumentSummary(text, metadata) {
  * @returns {Promise<{ summary: object, chunks: object[] }>}
  */
 export async function processDocument(buffer, mimeType, filename, context = {}) {
-  const { text, metadata } = await parseFile(buffer, mimeType, filename);
+  const { text, metadata, pages: extractedPages = [] } = await parseFile(buffer, mimeType, filename);
 
   // Ensure text is always a string
   const docText = typeof text === 'string' ? text : String(text?.text || text || '');
@@ -272,7 +443,9 @@ export async function processDocument(buffer, mimeType, filename, context = {}) 
   }
 
   const sections = extractSections(docText);
-  const chunks = chunkText(docText);
+  const chunks = extractedPages.length > 0
+    ? chunkPdfPages(extractedPages)
+    : chunkText(docText);
   const docTitle = metadata.title || filename || 'Untitled Document';
   const baseTags = ['knowledge-base', 'document', ...(context.tags || [])];
 
@@ -296,6 +469,8 @@ export async function processDocument(buffer, mimeType, filename, context = {}) 
       total_chars: docText.length,
       pages: metadata.pages || null,
       author: metadata.author || null,
+      table_count: metadata.table_count || 0,
+      ocr_fallback_pages: metadata.ocr_fallback_pages || 0,
       sections: sections.map(s => s.title),
     },
     project: context.project || null,
@@ -309,12 +484,18 @@ export async function processDocument(buffer, mimeType, filename, context = {}) 
     const section = getSectionForChunk(chunk.text, sections, docText);
     const chunkTitle = section
       ? `${docTitle} — ${section.title}`
-      : `${docTitle} — Part ${idx + 1}`;
+      : chunk.page_number
+        ? `${docTitle} — Page ${chunk.page_number}`
+        : `${docTitle} — Part ${idx + 1}`;
 
     return {
       content: chunk.text,
       title: chunkTitle,
-      tags: [...baseTags, ...(section ? [`section:${section.title.toLowerCase().replace(/\s+/g, '-').slice(0, 40)}`] : [])],
+      tags: [
+        ...baseTags,
+        ...(section ? [`section:${section.title.toLowerCase().replace(/\s+/g, '-').slice(0, 40)}`] : []),
+        ...(chunk.page_number ? [`page:${chunk.page_number}`] : []),
+      ],
       memory_type: 'fact',
       source: 'knowledge-base',
       source_metadata: {
@@ -324,6 +505,8 @@ export async function processDocument(buffer, mimeType, filename, context = {}) 
         filename,
         chunk_index: idx,
         total_chunks: chunks.length,
+        page_number: chunk.page_number || null,
+        page_label: chunk.page_label || null,
       },
       metadata: {
         document_title: docTitle,
@@ -331,6 +514,9 @@ export async function processDocument(buffer, mimeType, filename, context = {}) 
         total_chunks: chunks.length,
         section: section?.title || null,
         section_level: section?.level || null,
+        page_number: chunk.page_number || null,
+        page_label: chunk.page_label || null,
+        table_count: chunk.table_count || 0,
       },
       project: context.project || null,
       visibility: context.visibility || 'private',
@@ -341,3 +527,10 @@ export async function processDocument(buffer, mimeType, filename, context = {}) 
 
   return { summary, chunks: chunkPayloads };
 }
+
+export {
+  chunkPdfPages,
+  formatPdfTable,
+  mergePdfPageContent,
+  normalizeExtractedText,
+};

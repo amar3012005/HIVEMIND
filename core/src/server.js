@@ -2433,32 +2433,75 @@ const server = http.createServer(async (req, res) => {
         }
       });
 
-      const scopeListHtml = requestedScopes.map(s => `<li><code>${sanitizeHtml(s)}</code></li>`).join('');
-      const consentHtml = `<!DOCTYPE html>
+      const scopeListHtml = requestedScopes.map(s => `
+      <div style="display:flex; align-items:center; gap:0.5rem; margin:0.5rem 0; padding:0.5rem; background:#f8fafc; border-radius:8px; border:1px solid #e2e8f0;">
+        <input type="checkbox" checked disabled id="s-${s}" style="accent-color:#0ea5e9;">
+        <label for="s-${s}" style="font-size:0.9rem; color:#475569; cursor:default;">${sanitizeHtml(s)}</label>
+      </div>
+    `).join('');
+
+    const consentHtml = `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>HiveMind Consent</title>
+<title>HiveMind Partner Connection</title>
 <style>
-  body{font-family:system-ui,-apple-system,sans-serif;background:#f6f8fb;color:#1e293b;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}
-  .card{background:#fff;border:1px solid #dbe4ee;border-radius:14px;padding:2rem;max-width:460px;width:92%;box-shadow:0 10px 30px rgba(15,23,42,.08)}
-  h1{font-size:1.25rem;margin:0 0 .5rem;color:#0f172a}
-  h2{font-size:.95rem;font-weight:500;color:#334155;margin:0 0 1rem}
-  .app{color:#0369a1;font-weight:700}
-  ul{padding-left:1.2rem;margin:.8rem 0 1.2rem}
-  li{margin:.35rem 0}
-  code{background:#eef6ff;padding:2px 6px;border-radius:5px}
-  .meta{font-size:.82rem;color:#64748b;margin-bottom:1rem}
-  .actions{display:flex;gap:.7rem}
-  button{flex:1;padding:.65rem;border:none;border-radius:10px;font-size:.95rem;cursor:pointer;font-weight:600}
+  body{font-family:system-ui,-apple-system,sans-serif;background:#eff6ff;color:#1e293b;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}
+  .card{background:#fff;border:1px solid #dbe4ee;border-radius:14px;padding:2rem;max-width:480px;width:92%;box-shadow:0 20px 40px rgba(15,23,42,.1)}
+  .header{display:flex;align-items:center;gap:1rem;margin-bottom:1.5rem}
+  .app-icon{width:48px;height:48px;background:#f1f5f9;border-radius:12px;display:flex;align-items:center;justify-content:center;font-weight:bold;color:#64748b}
+  .sync-icon{color:#cbd5e1;font-size:1.5rem}
+  .hm-icon{width:48px;height:48px;background:#0ea5e9;border-radius:12px;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:bold}
+  h1{font-size:1.3rem;margin:0 0 .3rem;color:#0f172a}
+  p{font-size:0.95rem;color:#64748b;line-height:1.5;margin:0 0 1.2rem}
+  .permissions-box{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:1rem;margin-bottom:1.5rem}
+  .perm-header{font-size:0.85rem;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#94a3b8;margin-bottom:0.8rem}
+  .access-level{margin-bottom:1.5rem}
+  .radio-group{display:flex;flex-direction:column;gap:0.8rem}
+  .radio-item{display:flex;align-items:flex-start;gap:0.8rem;padding:1rem;border:1px solid #e2e8f0;border-radius:10px;cursor:pointer;transition:all 0.2s}
+  .radio-item:hover{background:#f8fafc;border-color:#0ea5e9}
+  .radio-item input:checked + .radio-content{color:#0ea5e9}
+  .radio-content strong{display:block;margin-bottom:0.2rem}
+  .radio-content span{font-size:0.85rem;color:#64748b}
+  .actions{display:flex;gap:.7rem;margin-top:1.5rem}
+  button{flex:1;padding:.85rem;border:none;border-radius:10px;font-size:.95rem;cursor:pointer;font-weight:600;transition:opacity 0.2s}
+  button:hover{opacity:0.9}
   .approve{background:#0ea5e9;color:#fff}
-  .deny{background:#e2e8f0;color:#334155}
+  .deny{background:#f1f5f9;color:#475569}
 </style></head><body>
 <div class="card">
+  <div class="header">
+    <div class="app-icon">${sanitizeHtml(client.client_name[0])}</div>
+    <div class="sync-icon">⇌</div>
+    <div class="hm-icon">H</div>
+  </div>
   <h1>Connect ${sanitizeHtml(client.client_name)}</h1>
-  <h2><span class="app">${sanitizeHtml(client.client_name)}</span> wants access to your HiveMind workspace.</h2>
-  <div class="meta">Resource: <code>${sanitizeHtml(resource)}</code></div>
-  <p>Requested permissions:</p>
-  <ul>${scopeListHtml}</ul>
+  <p>Authorize <strong>${sanitizeHtml(client.client_name)}</strong> to securely access your HiveMind account details and tools.</p>
+  
   <form method="POST" action="/oauth/authorize">
+    <div class="access-level">
+      <div class="perm-header">Select Access Level</div>
+      <div class="radio-group">
+        <label class="radio-item">
+          <input type="radio" name="access_tier" value="full" checked style="margin-top:0.3rem">
+          <div class="radio-content">
+            <strong>Full Access</strong>
+            <span>Ability to read, write and execute memory operations. recommended for full integration.</span>
+          </div>
+        </label>
+        <label class="radio-item">
+          <input type="radio" name="access_tier" value="default" style="margin-top:0.3rem">
+          <div class="radio-content">
+            <strong>Default Access</strong>
+            <span>Read-only access to specific memory segments and limited tool execution.</span>
+          </div>
+        </label>
+      </div>
+    </div>
+
+    <div class="permissions-box">
+      <div class="perm-header">Requested Scopes</div>
+      ${scopeListHtml}
+    </div>
+
     <input type="hidden" name="oauth_state_id" value="${sanitizeHtml(consentStateId)}">
     <input type="hidden" name="client_id" value="${sanitizeHtml(clientId)}">
     <input type="hidden" name="redirect_uri" value="${sanitizeHtml(redirectUri)}">
@@ -2467,9 +2510,10 @@ const server = http.createServer(async (req, res) => {
     <input type="hidden" name="code_challenge" value="${sanitizeHtml(codeChallenge)}">
     <input type="hidden" name="code_challenge_method" value="${sanitizeHtml(codeChallengeMethod)}">
     <input type="hidden" name="resource" value="${sanitizeHtml(resource)}">
+    
     <div class="actions">
-      <button type="submit" name="action" value="approve" class="approve">Approve</button>
-      <button type="submit" name="action" value="deny" class="deny">Deny</button>
+      <button type="submit" name="action" value="approve" class="approve">Proceed Further</button>
+      <button type="submit" name="action" value="deny" class="deny">Cancel</button>
     </div>
   </form>
 </div></body></html>`;

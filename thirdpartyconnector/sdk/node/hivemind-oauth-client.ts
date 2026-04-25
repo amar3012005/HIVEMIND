@@ -33,6 +33,30 @@ export type GetConnectionStatusInput = {
   accessToken: string;
 };
 
+export type ManagedTokens = {
+  accessToken: string;
+  refreshToken?: string;
+  scope?: string;
+};
+
+export type ManagedToolClientInput = {
+  baseUrl: string;
+  clientId: string;
+  getTokens: () => Promise<ManagedTokens> | ManagedTokens;
+  saveTokens: (tokens: ManagedTokens) => Promise<void> | void;
+};
+
+export type ToolDefinition = {
+  name: string;
+  description?: string;
+  inputSchema?: Record<string, unknown>;
+};
+
+export type CallToolInput = {
+  name: string;
+  arguments?: Record<string, unknown>;
+};
+
 function normalizeBaseUrl(baseUrl: string): string {
   return baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
 }
@@ -144,4 +168,114 @@ export async function getConnectionStatus({
     headers: { Authorization: `Bearer ${accessToken}` }
   });
   return parseJsonResponse(resp);
+}
+
+async function runJsonRpcRequest({
+  baseUrl,
+  accessToken,
+  body
+}: {
+  baseUrl: string;
+  accessToken: string;
+  body: Record<string, unknown>;
+}): Promise<any> {
+  const root = normalizeBaseUrl(baseUrl);
+  const resp = await fetch(`${root}/api/mcp/rpc`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${accessToken}`
+    },
+    body: JSON.stringify(body)
+  });
+
+  if (resp.status === 401) {
+    const error = new Error('Unauthorized');
+    (error as Error & { status?: number }).status = 401;
+    throw error;
+  }
+
+  const payload = await parseJsonResponse(resp);
+  if (payload?.error) {
+    throw new Error(payload.error.message || 'JSON-RPC request failed');
+  }
+  return payload?.result;
+}
+
+export class ManagedToolClient {
+  private readonly baseUrl: string;
+  private readonly clientId: string;
+  private readonly getTokensFn: ManagedToolClientInput['getTokens'];
+  private readonly saveTokensFn: ManagedToolClientInput['saveTokens'];
+
+  constructor({ baseUrl, clientId, getTokens, saveTokens }: ManagedToolClientInput) {
+    this.baseUrl = normalizeBaseUrl(baseUrl);
+    this.clientId = clientId;
+    this.getTokensFn = getTokens;
+    this.saveTokensFn = saveTokens;
+  }
+
+  async getConnectionStatus(): Promise<any> {
+    return this.withRefresh(tokens => getConnectionStatus({
+      baseUrl: this.baseUrl,
+      accessToken: tokens.accessToken
+    }));
+  }
+
+  async listTools(): Promise<ToolDefinition[]> {
+    const result = await this.withRefresh(tokens => runJsonRpcRequest({
+      baseUrl: this.baseUrl,
+      accessToken: tokens.accessToken,
+      body: {
+        jsonrpc: '2.0',
+        id: 'tools-list',
+        method: 'tools/list',
+        params: {}
+      }
+    }));
+    return Array.isArray(result?.tools) ? result.tools : [];
+  }
+
+  async callTool(input: CallToolInput): Promise<any> {
+    return this.withRefresh(tokens => runJsonRpcRequest({
+      baseUrl: this.baseUrl,
+      accessToken: tokens.accessToken,
+      body: {
+        jsonrpc: '2.0',
+        id: 'tool-call',
+        method: 'tools/call',
+        params: {
+          name: input.name,
+          arguments: input.arguments || {}
+        }
+      }
+    }));
+  }
+
+  private async withRefresh<T>(operation: (tokens: ManagedTokens) => Promise<T>): Promise<T> {
+    let tokens = await this.getTokensFn();
+
+    try {
+      return await operation(tokens);
+    } catch (error) {
+      const status = (error as Error & { status?: number }).status;
+      if (status !== 401 || !tokens.refreshToken) {
+        throw error;
+      }
+
+      const refreshed = await refreshAccessToken({
+        baseUrl: this.baseUrl,
+        refreshToken: tokens.refreshToken,
+        clientId: this.clientId
+      });
+
+      tokens = {
+        accessToken: refreshed.access_token,
+        refreshToken: refreshed.refresh_token || tokens.refreshToken,
+        scope: refreshed.scope || tokens.scope
+      };
+      await this.saveTokensFn(tokens);
+      return operation(tokens);
+    }
+  }
 }

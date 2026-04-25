@@ -45,6 +45,7 @@ Thumbs.db
 node_modules/
 dist/
 build/
+*.traineddata
 
 # Backups and temporary files
 *.backup.*

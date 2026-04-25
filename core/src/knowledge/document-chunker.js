@@ -450,23 +450,39 @@ export function generateDocumentSummary(text, metadata) {
  * @param {object} context - { user_id, org_id, project, tags, visibility }
  * @returns {Promise<{ summary: object, chunks: object[] }>}
  */
-export async function processDocument(buffer, mimeType, filename, context = {}) {
-  const { text, metadata, pages: extractedPages = [] } = await parseFile(buffer, mimeType, filename);
-
+export function buildDocumentPayloads(parsed, mimeType, filename, context = {}) {
+  const { text, metadata = {}, pages: extractedPages = [] } = parsed || {};
   // Ensure text is always a string
-  const docText = typeof text === 'string' ? text : String(text?.text || text || '');
+  let docText = typeof text === 'string' ? text : String(text?.text || text || '');
+  const normalizedText = docText.trim();
+  const lowerFilename = String(filename || '').toLowerCase();
+  const isPdf = mimeType === 'application/pdf' || lowerFilename.endsWith('.pdf');
+  const hasExtractedPageContent = extractedPages.some(
+    (page) => typeof page?.content === 'string' && page.content.trim().length > 0
+  );
+  let parseWarning = null;
 
-  // If the document is truly empty (0 characters), we still fail as it's invalid.
-  // But we lower the threshold from 10 to 0 characters to allow sparse documents
-  // to be detected as "general" instead of 500ing.
-  if (!docText) {
-    throw new Error('Document appears to be empty or could not be parsed');
+  // Use the new chunking logic that handles sparse/scanned PDFs gracefully
+  if (!normalizedText || normalizedText.length < 10) {
+    if (isPdf && (metadata.pages || extractedPages.length > 0)) {
+      parseWarning = 'pdf_text_unavailable';
+      docText = [
+        `Scanned PDF uploaded: ${filename || 'Untitled PDF'}.`,
+        'Direct text extraction was unavailable for this document.',
+        'The file is stored in the knowledge base, but its content may require OCR-enabled processing for full-text recall.',
+      ].join('\n');
+    } else {
+      throw new Error('Document appears to be empty or could not be parsed');
+    }
   }
 
   const sections = extractSections(docText);
-  const chunks = extractedPages.length > 0
+  let chunks = hasExtractedPageContent
     ? chunkPdfPages(extractedPages)
     : chunkText(docText);
+  if (!chunks.length) {
+    chunks = chunkText(docText);
+  }
   const docTitle = metadata.title || filename || 'Untitled Document';
   const baseTags = ['knowledge-base', 'document', ...(context.tags || [])];
 
@@ -492,6 +508,7 @@ export async function processDocument(buffer, mimeType, filename, context = {}) 
       author: metadata.author || null,
       table_count: metadata.table_count || 0,
       ocr_fallback_pages: metadata.ocr_fallback_pages || 0,
+      parse_warning: parseWarning,
       sections: sections.map(s => s.title),
     },
     project: context.project || null,
@@ -538,6 +555,7 @@ export async function processDocument(buffer, mimeType, filename, context = {}) 
         page_number: chunk.page_number || null,
         page_label: chunk.page_label || null,
         table_count: chunk.table_count || 0,
+        parse_warning: parseWarning,
       },
       project: context.project || null,
       visibility: context.visibility || 'private',
@@ -547,6 +565,11 @@ export async function processDocument(buffer, mimeType, filename, context = {}) 
   });
 
   return { summary, chunks: chunkPayloads };
+}
+
+export async function processDocument(buffer, mimeType, filename, context = {}) {
+  const parsed = await parseFile(buffer, mimeType, filename);
+  return buildDocumentPayloads(parsed, mimeType, filename, context);
 }
 
 export {

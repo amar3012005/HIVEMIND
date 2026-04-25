@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  buildDocumentPayloads,
   chunkPdfPages,
   formatPdfTable,
   mergePdfPageContent,
@@ -63,4 +64,42 @@ test('chunkPdfPages preserves page metadata on each chunk', () => {
   assert.equal(chunks[0].page_number, 1);
   assert.equal(chunks[0].page_label, 'i');
   assert.equal(chunks.at(-1).page_number, 2);
+});
+
+test('buildDocumentPayloads falls back for sparse PDFs when extracted text is unavailable', () => {
+  const result = buildDocumentPayloads(
+    {
+      text: '',
+      metadata: {
+        title: 'Scanned Policy',
+        pages: 2,
+        ocr_fallback_pages: 0,
+      },
+      pages: [
+        { page_number: 1, content: '', table_count: 0 },
+        { page_number: 2, content: '', table_count: 0 },
+      ],
+    },
+    'application/pdf',
+    'scanned.pdf',
+    { user_id: 'user-1', org_id: 'org-1' }
+  );
+
+  assert.match(result.summary.content, /Direct text extraction was unavailable/i);
+  assert.equal(result.summary.metadata.parse_warning, 'pdf_text_unavailable');
+  assert.ok(result.chunks.length >= 1);
+  assert.equal(result.chunks[0].metadata.parse_warning, 'pdf_text_unavailable');
+  assert.ok(result.summary.tags.includes('knowledge-base'));
+});
+
+test('buildDocumentPayloads still rejects empty non-PDF documents', () => {
+  assert.throws(
+    () => buildDocumentPayloads(
+      { text: '', metadata: {}, pages: [] },
+      'text/plain',
+      'empty.txt',
+      {}
+    ),
+    /Document appears to be empty or could not be parsed/
+  );
 });

@@ -562,10 +562,23 @@ async function purgeUserVectors(userId) {
   }
 }
 
-async function performAccountDeletion({ userId, orgIdsToDelete = [] }) {
+/**
+ * Perform cascading account deletion with optional progress callback.
+ * @param {object} opts
+ * @param {string} opts.userId
+ * @param {string[]} opts.orgIdsToDelete
+ * @param {(pct: number, step: string) => void} [opts.onProgress] - Called with 0-100 and step label
+ * @returns {Promise<{ok: boolean, error?: string}>}
+ */
+async function performAccountDeletion({ userId, orgIdsToDelete = [], onProgress }) {
   const t0 = Date.now();
-  const BATCH_SIZE = 5000; // Postgres bind variable limit is 32767; batching avoids overflow
-  console.log('[account-delete] ▶▶ Starting background deletion for userId:', userId, 'orgsToDelete:', orgIdsToDelete);
+  const BATCH_SIZE = 5000;
+  const emit = (pct, step) => {
+    console.log(`[account-delete] [${pct}%] ${step}`);
+    if (onProgress) onProgress(pct, step);
+  };
+
+  emit(0, 'Starting deletion...');
   try {
     const memoryIds = (
       await prisma.memory.findMany({
@@ -573,42 +586,26 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [] }) {
         select: { id: true },
       })
     ).map((memory) => memory.id);
-    console.log('[account-delete] Found', memoryIds.length, 'memories to delete');
+    emit(5, `Found ${memoryIds.length} memories`);
 
     if (memoryIds.length) {
       const totalBatches = Math.ceil(memoryIds.length / BATCH_SIZE);
+      // Memory deletion is 5% - 70% of progress
+      const memoryProgressRange = 65; // 5% to 70%
       for (let i = 0; i < memoryIds.length; i += BATCH_SIZE) {
         const batch = memoryIds.slice(i, i + BATCH_SIZE);
         const batchNum = Math.floor(i / BATCH_SIZE) + 1;
-        console.log(`[account-delete] Processing batch ${batchNum}/${totalBatches} (${batch.length} ids)`);
+        const batchPct = Math.round(5 + (batchNum / totalBatches) * memoryProgressRange);
 
-        const r1 = await prisma.auditLog.updateMany({
+        await prisma.auditLog.updateMany({
           where: { resourceId: { in: batch } },
           data: { resourceId: null },
         });
-        console.log(`[account-delete]   auditLog.resourceId nullified: ${r1.count}`);
-
-        const r2 = await prisma.sourceMetadata.deleteMany({
-          where: { memoryId: { in: batch } },
-        });
-        console.log(`[account-delete]   sourceMetadata deleted: ${r2.count}`);
-
-        const r3 = await prisma.codeMemoryMetadata.deleteMany({
-          where: { memoryId: { in: batch } },
-        });
-        console.log(`[account-delete]   codeMemoryMetadata deleted: ${r3.count}`);
-
-        const r4 = await prisma.vectorEmbedding.deleteMany({
-          where: { memoryId: { in: batch } },
-        });
-        console.log(`[account-delete]   vectorEmbedding deleted: ${r4.count}`);
-
-        const r5 = await prisma.memoryVersion.deleteMany({
-          where: { memoryId: { in: batch } },
-        });
-        console.log(`[account-delete]   memoryVersion deleted: ${r5.count}`);
-
-        const r6 = await prisma.relationship.deleteMany({
+        await prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: batch } } });
+        await prisma.codeMemoryMetadata.deleteMany({ where: { memoryId: { in: batch } } });
+        await prisma.vectorEmbedding.deleteMany({ where: { memoryId: { in: batch } } });
+        await prisma.memoryVersion.deleteMany({ where: { memoryId: { in: batch } } });
+        await prisma.relationship.deleteMany({
           where: {
             OR: [
               { fromId: { in: batch } },
@@ -616,9 +613,7 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [] }) {
             ],
           },
         });
-        console.log(`[account-delete]   relationships deleted: ${r6.count}`);
-
-        const r7 = await prisma.derivationJob.deleteMany({
+        await prisma.derivationJob.deleteMany({
           where: {
             OR: [
               { sourceMemoryId: { in: batch } },
@@ -626,60 +621,59 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [] }) {
             ],
           },
         });
-        console.log(`[account-delete]   derivationJobs deleted: ${r7.count}`);
+        await prisma.memory.deleteMany({ where: { id: { in: batch } } });
 
-        const r8 = await prisma.memory.deleteMany({
-          where: { id: { in: batch } },
-        });
-        console.log(`[account-delete] ✓ Batch ${batchNum} done — ${r8.count} memories deleted`);
+        emit(batchPct, `Deleted memory batch ${batchNum}/${totalBatches} (${batch.length} memories)`);
       }
+    } else {
+      emit(70, 'No memories to delete');
     }
 
-    const r9 = await prisma.platformIntegration.deleteMany({ where: { userId } });
-    console.log('[account-delete] ✓ platformIntegrations deleted:', r9.count);
+    await prisma.platformIntegration.deleteMany({ where: { userId } });
+    emit(75, 'Deleted integrations');
 
-    const r10 = await prisma.apiKey.deleteMany({ where: { userId } });
-    console.log('[account-delete] ✓ apiKeys deleted:', r10.count);
+    await prisma.apiKey.deleteMany({ where: { userId } });
+    emit(78, 'Deleted API keys');
 
-    const r11 = await prisma.dataExportRequest.deleteMany({ where: { userId } });
-    console.log('[account-delete] ✓ dataExportRequests deleted:', r11.count);
+    await prisma.dataExportRequest.deleteMany({ where: { userId } });
+    await prisma.syncLog.deleteMany({ where: { userId } });
+    emit(80, 'Deleted export requests & sync logs');
 
-    const r12 = await prisma.syncLog.deleteMany({ where: { userId } });
-    console.log('[account-delete] ✓ syncLogs deleted:', r12.count);
+    await prisma.session.deleteMany({ where: { userId } });
+    emit(83, 'Deleted sessions');
 
-    const r13 = await prisma.session.deleteMany({ where: { userId } });
-    console.log('[account-delete] ✓ sessions deleted:', r13.count);
+    await prisma.userOrganization.deleteMany({ where: { userId } });
+    emit(85, 'Deleted org memberships');
 
-    const r14 = await prisma.userOrganization.deleteMany({ where: { userId } });
-    console.log('[account-delete] ✓ userOrganizations deleted:', r14.count);
-
-    const r15 = await prisma.auditLog.updateMany({
+    await prisma.auditLog.updateMany({
       where: { userId },
       data: { userId: null },
     });
-    console.log('[account-delete] ✓ auditLog.userId nullified:', r15.count);
+    emit(88, 'Anonymized audit logs');
 
     await prisma.user.delete({ where: { id: userId } });
-    console.log('[account-delete] ✓ user record deleted');
+    emit(90, 'Deleted user record');
 
     await purgeUserVectors(userId);
-    console.log('[account-delete] ✓ Qdrant vectors purged');
+    emit(95, 'Purged vector embeddings');
 
     if (Array.isArray(orgIdsToDelete) && orgIdsToDelete.length) {
       try {
-        const r16 = await prisma.organization.deleteMany({
+        await prisma.organization.deleteMany({
           where: { id: { in: orgIdsToDelete } },
         });
-        console.log('[account-delete] ✓ orphan orgs deleted:', r16.count);
       } catch (error) {
         console.warn('[account-delete] ⚠ Orphan org cleanup skipped:', error.message);
       }
     }
 
-    console.log('[account-delete] ✅ Complete deletion finished in', Date.now() - t0, 'ms for userId:', userId);
+    emit(100, 'Account deleted');
+    console.log('[account-delete] ✅ Finished in', Date.now() - t0, 'ms for userId:', userId);
+    return { ok: true };
   } catch (error) {
-    console.error('[account-delete] ✗ Background deletion FAILED at', Date.now() - t0, 'ms:', error.message);
+    console.error('[account-delete] ✗ FAILED at', Date.now() - t0, 'ms:', error.message);
     console.error('[account-delete] Stack:', error.stack);
+    return { ok: false, error: error.message };
   }
 }
 
@@ -1710,17 +1704,57 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, deletionCheck, deletionCheck.status || 409);
     }
 
-    console.log('[account-delete] ✓ Validation passed — destroying session, scheduling deletion');
+    console.log('[account-delete] ✓ Validation passed — destroying session, starting deletion');
     await sessionStore.destroySession(current.sessionId);
-    void performAccountDeletion({
+
+    // Check if client wants SSE streaming (Accept: text/event-stream)
+    const wantsSSE = (req.headers.accept || '').includes('text/event-stream') || body.stream === true;
+
+    if (wantsSSE) {
+      // SSE streaming delete with progress
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'Set-Cookie': clearSessionCookie(),
+      });
+
+      const sendEvent = (data) => {
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
+      };
+
+      const result = await performAccountDeletion({
+        userId: user.id,
+        orgIdsToDelete: deletionCheck.orgIdsToDelete || [],
+        onProgress: (pct, step) => {
+          sendEvent({ progress: pct, step, userId: user.id });
+        },
+      });
+
+      if (result.ok) {
+        sendEvent({ progress: 100, step: 'Account deleted', done: true, success: true });
+      } else {
+        sendEvent({ progress: -1, step: result.error, done: true, success: false, error: result.error });
+      }
+      res.end();
+      return;
+    }
+
+    // Non-streaming: wait for completion, return final result
+    const result = await performAccountDeletion({
       userId: user.id,
       orgIdsToDelete: deletionCheck.orgIdsToDelete || [],
     });
 
-    console.log('[account-delete] ✓ Response sent — deletion scheduled for user:', user.email);
+    if (!result.ok) {
+      return jsonResponse(res, { error: result.error, status: 'failed' }, 500, {
+        'Set-Cookie': clearSessionCookie(),
+      });
+    }
+
     return jsonResponse(res, {
       success: true,
-      status: 'scheduled',
+      status: 'completed',
       deleted_user_id: user.id,
       deleted_email: user.email,
       deleted_org_ids: deletionCheck.orgIdsToDelete || [],

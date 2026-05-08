@@ -405,6 +405,16 @@ function generateToolsManifest(userId, orgId, options = {}) {
   const hasWebCrawl = hasAll || scopes.includes('web_crawl');
   const hasAnyWeb = hasWebSearch || hasWebCrawl;
 
+  // Coding scope: explicit grant OR auto-grant via known coding-platform connectors.
+  // Power users can override by adding 'coding' to scopes (force on) or '!coding' (force off).
+  const CODING_PLATFORM_KEYWORDS = ['cursor', 'claude', 'vscode', 'copilot', 'continue', 'cody', 'zed', 'windsurf'];
+  const platform = (options.platform || '').toLowerCase();
+  const platformIsCoding = !!platform && CODING_PLATFORM_KEYWORDS.some(kw => platform.includes(kw));
+  const hasCoding =
+    hasAll ||
+    scopes.includes('coding') ||
+    (platformIsCoding && !scopes.includes('!coding'));
+
   const tools = [
     {
       name: 'hivemind_save_memory',
@@ -667,6 +677,234 @@ function generateToolsManifest(userId, orgId, options = {}) {
       }
     },
   ];
+
+  // ── Coding Intelligence tools (platform/scope-gated) ───────
+  if (hasCoding) {
+    tools.push(
+    {
+      name: 'hivemind_ingest_code',
+      description: 'Save a code file or snippet to HIVE-MIND memory with auto-detected language and structural metadata. Use after editing files so future sessions can recall the codebase context. The AI coding assistant should call this after writing or significantly modifying any file.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          file_path: {
+            type: 'string',
+            description: 'Absolute or relative path to the file (e.g., src/auth/middleware.ts)'
+          },
+          content: {
+            type: 'string',
+            description: 'Full file content or relevant snippet'
+          },
+          summary: {
+            type: 'string',
+            description: 'Human-readable summary of what this code does (1-3 sentences)'
+          },
+          project: {
+            type: 'string',
+            description: 'Project this file belongs to'
+          },
+          tags: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Additional tags (e.g., ["auth", "middleware", "jwt"])'
+          },
+          related_to: {
+            type: 'string',
+            description: 'Memory ID of previous version of this file (for update tracking)'
+          }
+        },
+        required: ['file_path', 'content']
+      }
+    },
+    {
+      name: 'hivemind_recall_bugs',
+      description: 'Recall past bug patterns, fixes, and gotchas related to the current code context. Use before writing code in an area to avoid repeating known bugs. Returns relevant bug memories with fix context.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          context: {
+            type: 'string',
+            description: 'Describe what you are about to implement or the error you are seeing (e.g., "Prisma deleteMany with large IN arrays", "JWT expiry check")'
+          },
+          file_path: {
+            type: 'string',
+            description: 'File currently being edited (used to narrow search)'
+          },
+          project: {
+            type: 'string',
+            description: 'Project filter'
+          },
+          limit: {
+            type: 'integer',
+            description: 'Max results',
+            default: 5,
+            minimum: 1,
+            maximum: 20
+          }
+        },
+        required: ['context']
+      }
+    },
+    {
+      name: 'hivemind_log_decision',
+      description: 'Save an architectural or technical decision to HIVE-MIND. Use when you choose between options (e.g., library choice, algorithm, API design). This creates a permanent decision record that future sessions can recall with hivemind_why_code.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          title: {
+            type: 'string',
+            description: 'Short decision title (e.g., "Use SSE instead of WebSocket for delete progress")'
+          },
+          decision: {
+            type: 'string',
+            description: 'What was decided'
+          },
+          rationale: {
+            type: 'string',
+            description: 'Why this decision was made'
+          },
+          alternatives: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Options that were considered but not chosen'
+          },
+          affected_files: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Files impacted by this decision'
+          },
+          project: {
+            type: 'string',
+            description: 'Project this decision belongs to'
+          },
+          tags: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Tags for categorizing (e.g., ["api-design", "performance", "security"])'
+          },
+          related_to: {
+            type: 'string',
+            description: 'Memory ID of earlier related decision (creates decision chain)'
+          }
+        },
+        required: ['title', 'decision', 'rationale']
+      }
+    },
+    {
+      name: 'hivemind_track_refactor',
+      description: 'Record a code refactoring or rename so future sessions understand how code evolved. Creates a DERIVE relationship between old and new versions. Use after renames, moves, splits, or significant restructuring.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          refactor_type: {
+            type: 'string',
+            enum: ['rename', 'move', 'split', 'merge', 'restructure', 'extract'],
+            description: 'Type of refactoring performed'
+          },
+          old_name: {
+            type: 'string',
+            description: 'Original name, path, or identifier'
+          },
+          new_name: {
+            type: 'string',
+            description: 'New name, path, or identifier'
+          },
+          reason: {
+            type: 'string',
+            description: 'Why this refactoring was done'
+          },
+          affected_files: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'List of files changed'
+          },
+          project: {
+            type: 'string',
+            description: 'Project this refactoring belongs to'
+          },
+          related_to: {
+            type: 'string',
+            description: 'Memory ID of the original code memory (will create DERIVE relationship)'
+          }
+        },
+        required: ['refactor_type', 'old_name', 'new_name', 'reason']
+      }
+    },
+    {
+      name: 'hivemind_test_coverage',
+      description: 'Save or recall test coverage information for functions/modules. Use to record which functions have tests (and what those tests cover), or to recall coverage before modifying code.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          action: {
+            type: 'string',
+            enum: ['save', 'recall'],
+            description: 'save: store coverage info. recall: retrieve coverage for a function/file'
+          },
+          function_name: {
+            type: 'string',
+            description: 'Function, class, or module name'
+          },
+          file_path: {
+            type: 'string',
+            description: 'File path containing the function'
+          },
+          test_file: {
+            type: 'string',
+            description: 'Path to test file (for save action)'
+          },
+          test_cases: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'List of test case descriptions (for save action)'
+          },
+          coverage_pct: {
+            type: 'number',
+            description: 'Coverage percentage if known (for save action)'
+          },
+          project: {
+            type: 'string',
+            description: 'Project filter'
+          }
+        },
+        required: ['action', 'function_name']
+      }
+    },
+    {
+      name: 'hivemind_why_code',
+      description: 'Ask "why does this code exist/work this way?" — returns relevant decisions, bug fixes, and historical context for a piece of code. Use before modifying code you did not write or do not remember the context for.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'What you want to understand (e.g., "why is batch size 5000 in delete account", "why use SSE not polling")'
+          },
+          file_path: {
+            type: 'string',
+            description: 'File path for narrowing context'
+          },
+          function_name: {
+            type: 'string',
+            description: 'Function or class name for narrowing context'
+          },
+          project: {
+            type: 'string',
+            description: 'Project filter'
+          },
+          limit: {
+            type: 'integer',
+            description: 'Max context memories to retrieve',
+            default: 8,
+            minimum: 1,
+            maximum: 20
+          }
+        },
+        required: ['query']
+      }
+    }
+    );
+  }
 
   // ── Web Intelligence tools (scope-gated) ──────────────────
   if (hasWebSearch) {
@@ -1333,7 +1571,7 @@ export async function getHostedServerByToken(token, userId) {
       token: connection.token,
       expiresAt: connection.expiresAt
     },
-    tools: generateToolsManifest(userId, connection.orgId, { scopes: connection.scopes || ['*'] }),
+    tools: generateToolsManifest(userId, connection.orgId, { scopes: connection.scopes || ['*'], platform: connection.platform }),
     resources: generateResourcesManifest(userId, connection.orgId),
     prompts: generatePromptsManifest(userId, connection.orgId),
     clientConfig: generateClientConfig(userId, connection.orgId, connection.token),
@@ -1377,7 +1615,7 @@ export function handleInitialize(params, userId, orgId) {
  */
 export function handleToolsList(userId, orgId, options = {}) {
   return {
-    tools: generateToolsManifest(userId, orgId, { scopes: options.scopes })
+    tools: generateToolsManifest(userId, orgId, { scopes: options.scopes, platform: options.platform })
   };
 }
 
@@ -1856,6 +2094,213 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
         return formatToolContent(res);
       }
 
+      // ── Coding Intelligence handlers ──────────────────────
+      case 'hivemind_ingest_code': {
+        const filePath = normalizeMemoryText(args.file_path);
+        const content = normalizeMemoryText(args.content);
+        if (!filePath) throw new Error('hivemind_ingest_code requires file_path');
+        if (!content) throw new Error('hivemind_ingest_code requires content');
+
+        const ext = (filePath.match(/\.([a-z0-9]+)$/i) || [])[1] || 'unknown';
+        const langMap = { ts: 'typescript', tsx: 'typescript', js: 'javascript', jsx: 'javascript', py: 'python', rs: 'rust', go: 'go', java: 'java', kt: 'kotlin', swift: 'swift', rb: 'ruby', php: 'php', cs: 'csharp', cpp: 'cpp', c: 'c', sql: 'sql', sh: 'bash' };
+        const language = langMap[ext.toLowerCase()] || ext.toLowerCase();
+
+        const lineCount = content.split('\n').length;
+        const summary = normalizeMemoryText(args.summary, '') || `${language} file: ${filePath} (${lineCount} lines)`;
+
+        return formatToolContent(await apiClient.post('/api/memories', {
+          title: `code: ${filePath}`,
+          content: `${summary}\n\n--- ${filePath} ---\n${content}`,
+          memory_type: 'fact',
+          source_platform: 'mcp',
+          tags: [...normalizeTags(args.tags), 'code', language, `file:${filePath}`],
+          project: normalizeMemoryText(args.project, null) || null,
+          relationship: args.related_to ? buildRelationship('update', args.related_to) : undefined,
+          metadata: {
+            source_type: 'code',
+            file_path: filePath,
+            language,
+            line_count: lineCount
+          },
+          user_id: userId,
+          org_id: orgId
+        }));
+      }
+
+      case 'hivemind_recall_bugs': {
+        const ctx = normalizeMemoryText(args.context);
+        if (!ctx) throw new Error('hivemind_recall_bugs requires context');
+        const tagFilter = ['bug', 'fix', 'gotcha'];
+        if (args.file_path) tagFilter.push(`file:${args.file_path}`);
+
+        const recallResult = await apiClient.post('/api/recall', {
+          query_context: `bug fix gotcha: ${ctx}`,
+          tags: tagFilter,
+          project: args.project || null,
+          max_memories: Math.min(args.limit || 5, 20)
+        });
+
+        return formatToolContent({
+          memories: recallResult.memories || [],
+          injection_text: recallResult.injectionText || recallResult.injection_text || null,
+          query_context: ctx,
+          filter_tags: tagFilter
+        });
+      }
+
+      case 'hivemind_log_decision': {
+        const title = normalizeMemoryText(args.title);
+        const decision = normalizeMemoryText(args.decision);
+        const rationale = normalizeMemoryText(args.rationale);
+        if (!title) throw new Error('hivemind_log_decision requires title');
+        if (!decision) throw new Error('hivemind_log_decision requires decision');
+        if (!rationale) throw new Error('hivemind_log_decision requires rationale');
+
+        const alts = Array.isArray(args.alternatives) ? args.alternatives : [];
+        const files = Array.isArray(args.affected_files) ? args.affected_files : [];
+
+        const body = [
+          `Decision: ${decision}`,
+          `Rationale: ${rationale}`,
+          alts.length ? `Alternatives considered:\n- ${alts.join('\n- ')}` : null,
+          files.length ? `Affected files:\n- ${files.join('\n- ')}` : null
+        ].filter(Boolean).join('\n\n');
+
+        return formatToolContent(await apiClient.post('/api/memories', {
+          title,
+          content: body,
+          memory_type: 'decision',
+          source_platform: 'mcp',
+          tags: [...normalizeTags(args.tags), 'decision', ...files.map(f => `file:${f}`)],
+          project: normalizeMemoryText(args.project, null) || null,
+          relationship: args.related_to ? buildRelationship('extend', args.related_to) : undefined,
+          metadata: {
+            source_type: 'decision',
+            alternatives: alts,
+            affected_files: files
+          },
+          user_id: userId,
+          org_id: orgId
+        }));
+      }
+
+      case 'hivemind_track_refactor': {
+        const refactorType = normalizeMemoryText(args.refactor_type);
+        const oldName = normalizeMemoryText(args.old_name);
+        const newName = normalizeMemoryText(args.new_name);
+        const reason = normalizeMemoryText(args.reason);
+        if (!refactorType || !oldName || !newName || !reason) {
+          throw new Error('hivemind_track_refactor requires refactor_type, old_name, new_name, reason');
+        }
+        const files = Array.isArray(args.affected_files) ? args.affected_files : [];
+
+        return formatToolContent(await apiClient.post('/api/memories', {
+          title: `refactor (${refactorType}): ${oldName} → ${newName}`,
+          content: `Refactor type: ${refactorType}\nFrom: ${oldName}\nTo: ${newName}\nReason: ${reason}${files.length ? `\nAffected files:\n- ${files.join('\n- ')}` : ''}`,
+          memory_type: 'event',
+          source_platform: 'mcp',
+          tags: ['refactor', refactorType, ...files.map(f => `file:${f}`)],
+          project: normalizeMemoryText(args.project, null) || null,
+          relationship: args.related_to ? buildRelationship('derive', args.related_to) : undefined,
+          metadata: {
+            source_type: 'code',
+            refactor_type: refactorType,
+            old_name: oldName,
+            new_name: newName,
+            affected_files: files
+          },
+          user_id: userId,
+          org_id: orgId
+        }));
+      }
+
+      case 'hivemind_test_coverage': {
+        const action = args.action;
+        const fnName = normalizeMemoryText(args.function_name);
+        if (!fnName) throw new Error('hivemind_test_coverage requires function_name');
+
+        if (action === 'save') {
+          const cases = Array.isArray(args.test_cases) ? args.test_cases : [];
+          const tags = ['test-coverage', `fn:${fnName}`];
+          if (args.file_path) tags.push(`file:${args.file_path}`);
+          if (args.test_file) tags.push(`testfile:${args.test_file}`);
+
+          return formatToolContent(await apiClient.post('/api/memories', {
+            title: `test coverage: ${fnName}`,
+            content: `Function: ${fnName}\nFile: ${args.file_path || 'unknown'}\nTest file: ${args.test_file || 'unknown'}\nCoverage: ${args.coverage_pct ?? 'unknown'}%\nTest cases:\n- ${cases.join('\n- ') || 'none specified'}`,
+            memory_type: 'fact',
+            source_platform: 'mcp',
+            tags,
+            project: normalizeMemoryText(args.project, null) || null,
+            metadata: {
+              source_type: 'code',
+              function_name: fnName,
+              file_path: args.file_path || null,
+              test_file: args.test_file || null,
+              test_cases: cases,
+              coverage_pct: typeof args.coverage_pct === 'number' ? args.coverage_pct : null
+            },
+            user_id: userId,
+            org_id: orgId
+          }));
+        }
+
+        // recall
+        const tagFilter = ['test-coverage', `fn:${fnName}`];
+        if (args.file_path) tagFilter.push(`file:${args.file_path}`);
+        const recallResult = await apiClient.post('/api/recall', {
+          query_context: `test coverage for ${fnName}`,
+          tags: tagFilter,
+          project: args.project || null,
+          max_memories: 10
+        });
+        return formatToolContent({
+          memories: recallResult.memories || [],
+          function_name: fnName,
+          filter_tags: tagFilter
+        });
+      }
+
+      case 'hivemind_why_code': {
+        const query = normalizeMemoryText(args.query);
+        if (!query) throw new Error('hivemind_why_code requires query');
+
+        const tags = [];
+        if (args.file_path) tags.push(`file:${args.file_path}`);
+        if (args.function_name) tags.push(`fn:${args.function_name}`);
+
+        // Pull decisions, code, refactor history, and bug fixes for this code path.
+        const recallResult = await apiClient.post('/api/recall', {
+          query_context: `why: ${query}`,
+          tags,
+          project: args.project || null,
+          max_memories: Math.min(args.limit || 8, 20)
+        });
+
+        const memories = recallResult.memories || [];
+        const decisions = memories.filter(m => m.memory_type === 'decision' || (m.tags || []).includes('decision'));
+        const refactors = memories.filter(m => (m.tags || []).includes('refactor'));
+        const bugs = memories.filter(m => (m.tags || []).includes('bug') || (m.tags || []).includes('fix'));
+        const codeRefs = memories.filter(m => (m.tags || []).includes('code'));
+
+        return formatToolContent({
+          query,
+          memories,
+          summary: {
+            decisions: decisions.length,
+            refactors: refactors.length,
+            bugs: bugs.length,
+            code_refs: codeRefs.length,
+            total: memories.length
+          },
+          decisions,
+          refactors,
+          bugs,
+          code_refs: codeRefs,
+          injection_text: recallResult.injectionText || recallResult.injection_text || null
+        });
+      }
+
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
@@ -1924,7 +2369,9 @@ export function setupHostedMcpRoutes(app, authMiddleware) {
           break;
 
         case 'tools/list':
-          result = handleToolsList(userId, req.headers['x-org-id']);
+          result = handleToolsList(userId, req.headers['x-org-id'], {
+            platform: req.headers['x-mcp-platform'] || req.headers['x-client-platform'] || (req.headers['user-agent'] || '').toLowerCase()
+          });
           break;
 
         case 'tools/call':

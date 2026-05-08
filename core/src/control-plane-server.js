@@ -796,7 +796,7 @@ async function getOrCreateSessionKey(userId, orgId) {
       userId,
       orgId,
       name: 'auto-session',
-      scopes: ['memory', 'search', 'web_search', 'web_crawl', 'mcp', 'admin'],
+      scopes: ['memory', 'search', 'web_search', 'web_crawl', 'mcp', 'admin', 'coding'],
     });
 
     // Store raw key in description for future bootstrap calls
@@ -1638,7 +1638,7 @@ const server = http.createServer(async (req, res) => {
       orgId: current.session.orgId || null,
       name: body.name || 'Primary API Key',
       description: body.description || null,
-      scopes: Array.isArray(body.scopes) && body.scopes.length ? body.scopes : ['memory:read', 'memory:write', 'mcp'],
+      scopes: Array.isArray(body.scopes) && body.scopes.length ? body.scopes : ['memory:read', 'memory:write', 'mcp', 'coding'],
       expiresAt: body.expires_at ? new Date(body.expires_at) : null,
       rateLimitPerMinute: body.rate_limit_per_minute || 60,
       createdByIp: req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || null,

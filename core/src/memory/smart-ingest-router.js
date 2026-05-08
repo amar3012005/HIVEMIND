@@ -11,6 +11,7 @@
 
 import { deduplicateResults } from '../search/result-dedup.js';
 import { ContentNormalizer } from './content-normalizer.js';
+import { detectContentType, CHUNK_STRATEGY_MAP } from './content-type-detector.js';
 import { buildSemanticMetadata, inferMemorySemanticRole, normalizeRelationshipDescriptor } from './relationship-semantics.js';
 
 const SIMILARITY_UPDATE_THRESHOLD = 0.88;   // >this → Updates (supersede)
@@ -75,12 +76,34 @@ export class SmartIngestRouter {
       ''
     ).toLowerCase();
 
+    // Explicit platform metadata takes priority
     if (platform.includes('gmail') || platform.includes('google_mail') || platform.includes('email')) return 'gmail';
     if (platform.includes('claude') || platform.includes('anthropic')) return 'claude';
     if (platform.includes('notion') || platform.includes('obsidian') || platform.includes('document') || platform.includes('pdf') || platform.includes('knowledge')) return 'knowledge_base';
     if (platform.includes('github') || platform.includes('gitlab') || platform.includes('code')) return 'github';
     if (platform.includes('slack') || platform.includes('teams') || platform.includes('discord')) return 'slack';
     if (platform.includes('chat') || platform.includes('talk-to-hive') || platform.includes('conversation')) return 'chat';
+
+    // No explicit platform — auto-detect from content
+    if (platform === '' || platform === 'manual') {
+      const content = payload.content || '';
+      if (content.length > 0) {
+        const detection = detectContentType(content);
+        if (detection.confidence >= 0.70) {
+          payload.metadata = {
+            ...(payload.metadata || {}),
+            auto_detected_type: detection.detectedType,
+            detection_confidence: detection.confidence,
+            detection_signals: detection.signals,
+          };
+          if (!payload.memory_type) {
+            payload.memory_type = detection.suggestedMemoryType;
+          }
+          return detection.suggestedRoute;
+        }
+      }
+    }
+
     return 'manual';
   }
 
@@ -153,29 +176,30 @@ export class SmartIngestRouter {
   // --- Knowledge base documents ---
   async _routeKnowledgeBase(payload) {
     const content = payload.content || '';
+    const chunkStrategy = payload.metadata?.suggestedChunkStrategy
+      || payload.metadata?.auto_detected_type && CHUNK_STRATEGY_MAP[payload.metadata.auto_detected_type]
+      || 'heading_hierarchy';
 
-    // Split into chunks at heading markers or double newlines
-    const chunkSize = 1500; // chars
-    const rawChunks = this._chunkDocument(content, chunkSize);
+    const rawChunks = this._chunkByStrategy(content, chunkStrategy);
 
-    // Only chunk if document is large enough
     if (rawChunks.length <= 1) {
       return [{
         ...payload,
         memory_type: payload.memory_type || 'fact',
-        metadata: { ...payload.metadata, source_type_normalized: 'knowledge_base' }
+        metadata: { ...payload.metadata, source_type_normalized: 'knowledge_base', chunk_strategy: chunkStrategy }
       }];
     }
 
     return rawChunks.map((chunk, i) => ({
       ...payload,
-      id: undefined, // let graph-engine assign new IDs
+      id: undefined,
       content: chunk,
       title: payload.title ? `${payload.title} (part ${i + 1}/${rawChunks.length})` : undefined,
       memory_type: payload.memory_type || 'fact',
       metadata: {
         ...payload.metadata,
         source_type_normalized: 'knowledge_base',
+        chunk_strategy: chunkStrategy,
         chunk_index: i,
         chunk_total: rawChunks.length,
         parent_title: payload.title || null,
@@ -467,5 +491,200 @@ export class SmartIngestRouter {
     }
     if (current.trim()) chunks.push(current.trim());
     return chunks.length > 0 ? chunks : [content];
+  }
+
+  _chunkByStrategy(content, strategy) {
+    const MAX_CHUNK = 2000;
+    const MIN_CHUNK = 50;
+
+    switch (strategy) {
+      case 'heading_hierarchy':
+        return this._chunkByHeadings(content, MAX_CHUNK);
+
+      case 'paragraph_split':
+        return this._chunkByParagraphs(content, MAX_CHUNK);
+
+      case 'turn_pairs':
+        return this._chunkByTurns(content);
+
+      case 'row_batches':
+        return this._chunkByRows(content, 50);
+
+      case 'key_sections':
+        return this._chunkByKeyStructure(content, MAX_CHUNK);
+
+      case 'article_structure':
+        return this._chunkByHtmlSections(content, MAX_CHUNK);
+
+      case 'page_sections':
+      case 'ast_boundaries':
+      case 'thread_grouped':
+      case 'single':
+      default:
+        return this._chunkDocument(content, MAX_CHUNK);
+    }
+  }
+
+  _chunkByHeadings(content, maxChars) {
+    const sections = content.split(/(?=^#{1,6}\s)/m).filter(s => s.trim().length > 30);
+    if (sections.length <= 1) return this._chunkByParagraphs(content, maxChars);
+
+    const chunks = [];
+    let current = '';
+    for (const section of sections) {
+      if (current.length + section.length > maxChars && current.length > 0) {
+        chunks.push(current.trim());
+        current = section;
+      } else {
+        current += (current ? '\n\n' : '') + section;
+      }
+    }
+    if (current.trim()) chunks.push(current.trim());
+    return chunks.length > 0 ? chunks : [content];
+  }
+
+  _chunkByParagraphs(content, maxChars) {
+    const paragraphs = content.split(/\n\n+/).filter(p => p.trim().length > 20);
+    if (paragraphs.length <= 1) return [content];
+
+    const chunks = [];
+    let current = '';
+    for (const para of paragraphs) {
+      if (current.length + para.length > maxChars && current.length > 0) {
+        chunks.push(current.trim());
+        current = para;
+      } else {
+        current += (current ? '\n\n' : '') + para;
+      }
+    }
+    if (current.trim()) chunks.push(current.trim());
+    return chunks.length > 0 ? chunks : [content];
+  }
+
+  _chunkByTurns(content) {
+    // Split conversation into User+Assistant turn pairs
+    const turnPattern = /^(User|Human|You|Me|Assistant|AI|Claude|Bot|GPT|System):\s*/gim;
+    const parts = content.split(/(?=^(?:User|Human|You|Me):\s)/gim).filter(p => p.trim().length > 20);
+
+    if (parts.length <= 1) return [content];
+
+    // Group into pairs (user turn + assistant response)
+    const chunks = [];
+    let current = '';
+    for (const part of parts) {
+      const isUserTurn = /^(User|Human|You|Me):\s/i.test(part.trim());
+      if (isUserTurn && current.length > 0) {
+        chunks.push(current.trim());
+        current = part;
+      } else {
+        current += (current ? '\n' : '') + part;
+      }
+    }
+    if (current.trim()) chunks.push(current.trim());
+    return chunks.length > 0 ? chunks : [content];
+  }
+
+  _chunkByRows(content, rowsPerChunk) {
+    const lines = content.split('\n').filter(l => l.trim());
+    if (lines.length <= rowsPerChunk) return [content];
+
+    // Keep header row with each chunk
+    const header = lines[0];
+    const dataRows = lines.slice(1);
+    const chunks = [];
+
+    for (let i = 0; i < dataRows.length; i += rowsPerChunk) {
+      const batch = dataRows.slice(i, i + rowsPerChunk);
+      chunks.push(header + '\n' + batch.join('\n'));
+    }
+    return chunks.length > 0 ? chunks : [content];
+  }
+
+  _chunkByKeyStructure(content, maxChars) {
+    // For JSON/YAML: split by top-level keys
+    const trimmed = content.trimStart();
+
+    // JSON: split by top-level object keys
+    if (trimmed.startsWith('{')) {
+      try {
+        const obj = JSON.parse(trimmed);
+        const keys = Object.keys(obj);
+        if (keys.length <= 1) return [content];
+
+        const chunks = [];
+        let current = {};
+        let currentSize = 0;
+
+        for (const key of keys) {
+          const entry = JSON.stringify({ [key]: obj[key] }, null, 2);
+          if (currentSize + entry.length > maxChars && currentSize > 0) {
+            chunks.push(JSON.stringify(current, null, 2));
+            current = {};
+            currentSize = 0;
+          }
+          current[key] = obj[key];
+          currentSize += entry.length;
+        }
+        if (Object.keys(current).length > 0) {
+          chunks.push(JSON.stringify(current, null, 2));
+        }
+        return chunks.length > 0 ? chunks : [content];
+      } catch {
+        return this._chunkByParagraphs(content, maxChars);
+      }
+    }
+
+    // YAML: split by top-level keys (lines starting with non-whitespace + colon)
+    const yamlSections = content.split(/(?=^[a-zA-Z_][a-zA-Z0-9_]*:\s)/m).filter(s => s.trim().length > 10);
+    if (yamlSections.length > 1) {
+      const chunks = [];
+      let current = '';
+      for (const section of yamlSections) {
+        if (current.length + section.length > maxChars && current.length > 0) {
+          chunks.push(current.trim());
+          current = section;
+        } else {
+          current += (current ? '\n' : '') + section;
+        }
+      }
+      if (current.trim()) chunks.push(current.trim());
+      return chunks.length > 0 ? chunks : [content];
+    }
+
+    return this._chunkByParagraphs(content, maxChars);
+  }
+
+  _chunkByHtmlSections(content, maxChars) {
+    // Strip tags, split by heading-like elements
+    const stripped = content
+      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+      .replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, '')
+      .replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, '')
+      .replace(/<header[^>]*>[\s\S]*?<\/header>/gi, '');
+
+    // Split at heading tags
+    const sections = stripped.split(/(?=<h[1-6][^>]*>)/i).filter(s => s.trim().length > 30);
+
+    if (sections.length <= 1) {
+      // Fallback: strip all tags and chunk as paragraphs
+      const text = content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      return this._chunkByParagraphs(text, maxChars);
+    }
+
+    const chunks = [];
+    let current = '';
+    for (const section of sections) {
+      const text = section.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      if (text.length < 20) continue;
+      if (current.length + text.length > maxChars && current.length > 0) {
+        chunks.push(current.trim());
+        current = text;
+      } else {
+        current += (current ? '\n\n' : '') + text;
+      }
+    }
+    if (current.trim()) chunks.push(current.trim());
+    return chunks.length > 0 ? chunks : [content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()];
   }
 }

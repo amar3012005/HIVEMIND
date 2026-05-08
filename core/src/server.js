@@ -249,6 +249,7 @@ const ingestTracker = new IngestTracker();
 const persistentMemoryStore = prisma ? new PrismaGraphStore(prisma) : null;
 const persistentMemoryEngine = persistentMemoryStore ? new MemoryGraphEngine({
   store: persistentMemoryStore,
+  vectorStore: null, // Qdrant client injected after initialization (see below)
   predictCalibrate: true,
   predictCalibrateOptions: {
     strongMatchThreshold: 0.70,
@@ -728,6 +729,10 @@ const groqClient = getGroqClient();
 
 // Inject qdrantClient into TARA handler (created before qdrantClient was available)
 if (taraHandler) taraHandler.qdrantClient = qdrantClient;
+
+// Inject qdrantClient into MemoryGraphEngine for semantic similarity during ingestion
+// (triple operator detection: Updates/Extends/Derives need vector search, not just FTS)
+if (persistentMemoryEngine) persistentMemoryEngine.vectorStore = qdrantClient;
 
 // Initialize Three-Tier Retrieval
 const threeTierRetrieval = new ThreeTierRetrieval({

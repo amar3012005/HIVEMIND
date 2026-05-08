@@ -327,6 +327,7 @@ export class InMemoryGraphStore {
 export class MemoryGraphEngine {
   constructor({
     store,
+    vectorStore = null,
     conflictDetector = new ConflictDetector(),
     relationshipClassifier = new RelationshipClassifier({ conflictDetector }),
     deriveThreshold = 0.75,
@@ -338,6 +339,7 @@ export class MemoryGraphEngine {
     }
 
     this.store = store;
+    this.vectorStore = vectorStore; // Qdrant client for semantic similarity search
     this.conflictDetector = conflictDetector;
     this.relationshipClassifier = relationshipClassifier;
     this.deriveThreshold = deriveThreshold;
@@ -366,22 +368,76 @@ export class MemoryGraphEngine {
         const latestMemories = await store.listLatestMemories(baseMemory);
 
         // --- Smart Ingest: search-first duplicate/update detection ---
+        // Uses Qdrant semantic vector search when available (finds paraphrased/reformulated
+        // memories that keyword search misses), falls back to FTS otherwise.
         if (input.smartIngest !== false && !input.skipPredictCalibrate) {
           try {
-            const similar = await store.searchMemories({
-              query: baseMemory.content.slice(0, 500),
-              user_id: baseMemory.user_id,
-              org_id: baseMemory.org_id,
-              project: baseMemory.project,
-              n_results: 3,
-              is_latest: true,
-            });
+            let similar = [];
 
+            // Prefer Qdrant semantic search — finds semantically similar memories
+            // even when wording differs (e.g. "favorite color blue" ↔ "user prefers blue")
+            if (this.vectorStore) {
+              try {
+                const qdrantFilter = {
+                  must: [
+                    { key: 'user_id', match: { value: baseMemory.user_id } },
+                    { key: 'is_latest', match: { value: true } },
+                  ],
+                };
+                if (baseMemory.org_id) {
+                  qdrantFilter.must.push({ key: 'org_id', match: { value: baseMemory.org_id } });
+                }
+                if (baseMemory.project) {
+                  qdrantFilter.must.push({ key: 'project', match: { value: baseMemory.project } });
+                }
+
+                const vectorResults = await this.vectorStore.searchMemories({
+                  query: baseMemory.content.slice(0, 500),
+                  filter: qdrantFilter,
+                  limit: 5,
+                  score_threshold: 0.45,
+                });
+
+                // Normalize Qdrant results to match store.searchMemories format
+                similar = vectorResults.map(r => ({
+                  id: r.id,
+                  content: r.payload?.content || '',
+                  title: r.payload?.title || null,
+                  tags: r.payload?.tags || [],
+                  memory_type: r.payload?.memory_type,
+                  project: r.payload?.project,
+                  score: r.score,
+                  _searchMethod: 'qdrant_vector',
+                }));
+              } catch (qdrantErr) {
+                console.warn('[smart-ingest] Qdrant vector search failed, falling back to FTS:', qdrantErr.message);
+              }
+            }
+
+            // Fallback: FTS/token similarity from PostgreSQL
+            if (similar.length === 0) {
+              similar = await store.searchMemories({
+                query: baseMemory.content.slice(0, 500),
+                user_id: baseMemory.user_id,
+                org_id: baseMemory.org_id,
+                project: baseMemory.project,
+                n_results: 5,
+                is_latest: true,
+              });
+            }
+
+            // Use lower threshold for Qdrant (0.65) vs FTS (0.85) — vector scores
+            // are calibrated differently and semantically meaningful at lower values
+            const isVectorSearch = similar[0]?._searchMethod === 'qdrant_vector';
+            const similarityThreshold = isVectorSearch ? 0.65 : 0.85;
             const topMatch = similar[0];
-            if (topMatch && topMatch.score > 0.85) {
+
+            if (topMatch && topMatch.score > similarityThreshold) {
               const { MemoryProcessor } = await import('./memory-processor.js');
               const processor = new MemoryProcessor();
-              const result = await processor.process(baseMemory, [topMatch]);
+              // Send top 3 candidates to LLM for comparison (not just top 1)
+              const candidates = similar.filter(m => m.score > (isVectorSearch ? 0.50 : 0.70)).slice(0, 3);
+              const result = await processor.process(baseMemory, candidates);
 
               if (result.relationship.action === 'NOOP') {
                 return {
@@ -390,15 +446,25 @@ export class MemoryGraphEngine {
                   reason: 'smart_ingest_duplicate',
                   matchedMemoryId: topMatch.id,
                   similarity: topMatch.score,
+                  searchMethod: isVectorSearch ? 'qdrant_vector' : 'fts',
                   processingMs: Date.now() - startedAt,
                 };
               }
 
               if (result.relationship.action === 'UPDATE') {
+                // Use LLM's targetId if available (more accurate), fall back to topMatch
+                const targetId = result.relationship.targetId || topMatch.id;
                 input.relationship = {
                   type: 'Updates',
-                  target_id: topMatch.id,
-                  confidence: 0.9,
+                  target_id: targetId,
+                  confidence: topMatch.score,
+                };
+              } else if (result.relationship.action === 'EXTEND') {
+                const targetId = result.relationship.targetId || topMatch.id;
+                input.relationship = {
+                  type: 'Extends',
+                  target_id: targetId,
+                  confidence: topMatch.score,
                 };
               } else if (result.relationship.action === 'DERIVE' && result.relationship.sourceIds?.length > 0) {
                 input.relationship = {
@@ -577,9 +643,43 @@ export class MemoryGraphEngine {
             const processor = new MemoryProcessor();
 
             // Gather similar memories for comparison
-            const similarMemories = pcResult?.needsConflictResolution && pcResult.matchedMemoryIds?.length > 0
-              ? latestMemories.filter(m => pcResult.matchedMemoryIds.includes(m.id))
-              : this.conflictDetector.detectCandidates(baseMemory, latestMemories).map(candidate => candidate.memory);
+            // Priority: PredictCalibrate matches > ConflictDetector token matches > Qdrant vector matches
+            let similarMemories;
+            if (pcResult?.needsConflictResolution && pcResult.matchedMemoryIds?.length > 0) {
+              similarMemories = latestMemories.filter(m => pcResult.matchedMemoryIds.includes(m.id));
+            } else {
+              similarMemories = this.conflictDetector.detectCandidates(baseMemory, latestMemories).map(candidate => candidate.memory);
+              // If token-based detector found nothing, try Qdrant semantic search
+              if (similarMemories.length === 0 && this.vectorStore) {
+                try {
+                  const qdrantFilter = {
+                    must: [
+                      { key: 'user_id', match: { value: baseMemory.user_id } },
+                      { key: 'is_latest', match: { value: true } },
+                    ],
+                  };
+                  if (baseMemory.org_id) {
+                    qdrantFilter.must.push({ key: 'org_id', match: { value: baseMemory.org_id } });
+                  }
+                  const vectorResults = await this.vectorStore.searchMemories({
+                    query: baseMemory.content.slice(0, 500),
+                    filter: qdrantFilter,
+                    limit: 3,
+                    score_threshold: 0.55,
+                  });
+                  similarMemories = vectorResults.map(r => ({
+                    id: r.id,
+                    content: r.payload?.content || '',
+                    title: r.payload?.title || null,
+                    tags: r.payload?.tags || [],
+                    memory_type: r.payload?.memory_type,
+                    score: r.score,
+                  }));
+                } catch (vectorErr) {
+                  console.warn('[memory-processor] Qdrant fallback failed:', vectorErr.message);
+                }
+              }
+            }
 
             const result = await processor.process(baseMemory, similarMemories);
             processorResult = result;

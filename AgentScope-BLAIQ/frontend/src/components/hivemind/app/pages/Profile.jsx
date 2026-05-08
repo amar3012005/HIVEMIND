@@ -152,7 +152,10 @@ function PlanBadge({ plan }) {
 
 // ─── Confirmation Dialog ──────────────────────────────────────────────────────
 
-function ConfirmDialog({ title, message, confirmLabel, confirmVariant = 'red', onConfirm, onCancel }) {
+function ConfirmDialog({ title, message, confirmLabel, confirmVariant = 'red', onConfirm, onCancel, requireTypedConfirmation = false, loading = false }) {
+  const [typed, setTyped] = React.useState('');
+  const confirmed = requireTypedConfirmation ? typed.trim().toUpperCase() === 'DELETE' : true;
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
       <motion.div
@@ -167,20 +170,41 @@ function ConfirmDialog({ title, message, confirmLabel, confirmVariant = 'red', o
             <p className="text-[#525252] text-sm font-['Space_Grotesk']">{message}</p>
           </div>
         </div>
+        {requireTypedConfirmation && (
+          <div className="mb-4">
+            <label className="block text-[#525252] text-xs font-mono uppercase tracking-wider mb-2">
+              Type DELETE to confirm
+            </label>
+            <input
+              type="text"
+              value={typed}
+              onChange={(e) => setTyped(e.target.value)}
+              placeholder="DELETE"
+              className="w-full bg-transparent border border-[#e3e0db] rounded-xl py-2.5 px-4 text-[#0a0a0a] text-sm font-mono placeholder:text-[#d4d0ca] focus:outline-none focus:border-red-300 transition-colors"
+              autoFocus
+            />
+          </div>
+        )}
         <div className="flex gap-3 justify-end">
           <button
             onClick={onCancel}
-            className="px-4 py-2 rounded-xl text-sm font-['Space_Grotesk'] font-semibold border border-[#e3e0db] text-[#525252] hover:bg-[#f3f1ec] transition-colors"
+            disabled={loading}
+            className="px-4 py-2 rounded-xl text-sm font-['Space_Grotesk'] font-semibold border border-[#e3e0db] text-[#525252] hover:bg-[#f3f1ec] transition-colors disabled:opacity-40"
           >
             Cancel
           </button>
           <button
             onClick={onConfirm}
-            className={`px-4 py-2 rounded-xl text-sm font-['Space_Grotesk'] font-semibold text-white transition-colors ${
+            disabled={!confirmed || loading}
+            className={`px-4 py-2 rounded-xl text-sm font-['Space_Grotesk'] font-semibold text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
               confirmVariant === 'red' ? 'bg-[#dc2626] hover:bg-red-700' : 'bg-[#117dff] hover:bg-[#0066e0]'
             }`}
           >
-            {confirmLabel}
+            {loading ? (
+              <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+            ) : (
+              confirmLabel
+            )}
           </button>
         </div>
       </motion.div>
@@ -616,7 +640,10 @@ function ContextPreviewSection() {
 // ─── Section 6: Data & Privacy ────────────────────────────────────────────────
 
 function DataPrivacySection() {
+  const navigate = useNavigate();
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const [deleteLoading, setDeleteLoading] = useState(false);
+  const [deleteError, setDeleteError] = useState(null);
   const [exportLoading, setExportLoading] = useState(false);
   const [exportMsg, setExportMsg] = useState(null);
 
@@ -624,7 +651,7 @@ function DataPrivacySection() {
     setExportLoading(true);
     setExportMsg(null);
     try {
-      await apiClient.controlPlane.post('/api/user/export');
+      await apiClient.exportData();
       setExportMsg({ type: 'success', text: 'Export request received. You will receive an email when ready.' });
     } catch (err) {
       if (err.response?.status === 404 || err.response?.status === 405) {
@@ -637,9 +664,24 @@ function DataPrivacySection() {
     }
   };
 
-  const handleDeleteConfirm = () => {
-    setShowDeleteDialog(false);
-    // Coming soon — no destructive action
+  const handleDeleteConfirm = async () => {
+    setDeleteLoading(true);
+    setDeleteError(null);
+    try {
+      await apiClient.deleteAccount();
+      setShowDeleteDialog(false);
+      // Account deleted — redirect to home/login
+      window.location.href = '/';
+    } catch (err) {
+      const msg = err.response?.data?.error || err.message;
+      setDeleteError(msg);
+      // If it's an ownership issue, keep dialog open to show error
+      if (err.response?.status !== 409) {
+        setShowDeleteDialog(false);
+      }
+    } finally {
+      setDeleteLoading(false);
+    }
   };
 
   return (
@@ -735,12 +777,19 @@ function DataPrivacySection() {
       {showDeleteDialog && (
         <ConfirmDialog
           title="Delete Account"
-          message="Account deletion is coming soon. Our team will be in touch to process your request securely."
-          confirmLabel="Got it"
+          message="This will permanently delete all your memories, observations, profile facts, API keys, and connector data. This action cannot be undone."
+          confirmLabel="Delete My Account"
           confirmVariant="red"
+          requireTypedConfirmation
+          loading={deleteLoading}
           onConfirm={handleDeleteConfirm}
-          onCancel={() => setShowDeleteDialog(false)}
+          onCancel={() => { setShowDeleteDialog(false); setDeleteError(null); }}
         />
+      )}
+      {deleteError && !showDeleteDialog && (
+        <div className="fixed bottom-6 right-6 z-50 bg-red-50 border border-red-200 rounded-xl px-4 py-3 shadow-lg">
+          <p className="text-red-600 text-sm font-['Space_Grotesk']">{deleteError}</p>
+        </div>
       )}
     </>
   );

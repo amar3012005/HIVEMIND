@@ -112,9 +112,10 @@ CRITICAL RULES:
 
     // Parse RELATIONSHIP
     let relationship = { action: 'ADD', targetId: null, sourceIds: [], reason: 'default' };
-    const relLine = lines.find(l => /^(ADD|UPDATE|EXTEND|DERIVE|NOOP)[:\s]/i.test(l));
+    // Match both "UPDATE: ..." and "RELATIONSHIP: UPDATE: ..." (LLM often includes the RELATIONSHIP: prefix)
+    const relLine = lines.find(l => /^(?:RELATIONSHIP[:\s]+)?(ADD|UPDATE|EXTEND|DERIVE|NOOP)[:\s]/i.test(l));
     if (relLine) {
-      const match = relLine.match(/^(ADD|UPDATE|EXTEND|DERIVE|NOOP)[:\s]+(?:\[?([^\]]*)\]?)?\s*(.*)/i);
+      const match = relLine.match(/^(?:RELATIONSHIP[:\s]+)?(ADD|UPDATE|EXTEND|DERIVE|NOOP)[:\s]+(?:\[?([^\]]*)\]?)?\s*(.*)/i);
       if (match) {
         relationship.action = match[1].toUpperCase();
         const idOrReason = (match[2] || '').trim();

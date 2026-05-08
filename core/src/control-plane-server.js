@@ -564,6 +564,7 @@ async function purgeUserVectors(userId) {
 
 async function performAccountDeletion({ userId, orgIdsToDelete = [] }) {
   const t0 = Date.now();
+  const BATCH_SIZE = 5000; // Postgres bind variable limit is 32767; batching avoids overflow
   console.log('[account-delete] ▶▶ Starting background deletion for userId:', userId, 'orgsToDelete:', orgIdsToDelete);
   try {
     const memoryIds = (
@@ -575,56 +576,63 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [] }) {
     console.log('[account-delete] Found', memoryIds.length, 'memories to delete');
 
     if (memoryIds.length) {
-      const r1 = await prisma.auditLog.updateMany({
-        where: { resourceId: { in: memoryIds } },
-        data: { resourceId: null },
-      });
-      console.log('[account-delete] ✓ auditLog.resourceId nullified:', r1.count);
+      const totalBatches = Math.ceil(memoryIds.length / BATCH_SIZE);
+      for (let i = 0; i < memoryIds.length; i += BATCH_SIZE) {
+        const batch = memoryIds.slice(i, i + BATCH_SIZE);
+        const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+        console.log(`[account-delete] Processing batch ${batchNum}/${totalBatches} (${batch.length} ids)`);
 
-      const r2 = await prisma.sourceMetadata.deleteMany({
-        where: { memoryId: { in: memoryIds } },
-      });
-      console.log('[account-delete] ✓ sourceMetadata deleted:', r2.count);
+        const r1 = await prisma.auditLog.updateMany({
+          where: { resourceId: { in: batch } },
+          data: { resourceId: null },
+        });
+        console.log(`[account-delete]   auditLog.resourceId nullified: ${r1.count}`);
 
-      const r3 = await prisma.codeMemoryMetadata.deleteMany({
-        where: { memoryId: { in: memoryIds } },
-      });
-      console.log('[account-delete] ✓ codeMemoryMetadata deleted:', r3.count);
+        const r2 = await prisma.sourceMetadata.deleteMany({
+          where: { memoryId: { in: batch } },
+        });
+        console.log(`[account-delete]   sourceMetadata deleted: ${r2.count}`);
 
-      const r4 = await prisma.vectorEmbedding.deleteMany({
-        where: { memoryId: { in: memoryIds } },
-      });
-      console.log('[account-delete] ✓ vectorEmbedding deleted:', r4.count);
+        const r3 = await prisma.codeMemoryMetadata.deleteMany({
+          where: { memoryId: { in: batch } },
+        });
+        console.log(`[account-delete]   codeMemoryMetadata deleted: ${r3.count}`);
 
-      const r5 = await prisma.memoryVersion.deleteMany({
-        where: { memoryId: { in: memoryIds } },
-      });
-      console.log('[account-delete] ✓ memoryVersion deleted:', r5.count);
+        const r4 = await prisma.vectorEmbedding.deleteMany({
+          where: { memoryId: { in: batch } },
+        });
+        console.log(`[account-delete]   vectorEmbedding deleted: ${r4.count}`);
 
-      const r6 = await prisma.relationship.deleteMany({
-        where: {
-          OR: [
-            { fromId: { in: memoryIds } },
-            { toId: { in: memoryIds } },
-          ],
-        },
-      });
-      console.log('[account-delete] ✓ relationships deleted:', r6.count);
+        const r5 = await prisma.memoryVersion.deleteMany({
+          where: { memoryId: { in: batch } },
+        });
+        console.log(`[account-delete]   memoryVersion deleted: ${r5.count}`);
 
-      const r7 = await prisma.derivationJob.deleteMany({
-        where: {
-          OR: [
-            { sourceMemoryId: { in: memoryIds } },
-            { targetMemoryId: { in: memoryIds } },
-          ],
-        },
-      });
-      console.log('[account-delete] ✓ derivationJobs deleted:', r7.count);
+        const r6 = await prisma.relationship.deleteMany({
+          where: {
+            OR: [
+              { fromId: { in: batch } },
+              { toId: { in: batch } },
+            ],
+          },
+        });
+        console.log(`[account-delete]   relationships deleted: ${r6.count}`);
 
-      const r8 = await prisma.memory.deleteMany({
-        where: { id: { in: memoryIds } },
-      });
-      console.log('[account-delete] ✓ memories deleted:', r8.count);
+        const r7 = await prisma.derivationJob.deleteMany({
+          where: {
+            OR: [
+              { sourceMemoryId: { in: batch } },
+              { targetMemoryId: { in: batch } },
+            ],
+          },
+        });
+        console.log(`[account-delete]   derivationJobs deleted: ${r7.count}`);
+
+        const r8 = await prisma.memory.deleteMany({
+          where: { id: { in: batch } },
+        });
+        console.log(`[account-delete] ✓ Batch ${batchNum} done — ${r8.count} memories deleted`);
+      }
     }
 
     const r9 = await prisma.platformIntegration.deleteMany({ where: { userId } });

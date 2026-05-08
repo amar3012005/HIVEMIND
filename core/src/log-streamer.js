@@ -9,7 +9,7 @@ const logBuffer = {
   'hm-core': [],
 };
 
-const MAX_LOG_LINES = 500;
+const MAX_LOG_LINES = 2000;
 
 /**
  * Capture console output for a container

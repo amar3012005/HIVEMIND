@@ -536,9 +536,13 @@ async function purgeUserVectors(userId) {
     const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
     const qdrantCollection = process.env.QDRANT_COLLECTION || 'hivemind_memories';
     const qdrantKey = process.env.QDRANT_API_KEY || '';
-    if (!qdrantUrl || !userId) return;
+    if (!qdrantUrl || !userId) {
+      console.warn('[account-delete] ⚠ Qdrant purge skipped — no URL or userId:', { qdrantUrl: !!qdrantUrl, userId: !!userId });
+      return;
+    }
 
-    await fetch(`${qdrantUrl}/collections/${qdrantCollection}/points/delete`, {
+    console.log('[account-delete] Purging Qdrant vectors for userId:', userId, 'collection:', qdrantCollection);
+    const resp = await fetch(`${qdrantUrl}/collections/${qdrantCollection}/points/delete`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -551,12 +555,16 @@ async function purgeUserVectors(userId) {
         wait: true,
       }),
     });
+    const respBody = await resp.text();
+    console.log('[account-delete] Qdrant response:', resp.status, respBody.slice(0, 200));
   } catch (error) {
-    console.warn('[account-delete] Qdrant delete failed:', error.message);
+    console.warn('[account-delete] ⚠ Qdrant delete failed:', error.message);
   }
 }
 
 async function performAccountDeletion({ userId, orgIdsToDelete = [] }) {
+  const t0 = Date.now();
+  console.log('[account-delete] ▶▶ Starting background deletion for userId:', userId, 'orgsToDelete:', orgIdsToDelete);
   try {
     const memoryIds = (
       await prisma.memory.findMany({
@@ -564,26 +572,36 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [] }) {
         select: { id: true },
       })
     ).map((memory) => memory.id);
+    console.log('[account-delete] Found', memoryIds.length, 'memories to delete');
 
     if (memoryIds.length) {
-      await prisma.auditLog.updateMany({
+      const r1 = await prisma.auditLog.updateMany({
         where: { resourceId: { in: memoryIds } },
         data: { resourceId: null },
       });
+      console.log('[account-delete] ✓ auditLog.resourceId nullified:', r1.count);
 
-      await prisma.sourceMetadata.deleteMany({
+      const r2 = await prisma.sourceMetadata.deleteMany({
         where: { memoryId: { in: memoryIds } },
       });
-      await prisma.codeMemoryMetadata.deleteMany({
+      console.log('[account-delete] ✓ sourceMetadata deleted:', r2.count);
+
+      const r3 = await prisma.codeMemoryMetadata.deleteMany({
         where: { memoryId: { in: memoryIds } },
       });
-      await prisma.vectorEmbedding.deleteMany({
+      console.log('[account-delete] ✓ codeMemoryMetadata deleted:', r3.count);
+
+      const r4 = await prisma.vectorEmbedding.deleteMany({
         where: { memoryId: { in: memoryIds } },
       });
-      await prisma.memoryVersion.deleteMany({
+      console.log('[account-delete] ✓ vectorEmbedding deleted:', r4.count);
+
+      const r5 = await prisma.memoryVersion.deleteMany({
         where: { memoryId: { in: memoryIds } },
       });
-      await prisma.relationship.deleteMany({
+      console.log('[account-delete] ✓ memoryVersion deleted:', r5.count);
+
+      const r6 = await prisma.relationship.deleteMany({
         where: {
           OR: [
             { fromId: { in: memoryIds } },
@@ -591,7 +609,9 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [] }) {
           ],
         },
       });
-      await prisma.derivationJob.deleteMany({
+      console.log('[account-delete] ✓ relationships deleted:', r6.count);
+
+      const r7 = await prisma.derivationJob.deleteMany({
         where: {
           OR: [
             { sourceMemoryId: { in: memoryIds } },
@@ -599,44 +619,70 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [] }) {
           ],
         },
       });
-      await prisma.memory.deleteMany({
+      console.log('[account-delete] ✓ derivationJobs deleted:', r7.count);
+
+      const r8 = await prisma.memory.deleteMany({
         where: { id: { in: memoryIds } },
       });
+      console.log('[account-delete] ✓ memories deleted:', r8.count);
     }
 
-    await prisma.platformIntegration.deleteMany({ where: { userId } });
-    await prisma.apiKey.deleteMany({ where: { userId } });
-    await prisma.dataExportRequest.deleteMany({ where: { userId } });
-    await prisma.syncLog.deleteMany({ where: { userId } });
-    await prisma.session.deleteMany({ where: { userId } });
-    await prisma.userOrganization.deleteMany({ where: { userId } });
-    await prisma.auditLog.updateMany({
+    const r9 = await prisma.platformIntegration.deleteMany({ where: { userId } });
+    console.log('[account-delete] ✓ platformIntegrations deleted:', r9.count);
+
+    const r10 = await prisma.apiKey.deleteMany({ where: { userId } });
+    console.log('[account-delete] ✓ apiKeys deleted:', r10.count);
+
+    const r11 = await prisma.dataExportRequest.deleteMany({ where: { userId } });
+    console.log('[account-delete] ✓ dataExportRequests deleted:', r11.count);
+
+    const r12 = await prisma.syncLog.deleteMany({ where: { userId } });
+    console.log('[account-delete] ✓ syncLogs deleted:', r12.count);
+
+    const r13 = await prisma.session.deleteMany({ where: { userId } });
+    console.log('[account-delete] ✓ sessions deleted:', r13.count);
+
+    const r14 = await prisma.userOrganization.deleteMany({ where: { userId } });
+    console.log('[account-delete] ✓ userOrganizations deleted:', r14.count);
+
+    const r15 = await prisma.auditLog.updateMany({
       where: { userId },
       data: { userId: null },
     });
+    console.log('[account-delete] ✓ auditLog.userId nullified:', r15.count);
+
     await prisma.user.delete({ where: { id: userId } });
+    console.log('[account-delete] ✓ user record deleted');
 
     await purgeUserVectors(userId);
+    console.log('[account-delete] ✓ Qdrant vectors purged');
 
     if (Array.isArray(orgIdsToDelete) && orgIdsToDelete.length) {
       try {
-        await prisma.organization.deleteMany({
+        const r16 = await prisma.organization.deleteMany({
           where: { id: { in: orgIdsToDelete } },
         });
+        console.log('[account-delete] ✓ orphan orgs deleted:', r16.count);
       } catch (error) {
-        console.warn('[account-delete] Orphan org cleanup skipped:', error.message);
+        console.warn('[account-delete] ⚠ Orphan org cleanup skipped:', error.message);
       }
     }
+
+    console.log('[account-delete] ✅ Complete deletion finished in', Date.now() - t0, 'ms for userId:', userId);
   } catch (error) {
-    console.error('[account-delete] Background deletion failed:', error.message);
+    console.error('[account-delete] ✗ Background deletion FAILED at', Date.now() - t0, 'ms:', error.message);
+    console.error('[account-delete] Stack:', error.stack);
   }
 }
 
 async function validateAccountDeletion(userId) {
+  console.log('[account-delete] Validating deletion for userId:', userId);
   const ownerMemberships = await prisma.userOrganization.findMany({
     where: { userId, role: 'owner' },
     include: { org: true },
   });
+  console.log('[account-delete] Owner memberships found:', ownerMemberships.length,
+    ownerMemberships.map(m => ({ orgId: m.orgId, orgName: m.org?.name })));
 
   const orgIdsToDelete = [];
 
@@ -656,7 +702,10 @@ async function validateAccountDeletion(userId) {
       },
     });
 
+    console.log('[account-delete] Org', membership.org?.name, '(', membership.orgId, '): otherOwners=', otherOwners, 'otherMembers=', otherMembers);
+
     if (otherOwners === 0 && otherMembers > 0) {
+      console.warn('[account-delete] ✗ BLOCKED — sole owner of org with', otherMembers, 'members:', membership.org?.name);
       return {
         ok: false,
         status: 409,
@@ -674,6 +723,7 @@ async function validateAccountDeletion(userId) {
     }
   }
 
+  console.log('[account-delete] ✓ Validation passed. Orgs to delete:', orgIdsToDelete);
   return { ok: true, orgIdsToDelete };
 }
 
@@ -1612,14 +1662,23 @@ const server = http.createServer(async (req, res) => {
   }
 
   if ((pathname === '/v1/account' && req.method === 'DELETE') || (pathname === '/v1/account/delete' && req.method === 'POST')) {
+    console.log('[account-delete] ▶ Request received:', req.method, pathname);
     const current = await requireSession(req, res);
-    if (!current) return;
+    if (!current) {
+      console.warn('[account-delete] ✗ No valid session — requireSession rejected');
+      return;
+    }
+    console.log('[account-delete] ✓ Session valid, userId:', current.session.userId, 'sessionId:', current.sessionId);
+
     if (!prisma) {
+      console.error('[account-delete] ✗ Database unavailable (prisma is null)');
       return jsonResponse(res, { error: 'Database unavailable' }, 503);
     }
 
     const body = await parseBody(req);
+    console.log('[account-delete] Body received:', JSON.stringify({ confirm: body.confirm, keys: Object.keys(body) }));
     if ((body.confirm || '').trim().toUpperCase() !== 'DELETE') {
+      console.warn('[account-delete] ✗ Confirmation mismatch — got:', JSON.stringify(body.confirm));
       return jsonResponse(res, { error: 'Confirmation text must be DELETE' }, 400);
     }
 
@@ -1628,23 +1687,29 @@ const server = http.createServer(async (req, res) => {
       select: { id: true, email: true },
     });
     if (!user) {
+      console.warn('[account-delete] ✗ User not found in DB for userId:', current.session.userId);
       await sessionStore.destroySession(current.sessionId);
       return jsonResponse(res, { success: true }, 200, {
         'Set-Cookie': clearSessionCookie(),
       });
     }
+    console.log('[account-delete] ✓ User found:', user.email, '(id:', user.id, ')');
 
     const deletionCheck = await validateAccountDeletion(user.id);
+    console.log('[account-delete] Validation result:', JSON.stringify(deletionCheck));
     if (!deletionCheck.ok) {
+      console.warn('[account-delete] ✗ Validation failed:', JSON.stringify(deletionCheck));
       return jsonResponse(res, deletionCheck, deletionCheck.status || 409);
     }
 
+    console.log('[account-delete] ✓ Validation passed — destroying session, scheduling deletion');
     await sessionStore.destroySession(current.sessionId);
     void performAccountDeletion({
       userId: user.id,
       orgIdsToDelete: deletionCheck.orgIdsToDelete || [],
     });
 
+    console.log('[account-delete] ✓ Response sent — deletion scheduled for user:', user.email);
     return jsonResponse(res, {
       success: true,
       status: 'scheduled',

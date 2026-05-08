@@ -902,6 +902,70 @@ function generateToolsManifest(userId, orgId, options = {}) {
         },
         required: ['query']
       }
+    },
+    {
+      name: 'hivemind_code_at',
+      description: 'Bi-temporal time-travel query — return the codebase / memories as the system knew them at a given transaction time, optionally filtered to what was valid in the world at a given valid time. Use to answer "what did the code look like on X date".',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          transaction_time: {
+            type: 'string',
+            description: 'ISO timestamp — when the system learned the fact (e.g. "2026-05-01T00:00:00Z"). Required if valid_time omitted.'
+          },
+          valid_time: {
+            type: 'string',
+            description: 'ISO timestamp — when the fact was true in the world. Required if transaction_time omitted.'
+          },
+          file_path: {
+            type: 'string',
+            description: 'Optional file path filter (post-filters memories tagged file:<path>)'
+          },
+          project: {
+            type: 'string',
+            description: 'Optional project filter (client-side post-filter)'
+          }
+        }
+      }
+    },
+    {
+      name: 'hivemind_code_diff',
+      description: 'Bi-temporal diff between two timestamps — returns added / removed / modified memories. Use to answer "what changed between date A and date B".',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          time_a: {
+            type: 'string',
+            description: 'Earlier ISO timestamp'
+          },
+          time_b: {
+            type: 'string',
+            description: 'Later ISO timestamp'
+          },
+          file_path: {
+            type: 'string',
+            description: 'Optional file path filter'
+          }
+        },
+        required: ['time_a', 'time_b']
+      }
+    },
+    {
+      name: 'hivemind_code_timeline',
+      description: 'Full version chain (MemoryVersion ledger) for a single memory — every revision, supersession, and reason. Use to trace how one file or decision evolved.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          memory_id: {
+            type: 'string',
+            description: 'Memory UUID to fetch timeline for'
+          },
+          file_path: {
+            type: 'string',
+            description: 'Alternative: file path — resolves to the latest memory tagged file:<path> and walks its chain'
+          }
+        }
+      }
     }
     );
   }
@@ -2108,6 +2172,22 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
         const lineCount = content.split('\n').length;
         const summary = normalizeMemoryText(args.summary, '') || `${language} file: ${filePath} (${lineCount} lines)`;
 
+        // Auto-dedup: if caller didn't provide related_to, look up latest memory tagged file:<path>.
+        // Found → emit UPDATE relationship so re-ingest builds version chain instead of duplicates.
+        let relatedToId = args.related_to || null;
+        if (!relatedToId) {
+          try {
+            const existing = await apiClient.get('/api/memories', {
+              params: { tags: `file:${filePath}`, limit: 1 }
+            });
+            const list = Array.isArray(existing) ? existing : (existing?.memories || existing?.data || []);
+            const latest = list.find(m => (m.tags || []).includes('code') && m.is_latest !== false) || list[0];
+            if (latest && latest.id) relatedToId = latest.id;
+          } catch (_e) {
+            // Lookup failure must not block ingest — fall through to fresh insert.
+          }
+        }
+
         return formatToolContent(await apiClient.post('/api/memories', {
           title: `code: ${filePath}`,
           content: `${summary}\n\n--- ${filePath} ---\n${content}`,
@@ -2115,12 +2195,13 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
           source_platform: 'mcp',
           tags: [...normalizeTags(args.tags), 'code', language, `file:${filePath}`],
           project: normalizeMemoryText(args.project, null) || null,
-          relationship: args.related_to ? buildRelationship('update', args.related_to) : undefined,
+          relationship: relatedToId ? buildRelationship('update', relatedToId) : undefined,
           metadata: {
             source_type: 'code',
             file_path: filePath,
             language,
-            line_count: lineCount
+            line_count: lineCount,
+            auto_linked_to: relatedToId && !args.related_to ? relatedToId : undefined
           },
           user_id: userId,
           org_id: orgId
@@ -2299,6 +2380,77 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
           code_refs: codeRefs,
           injection_text: recallResult.injectionText || recallResult.injection_text || null
         });
+      }
+
+      case 'hivemind_code_at': {
+        if (!args.transaction_time && !args.valid_time) {
+          throw new Error('hivemind_code_at requires transaction_time and/or valid_time');
+        }
+        const res = await apiClient.post('/api/temporal/as-of', {
+          transaction_time: args.transaction_time || null,
+          valid_time: args.valid_time || null
+        });
+        let memories = res.memories || [];
+        if (args.file_path) {
+          memories = memories.filter(m => (m.tags || []).includes(`file:${args.file_path}`));
+        }
+        if (args.project) {
+          memories = memories.filter(m => m.project === args.project);
+        }
+        return formatToolContent({
+          query: res.query || { transaction_time: args.transaction_time, valid_time: args.valid_time },
+          count: memories.length,
+          memories
+        });
+      }
+
+      case 'hivemind_code_diff': {
+        if (!args.time_a || !args.time_b) {
+          throw new Error('hivemind_code_diff requires time_a and time_b');
+        }
+        const diff = await apiClient.post('/api/temporal/diff', {
+          time_a: args.time_a,
+          time_b: args.time_b
+        });
+        if (args.file_path) {
+          // Diff structure has .added/.removed/.modified arrays — filter each by file tag.
+          // Memory snapshots in diff don't carry tags (only id/content/memory_type), so we
+          // re-resolve via list-by-tag and intersect ids.
+          try {
+            const tagged = await apiClient.get('/api/memories', {
+              params: { tags: `file:${args.file_path}`, limit: 200 }
+            });
+            const list = Array.isArray(tagged) ? tagged : (tagged?.memories || tagged?.data || []);
+            const taggedIds = new Set(list.map(m => m.id));
+            return formatToolContent({
+              ...diff,
+              added: (diff.added || []).filter(m => taggedIds.has(m.memoryId)),
+              removed: (diff.removed || []).filter(m => taggedIds.has(m.memoryId)),
+              modified: (diff.modified || []).filter(m => taggedIds.has(m.memoryId)),
+              file_path: args.file_path
+            });
+          } catch (_e) {
+            return formatToolContent(diff);
+          }
+        }
+        return formatToolContent(diff);
+      }
+
+      case 'hivemind_code_timeline': {
+        let memoryId = args.memory_id;
+        if (!memoryId && args.file_path) {
+          // Resolve latest memory tagged file:<path>
+          const list = await apiClient.get('/api/memories', {
+            params: { tags: `file:${args.file_path}`, limit: 1 }
+          });
+          const memories = Array.isArray(list) ? list : (list?.memories || list?.data || []);
+          memoryId = memories[0]?.id || null;
+        }
+        if (!memoryId) {
+          throw new Error('hivemind_code_timeline requires memory_id or a resolvable file_path');
+        }
+        const res = await apiClient.post('/api/temporal/timeline', { memory_id: memoryId });
+        return formatToolContent(res);
       }
 
       default:

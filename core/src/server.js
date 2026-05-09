@@ -6869,7 +6869,13 @@ const server = http.createServer(async (req, res) => {
               if (!body.time_a || !body.time_b) {
                 return jsonResponse(res, { error: 'Provide time_a and time_b' }, 400);
               }
-              const diff = await biTemporalEngine.temporalDiff(userId, orgId, new Date(body.time_a), new Date(body.time_b));
+              const diff = await biTemporalEngine.temporalDiff(
+                userId,
+                orgId,
+                new Date(body.time_a),
+                new Date(body.time_b),
+                { tagsFilter: Array.isArray(body.tags_filter) ? body.tags_filter : [] }
+              );
               return jsonResponse(res, diff);
             } catch (error) {
               console.error('Temporal diff failed:', error);

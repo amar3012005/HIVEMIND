@@ -930,7 +930,7 @@ function generateToolsManifest(userId, orgId, options = {}) {
     },
     {
       name: 'hivemind_code_diff',
-      description: 'Bi-temporal diff between two timestamps — returns added / removed / modified memories. Use to answer "what changed between date A and date B".',
+      description: 'Bi-temporal diff between two timestamps — returns added / removed / modified memories with tags. Use to answer "what changed between date A and date B". Filter to a specific file with file_path or to arbitrary tag intersection with tags.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -944,7 +944,12 @@ function generateToolsManifest(userId, orgId, options = {}) {
           },
           file_path: {
             type: 'string',
-            description: 'Optional file path filter'
+            description: 'Optional file path filter — translated to tag file:<path>'
+          },
+          tags: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Optional additional tags — AND-intersected with file_path. E.g. ["fn:generateToolsManifest", "decision"]'
           }
         },
         required: ['time_a', 'time_b']
@@ -2408,32 +2413,16 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
         if (!args.time_a || !args.time_b) {
           throw new Error('hivemind_code_diff requires time_a and time_b');
         }
+        const tagsFilter = [];
+        if (args.file_path) tagsFilter.push(`file:${args.file_path}`);
+        if (Array.isArray(args.tags) && args.tags.length) tagsFilter.push(...args.tags);
+
         const diff = await apiClient.post('/api/temporal/diff', {
           time_a: args.time_a,
-          time_b: args.time_b
+          time_b: args.time_b,
+          tags_filter: tagsFilter.length ? tagsFilter : undefined
         });
-        if (args.file_path) {
-          // Diff structure has .added/.removed/.modified arrays — filter each by file tag.
-          // Memory snapshots in diff don't carry tags (only id/content/memory_type), so we
-          // re-resolve via list-by-tag and intersect ids.
-          try {
-            const tagged = await apiClient.get('/api/memories', {
-              params: { tags: `file:${args.file_path}`, limit: 200 }
-            });
-            const list = Array.isArray(tagged) ? tagged : (tagged?.memories || tagged?.data || []);
-            const taggedIds = new Set(list.map(m => m.id));
-            return formatToolContent({
-              ...diff,
-              added: (diff.added || []).filter(m => taggedIds.has(m.memoryId)),
-              removed: (diff.removed || []).filter(m => taggedIds.has(m.memoryId)),
-              modified: (diff.modified || []).filter(m => taggedIds.has(m.memoryId)),
-              file_path: args.file_path
-            });
-          } catch (_e) {
-            return formatToolContent(diff);
-          }
-        }
-        return formatToolContent(diff);
+        return formatToolContent({ ...diff, file_path: args.file_path || null });
       }
 
       case 'hivemind_code_timeline': {

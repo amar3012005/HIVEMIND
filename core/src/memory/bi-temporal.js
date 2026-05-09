@@ -166,26 +166,47 @@ export class BiTemporalEngine {
    * @param {string} orgId
    * @param {Date|string} timeA — earlier time
    * @param {Date|string} timeB — later time
+   * @param {object} [opts]
+   * @param {string[]} [opts.tagsFilter] — Only include memories whose tags contain ALL of these (AND).
+   *                                       Use prefix `file:<path>` / `fn:<name>` for code-scoped diffs.
    * @returns {Promise<{ added: Array, removed: Array, modified: Array, summary: string }>}
    */
-  async temporalDiff(userId, orgId, timeA, timeB) {
+  async temporalDiff(userId, orgId, timeA, timeB, opts = {}) {
     const [snapshotA, snapshotB] = await Promise.all([
       this.asOfTransaction(userId, orgId, timeA),
       this.asOfTransaction(userId, orgId, timeB)
     ]);
 
-    const mapA = new Map(snapshotA.map(m => [m.memoryId, m]));
-    const mapB = new Map(snapshotB.map(m => [m.memoryId, m]));
+    const tagsFilter = Array.isArray(opts.tagsFilter) ? opts.tagsFilter.filter(Boolean) : [];
+    const passesTagFilter = (m) => {
+      if (tagsFilter.length === 0) return true;
+      const tags = Array.isArray(m.tags) ? m.tags : [];
+      return tagsFilter.every(t => tags.includes(t));
+    };
+
+    const filteredA = snapshotA.filter(passesTagFilter);
+    const filteredB = snapshotB.filter(passesTagFilter);
+    const mapA = new Map(filteredA.map(m => [m.memoryId, m]));
+    const mapB = new Map(filteredB.map(m => [m.memoryId, m]));
     const diff = { added: [], removed: [], modified: [] };
+
+    const project = (mem) => ({
+      memoryId: mem.memoryId,
+      content: (mem.content || '').slice(0, 200),
+      memory_type: mem.memory_type,
+      tags: Array.isArray(mem.tags) ? mem.tags : [],
+      documentDate: mem.documentDate || null
+    });
 
     for (const [id, memB] of mapB.entries()) {
       if (!mapA.has(id)) {
-        diff.added.push({ memoryId: id, content: (memB.content || '').slice(0, 200), memory_type: memB.memory_type });
+        diff.added.push(project(memB));
       } else {
         const memA = mapA.get(id);
         if (memA.version !== memB.version) {
           diff.modified.push({
             memoryId: id,
+            tags: Array.isArray(memB.tags) ? memB.tags : [],
             before: { content: (memA.content || '').slice(0, 200), version: memA.version },
             after: { content: (memB.content || '').slice(0, 200), version: memB.version }
           });
@@ -195,11 +216,12 @@ export class BiTemporalEngine {
 
     for (const [id, memA] of mapA.entries()) {
       if (!mapB.has(id)) {
-        diff.removed.push({ memoryId: id, content: (memA.content || '').slice(0, 200), memory_type: memA.memory_type });
+        diff.removed.push(project(memA));
       }
     }
 
     diff.summary = `${diff.added.length} added, ${diff.removed.length} removed, ${diff.modified.length} modified`;
+    diff.filter = { tags: tagsFilter };
     return diff;
   }
 

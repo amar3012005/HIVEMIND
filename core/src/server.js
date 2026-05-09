@@ -9366,6 +9366,61 @@ const server = http.createServer(async (req, res) => {
                 console.warn('[chat] voice profile load failed:', vErr.message);
               }
 
+              // Step 1.5: Slack live fallback — when local recall is thin and
+              // query has Slack-shaped signals, fetch live Slack via SlackBridge,
+              // merge into LLM context, and auto-ingest top hits for next time.
+              let slackHits = [];
+              let slackBridgeFired = false;
+              try {
+                const { slackShapeDetector, SlackBridge } =
+                  await import('./connectors/providers/slack/bridge.js');
+                const strongMems = memories.filter(m => (m.score || 0) >= 0.3).length;
+                if (prisma && userId && strongMems < 3 && slackShapeDetector(message)) {
+                  const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
+                  const connStore = new ConnectorStore(prisma);
+                  const token = await connStore.getAccessToken(userId, 'slack').catch(() => null);
+                  if (token) {
+                    const bridge = new SlackBridge({ connectorStore: connStore });
+                    slackHits = await bridge.searchMessages(userId, message, { count: 8 }).catch(err => {
+                      console.warn('[chat] Slack live search failed:', err.message);
+                      return [];
+                    });
+                    if (slackHits.length > 0) {
+                      slackBridgeFired = true;
+                      console.log('[chat] Slack fallback fired: %d hits', slackHits.length);
+                      // Auto-ingest top 5 so next recall is cached
+                      if (persistentMemoryEngine) {
+                        for (const hit of slackHits.slice(0, 5)) {
+                          const content = (hit.text || '').trim();
+                          if (!content || content.length < 15) continue;
+                          const where = hit.channel_name ? `#${hit.channel_name}` : (hit.channel_id || 'unknown');
+                          const who = hit.username || hit.user || 'unknown';
+                          persistentMemoryEngine.ingestMemory({
+                            content,
+                            title: `Slack ${where} · ${who}: ${content.slice(0, 60)}`,
+                            tags: ['slack', 'live-slack', 'auto-ingest', `slack:${where}`],
+                            memory_type: 'note',
+                            user_id: userId,
+                            org_id: orgId,
+                            source_metadata: {
+                              source_platform: 'slack',
+                              source_url: hit.permalink,
+                              channel_id: hit.channel_id,
+                              channel_name: hit.channel_name,
+                              ts: hit.ts,
+                              user: hit.user,
+                            },
+                            skipProcessing: true,
+                          }).catch(err => console.warn('[chat] Slack auto-ingest failed:', err.message));
+                        }
+                      }
+                    }
+                  }
+                }
+              } catch (slackErr) {
+                console.warn('[chat] Slack fallback hook errored:', slackErr.message);
+              }
+
               // Step 2: Build system prompt — second-brain aware
               const recencyHint = isRecencyQuery ? '\n\nIMPORTANT: The user is asking about their MOST RECENT activity. Memories are sorted newest-first. Focus on the FIRST memory.' : '';
               const metaHint = isMetaQuery ? '\n\nIMPORTANT: The user is asking what you know ABOUT THEM. Summarize key personal facts, preferences, decisions, and topics from ALL memories below. Group by topic. Include names, companies, roles, and key decisions.' : '';
@@ -9428,6 +9483,13 @@ ${injectionText}`;
                 console.log('[chat] No memories found for query:', message.slice(0, 100));
                 // Add a hint to the system prompt when no memories found
                 memoryContext = '\n\nRetrieved Memories:\nNo specific memories found about this topic. Respond naturally based on general knowledge.';
+              }
+
+              // Append live Slack hits (white-labelled as "From your Slack")
+              if (slackBridgeFired && slackHits.length > 0) {
+                const { formatSlackHitForContext } = await import('./connectors/providers/slack/bridge.js');
+                const slackBlock = slackHits.slice(0, 8).map(formatSlackHitForContext).join('\n');
+                memoryContext += `\n\nFrom your Slack (live):\n${slackBlock}\n\nUse the lines above to answer if relevant. Prefix the answer with "From your Slack:" when the answer comes primarily from these live results.`;
               }
 
               // Step 4: Build message history for Groq
@@ -9499,6 +9561,14 @@ ${injectionText}`;
               return jsonResponse(res, {
                 response,
                 sources: memories,
+                slack_used: slackBridgeFired,
+                slack_hits: slackBridgeFired ? slackHits.slice(0, 8).map(h => ({
+                  channel: h.channel_name ? `#${h.channel_name}` : h.channel_id,
+                  user: h.username || h.user,
+                  ts: h.ts,
+                  permalink: h.permalink,
+                  preview: (h.text || '').slice(0, 200),
+                })) : undefined,
                 model: groqModel,
                 usage: {
                   prompt_tokens: groqData.usage?.prompt_tokens,

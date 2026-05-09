@@ -2073,11 +2073,19 @@ const server = http.createServer(async (req, res) => {
         }
       });
 
-      const returnTo = authState.returnTo || '/hivemind/app/connectors';
-      return redirect(res, `${returnTo}?connector_success=${provider}`);
+      // Resolve returnTo to an absolute frontend URL. authState.returnTo may
+      // already be absolute (set by the connectors page). If it's a bare path
+      // we prepend the frontend base — otherwise the redirect lands on the
+      // control-plane host (api.hivemind.davinciai.eu:8040) which serves
+      // {"error":"Not found"} for /hivemind/* paths.
+      const rawReturnTo = authState.returnTo || '/hivemind/app/connectors';
+      const isAbsolute = /^https?:\/\//i.test(rawReturnTo);
+      const returnTo = isAbsolute ? rawReturnTo : `${defaultFrontendBaseUrl}${rawReturnTo}`;
+      const sep = returnTo.includes('?') ? '&' : '?';
+      return redirect(res, `${returnTo}${sep}connector_success=${provider}`);
     } catch (tokenError) {
       console.error(`[connector] OAuth exchange failed for ${provider}:`, tokenError.message);
-      return redirect(res, `/hivemind/app/connectors?connector_error=${encodeURIComponent(tokenError.message)}`);
+      return redirect(res, `${defaultFrontendBaseUrl}/hivemind/app/connectors?connector_error=${encodeURIComponent(tokenError.message)}`);
     }
   }
 

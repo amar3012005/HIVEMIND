@@ -7590,7 +7590,16 @@ const server = http.createServer(async (req, res) => {
             try {
               const graphProject = url.searchParams.get('project') || null;
               const graphScope = url.searchParams.get('scope') || 'personal';
-              const graphLimit = Math.min(parseInt(url.searchParams.get('limit')) || 300, 1000);
+              // Hard cap raised to 50000 — full memory libraries should be visualisable.
+              // Pass limit=0 to mean "no cap" (will be clamped to 50000 max).
+              const rawLimit = parseInt(url.searchParams.get('limit'));
+              const graphLimit = !rawLimit || rawLimit <= 0
+                ? 50000
+                : Math.min(rawLimit, 50000);
+              // Layered priority budgeting only kicks in when limit is small enough that
+              // we have to ration; with large budgets (>2000) we just fetch everything
+              // sorted by updatedAt so users see their full graph spread out.
+              const useLayeredBudget = graphLimit <= 2000;
               const includeEdges = url.searchParams.get('include_edges') !== 'false';
               const includeResidents = url.searchParams.get('include_residents') !== 'false';
               const baseWhere = {
@@ -7616,18 +7625,25 @@ const server = http.createServer(async (req, res) => {
                       userId,
                     };
 
-              // ── Smart priority-based node selection ──
-              // Layer 1: High-value nodes (facts, observations, promoted-risks) — always shown
-              const highValueNodes = await prisma.memory.findMany({
-                where: {
-                  ...scopeWhere,
-                  tags: { hasSome: ['extracted-fact', 'promoted-risk', 'observation', 'turing-verified'] },
-                },
-                include: { sourceMetadata: true },
-                orderBy: { importanceScore: 'desc' },
-                take: Math.floor(graphLimit * 0.25), // 25% of budget
-              });
-              const seenIds = new Set(highValueNodes.map(r => r.id));
+              // ── Node selection ──
+              // Two modes:
+              //   useLayeredBudget=true  → small limit, ration via 3-layer priority (high-value, connected, recent)
+              //   useLayeredBudget=false → big limit, fetch ALL matching memories sorted by recency
+              let highValueNodes = [];
+              const seenIds = new Set();
+              if (useLayeredBudget) {
+                // Layer 1: High-value nodes (facts, observations, promoted-risks) — always shown
+                highValueNodes = await prisma.memory.findMany({
+                  where: {
+                    ...scopeWhere,
+                    tags: { hasSome: ['extracted-fact', 'promoted-risk', 'observation', 'turing-verified'] },
+                  },
+                  include: { sourceMetadata: true },
+                  orderBy: { importanceScore: 'desc' },
+                  take: Math.floor(graphLimit * 0.25), // 25% of budget
+                });
+                for (const r of highValueNodes) seenIds.add(r.id);
+              }
 
               // Layer 2: Connected nodes (have relationships) — show the graph structure
               const relationshipScope = graphScope === 'all'
@@ -7635,7 +7651,10 @@ const server = http.createServer(async (req, res) => {
                 : graphScope === 'team'
                   ? { orgId, deletedAt: null, visibility: 'organization' }
                   : { userId, orgId, deletedAt: null };
-              // Fetch relationships in priority order — TARA chains and curated edges first, bulk last
+              // Fetch relationships in priority order — TARA chains and curated edges first, bulk last.
+              // Edge caps scale with node budget so a full-graph view also gets a full edge set.
+              const priorityCap = useLayeredBudget ? 500 : Math.min(graphLimit * 2, 50000);
+              const bulkCap = useLayeredBudget ? 1500 : Math.min(graphLimit * 4, 200000);
               const [priorityRels, bulkRels] = await Promise.all([
                 // Priority: TARA chains, turing, memory_processor (meaningful edges)
                 prisma.relationship.findMany({
@@ -7647,7 +7666,7 @@ const server = http.createServer(async (req, res) => {
                     ],
                   },
                   select: { fromId: true, toId: true, type: true, confidence: true, createdBy: true },
-                  take: 500,
+                  take: priorityCap,
                 }),
                 // Bulk: everything else (conflict-detector, system)
                 prisma.relationship.findMany({
@@ -7659,7 +7678,7 @@ const server = http.createServer(async (req, res) => {
                     ],
                   },
                   select: { fromId: true, toId: true, type: true, confidence: true, createdBy: true },
-                  take: 1500,
+                  take: bulkCap,
                 }),
               ]);
               const allRelationships = [...priorityRels, ...bulkRels];
@@ -7671,20 +7690,30 @@ const server = http.createServer(async (req, res) => {
               // Remove already-loaded IDs
               for (const id of seenIds) connectedNodeIds.delete(id);
 
-              const connectedBudget = Math.floor(graphLimit * 0.35); // 35% of budget
-              const connectedNodes = connectedNodeIds.size > 0
-                ? await prisma.memory.findMany({
-                    where: { id: { in: [...connectedNodeIds].slice(0, connectedBudget) }, ...scopeWhere },
-                    include: { sourceMetadata: true },
-                  })
-                : [];
-              for (const r of connectedNodes) seenIds.add(r.id);
+              let connectedNodes = [];
+              if (useLayeredBudget) {
+                const connectedBudget = Math.floor(graphLimit * 0.35); // 35% of budget
+                connectedNodes = connectedNodeIds.size > 0
+                  ? await prisma.memory.findMany({
+                      where: { id: { in: [...connectedNodeIds].slice(0, connectedBudget) }, ...scopeWhere },
+                      include: { sourceMetadata: true },
+                    })
+                  : [];
+                for (const r of connectedNodes) seenIds.add(r.id);
+              }
 
-              // Layer 3: Recent memories — fill remaining budget
-              const recentBudget = graphLimit - seenIds.size;
+              // Recent / fill layer.
+              // Layered mode → fill remaining budget after layer 1+2.
+              // Unbounded mode → fetch up to graphLimit memories sorted by updatedAt desc; this is the path
+              // when the caller wants the full graph. We still exclude already-loaded ids (which are 0 in
+              // unbounded mode unless caller pre-warmed).
+              const recentBudget = useLayeredBudget ? (graphLimit - seenIds.size) : graphLimit;
               const recentNodes = recentBudget > 0
                 ? await prisma.memory.findMany({
-                    where: { ...scopeWhere, id: { notIn: [...seenIds] } },
+                    where: {
+                      ...scopeWhere,
+                      ...(seenIds.size > 0 ? { id: { notIn: [...seenIds] } } : {}),
+                    },
                     include: { sourceMetadata: true },
                     orderBy: { updatedAt: 'desc' },
                     take: recentBudget,

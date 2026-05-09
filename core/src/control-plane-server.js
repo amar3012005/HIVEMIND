@@ -1157,15 +1157,29 @@ const server = http.createServer(async (req, res) => {
     } catch {
       return jsonResponse(res, { error: 'invalid callback' }, 400);
     }
+    // Allowed callback origins:
+    //   - http(s)://localhost:NNNN | 127.0.0.1 | ::1   (CLI loopback)
+    //   - https://<allowed-frontend-origin>            (browser-driven 1-click flow)
+    // Frontend origins are read from HIVEMIND_ALLOWED_ORIGINS env (comma-separated).
     const isLoopback =
       (cbUrl.protocol === 'http:' || cbUrl.protocol === 'https:') &&
       (cbUrl.hostname === 'localhost' ||
         cbUrl.hostname === '127.0.0.1' ||
         cbUrl.hostname === '::1');
-    if (!isLoopback) {
+    const allowedFrontendOrigins = (process.env.HIVEMIND_ALLOWED_ORIGINS || '')
+      .split(',')
+      .map(o => o.trim())
+      .filter(Boolean);
+    const cbOrigin = `${cbUrl.protocol}//${cbUrl.host}`;
+    const isAllowedFrontend =
+      cbUrl.protocol === 'https:' && allowedFrontendOrigins.includes(cbOrigin);
+    if (!isLoopback && !isAllowedFrontend) {
       return jsonResponse(
         res,
-        { error: 'callback must be http://localhost:NNNN or http://127.0.0.1:NNNN' },
+        {
+          error: 'callback must be http(s)://localhost:NNNN, 127.0.0.1, or an allowed frontend origin',
+          allowed_frontend_origins: allowedFrontendOrigins,
+        },
         400
       );
     }

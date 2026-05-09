@@ -95,7 +95,9 @@ function startAuthFlow() {
           return;
         }
 
-        if (!apiKey || !apiKey.startsWith('hm_')) {
+        // Accept any HIVEMIND-issued key. Backend may mint hm_, hmk_, or
+        // hmk_live_ prefixes depending on key family. Just check non-empty.
+        if (!apiKey || apiKey.length < 16) {
           res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
           res.end(ERROR_HTML('No HIVEMIND API key in callback'));
           return;

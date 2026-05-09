@@ -9080,7 +9080,11 @@ const server = http.createServer(async (req, res) => {
               if (!assistantName && wasOnboardingPrompt) {
                 const extracted = extractNameFromReply(message);
                 const finalName = extracted || ASSISTANT_IDENTITY.DEFAULT_NAME;
-                // Save it via the standard ingest pipeline so Smart Ingest runs.
+                // Save it via the standard ingest pipeline. Skip processing so
+                // the LLM fact-extraction doesn't misinterpret "User chose to
+                // name their HIVEMIND assistant 'Sage'" as "User's name is
+                // Sage" — that pollution caused false claims in later
+                // "what's my name" queries.
                 try {
                   const payload = buildAssistantNamePayload({
                     name: finalName,
@@ -9089,7 +9093,11 @@ const server = http.createServer(async (req, res) => {
                     prevMemoryId: assistantNameMemoryId,
                   });
                   if (persistentMemoryEngine?.ingestMemory) {
-                    await persistentMemoryEngine.ingestMemory(payload);
+                    await persistentMemoryEngine.ingestMemory({
+                      ...payload,
+                      skipProcessing: true,
+                      smartIngest: false, // identity config, not knowledge
+                    });
                   }
                 } catch (saveErr) {
                   console.warn('[chat:onboarding] save name failed:', saveErr.message);
@@ -9213,7 +9221,15 @@ const server = http.createServer(async (req, res) => {
 
                   // Filter out irrelevant results - lower threshold for better recall
                   const CHAT_MIN_SCORE = 0.05; // Lowered from 0.12 to allow more relevant memories
+                  // Identity / voice-profile config memories must NEVER pollute the
+                  // user-knowledge recall context. They're consumed elsewhere
+                  // (assistant-identity loader + voice-profile loader) and
+                  // including them here causes the LLM to confuse "the user
+                  // named the assistant Sage" with "the user IS named Sage".
+                  const CONFIG_TAGS = new Set(['assistant-name', 'voice-profile', 'org-voice', 'user-voice']);
                   const relevantMemories = recalledMemories.filter(m => {
+                    const tags = m.tags || [];
+                    if (tags.some(t => CONFIG_TAGS.has(t))) return false;
                     if (m._recencyInjected) return true;
                     // Always include high confidence memories, lower threshold for others
                     return (m.score || 0) >= CHAT_MIN_SCORE || (m.vectorScore || 0) >= 0.3;
@@ -9341,7 +9357,7 @@ const server = http.createServer(async (req, res) => {
               const voiceSection = voiceFragment ? `\n\n${voiceFragment}\n` : '';
               const displayName = assistantName || 'HIVEMIND';
               const identityLine = assistantName
-                ? `You are ${displayName} — ${orgName}'s second brain (the user named you). Always introduce yourself as ${displayName} when asked. Speak in the first person as ${displayName}.`
+                ? `You are ${displayName} — ${orgName}'s second brain. The user gave YOU the name ${displayName}; ${displayName} is YOUR name, NOT the user's. Always introduce yourself as ${displayName} when asked "what is your name". When asked "what is MY name" or "who am I", look up the user's name from Retrieved Memories or User Profile — do NOT answer ${displayName}.`
                 : `You are HIVEMIND — this user's second brain and their organisation's collective memory.`;
               const systemPrompt = `${identityLine}
 You store, connect, and recall everything the user tells you, and you speak in their voice and the organisation's voice.

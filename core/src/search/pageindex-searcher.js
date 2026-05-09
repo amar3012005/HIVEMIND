@@ -26,13 +26,13 @@ export class PageIndexSearcher {
    * @returns {Promise<Array>} Search results with full memory data
    */
   async search(query, options = {}) {
-    const { userId, orgId, project = null, rootPath = null, limit = 20 } = options;
+    const { userId, orgId, project = null, rootPath = null, limit = 20, tags = [] } = options;
     const startTime = Date.now();
 
     const effectiveRootPath = await this._resolveRootPath({ userId, project, rootPath });
 
     // Try PageIndex first (with timeout)
-    const pageIndexPromise = this._searchPageIndex(query, { userId, orgId, project, rootPath: effectiveRootPath, limit })
+    const pageIndexPromise = this._searchPageIndex(query, { userId, orgId, project, rootPath: effectiveRootPath, limit, tags })
       .then(results => ({ source: 'pageindex', results, error: null }))
       .catch(err => {
         this.logger.warn('[PageIndexSearcher] PageIndex failed, using fallback:', err.message);
@@ -77,7 +77,7 @@ export class PageIndexSearcher {
    * @private
    */
   async _searchPageIndex(query, options) {
-    const { userId, orgId, project, rootPath, limit } = options;
+    const { userId, orgId, project, rootPath, limit, tags = [] } = options;
 
     // Check if PageIndex table exists (first-run safety)
     const tableExists = await this._checkPageIndexTableExists();
@@ -130,13 +130,15 @@ export class PageIndexSearcher {
       return []; // No PageIndex matches
     }
 
-    // 3. Fetch memories by ID
+    // 3. Fetch memories by ID — apply tag filter at SQL layer when provided.
+    // Use hasSome so any tag overlap counts (matches recall semantics).
     const memories = await this.prisma.memory.findMany({
       where: {
         id: { in: [...memoryIdsFromPageIndex] },
         userId,
         ...(orgId ? { orgId } : {}),
         ...(project ? { project } : {}),
+        ...(Array.isArray(tags) && tags.length > 0 ? { tags: { hasSome: tags } } : {}),
         deletedAt: null,
       },
       take: limit,

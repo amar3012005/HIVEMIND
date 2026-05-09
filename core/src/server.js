@@ -9139,6 +9139,24 @@ const server = http.createServer(async (req, res) => {
                   const chatIntent = detectQueryIntent(message);
                   const chatWeights = computeDynamicWeights(chatIntent);
 
+                  // Auto-infer tags from the query phrasing (decision/bug/refactor/
+                  // file:<path>/fn:<name>/...). These are passed as preferred_tags
+                  // to the recall layer — soft +0.08 score boost per overlap, never
+                  // a hard filter — so the right memories rise to the top without
+                  // hiding paraphrased matches.
+                  let inferredTags = [];
+                  let inferredType = null;
+                  try {
+                    const { inferQueryTags, inferMemoryType } = await import('./services/query-tag-inference.js');
+                    inferredTags = inferQueryTags(message);
+                    inferredType = inferMemoryType(message);
+                    if (inferredTags.length > 0) {
+                      console.log('[chat] inferred preferred_tags:', inferredTags, 'memory_type:', inferredType || '(any)');
+                    }
+                  } catch (tagErr) {
+                    console.warn('[chat] tag inference failed:', tagErr.message);
+                  }
+
                   // For meta-queries ("what do you know about me"), broaden the search
                   const recallQueries = isMetaQuery
                     ? [message, 'personal facts about user', 'user preferences decisions']
@@ -9158,6 +9176,7 @@ const server = http.createServer(async (req, res) => {
                         inject_parent_chunks: true,
                         weights: chatWeights,
                         preference_boost: chatIntent.type === 'preference',
+                        preferred_tags: inferredTags,
                       });
                       const recalled = recallResult.memories || [];
                       injectionText = injectionText || recallResult.injectionText || '';

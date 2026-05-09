@@ -56,6 +56,21 @@ export class SlackBridge {
   }
 
   /**
+   * Slack issues two tokens at install time: a bot token (xoxb-…) and a user
+   * token (xoxp-…). Some methods — notably search.messages — only accept user
+   * tokens. The user token is persisted in provider_metadata.user_access_token.
+   * Fall back to the bot token if no user token is available.
+   */
+  async _userToken(userId) {
+    try {
+      const conn = await this.connectorStore.getConnector?.(userId, 'slack');
+      const meta = conn?.provider_metadata || {};
+      if (meta.user_access_token) return meta.user_access_token;
+    } catch {}
+    return this._token(userId);
+  }
+
+  /**
    * Low-level Slack Web API call with 429 retry.
    * @param {string} method e.g. 'search.messages'
    * @param {Object} params
@@ -124,7 +139,8 @@ export class SlackBridge {
    * Requires scope: search:read.
    */
   async searchMessages(userId, query, opts = {}) {
-    const token = await this._token(userId);
+    // search.messages requires a user token (search:read is a user-only scope)
+    const token = await this._userToken(userId);
     const data = await this._call('search.messages', {
       query,
       count: opts.count || 10,

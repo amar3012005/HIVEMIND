@@ -2031,6 +2031,23 @@ const server = http.createServer(async (req, res) => {
         redirectUri: getConnectorCallbackUrl(provider),
       });
 
+      // For providers that issue both bot and user tokens (Slack), merge the
+      // granted scopes from both sides and stash the user-token in metadata
+      // so the bridge can use it for user-only API calls (e.g. search.messages).
+      const grantedBotScopes = (tokens.bot_scope || '').split(/[,\s]+/).filter(Boolean);
+      const grantedUserScopes = (tokens.user_scope || '').split(/[,\s]+/).filter(Boolean);
+      const mergedScopes = grantedBotScopes.length || grantedUserScopes.length
+        ? Array.from(new Set([...grantedBotScopes, ...grantedUserScopes]))
+        : (providerConfig.scopes || []);
+
+      const providerMetadata = {};
+      if (tokens.user_access_token) providerMetadata.user_access_token = tokens.user_access_token;
+      if (tokens.user_scope) providerMetadata.user_scope = tokens.user_scope;
+      if (tokens.bot_scope) providerMetadata.bot_scope = tokens.bot_scope;
+      if (tokens.team_id) providerMetadata.team_id = tokens.team_id;
+      if (tokens.team) providerMetadata.team = tokens.team;
+      if (tokens.authed_user_id) providerMetadata.authed_user_id = tokens.authed_user_id;
+
       // Store encrypted tokens
       await connectorStore.upsertConnector({
         userId: authState.userId,
@@ -2042,7 +2059,8 @@ const server = http.createServer(async (req, res) => {
         tokenExpiresAt: tokens.expires_in
           ? new Date(Date.now() + tokens.expires_in * 1000).toISOString()
           : null,
-        scopes: providerConfig.scopes,
+        scopes: mergedScopes,
+        metadata: providerMetadata,
       });
 
       // Enqueue initial sync (fire-and-forget background)

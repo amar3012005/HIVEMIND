@@ -800,6 +800,29 @@ function generateToolsManifest(userId, orgId, options = {}) {
       }
     },
     {
+      name: 'hivemind_set_voice',
+      description: 'Save the voice profile that "Talk to HIVE" uses when answering. This is how the user / organisation actually speaks — tone, terminology, do/don\'t rules, signature phrases, example outputs. Loaded into every chat system prompt. Use scope="organization" for company-wide voice (visible to every member), scope="personal" for individual voice. Re-running with the same scope updates the profile via Smart Ingest.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          scope: {
+            type: 'string',
+            enum: ['organization', 'personal'],
+            description: 'organization = applied to all org members. personal = applied only to the calling user.',
+          },
+          content: {
+            type: 'string',
+            description: 'Markdown / freeform text describing tone, terminology, do/don\'t rules, signature phrases, example outputs. Examples:\n\n# Tone\n- Direct, no hedging\n- Active voice\n- Numbers over adjectives\n\n# Terminology\n- "customer" not "user"\n- "ARR" not "revenue"\n\n# Do not\n- Apologize for limitations\n- Say "I think"\n\n# Signature phrases\n- "Ship it."\n- "What does the data say?"',
+          },
+          title: {
+            type: 'string',
+            description: 'Optional override title. Defaults to "Organisation voice profile" or "Personal voice profile".',
+          },
+        },
+        required: ['scope', 'content'],
+      },
+    },
+    {
       name: 'hivemind_log_decision',
       description: 'Save an architectural or technical decision to HIVE-MIND. Use when you choose between options (e.g., library choice, algorithm, API design). This creates a permanent decision record that future sessions can recall with hivemind_why_code.',
       inputSchema: {
@@ -2364,6 +2387,27 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
           count: merged.length,
           memories: polishMemories(merged.slice(0, limit))
         });
+      }
+
+      case 'hivemind_set_voice': {
+        const scope = args.scope === 'organization' || args.scope === 'org' ? 'organization' : 'personal';
+        const content = normalizeMemoryText(args.content);
+        if (!content) throw new Error('hivemind_set_voice requires content');
+        const isOrg = scope === 'organization';
+        return formatToolContent(await apiClient.post('/api/memories', {
+          title: normalizeMemoryText(args.title, '') || (isOrg ? 'Organisation voice profile' : 'Personal voice profile'),
+          content,
+          memory_type: 'fact',
+          source_platform: 'voice-profile',
+          tags: [isOrg ? 'org-voice' : 'user-voice', 'voice-profile'],
+          visibility: isOrg ? 'organization' : 'private',
+          metadata: {
+            source_type: 'voice-profile',
+            voice_scope: isOrg ? 'organization' : 'personal',
+          },
+          user_id: userId,
+          org_id: orgId,
+        }));
       }
 
       case 'hivemind_log_decision': {

@@ -9140,13 +9140,28 @@ const server = http.createServer(async (req, res) => {
                   // Debug logging for chat recall
                   console.log('[chat] Recall stats: %d total, %d relevant, scores:', recalledMemories.length, relevantMemories.length, relevantMemories.slice(0, 3).map(m => ({ score: m.score, vectorScore: m.vectorScore, content: (m.content||'').slice(0,50) })));
 
-                  memories = relevantMemories.slice(0, isMetaQuery ? 20 : 15).map(m => {
+                  // Decision-first sort when the user asks about choices.
+                  const isDecisionQuery = /\b(decide|decision|chose|chosen|picked|selected|why did (we|i|you)|why use|why prefer|trade-off)\b/i.test(message);
+                  if (isDecisionQuery) {
+                    relevantMemories.sort((a, b) => {
+                      const aDec = (a.memory_type === 'decision' || (a.tags || []).includes('decision')) ? 1 : 0;
+                      const bDec = (b.memory_type === 'decision' || (b.tags || []).includes('decision')) ? 1 : 0;
+                      return bDec - aDec || (b.score || 0) - (a.score || 0);
+                    });
+                  }
+
+                  // Variable per-memory content limit: top 3 get full reasoning,
+                  // rest get a tighter slice. This prevents "I couldn't find
+                  // info" caused by truncating the most relevant decision/code
+                  // block mid-sentence.
+                  memories = relevantMemories.slice(0, isMetaQuery ? 20 : 15).map((m, idx) => {
                     const isFact = (m.tags || []).includes('extracted-fact');
+                    const cap = idx < 3 ? 2400 : isFact ? 400 : 700;
                     return {
                       id: m.id,
                       title: m.title || (m.content || '').slice(0, 60),
-                      content: (m.content || '').slice(0, isFact ? 500 : 800),
-                      parent_chunk: m.parent_chunk ? m.parent_chunk.slice(0, 600) : undefined,
+                      content: (m.content || '').slice(0, cap),
+                      parent_chunk: m.parent_chunk ? m.parent_chunk.slice(0, idx < 3 ? 1200 : 500) : undefined,
                       score: m.score || 0,
                       tags: m.tags || [],
                       memory_type: m.memory_type,
@@ -9154,17 +9169,84 @@ const server = http.createServer(async (req, res) => {
                       document_date: m.document_date,
                     };
                   });
+
+                  // Graph-expand the top match: pull memories linked via
+                  // Updates / Extends / Derives one hop away. This surfaces
+                  // related decisions / refactors / bug fixes the recall
+                  // didn't score high but are structurally connected.
+                  if (memories.length > 0 && prisma) {
+                    try {
+                      const topId = memories[0].id;
+                      const links = await prisma.relationship.findMany({
+                        where: {
+                          OR: [{ fromId: topId }, { toId: topId }],
+                          type: { in: ['Updates', 'Extends', 'Derives'] },
+                          fromMemory: { userId, orgId, deletedAt: null },
+                          toMemory: { userId, orgId, deletedAt: null },
+                        },
+                        select: { fromId: true, toId: true, type: true },
+                        take: 5,
+                      });
+                      const seen = new Set(memories.map(m => m.id));
+                      const connectedIds = [];
+                      for (const r of links) {
+                        const nbr = r.fromId === topId ? r.toId : r.fromId;
+                        if (!seen.has(nbr)) { seen.add(nbr); connectedIds.push(nbr); }
+                      }
+                      if (connectedIds.length > 0) {
+                        const connectedMems = await prisma.memory.findMany({
+                          where: { id: { in: connectedIds }, userId, orgId, deletedAt: null },
+                          select: {
+                            id: true, title: true, content: true, tags: true,
+                            memoryType: true, createdAt: true, documentDate: true
+                          },
+                        });
+                        for (const cm of connectedMems) {
+                          memories.push({
+                            id: cm.id,
+                            title: cm.title || (cm.content || '').slice(0, 60),
+                            content: (cm.content || '').slice(0, 1200),
+                            score: 0.5, // synthetic — graph-expanded
+                            tags: cm.tags || [],
+                            memory_type: cm.memoryType,
+                            created_at: cm.createdAt,
+                            document_date: cm.documentDate,
+                            _graphExpanded: true,
+                          });
+                        }
+                      }
+                    } catch (gErr) {
+                      console.warn('[chat] graph expand failed:', gErr.message);
+                    }
+                  }
                 } catch (recallErr) {
                   console.warn('[chat] Recall failed:', recallErr.message);
                 }
               }
 
-              // Inject persistent user profile
+              // Inject persistent user profile (sanitized — drop any user-profile
+              // bleed from /api/recall's injectionText that could conflict with
+              // explicit prompt structure).
               let profileContext = '';
               if (profileStore) {
                 try {
                   profileContext = await profileStore.buildProfileContext(userId, orgId);
                 } catch {}
+              }
+
+              // Drop the recall-side injection_text — it includes a
+              // <chain-of-note> block that fights our explicit system prompt.
+              // We have the memories + their scores; we don't need the
+              // pre-baked CoT scaffolding.
+              injectionText = '';
+
+              // Load voice profile (org-voice + user-voice memories).
+              let voiceFragment = '';
+              try {
+                const { loadVoiceProfile } = await import('./services/voice-profile.js');
+                voiceFragment = await loadVoiceProfile(persistentMemoryStore, { userId, orgId });
+              } catch (vErr) {
+                console.warn('[chat] voice profile load failed:', vErr.message);
               }
 
               // Step 2: Build system prompt — second-brain aware
@@ -9174,8 +9256,9 @@ const server = http.createServer(async (req, res) => {
               const declarativeHint = (isDeclarative && !isQuestion) ? '\n\nIMPORTANT: The user may be TELLING you a new fact, not asking a question. If they are stating something new (e.g. "X is Y", "I started Z"), acknowledge it naturally: "Got it — [fact]." or "Noted, [fact]." Do NOT say "I don\'t have that in my memory" when the user is clearly informing you of something new.' : '';
               const updateHint = isUpdateStatement ? '\n\nIMPORTANT: The user is UPDATING a previous fact. Acknowledge the change and confirm what the new state is. Example: "Updated — [new fact]. Previously it was [old fact]."' : '';
               const profileSection = profileContext ? `\n\nUser Profile:\n${profileContext}\n` : '';
-              const systemPrompt = `You are HIVEMIND, the user's second brain and personal knowledge engine. You store, connect, and recall everything the user tells you.
-${profileSection}${recencyHint}${metaHint}${aggregateHint}${declarativeHint}${updateHint}
+              const voiceSection = voiceFragment ? `\n\n${voiceFragment}\n` : '';
+              const systemPrompt = `You are HIVEMIND — this user's second brain and their organisation's collective memory. You store, connect, and recall everything the user tells you, and you speak in their voice and the organisation's voice.
+${voiceSection}${profileSection}${recencyHint}${metaHint}${aggregateHint}${declarativeHint}${updateHint}
 Rules:
 - BELOW is a section called "Retrieved Memories" — ALWAYS read and use it to answer the user's question
 - Answer questions DIRECTLY using the memories provided — look at the Retrieved Memories section first

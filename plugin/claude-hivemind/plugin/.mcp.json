@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "hivemind": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@amar_528/mcp-bridge",
+        "hosted",
+        "--url",
+        "https://core.hivemind.davinciai.eu:8050/api/mcp/servers/${HIVEMIND_USER_ID}"
+      ],
+      "env": {
+        "HIVEMIND_API_KEY": "${HIVEMIND_API_KEY}",
+        "HIVEMIND_USER_ID": "${HIVEMIND_USER_ID}",
+        "HIVEMIND_CONTROL_PLANE": "https://api.hivemind.davinciai.eu:8040",
+        "HIVEMIND_CORE_API": "https://core.hivemind.davinciai.eu:8050"
+      }
+    }
+  }
+}

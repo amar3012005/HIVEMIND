@@ -1,0 +1,22 @@
+{
+  "name": "hivemind-plugins",
+  "owner": {
+    "name": "HIVEMIND",
+    "email": "leonardo@bundb.de",
+    "url": "https://hivemind.davinciai.eu"
+  },
+  "plugins": [
+    {
+      "name": "claude-hivemind",
+      "source": "./plugin",
+      "description": "HIVEMIND persistent memory + bi-temporal time travel for Claude Code. 22 MCP tools across memory, web intelligence, coding intelligence, and time-travel queries.",
+      "version": "0.1.0",
+      "author": {
+        "name": "HIVEMIND",
+        "url": "https://hivemind.davinciai.eu"
+      },
+      "homepage": "https://hivemind.davinciai.eu/hivemind/app/mcp",
+      "tags": ["memory", "rag", "mcp", "knowledge-graph", "bi-temporal"]
+    }
+  ]
+}

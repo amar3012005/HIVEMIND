@@ -1139,6 +1139,97 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
+  // ─── /auth/cli — OAuth loopback for CLI tools (Claude Code plugin etc.) ──
+  // Flow:
+  //   1. CLI calls /auth/cli?callback=http://localhost:NNNN/callback&client=claude_code
+  //   2. If session is missing, kick off Zitadel SSO with returnTo back to /auth/cli
+  //   3. On authenticated session, mint an API key with scopes [memory:read, memory:write, mcp, coding]
+  //      and 302 to <callback>?apikey=hm_...&user_id=...&org_id=...
+  //
+  // Loopback safety: callback MUST be http://localhost:* or http://127.0.0.1:* to prevent open-redirect abuse.
+  if (pathname === '/auth/cli' && req.method === 'GET') {
+    const callback = url.searchParams.get('callback') || '';
+    const client = url.searchParams.get('client') || 'cli';
+
+    let cbUrl;
+    try {
+      cbUrl = new URL(callback);
+    } catch {
+      return jsonResponse(res, { error: 'invalid callback' }, 400);
+    }
+    const isLoopback =
+      (cbUrl.protocol === 'http:' || cbUrl.protocol === 'https:') &&
+      (cbUrl.hostname === 'localhost' ||
+        cbUrl.hostname === '127.0.0.1' ||
+        cbUrl.hostname === '::1');
+    if (!isLoopback) {
+      return jsonResponse(
+        res,
+        { error: 'callback must be http://localhost:NNNN or http://127.0.0.1:NNNN' },
+        400
+      );
+    }
+
+    const current = await getCurrentSession(req);
+    if (!current) {
+      // No session — start Zitadel SSO with returnTo pointing back here so the
+      // post-auth redirect re-enters this branch with a session cookie.
+      if (!zitadelClient) {
+        return jsonResponse(res, { error: 'ZITADEL not configured' }, 503);
+      }
+      const cpBase =
+        process.env.HIVEMIND_CONTROL_PLANE_URL ||
+        `https://api.hivemind.davinciai.eu:8040`;
+      const selfReturnTo = `${cpBase}/auth/cli?callback=${encodeURIComponent(
+        callback
+      )}&client=${encodeURIComponent(client)}`;
+      const state = await sessionStore.createAuthState({
+        returnTo: selfReturnTo,
+      });
+      return redirect(res, zitadelClient.buildAuthorizeUrl(state, {}));
+    }
+
+    // Authenticated — mint an API key for this client.
+    try {
+      const userId = current.session.userId;
+      const orgId = current.session.orgId || null;
+      if (!prisma) {
+        return jsonResponse(res, { error: 'persistence offline' }, 503);
+      }
+      const userAgent = req.headers['user-agent'] || '';
+      const ip =
+        req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
+        req.socket.remoteAddress ||
+        null;
+      const { rawKey } = await createPersistedApiKey(prisma, {
+        userId,
+        orgId,
+        name: `cli:${client}`,
+        description: `Issued via /auth/cli for ${client} on ${new Date().toISOString()}`,
+        scopes: ['memory:read', 'memory:write', 'mcp', 'coding', 'web_search', 'web_crawl'],
+        expiresAt: null,
+        rateLimitPerMinute: 120,
+        createdByIp: ip,
+        userAgent,
+      });
+
+      const params = new URLSearchParams({
+        apikey: rawKey,
+        user_id: userId,
+        ...(orgId ? { org_id: orgId } : {}),
+        client,
+      });
+      const sep = cbUrl.search ? '&' : '?';
+      const target = `${callback}${sep}${params.toString()}`;
+      return redirect(res, target);
+    } catch (err) {
+      console.error('[auth/cli] failed:', err.message);
+      const params = new URLSearchParams({ error: err.message });
+      const sep = cbUrl.search ? '&' : '?';
+      return redirect(res, `${callback}${sep}${params.toString()}`);
+    }
+  }
+
   if (pathname === '/v1/bootstrap' && req.method === 'GET') {
     const current = await getCurrentSession(req);
     if (!current) {

@@ -1,0 +1,16 @@
+{
+  "description": "HIVEMIND: ensure auth credentials are loaded into env before MCP server starts.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/ensure-auth.cjs\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

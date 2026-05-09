@@ -1,0 +1,20 @@
+{
+  "name": "claude-hivemind",
+  "version": "0.1.0",
+  "description": "HIVEMIND persistent memory + bi-temporal time travel for Claude Code. 22 MCP tools.",
+  "author": {
+    "name": "HIVEMIND",
+    "email": "leonardo@bundb.de",
+    "url": "https://hivemind.davinciai.eu"
+  },
+  "homepage": "https://hivemind.davinciai.eu/hivemind/app/mcp",
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "rag",
+    "mcp",
+    "knowledge-graph",
+    "bi-temporal",
+    "claude-code"
+  ]
+}

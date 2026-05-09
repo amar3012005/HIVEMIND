@@ -5,7 +5,18 @@ export function getOAuthConfig() {
     clientSecret: process.env.SLACK_CLIENT_SECRET || '',
     authUrl: 'https://slack.com/oauth/v2/authorize',
     tokenUrl: 'https://slack.com/api/oauth.v2.access',
-    scopes: ['channels:history', 'channels:read', 'groups:history', 'groups:read', 'im:history', 'mpim:history', 'users:read', 'team:read'],
+    scopes: [
+      'channels:history', 'channels:read',
+      'groups:history', 'groups:read',
+      'im:history', 'mpim:history',
+      'users:read', 'users:read.email',
+      'team:read',
+      'chat:write',
+      'search:read',
+      'files:read',
+      'reactions:read',
+      'pins:read',
+    ],
   };
 }
 

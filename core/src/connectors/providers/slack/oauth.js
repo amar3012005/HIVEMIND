@@ -1,3 +1,26 @@
+// Slack OAuth v2 — bot scopes vs user scopes are separate.
+// `scope`      → installed bot's permissions (workspace-wide).
+// `user_scope` → permissions delegated by the installing user.
+// search.messages can only be called with a user token (search:read is a
+// user-only scope), so we request it via user_scope and use authed_user.access_token
+// for live search calls.
+
+const BOT_SCOPES = [
+  'channels:history', 'channels:read',
+  'groups:history', 'groups:read',
+  'im:history', 'mpim:history',
+  'users:read', 'users:read.email',
+  'team:read',
+  'chat:write',
+  'files:read',
+  'reactions:read',
+  'pins:read',
+];
+
+const USER_SCOPES = [
+  'search:read',
+];
+
 export function getOAuthConfig() {
   return {
     providerId: 'slack',
@@ -5,18 +28,8 @@ export function getOAuthConfig() {
     clientSecret: process.env.SLACK_CLIENT_SECRET || '',
     authUrl: 'https://slack.com/oauth/v2/authorize',
     tokenUrl: 'https://slack.com/api/oauth.v2.access',
-    scopes: [
-      'channels:history', 'channels:read',
-      'groups:history', 'groups:read',
-      'im:history', 'mpim:history',
-      'users:read', 'users:read.email',
-      'team:read',
-      'chat:write',
-      'search:read',
-      'files:read',
-      'reactions:read',
-      'pins:read',
-    ],
+    scopes: BOT_SCOPES,
+    userScopes: USER_SCOPES,
   };
 }
 
@@ -26,6 +39,7 @@ export function buildAuthUrl({ redirectUri, state }) {
     client_id: config.clientId,
     redirect_uri: redirectUri,
     scope: config.scopes.join(','),
+    user_scope: config.userScopes.join(','),
     state,
   });
   return `${config.authUrl}?${params}`;
@@ -50,6 +64,9 @@ export async function exchangeCode({ code, redirectUri }) {
   const data = await response.json();
   if (!data.ok) throw new Error(`Slack OAuth error: ${data.error}`);
 
+  // Persist bot token as primary access_token (used for channel reads, posting,
+  // user info, etc.). The user-scope token (authed_user.access_token) is what
+  // powers search.messages — store it in metadata so the bridge can pick it up.
   return {
     access_token: data.access_token,
     refresh_token: data.refresh_token || null,
@@ -58,5 +75,8 @@ export async function exchangeCode({ code, redirectUri }) {
     team: data.team?.name || null,
     team_id: data.team?.id || null,
     authed_user_id: data.authed_user?.id || null,
+    user_access_token: data.authed_user?.access_token || null,
+    user_scope: data.authed_user?.scope || null,
+    bot_scope: data.scope || null,
   };
 }

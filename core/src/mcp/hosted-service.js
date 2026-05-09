@@ -800,6 +800,20 @@ function generateToolsManifest(userId, orgId, options = {}) {
       }
     },
     {
+      name: 'hivemind_set_assistant_name',
+      description: 'Per-user setting: choose what HIVEMIND should call itself in Talk to HIVE chats (e.g. "Sage", "Brain", "Iris"). Stored as a personal memory tagged assistant-name. Re-running with a different name updates via Smart Ingest UPDATE relationship. Pass empty string or "default" to reset.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: {
+            type: 'string',
+            description: 'Short name (max 32 chars). "skip", "default", or empty resets to "HIVE".',
+          },
+        },
+        required: ['name'],
+      },
+    },
+    {
       name: 'hivemind_set_voice',
       description: 'Save the voice profile that "Talk to HIVE" uses when answering. This is how the user / organisation actually speaks — tone, terminology, do/don\'t rules, signature phrases, example outputs. Loaded into every chat system prompt. Use scope="organization" for company-wide voice (visible to every member), scope="personal" for individual voice. Re-running with the same scope updates the profile via Smart Ingest.',
       inputSchema: {
@@ -2387,6 +2401,41 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
           count: merged.length,
           memories: polishMemories(merged.slice(0, limit))
         });
+      }
+
+      case 'hivemind_set_assistant_name': {
+        const requested = normalizeMemoryText(args.name, '');
+        const { extractNameFromReply, ASSISTANT_IDENTITY } = await import('../services/assistant-identity.js');
+        // Treat "skip" / "default" / empty as fall-back to default name.
+        const finalName = (!requested || /^(skip|default|reset|none)$/i.test(requested))
+          ? ASSISTANT_IDENTITY.DEFAULT_NAME
+          : (extractNameFromReply(requested) || ASSISTANT_IDENTITY.DEFAULT_NAME);
+
+        // Look up prior name memory id so Smart Ingest UPDATE chains.
+        let prevId = null;
+        try {
+          const list = await apiClient.get('/api/memories', {
+            params: { tags: ASSISTANT_IDENTITY.TAG, limit: 1 },
+          });
+          const memories = list?.memories || list?.data || [];
+          prevId = memories[0]?.id || null;
+        } catch {}
+
+        return formatToolContent(await apiClient.post('/api/memories', {
+          title: `Assistant name: ${finalName}`,
+          content: `User chose to name their HIVEMIND assistant "${finalName}".`,
+          memory_type: 'fact',
+          source_platform: 'assistant-identity',
+          tags: [ASSISTANT_IDENTITY.TAG, 'voice-profile'],
+          visibility: 'private',
+          metadata: {
+            source_type: 'assistant-identity',
+            assistant_name: finalName,
+          },
+          relationship: prevId ? buildRelationship('update', prevId) : undefined,
+          user_id: userId,
+          org_id: orgId,
+        }));
       }
 
       case 'hivemind_set_voice': {

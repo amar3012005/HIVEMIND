@@ -9028,6 +9028,88 @@ const server = http.createServer(async (req, res) => {
               return jsonResponse(res, { error: 'Chat not available — no LLM API key configured' }, 503);
             }
 
+            // ─── Assistant identity onboarding ───
+            // Per-user: on the very first chat, HIVEMIND introduces itself as
+            // "<orgName>'s second brain" and asks for a name. The user's
+            // reply is parsed and persisted as a memory tagged
+            // `assistant-name`. Every subsequent chat reads that memory and
+            // addresses itself by the chosen name.
+            let assistantName = null;
+            let assistantNameMemoryId = null;
+            let orgName = 'your organisation';
+            try {
+              const { getAssistantName, extractNameFromReply, buildAssistantNamePayload, ASSISTANT_IDENTITY } =
+                await import('./services/assistant-identity.js');
+              if (persistentMemoryStore) {
+                const lookup = await getAssistantName(persistentMemoryStore, { userId, orgId });
+                assistantName = lookup.name;
+                assistantNameMemoryId = lookup.memoryId;
+              }
+              // Resolve org name (best-effort, falls back gracefully).
+              if (orgId && prisma) {
+                try {
+                  const org = await prisma.organization.findUnique({
+                    where: { id: orgId },
+                    select: { name: true, slug: true },
+                  });
+                  if (org?.name) orgName = org.name;
+                } catch {}
+              }
+
+              // Detect onboarding state via conversation history.
+              const lastAssistantTurn = [...(history || [])].reverse().find(h => h.role === 'assistant');
+              const wasOnboardingPrompt =
+                lastAssistantTurn &&
+                /(?:second brain|got a name for me|want to give me a name|what should i call myself|pick a name)/i.test(lastAssistantTurn.content || '');
+
+              // STATE 1: no name set, no onboarding prompt yet → ask now and short-circuit.
+              if (!assistantName && !wasOnboardingPrompt) {
+                const intro =
+                  `Hi — I'm ${orgName}'s second brain. I store, connect, and recall everything you and your team tell me.\n\n` +
+                  `Got a name for me? Pick something short (max 32 chars). Say "skip" to use the default ("${ASSISTANT_IDENTITY.DEFAULT_NAME}").`;
+                return jsonResponse(res, {
+                  response: intro,
+                  sources: [],
+                  usage: null,
+                  assistant_name: null,
+                  onboarding: { step: 'ask_name', org_name: orgName },
+                });
+              }
+
+              // STATE 2: no name set, last assistant turn was the prompt → user is replying with a name.
+              if (!assistantName && wasOnboardingPrompt) {
+                const extracted = extractNameFromReply(message);
+                const finalName = extracted || ASSISTANT_IDENTITY.DEFAULT_NAME;
+                // Save it via the standard ingest pipeline so Smart Ingest runs.
+                try {
+                  const payload = buildAssistantNamePayload({
+                    name: finalName,
+                    userId,
+                    orgId,
+                    prevMemoryId: assistantNameMemoryId,
+                  });
+                  if (persistentMemoryEngine?.ingestMemory) {
+                    await persistentMemoryEngine.ingestMemory(payload);
+                  }
+                } catch (saveErr) {
+                  console.warn('[chat:onboarding] save name failed:', saveErr.message);
+                }
+                assistantName = finalName;
+                const ack = extracted
+                  ? `Got it — I'll go by **${finalName}** from now on. What can I help you with?`
+                  : `Going with the default — call me **${finalName}**. What can I help you with?`;
+                return jsonResponse(res, {
+                  response: ack,
+                  sources: [],
+                  usage: null,
+                  assistant_name: finalName,
+                  onboarding: { step: 'name_saved', name: finalName, org_name: orgName },
+                });
+              }
+            } catch (idErr) {
+              console.warn('[chat:onboarding] identity load failed:', idErr.message);
+            }
+
             try {
               // --- Classify user intent ---
               const msgTrimmed = message.trim();
@@ -9257,7 +9339,12 @@ const server = http.createServer(async (req, res) => {
               const updateHint = isUpdateStatement ? '\n\nIMPORTANT: The user is UPDATING a previous fact. Acknowledge the change and confirm what the new state is. Example: "Updated — [new fact]. Previously it was [old fact]."' : '';
               const profileSection = profileContext ? `\n\nUser Profile:\n${profileContext}\n` : '';
               const voiceSection = voiceFragment ? `\n\n${voiceFragment}\n` : '';
-              const systemPrompt = `You are HIVEMIND — this user's second brain and their organisation's collective memory. You store, connect, and recall everything the user tells you, and you speak in their voice and the organisation's voice.
+              const displayName = assistantName || 'HIVEMIND';
+              const identityLine = assistantName
+                ? `You are ${displayName} — ${orgName}'s second brain (the user named you). Always introduce yourself as ${displayName} when asked. Speak in the first person as ${displayName}.`
+                : `You are HIVEMIND — this user's second brain and their organisation's collective memory.`;
+              const systemPrompt = `${identityLine}
+You store, connect, and recall everything the user tells you, and you speak in their voice and the organisation's voice.
 ${voiceSection}${profileSection}${recencyHint}${metaHint}${aggregateHint}${declarativeHint}${updateHint}
 Rules:
 - BELOW is a section called "Retrieved Memories" — ALWAYS read and use it to answer the user's question
@@ -9382,6 +9469,8 @@ ${injectionText}`;
                   prompt_tokens: groqData.usage?.prompt_tokens,
                   completion_tokens: groqData.usage?.completion_tokens,
                 },
+                assistant_name: assistantName || null,
+                org_name: orgName,
               });
             } catch (chatErr) {
               console.error('[chat] Failed:', chatErr.message);

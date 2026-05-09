@@ -6802,12 +6802,107 @@ const server = http.createServer(async (req, res) => {
 
         case '/api/memories/traverse':
           if (req.method === 'POST') {
-            const result = engine.traverse({
-              start_id: body.start_id,
-              depth: body.depth || 3,
-              relationship_types: body.relationship_types || ['Updates', 'Extends', 'Derives']
-            });
-            jsonResponse(res, result);
+            // Prisma-backed BFS traversal. Old engine.traverse() used in-memory
+            // sqlite which is invisible to production memories; this rewrite
+            // walks the Postgres relationship table scoped to the caller's
+            // tenant.
+            try {
+              const startId = body.start_id;
+              if (!startId) {
+                return jsonResponse(res, { error: 'start_id required' }, 400);
+              }
+              const maxDepth = Math.min(Math.max(parseInt(body.depth) || 2, 1), 5);
+              const allowedTypes = (Array.isArray(body.relationship_types) && body.relationship_types.length > 0)
+                ? body.relationship_types
+                : ['Updates', 'Extends', 'Derives'];
+
+              const startMem = await prisma.memory.findFirst({
+                where: { id: startId, userId, orgId, deletedAt: null },
+                include: { sourceMetadata: true }
+              });
+              if (!startMem) {
+                return jsonResponse(res, { error: 'Memory not found or not accessible' }, 404);
+              }
+
+              const visited = new Set([startId]);
+              const nodesById = new Map([[startId, startMem]]);
+              const edges = [];
+              let frontier = [startId];
+
+              for (let d = 0; d < maxDepth && frontier.length > 0; d++) {
+                const rels = await prisma.relationship.findMany({
+                  where: {
+                    type: { in: allowedTypes },
+                    OR: [
+                      { fromId: { in: frontier } },
+                      { toId: { in: frontier } }
+                    ],
+                    fromMemory: { userId, orgId, deletedAt: null },
+                    toMemory: { userId, orgId, deletedAt: null }
+                  },
+                  select: { id: true, fromId: true, toId: true, type: true, confidence: true, createdBy: true, createdAt: true }
+                });
+
+                const nextFrontier = new Set();
+                for (const rel of rels) {
+                  edges.push({
+                    id: rel.id,
+                    from_id: rel.fromId,
+                    to_id: rel.toId,
+                    type: rel.type,
+                    confidence: rel.confidence,
+                    created_by: rel.createdBy || null,
+                    created_at: rel.createdAt instanceof Date ? rel.createdAt.toISOString() : rel.createdAt
+                  });
+                  for (const nbr of [rel.fromId, rel.toId]) {
+                    if (!visited.has(nbr)) {
+                      visited.add(nbr);
+                      nextFrontier.add(nbr);
+                    }
+                  }
+                }
+
+                if (nextFrontier.size > 0) {
+                  const newMems = await prisma.memory.findMany({
+                    where: {
+                      id: { in: [...nextFrontier] },
+                      userId,
+                      orgId,
+                      deletedAt: null
+                    },
+                    include: { sourceMetadata: true }
+                  });
+                  for (const m of newMems) nodesById.set(m.id, m);
+                }
+
+                frontier = [...nextFrontier];
+              }
+
+              const polishNode = (m) => ({
+                id: m.id,
+                title: m.title || '',
+                content: (m.content || '').slice(0, 200),
+                memory_type: m.memoryType || null,
+                tags: m.tags || [],
+                project: m.project || null,
+                is_latest: m.isLatest,
+                version: m.version || 1,
+                created_at: m.createdAt instanceof Date ? m.createdAt.toISOString() : m.createdAt,
+                document_date: m.documentDate instanceof Date ? m.documentDate.toISOString() : m.documentDate
+              });
+
+              return jsonResponse(res, {
+                start_id: startId,
+                depth: maxDepth,
+                relationship_types: allowedTypes,
+                nodes: [...nodesById.values()].map(polishNode),
+                edges,
+                paths: [] // path enumeration omitted for now — clients want nodes + edges
+              });
+            } catch (err) {
+              console.error('[traverse] failed:', err.message);
+              return jsonResponse(res, { error: 'Traversal failed', message: err.message }, 500);
+            }
           }
           break;
 

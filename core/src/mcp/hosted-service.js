@@ -289,6 +289,60 @@ function formatToolError(name, error) {
   };
 }
 
+/**
+ * Strip noisy internal fields from a memory record before returning to the
+ * MCP client. Whitelist approach: caller-relevant fields only. Drops
+ * semantic_provenance, _searchMethod, vector_score, keyword_score,
+ * graph_score, policy_score, processed_at, factSentences,
+ * extracted_facts, parent_chunk, parent_document_date, semantic_relationship,
+ * semantic_role, semantic_*_ids, _normalized, _normalizer, source_message_id,
+ * source_session_id, expansion_metadata, operator_boost, etc.
+ *
+ * Content is NOT truncated here — call polishMemory(m, { contentLimit: N })
+ * to truncate when needed (e.g. query_with_ai).
+ */
+function polishMemory(m, opts = {}) {
+  if (!m || typeof m !== 'object') return m;
+  const contentLimit = typeof opts.contentLimit === 'number' ? opts.contentLimit : null;
+  const meta = m.metadata || {};
+  const srcMeta = m.source_metadata || {};
+  return {
+    id: m.id,
+    title: m.title || '',
+    content: contentLimit ? (m.content || '').slice(0, contentLimit) : (m.content || ''),
+    memory_type: m.memory_type || null,
+    tags: m.tags || [],
+    project: m.project || null,
+    visibility: m.visibility || null,
+    is_latest: m.is_latest,
+    version: m.version || 1,
+    importance_score: m.importance_score ?? null,
+    score: typeof m.score === 'number' ? Math.round(m.score * 1000) / 1000 : undefined,
+    created_at: m.created_at,
+    updated_at: m.updated_at,
+    document_date: m.document_date,
+    source_type: meta.source_type || srcMeta.source_type || null,
+    source_platform: srcMeta.source_platform || null,
+    source_url: srcMeta.source_url || null,
+    file_path: meta.file_path || null,
+    function_name: meta.function_name || null,
+    language: meta.language || null,
+    affected_files: Array.isArray(meta.affected_files) ? meta.affected_files : undefined,
+    alternatives: Array.isArray(meta.alternatives) ? meta.alternatives : undefined,
+    refactor_type: meta.refactor_type || undefined,
+    old_name: meta.old_name || undefined,
+    new_name: meta.new_name || undefined,
+    test_cases: Array.isArray(meta.test_cases) ? meta.test_cases : undefined,
+    coverage_pct: typeof meta.coverage_pct === 'number' ? meta.coverage_pct : undefined,
+    parent_memory_id: meta.parent_memory_id || undefined
+  };
+}
+
+function polishMemories(arr, opts = {}) {
+  if (!Array.isArray(arr)) return arr;
+  return arr.map(m => polishMemory(m, opts));
+}
+
 function relationshipTypeToGraphTypes(relationship) {
   switch (relationship) {
     case 'update':
@@ -1942,12 +1996,13 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
             max_memories: recallLimit,
           });
 
+          // Polished memory shape only — drops semantic_*, vector_score, user_profile,
+          // and injection_text noise. Caller asked for memories, not a JSON dump.
           const base = {
-            memories: recallResult.memories || [],
-            injection_text: recallResult.injectionText || recallResult.injection_text || null,
-            user_profile: recallResult.user_profile || null,
+            memories: polishMemories(recallResult.memories || []),
             search_method: recallResult.search_method || 'persisted-recall',
             mode: args.mode || 'quick',
+            count: (recallResult.memories || []).length,
           };
 
           // Quick: return base as-is
@@ -2081,8 +2136,10 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
           return formatToolContent(base);
         }
 
-      case 'hivemind_get_memory':
-        return formatToolContent(await apiClient.get(`/api/memories/${args.memory_id}`));
+      case 'hivemind_get_memory': {
+        const raw = await apiClient.get(`/api/memories/${args.memory_id}`);
+        return formatToolContent(polishMemory(raw));
+      }
 
       case 'hivemind_list_memories': {
         // Build params object with only defined values
@@ -2094,17 +2151,26 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
         if (args.tags && Array.isArray(args.tags) && args.tags.length > 0) listParams.tags = args.tags.join(',');
         if (args.source_type === 'decision') listParams.memory_type = 'decision';
 
-        return formatToolContent(await apiClient.get('/api/memories', { params: listParams }));
+        const listRes = await apiClient.get('/api/memories', { params: listParams });
+        return formatToolContent({
+          memories: polishMemories(listRes?.memories || []),
+          pagination: listRes?.pagination || undefined
+        });
       }
 
-      case 'hivemind_update_memory':
-        return formatToolContent(await apiClient.put(`/api/memories/${args.memory_id}`, {
+      case 'hivemind_update_memory': {
+        const updRes = await apiClient.put(`/api/memories/${args.memory_id}`, {
           title: args.title,
           content: args.content,
           tags: args.tags,
           user_id: userId,
           org_id: orgId
-        }));
+        });
+        return formatToolContent({
+          success: updRes?.success !== false,
+          memory: updRes?.memory ? polishMemory(updRes.memory) : undefined
+        });
+      }
 
       case 'hivemind_delete_memory':
         return formatToolContent(await apiClient.delete(`/api/memories/${args.memory_id}`));
@@ -2121,18 +2187,38 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
           org_id: orgId
         }));
 
-      case 'hivemind_traverse_graph':
-        return formatToolContent(await apiClient.post('/api/memories/traverse', {
+      case 'hivemind_traverse_graph': {
+        const trav = await apiClient.post('/api/memories/traverse', {
           start_id: args.memory_id,
           depth: args.depth || 2,
           relationship_types: relationshipTypeToGraphTypes(args.relationship || 'all')
-        }));
+        });
+        // Backend now returns already-polished node shape, but pass through
+        // polishMemory() defensively in case of legacy/non-polished responses.
+        return formatToolContent({
+          start_id: trav?.start_id || args.memory_id,
+          depth: trav?.depth || args.depth || 2,
+          nodes: Array.isArray(trav?.nodes) ? trav.nodes.map(n => polishMemory(n)) : [],
+          edges: Array.isArray(trav?.edges) ? trav.edges : [],
+          relationship_types: trav?.relationship_types || undefined
+        });
+      }
 
-      case 'hivemind_query_with_ai':
-        return formatToolContent(await apiClient.post('/api/search/insight', {
+      case 'hivemind_query_with_ai': {
+        const qres = await apiClient.post('/api/search/insight', {
           query: args.question,
           limit: args.context_limit || 5
-        }));
+        });
+        // Cap response size: polish memories AND truncate content to 800 chars
+        // each. Without this the raw insight payload routinely overflows the
+        // MCP response limit (saw 130k chars on a 5-memory query).
+        return formatToolContent({
+          query: args.question,
+          memories: polishMemories(qres?.memories || qres?.results || [], { contentLimit: 800 }),
+          answer: qres?.answer || qres?.synthesis || null,
+          context_limit: args.context_limit || 5
+        });
+      }
 
       // ── Web Intelligence handlers ─────────────────────────
       case 'hivemind_web_search': {
@@ -2216,21 +2302,67 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
       case 'hivemind_recall_bugs': {
         const ctx = normalizeMemoryText(args.context);
         if (!ctx) throw new Error('hivemind_recall_bugs requires context');
-        const tagFilter = ['bug', 'fix', 'gotcha'];
-        if (args.file_path) tagFilter.push(`file:${args.file_path}`);
+        const limit = Math.min(args.limit || 5, 20);
+        const fileTag = args.file_path ? `file:${args.file_path}` : null;
 
-        const recallResult = await apiClient.post('/api/recall', {
+        // Two-pronged retrieval — semantic recall captures paraphrased bug
+        // descriptions even with weak tags; tag-exact list ensures we never
+        // miss a memory that's been superseded (is_latest=false) but still
+        // tagged bug/fix/gotcha. Merge unique by id.
+        const semanticRecall = apiClient.post('/api/recall', {
           query_context: `bug fix gotcha: ${ctx}`,
-          tags: tagFilter,
+          tags: fileTag ? [fileTag] : [], // narrow by file only — tag OR is too restrictive on /api/recall
           project: args.project || null,
-          max_memories: Math.min(args.limit || 5, 20)
+          max_memories: limit * 2
+        }).catch(() => ({ memories: [] }));
+
+        const fetchByTag = (tag) => apiClient.get('/api/memories', {
+          params: {
+            tags: fileTag ? `${tag},${fileTag}` : tag,
+            limit: limit * 2,
+            ...(args.project ? { project: args.project } : {})
+          }
+        }).catch(() => ({ memories: [] }));
+
+        const [semantic, bugList, fixList, gotchaList] = await Promise.all([
+          semanticRecall,
+          fetchByTag('bug'),
+          fetchByTag('fix'),
+          fetchByTag('gotcha')
+        ]);
+
+        const seen = new Set();
+        const merged = [];
+        for (const src of [semantic.memories, bugList.memories, fixList.memories, gotchaList.memories]) {
+          for (const m of (src || [])) {
+            if (!m || seen.has(m.id)) continue;
+            // Filter to memories that actually carry a bug-class tag (semantic recall
+            // can return non-bug content matching the keywords).
+            const tags = m.tags || [];
+            const hasBugTag = tags.includes('bug') || tags.includes('fix') || tags.includes('gotcha');
+            if (!hasBugTag && src !== semantic.memories) {
+              // tag-list path is already filtered by tag — keep
+            } else if (!hasBugTag) {
+              continue;
+            }
+            seen.add(m.id);
+            merged.push(m);
+          }
+        }
+        // Rank: prefer is_latest, then by score (semantic) or recency
+        merged.sort((a, b) => {
+          if (a.is_latest !== b.is_latest) return a.is_latest ? -1 : 1;
+          const sa = typeof a.score === 'number' ? a.score : 0;
+          const sb = typeof b.score === 'number' ? b.score : 0;
+          if (sa !== sb) return sb - sa;
+          return new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0);
         });
 
         return formatToolContent({
-          memories: recallResult.memories || [],
-          injection_text: recallResult.injectionText || recallResult.injection_text || null,
           query_context: ctx,
-          filter_tags: tagFilter
+          filter_tags: ['bug | fix | gotcha', ...(fileTag ? [fileTag] : [])],
+          count: merged.length,
+          memories: polishMemories(merged.slice(0, limit))
         });
       }
 
@@ -2363,15 +2495,15 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
           max_memories: Math.min(args.limit || 8, 20)
         });
 
-        const memories = recallResult.memories || [];
-        const decisions = memories.filter(m => m.memory_type === 'decision' || (m.tags || []).includes('decision'));
-        const refactors = memories.filter(m => (m.tags || []).includes('refactor'));
-        const bugs = memories.filter(m => (m.tags || []).includes('bug') || (m.tags || []).includes('fix'));
-        const codeRefs = memories.filter(m => (m.tags || []).includes('code'));
+        const rawMemories = recallResult.memories || [];
+        const decisions = polishMemories(rawMemories.filter(m => m.memory_type === 'decision' || (m.tags || []).includes('decision')));
+        const refactors = polishMemories(rawMemories.filter(m => (m.tags || []).includes('refactor')));
+        const bugs = polishMemories(rawMemories.filter(m => (m.tags || []).includes('bug') || (m.tags || []).includes('fix')));
+        const codeRefs = polishMemories(rawMemories.filter(m => (m.tags || []).includes('code')));
+        const memories = polishMemories(rawMemories);
 
         return formatToolContent({
           query,
-          memories,
           summary: {
             decisions: decisions.length,
             refactors: refactors.length,
@@ -2379,11 +2511,11 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
             code_refs: codeRefs.length,
             total: memories.length
           },
+          memories,
           decisions,
           refactors,
           bugs,
-          code_refs: codeRefs,
-          injection_text: recallResult.injectionText || recallResult.injection_text || null
+          code_refs: codeRefs
         });
       }
 
@@ -2391,9 +2523,14 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
         if (!args.transaction_time && !args.valid_time) {
           throw new Error('hivemind_code_at requires transaction_time and/or valid_time');
         }
+        // Default transaction_time to "now" when only valid_time is given —
+        // and warn callers passing a TX-time earlier than any memory's
+        // creation: empty result is correct, not a bug.
+        const txTime = args.transaction_time || null;
+        const validTime = args.valid_time || null;
         const res = await apiClient.post('/api/temporal/as-of', {
-          transaction_time: args.transaction_time || null,
-          valid_time: args.valid_time || null
+          transaction_time: txTime,
+          valid_time: validTime
         });
         let memories = res.memories || [];
         if (args.file_path) {
@@ -2402,10 +2539,15 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
         if (args.project) {
           memories = memories.filter(m => m.project === args.project);
         }
+        const polished = polishMemories(memories);
+        const hint = (polished.length === 0 && txTime)
+          ? `No memories exist at transaction_time=${txTime}${args.file_path ? ` for file ${args.file_path}` : ''}. The system may not have learned anything by that time, or the file did not yet exist. Try a later timestamp or omit the filter.`
+          : null;
         return formatToolContent({
-          query: res.query || { transaction_time: args.transaction_time, valid_time: args.valid_time },
-          count: memories.length,
-          memories
+          query: res.query || { transaction_time: txTime, valid_time: validTime },
+          count: polished.length,
+          memories: polished,
+          ...(hint ? { hint } : {})
         });
       }
 

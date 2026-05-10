@@ -2171,6 +2171,119 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // POST /v1/connectors/slack/events — Slack Events API webhook
+  // Public endpoint (no session). Auth via HMAC signature over raw body.
+  // Handles url_verification handshake + message/reaction/pin events.
+  if (pathname === '/v1/connectors/slack/events' && req.method === 'POST') {
+    const signingSecret = process.env.SLACK_SIGNING_SECRET;
+    if (!signingSecret) {
+      console.error('[slack-events] SLACK_SIGNING_SECRET not configured');
+      return jsonResponse(res, { error: 'webhook not configured' }, 503);
+    }
+
+    // Read raw body for HMAC; reject if too large
+    const chunks = [];
+    let totalLen = 0;
+    const MAX_BODY = 1_000_000; // 1MB
+    for await (const chunk of req) {
+      totalLen += chunk.length;
+      if (totalLen > MAX_BODY) {
+        return jsonResponse(res, { error: 'body too large' }, 413);
+      }
+      chunks.push(chunk);
+    }
+    const rawBody = Buffer.concat(chunks).toString('utf8');
+
+    // Verify signature: v0=hex(hmac-sha256(secret, "v0:" + ts + ":" + body))
+    const ts = req.headers['x-slack-request-timestamp'];
+    const sig = req.headers['x-slack-signature'];
+    if (!ts || !sig) {
+      return jsonResponse(res, { error: 'missing signature headers' }, 400);
+    }
+    const skewSec = Math.abs(Math.floor(Date.now() / 1000) - parseInt(ts, 10));
+    if (Number.isNaN(skewSec) || skewSec > 300) {
+      return jsonResponse(res, { error: 'stale timestamp' }, 400);
+    }
+    const crypto = await import('node:crypto');
+    const base = `v0:${ts}:${rawBody}`;
+    const expected = `v0=${crypto.createHmac('sha256', signingSecret).update(base).digest('hex')}`;
+    let sigOk = false;
+    try {
+      sigOk = crypto.timingSafeEqual(Buffer.from(expected, 'utf8'), Buffer.from(String(sig), 'utf8'));
+    } catch {
+      sigOk = false;
+    }
+    if (!sigOk) {
+      return jsonResponse(res, { error: 'bad signature' }, 401);
+    }
+
+    let payload;
+    try {
+      payload = JSON.parse(rawBody);
+    } catch {
+      return jsonResponse(res, { error: 'invalid json' }, 400);
+    }
+
+    // 1. URL verification handshake (Slack one-time when subscribing)
+    if (payload.type === 'url_verification') {
+      return jsonResponse(res, { challenge: payload.challenge });
+    }
+
+    // 2. Event callback — ack 200 fast, ingest async
+    if (payload.type === 'event_callback') {
+      const teamId = payload.team_id;
+      const event = payload.event || {};
+
+      // Respond 200 within 3s (Slack retry policy)
+      jsonResponse(res, { ok: true });
+
+      // Background ingest (fire-and-forget)
+      setImmediate(async () => {
+        try {
+          if (!connectorStore || !prisma) return;
+          // Resolve connector by team_id (multi-tenant fanout)
+          const conn = await prisma.platformIntegration.findFirst({
+            where: {
+              platformType: 'slack',
+              isActive: true,
+              connectorMetadata: { path: ['provider_metadata', 'team_id'], equals: teamId },
+            },
+          });
+          if (!conn) {
+            console.warn(`[slack-events] no connector for team_id=${teamId}`);
+            return;
+          }
+
+          // Forward to core for ingestion (master-key authed)
+          const apiKey = process.env.HIVEMIND_MASTER_API_KEY;
+          if (!apiKey) {
+            console.error('[slack-events] HIVEMIND_MASTER_API_KEY missing — cannot ingest');
+            return;
+          }
+          await fetch(`${CONFIG.coreApiBaseUrl}/api/connectors/slack/event-ingest`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
+            body: JSON.stringify({
+              user_id: conn.userId,
+              org_id: conn.orgId || null,
+              team_id: teamId,
+              event,
+              event_type: event.type,
+              event_subtype: event.subtype || null,
+              event_ts: event.event_ts || event.ts || null,
+            }),
+          });
+        } catch (err) {
+          console.error('[slack-events] ingest dispatch failed:', err.message);
+        }
+      });
+      return;
+    }
+
+    // Unknown payload type — ack so Slack stops retrying
+    return jsonResponse(res, { ok: true });
+  }
+
   // ─── End Connector Routes ──────────────────────────────────────
 
   // ─── Proxy Routes (session-cookie → core API with master key) ─────

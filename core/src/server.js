@@ -9375,10 +9375,17 @@ const server = http.createServer(async (req, res) => {
                 const { slackShapeDetector, SlackBridge } =
                   await import('./connectors/providers/slack/bridge.js');
                 const strongMems = memories.filter(m => (m.score || 0) >= 0.3).length;
-                if (prisma && userId && strongMems < 3 && slackShapeDetector(message)) {
+                const detected = slackShapeDetector(message);
+                console.log('[chat][slack-gate] userId=%s prisma=%s strongMems=%d detected=%s',
+                  userId, !!prisma, strongMems, detected);
+                if (prisma && userId && strongMems < 3 && detected) {
                   const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
                   const connStore = new ConnectorStore(prisma);
-                  const token = await connStore.getAccessToken(userId, 'slack').catch(() => null);
+                  const token = await connStore.getAccessToken(userId, 'slack').catch((err) => {
+                    console.warn('[chat][slack-gate] getAccessToken errored:', err.message);
+                    return null;
+                  });
+                  console.log('[chat][slack-gate] token=%s', token ? 'present' : 'missing');
                   if (token) {
                     const bridge = new SlackBridge({ connectorStore: connStore });
                     slackHits = await bridge.searchMessages(userId, message, { count: 8 }).catch(err => {

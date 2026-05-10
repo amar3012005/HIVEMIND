@@ -439,6 +439,8 @@ async function vectorCandidatesForRecall(store, {
   scoreThreshold = 0.25,
   candidatePoolSize = Math.max(max_memories * 4, 20),
   is_latest = true,
+  access_context = null,
+  scope_filter = null,
 }) {
   const qdrantClient = getQdrantClient();
   const connected = await qdrantClient.isConnected();
@@ -467,6 +469,18 @@ async function vectorCandidatesForRecall(store, {
     const memory = await store.getMemory(memoryId);
     if (!memory) return null;
     if (!isMemoryInDateRange(memory, dateRange)) return null;
+    // V2 scope filtering: enforce after hydrate (vector index doesn't carry scope)
+    if (access_context) {
+      const m = memory;
+      const ok =
+        (m.scope === 'personal' && m.user_id === user_id) ||
+        (m.scope === 'organization' && m.org_id === org_id) ||
+        (m.scope === 'team' && (access_context.teamIds || []).includes(m.primary_team_id)) ||
+        (m.scope === 'project' && Array.isArray(m.project_ids) &&
+           m.project_ids.some(pid => (access_context.projectIds || []).includes(pid)));
+      if (!ok) return null;
+    }
+    if (scope_filter && memory.scope && memory.scope !== scope_filter) return null;
 
     return {
       memory,
@@ -883,6 +897,9 @@ export async function recallPersistedMemories(store, {
   sort,                // 'score' | 'date_asc' | 'date_desc'
   preference_boost,    // boolean — boost preference/personal/opinion memories
   include_superseded,  // boolean — include older update-chain versions via traverseUpdateChain
+  access_context = null, // { projectIds, teamIds } for V2 multi-tier scope filter
+  scope_filter = null,   // optional MemoryScope filter: 'personal'|'project'|'team'|'organization'
+                         // limits to memories whose scope === this value (in addition to access_context)
 }) {
   const temporalExpansion = expandTemporalQuery(query_context);
   const effectiveDateRange = date_range || temporalExpansion.dateRange || null;
@@ -904,13 +921,15 @@ export async function recallPersistedMemories(store, {
     is_latest: effectiveIsLatest,
     n_results: candidatePoolSize,
     created_after: effectiveDateRange?.start,
-    created_before: effectiveDateRange?.end
+    created_before: effectiveDateRange?.end,
+    access_context,
   });
 
   const filteredLexical = lexicalCandidates.filter(memory => {
     // Exclude benchmark data from production recall when no specific project is set
     if (!project && (memory.tags || []).includes('longmemeval')) return false;
     if (!isMemoryInDateRange(memory, effectiveDateRange)) return false;
+    if (scope_filter && memory.scope && memory.scope !== scope_filter) return false;
     if (source_platforms.length === 0) return true;
     const sourcePlatform = memory.source_metadata?.source_platform || memory.source || null;
     return source_platforms.includes(sourcePlatform);
@@ -928,6 +947,8 @@ export async function recallPersistedMemories(store, {
     scoreThreshold: vectorScoreThreshold,
     candidatePoolSize,
     is_latest: effectiveIsLatest,
+    access_context,
+    scope_filter,
   });
   const relationships = await store.listRelationships({ user_id, org_id, project, limit: 1000 });
   const relationshipCounts = buildRelationshipIndex(relationships);

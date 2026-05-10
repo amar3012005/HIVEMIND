@@ -35,6 +35,9 @@ model User {
   syncLogs             SyncLog[]             @relation("UserSyncLogs")
   organizations        UserOrganization[]    @relation("UserOrganizations")
   pageIndexNodes       PageIndexNode[]       @relation("UserPageIndexNodes")
+  teamMemberships      TeamMember[]          @relation("UserTeamMemberships")
+  projectMemberships   ProjectMember[]       @relation("UserProjectMemberships")
+  memoryProjects       MemoryProject[]       @relation("UserMemoryProjects")
 
   @@map("users")
 }
@@ -58,6 +61,7 @@ model Organization {
   memories            Memory[]           @relation("OrgMemories")
   invites             OrgInvite[]
   projects            Project[]
+  teams               Team[]             @relation("OrgTeams")
   users               UserOrganization[] @relation("OrgUserOrganizations")
   pageIndexNodes      PageIndexNode[]    @relation("OrgPageIndexNodes")
 
@@ -99,20 +103,102 @@ model OrgInvite {
   @@map("org_invites")
 }
 
-model Project {
-  id          String       @id @default(uuid()) @db.Uuid
+/// Team — sub-unit inside an Organization (Eng, Marketing, Sales).
+/// Members can be granted team-scope memory access via TeamMember.
+model Team {
+  id          String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   orgId       String       @map("org_id") @db.Uuid
-  name        String
-  slug        String
+  name        String       @db.VarChar(255)
+  slug        String       @db.VarChar(120)
   description String?
+  isDefault   Boolean      @default(false) @map("is_default")
   createdBy   String       @map("created_by") @db.Uuid
   createdAt   DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt   DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  org         Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  archivedAt  DateTime?    @map("archived_at") @db.Timestamptz(6)
+  org         Organization @relation("OrgTeams", fields: [orgId], references: [id], onDelete: Cascade)
+  members     TeamMember[]
+  projects    Project[]
+  memories    Memory[]     @relation("TeamMemories")
 
   @@unique([orgId, slug])
   @@index([orgId])
+  @@map("teams")
+}
+
+/// User ↔ Team membership with role.
+model TeamMember {
+  teamId      String   @map("team_id") @db.Uuid
+  userId      String   @map("user_id") @db.Uuid
+  role        String   @default("member") @db.VarChar(50) // 'lead' | 'member'
+  addedById   String?  @map("added_by") @db.Uuid
+  addedAt     DateTime @default(now()) @map("added_at") @db.Timestamptz(6)
+  team        Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user        User     @relation("UserTeamMemberships", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([teamId, userId])
+  @@index([userId])
+  @@index([teamId])
+  @@map("team_members")
+}
+
+/// Project — bounded context inside a Team (or directly under Org for legacy).
+/// teamId is preferred; orgId retained for backward compatibility with existing
+/// org-level projects predating the Team model.
+model Project {
+  id          String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId       String          @map("org_id") @db.Uuid
+  teamId      String?         @map("team_id") @db.Uuid
+  name        String          @db.VarChar(255)
+  slug        String          @db.VarChar(120)
+  description String?
+  status      String          @default("active") @db.VarChar(20) // 'active' | 'archived'
+  createdBy   String          @map("created_by") @db.Uuid
+  createdAt   DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime        @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  archivedAt  DateTime?       @map("archived_at") @db.Timestamptz(6)
+  org         Organization    @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  team        Team?           @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  members     ProjectMember[]
+  memories    MemoryProject[]
+
+  @@unique([orgId, slug])
+  @@index([orgId])
+  @@index([teamId])
+  @@index([status])
   @@map("projects")
+}
+
+/// Optional explicit project membership. If empty, all team members can access.
+model ProjectMember {
+  projectId String   @map("project_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  role      String   @default("contributor") @db.VarChar(50) // 'owner' | 'contributor' | 'viewer'
+  addedById String?  @map("added_by") @db.Uuid
+  addedAt   DateTime @default(now()) @map("added_at") @db.Timestamptz(6)
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user      User     @relation("UserProjectMemberships", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([projectId, userId])
+  @@index([userId])
+  @@index([projectId])
+  @@map("project_members")
+}
+
+/// Many-to-many: a memory can belong to N projects (e.g. cross-cutting research).
+model MemoryProject {
+  memoryId  String   @map("memory_id") @db.Uuid
+  projectId String   @map("project_id") @db.Uuid
+  addedById String?  @map("added_by") @db.Uuid
+  addedAt   DateTime @default(now()) @map("added_at") @db.Timestamptz(6)
+  memory    Memory   @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user      User?    @relation("UserMemoryProjects", fields: [addedById], references: [id], onDelete: SetNull)
+
+  @@id([memoryId, projectId])
+  @@index([memoryId])
+  @@index([projectId])
+  @@map("memory_projects")
 }
 
 /// Cross-platform authentication with AI platforms (ChatGPT, Claude, etc.)
@@ -175,6 +261,8 @@ model Memory {
   documentDate                                                DateTime?           @map("document_date") @db.Timestamptz(6)
   eventDates                                                  DateTime[]          @map("event_dates") @db.Timestamptz
   visibility                                                  VisibilityScope?    @default(private)
+  scope                                                       MemoryScope         @default(personal) @map("scope")
+  primaryTeamId                                               String?             @map("primary_team_id") @db.Uuid
   sharedWithOrgs                                              String[]            @map("shared_with_orgs") @db.Uuid
   embeddingModel                                              String?             @default("mistral-embed") @map("embedding_model") @db.VarChar(100)
   embeddingDimension                                          Int?                @default(1024) @map("embedding_dimension")
@@ -195,6 +283,8 @@ model Memory {
   supersedes                                                  Memory?             @relation("MemorySupersedes", fields: [supersedesId], references: [id], onDelete: Cascade)
   supersededBy                                                Memory[]            @relation("MemorySupersedes")
   user                                                        User                @relation("UserMemories", fields: [userId], references: [id], onDelete: Cascade)
+  primaryTeam                                                 Team?               @relation("TeamMemories", fields: [primaryTeamId], references: [id], onDelete: SetNull)
+  memoryProjects                                              MemoryProject[]
   versions                                                    MemoryVersion[]
   memory_versions_memory_versions_related_memory_idTomemories MemoryVersion[]     @relation("memory_versions_related_memory_idTomemories")
   relationshipsFrom                                           Relationship[]      @relation("RelationshipFromMemory")
@@ -205,6 +295,8 @@ model Memory {
   @@index([userId])
   @@index([orgId])
   @@index([project])
+  @@index([scope])
+  @@index([primaryTeamId])
   @@index([memoryType])
   @@index([sourcePlatform])
   @@index([documentDate(sort: Desc)])
@@ -738,6 +830,18 @@ enum VisibilityScope {
   private
   organization
   public
+}
+
+/// Access scope for a memory under the Teams + Projects model.
+/// personal     — only the owning user can read
+/// project      — accessible to members of any project this memory belongs to
+/// team         — accessible to all members of primaryTeamId
+/// organization — accessible to every member of org_id
+enum MemoryScope {
+  personal
+  project
+  team
+  organization
 }
 
 /// PageIndex hierarchical memory index nodes (optional optimization layer)

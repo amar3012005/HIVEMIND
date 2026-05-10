@@ -247,6 +247,42 @@ const auditLogger = prisma ? new AuditLogger(prisma) : null;
 const webhookManager = prisma ? new WebhookManager(prisma) : null;
 const ingestTracker = new IngestTracker();
 const persistentMemoryStore = prisma ? new PrismaGraphStore(prisma) : null;
+
+// Lazy TeamStore singleton — used by all recall paths to build access_context
+let _teamStoreCache = null;
+async function getTeamStore() {
+  if (!prisma) return null;
+  if (_teamStoreCache) return _teamStoreCache;
+  const mod = await import('./teams/team-store.js');
+  _teamStoreCache = new mod.TeamStore(prisma);
+  return _teamStoreCache;
+}
+
+// Cached per-request access context: { projectIds, teamIds }
+// Cache TTL 60s to avoid hitting DB on every recall in tight loops.
+const _accessContextCache = new Map();
+async function buildAccessContext(userId, orgId) {
+  if (!userId || !orgId) return null;
+  const key = `${userId}:${orgId}`;
+  const cached = _accessContextCache.get(key);
+  const now = Date.now();
+  if (cached && cached.expiresAt > now) return cached.value;
+  const ts = await getTeamStore();
+  if (!ts) return null;
+  try {
+    const [projectIds, teamIds] = await Promise.all([
+      ts.accessibleProjectIds({ userId, orgId }),
+      ts.accessibleTeamIds({ userId, orgId }),
+    ]);
+    const value = { projectIds, teamIds };
+    _accessContextCache.set(key, { value, expiresAt: now + 60_000 });
+    return value;
+  } catch (err) {
+    console.warn('[access-context] build failed:', err.message);
+    return null;
+  }
+}
+
 const persistentMemoryEngine = persistentMemoryStore ? new MemoryGraphEngine({
   store: persistentMemoryStore,
   vectorStore: null, // Qdrant client injected after initialization (see below)
@@ -1263,6 +1299,7 @@ async function buildContextPayload({ body, userId, orgId }) {
     return cached;
   }
 
+  const accessCtx = await buildAccessContext(userId, orgId);
   const recall = await recallPersistedMemories(persistentMemoryStore, {
     query_context: query,
     user_id: userId,
@@ -1273,7 +1310,9 @@ async function buildContextPayload({ body, userId, orgId }) {
     preferred_project: body.preferred_project || project,
     preferred_source_platforms: preferredSources,
     preferred_tags: preferredTags,
-    max_memories: maxMemories
+    max_memories: maxMemories,
+    access_context: accessCtx,
+    scope_filter: body.scope_filter || null,
   });
 
   const contextEnvelope = buildWebappContextResponse(recall, {
@@ -6484,6 +6523,10 @@ const server = http.createServer(async (req, res) => {
                 user_id: validation.data.user_id,
                 org_id: validation.data.org_id,
                 project: validation.data.project,
+                // V2 Teams + Projects scope routing (optional)
+                scope: body.scope || undefined,
+                primary_team_id: body.primary_team_id || null,
+                project_ids: Array.isArray(body.project_ids) ? body.project_ids : [],
                 content: validation.data.content,
                 tags: validation.data.tags,
                 memory_type: validation.data.memory_type,
@@ -7635,6 +7678,7 @@ const server = http.createServer(async (req, res) => {
               // containerTag → project mapping for recall
               const recallProject = body.project || effectiveContainerTag || null;
 
+              const recallAccessCtx = await buildAccessContext(userId, orgId);
               const result = await recallPersistedMemories(persistentMemoryStore, {
                 query_context: effectiveRecallQuery,
                 user_id: userId,
@@ -7654,6 +7698,8 @@ const server = http.createServer(async (req, res) => {
                 sort: body.sort,                        // 'score' | 'date_asc' | 'date_desc'
                 preference_boost: body.preference_boost,      // boolean — boost preference/opinion memories
                 include_superseded: body.include_superseded,  // boolean — traverse Updates chain for version history
+                access_context: recallAccessCtx,
+                scope_filter: body.scope_filter || null,
               });
 
               // Apply memory type boosts from Operator Layer
@@ -9232,6 +9278,7 @@ const server = http.createServer(async (req, res) => {
                     : [message];
 
                   let allRecalled = [];
+                  const chatAccessCtx = await buildAccessContext(userId, orgId);
                   for (const q of recallQueries) {
                     if (!q || q.length < 3) continue;
                     try {
@@ -9244,6 +9291,7 @@ const server = http.createServer(async (req, res) => {
                         weights: chatWeights,
                         preference_boost: chatIntent.type === 'preference',
                         preferred_tags: inferredTags,
+                        access_context: chatAccessCtx,
                       });
                       const recalled = recallResult.memories || [];
                       injectionText = injectionText || recallResult.injectionText || '';

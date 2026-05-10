@@ -9389,9 +9389,10 @@ const server = http.createServer(async (req, res) => {
                   if (token) {
                     const bridge = new SlackBridge({ connectorStore: connStore });
                     slackHits = await bridge.searchMessages(userId, message, { count: 8 }).catch(err => {
-                      console.warn('[chat] Slack live search failed:', err.message);
+                      console.warn('[chat] Slack live search failed:', err.message, err.code || '');
                       return [];
                     });
+                    console.log('[chat][slack-gate] searchMessages returned %d hits for query=%j', slackHits.length, message);
                     if (slackHits.length > 0) {
                       slackBridgeFired = true;
                       console.log('[chat] Slack fallback fired: %d hits', slackHits.length);
@@ -9545,7 +9546,13 @@ ${injectionText}`;
 
               // Step 5: Smart fact ingestion — extract clean facts, route through SmartIngestRouter
               if (persistentMemoryEngine && response.length > 20) {
-                const shouldIngest = isDeclarative || hasMemoryKeywords || isUpdateStatement;
+                // Treat command-shaped queries as questions (they are not user-facts).
+                // Without this, "summarize my latest slack thread" gets ingested as a
+                // fact, and on the next call recall finds it → blocks the live Slack
+                // fallback (self-poisoning loop).
+                const isCommandQuery = /^(summarize|summarise|find|search|show|tell|list|describe|explain|recap|fetch|pull|get|give me)\b/i.test(msgTrimmed);
+                const shouldIngest = (isDeclarative || hasMemoryKeywords || isUpdateStatement)
+                  && !isCommandQuery;
 
                 if (shouldIngest) {
                   // Extract the core fact from user's statement (not the full turn)

@@ -3732,6 +3732,73 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
+      // POST /api/connectors/slack/event-ingest — webhook ingest path
+      // Called by control-plane after Slack signature verification. Master-key auth.
+      // Ingests one Slack event (message/reaction/pin) as a HIVEMIND memory.
+      if (pathname === '/api/connectors/slack/event-ingest' && req.method === 'POST') {
+        if (!persistentMemoryEngine) {
+          return jsonResponse(res, { error: 'memory engine unavailable' }, 503);
+        }
+        const evUserId = body.user_id;
+        const evOrgId = body.org_id || orgId;
+        const teamId = body.team_id;
+        const ev = body.event || {};
+        const evType = body.event_type || ev.type || 'unknown';
+        const subtype = body.event_subtype || ev.subtype || null;
+
+        if (!evUserId) return jsonResponse(res, { error: 'user_id required' }, 400);
+
+        // Filter noise: skip joins/leaves/bot heartbeats/reaction-only short msgs
+        const NOISE_SUBTYPES = new Set(['channel_join', 'channel_leave', 'bot_message', 'message_deleted', 'thread_broadcast']);
+        if (subtype && NOISE_SUBTYPES.has(subtype)) {
+          return jsonResponse(res, { ok: true, skipped: 'noise_subtype' });
+        }
+
+        // Only ingest message-class events for now
+        if (!evType.startsWith('message') && evType !== 'pin_added' && evType !== 'reaction_added') {
+          return jsonResponse(res, { ok: true, skipped: `unhandled_type:${evType}` });
+        }
+
+        const text = (ev.text || '').trim();
+        if (evType === 'message' || evType.startsWith('message')) {
+          if (!text || text.length < 15) {
+            return jsonResponse(res, { ok: true, skipped: 'too_short' });
+          }
+        }
+
+        const channelId = ev.channel || ev.item?.channel || null;
+        const channelName = ev.channel_name || null;
+        const where = channelName ? `#${channelName}` : (channelId || 'unknown');
+        const who = ev.user || ev.user_id || 'unknown';
+        const ts = ev.ts || ev.event_ts || body.event_ts || null;
+
+        const titleBase = text || `Slack ${evType}`;
+        const title = `Slack ${where} · ${who}: ${titleBase.slice(0, 60)}`;
+
+        // Fire-and-forget ingest, ack 200 immediately
+        persistentMemoryEngine.ingestMemory({
+          content: text || `[${evType}${subtype ? `:${subtype}` : ''}] in ${where}`,
+          title,
+          tags: ['slack', 'live-slack', 'webhook', `slack:${where}`, `slack-team:${teamId || 'unknown'}`],
+          memory_type: 'note',
+          user_id: evUserId,
+          org_id: evOrgId,
+          source_metadata: {
+            source_platform: 'slack',
+            event_type: evType,
+            event_subtype: subtype,
+            channel_id: channelId,
+            channel_name: channelName,
+            ts,
+            user: who,
+            team_id: teamId,
+          },
+          skipProcessing: true, // already a clean message
+        }).catch(err => console.warn('[slack-events] ingest failed:', err.message));
+
+        return jsonResponse(res, { ok: true, ingested: true, event_type: evType });
+      }
+
       // ── Usage tracking + plan enforcement (PlanEnforcer) ──
       if (planEnforcer && orgId) {
         // Pre-flight: check the relevant limit type for this request

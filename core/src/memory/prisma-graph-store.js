@@ -42,6 +42,11 @@ function mapMemoryRecord(record) {
     org_id: record.orgId,
     project: record.project,
     visibility: record.visibility,
+    scope: record.scope || 'personal',
+    primary_team_id: record.primaryTeamId || null,
+    project_ids: Array.isArray(record.memoryProjects)
+      ? record.memoryProjects.map(mp => mp.projectId)
+      : undefined,
     content: record.content,
     tags: record.tags || [],
     is_latest: record.isLatest,
@@ -88,13 +93,32 @@ function mapRelationshipRecord(record) {
   };
 }
 
-function scopedMemoryWhere({ user_id, org_id, project, scope = 'personal' }) {
+function scopedMemoryWhere({ user_id, org_id, project, scope = 'personal', access_context = null }) {
   const base = {
     orgId: org_id,
     project: project || undefined,
     deletedAt: null,
   };
 
+  // V2 path: caller supplies the user's accessible team/project IDs from
+  // TeamStore. Build a multi-tier OR clause that respects Memory.scope.
+  if (access_context && (access_context.projectIds || access_context.teamIds)) {
+    const projectIds = Array.isArray(access_context.projectIds) ? access_context.projectIds : [];
+    const teamIds = Array.isArray(access_context.teamIds) ? access_context.teamIds : [];
+    const tiers = [
+      { userId: user_id, scope: 'personal' },
+      { scope: 'organization', orgId: org_id },
+    ];
+    if (projectIds.length > 0) {
+      tiers.push({ scope: 'project', memoryProjects: { some: { projectId: { in: projectIds } } } });
+    }
+    if (teamIds.length > 0) {
+      tiers.push({ scope: 'team', primaryTeamId: { in: teamIds } });
+    }
+    return { ...base, OR: tiers };
+  }
+
+  // Legacy paths preserved
   if (scope === 'organization') {
     return {
       ...base,
@@ -158,6 +182,8 @@ export class PrismaGraphStore {
         userId: memory.user_id,
         orgId: memory.org_id,
         visibility: memory.visibility || 'private',
+        scope: memory.scope || 'personal',
+        primaryTeamId: memory.primary_team_id || null,
         project: memory.project,
         content,
         tags: memory.tags,
@@ -179,6 +205,18 @@ export class PrismaGraphStore {
         sharedWithOrgs: memory.shared_with_orgs || [],
       },
     });
+
+    // Link memory to projects (V2 Teams+Projects scope)
+    if (Array.isArray(memory.project_ids) && memory.project_ids.length > 0) {
+      await this.client.memoryProject.createMany({
+        data: memory.project_ids.map(projectId => ({
+          memoryId: memory.id,
+          projectId,
+          addedById: memory.user_id,
+        })),
+        skipDuplicates: true,
+      });
+    }
 
     if (memory.source_metadata || memory.metadata) {
       await this.createSourceMetadata({
@@ -327,7 +365,12 @@ export class PrismaGraphStore {
     };
   }
 
-  async searchMemories({ query, user_id, org_id, project, memory_type, tags, is_latest, n_results = 10, created_after, created_before, source_platform, scope = 'personal' }) {
+  async searchMemories({ query, user_id, org_id, project, memory_type, tags, is_latest, n_results = 10, created_after, created_before, source_platform, scope = 'personal', access_context = null }) {
+    // V2 (Teams + Projects) scope: skip FTS raw branch since it cannot easily
+    // express the multi-tier OR; let Prisma findMany handle it below.
+    if (access_context) {
+      // intentional skip
+    } else
     // Try PostgreSQL full-text search with stemming (like code-review-graph's FTS5 + Porter)
     // Only run outside transactions — $queryRawUnsafe corrupts Prisma interactive transactions
     if (query && this.client.$queryRawUnsafe && !this.inTransaction) {
@@ -385,7 +428,7 @@ export class PrismaGraphStore {
     // Fallback: Prisma query + token similarity scoring
     const records = await this.client.memory.findMany({
       where: {
-        ...scopedMemoryWhere({ user_id, org_id, project, scope }),
+        ...scopedMemoryWhere({ user_id, org_id, project, scope, access_context }),
         memoryType: memory_type || undefined,
         sourcePlatform: source_platform || undefined,
         isLatest: typeof is_latest === 'boolean' ? is_latest : undefined,

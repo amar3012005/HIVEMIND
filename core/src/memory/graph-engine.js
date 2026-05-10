@@ -1387,11 +1387,28 @@ export class MemoryGraphEngine {
   _buildMemoryRecord(input) {
     const timestamp = nowIso();
     const documentDate = deriveDocumentDate(input);
+
+    // Derive scope: explicit input.scope wins; else infer from inputs.
+    //   - explicit project_ids[]   → scope=project
+    //   - explicit primary_team_id → scope=team
+    //   - target_scope=organization or visibility=organization → scope=organization
+    //   - default                  → personal
+    let scope = input.scope;
+    if (!scope) {
+      if (Array.isArray(input.project_ids) && input.project_ids.length > 0) scope = 'project';
+      else if (input.primary_team_id) scope = 'team';
+      else if (input.target_scope === 'organization' || input.visibility === 'organization') scope = 'organization';
+      else scope = 'personal';
+    }
+
     return {
       id: input.id || uuidv4(),
       user_id: input.user_id,
       org_id: input.org_id,
       visibility: input.visibility || 'private',
+      scope,
+      primary_team_id: input.primary_team_id || null,
+      project_ids: Array.isArray(input.project_ids) ? input.project_ids : [],
       project: input.project || null,
       content: input.content,
       memory_type: input.memory_type || 'fact',

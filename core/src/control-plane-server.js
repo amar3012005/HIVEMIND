@@ -2171,6 +2171,338 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // ─── Teams & Projects ─────────────────────────────────────
+  // Lazy-init TeamStore once prisma is ready (module-level cache).
+  const _getTeamStore = async () => {
+    if (!prisma) return null;
+    if (!_getTeamStore._cache) {
+      const mod = await import('./teams/team-store.js');
+      _getTeamStore._cache = {
+        store: new mod.TeamStore(prisma),
+        assertTeamPermission: mod.assertTeamPermission,
+        assertProjectPermission: mod.assertProjectPermission,
+      };
+    }
+    return _getTeamStore._cache;
+  };
+
+  // GET /v1/teams — list teams current user belongs to in current org
+  if (pathname === '/v1/teams' && req.method === 'GET') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const ts = await _getTeamStore();
+    if (!ts) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    try {
+      const teams = await ts.store.listTeamsForUser({
+        userId: current.session.userId,
+        orgId: current.session.orgId,
+      });
+      return jsonResponse(res, { teams });
+    } catch (err) {
+      return jsonResponse(res, { error: err.message }, 500);
+    }
+  }
+
+  // POST /v1/teams — create team (org admin only)
+  if (pathname === '/v1/teams' && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const admin = await requireOrgAdmin(req, res, current.session.userId, current.session.orgId);
+    if (!admin) return;
+    const ts = await _getTeamStore();
+    if (!ts) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const body = await parseBody(req);
+    if (!body.name || typeof body.name !== 'string') {
+      return jsonResponse(res, { error: 'name is required' }, 400);
+    }
+    try {
+      const team = await ts.store.createTeam({
+        orgId: current.session.orgId,
+        name: body.name.trim(),
+        description: body.description || null,
+        createdBy: current.session.userId,
+      });
+      return jsonResponse(res, { team }, 201);
+    } catch (err) {
+      return jsonResponse(res, { error: err.message }, 500);
+    }
+  }
+
+  // Routes scoped to a single team
+  const teamIdMatch = pathname.match(/^\/v1\/teams\/([0-9a-f-]{36})(?:\/(.+))?$/);
+  if (teamIdMatch) {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const ts = await _getTeamStore();
+    if (!ts) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const teamId = teamIdMatch[1];
+    const sub = teamIdMatch[2] || null;
+    const orgId = current.session.orgId;
+    const userId = current.session.userId;
+    const membership = await getOrgMembership(userId, orgId);
+    const orgRole = membership?.role;
+
+    // Sanity: team must belong to current org
+    const team = await prisma.team.findFirst({ where: { id: teamId, orgId } });
+    if (!team) return jsonResponse(res, { error: 'Team not found' }, 404);
+
+    // GET /v1/teams/:id
+    if (!sub && req.method === 'GET') {
+      try {
+        await ts.assertTeamPermission(prisma, { teamId, userId, orgRole, level: 'member' });
+        return jsonResponse(res, await ts.store.getTeam({ teamId, orgId }));
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, err.status || 500);
+      }
+    }
+    // PATCH /v1/teams/:id
+    if (!sub && req.method === 'PATCH') {
+      try {
+        await ts.assertTeamPermission(prisma, { teamId, userId, orgRole, level: 'lead' });
+        const body = await parseBody(req);
+        const updated = await ts.store.updateTeam({ teamId, orgId, data: body });
+        return jsonResponse(res, { team: updated });
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, err.status || 500);
+      }
+    }
+    // DELETE /v1/teams/:id  (archive)
+    if (!sub && req.method === 'DELETE') {
+      try {
+        await ts.assertTeamPermission(prisma, { teamId, userId, orgRole, level: 'admin' });
+        const archived = await ts.store.archiveTeam({ teamId, orgId });
+        return jsonResponse(res, { team: archived });
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, err.status || 400);
+      }
+    }
+    // GET /v1/teams/:id/members
+    if (sub === 'members' && req.method === 'GET') {
+      try {
+        await ts.assertTeamPermission(prisma, { teamId, userId, orgRole, level: 'member' });
+        return jsonResponse(res, { members: await ts.store.listTeamMembers({ teamId }) });
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, err.status || 500);
+      }
+    }
+    // POST /v1/teams/:id/members
+    if (sub === 'members' && req.method === 'POST') {
+      try {
+        await ts.assertTeamPermission(prisma, { teamId, userId, orgRole, level: 'lead' });
+        const body = await parseBody(req);
+        if (!body.user_id) return jsonResponse(res, { error: 'user_id required' }, 400);
+        const m = await ts.store.addTeamMember({
+          teamId,
+          userId: body.user_id,
+          role: body.role || 'member',
+          addedById: userId,
+        });
+        return jsonResponse(res, { member: m }, 201);
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, err.status || 500);
+      }
+    }
+    // DELETE /v1/teams/:id/members/:userId
+    const memberDelMatch = sub && sub.match(/^members\/([0-9a-f-]{36})$/);
+    if (memberDelMatch && req.method === 'DELETE') {
+      try {
+        await ts.assertTeamPermission(prisma, { teamId, userId, orgRole, level: 'lead' });
+        await ts.store.removeTeamMember({ teamId, userId: memberDelMatch[1] });
+        return jsonResponse(res, { success: true });
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, err.status || 400);
+      }
+    }
+    // GET /v1/teams/:id/projects
+    if (sub === 'projects' && req.method === 'GET') {
+      try {
+        await ts.assertTeamPermission(prisma, { teamId, userId, orgRole, level: 'member' });
+        const projects = await ts.store.listProjectsForUser({ userId, orgId, teamId });
+        return jsonResponse(res, { projects });
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, err.status || 500);
+      }
+    }
+    // POST /v1/teams/:id/projects
+    if (sub === 'projects' && req.method === 'POST') {
+      try {
+        await ts.assertTeamPermission(prisma, { teamId, userId, orgRole, level: 'member' });
+        const body = await parseBody(req);
+        if (!body.name) return jsonResponse(res, { error: 'name required' }, 400);
+        const p = await ts.store.createProject({
+          orgId,
+          teamId,
+          name: body.name.trim(),
+          description: body.description || null,
+          createdBy: userId,
+        });
+        return jsonResponse(res, { project: p }, 201);
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, err.status || 500);
+      }
+    }
+    // Fall through — unmatched team sub-route
+    return jsonResponse(res, { error: 'Not found' }, 404);
+  }
+
+  // ─── Projects ─────────────────────────────────────────────
+  // GET /v1/projects — list projects in current org for current user
+  if (pathname === '/v1/projects' && req.method === 'GET') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const ts = await _getTeamStore();
+    if (!ts) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    try {
+      const projects = await ts.store.listProjectsForUser({
+        userId: current.session.userId,
+        orgId: current.session.orgId,
+      });
+      return jsonResponse(res, { projects });
+    } catch (err) {
+      return jsonResponse(res, { error: err.message }, 500);
+    }
+  }
+
+  // Routes scoped to a single project
+  const projectIdMatch = pathname.match(/^\/v1\/projects\/([0-9a-f-]{36})(?:\/(.+))?$/);
+  if (projectIdMatch) {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const ts = await _getTeamStore();
+    if (!ts) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const projectId = projectIdMatch[1];
+    const sub = projectIdMatch[2] || null;
+    const orgId = current.session.orgId;
+    const userId = current.session.userId;
+    const membership = await getOrgMembership(userId, orgId);
+    const orgRole = membership?.role;
+
+    const project = await prisma.project.findFirst({ where: { id: projectId, orgId } });
+    if (!project) return jsonResponse(res, { error: 'Project not found' }, 404);
+
+    // GET /v1/projects/:id
+    if (!sub && req.method === 'GET') {
+      try {
+        await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'member' });
+        return jsonResponse(res, await ts.store.getProject({ projectId, orgId }));
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, err.status || 500);
+      }
+    }
+    // PATCH /v1/projects/:id
+    if (!sub && req.method === 'PATCH') {
+      try {
+        await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'owner' });
+        const body = await parseBody(req);
+        const updated = await ts.store.updateProject({ projectId, data: body });
+        return jsonResponse(res, { project: updated });
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, err.status || 500);
+      }
+    }
+    // DELETE /v1/projects/:id (archive)
+    if (!sub && req.method === 'DELETE') {
+      try {
+        await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'owner' });
+        await ts.store.archiveProject({ projectId });
+        return jsonResponse(res, { success: true });
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, err.status || 500);
+      }
+    }
+    // GET /v1/projects/:id/members
+    if (sub === 'members' && req.method === 'GET') {
+      try {
+        await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'member' });
+        const proj = await ts.store.getProject({ projectId, orgId });
+        return jsonResponse(res, { members: proj?.members || [] });
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, err.status || 500);
+      }
+    }
+    // POST /v1/projects/:id/members
+    if (sub === 'members' && req.method === 'POST') {
+      try {
+        await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'owner' });
+        const body = await parseBody(req);
+        if (!body.user_id) return jsonResponse(res, { error: 'user_id required' }, 400);
+        const m = await ts.store.addProjectMember({
+          projectId,
+          userId: body.user_id,
+          role: body.role || 'contributor',
+          addedById: userId,
+        });
+        return jsonResponse(res, { member: m }, 201);
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, err.status || 500);
+      }
+    }
+    // DELETE /v1/projects/:id/members/:userId
+    const projMemberDel = sub && sub.match(/^members\/([0-9a-f-]{36})$/);
+    if (projMemberDel && req.method === 'DELETE') {
+      try {
+        await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'owner' });
+        await ts.store.removeProjectMember({ projectId, userId: projMemberDel[1] });
+        return jsonResponse(res, { success: true });
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, err.status || 500);
+      }
+    }
+
+    return jsonResponse(res, { error: 'Not found' }, 404);
+  }
+
+  // PATCH /v1/memories/:id/scope — change memory scope + team + projects
+  const memoryScopeMatch = pathname.match(/^\/v1\/memories\/([0-9a-f-]{36})\/scope$/);
+  if (memoryScopeMatch && req.method === 'PATCH') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const ts = await _getTeamStore();
+    if (!ts) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const memoryId = memoryScopeMatch[1];
+    const body = await parseBody(req);
+    const userId = current.session.userId;
+    const orgId = current.session.orgId;
+
+    // Verify caller owns the memory or is org admin
+    const memory = await prisma.memory.findFirst({ where: { id: memoryId } });
+    if (!memory) return jsonResponse(res, { error: 'Memory not found' }, 404);
+    const membership = await getOrgMembership(userId, orgId);
+    const isOrgAdmin = membership?.role === 'owner' || membership?.role === 'admin';
+    if (memory.userId !== userId && !isOrgAdmin) {
+      return jsonResponse(res, { error: 'Forbidden' }, 403);
+    }
+
+    const VALID_SCOPES = new Set(['personal', 'project', 'team', 'organization']);
+    const data = {};
+    if (body.scope) {
+      if (!VALID_SCOPES.has(body.scope)) {
+        return jsonResponse(res, { error: 'Invalid scope' }, 400);
+      }
+      data.scope = body.scope;
+    }
+    if ('primary_team_id' in body) {
+      data.primaryTeamId = body.primary_team_id || null;
+    }
+    if (Object.keys(data).length > 0) {
+      await prisma.memory.update({ where: { id: memoryId }, data });
+    }
+    if (Array.isArray(body.project_ids)) {
+      await ts.store.setMemoryProjects({
+        memoryId,
+        projectIds: body.project_ids,
+        addedById: userId,
+      });
+    }
+    const updated = await prisma.memory.findUnique({
+      where: { id: memoryId },
+      include: { memoryProjects: { include: { project: true } } },
+    });
+    return jsonResponse(res, { memory: updated });
+  }
+
+  // ─── End Teams & Projects ─────────────────────────────────
+
   // POST /v1/connectors/slack/events — Slack Events API webhook
   // Public endpoint (no session). Auth via HMAC signature over raw body.
   // Handles url_verification handshake + message/reaction/pin events.

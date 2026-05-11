@@ -2186,6 +2186,33 @@ const server = http.createServer(async (req, res) => {
     return _getTeamStore._cache;
   };
 
+  // Lazy AuditLogger for control-plane. Records team/project/scope mutations.
+  const _getAuditLogger = async () => {
+    if (!prisma) return null;
+    if (!_getAuditLogger._cache) {
+      const mod = await import('./audit/audit-logger.js');
+      _getAuditLogger._cache = new mod.AuditLogger(prisma);
+    }
+    return _getAuditLogger._cache;
+  };
+
+  // Fire-and-forget helper. Skips on missing prisma.
+  async function audit(entry) {
+    const a = await _getAuditLogger();
+    if (!a) return;
+    a.log(entry).catch(err => console.warn('[audit] log failed:', err.message));
+  }
+
+  function _reqMeta(req) {
+    const fwd = req.headers?.['x-forwarded-for'];
+    const ip = typeof fwd === 'string' ? fwd.split(',')[0].trim() : null;
+    return {
+      ipAddress: ip || req.socket?.remoteAddress || null,
+      userAgent: req.headers?.['user-agent'] || null,
+      platformType: 'webapp',
+    };
+  }
+
   // GET /v1/teams — list teams current user belongs to in current org
   if (pathname === '/v1/teams' && req.method === 'GET') {
     const current = await requireSession(req, res);
@@ -2221,6 +2248,17 @@ const server = http.createServer(async (req, res) => {
         name: body.name.trim(),
         description: body.description || null,
         createdBy: current.session.userId,
+      });
+      audit({
+        organizationId: current.session.orgId,
+        userId: current.session.userId,
+        eventType: 'team.created',
+        eventCategory: 'team',
+        action: 'create',
+        resourceType: 'team',
+        resourceId: team.id,
+        newValue: { name: team.name, slug: team.slug },
+        ..._reqMeta(req),
       });
       return jsonResponse(res, { team }, 201);
     } catch (err) {
@@ -2261,6 +2299,14 @@ const server = http.createServer(async (req, res) => {
         await ts.assertTeamPermission(prisma, { teamId, userId, orgRole, level: 'lead' });
         const body = await parseBody(req);
         const updated = await ts.store.updateTeam({ teamId, orgId, data: body });
+        audit({
+          organizationId: orgId, userId,
+          eventType: 'team.updated', eventCategory: 'team', action: 'update',
+          resourceType: 'team', resourceId: teamId,
+          oldValue: { name: team.name, description: team.description },
+          newValue: { name: updated.name, description: updated.description },
+          ..._reqMeta(req),
+        });
         return jsonResponse(res, { team: updated });
       } catch (err) {
         return jsonResponse(res, { error: err.message }, err.status || 500);
@@ -2271,6 +2317,13 @@ const server = http.createServer(async (req, res) => {
       try {
         await ts.assertTeamPermission(prisma, { teamId, userId, orgRole, level: 'admin' });
         const archived = await ts.store.archiveTeam({ teamId, orgId });
+        audit({
+          organizationId: orgId, userId,
+          eventType: 'team.archived', eventCategory: 'team', action: 'delete',
+          resourceType: 'team', resourceId: teamId,
+          oldValue: { name: team.name },
+          ..._reqMeta(req),
+        });
         return jsonResponse(res, { team: archived });
       } catch (err) {
         return jsonResponse(res, { error: err.message }, err.status || 400);
@@ -2297,6 +2350,13 @@ const server = http.createServer(async (req, res) => {
           role: body.role || 'member',
           addedById: userId,
         });
+        audit({
+          organizationId: orgId, userId,
+          eventType: 'team.member_added', eventCategory: 'team', action: 'create',
+          resourceType: 'team_member', resourceId: teamId,
+          newValue: { team_id: teamId, user_id: body.user_id, role: body.role || 'member' },
+          ..._reqMeta(req),
+        });
         return jsonResponse(res, { member: m }, 201);
       } catch (err) {
         return jsonResponse(res, { error: err.message }, err.status || 500);
@@ -2308,6 +2368,13 @@ const server = http.createServer(async (req, res) => {
       try {
         await ts.assertTeamPermission(prisma, { teamId, userId, orgRole, level: 'lead' });
         await ts.store.removeTeamMember({ teamId, userId: memberDelMatch[1] });
+        audit({
+          organizationId: orgId, userId,
+          eventType: 'team.member_removed', eventCategory: 'team', action: 'delete',
+          resourceType: 'team_member', resourceId: teamId,
+          oldValue: { team_id: teamId, user_id: memberDelMatch[1] },
+          ..._reqMeta(req),
+        });
         return jsonResponse(res, { success: true });
       } catch (err) {
         return jsonResponse(res, { error: err.message }, err.status || 400);
@@ -2335,6 +2402,13 @@ const server = http.createServer(async (req, res) => {
           name: body.name.trim(),
           description: body.description || null,
           createdBy: userId,
+        });
+        audit({
+          organizationId: orgId, userId,
+          eventType: 'project.created', eventCategory: 'project', action: 'create',
+          resourceType: 'project', resourceId: p.id,
+          newValue: { name: p.name, slug: p.slug, team_id: teamId },
+          ..._reqMeta(req),
         });
         return jsonResponse(res, { project: p }, 201);
       } catch (err) {
@@ -2498,10 +2572,202 @@ const server = http.createServer(async (req, res) => {
       where: { id: memoryId },
       include: { memoryProjects: { include: { project: true } } },
     });
+    audit({
+      organizationId: orgId, userId,
+      eventType: 'memory.scope_changed', eventCategory: 'memory', action: 'update',
+      resourceType: 'memory', resourceId: memoryId,
+      oldValue: { scope: memory.scope, primary_team_id: memory.primaryTeamId },
+      newValue: { scope: updated.scope, primary_team_id: updated.primaryTeamId,
+                   project_ids: (updated.memoryProjects || []).map(mp => mp.projectId) },
+      ..._reqMeta(req),
+    });
     return jsonResponse(res, { memory: updated });
   }
 
   // ─── End Teams & Projects ─────────────────────────────────
+
+  // ─── Audit + DSR (Compliance) ────────────────────────────
+  // GET /v1/audit/logs — org-admin paginated query
+  if (pathname === '/v1/audit/logs' && req.method === 'GET') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const admin = await requireOrgAdmin(req, res, current.session.userId, current.session.orgId);
+    if (!admin) return;
+    const audit = await _getAuditLogger();
+    if (!audit) return jsonResponse(res, { error: 'Audit unavailable' }, 503);
+    try {
+      const result = await audit.query({
+        organizationId: current.session.orgId,
+        userId: url.searchParams.get('user_id') || undefined,
+        eventCategory: url.searchParams.get('category') || undefined,
+        action: url.searchParams.get('action') || undefined,
+        resourceType: url.searchParams.get('resource_type') || undefined,
+        from: url.searchParams.get('from') || undefined,
+        to: url.searchParams.get('to') || undefined,
+        limit: parseInt(url.searchParams.get('limit') || '50', 10),
+        offset: parseInt(url.searchParams.get('offset') || '0', 10),
+      });
+      return jsonResponse(res, result);
+    } catch (err) {
+      return jsonResponse(res, { error: err.message }, 500);
+    }
+  }
+
+  // GET /v1/audit/export.csv — streaming CSV (org-admin)
+  if (pathname === '/v1/audit/export.csv' && req.method === 'GET') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const admin = await requireOrgAdmin(req, res, current.session.userId, current.session.orgId);
+    if (!admin) return;
+    const orgId = current.session.orgId;
+    const filters = {
+      organizationId: orgId,
+      userId: url.searchParams.get('user_id') || undefined,
+      action: url.searchParams.get('action') || undefined,
+      eventType: url.searchParams.get('event_type') || undefined,
+      from: url.searchParams.get('from') ? new Date(url.searchParams.get('from')) : undefined,
+      to: url.searchParams.get('to') ? new Date(url.searchParams.get('to')) : undefined,
+    };
+    const safeDate = new Date().toISOString().slice(0, 10);
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="audit-${orgId}-${safeDate}.csv"`);
+    res.writeHead(200);
+    res.write([
+      'id', 'created_at', 'org_id', 'user_id', 'actor_type', 'event_type',
+      'event_category', 'action', 'resource_type', 'resource_id',
+      'ip_address', 'user_agent', 'metadata_json', 'request_id'
+    ].join(',') + '\n');
+
+    const esc = v => {
+      if (v == null) return '';
+      const s = typeof v === 'string' ? v : JSON.stringify(v);
+      if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+      return s;
+    };
+
+    let cursor = null;
+    const where = {
+      organizationId: orgId,
+      userId: filters.userId,
+      action: filters.action,
+      eventType: filters.eventType,
+      createdAt: (filters.from || filters.to)
+        ? { gte: filters.from, lte: filters.to }
+        : undefined,
+    };
+    try {
+      while (true) {
+        const batch = await prisma.auditLog.findMany({
+          where,
+          orderBy: { createdAt: 'desc' },
+          take: 500,
+          ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+        });
+        if (batch.length === 0) break;
+        for (const r of batch) {
+          res.write([
+            r.id,
+            r.createdAt?.toISOString?.() || '',
+            r.organizationId || '',
+            r.userId || '',
+            r.actorType || '',
+            r.eventType || '',
+            r.eventCategory || '',
+            r.action || '',
+            r.resourceType || '',
+            r.resourceId || '',
+            r.ipAddress || '',
+            esc(r.userAgent || ''),
+            esc(r.metadata || {}),
+            r.requestId || '',
+          ].map(esc).join(',') + '\n');
+        }
+        if (batch.length < 500) break;
+        cursor = batch[batch.length - 1].id;
+      }
+    } catch (err) {
+      console.error('[audit-export] failed:', err.message);
+    }
+    res.end();
+    return;
+  }
+
+  // ── DSR: data export for a user (GDPR right to portability) ──
+  // GET /v1/dsr/user/:userId/export — JSON dump of memories + audit
+  const dsrExportMatch = pathname.match(/^\/v1\/dsr\/user\/([0-9a-f-]{36})\/export$/);
+  if (dsrExportMatch && req.method === 'GET') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const targetUserId = dsrExportMatch[1];
+    const isSelf = targetUserId === current.session.userId;
+    const orgId = current.session.orgId;
+    if (!isSelf) {
+      const admin = await requireOrgAdmin(req, res, current.session.userId, orgId);
+      if (!admin) return;
+    }
+    try {
+      const [memories, auditRows] = await Promise.all([
+        prisma.memory.findMany({
+          where: { userId: targetUserId, deletedAt: null },
+          orderBy: { createdAt: 'asc' },
+          take: 10000,
+        }),
+        prisma.auditLog.findMany({
+          where: { userId: targetUserId },
+          orderBy: { createdAt: 'asc' },
+          take: 5000,
+        }),
+      ]);
+      audit({
+        organizationId: orgId, userId: current.session.userId,
+        eventType: 'dsr.export', eventCategory: 'compliance', action: 'export',
+        resourceType: 'user', resourceId: targetUserId,
+        metadata: { target_user_id: targetUserId, memories_count: memories.length },
+        ..._reqMeta(req),
+      });
+      return jsonResponse(res, {
+        user_id: targetUserId,
+        exported_at: new Date().toISOString(),
+        memories,
+        audit_logs: auditRows,
+      });
+    } catch (err) {
+      return jsonResponse(res, { error: err.message }, 500);
+    }
+  }
+
+  // POST /v1/dsr/user/:userId/erasure — soft-delete user memories
+  const dsrErasureMatch = pathname.match(/^\/v1\/dsr\/user\/([0-9a-f-]{36})\/erasure$/);
+  if (dsrErasureMatch && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const targetUserId = dsrErasureMatch[1];
+    const orgId = current.session.orgId;
+    const admin = await requireOrgAdmin(req, res, current.session.userId, orgId);
+    if (!admin) return;
+    try {
+      const result = await prisma.memory.updateMany({
+        where: { userId: targetUserId, deletedAt: null },
+        data: { deletedAt: new Date() },
+      });
+      audit({
+        organizationId: orgId, userId: current.session.userId,
+        eventType: 'dsr.erasure', eventCategory: 'compliance', action: 'delete',
+        resourceType: 'user', resourceId: targetUserId,
+        metadata: { target_user_id: targetUserId, memories_soft_deleted: result.count },
+        ..._reqMeta(req),
+      });
+      return jsonResponse(res, {
+        target_user_id: targetUserId,
+        memories_soft_deleted: result.count,
+        retention_days: 30,
+        note: 'Soft-deleted; permanent purge after 30 days via retention cron.',
+      });
+    } catch (err) {
+      return jsonResponse(res, { error: err.message }, 500);
+    }
+  }
+  // ─── End Audit + DSR ─────────────────────────────────────
 
   // POST /v1/connectors/slack/events — Slack Events API webhook
   // Public endpoint (no session). Auth via HMAC signature over raw body.

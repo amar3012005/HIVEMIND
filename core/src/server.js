@@ -337,19 +337,16 @@ if (persistentMemoryEngine && persistentMemoryStore && prisma) {
   syncScheduler.start();
 }
 
-// ─── Audit logging helper (Scale / Enterprise only) ─────────────────────────
+// ─── Audit logging helper ────────────────────────────────────────────────────
+// Writes are always recorded regardless of plan tier. Plan gating now happens
+// at the READ side (/v1/audit/logs, /v1/audit/export.csv) so paying customers
+// see audit history while non-paying orgs still leave an immutable trail.
 async function auditLog(event) {
   if (!auditLogger) return;
   try {
-    const org = await prisma.organization.findUnique({
-      where: { id: event.organizationId },
-      select: { plan: true },
-    });
-    if (org && (org.plan === 'scale' || org.plan === 'enterprise')) {
-      await auditLogger.log(event);
-    }
+    await auditLogger.log(event);
   } catch {
-    // Never let audit checks break the main flow
+    // Never let audit logging break the main flow
   }
 }
 
@@ -899,6 +896,27 @@ function cleanExpiredOAuthCodes() {
   }
 }
 setInterval(cleanExpiredOAuthCodes, 60_000);
+
+// Audit retention purge — daily at midnight UTC. Uses session GUC to unblock
+// the delete trigger that protects audit_logs from ad-hoc DELETE.
+const AUDIT_PURGE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+async function runAuditRetentionPurge() {
+  if (!prisma) return;
+  try {
+    const result = await prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(`SET LOCAL app.audit_retention_purge = 'on'`);
+      const count = await tx.$executeRawUnsafe(
+        `DELETE FROM "audit_logs" WHERE "retention_until" IS NOT NULL AND "retention_until" < NOW()`
+      );
+      return count;
+    });
+    if (result > 0) console.log(`[audit-retention] Purged ${result} expired audit rows`);
+  } catch (err) {
+    console.warn('[audit-retention] Purge failed:', err.message);
+  }
+}
+setInterval(runAuditRetentionPurge, AUDIT_PURGE_INTERVAL_MS);
+setTimeout(runAuditRetentionPurge, 60_000); // first run 60s after boot
 
 const ALLOWED_ORIGINS = (process.env.HIVEMIND_ALLOWED_ORIGINS || 'https://hivemind.davinciai.eu,https://www.davinciai.eu,https://davinciai.eu')
   .split(',')

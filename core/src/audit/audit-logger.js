@@ -33,6 +33,7 @@ export class AuditLogger {
   async log(event) {
     if (!this._enabled || !this.prisma) return;
     try {
+      const retentionDays = parseInt(process.env.AUDIT_RETENTION_DAYS || '2555', 10);
       await this.prisma.auditLog.create({
         data: {
           userId: event.userId || null,
@@ -42,12 +43,18 @@ export class AuditLogger {
           action: event.action || 'read',
           resourceType: event.resourceType || null,
           resourceId: event.resourceId || null,
+          actorType: event.actorType || 'user',
+          actorApiKeyId: event.actorApiKeyId || null,
+          metadata: event.metadata || {},
           oldValue: event.oldValue || undefined,
           newValue: event.newValue || undefined,
           ipAddress: event.ipAddress || null,
-          userAgent: event.userAgent || null,
+          userAgent: event.userAgent ? String(event.userAgent).slice(0, 500) : null,
           platformType: event.platformType || null,
           sessionId: event.sessionId || null,
+          processingBasis: event.processingBasis || null,
+          requestId: event.requestId || null,
+          retentionUntil: new Date(Date.now() + retentionDays * 24 * 60 * 60 * 1000),
         },
       });
     } catch (err) {

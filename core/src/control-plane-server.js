@@ -19,6 +19,7 @@ import {
   getRecentLogs,
   getLogSummary,
 } from './admin/live-log-store.js';
+import { ROLES, effectiveRoles, hasPermission, assertPermission } from './auth/permissions.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
@@ -408,10 +409,15 @@ async function requireOrgAdmin(req, res, userId, orgId) {
     jsonResponse(res, { error: 'Organization membership not found' }, 404);
     return null;
   }
-  if (!canManageOrg(membership.role)) {
+  // Prefer new roles[] array; fall back to legacy single role column
+  const roles = effectiveRoles(membership);
+  const allowed = hasPermission(roles, 'org', 'manage') || canManageOrg(membership.role);
+  if (!allowed) {
     jsonResponse(res, { error: 'Forbidden' }, 403);
     return null;
   }
+  // Attach effective roles to the membership object for callers that need it
+  membership._roles = roles;
   return membership;
 }
 
@@ -1317,17 +1323,40 @@ const server = http.createServer(async (req, res) => {
     if (!membership) return;
 
     const body = await parseBody(req);
-    const role = typeof body.role === 'string' && body.role.trim() ? body.role.trim().toLowerCase() : 'member';
-    if (!['member', 'viewer', 'developer', 'admin'].includes(role)) {
-      return jsonResponse(res, { error: 'invalid role' }, 400);
+    // Support both legacy `role` and new `roles[]`
+    let inviteRoles = [];
+    if (Array.isArray(body.roles) && body.roles.length > 0) {
+      const invalid = body.roles.filter(r => !ROLES.has(r));
+      if (invalid.length > 0) {
+        return jsonResponse(res, { error: `Invalid roles: ${invalid.join(', ')}` }, 400);
+      }
+      inviteRoles = body.roles;
+    } else {
+      const legacyRole = typeof body.role === 'string' && body.role.trim() ? body.role.trim().toLowerCase() : 'member';
+      if (!['member', 'viewer', 'developer', 'admin', 'org_admin', 'team_lead', 'compliance_admin'].includes(legacyRole)) {
+        return jsonResponse(res, { error: 'invalid role' }, 400);
+      }
+      // Map legacy to new role name if needed
+      const legacyMap = { admin: 'org_admin', owner: 'org_owner', developer: 'member' };
+      inviteRoles = [legacyMap[legacyRole] || legacyRole];
     }
 
+    // team_ids: optional array of team UUIDs to auto-join on accept
+    const teamIds = Array.isArray(body.team_ids) ? body.team_ids.filter(id => typeof id === 'string') : [];
+
     const token = crypto.randomBytes(24).toString('hex');
+    // Keep backward-compat `role` column as the first role mapped back to legacy
+    const legacyRoleReverse = inviteRoles.includes('org_owner') ? 'owner'
+      : inviteRoles.includes('org_admin') ? 'admin'
+      : inviteRoles[0] || 'member';
+
     const invite = await prisma.orgInvite.create({
       data: {
         orgId,
         email: typeof body.email === 'string' && body.email.trim() ? body.email.trim().toLowerCase() : null,
-        role,
+        role: legacyRoleReverse,
+        roles: inviteRoles,
+        teamIds,
         token,
         expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 7),
         createdBy: current.session.userId,
@@ -1341,6 +1370,8 @@ const server = http.createServer(async (req, res) => {
         id: invite.id,
         email: invite.email,
         role: invite.role,
+        roles: invite.roles,
+        team_ids: invite.teamIds,
         token: invite.token,
         expires_at: invite.expiresAt,
         created_at: invite.createdAt,
@@ -1415,20 +1446,41 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { error: 'Invite email does not match current account' }, 403);
     }
 
+    const inviteRoles = Array.isArray(invite.roles) && invite.roles.length > 0
+      ? invite.roles
+      : [invite.role || 'member'];
+
     await prisma.userOrganization.upsert({
       where: { userId_orgId: { userId: current.session.userId, orgId: invite.orgId } },
       update: {
         role: invite.role,
+        roles: inviteRoles,
         joinedAt: new Date(),
+        isActive: true,
+        deactivatedAt: null,
       },
       create: {
         userId: current.session.userId,
         orgId: invite.orgId,
         role: invite.role,
+        roles: inviteRoles,
         invitedAt: invite.createdAt,
         joinedAt: new Date(),
+        isActive: true,
       },
     });
+
+    // Auto-add to invited teams
+    const teamIds = Array.isArray(invite.teamIds) ? invite.teamIds : [];
+    if (teamIds.length > 0) {
+      for (const teamId of teamIds) {
+        await prisma.teamMember.upsert({
+          where: { teamId_userId: { teamId, userId: current.session.userId } },
+          update: {},
+          create: { teamId, userId: current.session.userId, role: 'member', addedById: invite.createdBy },
+        }).catch(() => null); // silently skip if team doesn't exist
+      }
+    }
 
     await prisma.orgInvite.update({
       where: { id: invite.id },
@@ -1436,6 +1488,18 @@ const server = http.createServer(async (req, res) => {
         usedAt: new Date(),
         usedBy: current.session.userId,
       },
+    });
+
+    audit({
+      organizationId: invite.orgId,
+      userId: current.session.userId,
+      eventType: 'invite.accepted',
+      eventCategory: 'auth',
+      action: 'create',
+      resourceType: 'user',
+      resourceId: current.session.userId,
+      newValue: { roles: inviteRoles, team_ids: teamIds },
+      ..._reqMeta(req),
     });
 
     await sessionStore.destroySession(current.sessionId);
@@ -1466,6 +1530,11 @@ const server = http.createServer(async (req, res) => {
     if (!membership) {
       return jsonResponse(res, { error: 'Organization membership not found' }, 404);
     }
+    // Require user:read permission to list members (org_admin, compliance_admin, team_lead)
+    const callerRoles = effectiveRoles(membership);
+    if (!hasPermission(callerRoles, 'user', 'read')) {
+      return jsonResponse(res, { error: 'Forbidden' }, 403);
+    }
 
     const members = await prisma.userOrganization.findMany({
       where: { orgId },
@@ -1490,6 +1559,9 @@ const server = http.createServer(async (req, res) => {
       members: members.map((entry) => ({
         user_id: entry.userId,
         role: entry.role,
+        roles: entry.roles && entry.roles.length ? entry.roles : effectiveRoles(entry),
+        is_active: entry.isActive ?? true,
+        deactivated_at: entry.deactivatedAt ?? null,
         invited_at: entry.invitedAt,
         joined_at: entry.joinedAt,
         email: entry.user?.email || null,
@@ -1578,6 +1650,7 @@ const server = http.createServer(async (req, res) => {
 
   const memberDetailMatch = pathname.match(/^\/v1\/orgs\/([^/]+)\/members\/([^/]+)$/);
   if (memberDetailMatch && req.method === 'PATCH') {
+    // Legacy: PATCH /v1/orgs/:id/members/:userId — update single role (kept for compat)
     const current = await requireSession(req, res);
     if (!current) return;
     const orgId = memberDetailMatch[1];
@@ -1605,6 +1678,176 @@ const server = http.createServer(async (req, res) => {
     });
 
     return jsonResponse(res, { success: true, member: { user_id: updated.userId, role: updated.role } });
+  }
+
+  // ─── RBAC: member role management (P0-4) ─────────────────────────────────
+
+  // PATCH /v1/orgs/:id/members/:userId/roles — set roles[] (multi-role RBAC)
+  const memberRolesMatch = pathname.match(/^\/v1\/orgs\/([^/]+)\/members\/([^/]+)\/roles$/);
+  if (memberRolesMatch && req.method === 'PATCH') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const orgId = memberRolesMatch[1];
+    const targetUserId = memberRolesMatch[2];
+    const callerMembership = await requireOrgAdmin(req, res, current.session.userId, orgId);
+    if (!callerMembership) return;
+
+    const body = await parseBody(req);
+    const newRoles = Array.isArray(body.roles) ? body.roles : [];
+
+    // Validate: all entries must be known roles
+    const invalidRoles = newRoles.filter(r => !ROLES.has(r));
+    if (newRoles.length === 0 || invalidRoles.length > 0) {
+      return jsonResponse(res, {
+        error: `Invalid roles: ${invalidRoles.join(', ') || 'roles[] must be non-empty'}. Allowed: ${[...ROLES].join(', ')}`,
+      }, 400);
+    }
+
+    const targetMembership = await getOrgMembership(targetUserId, orgId);
+    if (!targetMembership) {
+      return jsonResponse(res, { error: 'Member not found' }, 404);
+    }
+
+    // Last org_owner protection: block demotion if this would drop owner count to 0
+    if (!newRoles.includes('org_owner')) {
+      const targetCurrentRoles = effectiveRoles(targetMembership);
+      if (targetCurrentRoles.includes('org_owner')) {
+        const ownerCount = await prisma.userOrganization.count({
+          where: {
+            orgId,
+            roles: { has: 'org_owner' },
+          },
+        });
+        const legacyOwnerCount = ownerCount === 0
+          ? await prisma.userOrganization.count({ where: { orgId, role: 'owner' } })
+          : 0;
+        const totalOwners = ownerCount + legacyOwnerCount;
+        if (totalOwners <= 1) {
+          return jsonResponse(res, { error: 'Cannot remove the last org_owner' }, 400);
+        }
+      }
+    }
+
+    // Prevent self-demotion below org_owner if caller is the only owner
+    if (targetUserId === current.session.userId && !newRoles.includes('org_owner')) {
+      const callerRoles = effectiveRoles(callerMembership);
+      if (callerRoles.includes('org_owner')) {
+        const ownerCount = await prisma.userOrganization.count({
+          where: { orgId, roles: { has: 'org_owner' } },
+        });
+        if (ownerCount <= 1) {
+          return jsonResponse(res, { error: 'Cannot self-demote: you are the last org_owner' }, 400);
+        }
+      }
+    }
+
+    const oldRoles = effectiveRoles(targetMembership);
+    const updated = await prisma.userOrganization.update({
+      where: { userId_orgId: { userId: targetUserId, orgId } },
+      data: { roles: newRoles },
+    });
+
+    audit({
+      organizationId: orgId,
+      userId: current.session.userId,
+      eventType: 'rbac.role_changed',
+      eventCategory: 'data_modification',
+      action: 'update',
+      resourceType: 'user',
+      resourceId: targetUserId,
+      oldValue: { roles: oldRoles },
+      newValue: { roles: newRoles },
+      ..._reqMeta(req),
+    });
+
+    return jsonResponse(res, {
+      success: true,
+      member: { user_id: updated.userId, roles: updated.roles },
+    });
+  }
+
+  // POST /v1/orgs/:id/members/:userId/deactivate
+  const memberDeactivateMatch = pathname.match(/^\/v1\/orgs\/([^/]+)\/members\/([^/]+)\/deactivate$/);
+  if (memberDeactivateMatch && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const orgId = memberDeactivateMatch[1];
+    const targetUserId = memberDeactivateMatch[2];
+    const callerMembership = await requireOrgAdmin(req, res, current.session.userId, orgId);
+    if (!callerMembership) return;
+
+    if (targetUserId === current.session.userId) {
+      return jsonResponse(res, { error: 'Cannot deactivate yourself' }, 400);
+    }
+
+    const targetMembership = await getOrgMembership(targetUserId, orgId);
+    if (!targetMembership) {
+      return jsonResponse(res, { error: 'Member not found' }, 404);
+    }
+
+    const now = new Date();
+    await prisma.userOrganization.update({
+      where: { userId_orgId: { userId: targetUserId, orgId } },
+      data: { isActive: false, deactivatedAt: now },
+    });
+
+    // Revoke API keys for this user
+    await prisma.apiKey.updateMany({
+      where: { userId: targetUserId, revokedAt: null },
+      data: { revokedAt: now },
+    });
+
+    // Delete sessions for this user
+    await prisma.session.deleteMany({ where: { userId: targetUserId } }).catch(() => null);
+
+    audit({
+      organizationId: orgId,
+      userId: current.session.userId,
+      eventType: 'user.deactivated',
+      eventCategory: 'data_modification',
+      action: 'update',
+      resourceType: 'user',
+      resourceId: targetUserId,
+      newValue: { is_active: false, deactivated_at: now.toISOString() },
+      ..._reqMeta(req),
+    });
+
+    return jsonResponse(res, { success: true, user_id: targetUserId, deactivated_at: now.toISOString() });
+  }
+
+  // POST /v1/orgs/:id/members/:userId/reactivate
+  const memberReactivateMatch = pathname.match(/^\/v1\/orgs\/([^/]+)\/members\/([^/]+)\/reactivate$/);
+  if (memberReactivateMatch && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const orgId = memberReactivateMatch[1];
+    const targetUserId = memberReactivateMatch[2];
+    const callerMembership = await requireOrgAdmin(req, res, current.session.userId, orgId);
+    if (!callerMembership) return;
+
+    const targetMembership = await getOrgMembership(targetUserId, orgId);
+    if (!targetMembership) {
+      return jsonResponse(res, { error: 'Member not found' }, 404);
+    }
+
+    await prisma.userOrganization.update({
+      where: { userId_orgId: { userId: targetUserId, orgId } },
+      data: { isActive: true, deactivatedAt: null },
+    });
+
+    audit({
+      organizationId: orgId,
+      userId: current.session.userId,
+      eventType: 'user.reactivated',
+      eventCategory: 'data_modification',
+      action: 'update',
+      resourceType: 'user',
+      resourceId: targetUserId,
+      newValue: { is_active: true },
+      ..._reqMeta(req),
+    });
+
+    return jsonResponse(res, { success: true, user_id: targetUserId });
   }
 
   const projectDetailMatch = pathname.match(/^\/v1\/orgs\/([^/]+)\/projects\/([^/]+)$/);
@@ -1952,6 +2195,25 @@ const server = http.createServer(async (req, res) => {
     const current = await requireSession(req, res);
     if (!current) return;
 
+    // Org-scope connectors require connector:manage; personal connectors are open
+    const connectorStartBody = await parseBody(req);
+    if (connectorStartBody.target_scope === 'organization') {
+      const connMem = await getOrgMembership(current.session.userId, current.session.orgId);
+      if (connMem) {
+        try {
+          const auditLogger = await _getAuditLogger();
+          assertPermission(req, { resource: 'connector', action: 'manage' }, {
+            userRoles: effectiveRoles(connMem),
+            orgId: current.session.orgId,
+            userId: current.session.userId,
+            auditLogger,
+          });
+        } catch (permErr) {
+          return jsonResponse(res, { error: permErr.error || 'Forbidden' }, permErr.status || 403);
+        }
+      }
+    }
+
     const provider = connectorStartMatch[1];
     const providerConfig = PROVIDER_REGISTRY[provider];
     if (!providerConfig) {
@@ -1973,9 +2235,66 @@ const server = http.createServer(async (req, res) => {
       }
 
       const { buildAuthUrl } = oauthModule;
-      const body = await parseBody(req);
+      // connectorStartBody was already read for the permission check above
+      const body = connectorStartBody;
       const returnTo = body.return_to || '/hivemind/app/connectors';
-      const targetScope = body.target_scope === 'organization' ? 'organization' : 'personal';
+      const rawScope = body.target_scope;
+      const rawTeamId = body.team_id || null;
+
+      // Validate and normalise target_scope.
+      // 'organization' → requires org_admin or org_owner.
+      // 'team'         → requires team_lead on the specified team_id.
+      // 'personal'     → no extra permission needed.
+      let targetScope = 'personal';
+      let resolvedTeamId = null;
+
+      if (rawScope === 'organization') {
+        const membership = await getOrgMembership(current.session.userId, current.session.orgId);
+        if (!membership || !canManageOrg(membership.role)) {
+          return jsonResponse(res, { error: 'Only org admins can set org-scope connectors' }, 403);
+        }
+        targetScope = 'organization';
+      } else if (rawScope === 'team') {
+        if (!rawTeamId) {
+          return jsonResponse(res, { error: 'team_id is required when target_scope is "team"' }, 400);
+        }
+        if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+        // Inline team store import — _getTeamStore is const-scoped later in the handler
+        const tsModTeam = await import('./teams/team-store.js');
+        const orgMembership = await getOrgMembership(current.session.userId, current.session.orgId);
+        const orgRole = orgMembership?.role || 'member';
+        try {
+          await tsModTeam.assertTeamPermission(prisma, {
+            teamId: rawTeamId,
+            userId: current.session.userId,
+            orgRole,
+            level: 'lead',
+          });
+        } catch {
+          return jsonResponse(res, { error: 'Only team leads can set team-scope connectors' }, 403);
+        }
+        targetScope = 'team';
+        resolvedTeamId = rawTeamId;
+      }
+
+      // Audit-log connector scope selection (fire-and-forget)
+      if (prisma && (targetScope === 'organization' || targetScope === 'team')) {
+        const auditMod = await import('./audit/audit-logger.js');
+        const al = new auditMod.AuditLogger(prisma);
+        const fwdHdr = req.headers?.['x-forwarded-for'];
+        al.log({
+          organizationId: current.session.orgId,
+          userId: current.session.userId,
+          eventType: 'connector.scope_changed',
+          eventCategory: 'connector',
+          action: 'start_oauth',
+          resourceType: 'connector',
+          newValue: { provider, target_scope: targetScope, team_id: resolvedTeamId },
+          ipAddress: typeof fwdHdr === 'string' ? fwdHdr.split(',')[0].trim() : (req.socket?.remoteAddress || null),
+          userAgent: req.headers?.['user-agent'] || null,
+          platformType: 'webapp',
+        }).catch(err => console.warn('[audit] connector start log failed:', err.message));
+      }
 
       // Create CSRF-safe stateless state bound to user/org
       const stateId = encodeConnectorState({
@@ -1984,6 +2303,7 @@ const server = http.createServer(async (req, res) => {
         provider,
         returnTo,
         targetScope,
+        teamId: resolvedTeamId,
       });
 
       const authUrl = buildAuthUrl({
@@ -2053,6 +2373,7 @@ const server = http.createServer(async (req, res) => {
         userId: authState.userId,
         provider,
         targetScope: authState.targetScope || 'personal',
+        teamId: authState.teamId || null,
         accountRef: tokens.email || tokens.account_ref || null,
         accessToken: tokens.access_token,
         refreshToken: tokens.refresh_token,
@@ -2082,6 +2403,7 @@ const server = http.createServer(async (req, res) => {
               user_id: authState.userId,
               org_id: authState.orgId,
               target_scope: authState.targetScope || 'personal',
+              team_id: authState.teamId || null,
               incremental: false,
             }),
           });
@@ -2230,12 +2552,26 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  // POST /v1/teams — create team (org admin only)
+  // POST /v1/teams — create team (org_admin or team_lead)
   if (pathname === '/v1/teams' && req.method === 'POST') {
     const current = await requireSession(req, res);
     if (!current) return;
-    const admin = await requireOrgAdmin(req, res, current.session.userId, current.session.orgId);
-    if (!admin) return;
+    const callerMem = await getOrgMembership(current.session.userId, current.session.orgId);
+    if (!callerMem) return jsonResponse(res, { error: 'Organization membership not found' }, 404);
+    const callerRoles = effectiveRoles(callerMem);
+    try {
+      const auditLogger = await _getAuditLogger();
+      assertPermission(req, { resource: 'team', action: 'manage' }, {
+        userRoles: callerRoles,
+        orgId: current.session.orgId,
+        userId: current.session.userId,
+        auditLogger,
+      });
+    } catch (permErr) {
+      return jsonResponse(res, { error: permErr.error || 'Forbidden' }, permErr.status || 403);
+    }
+    // keep `admin` as alias for backward compat with the block below
+    const admin = callerMem;
     const ts = await _getTeamStore();
     if (!ts) return jsonResponse(res, { error: 'Database unavailable' }, 503);
     const body = await parseBody(req);
@@ -2587,12 +2923,23 @@ const server = http.createServer(async (req, res) => {
   // ─── End Teams & Projects ─────────────────────────────────
 
   // ─── Audit + DSR (Compliance) ────────────────────────────
-  // GET /v1/audit/logs — org-admin paginated query
+  // GET /v1/audit/logs — org_admin or compliance_admin
   if (pathname === '/v1/audit/logs' && req.method === 'GET') {
     const current = await requireSession(req, res);
     if (!current) return;
-    const admin = await requireOrgAdmin(req, res, current.session.userId, current.session.orgId);
-    if (!admin) return;
+    const callerMem = await getOrgMembership(current.session.userId, current.session.orgId);
+    if (!callerMem) return jsonResponse(res, { error: 'Organization membership not found' }, 404);
+    try {
+      const auditLogger = await _getAuditLogger();
+      assertPermission(req, { resource: 'audit', action: 'read' }, {
+        userRoles: effectiveRoles(callerMem),
+        orgId: current.session.orgId,
+        userId: current.session.userId,
+        auditLogger,
+      });
+    } catch (permErr) {
+      return jsonResponse(res, { error: permErr.error || 'Forbidden' }, permErr.status || 403);
+    }
     const audit = await _getAuditLogger();
     if (!audit) return jsonResponse(res, { error: 'Audit unavailable' }, 503);
     try {
@@ -2613,12 +2960,23 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  // GET /v1/audit/export.csv — streaming CSV (org-admin)
+  // GET /v1/audit/export.csv — streaming CSV (org_admin or compliance_admin)
   if (pathname === '/v1/audit/export.csv' && req.method === 'GET') {
     const current = await requireSession(req, res);
     if (!current) return;
-    const admin = await requireOrgAdmin(req, res, current.session.userId, current.session.orgId);
-    if (!admin) return;
+    const callerMem2 = await getOrgMembership(current.session.userId, current.session.orgId);
+    if (!callerMem2) return jsonResponse(res, { error: 'Organization membership not found' }, 404);
+    try {
+      const auditLogger = await _getAuditLogger();
+      assertPermission(req, { resource: 'audit', action: 'export' }, {
+        userRoles: effectiveRoles(callerMem2),
+        orgId: current.session.orgId,
+        userId: current.session.userId,
+        auditLogger,
+      });
+    } catch (permErr) {
+      return jsonResponse(res, { error: permErr.error || 'Forbidden' }, permErr.status || 403);
+    }
     const orgId = current.session.orgId;
     const filters = {
       organizationId: orgId,
@@ -2768,6 +3126,29 @@ const server = http.createServer(async (req, res) => {
     }
   }
   // ─── End Audit + DSR ─────────────────────────────────────
+
+  // ─── Billing (placeholder, org_owner only) ────────────────
+  if (pathname.startsWith('/v1/billing') && (req.method === 'GET' || req.method === 'POST' || req.method === 'PATCH')) {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const callerMem = await getOrgMembership(current.session.userId, current.session.orgId);
+    if (!callerMem) return jsonResponse(res, { error: 'Organization membership not found' }, 404);
+    const action = req.method === 'GET' ? 'read' : 'manage';
+    try {
+      const auditLogger = await _getAuditLogger();
+      assertPermission(req, { resource: 'billing', action }, {
+        userRoles: effectiveRoles(callerMem),
+        orgId: current.session.orgId,
+        userId: current.session.userId,
+        auditLogger,
+      });
+    } catch (permErr) {
+      return jsonResponse(res, { error: permErr.error || 'Forbidden' }, permErr.status || 403);
+    }
+    // Billing integration (Stripe etc.) is out of scope for P0-4; return 501
+    return jsonResponse(res, { error: 'Billing integration not yet available' }, 501);
+  }
+  // ─── End Billing ──────────────────────────────────────────
 
   // POST /v1/connectors/slack/events — Slack Events API webhook
   // Public endpoint (no session). Auth via HMAC signature over raw body.

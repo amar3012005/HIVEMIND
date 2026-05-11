@@ -102,10 +102,19 @@ export class SlackAdapter extends BaseProviderAdapter {
 
   /**
    * Shared fetch logic for both initial and incremental syncs.
+   *
+   * ACL rule: when context.target_scope is 'organization' or 'team', only
+   * public channels are ingested. Private channels are skipped to prevent
+   * accidental org-wide exposure of confidential conversations.
    */
   async _fetchMessages({ accessToken, cursor, context }) {
+    const targetScope = context?.target_scope || 'personal';
+    const orgScopeMode = targetScope === 'organization' || targetScope === 'team';
+
     const channelsRes = await this._slackFetch('conversations.list', {
-      types: 'public_channel,private_channel,im,mpim',
+      // In org-scope mode request only public channels to enforce ACL.
+      // In personal mode include all channel types the bot was invited to.
+      types: orgScopeMode ? 'public_channel' : 'public_channel,private_channel,im,mpim',
       limit: 200,
       exclude_archived: true,
     }, accessToken);
@@ -115,6 +124,12 @@ export class SlackAdapter extends BaseProviderAdapter {
     let latestTs = cursor || '0';
 
     for (const ch of channels) {
+      // Hard ACL guard: in org/team scope, never ingest private channels even if
+      // the API returned them (defensive check against API behaviour changes).
+      if (orgScopeMode && ch.is_private) {
+        continue;
+      }
+
       try {
         const units = await this._fetchChannelUnits(ch, cursor, accessToken);
         for (const unit of units) {

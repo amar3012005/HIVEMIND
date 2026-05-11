@@ -38,6 +38,7 @@ model User {
   teamMemberships      TeamMember[]          @relation("UserTeamMemberships")
   projectMemberships   ProjectMember[]       @relation("UserProjectMemberships")
   memoryProjects       MemoryProject[]       @relation("UserMemoryProjects")
+  digitalEmployees     DigitalEmployee[]     @relation("UserCreatedEmployees")
 
   @@map("users")
 }
@@ -62,6 +63,7 @@ model Organization {
   invites             OrgInvite[]
   projects            Project[]
   teams               Team[]             @relation("OrgTeams")
+  digitalEmployees    DigitalEmployee[]  @relation("OrgDigitalEmployees")
   users               UserOrganization[] @relation("OrgUserOrganizations")
   pageIndexNodes      PageIndexNode[]    @relation("OrgPageIndexNodes")
   ssoConfig           OrgSsoConfig?      @relation("OrgSsoConfig")
@@ -129,6 +131,7 @@ model Team {
   projects             Project[]
   memories             Memory[]              @relation("TeamMemories")
   platformIntegrations PlatformIntegration[] @relation("TeamPlatformIntegrations")
+  digitalEmployees     DigitalEmployee[]     @relation("TeamDigitalEmployees")
 
   @@unique([orgId, slug])
   @@index([orgId])
@@ -885,6 +888,100 @@ enum MemoryScope {
   project
   team
   organization
+}
+
+/// Digital Employee — autonomous AI agent backed by SlackAgents +
+/// AgentScope, running in the `hivemind-employees` Python sidecar
+/// service. Each employee owns a persona, a Slack workspace presence,
+/// a scoped HIVEMIND API key, and a policy ruleset.
+model DigitalEmployee {
+  id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId                String   @map("org_id") @db.Uuid
+  teamId               String?  @map("team_id") @db.Uuid
+  name                 String   @db.VarChar(100)
+  slug                 String   @db.VarChar(120)
+  avatarUrl            String?  @map("avatar_url")
+  persona              String   // system prompt
+  model                String   @default("claude-haiku-4-5") @db.VarChar(100)
+  llmProvider          String   @default("anthropic") @map("llm_provider") @db.VarChar(50)
+  hivemindApiKeyId     String?  @map("hivemind_api_key_id") @db.Uuid
+  scope                String   @default("team") @db.VarChar(20)
+  slackTeamId          String?  @map("slack_team_id") @db.VarChar(64)
+  slackBotUserId       String?  @map("slack_bot_user_id") @db.VarChar(64)
+  slackChannelsAllowed String[] @default([]) @map("slack_channels_allowed")
+  tools                String[] @default([])
+  policyRules          Json     @default("{}") @map("policy_rules")
+  status               String   @default("draft") @db.VarChar(20)
+  // draft | deploying | running | paused | error
+  replicas             Int      @default(1)
+  maxReplicas          Int      @default(3) @map("max_replicas")
+  metricsLast24h       Json?    @map("metrics_last_24h")
+  lastActiveAt         DateTime? @map("last_active_at") @db.Timestamptz(6)
+  createdBy            String   @map("created_by") @db.Uuid
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  archivedAt           DateTime? @map("archived_at") @db.Timestamptz(6)
+  org                  Organization @relation("OrgDigitalEmployees", fields: [orgId], references: [id], onDelete: Cascade)
+  team                 Team?        @relation("TeamDigitalEmployees", fields: [teamId], references: [id], onDelete: SetNull)
+  creator              User         @relation("UserCreatedEmployees", fields: [createdBy], references: [id])
+  events               SlackEvent[]
+  intents              ActionIntent[]
+
+  @@unique([orgId, slug])
+  @@index([orgId])
+  @@index([status])
+  @@index([slackTeamId])
+  @@map("digital_employees")
+}
+
+/// SlackEvent — deduped inbound event from a Slack workspace, routed
+/// to a Digital Employee. Backed by Redis dedup; this table is the
+/// durable audit + replay record.
+model SlackEvent {
+  id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  slackEventId        String   @unique @map("slack_event_id") @db.VarChar(64)
+  workspaceId         String   @map("workspace_id") @db.VarChar(64)
+  channelId           String?  @map("channel_id") @db.VarChar(64)
+  ts                  String   @db.VarChar(64)
+  eventType           String   @map("event_type") @db.VarChar(64)
+  eventSubtype        String?  @map("event_subtype") @db.VarChar(64)
+  routedToEmployeeId  String?  @map("routed_to_employee_id") @db.Uuid
+  payload             Json
+  status              String   @default("queued") @db.VarChar(20)
+  // queued | processing | done | failed | dlq
+  attempts            Int      @default(0)
+  errorMessage        String?  @map("error_message")
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  completedAt         DateTime? @map("completed_at") @db.Timestamptz(6)
+  employee            DigitalEmployee? @relation(fields: [routedToEmployeeId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, channelId])
+  @@index([status, createdAt])
+  @@index([routedToEmployeeId])
+  @@map("slack_events")
+}
+
+/// ActionIntent — every outbound action an employee wants to take.
+/// Persisted before policy check, then approved/denied/executed.
+/// Powers audit trail, replay, and human-in-the-loop approval flow.
+model ActionIntent {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  employeeId   String   @map("employee_id") @db.Uuid
+  actionType   String   @map("action_type") @db.VarChar(64)
+  // slack_post | slack_react | slack_dm | slack_search | slack_history | memory_save
+  payload      Json
+  status       String   @default("pending") @db.VarChar(20)
+  // pending | approved | executed | denied | failed
+  denyReason   String?  @map("deny_reason")
+  approvedById String?  @map("approved_by") @db.Uuid
+  executedAt   DateTime? @map("executed_at") @db.Timestamptz(6)
+  result       Json?
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  employee     DigitalEmployee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@index([employeeId, createdAt(sort: Desc)])
+  @@index([status])
+  @@map("action_intents")
 }
 
 /// PageIndex hierarchical memory index nodes (optional optimization layer)

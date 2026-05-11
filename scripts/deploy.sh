@@ -30,7 +30,11 @@ ensure_networks() {
 }
 
 start_employees() {
-  log "Starting hm-employees (Digital Employees / SlackAgents + AgentScope, port 8060)..."
+  # Host port: 8061 (8060 is owned by hivemind-caddy-csi). Container port
+  # stays 8060 so internal docker-network refs like hm-employees:8060
+  # are unchanged for hm-core + control-plane.
+  HM_EMP_HOST_PORT="${HM_EMP_HOST_PORT:-8061}"
+  log "Starting hm-employees (Digital Employees, host ${HM_EMP_HOST_PORT} → container 8060)..."
   docker stop hm-employees 2>/dev/null || true
   docker rm hm-employees 2>/dev/null || true
   ensure_networks
@@ -46,7 +50,7 @@ start_employees() {
     --name hm-employees \
     --network $NETWORK \
     --restart unless-stopped \
-    -p 8060:8060 \
+    -p ${HM_EMP_HOST_PORT}:8060 \
     -v /opt/HIVEMIND/employees-service:/app \
     -v /etc/localtime:/etc/localtime:ro \
     -w /app \
@@ -70,16 +74,21 @@ start_employees() {
       python -m hivemind_employees.main"
 
   log "Waiting for hm-employees health..."
-  for i in $(seq 1 30); do
+  for i in $(seq 1 60); do
     sleep 2
-    if curl -sf http://localhost:8060/health >/dev/null 2>&1; then
-      log "hm-employees is ${GREEN}healthy${NC} on port 8060"
+    # Probe via host port AND via container network (docker exec curl)
+    if curl -sf http://localhost:${HM_EMP_HOST_PORT}/health >/dev/null 2>&1; then
+      log "hm-employees is ${GREEN}healthy${NC} on host port ${HM_EMP_HOST_PORT} (container 8060)"
+      return 0
+    fi
+    if docker exec hm-employees curl -sf http://localhost:8060/health >/dev/null 2>&1; then
+      log "hm-employees is ${GREEN}healthy${NC} on container 8060 (host port ${HM_EMP_HOST_PORT} may be NAT-blocked)"
       return 0
     fi
     echo -n "."
   done
-  err "hm-employees not healthy after 60s"
-  docker logs hm-employees --tail 30
+  err "hm-employees not healthy after 120s"
+  docker logs hm-employees --tail 40
   return 1
 }
 

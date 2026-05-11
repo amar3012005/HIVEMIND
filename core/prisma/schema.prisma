@@ -501,6 +501,11 @@ model AuditLog {
   resourceType    String?       @map("resource_type") @db.VarChar(50)
   resourceId      String?       @map("resource_id") @db.Uuid
   action          String        @map("action") @db.VarChar(50)
+  actorType       String?       @default("user") @map("actor_type") @db.VarChar(20)
+  actorApiKeyId   String?       @map("actor_api_key_id") @db.Uuid
+  metadata        Json?         @default("{}") @map("metadata")
+  requestId       String?       @map("request_id") @db.VarChar(64)
+  retentionUntil  DateTime?     @map("retention_until") @db.Timestamptz(6)
   oldValue        Json?         @map("old_value")
   newValue        Json?         @map("new_value")
   ipAddress       String?       @map("ip_address") @db.Inet
@@ -520,6 +525,10 @@ model AuditLog {
   @@index([createdAt(sort: Desc)])
   @@index([resourceType, resourceId])
   @@index([action])
+  @@index([actorType])
+  @@index([organizationId, createdAt(sort: Desc)], map: "audit_logs_org_created_idx")
+  @@index([userId, createdAt(sort: Desc)], map: "audit_logs_user_created_idx")
+  @@index([requestId])
   @@map("audit_logs")
 }
 

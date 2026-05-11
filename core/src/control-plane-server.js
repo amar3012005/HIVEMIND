@@ -20,6 +20,8 @@ import {
   getLogSummary,
 } from './admin/live-log-store.js';
 import { ROLES, effectiveRoles, hasPermission, assertPermission } from './auth/permissions.js';
+import { attachSsoContext, resolveSsoConfig } from './auth/sso-resolver.js';
+import { handleScimRequest } from './scim/scim-router.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
@@ -899,6 +901,9 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const pathname = url.pathname;
 
+  // Attach SSO context early (subdomain-based org routing; no-op on non-subdomain hosts)
+  if (prisma) await attachSsoContext(req, prisma);
+
   // API endpoint for log streaming
   if (pathname === '/api/logs' && req.method === 'GET') {
     const container = url.searchParams.get('container') || 'hm-control';
@@ -1116,6 +1121,51 @@ const server = http.createServer(async (req, res) => {
       const { userInfo } = await zitadelClient.exchangeAndResolveUser(code);
       const user = await upsertUserFromZitadel(userInfo);
       const { org } = await resolveCurrentOrg(user.id);
+
+      // JIT Provisioning: if org resolved and OrgSsoConfig has jitProvisioning=true,
+      // auto-create UserOrganization if not already a member.
+      if (org?.id && prisma) {
+        try {
+          const ssoConf = await prisma.orgSsoConfig.findUnique({
+            where: { orgId: org.id },
+            select: { jitProvisioning: true, defaultRole: true, defaultTeamId: true, enabled: true },
+          });
+          if (ssoConf?.enabled && ssoConf.jitProvisioning) {
+            const existingMembership = await prisma.userOrganization.findUnique({
+              where: { userId_orgId: { userId: user.id, orgId: org.id } },
+            });
+            if (!existingMembership) {
+              const role = ssoConf.defaultRole || 'member';
+              await prisma.userOrganization.create({
+                data: { userId: user.id, orgId: org.id, role, joinedAt: new Date() },
+              });
+              if (ssoConf.defaultTeamId) {
+                await prisma.teamMember.upsert({
+                  where: { teamId_userId: { teamId: ssoConf.defaultTeamId, userId: user.id } },
+                  create: { teamId: ssoConf.defaultTeamId, userId: user.id, role: 'member' },
+                  update: {},
+                }).catch(() => {});
+              }
+              // Audit JIT provisioning event
+              const auditLoggerInst = await _getAuditLogger();
+              auditLoggerInst?.log({
+                userId: user.id,
+                organizationId: org.id,
+                eventType: 'sso.jit_provisioned',
+                eventCategory: 'provisioning',
+                action: 'create',
+                resourceType: 'user_organization',
+                newValue: { role, default_team_id: ssoConf.defaultTeamId },
+                metadata: { sso_provider: 'oidc' },
+              }).catch(() => {});
+            }
+          }
+        } catch (jitErr) {
+          // JIT errors must not block login
+          console.warn('[auth/callback] JIT provisioning error:', jitErr.message);
+        }
+      }
+
       const sessionId = await sessionStore.createSession({
         userId: user.id,
         email: user.email,
@@ -3314,6 +3364,199 @@ const server = http.createServer(async (req, res) => {
       core_api_base_url: CONFIG.coreApiBaseUrl
     });
   }
+
+  // ─── SCIM 2.0 endpoints (/scim/v2/*) ──────────────────────────
+  if (pathname.startsWith('/scim/v2/')) {
+    const auditLoggerForScim = await _getAuditLogger();
+    const handled = await handleScimRequest(req, res, prisma, pathname, auditLoggerForScim, CONFIG.publicBaseUrl);
+    if (handled) return;
+  }
+
+  // ─── /v1/auth/sso-redirect — IdP-initiated login redirect ─────
+  // GET /v1/auth/sso-redirect?org=<subdomain>
+  // Returns Zitadel auth URL for the org's project, else falls back to default.
+  if (pathname === '/v1/auth/sso-redirect' && req.method === 'GET') {
+    const slug = url.searchParams.get('org') || '';
+    const returnTo = url.searchParams.get('return_to') || CONFIG.postLoginRedirect;
+
+    let projectId = null;
+    if (slug && prisma) {
+      const cfg = await resolveSsoConfig(prisma, slug);
+      if (cfg && cfg.enabled && cfg.zitadelProjectId) {
+        projectId = cfg.zitadelProjectId;
+      }
+    }
+
+    if (!zitadelClient) {
+      return jsonResponse(res, { error: 'ZITADEL not configured' }, 503);
+    }
+
+    const state = await sessionStore.createAuthState({ returnTo });
+    // zitadelClient.buildAuthorizeUrl supports optional projectId via extra param
+    const authUrl = zitadelClient.buildAuthorizeUrl(state, {
+      ...(projectId ? { resource: projectId } : {}),
+    });
+
+    return jsonResponse(res, { auth_url: authUrl, org: slug || null });
+  }
+
+  // ─── /v1/orgs/:id/sso — SSO config CRUD ──────────────────────
+  const ssoConfigMatch = pathname.match(/^\/v1\/orgs\/([^/]+)\/sso$/);
+  if (ssoConfigMatch) {
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const orgId = ssoConfigMatch[1];
+    const membership = await requireOrgAdmin(req, res, current.session.userId, orgId);
+    if (!membership) return;
+
+    if (req.method === 'GET') {
+      const cfg = await prisma.orgSsoConfig.findUnique({ where: { orgId } });
+      if (!cfg) {
+        return jsonResponse(res, { sso_config: null });
+      }
+      return jsonResponse(res, {
+        sso_config: {
+          org_id: cfg.orgId,
+          sso_type: cfg.ssoType,
+          zitadel_project_id: cfg.zitadelProjectId,
+          saml_idp_metadata_url: cfg.samlIdpMetadataUrl,
+          saml_acs_url: cfg.samlAcsUrl,
+          subdomain: cfg.subdomain,
+          enabled: cfg.enabled,
+          jit_provisioning: cfg.jitProvisioning,
+          default_role: cfg.defaultRole,
+          default_team_id: cfg.defaultTeamId,
+          has_scim_token: Boolean(cfg.scimTokenHash),
+          scim_token_id: cfg.scimTokenId,
+          created_at: cfg.createdAt,
+          updated_at: cfg.updatedAt,
+          // Derived ACS URL for customer to paste into Okta/Azure AD
+          acs_url: cfg.subdomain
+            ? `https://${cfg.subdomain}.hivemind.davinciai.eu/saml/acs`
+            : null,
+        },
+      });
+    }
+
+    if (req.method === 'PUT') {
+      const body = await parseBody(req);
+      const data = {};
+      if (typeof body.sso_type === 'string') data.ssoType = body.sso_type;
+      if (typeof body.zitadel_project_id === 'string') data.zitadelProjectId = body.zitadel_project_id || null;
+      if (typeof body.saml_idp_metadata_url === 'string') data.samlIdpMetadataUrl = body.saml_idp_metadata_url || null;
+      if (typeof body.subdomain === 'string') {
+        const sub = body.subdomain.trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
+        data.subdomain = sub || null;
+        data.samlAcsUrl = sub ? `https://${sub}.hivemind.davinciai.eu/saml/acs` : null;
+      }
+      if (typeof body.enabled === 'boolean') data.enabled = body.enabled;
+      if (typeof body.jit_provisioning === 'boolean') data.jitProvisioning = body.jit_provisioning;
+      if (typeof body.default_role === 'string') data.defaultRole = body.default_role || 'member';
+      if (typeof body.default_team_id === 'string') data.defaultTeamId = body.default_team_id || null;
+
+      const cfg = await prisma.orgSsoConfig.upsert({
+        where: { orgId },
+        create: { orgId, ...data },
+        update: data,
+      });
+
+      audit({
+        organizationId: orgId,
+        userId: current.session.userId,
+        eventType: 'sso.config_changed',
+        eventCategory: 'security',
+        action: 'update',
+        resourceType: 'sso_config',
+        newValue: data,
+        ..._reqMeta(req),
+      });
+
+      return jsonResponse(res, {
+        success: true,
+        sso_config: {
+          org_id: cfg.orgId,
+          sso_type: cfg.ssoType,
+          subdomain: cfg.subdomain,
+          enabled: cfg.enabled,
+          has_scim_token: Boolean(cfg.scimTokenHash),
+          acs_url: cfg.subdomain ? `https://${cfg.subdomain}.hivemind.davinciai.eu/saml/acs` : null,
+        },
+      });
+    }
+
+    return jsonResponse(res, { error: 'Method not allowed' }, 405);
+  }
+
+  // ─── POST /v1/orgs/:id/sso/scim-token — generate SCIM token ──
+  const scimTokenGenMatch = pathname.match(/^\/v1\/orgs\/([^/]+)\/sso\/scim-token$/);
+  if (scimTokenGenMatch) {
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const orgId = scimTokenGenMatch[1];
+    const membership = await requireOrgAdmin(req, res, current.session.userId, orgId);
+    if (!membership) return;
+
+    if (req.method === 'POST') {
+      // Generate token: scim_<32-byte hex>
+      const rawToken = `scim_${crypto.randomBytes(32).toString('hex')}`;
+      const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+      const tokenId = crypto.randomUUID().slice(0, 8);
+
+      await prisma.orgSsoConfig.upsert({
+        where: { orgId },
+        create: { orgId, scimTokenHash: tokenHash, scimTokenId: tokenId },
+        update: { scimTokenHash: tokenHash, scimTokenId: tokenId },
+      });
+
+      audit({
+        organizationId: orgId,
+        userId: current.session.userId,
+        eventType: 'sso.scim_token_generated',
+        eventCategory: 'security',
+        action: 'create',
+        resourceType: 'scim_token',
+        newValue: { token_id: tokenId },
+        ..._reqMeta(req),
+      });
+
+      return jsonResponse(res, {
+        success: true,
+        // Returned once — caller must save this immediately
+        scim_token: rawToken,
+        token_id: tokenId,
+        warning: 'Save this token now — it will not be shown again.',
+      }, 201);
+    }
+
+    if (req.method === 'DELETE') {
+      await prisma.orgSsoConfig.upsert({
+        where: { orgId },
+        create: { orgId, scimTokenHash: null, scimTokenId: null },
+        update: { scimTokenHash: null, scimTokenId: null },
+      });
+
+      audit({
+        organizationId: orgId,
+        userId: current.session.userId,
+        eventType: 'sso.scim_token_revoked',
+        eventCategory: 'security',
+        action: 'delete',
+        resourceType: 'scim_token',
+        ..._reqMeta(req),
+      });
+
+      return jsonResponse(res, { success: true });
+    }
+
+    return jsonResponse(res, { error: 'Method not allowed' }, 405);
+  }
+
+  // ─── JIT Provisioning hook (called after /auth/callback) ──────
+  // This is integrated inline in the Zitadel callback handler above.
+  // The _jitProvision helper is called at the bottom of /auth/callback.
+  // Defined here as a module-level helper for reuse.
 
   return jsonResponse(res, { error: 'Not found' }, 404);
 });

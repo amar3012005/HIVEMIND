@@ -64,6 +64,7 @@ model Organization {
   teams               Team[]             @relation("OrgTeams")
   users               UserOrganization[] @relation("OrgUserOrganizations")
   pageIndexNodes      PageIndexNode[]    @relation("OrgPageIndexNodes")
+  ssoConfig           OrgSsoConfig?      @relation("OrgSsoConfig")
 
   @@map("organizations")
 }
@@ -827,6 +828,28 @@ model OrgUsage {
   @@unique([orgId, webIntelDay])
   @@index([orgId, month], map: "idx_org_usage_org_month")
   @@index([webIntelDay], map: "idx_org_usage_webIntelDay")
+}
+
+/// Per-org SSO configuration: Zitadel project mapping, SAML IdP metadata, SCIM token.
+/// Supports subdomain-based org routing for enterprise IdP-initiated login.
+model OrgSsoConfig {
+  orgId              String       @id @map("org_id") @db.Uuid
+  ssoType            String       @default("zitadel_oidc") @map("sso_type") @db.VarChar(50)
+  zitadelProjectId   String?      @map("zitadel_project_id") @db.VarChar(255)
+  samlIdpMetadataUrl String?      @map("saml_idp_metadata_url")
+  samlAcsUrl         String?      @map("saml_acs_url")
+  scimTokenHash      String?      @map("scim_token_hash") @db.VarChar(255)
+  scimTokenId        String?      @map("scim_token_id") @db.VarChar(64)
+  subdomain          String?      @unique @db.VarChar(100)
+  enabled            Boolean      @default(false)
+  jitProvisioning    Boolean      @default(true) @map("jit_provisioning")
+  defaultRole        String?      @default("member") @map("default_role")
+  defaultTeamId      String?      @map("default_team_id") @db.Uuid
+  createdAt          DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  org                Organization @relation("OrgSsoConfig", fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@map("org_sso_configs")
 }
 
 enum MemoryType {

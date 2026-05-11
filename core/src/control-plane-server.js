@@ -3177,6 +3177,223 @@ const server = http.createServer(async (req, res) => {
   }
   // ─── End Audit + DSR ─────────────────────────────────────
 
+  // ─── Digital Employees ───────────────────────────────────
+  // Lazy-init EmployeeStore + audit logger
+  const _getEmployeeStore = async () => {
+    if (!prisma) return null;
+    if (!_getEmployeeStore._cache) {
+      const mod = await import('./employees/store.js');
+      _getEmployeeStore._cache = new mod.EmployeeStore(prisma);
+    }
+    return _getEmployeeStore._cache;
+  };
+
+  // GET /v1/employees — list employees the caller can see in current org
+  if (pathname === '/v1/employees' && req.method === 'GET') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const store = await _getEmployeeStore();
+    if (!store) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    try {
+      const ts = await _getTeamStore();
+      const teamIds = ts
+        ? await ts.store.accessibleTeamIds({
+            userId: current.session.userId,
+            orgId: current.session.orgId,
+          })
+        : [];
+      const membership = await getOrgMembership(current.session.userId, current.session.orgId);
+      const isOrgAdmin = membership?.role === 'owner' || membership?.role === 'admin';
+      const employees = isOrgAdmin
+        ? await store.listForOrg({ orgId: current.session.orgId })
+        : await store.listForUserScope({
+            userId: current.session.userId,
+            orgId: current.session.orgId,
+            teamIds,
+          });
+      return jsonResponse(res, { employees });
+    } catch (err) {
+      return jsonResponse(res, { error: err.message }, 500);
+    }
+  }
+
+  // POST /v1/employees — create (org_admin only)
+  if (pathname === '/v1/employees' && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const admin = await requireOrgAdmin(req, res, current.session.userId, current.session.orgId);
+    if (!admin) return;
+    const store = await _getEmployeeStore();
+    if (!store) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const body = await parseBody(req);
+    if (!body.name || !body.persona) {
+      return jsonResponse(res, { error: 'name and persona are required' }, 400);
+    }
+    try {
+      const emp = await store.create({
+        orgId: current.session.orgId,
+        teamId: body.team_id || null,
+        name: body.name,
+        persona: body.persona,
+        model: body.model,
+        llmProvider: body.llm_provider,
+        scope: body.scope,
+        slackTeamId: body.slack_team_id,
+        slackChannelsAllowed: body.slack_channels_allowed,
+        tools: body.tools,
+        policyRules: body.policy_rules,
+        replicas: body.replicas,
+        maxReplicas: body.max_replicas,
+        avatarUrl: body.avatar_url,
+        createdBy: current.session.userId,
+      });
+      audit({
+        organizationId: current.session.orgId,
+        userId: current.session.userId,
+        eventType: 'employee.created',
+        eventCategory: 'employee',
+        action: 'create',
+        resourceType: 'digital_employee',
+        resourceId: emp.id,
+        newValue: { name: emp.name, slug: emp.slug, scope: emp.scope, model: emp.model },
+        ..._reqMeta(req),
+      });
+      return jsonResponse(res, { employee: emp }, 201);
+    } catch (err) {
+      return jsonResponse(res, { error: err.message }, 500);
+    }
+  }
+
+  // Routes scoped to a single employee
+  const employeeIdMatch = pathname.match(/^\/v1\/employees\/([0-9a-f-]{36})(?:\/(.+))?$/);
+  if (employeeIdMatch) {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const store = await _getEmployeeStore();
+    if (!store) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const empId = employeeIdMatch[1];
+    const sub = employeeIdMatch[2] || null;
+    const orgId = current.session.orgId;
+    const userId = current.session.userId;
+    const membership = await getOrgMembership(userId, orgId);
+    const isOrgAdmin = membership?.role === 'owner' || membership?.role === 'admin';
+
+    const emp = await store.getById({ id: empId, orgId });
+    if (!emp) return jsonResponse(res, { error: 'Employee not found' }, 404);
+
+    // GET /v1/employees/:id
+    if (!sub && req.method === 'GET') {
+      return jsonResponse(res, emp);
+    }
+
+    // PATCH /v1/employees/:id
+    if (!sub && req.method === 'PATCH') {
+      if (!isOrgAdmin) return jsonResponse(res, { error: 'Forbidden' }, 403);
+      try {
+        const body = await parseBody(req);
+        const updated = await store.update({ id: empId, data: body });
+        audit({
+          organizationId: orgId, userId,
+          eventType: 'employee.updated', eventCategory: 'employee', action: 'update',
+          resourceType: 'digital_employee', resourceId: empId,
+          newValue: body, ..._reqMeta(req),
+        });
+        return jsonResponse(res, { employee: updated });
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+
+    // DELETE /v1/employees/:id (archive)
+    if (!sub && req.method === 'DELETE') {
+      if (!isOrgAdmin) return jsonResponse(res, { error: 'Forbidden' }, 403);
+      try {
+        await store.archive({ id: empId });
+        audit({
+          organizationId: orgId, userId,
+          eventType: 'employee.archived', eventCategory: 'employee', action: 'delete',
+          resourceType: 'digital_employee', resourceId: empId,
+          oldValue: { name: emp.name }, ..._reqMeta(req),
+        });
+        return jsonResponse(res, { success: true });
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+
+    // POST /v1/employees/:id/pause
+    if (sub === 'pause' && req.method === 'POST') {
+      if (!isOrgAdmin) return jsonResponse(res, { error: 'Forbidden' }, 403);
+      try {
+        const updated = await store.setStatus({ id: empId, status: 'paused' });
+        audit({
+          organizationId: orgId, userId,
+          eventType: 'employee.paused', eventCategory: 'employee', action: 'update',
+          resourceType: 'digital_employee', resourceId: empId,
+          ..._reqMeta(req),
+        });
+        return jsonResponse(res, { employee: updated });
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+
+    // POST /v1/employees/:id/resume
+    if (sub === 'resume' && req.method === 'POST') {
+      if (!isOrgAdmin) return jsonResponse(res, { error: 'Forbidden' }, 403);
+      try {
+        const updated = await store.setStatus({ id: empId, status: 'running' });
+        audit({
+          organizationId: orgId, userId,
+          eventType: 'employee.resumed', eventCategory: 'employee', action: 'update',
+          resourceType: 'digital_employee', resourceId: empId,
+          ..._reqMeta(req),
+        });
+        return jsonResponse(res, { employee: updated });
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+
+    // GET /v1/employees/:id/runtime-config (called by Python sidecar)
+    // Auth here is the session cookie; sidecar will additionally use API key.
+    if (sub === 'runtime-config' && req.method === 'GET') {
+      const cfg = await store.getRuntimeConfig({ id: empId });
+      if (!cfg) return jsonResponse(res, { error: 'Not found' }, 404);
+      return jsonResponse(res, cfg);
+    }
+
+    return jsonResponse(res, { error: 'Not found' }, 404);
+  }
+
+  // POST /v1/orgs/:id/employees/pause-all — kill switch (org_admin only)
+  const pauseAllMatch = pathname.match(/^\/v1\/orgs\/([0-9a-f-]{36})\/employees\/pause-all$/);
+  if (pauseAllMatch && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const targetOrg = pauseAllMatch[1];
+    if (targetOrg !== current.session.orgId) {
+      return jsonResponse(res, { error: 'Forbidden' }, 403);
+    }
+    const admin = await requireOrgAdmin(req, res, current.session.userId, targetOrg);
+    if (!admin) return;
+    const store = await _getEmployeeStore();
+    try {
+      const result = await store.pauseAllInOrg({ orgId: targetOrg });
+      audit({
+        organizationId: targetOrg, userId: current.session.userId,
+        eventType: 'employee.pause_all', eventCategory: 'employee', action: 'update',
+        resourceType: 'organization', resourceId: targetOrg,
+        metadata: { paused_count: result.count },
+        ..._reqMeta(req),
+      });
+      return jsonResponse(res, { paused_count: result.count });
+    } catch (err) {
+      return jsonResponse(res, { error: err.message }, 500);
+    }
+  }
+  // ─── End Digital Employees ────────────────────────────────
+
   // ─── Billing (placeholder, org_owner only) ────────────────
   if (pathname.startsWith('/v1/billing') && (req.method === 'GET' || req.method === 'POST' || req.method === 'PATCH')) {
     const current = await requireSession(req, res);

@@ -69,14 +69,19 @@ model Organization {
 }
 
 /// Junction table for user-organization many-to-many relationship
+/// roles[] is the authoritative multi-role array (P0-4 RBAC).
+/// role (single) is kept for backward compatibility; new code reads roles[].
 model UserOrganization {
-  userId    String       @map("user_id") @db.Uuid
-  orgId     String       @map("org_id") @db.Uuid
-  role      String       @default("member") @db.VarChar(50)
-  invitedAt DateTime?    @default(now()) @map("invited_at") @db.Timestamptz(6)
-  joinedAt  DateTime?    @map("joined_at") @db.Timestamptz(6)
-  org       Organization @relation("OrgUserOrganizations", fields: [orgId], references: [id], onDelete: Cascade)
-  user      User         @relation("UserOrganizations", fields: [userId], references: [id], onDelete: Cascade)
+  userId        String       @map("user_id") @db.Uuid
+  orgId         String       @map("org_id") @db.Uuid
+  role          String       @default("member") @db.VarChar(50)
+  roles         String[]     @default([]) @map("roles")
+  isActive      Boolean      @default(true) @map("is_active")
+  deactivatedAt DateTime?    @map("deactivated_at") @db.Timestamptz(6)
+  invitedAt     DateTime?    @default(now()) @map("invited_at") @db.Timestamptz(6)
+  joinedAt      DateTime?    @map("joined_at") @db.Timestamptz(6)
+  org           Organization @relation("OrgUserOrganizations", fields: [orgId], references: [id], onDelete: Cascade)
+  user          User         @relation("UserOrganizations", fields: [userId], references: [id], onDelete: Cascade)
 
   @@id([userId, orgId])
   @@index([userId])
@@ -89,6 +94,8 @@ model OrgInvite {
   orgId     String       @map("org_id") @db.Uuid
   email     String?
   role      String       @default("member")
+  roles     String[]     @default([]) @map("roles")
+  teamIds   String[]     @default([]) @map("team_ids")
   token     String       @unique
   expiresAt DateTime     @map("expires_at") @db.Timestamptz(6)
   usedAt    DateTime?    @map("used_at") @db.Timestamptz(6)

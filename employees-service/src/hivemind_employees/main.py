@@ -16,6 +16,7 @@ from .config import get_settings
 from .db import init_pool, close_pool, list_running_employees
 from .redis_client import init_redis, close_redis
 from .hivemind_client import ServiceClient
+from .slack.gateway import SlackGateway
 
 
 def _configure_logging():
@@ -33,22 +34,25 @@ log = logging.getLogger("hivemind_employees")
 
 # ── Service-wide state ─────────────────────────────────────────
 class State:
-    """Module-level singletons. Phase 2.3 will replace placeholders
-    with real SlackGateway + WorkflowAgent pool."""
+    """Module-level singletons. SlackGateway holds the bolt apps +
+    Assistant pool; reconcile keeps it in sync with the DB."""
     employee_count: int = 0
     workspace_count: int = 0
     reconcile_task: asyncio.Task | None = None
     last_reconcile_at: str | None = None
     ready: bool = False
+    gateway: SlackGateway | None = None
 
 
 state = State()
 
 
 async def _reconcile_once():
-    """Pull active employees from DB. Phase 2.4 will diff against
-    in-memory gateway state to add/remove agents."""
+    """Trigger gateway reconcile + refresh counters."""
     try:
+        if state.gateway is not None:
+            await state.gateway.reconcile()
+        # Also keep counters in sync (even if gateway start failed)
         rows = await list_running_employees()
         state.employee_count = len(rows)
         state.workspace_count = len({r["slack_team_id"] for r in rows if r["slack_team_id"]})
@@ -80,6 +84,12 @@ async def lifespan(app: FastAPI):
     # Bring up shared infra
     await init_pool()
     await init_redis()
+    # Boot SlackGateway (loads employees + opens Bolt workspaces)
+    state.gateway = SlackGateway()
+    try:
+        await state.gateway.start()
+    except Exception as e:
+        log.warning("SlackGateway start failed (degraded mode): %s", e)
     # Initial reconcile (non-blocking)
     asyncio.create_task(_reconcile_once())
     # Start background loop
@@ -98,6 +108,9 @@ async def lifespan(app: FastAPI):
                 await state.reconcile_task
             except asyncio.CancelledError:
                 pass
+        if state.gateway is not None:
+            await state.gateway.stop()
+            state.gateway = None
         await close_redis()
         await close_pool()
         log.info("hivemind-employees stopped")

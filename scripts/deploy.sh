@@ -29,6 +29,60 @@ ensure_networks() {
   done
 }
 
+start_employees() {
+  log "Starting hm-employees (Digital Employees / SlackAgents + AgentScope, port 8060)..."
+  docker stop hm-employees 2>/dev/null || true
+  docker rm hm-employees 2>/dev/null || true
+  ensure_networks
+
+  # Vendored SlackAgents lives under /opt/HIVEMIND/employees-service/vendor/slackagents
+  # Wrapper lives under /opt/HIVEMIND/employees-service/src/hivemind_employees
+  if [ ! -d /opt/HIVEMIND/employees-service ]; then
+    err "Missing /opt/HIVEMIND/employees-service — Phase 2 not yet pushed"
+    return 1
+  fi
+
+  docker run -d \
+    --name hm-employees \
+    --network $NETWORK \
+    --restart unless-stopped \
+    -p 8060:8060 \
+    -v /opt/HIVEMIND/employees-service:/app \
+    -v /etc/localtime:/etc/localtime:ro \
+    -w /app \
+    --env-file "$COOLIFY_ENV" \
+    -e PYTHONUNBUFFERED=1 \
+    -e PORT=8060 \
+    -e LOG_LEVEL=info \
+    -e REPLICA_ID="${HOSTNAME:-rep1}" \
+    -e REPLICA_COUNT="${HM_EMPLOYEES_REPLICA_COUNT:-1}" \
+    -e "HIVEMIND_CORE_URL=http://hm-core:3000" \
+    -e "HIVEMIND_CP_URL=http://hm-control:3000" \
+    -e "HIVEMIND_PUBLIC_CORE_URL=https://core.hivemind.davinciai.eu:8050" \
+    -e "HIVEMIND_PUBLIC_CP_URL=https://api.hivemind.davinciai.eu:8040" \
+    -e "DATABASE_URL=postgresql://hivemind_user:hivemind_secure_pwd_2026@${COOLIFY_PG}:5432/hivemind?schema=hivemind" \
+    -e "REDIS_URL=redis://:redis_secure_vault_7711@${COOLIFY_REDIS}:6379/0" \
+    -e "HIVEMIND_ALLOWED_ORIGINS=https://hivemind.davinciai.eu,https://www.davinciai.eu,https://davinciai.eu" \
+    python:3.12-slim \
+    sh -c "set -e; \
+      apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates >/dev/null && \
+      pip install --no-cache-dir -q -e vendor/slackagents -e . && \
+      python -m hivemind_employees.main"
+
+  log "Waiting for hm-employees health..."
+  for i in $(seq 1 30); do
+    sleep 2
+    if curl -sf http://localhost:8060/health >/dev/null 2>&1; then
+      log "hm-employees is ${GREEN}healthy${NC} on port 8060"
+      return 0
+    fi
+    echo -n "."
+  done
+  err "hm-employees not healthy after 60s"
+  docker logs hm-employees --tail 30
+  return 1
+}
+
 start_core() {
   log "Starting hm-core (bind-mount /opt/HIVEMIND/core, Coolify .env)..."
   docker stop hm-core 2>/dev/null || true
@@ -252,14 +306,16 @@ start_core_benchmark() {
 }
 
 case "${1:-all}" in
-  core)      start_core && verify ;;
-  benchmark) start_core_benchmark && verify ;;
-  control)   start_control ;;
-  mirofish)  start_mirofish ;;
-  restart)   start_core && start_control && start_mirofish && verify ;;
-  status)    status ;;
-  logs)      logs "${2:-hm-core}" ;;
-  verify)    verify ;;
-  all)       start_core && start_control && start_mirofish && verify ;;
-  *)         echo "Usage: $0 {all|core|benchmark|control|mirofish|restart|status|logs [name]|verify}"; exit 1 ;;
+  core)              start_core && verify ;;
+  benchmark)         start_core_benchmark && verify ;;
+  control)           start_control ;;
+  mirofish)          start_mirofish ;;
+  employees|digital-employees|slack-agents)
+                     start_employees ;;
+  restart)           start_core && start_control && start_mirofish && start_employees && verify ;;
+  status)            status ;;
+  logs)              logs "${2:-hm-core}" ;;
+  verify)            verify ;;
+  all)               start_core && start_control && start_mirofish && start_employees && verify ;;
+  *)                 echo "Usage: $0 {all|core|benchmark|control|mirofish|employees|restart|status|logs [name]|verify}"; exit 1 ;;
 esac

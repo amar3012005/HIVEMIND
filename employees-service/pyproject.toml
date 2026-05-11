@@ -1,0 +1,46 @@
+[tool.poetry]
+name = "hivemind-employees"
+version = "0.1.0"
+description = "HIVEMIND Digital Employees — Python sidecar (SlackAgents + AgentScope wrapper)"
+authors = ["HIVEMIND <noreply@davinciai.eu>"]
+readme = "README.md"
+license = "Proprietary"
+packages = [{ include = "hivemind_employees", from = "src" }]
+
+[tool.poetry.dependencies]
+python = ">=3.12,<3.13"
+
+# FastAPI service stack
+fastapi = "^0.115.0"
+uvicorn = { extras = ["standard"], version = "^0.32.0" }
+pydantic = "^2.9.0"
+pydantic-settings = "^2.6.0"
+
+# DB + cache
+asyncpg = "^0.30.0"
+redis = "^5.2.0"
+
+# HTTP client to HIVEMIND core
+httpx = "^0.27.0"
+
+# Vendored SlackAgents (installed via pip -e in Dockerfile, not via poetry)
+# Keeping its transitive deps explicit here so poetry resolves them too
+slack-bolt = "^1.20.0"
+slack_sdk = "^3.33.0"
+openai = "^1.50.0"
+anthropic = "^0.34.0"
+python-dotenv = "^1.0.1"
+pyyaml = "^6.0.2"
+loguru = "^0.7.2"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3.0"
+pytest-asyncio = "^0.24.0"
+ruff = "^0.7.0"
+
+[build-system]
+requires = ["poetry-core>=1.8.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+hivemind-employees = "hivemind_employees.main:cli"

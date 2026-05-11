@@ -3852,6 +3852,131 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
+      // POST /api/employees/slack-action — Digital Employee action gateway.
+      // Called from MCP tools (hivemind_slack_post/react/search/history).
+      // Resolves employee from caller's API key, runs policy gate, executes
+      // via SlackBridge, persists ActionIntent, audits, optional auto-ingest.
+      if (pathname === '/api/employees/slack-action' && req.method === 'POST') {
+        if (!prisma || !persistentMemoryEngine) {
+          return jsonResponse(res, { error: 'service unavailable' }, 503);
+        }
+        const actionType = body?.action_type;
+        const payload = body?.payload || {};
+        if (!actionType) return jsonResponse(res, { error: 'action_type required' }, 400);
+
+        // Resolve employee by API key (principal.keyId → DigitalEmployee.hivemindApiKeyId)
+        const keyId = principal?.keyId || null;
+        if (!keyId) return jsonResponse(res, { error: 'API key required (Digital Employee scope)' }, 401);
+        const employee = await prisma.digitalEmployee.findFirst({
+          where: { hivemindApiKeyId: keyId, archivedAt: null },
+        });
+        if (!employee) return jsonResponse(res, { error: 'No Digital Employee bound to this key' }, 403);
+
+        // Scope check on API key
+        const scopes = principal?.scopes || [];
+        const hasSlackAct = scopes.includes('*') || scopes.includes('slack:act');
+        if (!hasSlackAct) return jsonResponse(res, { error: 'slack:act scope required' }, 403);
+
+        // Policy gate
+        const { checkPolicy, recordIntent } = await import('./employees/policy.js');
+        const redis = (typeof qdrantClient !== 'undefined' && qdrantClient?.redis) || null;
+        const intent = { actionType, payload };
+        const verdict = await checkPolicy({ intent, employee, redis });
+
+        if (!verdict.allowed) {
+          await recordIntent({ prisma, employee, intent, status: 'denied', denyReason: verdict.reason });
+          auditLog({
+            organizationId: employee.orgId,
+            userId: employee.createdBy,
+            actorType: 'api_key',
+            actorApiKeyId: keyId,
+            eventType: `action.${actionType}.denied`,
+            eventCategory: 'employee',
+            action: 'denied',
+            resourceType: 'digital_employee',
+            resourceId: employee.id,
+            metadata: { reason: verdict.reason, detail: verdict.detail || null, payload },
+          });
+          return jsonResponse(res, { ok: false, denied: true, reason: verdict.reason, detail: verdict.detail }, 403);
+        }
+
+        // Resolve Slack token for the employee's workspace via existing connector store
+        const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
+        const connStore = new ConnectorStore(prisma);
+        const installerUserId = employee.createdBy;
+        const token = await connStore.getAccessToken(installerUserId, 'slack').catch(() => null);
+        if (!token) {
+          await recordIntent({ prisma, employee, intent, status: 'failed', denyReason: 'slack_not_connected' });
+          return jsonResponse(res, { ok: false, error: 'Slack connector not connected for employee owner' }, 412);
+        }
+
+        // Execute via SlackBridge
+        const { SlackBridge } = await import('./connectors/providers/slack/bridge.js');
+        const bridge = new SlackBridge({ connectorStore: connStore });
+        let result = null;
+        let executionError = null;
+        try {
+          if (actionType === 'slack_post') {
+            result = await bridge.postMessage(installerUserId, payload.channel, payload.text, { threadTs: payload.thread_ts });
+          } else if (actionType === 'slack_react') {
+            result = await bridge._call('reactions.add', { channel: payload.channel, timestamp: payload.ts, name: payload.emoji }, token, 'POST');
+          } else if (actionType === 'slack_search') {
+            result = await bridge.searchMessages(installerUserId, payload.query, { count: payload.count || 10 });
+          } else if (actionType === 'slack_history') {
+            const sinceTs = payload.since ? String(new Date(payload.since).getTime() / 1000) : undefined;
+            result = await bridge.getChannelHistory(installerUserId, payload.channel, { limit: payload.limit || 50, since: sinceTs });
+          } else {
+            return jsonResponse(res, { error: `unknown action_type: ${actionType}` }, 400);
+          }
+        } catch (err) {
+          executionError = err.message;
+        }
+
+        if (executionError) {
+          await recordIntent({ prisma, employee, intent, status: 'failed', denyReason: executionError });
+          auditLog({
+            organizationId: employee.orgId, userId: employee.createdBy,
+            actorType: 'api_key', actorApiKeyId: keyId,
+            eventType: `action.${actionType}.failed`, eventCategory: 'employee',
+            action: 'failed', resourceType: 'digital_employee', resourceId: employee.id,
+            metadata: { error: executionError, payload },
+          });
+          return jsonResponse(res, { ok: false, error: executionError }, 502);
+        }
+
+        await recordIntent({ prisma, employee, intent, status: 'executed', result });
+        auditLog({
+          organizationId: employee.orgId, userId: employee.createdBy,
+          actorType: 'api_key', actorApiKeyId: keyId,
+          eventType: `action.${actionType}.executed`, eventCategory: 'employee',
+          action: 'execute', resourceType: 'digital_employee', resourceId: employee.id,
+          metadata: { payload, result_summary: actionType.startsWith('slack_post') ? 'message posted' : `${Array.isArray(result) ? result.length : 'ok'}` },
+        });
+
+        // Auto-ingest posted message back to memory (team-scope)
+        if (actionType === 'slack_post' && payload.text) {
+          persistentMemoryEngine.ingestMemory({
+            content: payload.text,
+            title: `${employee.name} → ${payload.channel}`,
+            tags: ['slack', 'employee', `employee:${employee.slug}`, 'live-slack', 'auto-ingest'],
+            memory_type: 'note',
+            user_id: employee.createdBy,
+            org_id: employee.orgId,
+            scope: 'team',
+            primary_team_id: employee.teamId,
+            source_metadata: {
+              source_platform: 'slack',
+              channel_id: payload.channel,
+              employee_id: employee.id,
+              thread_ts: payload.thread_ts || null,
+            },
+            skipProcessing: true,
+          }).catch(err => console.warn('[slack-action] auto-ingest failed:', err.message));
+        }
+
+        return jsonResponse(res, { ok: true, result });
+      }
+
       // POST /api/connectors/slack/event-ingest — webhook ingest path
       // Called by control-plane after Slack signature verification. Master-key auth.
       // Ingests one Slack event (message/reaction/pin) as a HIVEMIND memory.

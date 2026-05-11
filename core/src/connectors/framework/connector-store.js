@@ -95,6 +95,7 @@ export class ConnectorStore {
     userId,
     provider,
     targetScope = 'personal',
+    teamId = null,
     accountRef,
     accessToken,
     refreshToken,
@@ -103,9 +104,12 @@ export class ConnectorStore {
     cursor = null,
     metadata = {},
   }) {
+    // TODO: When user A leaves the org, org-scoped connectors they own should be
+    // transferred to the org owner via a background job (deactivation hook).
     const data = {
       authType: 'oauth2',
       targetScope,
+      teamId: teamId || null,
       platformUserId: accountRef,
       accessTokenEncrypted: encryptToken(accessToken),
       refreshTokenEncrypted: encryptToken(refreshToken),
@@ -328,6 +332,7 @@ export class ConnectorStore {
       provider: record.platformType,
       account_ref: record.platformUserId,
       target_scope: record.targetScope || 'personal',
+      team_id: record.teamId || null,
       status: this._mapStatus(record),
       scopes: record.oauthScopes,
       is_active: record.isActive,

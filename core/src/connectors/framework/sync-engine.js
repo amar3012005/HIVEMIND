@@ -35,7 +35,7 @@ export class SyncEngine {
    * @param {boolean} params.incremental - true for delta sync
    * @returns {Promise<SyncResult>}
    */
-  async runSync({ adapter, userId, orgId, provider, cursor = null, incremental = false, targetScope = null }) {
+  async runSync({ adapter, userId, orgId, provider, cursor = null, incremental = false, targetScope = null, teamId = null }) {
     const telemetry = {
       provider,
       user_id: userId,
@@ -62,6 +62,8 @@ export class SyncEngine {
       }
 
       const effectiveTargetScope = targetScope || existingConnector?.target_scope || 'personal';
+      // team_id from caller takes precedence; fall back to what is stored on the connector record
+      const effectiveTeamId = teamId || existingConnector?.team_id || null;
 
       // Get access token
       let accessToken = await this.connectorStore.getAccessToken(userId, provider);
@@ -73,7 +75,12 @@ export class SyncEngine {
         return { ...telemetry, status: 'reauth_required' };
       }
 
-      const context = { user_id: userId, org_id: orgId };
+      const context = {
+        user_id: userId,
+        org_id: orgId,
+        target_scope: effectiveTargetScope,
+        team_id: effectiveTeamId,
+      };
       let hasMore = true;
       let currentCursor = cursor;
 
@@ -120,13 +127,32 @@ export class SyncEngine {
               org_id: orgId,
               connector_id: provider,
               user_account_ref: userAccountRef,
+              // Pass scope context so adapters can apply ACL filters
+              // (e.g. Slack skips private channels in org/team mode).
+              target_scope: effectiveTargetScope,
+              team_id: effectiveTeamId,
             });
 
-            // Ingest each payload
+            // Ingest each payload — scope routing
             for (const payload of payloads) {
               payload.user_id = userId;
               payload.org_id = orgId;
-              payload.visibility = effectiveTargetScope === 'organization' ? 'organization' : 'private';
+
+              // Derive visibility and memory scope from connector's target_scope.
+              // - 'organization' → memory visible org-wide; scope=organization
+              // - 'team'         → memory visible to team members; scope=team
+              // - 'personal'     → private to installer; scope=personal (default)
+              if (effectiveTargetScope === 'organization') {
+                payload.visibility = 'organization';
+                payload.target_scope = 'organization';
+              } else if (effectiveTargetScope === 'team') {
+                payload.visibility = 'private'; // team-scoped read handled by access_context
+                payload.target_scope = 'team';
+                payload.primary_team_id = effectiveTeamId;
+              } else {
+                payload.visibility = 'private';
+                payload.target_scope = 'personal';
+              }
               const sourceId = payload?.source_metadata?.source_id || adapter.dedupeKey(record);
               if (await this._isDuplicate(sourceId, userId, provider)) {
                 telemetry.skipped++;

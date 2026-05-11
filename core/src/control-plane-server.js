@@ -2238,7 +2238,63 @@ const server = http.createServer(async (req, res) => {
       // connectorStartBody was already read for the permission check above
       const body = connectorStartBody;
       const returnTo = body.return_to || '/hivemind/app/connectors';
-      const targetScope = body.target_scope === 'organization' ? 'organization' : 'personal';
+      const rawScope = body.target_scope;
+      const rawTeamId = body.team_id || null;
+
+      // Validate and normalise target_scope.
+      // 'organization' → requires org_admin or org_owner.
+      // 'team'         → requires team_lead on the specified team_id.
+      // 'personal'     → no extra permission needed.
+      let targetScope = 'personal';
+      let resolvedTeamId = null;
+
+      if (rawScope === 'organization') {
+        const membership = await getOrgMembership(current.session.userId, current.session.orgId);
+        if (!membership || !canManageOrg(membership.role)) {
+          return jsonResponse(res, { error: 'Only org admins can set org-scope connectors' }, 403);
+        }
+        targetScope = 'organization';
+      } else if (rawScope === 'team') {
+        if (!rawTeamId) {
+          return jsonResponse(res, { error: 'team_id is required when target_scope is "team"' }, 400);
+        }
+        if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+        // Inline team store import — _getTeamStore is const-scoped later in the handler
+        const tsModTeam = await import('./teams/team-store.js');
+        const orgMembership = await getOrgMembership(current.session.userId, current.session.orgId);
+        const orgRole = orgMembership?.role || 'member';
+        try {
+          await tsModTeam.assertTeamPermission(prisma, {
+            teamId: rawTeamId,
+            userId: current.session.userId,
+            orgRole,
+            level: 'lead',
+          });
+        } catch {
+          return jsonResponse(res, { error: 'Only team leads can set team-scope connectors' }, 403);
+        }
+        targetScope = 'team';
+        resolvedTeamId = rawTeamId;
+      }
+
+      // Audit-log connector scope selection (fire-and-forget)
+      if (prisma && (targetScope === 'organization' || targetScope === 'team')) {
+        const auditMod = await import('./audit/audit-logger.js');
+        const al = new auditMod.AuditLogger(prisma);
+        const fwdHdr = req.headers?.['x-forwarded-for'];
+        al.log({
+          organizationId: current.session.orgId,
+          userId: current.session.userId,
+          eventType: 'connector.scope_changed',
+          eventCategory: 'connector',
+          action: 'start_oauth',
+          resourceType: 'connector',
+          newValue: { provider, target_scope: targetScope, team_id: resolvedTeamId },
+          ipAddress: typeof fwdHdr === 'string' ? fwdHdr.split(',')[0].trim() : (req.socket?.remoteAddress || null),
+          userAgent: req.headers?.['user-agent'] || null,
+          platformType: 'webapp',
+        }).catch(err => console.warn('[audit] connector start log failed:', err.message));
+      }
 
       // Create CSRF-safe stateless state bound to user/org
       const stateId = encodeConnectorState({
@@ -2247,6 +2303,7 @@ const server = http.createServer(async (req, res) => {
         provider,
         returnTo,
         targetScope,
+        teamId: resolvedTeamId,
       });
 
       const authUrl = buildAuthUrl({
@@ -2316,6 +2373,7 @@ const server = http.createServer(async (req, res) => {
         userId: authState.userId,
         provider,
         targetScope: authState.targetScope || 'personal',
+        teamId: authState.teamId || null,
         accountRef: tokens.email || tokens.account_ref || null,
         accessToken: tokens.access_token,
         refreshToken: tokens.refresh_token,
@@ -2345,6 +2403,7 @@ const server = http.createServer(async (req, res) => {
               user_id: authState.userId,
               org_id: authState.orgId,
               target_scope: authState.targetScope || 'personal',
+              team_id: authState.teamId || null,
               incremental: false,
             }),
           });

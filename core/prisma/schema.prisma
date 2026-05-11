@@ -123,10 +123,11 @@ model Team {
   createdAt   DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt   DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   archivedAt  DateTime?    @map("archived_at") @db.Timestamptz(6)
-  org         Organization @relation("OrgTeams", fields: [orgId], references: [id], onDelete: Cascade)
-  members     TeamMember[]
-  projects    Project[]
-  memories    Memory[]     @relation("TeamMemories")
+  org                  Organization          @relation("OrgTeams", fields: [orgId], references: [id], onDelete: Cascade)
+  members              TeamMember[]
+  projects             Project[]
+  memories             Memory[]              @relation("TeamMemories")
+  platformIntegrations PlatformIntegration[] @relation("TeamPlatformIntegrations")
 
   @@unique([orgId, slug])
   @@index([orgId])
@@ -235,12 +236,15 @@ model PlatformIntegration {
   updatedAt              DateTime? @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   connectorMetadata      Json      @default("{}") @map("connector_metadata")
   targetScope            String    @default("personal") @map("target_scope")
+  teamId                 String?   @map("team_id") @db.Uuid
   user                   User      @relation("UserPlatformIntegrations", fields: [userId], references: [id], onDelete: Cascade)
+  team                   Team?     @relation("TeamPlatformIntegrations", fields: [teamId], references: [id], onDelete: SetNull)
 
   @@unique([userId, platformType])
   @@index([userId])
   @@index([platformType])
   @@index([isActive, syncStatus])
+  @@index([teamId])
   @@map("platform_integrations")
 }
 

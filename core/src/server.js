@@ -3676,22 +3676,82 @@ const server = http.createServer(async (req, res) => {
       }
 
       // PATCH /api/connectors/:provider/scope — change sync target scope
+      // Permission gate:
+      //   target_scope='organization' → requires org_admin or org_owner role
+      //   target_scope='team'         → requires team_lead on the provided team_id
+      //   target_scope='personal'     → any authenticated user
       const connectorScopeMatch = pathname.match(/^\/api\/connectors\/(\w+)\/scope$/);
       if (connectorScopeMatch && req.method === 'PATCH') {
         const provider = connectorScopeMatch[1];
-        const { target_scope } = body;
-        if (!['personal', 'organization'].includes(target_scope)) {
-          return jsonResponse(res, { error: 'Invalid scope. Must be "personal" or "organization".' }, 400);
+        const { target_scope, team_id: scopeTeamId } = body;
+        if (!['personal', 'organization', 'team'].includes(target_scope)) {
+          return jsonResponse(res, { error: 'Invalid scope. Must be "personal", "team", or "organization".' }, 400);
         }
         try {
+          // Permission check — organisation scope
+          if (target_scope === 'organization') {
+            const orgMembership = prisma ? await prisma.userOrganization.findUnique({
+              where: { userId_orgId: { userId, orgId } },
+            }) : null;
+            const isOrgAdmin = orgMembership?.role === 'owner' || orgMembership?.role === 'admin';
+            if (!isOrgAdmin) {
+              return jsonResponse(res, { error: 'Only org admins can set org-scope connectors' }, 403);
+            }
+          }
+
+          // Permission check — team scope
+          if (target_scope === 'team') {
+            if (!scopeTeamId) {
+              return jsonResponse(res, { error: 'team_id is required when target_scope is "team"' }, 400);
+            }
+            const ts = await getTeamStore();
+            const orgMembership = prisma ? await prisma.userOrganization.findUnique({
+              where: { userId_orgId: { userId, orgId } },
+            }) : null;
+            const orgRole = orgMembership?.role || 'member';
+            try {
+              const { assertTeamPermission } = await import('./teams/team-store.js');
+              await assertTeamPermission(prisma, {
+                teamId: scopeTeamId,
+                userId,
+                orgRole,
+                level: 'lead',
+              });
+            } catch {
+              return jsonResponse(res, { error: 'Only team leads can set team-scope connectors' }, 403);
+            }
+          }
+
+          const patchData = { targetScope: target_scope };
+          if (target_scope === 'team' && scopeTeamId) {
+            patchData.teamId = scopeTeamId;
+          } else if (target_scope !== 'team') {
+            // Clear teamId when switching away from team scope
+            patchData.teamId = null;
+          }
+
           const updated = await prisma.platformIntegration.updateMany({
             where: { userId, platformType: provider },
-            data: { targetScope: target_scope },
+            data: patchData,
           });
           if (updated.count === 0) {
             return jsonResponse(res, { error: `No connector found for provider: ${provider}` }, 404);
           }
-          return jsonResponse(res, { success: true, provider, target_scope });
+
+          // Audit log the scope change
+          if (auditLogger) {
+            auditLogger.log({
+              userId,
+              organizationId: orgId,
+              eventType: 'connector.scope_changed',
+              eventCategory: 'connector',
+              action: 'update',
+              resourceType: 'connector',
+              newValue: { provider, target_scope, team_id: scopeTeamId || null },
+            }).catch(err => console.warn('[audit] connector scope_changed log failed:', err.message));
+          }
+
+          return jsonResponse(res, { success: true, provider, target_scope, team_id: scopeTeamId || null });
         } catch (err) {
           return jsonResponse(res, { error: err.message }, 500);
         }
@@ -3738,7 +3798,9 @@ const server = http.createServer(async (req, res) => {
           const provider = body.provider;
           const syncUserId = body.user_id || userId;
           const syncOrgId = body.org_id || orgId;
-          const targetScope = body.target_scope === 'organization' ? 'organization' : null;
+          const allowedScopes = ['personal', 'organization', 'team'];
+          const targetScope = allowedScopes.includes(body.target_scope) ? body.target_scope : null;
+          const syncTeamId = body.team_id || null;
 
           const adapterModules = {
             gmail: './connectors/providers/gmail/adapter.js',
@@ -3776,6 +3838,7 @@ const server = http.createServer(async (req, res) => {
                 cursor,
                 incremental,
                 targetScope,
+                teamId: syncTeamId,
               });
               console.log(`[connector-sync] ${provider}:${syncUserId} → ${result.status} (imported: ${result.imported}, skipped: ${result.skipped})`);
             } catch (syncErr) {

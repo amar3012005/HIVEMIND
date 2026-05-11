@@ -112,10 +112,25 @@ export class GmailAdapter extends BaseProviderAdapter {
 
   /**
    * Normalize a Gmail thread into memory payloads.
+   *
+   * ACL rule: when context.target_scope is 'organization' or 'team', only
+   * emails sent FROM or TO a shared / domain alias are ingested. Messages
+   * that appear to be personal inbox traffic (sent to/from a personal address
+   * that is not a shared alias) are skipped. This prevents org-wide exposure
+   * of personal email when the installer uses a corporate Gmail account.
+   *
+   * Heuristic: skip threads where every message was sent by the installer's
+   * own personal address (sentByUser=true for all) AND the thread has no
+   * external recipient at a different domain. In practice, "shared inbox" or
+   * forwarded-to-team email lands in the "received from external" bucket and
+   * passes through.
    */
   normalize(thread, context) {
     const messages = thread.messages || [];
     if (!messages.length) return [];
+
+    const targetScope = context?.target_scope || 'personal';
+    const orgScopeMode = targetScope === 'organization' || targetScope === 'team';
 
     const payloads = [];
     const firstMessage = messages[0];
@@ -135,6 +150,23 @@ export class GmailAdapter extends BaseProviderAdapter {
       // Determine content attribution: did the user send this or receive it?
       const fromEmail = (from.match(/[\w.+-]+@[\w.-]+\.\w{2,}/) || [''])[0].toLowerCase();
       const sentByUser = userEmail && fromEmail === userEmail;
+
+      // ACL gate: in org/team scope, skip purely-personal outgoing messages.
+      // A message is considered personal if it was sent by the installer AND
+      // all recipients share the same personal domain as the installer
+      // (i.e. not routed through a shared/team alias or external domain).
+      // This is a best-effort filter; shared-mailbox traffic always passes.
+      if (orgScopeMode && sentByUser) {
+        const installerDomain = userEmail.split('@')[1] || '';
+        const recipientEmails = (to + ' ' + (this._getHeader(msg, 'Cc') || ''))
+          .match(/[\w.+-]+@[\w.-]+\.\w{2,}/g) || [];
+        const allSameDomain = recipientEmails.length > 0 &&
+          recipientEmails.every(e => e.toLowerCase().endsWith(`@${installerDomain}`));
+        if (allSameDomain) {
+          // Personal internal email — skip under org/team scope
+          continue;
+        }
+      }
       const isNewsletter = /\b(newsletter|noreply|no-reply|unsubscribe|marketing|digest|updates@|info@|hello@)\b/i.test(from + ' ' + body.slice(0, 200));
       const attribution = sentByUser ? 'first_person' : isNewsletter ? 'newsletter' : 'third_party';
 

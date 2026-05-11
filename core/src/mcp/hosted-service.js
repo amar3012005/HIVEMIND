@@ -1119,6 +1119,62 @@ function generateToolsManifest(userId, orgId, options = {}) {
     });
   }
 
+  // ── Slack action tools (Digital Employee scope: slack:act) ──
+  const hasSlackAct = hasAll || scopes.includes('slack:act');
+  if (hasSlackAct) {
+    tools.push({
+      name: 'hivemind_slack_post',
+      description: 'Post a message to a Slack channel or thread. Routes through HIVEMIND policy gate (channel allowlist, rate limit, work hours). Use when a Digital Employee needs to reply or broadcast in Slack.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          channel:   { type: 'string', description: 'Slack channel ID (e.g. C01ABCDEF)' },
+          text:      { type: 'string', description: 'Message text (mrkdwn supported)' },
+          thread_ts: { type: 'string', description: 'Optional thread timestamp to reply in-thread' }
+        },
+        required: ['channel', 'text']
+      }
+    });
+    tools.push({
+      name: 'hivemind_slack_react',
+      description: 'Add an emoji reaction to a Slack message. Policy-gated like slack_post.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          channel: { type: 'string', description: 'Slack channel ID' },
+          ts:      { type: 'string', description: 'Message timestamp to react to' },
+          emoji:   { type: 'string', description: 'Emoji name without colons (e.g. "thumbsup")' }
+        },
+        required: ['channel', 'ts', 'emoji']
+      }
+    });
+    tools.push({
+      name: 'hivemind_slack_search',
+      description: 'Search messages across the employee\'s Slack workspace. Read-only.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Slack search query' },
+          count: { type: 'number', description: 'Max results (default 10, max 50)' }
+        },
+        required: ['query']
+      }
+    });
+    tools.push({
+      name: 'hivemind_slack_history',
+      description: 'Fetch recent messages from a Slack channel. Read-only.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          channel: { type: 'string', description: 'Slack channel ID' },
+          limit:   { type: 'number', description: 'Max messages (default 50, max 200)' },
+          since:   { type: 'string', description: 'Optional ISO timestamp lower bound' }
+        },
+        required: ['channel']
+      }
+    });
+  }
+
   return tools;
 }
 
@@ -2283,6 +2339,48 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
 
       case 'hivemind_web_usage': {
         const res = await apiClient.get('/api/web/usage');
+        return formatToolContent(res);
+      }
+
+      // ── Slack action handlers (Digital Employees) ─────────
+      // All four route to core's /api/employees/slack-action endpoint which
+      // resolves the caller's employee (via API key), runs policy gate,
+      // executes via SlackBridge, persists ActionIntent + audit row, and
+      // auto-ingests posted messages into HIVEMIND memory.
+      case 'hivemind_slack_post': {
+        if (!args.channel || !args.text) {
+          throw new Error('hivemind_slack_post requires {channel, text}');
+        }
+        const res = await apiClient.post('/api/employees/slack-action', {
+          action_type: 'slack_post',
+          payload: { channel: args.channel, text: args.text, thread_ts: args.thread_ts || null },
+        });
+        return formatToolContent(res);
+      }
+      case 'hivemind_slack_react': {
+        if (!args.channel || !args.ts || !args.emoji) {
+          throw new Error('hivemind_slack_react requires {channel, ts, emoji}');
+        }
+        const res = await apiClient.post('/api/employees/slack-action', {
+          action_type: 'slack_react',
+          payload: { channel: args.channel, ts: args.ts, emoji: args.emoji },
+        });
+        return formatToolContent(res);
+      }
+      case 'hivemind_slack_search': {
+        if (!args.query) throw new Error('hivemind_slack_search requires {query}');
+        const res = await apiClient.post('/api/employees/slack-action', {
+          action_type: 'slack_search',
+          payload: { query: args.query, count: Math.min(args.count || 10, 50) },
+        });
+        return formatToolContent(res);
+      }
+      case 'hivemind_slack_history': {
+        if (!args.channel) throw new Error('hivemind_slack_history requires {channel}');
+        const res = await apiClient.post('/api/employees/slack-action', {
+          action_type: 'slack_history',
+          payload: { channel: args.channel, limit: Math.min(args.limit || 50, 200), since: args.since || null },
+        });
         return formatToolContent(res);
       }
 

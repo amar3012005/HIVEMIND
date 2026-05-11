@@ -1,0 +1,16 @@
+HIVEMIND Digital Employees Service
+==================================
+
+This product includes software developed by Salesforce, Inc.
+Original work: SlackAgents (https://github.com/SalesforceAIResearch/slackagents)
+Vendored upstream commit: 42a9f7e (2026-04, "Format CODEOWNERS file for clarity")
+Licensed under the Apache License, Version 2.0.
+
+Vendored at: ./vendor/slackagents
+Modifications: white-labelled into the HIVEMIND Digital Employees runtime.
+No modifications to vendor source are intended; all integration code lives
+under ./src/hivemind_employees.
+
+Apache 2.0 license terms apply to ./vendor/slackagents — see vendor/slackagents/LICENSE.
+The HIVEMIND wrapper code under ./src/hivemind_employees is licensed
+separately (see repo root LICENSE).

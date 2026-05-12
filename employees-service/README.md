@@ -93,6 +93,16 @@ HIVEMIND_CORE_URL=http://localhost:3000 \
 Coolify auto-builds on git push to main. See `scripts/deploy.sh employees`
 for manual restart.
 
+Current public admin/health endpoint:
+
+```text
+https://core.hivemind.davinciai.eu:8061
+```
+
+This endpoint is served by a dedicated Caddy sidecar that proxies to the
+internal `hm-employees:8060` service and reuses the existing
+`core.hivemind.davinciai.eu` certificate.
+
 ## See also
 
 - `docs/architecture/digital-employees-slackagents-plan.md` — full architecture

@@ -387,14 +387,6 @@ services:
             - coolify.name=hivemind-employees
             - coolify.healthcheck=/health
             - coolify.port=8060
-            - traefik.enable=true
-            - 'traefik.http.routers.hivemind-employees.rule=Host(`$${EMPLOYEES_DOMAIN:-employees.hivemind.davinciai.eu}`)'
-            - traefik.http.routers.hivemind-employees.entrypoints=https
-            - traefik.http.routers.hivemind-employees.tls=true
-            - traefik.http.routers.hivemind-employees.tls.certresolver=letsencrypt
-            - traefik.http.services.hivemind-employees.loadbalancer.server.port=8060
-            - traefik.http.services.hivemind-employees.loadbalancer.healthcheck.path=/health
-            - traefik.http.services.hivemind-employees.loadbalancer.healthcheck.interval=30s
             - coolify.managed=true
             - coolify.version=4.0.0-beta.462
             - coolify.applicationId=20
@@ -419,6 +411,33 @@ services:
                 condition: service_healthy
         env_file:
             - .env
+    caddy-employees:
+        image: 'caddy:latest'
+        container_name: hivemind-caddy-employees
+        hostname: hivemind-caddy-employees
+        restart: unless-stopped
+        ports:
+            - '8061:443'
+        volumes:
+            - '/opt/HIVEMIND/Caddyfile.employees:/etc/caddy/Caddyfile'
+            - '/etc/letsencrypt:/etc/letsencrypt:ro'
+        labels:
+            - hivemind.component=employees-edge
+            - hivemind.tier=proxy
+            - coolify.managed=true
+            - coolify.version=4.0.0-beta.462
+            - coolify.applicationId=20
+            - coolify.type=application
+            - coolify.name=hivemind-caddy-employees
+            - coolify.resourceName=hive-mind
+            - coolify.projectName=hivemind
+            - coolify.serviceName=hive-mind
+        networks:
+            hivemind-network: null
+            s0k0s0k40wo44w4w8gcs8ow0: null
+        depends_on:
+            employees:
+                condition: service_started
     postgres:
         build:
             context: ./infra/postgres

@@ -87,8 +87,10 @@ hivemind-employees:
     coolify.name: "hivemind-employees"
 ```
 
-Coolify URL: `https://employees.hivemind.davinciai.eu` → returns admin
-JSON API only (no public UI). UI lives at `hivemind.davinciai.eu/hivemind/app/employees`.
+Public admin/health URL: `https://core.hivemind.davinciai.eu:8061` via a
+dedicated Caddy sidecar that reuses the `core.hivemind.davinciai.eu`
+certificate. JSON API only (no public UI). UI lives at
+`hivemind.davinciai.eu/hivemind/app/employees`.
 
 ## Source tree
 
@@ -521,18 +523,18 @@ their employees in separate containers), Hermes plan resumes.
 
 ## Coolify production deploy steps
 
-1. Create new service in Coolify dashboard:
-   - Type: Docker Compose service
-   - Build context: `employees-service/`
-   - Domain: `employees.hivemind.davinciai.eu` (admin API only, no public UI)
+1. Create or update the Coolify compose service:
+    - Build context: `employees-service/`
+    - Internal service: `hm-employees`
+    - Public admin edge: `https://core.hivemind.davinciai.eu:8061`
 2. Set env vars: DATABASE_URL, REDIS_URL, HIVEMIND_CORE_URL,
    HIVEMIND_CP_URL, HIVEMIND_MASTER_API_KEY, ANTHROPIC_API_KEY
 3. Set REPLICA_COUNT=1 initially; bump when concurrent workspaces > 50
 4. Health check: `GET /health` returns 200 with employee + workspace counts
 5. Connect to existing `hm-postgres` and `hm-redis` services on the
    Coolify-internal network
-6. Deploy. Run prisma migrate from core service:
-   `docker exec hm-core npx prisma migrate deploy`
+6. Deploy. Run prisma migrate from the host shell with the wrapper:
+    `cd /opt/HIVEMIND/core && node scripts/prisma-migrate-deploy.mjs`
 7. Verify `/admin/reload` callback wired from control-plane after employee CRUD
 
 ## Smoke test (post-E-5)

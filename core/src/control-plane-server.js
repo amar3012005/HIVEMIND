@@ -3429,6 +3429,10 @@ const server = http.createServer(async (req, res) => {
         replicas: body.replicas,
         maxReplicas: body.max_replicas,
         avatarUrl: body.avatar_url,
+        slackDisplayName: body.slack_display_name,
+        slackAvatarEmoji: body.slack_avatar_emoji,
+        roleArchetype: body.role_archetype,
+        peerReviewTargets: body.peer_review_targets,
         createdBy: current.session.userId,
       });
 
@@ -3527,6 +3531,8 @@ const server = http.createServer(async (req, res) => {
           slack_display_name: r.slackDisplayName,
           slack_avatar_url: r.avatarUrl,
           slack_avatar_emoji: r.slackAvatarEmoji,
+          role_archetype: r.roleArchetype,
+          peer_review_targets: r.peerReviewTargets || [],
           status: r.status,
           api_key: apiKey,
           slack_bot_token: slackBotToken,

@@ -192,6 +192,13 @@ export class SlackBridge {
 
   /**
    * Post a message. Requires scope: chat:write.
+   *
+   * Per-message identity override (Digital Employees one-app pattern):
+   *   opts.username   — overrides bot display name (needs chat:write.customize)
+   *   opts.iconUrl    — overrides avatar with a hosted image
+   *   opts.iconEmoji  — overrides avatar with an emoji (e.g. ":robot_face:")
+   * Only set when caller (e.g. employees-service) supplies them; otherwise
+   * Slack falls back to the app's default identity.
    */
   async postMessage(userId, channel, text, opts = {}) {
     const token = await this._token(userId);
@@ -200,6 +207,9 @@ export class SlackBridge {
       text,
       thread_ts: opts.threadTs || undefined,
       mrkdwn: opts.mrkdwn !== false ? 1 : 0,
+      username: opts.username || undefined,
+      icon_url: opts.iconUrl || undefined,
+      icon_emoji: opts.iconEmoji || undefined,
     }, token, 'POST');
   }
 

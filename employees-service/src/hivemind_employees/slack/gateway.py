@@ -234,7 +234,17 @@ class SlackGateway:
         if not api_key:
             log.warning("no API key for %s — cannot post reply", emp["slug"])
             return
-        await self._post_via_core(api_key, channel, reply_text, thread_ts)
+        # Per-employee identity override — one shared Slack app posts as N
+        # employees by passing username + icon to chat.postMessage (requires
+        # chat:write.customize scope on the app). Fields originate from the
+        # bootstrap snapshot; bot row falls back to .name + a default emoji.
+        username = emp.get("slack_display_name") or emp.get("name")
+        icon_url = emp.get("avatar_url") or emp.get("slack_avatar_url")
+        icon_emoji = emp.get("slack_avatar_emoji") or (None if icon_url else ":robot_face:")
+        await self._post_via_core(
+            api_key, channel, reply_text, thread_ts,
+            username=username, icon_url=icon_url, icon_emoji=icon_emoji,
+        )
 
     def _call_assistant(
         self,
@@ -259,17 +269,30 @@ class SlackGateway:
             log.exception("assistant.chat raised: %s", e)
             return f"(internal error: {e})"
 
-    async def _post_via_core(self, api_key: str, channel: str, text: str, thread_ts: Optional[str]):
+    async def _post_via_core(
+        self,
+        api_key: str,
+        channel: str,
+        text: str,
+        thread_ts: Optional[str],
+        username: Optional[str] = None,
+        icon_url: Optional[str] = None,
+        icon_emoji: Optional[str] = None,
+    ):
         core_url = os.environ.get("HIVEMIND_CORE_URL", "http://hm-core:3000")
+        payload: Dict[str, Any] = {"channel": channel, "text": text, "thread_ts": thread_ts}
+        if username:
+            payload["username"] = username
+        if icon_url:
+            payload["icon_url"] = icon_url
+        if icon_emoji:
+            payload["icon_emoji"] = icon_emoji
         async with httpx.AsyncClient(base_url=core_url, timeout=30.0) as c:
             try:
                 r = await c.post(
                     "/api/employees/slack-action",
                     headers={"Authorization": f"Bearer {api_key}"},
-                    json={
-                        "action_type": "slack_post",
-                        "payload": {"channel": channel, "text": text, "thread_ts": thread_ts},
-                    },
+                    json={"action_type": "slack_post", "payload": payload},
                 )
                 if r.status_code >= 400:
                     log.warning("core slack-action %d: %s", r.status_code, r.text[:200])

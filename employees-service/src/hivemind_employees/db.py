@@ -58,7 +58,8 @@ async def list_running_employees() -> List[Dict[str, Any]]:
             SELECT
               id, org_id, team_id, name, slug, persona, model, llm_provider,
               scope, slack_team_id, slack_channels_allowed, tools, policy_rules,
-              status, replicas, max_replicas, hivemind_api_key_id, created_by
+              status, replicas, max_replicas, hivemind_api_key_id, created_by,
+              avatar_url, slack_display_name, slack_avatar_emoji
             FROM hivemind.digital_employees
             WHERE archived_at IS NULL
               AND status IN ('running', 'deploying')

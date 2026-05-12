@@ -910,6 +910,10 @@ model DigitalEmployee {
   slackTeamId          String?  @map("slack_team_id") @db.VarChar(64)
   slackBotUserId       String?  @map("slack_bot_user_id") @db.VarChar(64)
   slackChannelsAllowed String[] @default([]) @map("slack_channels_allowed")
+  // Per-message identity override (chat:write.customize). One shared Slack
+  // app posts as N employees by overriding username + icon per call.
+  slackDisplayName     String?  @map("slack_display_name")
+  slackAvatarEmoji     String?  @map("slack_avatar_emoji")
   tools                String[] @default([])
   policyRules          Json     @default("{}") @map("policy_rules")
   status               String   @default("draft") @db.VarChar(20)

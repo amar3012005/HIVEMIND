@@ -22,14 +22,14 @@ class Executor(BaseExecutor):
         system_prompt: str = BASE_ASSISTANT_PROMPT,
         tool_choice: str = "auto",
         max_steps: int = 10,
-        llm: BaseLLM = OpenAILLM(BaseLLMConfig(model="gpt-4o")),
+        llm: BaseLLM | None = None,
         messages: List[Dict[str, str]] = None,
         verbose: bool = False,
         *args: Any, 
         **kwargs: Any
     ):
         super().__init__(name, desc)
-        self.llm = llm
+        self.llm = llm or OpenAILLM(BaseLLMConfig(model="gpt-4o"))
         if tools is None:
             tools = []
         self.tools = tools

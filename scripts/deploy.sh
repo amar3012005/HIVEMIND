@@ -34,6 +34,10 @@ start_employees() {
   # stays 8060 so internal docker-network refs like hm-employees:8060
   # are unchanged for hm-core + control-plane.
   HM_EMP_HOST_PORT="${HM_EMP_HOST_PORT:-8061}"
+  local REDIS_AUTH_SEG=""
+  if [ -n "${REDIS_PASSWORD:-}" ]; then
+    REDIS_AUTH_SEG=":${REDIS_PASSWORD}@"
+  fi
   log "Starting hm-employees (Digital Employees, host ${HM_EMP_HOST_PORT} → container 8060)..."
   docker stop hm-employees 2>/dev/null || true
   docker rm hm-employees 2>/dev/null || true
@@ -65,7 +69,7 @@ start_employees() {
     -e "HIVEMIND_PUBLIC_CORE_URL=https://core.hivemind.davinciai.eu:8050" \
     -e "HIVEMIND_PUBLIC_CP_URL=https://api.hivemind.davinciai.eu:8040" \
     -e "DATABASE_URL=postgresql://hivemind_user:hivemind_secure_pwd_2026@${COOLIFY_PG}:5432/hivemind?schema=hivemind" \
-    -e "REDIS_URL=redis://:redis_secure_vault_7711@${COOLIFY_REDIS}:6379/0" \
+    -e "REDIS_URL=redis://${REDIS_AUTH_SEG}${COOLIFY_REDIS}:6379/0" \
     -e "HIVEMIND_ALLOWED_ORIGINS=https://hivemind.davinciai.eu,https://www.davinciai.eu,https://davinciai.eu" \
     python:3.12-slim \
     sh -c "set -e; \

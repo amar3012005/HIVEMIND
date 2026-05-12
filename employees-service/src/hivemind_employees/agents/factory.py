@@ -10,8 +10,10 @@ import logging
 import os
 from typing import Optional
 
-from slackagents import Assistant, OpenAILLM, BaseLLMConfig
+from slackagents.agent.assistant import Assistant
 from slackagents.llms.base import BaseLLM
+from slackagents.llms.base import BaseLLMConfig
+from slackagents.llms.openai import OpenAILLM
 
 from .tools import build_hivemind_tools
 
@@ -55,7 +57,7 @@ def _resolve_llm(employee_row: dict, llm_api_key: Optional[str] = None) -> BaseL
     cfg = BaseLLMConfig(
         model=routed_model,
         api_key=api_key,
-        base_url=os.environ.get("OPENROUTER_BASE_URL", OPENROUTER_BASE),
+        openrouter_base_url=os.environ.get("OPENROUTER_BASE_URL", OPENROUTER_BASE),
     )
     return OpenAILLM(cfg)
 

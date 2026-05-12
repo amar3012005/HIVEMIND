@@ -65,7 +65,14 @@ async def list_running_employees() -> List[Dict[str, Any]]:
             ORDER BY updated_at DESC
             """
         )
-    return [dict(r) for r in rows]
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        for key in ("id", "org_id", "team_id", "hivemind_api_key_id", "created_by"):
+            if item.get(key) is not None:
+                item[key] = str(item[key])
+        out.append(item)
+    return out
 
 
 async def get_api_key_for_employee(employee_id: str) -> Optional[Dict[str, Any]]:

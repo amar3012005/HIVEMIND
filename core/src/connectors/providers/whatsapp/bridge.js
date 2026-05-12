@@ -27,6 +27,36 @@ export class WhatsAppBridge extends EventEmitter {
     this._sessionDir = null;
   }
 
+  async _emitInboundMessage(msg) {
+    if (msg.fromMe) {
+      return;
+    }
+
+    const text = String(msg.body || '').trim();
+    if (!text) {
+      return;
+    }
+
+    let chat = null;
+    try {
+      chat = await msg.getChat();
+    } catch {}
+
+    const chatId = chat?.id?._serialized || msg.from;
+    const contactName = chat?.name || msg._data?.notifyName || null;
+    const fromNumber = String(msg.from || '').replace(/@c\.us$/, '');
+
+    this.emit('message', {
+      id: msg.id?._serialized || null,
+      chatId,
+      from: msg.from,
+      fromNumber,
+      text,
+      timestamp: msg.timestamp || Math.floor(Date.now() / 1000),
+      contactName,
+    });
+  }
+
   // ── Lifecycle ─────────────────────────────────────────────────
 
   /**
@@ -44,6 +74,7 @@ export class WhatsAppBridge extends EventEmitter {
       authStrategy: new LocalAuth({ dataPath: sessionDir }),
       puppeteer: {
         headless: true,
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
@@ -70,6 +101,12 @@ export class WhatsAppBridge extends EventEmitter {
     this._client.on('authenticated', () => {
       console.log('[whatsapp-bridge] Authenticated');
       this.emit('authenticated');
+    });
+
+    this._client.on('message', (msg) => {
+      this._emitInboundMessage(msg).catch((err) => {
+        console.warn('[whatsapp-bridge] inbound message handling failed:', err.message);
+      });
     });
 
     this._client.on('auth_failure', (msg) => {

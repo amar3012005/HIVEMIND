@@ -18,11 +18,93 @@ import crypto from 'crypto';
 const DEFAULT_SESSIONS_DIR = path.join(process.cwd(), 'data', 'whatsapp-sessions');
 
 export class WhatsAppLifecycleManager {
-  constructor(sessionsDir = null) {
+  constructor(sessionsDir = null, options = {}) {
     /** @type {Map<string, import('./bridge.js').WhatsAppBridge>} */
     this._bridges = new Map();
     this._sessionsDir = sessionsDir || DEFAULT_SESSIONS_DIR;
+    this._onInboundMessage = typeof options.onInboundMessage === 'function'
+      ? options.onInboundMessage
+      : null;
+    this._histories = new Map();
     fs.mkdirSync(this._sessionsDir, { recursive: true });
+  }
+
+  _sessionDirFor(userId) {
+    return path.join(this._sessionsDir, userId);
+  }
+
+  _historyKey(userId, chatId) {
+    return `${userId}:${chatId}`;
+  }
+
+  getHistory(userId, chatId) {
+    return this._histories.get(this._historyKey(userId, chatId)) || [];
+  }
+
+  appendHistory(userId, chatId, role, content) {
+    const trimmed = String(content || '').trim();
+    if (!trimmed) {
+      return;
+    }
+
+    const key = this._historyKey(userId, chatId);
+    const history = this._histories.get(key) || [];
+    history.push({ role, content: trimmed });
+    this._histories.set(key, history.slice(-20));
+  }
+
+  async _wireBridge(userId, bridge, { replace = false } = {}) {
+    if (replace && this._bridges.has(userId)) {
+      const current = this._bridges.get(userId);
+      if (current && current !== bridge) {
+        try {
+          await current.disconnect();
+        } catch {}
+      }
+    }
+
+    if (this._onInboundMessage) {
+      bridge.on('message', async (event) => {
+        this.appendHistory(userId, event.chatId, 'user', event.text);
+        try {
+          const result = await this._onInboundMessage({
+            userId,
+            chatId: event.chatId,
+            history: this.getHistory(userId, event.chatId),
+            event,
+          });
+          const reply = String(result?.response || '').trim();
+          if (!reply) {
+            return;
+          }
+
+          await bridge.sendMessage(event.fromNumber, reply);
+          this.appendHistory(userId, event.chatId, 'assistant', reply);
+        } catch (err) {
+          console.error(`[whatsapp-manager] inbound reply failed for ${userId}:`, err.message);
+        }
+      });
+    }
+
+    this._bridges.set(userId, bridge);
+    return bridge;
+  }
+
+  async ensureBridge(userId) {
+    const existing = this._bridges.get(userId);
+    if (existing) {
+      return existing;
+    }
+
+    const sessionDir = this._sessionDirFor(userId);
+    if (!fs.existsSync(sessionDir)) {
+      return null;
+    }
+
+    const { WhatsAppBridge } = await import('./bridge.js');
+    const bridge = new WhatsAppBridge();
+    await bridge.startPairing(sessionDir);
+    return this._wireBridge(userId, bridge);
   }
 
   /**
@@ -35,14 +117,13 @@ export class WhatsAppLifecycleManager {
       await this.disconnect(userId);
     }
 
-    const sessionDir = path.join(this._sessionsDir, userId);
+    const sessionDir = this._sessionDirFor(userId);
     fs.mkdirSync(sessionDir, { recursive: true });
 
     const { WhatsAppBridge } = await import('./bridge.js');
     const bridge = new WhatsAppBridge();
-    bridge.startPairing(sessionDir);
-    this._bridges.set(userId, bridge);
-    return bridge;
+    await bridge.startPairing(sessionDir);
+    return this._wireBridge(userId, bridge, { replace: true });
   }
 
   /**
@@ -56,8 +137,8 @@ export class WhatsAppLifecycleManager {
    * Poll pairing status for a user.
    * Returns { paired, phoneNumber, qr?, error? }
    */
-  getStatus(userId) {
-    const bridge = this._bridges.get(userId);
+  async getStatus(userId, { ensureSession = true } = {}) {
+    const bridge = ensureSession ? await this.ensureBridge(userId) : this._bridges.get(userId);
     if (!bridge) {
       return { paired: false, phoneNumber: null, error: 'No active pairing session' };
     }
@@ -103,6 +184,11 @@ export class WhatsAppLifecycleManager {
     if (bridge) {
       await bridge.disconnect();
       this._bridges.delete(userId);
+    }
+    for (const key of [...this._histories.keys()]) {
+      if (key.startsWith(`${userId}:`)) {
+        this._histories.delete(key);
+      }
     }
   }
 

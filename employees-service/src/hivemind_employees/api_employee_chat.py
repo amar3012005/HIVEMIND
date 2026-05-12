@@ -1,0 +1,117 @@
+"""One-on-one chat with a Digital Employee.
+
+`POST /v1/employees/{slug}/chat` runs a single ReAct turn against one
+employee, scoped to a stable conversation_id so multiple turns share
+memory. Used by the Playground UI in DigitalEmployees to let humans
+talk directly with an agent outside the multi-employee TeamRoom flow.
+
+Conversation memory is in-process (kept alive between turns inside the
+sidecar) so the same conversation_id can carry over many turns. When
+the sidecar restarts the conversation resets — acceptable for now;
+later we can back this with Redis or the InMemoryMemory dump.
+"""
+from __future__ import annotations
+
+import logging
+from typing import Dict, Optional
+
+from agentscope.agent import ReActAgent
+from agentscope.message import Msg
+from fastapi import APIRouter, Header, HTTPException
+from pydantic import BaseModel, Field
+
+from .agents.agentscope_factory import build_react_agent
+from .bootstrap_client import fetch_bootstrap
+from .config import get_settings
+from .db import list_running_employees
+
+log = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/v1/employees", tags=["employee-chat"])
+
+
+class ChatRequest(BaseModel):
+    text: str = Field(..., min_length=1, description="User message")
+    conversation_id: Optional[str] = Field(
+        None,
+        description="Stable id to carry agent memory across turns. Omit to start a fresh thread.",
+    )
+
+
+class ChatResponse(BaseModel):
+    employee_slug: str
+    conversation_id: str
+    reply: str
+
+
+# conversation_id → ReActAgent (with InMemoryMemory). Resets on sidecar restart.
+_CHAT_AGENTS: Dict[str, ReActAgent] = {}
+
+
+def _require_master_key(token: Optional[str]) -> None:
+    settings = get_settings()
+    expected = settings.hivemind_master_api_key
+    if not expected:
+        raise HTTPException(503, "service not configured (master key missing)")
+    if token != expected:
+        raise HTTPException(401, "Invalid admin token")
+
+
+async def _resolve_employee(slug: str) -> Dict:
+    rows = await list_running_employees()
+    for r in rows:
+        if r.get("slug") == slug:
+            return r
+    raise HTTPException(404, f"employee slug={slug} not running")
+
+
+def _conv_key(employee_id: str, conversation_id: str) -> str:
+    return f"{employee_id}:{conversation_id}"
+
+
+async def _get_or_build_agent(emp: Dict, conv_key: str) -> ReActAgent:
+    if conv_key in _CHAT_AGENTS:
+        return _CHAT_AGENTS[conv_key]
+    boot = {b["id"]: b for b in await fetch_bootstrap()}
+    api_key = boot.get(emp["id"], {}).get("api_key")
+    if not api_key:
+        raise HTTPException(412, "employee has no bootstrap api_key")
+    agent = build_react_agent(emp, api_key)
+    _CHAT_AGENTS[conv_key] = agent
+    return agent
+
+
+@router.post("/{slug}/chat", response_model=ChatResponse)
+async def chat_with_employee(
+    slug: str,
+    req: ChatRequest,
+    x_admin_token: Optional[str] = Header(None, alias="X-Admin-Token"),
+) -> ChatResponse:
+    _require_master_key(x_admin_token)
+
+    emp = await _resolve_employee(slug)
+    conversation_id = req.conversation_id or f"adhoc-{emp['id']}"
+    key = _conv_key(emp["id"], conversation_id)
+    agent = await _get_or_build_agent(emp, key)
+
+    try:
+        reply: Msg = await agent(Msg(name="user", content=req.text, role="user"))
+    except Exception as exc:
+        log.exception("chat_with_employee failed (slug=%s): %s", slug, exc)
+        raise HTTPException(502, f"agent failure: {exc}") from exc
+
+    content = reply.content if reply is not None else ""
+    if isinstance(content, list):
+        text_parts = []
+        for blk in content:
+            if isinstance(blk, dict):
+                text_parts.append(blk.get("text") or "")
+            else:
+                text_parts.append(str(blk))
+        content = "\n".join(p for p in text_parts if p)
+
+    return ChatResponse(
+        employee_slug=slug,
+        conversation_id=conversation_id,
+        reply=(content or "").strip(),
+    )

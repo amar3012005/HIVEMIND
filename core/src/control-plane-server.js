@@ -3710,6 +3710,71 @@ const server = http.createServer(async (req, res) => {
   }
   // ─── End Digital Employees ────────────────────────────────
 
+  // ─── Team Tasks + Employee Chat (sidecar proxy) ───────────
+  // Forwards to the Python sidecar's /v1/team-tasks/* and
+  // /v1/employees/:slug/chat endpoints, which require the master key.
+  // Frontend authenticates via session cookie; this layer attaches
+  // the master key + caller's org_id so the sidecar can scope the
+  // run + persist the task row to the right organization.
+  const _sidecarBase = () => process.env.HIVEMIND_EMPLOYEES_URL || 'http://hm-employees:8060';
+  const _sidecarKey = () => process.env.HIVEMIND_MASTER_API_KEY || '';
+
+  async function _forwardSidecar(req, res, target, { injectOrg = false } = {}) {
+    const current = await requireSession(req, res);
+    if (!current) return true;
+    if (!_sidecarKey()) {
+      return jsonResponse(res, { error: 'sidecar not configured (master key missing)' }, 503);
+    }
+    let body = null;
+    if (req.method !== 'GET' && req.method !== 'DELETE') {
+      body = await parseBody(req).catch(() => ({}));
+      if (injectOrg && body && typeof body === 'object') {
+        body.org_id = current.session.orgId;
+        body.requested_by = current.session.userId;
+      }
+    }
+    const url = _sidecarBase() + target;
+    try {
+      const resp = await fetch(url, {
+        method: req.method,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Token': _sidecarKey(),
+        },
+        body: body ? JSON.stringify(body) : undefined,
+        signal: AbortSignal.timeout(60000),
+      });
+      const text = await resp.text();
+      let payload;
+      try { payload = JSON.parse(text); } catch { payload = { raw: text }; }
+      return jsonResponse(res, payload, resp.status);
+    } catch (err) {
+      return jsonResponse(res, { error: `sidecar unreachable: ${err.message}` }, 502);
+    }
+  }
+
+  // POST /v1/team-tasks — kick off a multi-employee task
+  if (pathname === '/v1/team-tasks' && req.method === 'POST') {
+    await _forwardSidecar(req, res, '/v1/team-tasks', { injectOrg: true });
+    return;
+  }
+  // GET  /v1/team-tasks/:id            — status + outcome
+  // GET  /v1/team-tasks/:id/transcript — paginated transcript
+  const teamTaskMatch = pathname.match(/^\/v1\/team-tasks\/([0-9a-f-]{36})(\/transcript)?$/);
+  if (teamTaskMatch && req.method === 'GET') {
+    const tail = teamTaskMatch[2] ? `/${teamTaskMatch[1]}/transcript` : `/${teamTaskMatch[1]}`;
+    const qs = url.search || '';
+    await _forwardSidecar(req, res, `/v1/team-tasks${tail}${qs}`);
+    return;
+  }
+  // POST /v1/employees/:slug/chat — 1-on-1 ReAct turn against one employee
+  const empChatMatch = pathname.match(/^\/v1\/employees\/([a-z0-9-]+)\/chat$/);
+  if (empChatMatch && req.method === 'POST') {
+    await _forwardSidecar(req, res, `/v1/employees/${empChatMatch[1]}/chat`);
+    return;
+  }
+  // ─── End Team Tasks ───────────────────────────────────────
+
   // ─── Billing (placeholder, org_owner only) ────────────────
   if (pathname.startsWith('/v1/billing') && (req.method === 'GET' || req.method === 'POST' || req.method === 'PATCH')) {
     const current = await requireSession(req, res);

@@ -12,7 +12,9 @@ const BOT_SCOPES = [
   'users:read', 'users:read.email',
   'team:read',
   'chat:write',
+  'chat:write.public',
   'files:read',
+  'reactions:write',
   'reactions:read',
   'pins:read',
 ];

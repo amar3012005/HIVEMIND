@@ -15,7 +15,7 @@ import os
 import httpx
 from typing import Optional, Any
 
-from slackagents import FunctionTool
+from slackagents.tools.function_tool import FunctionTool
 
 log = logging.getLogger(__name__)
 

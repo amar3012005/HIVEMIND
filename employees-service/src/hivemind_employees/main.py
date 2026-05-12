@@ -18,6 +18,7 @@ from .redis_client import init_redis, close_redis
 from .hivemind_client import ServiceClient
 from .slack.gateway import SlackGateway
 from .api_team_tasks import router as team_tasks_router
+from .api_employee_chat import router as employee_chat_router
 
 
 def _configure_logging():
@@ -126,6 +127,8 @@ app = FastAPI(
 
 # Multi-employee orchestration endpoints (Phase 3.5).
 app.include_router(team_tasks_router)
+# Per-employee 1-on-1 chat (Phase 3.6 Playground).
+app.include_router(employee_chat_router)
 
 
 # ── Routes ─────────────────────────────────────────────────────

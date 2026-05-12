@@ -103,6 +103,91 @@ const sessionStore = new ControlPlaneSessionStore(CONFIG);
 const connectorStore = prisma ? new ConnectorStore(prisma) : null;
 const ADMIN_SECRET = process.env.HIVEMIND_ADMIN_SECRET || 'local-admin-secret-change-me';
 
+const { WhatsAppLifecycleManager } = await import('./connectors/providers/whatsapp/manager.js');
+
+async function callCoreChatAsUser({ userId, orgId, message, history = [] }) {
+  const apiKey = process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811';
+  const response = await fetch(`${CONFIG.coreApiBaseUrl}/api/chat`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-API-Key': apiKey,
+      'X-HM-User-Id': userId || '',
+      'X-HM-Org-Id': orgId || '',
+    },
+    body: JSON.stringify({ message, history }),
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.error || `Core chat failed with ${response.status}`);
+  }
+  return payload;
+}
+
+async function waitForWhatsAppHandshake(bridge, timeoutMs = 15000) {
+  if (bridge.isReady()) {
+    return { paired: true, phoneNumber: bridge.getPhoneNumber(), qr: null };
+  }
+
+  const qr = bridge.getQrCode();
+  if (qr) {
+    return { paired: false, phoneNumber: null, qr };
+  }
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve({ paired: false, phoneNumber: null, status: 'generating' });
+    }, timeoutMs);
+
+    const onQr = (code) => {
+      cleanup();
+      resolve({ paired: false, phoneNumber: null, qr: code });
+    };
+    const onReady = (info) => {
+      cleanup();
+      resolve({ paired: true, phoneNumber: info?.phoneNumber || bridge.getPhoneNumber(), qr: null });
+    };
+    const onError = (err) => {
+      cleanup();
+      reject(new Error(err?.message || 'WhatsApp pairing failed'));
+    };
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      bridge.off('qr', onQr);
+      bridge.off('ready', onReady);
+      bridge.off('error', onError);
+    };
+
+    bridge.once('qr', onQr);
+    bridge.once('ready', onReady);
+    bridge.once('error', onError);
+  });
+}
+
+const whatsappManager = new WhatsAppLifecycleManager(process.env.HIVEMIND_WHATSAPP_SESSIONS_DIR, {
+  onInboundMessage: async ({ userId, history, event }) => {
+    const orgMembership = prisma
+      ? await prisma.organizationMember.findFirst({
+        where: { userId, status: 'active' },
+        select: { organizationId: true },
+        orderBy: { createdAt: 'asc' },
+      }).catch(() => null)
+      : null;
+
+    const chatResult = await callCoreChatAsUser({
+      userId,
+      orgId: orgMembership?.organizationId || null,
+      message: event.text,
+      history,
+    });
+
+    return { response: chatResult.response || '' };
+  },
+});
+
 // Provider registry — add new providers here
 const PROVIDER_REGISTRY = {
   gmail: {
@@ -141,6 +226,27 @@ const PROVIDER_REGISTRY = {
     scopes: ['https://www.googleapis.com/auth/drive.readonly'],
   },
 };
+
+function buildWhatsAppConnectorStatus(status) {
+  const paired = Boolean(status?.paired);
+  return {
+    provider: 'whatsapp',
+    label: 'WhatsApp',
+    status: paired ? 'connected' : 'available',
+    account_ref: status?.phoneNumber || null,
+    target_scope: 'personal',
+    last_sync_at: null,
+    last_error: status?.error || null,
+    is_active: paired,
+    scopes: ['chat'],
+    created_at: null,
+    configured: true,
+    disabled_reason: null,
+    qr_setup: true,
+    paired,
+    phone_number: status?.phoneNumber || null,
+  };
+}
 
 async function getProviderRuntimeConfig(providerConfig) {
   if (!providerConfig?.oauthModule) {
@@ -2236,7 +2342,54 @@ const server = http.createServer(async (req, res) => {
       };
     }));
 
+    const whatsappStatus = await whatsappManager.getStatus(current.session.userId).catch((err) => ({
+      paired: false,
+      phoneNumber: null,
+      error: err.message,
+    }));
+    result.push(buildWhatsAppConnectorStatus(whatsappStatus));
+
     return jsonResponse(res, { connectors: result });
+  }
+
+  const whatsappQrRoute = pathname === '/api/connectors/whatsapp/qr' || pathname === '/v1/connectors/whatsapp/qr';
+  if (whatsappQrRoute && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+
+    try {
+      const bridge = await whatsappManager.startPairing(current.session.userId);
+      const handshake = await waitForWhatsAppHandshake(bridge);
+      return jsonResponse(res, handshake);
+    } catch (err) {
+      return jsonResponse(res, { error: err.message }, 500);
+    }
+  }
+
+  const whatsappStatusRoute = pathname === '/api/connectors/whatsapp/status' || pathname === '/v1/connectors/whatsapp/status';
+  if (whatsappStatusRoute && req.method === 'GET') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+
+    try {
+      const status = await whatsappManager.getStatus(current.session.userId);
+      return jsonResponse(res, status);
+    } catch (err) {
+      return jsonResponse(res, { error: err.message }, 500);
+    }
+  }
+
+  const whatsappDisconnectRoute = pathname === '/api/connectors/whatsapp/disconnect' || pathname === '/v1/connectors/whatsapp/disconnect';
+  if (whatsappDisconnectRoute && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+
+    try {
+      await whatsappManager.disconnect(current.session.userId);
+      return jsonResponse(res, { success: true, provider: 'whatsapp' });
+    } catch (err) {
+      return jsonResponse(res, { error: err.message }, 500);
+    }
   }
 
   // POST /v1/connectors/:provider/start — begin OAuth flow

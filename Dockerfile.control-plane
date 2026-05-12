@@ -4,7 +4,7 @@
 FROM node:20-slim AS base
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends dumb-init ca-certificates openssl tzdata wget && \
+    apt-get install -y --no-install-recommends dumb-init ca-certificates openssl tzdata wget chromium libnss3 libatk-bridge2.0-0 libgbm1 libxkbcommon0 libasound2 fonts-liberation xdg-utils && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -47,6 +47,7 @@ ENV NODE_ENV=${NODE_ENV} \
     BUILD_DATE=${BUILD_DATE} \
     PORT=3000 \
     HOST=0.0.0.0 \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
     LOG_LEVEL=info \
     LOG_FORMAT=json
 

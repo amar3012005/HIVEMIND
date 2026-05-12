@@ -210,8 +210,36 @@ async def _amain(args: argparse.Namespace) -> int:
         from .task_store import TaskStore
         task_store = TaskStore(org_id=args.org_id, team_id=args.team_id or None)
 
-    room = TeamRoom(task=task, roster=roster, on_event=_on_event, task_store=task_store)
-    outcome = await room.run()
+    # Optional Slack milestone streamer. dry-run mode (default for smoke)
+    # logs card payloads to stderr instead of hitting Slack — verifies
+    # filter rules + identity mapping without any HTTP calls.
+    if args.slack_channel:
+        from .slack_streamer import SlackStreamer
+        identity_lookup = {
+            w.employee_id: {
+                "name": w.employee_name,
+                "slack_display_name": w.employee_name,
+                "slack_avatar_emoji": ":robot_face:",
+            }
+            for w in roster
+        }
+        async with SlackStreamer(
+            channel=args.slack_channel,
+            thread_ts=args.slack_thread_ts or None,
+            api_key=args.slack_api_key or "",
+            identity_lookup=identity_lookup,
+            dry_run=args.slack_dry_run,
+        ) as streamer:
+            def _combined(msg: WorkerMessage) -> None:
+                _on_event(msg)
+                streamer.on_event(msg)
+            room = TeamRoom(
+                task=task, roster=roster, on_event=_combined, task_store=task_store
+            )
+            outcome = await room.run()
+    else:
+        room = TeamRoom(task=task, roster=roster, on_event=_on_event, task_store=task_store)
+        outcome = await room.run()
 
     print("\n" + "=" * 60)
     print(f"FINAL ANSWER (rounds={outcome.rounds_completed}, "
@@ -247,6 +275,14 @@ def main() -> int:
                         help="Persist task + transcript to Postgres (requires --org-id)")
     parser.add_argument("--org-id", default="", help="Org UUID for persistence")
     parser.add_argument("--team-id", default="", help="Team UUID for persistence (optional)")
+    parser.add_argument("--slack-channel", default="",
+                        help="Slack channel ID to stream milestone cards into")
+    parser.add_argument("--slack-thread-ts", default="",
+                        help="Slack thread root ts to post cards into")
+    parser.add_argument("--slack-api-key", default="",
+                        help="HIVEMIND API key for /api/employees/slack-action (live mode)")
+    parser.add_argument("--slack-dry-run", action="store_true",
+                        help="Don't POST to Slack; log card payloads to stderr instead")
     args = parser.parse_args()
 
     logging.basicConfig(

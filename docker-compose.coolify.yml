@@ -310,6 +310,115 @@ services:
                 condition: service_healthy
         env_file:
             - .env
+    employees:
+        build:
+            context: ./employees-service
+            dockerfile: Dockerfile
+        image: 'hivemind/employees:${VERSION:-latest}'
+        container_name: employees-s0k0s0k40wo44w4w8gcs8ow0-125656582244
+        hostname: hm-employees
+        restart: unless-stopped
+        deploy:
+            resources:
+                limits:
+                    cpus: '1'
+                    memory: 1G
+                reservations:
+                    cpus: '0.25'
+                    memory: 256M
+            restart_policy:
+                condition: on-failure
+                delay: 5s
+                max_attempts: 3
+                window: 120s
+        environment:
+            PORT: '8060'
+            LOG_LEVEL: '${LOG_LEVEL:-info}'
+            REPLICA_ID: '${HOSTNAME:-rep1}'
+            REPLICA_COUNT: '${HM_EMPLOYEES_REPLICA_COUNT:-1}'
+            HIVEMIND_CORE_URL: 'http://app:3000'
+            HIVEMIND_CP_URL: 'http://control-plane:3000'
+            HIVEMIND_PUBLIC_CORE_URL: '${HIVEMIND_PUBLIC_CORE_URL:-https://core.hivemind.davinciai.eu:8050}'
+            HIVEMIND_PUBLIC_CP_URL: '${HIVEMIND_CONTROL_PLANE_PUBLIC_URL:-https://api.hivemind.davinciai.eu:8040}'
+            DATABASE_URL: 'postgresql://${POSTGRES_USER:-hivemind_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}?schema=public'
+            REDIS_URL: 'redis://:${REDIS_PASSWORD}@redis:6379/0'
+            REDIS_HOST: redis
+            REDIS_PORT: '6379'
+            REDIS_PASSWORD: '${REDIS_PASSWORD}'
+            HIVEMIND_MASTER_API_KEY: '${HIVEMIND_MASTER_API_KEY}'
+            OPENROUTER_API_KEY: '${OPENROUTER_API_KEY}'
+            OPENROUTER_BASE_URL: '${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}'
+            ANTHROPIC_API_KEY: '${ANTHROPIC_API_KEY}'
+            OPENAI_API_KEY: '${OPENAI_API_KEY}'
+            SLACK_CLIENT_ID: '${SLACK_CLIENT_ID}'
+            SLACK_CLIENT_SECRET: '${SLACK_CLIENT_SECRET}'
+            COOLIFY_BRANCH: '"main"'
+            COOLIFY_RESOURCE_UUID: s0k0s0k40wo44w4w8gcs8ow0
+            COOLIFY_CONTAINER_NAME: employees-s0k0s0k40wo44w4w8gcs8ow0-125656582244
+            SERVICE_NAME_APP: employees
+            SERVICE_NAME_POSTGRES: postgres
+            SERVICE_NAME_QDRANT: qdrant
+            SERVICE_NAME_REDIS: redis
+            SERVICE_NAME_BACKUP: backup
+        healthcheck:
+            test:
+                - CMD
+                - curl
+                - '-fsS'
+                - 'http://localhost:8060/health'
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 90s
+        logging:
+            driver: json-file
+            options:
+                max-size: 10m
+                max-file: '5'
+                compress: 'true'
+                tag: '{{.ImageName}}|{{.Name}}|{{.ImageFullID}}|{{.FullID}}'
+        volumes:
+            - 's0k0s0k40wo44w4w8gcs8ow0_employees-logs:/app/logs'
+            - '/etc/localtime:/etc/localtime:ro'
+        labels:
+            - hivemind.component=employees
+            - hivemind.tier=sidecar
+            - hivemind.region=eu
+            - coolify.name=hivemind-employees
+            - coolify.healthcheck=/health
+            - coolify.port=8060
+            - traefik.enable=true
+            - 'traefik.http.routers.hivemind-employees.rule=Host(`$${EMPLOYEES_DOMAIN:-employees.hivemind.davinciai.eu}`)'
+            - traefik.http.routers.hivemind-employees.entrypoints=https
+            - traefik.http.routers.hivemind-employees.tls=true
+            - traefik.http.routers.hivemind-employees.tls.certresolver=letsencrypt
+            - traefik.http.services.hivemind-employees.loadbalancer.server.port=8060
+            - traefik.http.services.hivemind-employees.loadbalancer.healthcheck.path=/health
+            - traefik.http.services.hivemind-employees.loadbalancer.healthcheck.interval=30s
+            - coolify.managed=true
+            - coolify.version=4.0.0-beta.462
+            - coolify.applicationId=20
+            - coolify.type=application
+            - coolify.name=employees-s0k0s0k40wo44w4w8gcs8ow0-125656582244
+            - coolify.resourceName=hive-mind
+            - coolify.projectName=hivemind
+            - coolify.serviceName=hive-mind
+            - coolify.environmentName=production
+            - coolify.pullRequestId=0
+        networks:
+            hivemind-network: null
+            s0k0s0k40wo44w4w8gcs8ow0: null
+        depends_on:
+            postgres:
+                condition: service_healthy
+            redis:
+                condition: service_healthy
+            app:
+                condition: service_healthy
+            control-plane:
+                condition: service_healthy
+        env_file:
+            - .env
     postgres:
         build:
             context: ./infra/postgres
@@ -664,6 +773,8 @@ volumes:
         name: s0k0s0k40wo44w4w8gcs8ow0_control-plane-logs
     s0k0s0k40wo44w4w8gcs8ow0_control-plane-data:
         name: s0k0s0k40wo44w4w8gcs8ow0_control-plane-data
+    s0k0s0k40wo44w4w8gcs8ow0_employees-logs:
+        name: s0k0s0k40wo44w4w8gcs8ow0_employees-logs
     s0k0s0k40wo44w4w8gcs8ow0_postgres-data:
         name: s0k0s0k40wo44w4w8gcs8ow0_postgres-data
     s0k0s0k40wo44w4w8gcs8ow0_qdrant-data:

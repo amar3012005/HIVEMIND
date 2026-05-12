@@ -112,9 +112,9 @@ export class WhatsAppLifecycleManager {
    * can wait for the 'qr' event.
    */
   async startPairing(userId) {
-    // Destroy existing bridge if any
-    if (this._bridges.has(userId)) {
-      await this.disconnect(userId);
+    const existing = this._bridges.get(userId);
+    if (existing?.hasActiveClient()) {
+      return existing;
     }
 
     const sessionDir = this._sessionDirFor(userId);

@@ -916,6 +916,12 @@ model DigitalEmployee {
   // app posts as N employees by overriding username + icon per call.
   slackDisplayName     String?  @map("slack_display_name")
   slackAvatarEmoji     String?  @map("slack_avatar_emoji")
+  // Multi-agent collaboration metadata (Phase 3.3). roleArchetype gates
+  // reviewer/synthesizer selection in the AgentScope TeamRoom phase
+  // machine; peerReviewTargets is a list of OTHER archetypes this
+  // employee likes to challenge — used to bias adversarial reviews.
+  roleArchetype        String?  @map("role_archetype") @db.VarChar(40)
+  peerReviewTargets    String[] @default([]) @map("peer_review_targets")
   tools                String[] @default([])
   policyRules          Json     @default("{}") @map("policy_rules")
   status               String   @default("draft") @db.VarChar(20)

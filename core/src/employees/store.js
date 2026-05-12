@@ -38,6 +38,8 @@ const PUBLIC_FIELDS = {
   slackChannelsAllowed: true,
   slackDisplayName: true,
   slackAvatarEmoji: true,
+  roleArchetype: true,
+  peerReviewTargets: true,
   tools: true,
   policyRules: true,
   status: true,
@@ -116,6 +118,8 @@ export class EmployeeStore {
   async create({ orgId, teamId, name, persona, model, llmProvider,
                  scope, slackTeamId, slackChannelsAllowed, tools,
                  policyRules, replicas, maxReplicas, avatarUrl,
+                 slackDisplayName, slackAvatarEmoji,
+                 roleArchetype, peerReviewTargets,
                  createdBy, hivemindApiKeyId }) {
     if (!name || !persona) throw new Error('name + persona required');
     if (scope && !VALID_SCOPES.has(scope)) throw new Error(`Invalid scope: ${scope}`);
@@ -153,6 +157,10 @@ export class EmployeeStore {
         status: 'draft',
         hivemindApiKeyId: hivemindApiKeyId || null,
         createdBy,
+        slackDisplayName: slackDisplayName || null,
+        slackAvatarEmoji: slackAvatarEmoji || null,
+        roleArchetype: roleArchetype || null,
+        peerReviewTargets: Array.isArray(peerReviewTargets) ? peerReviewTargets : [],
       },
       select: PUBLIC_FIELDS,
     });
@@ -174,6 +182,10 @@ export class EmployeeStore {
     if (typeof data.teamId === 'string' || data.teamId === null) allowed.teamId = data.teamId;
     if (typeof data.slackTeamId === 'string' || data.slackTeamId === null) allowed.slackTeamId = data.slackTeamId;
     if (typeof data.slackBotUserId === 'string') allowed.slackBotUserId = data.slackBotUserId;
+    if (typeof data.slackDisplayName === 'string' || data.slackDisplayName === null) allowed.slackDisplayName = data.slackDisplayName;
+    if (typeof data.slackAvatarEmoji === 'string' || data.slackAvatarEmoji === null) allowed.slackAvatarEmoji = data.slackAvatarEmoji;
+    if (typeof data.roleArchetype === 'string' || data.roleArchetype === null) allowed.roleArchetype = data.roleArchetype;
+    if (Array.isArray(data.peerReviewTargets)) allowed.peerReviewTargets = data.peerReviewTargets;
 
     if (Object.keys(allowed).length === 0) {
       throw new Error('No mutable fields supplied');

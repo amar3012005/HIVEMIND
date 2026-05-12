@@ -109,13 +109,26 @@ async def _build_roster(slugs: List[str]) -> List[EmployeeWorker]:
             log.warning("team-task: no bootstrap api_key for %s — skip", slug)
             continue
         agent = build_react_agent(emp, api_key)
+        # Phase 3.3: role_archetype + peer_review_targets are first-class
+        # columns. Fall back to legacy policy_rules JSONB for older rows
+        # that predate the migration.
         policy = emp.get("policy_rules") or {}
+        role_archetype = (
+            emp.get("role_archetype")
+            or policy.get("role_archetype")
+            or "generalist"
+        )
+        peer_review_targets = (
+            emp.get("peer_review_targets")
+            or policy.get("peer_review_targets")
+            or []
+        )
         roster.append(EmployeeWorker(
             employee_id=emp["id"],
             employee_name=emp["name"],
             slug=slug,
-            role_archetype=policy.get("role_archetype") or "generalist",
-            peer_review_targets=policy.get("peer_review_targets") or [],
+            role_archetype=role_archetype,
+            peer_review_targets=peer_review_targets,
             agent=agent,
         ))
     return roster

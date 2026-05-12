@@ -169,12 +169,22 @@ async def _roster_from_db(slugs: List[str]) -> List[EmployeeWorker]:
             continue
         agent = build_react_agent(emp, api_key)
         policy = emp.get("policy_rules") or {}
+        role_archetype = (
+            emp.get("role_archetype")
+            or policy.get("role_archetype")
+            or "generalist"
+        )
+        peer_review_targets = (
+            emp.get("peer_review_targets")
+            or policy.get("peer_review_targets")
+            or []
+        )
         roster.append(EmployeeWorker(
             employee_id=emp["id"],
             employee_name=emp["name"],
             slug=slug,
-            role_archetype=policy.get("role_archetype") or "generalist",
-            peer_review_targets=policy.get("peer_review_targets") or [],
+            role_archetype=role_archetype,
+            peer_review_targets=peer_review_targets,
             agent=agent,
         ))
     return roster

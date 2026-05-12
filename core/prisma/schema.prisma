@@ -117,16 +117,16 @@ model OrgInvite {
 /// Team — sub-unit inside an Organization (Eng, Marketing, Sales).
 /// Members can be granted team-scope memory access via TeamMember.
 model Team {
-  id          String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orgId       String       @map("org_id") @db.Uuid
-  name        String       @db.VarChar(255)
-  slug        String       @db.VarChar(120)
-  description String?
-  isDefault   Boolean      @default(false) @map("is_default")
-  createdBy   String       @map("created_by") @db.Uuid
-  createdAt   DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt   DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  archivedAt  DateTime?    @map("archived_at") @db.Timestamptz(6)
+  id                   String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId                String                @map("org_id") @db.Uuid
+  name                 String                @db.VarChar(255)
+  slug                 String                @db.VarChar(120)
+  description          String?
+  isDefault            Boolean               @default(false) @map("is_default")
+  createdBy            String                @map("created_by") @db.Uuid
+  createdAt            DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime              @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  archivedAt           DateTime?             @map("archived_at") @db.Timestamptz(6)
   org                  Organization          @relation("OrgTeams", fields: [orgId], references: [id], onDelete: Cascade)
   members              TeamMember[]
   projects             Project[]
@@ -142,13 +142,13 @@ model Team {
 
 /// User ↔ Team membership with role.
 model TeamMember {
-  teamId      String   @map("team_id") @db.Uuid
-  userId      String   @map("user_id") @db.Uuid
-  role        String   @default("member") @db.VarChar(50) // 'lead' | 'member'
-  addedById   String?  @map("added_by") @db.Uuid
-  addedAt     DateTime @default(now()) @map("added_at") @db.Timestamptz(6)
-  team        Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  user        User     @relation("UserTeamMemberships", fields: [userId], references: [id], onDelete: Cascade)
+  teamId    String   @map("team_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  role      String   @default("member") @db.VarChar(50) // 'lead' | 'member'
+  addedById String?  @map("added_by") @db.Uuid
+  addedAt   DateTime @default(now()) @map("added_at") @db.Timestamptz(6)
+  team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user      User     @relation("UserTeamMemberships", fields: [userId], references: [id], onDelete: Cascade)
 
   @@id([teamId, userId])
   @@index([userId])
@@ -897,48 +897,48 @@ enum MemoryScope {
 /// service. Each employee owns a persona, a Slack workspace presence,
 /// a scoped HIVEMIND API key, and a policy ruleset.
 model DigitalEmployee {
-  id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orgId                String   @map("org_id") @db.Uuid
-  teamId               String?  @map("team_id") @db.Uuid
-  name                 String   @db.VarChar(100)
-  slug                 String   @db.VarChar(120)
-  avatarUrl            String?  @map("avatar_url")
-  persona              String   // system prompt
-  model                String   @default("claude-haiku-4-5") @db.VarChar(100)
-  llmProvider          String   @default("anthropic") @map("llm_provider") @db.VarChar(50)
-  hivemindApiKeyId     String?  @map("hivemind_api_key_id") @db.Uuid
-  scopedApiKeyEncrypted String? @map("scoped_api_key_encrypted")
-  scope                String   @default("team") @db.VarChar(20)
-  slackTeamId          String?  @map("slack_team_id") @db.VarChar(64)
-  slackBotUserId       String?  @map("slack_bot_user_id") @db.VarChar(64)
-  slackChannelsAllowed String[] @default([]) @map("slack_channels_allowed")
+  id                    String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId                 String         @map("org_id") @db.Uuid
+  teamId                String?        @map("team_id") @db.Uuid
+  name                  String         @db.VarChar(100)
+  slug                  String         @db.VarChar(120)
+  avatarUrl             String?        @map("avatar_url")
+  persona               String // system prompt
+  model                 String         @default("claude-haiku-4-5") @db.VarChar(100)
+  llmProvider           String         @default("anthropic") @map("llm_provider") @db.VarChar(50)
+  hivemindApiKeyId      String?        @map("hivemind_api_key_id") @db.Uuid
+  scopedApiKeyEncrypted String?        @map("scoped_api_key_encrypted")
+  scope                 String         @default("team") @db.VarChar(20)
+  slackTeamId           String?        @map("slack_team_id") @db.VarChar(64)
+  slackBotUserId        String?        @map("slack_bot_user_id") @db.VarChar(64)
+  slackChannelsAllowed  String[]       @default([]) @map("slack_channels_allowed")
   // Per-message identity override (chat:write.customize). One shared Slack
   // app posts as N employees by overriding username + icon per call.
-  slackDisplayName     String?  @map("slack_display_name")
-  slackAvatarEmoji     String?  @map("slack_avatar_emoji")
+  slackDisplayName      String?        @map("slack_display_name")
+  slackAvatarEmoji      String?        @map("slack_avatar_emoji")
   // Multi-agent collaboration metadata (Phase 3.3). roleArchetype gates
   // reviewer/synthesizer selection in the AgentScope TeamRoom phase
   // machine; peerReviewTargets is a list of OTHER archetypes this
   // employee likes to challenge — used to bias adversarial reviews.
-  roleArchetype        String?  @map("role_archetype") @db.VarChar(40)
-  peerReviewTargets    String[] @default([]) @map("peer_review_targets")
-  tools                String[] @default([])
-  policyRules          Json     @default("{}") @map("policy_rules")
-  status               String   @default("draft") @db.VarChar(20)
+  roleArchetype         String?        @map("role_archetype") @db.VarChar(40)
+  peerReviewTargets     String[]       @default([]) @map("peer_review_targets")
+  tools                 String[]       @default([])
+  policyRules           Json           @default("{}") @map("policy_rules")
+  status                String         @default("draft") @db.VarChar(20)
   // draft | deploying | running | paused | error
-  replicas             Int      @default(1)
-  maxReplicas          Int      @default(3) @map("max_replicas")
-  metricsLast24h       Json?    @map("metrics_last_24h")
-  lastActiveAt         DateTime? @map("last_active_at") @db.Timestamptz(6)
-  createdBy            String   @map("created_by") @db.Uuid
-  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt            DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  archivedAt           DateTime? @map("archived_at") @db.Timestamptz(6)
-  org                  Organization @relation("OrgDigitalEmployees", fields: [orgId], references: [id], onDelete: Cascade)
-  team                 Team?        @relation("TeamDigitalEmployees", fields: [teamId], references: [id], onDelete: SetNull)
-  creator              User         @relation("UserCreatedEmployees", fields: [createdBy], references: [id])
-  events               SlackEvent[]
-  intents              ActionIntent[]
+  replicas              Int            @default(1)
+  maxReplicas           Int            @default(3) @map("max_replicas")
+  metricsLast24h        Json?          @map("metrics_last_24h")
+  lastActiveAt          DateTime?      @map("last_active_at") @db.Timestamptz(6)
+  createdBy             String         @map("created_by") @db.Uuid
+  createdAt             DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime       @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  archivedAt            DateTime?      @map("archived_at") @db.Timestamptz(6)
+  org                   Organization   @relation("OrgDigitalEmployees", fields: [orgId], references: [id], onDelete: Cascade)
+  team                  Team?          @relation("TeamDigitalEmployees", fields: [teamId], references: [id], onDelete: SetNull)
+  creator               User           @relation("UserCreatedEmployees", fields: [createdBy], references: [id])
+  events                SlackEvent[]
+  intents               ActionIntent[]
 
   @@unique([orgId, slug])
   @@index([orgId])
@@ -951,22 +951,22 @@ model DigitalEmployee {
 /// to a Digital Employee. Backed by Redis dedup; this table is the
 /// durable audit + replay record.
 model SlackEvent {
-  id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  slackEventId        String   @unique @map("slack_event_id") @db.VarChar(64)
-  workspaceId         String   @map("workspace_id") @db.VarChar(64)
-  channelId           String?  @map("channel_id") @db.VarChar(64)
-  ts                  String   @db.VarChar(64)
-  eventType           String   @map("event_type") @db.VarChar(64)
-  eventSubtype        String?  @map("event_subtype") @db.VarChar(64)
-  routedToEmployeeId  String?  @map("routed_to_employee_id") @db.Uuid
-  payload             Json
-  status              String   @default("queued") @db.VarChar(20)
+  id                 String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  slackEventId       String           @unique @map("slack_event_id") @db.VarChar(64)
+  workspaceId        String           @map("workspace_id") @db.VarChar(64)
+  channelId          String?          @map("channel_id") @db.VarChar(64)
+  ts                 String           @db.VarChar(64)
+  eventType          String           @map("event_type") @db.VarChar(64)
+  eventSubtype       String?          @map("event_subtype") @db.VarChar(64)
+  routedToEmployeeId String?          @map("routed_to_employee_id") @db.Uuid
+  payload            Json
+  status             String           @default("queued") @db.VarChar(20)
   // queued | processing | done | failed | dlq
-  attempts            Int      @default(0)
-  errorMessage        String?  @map("error_message")
-  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  completedAt         DateTime? @map("completed_at") @db.Timestamptz(6)
-  employee            DigitalEmployee? @relation(fields: [routedToEmployeeId], references: [id], onDelete: SetNull)
+  attempts           Int              @default(0)
+  errorMessage       String?          @map("error_message")
+  createdAt          DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  completedAt        DateTime?        @map("completed_at") @db.Timestamptz(6)
+  employee           DigitalEmployee? @relation(fields: [routedToEmployeeId], references: [id], onDelete: SetNull)
 
   @@index([workspaceId, channelId])
   @@index([status, createdAt])
@@ -978,18 +978,18 @@ model SlackEvent {
 /// Persisted before policy check, then approved/denied/executed.
 /// Powers audit trail, replay, and human-in-the-loop approval flow.
 model ActionIntent {
-  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  employeeId   String   @map("employee_id") @db.Uuid
-  actionType   String   @map("action_type") @db.VarChar(64)
+  id           String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  employeeId   String          @map("employee_id") @db.Uuid
+  actionType   String          @map("action_type") @db.VarChar(64)
   // slack_post | slack_react | slack_dm | slack_search | slack_history | memory_save
   payload      Json
-  status       String   @default("pending") @db.VarChar(20)
+  status       String          @default("pending") @db.VarChar(20)
   // pending | approved | executed | denied | failed
-  denyReason   String?  @map("deny_reason")
-  approvedById String?  @map("approved_by") @db.Uuid
-  executedAt   DateTime? @map("executed_at") @db.Timestamptz(6)
+  denyReason   String?         @map("deny_reason")
+  approvedById String?         @map("approved_by") @db.Uuid
+  executedAt   DateTime?       @map("executed_at") @db.Timestamptz(6)
   result       Json?
-  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  createdAt    DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
   employee     DigitalEmployee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
 
   @@index([employeeId, createdAt(sort: Desc)])
@@ -1000,30 +1000,30 @@ model ActionIntent {
 /// PageIndex hierarchical memory index nodes (optional optimization layer)
 /// Stores memory IDs organized by topic/project tree (max 4 levels)
 model PageIndexNode {
-  id               String       @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
-  userId           String       @map("user_id") @db.Uuid
-  orgId            String?      @map("org_id") @db.Uuid
-  user             User         @relation("UserPageIndexNodes", fields: [userId], references: [id], onDelete: Cascade)
-  org              Organization? @relation("OrgPageIndexNodes", fields: [orgId], references: [id], onDelete: Cascade)
-  parentId         String?      @map("parent_id") @db.Uuid
-  parent           PageIndexNode? @relation("PageIndexHierarchy", fields: [parentId], references: [id])
+  id               String          @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
+  userId           String          @map("user_id") @db.Uuid
+  orgId            String?         @map("org_id") @db.Uuid
+  user             User            @relation("UserPageIndexNodes", fields: [userId], references: [id], onDelete: Cascade)
+  org              Organization?   @relation("OrgPageIndexNodes", fields: [orgId], references: [id], onDelete: Cascade)
+  parentId         String?         @map("parent_id") @db.Uuid
+  parent           PageIndexNode?  @relation("PageIndexHierarchy", fields: [parentId], references: [id])
   children         PageIndexNode[] @relation("PageIndexHierarchy")
   label            String
-  path             String       @unique
-  nodeType         String       @default("topic") @map("node_type")
-  depth            Int          @default(1)
-  memoryIds        String[]     @default([]) @map("memory_ids")
-  memoryCount      Int          @default(0) @map("memory_count")
-  summary          String?      @db.Text @map("summary") // LLM-generated summary of memories in this node
-  summaryUpdatedAt DateTime?    @map("summary_updated_at")
-  autoGenerated    Boolean      @default(true) @map("auto_generated")
-  customBranch     Boolean      @default(false) @map("custom_branch")
-  lastPrunedAt     DateTime?    @map("last_pruned_at")
-  crossRefs        String[]     @default([]) @map("cross_refs")
-  cachedChildPaths String[]     @default([]) @map("cached_child_paths")
-  createdAt        DateTime     @default(now()) @map("created_at")
-  updatedAt        DateTime     @default(now()) @updatedAt @map("updated_at")
-  deletedAt        DateTime?    @map("deleted_at")
+  path             String          @unique
+  nodeType         String          @default("topic") @map("node_type")
+  depth            Int             @default(1)
+  memoryIds        String[]        @default([]) @map("memory_ids")
+  memoryCount      Int             @default(0) @map("memory_count")
+  summary          String?         @map("summary") @db.Text // LLM-generated summary of memories in this node
+  summaryUpdatedAt DateTime?       @map("summary_updated_at")
+  autoGenerated    Boolean         @default(true) @map("auto_generated")
+  customBranch     Boolean         @default(false) @map("custom_branch")
+  lastPrunedAt     DateTime?       @map("last_pruned_at")
+  crossRefs        String[]        @default([]) @map("cross_refs")
+  cachedChildPaths String[]        @default([]) @map("cached_child_paths")
+  createdAt        DateTime        @default(now()) @map("created_at")
+  updatedAt        DateTime        @default(now()) @updatedAt @map("updated_at")
+  deletedAt        DateTime?       @map("deleted_at")
 
   @@unique([userId, path])
   @@index([userId])
@@ -1033,36 +1033,35 @@ model PageIndexNode {
   @@map("PageIndexNode")
 }
 
-
 /// TeamTask — one collaborative run kicked off in the Python sidecar's
 /// TeamRoom (AgentScope-backed multi-employee orchestration). One row
 /// per team task; messages live in TeamTaskMessage.
 model TeamTask {
-  id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orgId               String   @map("org_id") @db.Uuid
-  teamId              String?  @map("team_id") @db.Uuid
-  brief               String   @db.Text
-  requestedBy         String?  @map("requested_by") @db.Uuid
-  slackChannel        String?  @map("slack_channel") @db.VarChar(64)
-  slackThreadTs       String?  @map("slack_thread_ts") @db.VarChar(32)
-  rosterEmployeeIds   String[] @default([]) @map("roster_employee_ids") @db.Uuid
-  status              String   @default("running") @db.VarChar(20)
-    // running | completed | failed | cancelled
-  roundsCompleted     Int      @default(0) @map("rounds_completed")
-  maxRounds           Int      @default(2) @map("max_rounds")
-  gateReason          String?  @map("gate_reason") @db.VarChar(40)
-  finalAnswer         String?  @map("final_answer") @db.Text
-  claimCount          Int      @default(0) @map("claim_count")
-  reviewCount         Int      @default(0) @map("review_count")
-  revisionCount       Int      @default(0) @map("revision_count")
-  contradictions      Int      @default(0)
-  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  startedAt           DateTime? @map("started_at") @db.Timestamptz(6)
-  completedAt         DateTime? @map("completed_at") @db.Timestamptz(6)
-  error               String?  @db.Text
-  org                 Organization @relation("OrgTeamTasks", fields: [orgId], references: [id], onDelete: Cascade)
-  team                Team?        @relation("TeamTeamTasks", fields: [teamId], references: [id], onDelete: SetNull)
-  messages            TeamTaskMessage[]
+  id                String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId             String            @map("org_id") @db.Uuid
+  teamId            String?           @map("team_id") @db.Uuid
+  brief             String            @db.Text
+  requestedBy       String?           @map("requested_by") @db.Uuid
+  slackChannel      String?           @map("slack_channel") @db.VarChar(64)
+  slackThreadTs     String?           @map("slack_thread_ts") @db.VarChar(32)
+  rosterEmployeeIds String[]          @default([]) @map("roster_employee_ids") @db.Uuid
+  status            String            @default("running") @db.VarChar(20)
+  // running | completed | failed | cancelled
+  roundsCompleted   Int               @default(0) @map("rounds_completed")
+  maxRounds         Int               @default(2) @map("max_rounds")
+  gateReason        String?           @map("gate_reason") @db.VarChar(40)
+  finalAnswer       String?           @map("final_answer") @db.Text
+  claimCount        Int               @default(0) @map("claim_count")
+  reviewCount       Int               @default(0) @map("review_count")
+  revisionCount     Int               @default(0) @map("revision_count")
+  contradictions    Int               @default(0)
+  createdAt         DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  startedAt         DateTime?         @map("started_at") @db.Timestamptz(6)
+  completedAt       DateTime?         @map("completed_at") @db.Timestamptz(6)
+  error             String?           @db.Text
+  org               Organization      @relation("OrgTeamTasks", fields: [orgId], references: [id], onDelete: Cascade)
+  team              Team?             @relation("TeamTeamTasks", fields: [teamId], references: [id], onDelete: SetNull)
+  messages          TeamTaskMessage[]
 
   @@index([orgId])
   @@index([teamId])
@@ -1072,23 +1071,22 @@ model TeamTask {
   @@map("team_tasks")
 }
 
-
 /// TeamTaskMessage — one published item in a TeamTask transcript
 /// (phase output by an employee, or 'system' annotation from TeamRoom).
 model TeamTaskMessage {
-  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  taskId       String   @map("task_id") @db.Uuid
-  senderId     String   @map("sender_id") @db.Text
-    // employee_id OR 'system'
-  senderName   String   @map("sender_name") @db.VarChar(120)
-  senderRole   String?  @map("sender_role") @db.VarChar(60)
-  kind         String   @db.VarChar(20)
-    // chat | claim | review | revision | synthesis | system
-  roundNum     Int      @default(0) @map("round_num")
-  content      String   @db.Text
-  metadata     Json     @default("{}") @map("metadata") @db.JsonB
-  ts           DateTime @default(now()) @db.Timestamptz(6)
-  task         TeamTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  taskId     String   @map("task_id") @db.Uuid
+  senderId   String   @map("sender_id") @db.Text
+  // employee_id OR 'system'
+  senderName String   @map("sender_name") @db.VarChar(120)
+  senderRole String?  @map("sender_role") @db.VarChar(60)
+  kind       String   @db.VarChar(20)
+  // chat | claim | review | revision | synthesis | system
+  roundNum   Int      @default(0) @map("round_num")
+  content    String   @db.Text
+  metadata   Json     @default("{}") @map("metadata") @db.JsonB
+  ts         DateTime @default(now()) @db.Timestamptz(6)
+  task       TeamTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
 
   @@index([taskId, ts])
   @@index([taskId, kind])

@@ -220,6 +220,37 @@ export class EmployeeStore {
     });
   }
 
+  /**
+   * Persist the encrypted plaintext scoped API key alongside the metadata
+   * row. Phase 2.4 lets the Python sidecar fetch it (decrypted) on boot
+   * via /v1/employees/bootstrap so we don't need per-employee env vars.
+   */
+  async setScopedApiKey({ id, apiKeyId, encryptedKey }) {
+    return this.prisma.digitalEmployee.update({
+      where: { id },
+      data: { hivemindApiKeyId: apiKeyId, scopedApiKeyEncrypted: encryptedKey },
+      select: PUBLIC_FIELDS,
+    });
+  }
+
+  /**
+   * Internal helper for the bootstrap endpoint. Returns rows WITH the
+   * encrypted key so the caller can decrypt server-side and ship to the
+   * sidecar over the internal docker network. Never expose this via UI.
+   */
+  async listForBootstrap({ orgId = null }) {
+    const where = { archivedAt: null, status: { in: ['running', 'deploying'] } };
+    if (orgId) where.orgId = orgId;
+    return this.prisma.digitalEmployee.findMany({
+      where,
+      select: {
+        ...PUBLIC_FIELDS,
+        scopedApiKeyEncrypted: true,
+      },
+      orderBy: { updatedAt: 'desc' },
+    });
+  }
+
   // Bump metrics — called by Python sidecar after each LLM call
   async incrementMetrics({ id, tokens = 0, messages = 0, errors = 0 }) {
     const emp = await this.prisma.digitalEmployee.findUnique({

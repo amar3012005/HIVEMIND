@@ -905,6 +905,7 @@ model DigitalEmployee {
   model                String   @default("claude-haiku-4-5") @db.VarChar(100)
   llmProvider          String   @default("anthropic") @map("llm_provider") @db.VarChar(50)
   hivemindApiKeyId     String?  @map("hivemind_api_key_id") @db.Uuid
+  scopedApiKeyEncrypted String? @map("scoped_api_key_encrypted")
   scope                String   @default("team") @db.VarChar(20)
   slackTeamId          String?  @map("slack_team_id") @db.VarChar(64)
   slackBotUserId       String?  @map("slack_bot_user_id") @db.VarChar(64)

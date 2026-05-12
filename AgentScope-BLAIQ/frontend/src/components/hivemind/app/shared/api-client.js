@@ -68,6 +68,26 @@ const apiClient = {
 
   /** Request data export */
   exportData: () => request('POST', '/v1/account/export'),
+
+  /** Connectors */
+  getDescriptors: () => request('GET', '/v1/clients/descriptors'),
+  getConnectorStatus: () => request('GET', '/v1/proxy/connectors/mcp/status'),
+  listConnectorJobs: () => request('GET', '/v1/proxy/connectors/mcp/jobs'),
+  listOAuthConnectors: () => request('GET', '/v1/connectors'),
+  startConnectorOAuth: (provider, returnTo) =>
+    request('POST', `/v1/connectors/${provider}/start`, { return_to: returnTo }),
+  disconnectConnector: (provider) => request('POST', `/v1/connectors/${provider}/disconnect`),
+  resyncConnector: (provider) => request('POST', `/v1/connectors/${provider}/resync`, {}),
+
+  /** Gmail legacy helpers used by Connectors.jsx */
+  gmailConnect: () => request('POST', '/v1/connectors/gmail/start', { return_to: window.location.pathname }),
+  gmailDisconnect: () => request('POST', '/v1/connectors/gmail/disconnect'),
+  gmailSync: (settings = {}) => request('POST', '/v1/connectors/gmail/resync', settings),
+
+  /** WhatsApp QR connector */
+  whatsappQr: () => request('POST', '/connectors/whatsapp/qr'),
+  whatsappStatus: () => request('GET', '/connectors/whatsapp/status'),
+  whatsappDisconnect: () => request('POST', '/connectors/whatsapp/disconnect'),
 };
 
 export default apiClient;

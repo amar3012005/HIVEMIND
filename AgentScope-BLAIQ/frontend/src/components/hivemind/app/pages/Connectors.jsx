@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -26,6 +26,7 @@ import {
   Zap,
   Plus,
 } from 'lucide-react';
+import { QRCodeSVG } from 'qrcode.react';
 import apiClient from '../shared/api-client';
 import { useApiQuery, useCopyToClipboard } from '../shared/hooks';
 import ApiKeyPrompt from '../shared/ApiKeyPrompt';
@@ -140,6 +141,17 @@ const CONNECTORS = [
     color: '#e11d48',
     priority: 2,
     oauthProvider: 'slack',
+  },
+  {
+    id: 'whatsapp',
+    name: 'WhatsApp',
+    description: 'Chat on WhatsApp via QR code pairing - scan once, reply forever',
+    icon: MessageSquare,
+    category: 'workspace',
+    status: 'available',
+    color: '#25d366',
+    priority: 2,
+    isQrSetup: true,
   },
   // Knowledge
   {
@@ -579,6 +591,182 @@ function EndpointTable({ endpoints, loading, onRefresh }) {
   );
 }
 
+function WhatsAppQRModal({ onClose, onSuccess }) {
+  const [qr, setQr] = useState(null);
+  const [status, setStatus] = useState('loading');
+  const [phoneNumber, setPhoneNumber] = useState(null);
+  const [errorMessage, setErrorMessage] = useState(null);
+  const [elapsed, setElapsed] = useState(0);
+  const pollRef = useRef(null);
+  const mountedRef = useRef(true);
+  const elapsedRef = useRef(0);
+  const TIMEOUT_S = 120;
+
+  const pollStatus = useCallback(async () => {
+    setElapsed((prev) => {
+      const next = prev + 2;
+      elapsedRef.current = next;
+      return next;
+    });
+
+    try {
+      const data = await apiClient.whatsappStatus();
+      if (!mountedRef.current) return;
+
+      if (data.paired) {
+        if (pollRef.current) clearInterval(pollRef.current);
+        setStatus('paired');
+        setPhoneNumber(data.phoneNumber);
+        onSuccess?.({ phoneNumber: data.phoneNumber });
+      } else if (elapsedRef.current >= TIMEOUT_S) {
+        if (pollRef.current) clearInterval(pollRef.current);
+        setStatus('timeout');
+      }
+    } catch {}
+  }, [onSuccess]);
+
+  const startPolling = useCallback(() => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    pollRef.current = setInterval(() => {
+      pollStatus();
+    }, 2000);
+  }, [pollStatus]);
+
+  const fetchQr = useCallback(async () => {
+    try {
+      const data = await apiClient.whatsappQr();
+      if (!mountedRef.current) return;
+      if (data.qr) {
+        setQr(data.qr);
+        setStatus('qr_ready');
+        startPolling();
+      } else {
+        setStatus('error');
+        setErrorMessage('Failed to generate QR code');
+      }
+    } catch (e) {
+      if (mountedRef.current) {
+        setStatus('error');
+        setErrorMessage(e.response?.data?.error || e.message);
+      }
+    }
+  }, [startPolling]);
+
+  const startPairing = useCallback(async () => {
+    setStatus('loading');
+    setErrorMessage(null);
+    setQr(null);
+    setElapsed(0);
+    elapsedRef.current = 0;
+
+    try {
+      const data = await apiClient.whatsappQr();
+      if (!mountedRef.current) return;
+
+      if (data.qr) {
+        setQr(data.qr);
+        setStatus('qr_ready');
+        startPolling();
+      } else if (data.status === 'generating') {
+        pollRef.current = setTimeout(() => {
+          if (mountedRef.current) fetchQr();
+        }, 2000);
+      }
+    } catch (e) {
+      if (mountedRef.current) {
+        setStatus('error');
+        setErrorMessage(e.response?.data?.error || e.message);
+      }
+    }
+  }, [fetchQr, startPolling]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    startPairing();
+    return () => {
+      mountedRef.current = false;
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, [startPairing]);
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-xl max-w-sm w-full p-6" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-5">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-[#25d366]/10 border border-[#25d366]/20 flex items-center justify-center">
+              <MessageSquare size={20} className="text-[#25d366]" />
+            </div>
+            <div>
+              <h2 className="text-[#0a0a0a] text-sm font-bold font-['Space_Grotesk']">Pair WhatsApp</h2>
+              <p className="text-[#a3a3a3] text-[10px] font-mono">
+                {status === 'loading' && 'Generating QR...'}
+                {status === 'qr_ready' && 'Scan with your phone'}
+                {status === 'paired' && 'Connected!'}
+                {status === 'timeout' && 'Session expired'}
+                {status === 'error' && 'Connection failed'}
+              </p>
+            </div>
+          </div>
+          <button onClick={onClose} className="text-[#a3a3a3] hover:text-[#525252]">
+            <RefreshCw size={16} className="opacity-0" />
+          </button>
+        </div>
+
+        <div className="flex flex-col items-center">
+          {status === 'loading' && (
+            <div className="w-56 h-56 bg-[#f3f1ec] rounded-xl flex items-center justify-center">
+              <RefreshCw size={32} className="text-[#a3a3a3] animate-spin" />
+            </div>
+          )}
+
+          {status === 'qr_ready' && qr && (
+            <>
+              <div className="bg-white border-2 border-[#25d366]/30 rounded-xl p-3 mb-4">
+                <QRCodeSVG value={qr} size={200} level="M" fgColor="#075e54" style={{ display: 'block' }} />
+              </div>
+              <div className="flex items-center gap-2 text-[#525252] text-[12px] font-['Space_Grotesk']">
+                <MessageSquare size={14} className="text-[#25d366]" />
+                <span>Open WhatsApp - Linked Devices - Scan QR</span>
+              </div>
+              <p className="text-[#a3a3a3] text-[10px] font-mono mt-1">Expires in {TIMEOUT_S - elapsed}s</p>
+            </>
+          )}
+
+          {status === 'paired' && (
+            <div className="flex flex-col items-center py-6">
+              <div className="w-14 h-14 rounded-full bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center mb-3">
+                <Check size={28} className="text-[#16a34a]" />
+              </div>
+              <h3 className="text-[#0a0a0a] text-sm font-bold font-['Space_Grotesk']">WhatsApp Connected</h3>
+              {phoneNumber && <p className="text-[#a3a3a3] text-[11px] font-mono mt-1">{phoneNumber}</p>}
+            </div>
+          )}
+
+          {status === 'timeout' && (
+            <div className="flex flex-col items-center py-6">
+              <WifiOff size={28} className="text-amber-500 mb-3" />
+              <h3 className="text-[#0a0a0a] text-sm font-bold font-['Space_Grotesk']">QR Code Expired</h3>
+            </div>
+          )}
+
+          {status === 'error' && (
+            <div className="flex flex-col items-center py-6">
+              <AlertCircle size={28} className="text-[#dc2626] mb-3" />
+              <h3 className="text-[#0a0a0a] text-sm font-bold font-['Space_Grotesk']">Connection Failed</h3>
+              <p className="text-[#a3a3a3] text-[11px] font-mono mt-1 text-center max-w-[240px]">{errorMessage || 'An error occurred'}</p>
+            </div>
+          )}
+
+          <button onClick={onClose} className="mt-4 text-[#a3a3a3] text-[11px] font-['Space_Grotesk'] hover:text-[#dc2626] hover:underline">
+            {status === 'paired' ? 'Done' : 'Cancel'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Main Page ───────────────────────────────────────────────────────────────
 
 // ─── Gmail Sync Settings Modal ──────────────────────────────────────────────
@@ -747,6 +935,7 @@ export default function Connectors() {
   const [gmailEmail, setGmailEmail] = useState(null);
   const [searchParams, setSearchParams] = useSearchParams();
   const [toastMessage, setToastMessage] = useState(null);
+  const [whatsappQRConnector, setWhatsappQRConnector] = useState(false);
 
   // Auto-dismiss toast
   useEffect(() => {
@@ -886,6 +1075,16 @@ export default function Connectors() {
     }
   }, [refetchOAuth]);
 
+  const handleWhatsAppDisconnect = useCallback(async () => {
+    try {
+      await apiClient.whatsappDisconnect();
+      setToastMessage({ type: 'success', text: 'WhatsApp disconnected' });
+      refetchOAuth();
+    } catch (err) {
+      setToastMessage({ type: 'error', text: err.response?.data?.error || err.message });
+    }
+  }, [refetchOAuth]);
+
   const npxCommand = 'npx -y @amar_528/mcp-bridge hosted';
   const endpoints = connectorStatus?.statuses || [];
   const jobList = Array.isArray(jobs) ? jobs : jobs?.jobs || [];
@@ -893,6 +1092,18 @@ export default function Connectors() {
 
   // Merge static CONNECTORS with live OAuth status
   const mergedConnectors = CONNECTORS.map((c) => {
+    if (c.isQrSetup) {
+      const live = oauthList.find((o) => o.provider === 'whatsapp');
+      if (live) {
+        return {
+          ...c,
+          status: live.status || c.status,
+          accountRef: live.account_ref,
+          lastSyncAt: live.last_sync_at,
+          lastError: live.last_error,
+        };
+      }
+    }
     if (c.oauthProvider) {
       const live = oauthList.find((o) => o.provider === c.oauthProvider);
       if (live) {
@@ -1019,12 +1230,16 @@ export default function Connectors() {
             connector={connector}
             config={descriptors?.[connector.configKey]}
             onConnect={() => {
-              if (connector.oauthProvider) {
+              if (connector.isQrSetup) {
+                setWhatsappQRConnector(true);
+              } else if (connector.oauthProvider) {
                 handleOAuthConnect(connector.oauthProvider);
               }
             }}
             onDisconnect={() => {
-              if (connector.oauthProvider) {
+              if (connector.isQrSetup) {
+                handleWhatsAppDisconnect();
+              } else if (connector.oauthProvider) {
                 handleDisconnect(connector.oauthProvider);
               }
             }}
@@ -1126,6 +1341,19 @@ export default function Connectors() {
             email={gmailEmail}
             onSync={handleGmailSync}
             onClose={() => setGmailSettingsOpen(false)}
+          />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {whatsappQRConnector && (
+          <WhatsAppQRModal
+            onClose={() => setWhatsappQRConnector(false)}
+            onSuccess={(info) => {
+              setWhatsappQRConnector(false);
+              setToastMessage({ type: 'success', text: `WhatsApp paired - +${info.phoneNumber}` });
+              refetchOAuth();
+            }}
           />
         )}
       </AnimatePresence>

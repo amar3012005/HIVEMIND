@@ -14,6 +14,8 @@
  */
 
 import { EventEmitter } from 'events';
+import fs from 'fs';
+import path from 'path';
 
 const DEFAULT_TIMEOUT_MS = 15000;
 
@@ -25,6 +27,36 @@ export class WhatsAppBridge extends EventEmitter {
     this._phoneNumber = null;
     this._qrCode = null;
     this._sessionDir = null;
+    this._lastError = null;
+  }
+
+  hasActiveClient() {
+    return this._client !== null;
+  }
+
+  getLastError() {
+    return this._lastError;
+  }
+
+  _emitError(payload) {
+    this._lastError = payload;
+    if (this.listenerCount('error') > 0) {
+      this.emit('error', payload);
+    }
+  }
+
+  _clearSingletonLocks() {
+    if (!this._sessionDir) {
+      return;
+    }
+
+    for (const baseDir of [this._sessionDir, path.join(this._sessionDir, 'session')]) {
+      for (const name of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
+        try {
+          fs.rmSync(path.join(baseDir, name), { force: true });
+        } catch {}
+      }
+    }
   }
 
   async _emitInboundMessage(msg) {
@@ -66,6 +98,8 @@ export class WhatsAppBridge extends EventEmitter {
    */
   async startPairing(sessionDir) {
     this._sessionDir = sessionDir;
+    this._lastError = null;
+    this._clearSingletonLocks();
 
     // Dynamic import — whatsapp-web.js has heavy deps (puppeteer)
     const whatsappModule = await import('whatsapp-web.js');
@@ -117,7 +151,7 @@ export class WhatsAppBridge extends EventEmitter {
 
     this._client.on('auth_failure', (msg) => {
       console.error('[whatsapp-bridge] Auth failure:', msg);
-      this.emit('error', { type: 'auth_failure', message: msg });
+      this._emitError({ type: 'auth_failure', message: msg });
     });
 
     this._client.on('disconnected', (reason) => {
@@ -129,7 +163,7 @@ export class WhatsAppBridge extends EventEmitter {
     // Start initialization — returns immediately, QR shows later
     this._client.initialize().catch((err) => {
       console.error('[whatsapp-bridge] Init failed:', err.message);
-      this.emit('error', { type: 'init_failed', message: err.message });
+      this._emitError({ type: 'init_failed', message: err.message });
     });
 
     return this;
@@ -242,15 +276,27 @@ export class WhatsAppBridge extends EventEmitter {
 
   async disconnect() {
     if (this._client) {
+      const client = this._client;
       try {
-        await this._client.destroy();
+        await client.destroy();
       } catch (err) {
         console.warn('[whatsapp-bridge] destroy failed:', err.message);
       }
+
+      try {
+        const browser = client.pupBrowser;
+        if (browser?.isConnected?.()) {
+          await browser.close();
+        }
+      } catch (err) {
+        console.warn('[whatsapp-bridge] browser close failed:', err.message);
+      }
+
       this._client = null;
       this._ready = false;
       this._phoneNumber = null;
       this._qrCode = null;
+      this._lastError = null;
     }
   }
 }

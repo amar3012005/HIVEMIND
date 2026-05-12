@@ -130,6 +130,11 @@ async function waitForWhatsAppHandshake(bridge, timeoutMs = 15000) {
     return { paired: true, phoneNumber: bridge.getPhoneNumber(), qr: null };
   }
 
+  const startupError = typeof bridge.getLastError === 'function' ? bridge.getLastError() : null;
+  if (startupError) {
+    throw new Error(startupError.message || 'WhatsApp pairing failed');
+  }
+
   const qr = bridge.getQrCode();
   if (qr) {
     return { paired: false, phoneNumber: null, qr };

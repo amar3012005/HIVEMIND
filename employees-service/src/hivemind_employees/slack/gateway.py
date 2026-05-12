@@ -21,6 +21,7 @@ from .. import db as db_module
 from ..redis_client import dedup_event
 from ..agents.factory import build_assistant
 from ..bootstrap_client import fetch_bootstrap, report_sidecar_status
+from ..sessions import load_thread, save_thread
 from .router import route_event
 
 log = logging.getLogger(__name__)
@@ -203,14 +204,27 @@ class SlackGateway:
         text = event.get("text") or ""
         channel = event.get("channel")
         thread_ts = event.get("thread_ts") or event.get("ts")
-        log.info("routing event to %s in #%s", emp["slug"], channel)
+        log.info("routing event to %s in #%s thread=%s", emp["slug"], channel, thread_ts)
+
+        # Restore thread history from Redis so the agent has context
+        # across multiple @mentions in the same Slack thread.
+        prior = await load_thread(emp["id"], channel, thread_ts)
 
         # Run sync Assistant.chat in a thread executor (slackagents is sync)
         try:
-            reply_text = await asyncio.to_thread(self._call_assistant, assistant, text, channel)
+            reply_text = await asyncio.to_thread(
+                self._call_assistant, assistant, text, channel, prior,
+            )
         except Exception as e:
             log.exception("assistant chat failed for %s: %s", emp["slug"], e)
             reply_text = None
+
+        # Persist updated message stack regardless of reply outcome —
+        # next inbound on this thread will resume cleanly.
+        try:
+            await save_thread(emp["id"], channel, thread_ts, list(assistant.messages))
+        except Exception as e:
+            log.warning("session save failed for %s: %s", emp["slug"], e)
 
         if not reply_text:
             return
@@ -222,9 +236,24 @@ class SlackGateway:
             return
         await self._post_via_core(api_key, channel, reply_text, thread_ts)
 
-    def _call_assistant(self, assistant, text: str, channel: str) -> str:
-        """Sync wrapper — runs in thread."""
+    def _call_assistant(
+        self,
+        assistant,
+        text: str,
+        channel: str,
+        prior_messages: Optional[List[Dict[str, Any]]] = None,
+    ) -> str:
+        """Sync wrapper — runs in thread.
+        Restores prior thread context if provided, else resets to fresh
+        [system_prompt] so threads don't bleed into each other when one
+        Assistant instance serves multiple Slack threads."""
         try:
+            if prior_messages:
+                assistant.messages = list(prior_messages)
+            else:
+                # Fresh thread — reseed with just the system prompt
+                # (system_prompt is held by Executor.__init__ as messages[0]).
+                assistant.messages = [{"role": "system", "content": assistant.system_prompt}]
             return assistant.chat(text)
         except Exception as e:
             log.exception("assistant.chat raised: %s", e)

@@ -17,6 +17,7 @@ from .db import init_pool, close_pool, list_running_employees
 from .redis_client import init_redis, close_redis
 from .hivemind_client import ServiceClient
 from .slack.gateway import SlackGateway
+from .api_team_tasks import router as team_tasks_router
 
 
 def _configure_logging():
@@ -122,6 +123,9 @@ app = FastAPI(
     description="Python sidecar — SlackAgents + AgentScope wrapper",
     lifespan=lifespan,
 )
+
+# Multi-employee orchestration endpoints (Phase 3.5).
+app.include_router(team_tasks_router)
 
 
 # ── Routes ─────────────────────────────────────────────────────

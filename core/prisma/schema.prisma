@@ -64,6 +64,7 @@ model Organization {
   projects            Project[]
   teams               Team[]             @relation("OrgTeams")
   digitalEmployees    DigitalEmployee[]  @relation("OrgDigitalEmployees")
+  teamTasks           TeamTask[]         @relation("OrgTeamTasks")
   users               UserOrganization[] @relation("OrgUserOrganizations")
   pageIndexNodes      PageIndexNode[]    @relation("OrgPageIndexNodes")
   ssoConfig           OrgSsoConfig?      @relation("OrgSsoConfig")
@@ -132,6 +133,7 @@ model Team {
   memories             Memory[]              @relation("TeamMemories")
   platformIntegrations PlatformIntegration[] @relation("TeamPlatformIntegrations")
   digitalEmployees     DigitalEmployee[]     @relation("TeamDigitalEmployees")
+  teamTasks            TeamTask[]            @relation("TeamTeamTasks")
 
   @@unique([orgId, slug])
   @@index([orgId])
@@ -1023,4 +1025,66 @@ model PageIndexNode {
   @@index([parentId])
   @@index([nodeType])
   @@map("PageIndexNode")
+}
+
+
+/// TeamTask — one collaborative run kicked off in the Python sidecar's
+/// TeamRoom (AgentScope-backed multi-employee orchestration). One row
+/// per team task; messages live in TeamTaskMessage.
+model TeamTask {
+  id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId               String   @map("org_id") @db.Uuid
+  teamId              String?  @map("team_id") @db.Uuid
+  brief               String   @db.Text
+  requestedBy         String?  @map("requested_by") @db.Uuid
+  slackChannel        String?  @map("slack_channel") @db.VarChar(64)
+  slackThreadTs       String?  @map("slack_thread_ts") @db.VarChar(32)
+  rosterEmployeeIds   String[] @default([]) @map("roster_employee_ids") @db.Uuid
+  status              String   @default("running") @db.VarChar(20)
+    // running | completed | failed | cancelled
+  roundsCompleted     Int      @default(0) @map("rounds_completed")
+  maxRounds           Int      @default(2) @map("max_rounds")
+  gateReason          String?  @map("gate_reason") @db.VarChar(40)
+  finalAnswer         String?  @map("final_answer") @db.Text
+  claimCount          Int      @default(0) @map("claim_count")
+  reviewCount         Int      @default(0) @map("review_count")
+  revisionCount       Int      @default(0) @map("revision_count")
+  contradictions      Int      @default(0)
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  startedAt           DateTime? @map("started_at") @db.Timestamptz(6)
+  completedAt         DateTime? @map("completed_at") @db.Timestamptz(6)
+  error               String?  @db.Text
+  org                 Organization @relation("OrgTeamTasks", fields: [orgId], references: [id], onDelete: Cascade)
+  team                Team?        @relation("TeamTeamTasks", fields: [teamId], references: [id], onDelete: SetNull)
+  messages            TeamTaskMessage[]
+
+  @@index([orgId])
+  @@index([teamId])
+  @@index([status])
+  @@index([createdAt(sort: Desc)])
+  @@index([slackChannel, slackThreadTs])
+  @@map("team_tasks")
+}
+
+
+/// TeamTaskMessage — one published item in a TeamTask transcript
+/// (phase output by an employee, or 'system' annotation from TeamRoom).
+model TeamTaskMessage {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  taskId       String   @map("task_id") @db.Uuid
+  senderId     String   @map("sender_id") @db.Text
+    // employee_id OR 'system'
+  senderName   String   @map("sender_name") @db.VarChar(120)
+  senderRole   String?  @map("sender_role") @db.VarChar(60)
+  kind         String   @db.VarChar(20)
+    // chat | claim | review | revision | synthesis | system
+  roundNum     Int      @default(0) @map("round_num")
+  content      String   @db.Text
+  metadata     Json     @default("{}") @map("metadata") @db.JsonB
+  ts           DateTime @default(now()) @db.Timestamptz(6)
+  task         TeamTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId, ts])
+  @@index([taskId, kind])
+  @@map("team_task_messages")
 }

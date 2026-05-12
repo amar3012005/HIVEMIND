@@ -68,7 +68,13 @@ export class WhatsAppBridge extends EventEmitter {
     this._sessionDir = sessionDir;
 
     // Dynamic import — whatsapp-web.js has heavy deps (puppeteer)
-    const { Client, LocalAuth } = await import('whatsapp-web.js');
+    const whatsappModule = await import('whatsapp-web.js');
+    const Client = whatsappModule.Client || whatsappModule.default?.Client;
+    const LocalAuth = whatsappModule.LocalAuth || whatsappModule.default?.LocalAuth;
+
+    if (!Client || !LocalAuth) {
+      throw new Error('whatsapp-web.js exports are unavailable');
+    }
 
     this._client = new Client({
       authStrategy: new LocalAuth({ dataPath: sessionDir }),

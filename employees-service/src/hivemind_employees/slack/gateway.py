@@ -20,6 +20,7 @@ from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from .. import db as db_module
 from ..redis_client import dedup_event
 from ..agents.factory import build_assistant
+from ..bootstrap_client import fetch_bootstrap, report_sidecar_status
 from .router import route_event
 
 log = logging.getLogger(__name__)
@@ -71,38 +72,51 @@ class SlackGateway:
         self.employees: Dict[str, Dict[str, Any]] = {}          # employee_id → row
         self.assistants: Dict[str, Any] = {}                    # employee_id → Assistant
         self.api_keys: Dict[str, str] = {}                      # employee_id → raw key
+        self.workspace_bot_tokens: Dict[str, str] = {}          # team_id → xoxb
 
     async def start(self):
         """Initial boot — fetch employees, set up workspaces + assistants."""
         await self.reconcile()
 
     async def reconcile(self):
-        """Diff DB state vs in-memory; add/remove workspaces + assistants."""
+        """Diff DB + bootstrap snapshot vs in-memory; add/remove
+        workspaces + assistants. Reports each new agent's status
+        back to control-plane so the dashboard badge flips."""
+        # Pull authoritative snapshot from control-plane (decrypted keys
+        # + bot tokens). Falls back to env vars on outage.
+        snapshot = {b["id"]: b for b in await fetch_bootstrap()}
         rows = await db_module.list_running_employees()
         seen_emp_ids = set()
         seen_ws_ids = set()
 
-        # Group employees by workspace
         for emp in rows:
             seen_emp_ids.add(emp["id"])
             wsid = emp.get("slack_team_id")
+            boot = snapshot.get(emp["id"], {})
+
             if wsid:
                 seen_ws_ids.add(wsid)
+                # Cache bot token from snapshot for this workspace
+                if boot.get("slack_bot_token") and wsid not in self.workspace_bot_tokens:
+                    self.workspace_bot_tokens[wsid] = boot["slack_bot_token"]
 
             # New employee → build Assistant + wire route
             if emp["id"] not in self.employees:
-                api_key = self._resolve_api_key_env(emp["id"])
+                api_key = boot.get("api_key") or self._resolve_api_key_env(emp["id"])
                 if not api_key:
-                    log.warning("employee %s: no API key env (HIVEMIND_EMP_KEY_%s) — skip",
-                                emp["slug"], emp["id"])
+                    log.warning("employee %s: no API key (bootstrap empty and env unset) — skip",
+                                emp["slug"])
+                    await report_sidecar_status(emp["id"], "error", "missing API key")
                     continue
                 try:
                     self.assistants[emp["id"]] = build_assistant(emp, api_key)
                     self.api_keys[emp["id"]] = api_key
                     self.employees[emp["id"]] = emp
                     log.info("loaded employee %s", emp["slug"])
+                    await report_sidecar_status(emp["id"], "running")
                 except Exception as e:
                     log.warning("failed building assistant for %s: %s", emp["slug"], e)
+                    await report_sidecar_status(emp["id"], "error", str(e)[:200])
             else:
                 self.employees[emp["id"]] = emp  # refresh row
 
@@ -116,10 +130,17 @@ class SlackGateway:
         # Ensure WorkspaceConnections exist for every seen workspace
         for wsid in seen_ws_ids:
             if wsid not in self.workspaces:
-                bot, app_t = self._resolve_workspace_tokens(wsid)
-                if not bot or not app_t:
-                    log.warning("workspace %s: missing SLACK_BOT_TOKEN_%s or SLACK_APP_TOKEN_%s env — skip",
-                                wsid, wsid, wsid)
+                bot = self.workspace_bot_tokens.get(wsid) or self._resolve_bot_token_env(wsid)
+                app_t = self._resolve_app_token_env(wsid)
+                if not bot:
+                    log.warning("workspace %s: no bot token (bootstrap empty, env SLACK_BOT_TOKEN_%s unset) — skip",
+                                wsid, wsid)
+                    continue
+                if not app_t:
+                    # Bolt allows POST-only mode without Socket Mode, but we need
+                    # WS for inbound. Skip if missing.
+                    log.warning("workspace %s: no SLACK_APP_TOKEN_%s — Socket Mode disabled",
+                                wsid, wsid)
                     continue
                 try:
                     conn = WorkspaceConnection(wsid, bot, app_t)
@@ -134,6 +155,7 @@ class SlackGateway:
             log.info("stopping workspace %s (no live employees)", stale_ws)
             await self.workspaces[stale_ws].stop()
             self.workspaces.pop(stale_ws, None)
+            self.workspace_bot_tokens.pop(stale_ws, None)
 
     async def stop(self):
         for conn in list(self.workspaces.values()):
@@ -226,17 +248,16 @@ class SlackGateway:
                 log.warning("core slack-action failed: %s", e)
 
     # ── Credential resolution ────────────────────────────────────
+    # Phase 2.4: bot tokens + employee API keys come from /v1/employees/bootstrap.
+    # Env vars below remain as fallback when control-plane is unreachable.
     @staticmethod
     def _resolve_api_key_env(employee_id: str) -> Optional[str]:
-        """Look up HIVEMIND_EMP_KEY_<id> env var. Phase 2.4 will replace
-        with a control-plane fetch endpoint."""
         return os.environ.get(f"HIVEMIND_EMP_KEY_{employee_id}")
 
     @staticmethod
-    def _resolve_workspace_tokens(slack_team_id: str) -> tuple[Optional[str], Optional[str]]:
-        """Look up SLACK_BOT_TOKEN_<team_id> + SLACK_APP_TOKEN_<team_id>.
-        Phase 2.4 will resolve from platform_integrations via core.
-        For now this is the simplest secret-injection path."""
-        bot = os.environ.get(f"SLACK_BOT_TOKEN_{slack_team_id}")
-        app = os.environ.get(f"SLACK_APP_TOKEN_{slack_team_id}")
-        return bot, app
+    def _resolve_bot_token_env(slack_team_id: str) -> Optional[str]:
+        return os.environ.get(f"SLACK_BOT_TOKEN_{slack_team_id}")
+
+    @staticmethod
+    def _resolve_app_token_env(slack_team_id: str) -> Optional[str]:
+        return os.environ.get(f"SLACK_APP_TOKEN_{slack_team_id}")

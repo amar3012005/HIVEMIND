@@ -3188,6 +3188,32 @@ const server = http.createServer(async (req, res) => {
     return _getEmployeeStore._cache;
   };
 
+  // Fire-and-forget POST to hm-employees:8060/admin/reload so the sidecar
+  // refetches the bootstrap snapshot immediately rather than waiting 30s
+  // for the next reconcile tick. Best-effort: never blocks the response.
+  function _notifyEmployeesReload() {
+    const url = process.env.HIVEMIND_EMPLOYEES_URL || 'http://hm-employees:8060';
+    const masterKey = process.env.HIVEMIND_MASTER_API_KEY || '';
+    setImmediate(async () => {
+      try {
+        const resp = await fetch(`${url}/admin/reload`, {
+          method: 'POST',
+          headers: { 'X-Admin-Token': masterKey },
+          // 3s timeout — sidecar may not be running yet in dev
+          signal: AbortSignal.timeout(3000),
+        });
+        if (!resp.ok) {
+          console.warn('[employees.reload] sidecar returned', resp.status);
+        }
+      } catch (err) {
+        // Silent in dev (sidecar not running); log in prod
+        if (process.env.NODE_ENV === 'production') {
+          console.warn('[employees.reload] failed:', err.message);
+        }
+      }
+    });
+  }
+
   // GET /v1/employees — list employees the caller can see in current org
   if (pathname === '/v1/employees' && req.method === 'GET') {
     const current = await requireSession(req, res);
@@ -3247,6 +3273,35 @@ const server = http.createServer(async (req, res) => {
         avatarUrl: body.avatar_url,
         createdBy: current.session.userId,
       });
+
+      // Mint scoped API key + encrypt + persist so Python sidecar can
+      // bootstrap without per-employee env vars.
+      try {
+        const crypto = await import('node:crypto');
+        const raw = 'hmk_emp_' + crypto.randomBytes(24).toString('hex');
+        const keyHash = crypto.createHash('sha256').update(raw).digest('hex');
+        const apiKey = await prisma.apiKey.create({
+          data: {
+            userId: current.session.userId,
+            orgId: current.session.orgId,
+            name: `${emp.name} (employee)`,
+            keyHash,
+            keyPrefix: raw.slice(0, 12),
+            scopes: ['memory:read', 'memory:write', 'mcp', 'slack:act'],
+            isActive: true,
+          },
+        });
+        const { encryptToken } = await import('./connectors/framework/connector-store.js');
+        const encrypted = encryptToken(raw);
+        await store.setScopedApiKey({ id: emp.id, apiKeyId: apiKey.id, encryptedKey: encrypted });
+      } catch (mintErr) {
+        console.warn('[employees.create] scoped key mint failed:', mintErr.message);
+      }
+
+      // Fire-and-forget hot-reload to the sidecar (skip in dev when host
+      // can't reach the docker network)
+      _notifyEmployeesReload();
+
       audit({
         organizationId: current.session.orgId,
         userId: current.session.userId,
@@ -3259,6 +3314,96 @@ const server = http.createServer(async (req, res) => {
         ..._reqMeta(req),
       });
       return jsonResponse(res, { employee: emp }, 201);
+    } catch (err) {
+      return jsonResponse(res, { error: err.message }, 500);
+    }
+  }
+
+  // GET /v1/employees/bootstrap — internal-only; master-key authed.
+  // Returns running employees with their decrypted API keys + decrypted
+  // Slack bot tokens so the Python sidecar can wire each Assistant + each
+  // workspace WS at boot. App-level tokens (xapp-) remain admin-managed
+  // via env (SLACK_APP_TOKEN_<team_id>) since Slack issues them per-app,
+  // not per-OAuth-grant.
+  if (pathname === '/v1/employees/bootstrap' && req.method === 'GET') {
+    const callerKey = (req.headers['authorization'] || '').replace('Bearer ', '').trim()
+      || (req.headers['x-hivemind-master-key'] || '').trim();
+    const expected = process.env.HIVEMIND_MASTER_API_KEY;
+    if (!expected || callerKey !== expected) {
+      return jsonResponse(res, { error: 'master key required' }, 403);
+    }
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const store = await _getEmployeeStore();
+    try {
+      const rows = await store.listForBootstrap({});
+      const { decryptToken } = await import('./connectors/framework/connector-store.js');
+      const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
+      const connStore = new ConnectorStore(prisma);
+
+      const out = [];
+      for (const r of rows) {
+        let apiKey = null;
+        if (r.scopedApiKeyEncrypted) {
+          try { apiKey = decryptToken(r.scopedApiKeyEncrypted); } catch {}
+        }
+        let slackBotToken = null;
+        if (r.slackTeamId) {
+          try {
+            slackBotToken = await connStore.getAccessToken(r.createdBy, 'slack');
+          } catch {}
+        }
+        out.push({
+          id: r.id,
+          slug: r.slug,
+          name: r.name,
+          org_id: r.orgId,
+          team_id: r.teamId,
+          persona: r.persona,
+          model: r.model,
+          llm_provider: r.llmProvider,
+          tools: r.tools,
+          policy_rules: r.policyRules,
+          scope: r.scope,
+          slack_team_id: r.slackTeamId,
+          slack_channels_allowed: r.slackChannelsAllowed,
+          status: r.status,
+          api_key: apiKey,
+          slack_bot_token: slackBotToken,
+          created_by: r.createdBy,
+        });
+      }
+      return jsonResponse(res, { employees: out, generated_at: new Date().toISOString() });
+    } catch (err) {
+      console.warn('[employees.bootstrap] failed:', err.message);
+      return jsonResponse(res, { error: err.message }, 500);
+    }
+  }
+
+  // PUT /v1/employees/:id/sidecar-status — master-key authed.
+  // Python sidecar POSTs after building (or failing to build) the
+  // Assistant for an employee so the UI badge flips draft → running
+  // (or error) automatically.
+  const sidecarStatusMatch = pathname.match(/^\/v1\/employees\/([0-9a-f-]{36})\/sidecar-status$/);
+  if (sidecarStatusMatch && req.method === 'PUT') {
+    const callerKey = (req.headers['authorization'] || '').replace('Bearer ', '').trim()
+      || (req.headers['x-hivemind-master-key'] || '').trim();
+    const expected = process.env.HIVEMIND_MASTER_API_KEY;
+    if (!expected || callerKey !== expected) {
+      return jsonResponse(res, { error: 'master key required' }, 403);
+    }
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const store = await _getEmployeeStore();
+    const empId = sidecarStatusMatch[1];
+    const body = await parseBody(req);
+    const newStatus = body?.status;
+    if (!newStatus) return jsonResponse(res, { error: 'status required' }, 400);
+    try {
+      const updated = await store.setStatus({
+        id: empId,
+        status: newStatus,
+        errorMessage: body?.error_message,
+      });
+      return jsonResponse(res, { employee: updated });
     } catch (err) {
       return jsonResponse(res, { error: err.message }, 500);
     }
@@ -3292,6 +3437,7 @@ const server = http.createServer(async (req, res) => {
       try {
         const body = await parseBody(req);
         const updated = await store.update({ id: empId, data: body });
+        _notifyEmployeesReload();
         audit({
           organizationId: orgId, userId,
           eventType: 'employee.updated', eventCategory: 'employee', action: 'update',
@@ -3309,6 +3455,7 @@ const server = http.createServer(async (req, res) => {
       if (!isOrgAdmin) return jsonResponse(res, { error: 'Forbidden' }, 403);
       try {
         await store.archive({ id: empId });
+        _notifyEmployeesReload();
         audit({
           organizationId: orgId, userId,
           eventType: 'employee.archived', eventCategory: 'employee', action: 'delete',
@@ -3326,6 +3473,7 @@ const server = http.createServer(async (req, res) => {
       if (!isOrgAdmin) return jsonResponse(res, { error: 'Forbidden' }, 403);
       try {
         const updated = await store.setStatus({ id: empId, status: 'paused' });
+        _notifyEmployeesReload();
         audit({
           organizationId: orgId, userId,
           eventType: 'employee.paused', eventCategory: 'employee', action: 'update',
@@ -3343,6 +3491,7 @@ const server = http.createServer(async (req, res) => {
       if (!isOrgAdmin) return jsonResponse(res, { error: 'Forbidden' }, 403);
       try {
         const updated = await store.setStatus({ id: empId, status: 'running' });
+        _notifyEmployeesReload();
         audit({
           organizationId: orgId, userId,
           eventType: 'employee.resumed', eventCategory: 'employee', action: 'update',

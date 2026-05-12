@@ -36,6 +36,8 @@ const PUBLIC_FIELDS = {
   slackTeamId: true,
   slackBotUserId: true,
   slackChannelsAllowed: true,
+  slackDisplayName: true,
+  slackAvatarEmoji: true,
   tools: true,
   policyRules: true,
   status: true,

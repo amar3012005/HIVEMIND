@@ -3917,7 +3917,18 @@ const server = http.createServer(async (req, res) => {
         let executionError = null;
         try {
           if (actionType === 'slack_post') {
-            result = await bridge.postMessage(installerUserId, payload.channel, payload.text, { threadTs: payload.thread_ts });
+            // Per-employee identity override. Payload may supply username/
+            // icon explicitly; otherwise we fall back to the employee row so
+            // the same shared Slack app appears as N distinct personas.
+            const displayName = payload.username || employee.slackDisplayName || employee.name;
+            const iconUrl = payload.icon_url || employee.avatarUrl || undefined;
+            const iconEmoji = payload.icon_emoji || employee.slackAvatarEmoji || (iconUrl ? undefined : ':robot_face:');
+            result = await bridge.postMessage(installerUserId, payload.channel, payload.text, {
+              threadTs: payload.thread_ts,
+              username: displayName,
+              iconUrl,
+              iconEmoji,
+            });
           } else if (actionType === 'slack_react') {
             result = await bridge._call('reactions.add', { channel: payload.channel, timestamp: payload.ts, name: payload.emoji }, token, 'POST');
           } else if (actionType === 'slack_search') {

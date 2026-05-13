@@ -5138,7 +5138,11 @@ const server = http.createServer(async (req, res) => {
                       where: {
                         userId,
                         deletedAt: null,
-                        sourceMetadata: { sourceId: { startsWith: sourcePattern } },
+                        sourceMetadata: {
+                          is: {
+                            sourceId: { startsWith: sourcePattern },
+                          },
+                        },
                       },
                       select: { id: true },
                     });

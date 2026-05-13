@@ -3337,7 +3337,7 @@ const server = http.createServer(async (req, res) => {
         });
       }
 
-      if ((pathname === '/api/mcp/rpc' || pathname === '/api/mcp/message') && req.method === 'POST') {
+      if ((pathname === '/api/mcp' || pathname === '/api/mcp/rpc' || pathname === '/api/mcp/message') && req.method === 'POST') {
         const apiClient = createHostedApiClient({
           baseUrl: getHostedApiBaseUrl(req),
           apiKey: principal.rawKey || MASTER_API_KEY || '',

@@ -8101,6 +8101,21 @@ const server = http.createServer(async (req, res) => {
             try {
               const graphProject = url.searchParams.get('project') || null;
               const graphScope = url.searchParams.get('scope') || 'personal';
+              // Phase 7: in-process cache to absorb FE auto-refresh + repeat reads
+              const { getGraphCache, setGraphCache } = await import('./memory/graph-cache.js');
+              const cacheKey = {
+                userId,
+                orgId,
+                project: graphProject,
+                scope: graphScope,
+                limit: url.searchParams.get('limit') || '',
+                edges: url.searchParams.get('include_edges') !== 'false' ? 1 : 0,
+                residents: url.searchParams.get('include_residents') !== 'false' ? 1 : 0,
+              };
+              const cached = getGraphCache(cacheKey);
+              if (cached) {
+                return jsonResponse(res, cached);
+              }
               // Hard cap raised to 50000 — full memory libraries should be visualisable.
               // Pass limit=0 to mean "no cap" (will be clamped to 50000 max).
               const rawLimit = parseInt(url.searchParams.get('limit'));
@@ -8409,7 +8424,7 @@ const server = http.createServer(async (req, res) => {
                 planEnforcer.recordUsage(orgId, 'graphQueries', 1);
               }
 
-              return jsonResponse(res, {
+              const responsePayload = {
                 nodes,
                 edges,
                 residentActivity,
@@ -8427,8 +8442,11 @@ const server = http.createServer(async (req, res) => {
                   tags: Array.from(tagSet).sort(),
                   clusters: clusterMetaList, // [{id, size, label, topTags, hubNodeId}]
                   clusterCount: clusterMetaList.length,
+                  cachedAt: new Date().toISOString(),
                 },
-              });
+              };
+              setGraphCache(cacheKey, responsePayload);
+              return jsonResponse(res, responsePayload);
             } catch (error) {
               console.error('Graph endpoint failed:', error);
               return jsonResponse(res, {

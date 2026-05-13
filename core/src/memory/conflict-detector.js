@@ -50,12 +50,86 @@ export function computeTokenSimilarity(left = '', right = '') {
   return dot / (Math.sqrt(leftMagnitude) * Math.sqrt(rightMagnitude));
 }
 
+/**
+ * Cosine similarity over dense embedding vectors.
+ * Returns 0 if vectors are missing/mismatched dimensions.
+ */
+export function computeEmbeddingSimilarity(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right)) return 0;
+  if (left.length === 0 || left.length !== right.length) return 0;
+  let dot = 0;
+  let leftMag = 0;
+  let rightMag = 0;
+  for (let i = 0; i < left.length; i++) {
+    const l = left[i];
+    const r = right[i];
+    if (!Number.isFinite(l) || !Number.isFinite(r)) return 0;
+    dot += l * r;
+    leftMag += l * l;
+    rightMag += r * r;
+  }
+  if (leftMag === 0 || rightMag === 0) return 0;
+  return dot / (Math.sqrt(leftMag) * Math.sqrt(rightMag));
+}
+
 export class ConflictDetector {
   // Lowered from 0.92 to 0.45 — the old threshold was so high that
   // only near-exact duplicates qualified as candidates, causing 0 graph edges.
   // Knowledge updates ("20 days → 25 days") typically have 0.5-0.7 Jaccard similarity.
-  constructor({ threshold = 0.45 } = {}) {
+  constructor({ threshold = 0.45, embeddingThreshold = 0.78 } = {}) {
     this.threshold = threshold;
+    // Cosine on dense embeddings is on different scale than bag-of-words.
+    // 0.78 = "same topic, same intent" for most embedding models (mistral-embed, OpenAI ada).
+    this.embeddingThreshold = embeddingThreshold;
+  }
+
+  /**
+   * Semantic candidate detection using dense embeddings.
+   *
+   * Replaces bag-of-words cosine (lexical) with embedding cosine (semantic).
+   * Embeddings should be supplied as { [memoryId]: number[] } map.
+   *
+   * Falls back to token similarity per-pair if either embedding is missing.
+   * This means callers can incrementally roll out embeddings without breaking
+   * existing behaviour.
+   *
+   * @param {{id?: string, content: string, embedding?: number[]}} newMemory
+   * @param {Array<{id?: string, content: string, embedding?: number[]}>} existingMemories
+   * @param {Map<string, number[]>|Object} [embeddingMap] optional id -> vector lookup
+   * @returns {Array<{memory, similarity, method: 'embedding'|'token', borderline?: boolean}>}
+   */
+  detectCandidatesWithEmbeddings(newMemory, existingMemories = [], embeddingMap = null) {
+    const newVec = newMemory.embedding || this._lookupEmbedding(embeddingMap, newMemory.id);
+    const candidates = [];
+
+    for (const existing of existingMemories) {
+      const existingVec = existing.embedding || this._lookupEmbedding(embeddingMap, existing.id);
+      let similarity;
+      let method;
+
+      if (Array.isArray(newVec) && Array.isArray(existingVec) && newVec.length === existingVec.length && newVec.length > 0) {
+        similarity = computeEmbeddingSimilarity(newVec, existingVec);
+        method = 'embedding';
+        if (similarity >= this.embeddingThreshold) {
+          candidates.push({ memory: existing, similarity, method });
+        }
+      } else {
+        // Fallback path — same logic as detectCandidates
+        similarity = computeTokenSimilarity(newMemory.content || '', existing.content || '');
+        method = 'token';
+        if (similarity >= this.threshold) {
+          candidates.push({ memory: existing, similarity, method });
+        }
+      }
+    }
+
+    return candidates.sort((left, right) => right.similarity - left.similarity);
+  }
+
+  _lookupEmbedding(map, id) {
+    if (!map || id == null) return null;
+    if (typeof map.get === 'function') return map.get(id) || null;
+    return map[id] || null;
   }
 
   detectCandidates(newMemory, existingMemories = []) {

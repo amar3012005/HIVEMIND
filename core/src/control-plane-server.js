@@ -230,6 +230,39 @@ const PROVIDER_REGISTRY = {
     label: 'Google Drive',
     scopes: ['https://www.googleapis.com/auth/drive.readonly'],
   },
+  atlassian: {
+    oauthModule: './connectors/providers/atlassian/oauth.js',
+    adapterModule: './connectors/providers/atlassian/adapter.js',
+    adapterClass: 'AtlassianAdapter',
+    label: 'Atlassian (Jira + Confluence)',
+    scopes: [
+      'read:jira-work', 'read:jira-user',
+      'read:confluence-content.summary', 'read:confluence-content.all',
+      'read:confluence-space.summary', 'read:confluence-user',
+      'offline_access',
+    ],
+  },
+  linear: {
+    oauthModule: './connectors/providers/linear/oauth.js',
+    adapterModule: './connectors/providers/linear/adapter.js',
+    adapterClass: 'LinearAdapter',
+    label: 'Linear',
+    scopes: ['read', 'issues:read', 'projects:read'],
+  },
+  microsoft: {
+    oauthModule: './connectors/providers/microsoft/oauth.js',
+    adapterModule: './connectors/providers/microsoft/adapter.js',
+    adapterClass: 'MicrosoftAdapter',
+    label: 'Microsoft (Outlook + Calendar)',
+    scopes: ['offline_access', 'User.Read', 'Mail.Read', 'Calendars.Read', 'Chat.Read', 'ChannelMessage.Read.All'],
+  },
+  salesforce: {
+    oauthModule: './connectors/providers/salesforce/oauth.js',
+    adapterModule: './connectors/providers/salesforce/adapter.js',
+    adapterClass: 'SalesforceAdapter',
+    label: 'Salesforce',
+    scopes: ['api', 'refresh_token', 'offline_access', 'chatter_api'],
+  },
 };
 
 function buildWhatsAppConnectorStatus(status) {
@@ -2575,6 +2608,13 @@ const server = http.createServer(async (req, res) => {
       if (tokens.team_id) providerMetadata.team_id = tokens.team_id;
       if (tokens.team) providerMetadata.team = tokens.team;
       if (tokens.authed_user_id) providerMetadata.authed_user_id = tokens.authed_user_id;
+      // Generic merge: providers like Atlassian, Salesforce, Microsoft
+      // return discovery fields (cloud_id, instance_url, tenant_id, ...)
+      // that the adapter needs at fetch time. exchangeCode can populate
+      // tokens.provider_metadata with any shape they want.
+      if (tokens.provider_metadata && typeof tokens.provider_metadata === 'object') {
+        Object.assign(providerMetadata, tokens.provider_metadata);
+      }
 
       // Store encrypted tokens
       await connectorStore.upsertConnector({

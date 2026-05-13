@@ -48,6 +48,9 @@ export const PLANS = {
     overage: null, // hard limit
     support: 'community',
     sla: null,
+    // Stripe price IDs are read from env (different prices per env).
+    // Stays null on free since there's nothing to charge.
+    stripePriceIdEnv: null,
   },
   pro: {
     id: 'pro',
@@ -70,6 +73,7 @@ export const PLANS = {
     overage: { tokensPerThousand: 0.01, queriesPerThousand: 0.10 },
     support: 'email',
     sla: '99.5%',
+    stripePriceIdEnv: 'STRIPE_PRICE_ID_PRO',
   },
   scale: {
     id: 'scale',
@@ -97,6 +101,7 @@ export const PLANS = {
     overage: { tokensPerThousand: 0.008, queriesPerThousand: 0.08 },
     support: 'priority',
     sla: '99.9%',
+    stripePriceIdEnv: 'STRIPE_PRICE_ID_SCALE',
   },
   enterprise: {
     id: 'enterprise',
@@ -126,6 +131,8 @@ export const PLANS = {
     overage: null,
     support: 'dedicated',
     sla: 'custom',
+    // Enterprise is sales-led; we don't expose a self-serve Stripe price.
+    stripePriceIdEnv: null,
   },
 };
 
@@ -135,6 +142,31 @@ export function getPlan(planId) {
 
 export function getAllPlans() {
   return Object.values(PLANS);
+}
+
+/**
+ * Resolve the Stripe price ID for a plan from env at call time.
+ * Returns null if the plan is free / enterprise / not configured.
+ */
+export function getStripePriceId(planId) {
+  const plan = PLANS[planId];
+  if (!plan?.stripePriceIdEnv) return null;
+  const id = process.env[plan.stripePriceIdEnv];
+  return id ? String(id) : null;
+}
+
+/**
+ * Reverse map: given a Stripe price ID (from a webhook payload) return
+ * the local plan ID. Lets the webhook handler stay in sync without
+ * reaching back into Stripe metadata.
+ */
+export function planIdForStripePrice(priceId) {
+  if (!priceId) return null;
+  for (const plan of Object.values(PLANS)) {
+    if (!plan.stripePriceIdEnv) continue;
+    if (process.env[plan.stripePriceIdEnv] === priceId) return plan.id;
+  }
+  return null;
 }
 
 export function isFeatureEnabled(planId, feature) {

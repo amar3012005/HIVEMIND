@@ -463,6 +463,19 @@ async function parseBody(req) {
   }
 }
 
+/** Same as parseBody but returns the raw Buffer + parsed JSON. Stripe webhook
+ *  signature verification requires the exact raw bytes. */
+async function parseBodyWithRaw(req) {
+  const chunks = [];
+  for await (const chunk of req) {
+    chunks.push(chunk);
+  }
+  const raw = chunks.length ? Buffer.concat(chunks) : Buffer.alloc(0);
+  let parsed = {};
+  try { parsed = raw.length ? JSON.parse(raw.toString('utf8')) : {}; } catch { /* keep parsed={} */ }
+  return { raw, parsed };
+}
+
 function makeSessionCookie(sessionId) {
   const value = buildSessionCookie(CONFIG.sessionSecret, sessionId);
   // SameSite=None; Secure required for cross-site cookie auth
@@ -3821,8 +3834,13 @@ const server = http.createServer(async (req, res) => {
   }
   // ─── End Team Tasks ───────────────────────────────────────
 
-  // ─── Billing (placeholder, org_owner only) ────────────────
-  if (pathname.startsWith('/v1/billing') && (req.method === 'GET' || req.method === 'POST' || req.method === 'PATCH')) {
+  // ─── Billing (Stripe-backed) ──────────────────────────────
+  // GET  /v1/billing/plan         — current plan + usage + limits
+  // POST /v1/billing/checkout     — create Stripe Checkout session
+  // POST /v1/billing/portal       — create Stripe Customer Portal session
+  // GET  /v1/billing/invoices     — list recent invoices
+  // GET  /v1/billing/invoices.csv — CSV export of recent invoices
+  if (pathname.startsWith('/v1/billing') && (req.method === 'GET' || req.method === 'POST')) {
     const current = await requireSession(req, res);
     if (!current) return;
     const callerMem = await getOrgMembership(current.session.userId, current.session.orgId);
@@ -3839,10 +3857,301 @@ const server = http.createServer(async (req, res) => {
     } catch (permErr) {
       return jsonResponse(res, { error: permErr.error || 'Forbidden' }, permErr.status || 403);
     }
-    // Billing integration (Stripe etc.) is out of scope for P0-4; return 501
-    return jsonResponse(res, { error: 'Billing integration not yet available' }, 501);
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+
+    const orgId = current.session.orgId;
+    const userId = current.session.userId;
+    const org = await prisma.organization.findUnique({ where: { id: orgId } });
+    if (!org) return jsonResponse(res, { error: 'Org not found' }, 404);
+
+    const billingMod = await import('./billing/stripe.js');
+    const plansMod = await import('./billing/plans.js');
+    const { UsageTracker } = await import('./billing/usage-tracker.js');
+    const usageTracker = new UsageTracker(prisma);
+
+    // GET /v1/billing/plan
+    if (pathname === '/v1/billing/plan' && req.method === 'GET') {
+      const plan = plansMod.getPlan(org.plan || 'free');
+      const usage = await usageTracker.getUsage(orgId);
+      const limitCheck = await usageTracker.checkLimits(orgId, plan.id);
+      return jsonResponse(res, {
+        plan: {
+          id: plan.id,
+          name: plan.name,
+          price: plan.price,
+          currency: plan.currency,
+          limits: plan.limits,
+          features: plan.features,
+          support: plan.support,
+          sla: plan.sla,
+        },
+        subscription: {
+          status: org.subscriptionStatus || 'inactive',
+          stripe_customer_id: org.stripeCustomerId || null,
+          stripe_subscription_id: org.stripeSubscriptionId || null,
+          current_period_end: org.currentPeriodEnd?.toISOString() || null,
+          trial_ends_at: org.trialEndsAt?.toISOString() || null,
+        },
+        usage,
+        warnings: limitCheck.warnings || [],
+        exceeded: limitCheck.exceeded || [],
+        stripe_enabled: billingMod.isEnabled(),
+        all_plans: plansMod.getAllPlans().map(p => ({
+          id: p.id,
+          name: p.name,
+          price: p.price,
+          currency: p.currency,
+          limits: p.limits,
+          features: p.features,
+          stripe_price_id: plansMod.getStripePriceId(p.id),
+          available_self_serve: Boolean(plansMod.getStripePriceId(p.id)),
+        })),
+      });
+    }
+
+    // POST /v1/billing/checkout — { plan: "pro"|"scale" }
+    if (pathname === '/v1/billing/checkout' && req.method === 'POST') {
+      if (!billingMod.isEnabled()) {
+        return jsonResponse(res, { error: 'Stripe not configured on this deployment' }, 503);
+      }
+      const body = await parseBody(req).catch(() => ({}));
+      const targetPlanId = String(body.plan || '').trim();
+      const priceId = plansMod.getStripePriceId(targetPlanId);
+      if (!priceId) {
+        return jsonResponse(res, { error: `Plan "${targetPlanId}" is not available for self-serve checkout` }, 400);
+      }
+
+      // Lookup the org owner's email so Stripe Customer has something useful.
+      const owner = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
+      const customerId = await billingMod.ensureCustomer(prisma, org, owner?.email || null);
+      if (!customerId) {
+        return jsonResponse(res, { error: 'Failed to create Stripe customer' }, 502);
+      }
+
+      try {
+        const session = await billingMod.createCheckoutSession({
+          customerId,
+          priceId,
+          orgId,
+          userId,
+        });
+        audit({
+          organizationId: orgId, userId,
+          eventType: 'billing.checkout_started', eventCategory: 'billing', action: 'create',
+          resourceType: 'subscription', resourceId: session.id,
+          metadata: { plan: targetPlanId, price_id: priceId }, ..._reqMeta(req),
+        });
+        return jsonResponse(res, { checkout_url: session.url, session_id: session.id });
+      } catch (err) {
+        return jsonResponse(res, { error: `Stripe checkout failed: ${err.message}` }, 502);
+      }
+    }
+
+    // POST /v1/billing/portal — opens Stripe Customer Portal
+    if (pathname === '/v1/billing/portal' && req.method === 'POST') {
+      if (!billingMod.isEnabled()) {
+        return jsonResponse(res, { error: 'Stripe not configured on this deployment' }, 503);
+      }
+      if (!org.stripeCustomerId) {
+        return jsonResponse(res, { error: 'No Stripe customer for this org yet — start a checkout first' }, 412);
+      }
+      try {
+        const session = await billingMod.createPortalSession({ customerId: org.stripeCustomerId });
+        return jsonResponse(res, { portal_url: session.url });
+      } catch (err) {
+        return jsonResponse(res, { error: `Stripe portal failed: ${err.message}` }, 502);
+      }
+    }
+
+    // GET /v1/billing/invoices
+    if (pathname === '/v1/billing/invoices' && req.method === 'GET') {
+      if (!org.stripeCustomerId) return jsonResponse(res, { invoices: [] });
+      try {
+        const invoices = await billingMod.listInvoices({ customerId: org.stripeCustomerId });
+        return jsonResponse(res, { invoices });
+      } catch (err) {
+        return jsonResponse(res, { error: err.message, invoices: [] }, 502);
+      }
+    }
+
+    // GET /v1/billing/invoices.csv — same shape, CSV body
+    if (pathname === '/v1/billing/invoices.csv' && req.method === 'GET') {
+      if (!org.stripeCustomerId) {
+        res.writeHead(200, { 'Content-Type': 'text/csv', 'Content-Disposition': 'attachment; filename="invoices.csv"' });
+        return res.end('invoice_number,status,amount_paid,currency,period_start,period_end,created\n');
+      }
+      try {
+        const invoices = await billingMod.listInvoices({ customerId: org.stripeCustomerId, limit: 100 });
+        const header = 'invoice_number,status,amount_paid,currency,period_start,period_end,created,hosted_invoice_url\n';
+        const rows = invoices.map(i => [
+          i.number || i.id,
+          i.status,
+          (i.amount_paid / 100).toFixed(2),
+          i.currency,
+          i.period_start || '',
+          i.period_end || '',
+          i.created,
+          i.hosted_invoice_url || '',
+        ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
+        res.writeHead(200, {
+          'Content-Type': 'text/csv',
+          'Content-Disposition': 'attachment; filename="invoices.csv"',
+        });
+        return res.end(header + rows + (rows ? '\n' : ''));
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, 502);
+      }
+    }
+
+    return jsonResponse(res, { error: `Unknown billing route: ${pathname}` }, 404);
   }
   // ─── End Billing ──────────────────────────────────────────
+
+  // ─── Stripe webhook ───────────────────────────────────────
+  // POST /v1/webhooks/stripe — public endpoint, signature-verified.
+  // Idempotent: every successfully processed event_id is recorded in
+  // hivemind.stripe_events; replays no-op.
+  if (pathname === '/v1/webhooks/stripe' && req.method === 'POST') {
+    const billingMod = await import('./billing/stripe.js');
+    const plansMod = await import('./billing/plans.js');
+    if (!billingMod.isEnabled()) {
+      return jsonResponse(res, { error: 'Stripe not configured' }, 503);
+    }
+    const sig = req.headers['stripe-signature'] || '';
+    const { raw } = await parseBodyWithRaw(req);
+    let event;
+    try {
+      event = await billingMod.constructEvent({ rawBody: raw, signature: sig });
+    } catch (err) {
+      console.warn('[stripe-webhook] signature verification failed:', err.message);
+      return jsonResponse(res, { error: 'invalid signature' }, 400);
+    }
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+
+    // Idempotency check.
+    try {
+      const existing = await prisma.$queryRawUnsafe(
+        `SELECT 1 FROM hivemind.stripe_events WHERE event_id = $1 LIMIT 1`,
+        event.id,
+      );
+      if (Array.isArray(existing) && existing.length > 0) {
+        return jsonResponse(res, { ok: true, replay: true });
+      }
+    } catch (err) {
+      console.warn('[stripe-webhook] idempotency check failed:', err.message);
+    }
+
+    // Resolve org via metadata.hivemind_org_id, fall back to customer.id.
+    const obj = event.data?.object || {};
+    const metaOrgId = obj.metadata?.hivemind_org_id
+      || obj.subscription_details?.metadata?.hivemind_org_id
+      || null;
+    const customerId = obj.customer || (typeof obj === 'object' && obj.id?.startsWith?.('cus_') ? obj.id : null);
+    let org = null;
+    if (metaOrgId) {
+      org = await prisma.organization.findUnique({ where: { id: metaOrgId } }).catch(() => null);
+    }
+    if (!org && customerId) {
+      org = await billingMod.findOrgByCustomerId(prisma, customerId);
+    }
+
+    try {
+      switch (event.type) {
+        case 'checkout.session.completed': {
+          // Initial subscription created — Stripe sends customer.subscription.created
+          // separately so we mostly just persist the customer_id here.
+          if (org && customerId && !org.stripeCustomerId) {
+            await prisma.organization.update({
+              where: { id: org.id },
+              data: { stripeCustomerId: customerId },
+            });
+          }
+          break;
+        }
+        case 'customer.subscription.created':
+        case 'customer.subscription.updated':
+        case 'customer.subscription.resumed': {
+          if (!org) break;
+          const sub = obj;
+          const priceId = sub.items?.data?.[0]?.price?.id || null;
+          const planId = plansMod.planIdForStripePrice(priceId) || org.plan || 'free';
+          await prisma.organization.update({
+            where: { id: org.id },
+            data: {
+              plan: planId,
+              stripeCustomerId: org.stripeCustomerId || sub.customer || null,
+              stripeSubscriptionId: sub.id || null,
+              subscriptionStatus: sub.status || null,
+              currentPeriodEnd: sub.current_period_end
+                ? new Date(sub.current_period_end * 1000)
+                : null,
+              trialEndsAt: sub.trial_end ? new Date(sub.trial_end * 1000) : null,
+            },
+          });
+          break;
+        }
+        case 'customer.subscription.deleted':
+        case 'customer.subscription.paused': {
+          if (!org) break;
+          await prisma.organization.update({
+            where: { id: org.id },
+            data: {
+              plan: 'free',
+              stripeSubscriptionId: null,
+              subscriptionStatus: event.type === 'customer.subscription.paused' ? 'paused' : 'canceled',
+              currentPeriodEnd: null,
+              trialEndsAt: null,
+            },
+          });
+          break;
+        }
+        case 'invoice.payment_failed': {
+          if (!org) break;
+          await prisma.organization.update({
+            where: { id: org.id },
+            data: { subscriptionStatus: 'past_due' },
+          });
+          break;
+        }
+        case 'invoice.payment_succeeded': {
+          if (!org) break;
+          // No state change needed — subscription.updated covers it. Still
+          // record so the audit trail shows the payment.
+          break;
+        }
+        default:
+          // Unknown event types are recorded but ignored.
+          break;
+      }
+
+      // Persist the event AFTER processing succeeds so failures retry.
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO hivemind.stripe_events (event_id, event_type, org_id, payload, processed_at)
+         VALUES ($1, $2, $3::uuid, $4::jsonb, NOW())
+         ON CONFLICT (event_id) DO NOTHING`,
+        event.id,
+        event.type,
+        org?.id || null,
+        JSON.stringify(event).slice(0, 200_000),
+      );
+      audit({
+        organizationId: org?.id || null,
+        userId: null,
+        actorType: 'webhook',
+        eventType: `stripe.${event.type}`,
+        eventCategory: 'billing',
+        action: 'webhook',
+        resourceType: 'subscription',
+        resourceId: obj.id || event.id,
+        metadata: { event_id: event.id, customer: customerId },
+      }).catch(() => {});
+      return jsonResponse(res, { ok: true });
+    } catch (err) {
+      console.error('[stripe-webhook] handler failed:', err.message, event.type, event.id);
+      return jsonResponse(res, { error: err.message }, 500);
+    }
+  }
+  // ─── End Stripe webhook ───────────────────────────────────
 
   // POST /v1/connectors/slack/events — Slack Events API webhook
   // Public endpoint (no session). Auth via HMAC signature over raw body.

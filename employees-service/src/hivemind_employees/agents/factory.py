@@ -23,6 +23,30 @@ log = logging.getLogger(__name__)
 # OpenRouter is OpenAI-compatible — lets us route to claude/haiku/etc.
 # without needing a separate Anthropic adapter for SlackAgents.
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
+GROQ_BASE = "https://api.groq.com/openai/v1"
+
+
+def _resolve_openai_compatible_target(
+    provider: str,
+    model: str,
+    llm_api_key: Optional[str] = None,
+) -> tuple[str, str, str]:
+    openrouter_key = llm_api_key or os.environ.get("OPENROUTER_API_KEY")
+    if openrouter_key:
+        routed_model = model
+        if provider == "anthropic" and "/" not in model:
+            routed_model = f"anthropic/{model}"
+        elif provider == "groq" and "/" not in model:
+            routed_model = f"groq/{model}"
+        base_url = os.environ.get("OPENROUTER_BASE_URL", OPENROUTER_BASE)
+        return routed_model, openrouter_key, base_url
+
+    groq_key = llm_api_key or os.environ.get("GROQ_API_KEY") or os.environ.get("LLM_API_KEY", "")
+    groq_model = model
+    if provider != "groq" or "/" in model:
+        groq_model = os.environ.get("GROQ_INFERENCE_MODEL") or "llama-3.3-70b-versatile"
+    base_url = os.environ.get("GROQ_BASE_URL", GROQ_BASE)
+    return groq_model, groq_key, base_url
 
 
 def _resolve_llm(employee_row: dict, llm_api_key: Optional[str] = None) -> BaseLLM:
@@ -41,23 +65,17 @@ def _resolve_llm(employee_row: dict, llm_api_key: Optional[str] = None) -> BaseL
         api_key = llm_api_key or os.environ.get("OPENAI_API_KEY", "")
         return OpenAILLM(BaseLLMConfig(model=model, api_key=api_key))
 
-    # Default to OpenRouter for everything else (anthropic, groq, etc.)
-    # OpenRouter prefixes: anthropic/claude-..., groq/llama-..., etc.
-    routed_model = model
-    if provider == "anthropic" and "/" not in model:
-        routed_model = f"anthropic/{model}"
-    elif provider == "groq" and "/" not in model:
-        routed_model = f"groq/{model}"
-
-    api_key = (
-        llm_api_key
-        or os.environ.get("OPENROUTER_API_KEY")
-        or os.environ.get("ANTHROPIC_API_KEY", "")
+    # Default to OpenRouter for everything else when configured, otherwise
+    # use Groq's OpenAI-compatible endpoint with the shared inference model.
+    routed_model, api_key, base_url = _resolve_openai_compatible_target(
+        provider,
+        model,
+        llm_api_key=llm_api_key,
     )
     cfg = BaseLLMConfig(
         model=routed_model,
         api_key=api_key,
-        openrouter_base_url=os.environ.get("OPENROUTER_BASE_URL", OPENROUTER_BASE),
+        openrouter_base_url=base_url,
     )
     return OpenAILLM(cfg)
 

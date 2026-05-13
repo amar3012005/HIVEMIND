@@ -144,6 +144,8 @@ class TeamRoom:
         # Failures inside the store must never break the phase machine.
         self._store = task_store
         self._transcript: List[WorkerMessage] = []
+        for worker in self.roster:
+            worker.bind_task(task.brief)
 
     # ── Public entry ──────────────────────────────────────────
     async def run(self) -> TeamOutcome:
@@ -222,19 +224,19 @@ class TeamRoom:
     async def _phase_investigate(self, hub: MsgHub, round_num: int) -> None:
         results = await self._gather(
             self.roster,
-            lambda w: w.respond(_PROMPT_INVESTIGATE, round_num=round_num),
+            lambda w: w.respond(_PROMPT_INVESTIGATE, round_num=round_num, phase="investigate"),
         )
-        replies = [(w, r) for w, r in results if r]
+        replies = [(w, turn) for w, turn in results if turn]
         await self._broadcast_batch(hub, replies, round_num, kind="chat", phase="investigate")
 
     # ── Phase 2: propose (parallel, then broadcast) ──────────
     async def _phase_propose(self, hub: MsgHub, round_num: int) -> List[WorkerMessage]:
         results = await self._gather(
             self.roster,
-            lambda w: w.respond(_PROMPT_PROPOSE, round_num=round_num),
+            lambda w: w.respond(_PROMPT_PROPOSE, round_num=round_num, phase="propose"),
         )
-        kept: List[Tuple[EmployeeWorker, str]] = [
-            (w, r) for w, r in results if r and _is_valid_claim(r)
+        kept: List[Tuple[EmployeeWorker, WorkerTurn]] = [
+            (w, turn) for w, turn in results if turn and turn.text and _is_valid_claim(turn.text)
         ]
         messages = await self._broadcast_batch(
             hub, kept, round_num, kind="claim", phase="propose"
@@ -262,7 +264,7 @@ class TeamRoom:
                 f"The claim under review was authored by {claim_msg.sender_name} "
                 f"({claim_msg.sender_role})."
             )
-            reply = await reviewer.respond(instruction, round_num=round_num)
+            reply = await reviewer.respond(instruction, round_num=round_num, phase="review", target_message=claim_msg)
             return reviewer, reply, claim_msg
 
         outputs = await asyncio.gather(*(_do(p) for p in plans), return_exceptions=True)
@@ -273,9 +275,9 @@ class TeamRoom:
                 log.warning("review failed: %s", out)
                 continue
             reviewer, reply, claim_msg = out
-            if not reply:
+            if not reply or not reply.text:
                 continue
-            verdict = _parse_verdict(reply)
+            verdict = _parse_verdict(reply.text)
             replies_to_broadcast.append((
                 reviewer,
                 reply,
@@ -308,7 +310,7 @@ class TeamRoom:
             proposer = self._find_worker(claim_msg.sender_id)
             if not proposer:
                 return None, "", {}
-            reply = await proposer.respond(_PROMPT_REVISE, round_num=round_num)
+            reply = await proposer.respond(_PROMPT_REVISE, round_num=round_num, phase="revise", target_message=claim_msg)
             return proposer, reply, {
                 "phase": "revise",
                 "revises_claim_id": claim_msg.msg_id,
@@ -321,7 +323,7 @@ class TeamRoom:
                 log.warning("revise failed: %s", out)
                 continue
             proposer, reply, meta = out
-            if proposer and reply:
+            if proposer and reply and reply.text:
                 replies_to_broadcast.append((proposer, reply, meta))
         await self._broadcast_with_metadata(hub, replies_to_broadcast, round_num, kind="revision")
 
@@ -330,15 +332,15 @@ class TeamRoom:
         synth = self._pick_synthesizer()
         if not synth:
             return "(no synthesizer available; review transcript directly)"
-        reply = await synth.respond(_PROMPT_SYNTHESIZE, round_num=round_num)
-        if reply:
+        reply = await synth.respond(_PROMPT_SYNTHESIZE, round_num=round_num, phase="synthesize")
+        if reply and reply.text:
             await self._broadcast_with_metadata(
                 hub,
                 [(synth, reply, {"phase": "synthesize"})],
                 round_num,
                 kind="synthesis",
             )
-        return reply or "(synthesizer returned empty answer)"
+        return reply.text if reply and reply.text else "(synthesizer returned empty answer)"
 
     # ── Gate policy ──────────────────────────────────────────
     def _gate_satisfied(self) -> bool:
@@ -392,38 +394,46 @@ class TeamRoom:
         self,
         workers: List[EmployeeWorker],
         coro_factory: Callable[[EmployeeWorker], Awaitable[str]],
-    ) -> List[Tuple[EmployeeWorker, str]]:
+    ) -> List[Tuple[EmployeeWorker, WorkerTurn]]:
         if not workers:
             return []
         outputs = await asyncio.gather(
             *(coro_factory(w) for w in workers), return_exceptions=True
         )
-        results: List[Tuple[EmployeeWorker, str]] = []
+        results: List[Tuple[EmployeeWorker, WorkerTurn]] = []
         for w, out in zip(workers, outputs):
             if isinstance(out, BaseException):
                 log.warning("worker %s failed: %s", w.slug, out)
                 continue
-            results.append((w, out or ""))
+            results.append((w, out or WorkerTurn(text="")))
         return results
 
     async def _broadcast_batch(
         self,
         hub: MsgHub,
-        replies: List[Tuple[EmployeeWorker, str]],
+        replies: List[Tuple[EmployeeWorker, WorkerTurn]],
         round_num: int,
         kind: str,
         phase: str,
     ) -> List[WorkerMessage]:
         """Broadcast batch to peers via MsgHub.broadcast() + record locally."""
         out_msgs: List[WorkerMessage] = []
-        for worker, text in replies:
-            if not text:
+        for worker, turn in replies:
+            if not turn or not turn.text:
                 continue
-            msg = Msg(name=worker.slug, content=text, role="assistant")
+            for action in turn.actions:
+                await self._record(
+                    worker,
+                    action.get("content") or action.get("label") or "simulation action",
+                    round_num=round_num,
+                    kind="action",
+                    metadata={"phase": phase, **(action.get("metadata") or {}), "action_label": action.get("label")},
+                )
+            msg = Msg(name=worker.slug, content=turn.text, role="assistant")
             await hub.broadcast(msg)
             out_msgs.append(
                 await self._record(
-                    worker, text, round_num=round_num, kind=kind, metadata={"phase": phase}
+                    worker, turn.text, round_num=round_num, kind=kind, metadata={"phase": phase}
                 )
             )
         return out_msgs
@@ -431,18 +441,26 @@ class TeamRoom:
     async def _broadcast_with_metadata(
         self,
         hub: MsgHub,
-        replies: List[Tuple[EmployeeWorker, str, Dict[str, Any]]],
+        replies: List[Tuple[EmployeeWorker, WorkerTurn, Dict[str, Any]]],
         round_num: int,
         kind: str,
     ) -> List[WorkerMessage]:
         out_msgs: List[WorkerMessage] = []
-        for worker, text, meta in replies:
-            if not text:
+        for worker, turn, meta in replies:
+            if not turn or not turn.text:
                 continue
-            msg = Msg(name=worker.slug, content=text, role="assistant", metadata=meta)
+            for action in turn.actions:
+                await self._record(
+                    worker,
+                    action.get("content") or action.get("label") or "simulation action",
+                    round_num=round_num,
+                    kind="action",
+                    metadata={**meta, **(action.get("metadata") or {}), "action_label": action.get("label")},
+                )
+            msg = Msg(name=worker.slug, content=turn.text, role="assistant", metadata=meta)
             await hub.broadcast(msg)
             out_msgs.append(
-                await self._record(worker, text, round_num=round_num, kind=kind, metadata=meta)
+                await self._record(worker, turn.text, round_num=round_num, kind=kind, metadata=meta)
             )
         return out_msgs
 

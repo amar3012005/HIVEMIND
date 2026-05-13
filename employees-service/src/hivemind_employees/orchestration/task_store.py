@@ -48,6 +48,14 @@ class TaskStore:
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::uuid[], 'running', $9, NOW())
                 ON CONFLICT (id) DO UPDATE SET
                     brief = EXCLUDED.brief,
+                    requested_by = COALESCE(EXCLUDED.requested_by, hivemind.team_tasks.requested_by),
+                    slack_channel = COALESCE(EXCLUDED.slack_channel, hivemind.team_tasks.slack_channel),
+                    slack_thread_ts = COALESCE(EXCLUDED.slack_thread_ts, hivemind.team_tasks.slack_thread_ts),
+                    roster_employee_ids = CASE
+                        WHEN cardinality(EXCLUDED.roster_employee_ids) > 0 THEN EXCLUDED.roster_employee_ids
+                        ELSE hivemind.team_tasks.roster_employee_ids
+                    END,
+                    max_rounds = EXCLUDED.max_rounds,
                     started_at = COALESCE(hivemind.team_tasks.started_at, NOW())
                 """,
                 task.task_id,

@@ -80,6 +80,10 @@ export class SyncEngine {
         org_id: orgId,
         target_scope: effectiveTargetScope,
         team_id: effectiveTeamId,
+        // Provider-specific metadata captured at OAuth time (Atlassian
+        // cloud_id, Salesforce instance_url, Microsoft tenant_id, ...).
+        // Adapters that need these fields read them from context.
+        provider_metadata: existingConnector?.provider_metadata || {},
       };
       let hasMore = true;
       let currentCursor = cursor;

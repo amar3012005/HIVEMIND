@@ -1,2 +1,0 @@
-"""AgentScope-BLAIQ package."""
-

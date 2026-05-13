@@ -3740,6 +3740,7 @@ const server = http.createServer(async (req, res) => {
         headers: {
           'Content-Type': 'application/json',
           'X-Admin-Token': _sidecarKey(),
+          'X-Org-Id': current.session.orgId,
         },
         body: body ? JSON.stringify(body) : undefined,
         signal: AbortSignal.timeout(60000),
@@ -3756,6 +3757,11 @@ const server = http.createServer(async (req, res) => {
   // POST /v1/team-tasks — kick off a multi-employee task
   if (pathname === '/v1/team-tasks' && req.method === 'POST') {
     await _forwardSidecar(req, res, '/v1/team-tasks', { injectOrg: true });
+    return;
+  }
+  // GET /v1/team-tasks — recent task history for current org
+  if (pathname === '/v1/team-tasks' && req.method === 'GET') {
+    await _forwardSidecar(req, res, `/v1/team-tasks${url.search || ''}`);
     return;
   }
   // GET  /v1/team-tasks/:id            — status + outcome

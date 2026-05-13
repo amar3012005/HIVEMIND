@@ -35,6 +35,39 @@ from .agentscope_tools import build_hivemind_toolkit
 log = logging.getLogger(__name__)
 
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
+GROQ_BASE = "https://api.groq.com/openai/v1"
+
+
+def _resolve_openai_compatible_target(
+    provider: str,
+    model: str,
+    llm_api_key: Optional[str] = None,
+) -> tuple[str, str, str]:
+    openrouter_key = llm_api_key or os.environ.get("OPENROUTER_API_KEY")
+    if openrouter_key:
+        routed_model = model
+        if provider == "anthropic" and "/" not in model:
+            routed_model = f"anthropic/{model}"
+        elif provider == "groq" and "/" not in model:
+            routed_model = f"groq/{model}"
+        base_url = os.environ.get("OPENROUTER_BASE_URL", OPENROUTER_BASE)
+        return routed_model, openrouter_key, base_url
+
+    groq_key = llm_api_key or os.environ.get("GROQ_API_KEY") or os.environ.get("LLM_API_KEY", "")
+    groq_model = model
+    if provider != "groq" or "/" in model:
+        groq_model = os.environ.get("GROQ_INFERENCE_MODEL") or "llama-3.3-70b-versatile"
+    base_url = os.environ.get("GROQ_BASE_URL", GROQ_BASE)
+    return groq_model, groq_key, base_url
+
+
+def _uses_groq_fallback(provider: str) -> bool:
+    normalized = (provider or "").lower()
+    if normalized in {"openai", "anthropic_direct"}:
+        return False
+    return not os.environ.get("OPENROUTER_API_KEY") and bool(
+        os.environ.get("GROQ_API_KEY") or os.environ.get("LLM_API_KEY")
+    )
 
 
 def _resolve_model(employee_row: dict, llm_api_key: Optional[str] = None) -> ChatModelBase:
@@ -53,19 +86,13 @@ def _resolve_model(employee_row: dict, llm_api_key: Optional[str] = None) -> Cha
         api_key = llm_api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         return AnthropicChatModel(model_name=model, api_key=api_key, stream=False)
 
-    # OpenRouter (anthropic, groq, etc.) via the OpenAI-compatible client.
-    routed_model = model
-    if provider == "anthropic" and "/" not in model:
-        routed_model = f"anthropic/{model}"
-    elif provider == "groq" and "/" not in model:
-        routed_model = f"groq/{model}"
-
-    api_key = (
-        llm_api_key
-        or os.environ.get("OPENROUTER_API_KEY")
-        or os.environ.get("ANTHROPIC_API_KEY", "")
+    # OpenAI-compatible providers can route through OpenRouter when present,
+    # otherwise fall back to the same Groq endpoint used by Talk to HIVE.
+    routed_model, api_key, base_url = _resolve_openai_compatible_target(
+        provider,
+        model,
+        llm_api_key=llm_api_key,
     )
-    base_url = os.environ.get("OPENROUTER_BASE_URL", OPENROUTER_BASE)
     return OpenAIChatModel(
         model_name=routed_model,
         api_key=api_key,
@@ -102,14 +129,22 @@ def build_react_agent(employee_row: dict, hivemind_api_key: str) -> ReActAgent:
     """
     name = employee_row["slug"]  # unique per org
     persona = employee_row.get("persona") or ""
-    enabled_tools = employee_row.get("tools") or [
+    requested_tools = employee_row.get("tools") or [
         "hivemind_recall",
         "hivemind_save_memory",
     ]
+    enabled_tools = list(requested_tools)
 
-    toolkit = build_hivemind_toolkit(api_key=hivemind_api_key, enabled_tool_names=enabled_tools)
+    provider = employee_row.get("llm_provider") or "anthropic"
+    toolkit = None
+    if _uses_groq_fallback(provider):
+        enabled_tools = []
+        log.info("Groq fallback active for employee=%s; disabling AgentScope tools for compatibility", name)
+    else:
+        toolkit = build_hivemind_toolkit(api_key=hivemind_api_key, enabled_tool_names=enabled_tools)
+
     model = _resolve_model(employee_row)
-    formatter = _resolve_formatter(employee_row.get("llm_provider") or "anthropic")
+    formatter = _resolve_formatter(provider)
 
     agent = ReActAgent(
         name=name,
@@ -125,6 +160,8 @@ def build_react_agent(employee_row: dict, hivemind_api_key: str) -> ReActAgent:
         parallel_tool_calls=False,
         print_hint_msg=False,
     )
+    setattr(agent, "hivemind_enabled_tools", list(requested_tools))
+    setattr(agent, "hivemind_use_simulation_actions", _uses_groq_fallback(provider))
     log.info(
         "Built ReActAgent for employee=%s model=%s tools=%d",
         name, employee_row.get("model"), len(enabled_tools),

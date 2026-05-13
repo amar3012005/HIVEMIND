@@ -10,19 +10,27 @@ Tools route through HIVEMIND core's `/api/employees/slack-action`,
 `/api/recall`, and `/api/memories` endpoints so the policy gate +
 audit + auto-ingest pipeline stays centralized.
 """
-from __future__ import annotations
 
 import json
 import logging
 import os
-from typing import Optional
+from typing import List, Optional
 
 import httpx
-from agentscope.tool import Toolkit
+from agentscope.message._message_block import TextBlock
+from agentscope.tool import ToolResponse, Toolkit
 
 log = logging.getLogger(__name__)
 
 HIVEMIND_TIMEOUT_S = 30.0
+
+
+def _tool_response(payload: object) -> ToolResponse:
+    text = json.dumps(payload)
+    return ToolResponse(
+        content=[TextBlock(type="text", text=text)],
+        metadata=payload if isinstance(payload, dict) else {"value": payload},
+    )
 
 
 def _client(api_key: str) -> httpx.Client:
@@ -48,7 +56,7 @@ def _post_slack_action(api_key: str, action_type: str, payload: dict) -> dict:
         return r.json()
 
 
-def build_hivemind_toolkit(api_key: str, enabled_tool_names: list[str]) -> Toolkit:
+def build_hivemind_toolkit(api_key: str, enabled_tool_names: List[str]) -> Toolkit:
     """Return an AgentScope Toolkit populated with HIVEMIND tools.
 
     enabled_tool_names mirrors the schema used by `tools.py`:
@@ -58,7 +66,7 @@ def build_hivemind_toolkit(api_key: str, enabled_tool_names: list[str]) -> Toolk
     tk = Toolkit()
 
     if "hivemind_slack_post" in enabled_tool_names:
-        def slack_post(channel: str, text: str, thread_ts: Optional[str] = None) -> str:
+        def slack_post(channel: str, text: str, thread_ts: Optional[str] = None) -> ToolResponse:
             """Post a message to a Slack channel or thread.
 
             Args:
@@ -69,11 +77,11 @@ def build_hivemind_toolkit(api_key: str, enabled_tool_names: list[str]) -> Toolk
             res = _post_slack_action(api_key, "slack_post", {
                 "channel": channel, "text": text, "thread_ts": thread_ts,
             })
-            return json.dumps(res)
+            return _tool_response(res)
         tk.register_tool_function(slack_post)
 
     if "hivemind_slack_react" in enabled_tool_names:
-        def slack_react(channel: str, ts: str, emoji: str) -> str:
+        def slack_react(channel: str, ts: str, emoji: str) -> ToolResponse:
             """Add an emoji reaction to a Slack message.
 
             Args:
@@ -84,11 +92,11 @@ def build_hivemind_toolkit(api_key: str, enabled_tool_names: list[str]) -> Toolk
             res = _post_slack_action(api_key, "slack_react", {
                 "channel": channel, "ts": ts, "emoji": emoji,
             })
-            return json.dumps(res)
+            return _tool_response(res)
         tk.register_tool_function(slack_react)
 
     if "hivemind_slack_search" in enabled_tool_names:
-        def slack_search(query: str, count: int = 10) -> str:
+        def slack_search(query: str, count: int = 10) -> ToolResponse:
             """Search Slack workspace messages.
 
             Args:
@@ -98,11 +106,11 @@ def build_hivemind_toolkit(api_key: str, enabled_tool_names: list[str]) -> Toolk
             res = _post_slack_action(api_key, "slack_search", {
                 "query": query, "count": count,
             })
-            return json.dumps(res)
+            return _tool_response(res)
         tk.register_tool_function(slack_search)
 
     if "hivemind_slack_history" in enabled_tool_names:
-        def slack_history(channel: str, limit: int = 50, since: Optional[str] = None) -> str:
+        def slack_history(channel: str, limit: int = 50, since: Optional[str] = None) -> ToolResponse:
             """Fetch recent Slack channel history.
 
             Args:
@@ -113,11 +121,11 @@ def build_hivemind_toolkit(api_key: str, enabled_tool_names: list[str]) -> Toolk
             res = _post_slack_action(api_key, "slack_history", {
                 "channel": channel, "limit": limit, "since": since,
             })
-            return json.dumps(res)
+            return _tool_response(res)
         tk.register_tool_function(slack_history)
 
     if "hivemind_recall" in enabled_tool_names:
-        def recall(query: str, max_memories: int = 5) -> str:
+        def recall(query: str, max_memories: int = 5) -> ToolResponse:
             """Recall memories from HIVEMIND knowledge graph.
 
             Args:
@@ -129,11 +137,11 @@ def build_hivemind_toolkit(api_key: str, enabled_tool_names: list[str]) -> Toolk
                     "query_context": query, "max_memories": max_memories,
                 })
                 r.raise_for_status()
-                return json.dumps(r.json())
+                return _tool_response(r.json())
         tk.register_tool_function(recall)
 
     if "hivemind_save_memory" in enabled_tool_names:
-        def save_memory(title: str, content: str, tags: Optional[str] = None) -> str:
+        def save_memory(title: str, content: str, tags: Optional[str] = None) -> ToolResponse:
             """Save a fact or note to HIVEMIND persistent memory.
 
             Args:
@@ -147,7 +155,7 @@ def build_hivemind_toolkit(api_key: str, enabled_tool_names: list[str]) -> Toolk
                     "title": title, "content": content, "tags": tag_list, "sync": True,
                 })
                 r.raise_for_status()
-                return json.dumps(r.json())
+                return _tool_response(r.json())
         tk.register_tool_function(save_memory)
 
     log.info("Built AgentScope toolkit (tools=%s)", enabled_tool_names)

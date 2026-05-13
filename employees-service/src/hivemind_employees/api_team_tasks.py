@@ -16,6 +16,8 @@ status endpoint OR subscribe to SSE (next phase) for live updates.
 from __future__ import annotations
 
 import asyncio
+import ast
+import json
 import logging
 import uuid
 from typing import Any, Dict, List, Optional
@@ -61,6 +63,7 @@ class CreateTeamTaskResponse(BaseModel):
 class TeamTaskStatus(BaseModel):
     task_id: str
     status: str
+    brief: Optional[str]
     rounds_completed: int
     claim_count: int
     review_count: int
@@ -69,6 +72,15 @@ class TeamTaskStatus(BaseModel):
     gate_reason: Optional[str]
     final_answer: Optional[str]
     error: Optional[str]
+
+
+class TeamTaskListItem(BaseModel):
+    task_id: str
+    status: str
+    brief: str
+    final_answer: Optional[str]
+    started_at: Optional[str]
+    completed_at: Optional[str]
 
 
 # ── Auth helper ──────────────────────────────────────────────────
@@ -92,6 +104,28 @@ def _reap(task_id: str, _task: asyncio.Task) -> None:
     _RUNNING.pop(task_id, None)
 
 
+def _normalize_tool_names(raw_tools: object) -> List[str]:
+    if isinstance(raw_tools, list):
+        return [str(tool) for tool in raw_tools if tool]
+    if isinstance(raw_tools, tuple):
+        return [str(tool) for tool in raw_tools if tool]
+    if isinstance(raw_tools, str):
+        text = raw_tools.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            try:
+                parsed = ast.literal_eval(text)
+            except Exception:
+                return [text]
+        if isinstance(parsed, list):
+            return [str(tool) for tool in parsed if tool]
+        return [str(parsed)] if parsed else []
+    return []
+
+
 # ── Background runner ────────────────────────────────────────────
 async def _build_roster(slugs: List[str]) -> List[EmployeeWorker]:
     rows = await list_running_employees()
@@ -113,6 +147,13 @@ async def _build_roster(slugs: List[str]) -> List[EmployeeWorker]:
         # columns. Fall back to legacy policy_rules JSONB for older rows
         # that predate the migration.
         policy = emp.get("policy_rules") or {}
+        if isinstance(policy, str):
+            try:
+                policy = json.loads(policy)
+            except Exception:
+                policy = {}
+        elif not isinstance(policy, dict):
+            policy = {}
         role_archetype = (
             emp.get("role_archetype")
             or policy.get("role_archetype")
@@ -130,6 +171,12 @@ async def _build_roster(slugs: List[str]) -> List[EmployeeWorker]:
             role_archetype=role_archetype,
             peer_review_targets=peer_review_targets,
             agent=agent,
+            api_key=api_key,
+            enabled_tools=_normalize_tool_names(
+                getattr(agent, "hivemind_enabled_tools", None) or emp.get("tools") or []
+            ),
+            use_simulation_actions=bool(getattr(agent, "hivemind_use_simulation_actions", False)),
+            slack_team_id=emp.get("slack_team_id"),
         ))
     return roster
 
@@ -195,6 +242,12 @@ async def create_team_task(
         thread_ts=req.slack_thread_ts,
         max_rounds=req.max_rounds,
     )
+
+    # Persist the parent row before returning so transcript writes and
+    # immediate status polling never race a missing team_tasks record.
+    store = TaskStore(org_id=req.org_id, team_id=req.team_id or None)
+    await store.open(task, [])
+
     bg = asyncio.create_task(_run_task_background(task, req))
     _RUNNING[task.task_id] = bg
     bg.add_done_callback(lambda t: _reap(task.task_id, t))
@@ -216,7 +269,7 @@ async def get_team_task(
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT id::text, status, rounds_completed, claim_count, review_count,
+            SELECT id::text, status, brief, rounds_completed, claim_count, review_count,
                    revision_count, contradictions, gate_reason, final_answer, error
             FROM hivemind.team_tasks
             WHERE id = $1
@@ -228,6 +281,7 @@ async def get_team_task(
     return TeamTaskStatus(
         task_id=row["id"],
         status=row["status"],
+        brief=row["brief"],
         rounds_completed=row["rounds_completed"] or 0,
         claim_count=row["claim_count"] or 0,
         review_count=row["review_count"] or 0,
@@ -237,6 +291,51 @@ async def get_team_task(
         final_answer=row["final_answer"],
         error=row["error"],
     )
+
+
+@router.get("")
+async def list_team_tasks(
+    limit: int = 12,
+    x_admin_token: Optional[str] = Header(None, alias="X-Admin-Token"),
+    x_org_id: Optional[str] = Header(None, alias="X-Org-Id"),
+) -> Dict[str, Any]:
+    _require_master_key(x_admin_token)
+    if not x_org_id:
+        raise HTTPException(400, "missing org id")
+    if limit < 1 or limit > 100:
+        raise HTTPException(400, "limit must be in [1, 100]")
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id::text AS task_id,
+                   status,
+                   brief,
+                   final_answer,
+                   started_at,
+                   completed_at
+            FROM hivemind.team_tasks
+            WHERE org_id = $1
+            ORDER BY COALESCE(started_at, completed_at, NOW()) DESC
+            LIMIT $2
+            """,
+            x_org_id,
+            limit,
+        )
+    return {
+        "count": len(rows),
+        "tasks": [
+            TeamTaskListItem(
+                task_id=row["task_id"],
+                status=row["status"],
+                brief=row["brief"] or "",
+                final_answer=row["final_answer"],
+                started_at=row["started_at"].isoformat() if row["started_at"] else None,
+                completed_at=row["completed_at"].isoformat() if row["completed_at"] else None,
+            ).model_dump()
+            for row in rows
+        ],
+    }
 
 
 @router.get("/{task_id}/transcript")

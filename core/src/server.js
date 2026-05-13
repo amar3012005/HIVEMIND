@@ -8280,17 +8280,55 @@ const server = http.createServer(async (req, res) => {
 
               // Build edges from relationships
               const nodeIdSet = new Set(allRecords.map(r => r.id));
-              let edges = [];
-              if (includeEdges) {
-                edges = allRelationships
-                  .filter(r => nodeIdSet.has(r.fromId) && nodeIdSet.has(r.toId))
-                  .map(r => ({
-                    source: r.fromId,
-                    target: r.toId,
-                    type: r.type,
-                    confidence: r.confidence,
-                    createdBy: r.createdBy || null, // 'turing' | 'memory_processor' | 'system'
-                  }));
+              // Materialize filtered edges once — clustering needs them even
+              // when the caller asked for include_edges=false.
+              const filteredEdges = allRelationships
+                .filter(r => nodeIdSet.has(r.fromId) && nodeIdSet.has(r.toId))
+                .map(r => ({
+                  source: r.fromId,
+                  target: r.toId,
+                  type: r.type,
+                  confidence: r.confidence,
+                  createdBy: r.createdBy || null, // 'turing' | 'memory_processor' | 'system'
+                }));
+              const edges = includeEdges ? filteredEdges : [];
+
+              // ── Cluster computation (Phase 2 of GRAPH_MEMORY_UPGRADE) ──
+              // Run Louvain community detection over the current node+edge set
+              // so the frontend can render mind-group constellations instead of
+              // a hairball. Pure function, no DB writes, ~50ms for 5k nodes.
+              let clusterMetaList = [];
+              try {
+                const { clusterGraph } = await import('./memory/graph-clusterer.js');
+                const clusterInput = nodes.map(n => ({
+                  id: n.id,
+                  tags: n.tags,
+                  importanceScore: n.importanceScore,
+                }));
+                const { nodeMeta, clusters: computedClusters } = clusterGraph(
+                  clusterInput,
+                  filteredEdges,
+                  { resolution: 1.05 },
+                );
+                clusterMetaList = computedClusters;
+                for (const node of nodes) {
+                  const m = nodeMeta[node.id];
+                  if (m) {
+                    node.clusterId = m.clusterId;
+                    node.clusterRole = m.clusterRole;
+                    node.hubScore = m.hubScore;
+                    node.bridgeScore = m.bridgeScore;
+                  } else {
+                    // Disconnected nodes still need a stable cluster id so the FE
+                    // forceCluster doesn't NaN them.
+                    node.clusterId = '_orphan';
+                    node.clusterRole = 'spoke';
+                    node.hubScore = 0;
+                    node.bridgeScore = 0;
+                  }
+                }
+              } catch (clusterErr) {
+                console.warn('[graph] clustering failed (non-fatal):', clusterErr.message);
               }
 
               // ── Resident overlay data ──
@@ -8387,6 +8425,8 @@ const server = http.createServer(async (req, res) => {
                   },
                   projects: Array.from(projectSet).sort(),
                   tags: Array.from(tagSet).sort(),
+                  clusters: clusterMetaList, // [{id, size, label, topTags, hubNodeId}]
+                  clusterCount: clusterMetaList.length,
                 },
               });
             } catch (error) {

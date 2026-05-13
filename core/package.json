@@ -33,6 +33,8 @@
     "bullmq": "^5.71.0",
     "stripe": "^17.5.0",
     "cors": "^2.8.5",
+    "graphology": "^0.26.0",
+    "graphology-communities-louvain": "^2.0.2",
     "ioredis": "^5.10.0",
     "mammoth": "^1.12.0",
     "node-fetch": "^3.3.2",

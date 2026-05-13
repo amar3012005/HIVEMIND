@@ -1106,12 +1106,29 @@ export async function recallPersistedMemories(store, {
 
   // Apply fact-memory boost before slicing to contextLimit
   // Items have shape { memory, score, vectorScore, ... }
+  // Phase 5 (GRAPH_MEMORY_UPGRADE): graph-structure-aware boost.
+  // Hubs are the most-cited node in their cluster — preferred representative.
+  // Bridges connect topics — small lift so they surface for cross-topic queries.
+  // Strength reflects recall reinforcement (Phase 6) — multiplicative.
+  const applyClusterBoost = (item) => {
+    const mem = item.memory || item;
+    const role = mem.clusterRole || mem.cluster_role;
+    const hubScore = Number.isFinite(mem.hubScore) ? mem.hubScore : (Number.isFinite(mem.hub_score) ? mem.hub_score : 0);
+    const strength = Number.isFinite(mem.strength) ? mem.strength : 1.0;
+    let mult = 1.0;
+    if (role === 'hub') mult *= 1.20;
+    else if (role === 'bridge') mult *= 1.05;
+    if (hubScore > 0) mult *= (1 + 0.10 * Math.min(1, hubScore));
+    mult *= (0.85 + 0.15 * Math.max(0.1, Math.min(1.0, strength)));
+    return { ...item, score: (item.score || 0) * mult };
+  };
+
   const applyItemBoosts = (items) => {
     let result = items.map(item => {
       const tags = item.memory?.tags || item.tags || [];
       const isFactMemory = Array.isArray(tags) && tags.includes('extracted-fact');
-      if (isFactMemory) return { ...item, score: (item.score || 0) * 1.15 };
-      return item;
+      const boosted = isFactMemory ? { ...item, score: (item.score || 0) * 1.15 } : item;
+      return applyClusterBoost(boosted);
     });
 
     if (preference_boost) {

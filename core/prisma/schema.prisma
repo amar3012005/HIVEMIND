@@ -57,6 +57,14 @@ model Organization {
   createdAt           DateTime?          @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt           DateTime?          @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   plan                String?            @default("free") @map("plan") @db.VarChar(50)
+  // Stripe billing state — populated on first checkout, sync'd via webhook.
+  stripeCustomerId    String?            @unique @map("stripe_customer_id") @db.VarChar(64)
+  stripeSubscriptionId String?           @map("stripe_subscription_id") @db.VarChar(64)
+  subscriptionStatus  String?            @map("subscription_status") @db.VarChar(32)
+    // active | trialing | past_due | canceled | unpaid | incomplete
+  currentPeriodEnd    DateTime?          @map("current_period_end") @db.Timestamptz(6)
+  trialEndsAt         DateTime?          @map("trial_ends_at") @db.Timestamptz(6)
+  billingEmail        String?            @map("billing_email") @db.VarChar(255)
   apiKeys             ApiKey[]           @relation("OrgApiKeys")
   auditLogs           AuditLog[]         @relation("OrgAuditLogs")
   memories            Memory[]           @relation("OrgMemories")

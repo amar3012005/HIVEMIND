@@ -5075,111 +5075,193 @@ const server = http.createServer(async (req, res) => {
               return jsonResponse(res, { error: 'Memory engine unavailable' }, 503);
             }
 
-            // Accept either memory_id (the document summary/schema memory) or upload_id
-            const deleteMemoryId = body.memory_id || url.searchParams.get('memory_id');
-            const deleteUploadId = body.upload_id || url.searchParams.get('upload_id');
+            // Accept memory_id, upload_id, or a generic id (the FE sends both
+            // when it can't tell which it has — just-uploaded docs carry an
+            // upload_id, persisted docs carry a real memory UUID).
+            const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+            const rawMemoryId = body.memory_id || url.searchParams.get('memory_id');
+            const rawUploadId = body.upload_id || url.searchParams.get('upload_id');
+            const rawId = body.id || url.searchParams.get('id') || rawMemoryId || rawUploadId;
 
-            if (!deleteMemoryId && !deleteUploadId) {
-              return jsonResponse(res, { error: 'memory_id or upload_id is required' }, 400);
+            if (!rawId && !rawMemoryId && !rawUploadId) {
+              return jsonResponse(res, { error: 'memory_id, upload_id, or id is required' }, 400);
+            }
+
+            // Resolve which slot the value belongs to. If memory_id is set but
+            // points to a non-existent memory (i.e. caller actually had an
+            // upload_id), we transparently fall back to upload_id below.
+            let deleteMemoryId = rawMemoryId && UUID_RE.test(rawMemoryId) ? rawMemoryId : null;
+            let deleteUploadId = rawUploadId || null;
+            // If we got rawId without splitting and it doesn't look UUID-ish,
+            // assume it's an upload_id.
+            if (!deleteMemoryId && !deleteUploadId && rawId) {
+              if (UUID_RE.test(rawId)) deleteMemoryId = rawId;
+              else deleteUploadId = rawId;
             }
 
             try {
               let memoryIds = [];
+              let resolutionStrategy = null;
 
-              if (deleteUploadId) {
-                // Find all memories with upload:{id} tag
-                const tagged = await prisma.memory.findMany({
-                  where: {
-                    userId,
-                    tags: { has: `upload:${deleteUploadId}` },
-                    deletedAt: null,
-                  },
-                  select: { id: true },
-                });
-                memoryIds = tagged.map(m => m.id);
-              } else {
+              // Helper: run a Prisma query but never let it bubble — log and
+              // return [] so the next strategy can run.
+              const safeFind = async (label, queryFn) => {
+                try {
+                  const rows = await queryFn();
+                  return Array.isArray(rows) ? rows.map(r => r.id).filter(Boolean) : [];
+                } catch (qErr) {
+                  console.warn(`[knowledge-delete] strategy "${label}" failed:`, qErr.message);
+                  return [];
+                }
+              };
+
+              if (deleteUploadId && !deleteMemoryId) {
+                // Direct upload_id path: find all memories tagged with upload:{id}
+                memoryIds = await safeFind('upload-tag-direct', () =>
+                  prisma.memory.findMany({
+                    where: { userId, tags: { has: `upload:${deleteUploadId}` }, deletedAt: null },
+                    select: { id: true },
+                  })
+                );
+                resolutionStrategy = 'upload-id-direct';
+              }
+
+              if (memoryIds.length === 0 && deleteMemoryId) {
                 // Find the document memory first to get its source info
-                const docMemory = await prisma.memory.findFirst({
-                  where: { id: deleteMemoryId, userId, deletedAt: null },
-                  select: { id: true, tags: true, title: true, sourceMetadata: { select: { sourceId: true, metadata: true } }, versions: { orderBy: { createdAt: 'desc' }, take: 1, select: { metadata: true } } },
-                });
-                const docMeta = docMemory?.versions?.[0]?.metadata || docMemory?.sourceMetadata?.metadata || {};
+                let docMemory = null;
+                try {
+                  docMemory = await prisma.memory.findFirst({
+                    where: { id: deleteMemoryId, userId, deletedAt: null },
+                    select: {
+                      id: true,
+                      tags: true,
+                      title: true,
+                      sourceMetadata: { select: { sourceId: true, metadata: true } },
+                      versions: { orderBy: { createdAt: 'desc' }, take: 1, select: { metadata: true } },
+                    },
+                  });
+                } catch (lookupErr) {
+                  console.warn('[knowledge-delete] doc lookup failed:', lookupErr.message);
+                }
 
+                // If memory_id didn't resolve, treat it as a possible upload_id.
                 if (!docMemory) {
-                  return jsonResponse(res, { error: 'Document not found' }, 404);
-                }
+                  const fallbackUploadId = deleteUploadId || deleteMemoryId;
+                  memoryIds = await safeFind('upload-tag-fallback', () =>
+                    prisma.memory.findMany({
+                      where: { userId, tags: { has: `upload:${fallbackUploadId}` }, deletedAt: null },
+                      select: { id: true },
+                    })
+                  );
+                  if (memoryIds.length === 0) {
+                    return jsonResponse(res, { error: 'Document not found' }, 404);
+                  }
+                  deleteUploadId = fallbackUploadId;
+                  resolutionStrategy = 'upload-id-fallback';
+                } else {
+                  const docMeta = docMemory.versions?.[0]?.metadata || docMemory.sourceMetadata?.metadata || {};
 
-                // Strategy 1: Check for upload:{id} tag (enterprise uploads)
-                const uploadTag = (docMemory.tags || []).find(t => t.startsWith('upload:'));
-                if (uploadTag) {
-                  const tagged = await prisma.memory.findMany({
-                    where: { userId, tags: { has: uploadTag }, deletedAt: null },
-                    select: { id: true },
-                  });
-                  memoryIds = tagged.map(m => m.id);
-                }
+                  // Strategy 1: upload:{id} tag on the document memory itself
+                  const uploadTag = (docMemory.tags || []).find(t => t.startsWith('upload:'));
+                  if (uploadTag) {
+                    memoryIds = await safeFind('upload-tag-on-doc', () =>
+                      prisma.memory.findMany({
+                        where: { userId, tags: { has: uploadTag }, deletedAt: null },
+                        select: { id: true },
+                      })
+                    );
+                    if (memoryIds.length) resolutionStrategy = 'tag-on-doc';
+                  }
 
-                // Strategy 2: Check metadata.source_upload_id (enterprise)
-                if (memoryIds.length === 0 && docMeta?.source_upload_id) {
-                  const uploadId = docMeta.source_upload_id;
-                  const tagged = await prisma.memory.findMany({
-                    where: { userId, tags: { has: `upload:${uploadId}` }, deletedAt: null },
-                    select: { id: true },
-                  });
-                  memoryIds = tagged.map(m => m.id);
-                }
+                  // Strategy 2: metadata.source_upload_id (enterprise schema)
+                  if (memoryIds.length === 0 && docMeta?.source_upload_id) {
+                    memoryIds = await safeFind('source-upload-id-tag', () =>
+                      prisma.memory.findMany({
+                        where: { userId, tags: { has: `upload:${docMeta.source_upload_id}` }, deletedAt: null },
+                        select: { id: true },
+                      })
+                    );
+                    if (memoryIds.length) resolutionStrategy = 'source-upload-id';
+                  }
 
-                // Strategy 3: Match by source_id pattern (regular KB uploads - doc:{filename}:*)
-                if (memoryIds.length === 0) {
-                  const filename = docMeta?.filename || docMeta?.document_title;
-                  if (filename) {
-                    const sourcePattern = `doc:${filename}`;
-                    const related = await prisma.memory.findMany({
-                      where: {
-                        userId,
-                        deletedAt: null,
-                        sourceMetadata: {
-                          is: {
-                            sourceId: { startsWith: sourcePattern },
+                  // Strategy 3: source_id pattern (regular KB uploads — doc:{filename}:*)
+                  if (memoryIds.length === 0) {
+                    const filename = docMeta?.filename || docMeta?.document_title;
+                    if (filename) {
+                      memoryIds = await safeFind('source-id-prefix', () =>
+                        prisma.memory.findMany({
+                          where: {
+                            userId,
+                            deletedAt: null,
+                            sourceMetadata: { is: { sourceId: { startsWith: `doc:${filename}` } } },
+                          },
+                          select: { id: true },
+                        })
+                      );
+                      if (memoryIds.length) resolutionStrategy = 'source-id-prefix';
+                    }
+                  }
+
+                  // Strategy 4: children via versions.metadata.parent_schema_id
+                  // (this is the JSON path filter that historically threw 500s
+                  // when metadata was null — safeFind() now isolates it).
+                  if (memoryIds.length === 0) {
+                    const children = await safeFind('parent-schema-id', () =>
+                      prisma.memory.findMany({
+                        where: {
+                          userId,
+                          deletedAt: null,
+                          versions: {
+                            some: {
+                              metadata: { path: ['parent_schema_id'], equals: deleteMemoryId },
+                            },
                           },
                         },
-                      },
-                      select: { id: true },
-                    });
-                    memoryIds = related.map(m => m.id);
+                        select: { id: true },
+                      })
+                    );
+                    memoryIds = [deleteMemoryId, ...children];
+                    resolutionStrategy = resolutionStrategy || 'self-plus-children';
                   }
-                }
 
-                // Strategy 4: If still nothing, at minimum delete this memory + children with parent_schema_id
-                if (memoryIds.length === 0) {
-                  memoryIds = [deleteMemoryId];
-                  // Find children that reference this as parent via versions metadata
-                  const children = await prisma.memory.findMany({
-                    where: {
-                      userId,
-                      deletedAt: null,
-                      versions: { some: { metadata: { path: ['parent_schema_id'], equals: deleteMemoryId } } },
-                    },
-                    select: { id: true },
-                  });
-                  memoryIds.push(...children.map(c => c.id));
-                }
-
-                // Ensure the clicked document is included
-                if (!memoryIds.includes(deleteMemoryId)) {
-                  memoryIds.push(deleteMemoryId);
+                  // Always include the clicked document
+                  if (!memoryIds.includes(deleteMemoryId)) {
+                    memoryIds.push(deleteMemoryId);
+                  }
                 }
               }
 
               if (memoryIds.length === 0) {
                 return jsonResponse(res, { error: 'No memories found for this document' }, 404);
               }
+              // De-dup
+              memoryIds = Array.from(new Set(memoryIds));
+              console.log(`[knowledge-delete] resolution=${resolutionStrategy} target=${deleteMemoryId || deleteUploadId} count=${memoryIds.length}`);
 
-              // Cascade hard delete (same pattern as delete-all)
-              await prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: memoryIds } } });
-              await prisma.memoryVersion.deleteMany({ where: { memoryId: { in: memoryIds } } });
-              await prisma.relationship.deleteMany({ where: { OR: [{ fromId: { in: memoryIds } }, { toId: { in: memoryIds } }] } });
-              await prisma.memory.deleteMany({ where: { id: { in: memoryIds } } });
+              // Cascade hard delete (same pattern as delete-all). Each step is
+              // wrapped so a partial failure (e.g. orphan relationship row)
+              // still lets the rest progress and the user gets a useful error
+              // mentioning WHICH step failed, not a generic 500.
+              const cascade = async (label, fn) => {
+                try { await fn(); } catch (cErr) {
+                  console.error(`[knowledge-delete] cascade "${label}" failed:`, cErr.message);
+                  throw new Error(`cascade ${label} failed: ${cErr.message}`);
+                }
+              };
+              await cascade('source_metadata', () =>
+                prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: memoryIds } } })
+              );
+              await cascade('memory_versions', () =>
+                prisma.memoryVersion.deleteMany({ where: { memoryId: { in: memoryIds } } })
+              );
+              await cascade('relationships', () =>
+                prisma.relationship.deleteMany({
+                  where: { OR: [{ fromId: { in: memoryIds } }, { toId: { in: memoryIds } }] },
+                })
+              );
+              await cascade('memories', () =>
+                prisma.memory.deleteMany({ where: { id: { in: memoryIds } } })
+              );
 
               // Delete from Qdrant
               try {

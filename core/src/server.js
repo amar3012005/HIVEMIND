@@ -5644,6 +5644,24 @@ const server = http.createServer(async (req, res) => {
                   where: { OR: [{ fromId: { in: memoryIds } }, { toId: { in: memoryIds } }] },
                 })
               );
+              // FK to Memory.id from OTHER memories' versions via related_memory_id.
+              // Has no onDelete cascade in schema → restrict → memories.deleteMany fails.
+              // Nullify these refs first (audit-safe — they were "see also" pointers).
+              await cascade('memory_versions_related_refs', () =>
+                prisma.memoryVersion.updateMany({
+                  where: { relatedMemoryId: { in: memoryIds } },
+                  data: { relatedMemoryId: null },
+                })
+              );
+              // AuditLog.resourceId → Memory.id has no onDelete cascade either.
+              // Audit records must outlive deletions (compliance) so we nullify the FK
+              // rather than delete the log entries.
+              await cascade('audit_log_refs', () =>
+                prisma.auditLog.updateMany({
+                  where: { resourceId: { in: memoryIds } },
+                  data: { resourceId: null },
+                })
+              );
               await cascade('memories', () =>
                 prisma.memory.deleteMany({ where: { id: { in: memoryIds } } })
               );

@@ -8098,6 +8098,7 @@ const server = http.createServer(async (req, res) => {
             if (!ensurePersistedMemoryOrFail(res, '/api/graph')) {
               return;
             }
+            let releaseSlot = null;
             try {
               const graphProject = url.searchParams.get('project') || null;
               const graphScope = url.searchParams.get('scope') || 'personal';
@@ -8112,9 +8113,21 @@ const server = http.createServer(async (req, res) => {
                 edges: url.searchParams.get('include_edges') !== 'false' ? 1 : 0,
                 residents: url.searchParams.get('include_residents') !== 'false' ? 1 : 0,
               };
-              const cached = getGraphCache(cacheKey);
+              const cached = await getGraphCache(cacheKey);
               if (cached) {
                 return jsonResponse(res, cached);
+              }
+              // Per-tenant concurrency gate: prevent one tenant from
+              // spawning N parallel expensive graph builds and starving others.
+              const { acquireTenantSlot } = await import('./memory/tenant-gate.js');
+              try {
+                releaseSlot = await acquireTenantSlot(userId || orgId || 'anon', '/api/graph');
+              } catch (gateErr) {
+                return jsonResponse(res, {
+                  error: 'Too many concurrent graph queries',
+                  message: 'Another graph build is in progress for this tenant. Retry shortly.',
+                  retryAfter: 3,
+                }, 429);
               }
               // Hard cap raised to 50000 — full memory libraries should be visualisable.
               // Pass limit=0 to mean "no cap" (will be clamped to 50000 max).
@@ -8446,8 +8459,10 @@ const server = http.createServer(async (req, res) => {
                 },
               };
               setGraphCache(cacheKey, responsePayload);
+              if (releaseSlot) releaseSlot();
               return jsonResponse(res, responsePayload);
             } catch (error) {
+              if (typeof releaseSlot === 'function') releaseSlot();
               console.error('Graph endpoint failed:', error);
               return jsonResponse(res, {
                 error: 'Graph generation failed',

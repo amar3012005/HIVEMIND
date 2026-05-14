@@ -178,6 +178,56 @@ export class ConnectorStore {
   }
 
   /**
+   * List every connector across all users for a given provider.
+   * Used by Pub/Sub watch renewal cron.
+   */
+  async listAllByProvider(provider) {
+    const records = await this.prisma.platformIntegration.findMany({
+      where: { platformType: provider, syncStatus: { not: 'revoked' } },
+      orderBy: { lastSyncedAt: 'desc' },
+    });
+    return records.map((r) => this._mapRecord(r));
+  }
+
+  /**
+   * Look up a connection by the external account it represents
+   * (e.g. find gmail connector for user_account_ref = "alice@example.com").
+   * Pub/Sub notifications carry the emailAddress; we map it back to userId.
+   */
+  async findByEmail(provider, email) {
+    if (!email) return null;
+    const normalized = String(email).toLowerCase();
+    const record = await this.prisma.platformIntegration.findFirst({
+      where: {
+        platformType: provider,
+        userAccountRef: { equals: normalized, mode: 'insensitive' },
+        syncStatus: { not: 'revoked' },
+      },
+    });
+    if (!record) return null;
+    return this._mapRecord(record);
+  }
+
+  /**
+   * Patch arbitrary keys into connectorMetadata (e.g. { watch: {...} }).
+   * Other metadata fields preserved.
+   */
+  async updateMetadata(userId, provider, partial) {
+    const existing = await this.prisma.platformIntegration.findUnique({
+      where: { userId_platformType: { userId, platformType: provider } },
+    });
+    if (!existing) return null;
+    const merged = {
+      ...readConnectorMetadata(existing),
+      ...partial,
+    };
+    return this.prisma.platformIntegration.update({
+      where: { id: existing.id },
+      data: { connectorMetadata: merged },
+    });
+  }
+
+  /**
    * Update connector sync status.
    */
   async updateStatus(userId, provider, { status, error = null, cursor = null, syncStats = null }) {

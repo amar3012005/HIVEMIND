@@ -8437,12 +8437,26 @@ const server = http.createServer(async (req, res) => {
                 planEnforcer.recordUsage(orgId, 'graphQueries', 1);
               }
 
+              // Step C: strip large `content` from graph nodes — visualization
+              // doesn't need full document text. Cuts payload ~80%.
+              const slimNodes = nodes.map((node) => {
+                const slim = { ...node };
+                if (slim.content && slim.content.length > 200) {
+                  slim.contentPreview = slim.content.slice(0, 180) + '…';
+                  delete slim.content;
+                }
+                // Drop heavy nested objects rarely needed for layout
+                delete slim.sourceMetadata;
+                delete slim.metadata;
+                return slim;
+              });
+
               const responsePayload = {
-                nodes,
+                nodes: slimNodes,
                 edges,
                 residentActivity,
                 meta: {
-                  nodeCount: nodes.length,
+                  nodeCount: slimNodes.length,
                   edgeCount: edges.length,
                   totalMemories: totalCount,
                   scope: graphScope,
@@ -8456,10 +8470,19 @@ const server = http.createServer(async (req, res) => {
                   clusters: clusterMetaList, // [{id, size, label, topTags, hubNodeId}]
                   clusterCount: clusterMetaList.length,
                   cachedAt: new Date().toISOString(),
+                  payloadSlimmed: true,
                 },
               };
               setGraphCache(cacheKey, responsePayload);
               if (releaseSlot) releaseSlot();
+
+              // Step A: HTTP cache headers for instant browser re-renders.
+              //   max-age=60        → browser uses local cache for 60s
+              //   stale-while-revalidate=300 → serve stale instantly while fetching fresh
+              //   private           → don't cache in shared CDNs (per-tenant data)
+              res.setHeader('Cache-Control', 'private, max-age=60, stale-while-revalidate=300');
+              // Weak ETag from cluster count + node count + timestamp — cheap, no body hash
+              res.setHeader('ETag', `W/"g-${slimNodes.length}-${edges.length}-${clusterMetaList.length}-${Math.floor(Date.now()/60000)}"`);
               return jsonResponse(res, responsePayload);
             } catch (error) {
               if (typeof releaseSlot === 'function') releaseSlot();

@@ -5586,8 +5586,11 @@ const server = http.createServer(async (req, res) => {
               // mentioning WHICH step failed, not a generic 500.
               const cascade = async (label, fn) => {
                 try { await fn(); } catch (cErr) {
-                  console.error(`[knowledge-delete] cascade "${label}" failed:`, cErr.message);
-                  throw new Error(`cascade ${label} failed: ${cErr.message}`);
+                  const detail = cErr.code
+                    ? `${cErr.code} ${cErr.message || ''} ${cErr.meta ? JSON.stringify(cErr.meta) : ''}`
+                    : (cErr.message || cErr.toString() || 'unknown');
+                  console.error(`[knowledge-delete] cascade "${label}" failed:`, detail, cErr);
+                  throw new Error(`cascade ${label} failed: ${detail}`);
                 }
               };
               await cascade('source_metadata', () =>

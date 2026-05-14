@@ -10,7 +10,16 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./integrations/vercel-ai-sdk": {
+      "import": "./src/integrations/vercel-ai-sdk.js"
     }
+  },
+  "peerDependencies": {
+    "zod": "^3.22.0"
+  },
+  "peerDependenciesMeta": {
+    "zod": { "optional": true }
   },
   "scripts": {
     "build": "tsc",

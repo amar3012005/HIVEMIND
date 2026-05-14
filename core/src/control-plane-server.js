@@ -2271,8 +2271,7 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, deletionCheck, deletionCheck.status || 409);
     }
 
-    console.log('[account-delete] ✓ Validation passed — destroying session, starting deletion');
-    await sessionStore.destroySession(current.sessionId);
+    console.log('[account-delete] ✓ Validation passed — starting deletion');
 
     // Check if client wants SSE streaming (Accept: text/event-stream)
     const wantsSSE = (req.headers.accept || '').includes('text/event-stream') || body.stream === true;
@@ -2299,6 +2298,7 @@ const server = http.createServer(async (req, res) => {
       });
 
       if (result.ok) {
+        await sessionStore.destroySession(current.sessionId);
         sendEvent({ progress: 100, step: 'Account deleted', done: true, success: true });
       } else {
         sendEvent({ progress: -1, step: result.error, done: true, success: false, error: result.error });
@@ -2315,9 +2315,10 @@ const server = http.createServer(async (req, res) => {
 
     if (!result.ok) {
       return jsonResponse(res, { error: result.error, status: 'failed' }, 500, {
-        'Set-Cookie': clearSessionCookie(),
       });
     }
+
+    await sessionStore.destroySession(current.sessionId);
 
     return jsonResponse(res, {
       success: true,

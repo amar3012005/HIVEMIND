@@ -4696,8 +4696,28 @@ const server = http.createServer(async (req, res) => {
 
               console.log(`[gmail-oauth] Connected for user=${stateUserId} email=${tokens.email}. Awaiting sync configuration.`);
 
-              // Do NOT auto-sync — redirect to frontend with needs_config flag
-              // User will configure filters (labels, date range, exclusions) before sync starts
+              // Auto-register Pub/Sub watch if topic configured. Non-fatal on failure —
+              // user can still use polling-based sync. Skipped if scopes don't include
+              // gmail.modify (watch requires write tier).
+              if (process.env.GCP_PUBSUB_TOPIC) {
+                const grantedScopes = (tokens.scope || '').split(' ');
+                if (grantedScopes.includes('https://www.googleapis.com/auth/gmail.modify')) {
+                  try {
+                    const { registerWatch } = await import('./connectors/providers/gmail/gmail-watch.js');
+                    const watch = await registerWatch({
+                      accessToken: tokens.access_token,
+                      topicName: process.env.GCP_PUBSUB_TOPIC,
+                    });
+                    await connStore.updateMetadata(stateUserId, 'gmail', { watch });
+                    console.log(`[gmail-oauth] Watch registered for ${tokens.email} expires=${new Date(watch.expirationMs).toISOString()}`);
+                  } catch (watchErr) {
+                    console.warn(`[gmail-oauth] Watch registration failed (non-fatal): ${watchErr.message}`);
+                  }
+                } else {
+                  console.log(`[gmail-oauth] Skipping watch — gmail.modify scope not granted (only got: ${tokens.scope})`);
+                }
+              }
+
               const frontendUrl = process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu';
               res.writeHead(302, { Location: `${frontendUrl}/hivemind/app/connectors?connected=gmail&needs_config=true&email=${encodeURIComponent(tokens.email || '')}&target_scope=${encodeURIComponent(stateTargetScope)}` });
               res.end();

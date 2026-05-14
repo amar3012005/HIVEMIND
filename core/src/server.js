@@ -16,6 +16,7 @@ import { createRequire } from 'module';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
 const REPO_ROOT = path.join(PROJECT_ROOT, '..');
+const CORE_SCRIPTS_ROOT = path.join(PROJECT_ROOT, 'scripts');
 const require = createRequire(import.meta.url);
 
 function loadLocalEnv(envPath) {
@@ -2248,6 +2249,48 @@ const server = http.createServer(async (req, res) => {
     } catch (e) {
       res.writeHead(500);
       res.end('Error loading tampermonkey-hivemind-web.user.js: ' + e.message);
+      return;
+    }
+  }
+
+  if ((pathname === '/install/claude-mcp-macos.sh' || pathname === '/install/claude-mcp-linux.sh') && req.method === 'GET') {
+    try {
+      const platform = pathname.includes('linux') ? 'linux' : 'macos';
+      const template = fs.readFileSync(path.join(CORE_SCRIPTS_ROOT, 'claude-mcp-installer.sh'), 'utf-8');
+      const apiKey = url.searchParams.get('api_key') || '';
+      const content = template
+        .replaceAll('__DIRECT_MCP_ENDPOINT__', 'https://core.hivemind.davinciai.eu:8050/api/mcp')
+        .replaceAll('__HAS_API_KEY__', apiKey ? '1' : '0')
+        .replaceAll('__API_KEY__', apiKey)
+        .replaceAll('__PLATFORM__', platform);
+      res.setHeader('Content-Type', 'text/x-shellscript; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-store');
+      res.writeHead(200);
+      res.end(content);
+      return;
+    } catch (e) {
+      res.writeHead(500);
+      res.end('Error loading Claude installer: ' + e.message);
+      return;
+    }
+  }
+
+  if (pathname === '/install/claude-mcp-windows.ps1' && req.method === 'GET') {
+    try {
+      const template = fs.readFileSync(path.join(CORE_SCRIPTS_ROOT, 'claude-mcp-installer.ps1'), 'utf-8');
+      const apiKey = url.searchParams.get('api_key') || '';
+      const content = template
+        .replaceAll('__DIRECT_MCP_ENDPOINT__', 'https://core.hivemind.davinciai.eu:8050/api/mcp')
+        .replaceAll('__HAS_API_KEY__', apiKey ? '1' : '0')
+        .replaceAll('__API_KEY__', apiKey);
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-store');
+      res.writeHead(200);
+      res.end(content);
+      return;
+    } catch (e) {
+      res.writeHead(500);
+      res.end('Error loading Claude PowerShell installer: ' + e.message);
       return;
     }
   }

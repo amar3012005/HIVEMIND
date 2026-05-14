@@ -6,6 +6,7 @@
  */
 
 import { BaseProviderAdapter } from '../../framework/provider-adapter.js';
+import { cleanEmailBody } from './email-cleaner.js';
 
 const GMAIL_API_BASE = 'https://gmail.googleapis.com/gmail/v1/users/me';
 const MAX_RESULTS_PER_PAGE = 50;
@@ -140,12 +141,23 @@ export class GmailAdapter extends BaseProviderAdapter {
     // Determine user's own email for content attribution
     const userEmail = (context.user_account_ref || '').toLowerCase();
 
+    // Thread mode: 'per-message' (default, fine-grained) or 'thread' (one memory per thread)
+    const threadMode = context?.gmail_thread_mode || 'per-message';
+    const threadMessageBlocks = []; // Used when threadMode === 'thread'
+
     for (let i = 0; i < messages.length; i++) {
       const msg = messages[i];
       const from = this._getHeader(msg, 'From') || '';
       const to = this._getHeader(msg, 'To') || '';
       const date = this._getHeader(msg, 'Date');
-      const body = this._extractBody(msg);
+      const cleanResult = this._extractBody(msg);
+      const body = cleanResult.markdown || '';
+
+      // Noise filter: skip auto-replies, OOO, bounces, empty messages
+      if (cleanResult.noise?.skip) {
+        console.log(`[gmail-adapter] Skipping message ${msg.id}: ${cleanResult.noise.reason}`);
+        continue;
+      }
 
       // Determine content attribution: did the user send this or receive it?
       const fromEmail = (from.match(/[\w.+-]+@[\w.-]+\.\w{2,}/) || [''])[0].toLowerCase();
@@ -175,14 +187,34 @@ export class GmailAdapter extends BaseProviderAdapter {
         ? `\nAttachments: ${attachments.map(a => `${a.filename} (${a.mimeType})`).join(', ')}`
         : '';
 
+      // Structured markdown content — uniform format, easy for LLMs to parse
       const content = [
-        `Subject: ${subject}`,
-        `From: ${from}`,
-        `To: ${to}`,
-        date ? `Date: ${date}` : null,
+        `**Subject:** ${subject}`,
+        `**From:** ${from}`,
+        `**To:** ${to}`,
+        date ? `**Date:** ${date}` : null,
+        attachments.length > 0
+          ? `**Attachments:** ${attachments.map(a => `${a.filename} (${a.mimeType})`).join(', ')}`
+          : null,
         '',
-        body + attachmentLine,
+        '---',
+        '',
+        body,
       ].filter(Boolean).join('\n');
+
+      // Collect per-message blocks for thread-mode aggregation
+      if (threadMode === 'thread') {
+        threadMessageBlocks.push({
+          index: i,
+          from,
+          to,
+          date,
+          body,
+          attachments,
+          sentByUser,
+        });
+        continue; // skip per-message payload — emit one thread payload at end
+      }
 
       const tags = [...this.defaultTags, ...threadLabels];
       if (attachments.length > 0) tags.push('has-attachments');
@@ -235,6 +267,80 @@ export class GmailAdapter extends BaseProviderAdapter {
       }
 
       payloads.push(payload);
+    }
+
+    // Thread-mode: emit one consolidated memory per thread with all messages
+    // preserved in order. Mirrors Supermemory's gmail_thread doc shape.
+    if (threadMode === 'thread' && threadMessageBlocks.length > 0) {
+      const lastMsg = messages[messages.length - 1];
+      const lastDate = this._getHeader(lastMsg, 'Date');
+      const firstDate = this._getHeader(messages[0], 'Date');
+      const participants = new Set();
+      const allAttachments = [];
+
+      for (const b of threadMessageBlocks) {
+        const emailMatch = (b.from || '').match(/<([^>]+)>/);
+        participants.add(emailMatch ? emailMatch[1] : b.from);
+        allAttachments.push(...b.attachments);
+      }
+
+      const threadContent = [
+        `**Subject:** ${subject}`,
+        `**Participants:** ${[...participants].join(', ')}`,
+        firstDate ? `**Date:** ${firstDate}${lastDate && lastDate !== firstDate ? ` → ${lastDate}` : ''}` : null,
+        `**Messages:** ${threadMessageBlocks.length}`,
+        allAttachments.length > 0
+          ? `**Attachments:** ${allAttachments.map(a => a.filename).join(', ')}`
+          : null,
+        '',
+        '---',
+        '',
+        ...threadMessageBlocks.map((b, idx) => [
+          `### Message ${idx + 1} — ${b.from}${b.date ? ` · ${b.date}` : ''}`,
+          b.to ? `*To: ${b.to}*` : null,
+          '',
+          b.body,
+          '',
+        ].filter(Boolean).join('\n')),
+      ].filter(Boolean).join('\n');
+
+      const threadTags = [...this.defaultTags, 'gmail-thread', ...threadLabels];
+      if (allAttachments.length > 0) threadTags.push('has-attachments');
+      const senderParticipants = [...participants].slice(0, 3).map(p => `from:${p.split('@')[0]}`);
+      threadTags.push(...senderParticipants);
+
+      payloads.push({
+        user_id: context.user_id,
+        org_id: context.org_id,
+        project: null,
+        content: threadContent,
+        title: subject,
+        tags: [...new Set(threadTags)],
+        memory_type: 'fact',
+        document_date: lastDate ? new Date(lastDate).toISOString() : null,
+        source_metadata: {
+          source_type: 'gmail',
+          source_platform: 'gmail',
+          source_id: `gmail:thread:${thread.id}`,
+          thread_id: thread.id,
+        },
+        metadata: {
+          type: 'gmail_thread',
+          gmail_thread_id: thread.id,
+          subject,
+          from: messages[0] ? this._getHeader(messages[0], 'From') : null,
+          to: messages[0] ? this._getHeader(messages[0], 'To') : null,
+          date_first: firstDate,
+          date_last: lastDate,
+          message_count: threadMessageBlocks.length,
+          participants: [...participants],
+          attachment_count: allAttachments.length,
+          attachment_names: allAttachments.map(a => a.filename),
+          labels: threadLabels,
+        },
+      });
+
+      return payloads;
     }
 
     // Thread summary for long threads (feature-flagged on by default)
@@ -321,31 +427,49 @@ export class GmailAdapter extends BaseProviderAdapter {
     return header?.value || null;
   }
 
+  /**
+   * Extract clean, structured body from a Gmail message.
+   * Returns markdown content with quoted replies + signatures stripped,
+   * plus noise classification + trim stats.
+   */
   _extractBody(message) {
     const payload = message.payload;
-    if (!payload) return message.snippet || '';
+    if (!payload) return { markdown: message.snippet || '', noise: { skip: false }, trimStats: {} };
 
-    // Try plain text first
-    if (payload.mimeType === 'text/plain' && payload.body?.data) {
-      return this._decodeBase64(payload.body.data);
-    }
+    // Gather raw text + html bodies from message parts
+    let rawText = '';
+    let rawHtml = '';
 
-    // Search parts for text/plain
-    const parts = payload.parts || [];
-    for (const part of parts) {
+    const walk = (part) => {
+      if (!part) return;
       if (part.mimeType === 'text/plain' && part.body?.data) {
-        return this._decodeBase64(part.body.data);
+        rawText = rawText || this._decodeBase64(part.body.data);
+      } else if (part.mimeType === 'text/html' && part.body?.data) {
+        rawHtml = rawHtml || this._decodeBase64(part.body.data);
       }
+      if (part.parts) part.parts.forEach(walk);
+    };
+    walk(payload);
+
+    // Build header map for noise classification
+    const headers = {};
+    for (const h of payload.headers || []) {
+      headers[h.name.toLowerCase()] = h.value;
     }
 
-    // Fallback to HTML stripped or snippet
-    for (const part of parts) {
-      if (part.mimeType === 'text/html' && part.body?.data) {
-        return this._stripHtml(this._decodeBase64(part.body.data));
-      }
+    const result = cleanEmailBody({ rawText, rawHtml, headers });
+    if (!result.markdown && message.snippet) {
+      result.markdown = message.snippet;
     }
+    return result;
+  }
 
-    return message.snippet || '';
+  /**
+   * Legacy plain body extractor — kept for thread summary fallback.
+   */
+  _extractBodyPlain(message) {
+    const result = this._extractBody(message);
+    return result.markdown || '';
   }
 
   _decodeBase64(data) {

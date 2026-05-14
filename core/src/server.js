@@ -5054,6 +5054,150 @@ const server = http.createServer(async (req, res) => {
           break;
 
         // ==========================================
+        // GMAIL PUB/SUB WATCH — Real-time email ingestion
+        // ==========================================
+
+        case '/api/connectors/gmail/watch/register':
+          // Caller-triggered: register a Gmail watch for the current user.
+          // Auto-called after successful OAuth; manual re-trigger via this route.
+          if (req.method === 'POST') {
+            try {
+              const { ConnectorStore, decryptToken } = await import('./connectors/framework/connector-store.js');
+              const { registerWatch } = await import('./connectors/providers/gmail/gmail-watch.js');
+              const cs = new ConnectorStore(prisma);
+              const conn = await cs.getConnector(userId, 'gmail');
+              if (!conn) return jsonResponse(res, { error: 'Gmail not connected' }, 400);
+
+              const topicName = process.env.GCP_PUBSUB_TOPIC;
+              if (!topicName) {
+                return jsonResponse(res, {
+                  error: 'Server not configured for Pub/Sub. Set GCP_PUBSUB_TOPIC env var.',
+                  hint: 'See docs/gmail-pubsub-setup.md',
+                }, 503);
+              }
+
+              const accessToken = decryptToken(conn.access_token_encrypted);
+              const watch = await registerWatch({
+                accessToken,
+                topicName,
+                labelIds: body.labels || undefined,
+              });
+
+              await cs.updateMetadata?.(userId, 'gmail', { watch });
+              return jsonResponse(res, { success: true, watch });
+            } catch (err) {
+              console.error('[gmail-watch] register failed:', err.message);
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/connectors/gmail/pubsub-webhook':
+          // Pub/Sub push target. Google sends a JSON payload with the base64
+          // Gmail notification + an OIDC token in Authorization header.
+          if (req.method === 'POST') {
+            try {
+              const { decodePubSubMessage, verifyPubSubAuth } = await import('./connectors/providers/gmail/gmail-watch.js');
+
+              // Verify OIDC token from Pub/Sub
+              const expectedAudience = process.env.GCP_PUBSUB_AUDIENCE
+                || `${process.env.HIVEMIND_PUBLIC_URL || 'https://core.hivemind.davinciai.eu:8050'}/api/connectors/gmail/pubsub-webhook`;
+              const authValid = await verifyPubSubAuth(
+                req.headers['authorization'] || '',
+                expectedAudience,
+              );
+              if (!authValid && process.env.NODE_ENV === 'production') {
+                return jsonResponse(res, { error: 'Invalid Pub/Sub auth token' }, 401);
+              }
+
+              const decoded = decodePubSubMessage(body);
+              if (!decoded) {
+                // Pub/Sub treats 2xx as ack; malformed = no retry
+                return jsonResponse(res, { ack: true, reason: 'malformed' });
+              }
+
+              // Find the user whose Gmail account matches this notification
+              const { ConnectorStore, decryptToken } = await import('./connectors/framework/connector-store.js');
+              const cs = new ConnectorStore(prisma);
+              const conn = await cs.findByEmail?.('gmail', decoded.emailAddress);
+              if (!conn) {
+                console.warn(`[gmail-pubsub] No connection for ${decoded.emailAddress}`);
+                return jsonResponse(res, { ack: true, reason: 'no-connection' });
+              }
+
+              // Trigger incremental sync from stored historyId → notification's historyId.
+              // SyncEngine handles the heavy lifting (fetch threads, normalize, ingest).
+              const { SyncEngine } = await import('./connectors/framework/sync-engine.js');
+              const { GmailAdapter } = await import('./connectors/providers/gmail/adapter.js');
+              const adapter = new GmailAdapter();
+              const engine = new SyncEngine({ connectorStore: cs, memoryStore: persistentMemoryStore, memoryEngine: persistentMemoryEngine });
+
+              const cursor = conn.metadata?.cursor || decoded.historyId;
+              const accessToken = decryptToken(conn.access_token_encrypted);
+
+              // Run async — Pub/Sub waits up to 10s for ack, don't block
+              engine.runSync({
+                adapter,
+                userId: conn.userId,
+                orgId: conn.orgId,
+                provider: 'gmail',
+                cursor,
+                incremental: true,
+                accessToken,
+                context: {
+                  user_id: conn.userId,
+                  org_id: conn.orgId,
+                  user_account_ref: decoded.emailAddress,
+                  target_scope: conn.target_scope || 'personal',
+                  gmail_thread_mode: conn.metadata?.gmail_thread_mode || 'thread',
+                },
+              }).catch(err => console.error(`[gmail-pubsub] sync failed for ${decoded.emailAddress}:`, err.message));
+
+              // Ack immediately so Pub/Sub doesn't retry
+              return jsonResponse(res, { ack: true, triggered_sync: true });
+            } catch (err) {
+              console.error('[gmail-pubsub] webhook error:', err.message);
+              // Return 2xx anyway — retries cause duplicates
+              return jsonResponse(res, { ack: true, error: err.message });
+            }
+          }
+          break;
+
+        case '/api/connectors/gmail/watch/renew-all':
+          // Cron-driven (or manual admin). Renews watches close to 7-day expiry.
+          if (req.method === 'POST') {
+            try {
+              const cronToken = req.headers['x-cron-token'] || req.headers['authorization']?.replace('Bearer ', '');
+              if (process.env.CRON_TOKEN && cronToken !== process.env.CRON_TOKEN) {
+                return jsonResponse(res, { error: 'Unauthorized' }, 401);
+              }
+
+              const { ConnectorStore, decryptToken, refreshOAuthToken } = await import('./connectors/framework/connector-store.js');
+              const { renewAllWatches } = await import('./connectors/providers/gmail/gmail-watch.js');
+              const cs = new ConnectorStore(prisma);
+
+              const topicName = process.env.GCP_PUBSUB_TOPIC;
+              if (!topicName) return jsonResponse(res, { error: 'GCP_PUBSUB_TOPIC not set' }, 503);
+
+              const refreshAccessToken = async (uid) => {
+                const c = await cs.getConnector(uid, 'gmail');
+                if (!c) throw new Error('connection-missing');
+                // Use refresh flow if access token expired; otherwise decrypt
+                if (refreshOAuthToken && c.refresh_token_encrypted) {
+                  try { return await refreshOAuthToken(c); } catch (_e) {}
+                }
+                return decryptToken(c.access_token_encrypted);
+              };
+
+              const result = await renewAllWatches({ connectorStore: cs, refreshAccessToken, topicName });
+              return jsonResponse(res, { success: true, ...result });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        // ==========================================
         // SLACK CONNECTOR — Status & Sync
         // ==========================================
 

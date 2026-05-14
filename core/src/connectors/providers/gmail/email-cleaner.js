@@ -173,6 +173,43 @@ export function trimSignature(text) {
   return text.slice(0, earliestIdx).trim();
 }
 
+// ── Marketing footer / boilerplate stripping ───────────────────────
+// Targets unsubscribe blocks, "view in browser", tracking pixels,
+// social links, copyright footers. Common in newsletters but also
+// in transactional emails (e.g. SaaS notifications).
+const MARKETING_FOOTERS = [
+  // "View this email in your browser"
+  /\b(?:View|Read)\s+(?:this\s+)?(?:email|message|newsletter)\s+in\s+(?:your\s+)?browser\b.*$/gim,
+  // "Click here to unsubscribe" / "Unsubscribe from this list"
+  /\b(?:click\s+here\s+to\s+)?unsubscribe\b.{0,200}$/gim,
+  // "You are receiving this email because"
+  /\bYou(?:'re|\s+are)\s+receiving\s+this\s+(?:email|message)\b.*$/gim,
+  // "Manage preferences" / "update preferences" / "email preferences"
+  /\b(?:Manage|Update|Change)\s+(?:your\s+)?(?:email\s+)?preferences\b.*$/gim,
+  // Copyright footer "© 2025 Company Name"
+  /(?:©|\(c\)|copyright)\s*(?:19|20)\d{2}.{0,150}$/gim,
+  // "Privacy policy | Terms of service" blocks
+  /(?:Privacy\s+Policy|Terms\s+of\s+(?:Service|Use))\s*[|·\-•]\s*(?:Privacy\s+Policy|Terms|Contact|Unsubscribe).*$/gim,
+  // Social links row: "Facebook | Twitter | LinkedIn"
+  /\b(?:Facebook|Twitter|LinkedIn|Instagram|YouTube|Pinterest|TikTok)\s*[|·\-•]\s*(?:Facebook|Twitter|LinkedIn|Instagram|YouTube).*$/gim,
+  // "Add us to your address book"
+  /\bAdd\s+(?:us|this\s+sender)\s+to\s+your\s+(?:address\s+book|contacts)\b.*$/gim,
+  // Tracking pixels / "view | remove" garbage from ad networks
+  /\(view\s*\|\s*remove\)/gi,
+  // "Open in app" / "Reply via app"
+  /\b(?:Open|Reply|View)\s+in\s+(?:the\s+)?app\b.{0,80}$/gim,
+];
+
+export function stripMarketingFooters(text) {
+  if (!text) return '';
+  let cleaned = text;
+  for (const pattern of MARKETING_FOOTERS) {
+    cleaned = cleaned.replace(pattern, '');
+  }
+  // Collapse leftover whitespace from removals
+  return cleaned.replace(/\n{3,}/g, '\n\n').replace(/[ \t]+\n/g, '\n').trim();
+}
+
 // ── Noise detection: skip auto-replies, OOO, bounces, calendar invites ──
 
 /**
@@ -249,6 +286,10 @@ export function cleanEmailBody({ rawText, rawHtml, headers = {} }) {
   body = stripQuotedReplies(body);
   const afterQuoteLen = body.length;
 
+  // Strip marketing footers (unsubscribe blocks, "view in browser", social links, etc.)
+  body = stripMarketingFooters(body);
+  const afterMarketingLen = body.length;
+
   // Then trim signature
   body = trimSignature(body);
   const afterSigLen = body.length;
@@ -264,6 +305,7 @@ export function cleanEmailBody({ rawText, rawHtml, headers = {} }) {
     trimStats: {
       original: originalLen,
       afterQuoteStrip: afterQuoteLen,
+      afterMarketing: afterMarketingLen,
       afterSignature: afterSigLen,
       final: body.length,
       removedPercent: originalLen > 0 ? Math.round((1 - body.length / originalLen) * 100) : 0,

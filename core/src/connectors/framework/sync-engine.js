@@ -135,7 +135,24 @@ export class SyncEngine {
               // (e.g. Slack skips private channels in org/team mode).
               target_scope: effectiveTargetScope,
               team_id: effectiveTeamId,
+              // Optional adapter context overrides (passed by caller)
+              ...(this._normalizeContext || {}),
             });
+
+            // Post-normalize hook: adapters can extract structured side-data
+            // (e.g. Gmail extracts contacts into hivemind.contacts table to
+            // avoid polluting memory with "Fact: X email is Y@z.com" garbage)
+            if (typeof adapter.extractStructured === 'function') {
+              try {
+                await adapter.extractStructured(record, {
+                  user_id: userId,
+                  org_id: orgId,
+                  prisma: this.prisma,
+                });
+              } catch (extractErr) {
+                console.warn(`[sync-engine] extractStructured failed (non-fatal): ${extractErr.message}`);
+              }
+            }
 
             // Ingest each payload — scope routing
             for (const payload of payloads) {

@@ -141,8 +141,12 @@ export class GmailAdapter extends BaseProviderAdapter {
     // Determine user's own email for content attribution
     const userEmail = (context.user_account_ref || '').toLowerCase();
 
-    // Thread mode: 'per-message' (default, fine-grained) or 'thread' (one memory per thread)
-    const threadMode = context?.gmail_thread_mode || 'per-message';
+    // Thread mode: 'thread' (default, one memory per thread) or 'per-message' (legacy fine-grained)
+    // Thread mode reduces fragmentation — one trivial email no longer creates 5 garbage facts.
+    const threadMode = context?.gmail_thread_mode || 'thread';
+    // Newsletter opt-in: by default, marketing emails are SKIPPED entirely.
+    // Caller can pass context.ingest_newsletters = true to include them.
+    const ingestNewsletters = context?.ingest_newsletters === true;
     const threadMessageBlocks = []; // Used when threadMode === 'thread'
 
     for (let i = 0; i < messages.length; i++) {
@@ -181,6 +185,19 @@ export class GmailAdapter extends BaseProviderAdapter {
       }
       const isNewsletter = /\b(newsletter|noreply|no-reply|unsubscribe|marketing|digest|updates@|info@|hello@)\b/i.test(from + ' ' + body.slice(0, 200));
       const attribution = sentByUser ? 'first_person' : isNewsletter ? 'newsletter' : 'third_party';
+
+      // Newsletter opt-in gate: skip marketing unless explicitly enabled
+      if (isNewsletter && !ingestNewsletters) {
+        console.log(`[gmail-adapter] Skipping newsletter ${msg.id}: from=${fromEmail}`);
+        continue;
+      }
+
+      // Quality gate: skip trivial content ("ok", "thanks", "got it")
+      const bodyLen = body.replace(/\s+/g, ' ').trim().length;
+      if (bodyLen < 50) {
+        console.log(`[gmail-adapter] Skipping low-signal message ${msg.id}: body=${bodyLen} chars`);
+        continue;
+      }
 
       const attachments = this._extractAttachments(msg);
       const attachmentLine = attachments.length > 0
@@ -233,8 +250,15 @@ export class GmailAdapter extends BaseProviderAdapter {
         content,
         title: i === 0 ? subject : `Re: ${subject}`,
         tags: [...new Set(tags)],
-        memory_type: 'fact',
+        // Email is an EVENT type — temporal, decay-friendly, NOT a fact.
+        // Fact-extraction is skipped at the ingestion layer to prevent
+        // garbage outputs like "X sent email on Y date".
+        memory_type: 'event',
+        skipProcessing: true,
+        // document_date = email Date header (when it happened, not when ingested).
+        // Critical for time-aware recall ("emails from last week").
         document_date: date ? new Date(date).toISOString() : null,
+        event_dates: date ? [new Date(date).toISOString()] : [],
         source_metadata: {
           source_type: 'gmail',
           source_platform: 'gmail',
@@ -309,6 +333,15 @@ export class GmailAdapter extends BaseProviderAdapter {
       const senderParticipants = [...participants].slice(0, 3).map(p => `from:${p.split('@')[0]}`);
       threadTags.push(...senderParticipants);
 
+      // Collect every message's date for time-aware retrieval
+      const allEventDates = threadMessageBlocks
+        .map(b => b.date)
+        .filter(Boolean)
+        .map(d => {
+          try { return new Date(d).toISOString(); } catch { return null; }
+        })
+        .filter(Boolean);
+
       payloads.push({
         user_id: context.user_id,
         org_id: context.org_id,
@@ -316,8 +349,11 @@ export class GmailAdapter extends BaseProviderAdapter {
         content: threadContent,
         title: subject,
         tags: [...new Set(threadTags)],
-        memory_type: 'fact',
+        // EVENT type + skip-processing → no garbage facts extracted
+        memory_type: 'event',
+        skipProcessing: true,
         document_date: lastDate ? new Date(lastDate).toISOString() : null,
+        event_dates: allEventDates,
         source_metadata: {
           source_type: 'gmail',
           source_platform: 'gmail',
@@ -353,7 +389,8 @@ export class GmailAdapter extends BaseProviderAdapter {
         content: summaryContent,
         title: `Thread Summary: ${subject}`,
         tags: [...this.defaultTags, 'thread-summary', ...threadLabels],
-        memory_type: 'fact',
+        memory_type: 'event',
+        skipProcessing: true,
         document_date: this._getHeader(messages[messages.length - 1], 'Date')
           ? new Date(this._getHeader(messages[messages.length - 1], 'Date')).toISOString()
           : null,
@@ -380,6 +417,39 @@ export class GmailAdapter extends BaseProviderAdapter {
    */
   dedupeKey(thread) {
     return `gmail:thread:${thread.id}`;
+  }
+
+  /**
+   * Post-normalize structured extraction.
+   * Pulls contact info (sender, recipients) from every message header in the
+   * thread and upserts into hivemind.contacts. Prevents "Fact: X email is Y@z.com"
+   * memory pollution.
+   *
+   * Called by SyncEngine after normalize() for adapters that implement it.
+   */
+  async extractStructured(thread, ctx) {
+    if (!ctx?.prisma) return;
+    try {
+      const { ContactsStore } = await import('./contacts-store.js');
+      const store = new ContactsStore(ctx.prisma);
+      const messages = thread.messages || [];
+      for (const msg of messages) {
+        const headers = {};
+        for (const h of (msg.payload?.headers || [])) {
+          headers[h.name.toLowerCase()] = h.value;
+        }
+        const eventDate = headers['date'] ? new Date(headers['date']) : null;
+        await store.upsertFromMessageHeaders({
+          userId: ctx.user_id,
+          orgId: ctx.org_id,
+          headers,
+          sourcePlatform: 'gmail',
+          eventDate,
+        });
+      }
+    } catch (err) {
+      console.warn(`[gmail-adapter] extractStructured failed: ${err.message}`);
+    }
   }
 
   // ─── Internal helpers ──────────────────────────────────────

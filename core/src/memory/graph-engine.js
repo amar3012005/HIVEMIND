@@ -391,8 +391,11 @@ export class MemoryGraphEngine {
                   qdrantFilter.must.push({ key: 'project', match: { value: baseMemory.project } });
                 }
 
+                // Use precomputed embedding when provided (upload pipeline
+                // pre-embeds outside the lock to keep the critical section fast).
                 const vectorResults = await this.vectorStore.searchMemories({
-                  query: baseMemory.content.slice(0, 500),
+                  query: input.precomputedQueryVector ? undefined : baseMemory.content.slice(0, 500),
+                  vector: input.precomputedQueryVector || undefined,
                   filter: qdrantFilter,
                   limit: 5,
                   score_threshold: 0.45,

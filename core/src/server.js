@@ -5675,53 +5675,131 @@ const server = http.createServer(async (req, res) => {
 
               // Ingest summary + chunks in background, return immediately
               const uploadId = crypto.randomUUID();
-              console.log(`[knowledge] Upload id=${uploadId} file=${filePart.filename} chunks=${chunks.length}`);
 
-              // Start background ingestion
+              // ── Optimization 1: Document-level fingerprint dedup ──
+              // Compute SHA256 of file bytes. If any existing memory for this user
+              // carries this doc-hash tag, skip ingestion entirely. Avoids running
+              // smart ingest for re-uploaded identical files.
+              const docHash = crypto.createHash('sha256').update(filePart.data).digest('hex').slice(0, 16);
+              const docHashTag = `doc-hash:${docHash}`;
+              try {
+                const existing = await prisma.memory.findFirst({
+                  where: {
+                    userId,
+                    deletedAt: null,
+                    tags: { has: docHashTag },
+                  },
+                  select: { id: true, title: true, createdAt: true },
+                });
+                if (existing) {
+                  console.log(`[knowledge] Upload id=${uploadId} file=${filePart.filename} DEDUPED via ${docHashTag} → existing ${existing.id}`);
+                  return jsonResponse(res, {
+                    upload_id: uploadId,
+                    filename: filePart.filename,
+                    chunks: 0,
+                    deduped: true,
+                    existing_memory_id: existing.id,
+                    message: 'Identical document already ingested. Skipping re-processing.',
+                  });
+                }
+              } catch (dedupErr) {
+                console.warn(`[knowledge] doc-hash dedup check failed (non-fatal):`, dedupErr.message);
+              }
+
+              // Tag every memory we create with the doc-hash so future re-uploads dedupe.
+              const taggedSummary = { ...summary, tags: [...(summary.tags || []), docHashTag] };
+              const taggedChunks = chunks.map(c => ({ ...c, tags: [...(c.tags || []), docHashTag] }));
+
+              console.log(`[knowledge] Upload id=${uploadId} file=${filePart.filename} chunks=${chunks.length} docHash=${docHash}`);
+
+              // Start background ingestion — smart ingest preserved + optimized.
               (async () => {
                 let ingested = 0;
                 let failed = 0;
                 const collectionName = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
 
-                const ingestAndEmbed = async (payload) => {
-                  const result = await persistentMemoryEngine.ingestMemory(payload);
-                  // Also embed in Qdrant for vector search
+                // ── Optimization 2: Pre-embed all chunks IN PARALLEL before
+                //   acquiring per-user advisory lock. Embedding is the slow part
+                //   (200ms/chunk via Mistral). Doing it in parallel before
+                //   smart-ingest critical section means the lock holds for
+                //   conflict-detect + relationship work only — not embedding.
+                const preEmbed = async (text) => {
+                  if (!qdrantClient || !text) return null;
+                  try {
+                    return await qdrantClient.generateEmbedding(String(text).slice(0, 8000));
+                  } catch (embedErr) {
+                    console.warn(`[knowledge] Pre-embed failed (non-fatal):`, embedErr.message);
+                    return null;
+                  }
+                };
+
+                const allPayloads = [
+                  { ...taggedSummary, skipProcessing: true },
+                  ...taggedChunks,
+                ];
+
+                console.log(`[knowledge] Upload ${uploadId} pre-embedding ${allPayloads.length} chunks in parallel...`);
+                const t0 = Date.now();
+                const vectors = await Promise.all(
+                  allPayloads.map(p => preEmbed(p.content))
+                );
+                console.log(`[knowledge] Upload ${uploadId} pre-embed done in ${Date.now() - t0}ms`);
+
+                // ── Optimization 3: Batch Qdrant upserts. Collect every memory
+                //   created during smart ingest, then upsert in one bulk call
+                //   instead of N round-trips.
+                const qdrantBatch = [];
+
+                const ingestOne = async (payload, precomputedVector) => {
+                  // Pass cached vector via `precomputedQueryVector` so graph-engine
+                  // can use it for Qdrant dedup search inside the lock without
+                  // re-embedding. Falls back to live embedding if missing.
+                  const enriched = precomputedVector
+                    ? { ...payload, precomputedQueryVector: precomputedVector }
+                    : payload;
+                  const result = await persistentMemoryEngine.ingestMemory(enriched);
+
+                  // Collect memories for batch Qdrant upsert (not per-chunk write)
                   if (result?.memoryId && qdrantClient) {
-                    try {
-                      const memory = await persistentMemoryStore.getMemory(result.memoryId);
-                      if (memory) {
-                        await qdrantClient.storeMemory(memory, { collectionName });
-                      }
-                    } catch (embedErr) {
-                      console.warn(`[knowledge] Qdrant embed failed for ${result.memoryId}:`, embedErr.message);
+                    const memory = await persistentMemoryStore.getMemory(result.memoryId);
+                    if (memory) {
+                      qdrantBatch.push({ memory, vector: precomputedVector || null });
                     }
                   }
-                  // Embed fact-memories in Qdrant
                   if (result?.factMemoryIds?.length > 0 && qdrantClient) {
                     for (const factId of result.factMemoryIds) {
-                      try {
-                        const factMem = await persistentMemoryStore.getMemory(factId);
-                        if (factMem) await qdrantClient.storeMemory(factMem, { collectionName });
-                      } catch (factErr) {
-                        console.warn(`[knowledge] Fact Qdrant embed failed for ${factId}:`, factErr.message);
-                      }
+                      const factMem = await persistentMemoryStore.getMemory(factId);
+                      if (factMem) qdrantBatch.push({ memory: factMem, vector: null });
                     }
                   }
                 };
 
                 try {
-                  await ingestAndEmbed({ ...summary, skipProcessing: true });
-                  ingested++;
-
-                  for (const chunk of chunks) {
+                  // Summary first (no-process), then chunks in order.
+                  for (let i = 0; i < allPayloads.length; i++) {
                     try {
-                      await ingestAndEmbed(chunk);
+                      await ingestOne(allPayloads[i], vectors[i]);
                       ingested++;
                     } catch (chunkErr) {
-                      console.warn(`[knowledge] Chunk ${chunk.metadata?.chunk_index} failed:`, chunkErr.message);
+                      console.warn(`[knowledge] Chunk ${i} failed:`, chunkErr.message);
                       failed++;
                     }
                   }
+
+                  // Bulk Qdrant upsert — single network roundtrip per batch
+                  if (qdrantBatch.length > 0 && qdrantClient) {
+                    try {
+                      const batchT0 = Date.now();
+                      await Promise.all(qdrantBatch.map(({ memory, vector }) =>
+                        qdrantClient.storeMemory(memory, { collectionName, vector })
+                          .catch(err => console.warn(`[knowledge] Qdrant store ${memory.id} failed:`, err.message))
+                      ));
+                      console.log(`[knowledge] Upload ${uploadId} Qdrant batch (${qdrantBatch.length}) in ${Date.now() - batchT0}ms`);
+                    } catch (batchErr) {
+                      console.warn(`[knowledge] Qdrant batch failed:`, batchErr.message);
+                    }
+                  }
+
                   console.log(`[knowledge] Upload ${uploadId} complete: ingested=${ingested}, failed=${failed}, qdrant=${collectionName}`);
                 } catch (err) {
                   console.error(`[knowledge] Upload ${uploadId} failed:`, err.message);

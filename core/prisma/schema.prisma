@@ -262,6 +262,31 @@ model PlatformIntegration {
   @@map("platform_integrations")
 }
 
+/// Contact directory — structured person index from email/connector ingestion.
+/// Avoids polluting memory with "Fact: X email is Y@z.com" garbage.
+model Contact {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId          String   @map("user_id") @db.Uuid
+  orgId           String?  @map("org_id") @db.Uuid
+  email           String   @db.VarChar(320)
+  displayName     String?  @map("display_name") @db.VarChar(255)
+  sourcePlatform  String   @default("gmail") @map("source_platform") @db.VarChar(50)
+  domain          String?  @db.VarChar(255)
+  firstSeenAt     DateTime @default(now()) @map("first_seen_at") @db.Timestamptz(6)
+  lastSeenAt      DateTime @default(now()) @map("last_seen_at") @db.Timestamptz(6)
+  msgCount        Int      @default(1) @map("msg_count")
+  metadata        Json?
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([userId, email, sourcePlatform])
+  @@index([userId, email])
+  @@index([orgId])
+  @@index([domain])
+  @@index([lastSeenAt(sort: Desc)])
+  @@map("contacts")
+}
+
 /// Core memory storage with triple-operator versioning (Updates, Extends, Derives)
 /// Supports cognitive scoring for spaced repetition and Ebbinghaus forgetting curve
 /// This model contains an expression index which requires additional setup for migrations. Visit https://pris.ly/d/expression-indexes for more info.

@@ -146,23 +146,27 @@ export class QdrantClient {
       return memory.id;
     }
 
-    // Contextual Retrieval: embed enriched key (facts + content), store raw content in payload
-    let embeddingInput = memory.content || '';
-    const pipelineFactSentences = memory.metadata?.factSentences || [];
-    if (pipelineFactSentences.length > 0) {
-      // Prefer pre-extracted factSentences from MemoryProcessor (cleaner, no brackets)
-      embeddingInput = pipelineFactSentences.join('. ') + '\n\n' + embeddingInput;
-    } else {
-      // Fallback: extract facts on-the-fly via fact-extractor
-      try {
-        const { extractFacts, buildAugmentedKey } = await import('../memory/fact-extractor.js');
-        const facts = await extractFacts(memory.content || '', { useLLM: false });
-        embeddingInput = buildAugmentedKey(memory.content || '', facts);
-      } catch (augErr) {
-        console.warn('[qdrant] Fact extraction failed, using raw content:', augErr.message);
+    // Reuse precomputed embedding when supplied (knowledge upload pipeline
+    // pre-embeds chunks in parallel before smart ingest to avoid re-embedding).
+    let embedding = options.vector || null;
+
+    if (!embedding) {
+      // Contextual Retrieval: embed enriched key (facts + content), store raw content in payload
+      let embeddingInput = memory.content || '';
+      const pipelineFactSentences = memory.metadata?.factSentences || [];
+      if (pipelineFactSentences.length > 0) {
+        embeddingInput = pipelineFactSentences.join('. ') + '\n\n' + embeddingInput;
+      } else {
+        try {
+          const { extractFacts, buildAugmentedKey } = await import('../memory/fact-extractor.js');
+          const facts = await extractFacts(memory.content || '', { useLLM: false });
+          embeddingInput = buildAugmentedKey(memory.content || '', facts);
+        } catch (augErr) {
+          console.warn('[qdrant] Fact extraction failed, using raw content:', augErr.message);
+        }
       }
+      embedding = await this.generateEmbedding(embeddingInput);
     }
-    const embedding = await this.generateEmbedding(embeddingInput);
 
     if (!embedding) {
       console.warn('⚠️  Storing memory without embedding');

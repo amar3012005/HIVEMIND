@@ -332,7 +332,7 @@ if (persistentMemoryEngine && persistentMemoryStore && prisma) {
     connectorStore: schedulerConnStore,
     syncEngine: schedulerSyncEngine,
     prisma,
-    interval: Number(process.env.HIVEMIND_SYNC_INTERVAL_MS || 4 * 60 * 60 * 1000),
+    interval: Number(process.env.HIVEMIND_SYNC_INTERVAL_MS || 60 * 60 * 1000), // 1h default
   });
   syncScheduler.start();
 }

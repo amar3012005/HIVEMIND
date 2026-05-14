@@ -1,0 +1,381 @@
+openapi: 3.0.3
+info:
+  title: HIVEMIND API
+  description: |
+    EU-sovereign company brain. Plug into any LLM stack via REST, MCP, or SDKs.
+
+    All endpoints require `Authorization: Bearer <hmk_live_...>`.
+    Issue keys at https://hivemind.davinciai.eu/app/settings/api-keys.
+
+    Provenance is included on every retrieval result — every memory carries
+    `id`, `cluster_id`, `score`, and `method` for citation in your LLM answers.
+  version: "1.0.0"
+  license:
+    name: Apache-2.0
+  contact:
+    name: HIVEMIND Support
+    email: support@hivemind.davinciai.eu
+    url: https://hivemind.davinciai.eu
+
+servers:
+  - url: https://core.hivemind.davinciai.eu:8050
+    description: Production (EU, Coolify)
+  - url: http://localhost:3000
+    description: Local dev
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Memories
+    description: Save, search, recall — the core memory ops.
+  - name: Graph
+    description: Memory graph (nodes, edges, clusters, hubs).
+  - name: Knowledge
+    description: Document uploads (PDF/DOCX/CSV/XLSX) — chunked + embedded.
+  - name: Health
+    description: Status + observability.
+
+paths:
+  /api/health:
+    get:
+      tags: [Health]
+      summary: Health check
+      security: []
+      responses:
+        '200':
+          description: Service healthy.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  version: { type: string }
+
+  /api/memories:
+    get:
+      tags: [Memories]
+      summary: List memories
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50, maximum: 500 }
+        - in: query
+          name: offset
+          schema: { type: integer, default: 0 }
+        - in: query
+          name: tags
+          schema: { type: string, description: 'Comma-separated tags' }
+        - in: query
+          name: project
+          schema: { type: string }
+        - in: query
+          name: scope
+          schema:
+            type: string
+            enum: [personal, team, all]
+            default: personal
+      responses:
+        '200':
+          description: List of memories
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  memories:
+                    type: array
+                    items: { $ref: '#/components/schemas/Memory' }
+    post:
+      tags: [Memories]
+      summary: Save a new memory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: string }
+                title: { type: string }
+                tags:
+                  type: array
+                  items: { type: string }
+                memoryType:
+                  type: string
+                  enum: [fact, preference, decision, lesson, goal, event, relationship]
+                  default: fact
+                project: { type: string }
+                importanceScore: { type: number, format: float, minimum: 0, maximum: 1 }
+                metadata: { type: object, additionalProperties: true }
+      responses:
+        '200':
+          description: Created memory
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  memory: { $ref: '#/components/schemas/Memory' }
+
+  /api/memories/{id}:
+    get:
+      tags: [Memories]
+      summary: Get a memory by id
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Single memory
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  memory: { $ref: '#/components/schemas/Memory' }
+    delete:
+      tags: [Memories]
+      summary: Soft-delete a memory (sets deletedAt)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Deletion result with cascade counts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: integer }
+                  memory_ids:
+                    type: array
+                    items: { type: string }
+
+  /api/memories/search:
+    post:
+      tags: [Memories]
+      summary: Hybrid semantic search with provenance
+      description: |
+        Embedding + lexical + graph-aware retrieval. Results include `cluster_id`,
+        `cluster_role`, and `method` so your LLM can cite where each result came from.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query: { type: string }
+                n_results: { type: integer, default: 10, maximum: 50 }
+                scope:
+                  type: string
+                  enum: [personal, team, all]
+                  default: personal
+                tags:
+                  type: array
+                  items: { type: string }
+                project: { type: string }
+                memoryType: { type: string }
+                minScore: { type: number, format: float }
+      responses:
+        '200':
+          description: Ranked results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items: { $ref: '#/components/schemas/SearchResult' }
+
+  /api/recall:
+    post:
+      tags: [Memories]
+      summary: High-level recall with reasoning modes
+      description: |
+        Same retrieval surface as `/api/memories/search` but with optional
+        reasoning modes (`quick`/`panorama`/`insight`) for deeper synthesis.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query: { type: string }
+                limit: { type: integer, default: 10 }
+                mode:
+                  type: string
+                  enum: [quick, panorama, insight]
+                  default: quick
+                scope:
+                  type: string
+                  enum: [personal, team, all]
+                  default: personal
+                project: { type: string }
+      responses:
+        '200':
+          description: Ranked + synthesized results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  memories:
+                    type: array
+                    items: { $ref: '#/components/schemas/SearchResult' }
+
+  /api/graph:
+    get:
+      tags: [Graph]
+      summary: Memory graph (nodes + edges + clusters)
+      description: |
+        Cached at the edge for 60s, stale-while-revalidate 300s. Includes
+        Louvain cluster ids, hub/bridge roles, and `payloadSlimmed: true`
+        (heavy content fields stripped — fetch full content via `/api/memories/{id}`).
+      parameters:
+        - in: query
+          name: scope
+          schema: { type: string, enum: [personal, team, all], default: personal }
+        - in: query
+          name: project
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 1000, maximum: 50000 }
+        - in: query
+          name: include_edges
+          schema: { type: boolean, default: true }
+      responses:
+        '200':
+          description: Graph snapshot
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GraphSnapshot' }
+        '429':
+          description: Too many concurrent graph queries for this tenant. Retry after a moment.
+
+  /api/knowledge/upload:
+    post:
+      tags: [Knowledge]
+      summary: Upload a document for chunked ingestion
+      description: |
+        Supports PDF, DOCX, TXT, MD, CSV, XLSX up to 100MB. Document is chunked
+        into semantic sections, embedded, and stored as searchable memories.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+                tags: { type: string, description: 'Comma-separated tags' }
+                targetScope:
+                  type: string
+                  enum: [personal, organization]
+                  default: personal
+                containerTag: { type: string, description: 'Project slug for organization scope' }
+      responses:
+        '200':
+          description: Upload accepted, chunking queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  upload_id: { type: string }
+                  filename: { type: string }
+                  chunks: { type: integer }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: hmk_live_*
+
+  schemas:
+    Memory:
+      type: object
+      properties:
+        id: { type: string, format: uuid, readOnly: true }
+        title: { type: string }
+        content: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+        memoryType:
+          type: string
+          enum: [fact, preference, decision, lesson, goal, event, relationship]
+        project: { type: string }
+        importanceScore: { type: number, format: float }
+        strength: { type: number, format: float }
+        recallCount: { type: integer }
+        clusterId: { type: string }
+        clusterRole:
+          type: string
+          enum: [hub, spoke, bridge]
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    SearchResult:
+      type: object
+      properties:
+        memory: { $ref: '#/components/schemas/Memory' }
+        score: { type: number, format: float }
+        method:
+          type: string
+          enum: [embedding, token, graph_expanded, hybrid]
+        explanation: { type: string }
+
+    GraphSnapshot:
+      type: object
+      properties:
+        nodes:
+          type: array
+          items: { $ref: '#/components/schemas/Memory' }
+        edges:
+          type: array
+          items:
+            type: object
+            properties:
+              source: { type: string }
+              target: { type: string }
+              type:
+                type: string
+                enum: [Updates, Extends, Derives, Contradicts]
+              confidence: { type: number }
+        meta:
+          type: object
+          properties:
+            nodeCount: { type: integer }
+            edgeCount: { type: integer }
+            totalMemories: { type: integer }
+            clusters:
+              type: array
+              items:
+                type: object
+                properties:
+                  id: { type: string }
+                  size: { type: integer }
+                  label: { type: string }
+                  topTags:
+                    type: array
+                    items: { type: string }
+                  hubNodeId: { type: string }
+            clusterCount: { type: integer }
+            cachedAt: { type: string, format: date-time }
+            payloadSlimmed: { type: boolean }

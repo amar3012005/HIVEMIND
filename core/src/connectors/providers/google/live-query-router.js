@@ -29,13 +29,38 @@ const QUERY_INTENT_PATTERNS = [
   { pattern: /\b(contact|email\s+address|phone|who\s+is)\b/i, services: ['google_contacts'] },
 ];
 
+// Tool names match taylorwilsdon/google_workspace_mcp v3.2.4 surface.
+// Verified live against prod sidecar.
 const SERVICE_TOOL_MAP = {
-  google_calendar: { tool: 'list_calendar_events', argsBuilder: (q) => ({ time_min: new Date().toISOString(), max_results: 10 }) },
-  google_drive:    { tool: 'search_drive_files',  argsBuilder: (q) => ({ query: q, page_size: 10 }) },
-  google_docs:     { tool: 'search_drive_files',  argsBuilder: (q) => ({ query: `${q} mimeType='application/vnd.google-apps.document'`, page_size: 10 }) },
-  google_tasks:    { tool: 'list_tasks',          argsBuilder: () => ({ max_results: 20 }) },
-  google_contacts: { tool: 'search_contacts',     argsBuilder: (q) => ({ query: q, page_size: 10 }) },
-  google_chat:     { tool: 'list_chat_spaces',    argsBuilder: () => ({ page_size: 20 }) },
+  google_calendar: {
+    tool: 'get_events',
+    argsBuilder: (q) => {
+      const now = new Date();
+      const past = new Date(now.getTime() - 7 * 86400000);
+      const future = new Date(now.getTime() + 30 * 86400000);
+      return {
+        calendar_id: 'primary',
+        time_min: past.toISOString(),
+        time_max: future.toISOString(),
+        max_results: 10,
+      };
+    },
+  },
+  google_drive: {
+    tool: 'search_drive_files',
+    argsBuilder: (q) => ({ query: q || 'mimeType!=\'application/vnd.google-apps.folder\'', page_size: 10 }),
+  },
+  google_docs: {
+    tool: 'search_drive_files',
+    argsBuilder: (q) => ({
+      query: q ? `name contains '${q.replace(/'/g, '')}' and mimeType='application/vnd.google-apps.document'`
+                : "mimeType='application/vnd.google-apps.document'",
+      page_size: 10,
+    }),
+  },
+  google_tasks:    { tool: 'list_tasks',            argsBuilder: () => ({ max_results: 20 }) },
+  google_contacts: { tool: 'search_contacts',       argsBuilder: (q) => ({ query: q, page_size: 10 }) },
+  google_chat:     { tool: 'list_spaces',           argsBuilder: () => ({ page_size: 20 }) },
   gmail:           { tool: 'search_gmail_messages', argsBuilder: (q) => ({ query: q, page_size: 10 }) },
 };
 

@@ -100,6 +100,7 @@ export class LiveQueryRouter {
    * Skips services the user hasn't granted access to.
    */
   async getConnectedServices(userId, candidates) {
+    // First try per-service rows
     const rows = await this.prisma.platformIntegration.findMany({
       where: {
         userId,
@@ -109,7 +110,34 @@ export class LiveQueryRouter {
       },
       select: { platformType: true },
     });
-    return rows.map(r => r.platformType);
+    const found = rows.map(r => r.platformType);
+    if (found.length > 0) return found;
+
+    // Fallback: legacy single-row scheme — check if user has a gmail row
+    // with scopes covering the requested service. The OAuth callback didn't
+    // always split per-service for older connections.
+    const SERVICE_TO_SCOPES = {
+      google_calendar: ['https://www.googleapis.com/auth/calendar.readonly', 'https://www.googleapis.com/auth/calendar'],
+      google_drive:    ['https://www.googleapis.com/auth/drive.readonly', 'https://www.googleapis.com/auth/drive'],
+      google_docs:     ['https://www.googleapis.com/auth/documents.readonly', 'https://www.googleapis.com/auth/documents'],
+      google_sheets:   ['https://www.googleapis.com/auth/spreadsheets.readonly', 'https://www.googleapis.com/auth/spreadsheets'],
+      google_slides:   ['https://www.googleapis.com/auth/presentations.readonly', 'https://www.googleapis.com/auth/presentations'],
+      google_contacts: ['https://www.googleapis.com/auth/contacts.readonly', 'https://www.googleapis.com/auth/contacts'],
+      google_chat:     ['https://www.googleapis.com/auth/chat.messages.readonly'],
+      google_tasks:    ['https://www.googleapis.com/auth/tasks.readonly', 'https://www.googleapis.com/auth/tasks'],
+      gmail:           ['https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/gmail.modify'],
+    };
+
+    const gmailRow = await this.prisma.platformIntegration.findFirst({
+      where: { userId, platformType: 'gmail', isActive: true, syncStatus: { not: 'revoked' } },
+      select: { oauthScopes: true },
+    });
+    if (!gmailRow) return [];
+    const scopes = gmailRow.oauthScopes || [];
+    return candidates.filter(svc => {
+      const requiredScopes = SERVICE_TO_SCOPES[svc] || [];
+      return requiredScopes.some(rs => scopes.includes(rs));
+    });
   }
 
   /**

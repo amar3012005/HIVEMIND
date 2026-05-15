@@ -10718,6 +10718,41 @@ const server = http.createServer(async (req, res) => {
                 console.warn('[chat] Slack fallback hook errored:', slackErr.message);
               }
 
+              // Step 1.6: Google Workspace live fallback — same pattern as Slack.
+              // When recall is thin OR query has fresh/intent markers, call live
+              // MCP tools (Calendar/Drive/Gmail/etc.) and merge hits into context.
+              let googleHits = [];
+              let googleBridgeFired = false;
+              try {
+                if (prisma && userId) {
+                  const { LiveQueryRouter } = await import('./connectors/providers/google/live-query-router.js');
+                  const { decryptToken, refreshOAuthToken } = await import('./connectors/framework/connector-store.js');
+                  const router = new LiveQueryRouter({
+                    prisma,
+                    decryptToken,
+                    refreshOAuthToken: refreshOAuthToken || null,
+                  });
+                  const classification = router.classify(message, memories);
+                  console.log('[chat][google-gate] decision=%s reason=%s services=%j',
+                    classification.needsLive ? 'fetched' : 'skipped',
+                    classification.reason,
+                    classification.services);
+                  if (classification.needsLive && classification.services.length > 0) {
+                    googleHits = await router.fetch(userId, message, classification.services).catch(err => {
+                      console.warn('[chat] Google live fetch failed:', err.message);
+                      return [];
+                    });
+                    if (googleHits.length > 0) {
+                      googleBridgeFired = true;
+                      console.log('[chat] Google live fallback fired: %d hits across [%s]',
+                        googleHits.length, classification.services.join(', '));
+                    }
+                  }
+                }
+              } catch (googleErr) {
+                console.warn('[chat] Google fallback hook errored:', googleErr.message);
+              }
+
               // Step 2: Build system prompt — second-brain aware
               const recencyHint = isRecencyQuery ? '\n\nIMPORTANT: The user is asking about their MOST RECENT activity. Memories are sorted newest-first. Focus on the FIRST memory.' : '';
               const metaHint = isMetaQuery ? '\n\nIMPORTANT: The user is asking what you know ABOUT THEM. Summarize key personal facts, preferences, decisions, and topics from ALL memories below. Group by topic. Include names, companies, roles, and key decisions.' : '';
@@ -10787,6 +10822,42 @@ ${injectionText}`;
                 const { formatSlackHitForContext } = await import('./connectors/providers/slack/bridge.js');
                 const slackBlock = slackHits.slice(0, 8).map(formatSlackHitForContext).join('\n');
                 memoryContext += `\n\nFrom your Slack (live):\n${slackBlock}\n\nUse the lines above to answer if relevant. Prefix the answer with "From your Slack:" when the answer comes primarily from these live results.`;
+              }
+
+              // Append live Google Workspace hits (grouped per source service)
+              if (googleBridgeFired && googleHits.length > 0) {
+                // Group by _source so LLM sees [Calendar / Drive / Gmail] cleanly
+                const grouped = {};
+                for (const hit of googleHits.slice(0, 20)) {
+                  const src = hit._source || 'google';
+                  if (!grouped[src]) grouped[src] = [];
+                  grouped[src].push(hit);
+                }
+                const formatHit = (hit) => {
+                  // Text-typed results come back as { text: "<verbose>", _service }
+                  if (typeof hit.text === 'string') {
+                    return `- ${hit.text.split('\n').slice(0, 8).join('\n  ').slice(0, 600)}`;
+                  }
+                  // Structured event/file objects
+                  if (hit.summary || hit.subject || hit.name) {
+                    const when = hit.start?.dateTime || hit.start?.date || hit.modifiedTime || hit.date || '';
+                    return `- ${hit.summary || hit.subject || hit.name}${when ? ` · ${when}` : ''}${hit.location ? ` @ ${hit.location}` : ''}`;
+                  }
+                  return `- ${JSON.stringify(hit).slice(0, 300)}`;
+                };
+                const labelOf = (src) => ({
+                  google_calendar: 'Calendar',
+                  google_drive: 'Drive',
+                  google_docs: 'Docs',
+                  google_sheets: 'Sheets',
+                  google_contacts: 'Contacts',
+                  google_tasks: 'Tasks',
+                  gmail: 'Gmail',
+                }[src] || src);
+                const blocks = Object.entries(grouped).map(([src, hits]) =>
+                  `From your ${labelOf(src)} (live):\n${hits.map(formatHit).join('\n')}`
+                ).join('\n\n');
+                memoryContext += `\n\n${blocks}\n\nUse the lines above to answer. Prefix the answer with "From your <source>:" when answering from live results. These reflect the user's actual Google data right now.`;
               }
 
               // Step 4: Build message history for Groq

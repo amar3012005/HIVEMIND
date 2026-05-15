@@ -128,8 +128,10 @@ export class LiveQueryRouter {
       gmail:           ['https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/gmail.modify'],
     };
 
+    // Don't filter by isActive here — sync errors can flip it false even
+    // when token is still valid. syncStatus != revoked is the truer signal.
     const gmailRow = await this.prisma.platformIntegration.findFirst({
-      where: { userId, platformType: 'gmail', isActive: true, syncStatus: { not: 'revoked' } },
+      where: { userId, platformType: 'gmail', syncStatus: { not: 'revoked' } },
       select: { oauthScopes: true },
     });
     if (!gmailRow) return [];

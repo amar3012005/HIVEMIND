@@ -4688,7 +4688,10 @@ const server = http.createServer(async (req, res) => {
               const gmailCallbackUri = `${process.env.HIVEMIND_BASE_URL || getHostedApiBaseUrl(req)}/api/connectors/gmail/callback`;
               const tokens = await exchangeCode({ code: callbackCode, redirectUri: gmailCallbackUri });
 
-              // Store connection via ConnectorStore
+              // Store connection via ConnectorStore — ONE ROW PER GRANTED SERVICE
+              // so user can disconnect any service independently (Drive without
+              // losing Gmail, etc.). All rows share the same Google token because
+              // the OAuth grant is single — but stored under per-service provider.
               const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
               const connStore = new ConnectorStore(prisma);
 
@@ -4696,19 +4699,58 @@ const server = http.createServer(async (req, res) => {
                 ? new Date(Date.now() + tokens.expires_in * 1000)
                 : null;
 
-              await connStore.upsertConnector({
-                userId: stateUserId,
-                provider: 'gmail',
-                targetScope: stateTargetScope,
-                accountRef: tokens.email || null,
-                accessToken: tokens.access_token,
-                refreshToken: tokens.refresh_token,
-                tokenExpiresAt,
-                scopes: tokens.scope?.split(' ') || ['https://www.googleapis.com/auth/gmail.readonly'],
-                metadata: { email: tokens.email },
-              });
+              const grantedScopes = (tokens.scope || '').split(' ').filter(Boolean);
 
-              console.log(`[gmail-oauth] Connected for user=${stateUserId} email=${tokens.email}. Awaiting sync configuration.`);
+              // Map each granted scope to the service it represents
+              const SCOPE_TO_SERVICE = {
+                'https://www.googleapis.com/auth/gmail.readonly':     'gmail',
+                'https://www.googleapis.com/auth/gmail.modify':        'gmail',
+                'https://www.googleapis.com/auth/drive.readonly':      'google_drive',
+                'https://www.googleapis.com/auth/drive':               'google_drive',
+                'https://www.googleapis.com/auth/calendar.readonly':   'google_calendar',
+                'https://www.googleapis.com/auth/calendar':            'google_calendar',
+                'https://www.googleapis.com/auth/documents.readonly':  'google_docs',
+                'https://www.googleapis.com/auth/documents':           'google_docs',
+                'https://www.googleapis.com/auth/spreadsheets.readonly':'google_sheets',
+                'https://www.googleapis.com/auth/spreadsheets':        'google_sheets',
+                'https://www.googleapis.com/auth/presentations.readonly':'google_slides',
+                'https://www.googleapis.com/auth/presentations':       'google_slides',
+                'https://www.googleapis.com/auth/contacts.readonly':   'google_contacts',
+                'https://www.googleapis.com/auth/contacts':            'google_contacts',
+                'https://www.googleapis.com/auth/chat.messages.readonly':'google_chat',
+                'https://www.googleapis.com/auth/tasks.readonly':      'google_tasks',
+                'https://www.googleapis.com/auth/tasks':               'google_tasks',
+                'https://www.googleapis.com/auth/forms.body.readonly': 'google_forms',
+              };
+
+              const grantedServices = [...new Set(
+                grantedScopes.map(s => SCOPE_TO_SERVICE[s]).filter(Boolean)
+              )];
+              // Always upsert gmail when a Google account connects (userinfo + email
+              // scopes are guaranteed). Acts as the "primary" Google account row.
+              if (!grantedServices.includes('gmail')) grantedServices.unshift('gmail');
+
+              // Per-service upsert — same token shared across all rows
+              for (const service of grantedServices) {
+                await connStore.upsertConnector({
+                  userId: stateUserId,
+                  provider: service,
+                  targetScope: stateTargetScope,
+                  accountRef: tokens.email || null,
+                  accessToken: tokens.access_token,
+                  refreshToken: tokens.refresh_token,
+                  tokenExpiresAt,
+                  scopes: grantedScopes,
+                  metadata: {
+                    email: tokens.email,
+                    google_account: tokens.email,
+                    primary_provider: 'gmail',
+                    granted_services: grantedServices,
+                  },
+                });
+              }
+
+              console.log(`[google-oauth] Connected user=${stateUserId} email=${tokens.email} services=[${grantedServices.join(', ')}]`);
 
               // Auto-register Pub/Sub watch if topic configured. Non-fatal on failure —
               // user can still use polling-based sync. Skipped if scopes don't include
@@ -4742,6 +4784,84 @@ const server = http.createServer(async (req, res) => {
               res.writeHead(302, { Location: `${frontendUrl}/hivemind/app/connectors?error=${encodeURIComponent(err.message)}` });
               res.end();
               return;
+            }
+          }
+          break;
+
+        case '/api/connectors/google/status':
+          // Returns ALL Google service connections for current user.
+          // Lets FE render per-service tiles with connected/disconnect status.
+          if (req.method === 'GET') {
+            try {
+              const services = ['gmail', 'google_drive', 'google_calendar', 'google_docs', 'google_sheets', 'google_slides', 'google_contacts', 'google_chat', 'google_tasks', 'google_forms'];
+              const rows = await prisma.platformIntegration.findMany({
+                where: { userId, platformType: { in: services } },
+                select: {
+                  platformType: true,
+                  syncStatus: true,
+                  isActive: true,
+                  lastSyncedAt: true,
+                  syncIntervalMinutes: true,
+                  oauthScopes: true,
+                  connectorMetadata: true,
+                  createdAt: true,
+                },
+              });
+
+              const map = {};
+              for (const r of rows) {
+                map[r.platformType] = {
+                  connected: r.isActive && r.syncStatus !== 'revoked',
+                  status: r.syncStatus,
+                  email: r.connectorMetadata?.email || null,
+                  last_synced_at: r.lastSyncedAt,
+                  sync_interval_minutes: r.syncIntervalMinutes,
+                  connected_at: r.createdAt,
+                  scopes_count: r.oauthScopes?.length || 0,
+                };
+              }
+
+              // Group: same Google account → one "session", multiple services
+              const primaryEmail = Object.values(map).map(s => s.email).find(Boolean);
+              return jsonResponse(res, {
+                google_account: primaryEmail,
+                services: services.map(s => ({
+                  provider: s,
+                  ...(map[s] || { connected: false, status: null }),
+                })),
+              });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/connectors/google/disconnect':
+          // POST { provider: 'google_drive' }  → revoke one service
+          // POST { provider: 'all' }           → revoke entire Google account
+          if (req.method === 'POST') {
+            try {
+              const targetProvider = body.provider;
+              if (!targetProvider) {
+                return jsonResponse(res, { error: 'provider required (or "all")' }, 400);
+              }
+
+              const services = ['gmail', 'google_drive', 'google_calendar', 'google_docs', 'google_sheets', 'google_slides', 'google_contacts', 'google_chat', 'google_tasks', 'google_forms'];
+              const toRevoke = targetProvider === 'all' ? services : [targetProvider];
+
+              const result = await prisma.platformIntegration.updateMany({
+                where: { userId, platformType: { in: toRevoke } },
+                data: { syncStatus: 'revoked', isActive: false },
+              });
+
+              console.log(`[google-disconnect] user=${userId} revoked=${toRevoke.join(',')} count=${result.count}`);
+              return jsonResponse(res, {
+                success: true,
+                revoked: toRevoke,
+                count: result.count,
+              });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
             }
           }
           break;
@@ -5047,6 +5167,56 @@ const server = http.createServer(async (req, res) => {
         // ==========================================
         // GMAIL PUB/SUB WATCH — Real-time email ingestion
         // ==========================================
+
+        case '/api/workspace/live-query':
+          // POST { query: 'meeting tomorrow', memory_results?: [...] }
+          // → fans out live calls to Drive/Calendar/Gmail based on intent
+          // → merges with memory hits
+          if (req.method === 'POST') {
+            try {
+              const { query, memory_results = [], force_services = null } = body;
+              if (!query) return jsonResponse(res, { error: 'query required' }, 400);
+
+              const { LiveQueryRouter } = await import('./connectors/providers/google/live-query-router.js');
+              const { decryptToken, refreshOAuthToken } = await import('./connectors/framework/connector-store.js');
+              const router = new LiveQueryRouter({
+                prisma,
+                decryptToken,
+                refreshOAuthToken: refreshOAuthToken || null,
+              });
+
+              let services;
+              let reason;
+              if (Array.isArray(force_services) && force_services.length > 0) {
+                services = force_services;
+                reason = 'caller-specified';
+              } else {
+                const classification = router.classify(query, memory_results);
+                services = classification.services;
+                reason = classification.reason;
+                if (!classification.needsLive) {
+                  return jsonResponse(res, {
+                    needsLive: false,
+                    reason,
+                    items: [],
+                  });
+                }
+              }
+
+              const items = await router.fetch(userId, query, services);
+              return jsonResponse(res, {
+                needsLive: true,
+                reason,
+                services_queried: services,
+                item_count: items.length,
+                items,
+              });
+            } catch (err) {
+              console.error('[live-query] failed:', err.message);
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
 
         case '/api/workspace/health':
           if (req.method === 'GET') {

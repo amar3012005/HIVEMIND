@@ -40,10 +40,18 @@ export class WorkspaceMcpBridge {
    * Looks up the platform_integrations row for either 'gmail' or 'google_workspace'.
    */
   async getAccessToken(userId) {
+    // Any active Google service row carries the shared token. Pick the most
+    // recently updated one (Gmail is always present if any Google service is
+    // connected because we always upsert gmail as the primary row).
+    const googleProviders = [
+      'gmail', 'google_drive', 'google_calendar', 'google_docs',
+      'google_sheets', 'google_slides', 'google_contacts', 'google_chat',
+      'google_tasks', 'google_forms', 'google_workspace',
+    ];
     const row = await this.prisma.platformIntegration.findFirst({
       where: {
         userId,
-        platformType: { in: ['gmail', 'google_workspace'] },
+        platformType: { in: googleProviders },
         isActive: true,
         syncStatus: { not: 'revoked' },
       },

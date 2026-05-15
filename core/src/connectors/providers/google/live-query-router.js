@@ -20,13 +20,13 @@ const FRESH_QUERY_PATTERNS = [
 
 const QUERY_INTENT_PATTERNS = [
   // Calendar intents
-  { pattern: /\b(meeting|event|schedule|calendar|appointment|availability)\b/i, services: ['google_calendar'] },
-  // Drive intents
-  { pattern: /\b(file|document|drive|folder|sharing|attachment)\b/i, services: ['google_drive', 'google_docs'] },
+  { pattern: /\b(meeting|event|events|schedule|calendar|appointment|availability|booked|busy)\b/i, services: ['google_calendar'] },
+  // Drive / Docs intents — match singular AND plural variants
+  { pattern: /\b(file|files|document|documents|doc|docs|drive|folder|folders|sharing|attachment|spreadsheet|sheet|sheets|slide|slides|presentation)\b/i, services: ['google_drive', 'google_docs'] },
   // Tasks intents
-  { pattern: /\b(task|todo|to-do|action\s+item|pending)\b/i, services: ['google_tasks'] },
+  { pattern: /\b(task|tasks|todo|todos|to-do|action\s+item|pending)\b/i, services: ['google_tasks'] },
   // Contact intents
-  { pattern: /\b(contact|email\s+address|phone|who\s+is)\b/i, services: ['google_contacts'] },
+  { pattern: /\b(contact|contacts|email\s+address|phone|who\s+is)\b/i, services: ['google_contacts'] },
 ];
 
 // Drive's query syntax is structured (not natural language).

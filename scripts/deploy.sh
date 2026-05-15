@@ -96,6 +96,83 @@ start_employees() {
   return 1
 }
 
+start_workspace_mcp() {
+  # Google Workspace MCP — stateless sidecar that handles 12 Google services
+  # (Gmail, Drive, Calendar, Docs, Sheets, Slides, Forms, Tasks, Contacts,
+  # Chat, Apps Script, Search). HIVEMIND owns OAuth + tokens; this server
+  # is just a stateless executor that takes Bearer ya29.* tokens per request.
+  log "Starting workspace-mcp (Google Workspace MCP, port 8070 external → 8000 internal)..."
+  docker stop workspace-mcp 2>/dev/null || true
+  docker rm workspace-mcp 2>/dev/null || true
+  ensure_networks
+
+  if [ ! -d /opt/HIVEMIND/google_workspace_mcp ]; then
+    err "Missing /opt/HIVEMIND/google_workspace_mcp — clone it first:"
+    err "  cd /opt/HIVEMIND && git clone https://github.com/taylorwilsdon/google_workspace_mcp.git"
+    return 1
+  fi
+
+  # Read GOOGLE_CLIENT_ID + secret from Coolify env (already used by HIVEMIND)
+  local GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET
+  GOOGLE_CLIENT_ID="$(grep '^GOOGLE_CLIENT_ID=' "$COOLIFY_ENV" | cut -d= -f2-)"
+  GOOGLE_CLIENT_SECRET="$(grep '^GOOGLE_CLIENT_SECRET=' "$COOLIFY_ENV" | cut -d= -f2-)"
+
+  if [ -z "$GOOGLE_CLIENT_ID" ]; then
+    err "GOOGLE_CLIENT_ID not set in Coolify .env"
+    return 1
+  fi
+
+  # JWT signing key — generated once, kept stable in Coolify .env
+  local JWT_SIGNING_KEY
+  JWT_SIGNING_KEY="$(grep '^WORKSPACE_MCP_JWT_KEY=' "$COOLIFY_ENV" | cut -d= -f2-)"
+  if [ -z "$JWT_SIGNING_KEY" ]; then
+    JWT_SIGNING_KEY="$(openssl rand -hex 32)"
+    log "Generated WORKSPACE_MCP_JWT_KEY — appending to $COOLIFY_ENV"
+    echo "WORKSPACE_MCP_JWT_KEY=$JWT_SIGNING_KEY" >> "$COOLIFY_ENV"
+  fi
+
+  docker run -d \
+    --name workspace-mcp \
+    --network $NETWORK \
+    --restart unless-stopped \
+    -p 8070:8000 \
+    -v /opt/HIVEMIND/google_workspace_mcp:/app \
+    -w /app \
+    -e PORT=8000 \
+    -e "GOOGLE_OAUTH_CLIENT_ID=$GOOGLE_CLIENT_ID" \
+    -e "GOOGLE_OAUTH_CLIENT_SECRET=$GOOGLE_CLIENT_SECRET" \
+    -e "FASTMCP_SERVER_AUTH_GOOGLE_JWT_SIGNING_KEY=$JWT_SIGNING_KEY" \
+    -e MCP_ENABLE_OAUTH21=true \
+    -e EXTERNAL_OAUTH21_PROVIDER=true \
+    -e WORKSPACE_MCP_STATELESS_MODE=true \
+    -e WORKSPACE_MCP_TRANSPORT=streamable-http \
+    -e PYTHONUNBUFFERED=1 \
+    -e USER_GOOGLE_EMAIL="ingest@hivemind.davinciai.eu" \
+    python:3.11-slim \
+    sh -c "set -e; \
+      apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates >/dev/null && \
+      pip install --no-cache-dir -q uv && \
+      uv sync --frozen --no-dev --extra disk && \
+      uv run main.py --transport streamable-http"
+
+  log "Waiting for workspace-mcp health..."
+  for i in $(seq 1 60); do
+    sleep 2
+    if curl -sf http://localhost:8070/health >/dev/null 2>&1; then
+      log "workspace-mcp is ${GREEN}healthy${NC} on host 8070 → container 8000"
+      return 0
+    fi
+    if docker exec workspace-mcp curl -sf http://localhost:8000/health >/dev/null 2>&1; then
+      log "workspace-mcp is ${GREEN}healthy${NC} on container 8000"
+      return 0
+    fi
+    echo -n "."
+  done
+  err "workspace-mcp not healthy after 120s"
+  docker logs workspace-mcp --tail 30
+  return 1
+}
+
 start_core() {
   log "Starting hm-core (bind-mount /opt/HIVEMIND/core, Coolify .env)..."
   docker stop hm-core 2>/dev/null || true
@@ -117,6 +194,7 @@ start_core() {
     -e "DATABASE_URL=postgresql://hivemind_user:hivemind_secure_pwd_2026@${COOLIFY_PG}:5432/hivemind?schema=hivemind&connection_limit=20&pool_timeout=30" \
     -e "REDIS_URL=redis://:redis_secure_vault_7711@${COOLIFY_REDIS}:6379/0" \
     -e "HIVEMIND_ALLOWED_ORIGINS=https://hivemind.davinciai.eu,https://www.davinciai.eu,https://davinciai.eu" \
+    -e "WORKSPACE_MCP_URL=http://workspace-mcp:8000" \
     node:20 \
     sh -c "npx prisma generate 2>/dev/null && npx prisma migrate deploy && node src/server.js"
 
@@ -157,6 +235,7 @@ start_control() {
     -e "DATABASE_URL=postgresql://hivemind_user:hivemind_secure_pwd_2026@${COOLIFY_PG}:5432/hivemind?schema=hivemind&connection_limit=20&pool_timeout=30" \
     -e "REDIS_URL=redis://:redis_secure_vault_7711@${COOLIFY_REDIS}:6379/0" \
     -e "HIVEMIND_ALLOWED_ORIGINS=https://hivemind.davinciai.eu,https://www.davinciai.eu,https://davinciai.eu" \
+    -e "WORKSPACE_MCP_URL=http://workspace-mcp:8000" \
     node:20 \
     sh -c "npx prisma generate 2>/dev/null; node src/control-plane-server.js"
 
@@ -301,6 +380,7 @@ start_core_benchmark() {
     -e "DATABASE_URL=postgresql://hivemind_user:hivemind_secure_pwd_2026@${COOLIFY_PG}:5432/hivemind?schema=hivemind&connection_limit=20&pool_timeout=30" \
     -e "REDIS_URL=redis://:redis_secure_vault_7711@${COOLIFY_REDIS}:6379/0" \
     -e "HIVEMIND_ALLOWED_ORIGINS=https://hivemind.davinciai.eu,https://www.davinciai.eu,https://davinciai.eu" \
+    -e "WORKSPACE_MCP_URL=http://workspace-mcp:8000" \
     node:20 \
     sh -c "npx prisma generate 2>/dev/null && npx prisma migrate deploy && node src/server.js"
 
@@ -325,10 +405,11 @@ case "${1:-all}" in
   mirofish)          start_mirofish ;;
   employees|digital-employees|slack-agents)
                      start_employees ;;
-  restart)           start_core && start_control && start_mirofish && start_employees && verify ;;
+  workspace-mcp|gws) start_workspace_mcp ;;
+  restart)           start_workspace_mcp && start_core && start_control && start_mirofish && start_employees && verify ;;
   status)            status ;;
   logs)              logs "${2:-hm-core}" ;;
   verify)            verify ;;
-  all)               start_core && start_control && start_mirofish && start_employees && verify ;;
-  *)                 echo "Usage: $0 {all|core|benchmark|control|mirofish|employees|restart|status|logs [name]|verify}"; exit 1 ;;
+  all)               start_workspace_mcp && start_core && start_control && start_mirofish && start_employees && verify ;;
+  *)                 echo "Usage: $0 {all|core|benchmark|control|mirofish|employees|workspace-mcp|restart|status|logs [name]|verify}"; exit 1 ;;
 esac

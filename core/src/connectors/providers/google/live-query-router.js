@@ -153,11 +153,16 @@ export class LiveQueryRouter {
     const results = await Promise.allSettled(
       connected.map(async (service) => {
         const config = SERVICE_TOOL_MAP[service];
-        if (!config) return { service, items: [] };
+        if (!config) {
+          console.warn(`[live-query] no config for service ${service}`);
+          return { service, items: [] };
+        }
         try {
           const args = config.argsBuilder(query);
           const result = await this.bridge.callTool(userId, config.tool, args);
-          return { service, tool: config.tool, items: this._parseToolResult(result, service) };
+          const items = this._parseToolResult(result, service);
+          console.log(`[live-query] ${service}/${config.tool} → ${items.length} items (raw content present: ${!!result?.content})`);
+          return { service, tool: config.tool, items };
         } catch (err) {
           console.warn(`[live-query] ${service}/${config.tool} failed: ${err.message}`);
           return { service, items: [], error: err.message };

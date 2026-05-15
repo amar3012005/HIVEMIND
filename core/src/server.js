@@ -7847,13 +7847,105 @@ const server = http.createServer(async (req, res) => {
             
             try {
               const results = await persistentMemoryStore.searchMemories(validation.data);
+
+              // ── Auto-routing: live Workspace fallback ──
+              // body.include_live: 'auto' (default) | true | false
+              //   'auto' → router decides (fresh markers / low recall / intent)
+              //   true   → force MCP fan-out
+              //   false  → memory-only
+              const includeLive = body.include_live;
+              let liveItems = [];
+              let liveMeta = null;
+
+              if (includeLive !== false) {
+                try {
+                  const { LiveQueryRouter } = await import('./connectors/providers/google/live-query-router.js');
+                  const { decryptToken, refreshOAuthToken } = await import('./connectors/framework/connector-store.js');
+                  const router = new LiveQueryRouter({
+                    prisma,
+                    decryptToken,
+                    refreshOAuthToken: refreshOAuthToken || null,
+                  });
+
+                  let services;
+                  let reason;
+                  if (includeLive === true) {
+                    const c = router.classify(validation.data.query, results);
+                    services = c.services.length > 0
+                      ? c.services
+                      : ['google_drive', 'google_calendar', 'gmail'];
+                    reason = 'forced-include-live';
+                  } else {
+                    // 'auto' default
+                    const c = router.classify(validation.data.query, results);
+                    if (!c.needsLive) {
+                      liveMeta = { decision: 'skipped', reason: c.reason };
+                    } else {
+                      services = c.services;
+                      reason = c.reason;
+                    }
+                  }
+
+                  if (services && services.length > 0) {
+                    const fetched = await router.fetch(userId, validation.data.query, services);
+                    liveItems = fetched;
+                    liveMeta = {
+                      decision: 'fetched',
+                      reason,
+                      services_queried: services,
+                      item_count: fetched.length,
+                    };
+
+                    // Memory promotion: if a live item is recalled and has high
+                    // confidence (>= 0.7) or is explicitly important, save as memory
+                    // with low importance score (decays unless reinforced).
+                    if (fetched.length > 0 && body.promote_to_memory === true) {
+                      for (const item of fetched.slice(0, 3)) {
+                        try {
+                          await persistentMemoryEngine.ingestMemory({
+                            user_id: userId,
+                            org_id: orgId,
+                            content: typeof item.text === 'string' ? item.text
+                                   : item.snippet || item.summary || JSON.stringify(item).slice(0, 1000),
+                            title: item.name || item.subject || item.summary || `Live result from ${item._source}`,
+                            tags: ['live-query', `source:${item._source}`, 'auto-promoted'],
+                            memory_type: 'fact',
+                            importance_score: 0.4,
+                            skipProcessing: true,
+                            source_metadata: {
+                              source_type: 'live_query',
+                              source_platform: item._source,
+                              source_id: `live:${item.id || item._source}:${Date.now()}`,
+                            },
+                            metadata: {
+                              live_query_source: item._source,
+                              live_query_tool: item._tool,
+                              promoted_at: new Date().toISOString(),
+                              original_query: validation.data.query,
+                            },
+                          });
+                        } catch (promoteErr) {
+                          console.warn('[memory-promote] failed:', promoteErr.message);
+                        }
+                      }
+                    }
+                  }
+                } catch (liveErr) {
+                  console.warn('[search/live] router failed (non-fatal):', liveErr.message);
+                  liveMeta = { decision: 'error', error: liveErr.message };
+                }
+              }
+
               return jsonResponse(res, {
                 results,
+                live_items: liveItems,
+                live: liveMeta,
                 search_params: {
                   query: validation.data.query,
                   project: validation.data.project,
                   memory_type: validation.data.memory_type,
-                  count: results.length
+                  count: results.length,
+                  live_count: liveItems.length,
                 }
               });
             } catch (error) {

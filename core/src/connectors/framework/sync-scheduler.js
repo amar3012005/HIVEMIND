@@ -93,15 +93,62 @@ export class SyncScheduler {
 
       console.log(`[sync-scheduler] ${due.length}/${connectors.length} connectors due`);
 
+      // Provider → adapter path mapping. New per-service Google adapters
+      // live under providers/google/{service}-adapter.js with different
+      // export names + constructor dependencies (workspace-mcp bridge needs
+      // prisma + decryptToken).
+      const ADAPTER_DISPATCH = {
+        gmail:            { path: '../providers/gmail/adapter.js', exportName: 'GmailAdapter', mcpBridge: false },
+        google_drive:     { path: '../providers/google/drive-docs-adapter.js', exportName: 'GoogleDriveDocsAdapter', mcpBridge: true },
+        google_docs:      { path: '../providers/google/drive-docs-adapter.js', exportName: 'GoogleDriveDocsAdapter', mcpBridge: true },
+        google_sheets:    { path: '../providers/google/drive-docs-adapter.js', exportName: 'GoogleDriveDocsAdapter', mcpBridge: true },
+        google_slides:    { path: '../providers/google/drive-docs-adapter.js', exportName: 'GoogleDriveDocsAdapter', mcpBridge: true },
+        google_calendar:  { path: '../providers/google/calendar-adapter.js',   exportName: 'GoogleCalendarAdapter', mcpBridge: true },
+        google_contacts:  { path: '../providers/google/contacts-adapter.js',   exportName: 'GoogleContactsAdapter', mcpBridge: true },
+      };
+
+      // Lazy-load decryptToken once for all MCP-bridged adapters
+      let decryptTokenFn = null;
+      let refreshOAuthTokenFn = null;
+
       for (const connector of due) {
         try {
-          const adapterModule = await import(`../providers/${connector.platformType}/adapter.js`);
-          const AdapterClass = adapterModule.default
-            || adapterModule.GmailAdapter
-            || Object.values(adapterModule).find(v => typeof v === 'function');
-          if (!AdapterClass) continue;
+          const dispatch = ADAPTER_DISPATCH[connector.platformType];
+          let adapter;
 
-          const adapter = new AdapterClass();
+          if (dispatch) {
+            const adapterModule = await import(dispatch.path);
+            const AdapterClass = adapterModule[dispatch.exportName]
+              || adapterModule.default
+              || Object.values(adapterModule).find(v => typeof v === 'function');
+            if (!AdapterClass) {
+              console.warn(`[sync-scheduler] No adapter export for ${connector.platformType}`);
+              continue;
+            }
+            if (dispatch.mcpBridge) {
+              if (!decryptTokenFn) {
+                const cs = await import('./connector-store.js');
+                decryptTokenFn = cs.decryptToken;
+                refreshOAuthTokenFn = cs.refreshOAuthToken || null;
+              }
+              adapter = new AdapterClass({
+                prisma: this.prisma,
+                decryptToken: decryptTokenFn,
+                refreshOAuthToken: refreshOAuthTokenFn,
+              });
+            } else {
+              adapter = new AdapterClass();
+            }
+          } else {
+            // Fallback: legacy dynamic path
+            const adapterModule = await import(`../providers/${connector.platformType}/adapter.js`).catch(() => null);
+            if (!adapterModule) continue;
+            const AdapterClass = adapterModule.default
+              || adapterModule.GmailAdapter
+              || Object.values(adapterModule).find(v => typeof v === 'function');
+            if (!AdapterClass) continue;
+            adapter = new AdapterClass();
+          }
 
           await this.syncEngine.runSync({
             adapter,

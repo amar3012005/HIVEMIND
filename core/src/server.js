@@ -10738,10 +10738,13 @@ const server = http.createServer(async (req, res) => {
                     classification.reason,
                     classification.services);
                   if (classification.needsLive && classification.services.length > 0) {
+                    const connectedSvcs = await router.getConnectedServices(userId, classification.services);
+                    console.log('[chat][google-gate] connected=%j (requested=%j)', connectedSvcs, classification.services);
                     googleHits = await router.fetch(userId, message, classification.services).catch(err => {
                       console.warn('[chat] Google live fetch failed:', err.message);
                       return [];
                     });
+                    console.log('[chat][google-gate] fetch returned %d hits', googleHits.length);
                     if (googleHits.length > 0) {
                       googleBridgeFired = true;
                       console.log('[chat] Google live fallback fired: %d hits across [%s]',

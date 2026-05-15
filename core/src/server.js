@@ -5034,6 +5034,64 @@ const server = http.createServer(async (req, res) => {
         // GMAIL PUB/SUB WATCH — Real-time email ingestion
         // ==========================================
 
+        case '/api/workspace/health':
+          if (req.method === 'GET') {
+            try {
+              const { WorkspaceMcpBridge } = await import('./connectors/providers/google/workspace-mcp-bridge.js');
+              const { ConnectorStore, decryptToken } = await import('./connectors/framework/connector-store.js');
+              const bridge = new WorkspaceMcpBridge({ prisma, decryptToken });
+              const health = await bridge.health();
+              return jsonResponse(res, {
+                bridge_url: process.env.WORKSPACE_MCP_URL || 'http://workspace-mcp:8000',
+                ...health,
+              });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/workspace/tools':
+          if (req.method === 'GET') {
+            try {
+              const { WorkspaceMcpBridge } = await import('./connectors/providers/google/workspace-mcp-bridge.js');
+              const { decryptToken } = await import('./connectors/framework/connector-store.js');
+              const bridge = new WorkspaceMcpBridge({ prisma, decryptToken });
+              const tools = await bridge.listTools();
+              return jsonResponse(res, {
+                tool_count: tools.length,
+                tools: tools.map(t => ({ name: t.name, description: t.description?.slice(0, 200) })),
+              });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/workspace/call':
+          // POST { tool: 'gmail_search_messages', args: { query: 'from:alice' } }
+          // Forwards to workspace-mcp sidecar with this user's Google token
+          if (req.method === 'POST') {
+            try {
+              const { tool, args = {} } = body;
+              if (!tool) return jsonResponse(res, { error: 'tool name required' }, 400);
+
+              const { WorkspaceMcpBridge } = await import('./connectors/providers/google/workspace-mcp-bridge.js');
+              const { decryptToken, refreshOAuthToken } = await import('./connectors/framework/connector-store.js');
+              const bridge = new WorkspaceMcpBridge({
+                prisma,
+                decryptToken,
+                refreshOAuthToken: refreshOAuthToken || null,
+              });
+              const result = await bridge.callTool(userId, tool, args);
+              return jsonResponse(res, { tool, result });
+            } catch (err) {
+              console.error('[workspace-call] failed:', err.message);
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
         case '/api/connectors/cadence':
           // GET → list per-connector cadences for this user
           // POST { provider, sync_interval_minutes } → update one

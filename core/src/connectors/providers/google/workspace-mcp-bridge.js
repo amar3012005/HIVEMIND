@@ -48,11 +48,12 @@ export class WorkspaceMcpBridge {
       'google_sheets', 'google_slides', 'google_contacts', 'google_chat',
       'google_tasks', 'google_forms', 'google_workspace',
     ];
+    // Don't filter by isActive — sync errors flip it false but token may
+    // still be valid for live queries. Revoked is the hard fail signal.
     const row = await this.prisma.platformIntegration.findFirst({
       where: {
         userId,
         platformType: { in: googleProviders },
-        isActive: true,
         syncStatus: { not: 'revoked' },
       },
       orderBy: { updatedAt: 'desc' },

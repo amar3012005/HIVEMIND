@@ -131,12 +131,20 @@ start_workspace_mcp() {
     echo "WORKSPACE_MCP_JWT_KEY=$JWT_SIGNING_KEY" >> "$COOLIFY_ENV"
   fi
 
+  # Service account JSON (for optional domain-wide delegation)
+  local SA_KEY_PATH="/data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/google-workspace-sa.json"
+  local SA_MOUNT_ARG=""
+  if [ -f "$SA_KEY_PATH" ]; then
+    SA_MOUNT_ARG="-v $SA_KEY_PATH:/app/google-workspace-sa.json:ro"
+  fi
+
   docker run -d \
     --name workspace-mcp \
     --network $NETWORK \
     --restart unless-stopped \
     -p 8070:8000 \
     -v /opt/HIVEMIND/google_workspace_mcp:/app \
+    $SA_MOUNT_ARG \
     -w /app \
     -e PORT=8000 \
     -e "GOOGLE_OAUTH_CLIENT_ID=$GOOGLE_CLIENT_ID" \
@@ -179,6 +187,12 @@ start_core() {
   docker rm hm-core 2>/dev/null || true
   ensure_networks
 
+  # Mount Google service account JSON if available
+  local CORE_SA_MOUNT=""
+  if [ -f "/data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/google-workspace-sa.json" ]; then
+    CORE_SA_MOUNT="-v /data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/google-workspace-sa.json:/app/google-workspace-sa.json:ro"
+  fi
+
   docker run -d \
     --name hm-core \
     --network $NETWORK \
@@ -186,6 +200,7 @@ start_core() {
     -p 3001:3000 \
     -v /opt/HIVEMIND/core:/app \
     -v /etc/localtime:/etc/localtime:ro \
+    $CORE_SA_MOUNT \
     -w /app \
     --env-file "$COOLIFY_ENV" \
     -e NODE_ENV=production \

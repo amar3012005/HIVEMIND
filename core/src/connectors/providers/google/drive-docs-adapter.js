@@ -13,6 +13,8 @@
 
 import { BaseProviderAdapter } from '../../framework/provider-adapter.js';
 import { WorkspaceMcpBridge } from './workspace-mcp-bridge.js';
+import crypto from 'node:crypto';
+import { chunkText } from '../../../knowledge/document-chunker.js';
 
 const DOC_MIME_TYPES = {
   document:    'application/vnd.google-apps.document',
@@ -117,16 +119,33 @@ export class GoogleDriveDocsAdapter extends BaseProviderAdapter {
                   : 'file';
 
     const lastModified = file.modifiedTime ? new Date(file.modifiedTime).toISOString() : null;
+    const ownerTags = (file.owners?.map(o => `owner:${o.emailAddress}`) || []).slice(0, 2);
+    const baseTags = [...this.defaultTags, `drive-${docType}`, ...ownerTags];
 
-    return [{
+    // Doc-hash for dedup on re-sync (skip unchanged docs entirely)
+    const docHash = crypto.createHash('sha256').update(file._body).digest('hex').slice(0, 16);
+    const docHashTag = `doc-hash:${docHash}`;
+
+    // KB-style chunking: same chunker as /api/knowledge/upload uses
+    let chunks;
+    try {
+      chunks = chunkText(file._body, { targetSize: 800, maxSize: 1200, minSize: 100, overlapSize: 80 });
+    } catch (_chunkerErr) {
+      // Fallback: single chunk if chunker fails
+      chunks = [{ text: file._body, index: 0 }];
+    }
+
+    // Document-level summary payload (gets the full body? no — just metadata)
+    const summaryPayload = {
       user_id: context.user_id,
       org_id: context.org_id,
       project: null,
-      content: file._body,
+      content: `# ${file.name || 'Untitled'}\n\n${file._body.slice(0, 500)}${file._body.length > 500 ? '…' : ''}`,
       title: file.name || 'Untitled',
-      tags: [...this.defaultTags, `drive-${docType}`, ...(file.owners?.map(o => `owner:${o.emailAddress}`) || []).slice(0, 2)],
-      memory_type: 'fact',          // durable knowledge, not event
+      tags: [...baseTags, 'document-summary', docHashTag],
+      memory_type: 'fact',
       document_date: lastModified,
+      importance_score: 0.7,
       source_metadata: {
         source_type: 'google_drive',
         source_platform: 'google_drive',
@@ -142,10 +161,39 @@ export class GoogleDriveDocsAdapter extends BaseProviderAdapter {
         size_bytes: parseInt(file.size, 10) || null,
         modified_time: lastModified,
         web_view_link: file.webViewLink,
-        // Hint to upstream chunker that this is a long-form doc
-        kb_chunk: true,
+        total_chunks: chunks.length,
+        doc_hash: docHash,
+        is_document_summary: true,
       },
-    }];
+    };
+
+    // Per-chunk payloads — these become searchable, dedup via Qdrant
+    const chunkPayloads = chunks.map((chunk, idx) => ({
+      user_id: context.user_id,
+      org_id: context.org_id,
+      project: null,
+      content: chunk.text,
+      title: `${file.name || 'Untitled'} (chunk ${idx + 1}/${chunks.length})`,
+      tags: [...baseTags, 'document-chunk', `chunk:${idx}`, docHashTag],
+      memory_type: 'fact',
+      document_date: lastModified,
+      importance_score: 0.5,
+      source_metadata: {
+        source_type: 'google_drive',
+        source_platform: 'google_drive',
+        source_id: `drive:${file.id}:chunk:${idx}`,
+        source_url: file.webViewLink || `https://drive.google.com/file/d/${file.id}`,
+      },
+      metadata: {
+        drive_file_id: file.id,
+        chunk_index: idx,
+        total_chunks: chunks.length,
+        parent_summary_id: `drive:${file.id}`,
+        doc_hash: docHash,
+      },
+    }));
+
+    return [summaryPayload, ...chunkPayloads];
   }
 
   dedupeKey(file) {

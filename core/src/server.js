@@ -10522,6 +10522,134 @@ const server = http.createServer(async (req, res) => {
               console.warn('[chat:onboarding] identity load failed:', idErr.message);
             }
 
+            // ─── Slack action intent (Talk-to-HIVE write actions) ───
+            // Detect "send msg to #channel: 'hi'" / "react :thumbsup: ..." /
+            // "search slack for X" / "show last 20 messages in #general".
+            // Writes use 2-turn confirm (stage → user confirms → execute).
+            // Reads execute immediately. Falls through to LLM if no match.
+            try {
+              const { detectSlackAction, stripPendingSentinel } = await import('./connectors/providers/slack/action-detector.js');
+              const lastAssistant = [...(history || [])].reverse().find(h => h.role === 'assistant')?.content || null;
+              const slackIntent = detectSlackAction(message, { lastAssistantTurn: lastAssistant });
+
+              if (slackIntent.matched) {
+                // STAGE — write intent detected, ask user to confirm.
+                if (slackIntent.phase === 'stage') {
+                  return jsonResponse(res, {
+                    response: slackIntent.draftAck,  // contains sentinel for next turn
+                    sources: [],
+                    usage: null,
+                    assistant_name: assistantName,
+                    slack_action: { phase: 'stage', action_type: slackIntent.action_type },
+                  });
+                }
+                if (slackIntent.phase === 'clarify') {
+                  return jsonResponse(res, {
+                    response: slackIntent.clarify,
+                    sources: [],
+                    usage: null,
+                    assistant_name: assistantName,
+                    slack_action: { phase: 'clarify' },
+                  });
+                }
+                if (slackIntent.phase === 'cancel') {
+                  return jsonResponse(res, {
+                    response: 'Cancelled. Nothing was sent to Slack.',
+                    sources: [],
+                    usage: null,
+                    assistant_name: assistantName,
+                    slack_action: { phase: 'cancel' },
+                  });
+                }
+
+                // EXECUTE — either read action (search/history) or confirmed write.
+                if (slackIntent.phase === 'execute' && prisma) {
+                  try {
+                    const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
+                    const { SlackBridge } = await import('./connectors/providers/slack/bridge.js');
+                    const connStore = new ConnectorStore(prisma);
+                    const bridge = new SlackBridge({ connectorStore: connStore });
+                    const a = slackIntent.action_type;
+                    const p = slackIntent.payload || {};
+                    let result = null;
+                    let summary = '';
+
+                    if (a === 'slack_post') {
+                      result = await bridge.postMessage(userId, p.channel, p.text, { threadTs: p.thread_ts });
+                      const permalink = result?.permalink || result?.message?.permalink || null;
+                      summary = permalink
+                        ? `Sent to **${p.channel.startsWith('#') || p.channel.startsWith('@') ? p.channel : '#' + p.channel}**. [View](${permalink})`
+                        : `Sent to **${p.channel}**.`;
+                      // Audit + auto-ingest mirroring the employees endpoint.
+                      try {
+                        auditLog({
+                          organizationId: orgId, userId,
+                          actorType: 'user', actorUserId: userId,
+                          eventType: 'action.slack_post.executed', eventCategory: 'chat',
+                          action: 'execute', resourceType: 'slack_channel', resourceId: p.channel,
+                          metadata: { via: 'talk-to-hive', preview: p.text.slice(0, 200) },
+                        });
+                      } catch {}
+                      if (persistentMemoryEngine?.ingestMemory) {
+                        persistentMemoryEngine.ingestMemory({
+                          content: p.text,
+                          title: `You → ${p.channel}`,
+                          tags: ['slack', 'talk-to-hive', 'auto-ingest', 'live-slack'],
+                          memory_type: 'note',
+                          user_id: userId,
+                          org_id: orgId,
+                          source_metadata: { source_platform: 'slack', channel: p.channel, via: 'talk-to-hive' },
+                          skipProcessing: true,
+                        }).catch(err => console.warn('[chat:slack-post] auto-ingest failed:', err.message));
+                      }
+                    } else if (a === 'slack_react') {
+                      result = await bridge._call('reactions.add',
+                        { channel: p.channel, timestamp: p.ts, name: p.emoji },
+                        await connStore.getAccessToken(userId, 'slack'), 'POST');
+                      summary = `Reacted with :${p.emoji}:`;
+                    } else if (a === 'slack_search') {
+                      result = await bridge.searchMessages(userId, p.query, { count: p.count || 10 });
+                      const hits = Array.isArray(result) ? result : (result?.matches || []);
+                      summary = hits.length > 0
+                        ? `Found ${hits.length} match${hits.length > 1 ? 'es' : ''}:\n\n` +
+                          hits.slice(0, 5).map((h, i) => `${i + 1}. **#${h.channel?.name || h.channel || '?'}** · ${h.username || h.user || ''} — ${(h.text || '').slice(0, 160)}`).join('\n')
+                        : `No Slack messages matched "${p.query}".`;
+                    } else if (a === 'slack_history') {
+                      result = await bridge.getChannelHistory(userId, p.channel, { limit: p.limit || 50 });
+                      const msgs = Array.isArray(result) ? result : (result?.messages || []);
+                      summary = msgs.length > 0
+                        ? `Last ${msgs.length} message${msgs.length > 1 ? 's' : ''} in **#${p.channel}**:\n\n` +
+                          msgs.slice(0, 10).map(m => `· ${m.username || m.user || ''}: ${(m.text || '').slice(0, 160)}`).join('\n')
+                        : `No recent messages in **#${p.channel}**.`;
+                    }
+
+                    return jsonResponse(res, {
+                      response: stripPendingSentinel(summary),
+                      sources: [],
+                      usage: null,
+                      assistant_name: assistantName,
+                      slack_action: { phase: 'executed', action_type: a, ok: true },
+                    });
+                  } catch (slackExecErr) {
+                    console.warn('[chat:slack-action] execute failed:', slackExecErr.message);
+                    const errMsg = /not connected|no token/i.test(slackExecErr.message)
+                      ? 'Slack isn\'t connected for your account. Connect it in **Settings → Connectors → Slack** first.'
+                      : `Slack action failed: ${slackExecErr.message}`;
+                    return jsonResponse(res, {
+                      response: errMsg,
+                      sources: [],
+                      usage: null,
+                      assistant_name: assistantName,
+                      slack_action: { phase: 'failed', error: slackExecErr.message },
+                    });
+                  }
+                }
+              }
+            } catch (slackDetectErr) {
+              console.warn('[chat:slack-action] detector failed:', slackDetectErr.message);
+              // Fall through to normal chat flow on any detector failure.
+            }
+
             try {
               // --- Classify user intent ---
               const msgTrimmed = message.trim();

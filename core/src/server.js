@@ -4831,6 +4831,123 @@ const server = http.createServer(async (req, res) => {
           }
           break;
 
+        case '/api/connectors/google/sync':
+          // POST { provider, config }
+          //   provider: 'gmail' | 'google_drive' | 'google_calendar' |
+          //             'google_docs' | 'google_sheets' | 'google_slides' |
+          //             'google_contacts' | 'google_tasks'
+          //   config: per-service config object (see SERVICE_CONFIG_SCHEMAS on FE)
+          //
+          // Persists config to connectorMetadata + triggers initial sync via
+          // the matching adapter through SyncEngine.
+          if (req.method === 'POST') {
+            try {
+              const { provider, config = {} } = body;
+              if (!provider) return jsonResponse(res, { error: 'provider required' }, 400);
+
+              const validProviders = [
+                'gmail', 'google_drive', 'google_calendar', 'google_docs',
+                'google_sheets', 'google_slides', 'google_contacts',
+                'google_chat', 'google_tasks', 'google_forms',
+              ];
+              if (!validProviders.includes(provider)) {
+                return jsonResponse(res, { error: `Invalid provider: ${provider}` }, 400);
+              }
+
+              // 1. Persist config to connectorMetadata.sync_config
+              const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
+              const cs = new ConnectorStore(prisma);
+              await cs.updateMetadata(userId, provider, { sync_config: config });
+
+              // 2. For Gmail, route through existing /api/connectors/gmail/sync logic
+              //    (per-folder, max_emails, exclude_categories) — has its own
+              //    optimized pipeline with Pub/Sub watch hook.
+              if (provider === 'gmail') {
+                // Defer to existing Gmail sync handler logic
+                console.log(`[google-sync] gmail config saved, advise user to use /api/connectors/gmail/sync for run`);
+                return jsonResponse(res, {
+                  success: true,
+                  provider,
+                  config_saved: true,
+                  note: 'Gmail uses dedicated sync endpoint — call /api/connectors/gmail/sync to trigger',
+                });
+              }
+
+              // 3. For new providers, dispatch via SyncEngine + adapter
+              const adapterModule = await (async () => {
+                if (provider.startsWith('google_drive') || provider === 'google_docs' || provider === 'google_sheets' || provider === 'google_slides') {
+                  return import('./connectors/providers/google/drive-docs-adapter.js');
+                }
+                if (provider === 'google_calendar') {
+                  return import('./connectors/providers/google/calendar-adapter.js');
+                }
+                if (provider === 'google_contacts') {
+                  return import('./connectors/providers/google/contacts-adapter.js');
+                }
+                return null;
+              })();
+
+              if (!adapterModule) {
+                // Live-only services (tasks/chat/forms/slides/sheets) — no sync,
+                // they're queried on-demand via live-query-router
+                console.log(`[google-sync] ${provider} is live-only, config saved but no scheduled sync`);
+                return jsonResponse(res, {
+                  success: true,
+                  provider,
+                  config_saved: true,
+                  mode: 'live-only',
+                  note: `${provider} is queried live on demand; no background sync runs.`,
+                });
+              }
+
+              const AdapterClass = adapterModule.default
+                || Object.values(adapterModule).find(v => typeof v === 'function');
+
+              const { decryptToken, refreshOAuthToken } = await import('./connectors/framework/connector-store.js');
+              const adapter = new AdapterClass({
+                prisma,
+                decryptToken,
+                refreshOAuthToken: refreshOAuthToken || null,
+              });
+
+              // Fire off background sync — don't block FE
+              (async () => {
+                try {
+                  const { SyncEngine } = await import('./connectors/framework/sync-engine.js');
+                  const engine = new SyncEngine({
+                    connectorStore: cs,
+                    memoryStore: persistentMemoryStore,
+                    memoryEngine: persistentMemoryEngine,
+                    prisma,
+                  });
+                  await engine.runSync({
+                    adapter,
+                    userId,
+                    orgId,
+                    provider,
+                    incremental: false,
+                    targetScope: 'personal',
+                  });
+                  console.log(`[google-sync] ${provider} initial sync complete`);
+                } catch (syncErr) {
+                  console.warn(`[google-sync] ${provider} sync failed: ${syncErr.message}`);
+                }
+              })();
+
+              return jsonResponse(res, {
+                success: true,
+                provider,
+                config_saved: true,
+                sync_started: true,
+                message: `Sync started in background for ${provider}. Check status for progress.`,
+              });
+            } catch (err) {
+              console.error('[google-sync] failed:', err.message);
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
         case '/api/connectors/google/status':
           // Returns ALL Google service connections for current user.
           // Lets FE render per-service tiles with connected/disconnect status.

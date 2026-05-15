@@ -4633,12 +4633,26 @@ const server = http.createServer(async (req, res) => {
 
         case '/api/connectors/gmail/connect':
           if (req.method === 'GET') {
-            const { buildAuthUrl } = await import('./connectors/providers/gmail/oauth.js');
+            const { buildAuthUrl, AVAILABLE_SERVICES } = await import('./connectors/providers/gmail/oauth.js');
             const gmailRedirectUri = `${process.env.HIVEMIND_BASE_URL || getHostedApiBaseUrl(req)}/api/connectors/gmail/callback`;
             const targetScope = url.searchParams.get('target_scope') === 'organization' ? 'organization' : 'personal';
-            const gmailState = Buffer.from(JSON.stringify({ userId, orgId, targetScope })).toString('base64url');
-            const authorizationUrl = buildAuthUrl({ redirectUri: gmailRedirectUri, state: gmailState });
-            return jsonResponse(res, { url: authorizationUrl, redirect_uri: gmailRedirectUri });
+
+            // Services opt-in: ?services=gmail,drive,calendar,docs
+            // Default to all available (full Workspace) for new connections.
+            const requestedServices = (url.searchParams.get('services') || AVAILABLE_SERVICES.join(','))
+              .split(',')
+              .map(s => s.trim().toLowerCase())
+              .filter(s => AVAILABLE_SERVICES.includes(s));
+            const services = requestedServices.length > 0 ? requestedServices : ['gmail'];
+
+            const gmailState = Buffer.from(JSON.stringify({ userId, orgId, targetScope, services })).toString('base64url');
+            const authorizationUrl = buildAuthUrl({ redirectUri: gmailRedirectUri, state: gmailState, services });
+            return jsonResponse(res, {
+              url: authorizationUrl,
+              redirect_uri: gmailRedirectUri,
+              services_requested: services,
+              available_services: AVAILABLE_SERVICES,
+            });
           }
           break;
 

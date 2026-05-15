@@ -4,28 +4,58 @@
  * Read-only scopes for ingestion. No write-back to Gmail.
  */
 
-export function getOAuthConfig() {
+// Per-service scope map. Caller picks which services to request.
+// Adding a service here = one more checkbox in the consent screen,
+// nothing else changes server-side.
+const SCOPE_MAP = {
+  gmail:    ['https://www.googleapis.com/auth/gmail.readonly'],
+  drive:    ['https://www.googleapis.com/auth/drive.readonly'],
+  calendar: ['https://www.googleapis.com/auth/calendar.readonly'],
+  docs:     ['https://www.googleapis.com/auth/documents.readonly'],
+  sheets:   ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+  slides:   ['https://www.googleapis.com/auth/presentations.readonly'],
+  contacts: ['https://www.googleapis.com/auth/contacts.readonly'],
+  chat:     ['https://www.googleapis.com/auth/chat.messages.readonly'],
+  tasks:    ['https://www.googleapis.com/auth/tasks.readonly'],
+  forms:    ['https://www.googleapis.com/auth/forms.body.readonly'],
+};
+
+const BASE_SCOPES = [
+  'openid',
+  'https://www.googleapis.com/auth/userinfo.email',
+  'https://www.googleapis.com/auth/userinfo.profile',
+];
+
+export function getOAuthConfig(options = {}) {
+  // services: ['gmail', 'drive', ...]  default = gmail only for backward compat
+  const services = Array.isArray(options.services) && options.services.length > 0
+    ? options.services
+    : ['gmail'];
+
+  const serviceScopes = services.flatMap(s => SCOPE_MAP[s] || []);
+  const scopes = [...new Set([...BASE_SCOPES, ...serviceScopes])];
+
   return {
-    providerId: 'gmail',
-    clientId: process.env.GOOGLE_CLIENT_ID || '',
-    clientSecret: process.env.GOOGLE_CLIENT_SECRET || '',
+    providerId: 'gmail', // kept for backward compat — callback path still /gmail/callback
+    clientId: process.env.GOOGLE_CLIENT_ID || process.env.GOOGLE_OAUTH_CLIENT_ID || '',
+    clientSecret: process.env.GOOGLE_CLIENT_SECRET || process.env.GOOGLE_OAUTH_CLIENT_SECRET || '',
     authUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
     tokenUrl: 'https://oauth2.googleapis.com/token',
-    scopes: [
-      'https://www.googleapis.com/auth/gmail.readonly',
-      'https://www.googleapis.com/auth/userinfo.email',
-      'https://www.googleapis.com/auth/userinfo.profile',
-    ],
+    scopes,
     accessType: 'offline',
     prompt: 'consent',
+    services,
   };
 }
+
+export const AVAILABLE_SERVICES = Object.keys(SCOPE_MAP);
+export { SCOPE_MAP };
 
 /**
  * Build the OAuth authorization URL for Gmail.
  */
-export function buildAuthUrl({ redirectUri, state }) {
-  const config = getOAuthConfig();
+export function buildAuthUrl({ redirectUri, state, services }) {
+  const config = getOAuthConfig({ services });
   const params = new URLSearchParams({
     client_id: config.clientId,
     redirect_uri: redirectUri,
@@ -34,6 +64,7 @@ export function buildAuthUrl({ redirectUri, state }) {
     access_type: config.accessType,
     prompt: config.prompt,
     state,
+    include_granted_scopes: 'true',
   });
   return `${config.authUrl}?${params.toString()}`;
 }

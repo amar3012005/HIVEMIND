@@ -113,9 +113,10 @@ start_workspace_mcp() {
   fi
 
   # Read GOOGLE_CLIENT_ID + secret from Coolify env (already used by HIVEMIND)
-  local GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET
-  GOOGLE_CLIENT_ID="$(grep '^GOOGLE_CLIENT_ID=' "$COOLIFY_ENV" | cut -d= -f2-)"
-  GOOGLE_CLIENT_SECRET="$(grep '^GOOGLE_CLIENT_SECRET=' "$COOLIFY_ENV" | cut -d= -f2-)"
+  # Note: `set -e` + grep no-match would exit; use `|| true` to tolerate.
+  local GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET JWT_SIGNING_KEY
+  GOOGLE_CLIENT_ID="$(grep '^GOOGLE_CLIENT_ID=' "$COOLIFY_ENV" 2>/dev/null | cut -d= -f2- || true)"
+  GOOGLE_CLIENT_SECRET="$(grep '^GOOGLE_CLIENT_SECRET=' "$COOLIFY_ENV" 2>/dev/null | cut -d= -f2- || true)"
 
   if [ -z "$GOOGLE_CLIENT_ID" ]; then
     err "GOOGLE_CLIENT_ID not set in Coolify .env"
@@ -123,8 +124,7 @@ start_workspace_mcp() {
   fi
 
   # JWT signing key — generated once, kept stable in Coolify .env
-  local JWT_SIGNING_KEY
-  JWT_SIGNING_KEY="$(grep '^WORKSPACE_MCP_JWT_KEY=' "$COOLIFY_ENV" | cut -d= -f2-)"
+  JWT_SIGNING_KEY="$(grep '^WORKSPACE_MCP_JWT_KEY=' "$COOLIFY_ENV" 2>/dev/null | cut -d= -f2- || true)"
   if [ -z "$JWT_SIGNING_KEY" ]; then
     JWT_SIGNING_KEY="$(openssl rand -hex 32)"
     log "Generated WORKSPACE_MCP_JWT_KEY — appending to $COOLIFY_ENV"

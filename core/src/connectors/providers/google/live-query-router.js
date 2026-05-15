@@ -29,6 +29,34 @@ const QUERY_INTENT_PATTERNS = [
   { pattern: /\b(contact|email\s+address|phone|who\s+is)\b/i, services: ['google_contacts'] },
 ];
 
+// Drive's query syntax is structured (not natural language).
+// Extract keywords from user message, strip intent words, wrap in
+// `name contains '<kw>' OR fullText contains '<kw>'`.
+const STOP_WORDS = new Set([
+  'a','an','the','my','our','your','find','search','show','give','get',
+  'me','for','about','from','on','in','at','of','to','with','any','all',
+  'document','documents','doc','docs','file','files','drive','google',
+  'last','recent','latest','today','now','please','can','could','would',
+  'is','are','was','were','have','has','had','do','does','did',
+]);
+function extractKeywords(query) {
+  if (!query) return [];
+  return query
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length >= 3 && !STOP_WORDS.has(w))
+    .slice(0, 4); // first 4 most-likely-meaningful terms
+}
+function buildDriveQuery(q) {
+  const kws = extractKeywords(q);
+  if (kws.length === 0) {
+    return "trashed=false and mimeType!='application/vnd.google-apps.folder'";
+  }
+  const clauses = kws.map(kw => `(name contains '${kw}' or fullText contains '${kw}')`);
+  return `(${clauses.join(' or ')}) and trashed=false`;
+}
+
 // Tool names match taylorwilsdon/google_workspace_mcp v3.2.4 surface.
 // Verified live against prod sidecar.
 const SERVICE_TOOL_MAP = {
@@ -48,13 +76,12 @@ const SERVICE_TOOL_MAP = {
   },
   google_drive: {
     tool: 'search_drive_files',
-    argsBuilder: (q) => ({ query: q || 'mimeType!=\'application/vnd.google-apps.folder\'', page_size: 10 }),
+    argsBuilder: (q) => ({ query: buildDriveQuery(q), page_size: 10 }),
   },
   google_docs: {
     tool: 'search_drive_files',
     argsBuilder: (q) => ({
-      query: q ? `name contains '${q.replace(/'/g, '')}' and mimeType='application/vnd.google-apps.document'`
-                : "mimeType='application/vnd.google-apps.document'",
+      query: `${buildDriveQuery(q)} and mimeType='application/vnd.google-apps.document'`,
       page_size: 10,
     }),
   },

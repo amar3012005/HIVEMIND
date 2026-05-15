@@ -123,7 +123,13 @@ configure_mcp() {
   local claude_bin
   claude_bin="$(resolve_claude_bin)"
   note "Configuring HIVEMIND MCP server..."
-  "$claude_bin" mcp remove hivemind >/dev/null 2>&1 || true
+  # Claude CLI stores MCP entries per-scope. A bare `mcp remove` errors out
+  # when an entry exists in multiple scopes — and the next `mcp add` then
+  # fails as "already exists". Remove from user + local + project explicitly
+  # so the reinstall is always clean across all scopes.
+  "$claude_bin" mcp remove hivemind -s user    >/dev/null 2>&1 || true
+  "$claude_bin" mcp remove hivemind -s local   >/dev/null 2>&1 || true
+  "$claude_bin" mcp remove hivemind -s project >/dev/null 2>&1 || true
   "$claude_bin" mcp add --scope user --transport http hivemind "$HIVEMIND_ENDPOINT" --header "Authorization: Bearer $HIVEMIND_API_KEY"
   success "HIVEMIND MCP server configured."
 

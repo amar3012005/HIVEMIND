@@ -6184,8 +6184,20 @@ const server = http.createServer(async (req, res) => {
                   throw new Error(`cascade ${label} failed: ${detail}`);
                 }
               };
+              await cascade('audit_logs', () =>
+                prisma.auditLog.updateMany({
+                  where: { resourceId: { in: memoryIds } },
+                  data: { resourceId: null },
+                })
+              );
               await cascade('source_metadata', () =>
                 prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: memoryIds } } })
+              );
+              await cascade('related_memory_versions', () =>
+                prisma.memoryVersion.updateMany({
+                  where: { relatedMemoryId: { in: memoryIds } },
+                  data: { relatedMemoryId: null },
+                })
               );
               await cascade('memory_versions', () =>
                 prisma.memoryVersion.deleteMany({ where: { memoryId: { in: memoryIds } } })
@@ -7688,7 +7700,15 @@ const server = http.createServer(async (req, res) => {
 
               if (ids.length > 0) {
                 // Bulk Prisma: delete related tables then memories (4 queries total)
+                await prisma.auditLog.updateMany({
+                  where: { resourceId: { in: ids } },
+                  data: { resourceId: null },
+                });
                 await prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: ids } } });
+                await prisma.memoryVersion.updateMany({
+                  where: { relatedMemoryId: { in: ids } },
+                  data: { relatedMemoryId: null },
+                });
                 await prisma.memoryVersion.deleteMany({ where: { memoryId: { in: ids } } });
                 await prisma.relationship.deleteMany({ where: { OR: [{ fromId: { in: ids } }, { toId: { in: ids } }] } });
                 await prisma.memory.deleteMany({ where: { id: { in: ids } } });

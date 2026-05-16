@@ -131,7 +131,7 @@ export class GoogleCalendarAdapter extends BaseProviderAdapter {
       tags: [...tags],
       // Provider-specific type — distinguish from generic 'event' rows
       // so filters/facets can partition calendar entries cleanly.
-      memory_type: 'calendar_event',
+      memory_type: 'event',
       skipProcessing: true,
       document_date: startTime,
       event_dates: [startTime, endTime].filter(Boolean),

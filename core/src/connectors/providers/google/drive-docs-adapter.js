@@ -182,7 +182,7 @@ export class GoogleDriveDocsAdapter extends BaseProviderAdapter {
       ].filter(Boolean),
       // Provider-specific type — distinguishes Drive docs from generic facts.
       // Maps from Drive mime: drive_doc / drive_sheet / drive_slide / drive_pdf / drive_file
-      memory_type: `drive_${docType}`,
+      memory_type: "fact",
       document_date: lastModified,
       importance_score: 0.7,
       source_metadata: {
@@ -227,7 +227,7 @@ export class GoogleDriveDocsAdapter extends BaseProviderAdapter {
         docHashTag,
         `drive_type:${docType}`,
       ],
-      memory_type: `drive_${docType}_chunk`,
+      memory_type: "fact",
       document_date: lastModified,
       importance_score: 0.5,
       source_metadata: {

@@ -31,6 +31,19 @@ export class GmailAdapter extends BaseProviderAdapter {
     if (cursor) {
       params.set('pageToken', cursor);
     }
+    // ── Enforce user sync configuration at FETCH time (Gmail q=) ──
+    // Previously the config object was logged but never translated to
+    // Gmail's search syntax, so users who chose "sent-only" or
+    // "exclude promotions" still got the firehose. This builds the q
+    // expression from context.config and pins it on the request.
+    const q = this._buildGmailQuery(context?.config || {});
+    if (q) params.set('q', q);
+    // Also pass labelIds if user pinned folders — narrower than q= and
+    // faster server-side.
+    const folders = context?.config?.folders || [];
+    if (Array.isArray(folders) && folders.length > 0) {
+      folders.forEach((f) => params.append('labelIds', String(f).toUpperCase()));
+    }
 
     const response = await this._gmailFetch(`/threads?${params}`, accessToken);
     const threads = response.threads || [];
@@ -233,15 +246,18 @@ export class GmailAdapter extends BaseProviderAdapter {
         continue; // skip per-message payload — emit one thread payload at end
       }
 
-      const tags = [...this.defaultTags, ...threadLabels];
-      if (attachments.length > 0) tags.push('has-attachments');
-      const participants = this._extractParticipants(msg);
-      if (participants.length) {
-        tags.push(...participants.slice(0, 3).map(p => `from:${p}`));
-      }
-      // Tag attribution for downstream filtering
-      if (attribution === 'newsletter') tags.push('newsletter');
-      if (sentByUser) tags.push('sent-by-user');
+      // Rich, queryable tag set — sender/to/subject/label/year-month
+      // for fast filtering at recall time.
+      const tags = this._buildRichTags({
+        messages: [msg],
+        threadLabels,
+        attribution,
+        sentByUser,
+        hasAttachments: attachments.length > 0,
+        isThread: false,
+        subject,
+        date,
+      });
 
       const payload = {
         user_id: context.user_id,
@@ -250,10 +266,11 @@ export class GmailAdapter extends BaseProviderAdapter {
         content,
         title: i === 0 ? subject : `Re: ${subject}`,
         tags: [...new Set(tags)],
-        // Email is an EVENT type — temporal, decay-friendly, NOT a fact.
-        // Fact-extraction is skipped at the ingestion layer to prevent
-        // garbage outputs like "X sent email on Y date".
-        memory_type: 'event',
+        // Provider-specific memory type — distinguishes Gmail messages
+        // from generic 'event' rows so filters / facets / charts can
+        // partition cleanly. Still EVENT-shaped temporally (decay-aware,
+        // no fact extraction) — just typed.
+        memory_type: 'gmail_message',
         skipProcessing: true,
         // document_date = email Date header (when it happened, not when ingested).
         // Critical for time-aware recall ("emails from last week").
@@ -328,10 +345,18 @@ export class GmailAdapter extends BaseProviderAdapter {
         ].filter(Boolean).join('\n')),
       ].filter(Boolean).join('\n');
 
-      const threadTags = [...this.defaultTags, 'gmail-thread', ...threadLabels];
-      if (allAttachments.length > 0) threadTags.push('has-attachments');
-      const senderParticipants = [...participants].slice(0, 3).map(p => `from:${p.split('@')[0]}`);
-      threadTags.push(...senderParticipants);
+      const threadTags = this._buildRichTags({
+        messages,
+        threadLabels,
+        attribution: null, // multi-message: per-msg attribution not aggregated
+        sentByUser: false, // (legacy 'sent-by-user' attached per-message)
+        hasAttachments: allAttachments.length > 0,
+        isThread: true,
+        subject,
+        date: lastDate || firstDate,
+      });
+      // Backwards-compat legacy tag
+      threadTags.push('gmail-thread');
 
       // Collect every message's date for time-aware retrieval
       const allEventDates = threadMessageBlocks
@@ -349,8 +374,9 @@ export class GmailAdapter extends BaseProviderAdapter {
         content: threadContent,
         title: subject,
         tags: [...new Set(threadTags)],
-        // EVENT type + skip-processing → no garbage facts extracted
-        memory_type: 'event',
+        // Provider-specific memory type — one consolidated row per
+        // thread, structured-markdown content. EVENT-shaped temporally.
+        memory_type: 'gmail_thread',
         skipProcessing: true,
         document_date: lastDate ? new Date(lastDate).toISOString() : null,
         event_dates: allEventDates,
@@ -389,7 +415,7 @@ export class GmailAdapter extends BaseProviderAdapter {
         content: summaryContent,
         title: `Thread Summary: ${subject}`,
         tags: [...this.defaultTags, 'thread-summary', ...threadLabels],
-        memory_type: 'event',
+        memory_type: 'gmail_thread_summary',
         skipProcessing: true,
         document_date: this._getHeader(messages[messages.length - 1], 'Date')
           ? new Date(this._getHeader(messages[messages.length - 1], 'Date')).toISOString()
@@ -453,6 +479,162 @@ export class GmailAdapter extends BaseProviderAdapter {
   }
 
   // ─── Internal helpers ──────────────────────────────────────
+
+  /**
+   * Translate HIVEMIND user sync config into a Gmail API q= expression.
+   *
+   * Honors:
+   *   exclude_categories: ['promotions','social','updates','forums']
+   *   date_range: '7d' | '30d' | '90d' | '365d' | 'all'
+   *   include_keywords: free-text AND
+   *   exclude_keywords: free-text NOT
+   *   include_only_sent: bool → adds in:sent
+   *   exclude_chats: bool → -in:chats
+   *
+   * Returns empty string when no filters specified (Gmail then returns all).
+   */
+  _buildGmailQuery(config) {
+    if (!config || typeof config !== 'object') return '';
+    const parts = [];
+
+    // Exclude common noisy Gmail categories
+    const excludeCategories = Array.isArray(config.exclude_categories)
+      ? config.exclude_categories
+      : [];
+    excludeCategories.forEach((cat) => {
+      const c = String(cat).toLowerCase();
+      if (['promotions', 'social', 'updates', 'forums'].includes(c)) {
+        parts.push(`-category:${c}`);
+      }
+    });
+
+    // Date range → after:YYYY/MM/DD
+    if (config.date_range && config.date_range !== 'all') {
+      const m = /^(\d+)d$/.exec(String(config.date_range));
+      if (m) {
+        const days = parseInt(m[1], 10);
+        if (Number.isFinite(days) && days > 0) {
+          const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+          const y = since.getUTCFullYear();
+          const mo = String(since.getUTCMonth() + 1).padStart(2, '0');
+          const d = String(since.getUTCDate()).padStart(2, '0');
+          parts.push(`after:${y}/${mo}/${d}`);
+        }
+      }
+    }
+
+    // Sent-only mode
+    if (config.include_only_sent) {
+      parts.push('in:sent');
+    }
+
+    // Chats are noise for most knowledge workflows
+    if (config.exclude_chats !== false) {
+      parts.push('-in:chats');
+    }
+
+    // Include keywords (AND)
+    if (Array.isArray(config.include_keywords)) {
+      config.include_keywords.forEach((k) => {
+        const kw = String(k).trim();
+        if (kw) parts.push(/\s/.test(kw) ? `"${kw}"` : kw);
+      });
+    }
+
+    // Exclude keywords (NOT)
+    if (Array.isArray(config.exclude_keywords)) {
+      config.exclude_keywords.forEach((k) => {
+        const kw = String(k).trim();
+        if (kw) parts.push(/\s/.test(kw) ? `-"${kw}"` : `-${kw}`);
+      });
+    }
+
+    // Drop attachments-only filter
+    if (config.include_only_with_attachments) {
+      parts.push('has:attachment');
+    }
+
+    return parts.join(' ');
+  }
+
+  /**
+   * Build rich Gmail tag set so recall can filter by sender, recipient,
+   * label, year-month, attribution. Replaces the bare ['gmail', ...labels]
+   * baseline. Used by both per-message and thread-mode payloads.
+   *
+   * Outputs (all lowercase, deduped):
+   *   gmail, gmail_thread
+   *   from:<email-or-handle>           ← every sender in thread
+   *   to:<email-or-handle>             ← every recipient in thread
+   *   participant:<email-or-handle>    ← union of from+to (legacy alias)
+   *   subject:<slug>                   ← truncated normalized subject
+   *   label:<gmail-label-lowercased>   ← INBOX, SENT, IMPORTANT, etc.
+   *   yyyy-mm:<year-month>             ← e.g. 2026-05 — time-aware recall
+   *   newsletter | sent-by-user | has-attachments  — attribution tags
+   */
+  _buildRichTags({ messages, threadLabels, attribution, sentByUser, hasAttachments, isThread, subject, date }) {
+    const tags = new Set([...(this.defaultTags || []), 'gmail']);
+    if (isThread) tags.add('gmail_thread');
+
+    // Per-label tag (lowercased, namespaced so it doesn't collide with
+    // generic tag soup): label:inbox, label:sent, label:important, …
+    (threadLabels || []).forEach((l) => {
+      if (!l) return;
+      tags.add(String(l).toLowerCase());                 // legacy: bare label
+      tags.add(`label:${String(l).toLowerCase()}`);
+    });
+
+    // Participants: extract every From / To / Cc email across messages
+    const emails = new Set();
+    const fromEmails = new Set();
+    const toEmails = new Set();
+    const extractAddr = (header) => {
+      if (!header) return null;
+      const m = header.match(/<([^>]+)>/);
+      const addr = (m ? m[1] : header).trim().toLowerCase();
+      return /@/.test(addr) ? addr : null;
+    };
+    (messages || []).forEach((msg) => {
+      const f = extractAddr(this._getHeader(msg, 'From'));
+      const t = extractAddr(this._getHeader(msg, 'To'));
+      const c = extractAddr(this._getHeader(msg, 'Cc'));
+      if (f) { fromEmails.add(f); emails.add(f); }
+      if (t) { toEmails.add(t); emails.add(t); }
+      if (c) { emails.add(c); }
+    });
+    fromEmails.forEach((e) => tags.add(`from:${e}`));
+    toEmails.forEach((e) => tags.add(`to:${e}`));
+    emails.forEach((e) => tags.add(`participant:${e}`));
+
+    // Subject slug (truncated, lowercased, non-alphanum → '-')
+    if (subject) {
+      const slug = String(subject)
+        .toLowerCase()
+        .replace(/^(re|fwd?|fw):\s*/i, '')
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 60);
+      if (slug) tags.add(`subject:${slug}`);
+    }
+
+    // Year-month bucket for time-aware recall (e.g. yyyy-mm:2026-05)
+    if (date) {
+      try {
+        const d = new Date(date);
+        if (!isNaN(d)) {
+          tags.add(`yyyy-mm:${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`);
+          tags.add(`year:${d.getUTCFullYear()}`);
+        }
+      } catch { /* ignore bad date */ }
+    }
+
+    // Attribution
+    if (attribution === 'newsletter') tags.add('newsletter');
+    if (sentByUser) tags.add('sent-by-user');
+    if (hasAttachments) tags.add('has-attachments');
+
+    return [...tags];
+  }
 
   _extractAttachments(msg) {
     const attachments = [];

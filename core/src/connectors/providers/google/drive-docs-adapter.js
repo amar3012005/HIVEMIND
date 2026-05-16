@@ -142,8 +142,18 @@ export class GoogleDriveDocsAdapter extends BaseProviderAdapter {
       project: null,
       content: `# ${file.name || 'Untitled'}\n\n${file._body.slice(0, 500)}${file._body.length > 500 ? '…' : ''}`,
       title: file.name || 'Untitled',
-      tags: [...baseTags, 'document-summary', docHashTag],
-      memory_type: 'fact',
+      tags: [
+        ...baseTags,
+        'document-summary',
+        docHashTag,
+        // Rich tags for recall — owner / mime / folder / year-month
+        ...(file.owners || []).slice(0, 3).map(o => `owner:${(o.emailAddress || '').toLowerCase()}`),
+        file.mimeType ? `mime:${file.mimeType}` : null,
+        `drive_type:${docType}`, // doc | sheet | slide | pdf | file
+      ].filter(Boolean),
+      // Provider-specific type — distinguishes Drive docs from generic facts.
+      // Maps from Drive mime: drive_doc / drive_sheet / drive_slide / drive_pdf / drive_file
+      memory_type: `drive_${docType}`,
       document_date: lastModified,
       importance_score: 0.7,
       source_metadata: {
@@ -153,29 +163,42 @@ export class GoogleDriveDocsAdapter extends BaseProviderAdapter {
         source_url: file.webViewLink || `https://drive.google.com/file/d/${file.id}`,
       },
       metadata: {
-        type: `google_${docType}`,
+        type: `google_${docType}`, // legacy alias retained for downstream
+        drive_type: docType,
         drive_file_id: file.id,
         mime_type: file.mimeType,
         file_name: file.name,
         owners: file.owners?.map(o => o.emailAddress) || [],
+        last_modifying_user: file.lastModifyingUser?.emailAddress || null,
+        parents: file.parents || [],
         size_bytes: parseInt(file.size, 10) || null,
         modified_time: lastModified,
+        created_time: file.createdTime || null,
         web_view_link: file.webViewLink,
+        starred: !!file.starred,
+        shared: !!file.shared,
         total_chunks: chunks.length,
         doc_hash: docHash,
         is_document_summary: true,
       },
     };
 
-    // Per-chunk payloads — these become searchable, dedup via Qdrant
+    // Per-chunk payloads — searchable units. Type tagged with drive_chunk
+    // so chunk noise is filterable separately from summary cards.
     const chunkPayloads = chunks.map((chunk, idx) => ({
       user_id: context.user_id,
       org_id: context.org_id,
       project: null,
       content: chunk.text,
       title: `${file.name || 'Untitled'} (chunk ${idx + 1}/${chunks.length})`,
-      tags: [...baseTags, 'document-chunk', `chunk:${idx}`, docHashTag],
-      memory_type: 'fact',
+      tags: [
+        ...baseTags,
+        'document-chunk',
+        `chunk:${idx}`,
+        docHashTag,
+        `drive_type:${docType}`,
+      ],
+      memory_type: `drive_${docType}_chunk`,
       document_date: lastModified,
       importance_score: 0.5,
       source_metadata: {
@@ -186,6 +209,7 @@ export class GoogleDriveDocsAdapter extends BaseProviderAdapter {
       },
       metadata: {
         drive_file_id: file.id,
+        drive_type: docType,
         chunk_index: idx,
         total_chunks: chunks.length,
         parent_summary_id: `drive:${file.id}`,

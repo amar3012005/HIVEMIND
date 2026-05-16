@@ -1,7 +1,7 @@
 services:
   open-design:
     build:
-      context: ..
+      context: .
       dockerfile: deploy/Dockerfile
       args:
         NODE_ENV: ${NODE_ENV:-production}

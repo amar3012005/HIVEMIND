@@ -31,6 +31,19 @@ export class GmailAdapter extends BaseProviderAdapter {
     if (cursor) {
       params.set('pageToken', cursor);
     }
+    // ── Enforce user sync configuration at FETCH time (Gmail q=) ──
+    // Previously the config object was logged but never translated to
+    // Gmail's search syntax, so users who chose "sent-only" or
+    // "exclude promotions" still got the firehose. This builds the q
+    // expression from context.config and pins it on the request.
+    const q = this._buildGmailQuery(context?.config || {});
+    if (q) params.set('q', q);
+    // Also pass labelIds if user pinned folders — narrower than q= and
+    // faster server-side.
+    const folders = context?.config?.folders || [];
+    if (Array.isArray(folders) && folders.length > 0) {
+      folders.forEach((f) => params.append('labelIds', String(f).toUpperCase()));
+    }
 
     const response = await this._gmailFetch(`/threads?${params}`, accessToken);
     const threads = response.threads || [];
@@ -253,10 +266,11 @@ export class GmailAdapter extends BaseProviderAdapter {
         content,
         title: i === 0 ? subject : `Re: ${subject}`,
         tags: [...new Set(tags)],
-        // Email is an EVENT type — temporal, decay-friendly, NOT a fact.
-        // Fact-extraction is skipped at the ingestion layer to prevent
-        // garbage outputs like "X sent email on Y date".
-        memory_type: 'event',
+        // Provider-specific memory type — distinguishes Gmail messages
+        // from generic 'event' rows so filters / facets / charts can
+        // partition cleanly. Still EVENT-shaped temporally (decay-aware,
+        // no fact extraction) — just typed.
+        memory_type: 'gmail_message',
         skipProcessing: true,
         // document_date = email Date header (when it happened, not when ingested).
         // Critical for time-aware recall ("emails from last week").
@@ -360,8 +374,9 @@ export class GmailAdapter extends BaseProviderAdapter {
         content: threadContent,
         title: subject,
         tags: [...new Set(threadTags)],
-        // EVENT type + skip-processing → no garbage facts extracted
-        memory_type: 'event',
+        // Provider-specific memory type — one consolidated row per
+        // thread, structured-markdown content. EVENT-shaped temporally.
+        memory_type: 'gmail_thread',
         skipProcessing: true,
         document_date: lastDate ? new Date(lastDate).toISOString() : null,
         event_dates: allEventDates,
@@ -400,7 +415,7 @@ export class GmailAdapter extends BaseProviderAdapter {
         content: summaryContent,
         title: `Thread Summary: ${subject}`,
         tags: [...this.defaultTags, 'thread-summary', ...threadLabels],
-        memory_type: 'event',
+        memory_type: 'gmail_thread_summary',
         skipProcessing: true,
         document_date: this._getHeader(messages[messages.length - 1], 'Date')
           ? new Date(this._getHeader(messages[messages.length - 1], 'Date')).toISOString()
@@ -464,6 +479,83 @@ export class GmailAdapter extends BaseProviderAdapter {
   }
 
   // ─── Internal helpers ──────────────────────────────────────
+
+  /**
+   * Translate HIVEMIND user sync config into a Gmail API q= expression.
+   *
+   * Honors:
+   *   exclude_categories: ['promotions','social','updates','forums']
+   *   date_range: '7d' | '30d' | '90d' | '365d' | 'all'
+   *   include_keywords: free-text AND
+   *   exclude_keywords: free-text NOT
+   *   include_only_sent: bool → adds in:sent
+   *   exclude_chats: bool → -in:chats
+   *
+   * Returns empty string when no filters specified (Gmail then returns all).
+   */
+  _buildGmailQuery(config) {
+    if (!config || typeof config !== 'object') return '';
+    const parts = [];
+
+    // Exclude common noisy Gmail categories
+    const excludeCategories = Array.isArray(config.exclude_categories)
+      ? config.exclude_categories
+      : [];
+    excludeCategories.forEach((cat) => {
+      const c = String(cat).toLowerCase();
+      if (['promotions', 'social', 'updates', 'forums'].includes(c)) {
+        parts.push(`-category:${c}`);
+      }
+    });
+
+    // Date range → after:YYYY/MM/DD
+    if (config.date_range && config.date_range !== 'all') {
+      const m = /^(\d+)d$/.exec(String(config.date_range));
+      if (m) {
+        const days = parseInt(m[1], 10);
+        if (Number.isFinite(days) && days > 0) {
+          const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+          const y = since.getUTCFullYear();
+          const mo = String(since.getUTCMonth() + 1).padStart(2, '0');
+          const d = String(since.getUTCDate()).padStart(2, '0');
+          parts.push(`after:${y}/${mo}/${d}`);
+        }
+      }
+    }
+
+    // Sent-only mode
+    if (config.include_only_sent) {
+      parts.push('in:sent');
+    }
+
+    // Chats are noise for most knowledge workflows
+    if (config.exclude_chats !== false) {
+      parts.push('-in:chats');
+    }
+
+    // Include keywords (AND)
+    if (Array.isArray(config.include_keywords)) {
+      config.include_keywords.forEach((k) => {
+        const kw = String(k).trim();
+        if (kw) parts.push(/\s/.test(kw) ? `"${kw}"` : kw);
+      });
+    }
+
+    // Exclude keywords (NOT)
+    if (Array.isArray(config.exclude_keywords)) {
+      config.exclude_keywords.forEach((k) => {
+        const kw = String(k).trim();
+        if (kw) parts.push(/\s/.test(kw) ? `-"${kw}"` : `-${kw}`);
+      });
+    }
+
+    // Drop attachments-only filter
+    if (config.include_only_with_attachments) {
+      parts.push('has:attachment');
+    }
+
+    return parts.join(' ');
+  }
 
   /**
    * Build rich Gmail tag set so recall can filter by sender, recipient,

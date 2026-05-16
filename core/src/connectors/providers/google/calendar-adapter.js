@@ -88,14 +88,50 @@ export class GoogleCalendarAdapter extends BaseProviderAdapter {
       event.organizer?.email ? `**Organizer:** ${event.organizer.email}` : null,
     ].filter(Boolean).join('\n');
 
+    // Rich, queryable tags: organizer, attendee emails, year-month bucket,
+    // recurrence flag, location slug. Matches Gmail / Drive enrichment.
+    const tags = new Set([...(this.defaultTags || []), 'google_calendar', 'calendar_event']);
+    attendeeEmails.forEach((e) => {
+      const lo = String(e).toLowerCase();
+      tags.add(`with:${lo}`);
+      tags.add(`attendee:${lo}`);
+    });
+    if (event.organizer?.email) {
+      tags.add(`organizer:${String(event.organizer.email).toLowerCase()}`);
+    }
+    // Time bucket: yyyy-mm + year
+    try {
+      const d = new Date(startTime);
+      if (!isNaN(d)) {
+        tags.add(`yyyy-mm:${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`);
+        tags.add(`year:${d.getUTCFullYear()}`);
+      }
+    } catch { /* ignore */ }
+    // Title slug for fuzzy recall on event name
+    if (event.summary) {
+      const slug = String(event.summary).toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 60);
+      if (slug) tags.add(`event:${slug}`);
+    }
+    if (event.location) tags.add('has-location');
+    if (event.recurringEventId || (Array.isArray(event.recurrence) && event.recurrence.length > 0)) {
+      tags.add('recurring');
+    }
+    if (event.attachments?.length > 0) tags.add('has-attachments');
+    if (event.conferenceData?.entryPoints?.length > 0) tags.add('has-video-call');
+
     return [{
       user_id: context.user_id,
       org_id: context.org_id,
       project: null,
       content,
       title: event.summary || 'Untitled Event',
-      tags: [...this.defaultTags, ...(attendeeEmails.slice(0, 3).map(e => `with:${e}`))],
-      memory_type: 'event',
+      tags: [...tags],
+      // Provider-specific type — distinguish from generic 'event' rows
+      // so filters/facets can partition calendar entries cleanly.
+      memory_type: 'calendar_event',
       skipProcessing: true,
       document_date: startTime,
       event_dates: [startTime, endTime].filter(Boolean),
@@ -115,6 +151,10 @@ export class GoogleCalendarAdapter extends BaseProviderAdapter {
         attendees: attendeeEmails,
         organizer: event.organizer?.email,
         status: event.status,
+        recurring: !!event.recurringEventId || (Array.isArray(event.recurrence) && event.recurrence.length > 0),
+        recurring_event_id: event.recurringEventId || null,
+        conference: event.conferenceData?.entryPoints?.[0]?.uri || null,
+        attachment_count: event.attachments?.length || 0,
       },
     }];
   }

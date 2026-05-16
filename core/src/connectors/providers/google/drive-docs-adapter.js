@@ -120,7 +120,36 @@ export class GoogleDriveDocsAdapter extends BaseProviderAdapter {
 
     const lastModified = file.modifiedTime ? new Date(file.modifiedTime).toISOString() : null;
     const ownerTags = (file.owners?.map(o => `owner:${o.emailAddress}`) || []).slice(0, 2);
-    const baseTags = [...this.defaultTags, `drive-${docType}`, ...ownerTags];
+    // Year-month bucket for time-aware recall + filename slug for fuzzy match
+    const timeBucketTags = [];
+    if (lastModified) {
+      try {
+        const d = new Date(lastModified);
+        timeBucketTags.push(
+          `yyyy-mm:${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`,
+          `year:${d.getUTCFullYear()}`,
+        );
+      } catch { /* ignore bad date */ }
+    }
+    const filenameSlug = file.name
+      ? String(file.name).toLowerCase()
+          .replace(/\.[a-z0-9]+$/i, '')   // drop extension
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '')
+          .slice(0, 60)
+      : null;
+    const sharingTags = [
+      file.shared ? 'shared' : null,
+      file.starred ? 'starred' : null,
+    ].filter(Boolean);
+    const baseTags = [
+      ...this.defaultTags,
+      `drive-${docType}`,
+      ...ownerTags,
+      ...timeBucketTags,
+      ...sharingTags,
+      filenameSlug ? `file:${filenameSlug}` : null,
+    ].filter(Boolean);
 
     // Doc-hash for dedup on re-sync (skip unchanged docs entirely)
     const docHash = crypto.createHash('sha256').update(file._body).digest('hex').slice(0, 16);

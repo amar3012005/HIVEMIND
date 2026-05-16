@@ -271,6 +271,37 @@ export function classifyNoise(message, headers, body) {
  * @param {object} options.headers - Header map
  * @returns {{ markdown: string, noise: object, trimStats: object }}
  */
+// ── Marketing-noise specific: zero-width chars, image markers, trackers ──
+// Common patterns in newsletter / promo / corporate-email content that
+// inflate memory size and pollute search:
+//   • zero-width-space + soft-hyphen + non-joiner runs (preheader text)
+//   • [image: Foo] inline markers from HTML → markdown conversion
+//   • opaque ESP tracking URLs (sendgrid, mailchimp, hubspot, …) which
+//     contribute zero semantic content but bloat the body 10-50×
+const ZERO_WIDTH_REGEX = /[​-‍­⁠﻿]/g;
+const IMAGE_MARKER_REGEX = /\[image:[^\]]{0,120}\]/gi;
+// Match http(s) URLs whose path is long & opaque (>40 chars after the
+// domain, no human-readable structure). Catches tracking links from
+// click.email-domain.com, links.email.example.com, etc.
+const TRACKING_URL_REGEX = /https?:\/\/(?:click|links|track|email|e|t|cl|mail)[.][\w.-]+\/[^\s<>"')]{40,}/gi;
+// Markdown link with opaque tracking href: [text](https://...) where
+// href matches TRACKING_URL_REGEX. Keep [text], drop the href.
+const MD_TRACKING_LINK = /\[([^\]]{1,200})\]\((https?:\/\/(?:click|links|track|email|e|t|cl|mail)[.][\w.-]+\/[^)]{40,})\)/gi;
+
+function stripStructuralNoise(text) {
+  if (!text) return '';
+  return text
+    .replace(ZERO_WIDTH_REGEX, '')
+    .replace(IMAGE_MARKER_REGEX, '')
+    .replace(MD_TRACKING_LINK, '$1')        // keep label, drop tracking URL
+    .replace(TRACKING_URL_REGEX, '')         // bare tracking URLs
+    // Collapse 3+ blank lines and runs of bullet/separator chars
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/^[ \t·•▪–—-]{3,}\s*$/gm, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .trim();
+}
+
 export function cleanEmailBody({ rawText, rawHtml, headers = {} }) {
   // Prefer markdown-from-HTML when HTML present — preserves structure better
   let body = '';
@@ -282,7 +313,11 @@ export function cleanEmailBody({ rawText, rawHtml, headers = {} }) {
 
   const originalLen = body.length;
 
-  // Strip quoted replies first (operate on markdown)
+  // Strip structural noise FIRST (zero-width chars, image markers, ESP
+  // tracking URLs) so subsequent regex passes don't see polluted input.
+  body = stripStructuralNoise(body);
+
+  // Strip quoted replies (operate on markdown)
   body = stripQuotedReplies(body);
   const afterQuoteLen = body.length;
 
@@ -293,6 +328,9 @@ export function cleanEmailBody({ rawText, rawHtml, headers = {} }) {
   // Then trim signature
   body = trimSignature(body);
   const afterSigLen = body.length;
+
+  // Final pass: re-strip in case earlier transforms re-introduced trackers
+  body = stripStructuralNoise(body);
 
   // Final whitespace cleanup
   body = body.replace(/\n{3,}/g, '\n\n').trim();

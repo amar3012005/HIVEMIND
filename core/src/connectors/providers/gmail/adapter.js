@@ -233,15 +233,18 @@ export class GmailAdapter extends BaseProviderAdapter {
         continue; // skip per-message payload — emit one thread payload at end
       }
 
-      const tags = [...this.defaultTags, ...threadLabels];
-      if (attachments.length > 0) tags.push('has-attachments');
-      const participants = this._extractParticipants(msg);
-      if (participants.length) {
-        tags.push(...participants.slice(0, 3).map(p => `from:${p}`));
-      }
-      // Tag attribution for downstream filtering
-      if (attribution === 'newsletter') tags.push('newsletter');
-      if (sentByUser) tags.push('sent-by-user');
+      // Rich, queryable tag set — sender/to/subject/label/year-month
+      // for fast filtering at recall time.
+      const tags = this._buildRichTags({
+        messages: [msg],
+        threadLabels,
+        attribution,
+        sentByUser,
+        hasAttachments: attachments.length > 0,
+        isThread: false,
+        subject,
+        date,
+      });
 
       const payload = {
         user_id: context.user_id,
@@ -328,10 +331,18 @@ export class GmailAdapter extends BaseProviderAdapter {
         ].filter(Boolean).join('\n')),
       ].filter(Boolean).join('\n');
 
-      const threadTags = [...this.defaultTags, 'gmail-thread', ...threadLabels];
-      if (allAttachments.length > 0) threadTags.push('has-attachments');
-      const senderParticipants = [...participants].slice(0, 3).map(p => `from:${p.split('@')[0]}`);
-      threadTags.push(...senderParticipants);
+      const threadTags = this._buildRichTags({
+        messages,
+        threadLabels,
+        attribution: null, // multi-message: per-msg attribution not aggregated
+        sentByUser: false, // (legacy 'sent-by-user' attached per-message)
+        hasAttachments: allAttachments.length > 0,
+        isThread: true,
+        subject,
+        date: lastDate || firstDate,
+      });
+      // Backwards-compat legacy tag
+      threadTags.push('gmail-thread');
 
       // Collect every message's date for time-aware retrieval
       const allEventDates = threadMessageBlocks
@@ -453,6 +464,85 @@ export class GmailAdapter extends BaseProviderAdapter {
   }
 
   // ─── Internal helpers ──────────────────────────────────────
+
+  /**
+   * Build rich Gmail tag set so recall can filter by sender, recipient,
+   * label, year-month, attribution. Replaces the bare ['gmail', ...labels]
+   * baseline. Used by both per-message and thread-mode payloads.
+   *
+   * Outputs (all lowercase, deduped):
+   *   gmail, gmail_thread
+   *   from:<email-or-handle>           ← every sender in thread
+   *   to:<email-or-handle>             ← every recipient in thread
+   *   participant:<email-or-handle>    ← union of from+to (legacy alias)
+   *   subject:<slug>                   ← truncated normalized subject
+   *   label:<gmail-label-lowercased>   ← INBOX, SENT, IMPORTANT, etc.
+   *   yyyy-mm:<year-month>             ← e.g. 2026-05 — time-aware recall
+   *   newsletter | sent-by-user | has-attachments  — attribution tags
+   */
+  _buildRichTags({ messages, threadLabels, attribution, sentByUser, hasAttachments, isThread, subject, date }) {
+    const tags = new Set([...(this.defaultTags || []), 'gmail']);
+    if (isThread) tags.add('gmail_thread');
+
+    // Per-label tag (lowercased, namespaced so it doesn't collide with
+    // generic tag soup): label:inbox, label:sent, label:important, …
+    (threadLabels || []).forEach((l) => {
+      if (!l) return;
+      tags.add(String(l).toLowerCase());                 // legacy: bare label
+      tags.add(`label:${String(l).toLowerCase()}`);
+    });
+
+    // Participants: extract every From / To / Cc email across messages
+    const emails = new Set();
+    const fromEmails = new Set();
+    const toEmails = new Set();
+    const extractAddr = (header) => {
+      if (!header) return null;
+      const m = header.match(/<([^>]+)>/);
+      const addr = (m ? m[1] : header).trim().toLowerCase();
+      return /@/.test(addr) ? addr : null;
+    };
+    (messages || []).forEach((msg) => {
+      const f = extractAddr(this._getHeader(msg, 'From'));
+      const t = extractAddr(this._getHeader(msg, 'To'));
+      const c = extractAddr(this._getHeader(msg, 'Cc'));
+      if (f) { fromEmails.add(f); emails.add(f); }
+      if (t) { toEmails.add(t); emails.add(t); }
+      if (c) { emails.add(c); }
+    });
+    fromEmails.forEach((e) => tags.add(`from:${e}`));
+    toEmails.forEach((e) => tags.add(`to:${e}`));
+    emails.forEach((e) => tags.add(`participant:${e}`));
+
+    // Subject slug (truncated, lowercased, non-alphanum → '-')
+    if (subject) {
+      const slug = String(subject)
+        .toLowerCase()
+        .replace(/^(re|fwd?|fw):\s*/i, '')
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 60);
+      if (slug) tags.add(`subject:${slug}`);
+    }
+
+    // Year-month bucket for time-aware recall (e.g. yyyy-mm:2026-05)
+    if (date) {
+      try {
+        const d = new Date(date);
+        if (!isNaN(d)) {
+          tags.add(`yyyy-mm:${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`);
+          tags.add(`year:${d.getUTCFullYear()}`);
+        }
+      } catch { /* ignore bad date */ }
+    }
+
+    // Attribution
+    if (attribution === 'newsletter') tags.add('newsletter');
+    if (sentByUser) tags.add('sent-by-user');
+    if (hasAttachments) tags.add('has-attachments');
+
+    return [...tags];
+  }
 
   _extractAttachments(msg) {
     const attachments = [];

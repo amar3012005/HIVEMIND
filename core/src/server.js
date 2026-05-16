@@ -5020,6 +5020,51 @@ const server = http.createServer(async (req, res) => {
           break;
 
         // Gmail sync settings + trigger
+        // ──────────────────────────────────────────────────────────
+        // POST /api/connectors/gmail/flush — nuke all Gmail-sourced
+        // memories for the current user. One-shot cleanup for users
+        // whose graph got polluted by an over-eager initial sync.
+        // Soft-deletes via deletedAt so a recovery path exists.
+        // ──────────────────────────────────────────────────────────
+        case '/api/connectors/gmail/flush':
+          if (req.method === 'POST') {
+            if (!prisma) return jsonResponse(res, { error: 'service unavailable' }, 503);
+            try {
+              const now = new Date();
+              const result = await prisma.memory.updateMany({
+                where: {
+                  userId,
+                  orgId,
+                  deletedAt: null,
+                  OR: [
+                    { tags: { has: 'gmail' } },
+                    { tags: { has: 'gmail_thread' } },
+                    { tags: { has: 'gmail-thread' } },
+                    { sourceMetadata: { is: { sourceType: 'gmail' } } },
+                    { sourceMetadata: { is: { sourcePlatform: 'gmail' } } },
+                  ],
+                },
+                data: { deletedAt: now },
+              });
+              auditLog({
+                organizationId: orgId, userId,
+                actorType: 'user', actorUserId: userId,
+                eventType: 'connector.gmail.flush', eventCategory: 'connector',
+                action: 'flush', resourceType: 'memory_bulk', resourceId: 'gmail',
+                metadata: { deleted_count: result.count, soft: true },
+              });
+              return jsonResponse(res, {
+                ok: true,
+                deleted: result.count,
+                message: `Soft-deleted ${result.count} Gmail-sourced memor${result.count === 1 ? 'y' : 'ies'}.`,
+              });
+            } catch (err) {
+              console.error('[gmail-flush] error:', err);
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
         case '/api/connectors/gmail/sync':
           if (req.method === 'POST') {
             // Accept sync configuration from the frontend settings panel

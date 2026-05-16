@@ -5252,33 +5252,126 @@ const server = http.createServer(async (req, res) => {
           if (req.method === 'POST') {
             if (!prisma) return jsonResponse(res, { error: 'service unavailable' }, 503);
             try {
-              const now = new Date();
-              const result = await prisma.memory.updateMany({
-                where: {
-                  userId,
-                  orgId,
-                  deletedAt: null,
-                  OR: [
-                    { tags: { has: 'gmail' } },
-                    { tags: { has: 'gmail_thread' } },
-                    { tags: { has: 'gmail-thread' } },
-                    { sourceMetadata: { is: { sourceType: 'gmail' } } },
-                    { sourceMetadata: { is: { sourcePlatform: 'gmail' } } },
-                  ],
-                },
-                data: { deletedAt: now },
+              // Match every memory sourced from Gmail — tags OR sourceMetadata.
+              const matchWhere = {
+                userId,
+                orgId,
+                OR: [
+                  { tags: { has: 'gmail' } },
+                  { tags: { has: 'gmail_thread' } },
+                  { tags: { has: 'gmail-thread' } },
+                  { sourceMetadata: { is: { sourceType: 'gmail' } } },
+                  { sourceMetadata: { is: { sourcePlatform: 'gmail' } } },
+                ],
+              };
+
+              // Hard-delete mode: ?hard=true query param OR body.hard=true.
+              // Purges Postgres rows, Qdrant vectors, and any pageindex /
+              // memory_versions / relationships referencing the targets.
+              const hard = url.searchParams.get('hard') === 'true' || body.hard === true;
+
+              if (!hard) {
+                // ── Soft delete (default, recoverable) ──
+                const result = await prisma.memory.updateMany({
+                  where: { ...matchWhere, deletedAt: null },
+                  data: { deletedAt: new Date() },
+                });
+                auditLog({
+                  organizationId: orgId, userId,
+                  actorType: 'user', actorUserId: userId,
+                  eventType: 'connector.gmail.flush', eventCategory: 'connector',
+                  action: 'flush', resourceType: 'memory_bulk', resourceId: 'gmail',
+                  metadata: { deleted_count: result.count, soft: true },
+                });
+                return jsonResponse(res, {
+                  ok: true,
+                  deleted: result.count,
+                  mode: 'soft',
+                  message: `Soft-deleted ${result.count} Gmail-sourced memor${result.count === 1 ? 'y' : 'ies'}. Pass {"hard":true} to purge.`,
+                });
+              }
+
+              // ── HARD delete (unrecoverable) ──
+              // 1. Collect ids (include already soft-deleted so we wipe them too)
+              const matches = await prisma.memory.findMany({
+                where: matchWhere,
+                select: { id: true },
               });
+              const ids = matches.map((m) => m.id);
+              if (ids.length === 0) {
+                return jsonResponse(res, { ok: true, deleted: 0, mode: 'hard', message: 'Nothing to purge.' });
+              }
+
+              // 2. Cascade-cleanup FK references then delete rows
+              await prisma.auditLog.updateMany({
+                where: { resourceId: { in: ids } },
+                data: { resourceId: null },
+              });
+              await prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: ids } } });
+              await prisma.memoryVersion.updateMany({
+                where: { relatedMemoryId: { in: ids } },
+                data: { relatedMemoryId: null },
+              });
+              await prisma.memoryVersion.deleteMany({ where: { memoryId: { in: ids } } });
+              await prisma.relationship.deleteMany({
+                where: { OR: [{ fromId: { in: ids } }, { toId: { in: ids } }] },
+              });
+              // Page index rows if model exists (best-effort, table may not exist on older deployments)
+              try {
+                if (prisma.pageIndex?.deleteMany) {
+                  await prisma.pageIndex.deleteMany({ where: { memoryId: { in: ids } } });
+                }
+              } catch (pageErr) {
+                console.warn('[gmail-flush:hard] pageindex delete failed (non-fatal):', pageErr.message);
+              }
+              const deletedRows = await prisma.memory.deleteMany({ where: { id: { in: ids } } });
+
+              // 3. Qdrant vector purge — delete points whose payload memory_id ∈ ids.
+              //    One filter-batched POST so we do not N+1 the vector store.
+              let qdrantDeleted = 0;
+              try {
+                const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
+                const qdrantCollection = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
+                const qdrantKey = process.env.QDRANT_API_KEY || '';
+                if (qdrantUrl) {
+                  // Chunk ids to keep the filter payload small on big batches
+                  const chunkSize = 500;
+                  for (let i = 0; i < ids.length; i += chunkSize) {
+                    const slice = ids.slice(i, i + chunkSize);
+                    await fetch(`${qdrantUrl}/collections/${qdrantCollection}/points/delete`, {
+                      method: 'POST',
+                      headers: {
+                        'Content-Type': 'application/json',
+                        ...(qdrantKey ? { 'api-key': qdrantKey } : {}),
+                      },
+                      body: JSON.stringify({
+                        filter: { must: [{ key: 'memory_id', match: { any: slice } }] },
+                        wait: true,
+                      }),
+                    });
+                    qdrantDeleted += slice.length;
+                  }
+                }
+              } catch (qErr) {
+                console.warn('[gmail-flush:hard] Qdrant purge failed (non-fatal):', qErr.message);
+              }
+
+              // 4. Invalidate aggregate cache so /api/memories etc. don't serve stale counts
+              try { invalidateAggregateCache({ userId, orgId, project: null }); } catch { /* noop */ }
+
               auditLog({
                 organizationId: orgId, userId,
                 actorType: 'user', actorUserId: userId,
-                eventType: 'connector.gmail.flush', eventCategory: 'connector',
-                action: 'flush', resourceType: 'memory_bulk', resourceId: 'gmail',
-                metadata: { deleted_count: result.count, soft: true },
+                eventType: 'connector.gmail.flush.hard', eventCategory: 'connector',
+                action: 'purge', resourceType: 'memory_bulk', resourceId: 'gmail',
+                metadata: { deleted_count: deletedRows.count, qdrant_deleted: qdrantDeleted, hard: true },
               });
               return jsonResponse(res, {
                 ok: true,
-                deleted: result.count,
-                message: `Soft-deleted ${result.count} Gmail-sourced memor${result.count === 1 ? 'y' : 'ies'}.`,
+                deleted: deletedRows.count,
+                qdrant_deleted: qdrantDeleted,
+                mode: 'hard',
+                message: `Hard-deleted ${deletedRows.count} Gmail-sourced memor${deletedRows.count === 1 ? 'y' : 'ies'} (Postgres + Qdrant).`,
               });
             } catch (err) {
               console.error('[gmail-flush] error:', err);

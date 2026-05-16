@@ -64,7 +64,12 @@ export function buildAuthUrl({ redirectUri, state, services }) {
     access_type: config.accessType,
     prompt: config.prompt,
     state,
-    include_granted_scopes: 'true',
+    // include_granted_scopes DELIBERATELY OMITTED.
+    // With it set to 'true' Google would return EVERY previously
+    // authorized scope on this client, so a user clicking "Connect
+    // Gmail" after having once granted Drive/Calendar would end up
+    // with platform_integration rows for all of them. We want a
+    // single Connect to grant only what was explicitly requested.
   });
   return `${config.authUrl}?${params.toString()}`;
 }

@@ -4769,9 +4769,44 @@ const server = http.createServer(async (req, res) => {
               const grantedServices = [...new Set(
                 grantedScopes.map(s => SCOPE_TO_SERVICE[s]).filter(Boolean)
               )];
-              // Always upsert gmail when a Google account connects (userinfo + email
-              // scopes are guaranteed). Acts as the "primary" Google account row.
-              if (!grantedServices.includes('gmail')) grantedServices.unshift('gmail');
+
+              // Intersect with services the user actually REQUESTED in this
+              // OAuth round (parsed from state.services). Defends against
+              // Google echoing previously-authorized scopes — without this,
+              // clicking "Connect Gmail" after a prior Drive/Calendar grant
+              // would create rows for everything.
+              let requestedServices = null;
+              if (callbackState) {
+                try {
+                  const parsedState = JSON.parse(Buffer.from(callbackState, 'base64url').toString());
+                  if (Array.isArray(parsedState.services) && parsedState.services.length > 0) {
+                    // state uses short names ('gmail','drive','calendar') —
+                    // SCOPE_TO_SERVICE produces canonical ('google_drive', …).
+                    const SHORT_TO_CANON = {
+                      gmail: 'gmail',
+                      drive: 'google_drive',
+                      calendar: 'google_calendar',
+                      docs: 'google_docs',
+                      sheets: 'google_sheets',
+                      slides: 'google_slides',
+                      contacts: 'google_contacts',
+                      chat: 'google_chat',
+                      tasks: 'google_tasks',
+                      forms: 'google_forms',
+                    };
+                    requestedServices = new Set(parsedState.services
+                      .map(s => SHORT_TO_CANON[String(s).toLowerCase()])
+                      .filter(Boolean));
+                  }
+                } catch { /* state parse already happened above */ }
+              }
+              const filteredServices = requestedServices
+                ? grantedServices.filter(s => requestedServices.has(s))
+                : grantedServices;
+              if (filteredServices.length === 0) filteredServices.push('gmail');
+              // Replace grantedServices with filtered set for downstream upsert
+              grantedServices.length = 0;
+              grantedServices.push(...filteredServices);
 
               // Per-service upsert — same token shared across all rows
               for (const service of grantedServices) {

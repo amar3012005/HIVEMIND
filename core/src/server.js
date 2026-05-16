@@ -1207,10 +1207,14 @@ async function buildProfileSummary({ userId, orgId, project = null }) {
     // Relationship count — use raw query against mapped table name, scoped to user
     let relationships = 0;
     try {
+      // is_latest=true gate matches the graph endpoint exactly so the
+      // numbers reconcile between profile and graph pages. Without it,
+      // every superseded memory's incoming/outgoing edges were counted
+      // (2459 vs ~100 visible mismatch).
       const relRows = await prisma.$queryRawUnsafe(
         `SELECT COUNT(*)::int as c FROM "relationships" r
          JOIN "memories" m ON r."from_id" = m."id"
-         WHERE m."user_id" = $1::uuid AND m."deleted_at" IS NULL`,
+         WHERE m."user_id" = $1::uuid AND m."deleted_at" IS NULL AND m."is_latest" = true`,
         userId
       );
       relationships = relRows?.[0]?.c || 0;
@@ -9413,9 +9417,15 @@ const server = http.createServer(async (req, res) => {
               const useLayeredBudget = graphLimit <= 2000;
               const includeEdges = url.searchParams.get('include_edges') !== 'false';
               const includeResidents = url.searchParams.get('include_residents') !== 'false';
+              // Only LATEST versions render in the graph. Without isLatest
+              // filter, every Update edge effectively doubles the node
+              // count (old + new version both show up), producing the
+              // 406-vs-221 mismatch the user reported between graph and
+              // profile pages. Profile already filters isLatest=true.
               const baseWhere = {
                 orgId: orgId,
                 deletedAt: null,
+                isLatest: true,
                 ...(graphProject ? { project: graphProject } : {}),
               };
               const scopeWhere = graphScope === 'team'
@@ -9723,6 +9733,20 @@ const server = http.createServer(async (req, res) => {
                 return slim;
               });
 
+              // Total relationships across the user's graph (DB-level count,
+              // not clipped to the visible node window). FE can show this
+              // alongside edgeCount so the profile/graph counts reconcile.
+              let totalRelationships = 0;
+              try {
+                const relCountRows = await prisma.$queryRawUnsafe(
+                  `SELECT COUNT(*)::int AS c FROM "relationships" r
+                   JOIN "memories" m ON r."from_id" = m."id"
+                   WHERE m."user_id" = $1::uuid AND m."deleted_at" IS NULL AND m."is_latest" = true`,
+                  userId,
+                );
+                totalRelationships = relCountRows?.[0]?.c || 0;
+              } catch { /* non-fatal */ }
+
               const responsePayload = {
                 nodes: slimNodes,
                 edges,
@@ -9731,6 +9755,7 @@ const server = http.createServer(async (req, res) => {
                   nodeCount: slimNodes.length,
                   edgeCount: edges.length,
                   totalMemories: totalCount,
+                  totalRelationships,
                   scope: graphScope,
                   loadedLayers: {
                     highValue: highValueNodes.length,

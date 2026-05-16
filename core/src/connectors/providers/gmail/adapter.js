@@ -270,7 +270,7 @@ export class GmailAdapter extends BaseProviderAdapter {
         // from generic 'event' rows so filters / facets / charts can
         // partition cleanly. Still EVENT-shaped temporally (decay-aware,
         // no fact extraction) — just typed.
-        memory_type: 'gmail_message',
+        memory_type: 'event',
         skipProcessing: true,
         // document_date = email Date header (when it happened, not when ingested).
         // Critical for time-aware recall ("emails from last week").
@@ -376,7 +376,7 @@ export class GmailAdapter extends BaseProviderAdapter {
         tags: [...new Set(threadTags)],
         // Provider-specific memory type — one consolidated row per
         // thread, structured-markdown content. EVENT-shaped temporally.
-        memory_type: 'gmail_thread',
+        memory_type: 'event',
         skipProcessing: true,
         document_date: lastDate ? new Date(lastDate).toISOString() : null,
         event_dates: allEventDates,
@@ -415,7 +415,7 @@ export class GmailAdapter extends BaseProviderAdapter {
         content: summaryContent,
         title: `Thread Summary: ${subject}`,
         tags: [...this.defaultTags, 'thread-summary', ...threadLabels],
-        memory_type: 'gmail_thread_summary',
+        memory_type: 'event',
         skipProcessing: true,
         document_date: this._getHeader(messages[messages.length - 1], 'Date')
           ? new Date(this._getHeader(messages[messages.length - 1], 'Date')).toISOString()

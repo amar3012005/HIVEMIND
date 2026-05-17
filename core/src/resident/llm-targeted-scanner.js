@@ -15,7 +15,7 @@
 
 const GROQ_URL = process.env.GROQ_API_URL || 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_KEY = process.env.GROQ_API_KEY || '';
-const GROQ_MODEL = process.env.SWARM_TARGETED_MODEL || 'llama-3.3-70b-versatile';
+const GROQ_MODEL = process.env.SWARM_TARGETED_MODEL || 'openai/gpt-oss-20b';
 const BATCH = parseInt(process.env.SWARM_TARGETED_BATCH || '15', 10);
 const MAX_MEMS = parseInt(process.env.SWARM_TARGETED_MAX || '300', 10);
 

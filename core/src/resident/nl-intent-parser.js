@@ -25,12 +25,12 @@ const GROQ_KEY = process.env.GROQ_API_KEY || '';
 const GROQ_MODEL = process.env.SWARM_INTENT_MODEL || 'llama-3.3-70b-versatile';
 const NL_INTENT_ENABLED = process.env.SWARM_NL_INTENT !== 'false';
 
-const ALL_CATEGORIES = ['duplicates', 'noise', 'stale', 'orphans', 'contradictions', 'artifacts'];
+const ALL_CATEGORIES = ['duplicates', 'noise', 'stale', 'orphans', 'contradictions', 'artifacts', 'updates'];
 
 const SYSTEM_PROMPT = `You translate user requests about cleaning up a personal memory graph into a structured JSON intent. Reply ONLY with valid JSON matching this exact schema:
 
 {
-  "categories": [<subset of: "duplicates","noise","stale","orphans","contradictions","artifacts">],
+  "categories": [<subset of: "duplicates","noise","stale","orphans","contradictions","artifacts","updates">],
   "filter": {
     "source_platform": "gmail" | "google_drive" | "google_calendar" | "google_docs" | "slack" | "notion" | "github" | "knowledge" | null,
     "tags": [<lowercase strings, fully qualified e.g. "agent:faraday">],
@@ -51,6 +51,7 @@ Rules:
 - If user says "clean" / "archive" / "tidy" / "dedupe" → mutate
 - If user says "find" / "show" / "audit" / "scan" → read
 - Categories: include ONLY what the user asks for. "Clean gmail noise" → ["noise"]. "Find duplicates and stale notes" → ["duplicates","stale"]
+- "find updates" / "facts that were corrected" / "evolved" / "link old → new" / "update chains" → ["updates"]
 - Unknown → include ALL categories
 - date_from/date_to: ISO 8601 ("2024-01-01T00:00:00Z"). Use null when not specified.
 - "older than N days/weeks/months" → date_to = (now - N) ISO, date_from = null
@@ -94,6 +95,16 @@ const KEYWORD_CATEGORIES = {
   artifact: 'artifacts',
   tara: 'artifacts',
   session: 'artifacts',
+  update: 'updates',
+  updates: 'updates',
+  updated: 'updates',
+  correction: 'updates',
+  corrected: 'updates',
+  supersede: 'updates',
+  superseded: 'updates',
+  evolution: 'updates',
+  evolved: 'updates',
+  changed: 'updates',
 };
 
 const SOURCE_KEYWORDS = {

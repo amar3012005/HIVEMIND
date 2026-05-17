@@ -10108,8 +10108,8 @@ const server = http.createServer(async (req, res) => {
               if (!proposals || !Array.isArray(proposals) || proposals.length === 0) {
                 return jsonResponse(res, { error: 'proposals array is required' }, 400);
               }
-              if (!action || !['merge', 'archive_duplicates', 'delete', 'archive', 'suppress', 'resolve'].includes(action)) {
-                return jsonResponse(res, { error: 'action must be one of: merge, archive_duplicates, delete, archive, suppress, resolve' }, 400);
+              if (!action || !['merge', 'archive_duplicates', 'delete', 'archive', 'suppress', 'resolve', 'link_update_chain'].includes(action)) {
+                return jsonResponse(res, { error: 'action must be one of: merge, archive_duplicates, delete, archive, suppress, resolve, link_update_chain' }, 400);
               }
               const results = await hygieneScanner.executeProposals(proposals, action);
               auditLog({

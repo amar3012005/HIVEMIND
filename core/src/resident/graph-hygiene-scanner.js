@@ -216,6 +216,11 @@ export class GraphHygieneScanner {
       proposals.push(...found);
       stats.byCategory.contradictions = found.length;
     }
+    if (categories.includes('updates')) {
+      const found = this._findUpdates(memories, relationships, tokenCache);
+      proposals.push(...found);
+      stats.byCategory.updates = found.length;
+    }
 
     // Sort by confidence descending, then severity
     const severityOrder = { high: 0, medium: 1, low: 2 };
@@ -704,6 +709,108 @@ export class GraphHygieneScanner {
     return proposals;
   }
 
+  /**
+   * Find facts that were updated/corrected over time. Groups memories by a
+   * fact-key (normalized title + extracted-fact tag) and proposes Updates
+   * edges from older → newer where content differs but semantic overlap is
+   * high (same topic, different value).
+   *
+   * Output proposals have category='updates' + suggestedAction='link_update_chain'.
+   */
+  _findUpdates(memories, relationships, tokenCache) {
+    const proposals = [];
+    if (!Array.isArray(memories) || memories.length < 2) return proposals;
+
+    // Build set of already-linked (from_id, to_id) where type=Updates so we
+    // don't propose duplicates of existing chain links.
+    const existingUpdates = new Set();
+    for (const r of relationships || []) {
+      if (r.type === 'Updates') {
+        existingUpdates.add(`${r.from_id}→${r.to_id}`);
+      }
+    }
+
+    // Group by fact-key. Prefer explicit fact-key in tags (e.g. "fact:user-name"),
+    // fall back to normalized title prefix (first 60 chars lowercased, alphanumeric).
+    const groups = new Map(); // key → memory[]
+    for (const m of memories) {
+      if (m.memory_type === 'event') continue; // events aren't fact-updates
+      let key = null;
+      for (const t of m.tags || []) {
+        if (typeof t === 'string' && t.startsWith('fact:')) { key = t; break; }
+      }
+      if (!key && m.title) {
+        const norm = m.title.toLowerCase().replace(/[^a-z0-9 ]+/g, '').trim().slice(0, 60);
+        if (norm.length >= 8) key = `title:${norm}`;
+      }
+      if (!key) continue;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(m);
+    }
+
+    for (const [key, grp] of groups.entries()) {
+      if (grp.length < 2) continue;
+      // Order chronologically
+      grp.sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0));
+
+      // Pair consecutive memories where:
+      //   (a) Edge from_id→to_id doesn't already exist as Updates
+      //   (b) Content actually differs (Jaccard < 0.92 — close but not identical)
+      //   (c) Content is related (Jaccard > 0.25 — same topic, not random)
+      for (let i = 0; i < grp.length - 1; i++) {
+        const older = grp[i];
+        const newer = grp[i + 1];
+        if (existingUpdates.has(`${older.id}→${newer.id}`)) continue;
+        const a = tokenCache.get(older.id);
+        const b = tokenCache.get(newer.id);
+        if (!a || !b) continue;
+        const sim = jaccardSimilarity(a, b);
+        if (sim >= 0.92 || sim < 0.25) continue;
+
+        const ageDays = (new Date(newer.created_at) - new Date(older.created_at)) / 86400000;
+        const confidence = Math.min(0.92, 0.55 + sim * 0.4); // similarity boost
+        proposals.push({
+          id: randomUUID(),
+          category: 'updates',
+          severity: 'low',
+          confidence,
+          suggestedAction: 'link_update_chain',
+          reason: `${older.title?.slice(0, 60) || 'Memory'} appears to have been updated ${ageDays >= 1 ? `${ageDays.toFixed(0)} days later` : 'shortly after'} — link old→new as Updates chain (sim=${sim.toFixed(2)}).`,
+          memories: [
+            {
+              id: older.id,
+              title: older.title || null,
+              content_preview: preview(older.content),
+              created_at: older.created_at,
+              importance_score: older.importance_score,
+              is_canonical: false,
+              role: 'older',
+            },
+            {
+              id: newer.id,
+              title: newer.title || null,
+              content_preview: preview(newer.content),
+              created_at: newer.created_at,
+              importance_score: newer.importance_score,
+              is_canonical: true,
+              role: 'newer',
+            },
+          ],
+          metadata: {
+            fact_key: key,
+            similarity: sim,
+            age_days: ageDays,
+            from_id: older.id,
+            to_id: newer.id,
+            edge_type: 'Updates',
+          },
+        });
+      }
+    }
+
+    return proposals;
+  }
+
   // ── Execution ──────────────────────────────────────────────────────────────
 
   /**
@@ -726,9 +833,50 @@ export class GraphHygieneScanner {
         return this._executeSuppress(proposal);
       case 'resolve':
         return this._executeResolve(proposal);
+      case 'link_update_chain':
+        return this._executeLinkUpdateChain(proposal);
       default:
         throw new Error(`Unknown action: ${action}`);
     }
+  }
+
+  /**
+   * Link two memories as Updates chain — create `Updates` edge from older→newer,
+   * flip older's isLatest=false so retrieval surfaces newer state. Idempotent
+   * via the upserted (from_id, to_id, type) unique key in prisma-graph-store.
+   */
+  async _executeLinkUpdateChain(proposal) {
+    const meta = proposal?.metadata || {};
+    const fromId = meta.from_id;
+    const toId = meta.to_id;
+    if (!fromId || !toId) {
+      throw new Error('link_update_chain requires metadata.from_id and metadata.to_id');
+    }
+    // Create idempotent Updates edge via store's upsert path
+    await this.memoryStore.createRelationship({
+      id: randomUUID(),
+      from_id: fromId,
+      to_id: toId,
+      type: 'Updates',
+      confidence: proposal.confidence || 0.7,
+      metadata: {
+        source: 'graph-hygiene-scanner',
+        proposal_id: proposal.id,
+        fact_key: meta.fact_key || null,
+        similarity: meta.similarity || null,
+        age_days: meta.age_days || null,
+        linked_at: new Date().toISOString(),
+      },
+      created_by: 'hygiene-scanner',
+    });
+    // Older memory is no longer "latest" of this fact-key chain
+    try {
+      await this.memoryStore.updateMemory(fromId, { is_latest: false });
+    } catch (err) {
+      // updateMemory might not exist on all stores — non-fatal, edge alone is meaningful
+      console.warn('[hygiene-scanner] link_update_chain isLatest flip failed:', err.message);
+    }
+    return { status: 'executed', from_id: fromId, to_id: toId, edge_type: 'Updates' };
   }
 
   /**

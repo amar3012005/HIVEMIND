@@ -9801,9 +9801,32 @@ const server = http.createServer(async (req, res) => {
               return jsonResponse(res, { error: 'Graph hygiene scanner not available' }, 503);
             }
             try {
-              const categories = body.categories || ['duplicates', 'noise', 'stale', 'orphans', 'artifacts', 'contradictions'];
+              // ── NL intent parsing ──
+              // If caller passes body.goal (free text), parse it into a
+              // structured intent: categories, filter (source/tags/dates),
+              // safety_class. Falls back to keyword regex when LLM
+              // unavailable, then to the full default category set.
+              let parsedIntent = null;
+              if (typeof body.goal === 'string' && body.goal.trim()) {
+                try {
+                  const { parseIntent } = await import('./resident/nl-intent-parser.js');
+                  parsedIntent = await parseIntent(body.goal);
+                } catch (intentErr) {
+                  console.warn('[hygiene-scan] intent parse failed (non-fatal):', intentErr.message);
+                }
+              }
+              const categories = body.categories
+                || parsedIntent?.categories
+                || ['duplicates', 'noise', 'stale', 'orphans', 'artifacts', 'contradictions'];
               const limit = Math.min(parseInt(body.limit) || 100, 500);
-              const scanResult = await hygieneScanner.scan(userId, orgId, { categories, limit });
+              const scanResult = await hygieneScanner.scan(userId, orgId, {
+                categories,
+                limit,
+                filter: parsedIntent?.filter || null,
+              });
+              if (parsedIntent) {
+                scanResult.intent = parsedIntent;
+              }
 
               // ── LLM verification gate ──
               // Heuristic proposals are fast but noisy (e.g. staleness scoring

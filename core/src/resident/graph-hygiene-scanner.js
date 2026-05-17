@@ -108,16 +108,41 @@ export class GraphHygieneScanner {
       categories = ['duplicates', 'stale', 'noise', 'orphans', 'contradictions', 'artifacts'],
       limit = 500,
       duplicateThreshold = 0.70,
+      filter = null,
     } = options;
 
     // Fetch ALL memories for the user (bypass scope filtering for hygiene scan)
+    // ── Apply NL-derived filter to the fetch query ──
+    // If user said "clean gmail noise from 2024", filter scopes the scan
+    // to only Gmail memories in 2024 so smaller surface = faster + safer.
+    const whereClause = { userId, orgId, deletedAt: null, isLatest: true };
+    if (filter?.tags?.length > 0) {
+      whereClause.tags = { hasSome: filter.tags };
+    }
+    if (filter?.date_from || filter?.date_to) {
+      whereClause.createdAt = {};
+      if (filter.date_from) whereClause.createdAt.gte = new Date(filter.date_from);
+      if (filter.date_to)   whereClause.createdAt.lte = new Date(filter.date_to);
+    }
+    if (filter?.source_platform) {
+      // sourceMetadata is a relation; filter via nested condition
+      whereClause.sourceMetadata = {
+        is: {
+          OR: [
+            { sourcePlatform: filter.source_platform },
+            { sourceType: filter.source_platform },
+          ],
+        },
+      };
+    }
+
     let memories;
     if (this.prisma) {
       // Direct Prisma query — scope filter via userId + orgId.
       // isLatest=true: re-scans skip already-archived rows so the same
       // proposals don't keep reappearing after the user approves them.
       const raw = await this.prisma.memory.findMany({
-        where: { userId, orgId, deletedAt: null, isLatest: true },
+        where: whereClause,
         include: { sourceMetadata: true },
         orderBy: { createdAt: 'desc' },
         take: 2000, // cap for performance

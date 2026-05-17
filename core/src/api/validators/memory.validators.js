@@ -285,7 +285,7 @@ export const memoryQueryParamsSchema = z.object({
   
   limit: z.string()
     .transform(val => parseInt(val, 10))
-    .pipe(z.number().int().min(1).max(100))
+    .pipe(z.number().int().min(1).max(2000))
     .optional()
     .default('50'),
   

@@ -3622,12 +3622,27 @@ const server = http.createServer(async (req, res) => {
       }
       // ── Phase 3: research session ephemeral-buffer endpoints ───────────
       // Proxies the DeepResearcher static buffer Map (shared in-process).
+      // All routes tenant-scoped: only the buffer's recorded userId/orgId
+      // can read/approve/discard.
+      if (pathname === '/api/research/sessions' && req.method === 'GET') {
+        try {
+          const { DeepResearcher } = await import('./deep-research/researcher.js');
+          const list = DeepResearcher.listSessionBuffers(userId, orgId);
+          return jsonResponse(res, { sessions: list, count: list.length });
+        } catch (err) {
+          return jsonResponse(res, { error: 'list sessions failed', message: err.message }, 500);
+        }
+      }
       {
         const pendingMatch = pathname.match(/^\/api\/research\/sessions\/([^/]+)\/pending-proposals$/);
         if (pendingMatch && req.method === 'GET') {
           try {
             const sid = pendingMatch[1];
             const { DeepResearcher } = await import('./deep-research/researcher.js');
+            const buf = DeepResearcher._sessionBuffers.get(sid);
+            if (buf && buf.userId && buf.userId !== userId) {
+              return jsonResponse(res, { error: 'forbidden' }, 403);
+            }
             const tmp = new DeepResearcher({ memoryStore: null, recallFn: null, prisma: null, groqApiKey: '' });
             return jsonResponse(res, tmp.getPendingProposals(sid));
           } catch (err) {
@@ -3639,6 +3654,10 @@ const server = http.createServer(async (req, res) => {
           try {
             const sid = approveMatch[1];
             const { DeepResearcher } = await import('./deep-research/researcher.js');
+            const buf = DeepResearcher._sessionBuffers.get(sid);
+            if (buf && buf.userId && buf.userId !== userId) {
+              return jsonResponse(res, { error: 'forbidden' }, 403);
+            }
             const tmp = new DeepResearcher({ memoryStore: persistentMemoryStore, recallFn: null, prisma, groqApiKey: '' });
             const result = await tmp.approveSessionProposals(sid, {
               kinds: Array.isArray(body.kinds) ? body.kinds : undefined,
@@ -3654,6 +3673,10 @@ const server = http.createServer(async (req, res) => {
           try {
             const sid = discardMatch[1];
             const { DeepResearcher } = await import('./deep-research/researcher.js');
+            const buf = DeepResearcher._sessionBuffers.get(sid);
+            if (buf && buf.userId && buf.userId !== userId) {
+              return jsonResponse(res, { error: 'forbidden' }, 403);
+            }
             const tmp = new DeepResearcher({ memoryStore: null, recallFn: null, prisma: null, groqApiKey: '' });
             return jsonResponse(res, tmp.discardSessionProposals(sid));
           } catch (err) {

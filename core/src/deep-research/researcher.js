@@ -364,7 +364,13 @@ export class DeepResearcher {
     }
     let buf = this._sessionBuffers.get(sessionId);
     if (!buf) {
-      buf = { observations: [], executionEvents: [], findings: [], sources: [], checkpoints: [], createdAt: Date.now() };
+      buf = {
+        observations: [], executionEvents: [], findings: [], sources: [], checkpoints: [],
+        createdAt: Date.now(),
+        userId: memoryPayload.user_id || null,
+        orgId: memoryPayload.org_id || null,
+        firstTitle: memoryPayload.title || null,
+      };
       this._sessionBuffers.set(sessionId, buf);
     }
     const slot = ({
@@ -376,6 +382,39 @@ export class DeepResearcher {
     })[kind] || 'observations';
     buf[slot].push({ ...memoryPayload, _bufferedAt: Date.now() });
     return { buffered: true, persisted: false };
+  }
+
+  /**
+   * List buffered sessions owned by a tenant. Static so callers don't need
+   * a recallFn/memoryStore instance.
+   */
+  static listSessionBuffers(userId, orgId) {
+    const out = [];
+    for (const [sid, buf] of DeepResearcher._sessionBuffers.entries()) {
+      if (buf.userId && userId && buf.userId !== userId) continue;
+      if (buf.orgId && orgId && buf.orgId !== orgId) continue;
+      const total = (buf.observations?.length || 0)
+        + (buf.executionEvents?.length || 0)
+        + (buf.findings?.length || 0)
+        + (buf.sources?.length || 0)
+        + (buf.checkpoints?.length || 0);
+      out.push({
+        sessionId: sid,
+        createdAt: buf.createdAt,
+        ageMs: Date.now() - buf.createdAt,
+        firstTitle: buf.firstTitle || null,
+        counts: {
+          observations: buf.observations?.length || 0,
+          executionEvents: buf.executionEvents?.length || 0,
+          findings: buf.findings?.length || 0,
+          sources: buf.sources?.length || 0,
+          checkpoints: buf.checkpoints?.length || 0,
+        },
+        total,
+      });
+    }
+    out.sort((a, b) => b.createdAt - a.createdAt);
+    return out;
   }
 
   /** Inspect what's buffered for a session. */

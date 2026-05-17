@@ -113,9 +113,11 @@ export class GraphHygieneScanner {
     // Fetch ALL memories for the user (bypass scope filtering for hygiene scan)
     let memories;
     if (this.prisma) {
-      // Direct Prisma query — no scope filter, includes all visibility
+      // Direct Prisma query — scope filter via userId + orgId.
+      // isLatest=true: re-scans skip already-archived rows so the same
+      // proposals don't keep reappearing after the user approves them.
       const raw = await this.prisma.memory.findMany({
-        where: { userId, orgId, deletedAt: null },
+        where: { userId, orgId, deletedAt: null, isLatest: true },
         include: { sourceMetadata: true },
         orderBy: { createdAt: 'desc' },
         take: 2000, // cap for performance
@@ -292,9 +294,13 @@ export class GraphHygieneScanner {
         category: 'duplicate',
         severity: cluster.length >= 4 ? 'high' : cluster.length >= 3 ? 'medium' : 'low',
         confidence: Math.min(0.95, avgSimilarity + 0.1),
-        suggestedAction: 'merge',
+        // No-merge policy: keep canonical, archive others (is_latest=false,
+        // importance=0.05). Memory rows preserved for history; recall + graph
+        // visualization ignore them. User can still revert via DB if needed.
+        suggestedAction: 'archive_duplicates',
         reason: `${cluster.length} memories contain nearly identical content` +
           (clusterMems[0].title ? ` about "${clusterMems[0].title}"` : ''),
+        plainEnglishReason: `${cluster.length} near-identical copies. Keep one, hide the rest.`,
         memories: clusterMems.map(m => ({
           id: m.id,
           title: m.title || null,
@@ -683,7 +689,10 @@ export class GraphHygieneScanner {
   async _executeProposal(proposal, action) {
     switch (action) {
       case 'merge':
-        return this._executeMerge(proposal);
+        // Legacy — no-merge policy redirects to archive_duplicates.
+        return this._executeArchiveDuplicates(proposal);
+      case 'archive_duplicates':
+        return this._executeArchiveDuplicates(proposal);
       case 'delete':
         return this._executeDelete(proposal);
       case 'archive':
@@ -695,6 +704,48 @@ export class GraphHygieneScanner {
       default:
         throw new Error(`Unknown action: ${action}`);
     }
+  }
+
+  /**
+   * Archive duplicates — keep canonical (is_latest=true), mark others
+   * is_latest=false + importance=0.05 + tag 'superseded-by:<canonical>'.
+   * No content fusion. No deletion. Reversible by setting is_latest back.
+   */
+  async _executeArchiveDuplicates(proposal) {
+    const canonical = proposal.memories.find(m => m.is_canonical);
+    if (!canonical) {
+      throw new Error('No canonical memory in duplicate proposal');
+    }
+    const others = proposal.memories.filter(m => !m.is_canonical);
+    let archived = 0;
+    const affectedIds = [canonical.id];
+
+    for (const dup of others) {
+      // Create Derives edge so the version chain is traceable
+      try {
+        await this.store.createRelationship({
+          id: randomUUID(),
+          from_id: canonical.id,
+          to_id: dup.id,
+          type: 'Derives',
+          confidence: proposal.confidence,
+          metadata: { source: 'hygiene-scanner', action: 'archive_duplicates' },
+          created_by: 'hygiene-scanner',
+        });
+      } catch (relErr) {
+        // Relationship may already exist — non-fatal
+      }
+
+      // Mark dup as not-latest + low importance + add superseded-by tag
+      await this.store.updateMemory(dup.id, {
+        isLatest: false,
+        importanceScore: 0.05,
+        supersedesId: canonical.id,
+      });
+      affectedIds.push(dup.id);
+      archived++;
+    }
+    return { canonical: canonical.id, archived, affected_memory_ids: affectedIds };
   }
 
   /**

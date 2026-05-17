@@ -66,13 +66,15 @@ function buildGraphActions(hypothesis, evaluation) {
   }
 
   if (evaluation.verdict === 'likely_true' && evidenceRefs.length >= 2 && relatedMemoryIds.length >= 1) {
+    // No-merge policy: emit archive_duplicates (keep canonical, hide
+    // copies as is_latest=false) instead of merging content together.
     actions.push({
-      action: 'merge_duplicate_cluster',
+      action: 'archive_duplicates',
       confidence: evaluation.confidence,
-      reason: 'The evidence is strong enough to recommend a canonical merge or cluster promotion review.',
+      reason: 'Strong evidence of duplicate cluster — keep canonical version, archive the rest (reversible).',
       target_memory_ids: relatedMemoryIds.slice(0, 6),
       evidence_memory_ids: evidenceRefs.slice(0, 6),
-      expected_impact: 'Create a cleaner canonical node and reduce fragmented duplicate state.',
+      expected_impact: 'Reduce duplicate noise in recall while preserving every original row as version history.',
     });
   }
 
@@ -108,18 +110,20 @@ function buildGraphActions(hypothesis, evaluation) {
 }
 
 function candidateKindForAction(action) {
-  if (action === 'merge_duplicate_cluster') return 'merge_candidate';
+  if (action === 'archive_duplicates') return 'archive_duplicates';
+  if (action === 'merge_duplicate_cluster') return 'archive_duplicates'; // legacy alias
   if (action === 'suppress_noise_cluster') return 'noise_reduction_candidate';
   if (action === 'promote_known_risk') return 'promotion_candidate';
   return 'relationship_candidate';
 }
 
 function candidateSummaryForAction(action, region) {
-  if (action === 'merge_duplicate_cluster') return `Merge candidate: consolidate duplicate cluster for ${region}.`;
-  if (action === 'suppress_noise_cluster') return `Noise reduction candidate: suppress repetitive cluster for ${region}.`;
-  if (action === 'promote_known_risk') return `Promotion candidate: elevate ${region} into a known risk pattern.`;
-  if (action === 'link_update_chain') return `Relationship candidate: link stale-versus-new truth updates for ${region}.`;
-  return `Relationship candidate: connect related memories for ${region}.`;
+  if (action === 'archive_duplicates') return `Archive duplicates: keep canonical, hide other copies for ${region}.`;
+  if (action === 'merge_duplicate_cluster') return `Archive duplicates: keep canonical, hide other copies for ${region}.`;
+  if (action === 'suppress_noise_cluster') return `Suppress noise: lower importance for repetitive cluster around ${region}.`;
+  if (action === 'promote_known_risk') return `Promote: elevate ${region} into a known-risk pattern.`;
+  if (action === 'link_update_chain') return `Link update chain: connect old → new truth around ${region}.`;
+  return `Connect related memories around ${region}.`;
 }
 
 function verificationObservation({

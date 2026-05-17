@@ -10151,16 +10151,96 @@ const server = http.createServer(async (req, res) => {
                 scanResult.intent = parsedIntent;
               }
 
+              // ── LLM-targeted pass (intent-aware, no heuristic clustering) ──
+              // When user typed a free-text goal AND safety is destructive/
+              // mutate, ask the LLM to evaluate each candidate memory against
+              // that exact instruction and surface only those it judges a
+              // clear match. This is what makes AgentSwarm respond to NL
+              // prompts ("delete memories about Solvis") instead of always
+              // returning the same generic clusters.
+              const safety = parsedIntent?.safety_class;
+              if (body.goal && typeof body.goal === 'string' && body.goal.trim().length > 3
+                  && (safety === 'destructive' || safety === 'mutate')) {
+                try {
+                  const { evaluateMemoriesAgainstGoal } = await import('./resident/llm-targeted-scanner.js');
+
+                  // Pull a tenant-scoped pool of latest memories. Narrow by
+                  // filter.tags / keywords / date if NL parser produced them.
+                  const poolWhere = { userId, orgId, deletedAt: null, isLatest: true };
+                  const f = parsedIntent?.filter;
+                  if (f?.tags?.length > 0) poolWhere.tags = { hasSome: f.tags };
+                  if (f?.date_from || f?.date_to) {
+                    poolWhere.createdAt = {};
+                    if (f.date_from) poolWhere.createdAt.gte = new Date(f.date_from);
+                    if (f.date_to) poolWhere.createdAt.lte = new Date(f.date_to);
+                  }
+                  const candidates = await prisma.memory.findMany({
+                    where: poolWhere,
+                    select: { id: true, title: true, content: true, tags: true, createdAt: true },
+                    orderBy: { createdAt: 'desc' },
+                    take: 300,
+                  });
+                  let pool = candidates;
+                  if (Array.isArray(f?.keywords) && f.keywords.length > 0) {
+                    const kws = f.keywords.map(k => String(k).toLowerCase());
+                    pool = pool.filter(m => {
+                      const hay = `${m.title || ''} ${m.content || ''} ${(m.tags || []).join(' ')}`.toLowerCase();
+                      return kws.some(kw => hay.includes(kw));
+                    });
+                  }
+
+                  const matches = await evaluateMemoriesAgainstGoal(body.goal, pool.map(m => ({
+                    id: m.id,
+                    title: m.title,
+                    content: m.content,
+                    tags: m.tags,
+                    created_at: m.createdAt?.toISOString?.() || null,
+                  })));
+
+                  const byId = new Map(pool.map(m => [m.id, m]));
+                  const targetedProposals = matches.map(ev => {
+                    const mem = byId.get(ev.id);
+                    return {
+                      id: `targeted-${ev.id}`,
+                      category: 'targeted',
+                      severity: ev.action === 'delete' ? 'high' : 'medium',
+                      confidence: Math.max(0, Math.min(1, ev.confidence || 0.7)),
+                      suggestedAction: ev.action,
+                      reason: ev.reason,
+                      memories: mem ? [{
+                        id: mem.id,
+                        title: mem.title || null,
+                        content_preview: (mem.content || '').slice(0, 240),
+                        created_at: mem.createdAt?.toISOString?.() || null,
+                        importance_score: null,
+                        is_canonical: true,
+                      }] : [],
+                      metadata: { llm_targeted: true, goal: body.goal },
+                    };
+                  });
+
+                  // Merge into the proposals list, preserving heuristic finds
+                  scanResult.proposals = [...targetedProposals, ...(scanResult.proposals || [])];
+                  scanResult.stats = scanResult.stats || {};
+                  scanResult.stats.scanned = (scanResult.stats.scanned || 0) + pool.length;
+                  scanResult.stats.llm_targeted_matches = targetedProposals.length;
+                  scanResult.stats.llm_targeted_pool = pool.length;
+                } catch (targetErr) {
+                  console.warn('[hygiene-scan] LLM-targeted pass failed (non-fatal):', targetErr.message);
+                }
+              }
+
               // ── LLM verification gate ──
-              // Heuristic proposals are fast but noisy (e.g. staleness scoring
-              // false-positives ~83% on real graphs). Re-rank top candidates
-              // with Groq llama-3.3-70b w/ JSON-mode for grounded confidence.
-              // Falls back to heuristic scores on error. Budget-capped so a
-              // 500-proposal scan doesn't burn quota.
+              // Re-rank heuristic proposals with Groq for grounded confidence.
+              // Skip verification on category:'targeted' — those already came
+              // from a per-memory LLM evaluation and don't need re-ranking.
               try {
                 const { verifyProposals, filterForQueue } = await import('./resident/llm-proposal-verifier.js');
-                const verified = await verifyProposals(scanResult.proposals || []);
-                scanResult.proposals = filterForQueue(verified);
+                const targeted = (scanResult.proposals || []).filter(p => p.category === 'targeted');
+                const heuristic = (scanResult.proposals || []).filter(p => p.category !== 'targeted');
+                const verified = await verifyProposals(heuristic);
+                const queued = filterForQueue(verified);
+                scanResult.proposals = [...targeted, ...queued];
                 scanResult.stats = scanResult.stats || {};
                 scanResult.stats.llm_verified = verified.length;
                 scanResult.stats.llm_dropped = verified.filter(v => v.verdict === 'drop').length;

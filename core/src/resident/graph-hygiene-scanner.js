@@ -165,6 +165,19 @@ export class GraphHygieneScanner {
       memories = await this.store.listLatestMemories({ user_id: userId, org_id: orgId });
     }
 
+    // ── Keyword content match (NL filter.keywords) ──
+    // When user says "delete memories about Solvis", parser sets
+    // filter.keywords=['solvis']. Narrow the pool to memories whose
+    // title/content/tags contain any of those keywords. Case-insensitive
+    // substring match — bigger surface than exact tags.
+    if (Array.isArray(filter?.keywords) && filter.keywords.length > 0) {
+      const kws = filter.keywords.map(k => String(k).toLowerCase()).filter(Boolean);
+      memories = memories.filter(m => {
+        const hay = `${m.title || ''} ${m.content || ''} ${(m.tags || []).join(' ')}`.toLowerCase();
+        return kws.some(kw => hay.includes(kw));
+      });
+    }
+
     // Also fetch relationships for orphan / contradiction detection
     const relationships = await this.store.listRelationships({
       user_id: userId,

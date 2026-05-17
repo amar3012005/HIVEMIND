@@ -328,6 +328,7 @@ if (persistentMemoryEngine && persistentMemoryStore && prisma) {
     memoryEngine: persistentMemoryEngine,
     memoryStore: persistentMemoryStore,
     prisma,
+    smartIngestRouter,
   });
   syncScheduler = new SyncScheduler({
     connectorStore: schedulerConnStore,
@@ -3887,6 +3888,7 @@ const server = http.createServer(async (req, res) => {
             memoryStore: persistentMemoryStore,
             prisma,
             trailExecutor,
+            smartIngestRouter,
           });
 
           const incremental = body.incremental !== false;
@@ -4981,6 +4983,7 @@ const server = http.createServer(async (req, res) => {
                     memoryStore: persistentMemoryStore,
                     memoryEngine: persistentMemoryEngine,
                     prisma,
+                    smartIngestRouter,
                   });
                   await engine.runSync({
                     adapter,
@@ -6034,7 +6037,7 @@ const server = http.createServer(async (req, res) => {
               const { SyncEngine } = await import('./connectors/framework/sync-engine.js');
               const { GmailAdapter } = await import('./connectors/providers/gmail/adapter.js');
               const adapter = new GmailAdapter();
-              const engine = new SyncEngine({ connectorStore: cs, memoryStore: persistentMemoryStore, memoryEngine: persistentMemoryEngine });
+              const engine = new SyncEngine({ connectorStore: cs, memoryStore: persistentMemoryStore, memoryEngine: persistentMemoryEngine, smartIngestRouter });
 
               const cursor = conn.metadata?.cursor || decoded.historyId;
               const accessToken = decryptToken(conn.access_token_encrypted);
@@ -7010,6 +7013,7 @@ const server = http.createServer(async (req, res) => {
                 memoryEngine: persistentMemoryEngine,
                 memoryStore: persistentMemoryStore,
                 prisma,
+                smartIngestRouter,
               });
 
               // Run sync in background

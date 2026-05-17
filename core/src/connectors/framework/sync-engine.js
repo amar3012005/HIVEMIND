@@ -15,12 +15,13 @@ export class SyncEngine {
    * @param {import('../../memory/graph-engine.js').MemoryGraphEngine} deps.memoryEngine
    * @param {import('../../memory/prisma-graph-store.js').PrismaGraphStore} deps.memoryStore
    */
-  constructor({ connectorStore, memoryEngine, memoryStore, prisma, trailExecutor }) {
+  constructor({ connectorStore, memoryEngine, memoryStore, prisma, trailExecutor, smartIngestRouter }) {
     this.connectorStore = connectorStore;
     this.memoryEngine = memoryEngine;
     this.memoryStore = memoryStore;
     this.prisma = prisma;
     this.trailExecutor = trailExecutor || null;
+    this.smartIngestRouter = smartIngestRouter || null;
     this._dedupeCache = new Map(); // in-memory for now; can be Redis later
   }
 
@@ -229,7 +230,21 @@ export class SyncEngine {
 
   async _ingestWithRetry(payload, dedupeKey, userId, attempt = 0) {
     try {
-      await this.memoryEngine.ingestMemory(payload);
+      // P1 canonical contract: route through SmartIngestRouter so background
+      // connector polls produce deterministic edges (thread/session/chunk),
+      // same as manual UI ingest paths. Safe fallback to raw payload on error.
+      let effective = payload;
+      if (this.smartIngestRouter) {
+        try {
+          const routed = await this.smartIngestRouter.route(payload);
+          if (Array.isArray(routed) && routed.length > 0) {
+            effective = routed[0];
+          }
+        } catch (routeErr) {
+          console.warn('[sync-engine] route failed, using raw payload:', routeErr.message);
+        }
+      }
+      await this.memoryEngine.ingestMemory(effective);
     } catch (error) {
       if (attempt < MAX_RETRIES) {
         const delay = BACKOFF_BASE_MS * Math.pow(2, attempt);

@@ -3620,6 +3620,48 @@ const server = http.createServer(async (req, res) => {
           }
         }
       }
+      // ── Phase 3: research session ephemeral-buffer endpoints ───────────
+      // Proxies the DeepResearcher static buffer Map (shared in-process).
+      {
+        const pendingMatch = pathname.match(/^\/api\/research\/sessions\/([^/]+)\/pending-proposals$/);
+        if (pendingMatch && req.method === 'GET') {
+          try {
+            const sid = pendingMatch[1];
+            const { DeepResearcher } = await import('./deep-research/researcher.js');
+            const tmp = new DeepResearcher({ memoryStore: null, recallFn: null, prisma: null, groqApiKey: '' });
+            return jsonResponse(res, tmp.getPendingProposals(sid));
+          } catch (err) {
+            return jsonResponse(res, { error: 'pending-proposals failed', message: err.message }, 500);
+          }
+        }
+        const approveMatch = pathname.match(/^\/api\/research\/sessions\/([^/]+)\/approve$/);
+        if (approveMatch && req.method === 'POST') {
+          try {
+            const sid = approveMatch[1];
+            const { DeepResearcher } = await import('./deep-research/researcher.js');
+            const tmp = new DeepResearcher({ memoryStore: persistentMemoryStore, recallFn: null, prisma, groqApiKey: '' });
+            const result = await tmp.approveSessionProposals(sid, {
+              kinds: Array.isArray(body.kinds) ? body.kinds : undefined,
+              ids: Array.isArray(body.ids) ? body.ids : undefined,
+            });
+            return jsonResponse(res, result);
+          } catch (err) {
+            return jsonResponse(res, { error: 'approve failed', message: err.message }, 500);
+          }
+        }
+        const discardMatch = pathname.match(/^\/api\/research\/sessions\/([^/]+)\/discard$/);
+        if (discardMatch && req.method === 'POST') {
+          try {
+            const sid = discardMatch[1];
+            const { DeepResearcher } = await import('./deep-research/researcher.js');
+            const tmp = new DeepResearcher({ memoryStore: null, recallFn: null, prisma: null, groqApiKey: '' });
+            return jsonResponse(res, tmp.discardSessionProposals(sid));
+          } catch (err) {
+            return jsonResponse(res, { error: 'discard failed', message: err.message }, 500);
+          }
+        }
+      }
+
       if (pathname.startsWith('/api/memories/') && pathname !== '/api/memories/search' && pathname !== '/api/memories/query' && pathname !== '/api/memories/code/ingest' && pathname !== '/api/memories/traverse' && pathname !== '/api/memories/decay' && pathname !== '/api/memories/reinforce' && pathname !== '/api/memories/delete-all') {
         if (req.method === 'GET') {
           if (!ensurePersistedMemoryOrFail(res, '/api/memories/:id')) {

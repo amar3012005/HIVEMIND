@@ -711,6 +711,61 @@ export async function startDRServer({ memoryStore, prisma, recallFn, browserRunt
     return jsonResponse(res, { sessions });
   }
 
+  // GET /research/sessions/:id/pending-proposals
+  // Returns buffered observations/findings/sources/etc waiting for approval.
+  {
+    const m = pathname.match(/^\/research\/sessions\/([^/]+)\/pending-proposals$/);
+    if (m && req.method === 'GET') {
+      const sid = m[1];
+      const session = researchSessions.get(sid);
+      if (!session || session.userId !== userId) {
+        return jsonResponse(res, { error: 'session not found' }, 404);
+      }
+      const { DeepResearcher } = await import('./researcher.js');
+      const tmp = new DeepResearcher({ memoryStore: null, recallFn: null, prisma: null, groqApiKey: '' });
+      const proposals = tmp.getPendingProposals(sid);
+      return jsonResponse(res, proposals);
+    }
+  }
+
+  // POST /research/sessions/:id/approve
+  // body: { kinds?: string[], ids?: string[] }
+  // Flush approved subset to memories table.
+  {
+    const m = pathname.match(/^\/research\/sessions\/([^/]+)\/approve$/);
+    if (m && req.method === 'POST') {
+      const sid = m[1];
+      const session = researchSessions.get(sid);
+      if (!session || session.userId !== userId) {
+        return jsonResponse(res, { error: 'session not found' }, 404);
+      }
+      const body = await parseBody(req);
+      const { DeepResearcher } = await import('./researcher.js');
+      const tmp = new DeepResearcher({ memoryStore, recallFn, prisma: null, groqApiKey: '' });
+      const result = await tmp.approveSessionProposals(sid, {
+        kinds: Array.isArray(body.kinds) ? body.kinds : undefined,
+        ids: Array.isArray(body.ids) ? body.ids : undefined,
+      });
+      return jsonResponse(res, result);
+    }
+  }
+
+  // POST /research/sessions/:id/discard — drop buffer without persisting.
+  {
+    const m = pathname.match(/^\/research\/sessions\/([^/]+)\/discard$/);
+    if (m && req.method === 'POST') {
+      const sid = m[1];
+      const session = researchSessions.get(sid);
+      if (!session || session.userId !== userId) {
+        return jsonResponse(res, { error: 'session not found' }, 404);
+      }
+      const { DeepResearcher } = await import('./researcher.js');
+      const tmp = new DeepResearcher({ memoryStore: null, recallFn: null, prisma: null, groqApiKey: '' });
+      const result = tmp.discardSessionProposals(sid);
+      return jsonResponse(res, result);
+    }
+  }
+
   // GET /research/blueprints
   if (pathname === '/research/blueprints' && req.method === 'GET') {
     const domain = urlObj.searchParams.get('domain') || null;

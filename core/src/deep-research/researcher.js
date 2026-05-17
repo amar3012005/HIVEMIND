@@ -323,6 +323,140 @@ export class DeepResearcher {
     };
     this._abortController = null;
     this._synthesizeResolve = null; // Unblocked by POST /synthesize endpoint
+
+    // ── Ephemeral session buffers (Phase 3) ───────────────────────────────
+    // Mid-trail observations/execution-events/findings/sources/checkpoints
+    // buffered in RAM rather than persisted live to memories table.
+    // Persisted only when human approves via approveSessionProposals().
+    // Shared across DeepResearcher instances (dr-server spawns new one per
+    // request) via the class-level static Map below.
+    // Legacy live-persist re-enabled via env RESEARCH_PERSIST_TRACES=true.
+    this._persistTracesLive = process.env.RESEARCH_PERSIST_TRACES === 'true';
+    this._sessionBufferTtlMs = 24 * 60 * 60 * 1000; // 24h
+  }
+
+  // Shared static buffer registry — survives across per-request DeepResearcher
+  // instances within the same Node process. Map<sessionId, { observations, executionEvents, findings, sources, checkpoints, createdAt }>.
+  static _sessionBuffers = new Map();
+
+  get _sessionBuffers() { return DeepResearcher._sessionBuffers; }
+
+  /**
+   * Buffer a mid-trail memory payload (or persist it live if RESEARCH_PERSIST_TRACES=true).
+   * @param {string} sessionId
+   * @param {string} kind — 'observation' | 'executionEvent' | 'finding' | 'source' | 'checkpoint'
+   * @param {object} memoryPayload — full payload that would have gone to memoryStore.createMemory()
+   */
+  async _bufferOrPersistMemory(sessionId, kind, memoryPayload) {
+    if (this._persistTracesLive) {
+      try {
+        await this.memoryStore.createMemory(memoryPayload);
+        return { buffered: false, persisted: true };
+      } catch (err) {
+        console.error(`[DeepResearcher] live-persist ${kind} failed:`, err.message);
+        return { buffered: false, persisted: false };
+      }
+    }
+    if (!sessionId) {
+      try { await this.memoryStore.createMemory(memoryPayload); }
+      catch (err) { console.warn(`[DeepResearcher] persist (no session) ${kind} failed:`, err.message); }
+      return { buffered: false, persisted: true };
+    }
+    let buf = this._sessionBuffers.get(sessionId);
+    if (!buf) {
+      buf = { observations: [], executionEvents: [], findings: [], sources: [], checkpoints: [], createdAt: Date.now() };
+      this._sessionBuffers.set(sessionId, buf);
+    }
+    const slot = ({
+      observation: 'observations',
+      executionEvent: 'executionEvents',
+      finding: 'findings',
+      source: 'sources',
+      checkpoint: 'checkpoints',
+    })[kind] || 'observations';
+    buf[slot].push({ ...memoryPayload, _bufferedAt: Date.now() });
+    return { buffered: true, persisted: false };
+  }
+
+  /** Inspect what's buffered for a session. */
+  getPendingProposals(sessionId) {
+    const buf = this._sessionBuffers.get(sessionId);
+    if (!buf) return { sessionId, exists: false };
+    return {
+      sessionId,
+      exists: true,
+      createdAt: buf.createdAt,
+      ageMs: Date.now() - buf.createdAt,
+      counts: {
+        observations: buf.observations.length,
+        executionEvents: buf.executionEvents.length,
+        findings: buf.findings.length,
+        sources: buf.sources.length,
+        checkpoints: buf.checkpoints.length,
+      },
+      samples: {
+        observations: buf.observations.slice(0, 5).map(o => ({ id: o.id, title: o.title, tags: o.tags })),
+        findings: buf.findings.slice(0, 5).map(o => ({ id: o.id, title: o.title, tags: o.tags })),
+        sources: buf.sources.slice(0, 5).map(o => ({ id: o.id, title: o.title, tags: o.tags })),
+      },
+    };
+  }
+
+  /** Approve buffered proposals → flush to memoryStore. Empty kinds = approve all. */
+  async approveSessionProposals(sessionId, opts = {}) {
+    const buf = this._sessionBuffers.get(sessionId);
+    if (!buf) return { persisted: 0, errors: 0, byKind: {}, notFound: true };
+    const allKinds = ['observations', 'executionEvents', 'findings', 'sources', 'checkpoints'];
+    const wantKinds = Array.isArray(opts.kinds) && opts.kinds.length > 0 ? opts.kinds : allKinds;
+    const wantIds = Array.isArray(opts.ids) && opts.ids.length > 0 ? new Set(opts.ids) : null;
+    const byKind = {};
+    let persisted = 0;
+    let errors = 0;
+    for (const kind of wantKinds) {
+      const items = buf[kind] || [];
+      byKind[kind] = { attempted: 0, persisted: 0 };
+      for (const payload of items) {
+        if (wantIds && !wantIds.has(payload.id)) continue;
+        byKind[kind].attempted++;
+        try {
+          const clean = { ...payload };
+          delete clean._bufferedAt;
+          await this.memoryStore.createMemory(clean);
+          persisted++;
+          byKind[kind].persisted++;
+        } catch (err) {
+          errors++;
+          console.warn(`[DeepResearcher] approve flush ${kind} ${payload.id} failed:`, err.message);
+        }
+      }
+    }
+    if (!wantIds) {
+      this._sessionBuffers.delete(sessionId);
+    } else {
+      for (const kind of allKinds) {
+        buf[kind] = (buf[kind] || []).filter(p => !wantIds.has(p.id));
+      }
+      const totalLeft = allKinds.reduce((sum, k) => sum + (buf[k]?.length || 0), 0);
+      if (totalLeft === 0) this._sessionBuffers.delete(sessionId);
+    }
+    return { persisted, errors, byKind, notFound: false };
+  }
+
+  /** Drop a session buffer without persisting. */
+  discardSessionProposals(sessionId) {
+    const existed = this._sessionBuffers.has(sessionId);
+    this._sessionBuffers.delete(sessionId);
+    return { dropped: existed };
+  }
+
+  /** TTL-evict old buffers. */
+  _evictExpiredBuffers() {
+    const now = Date.now();
+    for (const [sid, buf] of this._sessionBuffers.entries()) {
+      if (now - buf.createdAt > this._sessionBufferTtlMs) {
+        this._sessionBuffers.delete(sid);
+      }
+    }
   }
 
   /**
@@ -1441,7 +1575,10 @@ export class DeepResearcher {
         metadata.csiTitle = `${agent}/${action}: ${finding.title?.slice(0, 80) || 'Observation'}`;
         metadata.summary = finding.content?.slice(0, 280) || '';
       }
-      await this.memoryStore.createMemory({
+      // Phase 3: buffer instead of persisting mid-trail. Flushed to memories
+      // table only when human approves via POST /api/research/sessions/:id/approve.
+      // Legacy live-persist: set env RESEARCH_PERSIST_TRACES=true.
+      await this._bufferOrPersistMemory(sessionId, 'observation', {
         id: observationId,
         user_id: trailStore.userId,
         org_id: trailStore.orgId,
@@ -1509,7 +1646,8 @@ export class DeepResearcher {
       if (output.verdict) metadata.verdict = output.verdict;
       if (output.summary) metadata.summary = output.summary;
       if (output.csiTitle) metadata.csiTitle = output.csiTitle;
-      await this.memoryStore.createMemory({
+      // Phase 3: buffer execution events; flushed only after human approval.
+      await this._bufferOrPersistMemory(sessionId, 'executionEvent', {
         id: eventId,
         user_id: trailStore.userId,
         org_id: trailStore.orgId,
@@ -2676,7 +2814,8 @@ Rules:
         relationTargetClaimIds: provenance.targetClaimIds,
         createdAt,
       };
-      await this.memoryStore.createMemory({
+      // Phase 3: buffer mid-trail finding. Persisted only after approval.
+      await this._bufferOrPersistMemory(context.sessionId || finding.sessionId || null, 'finding', {
         id: finding.id,
         user_id: userId,
         org_id: orgId,
@@ -2761,7 +2900,8 @@ Rules:
       const sourceId = randomUUID();
       try {
         const createdAt = new Date().toISOString();
-        await this.memoryStore.createMemory({
+        // Phase 3: buffer source page. Persisted only after approval.
+        await this._bufferOrPersistMemory(sessionId, 'source', {
           id: sourceId,
           user_id: userId,
           org_id: orgId,
@@ -2837,9 +2977,9 @@ Rules:
         taskProgress: progress,
       };
 
-      // Upsert checkpoint memory — always overwrite with latest state
+      // Phase 3: buffer checkpoint. Persisted only after approval.
       try {
-        await this.memoryStore.createMemory({
+        await this._bufferOrPersistMemory(sessionId, 'checkpoint', {
           id: checkpointId,
           user_id: userId,
           org_id: orgId,

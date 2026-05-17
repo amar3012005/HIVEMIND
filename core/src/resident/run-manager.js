@@ -498,20 +498,49 @@ export class ResidentRunManager {
   async _onRunCompleted(run, result) {
     const agentId = run.agent_id;
 
-    // 0. Faraday LLM findings → execute directly (skip Feynman/Turing for clear-cut cases)
+    // ─────────────────────────────────────────────────────────────────
+    // KILL-SWITCH: SWARM_AUTO_EXECUTE
+    //
+    // Default = FALSE. Sentinels emit proposals ONLY; the user approves
+    // each action manually via the /swarm page. This matches the
+    // enterprise-non-tech UX requirement (no autonomous mutation).
+    //
+    // Set SWARM_AUTO_EXECUTE=true in env to opt in to legacy behavior
+    // (kept for power-users + smoke tests). Even when enabled, merge
+    // ops are gated separately by SWARM_ALLOW_MERGE (default FALSE
+    // per the no-merge policy).
+    // ─────────────────────────────────────────────────────────────────
+    const AUTO_EXECUTE = process.env.SWARM_AUTO_EXECUTE === 'true';
+    const ALLOW_MERGE = process.env.SWARM_ALLOW_MERGE === 'true';
+
+    // Helper — turn a Turing/Faraday action candidate into a queueable
+    // proposal record. Kept on `run.pending_proposals` for the FE to
+    // render in the approval queue. NO DB mutation here.
+    const queueProposal = (action, source) => {
+      if (!run.pending_proposals) run.pending_proposals = [];
+      run.pending_proposals.push({
+        id: `${run.id}:${run.pending_proposals.length}`,
+        source,                              // 'faraday' | 'turing'
+        recommendation: action.recommendation,
+        target_memory_ids: action.target_memory_ids || [],
+        confidence: action.confidence ?? 0,
+        reason: action.reason || null,
+        status: 'pending',                   // pending | approved | rejected
+        created_at: new Date().toISOString(),
+      });
+    };
+
+    // 0. Faraday LLM findings → propose only (never auto-execute now)
     if (agentId === 'faraday' && this.memoryStore) {
       try {
         const obs = result.observations || [];
         const llmObs = obs.filter(o => o.kind === 'llm_cluster_analysis');
         if (llmObs.length > 0) {
-          const { GraphActionExecutor } = await import('./graph-action-executor.js');
-          const executor = new GraphActionExecutor({ memoryStore: this.memoryStore });
-
           const actions = [];
           for (const o of llmObs) {
             const llmActions = o.content?.actions || [];
             for (const a of llmActions) {
-              if (a.type === 'merge_duplicate' || a.type === 'merge') {
+              if ((a.type === 'merge_duplicate' || a.type === 'merge') && ALLOW_MERGE) {
                 const targetIds = a.memory_ids || (a.canonical_id && a.absorb_ids ? [a.canonical_id, ...a.absorb_ids] : []);
                 if (targetIds.length >= 2) {
                   actions.push({ recommendation: 'merge_duplicate_cluster', confidence: 0.88, target_memory_ids: targetIds });
@@ -530,30 +559,49 @@ export class ResidentRunManager {
           }
 
           if (actions.length > 0) {
-            const actionResult = await executor.executeActions(actions, { minConfidence: 0.7, project: run.project, duplicateMode: run.duplicate_mode || 'merge' });
-            run.graph_actions_result = actionResult;
-            this.logger?.log?.(`[run-manager] Faraday direct actions: ${actionResult.executed} executed, ${actionResult.skipped} skipped, ${actionResult.failed} failed`);
+            if (AUTO_EXECUTE) {
+              const { GraphActionExecutor } = await import('./graph-action-executor.js');
+              const executor = new GraphActionExecutor({ memoryStore: this.memoryStore });
+              const actionResult = await executor.executeActions(actions, { minConfidence: 0.95, project: run.project, duplicateMode: 'flag' });
+              run.graph_actions_result = actionResult;
+              this.logger?.log?.(`[run-manager] Faraday auto-exec (opt-in): ${actionResult.executed}/${actions.length}`);
+            } else {
+              actions.forEach(a => queueProposal(a, 'faraday'));
+              this.logger?.log?.(`[run-manager] Faraday queued ${actions.length} proposals (auto-exec disabled)`);
+            }
           }
         }
       } catch (err) {
-        this.logger?.warn?.(`[run-manager] Faraday direct actions failed: ${err.message}`);
+        this.logger?.warn?.(`[run-manager] Faraday proposals failed: ${err.message}`);
       }
     }
 
-    // 1. Execute graph actions (Turing's recommendations)
+    // 1. Turing's action_candidates → propose only (never auto-execute now)
     if (agentId === 'turing' && result.action_candidates?.length > 0) {
       try {
-        const { GraphActionExecutor } = await import('./graph-action-executor.js');
-        const executor = new GraphActionExecutor({ memoryStore: this.memoryStore });
-        const actionResult = await executor.executeActions(result.action_candidates, {
-          minConfidence: 0.65,
-          project: run.project,
-          duplicateMode: run.duplicate_mode || 'merge',
+        const candidates = result.action_candidates;
+        // Drop merge candidates entirely unless explicit override
+        const filtered = candidates.filter(a => {
+          if (a.recommendation === 'merge_duplicate_cluster' && !ALLOW_MERGE) return false;
+          return true;
         });
-        run.graph_actions_result = actionResult;
-        this.logger.log(`[run-manager] Turing graph actions: ${actionResult.executed} executed, ${actionResult.skipped} skipped`);
+
+        if (AUTO_EXECUTE) {
+          const { GraphActionExecutor } = await import('./graph-action-executor.js');
+          const executor = new GraphActionExecutor({ memoryStore: this.memoryStore });
+          const actionResult = await executor.executeActions(filtered, {
+            minConfidence: 0.95,    // raised from 0.65 — only high-conf
+            project: run.project,
+            duplicateMode: 'flag',  // never merge by default
+          });
+          run.graph_actions_result = actionResult;
+          this.logger.log(`[run-manager] Turing auto-exec (opt-in): ${actionResult.executed}/${filtered.length}`);
+        } else {
+          filtered.forEach(a => queueProposal(a, 'turing'));
+          this.logger.log(`[run-manager] Turing queued ${filtered.length} proposals (auto-exec disabled)`);
+        }
       } catch (err) {
-        this.logger.warn(`[run-manager] Graph action execution failed: ${err.message}`);
+        this.logger.warn(`[run-manager] Turing proposal generation failed: ${err.message}`);
       }
     }
 

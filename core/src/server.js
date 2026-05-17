@@ -7937,6 +7937,86 @@ const server = http.createServer(async (req, res) => {
           }
           break;
 
+        case '/api/memories/bulk-delete-by-tag':
+          if (req.method === 'POST') {
+            if (!ensurePersistedMemoryOrFail(res, '/api/memories/bulk-delete-by-tag')) return;
+            try {
+              // Body: { tags: string[], date_to?: ISO, date_from?: ISO, dry_run?: boolean, project?: string }
+              // Matches memories where tags hasSome <tags> AND createdAt within range.
+              const requestedTags = Array.isArray(body.tags) ? body.tags.filter(t => typeof t === 'string' && t.length > 0) : [];
+              if (requestedTags.length === 0) {
+                return jsonResponse(res, { error: 'tags[] required' }, 400);
+              }
+              const dryRun = body.dry_run !== false;
+              const project = body.project || null;
+
+              const where = {
+                userId,
+                orgId,
+                deletedAt: null,
+                tags: { hasSome: requestedTags },
+                ...(project ? { project } : {}),
+              };
+              if (body.date_from || body.date_to) {
+                where.createdAt = {};
+                if (body.date_from) where.createdAt.gte = new Date(body.date_from);
+                if (body.date_to) where.createdAt.lte = new Date(body.date_to);
+              }
+
+              const matched = await prisma.memory.findMany({
+                where,
+                select: { id: true, title: true, tags: true, createdAt: true },
+                take: 5000,
+              });
+              const ids = matched.map(m => m.id);
+
+              if (dryRun) {
+                return jsonResponse(res, {
+                  dry_run: true,
+                  matched_count: ids.length,
+                  filter: { tags: requestedTags, date_from: body.date_from || null, date_to: body.date_to || null, project },
+                  sample: matched.slice(0, 10).map(m => ({ id: m.id, title: m.title, tags: m.tags, created_at: m.createdAt })),
+                });
+              }
+
+              if (ids.length > 0) {
+                await prisma.auditLog.updateMany({ where: { resourceId: { in: ids } }, data: { resourceId: null } });
+                await prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: ids } } });
+                await prisma.memoryVersion.updateMany({ where: { relatedMemoryId: { in: ids } }, data: { relatedMemoryId: null } });
+                await prisma.memoryVersion.deleteMany({ where: { memoryId: { in: ids } } });
+                await prisma.relationship.deleteMany({ where: { OR: [{ fromId: { in: ids } }, { toId: { in: ids } }] } });
+                await prisma.memory.deleteMany({ where: { id: { in: ids } } });
+
+                try {
+                  const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
+                  const qdrantCollection = process.env.QDRANT_COLLECTION || 'hivemind_memories';
+                  const qdrantKey = process.env.QDRANT_API_KEY || '';
+                  if (qdrantUrl) {
+                    await fetch(`${qdrantUrl}/collections/${qdrantCollection}/points/delete`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json', ...(qdrantKey ? { 'api-key': qdrantKey } : {}) },
+                      body: JSON.stringify({ points: ids, wait: true }),
+                    });
+                  }
+                } catch (qdrantErr) {
+                  console.warn('[bulk-delete-by-tag] Qdrant delete failed:', qdrantErr.message);
+                }
+
+                invalidateAggregateCache({ userId, orgId, project: project || null });
+                invalidateAggregateCache({ userId, orgId, project: null });
+              }
+
+              return jsonResponse(res, {
+                dry_run: false,
+                deleted: ids.length,
+                filter: { tags: requestedTags, date_from: body.date_from || null, date_to: body.date_to || null, project },
+              });
+            } catch (error) {
+              return jsonResponse(res, { error: 'Bulk delete by tag failed', message: error.message }, 500);
+            }
+          }
+          break;
+
         case '/api/memories':
           if (req.method === 'GET') {
             if (!ensurePersistedMemoryOrFail(res, '/api/memories')) {

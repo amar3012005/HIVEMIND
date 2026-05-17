@@ -33,7 +33,7 @@ const SYSTEM_PROMPT = `You translate user requests about cleaning up a personal 
   "categories": [<subset of: "duplicates","noise","stale","orphans","contradictions","artifacts">],
   "filter": {
     "source_platform": "gmail" | "google_drive" | "google_calendar" | "google_docs" | "slack" | "notion" | "github" | "knowledge" | null,
-    "tags": [<lowercase strings>],
+    "tags": [<lowercase strings, fully qualified e.g. "agent:faraday">],
     "date_from": "<ISO date or null>",
     "date_to":   "<ISO date or null>",
     "keywords":  [<lowercase strings>]
@@ -53,7 +53,22 @@ Rules:
 - Categories: include ONLY what the user asks for. "Clean gmail noise" → ["noise"]. "Find duplicates and stale notes" → ["duplicates","stale"]
 - Unknown → include ALL categories
 - date_from/date_to: ISO 8601 ("2024-01-01T00:00:00Z"). Use null when not specified.
+- "older than N days/weeks/months" → date_to = (now - N) ISO, date_from = null
+- "newer than N days" / "last N days" → date_from = (now - N) ISO, date_to = now ISO
 - source_platform: null when not specified.
+- Tag conventions in this graph (use these exact tag strings when relevant):
+    "agent:faraday"   — when user mentions faraday, scanner, explorer
+    "agent:feynmann"  — when user mentions feynmann, feynman, analyst, hypothesis
+    "agent:turing"    — when user mentions turing, verifier
+    "research-source" — web research sources
+    "research-observation" — research engine observations
+    "research-finding" — research engine findings
+    "research-execution-event" — research action logs
+    "promoted-claim"  — promoted research claims
+    "trace"           — research trail steps
+    "cot"             — chain-of-thought reasoning
+    "deep-research"   — deep research session memories
+- "research traces" / "research noise" → tags=["research-observation","research-execution-event","trace","cot"], category="noise"
 - summary: rephrase user intent in plain English, max 100 chars
 
 Output JSON only — no markdown, no explanation.`;
@@ -159,7 +174,6 @@ function keywordParse(goal) {
     const cat = KEYWORD_CATEGORIES[tok];
     if (cat) cats.add(cat);
   }
-  if (cats.size === 0) ALL_CATEGORIES.forEach(c => cats.add(c));
 
   // Source platform
   let source = null;
@@ -173,14 +187,24 @@ function keywordParse(goal) {
   else if (MUTATE_KEYWORDS.test(goal)) safety = 'mutate';
   else if (READ_KEYWORDS.test(goal)) safety = 'read';
 
-  // Date range — match "2024", "last 30 days", "this year"
+  // Date range — match "2024", "last 30 days", "this year", "older than N days"
   const dateRange = extractDateRange(goal);
+
+  // Tag extraction — recognize agent names + research trace phrases
+  const tags = extractTags(lower);
+
+  // If we matched tags or research traces, default category set
+  if (cats.size === 0 && tags.length > 0) {
+    cats.add('noise');
+    cats.add('stale');
+  }
+  if (cats.size === 0) ALL_CATEGORIES.forEach(c => cats.add(c));
 
   return normalizeIntent({
     categories: [...cats],
     filter: {
       source_platform: source,
-      tags: [],
+      tags,
       date_from: dateRange.from,
       date_to: dateRange.to,
       keywords: [],
@@ -190,9 +214,47 @@ function keywordParse(goal) {
   }, goal);
 }
 
+function extractTags(lower) {
+  const tags = new Set();
+  // Agent name aliases — canonical tag strings as written by deep-research engine
+  if (/\bfaraday\b|\bscanner\b|\bexplorer\b/.test(lower))       tags.add('agent:faraday');
+  if (/\bfeynm(an|ann)\b|\banalyst\b/.test(lower))              tags.add('agent:feynmann');
+  if (/\bturing\b|\bverifier\b/.test(lower))                    tags.add('agent:turing');
+  // "research traces" / "research noise" / "research observations" → broad set
+  if (/\bresearch\s+(trace|traces|noise|observation|observations|event|events|step|steps)\b/.test(lower)
+      || /\bresearch\s+execution\b/.test(lower)) {
+    tags.add('research-observation');
+    tags.add('research-execution-event');
+    tags.add('trace');
+    tags.add('cot');
+  }
+  // explicit tag mentions like "deep-research", "promoted claims"
+  if (/\bdeep[\s-]?research\b/.test(lower))   tags.add('deep-research');
+  if (/\bpromoted\s+claim/.test(lower))       tags.add('promoted-claim');
+  if (/\breasoning\s+step/.test(lower))       tags.add('reasoning:step');
+  return [...tags];
+}
+
 function extractDateRange(goal) {
   const lower = goal.toLowerCase();
   const now = new Date();
+  const UNIT_MS = { day: 86400000, week: 86400000 * 7, month: 86400000 * 30, year: 86400000 * 365 };
+
+  // "older than N days/weeks/months/years" → date_to = now - N (records BEFORE that)
+  const olderMatch = lower.match(/older\s+than\s+(\d+)\s+(day|week|month|year)s?/);
+  if (olderMatch) {
+    const n = parseInt(olderMatch[1], 10);
+    const cutoff = new Date(now - n * UNIT_MS[olderMatch[2]]);
+    return { from: null, to: cutoff.toISOString() };
+  }
+
+  // "from before <date>" / "before N days ago"
+  const beforeMatch = lower.match(/before\s+(\d+)\s+(day|week|month|year)s?\s+ago/);
+  if (beforeMatch) {
+    const n = parseInt(beforeMatch[1], 10);
+    const cutoff = new Date(now - n * UNIT_MS[beforeMatch[2]]);
+    return { from: null, to: cutoff.toISOString() };
+  }
 
   // explicit year: 2024, 2025, ...
   const yearMatch = goal.match(/\b(20\d{2})\b/);
@@ -205,9 +267,16 @@ function extractDateRange(goal) {
   const lastMatch = lower.match(/last\s+(\d+)\s+(day|week|month|year)s?/);
   if (lastMatch) {
     const n = parseInt(lastMatch[1], 10);
-    const unit = lastMatch[2];
-    const ms = { day: 86400000, week: 86400000 * 7, month: 86400000 * 30, year: 86400000 * 365 }[unit];
-    return { from: new Date(now - n * ms).toISOString(), to: now.toISOString() };
+    const cutoff = new Date(now - n * UNIT_MS[lastMatch[2]]);
+    return { from: cutoff.toISOString(), to: now.toISOString() };
+  }
+
+  // "newer than N days"
+  const newerMatch = lower.match(/newer\s+than\s+(\d+)\s+(day|week|month|year)s?/);
+  if (newerMatch) {
+    const n = parseInt(newerMatch[1], 10);
+    const cutoff = new Date(now - n * UNIT_MS[newerMatch[2]]);
+    return { from: cutoff.toISOString(), to: now.toISOString() };
   }
 
   // "this year" / "this month"

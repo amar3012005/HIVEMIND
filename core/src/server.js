@@ -1089,6 +1089,25 @@ function findExistingFile(candidates) {
   return candidates[0];
 }
 
+async function buildRoutedIngestPayloads(payload, {
+  smartIngestRouter,
+  enableSmartRouting = true,
+} = {}) {
+  if (!enableSmartRouting || !smartIngestRouter) {
+    return [payload];
+  }
+
+  try {
+    const routedPayloads = await smartIngestRouter.route(payload);
+    return Array.isArray(routedPayloads) && routedPayloads.length > 0
+      ? routedPayloads
+      : [payload];
+  } catch (routerErr) {
+    console.warn('[smart-ingest-router] Routing failed, using raw payload:', routerErr.message);
+    return [payload];
+  }
+}
+
 function ensurePersistedMemoryOrFail(res, endpoint) {
   if (!persistentMemoryStore && REQUIRE_PERSISTED_MEMORY) {
     jsonResponse(res, {
@@ -2295,6 +2314,68 @@ const server = http.createServer(async (req, res) => {
     } catch (e) {
       res.writeHead(500);
       res.end('Error loading Claude PowerShell installer: ' + e.message);
+      return;
+    }
+  }
+
+  // ── TUI installer (Charm Bubble Tea) ──────────────────────────────────
+  // /install/tui.sh   → shell shim (curl|bash) detects OS+arch, downloads
+  //                     the right binary, then execs it.
+  // /install/tui.ps1  → PowerShell shim (irm|iex) for Windows hosts.
+  // /install/tui/<asset> → raw binary; <asset> ∈
+  //   hivemind-mcp-{darwin-arm64,darwin-amd64,linux-amd64,linux-arm64,
+  //                 windows-amd64.exe}
+  if ((pathname === '/install/tui.sh' || pathname === '/install/tui.ps1') && req.method === 'GET') {
+    try {
+      const isPs1 = pathname.endsWith('.ps1');
+      const tplName = isPs1 ? 'tui-install.ps1' : 'tui-install.sh';
+      const template = fs.readFileSync(path.join(CORE_SCRIPTS_ROOT, tplName), 'utf-8');
+      const apiKey = url.searchParams.get('api_key') || '';
+      // Build absolute base URL from the request host so the shim can
+      // download the binary from the same control plane.
+      const proto = (req.headers['x-forwarded-proto'] || 'https').toString().split(',')[0].trim();
+      const host = (req.headers['x-forwarded-host'] || req.headers.host || 'core.hivemind.davinciai.eu:8050').toString();
+      const base = `${proto}://${host}`;
+      const content = template
+        .replaceAll('__HIVEMIND_BASE__', base)
+        .replaceAll('__HAS_API_KEY__', apiKey ? '1' : '0')
+        .replaceAll('__API_KEY__', apiKey);
+      res.setHeader('Content-Type', isPs1 ? 'text/plain; charset=utf-8' : 'text/x-shellscript; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-store');
+      res.writeHead(200);
+      res.end(content);
+      return;
+    } catch (e) {
+      res.writeHead(500);
+      res.end('Error loading TUI installer shim: ' + e.message);
+      return;
+    }
+  }
+
+  const tuiAssetMatch = pathname.match(/^\/install\/tui\/(hivemind-mcp-[a-z0-9.-]+(?:\.exe)?)$/);
+  if (tuiAssetMatch && req.method === 'GET') {
+    const asset = tuiAssetMatch[1];
+    const TUI_DIST = path.join(PROJECT_ROOT, 'tui-installer', 'dist');
+    const filePath = path.join(TUI_DIST, asset);
+    // Guard against path escape (defence-in-depth — regex already restricts
+    // the name set, but verify the resolved path stays inside dist).
+    if (!filePath.startsWith(TUI_DIST + path.sep)) {
+      res.writeHead(400);
+      res.end('invalid asset name');
+      return;
+    }
+    try {
+      const stat = fs.statSync(filePath);
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Length', stat.size);
+      res.setHeader('Content-Disposition', `attachment; filename="${asset}"`);
+      res.setHeader('Cache-Control', 'public, max-age=300');
+      res.writeHead(200);
+      fs.createReadStream(filePath).pipe(res);
+      return;
+    } catch (e) {
+      res.writeHead(404);
+      res.end('asset not found: ' + asset);
       return;
     }
   }
@@ -4013,7 +4094,7 @@ const server = http.createServer(async (req, res) => {
 
         // Auto-ingest posted message back to memory (team-scope)
         if (actionType === 'slack_post' && payload.text) {
-          persistentMemoryEngine.ingestMemory({
+          const slackPayload = {
             content: payload.text,
             title: `${employee.name} → ${payload.channel}`,
             tags: ['slack', 'employee', `employee:${employee.slug}`, 'live-slack', 'auto-ingest'],
@@ -4028,8 +4109,13 @@ const server = http.createServer(async (req, res) => {
               employee_id: employee.id,
               thread_ts: payload.thread_ts || null,
             },
-            skipProcessing: true,
-          }).catch(err => console.warn('[slack-action] auto-ingest failed:', err.message));
+            skip_fact_extraction: true,
+          };
+          buildRoutedIngestPayloads(slackPayload, { smartIngestRouter }).then((routedPayloads) => {
+            for (const routedPayload of routedPayloads) {
+              persistentMemoryEngine.ingestMemory(routedPayload).catch(err => console.warn('[slack-action] auto-ingest failed:', err.message));
+            }
+          }).catch(err => console.warn('[slack-action] smart routing failed:', err.message));
         }
 
         return jsonResponse(res, { ok: true, result });
@@ -4079,7 +4165,7 @@ const server = http.createServer(async (req, res) => {
         const title = `Slack ${where} · ${who}: ${titleBase.slice(0, 60)}`;
 
         // Fire-and-forget ingest, ack 200 immediately
-        persistentMemoryEngine.ingestMemory({
+        const slackEventPayload = {
           content: text || `[${evType}${subtype ? `:${subtype}` : ''}] in ${where}`,
           title,
           tags: ['slack', 'live-slack', 'webhook', `slack:${where}`, `slack-team:${teamId || 'unknown'}`],
@@ -4096,8 +4182,13 @@ const server = http.createServer(async (req, res) => {
             user: who,
             team_id: teamId,
           },
-          skipProcessing: true, // already a clean message
-        }).catch(err => console.warn('[slack-events] ingest failed:', err.message));
+          skip_fact_extraction: true,
+        };
+        buildRoutedIngestPayloads(slackEventPayload, { smartIngestRouter }).then((routedPayloads) => {
+          for (const routedPayload of routedPayloads) {
+            persistentMemoryEngine.ingestMemory(routedPayload).catch(err => console.warn('[slack-events] ingest failed:', err.message));
+          }
+        }).catch(err => console.warn('[slack-events] smart routing failed:', err.message));
 
         return jsonResponse(res, { ok: true, ingested: true, event_type: evType });
       }
@@ -5229,7 +5320,8 @@ const server = http.createServer(async (req, res) => {
                   const thread = await adapter._gmailFetch(`/threads/${threadId}?format=full`, token);
                   const payloads = adapter.normalize(thread, context);
                   for (const p of payloads) {
-                    await persistentMemoryEngine.ingestMemory(p);
+                    const [routed] = await buildRoutedIngestPayloads(p, { smartIngestRouter });
+                    await persistentMemoryEngine.ingestMemory(routed);
                     ingested += 1;
                   }
                 } catch (err) {
@@ -5565,7 +5657,7 @@ const server = http.createServer(async (req, res) => {
                         const content = `Email Thread: ${subject}\n\n${threadContent}`.slice(0, 8000);
 
                         try {
-                          const gmailResult = await persistentMemoryEngine.ingestMemory({
+                          const gmailPayload = {
                             content,
                             title: subject,
                             tags,
@@ -5584,7 +5676,9 @@ const server = http.createServer(async (req, res) => {
                             project: container_tag || null,
                             user_id: userId,
                             org_id: orgId,
-                          });
+                          };
+                          const [routedGmailPayload] = await buildRoutedIngestPayloads(gmailPayload, { smartIngestRouter });
+                          const gmailResult = await persistentMemoryEngine.ingestMemory(routedGmailPayload);
                           // Embed thread memory in Qdrant for vector search
                           if (gmailResult?.memoryId && qdrantClient) {
                             try {
@@ -6614,7 +6708,9 @@ const server = http.createServer(async (req, res) => {
                 for (const result of results) {
                   try {
                     // Ingest parent schema memory
-                    const parentResult = await persistentMemoryEngine.ingestMemory({ ...result.parent, skipProcessing: true });
+                    const parentPayload = { ...result.parent, skip_fact_extraction: true };
+                    const [routedParent] = await buildRoutedIngestPayloads(parentPayload, { smartIngestRouter });
+                    const parentResult = await persistentMemoryEngine.ingestMemory(routedParent);
                     const parentId = parentResult?.memoryId;
                     console.log(`[enterprise] Parent ingested: id=${parentId} operation=${parentResult?.operation}`);
 
@@ -6637,7 +6733,16 @@ const server = http.createServer(async (req, res) => {
                     for (const chunk of result.chunks) {
                       try {
                         chunk.metadata.parent_schema_id = parentId || null;
-                        const chunkResult = await persistentMemoryEngine.ingestMemory(chunk);
+                        // Route through smart ingest so chunks get deterministic
+                        // Extends edges to their parent document.
+                        const [routedChunk] = await buildRoutedIngestPayloads(chunk, { smartIngestRouter });
+                        // Ensure parent→chunk Extends edge even if smart router
+                        // didn't find a semantic match.
+                        if (parentId && !routedChunk.relationship && !routedChunk._derives_from) {
+                          routedChunk.relationship = 'Extends';
+                          routedChunk.related_to = parentId;
+                        }
+                        const chunkResult = await persistentMemoryEngine.ingestMemory(routedChunk);
                         console.log(`[enterprise] Chunk ingested: id=${chunkResult?.memoryId} operation=${chunkResult?.operation}`);
                         if (chunkResult?.memoryId && qdrantClient) {
                           try {
@@ -6832,7 +6937,7 @@ const server = http.createServer(async (req, res) => {
                 };
 
                 const allPayloads = [
-                  { ...taggedSummary, skipProcessing: true },
+                  { ...taggedSummary, skip_fact_extraction: true },
                   ...taggedChunks,
                 ];
 
@@ -6852,9 +6957,10 @@ const server = http.createServer(async (req, res) => {
                   // Pass cached vector via `precomputedQueryVector` so graph-engine
                   // can use it for Qdrant dedup search inside the lock without
                   // re-embedding. Falls back to live embedding if missing.
-                  const enriched = precomputedVector
+                  const basePayload = precomputedVector
                     ? { ...payload, precomputedQueryVector: precomputedVector }
                     : payload;
+                  const [enriched] = await buildRoutedIngestPayloads(basePayload, { smartIngestRouter });
                   const result = await persistentMemoryEngine.ingestMemory(enriched);
 
                   // Collect memories for batch Qdrant upsert (not per-chunk write)
@@ -7761,7 +7867,7 @@ const server = http.createServer(async (req, res) => {
                 await ensureTenantContext(prisma, { user_id: userId, org_id: orgId });
               }
 
-              const result = await persistentMemoryEngine.ingestMemory({
+              const webappPayload = {
                 user_id: validation.data.user_id,
                 org_id: validation.data.org_id,
                 project: validation.data.project,
@@ -7778,7 +7884,9 @@ const server = http.createServer(async (req, res) => {
                   source_platform: validation.data.source_platform || 'webapp',
                   source_url: validation.data.source_url || null
                 }
-              });
+              };
+              const [routedWebappPayload] = await buildRoutedIngestPayloads(webappPayload, { smartIngestRouter });
+              const result = await persistentMemoryEngine.ingestMemory(routedWebappPayload);
               const memory = await persistentMemoryStore.getMemory(result.memoryId);
               if (memory) {
                 await qdrantClient.storeMemory(memory, {
@@ -8360,7 +8468,7 @@ const server = http.createServer(async (req, res) => {
                     if (fetched.length > 0 && body.promote_to_memory === true) {
                       for (const item of fetched.slice(0, 3)) {
                         try {
-                          await persistentMemoryEngine.ingestMemory({
+                          const livePayload = {
                             user_id: userId,
                             org_id: orgId,
                             content: typeof item.text === 'string' ? item.text
@@ -8369,7 +8477,7 @@ const server = http.createServer(async (req, res) => {
                             tags: ['live-query', `source:${item._source}`, 'auto-promoted'],
                             memory_type: 'fact',
                             importance_score: 0.4,
-                            skipProcessing: true,
+                            skip_fact_extraction: true,
                             source_metadata: {
                               source_type: 'live_query',
                               source_platform: item._source,
@@ -8381,7 +8489,9 @@ const server = http.createServer(async (req, res) => {
                               promoted_at: new Date().toISOString(),
                               original_query: validation.data.query,
                             },
-                          });
+                          };
+                          const [routedLive] = await buildRoutedIngestPayloads(livePayload, { smartIngestRouter });
+                          await persistentMemoryEngine.ingestMemory(routedLive);
                         } catch (promoteErr) {
                           console.warn('[memory-promote] failed:', promoteErr.message);
                         }
@@ -9967,6 +10077,122 @@ const server = http.createServer(async (req, res) => {
           }
           break;
 
+        // ── Graph Backfill ──────────────────────────────────────────
+        // POST /api/graph/backfill — repair sparse graphs for tenants
+        // that ingested before SmartIngestRouter was universally applied.
+        // For each orphan memory (no relationships), re-runs the smart
+        // router to discover missing deterministic edges (same session,
+        // same thread, same source, or semantic similarity).
+        case '/api/graph/backfill':
+          if (req.method === 'POST') {
+            if (!ensurePersistedMemoryOrFail(res, '/api/graph/backfill')) {
+              return;
+            }
+            try {
+              const backfillProject = body.project || null;
+              const backfillBatchSize = Math.min(body.batch_size || 200, 1000);
+              const backfillDryRun = body.dry_run !== false; // default true for safety
+
+              // Find orphan memories: isLatest, not deleted, no relationships
+              const userIdUuid = userId;
+              const orgIdUuid = orgId;
+              const orphans = await prisma.$queryRaw`
+                SELECT m.id, m.content, m.title, m.tags, m.memory_type,
+                       m.metadata, m.source_metadata, m.project,
+                       m.created_at, m.updated_at
+                FROM memories m
+                WHERE m.user_id = ${userIdUuid}::uuid
+                  AND m.org_id = ${orgIdUuid}::uuid
+                  AND m.deleted_at IS NULL
+                  AND m.is_latest = true
+                  AND NOT EXISTS (
+                    SELECT 1 FROM relationships r
+                    WHERE r.from_id = m.id OR r.to_id = m.id
+                  )
+                  ${backfillProject ? Prisma.sql`AND m.project = ${backfillProject}` : Prisma.sql``}
+                ORDER BY m.updated_at DESC
+                LIMIT ${backfillBatchSize}
+              `;
+
+              const totalOrphans = await prisma.$queryRaw`
+                SELECT COUNT(*)::int as cnt FROM memories m
+                WHERE m.user_id = ${userIdUuid}::uuid
+                  AND m.org_id = ${orgIdUuid}::uuid
+                  AND m.deleted_at IS NULL
+                  AND m.is_latest = true
+                  AND NOT EXISTS (
+                    SELECT 1 FROM relationships r
+                    WHERE r.from_id = m.id OR r.to_id = m.id
+                  )
+                  ${backfillProject ? Prisma.sql`AND m.project = ${backfillProject}` : Prisma.sql``}
+              `;
+
+              const results = [];
+              let edgesCreated = 0;
+
+              for (const orphan of orphans) {
+                // Build a minimal payload to feed the smart router
+                const payload = {
+                  content: orphan.content,
+                  title: orphan.title,
+                  tags: orphan.tags || [],
+                  memory_type: orphan.memory_type,
+                  metadata: orphan.metadata || {},
+                  source_metadata: orphan.source_metadata || {},
+                  user_id: userId,
+                  org_id: orgId,
+                  project: orphan.project,
+                  // Don't actually ingest — just discover relationships
+                  skip_fact_extraction: true,
+                  _backfill_mode: true,
+                };
+
+                try {
+                  const [routed] = await buildRoutedIngestPayloads(payload, { smartIngestRouter });
+                  if (routed.relationship && routed.related_to) {
+                    if (!backfillDryRun) {
+                      // Create the relationship edge
+                      await persistentMemoryStore.createRelationship({
+                        id: crypto.randomUUID(),
+                        from_id: orphan.id,
+                        to_id: routed.related_to,
+                        type: routed.relationship,
+                        confidence: 0.85,
+                        metadata: { backfilled: true, backfill_at: new Date().toISOString() },
+                        created_by: 'backfill',
+                      });
+                    }
+                    edgesCreated++;
+                    results.push({
+                      memory_id: orphan.id,
+                      title: orphan.title?.slice(0, 80),
+                      relationship: routed.relationship,
+                      related_to: routed.related_to,
+                    });
+                  }
+                } catch (routeErr) {
+                  // Non-fatal: skip this orphan
+                  console.warn(`[backfill] route failed for ${orphan.id}:`, routeErr.message);
+                }
+              }
+
+              jsonResponse(res, {
+                dry_run: backfillDryRun,
+                total_orphans: Number(totalOrphans[0]?.cnt || 0),
+                processed: orphans.length,
+                edges_created: edgesCreated,
+                sample: results.slice(0, 50),
+                message: backfillDryRun
+                  ? `Dry run: would create ${edgesCreated} edges across ${orphans.length} scanned orphans (${Number(totalOrphans[0]?.cnt || 0)} total). Set dry_run: false to apply.`
+                  : `Created ${edgesCreated} edges across ${orphans.length} scanned orphans.`,
+              });
+            } catch (error) {
+              console.error('[backfill] failed:', error);
+              return jsonResponse(res, { error: 'Backfill failed', message: error.message }, 500);
+            }
+          }
+          break;
+
         case '/api/session/end':
           if (req.method === 'POST') {
             const result = engine.sessionEndHook({
@@ -11043,7 +11269,7 @@ const server = http.createServer(async (req, res) => {
                         });
                       } catch {}
                       if (persistentMemoryEngine?.ingestMemory) {
-                        persistentMemoryEngine.ingestMemory({
+                        const slackPostPayload = {
                           content: p.text,
                           title: `You → ${p.channel}`,
                           tags: ['slack', 'talk-to-hive', 'auto-ingest', 'live-slack'],
@@ -11051,8 +11277,11 @@ const server = http.createServer(async (req, res) => {
                           user_id: userId,
                           org_id: orgId,
                           source_metadata: { source_platform: 'slack', channel: p.channel, via: 'talk-to-hive' },
-                          skipProcessing: true,
-                        }).catch(err => console.warn('[chat:slack-post] auto-ingest failed:', err.message));
+                          skip_fact_extraction: true,
+                        };
+                        buildRoutedIngestPayloads(slackPostPayload, { smartIngestRouter }).then(([routed]) =>
+                          persistentMemoryEngine.ingestMemory(routed)
+                        ).catch(err => console.warn('[chat:slack-post] auto-ingest failed:', err.message));
                       }
                     } else if (a === 'slack_react') {
                       result = await bridge._call('reactions.add',
@@ -11389,7 +11618,7 @@ const server = http.createServer(async (req, res) => {
                           if (!content || content.length < 15) continue;
                           const where = hit.channel_name ? `#${hit.channel_name}` : (hit.channel_id || 'unknown');
                           const who = hit.username || hit.user || 'unknown';
-                          persistentMemoryEngine.ingestMemory({
+                          const slackFallbackPayload = {
                             content,
                             title: `Slack ${where} · ${who}: ${content.slice(0, 60)}`,
                             tags: ['slack', 'live-slack', 'auto-ingest', `slack:${where}`],
@@ -11404,8 +11633,11 @@ const server = http.createServer(async (req, res) => {
                               ts: hit.ts,
                               user: hit.user,
                             },
-                            skipProcessing: true,
-                          }).catch(err => console.warn('[chat] Slack auto-ingest failed:', err.message));
+                            skip_fact_extraction: true,
+                          };
+                          buildRoutedIngestPayloads(slackFallbackPayload, { smartIngestRouter }).then(([routed]) =>
+                            persistentMemoryEngine.ingestMemory(routed)
+                          ).catch(err => console.warn('[chat] Slack auto-ingest failed:', err.message));
                         }
                       }
                     }
@@ -11619,7 +11851,7 @@ ${injectionText}`;
                   const factContent = msgTrimmed;
                   const factTitle = `Fact: ${msgTrimmed.slice(0, 80)}`;
 
-                  persistentMemoryEngine.ingestMemory({
+                  const chatFactPayload = {
                     content: factContent,
                     title: factTitle,
                     tags: ['chat', 'talk-to-hive', 'extracted-fact'],
@@ -11627,8 +11859,13 @@ ${injectionText}`;
                     user_id: userId,
                     org_id: orgId,
                     source_metadata: { source_platform: 'chat' },
-                    skipProcessing: true, // Already a clean fact — skip LLM re-extraction
-                  }).catch(err => console.warn('[chat] Fact ingest failed:', err.message));
+                    skip_fact_extraction: true,
+                  };
+                  buildRoutedIngestPayloads(chatFactPayload, { smartIngestRouter }).then((routedPayloads) => {
+                    for (const routedPayload of routedPayloads) {
+                      persistentMemoryEngine.ingestMemory(routedPayload).catch(err => console.warn('[chat] Fact ingest failed:', err.message));
+                    }
+                  }).catch(err => console.warn('[chat] Smart routing failed:', err.message));
                 }
               }
 

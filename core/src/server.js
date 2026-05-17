@@ -10213,7 +10213,10 @@ const server = http.createServer(async (req, res) => {
                         content_preview: (mem.content || '').slice(0, 240),
                         created_at: mem.createdAt?.toISOString?.() || null,
                         importance_score: null,
-                        is_canonical: true,
+                        // is_canonical=false: this memory is the TARGET of the
+                        // action, not a "keep" canonical reference. UI shows
+                        // "keep" chip when true — wrong signal for delete.
+                        is_canonical: false,
                       }] : [],
                       metadata: { llm_targeted: true, goal: body.goal },
                     };

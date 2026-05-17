@@ -7979,27 +7979,40 @@ const server = http.createServer(async (req, res) => {
                 });
               }
 
+              let deletedCount = 0;
               if (ids.length > 0) {
-                await prisma.auditLog.updateMany({ where: { resourceId: { in: ids } }, data: { resourceId: null } });
-                await prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: ids } } });
-                await prisma.memoryVersion.updateMany({ where: { relatedMemoryId: { in: ids } }, data: { relatedMemoryId: null } });
-                await prisma.memoryVersion.deleteMany({ where: { memoryId: { in: ids } } });
-                await prisma.relationship.deleteMany({ where: { OR: [{ fromId: { in: ids } }, { toId: { in: ids } }] } });
-                await prisma.memory.deleteMany({ where: { id: { in: ids } } });
-
-                try {
-                  const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
-                  const qdrantCollection = process.env.QDRANT_COLLECTION || 'hivemind_memories';
-                  const qdrantKey = process.env.QDRANT_API_KEY || '';
-                  if (qdrantUrl) {
-                    await fetch(`${qdrantUrl}/collections/${qdrantCollection}/points/delete`, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json', ...(qdrantKey ? { 'api-key': qdrantKey } : {}) },
-                      body: JSON.stringify({ points: ids, wait: true }),
-                    });
+                // Batch in chunks of 500 to avoid Prisma 30s socket timeout
+                // on large cascade deletes. Each chunk = full 6-table cascade
+                // for that subset, then Qdrant point delete for those IDs.
+                const BATCH = 500;
+                for (let i = 0; i < ids.length; i += BATCH) {
+                  const chunk = ids.slice(i, i + BATCH);
+                  try {
+                    await prisma.auditLog.updateMany({ where: { resourceId: { in: chunk } }, data: { resourceId: null } });
+                    await prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: chunk } } });
+                    await prisma.memoryVersion.updateMany({ where: { relatedMemoryId: { in: chunk } }, data: { relatedMemoryId: null } });
+                    await prisma.memoryVersion.deleteMany({ where: { memoryId: { in: chunk } } });
+                    await prisma.relationship.deleteMany({ where: { OR: [{ fromId: { in: chunk } }, { toId: { in: chunk } }] } });
+                    const r = await prisma.memory.deleteMany({ where: { id: { in: chunk } } });
+                    deletedCount += r.count;
+                  } catch (batchErr) {
+                    console.warn(`[bulk-delete-by-tag] batch ${i}/${ids.length} failed:`, batchErr.message);
                   }
-                } catch (qdrantErr) {
-                  console.warn('[bulk-delete-by-tag] Qdrant delete failed:', qdrantErr.message);
+
+                  try {
+                    const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
+                    const qdrantCollection = process.env.QDRANT_COLLECTION || 'hivemind_memories';
+                    const qdrantKey = process.env.QDRANT_API_KEY || '';
+                    if (qdrantUrl) {
+                      await fetch(`${qdrantUrl}/collections/${qdrantCollection}/points/delete`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', ...(qdrantKey ? { 'api-key': qdrantKey } : {}) },
+                        body: JSON.stringify({ points: chunk, wait: false }),
+                      });
+                    }
+                  } catch (qdrantErr) {
+                    console.warn('[bulk-delete-by-tag] Qdrant batch delete failed:', qdrantErr.message);
+                  }
                 }
 
                 invalidateAggregateCache({ userId, orgId, project: project || null });
@@ -8008,7 +8021,8 @@ const server = http.createServer(async (req, res) => {
 
               return jsonResponse(res, {
                 dry_run: false,
-                deleted: ids.length,
+                deleted: deletedCount,
+                matched: ids.length,
                 filter: { tags: requestedTags, date_from: body.date_from || null, date_to: body.date_to || null, project },
               });
             } catch (error) {

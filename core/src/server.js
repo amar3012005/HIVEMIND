@@ -9804,6 +9804,25 @@ const server = http.createServer(async (req, res) => {
               const categories = body.categories || ['duplicates', 'noise', 'stale', 'orphans', 'artifacts', 'contradictions'];
               const limit = Math.min(parseInt(body.limit) || 100, 500);
               const scanResult = await hygieneScanner.scan(userId, orgId, { categories, limit });
+
+              // ── LLM verification gate ──
+              // Heuristic proposals are fast but noisy (e.g. staleness scoring
+              // false-positives ~83% on real graphs). Re-rank top candidates
+              // with Groq llama-3.3-70b w/ JSON-mode for grounded confidence.
+              // Falls back to heuristic scores on error. Budget-capped so a
+              // 500-proposal scan doesn't burn quota.
+              try {
+                const { verifyProposals, filterForQueue } = await import('./resident/llm-proposal-verifier.js');
+                const verified = await verifyProposals(scanResult.proposals || []);
+                scanResult.proposals = filterForQueue(verified);
+                scanResult.stats = scanResult.stats || {};
+                scanResult.stats.llm_verified = verified.length;
+                scanResult.stats.llm_dropped = verified.filter(v => v.verdict === 'drop').length;
+                scanResult.stats.queued_for_approval = scanResult.proposals.length;
+              } catch (verifyErr) {
+                console.warn('[hygiene-scan] LLM verify failed (non-fatal):', verifyErr.message);
+              }
+
               auditLog({
                 userId,
                 organizationId: orgId,
@@ -9811,7 +9830,12 @@ const server = http.createServer(async (req, res) => {
                 eventCategory: 'data_access',
                 action: 'scan',
                 resourceType: 'graph',
-                metadata: { categories, proposalCount: scanResult.proposals?.length || 0 },
+                metadata: {
+                  categories,
+                  proposalCount: scanResult.proposals?.length || 0,
+                  llm_verified: scanResult.stats?.llm_verified || 0,
+                  llm_dropped: scanResult.stats?.llm_dropped || 0,
+                },
                 ipAddress: req.headers['x-forwarded-for'] || req.socket?.remoteAddress || null,
                 userAgent: req.headers['user-agent'] || null,
               });

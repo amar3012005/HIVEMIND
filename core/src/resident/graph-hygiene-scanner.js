@@ -374,42 +374,96 @@ export class GraphHygieneScanner {
     const proposals = [];
 
     for (const mem of memories) {
-      const reasons = [];
+      // ── Skip pinned / important / legal-hold rows ──
+      const tags = (mem.tags || []).map(t => String(t).toLowerCase());
+      const PROTECTED = ['pinned', 'do-not-delete', 'important', 'legal-hold', 'starred'];
+      if (PROTECTED.some(p => tags.includes(p))) continue;
+
+      // ── Skip rows already superseded ──
+      // Previously we surfaced these with confidence 0.90 + suggestedAction:
+      // 'archive', but is_latest=false rows ARE the historical version — they
+      // already serve their purpose as version trail. Telling the user to
+      // "archive" them produced 90% of the false-positive volume.
+      if (mem.is_latest === false) continue;
+
       const age = daysSince(mem.created_at);
+      const lastActivity = daysSince(mem.updated_at || mem.created_at);
       const importance = mem.importance_score ?? 0.5;
-      const recallCount = mem.metadata?.recall_count || 0;
+      const recallCount = mem.metadata?.recall_count ?? mem.recall_count ?? 0;
+      const hasEdges = (mem.metadata?.edge_count ?? mem.edge_count ?? 0) > 0;
 
-      // Superseded but still marked latest (data inconsistency)
-      if (mem.is_latest === false) {
-        reasons.push('marked as superseded (is_latest=false)');
+      // ── Multi-signal stale score (0..1) ──
+      // Each signal contributes to a weighted score. Final confidence is the
+      // score, not a constant. Threshold cutoff at 0.60 so we only surface
+      // strong candidates.
+      let score = 0;
+      const reasons = [];
+
+      // Age signal (gradual, capped at 1.0 at 730 days = 2 years)
+      if (age > 180) {
+        const ageScore = Math.min(1, (age - 180) / 550);
+        score += ageScore * 0.30;
+        reasons.push(`${Math.round(age)} days old`);
       }
 
-      // Old + low importance + never recalled
-      if (age > 180 && importance < 0.3 && recallCount === 0) {
-        reasons.push(`${Math.round(age)} days old, importance=${importance.toFixed(2)}, never recalled`);
+      // Recall signal (never recalled = strong stale signal)
+      if (recallCount === 0) {
+        score += 0.25;
+        reasons.push('never recalled');
       }
 
-      if (reasons.length === 0) continue;
+      // Importance signal
+      if (importance < 0.3) {
+        score += 0.20 * (1 - importance / 0.3);
+        reasons.push(`low importance (${importance.toFixed(2)})`);
+      }
+
+      // No-edges signal (orphan-adjacent)
+      if (!hasEdges) {
+        score += 0.15;
+        reasons.push('no relationships');
+      }
+
+      // Recent activity bonus (decay): if updated in last 30d → strong NOT-stale
+      if (lastActivity < 30) {
+        score *= 0.3; // big penalty
+      }
+
+      // Cutoff
+      if (score < 0.60 || reasons.length < 2) continue;
+
+      const severity = score >= 0.85 ? 'high' : score >= 0.70 ? 'medium' : 'low';
 
       proposals.push({
         id: randomUUID(),
         category: 'stale',
-        severity: reasons.length >= 2 ? 'high' : age > 365 ? 'high' : 'medium',
-        confidence: mem.is_latest === false ? 0.90 : 0.65,
+        severity,
+        confidence: Number(score.toFixed(2)),
         suggestedAction: 'archive',
         reason: reasons.join('; '),
+        plainEnglishReason: this._plainEnglishStale(reasons, age, recallCount),
         memories: [{
           id: mem.id,
           title: mem.title || null,
           content_preview: preview(mem.content),
           created_at: mem.created_at,
+          updated_at: mem.updated_at,
           importance_score: mem.importance_score,
+          recall_count: recallCount,
+          tags: mem.tags || [],
           is_canonical: false,
         }],
       });
     }
 
     return proposals;
+  }
+
+  _plainEnglishStale(reasons, age, recallCount) {
+    if (age > 730) return `Older than 2 years and never used. Likely safe to archive.`;
+    if (recallCount === 0 && age > 365) return `Over a year old and never referenced. Probably noise.`;
+    if (recallCount === 0) return `Never accessed since creation.`;
+    return `Looks unused — ${reasons.slice(0, 2).join(', ')}.`;
   }
 
   /**

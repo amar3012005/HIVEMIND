@@ -316,49 +316,64 @@ export class GraphHygieneScanner {
     const proposals = [];
 
     for (const mem of memories) {
+      // Skip protected
+      const tags = (mem.tags || []).map(t => String(t).toLowerCase());
+      const PROTECTED = ['pinned', 'do-not-delete', 'important', 'legal-hold', 'starred'];
+      if (PROTECTED.some(p => tags.includes(p))) continue;
+      if (mem.is_latest === false) continue;
+
       const content = mem.content || '';
       const reasons = [];
+      const plainReasons = [];
 
       // Check noise patterns (unsubscribe, noreply, etc.)
       for (const pattern of NOISE_PATTERNS) {
         if (pattern.test(content)) {
           reasons.push(`contains "${pattern.source.replace(/\\/g, '')}"`);
+          plainReasons.push('marketing / unsubscribe boilerplate');
           break;
         }
       }
 
-      // Very short content
+      // Very short content (< 20 chars, non-empty)
       if (content.trim().length < 20 && content.trim().length > 0) {
         reasons.push(`very short content (${content.trim().length} chars)`);
+        plainReasons.push('almost-empty content');
       }
 
       // Pure whitespace / empty
       if (content.trim().length === 0) {
         reasons.push('empty content');
+        plainReasons.push('empty memory');
       }
 
       // Pure emoji / non-alphanumeric
       const alphanumeric = content.replace(/[^a-zA-Z0-9]/g, '');
       if (alphanumeric.length === 0 && content.trim().length > 0) {
         reasons.push('no alphanumeric content');
+        plainReasons.push('no readable text');
       }
 
-      // Zero relationships + low importance (checked separately below as a weaker signal)
       if (reasons.length === 0) continue;
+
+      const confidence = Math.min(0.95, 0.6 + reasons.length * 0.15);
+      const severity = reasons.length >= 2 ? 'high' : 'medium';
 
       proposals.push({
         id: randomUUID(),
         category: 'noise',
-        severity: reasons.length >= 2 ? 'high' : 'medium',
-        confidence: Math.min(0.95, 0.6 + reasons.length * 0.15),
+        severity,
+        confidence,
         suggestedAction: 'delete',
         reason: reasons.join('; '),
+        plainEnglishReason: plainReasons[0] || 'Marketing / boilerplate content',
         memories: [{
           id: mem.id,
           title: mem.title || null,
           content_preview: preview(content),
           created_at: mem.created_at,
           importance_score: mem.importance_score,
+          tags: mem.tags || [],
           is_canonical: false,
         }],
       });
@@ -470,7 +485,12 @@ export class GraphHygieneScanner {
    * Find orphan nodes with zero relationships.
    */
   _findOrphans(memories, relationships) {
-    // Build set of all memory IDs that participate in any relationship
+    // Orphan logic rewritten — only flag memories that are:
+    //   no relationships  AND  > 90 days old  AND  never recalled
+    //   AND  low importance  AND  not pinned/important/legal-hold
+    // Bare "no edges" is too noisy — many useful single-shot facts have
+    // no edges by design (one-off observations, single Slack pings).
+
     const connected = new Set();
     for (const rel of relationships) {
       connected.add(rel.from_id);
@@ -480,26 +500,54 @@ export class GraphHygieneScanner {
     const proposals = [];
 
     for (const mem of memories) {
+      // Skip if has edges
       if (connected.has(mem.id)) continue;
-      const age = daysSince(mem.created_at);
-      if (age <= 7) continue; // Recently created, give them time
 
+      // Skip protected tags
+      const tags = (mem.tags || []).map(t => String(t).toLowerCase());
+      const PROTECTED = ['pinned', 'do-not-delete', 'important', 'legal-hold', 'starred'];
+      if (PROTECTED.some(p => tags.includes(p))) continue;
+
+      // Skip superseded versions — they're versioned history, not orphans
+      if (mem.is_latest === false) continue;
+
+      const age = daysSince(mem.created_at);
+      const recallCount = mem.metadata?.recall_count ?? mem.recall_count ?? 0;
       const importance = mem.importance_score ?? 0.5;
+
+      // Multi-signal gate — require all three
+      if (age < 90) continue;
+      if (recallCount > 0) continue;
+      if (importance >= 0.4) continue;
+
+      // Score the orphan
+      let score = 0.40; // base
+      if (age > 180) score += 0.15;
+      if (age > 365) score += 0.15;
+      if (importance < 0.2) score += 0.15;
+
+      // Skip if even the score doesn't exceed cutoff — borderline orphans
+      // shouldn't pollute the queue
+      if (score < 0.55) continue;
+
+      const severity = score >= 0.80 ? 'medium' : 'low';
 
       proposals.push({
         id: randomUUID(),
         category: 'orphan',
-        severity: importance < 0.3 ? 'medium' : 'low',
-        confidence: 0.50,
-        suggestedAction: 'review',
-        reason: `No relationships, ${Math.round(age)} days old` +
-          (importance < 0.3 ? ', low importance' : ''),
+        severity,
+        confidence: Number(score.toFixed(2)),
+        suggestedAction: 'archive',
+        reason: `Disconnected from graph, ${Math.round(age)} days old, never recalled, importance ${importance.toFixed(2)}`,
+        plainEnglishReason: `Isolated memory — no links to anything else and never used. Safe to archive.`,
         memories: [{
           id: mem.id,
           title: mem.title || null,
           content_preview: preview(mem.content),
           created_at: mem.created_at,
           importance_score: mem.importance_score,
+          recall_count: recallCount,
+          tags: mem.tags || [],
           is_canonical: false,
         }],
       });

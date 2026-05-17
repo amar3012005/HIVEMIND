@@ -6226,6 +6226,104 @@ const server = http.createServer(async (req, res) => {
           break;
 
         // ==========================================
+        // KNOWLEDGE BASE — Per-document relations summary (batch)
+        // ==========================================
+        case '/api/knowledge/relations-summary':
+          if (req.method === 'POST') {
+            if (!ensurePersistedMemoryOrFail(res, '/api/knowledge/relations-summary')) return;
+            try {
+              // Body: { doc_ids: string[] } — each is a top-level document memory id
+              const reqIds = Array.isArray(body.doc_ids) ? body.doc_ids.filter(x => typeof x === 'string' && x.length > 0) : [];
+              if (reqIds.length === 0) {
+                return jsonResponse(res, { error: 'doc_ids[] required' }, 400);
+              }
+
+              // Resolve the cluster (doc + chunks + facts) per docId using same
+              // strategies as DELETE handler.
+              const out = {};
+              for (const docId of reqIds.slice(0, 100)) {
+                let docMemory = null;
+                try {
+                  docMemory = await prisma.memory.findFirst({
+                    where: { id: docId, userId, deletedAt: null },
+                    select: {
+                      id: true, tags: true, title: true,
+                      sourceMetadata: { select: { sourceId: true, metadata: true } },
+                    },
+                  });
+                } catch (_) { docMemory = null; }
+
+                const memoryIds = new Set([docId]);
+                const docMeta = docMemory?.sourceMetadata?.metadata || {};
+                const uploadTag = (docMemory?.tags || []).find(t => typeof t === 'string' && t.startsWith('upload:')) || null;
+
+                if (uploadTag) {
+                  try {
+                    const rows = await prisma.memory.findMany({
+                      where: { userId, tags: { has: uploadTag }, deletedAt: null },
+                      select: { id: true },
+                    });
+                    rows.forEach(r => memoryIds.add(r.id));
+                  } catch (_) { /* swallow */ }
+                }
+                if (docMeta?.source_upload_id) {
+                  try {
+                    const rows = await prisma.memory.findMany({
+                      where: { userId, tags: { has: `upload:${docMeta.source_upload_id}` }, deletedAt: null },
+                      select: { id: true },
+                    });
+                    rows.forEach(r => memoryIds.add(r.id));
+                  } catch (_) { /* swallow */ }
+                }
+                const fname = docMeta?.filename || docMeta?.document_title;
+                if (fname) {
+                  try {
+                    const rows = await prisma.memory.findMany({
+                      where: {
+                        userId, deletedAt: null,
+                        sourceMetadata: { is: { sourceId: { startsWith: `doc:${fname}` } } },
+                      },
+                      select: { id: true },
+                    });
+                    rows.forEach(r => memoryIds.add(r.id));
+                  } catch (_) { /* swallow */ }
+                }
+
+                const idArr = Array.from(memoryIds);
+                if (idArr.length === 0) {
+                  out[docId] = { total: 0, byType: {}, cluster_size: 0 };
+                  continue;
+                }
+
+                // Aggregate relationship types touching the cluster
+                try {
+                  const grouped = await prisma.relationship.groupBy({
+                    by: ['type'],
+                    where: { OR: [{ fromId: { in: idArr } }, { toId: { in: idArr } }] },
+                    _count: { type: true },
+                  });
+                  const byType = {};
+                  let total = 0;
+                  for (const row of grouped) {
+                    const t = row.type;
+                    const c = row._count?.type || 0;
+                    byType[t] = (byType[t] || 0) + c;
+                    total += c;
+                  }
+                  out[docId] = { total, byType, cluster_size: idArr.length };
+                } catch (relErr) {
+                  out[docId] = { total: 0, byType: {}, cluster_size: idArr.length, error: relErr.message };
+                }
+              }
+
+              return jsonResponse(res, { summaries: out, count: Object.keys(out).length });
+            } catch (err) {
+              return jsonResponse(res, { error: 'relations-summary failed', message: err.message }, 500);
+            }
+          }
+          break;
+
+        // ==========================================
         // KNOWLEDGE BASE — Document Delete (cascading)
         // ==========================================
         case '/api/knowledge/document':

@@ -284,6 +284,84 @@ export class SmartIngestRouter {
         is_latest: true,
       });
 
+      // Deterministic document-structure override: later chunks should chain
+      // to the previous chunk when we can identify it reliably.
+      const chunkIndex = Number.isInteger(payload.metadata?.chunk_index)
+        ? payload.metadata.chunk_index
+        : Number(payload.metadata?.chunk_index);
+      const chunkTotal = Number.isInteger(payload.metadata?.chunk_total)
+        ? payload.metadata.chunk_total
+        : Number(payload.metadata?.chunk_total);
+      const parentTitle = payload.metadata?.parent_title || null;
+      if (Number.isInteger(chunkIndex) && chunkIndex > 0 && parentTitle) {
+        const previousIndex = chunkIndex - 1;
+        let previousChunkMatch = (similar || []).find(m =>
+          m.metadata?.parent_title === parentTitle &&
+          Number(m.metadata?.chunk_index) === previousIndex
+        );
+
+        if (!previousChunkMatch) {
+          const previousChunkQuery = `${parentTitle} (part ${chunkIndex}/${chunkTotal || '?'})`;
+          const previousCandidates = await this.memoryStore.searchMemories({
+            query: previousChunkQuery,
+            user_id: payload.user_id,
+            org_id: payload.org_id,
+            project: payload.project || null,
+            n_results: 5,
+            is_latest: true,
+          });
+          previousChunkMatch = (previousCandidates || []).find(m =>
+            m.metadata?.parent_title === parentTitle &&
+            Number(m.metadata?.chunk_index) === previousIndex
+          );
+        }
+
+        if (previousChunkMatch) {
+          const relationship = normalizeRelationshipDescriptor({
+            type: 'Extends',
+            targetId: previousChunkMatch.id,
+            confidence: 0.98,
+            reason: 'previous_chunk_match',
+          });
+          return {
+            ...payload,
+            metadata: {
+              ...(payload.metadata || {}),
+              ...buildSemanticMetadata({
+                semanticRole: inferMemorySemanticRole(payload),
+                relationship,
+                sourceMetadata: payload.source_metadata,
+              }),
+            },
+            relationship: { type: 'Extends', target_id: previousChunkMatch.id, confidence: 0.98 }
+          };
+        }
+      }
+
+      // Deterministic document-structure override: if a chunk already knows
+      // its persisted parent memory id, always attach to that parent.
+      const parentSchemaId = payload.metadata?.parent_schema_id || null;
+      if (parentSchemaId) {
+        const relationship = normalizeRelationshipDescriptor({
+          type: 'Extends',
+          targetId: parentSchemaId,
+          confidence: 0.99,
+          reason: 'parent_schema_match',
+        });
+        return {
+          ...payload,
+          metadata: {
+            ...(payload.metadata || {}),
+            ...buildSemanticMetadata({
+              semanticRole: inferMemorySemanticRole(payload),
+              relationship,
+              sourceMetadata: payload.source_metadata,
+            }),
+          },
+          relationship: { type: 'Extends', target_id: parentSchemaId, confidence: 0.99 }
+        };
+      }
+
       if (!similar || similar.length === 0) return payload;
 
       // Thread-based override: exact thread match → always Extends

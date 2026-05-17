@@ -541,12 +541,24 @@ export class PrismaGraphStore {
   }
 
   async createRelationship(edge) {
-    const created = await this.client.relationship.create({
-      data: {
+    const type = normalizeRelationshipType(edge.type) || edge.type;
+    const created = await this.client.relationship.upsert({
+      where: {
+        fromId_toId_type: {
+          fromId: edge.from_id,
+          toId: edge.to_id,
+          type,
+        },
+      },
+      update: {
+        confidence: edge.confidence ?? 1.0,
+        metadata: edge.metadata || {},
+      },
+      create: {
         id: edge.id,
         fromId: edge.from_id,
         toId: edge.to_id,
-        type: normalizeRelationshipType(edge.type) || edge.type,
+        type,
         confidence: edge.confidence,
         metadata: edge.metadata || {},
         createdBy: edge.created_by || 'system'

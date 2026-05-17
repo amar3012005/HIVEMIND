@@ -526,7 +526,8 @@ export class MemoryGraphEngine {
           }
         }
 
-        const shouldRunProcessor = baseMemory.memory_type !== 'observation' && !input.skipProcessing;
+        const shouldSkipFactExtraction = input.skip_fact_extraction === true || input.skipProcessing === true;
+        const shouldRunProcessor = baseMemory.memory_type !== 'observation' && !shouldSkipFactExtraction;
         let processorResult = null;
 
         // --- Fact-Augment-Only mode (benchmark mode) ---
@@ -778,7 +779,7 @@ export class MemoryGraphEngine {
           }
         }
 
-        const shouldSkipRelationshipClassification = (input.skip_relationship_classification || input.skipProcessing === true) && !input.relationship;
+        const shouldSkipRelationshipClassification = input.skip_relationship_classification === true && !input.relationship;
         const classification = shouldSkipRelationshipClassification
           ? { operation: 'created', relationship: null }
           : input.relationship
@@ -1073,7 +1074,7 @@ export class MemoryGraphEngine {
         // --- Auto-Derives from SmartIngestRouter ---
         // When the router detected multiple moderately-similar source memories,
         // create Derives edges: source → new memory (synthesis relationship).
-        if (input._derives_from && Array.isArray(input._derives_from)) {
+        if (effectiveRelationshipType !== 'Derives' && input._derives_from && Array.isArray(input._derives_from)) {
           for (const source of input._derives_from) {
             try {
               await store.createRelationship({

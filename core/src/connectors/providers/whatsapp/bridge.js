@@ -28,6 +28,9 @@ export class WhatsAppBridge extends EventEmitter {
     this._qrCode = null;
     this._sessionDir = null;
     this._lastError = null;
+    this._reconnectTimer = null;
+    this._reconnectAttempts = 0;
+    this._isReconnecting = false;
   }
 
   hasActiveClient() {
@@ -43,6 +46,55 @@ export class WhatsAppBridge extends EventEmitter {
     if (this.listenerCount('error') > 0) {
       this.emit('error', payload);
     }
+  }
+
+  _clearReconnectTimer() {
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
+  }
+
+  _shouldReconnect(reason) {
+    const value = String(reason?.message || reason?.reason || reason || '').toLowerCase();
+    return value.includes('515') || value.includes('restart');
+  }
+
+  _scheduleReconnect(reason) {
+    if (this._isReconnecting || !this._sessionDir) {
+      return;
+    }
+    if (!this._shouldReconnect(reason)) {
+      return;
+    }
+
+    this._clearReconnectTimer();
+    this._isReconnecting = true;
+    this._reconnectAttempts += 1;
+    const delayMs = Math.min(1000 * this._reconnectAttempts, 5000);
+
+    console.warn(`[whatsapp-bridge] reconnect requested (${String(reason?.message || reason || 'unknown')})`);
+
+    this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = null;
+      this._restartClient().catch((err) => {
+        this._isReconnecting = false;
+        this._emitError({ type: 'reconnect_failed', message: err.message });
+      });
+    }, delayMs);
+  }
+
+  async _restartClient() {
+    const sessionDir = this._sessionDir;
+    await this.disconnect({ preserveSessionDir: true });
+    this._isReconnecting = false;
+    if (sessionDir) {
+      await this.startPairing(sessionDir);
+    }
+  }
+
+  _normalizePhoneId(rawValue) {
+    return String(rawValue || '').replace(/@(c|s)\.us$/, '').replace(/\D/g, '');
   }
 
   _clearSingletonLocks() {
@@ -76,7 +128,7 @@ export class WhatsAppBridge extends EventEmitter {
 
     const chatId = chat?.id?._serialized || msg.from;
     const contactName = chat?.name || msg._data?.notifyName || null;
-    const fromNumber = String(msg.from || '').replace(/@c\.us$/, '');
+    const fromNumber = this._normalizePhoneId(msg.from);
 
     this.emit('message', {
       id: msg.id?._serialized || null,
@@ -132,8 +184,10 @@ export class WhatsAppBridge extends EventEmitter {
 
     this._client.on('ready', () => {
       this._ready = true;
-      this._phoneNumber = this._client.info?.wid?.user || null;
+      this._phoneNumber = this._normalizePhoneId(this._client.info?.wid?.user || null);
       this._qrCode = null;
+      this._lastError = null;
+      this._reconnectAttempts = 0;
       this.emit('ready', { phoneNumber: this._phoneNumber });
       console.log('[whatsapp-bridge] Client ready — device paired');
     });
@@ -158,6 +212,7 @@ export class WhatsAppBridge extends EventEmitter {
       console.warn('[whatsapp-bridge] Disconnected:', reason);
       this._ready = false;
       this.emit('disconnected', { reason });
+      this._scheduleReconnect(reason);
     });
 
     // Start initialization — returns immediately, QR shows later
@@ -274,7 +329,16 @@ export class WhatsAppBridge extends EventEmitter {
 
   // ── Cleanup ───────────────────────────────────────────────────
 
-  async disconnect() {
+  async disconnect(options = {}) {
+    return this._disconnectInternal({
+      preserveSessionDir: false,
+      ...options,
+    });
+  }
+
+  async _disconnectInternal({ preserveSessionDir = false } = {}) {
+    this._clearReconnectTimer();
+    this._isReconnecting = false;
     if (this._client) {
       const client = this._client;
       try {
@@ -297,6 +361,10 @@ export class WhatsAppBridge extends EventEmitter {
       this._phoneNumber = null;
       this._qrCode = null;
       this._lastError = null;
+    }
+    if (!preserveSessionDir) {
+      this._sessionDir = null;
+      this._reconnectAttempts = 0;
     }
   }
 }

@@ -13,7 +13,6 @@
 
 import path from 'path';
 import fs from 'fs';
-import crypto from 'crypto';
 
 const DEFAULT_SESSIONS_DIR = path.join(process.cwd(), 'data', 'whatsapp-sessions');
 
@@ -31,6 +30,78 @@ export class WhatsAppLifecycleManager {
 
   _sessionDirFor(userId) {
     return path.join(this._sessionsDir, userId);
+  }
+
+  _configPathFor(userId) {
+    return path.join(this._sessionDirFor(userId), 'config.json');
+  }
+
+  _normalizePhoneId(rawValue) {
+    return String(rawValue || '').replace(/@(c|s)\.us$/, '').replace(/\D/g, '');
+  }
+
+  _normalizeAllowedUsers(values = []) {
+    const normalized = [];
+    for (const value of Array.isArray(values) ? values : [values]) {
+      const phone = this._normalizePhoneId(value);
+      if (phone && !normalized.includes(phone)) {
+        normalized.push(phone);
+      }
+    }
+    return normalized;
+  }
+
+  loadConfig(userId) {
+    const configPath = this._configPathFor(userId);
+    if (!fs.existsSync(configPath)) {
+      return { mode: 'bot', allowedUsers: [], pairedPhoneNumber: null };
+    }
+
+    try {
+      const parsed = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      return {
+        mode: parsed.mode === 'self_chat' ? 'self_chat' : 'bot',
+        allowedUsers: this._normalizeAllowedUsers(parsed.allowedUsers),
+        pairedPhoneNumber: this._normalizePhoneId(parsed.pairedPhoneNumber),
+      };
+    } catch (err) {
+      console.warn(`[whatsapp-manager] failed to read config for ${userId}:`, err.message);
+      return { mode: 'bot', allowedUsers: [], pairedPhoneNumber: null };
+    }
+  }
+
+  saveConfig(userId, config = {}) {
+    const sessionDir = this._sessionDirFor(userId);
+    fs.mkdirSync(sessionDir, { recursive: true });
+
+    const current = this.loadConfig(userId);
+    const next = {
+      mode: config.mode === 'self_chat' ? 'self_chat' : (current.mode || 'bot'),
+      allowedUsers: this._normalizeAllowedUsers(
+        config.allowedUsers === undefined ? current.allowedUsers : config.allowedUsers
+      ),
+      pairedPhoneNumber: this._normalizePhoneId(
+        config.pairedPhoneNumber === undefined ? current.pairedPhoneNumber : config.pairedPhoneNumber
+      ) || null,
+    };
+
+    fs.writeFileSync(this._configPathFor(userId), `${JSON.stringify(next, null, 2)}\n`);
+    return next;
+  }
+
+  _shouldProcessInbound(userId, event) {
+    const config = this.loadConfig(userId);
+    if (config.mode !== 'self_chat') {
+      return { allowed: true, config };
+    }
+
+    const senderId = this._normalizePhoneId(event.fromNumber || event.from);
+    const allowedUsers = this._normalizeAllowedUsers([
+      ...(config.allowedUsers || []),
+      config.pairedPhoneNumber,
+    ]);
+    const allowed = allowedUsers.includes(senderId);
+    return { allowed, config, senderId, allowedUsers };
   }
 
   _historyKey(userId, chatId) {
@@ -63,8 +134,31 @@ export class WhatsAppLifecycleManager {
       }
     }
 
+    bridge.removeAllListeners('ready');
+    bridge.on('ready', ({ phoneNumber }) => {
+      const current = this.loadConfig(userId);
+      this.saveConfig(userId, {
+        ...current,
+        pairedPhoneNumber: phoneNumber,
+        allowedUsers: current.mode === 'self_chat'
+          ? this._normalizeAllowedUsers([...(current.allowedUsers || []), phoneNumber])
+          : current.allowedUsers,
+      });
+    });
+
     if (this._onInboundMessage) {
       bridge.on('message', async (event) => {
+        const policy = this._shouldProcessInbound(userId, event);
+        if (!policy.allowed) {
+          console.info(JSON.stringify({
+            event: 'ignored',
+            reason: 'self_chat_mode_rejects_non_self',
+            chatId: event.chatId,
+            senderId: `${policy.senderId}@s.whatsapp.net`,
+          }));
+          return;
+        }
+
         this.appendHistory(userId, event.chatId, 'user', event.text);
         try {
           const result = await this._onInboundMessage({
@@ -107,18 +201,18 @@ export class WhatsAppLifecycleManager {
     return this._wireBridge(userId, bridge);
   }
 
-  /**
-   * Start QR pairing for a user. Returns the bridge instance so callers
-   * can wait for the 'qr' event.
-   */
-  async startPairing(userId) {
+  async startPairing(userId, config = {}) {
     const existing = this._bridges.get(userId);
     if (existing?.hasActiveClient()) {
+      if (Object.keys(config).length > 0) {
+        this.saveConfig(userId, config);
+      }
       return existing;
     }
 
     const sessionDir = this._sessionDirFor(userId);
     fs.mkdirSync(sessionDir, { recursive: true });
+    this.saveConfig(userId, config);
 
     const { WhatsAppBridge } = await import('./bridge.js');
     const bridge = new WhatsAppBridge();
@@ -138,15 +232,36 @@ export class WhatsAppLifecycleManager {
    * Returns { paired, phoneNumber, qr?, error? }
    */
   async getStatus(userId, { ensureSession = true } = {}) {
+    const config = this.loadConfig(userId);
     const bridge = ensureSession ? await this.ensureBridge(userId) : this._bridges.get(userId);
     if (!bridge) {
-      return { paired: false, phoneNumber: null, error: 'No active pairing session' };
+      return {
+        paired: false,
+        phoneNumber: null,
+        error: 'No active pairing session',
+        mode: config.mode,
+        allowedUsers: config.allowedUsers,
+        pairedPhoneNumber: config.pairedPhoneNumber,
+      };
     }
     if (bridge.isReady()) {
-      return { paired: true, phoneNumber: bridge.getPhoneNumber() };
+      return {
+        paired: true,
+        phoneNumber: bridge.getPhoneNumber(),
+        mode: config.mode,
+        allowedUsers: config.allowedUsers,
+        pairedPhoneNumber: config.pairedPhoneNumber || bridge.getPhoneNumber(),
+      };
     }
     const qr = bridge.getQrCode();
-    return { paired: false, phoneNumber: null, qr: qr || null };
+    return {
+      paired: false,
+      phoneNumber: null,
+      qr: qr || null,
+      mode: config.mode,
+      allowedUsers: config.allowedUsers,
+      pairedPhoneNumber: config.pairedPhoneNumber,
+    };
   }
 
   /**

@@ -283,6 +283,8 @@ function buildWhatsAppConnectorStatus(status) {
     qr_setup: true,
     paired,
     phone_number: status?.phoneNumber || null,
+    mode: status?.mode || 'bot',
+    allowed_users: Array.isArray(status?.allowedUsers) ? status.allowedUsers : [],
   };
 }
 
@@ -2468,7 +2470,12 @@ const server = http.createServer(async (req, res) => {
     if (!current) return;
 
     try {
-      const bridge = await whatsappManager.startPairing(current.session.userId);
+      const payload = await parseBody(req);
+      const bridge = await whatsappManager.startPairing(current.session.userId, {
+        mode: payload?.mode,
+        allowedUsers: payload?.allowedUsers,
+        pairedPhoneNumber: payload?.pairedPhoneNumber,
+      });
       const handshake = await waitForWhatsAppHandshake(bridge);
       return jsonResponse(res, handshake);
     } catch (err) {

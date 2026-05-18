@@ -39,6 +39,15 @@ Per-provider OAuth setup for self-hosted Nango at `api.hivemind.davinciai.eu:804
 - Calendar: `calendar.readonly`, `calendar.events`
 - All: `userinfo.email`, `userinfo.profile`, `openid`, `offline_access`
 
+## Provider template selection (CRITICAL)
+
+Pick the **standard** template per provider, NOT "(MCP)" variants:
+- `slack` (NOT `slack-mcp`)
+- `notion` (NOT `notion-mcp` if exists)
+- etc.
+
+MCP-suffixed templates have different auth shapes and silently fail with empty scopes. Catalog `nango_provider` always matches the standard key.
+
 ## OAuth callback URL (MANDATORY for every provider)
 
 ```

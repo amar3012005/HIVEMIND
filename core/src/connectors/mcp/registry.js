@@ -31,6 +31,10 @@ export class MCPConnectorRegistry {
   list({ user_id, org_id } = {}) {
     const endpoints = readJson(this.filePath);
     return endpoints.filter(endpoint => {
+      // Entries shipped with the codebase (no user_id/org_id fields) are
+      // global catalog and always visible. Per-tenant entries still scoped.
+      const isGlobal = !endpoint.user_id && !endpoint.org_id;
+      if (isGlobal) return true;
       if (user_id && endpoint.user_id !== user_id) return false;
       if (org_id && endpoint.org_id !== org_id) return false;
       return true;

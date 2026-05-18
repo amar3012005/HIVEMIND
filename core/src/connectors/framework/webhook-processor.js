@@ -1,0 +1,145 @@
+/**
+ * WebhookProcessor
+ *
+ * Background worker that polls webhook_events rows in 'received' status,
+ * claims them with SELECT FOR UPDATE SKIP LOCKED semantics, processes each
+ * through the appropriate provider adapter, and routes results to SmartIngestRouter.
+ */
+
+const BATCH_SIZE = 10;
+const MAX_ATTEMPTS = 5;
+const MIN_INTERVAL_MS = 5000;
+const MAX_INTERVAL_MS = 60000;
+
+export class WebhookProcessor {
+  /**
+   * @param {Object} deps
+   * @param {import('@prisma/client').PrismaClient} deps.prisma
+   * @param {import('./adapter-registry.js').AdapterRegistry} deps.adapterRegistry
+   * @param {Function} deps.tokenResolver - async (userId, orgId, provider) => token
+   * @param {Object} deps.smartIngestRouter
+   * @param {Object} deps.logger
+   * @param {number} [deps.intervalMs]
+   */
+  constructor({ prisma, adapterRegistry, tokenResolver, smartIngestRouter, logger, intervalMs = MIN_INTERVAL_MS }) {
+    this.prisma = prisma;
+    this.adapterRegistry = adapterRegistry;
+    this.tokenResolver = tokenResolver;
+    this.smartIngestRouter = smartIngestRouter;
+    this.logger = logger;
+    this._baseIntervalMs = intervalMs;
+    this._currentIntervalMs = intervalMs;
+    this._timer = null;
+    this._consecutiveEmptyTicks = 0;
+  }
+
+  /** Begin polling loop. Idempotent. */
+  start() {
+    if (this._timer !== null) return;
+    const tick = async () => {
+      await this.tickOnce();
+      this._timer = setTimeout(tick, this._currentIntervalMs);
+    };
+    this._timer = setTimeout(tick, 0);
+  }
+
+  /** Stop polling loop. */
+  stop() {
+    if (this._timer !== null) {
+      clearTimeout(this._timer);
+      this._timer = null;
+    }
+  }
+
+  /**
+   * Process one batch of pending webhook events.
+   * @returns {Promise<number>} Count of events processed in this tick.
+   */
+  async tickOnce() {
+    let processed = 0;
+    try {
+      const rows = await this.prisma.$queryRaw`
+        UPDATE webhook_events
+        SET status = 'processing', attempts = attempts + 1
+        WHERE id IN (
+          SELECT id FROM webhook_events
+          WHERE status = 'received' AND attempts < ${MAX_ATTEMPTS}
+          ORDER BY received_at ASC
+          LIMIT ${BATCH_SIZE}
+          FOR UPDATE SKIP LOCKED
+        )
+        RETURNING *
+      `;
+
+      for (const row of rows) {
+        await this._processRow(row);
+        processed++;
+      }
+    } catch (err) {
+      this.logger.error({ err }, 'webhook-processor: tick failed');
+    }
+
+    // Adaptive backoff when idle
+    if (processed === 0) {
+      this._consecutiveEmptyTicks++;
+      if (this._consecutiveEmptyTicks >= 2) {
+        this._currentIntervalMs = Math.min(this._currentIntervalMs * 2, MAX_INTERVAL_MS);
+      }
+    } else {
+      this._consecutiveEmptyTicks = 0;
+      this._currentIntervalMs = this._baseIntervalMs;
+    }
+
+    return processed;
+  }
+
+  /** @param {Object} row - raw webhook_events row */
+  async _processRow(row) {
+    try {
+      const sub = await this.prisma.webhookSubscription.findUnique({ where: { id: row.subscriptionId } });
+      if (!sub) throw new Error(`subscription not found: ${row.subscriptionId}`);
+
+      const adapter = this.adapterRegistry.get(sub.provider);
+      const { resourceId, type } = await adapter.parseEvent(row.payload);
+      const resource = await adapter.fetchResource({
+        userId: sub.userId,
+        orgId: sub.orgId,
+        resourceId,
+        type,
+      });
+
+      if (resource) {
+        await this.smartIngestRouter.route({ userId: sub.userId, orgId: sub.orgId, resource, type });
+      }
+
+      await this.prisma.webhookEvent.update({
+        where: { id: row.id },
+        data: { status: 'processed', processedAt: new Date() },
+      });
+
+      await this.prisma.webhookSubscription.update({
+        where: { id: sub.id },
+        data: { lastEventAt: new Date(), consecutiveFailures: 0 },
+      });
+    } catch (err) {
+      this.logger.warn({ err, eventId: row.id }, 'webhook-processor: event failed');
+      const isDead = row.attempts >= MAX_ATTEMPTS;
+      await this.prisma.webhookEvent.update({
+        where: { id: row.id },
+        data: {
+          status: isDead ? 'dead_lettered' : 'failed',
+          error: err.message,
+        },
+      });
+
+      try {
+        await this.prisma.webhookSubscription.update({
+          where: { id: row.subscriptionId },
+          data: { consecutiveFailures: { increment: 1 } },
+        });
+      } catch (_) {
+        // subscription may not exist; already logged above
+      }
+    }
+  }
+}

@@ -344,6 +344,35 @@ if (persistentMemoryEngine && persistentMemoryStore && prisma) {
   syncScheduler.start();
 }
 
+// ─── WebhookProcessor boot ───────────────────────────────────────────────────
+{
+  const { WebhookProcessor } = await import('./connectors/framework/webhook-processor.js');
+  const adapterRegistryModule = await import('./connectors/framework/adapter-registry.js');
+  const adapterRegistry = adapterRegistryModule.default;
+
+  // Self-register adapters (triggers registry.register at bottom of each file)
+  await import('./connectors/adapters/notion/notion-adapter.js');
+  await import('./connectors/adapters/slack/slack-adapter.js');
+
+  const nangoTokenResolver = async ({ userId, orgId, providerKey }) => {
+    const { getConnectionId, fetchBearerFromNango } = await import('./connectors/mcp/nango-service.js');
+    const connId = await getConnectionId({ userId, orgId, providerKey }, { db: prisma });
+    if (!connId) throw new Error(`no nango connection for ${providerKey}`);
+    return fetchBearerFromNango(providerKey, connId);
+  };
+
+  const webhookProcessor = new WebhookProcessor({
+    prisma,
+    adapterRegistry,
+    tokenResolver: nangoTokenResolver,
+    smartIngestRouter,
+    logger: console,
+    intervalMs: 5000,
+  });
+  webhookProcessor.start();
+  console.log('[webhook-processor] started');
+}
+
 // ─── Audit logging helper ────────────────────────────────────────────────────
 // Writes are always recorded regardless of plan tier. Plan gating now happens
 // at the READ side (/v1/audit/logs, /v1/audit/export.csv) so paying customers
@@ -2065,6 +2094,152 @@ const server = http.createServer(async (req, res) => {
 
   const url = new URL(req.url, `http://${req.headers.host}`);
   const pathname = url.pathname;
+
+  // ─── Inbound webhook receiver (Nango-bridged connectors) ──────
+  // POST /webhooks/:provider — no user auth; provider HMAC signature only.
+  if (pathname.startsWith('/webhooks/') && req.method === 'POST') {
+    const provider = pathname.slice('/webhooks/'.length).split('/')[0];
+    try {
+      // Body size cap 1 MiB
+      const declared = parseInt(req.headers['content-length'] || '0', 10);
+      if (declared > 1048576) {
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'payload too large' }));
+        return;
+      }
+      // Per-IP rate limit: 30 req/min
+      const ip = (req.socket.remoteAddress || 'unknown').replace(/^::ffff:/, '');
+      const now = Date.now();
+      globalThis.__webhookBucket = globalThis.__webhookBucket || new Map();
+      const bucket = globalThis.__webhookBucket;
+      const entry = bucket.get(ip) || { count: 0, resetAt: now + 60000 };
+      if (now > entry.resetAt) { entry.count = 0; entry.resetAt = now + 60000; }
+      entry.count++;
+      bucket.set(ip, entry);
+      if (entry.count > 30) {
+        res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '30' });
+        res.end(JSON.stringify({ error: 'rate_limited' }));
+        return;
+      }
+
+      // Read raw body (cap during stream)
+      const chunks = [];
+      let total = 0;
+      let aborted = false;
+      for await (const chunk of req) {
+        total += chunk.length;
+        if (total > 1048576) { aborted = true; break; }
+        chunks.push(chunk);
+      }
+      if (aborted) {
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'payload too large' }));
+        return;
+      }
+      const rawBody = Buffer.concat(chunks);
+
+      // Resolve adapter
+      const { default: adapterRegistry } = await import('./connectors/framework/adapter-registry.js');
+      // Lazy-import adapters so they self-register
+      try {
+        if (provider === 'notion') await import('./connectors/adapters/notion/notion-adapter.js');
+        if (provider === 'slack') await import('./connectors/adapters/slack/slack-adapter.js');
+      } catch (_) { /* registry remains empty for unknown providers */ }
+      const AdapterClass = adapterRegistry.get(provider);
+      if (!AdapterClass) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'unknown provider' }));
+        return;
+      }
+
+      const adapter = adapterRegistry.instantiate(provider, {
+        providerKey: provider,
+        tokenResolver: async ({ userId, orgId, providerKey }) => {
+          const { getConnectionId, fetchBearerFromNango } = await import('./connectors/mcp/nango-service.js');
+          const connId = await getConnectionId({ userId, orgId, providerKey }, { db: prisma });
+          if (!connId) throw new Error(`no nango connection for ${providerKey}`);
+          return fetchBearerFromNango(providerKey, connId);
+        },
+        prisma,
+        logger: console,
+      });
+
+      // Verify signature
+      let sigOk = false;
+      try {
+        sigOk = adapter.verifyWebhookSignature(req.headers, rawBody);
+      } catch (sigErr) {
+        sigOk = false;
+        console.warn(`[webhook] ${provider} signature verify error: ${sigErr.code || 'unknown'}`);
+      }
+      if (!sigOk) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'invalid signature' }));
+        return;
+      }
+
+      // Parse JSON
+      let payload;
+      try { payload = JSON.parse(rawBody.toString('utf8')); }
+      catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'invalid json' }));
+        return;
+      }
+
+      // Slack URL verification short-circuit
+      const parsed = adapter.parseEvent(payload);
+      if (parsed?.urlVerification) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ challenge: parsed.challenge }));
+        return;
+      }
+
+      // Find subscription
+      const sub = parsed?.externalId
+        ? await prisma.webhookSubscription.findFirst({
+            where: { providerKey: provider, externalId: String(parsed.externalId), status: 'active' },
+          })
+        : null;
+      if (!sub) {
+        res.writeHead(410, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'no subscription' }));
+        return;
+      }
+
+      // Persist event
+      try {
+        const evt = await prisma.webhookEvent.create({
+          data: {
+            subscriptionId: sub.id,
+            orgId: sub.orgId,
+            providerKey: provider,
+            eventId: parsed.eventId || null,
+            eventType: parsed.eventType || null,
+            status: 'received',
+            payload,
+          },
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ accepted: true, event_id: evt.id }));
+      } catch (insertErr) {
+        // Dedup on (org_id, provider_key, event_id) — treat as accepted
+        if (insertErr.code === 'P2002') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ accepted: true, dedup: true }));
+        } else {
+          console.error(`[webhook] ${provider} persist failed: ${insertErr.message}`);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'persist failed' }));
+        }
+      }
+    } catch (outerErr) {
+      console.error(`[webhook] ${provider} unhandled: ${outerErr.message}`);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'internal' }));
+    }
+    return;
+  }
 
   if (pathname === '/admin/logs' && req.method === 'GET') {
     const content = renderAdminLogsPage({

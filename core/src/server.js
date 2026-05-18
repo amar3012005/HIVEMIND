@@ -4837,9 +4837,6 @@ const server = http.createServer(async (req, res) => {
           if (req.method === 'GET') {
             try {
               const { CONNECTOR_CATALOG } = await import('./connectors/catalog.js');
-              // Pull connection records from ConnectorStore for this tenant.
-              // ConnectorStore is the multi-tenant registry living under
-              // core/src/connectors/framework/connector-store.js.
               let records = [];
               try {
                 if (typeof connectorStore?.listConnectors === 'function') {
@@ -4861,6 +4858,50 @@ const server = http.createServer(async (req, res) => {
                   email: r.email || r.providerEmail || null,
                 };
               }
+
+              // Overlay Nango connections (connectors/connect writes here)
+              const CATALOG_ID_TO_NANGO = {
+                slack: 'slack',
+                notion: 'notion',
+                github: 'github',
+                linear: 'linear',
+                atlassian: 'jira',
+                jira: 'jira',
+                confluence: 'confluence',
+                gmail: 'google-mail',
+                'google-mail': 'google-mail',
+                'google-drive': 'google-drive',
+                'google-calendar': 'google-calendar',
+              };
+              try {
+                if (prisma?.nangoConnection) {
+                  const nangoRows = await prisma.nangoConnection.findMany({
+                    where: { userId, orgId, status: 'active' },
+                    select: { providerKey: true, connectionId: true, connectedAt: true, metadata: true },
+                  });
+                  const nangoByProvider = {};
+                  for (const row of nangoRows) {
+                    nangoByProvider[row.providerKey] = {
+                      provider: row.providerKey,
+                      status: 'connected',
+                      lastSyncAt: null,
+                      createdAt: row.connectedAt,
+                      metadata: row.metadata,
+                      connectionId: row.connectionId,
+                      source: 'nango',
+                    };
+                  }
+                  for (const c of CONNECTOR_CATALOG) {
+                    const nangoKey = CATALOG_ID_TO_NANGO[c.id] || c.id;
+                    if (nangoByProvider[nangoKey] && !byProvider[c.id]) {
+                      byProvider[c.id] = nangoByProvider[nangoKey];
+                    }
+                  }
+                }
+              } catch (nangoErr) {
+                console.warn('[connectors/status] nango overlay failed:', nangoErr.message);
+              }
+
               const merged = CONNECTOR_CATALOG.map(c => ({
                 id: c.id,
                 name: c.name,
@@ -5191,9 +5232,17 @@ const server = http.createServer(async (req, res) => {
                 allowedIntegrations,
               });
 
+              const publicNangoHost =
+                process.env.NANGO_PUBLIC_URL ||
+                process.env.NANGO_BROWSER_URL ||
+                (process.env.NODE_ENV === 'production'
+                  ? 'https://api.hivemind.davinciai.eu:8042'
+                  : null);
+
               return jsonResponse(res, {
                 connect_session_token: token,
                 provider: nangoProvider,
+                ...(publicNangoHost ? { host: publicNangoHost } : {}),
               });
             } catch (err) {
               console.error('[nango-connect-session] Failed:', err.message);

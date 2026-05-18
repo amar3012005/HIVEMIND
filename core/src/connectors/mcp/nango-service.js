@@ -22,22 +22,34 @@ const NANGO_SECRET_KEY = process.env.NANGO_SECRET_KEY || 'dev-secret-change-me';
 //   const nango = new Nango({ baseUrl: NANGO_URL, secretKey: NANGO_SECRET_KEY });
 // ---------------------------------------------------------------------------
 
-/** @param {string} path — e.g. /connection/slack/:connectionId */
-async function nangoGet(path, { retries = 2 } = {}) {
+/** GET wrapper. */
+async function nangoGet(path, opts = {}) {
+  return _nangoRequest('GET', path, null, opts);
+}
+
+/** POST wrapper. */
+async function nangoPost(path, body, opts = {}) {
+  return _nangoRequest('POST', path, body, opts);
+}
+
+async function _nangoRequest(method, path, body, { retries = 2 } = {}) {
   const url = `${NANGO_URL}${path}`;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const res = await fetch(url, {
+        method,
         headers: {
           Authorization: `Bearer ${NANGO_SECRET_KEY}`,
           'Content-Type': 'application/json',
         },
+        body: body ? JSON.stringify(body) : undefined,
         signal: AbortSignal.timeout(10_000),
       });
+      const text = await res.text().catch(() => '');
       if (!res.ok) {
-        throw new Error(`Nango ${res.status}: ${await res.text().catch(() => '')}`);
+        throw new Error(`Nango ${method} ${path} ${res.status}: ${text.slice(0, 200)}`);
       }
-      return res.json();
+      try { return JSON.parse(text); } catch { return text; }
     } catch (err) {
       if (attempt === retries) throw err;
       await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
@@ -125,10 +137,14 @@ export async function enrichEndpointWithToken(endpoint, { userId, orgId }, { db 
  * @returns {Promise<string>} connectSessionToken
  */
 export async function createConnectSession({ userId, orgId, allowedIntegrations }) {
-  const body = await nangoGet(
-    `/connect/session?end_user_id=${encodeURIComponent(userId)}&organization_id=${encodeURIComponent(orgId)}&allowed_integrations=${allowedIntegrations.join(',')}`,
-  );
-  // The Nango REST API returns the session token in the body.
-  // If using the SDK, the shape is: const { data } = await nango.createConnectSession({...})
-  return body?.connect_session_token || body?.data?.connect_session_token || null;
+  // Nango Connect REST API: POST /connect/sessions
+  // https://docs.nango.dev/reference/api/connect/sessions/create
+  const body = await nangoPost('/connect/sessions', {
+    end_user: {
+      id: userId,
+      ...(orgId ? { organization: { id: orgId } } : {}),
+    },
+    allowed_integrations: allowedIntegrations,
+  });
+  return body?.data?.token || body?.token || body?.connect_session_token || null;
 }

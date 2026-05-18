@@ -5160,8 +5160,22 @@ const server = http.createServer(async (req, res) => {
                 return jsonResponse(res, { error: 'connector_id is required' }, 400);
               }
 
-              // Resolve which Nango provider this connector maps to
-              const endpoint = mcpIngestionService.registry.get(connectorId, { user_id: userId, org_id: orgId });
+              // Resolve which Nango provider this connector maps to.
+              // Accept either the catalog name (e.g. "slack-live") OR the
+              // FE-facing id / nango_provider (e.g. "slack") — list-and-find
+              // covers all three so the FE doesn't need to know the catalog
+              // naming scheme.
+              const scope = { user_id: userId, org_id: orgId };
+              let endpoint = mcpIngestionService.registry.get(connectorId, scope);
+              if (!endpoint) {
+                const all = mcpIngestionService.registry.list(scope);
+                endpoint = all.find(e =>
+                  e.name === connectorId ||
+                  e.nango_provider === connectorId ||
+                  e.name === `${connectorId}-live` ||
+                  e.name === `${connectorId}-ingestion`
+                ) || null;
+              }
               if (!endpoint) {
                 return jsonResponse(res, { error: `Unknown connector: ${connectorId}` }, 404);
               }

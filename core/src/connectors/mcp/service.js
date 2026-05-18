@@ -4,6 +4,7 @@ import { MCPConnectorRegistry } from './registry.js';
 import { MCPConnectorJobStore } from './job-store.js';
 import { MCPConnectorRunner } from './runner.js';
 import { getMcpAdapter } from './adapters/index.js';
+import { enrichEndpointWithToken, createConnectSession } from './nango-service.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_REGISTRY_PATH = path.join(__dirname, '../../../data/mcp-connectors.json');
@@ -52,12 +53,36 @@ export class MCPIngestionService {
     ingestionPipeline,
     registryPath = DEFAULT_REGISTRY_PATH,
     jobStorePath = DEFAULT_JOB_STORE_PATH,
-    runner = new MCPConnectorRunner()
+    runner = new MCPConnectorRunner(),
+    db = null,
   } = {}) {
     this.ingestionPipeline = ingestionPipeline;
     this.registry = new MCPConnectorRegistry({ filePath: registryPath });
     this.jobStore = new MCPConnectorJobStore({ filePath: jobStorePath });
     this.runner = runner;
+    this.db = db; // Prisma client for Nango token resolution
+  }
+
+  /**
+   * Resolve Nango bearer token for an endpoint when requested with user scope.
+   * No-op when no db or no nango_provider on endpoint.
+   */
+  async _resolveAuthenticatedEndpoint(endpoint, { user_id, org_id } = {}) {
+    if (!this.db || !endpoint.nango_provider || !user_id) {
+      return endpoint;
+    }
+    try {
+      return await enrichEndpointWithToken(
+        endpoint,
+        { userId: user_id, orgId: org_id },
+        { db: this.db },
+      );
+    } catch (err) {
+      // Non-fatal — caller still gets unauthenticated endpoint;
+      // the runner will fail with a clear auth error.
+      console.warn(`[Nango] token resolution failed for ${endpoint.name}:`, err.message);
+      return endpoint;
+    }
   }
 
   registerEndpoint(endpoint) {
@@ -78,7 +103,8 @@ export class MCPIngestionService {
 
   async inspectEndpoint(name, scope) {
     const endpoint = this.getEndpoint(name, scope);
-    const capabilities = await this.runner.inspect(endpoint);
+    const authed = await this._resolveAuthenticatedEndpoint(endpoint, scope);
+    const capabilities = await this.runner.inspect(authed);
     return {
       endpoint,
       ...capabilities,
@@ -91,9 +117,10 @@ export class MCPIngestionService {
     const statuses = await Promise.all(endpoints.map(async endpoint => {
       const endpointJobs = jobs.filter(job => job.endpoint_name === endpoint.name);
       const summary = buildJobSummary(endpointJobs);
+      const authed = await this._resolveAuthenticatedEndpoint(endpoint, scope);
 
       try {
-        const inspection = await this.runner.inspect(endpoint);
+        const inspection = await this.runner.inspect(authed);
         return {
           name: endpoint.name,
           transport: endpoint.transport,
@@ -221,10 +248,15 @@ export class MCPIngestionService {
         attempt_count: (orchestrationJob.attempt_count || 0) + 1
       });
 
-      const result = await this.runner.execute(endpoint, operation);
+      const authedEndpoint = await this._resolveAuthenticatedEndpoint(
+        endpoint,
+        { user_id, org_id },
+      );
+
+      const result = await this.runner.execute(authedEndpoint, operation);
       const normalize = getMcpAdapter(selectedAdapter);
       const jobs = normalize(result, {
-        endpoint,
+        endpoint: authedEndpoint,
         operation,
         user_id,
         org_id,

@@ -60,6 +60,9 @@ export class MCPConnectorRunner {
   constructor({ clientName = 'hivemind-mcp-connector', clientVersion = '1.0.0' } = {}) {
     this.clientName = clientName;
     this.clientVersion = clientVersion;
+    // Persistent (long-lived) client pool — keyed by endpoint name or url.
+    // Only used when endpoint.supports_persistent_client is true.
+    this._persistentPool = new Map();
   }
 
   async withClient(endpoint, fn) {
@@ -92,6 +95,57 @@ export class MCPConnectorRunner {
       return await fn(client);
     } finally {
       await transport.close().catch(() => {});
+    }
+  }
+
+  /**
+   * Acquire a persistent (warm) client for live-tool endpoints.
+   * Only keeps the client alive if endpoint.supports_persistent_client is true;
+   * otherwise falls back to a fresh connect+dispose cycle via withClient().
+   *
+   * @param {object} endpoint
+   * @param {(client: Client) => Promise<any>} fn
+   * @returns {Promise<any>}
+   */
+  async withPersistentClient(endpoint, fn) {
+    if (!endpoint.supports_persistent_client) {
+      return this.withClient(endpoint, fn);
+    }
+
+    const key = endpoint.name || endpoint.url || endpoint.command;
+    let entry = this._persistentPool.get(key);
+
+    if (!entry) {
+      const transport = buildTransport(endpoint);
+      const client = new Client({
+        name: this.clientName,
+        version: this.clientVersion,
+      });
+      await client.connect(transport);
+      entry = { client, transport };
+      this._persistentPool.set(key, entry);
+    }
+
+    try {
+      return await fn(entry.client);
+    } catch (err) {
+      // On any transport error, evict and let caller retry fresh.
+      try { await entry.transport.close().catch(() => {}); } catch (_) {}
+      this._persistentPool.delete(key);
+      throw err;
+    }
+  }
+
+  /**
+   * Explicitly close and evict a persistent client.
+   * Safe to call even if no client is pooled.
+   */
+  async closePersistentClient(endpoint) {
+    const key = endpoint.name || endpoint.url || endpoint.command;
+    const entry = this._persistentPool.get(key);
+    if (entry) {
+      try { await entry.transport.close().catch(() => {}); } catch (_) {}
+      this._persistentPool.delete(key);
     }
   }
 

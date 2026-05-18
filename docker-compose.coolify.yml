@@ -86,6 +86,8 @@ services:
             SENTRY_DSN: '${SENTRY_DSN:-}'
             SENTRY_ENVIRONMENT: '${SENTRY_ENVIRONMENT:-production}'
             BUILD_DATE: '${BUILD_DATE:-unknown}'
+            NANGO_URL: 'http://nango:3003'
+            NANGO_SECRET_KEY: '${NANGO_SECRET_KEY}'
             POSTGRES_PASSWORD: '${POSTGRES_PASSWORD}'
             COOLIFY_BRANCH: '"main"'
             COOLIFY_RESOURCE_UUID: s0k0s0k40wo44w4w8gcs8ow0
@@ -237,6 +239,8 @@ services:
             SENTRY_ENVIRONMENT: '${SENTRY_ENVIRONMENT:-production}'
             BUILD_DATE: '${BUILD_DATE:-unknown}'
             POSTGRES_PASSWORD: '${POSTGRES_PASSWORD}'
+            NANGO_URL: 'http://nango:3003'
+            NANGO_SECRET_KEY: '${NANGO_SECRET_KEY}'
             COOLIFY_BRANCH: '"main"'
             COOLIFY_RESOURCE_UUID: s0k0s0k40wo44w4w8gcs8ow0
             COOLIFY_CONTAINER_NAME: control-plane-s0k0s0k40wo44w4w8gcs8ow0-125656582243
@@ -438,6 +442,92 @@ services:
         depends_on:
             employees:
                 condition: service_started
+    # ==========================================
+    # Nango — OAuth & token management (self-hosted)
+    # Uses same postgres service, separate nango DB
+    # ==========================================
+    nango:
+        image: 'nangohq/nango-server:latest'
+        container_name: nango-s0k0s0k40wo44w4w8gcs8ow0-125656700000
+        hostname: hivemind-nango
+        restart: unless-stopped
+        deploy:
+            resources:
+                limits:
+                    cpus: '1'
+                    memory: 1G
+                reservations:
+                    cpus: '0.25'
+                    memory: 256M
+            restart_policy:
+                condition: on-failure
+                delay: 5s
+                max_attempts: 3
+        environment:
+            NANGO_DB_USER: '${POSTGRES_USER:-hivemind_user}'
+            NANGO_DB_PASSWORD: '${POSTGRES_PASSWORD}'
+            NANGO_DB_HOST: postgres
+            NANGO_DB_PORT: '5432'
+            NANGO_DB_NAME: nango
+            NANGO_DB_SSL: 'false'
+            NANGO_SERVER_HOSTPORT: '0.0.0.0:3003'
+            NANGO_SERVER_URL: '${NANGO_PUBLIC_URL:-http://nango:3003}'
+            NANGO_LOGS_ENABLED: 'true'
+            NANGO_SECRET_KEY: '${NANGO_SECRET_KEY}'
+            COOLIFY_BRANCH: '"main"'
+            COOLIFY_RESOURCE_UUID: s0k0s0k40wo44w4w8gcs8ow0
+            COOLIFY_CONTAINER_NAME: nango-s0k0s0k40wo44w4w8gcs8ow0-125656700000
+            SERVICE_NAME_APP: app
+            SERVICE_NAME_POSTGRES: postgres
+            SERVICE_NAME_QDRANT: qdrant
+            SERVICE_NAME_REDIS: redis
+            SERVICE_NAME_BACKUP: backup
+        ports:
+            - '3003:3003'
+        healthcheck:
+            test:
+                - CMD-SHELL
+                - 'wget --no-verbose --tries=1 --spider http://localhost:3003/health || exit 1'
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 60s
+        logging:
+            driver: json-file
+            options:
+                max-size: 10m
+                max-file: '5'
+                compress: 'true'
+                tag: '{{.ImageName}}|{{.Name}}|{{.ImageFullID}}|{{.FullID}}'
+        labels:
+            - hivemind.component=auth-connector
+            - hivemind.tier=infrastructure
+            - hivemind.region=eu
+            - 'hivemind.compliance=gdpr,nis2,dora'
+            - coolify.name=hivemind-nango
+            - coolify.managed=true
+            - coolify.version=4.0.0-beta.462
+            - coolify.applicationId=20
+            - coolify.type=application
+            - coolify.name=nango-s0k0s0k40wo44w4w8gcs8ow0-125656700000
+            - coolify.resourceName=hive-mind
+            - coolify.projectName=hivemind
+            - coolify.serviceName=hive-mind
+            - coolify.environmentName=production
+            - coolify.pullRequestId=0
+            - traefik.enable=true
+            - 'traefik.http.routers.hivemind-nango.rule=Host(`nango.hivemind.davinciai.eu`)'
+            - traefik.http.routers.hivemind-nango.entrypoints=websecure
+            - traefik.http.routers.hivemind-nango.tls.certresolver=letsencrypt
+            - traefik.http.services.hivemind-nango.loadbalancer.server.port=3003
+        networks:
+            hivemind-network: null
+            s0k0s0k40wo44w4w8gcs8ow0: null
+        depends_on:
+            postgres:
+                condition: service_healthy
+        env_file:
+            - .env
     postgres:
         build:
             context: ./infra/postgres

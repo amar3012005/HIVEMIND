@@ -962,7 +962,7 @@ function applyCorsHeaders(req, res) {
 }
 
 const ingestionPipeline = loadIngestionPipeline();
-const mcpIngestionService = new MCPIngestionService({ ingestionPipeline });
+const mcpIngestionService = new MCPIngestionService({ ingestionPipeline, db: prisma });
 
 async function getIngestionJobStatus(jobId) {
   if (!ingestionPipeline || !jobId) {
@@ -5139,6 +5139,102 @@ const server = http.createServer(async (req, res) => {
               res.writeHead(302, { Location: `${frontendUrl}/hivemind/app/connectors?error=${encodeURIComponent(err.message)}` });
               res.end();
               return;
+            }
+          }
+          break;
+
+        // ==========================================
+        // NANGO CONNECT SESSION (OAuth popup trigger)
+        // POST /api/connectors/connect-session
+        // Body: { connector_id: string, allowed_integrations?: string[] }
+        // Returns: { connect_session_token: string }
+        // ==========================================
+        case '/api/connectors/connect-session':
+          if (req.method === 'POST') {
+            try {
+              const { createConnectSession: createNangoConnectSession } = await import('./connectors/mcp/nango-service.js');
+              const connectorId = body.connector_id;
+              if (!connectorId) {
+                return jsonResponse(res, { error: 'connector_id is required' }, 400);
+              }
+
+              // Resolve which Nango provider this connector maps to
+              const endpoint = mcpIngestionService.registry.get(connectorId, { user_id: userId, org_id: orgId });
+              if (!endpoint) {
+                return jsonResponse(res, { error: `Unknown connector: ${connectorId}` }, 404);
+              }
+              const nangoProvider = endpoint.nango_provider;
+              if (!nangoProvider) {
+                return jsonResponse(res, { error: `Connector ${connectorId} does not use Nango auth` }, 400);
+              }
+
+              const allowedIntegrations = body.allowed_integrations || [nangoProvider];
+              const token = await createNangoConnectSession({
+                userId,
+                orgId,
+                allowedIntegrations,
+              });
+
+              return jsonResponse(res, {
+                connect_session_token: token,
+                provider: nangoProvider,
+              });
+            } catch (err) {
+              console.error('[nango-connect-session] Failed:', err.message);
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        // ==========================================
+        // NANGO CONNECTION FINALIZE (after OAuth success)
+        // POST /api/connectors/:id/connect
+        // Body: { connection_id: string, provider_key: string }
+        // ==========================================
+        case '/api/connectors/connect':
+          if (req.method === 'POST') {
+            try {
+              const providerKey = body.provider_key;
+              const connectionId = body.connection_id;
+              if (!providerKey || !connectionId) {
+                return jsonResponse(res, { error: 'provider_key and connection_id are required' }, 400);
+              }
+
+              if (!prisma) {
+                return jsonResponse(res, { error: 'Database unavailable' }, 503);
+              }
+
+              await prisma.nangoConnection.upsert({
+                where: {
+                  userId_providerKey_orgId: {
+                    userId,
+                    providerKey,
+                    orgId,
+                  },
+                },
+                create: {
+                  userId,
+                  orgId,
+                  providerKey,
+                  connectionId,
+                  status: 'active',
+                },
+                update: {
+                  connectionId,
+                  status: 'active',
+                  updatedAt: new Date(),
+                  metadata: { last_connected_via: 'connect-ui' },
+                },
+              });
+
+              return jsonResponse(res, {
+                success: true,
+                provider: providerKey,
+                status: 'active',
+              }, 201);
+            } catch (err) {
+              console.error('[nango-connect] Failed:', err.message);
+              return jsonResponse(res, { error: err.message }, 500);
             }
           }
           break;

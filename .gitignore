@@ -73,3 +73,4 @@ benchmarks/memorybench-hivemind/memorybench/.git/
 
 # Benchmark results may contain API keys
 benchmarks/results/*.md
+!core/data/mcp-connectors.json

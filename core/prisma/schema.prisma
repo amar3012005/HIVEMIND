@@ -289,6 +289,26 @@ model Contact {
   @@map("contacts")
 }
 
+/// Nango OAuth connection — maps user/org/provider to Nango connection_id
+/// so backend can fetch+inject bearer tokens at runtime before MCP runner calls
+model NangoConnection {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId       String   @map("user_id") @db.Uuid
+  orgId        String   @map("org_id") @db.Uuid
+  providerKey  String   @map("provider_key") @db.VarChar(100)
+  connectionId String   @map("connection_id") @db.VarChar(255)
+  status       String   @default("active") @db.VarChar(20) // active | expired | revoked
+  connectedAt  DateTime @default(now()) @map("connected_at") @db.Timestamptz(6)
+  updatedAt    DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  metadata     Json     @default("{}")
+
+  @@unique([userId, providerKey, orgId])
+  @@index([userId, providerKey])
+  @@index([orgId])
+  @@index([status])
+  @@map("nango_connections")
+}
+
 /// Core memory storage with triple-operator versioning (Updates, Extends, Derives)
 /// Supports cognitive scoring for spaced repetition and Ebbinghaus forgetting curve
 /// This model contains an expression index which requires additional setup for migrations. Visit https://pris.ly/d/expression-indexes for more info.

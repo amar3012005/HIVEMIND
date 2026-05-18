@@ -39,11 +39,21 @@ Per-provider OAuth setup for self-hosted Nango at `api.hivemind.davinciai.eu:804
 - Calendar: `calendar.readonly`, `calendar.events`
 - All: `userinfo.email`, `userinfo.profile`, `openid`, `offline_access`
 
+## OAuth callback URL (MANDATORY for every provider)
+
+```
+https://api.hivemind.davinciai.eu:8042/oauth/callback
+```
+
+Must be added EXACTLY (including port, trailing path, no slash) to each provider's redirect URI allowlist BEFORE Nango integration will work. Missing this = "redirect_uri did not match" error.
+
 ## Adding a new provider
 
-1. Admin UI (`https://api.hivemind.davinciai.eu:8042` → log in → Integrations → New)
-2. Select template, paste Client ID + Secret from provider's dev console
-3. Set redirect URI in provider console: `https://api.hivemind.davinciai.eu:8042/oauth/callback`
+1. Provider dev console (e.g. https://api.slack.com/apps, https://www.notion.so/my-integrations, https://github.com/settings/developers, etc.)
+2. Add redirect URI: `https://api.hivemind.davinciai.eu:8042/oauth/callback`
+3. Copy Client ID + Secret
+4. Nango admin UI (`https://api.hivemind.davinciai.eu:8042` → Integrations → New)
+5. Select template, paste Client ID + Secret
 4. Scopes per above
 5. Ensure `nango_provider` in all three catalogs matches the key here
 6. Test: `curl POST /v1/proxy/connectors/connect-session` with that connector_id

@@ -2781,33 +2781,79 @@ const server = http.createServer(async (req, res) => {
     if (!current) return;
 
     const provider = connectorResyncMatch[1];
+    const apiKey = process.env.HIVEMIND_MASTER_API_KEY;
+    if (!apiKey) {
+      return jsonResponse(res, { error: 'HIVEMIND_MASTER_API_KEY is not configured' }, 503);
+    }
+    const body = await parseBody(req);
+
+    // 1. Legacy connector store path (gmail/google-* via legacy oauth_tokens)
     const connector = await connectorStore?.getConnector(current.session.userId, provider);
-    if (!connector || connector.status === 'disconnected') {
-      return jsonResponse(res, { error: 'Connector not connected' }, 400);
+    if (connector && connector.status !== 'disconnected') {
+      try {
+        await fetch(`${CONFIG.coreApiBaseUrl}/api/connectors/sync`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
+          body: JSON.stringify({
+            provider,
+            user_id: current.session.userId,
+            org_id: current.session.orgId,
+            target_scope: connector.target_scope || 'personal',
+            incremental: body.incremental !== false,
+          }),
+        });
+        return jsonResponse(res, { success: true, message: 'Sync enqueued (legacy)' });
+      } catch (error) {
+        return jsonResponse(res, { error: error.message }, 500);
+      }
     }
 
-    // Trigger sync via core API
+    // 2. Nango path — find MCP ingestion endpoint for this provider
     try {
-      const apiKey = process.env.HIVEMIND_MASTER_API_KEY;
-      if (!apiKey) {
-        return jsonResponse(res, { error: 'HIVEMIND_MASTER_API_KEY is not configured' }, 503);
+      const REGISTRY_TO_NANGO = {
+        slack: 'slack', notion: 'notion', github: 'github', linear: 'linear',
+        atlassian: 'jira', jira: 'jira', confluence: 'confluence',
+        gmail: 'google-mail', 'google-mail': 'google-mail',
+        'google-drive': 'google-drive', 'google-calendar': 'google-calendar',
+      };
+      const nangoKey = REGISTRY_TO_NANGO[provider] || provider;
+      const nangoRow = await prisma?.nangoConnection?.findFirst({
+        where: { userId: current.session.userId, providerKey: nangoKey, status: 'active' },
+      });
+      if (!nangoRow) {
+        return jsonResponse(res, { error: 'Connector not connected' }, 400);
       }
-      const body = await parseBody(req);
-      await fetch(`${CONFIG.coreApiBaseUrl}/api/connectors/sync`, {
+
+      // Resolve ingestion endpoint name from catalog
+      const ingestionByProvider = {
+        notion: 'notion-ingestion',
+        'google-mail': 'gmail-ingestion',
+        gmail: 'gmail-ingestion',
+        'google-drive': 'google-drive-ingestion',
+        confluence: 'confluence-ingestion',
+      };
+      const endpointName = ingestionByProvider[nangoKey] || ingestionByProvider[provider];
+      if (!endpointName) {
+        return jsonResponse(res, {
+          error: `No ingestion endpoint configured for ${provider} — live-only connector`,
+        }, 400);
+      }
+
+      const r = await fetch(`${CONFIG.coreApiBaseUrl}/api/connectors/mcp/ingest`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-API-Key': apiKey,
-        },
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
         body: JSON.stringify({
-          provider,
+          name: endpointName,
           user_id: current.session.userId,
           org_id: current.session.orgId,
-          target_scope: connector.target_scope || 'personal',
-          incremental: body.incremental !== false,
+          limit: body.limit || 100,
         }),
       });
-      return jsonResponse(res, { success: true, message: 'Sync enqueued' });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        return jsonResponse(res, { error: data.error || 'MCP ingest failed', ...data }, r.status);
+      }
+      return jsonResponse(res, { success: true, message: 'Sync enqueued (Nango)', ...data });
     } catch (error) {
       return jsonResponse(res, { error: error.message }, 500);
     }

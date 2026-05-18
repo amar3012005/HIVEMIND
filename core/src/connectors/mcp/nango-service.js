@@ -140,10 +140,8 @@ export async function createConnectSession({ userId, orgId, allowedIntegrations 
   // Nango Connect REST API: POST /connect/sessions
   // https://docs.nango.dev/reference/api/connect/sessions/create
   const body = await nangoPost('/connect/sessions', {
-    end_user: {
-      id: userId,
-      ...(orgId ? { organization: { id: orgId } } : {}),
-    },
+    end_user: { id: userId },
+    ...(orgId ? { organization: { id: orgId } } : {}),
     allowed_integrations: allowedIntegrations,
   });
   return body?.data?.token || body?.token || body?.connect_session_token || null;

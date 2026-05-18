@@ -2406,6 +2406,47 @@ const server = http.createServer(async (req, res) => {
       };
     }));
 
+    // Overlay nango_connections so Nango-finalized OAuth shows as connected
+    try {
+      if (prisma?.nangoConnection) {
+        const NANGO_TO_REGISTRY = {
+          slack: 'slack',
+          notion: 'notion',
+          github: 'github',
+          linear: 'linear',
+          jira: 'atlassian',
+          confluence: 'confluence',
+          'google-mail': 'gmail',
+          'google-drive': 'google-drive',
+          'google-calendar': 'google-calendar',
+        };
+        const orgId = current.session.orgId || current.session.org_id;
+        const where = { userId: current.session.userId, status: 'active' };
+        if (orgId) where.orgId = orgId;
+        const nangoRows = await prisma.nangoConnection.findMany({
+          where,
+          select: { providerKey: true, connectionId: true, connectedAt: true },
+        });
+        const overlayByProvider = {};
+        for (const row of nangoRows) {
+          const regId = NANGO_TO_REGISTRY[row.providerKey] || row.providerKey;
+          overlayByProvider[regId] = row;
+        }
+        for (const entry of result) {
+          const nangoRow = overlayByProvider[entry.provider];
+          if (nangoRow && entry.status !== 'connected') {
+            entry.status = 'connected';
+            entry.is_active = true;
+            entry.account_ref = entry.account_ref || nangoRow.connectionId;
+            entry.created_at = entry.created_at || nangoRow.connectedAt;
+            entry.source = 'nango';
+          }
+        }
+      }
+    } catch (nangoErr) {
+      console.warn('[v1/connectors] nango overlay failed:', nangoErr.message);
+    }
+
     const whatsappStatus = await whatsappManager.getStatus(current.session.userId).catch((err) => ({
       paired: false,
       phoneNumber: null,

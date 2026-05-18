@@ -63,7 +63,9 @@ export class WebhookProcessor {
         SET status = 'processing', attempts = attempts + 1
         WHERE id IN (
           SELECT id FROM inbound_webhook_events
-          WHERE status = 'received' AND attempts < ${MAX_ATTEMPTS}
+          WHERE status IN ('received', 'failed')
+            AND subscription_id IS NOT NULL
+            AND attempts < ${MAX_ATTEMPTS}
           ORDER BY received_at ASC
           LIMIT ${BATCH_SIZE}
           FOR UPDATE SKIP LOCKED
@@ -96,10 +98,22 @@ export class WebhookProcessor {
   /** @param {Object} row - raw webhook_events row */
   async _processRow(row) {
     try {
-      const sub = await this.prisma.inboundWebhookSubscription.findUnique({ where: { id: row.subscriptionId } });
-      if (!sub) throw new Error(`subscription not found: ${row.subscriptionId}`);
+      const subscriptionId = row.subscriptionId ?? row.subscription_id ?? null;
+      const eventId = row.id;
 
-      const adapter = this.adapterRegistry.get(sub.provider);
+      if (!subscriptionId) {
+        throw new Error(`event missing subscription_id: ${row.id}`);
+      }
+
+      const sub = await this.prisma.inboundWebhookSubscription.findUnique({ where: { id: subscriptionId } });
+      if (!sub) throw new Error(`subscription not found: ${subscriptionId}`);
+
+      const adapter = this.adapterRegistry.instantiate(sub.providerKey, {
+        providerKey: sub.providerKey,
+        tokenResolver: this.tokenResolver,
+        prisma: this.prisma,
+        logger: this.logger,
+      });
       const { resourceId, type } = await adapter.parseEvent(row.payload);
       const resource = await adapter.fetchResource({
         userId: sub.userId,
@@ -113,7 +127,7 @@ export class WebhookProcessor {
       }
 
       await this.prisma.inboundWebhookEvent.update({
-        where: { id: row.id },
+        where: { id: eventId },
         data: { status: 'processed', processedAt: new Date() },
       });
 

@@ -20,14 +20,14 @@ function makePrisma({ rows = [], sub = null } = {}) {
   if (sub) store.subs[sub.id] = { ...sub };
   return {
     $queryRaw: async () => rows,
-    webhookSubscription: {
+    inboundWebhookSubscription: {
       findUnique: async ({ where }) => store.subs[where.id] ?? null,
       update: async ({ where, data }) => {
         store.subs[where.id] = { ...store.subs[where.id], ...data };
         return store.subs[where.id];
       },
     },
-    webhookEvent: {
+    inboundWebhookEvent: {
       update: async ({ where, data }) => {
         store.events[where.id] = { ...store.events[where.id], ...data };
         return store.events[where.id];
@@ -49,7 +49,7 @@ function makeProcessor({ rows, sub, adapterClass = FakeSlackAdapter, smartIngest
   const registry = new AdapterRegistry();
   registry.register('slack', adapterClass);
 
-  const defaultSub = sub ?? { id: 'sub-1', provider: 'slack', userId: 'u1', orgId: 'o1', consecutiveFailures: 0 };
+  const defaultSub = sub ?? { id: 'sub-1', providerKey: 'slack', userId: 'u1', orgId: 'o1', consecutiveFailures: 0 };
   const prisma = makePrisma({ rows: rows ?? [makeRow()], sub: defaultSub });
 
   const router = smartIngestRouter ?? { route: async () => {} };
@@ -150,12 +150,53 @@ describe('WebhookProcessor.tickOnce — missing subscription', () => {
       sub: null,
     });
     // Override makePrisma sub store is empty; findUnique returns null
-    processor.prisma.webhookSubscription.findUnique = async () => null;
-    processor.prisma.webhookEvent.update = async ({ where, data }) => {
+    processor.prisma.inboundWebhookSubscription.findUnique = async () => null;
+    processor.prisma.inboundWebhookEvent.update = async ({ where, data }) => {
       processor.prisma._store.events[where.id] = data;
     };
     await processor.tickOnce();
     assert.equal(processor.prisma._store.events['evt-1'].status, 'dead_lettered');
+  });
+});
+
+describe('WebhookProcessor.tickOnce — current schema contract', () => {
+  it('instantiates the adapter using subscription.providerKey', async () => {
+    const calls = [];
+
+    class InspectingAdapter {
+      constructor(ctx) {
+        calls.push(ctx);
+      }
+
+      async parseEvent() {
+        return { resourceId: 'res-1', type: 'message' };
+      }
+
+      async fetchResource() {
+        return { id: 'res-1', title: 'Hi', body: 'body', ts: null, refs: {} };
+      }
+    }
+
+    const { processor } = makeProcessor({ adapterClass: InspectingAdapter });
+    await processor.tickOnce();
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].providerKey, 'slack');
+    assert.equal(typeof calls[0].tokenResolver, 'function');
+  });
+
+  it('retries failed rows on subsequent ticks', async () => {
+    const rows = [makeRow({ status: 'failed', attempts: 2 })];
+    const { processor, prisma } = makeProcessor({ rows });
+    await processor.tickOnce();
+    assert.equal(prisma._store.events['evt-1'].status, 'processed');
+  });
+
+  it('accepts snake_case rows from raw SQL queries', async () => {
+    const rows = [{ id: 'evt-1', subscription_id: 'sub-1', payload: { event: 'test' }, attempts: 1, status: 'received' }];
+    const { processor, prisma } = makeProcessor({ rows });
+    await processor.tickOnce();
+    assert.equal(prisma._store.events['evt-1'].status, 'processed');
   });
 });
 

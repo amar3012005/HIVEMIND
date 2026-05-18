@@ -319,10 +319,15 @@ if (persistentMemoryStore) {
 
 // Scheduled connector sync
 let syncScheduler = null;
+// Shared module-level ConnectorStore — used by both the scheduler and the
+// per-request handlers for /api/connectors/* dispatch. Single instance is
+// safe because ConnectorStore is stateless (all state lives in Prisma).
+let connectorStore = null;
 if (persistentMemoryEngine && persistentMemoryStore && prisma) {
   const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
   const { SyncEngine } = await import('./connectors/framework/sync-engine.js');
   const schedulerConnStore = new ConnectorStore(prisma);
+  connectorStore = schedulerConnStore;
   const schedulerSyncEngine = new SyncEngine({
     connectorStore: schedulerConnStore,
     memoryEngine: persistentMemoryEngine,
@@ -3685,6 +3690,122 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
+      // ── Generic per-connector dispatch ──────────────────────────────
+      // POST   /api/connectors/:id/connect    — start OAuth or store API key
+      // POST   /api/connectors/:id/disconnect — revoke + delete tokens
+      // GET    /api/connectors/:id/status     — single-connector status
+      //
+      // For OAuth providers (gmail, slack, notion, microsoft, atlassian,
+      // salesforce, github), the connect handler RETURNS a redirect URL
+      // for the FE to open in a popup; it does not perform the redirect
+      // itself (CORS-safe). For api-key providers (linear), the body
+      // carries { api_key } and is stored encrypted server-side.
+      {
+        const connectorMatch = pathname.match(/^\/api\/connectors\/([a-z0-9_-]+)\/(connect|disconnect|status)$/i);
+        if (connectorMatch) {
+          const provider = connectorMatch[1].toLowerCase();
+          const verb = connectorMatch[2].toLowerCase();
+          try {
+            const { CONNECTOR_BY_ID } = await import('./connectors/catalog.js');
+            const catalog = CONNECTOR_BY_ID[provider];
+            if (!catalog) {
+              return jsonResponse(res, { error: 'unknown connector', provider }, 404);
+            }
+
+            if (verb === 'status' && req.method === 'GET') {
+              let record = null;
+              try {
+                if (typeof connectorStore?.getConnector === 'function') {
+                  record = await connectorStore.getConnector(userId, provider);
+                }
+              } catch (_) { /* swallow */ }
+              return jsonResponse(res, {
+                provider,
+                catalog,
+                connection: record || null,
+                connected: Boolean(record),
+              });
+            }
+
+            if (verb === 'connect' && req.method === 'POST') {
+              // OAuth providers — return existing per-provider OAuth start URL.
+              // The FE opens it in a popup; callback already lives at
+              // /api/connectors/<provider>/callback and stores the token.
+              const oauthStartByProvider = {
+                gmail: '/api/connectors/gmail/connect',
+                'google-drive': '/api/connectors/google/connect',
+                'google-calendar': '/api/connectors/google/connect',
+                'google-docs': '/api/connectors/google/connect',
+                'google-sheets': '/api/connectors/google/connect',
+                'google-slides': '/api/connectors/google/connect',
+                'google-contacts': '/api/connectors/google/connect',
+                'google-tasks': '/api/connectors/google/connect',
+                'google-chat': '/api/connectors/google/connect',
+                slack: '/api/connectors/slack/connect',
+                notion: '/api/connectors/notion/connect',
+                github: '/api/connectors/github/connect',
+                microsoft365: '/api/connectors/microsoft/connect',
+                atlassian: '/api/connectors/atlassian/connect',
+                salesforce: '/api/connectors/salesforce/connect',
+              };
+
+              if (catalog.authType === 'oauth2') {
+                const startPath = oauthStartByProvider[provider];
+                if (!startPath) {
+                  return jsonResponse(res, {
+                    error: 'oauth start not configured',
+                    provider,
+                    hint: catalog.setupHint || null,
+                  }, 501);
+                }
+                return jsonResponse(res, {
+                  provider,
+                  authType: 'oauth2',
+                  oauthStartUrl: startPath,
+                  // FE should open this in a popup w/ Authorization header.
+                  // Server-side OAuth handler issues the 302 to the provider.
+                });
+              }
+
+              if (catalog.authType === 'api_key' || catalog.authType === 'connection_string') {
+                // ConnectorStore today is OAuth-centric. API-key /
+                // connection-string flows need a dedicated store table.
+                // Surface 501 with hint so the UI shows "coming soon".
+                return jsonResponse(res, {
+                  error: 'not implemented',
+                  provider,
+                  authType: catalog.authType,
+                  hint: 'API-key / connection-string flow needs a secrets store. OAuth providers work today.',
+                }, 501);
+              }
+
+              if (catalog.authType === 'none') {
+                return jsonResponse(res, {
+                  provider,
+                  authType: 'none',
+                  hint: 'No connection needed. Use the connector directly.',
+                });
+              }
+
+              return jsonResponse(res, { error: 'unsupported authType', authType: catalog.authType }, 400);
+            }
+
+            if (verb === 'disconnect' && req.method === 'POST') {
+              try {
+                if (typeof connectorStore?.disconnect === 'function') {
+                  await connectorStore.disconnect(userId, provider);
+                }
+                return jsonResponse(res, { provider, disconnected: true });
+              } catch (delErr) {
+                return jsonResponse(res, { error: 'disconnect failed', message: delErr.message }, 500);
+              }
+            }
+          } catch (err) {
+            return jsonResponse(res, { error: 'connector dispatch failed', message: err.message }, 500);
+          }
+        }
+      }
+
       if (pathname.startsWith('/api/memories/') && pathname !== '/api/memories/search' && pathname !== '/api/memories/query' && pathname !== '/api/memories/code/ingest' && pathname !== '/api/memories/traverse' && pathname !== '/api/memories/decay' && pathname !== '/api/memories/reinforce' && pathname !== '/api/memories/delete-all') {
         if (req.method === 'GET') {
           if (!ensurePersistedMemoryOrFail(res, '/api/memories/:id')) {
@@ -4689,6 +4810,68 @@ const server = http.createServer(async (req, res) => {
             }
 
             return jsonResponse(res, status);
+          }
+          break;
+
+        // ── Static catalog: what connectors exist + their modes ─────────
+        case '/api/connectors/catalog':
+          if (req.method === 'GET') {
+            try {
+              const { CONNECTOR_CATALOG, CONNECTOR_CATEGORIES, CONNECTOR_MODES } = await import('./connectors/catalog.js');
+              return jsonResponse(res, {
+                connectors: CONNECTOR_CATALOG,
+                categories: CONNECTOR_CATEGORIES,
+                modes: CONNECTOR_MODES,
+                count: CONNECTOR_CATALOG.length,
+              });
+            } catch (err) {
+              return jsonResponse(res, { error: 'catalog load failed', message: err.message }, 500);
+            }
+          }
+          break;
+
+        // ── Per-tenant connection status across all connectors ──────────
+        case '/api/connectors/status':
+          if (req.method === 'GET') {
+            try {
+              const { CONNECTOR_CATALOG } = await import('./connectors/catalog.js');
+              // Pull connection records from ConnectorStore for this tenant.
+              // ConnectorStore is the multi-tenant registry living under
+              // core/src/connectors/framework/connector-store.js.
+              let records = [];
+              try {
+                if (typeof connectorStore?.listConnectors === 'function') {
+                  records = await connectorStore.listConnectors(userId) || [];
+                }
+              } catch (storeErr) {
+                console.warn('[connectors/status] store query failed:', storeErr.message);
+              }
+              const byProvider = {};
+              for (const r of records) {
+                const key = r.provider || r.connector_id || r.id;
+                if (!key) continue;
+                byProvider[key] = {
+                  provider: key,
+                  status: r.status || 'connected',
+                  lastSyncAt: r.lastSyncAt || r.last_sync_at || null,
+                  createdAt: r.createdAt || r.created_at || null,
+                  metadata: r.metadata || null,
+                  email: r.email || r.providerEmail || null,
+                };
+              }
+              const merged = CONNECTOR_CATALOG.map(c => ({
+                id: c.id,
+                name: c.name,
+                category: c.category,
+                mode: c.mode,
+                authType: c.authType,
+                catalogStatus: c.status,
+                connection: byProvider[c.id] || null,
+              }));
+              return jsonResponse(res, { connectors: merged, count: merged.length });
+            } catch (err) {
+              return jsonResponse(res, { error: 'status load failed', message: err.message }, 500);
+            }
           }
           break;
 

@@ -2407,6 +2407,7 @@ const server = http.createServer(async (req, res) => {
     }));
 
     // Overlay nango_connections so Nango-finalized OAuth shows as connected
+    console.log(`[v1/connectors] overlay start userId=${current.session.userId} orgId=${current.session.orgId}`);
     try {
       if (prisma?.nangoConnection) {
         const NANGO_TO_REGISTRY = {
@@ -2427,11 +2428,13 @@ const server = http.createServer(async (req, res) => {
           where,
           select: { providerKey: true, connectionId: true, connectedAt: true },
         });
+        console.log(`[v1/connectors] overlay where=${JSON.stringify(where)} rows=${nangoRows.length} keys=${nangoRows.map(r => r.providerKey).join(',')}`);
         const overlayByProvider = {};
         for (const row of nangoRows) {
           const regId = NANGO_TO_REGISTRY[row.providerKey] || row.providerKey;
           overlayByProvider[regId] = row;
         }
+        let promoted = 0;
         for (const entry of result) {
           const nangoRow = overlayByProvider[entry.provider];
           if (nangoRow && entry.status !== 'connected') {
@@ -2440,8 +2443,10 @@ const server = http.createServer(async (req, res) => {
             entry.account_ref = entry.account_ref || nangoRow.connectionId;
             entry.created_at = entry.created_at || nangoRow.connectedAt;
             entry.source = 'nango';
+            promoted++;
           }
         }
+        console.log(`[v1/connectors] overlay promoted=${promoted} providers=${Object.keys(overlayByProvider).join(',')}`);
       }
     } catch (nangoErr) {
       console.warn('[v1/connectors] nango overlay failed:', nangoErr.message);

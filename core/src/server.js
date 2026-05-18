@@ -3702,15 +3702,17 @@ const server = http.createServer(async (req, res) => {
       // carries { api_key } and is stored encrypted server-side.
       {
         const connectorMatch = pathname.match(/^\/api\/connectors\/([a-z0-9_-]+)\/(connect|disconnect|status)$/i);
-        if (connectorMatch) {
+        // Only handle dispatch for catalog-known providers; let legacy
+        // routes like /api/connectors/mcp/status and /api/connectors/gmail/callback
+        // fall through to the existing switch.
+        const { CONNECTOR_BY_ID: _DISPATCH_CATALOG } = connectorMatch
+          ? await import('./connectors/catalog.js')
+          : { CONNECTOR_BY_ID: {} };
+        if (connectorMatch && _DISPATCH_CATALOG[connectorMatch[1].toLowerCase()]) {
           const provider = connectorMatch[1].toLowerCase();
           const verb = connectorMatch[2].toLowerCase();
+          const catalog = _DISPATCH_CATALOG[provider];
           try {
-            const { CONNECTOR_BY_ID } = await import('./connectors/catalog.js');
-            const catalog = CONNECTOR_BY_ID[provider];
-            if (!catalog) {
-              return jsonResponse(res, { error: 'unknown connector', provider }, 404);
-            }
 
             if (verb === 'status' && req.method === 'GET') {
               let record = null;
@@ -6910,8 +6912,32 @@ const server = http.createServer(async (req, res) => {
               }
 
               const uploadId = crypto.randomUUID();
+              // Write to temp storage immediately instead of keeping raw buffer in RAM.
+              const fs = await import('fs');
+              const path = await import('path');
+              const os = await import('os');
+              const tempDir = path.join(os.tmpdir(), 'hivemind-enterprise');
+              fs.mkdirSync(tempDir, { recursive: true });
+              const tempPath = path.join(tempDir, `${uploadId}_${filePart.filename}`);
+              fs.writeFileSync(tempPath, filePart.data);
+
               let parsedText = '';
               let sheets = null;
+              let doclingOutput = null;
+
+              // Try Docling sidecar for rich parsing (non-blocking — fallback on failure)
+              try {
+                const { parseWithDocling } = await import('./knowledge/enterprise/docling-adapter.js');
+                doclingOutput = await parseWithDocling(tempPath, filePart.filename);
+                if (doclingOutput.error) {
+                  console.warn(`[enterprise] Docling fallback: ${doclingOutput.error}`);
+                  doclingOutput = null;
+                } else {
+                  console.log(`[enterprise] Docling parsed ${filePart.filename}: ${doclingOutput.pages} pages, ${doclingOutput.tables.length} tables`);
+                }
+              } catch (doclingErr) {
+                console.warn(`[enterprise] Docling unavailable: ${doclingErr.message}`);
+              }
 
               // Excel: parse sheets for detection
               if (ext === 'xlsx' || ext === 'xls') {
@@ -6920,18 +6946,21 @@ const server = http.createServer(async (req, res) => {
                 // Use all sheet previews combined for type detection
                 parsedText = sheets.filter(s => !s.empty).map(s => `Sheet: ${s.name}\n${s.preview}`).join('\n\n');
               } else {
-                // Non-Excel: extract raw text without requiring successful chunk creation.
-                // Enterprise detection should still classify sparse / OCR-less documents
-                // as low-confidence "general" instead of failing the whole request.
-                const { parseFile } = await import('./knowledge/document-chunker.js');
-                const parsed = await parseFile(
-                  filePart.data,
-                  filePart.contentType || `text/${ext}`,
-                  filePart.filename
-                );
-                parsedText = typeof parsed?.text === 'string'
-                  ? parsed.text
-                  : String(parsed?.text || '');
+                // Non-Excel: prefer Docling output, fall back to raw parsing
+                if (doclingOutput) {
+                  parsedText = doclingOutput.text || doclingOutput.markdown;
+                }
+                if (!parsedText) {
+                  const { parseFile } = await import('./knowledge/document-chunker.js');
+                  const parsed = await parseFile(
+                    filePart.data,
+                    filePart.contentType || `text/${ext}`,
+                    filePart.filename
+                  );
+                  parsedText = typeof parsed?.text === 'string'
+                    ? parsed.text
+                    : String(parsed?.text || '');
+                }
               }
 
               // Run type detection
@@ -6966,7 +6995,7 @@ const server = http.createServer(async (req, res) => {
               }
 
               global._enterprisePendingUploads.set(uploadId, {
-                buffer: filePart.data,
+                tempPath,
                 filename: filePart.filename,
                 mimeType: filePart.contentType || `application/${ext}`,
                 ext,
@@ -6974,6 +7003,7 @@ const server = http.createServer(async (req, res) => {
                 parsedText,
                 detectedType: detected.type,
                 confidence: detected.confidence,
+                doclingOutput,
                 createdAt: Date.now(),
               });
 
@@ -7028,12 +7058,21 @@ const server = http.createServer(async (req, res) => {
               const isExcel = pending.ext === 'xlsx' || pending.ext === 'xls';
               const results = [];
 
+              // Resolve preferred text source: Docling output > plain parsed text
+              const doclingOut = pending.doclingOutput;
+              const resolveText = () => {
+                if (doclingOut) return doclingOut.text || doclingOut.markdown || pending.parsedText;
+                return pending.parsedText;
+              };
+
               if (isExcel && sheet_configs && sheet_configs.length > 0) {
+                // Read Excel buffer from temp path if buffer not stored
+                const excelBuffer = pending.buffer || (pending.tempPath ? require('fs').readFileSync(pending.tempPath) : null);
                 // Process each selected sheet
                 for (const sheetConfig of sheet_configs) {
                   if (sheetConfig.include === false) continue;
                   const sheetType = sheetConfig.confirmed_type || confirmed_type;
-                  const sheetData = parseSheet(pending.buffer, sheetConfig.sheet_name);
+                  const sheetData = parseSheet(excelBuffer, sheetConfig.sheet_name);
 
                   const extracted = await extractSchema(sheetData.raw_text, sheetType, { model, filename: `${pending.filename} — ${sheetConfig.sheet_name}` });
                   // For spreadsheets, inject sheet metadata
@@ -7057,12 +7096,13 @@ const server = http.createServer(async (req, res) => {
                   results.push({ sheet: sheetConfig.sheet_name, type: sheetType, ...memories });
                 }
               } else {
-                // Single document processing
-                const extracted = await extractSchema(pending.parsedText, confirmed_type, { model, filename: pending.filename });
+                // Single document processing — prefer Docling-enriched text
+                const text = resolveText();
+                const extracted = await extractSchema(text, confirmed_type, { model, filename: pending.filename });
                 const memories = createEnterpriseMemories({
                   documentType: confirmed_type,
                   extractedSchema: extracted,
-                  rawText: pending.parsedText,
+                  rawText: text,
                   filename: pending.filename,
                   uploadId: upload_id,
                   userId, orgId, project, visibility, userTags,
@@ -7106,10 +7146,12 @@ const server = http.createServer(async (req, res) => {
                     }
                     ingested++;
 
-                    // Ingest child chunks
+                    // Ingest child chunks with previous-chunk chaining
+                    let prevChunkId = null;
                     for (const chunk of result.chunks) {
                       try {
                         chunk.metadata.parent_schema_id = parentId || null;
+                        chunk.metadata.previous_chunk_id = prevChunkId || null;
                         // Route through smart ingest so chunks get deterministic
                         // Extends edges to their parent document.
                         const [routedChunk] = await buildRoutedIngestPayloads(chunk, { smartIngestRouter });
@@ -7119,6 +7161,28 @@ const server = http.createServer(async (req, res) => {
                           routedChunk.related_to = parentId;
                         }
                         const chunkResult = await persistentMemoryEngine.ingestMemory(routedChunk);
+                        const chunkMemoryId = chunkResult?.memoryId;
+                        // Deterministic previous-chunk edge
+                        if (prevChunkId && chunkMemoryId) {
+                          try {
+                            await persistentMemoryStore.createRelationship({
+                              id: crypto.randomUUID(),
+                              from_id: chunkMemoryId,
+                              to_id: prevChunkId,
+                              type: 'Extends',
+                              confidence: 0.99,
+                              metadata: {
+                                auto_structural: true,
+                                source: 'enterprise_chunk_chain',
+                              },
+                              created_by: 'enterprise_ingest',
+                            });
+                            console.log(`[enterprise] Chunk chain edge: ${chunkMemoryId} -> ${prevChunkId}`);
+                          } catch (chainErr) {
+                            console.warn('[enterprise] Chunk chain edge failed:', chainErr.message);
+                          }
+                        }
+                        prevChunkId = chunkMemoryId;
                         const routedTargetId = routedChunk.related_to || routedChunk.relationship?.target_id || routedChunk.relationship?.targetId || null;
                         if (parentId && chunkResult?.memoryId && routedTargetId !== parentId) {
                           try {

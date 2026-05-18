@@ -1150,45 +1150,45 @@ model TeamTaskMessage {
   @@map("team_task_messages")
 }
 
-model WebhookSubscription {
-  id                     String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId                 String         @map("user_id") @db.Uuid
-  orgId                  String         @map("org_id") @db.Uuid
-  providerKey            String         @map("provider_key") @db.VarChar(100)
-  externalId             String         @map("external_id") @db.VarChar(255)
-  webhookSecretEncrypted String?        @map("webhook_secret_encrypted") @db.VarChar(255)
-  eventTypes             String[]       @map("event_types")
-  webhookUrl             String         @map("webhook_url")
-  registeredAt           DateTime       @default(now()) @map("registered_at") @db.Timestamptz(6)
-  lastEventAt            DateTime?      @map("last_event_at") @db.Timestamptz(6)
-  consecutiveFailures    Int            @default(0) @map("consecutive_failures")
-  status                 String         @default("active") @db.VarChar(20)
-  updatedAt              DateTime       @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  events                 WebhookEvent[]
+model InboundWebhookSubscription {
+  id                     String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId                 String                @map("user_id") @db.Uuid
+  orgId                  String                @map("org_id") @db.Uuid
+  providerKey            String                @map("provider_key") @db.VarChar(100)
+  externalId             String                @map("external_id") @db.VarChar(255)
+  webhookSecretEncrypted String?               @map("webhook_secret_encrypted") @db.VarChar(255)
+  eventTypes             String[]              @map("event_types")
+  webhookUrl             String                @map("webhook_url")
+  registeredAt           DateTime              @default(now()) @map("registered_at") @db.Timestamptz(6)
+  lastEventAt            DateTime?             @map("last_event_at") @db.Timestamptz(6)
+  consecutiveFailures    Int                   @default(0) @map("consecutive_failures")
+  status                 String                @default("active") @db.VarChar(20)
+  updatedAt              DateTime              @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  events                 InboundWebhookEvent[]
 
   @@unique([orgId, providerKey, externalId])
   @@index([userId, orgId])
   @@index([orgId, providerKey])
-  @@map("webhook_subscriptions")
+  @@map("inbound_webhook_subscriptions")
 }
 
-model WebhookEvent {
-  id             String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  subscriptionId String?              @map("subscription_id") @db.Uuid
-  orgId          String               @map("org_id") @db.Uuid
-  providerKey    String               @map("provider_key") @db.VarChar(100)
-  eventId        String?              @map("event_id") @db.VarChar(255)
-  eventType      String?              @map("event_type") @db.VarChar(100)
-  receivedAt     DateTime             @default(now()) @map("received_at") @db.Timestamptz(6)
-  processedAt    DateTime?            @map("processed_at") @db.Timestamptz(6)
-  status         String               @default("received") @db.VarChar(20)
+model InboundWebhookEvent {
+  id             String                      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  subscriptionId String?                     @map("subscription_id") @db.Uuid
+  orgId          String                      @map("org_id") @db.Uuid
+  providerKey    String                      @map("provider_key") @db.VarChar(100)
+  eventId        String?                     @map("event_id") @db.VarChar(255)
+  eventType      String?                     @map("event_type") @db.VarChar(100)
+  receivedAt     DateTime                    @default(now()) @map("received_at") @db.Timestamptz(6)
+  processedAt    DateTime?                   @map("processed_at") @db.Timestamptz(6)
+  status         String                      @default("received") @db.VarChar(20)
   payload        Json?
-  error          String?              @db.Text
-  attempts       Int                  @default(0)
-  subscription   WebhookSubscription? @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  error          String?                     @db.Text
+  attempts       Int                         @default(0)
+  subscription   InboundWebhookSubscription? @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
 
   @@unique([orgId, providerKey, eventId])
   @@index([subscriptionId, receivedAt(sort: Desc)])
   @@index([orgId, receivedAt(sort: Desc)])
-  @@map("webhook_events")
+  @@map("inbound_webhook_events")
 }

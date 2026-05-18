@@ -59,10 +59,10 @@ export class WebhookProcessor {
     let processed = 0;
     try {
       const rows = await this.prisma.$queryRaw`
-        UPDATE webhook_events
+        UPDATE inbound_webhook_events
         SET status = 'processing', attempts = attempts + 1
         WHERE id IN (
-          SELECT id FROM webhook_events
+          SELECT id FROM inbound_webhook_events
           WHERE status = 'received' AND attempts < ${MAX_ATTEMPTS}
           ORDER BY received_at ASC
           LIMIT ${BATCH_SIZE}
@@ -96,7 +96,7 @@ export class WebhookProcessor {
   /** @param {Object} row - raw webhook_events row */
   async _processRow(row) {
     try {
-      const sub = await this.prisma.webhookSubscription.findUnique({ where: { id: row.subscriptionId } });
+      const sub = await this.prisma.inboundWebhookSubscription.findUnique({ where: { id: row.subscriptionId } });
       if (!sub) throw new Error(`subscription not found: ${row.subscriptionId}`);
 
       const adapter = this.adapterRegistry.get(sub.provider);
@@ -112,19 +112,19 @@ export class WebhookProcessor {
         await this.smartIngestRouter.route({ userId: sub.userId, orgId: sub.orgId, resource, type });
       }
 
-      await this.prisma.webhookEvent.update({
+      await this.prisma.inboundWebhookEvent.update({
         where: { id: row.id },
         data: { status: 'processed', processedAt: new Date() },
       });
 
-      await this.prisma.webhookSubscription.update({
+      await this.prisma.inboundWebhookSubscription.update({
         where: { id: sub.id },
         data: { lastEventAt: new Date(), consecutiveFailures: 0 },
       });
     } catch (err) {
       this.logger.warn({ err, eventId: row.id }, 'webhook-processor: event failed');
       const isDead = row.attempts >= MAX_ATTEMPTS;
-      await this.prisma.webhookEvent.update({
+      await this.prisma.inboundWebhookEvent.update({
         where: { id: row.id },
         data: {
           status: isDead ? 'dead_lettered' : 'failed',
@@ -133,7 +133,7 @@ export class WebhookProcessor {
       });
 
       try {
-        await this.prisma.webhookSubscription.update({
+        await this.prisma.inboundWebhookSubscription.update({
           where: { id: row.subscriptionId },
           data: { consecutiveFailures: { increment: 1 } },
         });

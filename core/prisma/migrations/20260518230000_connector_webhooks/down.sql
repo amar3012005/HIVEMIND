@@ -16,7 +16,7 @@ BEGIN
 END$$;
 
 -- Drop webhook_events before subscriptions (FK dependency)
-DROP TABLE IF EXISTS "webhook_events";
-DROP TABLE IF EXISTS "webhook_subscriptions";
+DROP TABLE IF EXISTS "inbound_webhook_events";
+DROP TABLE IF EXISTS "inbound_webhook_subscriptions";
 
 COMMIT;

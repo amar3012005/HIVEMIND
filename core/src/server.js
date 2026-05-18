@@ -2197,7 +2197,7 @@ const server = http.createServer(async (req, res) => {
 
       // Find subscription
       const sub = parsed?.externalId
-        ? await prisma.webhookSubscription.findFirst({
+        ? await prisma.inboundWebhookSubscription.findFirst({
             where: { providerKey: provider, externalId: String(parsed.externalId), status: 'active' },
           })
         : null;
@@ -2209,7 +2209,7 @@ const server = http.createServer(async (req, res) => {
 
       // Persist event
       try {
-        const evt = await prisma.webhookEvent.create({
+        const evt = await prisma.inboundWebhookEvent.create({
           data: {
             subscriptionId: sub.id,
             orgId: sub.orgId,

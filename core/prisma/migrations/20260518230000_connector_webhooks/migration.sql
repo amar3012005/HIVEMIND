@@ -5,7 +5,7 @@
 -- ============================================================
 
 -- CreateTable: webhook_subscriptions
-CREATE TABLE IF NOT EXISTS "webhook_subscriptions" (
+CREATE TABLE IF NOT EXISTS "inbound_webhook_subscriptions" (
     "id"                       UUID NOT NULL DEFAULT gen_random_uuid(),
     "user_id"                  UUID NOT NULL,
     "org_id"                   UUID NOT NULL,
@@ -20,20 +20,20 @@ CREATE TABLE IF NOT EXISTS "webhook_subscriptions" (
     "status"                   VARCHAR(20) NOT NULL DEFAULT 'active',
     "updated_at"               TIMESTAMPTZ(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
-    CONSTRAINT "webhook_subscriptions_pkey" PRIMARY KEY ("id"),
-    CONSTRAINT "webhook_subscriptions_status_check"
+    CONSTRAINT "inbound_webhook_subscriptions_pkey" PRIMARY KEY ("id"),
+    CONSTRAINT "inbound_webhook_subscriptions_status_check"
       CHECK ("status" IN ('active','paused','revoked'))
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS "webhook_subscriptions_org_id_provider_key_external_id_key"
-  ON "webhook_subscriptions"("org_id", "provider_key", "external_id");
-CREATE INDEX IF NOT EXISTS "webhook_subscriptions_user_id_org_id_idx"
-  ON "webhook_subscriptions"("user_id", "org_id");
-CREATE INDEX IF NOT EXISTS "webhook_subscriptions_org_id_provider_key_idx"
-  ON "webhook_subscriptions"("org_id", "provider_key");
+CREATE UNIQUE INDEX IF NOT EXISTS "inbound_webhook_subscriptions_org_id_provider_key_external_id_key"
+  ON "inbound_webhook_subscriptions"("org_id", "provider_key", "external_id");
+CREATE INDEX IF NOT EXISTS "inbound_webhook_subscriptions_user_id_org_id_idx"
+  ON "inbound_webhook_subscriptions"("user_id", "org_id");
+CREATE INDEX IF NOT EXISTS "inbound_webhook_subscriptions_org_id_provider_key_idx"
+  ON "inbound_webhook_subscriptions"("org_id", "provider_key");
 
 -- CreateTable: webhook_events
-CREATE TABLE IF NOT EXISTS "webhook_events" (
+CREATE TABLE IF NOT EXISTS "inbound_webhook_events" (
     "id"              UUID NOT NULL DEFAULT gen_random_uuid(),
     "subscription_id" UUID,
     "org_id"          UUID NOT NULL,
@@ -47,22 +47,22 @@ CREATE TABLE IF NOT EXISTS "webhook_events" (
     "error"           TEXT,
     "attempts"        INTEGER NOT NULL DEFAULT 0,
 
-    CONSTRAINT "webhook_events_pkey" PRIMARY KEY ("id"),
-    CONSTRAINT "webhook_events_status_check"
+    CONSTRAINT "inbound_webhook_events_pkey" PRIMARY KEY ("id"),
+    CONSTRAINT "inbound_webhook_events_status_check"
       CHECK ("status" IN ('received','processing','processed','failed','dead_lettered')),
-    CONSTRAINT "webhook_events_subscription_id_fkey"
-      FOREIGN KEY ("subscription_id") REFERENCES "webhook_subscriptions"("id")
+    CONSTRAINT "inbound_webhook_events_subscription_id_fkey"
+      FOREIGN KEY ("subscription_id") REFERENCES "inbound_webhook_subscriptions"("id")
       ON DELETE CASCADE ON UPDATE CASCADE
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS "webhook_events_org_id_provider_key_event_id_key"
-  ON "webhook_events"("org_id", "provider_key", "event_id");
-CREATE INDEX IF NOT EXISTS "webhook_events_subscription_id_received_at_idx"
-  ON "webhook_events"("subscription_id", "received_at" DESC);
-CREATE INDEX IF NOT EXISTS "webhook_events_org_id_received_at_idx"
-  ON "webhook_events"("org_id", "received_at" DESC);
-CREATE INDEX IF NOT EXISTS "webhook_events_pending_received_at_idx"
-  ON "webhook_events" ("received_at")
+CREATE UNIQUE INDEX IF NOT EXISTS "inbound_webhook_events_org_id_provider_key_event_id_key"
+  ON "inbound_webhook_events"("org_id", "provider_key", "event_id");
+CREATE INDEX IF NOT EXISTS "inbound_webhook_events_subscription_id_received_at_idx"
+  ON "inbound_webhook_events"("subscription_id", "received_at" DESC);
+CREATE INDEX IF NOT EXISTS "inbound_webhook_events_org_id_received_at_idx"
+  ON "inbound_webhook_events"("org_id", "received_at" DESC);
+CREATE INDEX IF NOT EXISTS "inbound_webhook_events_pending_received_at_idx"
+  ON "inbound_webhook_events" ("received_at")
   WHERE "status" = 'received';
 
 -- Nango connections metadata GIN index (table exists from prior migration)

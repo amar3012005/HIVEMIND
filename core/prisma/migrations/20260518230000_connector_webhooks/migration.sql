@@ -1,9 +1,8 @@
 -- ============================================================
 -- Migration: connector_webhooks
 -- Aligned with Prisma models WebhookSubscription / WebhookEvent.
+-- (Prisma wraps in its own transaction; no BEGIN/COMMIT here.)
 -- ============================================================
-
-BEGIN;
 
 -- CreateTable: webhook_subscriptions
 CREATE TABLE IF NOT EXISTS "webhook_subscriptions" (
@@ -79,5 +78,3 @@ BEGIN
       'Shape: { syncConfig: { intervalMinutes, scope, lastFullSyncAt }, cursor, externalIds }';
   END IF;
 END$$;
-
-COMMIT;

@@ -1058,6 +1058,59 @@ if (process.env.DOCLING_URL) {
         const ext = (filename || '').split('.').pop()?.toLowerCase();
         const tParse = Date.now();
 
+        // ── Image-only files (PNG/JPG/TIFF/WebP) → direct Groq vision OCR ──
+        // Cheaper + faster than full Docling pipeline for a single bitmap.
+        if (['png', 'jpg', 'jpeg', 'tiff', 'tif', 'webp'].includes(ext) && process.env.GROQ_API_KEY) {
+          try {
+            const { ocrSingleImage } = await import('./knowledge/enterprise/groq-vision-parser.js');
+            if (typeof ocrSingleImage === 'function') {
+              const out = await ocrSingleImage(tempPath);
+              if (!out.error && out.text.length > 20) {
+                console.log(`[docling-adapter] tier=image-vision file=${filename} chars=${out.text.length} ms=${Date.now() - tParse}`);
+                return {
+                  text: out.text, markdown: out.markdown || out.text, json: null,
+                  tables: [], pages: 1, confidence: null, error: null,
+                  hybridChunks: [{ text: out.text, headings: [filename], page: 1 }],
+                  chunkerError: null, engine: 'groq-image',
+                };
+              }
+            }
+          } catch (imgErr) {
+            console.warn(`[docling-adapter] image vision failed: ${imgErr.message} — falling through to Docling`);
+          }
+        }
+
+        // ── CSV/TSV → row-as-segment (no LLM, structure-preserving) ──
+        if (['csv', 'tsv'].includes(ext)) {
+          try {
+            const raw = fileBuffer.toString('utf-8');
+            const delim = ext === 'tsv' ? '\t' : ',';
+            const lines = raw.split(/\r?\n/).filter(l => l.trim().length > 0);
+            if (lines.length > 0) {
+              const headers = lines[0].split(delim).map(h => h.trim());
+              const hybridChunks = [];
+              for (let i = 1; i < lines.length; i++) {
+                const cols = lines[i].split(delim);
+                const row = headers.map((h, j) => `${h}: ${(cols[j] || '').trim()}`).join('\n');
+                hybridChunks.push({
+                  text: row,
+                  headings: [`Row ${i}`],
+                  page: 1,
+                });
+              }
+              console.log(`[docling-adapter] tier=csv file=${filename} rows=${hybridChunks.length} ms=${Date.now() - tParse}`);
+              return {
+                text: raw, markdown: raw, json: { headers, rowCount: hybridChunks.length },
+                tables: [{ sheet: 'sheet1', headers, rows: lines.slice(1).map(l => l.split(delim)) }],
+                pages: 1, confidence: null, error: null,
+                hybridChunks, chunkerError: null, engine: 'csv-direct',
+              };
+            }
+          } catch (csvErr) {
+            console.warn(`[docling-adapter] csv parse failed: ${csvErr.message}`);
+          }
+        }
+
         // ── Tier 1: pdf-parse (text-native PDFs, 1-2s) ──
         if (ext === 'pdf') {
           try {
@@ -8722,11 +8775,28 @@ const server = http.createServer(async (req, res) => {
               }
 
               // Validate file type
-              const allowedTypes = ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'text/plain', 'text/markdown', 'text/csv'];
+              const allowedTypes = [
+                'application/pdf',
+                'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // docx
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // xlsx
+                'application/vnd.openxmlformats-officedocument.presentationml.presentation', // pptx
+                'application/vnd.ms-excel', // xls
+                'application/vnd.ms-powerpoint', // ppt
+                'text/plain', 'text/markdown', 'text/csv', 'text/html',
+                'image/png', 'image/jpeg', 'image/tiff', 'image/webp',
+                'audio/mpeg', 'audio/wav', 'audio/x-wav', 'audio/mp4', 'audio/x-m4a',
+              ];
               const ext = (filePart.filename || '').split('.').pop()?.toLowerCase();
-              const allowedExts = ['pdf', 'docx', 'txt', 'md', 'csv'];
+              const allowedExts = [
+                'pdf', 'docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt',
+                'txt', 'md', 'markdown', 'csv', 'tsv', 'html', 'htm',
+                'png', 'jpg', 'jpeg', 'tiff', 'tif', 'webp',
+                'mp3', 'wav', 'm4a', 'flac', 'ogg',
+              ];
               if (!allowedTypes.includes(filePart.contentType) && !allowedExts.includes(ext)) {
-                return jsonResponse(res, { error: `Unsupported file type: ${filePart.contentType || ext}. Allowed: PDF, DOCX, TXT, MD, CSV` }, 415);
+                return jsonResponse(res, {
+                  error: `Unsupported file type: ${filePart.contentType || ext}. Allowed: PDF, DOCX, XLSX, PPTX, TXT, MD, CSV, HTML, PNG, JPG, TIFF, MP3, WAV.`
+                }, 415);
               }
 
               // ─── Phase 1: Document-First Ingestion Path (feature-flagged) ───

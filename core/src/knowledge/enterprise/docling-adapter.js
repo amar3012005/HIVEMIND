@@ -47,6 +47,28 @@ export async function parseWithDocling(filePath, filename, opts = {}) {
     formData.append('do_code_enrichment', 'true');
     formData.append('do_formula_enrichment', 'true');
     formData.append('table_mode', 'accurate');
+    // Newer dlparse_v4 backend ~20% faster than legacy docling_parse
+    formData.append('pdf_backend', process.env.DOCLING_PDF_BACKEND || 'dlparse_v4');
+    // Multi-language OCR (German+English by default — SOLVIS-class docs)
+    const ocrLangs = (process.env.DOCLING_OCR_LANGS || 'de,en').split(',').map(s => s.trim()).filter(Boolean);
+    for (const lang of ocrLangs) formData.append('ocr_lang', lang);
+    // Picture descriptions via remote VLM (Groq llama-4-scout) — inline
+    // captions for diagrams/charts/photos so they survive into markdown.
+    if (process.env.GROQ_API_KEY) {
+      formData.append('do_picture_description', 'true');
+      formData.append('enable_remote_services', 'true');
+      formData.append('picture_description_custom_config', JSON.stringify({
+        kind: 'api',
+        url: 'https://api.groq.com/openai/v1/chat/completions',
+        params: { model: process.env.GROQ_VISION_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct' },
+        headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+        prompt: 'Describe this figure in 1 short sentence (max 25 words). Focus on what is depicted, not styling.',
+        timeout: 30,
+      }));
+      formData.append('picture_description_area_threshold', '0.03');
+    }
+    // Preserve page anchors in markdown output (mirrors Tier 1 page markers)
+    formData.append('md_page_break_placeholder', '\n-- {page} of {total} --\n');
   }
 
   // For large files OR smart-mode, use async + poll (Docling sync wait caps
@@ -145,6 +167,11 @@ export async function chunkWithDocling(filePath, filename) {
   const formData = new FormData();
   // Docling hybrid chunker expects "files" (plural), unlike /v1/convert which uses "file"
   formData.append('files', new Blob([fs.readFileSync(filePath)]), filename);
+  // Match embedder context window (BGE-M3 → 512 tokens). Repeat table header
+  // across split chunks so each row keeps its column names.
+  formData.append('max_tokens', String(Number(process.env.DOCLING_CHUNK_MAX_TOKENS || 512)));
+  formData.append('merge_peers', 'true');
+  formData.append('repeat_table_header', 'true');
   try {
     const res = await fetch(`${DOCLING_URL}/v1/chunk/hybrid/file`, {
       method: 'POST',

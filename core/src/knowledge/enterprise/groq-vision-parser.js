@@ -18,8 +18,8 @@ import crypto from 'crypto';
 
 const GROQ_KEY = process.env.GROQ_API_KEY || '';
 const VISION_MODEL = process.env.GROQ_VISION_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct';
-const CONCURRENCY = Number(process.env.GROQ_VISION_CONCURRENCY || 4);
-const MAX_PAGES = Number(process.env.GROQ_VISION_MAX_PAGES || 30);
+const CONCURRENCY = Number(process.env.GROQ_VISION_CONCURRENCY || 8);
+const MAX_PAGES = Number(process.env.GROQ_VISION_MAX_PAGES || 100);
 const PAGE_DENSITY = process.env.GROQ_VISION_DENSITY || '150'; // DPI for convert
 
 const SYSTEM_PROMPT = `You are an OCR + layout extractor. Read the entire page image and output clean Markdown:
@@ -93,6 +93,22 @@ export async function parsePdfWithGroqVision(pdfPath) {
   }
 }
 
+/**
+ * OCR a single image file (PNG/JPG/TIFF/WebP) via Groq vision.
+ * Used for image-only uploads (no PDF render step needed).
+ * @param {string} imagePath
+ * @returns {Promise<{text:string, markdown:string, error:string|null}>}
+ */
+export async function ocrSingleImage(imagePath) {
+  if (!GROQ_KEY) return { text: '', markdown: '', error: 'GROQ_API_KEY not set' };
+  try {
+    const text = await visionOcrPage(imagePath, 1);
+    return { text, markdown: text, error: null };
+  } catch (err) {
+    return { text: '', markdown: '', error: err.message };
+  }
+}
+
 async function visionOcrPage(imagePath, pageNum) {
   const imageBuf = fs.readFileSync(imagePath);
   const b64 = imageBuf.toString('base64');
@@ -113,19 +129,30 @@ async function visionOcrPage(imagePath, pageNum) {
     ],
   };
 
-  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${GROQ_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(60_000),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`Groq vision ${res.status}: ${text.slice(0, 200)}`);
+  // Retry up to 3× on 429/5xx with exponential backoff
+  const MAX_RETRIES = 3;
+  let lastErr = null;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${GROQ_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (res.ok) {
+      const json = await res.json();
+      return json.choices?.[0]?.message?.content || '';
+    }
+    const txt = await res.text().catch(() => '');
+    const transient = res.status === 429 || res.status >= 500;
+    lastErr = new Error(`Groq vision ${res.status}: ${txt.slice(0, 200)}`);
+    if (!transient || attempt === MAX_RETRIES) break;
+    const retryAfter = Number(res.headers.get('retry-after')) || 0;
+    const backoffMs = retryAfter > 0 ? retryAfter * 1000 : Math.min(8000, 500 * Math.pow(2, attempt));
+    await new Promise(r => setTimeout(r, backoffMs));
   }
-  const json = await res.json();
-  return json.choices?.[0]?.message?.content || '';
+  throw lastErr || new Error('Groq vision exhausted retries');
 }

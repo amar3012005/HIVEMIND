@@ -49,11 +49,62 @@ export async function parseWithDocling(filePath, filename, opts = {}) {
     formData.append('table_mode', 'accurate');
   }
 
+  // For large files OR smart-mode, use async + poll (Docling sync wait caps
+  // at DOCLING_SERVE_MAX_SYNC_WAIT seconds internally).
+  const fileSize = fs.statSync(filePath).size;
+  const useAsync = smart || fileSize > 4 * 1024 * 1024; // >4 MB
+  const overallTimeout = smart ? 600_000 : 240_000;
+
   try {
+    if (useAsync) {
+      const submitRes = await fetch(`${DOCLING_URL}/v1/convert/file/async`, {
+        method: 'POST', body: formData,
+        signal: AbortSignal.timeout(60_000),
+      });
+      if (!submitRes.ok) {
+        return fallbackResult(`Docling async submit ${submitRes.status}: ${(await submitRes.text()).slice(0, 200)}`);
+      }
+      const submit = await submitRes.json();
+      const taskId = submit.task_id || submit.task?.task_id || submit.id;
+      if (!taskId) return fallbackResult(`Docling async submit missing task_id`);
+      const deadline = Date.now() + overallTimeout;
+      let pollDelay = 1500;
+      while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, pollDelay));
+        const statusRes = await fetch(`${DOCLING_URL}/v1/status/poll/${taskId}`).catch(() => null);
+        if (!statusRes || !statusRes.ok) continue;
+        const status = await statusRes.json().catch(() => ({}));
+        const taskStatus = status.task_status || status.status;
+        if (taskStatus === 'success' || taskStatus === 'completed') break;
+        if (taskStatus === 'failed' || taskStatus === 'error') {
+          return fallbackResult(`Docling async failed: ${JSON.stringify(status).slice(0, 200)}`);
+        }
+        pollDelay = Math.min(pollDelay * 1.5, 5000);
+      }
+      if (Date.now() >= deadline) {
+        return fallbackResult(`Docling async polling timeout after ${overallTimeout}ms`);
+      }
+      const resultRes = await fetch(`${DOCLING_URL}/v1/result/${taskId}`);
+      if (!resultRes.ok) {
+        return fallbackResult(`Docling result ${resultRes.status}`);
+      }
+      const data = await resultRes.json();
+      const doc = data.document || data;
+      return {
+        markdown: data.markdown || doc.markdown || '',
+        text: data.text || doc.text || '',
+        json: doc,
+        tables: extractTablesFromDocling(doc),
+        pages: Array.isArray(data.pages) ? data.pages.length : (doc.num_pages || 1),
+        confidence: data.confidence ?? doc.confidence ?? null,
+        error: null,
+      };
+    }
+
     const res = await fetch(`${DOCLING_URL}/v1/convert/file`, {
       method: 'POST',
       body: formData,
-      signal: AbortSignal.timeout(smart ? 240_000 : 120_000),
+      signal: AbortSignal.timeout(overallTimeout),
     });
 
     if (!res.ok) {

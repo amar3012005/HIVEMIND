@@ -1055,10 +1055,10 @@ if (process.env.DOCLING_URL) {
 
       try {
         fs.writeFileSync(tempPath, fileBuffer);
-        // Smart Extract auto-enables for PDF/DOCX/XLSX where layout matters
-        const ext = (filename || '').split('.').pop()?.toLowerCase();
-        const autoSmart = ['pdf', 'docx', 'xlsx', 'xls'].includes(ext);
-        const useSmart = smart || autoSmart;
+        // Smart Extract = OCR + tables + chart enrichment. 10x slower (180s on
+        // an 8 MB PDF). KB upload defaults to FAST text-extract; smart is opt-in
+        // via /api/enterprise/upload/* OR explicit caller flag.
+        const useSmart = smart === true;
         // Parse + chunk in parallel — chunker provides structure-aware
         // segmentation (respects headings, paragraphs, tables).
         const tParse = Date.now();
@@ -8207,7 +8207,7 @@ const server = http.createServer(async (req, res) => {
               // Try Docling sidecar for rich parsing (non-blocking — fallback on failure)
               try {
                 const { parseWithDocling } = await import('./knowledge/enterprise/docling-adapter.js');
-                doclingOutput = await parseWithDocling(tempPath, filePart.filename);
+                doclingOutput = await parseWithDocling(tempPath, filePart.filename, { smart: true });
                 if (doclingOutput.error) {
                   console.warn(`[enterprise] Docling fallback: ${doclingOutput.error}`);
                   doclingOutput = null;

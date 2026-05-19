@@ -497,6 +497,9 @@ if (process.env.ENABLE_MEMORY_SYNTHESIS === 'true' && prisma) {
         const n = await synthesizer.synthesizeForOrg(oid).catch(() => 0);
         totalSynthesized += n;
       }
+      globalThis.__hmMetrics = globalThis.__hmMetrics || {};
+      globalThis.__hmMetrics.synthesis_runs_total = (globalThis.__hmMetrics.synthesis_runs_total || 0) + 1;
+      globalThis.__hmMetrics.synthesis_emitted_total = (globalThis.__hmMetrics.synthesis_emitted_total || 0) + totalSynthesized;
       console.log(`[memory-synth] ${orgs.length} orgs scanned, ${totalSynthesized} synthesis memories created`);
     } catch (err) {
       console.error('[memory-synth] tick failed:', err.message);
@@ -2744,12 +2747,14 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === '/metrics' && req.method === 'GET') {
-    // Initialize metrics namespace if missing
-    globalThis.__hmMetrics = globalThis.__hmMetrics || {
+    // Initialize metrics namespace with all known keys defaulted to 0
+    const DEFAULTS = {
       promotion_runs_total: 0, promotion_promoted_total: 0, promotion_stale_total: 0,
       contradiction_runs_total: 0, contradiction_emitted_total: 0,
       hygiene_runs_total: 0, hygiene_proposals_total: 0,
+      synthesis_runs_total: 0, synthesis_emitted_total: 0,
     };
+    globalThis.__hmMetrics = { ...DEFAULTS, ...(globalThis.__hmMetrics || {}) };
     // P3 #27 — Prometheus exposition format for ingest stats
     try {
       const [docs, segs, memEvLinks, entities, mentions, webhookFailed, webhookReceived, srcArt] = await Promise.all([
@@ -2805,6 +2810,12 @@ const server = http.createServer(async (req, res) => {
         '# HELP hivemind_hygiene_proposals_total Hygiene proposals generated',
         '# TYPE hivemind_hygiene_proposals_total counter',
         `hivemind_hygiene_proposals_total ${globalThis.__hmMetrics.hygiene_proposals_total}`,
+        '# HELP hivemind_synthesis_runs_total Memory synthesizer cron ticks since boot',
+        '# TYPE hivemind_synthesis_runs_total counter',
+        `hivemind_synthesis_runs_total ${globalThis.__hmMetrics.synthesis_runs_total}`,
+        '# HELP hivemind_synthesis_emitted_total Synthesis memories created',
+        '# TYPE hivemind_synthesis_emitted_total counter',
+        `hivemind_synthesis_emitted_total ${globalThis.__hmMetrics.synthesis_emitted_total}`,
       ];
       res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4' });
       res.end(lines.join('\n') + '\n');
@@ -2846,6 +2857,7 @@ const server = http.createServer(async (req, res) => {
         hygiene_cron: process.env.ENABLE_HYGIENE_CRON === 'true',
         memory_promotion_jobs: process.env.ENABLE_MEMORY_PROMOTION_JOBS === 'true',
         contradiction_scan: process.env.ENABLE_CONTRADICTION_SCAN === 'true',
+        memory_synthesis: process.env.ENABLE_MEMORY_SYNTHESIS === 'true',
       },
       features: {
         evidence_recall: process.env.ENABLE_EVIDENCE_RECALL === 'true',

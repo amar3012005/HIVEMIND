@@ -375,7 +375,12 @@ export class PrismaGraphStore {
     // Only run outside transactions — $queryRawUnsafe corrupts Prisma interactive transactions
     if (query && this.client.$queryRawUnsafe && !this.inTransaction) {
       try {
-        const tsQuery = query.trim().split(/\s+/).filter(w => w.length > 1).map(w => w + ':*').join(' & ');
+        // Sanitize: tsquery rejects punctuation, special chars, leading digits-only.
+        // Strip everything except a-z0-9, lowercase, drop tokens <2 chars.
+        const tsQuery = query.trim().split(/\s+/)
+          .map(w => w.toLowerCase().replace(/[^a-z0-9]/g, ''))
+          .filter(w => w.length > 1)
+          .map(w => w + ':*').join(' & ');
         if (tsQuery) {
           const scopeWhere = scope === 'personal'
             ? `AND m.user_id = '${user_id}'::uuid`

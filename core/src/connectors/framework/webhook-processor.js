@@ -21,12 +21,15 @@ export class WebhookProcessor {
    * @param {Object} deps.logger
    * @param {number} [deps.intervalMs]
    */
-  constructor({ prisma, adapterRegistry, tokenResolver, smartIngestRouter, documentFirstIngestion, logger, intervalMs = MIN_INTERVAL_MS }) {
+  constructor({ prisma, adapterRegistry, tokenResolver, smartIngestRouter, documentFirstIngestion, getDocumentFirstIngestion, logger, intervalMs = MIN_INTERVAL_MS }) {
     this.prisma = prisma;
     this.adapterRegistry = adapterRegistry;
     this.tokenResolver = tokenResolver;
     this.smartIngestRouter = smartIngestRouter;
-    this.documentFirstIngestion = documentFirstIngestion;
+    // Accept either an eager instance or a getter for late binding
+    this._dfiGetter = typeof getDocumentFirstIngestion === 'function'
+      ? getDocumentFirstIngestion
+      : () => documentFirstIngestion;
     this.logger = logger;
     this._baseIntervalMs = intervalMs;
     this._currentIntervalMs = intervalMs;
@@ -128,8 +131,9 @@ export class WebhookProcessor {
         // lands in source_artifacts + knowledge_documents + knowledge_segments
         // and produces memory_evidence_links. Falls back to legacy router if
         // documentFirstIngestion not wired (back-compat).
-        if (this.documentFirstIngestion && resource?.content) {
-          await this.documentFirstIngestion.ingestConnectorRecord({
+        const dfi = this._dfiGetter?.();
+        if (dfi && resource?.content) {
+          await dfi.ingestConnectorRecord({
             userId: sub.userId,
             orgId: sub.orgId,
             providerKey: sub.providerKey,

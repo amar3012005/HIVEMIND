@@ -327,6 +327,9 @@ let syncScheduler = null;
 // Shared module-level ConnectorStore — used by both the scheduler and the
 // per-request handlers for /api/connectors/* dispatch. Single instance is
 // safe because ConnectorStore is stateless (all state lives in Prisma).
+// Hoisted Phase1 service handle (initialized lower, referenced by webhookProcessor)
+let documentFirstIngestion = null;
+
 // Hoisted Nango token resolver — used by syncScheduler + webhookProcessor
 const nangoTokenResolver = async ({ userId, orgId, providerKey }) => {
   const { getConnectionId, fetchBearerFromNango } = await import('./connectors/mcp/nango-service.js');
@@ -374,7 +377,9 @@ if (persistentMemoryEngine && persistentMemoryStore && prisma) {
     adapterRegistry,
     tokenResolver: nangoTokenResolver,
     smartIngestRouter,
-    documentFirstIngestion, // P1 #13: connectors land in evidence layer
+    // Late-bound: documentFirstIngestion is initialized below; provide a
+    // getter so the processor sees the populated reference at tick time.
+    getDocumentFirstIngestion: () => documentFirstIngestion,
     logger: console,
     intervalMs: 5000,
   });
@@ -851,7 +856,6 @@ if (persistentMemoryEngine) persistentMemoryEngine.vectorStore = qdrantClient;
 
 // ─── Phase 1: Document-Backed Memory Services ───────────────────────────────────
 // Feature-flagged: enabled via ENABLE_DOCUMENT_FIRST_INGEST and ENABLE_EVIDENCE_RECALL env vars
-let documentFirstIngestion = null;
 let evidenceRetrieval = null;
 
 // Docling adapter wrapper: converts buffer→file→parse→cleanup

@@ -11344,6 +11344,157 @@ const server = http.createServer(async (req, res) => {
           }
           break;
 
+        case '/api/graph/intelligent':
+          // Rich graph: memories + documents + entities + typed relationships
+          if (req.method === 'GET') {
+            if (!ensurePersistedMemoryOrFail(res, '/api/graph/intelligent')) return;
+            try {
+              const limit = Math.min(Number(url.searchParams.get('limit') || 500), 2000);
+              const entityFilter = url.searchParams.get('entity') || null;
+              const memTypeFilter = url.searchParams.get('memory_type') || null;
+              const docFilter = url.searchParams.get('document_id') || null;
+
+              // 1. Memories scoped to user/org
+              const memWhere = {
+                userId, orgId, deletedAt: null, isLatest: true,
+                ...(memTypeFilter ? { memoryType: memTypeFilter } : {}),
+              };
+              const memories = await prisma.memory.findMany({
+                where: memWhere,
+                orderBy: { updatedAt: 'desc' },
+                take: limit,
+                select: {
+                  id: true, title: true, content: true, memoryType: true,
+                  tags: true, importanceScore: true, createdAt: true, updatedAt: true,
+                  sourcePlatform: true,
+                },
+              });
+              const memoryIds = memories.map(m => m.id);
+
+              // 2. Relationships between these memories
+              const relationships = await prisma.relationship.findMany({
+                where: { OR: [{ fromId: { in: memoryIds } }, { toId: { in: memoryIds } }] },
+                select: { id: true, fromId: true, toId: true, type: true, confidence: true, createdBy: true },
+              });
+
+              // 3. Evidence links → documents
+              const evLinks = await prisma.memoryEvidenceLink.findMany({
+                where: { memoryId: { in: memoryIds } },
+                select: { memoryId: true, segmentId: true, documentId: true, linkType: true, confidence: true },
+              });
+              const docIds = [...new Set(evLinks.map(l => l.documentId).filter(Boolean))];
+              const documents = docIds.length ? await prisma.knowledgeDocument.findMany({
+                where: { id: { in: docIds }, orgId },
+                select: { id: true, title: true, sourcePlatform: true, documentType: true, documentDate: true, wordCount: true },
+              }) : [];
+
+              // 4. Entity mentions → entities
+              const mentions = await prisma.entityMention.findMany({
+                where: { memoryId: { in: memoryIds } },
+                select: { entityId: true, memoryId: true, confidence: true },
+              });
+              const entityIds = [...new Set(mentions.map(m => m.entityId))];
+              const entities = entityIds.length ? await prisma.entity.findMany({
+                where: {
+                  id: { in: entityIds },
+                  orgId,
+                  ...(entityFilter ? { canonicalName: { contains: entityFilter, mode: 'insensitive' } } : {}),
+                },
+                select: { id: true, canonicalName: true, entityType: true, mentionCount: true, aliases: true },
+              }) : [];
+
+              // 5. Build node + edge arrays
+              const nodes = [];
+              for (const m of memories) {
+                if (docFilter && !evLinks.some(l => l.memoryId === m.id && l.documentId === docFilter)) continue;
+                nodes.push({
+                  id: m.id,
+                  kind: 'memory',
+                  label: (m.title || m.content || '').slice(0, 60),
+                  memory_type: m.memoryType,
+                  importance: m.importanceScore || 0.5,
+                  tags: m.tags || [],
+                  source: m.sourcePlatform,
+                  createdAt: m.createdAt,
+                  size: 1 + Math.log2(1 + (m.importanceScore || 0.5) * 10),
+                });
+              }
+              for (const d of documents) {
+                nodes.push({
+                  id: d.id,
+                  kind: 'document',
+                  label: (d.title || '').slice(0, 60),
+                  doc_type: d.documentType,
+                  source: d.sourcePlatform,
+                  word_count: d.wordCount,
+                  createdAt: d.documentDate,
+                });
+              }
+              for (const e of entities) {
+                nodes.push({
+                  id: e.id,
+                  kind: 'entity',
+                  label: e.canonicalName,
+                  entity_type: e.entityType,
+                  mention_count: e.mentionCount || 1,
+                  aliases: e.aliases || [],
+                });
+              }
+
+              const edges = [];
+              // memory<->memory relationships
+              for (const r of relationships) {
+                edges.push({
+                  id: r.id,
+                  source: r.fromId,
+                  target: r.toId,
+                  type: String(r.type).toLowerCase(),
+                  confidence: r.confidence ?? 1.0,
+                  created_by: r.createdBy,
+                });
+              }
+              // memory -> document
+              for (const l of evLinks) {
+                if (!l.documentId) continue;
+                edges.push({
+                  id: `ev_${l.memoryId}_${l.documentId}`,
+                  source: l.memoryId,
+                  target: l.documentId,
+                  type: 'derived_from',
+                  confidence: l.confidence ?? 0.9,
+                  kind: 'evidence',
+                });
+              }
+              // memory -> entity
+              for (const m of mentions) {
+                edges.push({
+                  id: `em_${m.memoryId}_${m.entityId}`,
+                  source: m.memoryId,
+                  target: m.entityId,
+                  type: 'mentions',
+                  confidence: m.confidence ?? 0.7,
+                  kind: 'mention',
+                });
+              }
+
+              return jsonResponse(res, {
+                nodes,
+                edges,
+                counts: {
+                  memories: memories.length,
+                  documents: documents.length,
+                  entities: entities.length,
+                  relationships: relationships.length,
+                  evidence_links: evLinks.length,
+                  mentions: mentions.length,
+                },
+              });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
         case '/api/graph':
           if (req.method === 'GET') {
             if (!ensurePersistedMemoryOrFail(res, '/api/graph')) {

@@ -564,6 +564,11 @@ export class DocumentFirstIngestionService {
               }
             }
           });
+
+          // P1 #12 — entity-aware memory linking
+          // Mirror segment's entity_mentions onto the promoted memory so
+          // memory recall can filter/rank by entity.
+          this._linkEntitiesToMemoryAsync({ memoryId, segmentId: segment.id });
         }
       } catch (error) {
         console.error(`[DocumentFirstIngestion] Failed to promote segment ${segment.id}:`, error);
@@ -571,5 +576,33 @@ export class DocumentFirstIngestionService {
     }
 
     return { candidates, memories };
+  }
+
+  /** Fire-and-forget: copy segment's entity mentions onto memory. */
+  _linkEntitiesToMemoryAsync({ memoryId, segmentId }) {
+    if (process.env.ENABLE_ENTITY_EXTRACTION !== 'true') return;
+    (async () => {
+      try {
+        // Wait briefly so extractor (also async) has time to land mentions
+        await new Promise(r => setTimeout(r, 500));
+        const segMentions = await this.db.entityMention.findMany({
+          where: { segmentId },
+          select: { entityId: true, mentionText: true, confidence: true, context: true },
+        });
+        if (!segMentions.length) return;
+        await this.db.entityMention.createMany({
+          data: segMentions.map(m => ({
+            entityId: m.entityId,
+            memoryId,
+            mentionText: m.mentionText,
+            confidence: m.confidence,
+            context: m.context,
+          })),
+          skipDuplicates: true,
+        });
+      } catch (err) {
+        this.logger.warn(`[entity-memory-link] memory ${memoryId} failed: ${err.message}`);
+      }
+    })();
   }
 }

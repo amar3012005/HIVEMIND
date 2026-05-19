@@ -368,6 +368,7 @@ model Memory {
   // Phase 1: Document-backed memory relations
   derivation                                                  MemoryDerivation?
   evidenceLinks                                               MemoryEvidenceLink[]
+  entityMentions                                              EntityMention[]
 
   @@index([userId])
   @@index([orgId])
@@ -614,6 +615,7 @@ model EntityMention {
   entityId    String             @map("entity_id") @db.Uuid
   documentId  String?            @map("document_id") @db.Uuid
   segmentId   String?            @map("segment_id") @db.Uuid
+  memoryId    String?            @map("memory_id") @db.Uuid
   mentionText String             @map("mention_text") @db.VarChar(500)
   startOffset Int?               @map("start_offset")
   endOffset   Int?               @map("end_offset")
@@ -624,10 +626,12 @@ model EntityMention {
   entity      Entity             @relation(fields: [entityId], references: [id], onDelete: Cascade)
   document    KnowledgeDocument? @relation(fields: [documentId], references: [id], onDelete: Cascade)
   segment     KnowledgeSegment?  @relation(fields: [segmentId], references: [id], onDelete: Cascade)
+  memory      Memory?            @relation(fields: [memoryId], references: [id], onDelete: Cascade)
 
   @@index([entityId])
   @@index([documentId])
   @@index([segmentId])
+  @@index([memoryId])
   @@index([createdAt(sort: Desc)])
   @@map("entity_mentions")
 }

@@ -265,7 +265,27 @@ export class EntityExtractor {
           continue;
         }
       }
-      // 3. New unique entity
+      // 3. Email heuristic — match email domain/local-part to existing entity alias
+      if (c.source === 'regex_email' && c.type === 'person') {
+        const emailParts = lower.split('@');
+        if (emailParts.length === 2) {
+          const local = emailParts[0];
+          const domain = emailParts[1].split('.')[0]; // strip TLD
+          // Try matching against other entries in `out` by alias OR canonical
+          let absorbed = false;
+          for (const [k, v] of out.entries()) {
+            const candidates = [v.name.toLowerCase(), ...(v.aliases || []).map(a => a.toLowerCase())];
+            if (candidates.some(s => s === domain || s.includes(domain) || domain.includes(s)) ||
+                candidates.some(s => s === local || s.includes(local))) {
+              v.aliases = Array.from(new Set([...(v.aliases || []), c.name]));
+              absorbed = true;
+              break;
+            }
+          }
+          if (absorbed) continue;
+        }
+      }
+      // 4. New unique entity
       const key = `${c.type}|${lower}`;
       const prev = out.get(key);
       if (prev) {

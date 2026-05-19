@@ -175,6 +175,11 @@ const { SessionManager } = await import('./tara/session-manager.js');
 const { SessionAnalytics } = await import('./tara/session-analytics.js');
 const { isTaraRoute } = await import('./tara/routes.js');
 
+// Phase 1: Document-Backed Memory Architecture
+const { DocumentFirstIngestionService } = await import('./knowledge/document-first-ingestion.js');
+const { EvidenceRetrievalService } = await import('./knowledge/evidence-retrieval.js');
+const { parseWithDocling } = await import('./knowledge/enterprise/docling-adapter.js');
+
 // Session analytics instance (lazy init)
 let taraAnalytics = null;
 
@@ -802,6 +807,79 @@ if (taraHandler) taraHandler.qdrantClient = qdrantClient;
 // Inject qdrantClient into MemoryGraphEngine for semantic similarity during ingestion
 // (triple operator detection: Updates/Extends/Derives need vector search, not just FTS)
 if (persistentMemoryEngine) persistentMemoryEngine.vectorStore = qdrantClient;
+
+// ─── Phase 1: Document-Backed Memory Services ───────────────────────────────────
+// Feature-flagged: enabled via ENABLE_DOCUMENT_FIRST_INGEST and ENABLE_EVIDENCE_RECALL env vars
+let documentFirstIngestion = null;
+let evidenceRetrieval = null;
+
+// Docling adapter wrapper: converts buffer→file→parse→cleanup
+let doclingAdapter = null;
+if (process.env.DOCLING_URL) {
+  doclingAdapter = {
+    parseBuffer: async (fileBuffer, { filename, contentType }) => {
+      const tempDir = '/tmp/hivemind-docling';
+      fs.mkdirSync(tempDir, { recursive: true });
+      const tempPath = path.join(tempDir, `${crypto.randomUUID()}_${filename}`);
+      
+      try {
+        fs.writeFileSync(tempPath, fileBuffer);
+        const result = await parseWithDocling(tempPath, filename);
+        return result;
+      } finally {
+        // Cleanup temp file
+        try {
+          fs.unlinkSync(tempPath);
+        } catch (cleanupErr) {
+          console.warn('[Docling] Failed to cleanup temp file:', cleanupErr.message);
+        }
+      }
+    }
+  };
+  console.log('[Phase1] Docling adapter enabled');
+}
+
+if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentMemoryStore && persistentMemoryEngine) {
+  try {
+    documentFirstIngestion = new DocumentFirstIngestionService({
+      db: prisma,
+      smartIngestRouter,
+      memoryGraphEngine: persistentMemoryEngine,
+      doclingAdapter, // Pass Docling adapter if DOCLING_URL is set, null otherwise
+      embeddingService: {
+        embed: async (text) => {
+          // Use the same embedding pipeline as the existing system
+          const { embedText } = await import('./vector/embedding-service.js');
+          return embedText(text);
+        },
+        storeVector: async ({ collectionName, id, vector, payload }) => {
+          await qdrantClient.upsert(collectionName, {
+            points: [{
+              id,
+              vector,
+              payload
+            }]
+          });
+        }
+      }
+    });
+    console.log('[Phase1] DocumentFirstIngestionService enabled');
+  } catch (err) {
+    console.warn('[Phase1] DocumentFirstIngestionService failed to init:', err.message);
+  }
+}
+
+if (process.env.ENABLE_EVIDENCE_RECALL === 'true' && prisma && qdrantClient) {
+  try {
+    evidenceRetrieval = new EvidenceRetrievalService({
+      db: prisma,
+      qdrantClient
+    });
+    console.log('[Phase1] EvidenceRetrievalService enabled');
+  } catch (err) {
+    console.warn('[Phase1] EvidenceRetrievalService failed to init:', err.message);
+  }
+}
 
 // Initialize Three-Tier Retrieval
 const threeTierRetrieval = new ThreeTierRetrieval({
@@ -2339,7 +2417,13 @@ const server = http.createServer(async (req, res) => {
     return jsonResponse(res, {
       ok: true,
       service: 'hivemind-api',
-      port: process.env.PORT || 3000
+      port: process.env.PORT || 3000,
+      phase1: {
+        document_first_ingestion: !!documentFirstIngestion,
+        evidence_retrieval: !!evidenceRetrieval,
+        evidence_collection: process.env.EVIDENCE_QDRANT_COLLECTION || null,
+        memory_collection: process.env.MEMORY_QDRANT_COLLECTION || process.env.QDRANT_COLLECTION || null
+      }
     });
   }
 
@@ -4901,6 +4985,84 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
+      // GET /api/documents/:documentId — get single document with segments and promoted memories
+      if (pathname.match(/^\/api\/documents\/[^/]+$/) && req.method === 'GET') {
+        if (!ensurePersistedMemoryOrFail(res, '/api/documents/:id')) return;
+        if (!documentFirstIngestion) {
+          return jsonResponse(res, { error: 'Document-first ingestion not enabled' }, 501);
+        }
+
+        const documentId = pathname.split('/')[3];
+        
+        try {
+          const document = await prisma.knowledgeDocument.findFirst({
+            where: {
+              id: documentId,
+              userId,
+              orgId
+            },
+            include: {
+              sourceArtifact: {
+                select: {
+                  id: true,
+                  contentType: true,
+                  sizeBytes: true,
+                  storageLocation: true,
+                  payload: true
+                }
+              }
+            }
+          });
+
+          if (!document) {
+            return jsonResponse(res, { error: 'Document not found or access denied' }, 404);
+          }
+
+          // Get segments
+          const segments = await prisma.knowledgeSegment.findMany({
+            where: { documentId },
+            orderBy: { segmentIndex: 'asc' }
+          });
+
+          // Get promoted memories linked to this document
+          const evidenceLinks = await prisma.memoryEvidenceLink.findMany({
+            where: { documentId },
+            include: {
+              memory: {
+                select: {
+                  id: true,
+                  title: true,
+                  content: true,
+                  memoryType: true,
+                  importance: true,
+                  tags: true,
+                  createdAt: true
+                }
+              }
+            },
+            orderBy: { confidence: 'desc' }
+          });
+
+          const promotedMemories = evidenceLinks.map(link => ({
+            ...link.memory,
+            linkType: link.linkType,
+            confidence: link.confidence,
+            excerpt: link.excerpt
+          }));
+
+          return jsonResponse(res, {
+            document,
+            segments,
+            promotedMemories,
+            segmentCount: segments.length,
+            promotedCount: promotedMemories.length
+          });
+        } catch (err) {
+          console.error('[documents/:id] Failed:', err.message);
+          return jsonResponse(res, { error: err.message }, 500);
+        }
+      }
+
       switch (pathname) {
         case '/api/generate':
           if (req.method === 'POST') {
@@ -7242,6 +7404,7 @@ const server = http.createServer(async (req, res) => {
                 detectedType: detected.type,
                 confidence: detected.confidence,
                 doclingOutput,
+                buffer: filePart.data, // Phase 1: preserve buffer for document-first path
                 createdAt: Date.now(),
               });
 
@@ -7287,6 +7450,36 @@ const server = http.createServer(async (req, res) => {
             const userTags = ingestTags ? (Array.isArray(ingestTags) ? ingestTags : ingestTags.split(',').map(t => t.trim()).filter(Boolean)) : [];
             const visibility = targetScope === 'organization' ? 'organization' : 'private';
             const project = containerTag || null;
+
+            // ─── Phase 1: Document-First Enterprise Ingestion (feature-flagged) ───
+            if (documentFirstIngestion && pending.buffer) {
+              try {
+                const result = await documentFirstIngestion.ingestEnterpriseDocument({
+                  userId, orgId,
+                  filename: pending.filename,
+                  fileBuffer: pending.buffer,
+                  contentType: pending.mimeType || 'application/octet-stream',
+                  schema: { documentType: confirmed_type, title: pending.filename },
+                  metadata: { tags: userTags, project, visibility }
+                });
+                console.log(`[enterprise] Phase1 upload file=${pending.filename} docId=${result.documentId} segments=${result.segmentCount} promoted=${result.promotedCount}`);
+                return jsonResponse(res, {
+                  job_id: crypto.randomUUID(),
+                  upload_id,
+                  mode: 'document_first',
+                  status: 'completed',
+                  confirmed_type,
+                  documentId: result.documentId,
+                  segmentCount: result.segmentCount,
+                  candidateCount: result.candidateCount,
+                  promotedCount: result.promotedCount,
+                  promotedMemoryIds: result.promotedMemoryIds
+                }, 202);
+              } catch (phase1Err) {
+                console.error('[enterprise] Phase1 upload failed, falling back to legacy path:', phase1Err.message);
+                // Fall through to legacy path
+              }
+            }
 
             try {
               const { extractSchema } = await import('./knowledge/enterprise/extractor.js');
@@ -7557,6 +7750,36 @@ const server = http.createServer(async (req, res) => {
               const allowedExts = ['pdf', 'docx', 'txt', 'md', 'csv'];
               if (!allowedTypes.includes(filePart.contentType) && !allowedExts.includes(ext)) {
                 return jsonResponse(res, { error: `Unsupported file type: ${filePart.contentType || ext}. Allowed: PDF, DOCX, TXT, MD, CSV` }, 415);
+              }
+
+              // ─── Phase 1: Document-First Ingestion Path (feature-flagged) ───
+              if (documentFirstIngestion) {
+                console.log(`[knowledge] Using Phase 1 document-first ingestion for ${filePart.filename}`);
+                try {
+                  const result = await documentFirstIngestion.ingestKnowledgeDocument({
+                    userId, orgId,
+                    filename: filePart.filename,
+                    fileBuffer: filePart.data,
+                    contentType: filePart.contentType || `text/${ext}`,
+                    metadata: { tags: userTags, project: containerTag, visibility: targetScope === 'organization' ? 'organization' : 'private' }
+                  });
+                  console.log(`[knowledge] ✓ Phase1 complete: file=${filePart.filename} docId=${result.documentId} segments=${result.segmentCount} promoted=${result.promotedCount}`);
+                  return jsonResponse(res, {
+                    upload_id: crypto.randomUUID(),
+                    filename: filePart.filename,
+                    mode: 'document_first',
+                    documentId: result.documentId,
+                    segmentCount: result.segmentCount,
+                    candidateCount: result.candidateCount,
+                    promotedCount: result.promotedCount,
+                    promotedMemoryIds: result.promotedMemoryIds
+                  });
+                } catch (phase1Err) {
+                  console.error('[knowledge] ✗ Phase1 failed, falling back to legacy:', phase1Err.message, phase1Err.stack);
+                  // Fall through to legacy path
+                }
+              } else {
+                console.log(`[knowledge] Phase 1 disabled (ENABLE_DOCUMENT_FIRST_INGEST=${process.env.ENABLE_DOCUMENT_FIRST_INGEST}), using legacy path`);
               }
 
               const { processDocument } = await import('./knowledge/document-chunker.js');
@@ -12847,6 +13070,244 @@ ${injectionText}`;
             } catch (chatErr) {
               console.error('[chat] Failed:', chatErr.message);
               return jsonResponse(res, { error: chatErr.message }, 500);
+            }
+          }
+          break;
+
+        // ─── Phase 1: Evidence Retrieval & Feature Flags ────────────────────────
+
+        case '/api/features':
+          if (req.method === 'GET') {
+            return jsonResponse(res, {
+              document_first_ingest: process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && !!documentFirstIngestion,
+              evidence_recall: process.env.ENABLE_EVIDENCE_RECALL === 'true' && !!evidenceRetrieval,
+              memory_promotion_jobs: process.env.ENABLE_MEMORY_PROMOTION_JOBS === 'true',
+              evidence_collection: process.env.EVIDENCE_QDRANT_COLLECTION || null,
+              memory_collection: process.env.MEMORY_QDRANT_COLLECTION || process.env.QDRANT_COLLECTION || null
+            });
+          }
+          break;
+
+        case '/api/evidence/search':
+          if (req.method === 'POST') {
+            if (!ensurePersistedMemoryOrFail(res, '/api/evidence/search')) return;
+            if (!evidenceRetrieval) {
+              return jsonResponse(res, { error: 'Evidence retrieval not enabled. Set ENABLE_EVIDENCE_RECALL=true' }, 501);
+            }
+            const { query, limit, documentId } = body;
+            if (!query) return jsonResponse(res, { error: 'query is required' }, 400);
+            try {
+              const results = await evidenceRetrieval.retrieveEvidence({
+                query, userId, orgId, limit: limit || 10, documentId
+              });
+              return jsonResponse(res, { success: true, mode: 'evidence', results, count: results.length });
+            } catch (err) {
+              console.error('[evidence/search] Failed:', err.message);
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/evidence/hybrid':
+          if (req.method === 'POST') {
+            if (!ensurePersistedMemoryOrFail(res, '/api/evidence/hybrid')) return;
+            if (!evidenceRetrieval) {
+              return jsonResponse(res, { error: 'Evidence retrieval not enabled. Set ENABLE_EVIDENCE_RECALL=true' }, 501);
+            }
+            const { query, memoryLimit, evidenceLimit } = body;
+            if (!query) return jsonResponse(res, { error: 'query is required' }, 400);
+            try {
+              const result = await evidenceRetrieval.retrieveHybrid({
+                query, userId, orgId, memoryLimit: memoryLimit || 5, evidenceLimit: evidenceLimit || 5
+              });
+              return jsonResponse(res, {
+                success: true, mode: 'hybrid',
+                memories: result.memories, evidence: result.evidence,
+                memoriesCount: result.memories.length, evidenceCount: result.evidence.length
+              });
+            } catch (err) {
+              console.error('[evidence/hybrid] Failed:', err.message);
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/evidence/memory':
+          if (req.method === 'GET') {
+            if (!ensurePersistedMemoryOrFail(res, '/api/evidence/memory')) return;
+            if (!evidenceRetrieval) {
+              return jsonResponse(res, { error: 'Evidence retrieval not enabled. Set ENABLE_EVIDENCE_RECALL=true' }, 501);
+            }
+            const memoryId = url.searchParams.get('memoryId') || body?.memoryId;
+            if (!memoryId) return jsonResponse(res, { error: 'memoryId query parameter is required' }, 400);
+            try {
+              const evidenceLinks = await evidenceRetrieval.getMemoryEvidence(memoryId);
+              return jsonResponse(res, { success: true, memoryId, evidenceLinks, count: evidenceLinks.length });
+            } catch (err) {
+              console.error('[evidence/memory] Failed:', err.message);
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/evidence/document':
+          if (req.method === 'GET') {
+            if (!ensurePersistedMemoryOrFail(res, '/api/evidence/document')) return;
+            if (!evidenceRetrieval) {
+              return jsonResponse(res, { error: 'Evidence retrieval not enabled. Set ENABLE_EVIDENCE_RECALL=true' }, 501);
+            }
+            const documentId = url.searchParams.get('documentId') || body?.documentId;
+            if (!documentId) return jsonResponse(res, { error: 'documentId query parameter is required' }, 400);
+            try {
+              const result = await evidenceRetrieval.getDocumentEvidence({ documentId, userId, orgId });
+              if (!result) return jsonResponse(res, { error: 'Document not found or access denied' }, 404);
+              return jsonResponse(res, {
+                success: true,
+                document: result.document,
+                segments: result.segments,
+                linkedMemories: result.linkedMemories,
+                segmentCount: result.segments.length,
+                memoryCount: result.linkedMemories.length
+              });
+            } catch (err) {
+              console.error('[evidence/document] Failed:', err.message);
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        // ─── Phase 1: Document Browser Routes ───────────────────────────────────
+
+        case '/api/documents':
+          if (req.method === 'GET') {
+            if (!ensurePersistedMemoryOrFail(res, '/api/documents')) return;
+            if (!documentFirstIngestion) {
+              return jsonResponse(res, { error: 'Document-first ingestion not enabled. Set ENABLE_DOCUMENT_FIRST_INGEST=true' }, 501);
+            }
+
+            const limit = parseInt(url.searchParams.get('limit') || '20');
+            const offset = parseInt(url.searchParams.get('offset') || '0');
+            const documentType = url.searchParams.get('document_type');
+            const tags = url.searchParams.get('tags');
+
+            try {
+              const where = {
+                userId,
+                orgId,
+                ...(documentType ? { documentType } : {}),
+                ...(tags ? { tags: { hasSome: tags.split(',').map(t => t.trim()) } } : {})
+              };
+
+              const [documents, total] = await Promise.all([
+                prisma.knowledgeDocument.findMany({
+                  where,
+                  orderBy: { createdAt: 'desc' },
+                  take: limit,
+                  skip: offset,
+                  select: {
+                    id: true,
+                    title: true,
+                    documentType: true,
+                    sourcePlatform: true,
+                    sourceUrl: true,
+                    documentDate: true,
+                    wordCount: true,
+                    parseStatus: true,
+                    parseEngine: true,
+                    structureExtracted: true,
+                    tags: true,
+                    createdAt: true,
+                    updatedAt: true,
+                    _count: {
+                      select: {
+                        segments: true,
+                        evidenceLinks: true
+                      }
+                    }
+                  }
+                }),
+                prisma.knowledgeDocument.count({ where })
+              ]);
+
+              const enriched = documents.map(doc => ({
+                ...doc,
+                segmentCount: doc._count.segments,
+                promotedCount: doc._count.evidenceLinks,
+                _count: undefined
+              }));
+
+              return jsonResponse(res, {
+                documents: enriched,
+                pagination: {
+                  total,
+                  limit,
+                  offset,
+                  hasMore: offset + limit < total
+                }
+              });
+            } catch (err) {
+              console.error('[documents] List failed:', err.message);
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/documents/search':
+          if (req.method === 'GET') {
+            if (!ensurePersistedMemoryOrFail(res, '/api/documents/search')) return;
+            if (!documentFirstIngestion) {
+              return jsonResponse(res, { error: 'Document-first ingestion not enabled' }, 501);
+            }
+
+            const query = url.searchParams.get('q');
+            const limit = parseInt(url.searchParams.get('limit') || '20');
+
+            if (!query) return jsonResponse(res, { error: 'q query parameter is required' }, 400);
+
+            try {
+              const documents = await prisma.knowledgeDocument.findMany({
+                where: {
+                  userId,
+                  orgId,
+                  OR: [
+                    { title: { contains: query, mode: 'insensitive' } },
+                    { tags: { hasSome: [query] } },
+                    { sourcePlatform: { contains: query, mode: 'insensitive' } }
+                  ]
+                },
+                orderBy: { createdAt: 'desc' },
+                take: limit,
+                select: {
+                  id: true,
+                  title: true,
+                  documentType: true,
+                  sourcePlatform: true,
+                  sourceUrl: true,
+                  documentDate: true,
+                  wordCount: true,
+                  parseEngine: true,
+                  tags: true,
+                  createdAt: true,
+                  _count: {
+                    select: {
+                      segments: true,
+                      evidenceLinks: true
+                    }
+                  }
+                }
+              });
+
+              const enriched = documents.map(doc => ({
+                ...doc,
+                segmentCount: doc._count.segments,
+                promotedCount: doc._count.evidenceLinks,
+                _count: undefined
+              }));
+
+              return jsonResponse(res, { results: enriched });
+            } catch (err) {
+              console.error('[documents/search] Failed:', err.message);
+              return jsonResponse(res, { error: err.message }, 500);
             }
           }
           break;

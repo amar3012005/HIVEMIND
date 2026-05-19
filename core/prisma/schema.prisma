@@ -315,56 +315,59 @@ model NangoConnection {
 /// Supports cognitive scoring for spaced repetition and Ebbinghaus forgetting curve
 /// This model contains an expression index which requires additional setup for migrations. Visit https://pris.ly/d/expression-indexes for more info.
 model Memory {
-  id                                                          String              @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
-  userId                                                      String              @map("user_id") @db.Uuid
-  orgId                                                       String?             @map("org_id") @db.Uuid
+  id                                                          String               @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
+  userId                                                      String               @map("user_id") @db.Uuid
+  orgId                                                       String?              @map("org_id") @db.Uuid
   content                                                     String
-  memoryType                                                  MemoryType?         @default(fact) @map("memory_type")
-  title                                                       String?             @db.VarChar(500)
+  memoryType                                                  MemoryType?          @default(fact) @map("memory_type")
+  title                                                       String?              @db.VarChar(500)
   tags                                                        String[]
-  sourcePlatform                                              String?             @map("source_platform") @db.VarChar(50)
-  sourceSessionId                                             String?             @map("source_session_id") @db.VarChar(255)
-  sourceMessageId                                             String?             @map("source_message_id") @db.VarChar(255)
-  sourceUrl                                                   String?             @map("source_url")
-  isLatest                                                    Boolean?            @default(true) @map("is_latest")
-  supersedesId                                                String?             @map("supersedes_id") @db.Uuid
-  strength                                                    Float?              @default(1.0) @db.Real
-  recallCount                                                 Int?                @default(0) @map("recall_count")
-  importanceScore                                             Float?              @default(0.5) @map("importance_score") @db.Real
-  lastConfirmedAt                                             DateTime?           @default(now()) @map("last_confirmed_at") @db.Timestamptz(6)
-  documentDate                                                DateTime?           @map("document_date") @db.Timestamptz(6)
-  eventDates                                                  DateTime[]          @map("event_dates") @db.Timestamptz
-  visibility                                                  VisibilityScope?    @default(private)
-  scope                                                       MemoryScope         @default(personal) @map("scope")
-  primaryTeamId                                               String?             @map("primary_team_id") @db.Uuid
-  sharedWithOrgs                                              String[]            @map("shared_with_orgs") @db.Uuid
-  embeddingModel                                              String?             @default("mistral-embed") @map("embedding_model") @db.VarChar(100)
-  embeddingDimension                                          Int?                @default(1024) @map("embedding_dimension")
-  embeddingVersion                                            Int?                @default(1) @map("embedding_version")
-  processingBasis                                             String?             @default("consent") @map("processing_basis") @db.VarChar(100)
-  retentionUntil                                              DateTime?           @map("retention_until") @db.Timestamptz(6)
-  exportBlocked                                               Boolean?            @default(false) @map("export_blocked")
-  createdAt                                                   DateTime?           @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt                                                   DateTime?           @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  deletedAt                                                   DateTime?           @map("deleted_at") @db.Timestamptz(6)
-  project                                                     String?             @map("project")
-  version                                                     Int                 @default(1)
-  auditLogs                                                   AuditLog[]          @relation("MemoryAuditLogs")
+  sourcePlatform                                              String?              @map("source_platform") @db.VarChar(50)
+  sourceSessionId                                             String?              @map("source_session_id") @db.VarChar(255)
+  sourceMessageId                                             String?              @map("source_message_id") @db.VarChar(255)
+  sourceUrl                                                   String?              @map("source_url")
+  isLatest                                                    Boolean?             @default(true) @map("is_latest")
+  supersedesId                                                String?              @map("supersedes_id") @db.Uuid
+  strength                                                    Float?               @default(1.0) @db.Real
+  recallCount                                                 Int?                 @default(0) @map("recall_count")
+  importanceScore                                             Float?               @default(0.5) @map("importance_score") @db.Real
+  lastConfirmedAt                                             DateTime?            @default(now()) @map("last_confirmed_at") @db.Timestamptz(6)
+  documentDate                                                DateTime?            @map("document_date") @db.Timestamptz(6)
+  eventDates                                                  DateTime[]           @map("event_dates") @db.Timestamptz
+  visibility                                                  VisibilityScope?     @default(private)
+  scope                                                       MemoryScope          @default(personal) @map("scope")
+  primaryTeamId                                               String?              @map("primary_team_id") @db.Uuid
+  sharedWithOrgs                                              String[]             @map("shared_with_orgs") @db.Uuid
+  embeddingModel                                              String?              @default("mistral-embed") @map("embedding_model") @db.VarChar(100)
+  embeddingDimension                                          Int?                 @default(1024) @map("embedding_dimension")
+  embeddingVersion                                            Int?                 @default(1) @map("embedding_version")
+  processingBasis                                             String?              @default("consent") @map("processing_basis") @db.VarChar(100)
+  retentionUntil                                              DateTime?            @map("retention_until") @db.Timestamptz(6)
+  exportBlocked                                               Boolean?             @default(false) @map("export_blocked")
+  createdAt                                                   DateTime?            @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                                                   DateTime?            @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt                                                   DateTime?            @map("deleted_at") @db.Timestamptz(6)
+  project                                                     String?              @map("project")
+  version                                                     Int                  @default(1)
+  auditLogs                                                   AuditLog[]           @relation("MemoryAuditLogs")
   codeMetadata                                                CodeMemoryMetadata?
-  derivationSources                                           DerivationJob[]     @relation("DerivationSourceMemory")
-  derivationTargets                                           DerivationJob[]     @relation("DerivationTargetMemory")
-  organization                                                Organization?       @relation("OrgMemories", fields: [orgId], references: [id], onDelete: Cascade)
-  supersedes                                                  Memory?             @relation("MemorySupersedes", fields: [supersedesId], references: [id], onDelete: Cascade)
-  supersededBy                                                Memory[]            @relation("MemorySupersedes")
-  user                                                        User                @relation("UserMemories", fields: [userId], references: [id], onDelete: Cascade)
-  primaryTeam                                                 Team?               @relation("TeamMemories", fields: [primaryTeamId], references: [id], onDelete: SetNull)
+  derivationSources                                           DerivationJob[]      @relation("DerivationSourceMemory")
+  derivationTargets                                           DerivationJob[]      @relation("DerivationTargetMemory")
+  organization                                                Organization?        @relation("OrgMemories", fields: [orgId], references: [id], onDelete: Cascade)
+  supersedes                                                  Memory?              @relation("MemorySupersedes", fields: [supersedesId], references: [id], onDelete: Cascade)
+  supersededBy                                                Memory[]             @relation("MemorySupersedes")
+  user                                                        User                 @relation("UserMemories", fields: [userId], references: [id], onDelete: Cascade)
+  primaryTeam                                                 Team?                @relation("TeamMemories", fields: [primaryTeamId], references: [id], onDelete: SetNull)
   memoryProjects                                              MemoryProject[]
   versions                                                    MemoryVersion[]
-  memory_versions_memory_versions_related_memory_idTomemories MemoryVersion[]     @relation("memory_versions_related_memory_idTomemories")
-  relationshipsFrom                                           Relationship[]      @relation("RelationshipFromMemory")
-  relationshipsTo                                             Relationship[]      @relation("RelationshipToMemory")
+  memory_versions_memory_versions_related_memory_idTomemories MemoryVersion[]      @relation("memory_versions_related_memory_idTomemories")
+  relationshipsFrom                                           Relationship[]       @relation("RelationshipFromMemory")
+  relationshipsTo                                             Relationship[]       @relation("RelationshipToMemory")
   sourceMetadata                                              SourceMetadata?
-  vectorEmbedding                                             VectorEmbedding?    @relation("MemoryVectorEmbedding")
+  vectorEmbedding                                             VectorEmbedding?     @relation("MemoryVectorEmbedding")
+  // Phase 1: Document-backed memory relations
+  derivation                                                  MemoryDerivation?
+  evidenceLinks                                               MemoryEvidenceLink[]
 
   @@index([userId])
   @@index([orgId])
@@ -446,6 +449,259 @@ model CodeMemoryMetadata {
   @@index([filepath], map: "idx_code_memory_metadata_filepath")
   @@index([language], map: "idx_code_memory_metadata_language")
   @@map("code_memory_metadata")
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// PHASE 1: DOCUMENT-BACKED MEMORY ARCHITECTURE
+// Self-evolving company brain with evidence/structure/memory separation
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Raw source artifacts — immutable evidence layer
+/// Stores original uploads, API responses, webhook payloads
+model SourceArtifact {
+  id              String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId          String              @map("user_id") @db.Uuid
+  orgId           String              @map("org_id") @db.Uuid
+  artifactType    String              @map("artifact_type") @db.VarChar(50) // 'upload' | 'api_response' | 'webhook' | 'sync'
+  sourcePlatform  String              @map("source_platform") @db.VarChar(50)
+  sourceId        String?             @map("source_id") @db.VarChar(500)
+  sourceUrl       String?             @map("source_url")
+  contentType     String?             @map("content_type") @db.VarChar(100)
+  sizeBytes       BigInt?             @map("size_bytes")
+  checksum        String              @db.VarChar(64) // SHA-256 for dedup
+  storageLocation String              @map("storage_location") // S3/local path or inline if small
+  payload         Json? // for small artifacts, stored inline
+  version         Int                 @default(1)
+  createdAt       DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  metadata        Json                @default("{}")
+  documents       KnowledgeDocument[]
+
+  @@unique([userId, orgId, checksum, sourcePlatform])
+  @@index([userId, orgId])
+  @@index([sourcePlatform])
+  @@index([artifactType])
+  @@index([checksum])
+  @@index([createdAt(sort: Desc)])
+  @@map("source_artifacts")
+}
+
+/// Knowledge documents — parsed/normalized from source artifacts
+/// Represents threads, files, web pages, conversations
+model KnowledgeDocument {
+  id                 String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId             String               @map("user_id") @db.Uuid
+  orgId              String               @map("org_id") @db.Uuid
+  sourceArtifactId   String?              @map("source_artifact_id") @db.Uuid
+  documentType       String               @map("document_type") @db.VarChar(50) // 'email_thread' | 'file' | 'conversation' | 'web_page' | 'code_module'
+  title              String?              @db.VarChar(1000)
+  sourcePlatform     String               @map("source_platform") @db.VarChar(50)
+  sourceId           String?              @map("source_id") @db.VarChar(500)
+  sourceUrl          String?              @map("source_url")
+  threadId           String?              @map("thread_id") @db.VarChar(500)
+  sessionId          String?              @map("session_id") @db.VarChar(500)
+  parentDocumentId   String?              @map("parent_document_id") @db.Uuid
+  documentDate       DateTime?            @map("document_date") @db.Timestamptz(6)
+  author             String?              @db.VarChar(500)
+  participants       String[]             @default([])
+  tags               String[]             @default([])
+  language           String?              @default("en") @db.VarChar(10)
+  wordCount          Int?                 @map("word_count")
+  parseStatus        String               @default("pending") @map("parse_status") @db.VarChar(20) // 'pending' | 'parsed' | 'failed'
+  parseEngine        String?              @map("parse_engine") @db.VarChar(50) // 'docling' | 'pdf.js' | 'mammoth' | 'markdown'
+  parseMetadata      Json                 @default("{}") @map("parse_metadata")
+  structureExtracted Boolean              @default(false) @map("structure_extracted")
+  createdAt          DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime             @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  archivedAt         DateTime?            @map("archived_at") @db.Timestamptz(6)
+  sourceArtifact     SourceArtifact?      @relation(fields: [sourceArtifactId], references: [id], onDelete: SetNull)
+  parentDocument     KnowledgeDocument?   @relation("DocumentHierarchy", fields: [parentDocumentId], references: [id], onDelete: SetNull)
+  childDocuments     KnowledgeDocument[]  @relation("DocumentHierarchy")
+  segments           KnowledgeSegment[]
+  entityMentions     EntityMention[]
+  memoryLinks        MemoryEvidenceLink[]
+
+  @@unique([userId, orgId, sourcePlatform, sourceId])
+  @@index([userId, orgId])
+  @@index([documentType])
+  @@index([sourcePlatform])
+  @@index([threadId])
+  @@index([sessionId])
+  @@index([parentDocumentId])
+  @@index([documentDate(sort: Desc)])
+  @@index([parseStatus])
+  @@index([tags], type: Gin)
+  @@index([createdAt(sort: Desc)])
+  @@map("knowledge_documents")
+}
+
+/// Document segments — structural retrieval units
+/// Chunks, sections, paragraphs, messages within documents
+model KnowledgeSegment {
+  id                 String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  documentId         String               @map("document_id") @db.Uuid
+  userId             String               @map("user_id") @db.Uuid
+  orgId              String               @map("org_id") @db.Uuid
+  segmentType        String               @map("segment_type") @db.VarChar(50) // 'heading' | 'paragraph' | 'table' | 'code_block' | 'message' | 'chunk'
+  content            String
+  contentHash        String               @map("content_hash") @db.VarChar(64)
+  segmentIndex       Int                  @map("segment_index") // position within document
+  parentSegmentId    String?              @map("parent_segment_id") @db.Uuid
+  previousSegmentId  String?              @map("previous_segment_id") @db.Uuid
+  depth              Int                  @default(0) // heading depth, nesting level
+  startOffset        Int?                 @map("start_offset")
+  endOffset          Int?                 @map("end_offset")
+  startPage          Int?                 @map("start_page")
+  endPage            Int?                 @map("end_page")
+  wordCount          Int?                 @map("word_count")
+  embeddingModel     String?              @default("mistral-embed") @map("embedding_model") @db.VarChar(100)
+  embeddingDimension Int?                 @default(1024) @map("embedding_dimension")
+  vectorStored       Boolean              @default(false) @map("vector_stored")
+  metadata           Json                 @default("{}") // heading level, table structure, code language, etc
+  createdAt          DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+  document           KnowledgeDocument    @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  parentSegment      KnowledgeSegment?    @relation("SegmentHierarchy", fields: [parentSegmentId], references: [id], onDelete: SetNull)
+  childSegments      KnowledgeSegment[]   @relation("SegmentHierarchy")
+  previousSegment    KnowledgeSegment?    @relation("SegmentSequence", fields: [previousSegmentId], references: [id], onDelete: SetNull)
+  nextSegments       KnowledgeSegment[]   @relation("SegmentSequence")
+  entityMentions     EntityMention[]
+  memoryLinks        MemoryEvidenceLink[]
+
+  @@unique([documentId, segmentIndex])
+  @@index([documentId])
+  @@index([userId, orgId])
+  @@index([segmentType])
+  @@index([parentSegmentId])
+  @@index([previousSegmentId])
+  @@index([contentHash])
+  @@index([vectorStored])
+  @@index([createdAt(sort: Desc)])
+  @@map("knowledge_segments")
+}
+
+/// Named entities — people, orgs, projects, topics, locations, dates
+model Entity {
+  id            String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId         String          @map("org_id") @db.Uuid
+  entityType    String          @map("entity_type") @db.VarChar(50) // 'person' | 'organization' | 'project' | 'topic' | 'location' | 'date' | 'product'
+  canonicalName String          @map("canonical_name") @db.VarChar(500)
+  aliases       String[]        @default([])
+  description   String?
+  externalIds   Json            @default("{}") @map("external_ids") // { "email": "x@y.com", "slack_id": "U123", "github": "user" }
+  confidence    Float           @default(0.8) @db.Real // entity resolution confidence
+  mergedFromIds String[]        @default([]) @map("merged_from_ids") @db.Uuid // track entity merges
+  isActive      Boolean         @default(true) @map("is_active")
+  firstSeenAt   DateTime        @default(now()) @map("first_seen_at") @db.Timestamptz(6)
+  lastSeenAt    DateTime        @default(now()) @map("last_seen_at") @db.Timestamptz(6)
+  mentionCount  Int             @default(0) @map("mention_count")
+  metadata      Json            @default("{}")
+  createdAt     DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime        @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  mentions      EntityMention[]
+  TopicState    TopicState[]
+
+  @@unique([orgId, entityType, canonicalName])
+  @@index([orgId, entityType])
+  @@index([canonicalName])
+  @@index([aliases], type: Gin)
+  @@index([lastSeenAt(sort: Desc)])
+  @@index([mentionCount(sort: Desc)])
+  @@map("entities")
+}
+
+/// Entity mentions in documents and segments
+model EntityMention {
+  id          String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  entityId    String             @map("entity_id") @db.Uuid
+  documentId  String?            @map("document_id") @db.Uuid
+  segmentId   String?            @map("segment_id") @db.Uuid
+  mentionText String             @map("mention_text") @db.VarChar(500)
+  startOffset Int?               @map("start_offset")
+  endOffset   Int?               @map("end_offset")
+  confidence  Float              @default(0.9) @db.Real
+  context     String? // surrounding text
+  metadata    Json               @default("{}")
+  createdAt   DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  entity      Entity             @relation(fields: [entityId], references: [id], onDelete: Cascade)
+  document    KnowledgeDocument? @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  segment     KnowledgeSegment?  @relation(fields: [segmentId], references: [id], onDelete: Cascade)
+
+  @@index([entityId])
+  @@index([documentId])
+  @@index([segmentId])
+  @@index([createdAt(sort: Desc)])
+  @@map("entity_mentions")
+}
+
+/// Links canonical memories to supporting evidence
+model MemoryEvidenceLink {
+  id         String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  memoryId   String             @map("memory_id") @db.Uuid
+  documentId String?            @map("document_id") @db.Uuid
+  segmentId  String?            @map("segment_id") @db.Uuid
+  linkType   String             @default("supports") @map("link_type") @db.VarChar(50) // 'supports' | 'contradicts' | 'refines'
+  confidence Float              @default(0.9) @db.Real
+  excerpt    String? // relevant snippet from evidence
+  createdAt  DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  memory     Memory             @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  document   KnowledgeDocument? @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  segment    KnowledgeSegment?  @relation(fields: [segmentId], references: [id], onDelete: Cascade)
+
+  @@unique([memoryId, documentId, segmentId])
+  @@index([memoryId])
+  @@index([documentId])
+  @@index([segmentId])
+  @@index([linkType])
+  @@map("memory_evidence_links")
+}
+
+/// Tracks how memories were derived from evidence
+model MemoryDerivation {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  memoryId         String    @map("memory_id") @db.Uuid
+  derivationMethod String    @map("derivation_method") @db.VarChar(50) // 'manual' | 'llm_extract' | 'rule_based' | 'promoted_from_segment'
+  derivationAgent  String?   @map("derivation_agent") @db.VarChar(100) // 'gpt-4' | 'claude-3.7' | 'groq-llama3' | 'user'
+  promptTemplate   String?   @map("prompt_template")
+  inputTokens      Int?      @map("input_tokens")
+  outputTokens     Int?      @map("output_tokens")
+  confidence       Float     @default(0.8) @db.Real
+  reviewStatus     String    @default("unreviewed") @map("review_status") @db.VarChar(20) // 'unreviewed' | 'approved' | 'rejected'
+  reviewedBy       String?   @map("reviewed_by") @db.Uuid
+  reviewedAt       DateTime? @map("reviewed_at") @db.Timestamptz(6)
+  metadata         Json      @default("{}")
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  memory           Memory    @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@unique([memoryId])
+  @@index([derivationMethod])
+  @@index([reviewStatus])
+  @@index([createdAt(sort: Desc)])
+  @@map("memory_derivations")
+}
+
+/// Rolling topic state summaries for major entities/projects
+model TopicState {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId          String   @map("org_id") @db.Uuid
+  entityId       String?  @map("entity_id") @db.Uuid
+  topicKey       String   @map("topic_key") @db.VarChar(200) // 'project:qdrant-migration' | 'person:amar' | 'team:eng'
+  summary        String // rolling current state
+  lastMemoryId   String?  @map("last_memory_id") @db.Uuid
+  lastDocumentId String?  @map("last_document_id") @db.Uuid
+  memoryCount    Int      @default(0) @map("memory_count")
+  documentCount  Int      @default(0) @map("document_count")
+  firstSeenAt    DateTime @default(now()) @map("first_seen_at") @db.Timestamptz(6)
+  lastUpdatedAt  DateTime @default(now()) @map("last_updated_at") @db.Timestamptz(6)
+  confidence     Float    @default(0.8) @db.Real
+  metadata       Json     @default("{}")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  entity         Entity?  @relation(fields: [entityId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, topicKey])
+  @@index([orgId])
+  @@index([entityId])
+  @@index([topicKey])
+  @@index([lastUpdatedAt(sort: Desc)])
+  @@map("topic_states")
 }
 
 /// Async queue for deferred DERIVES evaluation

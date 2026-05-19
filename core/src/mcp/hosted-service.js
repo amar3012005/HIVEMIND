@@ -507,6 +507,10 @@ function generateToolsManifest(userId, orgId, options = {}) {
           related_to: {
             type: 'string',
             description: 'Memory ID this relates to (for update/extend/derive relationships)'
+          },
+          project_id: {
+            type: 'string',
+            description: 'Optional HIVEMIND project ID to scope this memory. Omit for org-wide storage.'
           }
         },
         required: ['title', 'content']
@@ -537,6 +541,10 @@ function generateToolsManifest(userId, orgId, options = {}) {
           project: {
             type: 'string',
             description: 'Filter by project'
+          },
+          project_id: {
+            type: 'string',
+            description: 'Optional HIVEMIND project ID for scoped recall. Omit for org-wide search.'
           },
           source_type: {
             type: 'string',
@@ -575,6 +583,10 @@ function generateToolsManifest(userId, orgId, options = {}) {
           project: {
             type: 'string',
             description: 'Filter by project'
+          },
+          project_id: {
+            type: 'string',
+            description: 'Optional HIVEMIND project ID for scoped listing. Omit for org-wide list.'
           },
           tags: {
             type: 'array',
@@ -676,6 +688,10 @@ function generateToolsManifest(userId, orgId, options = {}) {
             type: 'string',
             description: 'Project this conversation relates to'
           },
+          project_id: {
+            type: 'string',
+            description: 'Optional HIVEMIND project ID to scope this conversation. Omit for org-wide storage.'
+          },
           platform: {
             type: 'string',
             enum: ['claude', 'cursor', 'chatgpt', 'other'],
@@ -757,6 +773,10 @@ function generateToolsManifest(userId, orgId, options = {}) {
             type: 'string',
             description: 'Project this file belongs to'
           },
+          project_id: {
+            type: 'string',
+            description: 'Optional HIVEMIND project ID to scope this code memory. Omit for org-wide storage.'
+          },
           tags: {
             type: 'array',
             items: { type: 'string' },
@@ -787,6 +807,10 @@ function generateToolsManifest(userId, orgId, options = {}) {
           project: {
             type: 'string',
             description: 'Project filter'
+          },
+          project_id: {
+            type: 'string',
+            description: 'Optional HIVEMIND project ID for scoped recall. Omit for org-wide search.'
           },
           limit: {
             type: 'integer',
@@ -867,6 +891,10 @@ function generateToolsManifest(userId, orgId, options = {}) {
           project: {
             type: 'string',
             description: 'Project this decision belongs to'
+          },
+          project_id: {
+            type: 'string',
+            description: 'Optional HIVEMIND project ID to scope this decision. Omit for org-wide storage.'
           },
           tags: {
             type: 'array',
@@ -983,6 +1011,10 @@ function generateToolsManifest(userId, orgId, options = {}) {
             type: 'string',
             description: 'Project filter'
           },
+          project_id: {
+            type: 'string',
+            description: 'Optional HIVEMIND project ID for scoped recall. Omit for org-wide search.'
+          },
           limit: {
             type: 'integer',
             description: 'Max context memories to retrieve',
@@ -1015,6 +1047,10 @@ function generateToolsManifest(userId, orgId, options = {}) {
           project: {
             type: 'string',
             description: 'Optional project filter (client-side post-filter)'
+          },
+          project_id: {
+            type: 'string',
+            description: 'Optional HIVEMIND project ID for scoped time-travel. Omit for org-wide search.'
           }
         }
       }
@@ -2043,6 +2079,36 @@ function buildRelationship(relationship, relatedTo) {
 export async function handleToolCall(params, userId, orgId, apiClient) {
   const { name, arguments: args } = params;
 
+  // Resolve optional project_id into validated scope fields.
+  // When project_id is provided: validate membership, resolve team, stamp scope.
+  // When omitted: leave null → backend defaults to org-wide.
+  const requestedProjectId = typeof args.project_id === 'string' && args.project_id.trim()
+    ? args.project_id.trim()
+    : null;
+  let resolvedProjectId = null;
+  let resolvedProjectIds = [];
+  let resolvedTeamId = null;
+  if (requestedProjectId && userId && orgId) {
+    try {
+      const { resolveScopedIngestPayload } = await import('../server.js');
+      const scoped = await resolveScopedIngestPayload({
+        user_id: userId,
+        org_id: orgId,
+        project_ids: [requestedProjectId],
+      });
+      resolvedProjectId = requestedProjectId;
+      resolvedProjectIds = scoped.project_ids || [];
+      resolvedTeamId = scoped.primary_team_id || null;
+    } catch (_ignored) {
+      // Membership validation failure — leave scope null, fall back to org-wide.
+    }
+  }
+  const SCOPE_FIELDS = resolvedProjectId ? {
+    project_id: resolvedProjectId,
+    project_ids: resolvedProjectIds,
+    primary_team_id: resolvedTeamId || undefined,
+  } : {};
+
   try {
     switch (name) {
       case 'hivemind_save_memory': {
@@ -2070,7 +2136,8 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
             source_type: args.source_type || 'text'
           },
           user_id: userId,
-          org_id: orgId
+          org_id: orgId,
+          ...SCOPE_FIELDS,
         }));
       }
 
@@ -2087,6 +2154,7 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
             project: args.project || null,
             source_platforms: args.source_type ? [args.source_type] : [],
             max_memories: recallLimit,
+            ...(resolvedProjectId ? { project_id: resolvedProjectId, project_ids: resolvedProjectIds } : {}),
           });
 
           // Polished memory shape only — drops semantic_*, vector_score, user_profile,
@@ -2277,7 +2345,8 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
           tags: [...(args.tags || []), 'conversation', args.platform || 'unknown'],
           project: args.project || null,
           user_id: userId,
-          org_id: orgId
+          org_id: orgId,
+          ...SCOPE_FIELDS,
         }));
 
       case 'hivemind_traverse_graph': {
@@ -2430,7 +2499,8 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
             auto_linked_to: relatedToId && !args.related_to ? relatedToId : undefined
           },
           user_id: userId,
-          org_id: orgId
+          org_id: orgId,
+          ...SCOPE_FIELDS,
         }));
       }
 
@@ -2448,7 +2518,8 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
           query_context: `bug fix gotcha: ${ctx}`,
           tags: fileTag ? [fileTag] : [], // narrow by file only — tag OR is too restrictive on /api/recall
           project: args.project || null,
-          max_memories: limit * 2
+          max_memories: limit * 2,
+          ...(resolvedProjectId ? { project_id: resolvedProjectId, project_ids: resolvedProjectIds } : {}),
         }).catch(() => ({ memories: [] }));
 
         const fetchByTag = (tag) => apiClient.get('/api/memories', {
@@ -2589,7 +2660,8 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
             affected_files: files
           },
           user_id: userId,
-          org_id: orgId
+          org_id: orgId,
+          ...SCOPE_FIELDS,
         }));
       }
 
@@ -2619,7 +2691,8 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
             affected_files: files
           },
           user_id: userId,
-          org_id: orgId
+          org_id: orgId,
+          ...SCOPE_FIELDS,
         }));
       }
 
@@ -2650,7 +2723,8 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
               coverage_pct: typeof args.coverage_pct === 'number' ? args.coverage_pct : null
             },
             user_id: userId,
-            org_id: orgId
+            org_id: orgId,
+            ...SCOPE_FIELDS,
           }));
         }
 
@@ -2661,7 +2735,8 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
           query_context: `test coverage for ${fnName}`,
           tags: tagFilter,
           project: args.project || null,
-          max_memories: 10
+          max_memories: 10,
+          ...(resolvedProjectId ? { project_id: resolvedProjectId, project_ids: resolvedProjectIds } : {}),
         });
         return formatToolContent({
           memories: recallResult.memories || [],
@@ -2683,7 +2758,8 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
           query_context: `why: ${query}`,
           tags,
           project: args.project || null,
-          max_memories: Math.min(args.limit || 8, 20)
+          max_memories: Math.min(args.limit || 8, 20),
+          ...(resolvedProjectId ? { project_id: resolvedProjectId, project_ids: resolvedProjectIds } : {}),
         });
 
         const rawMemories = recallResult.memories || [];

@@ -66,14 +66,17 @@ export class SyncEngine {
       // team_id from caller takes precedence; fall back to what is stored on the connector record
       const effectiveTeamId = teamId || existingConnector?.team_id || null;
 
-      // Get access token
-      let accessToken = await this.connectorStore.getAccessToken(userId, provider);
-      if (!accessToken) {
-        await this.connectorStore.updateStatus(userId, provider, {
-          status: 'revoked',
-          error: 'No valid access token',
-        });
-        return { ...telemetry, status: 'reauth_required' };
+      const usesResolvedBearer = typeof adapter.getBearer === 'function' && typeof adapter.fetchBulk === 'function';
+      let accessToken = null;
+      if (!usesResolvedBearer) {
+        accessToken = await this.connectorStore.getAccessToken(userId, provider);
+        if (!accessToken) {
+          await this.connectorStore.updateStatus(userId, provider, {
+            status: 'revoked',
+            error: 'No valid access token',
+          });
+          return { ...telemetry, status: 'reauth_required' };
+        }
       }
 
       const context = {
@@ -92,7 +95,11 @@ export class SyncEngine {
       while (hasMore) {
         let fetchResult;
         try {
-          if (incremental && currentCursor) {
+          if (usesResolvedBearer) {
+            fetchResult = incremental && currentCursor
+              ? await adapter.fetchIncremental({ cursor: currentCursor, context })
+              : await adapter.fetchInitial({ cursor: currentCursor, context });
+          } else if (incremental && currentCursor) {
             fetchResult = await adapter.fetchIncremental({ accessToken, cursor: currentCursor, context });
           } else {
             fetchResult = await adapter.fetchInitial({ accessToken, cursor: currentCursor, context });
@@ -124,10 +131,29 @@ export class SyncEngine {
           telemetry.processed++;
 
           try {
+            let effectiveRecord = record;
+            if (
+              usesResolvedBearer &&
+              typeof adapter.fetchResource === 'function' &&
+              (!record?.body || String(record.body).trim() === '') &&
+              (record?.resource_id || record?.id)
+            ) {
+              try {
+                effectiveRecord = await adapter.fetchResource({
+                  userId,
+                  orgId,
+                  resourceId: record.resource_id || record.id,
+                  type: record.resource_type || undefined,
+                });
+              } catch (fetchResourceErr) {
+                console.warn(`[sync-engine] fetchResource failed for ${provider}: ${fetchResourceErr.message}`);
+              }
+            }
+
             // Dedupe check
             // Normalize to memory payloads — pass user's account ref for attribution
             const userAccountRef = existingConnector?.account_ref || existingConnector?.platformUserId || null;
-            const payloads = adapter.normalize(record, {
+            const normalizedContext = {
               user_id: userId,
               org_id: orgId,
               connector_id: provider,
@@ -138,14 +164,17 @@ export class SyncEngine {
               team_id: effectiveTeamId,
               // Optional adapter context overrides (passed by caller)
               ...(this._normalizeContext || {}),
-            });
+            };
+            const payloads = typeof adapter.toMemoryPayloads === 'function'
+              ? adapter.toMemoryPayloads(effectiveRecord, normalizedContext)
+              : adapter.normalize(effectiveRecord, normalizedContext);
 
             // Post-normalize hook: adapters can extract structured side-data
             // (e.g. Gmail extracts contacts into hivemind.contacts table to
             // avoid polluting memory with "Fact: X email is Y@z.com" garbage)
             if (typeof adapter.extractStructured === 'function') {
               try {
-                await adapter.extractStructured(record, {
+                await adapter.extractStructured(effectiveRecord, {
                   user_id: userId,
                   org_id: orgId,
                   prisma: this.prisma,
@@ -175,7 +204,25 @@ export class SyncEngine {
                 payload.visibility = 'private';
                 payload.target_scope = 'personal';
               }
-              const sourceId = payload?.source_metadata?.source_id || adapter.dedupeKey(record);
+
+              // Propagate connector-level project mapping into payload scope.
+              // projectMetadata comes from existingConnector.connectorMetadata.project_ids
+              // or adapter.enrichContext() if available.
+              const connectorProjectIds = Array.isArray(existingConnector?.connectorMetadata?.project_ids)
+                ? existingConnector.connectorMetadata.project_ids
+                : (Array.isArray(existingConnector?.connectorMetadata?.projectId) ? [existingConnector.connectorMetadata.projectId] : []);
+              if (connectorProjectIds.length > 0) {
+                payload.project_ids = [...new Set([
+                  ...(Array.isArray(payload.project_ids) ? payload.project_ids : []),
+                  ...connectorProjectIds,
+                ])];
+                payload.scope = 'project';
+              }
+              if (!payload.primary_team_id && existingConnector?.team_id) {
+                payload.primary_team_id = existingConnector.team_id;
+              }
+
+              const sourceId = payload?.source_metadata?.source_id || adapter.dedupeKey(effectiveRecord);
               if (await this._isDuplicate(sourceId, userId, provider)) {
                 telemetry.skipped++;
                 continue;

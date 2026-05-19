@@ -57,6 +57,39 @@ export class BaseConnectorAdapter {
   }
 
   /**
+   * Legacy SyncEngine compatibility wrapper.
+   * Second-generation adapters expose fetchBulk(); the older engine expects
+   * fetchInitial/fetchIncremental plus a hasMore flag.
+   *
+   * @param {{ cursor: string|null, context: Object }} params
+   * @returns {Promise<{ records: NormalizedRecord[], nextCursor: string|null, hasMore: boolean }>}
+   */
+  async fetchInitial({ cursor = null, context = {} }) {
+    const result = await this.fetchBulk({
+      userId: context.user_id,
+      orgId: context.org_id,
+      cursor,
+      scope: {
+        targetScope: context.target_scope,
+        teamId: context.team_id,
+        providerMetadata: context.provider_metadata || {},
+      },
+      limit: context.limit,
+    });
+
+    return {
+      records: result?.records || [],
+      nextCursor: result?.nextCursor || null,
+      hasMore: Boolean(result?.nextCursor),
+    };
+  }
+
+  /** @inheritdoc */
+  async fetchIncremental(params) {
+    return this.fetchInitial(params);
+  }
+
+  /**
    * Fetch a single resource by ID.
    * @param {{ userId: string, orgId: string, resourceId: string, type?: string }} params
    * @returns {Promise<NormalizedRecord>}
@@ -93,5 +126,70 @@ export class BaseConnectorAdapter {
    */
   normalize(raw, type) { // eslint-disable-line no-unused-vars
     return { id: null, title: '', body: '', ts: null, refs: {} };
+  }
+
+  /**
+   * Default dedupe key for normalized records.
+   * @param {NormalizedRecord} record
+   * @returns {string}
+   */
+  dedupeKey(record) {
+    return String(
+      record?.resource_id
+      || record?.id
+      || record?.refs?.url
+      || `${this.providerKey}:${record?.ts || 'unknown'}`
+    );
+  }
+
+  /**
+   * Shared helper for converting a normalized record into the canonical
+   * memory-ingest payload shape expected by SmartIngestRouter + graph engine.
+   *
+   * @param {NormalizedRecord} record
+   * @param {{ user_id: string, org_id: string, user_account_ref?: string }} context
+   * @param {Object} overrides
+   * @returns {Object}
+   */
+  buildMemoryPayload(record, context, overrides = {}) {
+    const sourceId = this.dedupeKey(record);
+    const metadata = {
+      source_platform: this.providerKey,
+      resource_type: record?.resource_type || null,
+      created_at: record?.ts || null,
+      ...(record?.refs || {}),
+      ...(overrides.metadata || {}),
+    };
+
+    return {
+      title: overrides.title ?? record?.title ?? null,
+      content: overrides.content ?? record?.body ?? record?.title ?? '',
+      memory_type: overrides.memory_type ?? 'fact',
+      tags: overrides.tags ?? [this.providerKey],
+      source_metadata: {
+        source_platform: this.providerKey,
+        source_type: overrides.source_type ?? record?.resource_type ?? 'record',
+        source_id: sourceId,
+        user_account_ref: context?.user_account_ref || null,
+        ...(record?.refs || {}),
+        ...(overrides.source_metadata || {}),
+      },
+      metadata,
+      user_id: context?.user_id,
+      org_id: context?.org_id,
+      ...(overrides.extra || {}),
+    };
+  }
+
+  /**
+   * Convert a normalized record into one or more canonical memory payloads.
+   * Subclasses can override for provider-specific shaping.
+   *
+   * @param {NormalizedRecord} record
+   * @param {Object} context
+   * @returns {Object[]}
+   */
+  toMemoryPayloads(record, context) {
+    return [this.buildMemoryPayload(record, context)];
   }
 }

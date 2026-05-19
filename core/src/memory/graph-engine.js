@@ -354,6 +354,12 @@ export class MemoryGraphEngine {
   async ingestMemory(input) {
     const startedAt = Date.now();
     const baseMemory = this._buildMemoryRecord(input);
+    if (baseMemory.scope === 'project' && (!Array.isArray(baseMemory.project_ids) || baseMemory.project_ids.length === 0)) {
+      throw new Error('Project-scoped memory requires at least one project_id');
+    }
+    if (baseMemory.scope === 'team' && !baseMemory.primary_team_id) {
+      throw new Error('Team-scoped memory requires primary_team_id');
+    }
     baseMemory.metadata = {
       ...(baseMemory.metadata || {}),
       ...buildSemanticMetadata({

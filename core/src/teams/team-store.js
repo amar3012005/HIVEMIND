@@ -29,6 +29,20 @@ export class TeamStore {
   constructor(prisma) {
     if (!prisma) throw new Error('TeamStore: prisma required');
     this.prisma = prisma;
+    this._onMembershipChange = null;
+  }
+
+  /** Register a callback invoked after any team/project membership change. */
+  onMembershipChange(fn) {
+    this._onMembershipChange = fn;
+  }
+
+  _notifyMembershipChange(userId, orgId) {
+    if (typeof this._onMembershipChange === 'function') {
+      try {
+        this._onMembershipChange(userId, orgId);
+      } catch { /* noop */ }
+    }
   }
 
   // ── Teams ─────────────────────────────────────────────────
@@ -124,11 +138,14 @@ export class TeamStore {
 
   async addTeamMember({ teamId, userId, role = 'member', addedById }) {
     if (!VALID_TEAM_ROLES.has(role)) throw new Error(`Invalid role: ${role}`);
-    return this.prisma.teamMember.upsert({
+    const result = await this.prisma.teamMember.upsert({
       where: { teamId_userId: { teamId, userId } },
       create: { teamId, userId, role, addedById },
       update: { role },
     });
+    const team = await this.prisma.team.findUnique({ where: { id: teamId }, select: { orgId: true } });
+    if (team) this._notifyMembershipChange(userId, team.orgId);
+    return result;
   }
 
   async removeTeamMember({ teamId, userId }) {
@@ -140,9 +157,12 @@ export class TeamStore {
     if (target?.role === 'lead' && leads <= 1) {
       throw new Error('Cannot remove the last team lead. Promote another member first.');
     }
-    return this.prisma.teamMember.delete({
+    const team = await this.prisma.team.findUnique({ where: { id: teamId }, select: { orgId: true } });
+    const result = await this.prisma.teamMember.delete({
       where: { teamId_userId: { teamId, userId } },
     });
+    if (team) this._notifyMembershipChange(userId, team.orgId);
+    return result;
   }
 
   async userIsTeamMember({ teamId, userId }) {
@@ -245,17 +265,23 @@ export class TeamStore {
 
   async addProjectMember({ projectId, userId, role = 'contributor', addedById }) {
     if (!VALID_PROJECT_ROLES.has(role)) throw new Error(`Invalid role: ${role}`);
-    return this.prisma.projectMember.upsert({
+    const result = await this.prisma.projectMember.upsert({
       where: { projectId_userId: { projectId, userId } },
       create: { projectId, userId, role, addedById },
       update: { role },
     });
+    const project = await this.prisma.project.findUnique({ where: { id: projectId }, select: { orgId: true } });
+    if (project) this._notifyMembershipChange(userId, project.orgId);
+    return result;
   }
 
   async removeProjectMember({ projectId, userId }) {
-    return this.prisma.projectMember.delete({
+    const project = await this.prisma.project.findUnique({ where: { id: projectId }, select: { orgId: true } });
+    const result = await this.prisma.projectMember.delete({
       where: { projectId_userId: { projectId, userId } },
     });
+    if (project) this._notifyMembershipChange(userId, project.orgId);
+    return result;
   }
 
   // ── Memory ↔ Project linking ─────────────────────────────

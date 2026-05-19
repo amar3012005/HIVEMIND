@@ -179,6 +179,8 @@ export class QdrantClient {
         user_id: memory.user_id,
         org_id: memory.org_id,
         project: memory.project,
+        project_ids: Array.isArray(memory.project_ids) ? memory.project_ids : [],
+        team_id: memory.primary_team_id || null,
         memory_type: memory.memory_type,
         tags: memory.tags || [],
         content: memory.content,
@@ -332,6 +334,27 @@ export class QdrantClient {
       mustFilters.push({
         key: 'project',
         match: { value: filters.project }
+      });
+    }
+
+    // Add project_ids filter (V2 — array membership check on payload.project_ids)
+    if (Array.isArray(filters.project_ids) && filters.project_ids.length > 0) {
+      mustFilters.push({
+        key: 'project_ids',
+        match: { any: filters.project_ids }
+      });
+    } else if (typeof filters.project_id === 'string' && filters.project_id.trim()) {
+      mustFilters.push({
+        key: 'project_ids',
+        match: { any: [filters.project_id.trim()] }
+      });
+    }
+
+    // Add team_id filter (V2 — payload.team_id)
+    if (typeof filters.team_id === 'string' && filters.team_id.trim()) {
+      mustFilters.push({
+        key: 'team_id',
+        match: { value: filters.team_id.trim() }
       });
     }
 

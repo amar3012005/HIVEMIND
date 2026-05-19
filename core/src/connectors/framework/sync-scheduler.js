@@ -20,10 +20,12 @@ const DEFAULT_GLOBAL_INTERVAL_MS = 60 * 60 * 1000; // 1 hour (was 4h)
 const MIN_PER_CONNECTOR_MINUTES = 15;
 
 export class SyncScheduler {
-  constructor({ connectorStore, syncEngine, prisma, interval = DEFAULT_GLOBAL_INTERVAL_MS }) {
+  constructor({ connectorStore, syncEngine, prisma, tokenResolver = null, logger = console, interval = DEFAULT_GLOBAL_INTERVAL_MS }) {
     this.connectorStore = connectorStore;
     this.syncEngine = syncEngine;
     this.prisma = prisma;
+    this.tokenResolver = tokenResolver;
+    this.logger = logger;
     this.globalInterval = Math.max(interval, MIN_PER_CONNECTOR_MINUTES * 60 * 1000);
     this._timer = null;
     this._running = false;
@@ -105,6 +107,10 @@ export class SyncScheduler {
         google_slides:    { path: '../providers/google/drive-docs-adapter.js', exportName: 'GoogleDriveDocsAdapter', mcpBridge: true },
         google_calendar:  { path: '../providers/google/calendar-adapter.js',   exportName: 'GoogleCalendarAdapter', mcpBridge: true },
         google_contacts:  { path: '../providers/google/contacts-adapter.js',   exportName: 'GoogleContactsAdapter', mcpBridge: true },
+        slack:            { path: '../adapters/slack/slack-adapter.js',        exportName: 'SlackAdapter', nango: true },
+        notion:           { path: '../adapters/notion/notion-adapter.js',      exportName: 'NotionAdapter', nango: true },
+        github:           { path: '../adapters/github/github-adapter.js',      exportName: 'GitHubAdapter', nango: true },
+        linear:           { path: '../adapters/linear/linear-adapter.js',      exportName: 'LinearAdapter', nango: true },
       };
 
       // Lazy-load decryptToken once for all MCP-bridged adapters
@@ -125,7 +131,14 @@ export class SyncScheduler {
               console.warn(`[sync-scheduler] No adapter export for ${connector.platformType}`);
               continue;
             }
-            if (dispatch.mcpBridge) {
+            if (dispatch.nango) {
+              adapter = new AdapterClass({
+                providerKey: connector.platformType,
+                tokenResolver: this.tokenResolver,
+                prisma: this.prisma,
+                logger: this.logger,
+              });
+            } else if (dispatch.mcpBridge) {
               if (!decryptTokenFn) {
                 const cs = await import('./connector-store.js');
                 decryptTokenFn = cs.decryptToken;

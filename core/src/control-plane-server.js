@@ -2831,7 +2831,35 @@ const server = http.createServer(async (req, res) => {
         return jsonResponse(res, { error: 'Connector not connected' }, 400);
       }
 
-      // Resolve ingestion endpoint name from catalog
+      // P1 #1.7 — try evidence-first resync via adapter.fetchBulk BEFORE legacy MCP
+      try {
+        const evidenceResp = await fetch(`${CONFIG.coreApiBaseUrl}/api/connectors/evidence-resync`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
+          body: JSON.stringify({
+            provider_key: nangoKey,
+            user_id: current.session.userId,
+            org_id: current.session.orgId,
+            limit: body.limit || 50,
+            scope: body.scope || {},
+            cursor: body.cursor || null,
+          }),
+        });
+        if (evidenceResp.ok) {
+          const evidenceData = await evidenceResp.json().catch(() => ({}));
+          if (evidenceData.processed > 0) {
+            return jsonResponse(res, {
+              success: true,
+              message: `Evidence resync complete (${evidenceData.processed} records)`,
+              ...evidenceData,
+            });
+          }
+        }
+      } catch (evidenceErr) {
+        console.warn(`[resync] evidence path failed for ${provider}: ${evidenceErr.message}`);
+      }
+
+      // Fallback: legacy MCP ingest endpoint
       const ingestionByProvider = {
         notion: 'notion-ingestion',
         'google-mail': 'gmail-ingestion',

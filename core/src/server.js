@@ -5468,6 +5468,70 @@ const server = http.createServer(async (req, res) => {
           }
           break;
 
+        case '/api/connectors/evidence-resync':
+          // P1 #1.7 — manual bulk resync via adapter.fetchBulk into evidence-first pipeline
+          if (req.method === 'POST') {
+            if (!documentFirstIngestion) {
+              return jsonResponse(res, { error: 'Document-first ingestion not enabled' }, 503);
+            }
+            try {
+              const providerKey = body.provider_key || body.provider;
+              const targetUserId = body.user_id || userId;
+              const targetOrgId = body.org_id || orgId;
+              const limit = Math.min(Number(body.limit || 50), 200);
+              const scope = body.scope || {};
+              const cursor = body.cursor || null;
+              if (!providerKey) {
+                return jsonResponse(res, { error: 'provider_key required' }, 400);
+              }
+              const { default: adapterRegistry } = await import('./connectors/framework/adapter-registry.js');
+              const AdapterClass = adapterRegistry.get(providerKey);
+              if (!AdapterClass) {
+                return jsonResponse(res, { error: `unknown provider ${providerKey}` }, 404);
+              }
+              const adapter = adapterRegistry.instantiate(providerKey, {
+                providerKey,
+                tokenResolver: async ({ userId: u, orgId: o, providerKey: p }) => {
+                  const { getConnectionId, fetchBearerFromNango } = await import('./connectors/mcp/nango-service.js');
+                  const connId = await getConnectionId({ userId: u, orgId: o, providerKey: p }, { db: prisma });
+                  if (!connId) throw new Error(`no nango connection for ${p}`);
+                  return fetchBearerFromNango(p, connId);
+                },
+                prisma,
+                logger: console,
+              });
+              if (typeof adapter.fetchBulk !== 'function') {
+                return jsonResponse(res, { error: `${providerKey} adapter has no fetchBulk` }, 400);
+              }
+              const { records, nextCursor } = await adapter.fetchBulk({ userId: targetUserId, orgId: targetOrgId, cursor, scope, limit });
+              const ingested = [];
+              for (const rec of records) {
+                const content = rec.content || rec.body || rec.text || null;
+                if (!content) continue;
+                try {
+                  const result = await documentFirstIngestion.ingestConnectorRecord({
+                    userId: targetUserId,
+                    orgId: targetOrgId,
+                    providerKey,
+                    sourceId: String(rec.resource_id || rec.id || `${providerKey}-${Date.now()}-${Math.random()}`),
+                    title: rec.title || null,
+                    content,
+                    sourceUrl: rec.refs?.url || null,
+                    documentDate: rec.ts ? new Date(rec.ts) : null,
+                    metadata: { resource_type: rec.resource_type, refs: rec.refs || null },
+                  });
+                  ingested.push({ resource_id: rec.resource_id, ...result });
+                } catch (e) {
+                  ingested.push({ resource_id: rec.resource_id, error: e.message });
+                }
+              }
+              return jsonResponse(res, { success: true, processed: records.length, ingested, nextCursor }, 200);
+            } catch (error) {
+              return jsonResponse(res, { error: error.message }, 500);
+            }
+          }
+          break;
+
         case '/api/connectors/mcp/ingest':
           if (req.method === 'POST') {
             if (!ensurePersistedMemoryOrFail(res, '/api/connectors/mcp/ingest')) {

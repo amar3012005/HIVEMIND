@@ -56,14 +56,16 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
     max_tokens,
   };
 
-  if (json_mode) {
+  const route = pickRoute(model);
+  // Groq's strict json_object mode rejects empty/invalid generations with
+  // a 400. Skip strict mode there and rely on the salvage parser below.
+  if (json_mode && route.provider !== 'groq') {
     body.response_format = { type: 'json_object' };
   }
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
-  const route = pickRoute(model);
   let res;
   try {
     res = await fetch(`${route.base}/chat/completions`, {

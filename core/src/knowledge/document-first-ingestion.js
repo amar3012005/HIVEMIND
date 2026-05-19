@@ -350,23 +350,33 @@ export class DocumentFirstIngestionService {
           contentType
         });
 
-        if (doclingResult && !doclingResult.error) {
-          return {
-            success: true,
-            engine: 'docling',
-            text: doclingResult.text,
-            markdown: doclingResult.markdown,
-            structure: doclingResult.json,
-            tables: doclingResult.tables || [],
-            pages: doclingResult.pages || [],
-            wordCount: (doclingResult.text || '').split(/\s+/).length,
-            metadata: {
-              confidence: doclingResult.confidence,
-              pages: doclingResult.pages?.length,
-              hybridChunks: Array.isArray(doclingResult.hybridChunks) ? doclingResult.hybridChunks : [],
-              chunkerError: doclingResult.chunkerError || null,
-            }
-          };
+        if (doclingResult) {
+          // Treat parse + chunk as independent — chunker may succeed even when parser fails.
+          const parseOk = !doclingResult.error && (doclingResult.text || doclingResult.markdown);
+          const chunkCount = Array.isArray(doclingResult.hybridChunks) ? doclingResult.hybridChunks.length : 0;
+          if (parseOk || chunkCount > 0) {
+            // Synthesize text from chunks if parse failed
+            const synthesizedText = parseOk
+              ? doclingResult.text
+              : (doclingResult.hybridChunks || []).map(c => c.text).join('\n\n');
+            return {
+              success: true,
+              engine: parseOk ? 'docling' : 'docling-chunks-only',
+              text: synthesizedText,
+              markdown: doclingResult.markdown || synthesizedText,
+              structure: doclingResult.json,
+              tables: doclingResult.tables || [],
+              pages: doclingResult.pages || [],
+              wordCount: synthesizedText.split(/\s+/).length,
+              metadata: {
+                confidence: doclingResult.confidence,
+                pages: doclingResult.pages?.length,
+                hybridChunks: Array.isArray(doclingResult.hybridChunks) ? doclingResult.hybridChunks : [],
+                chunkerError: doclingResult.chunkerError || null,
+                parseError: doclingResult.error || null,
+              }
+            };
+          }
         }
       }
 
@@ -397,12 +407,13 @@ export class DocumentFirstIngestionService {
    * @private
    */
   async _createSegments({ documentId, userId, orgId, parseResult }) {
-    if (!parseResult.success || !parseResult.text) {
+    const hybridChunks = parseResult?.metadata?.hybridChunks;
+    const hasChunks = Array.isArray(hybridChunks) && hybridChunks.length > 0;
+    // If parse failed AND no chunks, nothing to segment.
+    if ((!parseResult.success || !parseResult.text) && !hasChunks) {
       return [];
     }
-    // Try structure-aware chunks first (provided by parseResult.metadata.hybridChunks)
-    const hybridChunks = parseResult?.metadata?.hybridChunks;
-    console.log(`[segments] hybridChunks=${Array.isArray(hybridChunks) ? hybridChunks.length : 'none'} for doc ${documentId}`);
+    console.log(`[segments] hybridChunks=${hasChunks ? hybridChunks.length : 'none'} parseText=${(parseResult?.text || '').length}ch for doc ${documentId}`);
     if (Array.isArray(hybridChunks) && hybridChunks.length > 0) {
       const segments = [];
       let segmentIndex = 0;

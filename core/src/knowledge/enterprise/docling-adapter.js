@@ -31,7 +31,8 @@ export async function parseWithDocling(filePath, filename) {
   const ext = path.extname(filename).toLowerCase();
   const formData = new FormData();
 
-  formData.append('file', new Blob([fs.readFileSync(filePath)]), filename);
+  // Docling expects "files" (plural) on both /v1/convert/file and /v1/chunk/hybrid/file
+  formData.append('files', new Blob([fs.readFileSync(filePath)]), filename);
 
   try {
     const res = await fetch(`${DOCLING_URL}/v1/convert/file`, {

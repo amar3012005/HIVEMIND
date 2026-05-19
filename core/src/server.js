@@ -924,6 +924,16 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
         console.warn('[Phase1] EntityExtractor failed to init:', err.message);
       }
     }
+    // P1 #11 topic state writer
+    if (process.env.ENABLE_TOPIC_STATE === 'true') {
+      try {
+        const { TopicStateWriter } = await import('./knowledge/topic-state-writer.js');
+        documentFirstIngestion.topicStateWriter = new TopicStateWriter({ prisma, logger: console });
+        console.log('[Phase1] TopicStateWriter enabled');
+      } catch (err) {
+        console.warn('[Phase1] TopicStateWriter failed to init:', err.message);
+      }
+    }
     console.log('[Phase1] DocumentFirstIngestionService enabled');
   } catch (err) {
     console.warn('[Phase1] DocumentFirstIngestionService failed to init:', err.message);

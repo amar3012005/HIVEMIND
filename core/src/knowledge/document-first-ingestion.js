@@ -13,13 +13,14 @@
 import crypto from 'crypto';
 
 export class DocumentFirstIngestionService {
-  constructor({ db, smartIngestRouter, memoryGraphEngine, doclingAdapter, embeddingService, entityExtractor = null, logger = console }) {
+  constructor({ db, smartIngestRouter, memoryGraphEngine, doclingAdapter, embeddingService, entityExtractor = null, topicStateWriter = null, logger = console }) {
     this.db = db;
     this.smartIngestRouter = smartIngestRouter;
     this.memoryGraphEngine = memoryGraphEngine;
     this.doclingAdapter = doclingAdapter;
     this.embeddingService = embeddingService;
     this.entityExtractor = entityExtractor;
+    this.topicStateWriter = topicStateWriter;
     this.logger = logger;
   }
 
@@ -512,6 +513,11 @@ export class DocumentFirstIngestionService {
           orgId,
           user_id: userId,
           org_id: orgId,
+          scope: Array.isArray(metadata.project_ids) && metadata.project_ids.length > 0
+            ? 'project'
+            : metadata.primary_team_id ? 'team' : undefined,
+          primary_team_id: metadata.primary_team_id || null,
+          project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
           content: segment.content,
           title: `Extracted from ${documentId.slice(0, 8)}`,
           source_type: 'knowledge_segment',
@@ -521,7 +527,13 @@ export class DocumentFirstIngestionService {
           },
           tags: [...(metadata.tags || []), 'promoted-from-segment'],
           skip_fact_extraction: false, // Enable fact extraction for promoted memories
-          documentDate: new Date()
+          documentDate: new Date(),
+          metadata: {
+            ...(metadata || {}),
+            project_id: Array.isArray(metadata.project_ids) && metadata.project_ids.length === 1
+              ? metadata.project_ids[0]
+              : metadata.project_id || null,
+          }
         };
 
         const routedPayloads = await this.smartIngestRouter.route(payload);
@@ -574,7 +586,9 @@ export class DocumentFirstIngestionService {
           // P1 #12 — entity-aware memory linking
           // Mirror segment's entity_mentions onto the promoted memory so
           // memory recall can filter/rank by entity.
-          this._linkEntitiesToMemoryAsync({ memoryId, segmentId: segment.id });
+          this._linkEntitiesToMemoryAsync({
+            memoryId, segmentId: segment.id, orgId, documentId, memoryContent: segment.content,
+          });
         }
       } catch (error) {
         console.error(`[DocumentFirstIngestion] Failed to promote segment ${segment.id}:`, error);
@@ -584,12 +598,11 @@ export class DocumentFirstIngestionService {
     return { candidates, memories };
   }
 
-  /** Fire-and-forget: copy segment's entity mentions onto memory. */
-  _linkEntitiesToMemoryAsync({ memoryId, segmentId }) {
+  /** Fire-and-forget: copy segment's entity mentions onto memory + update topic state. */
+  _linkEntitiesToMemoryAsync({ memoryId, segmentId, orgId, documentId, memoryContent }) {
     if (process.env.ENABLE_ENTITY_EXTRACTION !== 'true') return;
     (async () => {
       try {
-        // Wait briefly so extractor (also async) has time to land mentions
         await new Promise(r => setTimeout(r, 500));
         const segMentions = await this.db.entityMention.findMany({
           where: { segmentId },
@@ -606,6 +619,18 @@ export class DocumentFirstIngestionService {
           })),
           skipDuplicates: true,
         });
+        // P1 #11 — update rolling topic state per linked entity
+        if (this.topicStateWriter && process.env.ENABLE_TOPIC_STATE === 'true') {
+          for (const m of segMentions) {
+            this.topicStateWriter.recordMemoryForEntity({
+              orgId,
+              entityId: m.entityId,
+              memoryId,
+              documentId,
+              memoryContent,
+            }).catch(() => {});
+          }
+        }
       } catch (err) {
         this.logger.warn(`[entity-memory-link] memory ${memoryId} failed: ${err.message}`);
       }

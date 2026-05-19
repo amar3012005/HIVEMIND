@@ -61,7 +61,10 @@ export class EntityExtractor {
     }
 
     // 3. Merge + dedup by (type, lowercased canonical)
-    const merged = this._mergeCandidates(regexCandidates, llmCandidates);
+    let merged = this._mergeCandidates(regexCandidates, llmCandidates);
+
+    // 3b. Entity resolution: collapse aliases pointing at same canonical (P1 #10)
+    merged = await this._resolveCandidates(merged, orgId);
 
     // 4. Upsert entities + write mentions
     const entities = [];
@@ -173,6 +176,100 @@ export class EntityExtractor {
         confidence: Number.isFinite(e.confidence) ? Math.min(Math.max(e.confidence, 0), 1) : 0.7,
         source: 'llm',
       }));
+  }
+
+  /**
+   * Entity resolution — collapse candidate variants that refer to the same
+   * canonical entity. Applies three strategies:
+   *   1. Email/handle/hashtag → look up by alias in existing entities for tenant
+   *   2. Re-type regex hits when an LLM-identified entity claims them
+   *      (e.g. regex tagged "acme-corp" as person; LLM tagged "Acme Corp" as
+   *      organization with alias "acme-corp" → merge into the organization)
+   *   3. Drop candidates whose name is just an email/handle of an LLM entity
+   */
+  async _resolveCandidates(candidates, orgId) {
+    if (!candidates.length) return candidates;
+
+    // Build alias index from LLM candidates so we can absorb regex variants
+    const aliasIndex = new Map(); // lowered alias/name -> winning canonical
+    for (const c of candidates) {
+      if (c.source !== 'llm') continue;
+      const winningKey = `${c.type}|${c.name.toLowerCase()}`;
+      aliasIndex.set(c.name.toLowerCase(), winningKey);
+      for (const a of c.aliases || []) {
+        aliasIndex.set(String(a).toLowerCase(), winningKey);
+      }
+    }
+
+    // Pull existing entities for cross-document resolution
+    const lookupNames = Array.from(new Set(candidates.flatMap(c => [c.name.toLowerCase(), ...(c.aliases || []).map(a => a.toLowerCase())])));
+    let existing = [];
+    if (lookupNames.length) {
+      try {
+        existing = await this.prisma.entity.findMany({
+          where: {
+            orgId,
+            OR: [
+              { canonicalName: { in: lookupNames, mode: 'insensitive' } },
+              { aliases: { hasSome: lookupNames } },
+            ],
+          },
+          select: { id: true, entityType: true, canonicalName: true, aliases: true },
+        });
+      } catch {
+        existing = [];
+      }
+    }
+    const existingByAlias = new Map();
+    for (const e of existing) {
+      existingByAlias.set(e.canonicalName.toLowerCase(), e);
+      for (const a of e.aliases || []) {
+        existingByAlias.set(String(a).toLowerCase(), e);
+      }
+    }
+
+    const out = new Map(); // dedup
+    for (const c of candidates) {
+      const lower = c.name.toLowerCase();
+      // 1. Already known entity in DB — pin to it
+      const known = existingByAlias.get(lower);
+      if (known) {
+        const key = `${known.entityType}|${known.canonicalName.toLowerCase()}`;
+        const prev = out.get(key);
+        if (prev) {
+          prev.aliases = Array.from(new Set([...(prev.aliases || []), c.name, ...(c.aliases || [])]));
+        } else {
+          out.set(key, {
+            name: known.canonicalName,
+            type: known.entityType,
+            aliases: Array.from(new Set([...(known.aliases || []), c.name, ...(c.aliases || [])])).filter(a => a.toLowerCase() !== known.canonicalName.toLowerCase()),
+            confidence: c.confidence,
+            surfaceForm: c.surfaceForm,
+            source: 'resolved_existing',
+          });
+        }
+        continue;
+      }
+      // 2. Match against another LLM candidate's alias set in this batch
+      const winnerKey = aliasIndex.get(lower);
+      if (winnerKey && winnerKey !== `${c.type}|${lower}`) {
+        const prev = out.get(winnerKey);
+        if (prev) {
+          prev.aliases = Array.from(new Set([...(prev.aliases || []), c.name, ...(c.aliases || [])]));
+          continue;
+        }
+      }
+      // 3. New unique entity
+      const key = `${c.type}|${lower}`;
+      const prev = out.get(key);
+      if (prev) {
+        prev.confidence = Math.max(prev.confidence, c.confidence);
+        prev.aliases = Array.from(new Set([...(prev.aliases || []), ...(c.aliases || [])]));
+      } else {
+        out.set(key, c);
+      }
+    }
+    return Array.from(out.values());
   }
 
   _mergeCandidates(regexC, llmC) {

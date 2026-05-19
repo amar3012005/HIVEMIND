@@ -2554,6 +2554,55 @@ const server = http.createServer(async (req, res) => {
     return jsonResponse(res, { container, logs: [], note: 'Control plane log endpoint not available' });
   }
 
+  if (pathname === '/metrics' && req.method === 'GET') {
+    // P3 #27 — Prometheus exposition format for ingest stats
+    try {
+      const [docs, segs, memEvLinks, entities, mentions, webhookFailed, webhookReceived, srcArt] = await Promise.all([
+        prisma.knowledgeDocument.count().catch(() => 0),
+        prisma.knowledgeSegment.count().catch(() => 0),
+        prisma.memoryEvidenceLink.count().catch(() => 0),
+        prisma.entity.count().catch(() => 0),
+        prisma.entityMention.count().catch(() => 0),
+        prisma.inboundWebhookEvent.count({ where: { status: 'failed' } }).catch(() => 0),
+        prisma.inboundWebhookEvent.count({ where: { status: 'received' } }).catch(() => 0),
+        prisma.sourceArtifact.count().catch(() => 0),
+      ]);
+      const lines = [
+        '# HELP hivemind_knowledge_documents_total Number of knowledge documents stored',
+        '# TYPE hivemind_knowledge_documents_total gauge',
+        `hivemind_knowledge_documents_total ${docs}`,
+        '# HELP hivemind_knowledge_segments_total Number of knowledge segments stored',
+        '# TYPE hivemind_knowledge_segments_total gauge',
+        `hivemind_knowledge_segments_total ${segs}`,
+        '# HELP hivemind_source_artifacts_total Immutable evidence artifacts',
+        '# TYPE hivemind_source_artifacts_total gauge',
+        `hivemind_source_artifacts_total ${srcArt}`,
+        '# HELP hivemind_memory_evidence_links_total Provenance links memory<->segment',
+        '# TYPE hivemind_memory_evidence_links_total gauge',
+        `hivemind_memory_evidence_links_total ${memEvLinks}`,
+        '# HELP hivemind_entities_total Distinct canonical entities',
+        '# TYPE hivemind_entities_total gauge',
+        `hivemind_entities_total ${entities}`,
+        '# HELP hivemind_entity_mentions_total Entity mention rows',
+        '# TYPE hivemind_entity_mentions_total gauge',
+        `hivemind_entity_mentions_total ${mentions}`,
+        '# HELP hivemind_inbound_webhook_pending Pending webhook events to process',
+        '# TYPE hivemind_inbound_webhook_pending gauge',
+        `hivemind_inbound_webhook_pending ${webhookReceived}`,
+        '# HELP hivemind_inbound_webhook_failed Failed webhook events',
+        '# TYPE hivemind_inbound_webhook_failed gauge',
+        `hivemind_inbound_webhook_failed ${webhookFailed}`,
+      ];
+      res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4' });
+      res.end(lines.join('\n') + '\n');
+      return;
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'text/plain' });
+      res.end(`# error: ${err.message}\n`);
+      return;
+    }
+  }
+
   if (pathname === '/health') {
     // Probe Docling sidecar (non-blocking, short timeout)
     let doclingOk = null;
@@ -5464,6 +5513,42 @@ const server = http.createServer(async (req, res) => {
               return jsonResponse(res, { success: true, ...status });
             } catch (error) {
               return jsonResponse(res, { error: error.message }, 400);
+            }
+          }
+          break;
+
+        case '/api/admin/webhook-events/dead-letter':
+          // P2 #25 — list webhook events that failed processing (admin)
+          if (req.method === 'GET') {
+            try {
+              const limit = Math.min(Number(url.searchParams.get('limit') || 50), 200);
+              const status = url.searchParams.get('status') || 'failed';
+              const events = await prisma.inboundWebhookEvent.findMany({
+                where: { orgId, status },
+                orderBy: { receivedAt: 'desc' },
+                take: limit,
+                select: {
+                  id: true, providerKey: true, eventId: true, eventType: true,
+                  status: true, attempts: true, error: true, receivedAt: true, processedAt: true,
+                },
+              });
+              return jsonResponse(res, { count: events.length, events });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          if (req.method === 'POST') {
+            // Retry a dead-lettered event: reset status to 'received' for processor pickup
+            try {
+              const eventId = body.event_id;
+              if (!eventId) return jsonResponse(res, { error: 'event_id required' }, 400);
+              const updated = await prisma.inboundWebhookEvent.updateMany({
+                where: { id: eventId, orgId, status: { in: ['failed', 'dead_lettered'] } },
+                data: { status: 'received', attempts: 0, error: null },
+              });
+              return jsonResponse(res, { success: true, requeued: updated.count });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
             }
           }
           break;

@@ -1153,8 +1153,8 @@ if (process.env.DOCLING_URL) {
           }
         }
 
-        // ── Tier 1: pdf-parse (text-native PDFs, 1-2s) ──
-        if (ext === 'pdf') {
+        // ── Tier 1: pdf-parse (text-native PDFs, 1-2s) — skip when smart=true ──
+        if (ext === 'pdf' && !smart) {
           try {
             const { fastPdfExtract } = await import('./knowledge/enterprise/fast-pdf-parser.js');
             const fast = await fastPdfExtract(tempPath);
@@ -8841,9 +8841,14 @@ const server = http.createServer(async (req, res) => {
                 }, 415);
               }
 
+              // Read smart flag — when true, force Docling smart-mode parse
+              // (full enrichment: tables, charts, picture descriptions via
+              // Groq VLM, code/formula extraction). Default false = fast tiers.
+              const smartFlag = (parts.find(p => p.name === 'smart')?.value || '').toLowerCase() === 'true';
+
               // ─── Phase 1: Document-First Ingestion Path (feature-flagged) ───
               if (documentFirstIngestion) {
-                console.log(`[knowledge] Using Phase 1 document-first ingestion for ${filePart.filename}`);
+                console.log(`[knowledge] Using Phase 1 document-first ingestion for ${filePart.filename}${smartFlag ? ' (smart=true)' : ''}`);
                 const tPhase1 = Date.now();
                 try {
                   const result = await documentFirstIngestion.ingestKnowledgeDocument({
@@ -8857,7 +8862,8 @@ const server = http.createServer(async (req, res) => {
                       project_id: projectIds[0] || null,
                       project_ids: projectIds,
                       primary_team_id: primaryTeamId,
-                      visibility: targetScope === 'organization' ? 'organization' : 'private'
+                      visibility: targetScope === 'organization' ? 'organization' : 'private',
+                      smart: smartFlag,
                     }
                   });
                   console.log(`[knowledge] ✓ Phase1 complete: file=${filePart.filename} docId=${result.documentId} segments=${result.segmentCount} promoted=${result.promotedCount} ms=${Date.now() - tPhase1}`);

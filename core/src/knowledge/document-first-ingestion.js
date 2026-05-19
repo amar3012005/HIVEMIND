@@ -95,7 +95,9 @@ export class DocumentFirstIngestionService {
 
     // Step 2: Parse document with Docling
     const _tParse = Date.now();
-    const parseResult = await this._parseDocument(fileBuffer, contentType, filename);
+    const parseResult = await this._parseDocument(fileBuffer, contentType, filename, {
+      smart: metadata?.smart === true,
+    });
     const _msParse = Date.now() - _tParse;
 
     // Step 3: Create knowledge document
@@ -367,12 +369,13 @@ export class DocumentFirstIngestionService {
    * Parse document with Docling (or fallback parsers)
    * @private
    */
-  async _parseDocument(fileBuffer, contentType, filename) {
+  async _parseDocument(fileBuffer, contentType, filename, opts = {}) {
     try {
       if (this.doclingAdapter && process.env.DOCLING_URL) {
         const doclingResult = await this.doclingAdapter.parseBuffer(fileBuffer, {
           filename,
-          contentType
+          contentType,
+          smart: opts.smart === true,
         });
 
         if (doclingResult) {

@@ -200,6 +200,107 @@ export class DocumentFirstIngestionService {
   }
 
   /**
+   * Ingest a connector record (Slack message, Notion page, GitHub issue, etc.)
+   * Text already extracted by adapter — no Docling needed. Creates
+   * source_artifact + knowledge_document + 1+ knowledge_segments + memories
+   * with full evidence-layer provenance.
+   *
+   * @param {Object} params
+   * @param {string} params.userId
+   * @param {string} params.orgId
+   * @param {string} params.providerKey - slack | notion | github | linear | jira | confluence
+   * @param {string} params.sourceId - provider's own ID (channel-ts, page_id, issue_id, ...)
+   * @param {string} params.title
+   * @param {string} params.content - full text body
+   * @param {string} [params.sourceUrl]
+   * @param {Date} [params.documentDate]
+   * @param {Object} [params.metadata]
+   */
+  async ingestConnectorRecord({ userId, orgId, providerKey, sourceId, title, content, sourceUrl = null, documentDate = null, metadata = {} }) {
+    if (!content || typeof content !== 'string' || content.trim() === '') {
+      return { skipped: true, reason: 'empty_content' };
+    }
+    const checksum = crypto.createHash('sha256').update(`${providerKey}:${sourceId}:${content}`).digest('hex');
+
+    // Step 1: source artifact (immutable evidence)
+    const sourceArtifact = await this.db.sourceArtifact.upsert({
+      where: {
+        userId_orgId_checksum_sourcePlatform: {
+          userId, orgId, checksum, sourcePlatform: providerKey,
+        },
+      },
+      create: {
+        userId, orgId,
+        artifactType: 'connector_record',
+        sourcePlatform: providerKey,
+        sourceId,
+        contentType: 'text/plain',
+        sizeBytes: BigInt(Buffer.byteLength(content, 'utf8')),
+        checksum,
+        storageLocation: `connector/${providerKey}/${userId}/${sourceId}`,
+        payload: { title, content, sourceUrl, ...metadata },
+        metadata,
+      },
+      update: {},
+    });
+
+    // Step 2: knowledge_document
+    const knowledgeDoc = await this.db.knowledgeDocument.create({
+      data: {
+        userId, orgId,
+        sourceArtifactId: sourceArtifact.id,
+        documentType: 'connector_record',
+        title: title || `${providerKey}:${sourceId}`,
+        sourcePlatform: providerKey,
+        sourceId,
+        sourceUrl,
+        documentDate: documentDate || new Date(),
+        wordCount: content.split(/\s+/).filter(Boolean).length,
+        parseStatus: 'parsed',
+        parseEngine: 'connector-native',
+        parseMetadata: {},
+        structureExtracted: true,
+        tags: metadata.tags || [],
+      },
+    });
+
+    // Step 3: single segment (whole record body) — adapter could split later
+    const segment = await this.db.knowledgeSegment.create({
+      data: {
+        userId, orgId,
+        documentId: knowledgeDoc.id,
+        segmentType: 'chunk',
+        segmentIndex: 0,
+        content,
+        wordCount: content.split(/\s+/).filter(Boolean).length,
+        startPage: null, endPage: null,
+        metadata: { providerKey, sourceId },
+      },
+    });
+    const segments = [segment];
+
+    // Step 4: embed segment
+    await this._embedSegments(segments);
+
+    // Step 5: promote memories
+    const promoted = await this._promoteMemories({
+      documentId: knowledgeDoc.id,
+      segments,
+      userId, orgId,
+      metadata,
+      promotionStrategy: `connector_${providerKey}`,
+    });
+
+    return {
+      documentId: knowledgeDoc.id,
+      segmentCount: segments.length,
+      candidateCount: promoted.candidates.length,
+      promotedCount: promoted.memories.length,
+      promotedMemoryIds: promoted.memories.map(m => m.id).filter(Boolean),
+    };
+  }
+
+  /**
    * Parse document with Docling (or fallback parsers)
    * @private
    */

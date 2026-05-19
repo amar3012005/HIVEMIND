@@ -21,11 +21,12 @@ export class WebhookProcessor {
    * @param {Object} deps.logger
    * @param {number} [deps.intervalMs]
    */
-  constructor({ prisma, adapterRegistry, tokenResolver, smartIngestRouter, logger, intervalMs = MIN_INTERVAL_MS }) {
+  constructor({ prisma, adapterRegistry, tokenResolver, smartIngestRouter, documentFirstIngestion, logger, intervalMs = MIN_INTERVAL_MS }) {
     this.prisma = prisma;
     this.adapterRegistry = adapterRegistry;
     this.tokenResolver = tokenResolver;
     this.smartIngestRouter = smartIngestRouter;
+    this.documentFirstIngestion = documentFirstIngestion;
     this.logger = logger;
     this._baseIntervalMs = intervalMs;
     this._currentIntervalMs = intervalMs;
@@ -123,7 +124,25 @@ export class WebhookProcessor {
       });
 
       if (resource) {
-        await this.smartIngestRouter.route({ userId: sub.userId, orgId: sub.orgId, resource, type });
+        // Evidence-first path (P1 #13): wrap resource as connector record so it
+        // lands in source_artifacts + knowledge_documents + knowledge_segments
+        // and produces memory_evidence_links. Falls back to legacy router if
+        // documentFirstIngestion not wired (back-compat).
+        if (this.documentFirstIngestion && resource?.content) {
+          await this.documentFirstIngestion.ingestConnectorRecord({
+            userId: sub.userId,
+            orgId: sub.orgId,
+            providerKey: sub.providerKey,
+            sourceId: resource.id || resource.resourceId || `${sub.providerKey}-${Date.now()}`,
+            title: resource.title || resource.subject || null,
+            content: resource.content,
+            sourceUrl: resource.sourceUrl || resource.url || null,
+            documentDate: resource.timestamp ? new Date(resource.timestamp) : null,
+            metadata: { ...(resource.metadata || {}), webhookEventId: eventId, eventType: type },
+          });
+        } else if (this.smartIngestRouter) {
+          await this.smartIngestRouter.route({ userId: sub.userId, orgId: sub.orgId, resource, type });
+        }
       }
 
       await this.prisma.inboundWebhookEvent.update({

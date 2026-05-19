@@ -374,6 +374,7 @@ if (persistentMemoryEngine && persistentMemoryStore && prisma) {
     adapterRegistry,
     tokenResolver: nangoTokenResolver,
     smartIngestRouter,
+    documentFirstIngestion, // P1 #13: connectors land in evidence layer
     logger: console,
     intervalMs: 5000,
   });

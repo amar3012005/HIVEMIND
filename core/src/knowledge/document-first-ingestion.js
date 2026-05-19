@@ -372,6 +372,8 @@ export class DocumentFirstIngestionService {
         const payload = {
           userId,
           orgId,
+          user_id: userId,
+          org_id: orgId,
           content: segment.content,
           title: `Extracted from ${documentId.slice(0, 8)}`,
           source_type: 'knowledge_segment',

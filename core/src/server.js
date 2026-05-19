@@ -11455,6 +11455,35 @@ const server = http.createServer(async (req, res) => {
                 planEnforcer.recordUsage(orgId, 'searches', 1);
               }
 
+              // Slim response — default ON for mode=auto/memory/hybrid/evidence
+              // Caller can opt back into full payload via body.verbose=true
+              if (!body.verbose) {
+                const SLIM_MEM_KEYS = ['id','title','content','memory_type','tags','score','created_at','document_date','project','source','evidence'];
+                const slimMem = (m) => {
+                  const out = {};
+                  for (const k of SLIM_MEM_KEYS) if (m[k] !== undefined) out[k] = m[k];
+                  return out;
+                };
+                result.memories = (result.memories || []).map(slimMem);
+                // Drop heavy top-level noise
+                delete result.injectionText;
+                delete result.user_profile;
+                delete result.expansion_stats;
+                delete result.dedup;
+                delete result.query_rewrite;
+                delete result.intent;
+                // Trim evidence snippet payloads
+                if (Array.isArray(result.evidence)) {
+                  result.evidence = result.evidence.map(e => ({
+                    segment_id: e.segmentId || e.segment_id,
+                    document_id: e.documentId || e.document_id,
+                    document_title: e.document?.title || e.document_title || null,
+                    score: e.score,
+                    snippet: (e.snippet || e.content || '').slice(0, 200),
+                  }));
+                }
+              }
+
               jsonResponse(res, result);
             } catch (error) {
               console.error('Auto recall failed:', error);

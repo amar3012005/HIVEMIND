@@ -344,6 +344,8 @@ if (persistentMemoryEngine && persistentMemoryStore && prisma) {
     connectorStore: schedulerConnStore,
     syncEngine: schedulerSyncEngine,
     prisma,
+    tokenResolver: nangoTokenResolver,
+    logger: console,
     interval: Number(process.env.HIVEMIND_SYNC_INTERVAL_MS || 60 * 60 * 1000), // 1h default
   });
   syncScheduler.start();
@@ -376,6 +378,43 @@ if (persistentMemoryEngine && persistentMemoryStore && prisma) {
   });
   webhookProcessor.start();
   console.log('[webhook-processor] started');
+}
+
+// ─── Hygiene Scanner cron (P1 #7) ────────────────────────────────────────────
+// Runs nightly across recently active tenants. Generates proposals only —
+// nothing auto-executes (executeProposals still requires admin approval).
+if (process.env.ENABLE_HYGIENE_CRON === 'true' && hygieneScanner && prisma) {
+  const HYGIENE_INTERVAL_MS = Number(process.env.HYGIENE_INTERVAL_MS || 24 * 60 * 60 * 1000); // 24h
+  const HYGIENE_USER_LIMIT = Number(process.env.HYGIENE_USER_LIMIT || 25);
+  const runHygieneCron = async () => {
+    try {
+      // Fetch most-recently-active users by latest memory write
+      const recent = await prisma.memory.groupBy({
+        by: ['userId', 'orgId'],
+        where: { deletedAt: null, isLatest: true },
+        _max: { updatedAt: true },
+        orderBy: { _max: { updatedAt: 'desc' } },
+        take: HYGIENE_USER_LIMIT,
+      });
+      console.log(`[hygiene-cron] scanning ${recent.length} active tenants`);
+      let totalProposals = 0;
+      for (const { userId, orgId } of recent) {
+        try {
+          const { proposals } = await hygieneScanner.scan(userId, orgId, { limit: 100 });
+          totalProposals += proposals.length;
+        } catch (err) {
+          console.warn(`[hygiene-cron] scan failed for ${userId}/${orgId}: ${err.message}`);
+        }
+      }
+      console.log(`[hygiene-cron] done — ${totalProposals} proposals generated`);
+    } catch (err) {
+      console.error('[hygiene-cron] tick failed:', err.message);
+    }
+  };
+  // First run after 5min (post-boot warm-up), then every interval
+  setTimeout(runHygieneCron, 5 * 60 * 1000);
+  setInterval(runHygieneCron, HYGIENE_INTERVAL_MS);
+  console.log(`[hygiene-cron] scheduled — every ${HYGIENE_INTERVAL_MS / 3600000}h, top ${HYGIENE_USER_LIMIT} tenants`);
 }
 
 // ─── Audit logging helper ────────────────────────────────────────────────────
@@ -2222,8 +2261,15 @@ const server = http.createServer(async (req, res) => {
       const { default: adapterRegistry } = await import('./connectors/framework/adapter-registry.js');
       // Lazy-import adapters so they self-register
       try {
-        if (provider === 'notion') await import('./connectors/adapters/notion/notion-adapter.js');
-        if (provider === 'slack') await import('./connectors/adapters/slack/slack-adapter.js');
+        const providerModuleMap = {
+          notion: './connectors/adapters/notion/notion-adapter.js',
+          slack: './connectors/adapters/slack/slack-adapter.js',
+          github: './connectors/adapters/github/github-adapter.js',
+          linear: './connectors/adapters/linear/linear-adapter.js',
+        };
+        if (providerModuleMap[provider]) {
+          await import(providerModuleMap[provider]);
+        }
       } catch (_) { /* registry remains empty for unknown providers */ }
       const AdapterClass = adapterRegistry.get(provider);
       if (!AdapterClass) {
@@ -5600,6 +5646,8 @@ const server = http.createServer(async (req, res) => {
             try {
               const providerKey = body.provider_key;
               const connectionId = body.connection_id;
+              const targetScope = body.target_scope || 'personal';
+              const teamId = body.team_id || null;
               if (!providerKey || !connectionId) {
                 return jsonResponse(res, { error: 'provider_key and connection_id are required' }, 400);
               }
@@ -5630,6 +5678,117 @@ const server = http.createServer(async (req, res) => {
                   metadata: { last_connected_via: 'connect-ui' },
                 },
               });
+
+              await prisma.platformIntegration.upsert({
+                where: {
+                  userId_platformType: {
+                    userId,
+                    platformType: providerKey,
+                  },
+                },
+                create: {
+                  userId,
+                  platformType: providerKey,
+                  authType: 'oauth2',
+                  oauthScopes: [],
+                  oauthGrantedAt: new Date(),
+                  oauthLastRefreshed: new Date(),
+                  isActive: true,
+                  syncStatus: 'idle',
+                  targetScope,
+                  teamId,
+                  connectorMetadata: {
+                    nango: {
+                      connection_id: connectionId,
+                      provider_key: providerKey,
+                    },
+                  },
+                },
+                update: {
+                  authType: 'oauth2',
+                  isActive: true,
+                  syncStatus: 'idle',
+                  targetScope,
+                  teamId,
+                  oauthLastRefreshed: new Date(),
+                  connectorMetadata: {
+                    nango: {
+                      connection_id: connectionId,
+                      provider_key: providerKey,
+                    },
+                    last_connected_via: 'connect-ui',
+                  },
+                },
+              });
+
+              try {
+                const { default: adapterRegistry } = await import('./connectors/framework/adapter-registry.js');
+                const providerModuleMap = {
+                  notion: './connectors/adapters/notion/notion-adapter.js',
+                  slack: './connectors/adapters/slack/slack-adapter.js',
+                  github: './connectors/adapters/github/github-adapter.js',
+                  linear: './connectors/adapters/linear/linear-adapter.js',
+                };
+                if (providerModuleMap[providerKey]) {
+                  await import(providerModuleMap[providerKey]);
+                }
+
+                const AdapterClass = adapterRegistry.get(providerKey);
+                if (AdapterClass) {
+                  const adapter = adapterRegistry.instantiate(providerKey, {
+                    providerKey,
+                    tokenResolver: nangoTokenResolver,
+                    prisma,
+                    logger: console,
+                  });
+
+                  const publicBaseUrl =
+                    process.env.HIVEMIND_PUBLIC_URL ||
+                    process.env.PUBLIC_API_URL ||
+                    process.env.API_BASE_URL ||
+                    `${req.headers['x-forwarded-proto'] || 'https'}://${req.headers['x-forwarded-host'] || req.headers.host}`;
+
+                  const webhook = await adapter.registerWebhook({
+                    userId,
+                    orgId,
+                    callbackUrl: `${publicBaseUrl}/webhooks/${providerKey}`,
+                    secret: crypto.randomUUID().replace(/-/g, ''),
+                  }).catch((err) => {
+                    if (err?.code === 'not_supported') return null;
+                    throw err;
+                  });
+
+                  if (webhook?.externalId) {
+                    await prisma.inboundWebhookSubscription.upsert({
+                      where: {
+                        orgId_providerKey_externalId: {
+                          orgId,
+                          providerKey,
+                          externalId: String(webhook.externalId),
+                        },
+                      },
+                      create: {
+                        userId,
+                        orgId,
+                        providerKey,
+                        externalId: String(webhook.externalId),
+                        webhookSecretEncrypted: webhook.secret ? encryptToken(webhook.secret) : null,
+                        eventTypes: webhook.eventTypes || ['*'],
+                        webhookUrl: `${publicBaseUrl}/webhooks/${providerKey}`,
+                        status: 'active',
+                      },
+                      update: {
+                        webhookSecretEncrypted: webhook.secret ? encryptToken(webhook.secret) : undefined,
+                        eventTypes: webhook.eventTypes || ['*'],
+                        webhookUrl: `${publicBaseUrl}/webhooks/${providerKey}`,
+                        status: 'active',
+                      },
+                    });
+                  }
+                }
+              } catch (webhookErr) {
+                console.warn(`[nango-connect] Webhook registration skipped for ${providerKey}: ${webhookErr.message}`);
+              }
 
               return jsonResponse(res, {
                 success: true,

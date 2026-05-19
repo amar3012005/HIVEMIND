@@ -37,7 +37,11 @@ export class EntityExtractor {
   constructor({ prisma, logger = console, model = null }) {
     this.prisma = prisma;
     this.logger = logger;
-    this.model = model || getDefaultModel();
+    // Entity extraction prefers a fast non-reasoning model (llama 3.3 70B is
+    // ~5x faster than gpt-oss-20b and emits JSON cleanly).
+    this.model = model
+      || process.env.ENTITY_EXTRACTION_MODEL
+      || (process.env.GROQ_API_KEY ? 'llama-3.3-70b-versatile' : getDefaultModel());
   }
 
   /**

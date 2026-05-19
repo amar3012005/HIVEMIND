@@ -94,7 +94,10 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
 
   const json = await res.json();
   const usage = json.usage;
-  const content = json.choices?.[0]?.message?.content || '';
+  // gpt-oss-* reasoning models put visible output in reasoning_content (Groq)
+  // or content; coalesce both.
+  const msg = json.choices?.[0]?.message || {};
+  const content = msg.content || msg.reasoning_content || '';
 
   console.log(`[enterprise-extract] provider=${route.provider} model=${model} tokens=${usage?.total_tokens}`);
 

@@ -309,6 +309,51 @@ Tracked in `PHASE2_FINAL_INTEGRATION_PLAN.md` Wave B.
 
 ---
 
+## Existing strategy modes (still alive)
+
+Recall has TWO orthogonal axes:
+
+### Axis 1 — Strategy (search algorithm)
+
+| Endpoint / MCP arg | Purpose | Default limit |
+|---|---|---|
+| `/api/search/quick` · `mode: 'quick'` | Fast semantic vector lookup | 5 |
+| `/api/search/panorama` · `mode: 'panorama'` | Temporal/historical sweep | 15 |
+| `/api/search/insight` · `mode: 'insight'` | LLM sub-query decomposition + relationship chains | 10 |
+| `/api/search/compare` | Run all three side-by-side | — |
+
+### Axis 2 — Orchestrator (which layers to fan out to) — NEW in v2
+
+| `body.mode` | Purpose |
+|---|---|
+| `memory` | Memories only (fast) |
+| `auto` (default) | Memories-first + evidence on-demand |
+| `hybrid` | Always both |
+| `evidence` | Segments only |
+
+### Composition
+
+```js
+// Quick lookup with auto evidence
+hivemind_recall({ query: "...", mode: "quick", evidence_mode: "auto" })
+
+// Insight with always-on evidence citation
+hivemind_recall({ query: "...", mode: "insight", evidence_mode: "hybrid" })
+
+// Panorama timeline, memory-only (fast)
+hivemind_recall({ query: "...", mode: "panorama", evidence_mode: "memory" })
+```
+
+### Naming note
+- MCP tool arg `mode` → strategy
+- Backend body `mode` → orchestrator
+- MCP tool arg `evidence_mode` → maps to backend body `mode`
+
+Both axes coexist. Strategy = HOW to search. Orchestrator = WHICH layers
+to return.
+
+---
+
 ## TL;DR
 
 - **One endpoint** `/api/recall` handles all modes

@@ -14220,7 +14220,7 @@ ${injectionText}`;
                     _count: {
                       select: {
                         segments: true,
-                        evidenceLinks: true
+                        memoryLinks: true
                       }
                     }
                   }
@@ -14231,7 +14231,7 @@ ${injectionText}`;
               const enriched = documents.map(doc => ({
                 ...doc,
                 segmentCount: doc._count.segments,
-                promotedCount: doc._count.evidenceLinks,
+                promotedCount: doc._count.memoryLinks,
                 _count: undefined
               }));
 
@@ -14290,7 +14290,7 @@ ${injectionText}`;
                   _count: {
                     select: {
                       segments: true,
-                      evidenceLinks: true
+                      memoryLinks: true
                     }
                   }
                 }
@@ -14299,7 +14299,7 @@ ${injectionText}`;
               const enriched = documents.map(doc => ({
                 ...doc,
                 segmentCount: doc._count.segments,
-                promotedCount: doc._count.evidenceLinks,
+                promotedCount: doc._count.memoryLinks,
                 _count: undefined
               }));
 

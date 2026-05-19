@@ -45,7 +45,7 @@ export class MemoryProcessor {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          model: 'llama-3.3-70b-versatile',
+          model: process.env.MEMORY_PROCESSOR_MODEL || 'openai/gpt-oss-20b',
           messages: [
             {
               role: 'system',

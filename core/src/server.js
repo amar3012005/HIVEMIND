@@ -1061,11 +1061,12 @@ if (process.env.DOCLING_URL) {
         const useSmart = smart || autoSmart;
         // Parse + chunk in parallel — chunker provides structure-aware
         // segmentation (respects headings, paragraphs, tables).
+        const tParse = Date.now();
         const [parseResult, chunkResult] = await Promise.all([
           parseWithDocling(tempPath, filename, { smart: useSmart }),
           chunkWithDocling(tempPath, filename).catch(e => ({ chunks: [], error: e.message })),
         ]);
-        console.log(`[docling-adapter] file=${filename} chunks=${chunkResult?.chunks?.length || 0} parseError=${parseResult?.error || 'none'} chunkerError=${chunkResult?.error || 'none'}`);
+        console.log(`[docling-adapter] file=${filename} smart=${useSmart} chunks=${chunkResult?.chunks?.length || 0} ms=${Date.now() - tParse} parseError=${parseResult?.error || 'none'} chunkerError=${chunkResult?.error || 'none'}`);
         // Merge: surface hybridChunks alongside parsed text
         return {
           ...parseResult,
@@ -8652,6 +8653,7 @@ const server = http.createServer(async (req, res) => {
               // ─── Phase 1: Document-First Ingestion Path (feature-flagged) ───
               if (documentFirstIngestion) {
                 console.log(`[knowledge] Using Phase 1 document-first ingestion for ${filePart.filename}`);
+                const tPhase1 = Date.now();
                 try {
                   const result = await documentFirstIngestion.ingestKnowledgeDocument({
                     userId, orgId,
@@ -8667,7 +8669,7 @@ const server = http.createServer(async (req, res) => {
                       visibility: targetScope === 'organization' ? 'organization' : 'private'
                     }
                   });
-                  console.log(`[knowledge] ✓ Phase1 complete: file=${filePart.filename} docId=${result.documentId} segments=${result.segmentCount} promoted=${result.promotedCount}`);
+                  console.log(`[knowledge] ✓ Phase1 complete: file=${filePart.filename} docId=${result.documentId} segments=${result.segmentCount} promoted=${result.promotedCount} ms=${Date.now() - tPhase1}`);
                   return jsonResponse(res, {
                     upload_id: crypto.randomUUID(),
                     filename: filePart.filename,

@@ -79,7 +79,9 @@ export class DocumentFirstIngestionService {
     });
 
     // Step 2: Parse document with Docling
+    const _tParse = Date.now();
     const parseResult = await this._parseDocument(fileBuffer, contentType, filename);
+    const _msParse = Date.now() - _tParse;
 
     // Step 3: Create knowledge document
     // sourceId scoped per checksum so identical re-uploads dedupe via source_artifact
@@ -115,10 +117,12 @@ export class DocumentFirstIngestionService {
 
     // Step 4: Create segments from parsed structure (idempotent — re-uploads
     // of identical content reuse existing segments)
+    const _tSeg = Date.now();
     let segments = await this.db.knowledgeSegment.findMany({
       where: { documentId: knowledgeDoc.id },
       orderBy: { segmentIndex: 'asc' },
     });
+    let _msEmbed = 0;
     if (!segments.length) {
       segments = await this._createSegments({
         documentId: knowledgeDoc.id,
@@ -127,11 +131,15 @@ export class DocumentFirstIngestionService {
         parseResult
       });
       // Step 5: Embed segments (only on first-time creation)
+      const _tEmbed = Date.now();
       await this._embedSegments(segments);
+      _msEmbed = Date.now() - _tEmbed;
     }
+    const _msSeg = Date.now() - _tSeg;
 
     this._extractEntitiesAsync({ segments, userId, orgId, documentId: knowledgeDoc.id });
     // Step 6: Promote candidate memories
+    const _tPromote = Date.now();
     const promoted = await this._promoteMemories({
       documentId: knowledgeDoc.id,
       segments,
@@ -139,6 +147,8 @@ export class DocumentFirstIngestionService {
       orgId,
       metadata
     });
+    const _msPromote = Date.now() - _tPromote;
+    console.log(`[phase1-timing] parse=${_msParse}ms seg=${_msSeg}ms embed=${_msEmbed}ms promote=${_msPromote}ms segs=${segments.length} memories=${promoted.memories.length}`);
 
     return {
       documentId: knowledgeDoc.id,
@@ -589,7 +599,12 @@ export class DocumentFirstIngestionService {
               : []),
             ...(segment.metadata?.page ? [`page:${segment.metadata.page}`] : []),
           ],
-          skip_fact_extraction: false, // Enable fact extraction for promoted memories
+          // Fact-extract enabled by default. Big PDFs (≥30 segs) skip per-segment
+          // LLM to keep ingest under a minute — facts can be extracted lazily by
+          // promotion-cron later. Override via metadata.force_fact_extraction.
+          skip_fact_extraction: metadata.force_fact_extraction === true
+            ? false
+            : (Array.isArray(segments) && segments.length >= 30),
           documentDate: new Date(),
           metadata: {
             ...(metadata || {}),

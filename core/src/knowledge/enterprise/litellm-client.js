@@ -9,9 +9,17 @@
 
 import fetch from 'node-fetch';
 
-const DEFAULT_MODEL = process.env.ENTERPRISE_EXTRACTION_MODEL || 'gemini-2.5-flash-lite';
-const API_KEY = process.env.LITELLM_API_KEY || process.env.OPENAI_API_KEY || '';
-const BASE_URL = (process.env.LITELLM_BASE_URL || process.env.OPENAI_API_BASE_URL || 'https://api.blaiq.ai/v1').replace(/\/+$/, '');
+// Default routes through Groq direct (gpt-oss-20b — fast, cheap, JSON-mode).
+// LITELLM_BASE_URL still wins when explicitly set (preserves backward compat).
+const GROQ_KEY = process.env.GROQ_API_KEY || '';
+const USE_GROQ = !process.env.LITELLM_BASE_URL && !process.env.OPENAI_API_BASE_URL && GROQ_KEY;
+
+const DEFAULT_MODEL = process.env.ENTERPRISE_EXTRACTION_MODEL
+  || (USE_GROQ ? 'openai/gpt-oss-20b' : 'gemini-2.5-flash-lite');
+const API_KEY = USE_GROQ ? GROQ_KEY : (process.env.LITELLM_API_KEY || process.env.OPENAI_API_KEY || '');
+const BASE_URL = (process.env.LITELLM_BASE_URL
+  || process.env.OPENAI_API_BASE_URL
+  || (USE_GROQ ? 'https://api.groq.com/openai/v1' : 'https://api.blaiq.ai/v1')).replace(/\/+$/, '');
 const TIMEOUT_MS = 60_000;
 
 /**

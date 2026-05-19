@@ -88,6 +88,7 @@ services:
             BUILD_DATE: '${BUILD_DATE:-unknown}'
             NANGO_URL: 'http://nango:3003'
             NANGO_SECRET_KEY: '${NANGO_SECRET_KEY}'
+            DOCLING_URL: 'http://docling:5001'
             POSTGRES_PASSWORD: '${POSTGRES_PASSWORD}'
             COOLIFY_BRANCH: '"main"'
             COOLIFY_RESOURCE_UUID: s0k0s0k40wo44w4w8gcs8ow0
@@ -241,6 +242,9 @@ services:
             POSTGRES_PASSWORD: '${POSTGRES_PASSWORD}'
             NANGO_URL: 'http://nango:3003'
             NANGO_SECRET_KEY: '${NANGO_SECRET_KEY}'
+            PUPPETEER_EXECUTABLE_PATH: '${PUPPETEER_EXECUTABLE_PATH:-/usr/bin/chromium}'
+            PUPPETEER_SKIP_DOWNLOAD: 'true'
+            HIVEMIND_WHATSAPP_SESSIONS_DIR: '${HIVEMIND_WHATSAPP_SESSIONS_DIR:-/app/data/whatsapp-sessions}'
             COOLIFY_BRANCH: '"main"'
             COOLIFY_RESOURCE_UUID: s0k0s0k40wo44w4w8gcs8ow0
             COOLIFY_CONTAINER_NAME: control-plane-s0k0s0k40wo44w4w8gcs8ow0-125656582243
@@ -526,6 +530,65 @@ services:
         depends_on:
             postgres:
                 condition: service_healthy
+        env_file:
+            - .env
+    # ==========================================
+    # Docling — document parsing & OCR sidecar
+    # CPU-only mode by default; GPU optional
+    # ==========================================
+    docling:
+        image: 'ds4sd/docling-serve:latest'
+        container_name: docling-s0k0s0k40wo44w4w8gcs8ow0-125656800000
+        hostname: hivemind-docling
+        restart: unless-stopped
+        deploy:
+            resources:
+                limits:
+                    cpus: '2'
+                    memory: 4G
+                reservations:
+                    cpus: '1'
+                    memory: 2G
+            restart_policy:
+                condition: on-failure
+                delay: 5s
+                max_attempts: 3
+        ports:
+            - '5001:5001'
+        healthcheck:
+            test:
+                - CMD-SHELL
+                - 'curl -f http://localhost:5001/health || exit 1'
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 120s
+        logging:
+            driver: json-file
+            options:
+                max-size: 10m
+                max-file: '5'
+                compress: 'true'
+                tag: '{{.ImageName}}|{{.Name}}|{{.ImageFullID}}|{{.FullID}}'
+        labels:
+            - hivemind.component=doc-parser
+            - hivemind.tier=infrastructure
+            - hivemind.region=eu
+            - 'hivemind.compliance=gdpr,nis2,dora'
+            - coolify.name=hivemind-docling
+            - coolify.managed=true
+            - coolify.version=4.0.0-beta.462
+            - coolify.applicationId=20
+            - coolify.type=application
+            - coolify.name=docling-s0k0s0k40wo44w4w8gcs8ow0-125656800000
+            - coolify.resourceName=hive-mind
+            - coolify.projectName=hivemind
+            - coolify.serviceName=hive-mind
+            - coolify.environmentName=production
+            - coolify.pullRequestId=0
+        networks:
+            hivemind-network: null
+            s0k0s0k40wo44w4w8gcs8ow0: null
         env_file:
             - .env
     postgres:

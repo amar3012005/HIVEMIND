@@ -392,14 +392,17 @@ if (persistentMemoryEngine && persistentMemoryStore && prisma) {
 }
 
 // ─── Memory Promotion Jobs cron (Wave 5 / P1 #5) ────────────────────────────
-// Background re-evaluation: scans recent unprocessed segments and promotes
-// candidates that scored borderline at ingest time. Also marks memories stale
-// when their source segments age out of relevance.
-if (process.env.ENABLE_MEMORY_PROMOTION_JOBS === 'true' && documentFirstIngestion && prisma) {
+// Late-resolution: documentFirstIngestion is initialized later (line ~1028).
+// Use setImmediate so this block runs after module-init completes.
+if (process.env.ENABLE_MEMORY_PROMOTION_JOBS === 'true' && prisma) {
   const PROMOTION_INTERVAL_MS = Number(process.env.PROMOTION_INTERVAL_MS || 6 * 60 * 60 * 1000); // 6h
   const PROMOTION_BATCH = Number(process.env.PROMOTION_BATCH || 50);
   const STALE_AFTER_DAYS = Number(process.env.MEMORY_STALE_AFTER_DAYS || 90);
   const runPromotion = async () => {
+    if (!documentFirstIngestion) {
+      console.warn('[promotion-cron] documentFirstIngestion not yet initialized — skipping tick');
+      return;
+    }
     try {
       // Find segments without any linked memory_evidence_link — re-evaluate them
       const orphans = await prisma.knowledgeSegment.findMany({

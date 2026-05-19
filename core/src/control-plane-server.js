@@ -823,6 +823,45 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [], onProgress 
     });
     emit(88, 'Anonymized audit logs');
 
+    // Delete or detach createdBy FK rows that block user delete.
+    // createdBy is NOT NULL on DigitalEmployee + Team + Project +
+    // PendingMcpInstall, so we can't null them. For DigitalEmployees +
+    // PendingMcpInstalls we hard-delete; for Team/Project we delete only
+    // when the user is the sole member (otherwise reassign to first
+    // remaining admin).
+    try {
+      await prisma.digitalEmployee.deleteMany({ where: { createdBy: userId } });
+    } catch (err) { console.warn(`[account-delete] ⚠ DigitalEmployee delete: ${err.message}`); }
+    try {
+      await prisma.pendingMcpInstall.deleteMany({ where: { createdBy: userId } });
+    } catch { /* noop */ }
+    // Project / Team — keep but reassign createdBy to any remaining admin in
+    // same org; if no remaining member, hard-delete.
+    const reassignCreatedBy = async (model, scopeKey) => {
+      try {
+        const rows = await prisma[model].findMany({
+          where: { createdBy: userId },
+          select: { id: true, orgId: true },
+        });
+        for (const row of rows) {
+          const replacement = await prisma.userOrganization.findFirst({
+            where: { orgId: row.orgId, userId: { not: userId } },
+            select: { userId: true },
+          });
+          if (replacement) {
+            await prisma[model].update({ where: { id: row.id }, data: { createdBy: replacement.userId } });
+          } else {
+            await prisma[model].delete({ where: { id: row.id } }).catch(() => {});
+          }
+        }
+      } catch (err) {
+        console.warn(`[account-delete] ⚠ reassign ${model}: ${err.message}`);
+      }
+    };
+    await reassignCreatedBy('team');
+    await reassignCreatedBy('project');
+    emit(89, 'Detached created_by references');
+
     await prisma.user.delete({ where: { id: userId } });
     emit(90, 'Deleted user record');
 

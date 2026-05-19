@@ -36,13 +36,14 @@ const headers = {
 };
 
 async function checkHealth() {
-  console.log('🏥 Checking Qdrant health...');
-  const response = await fetch(`${QDRANT_URL}/`);
+  console.log('🏥 Checking Qdrant reachability...');
+  // Cloud Qdrant requires API key on every request; root path may 403.
+  // Use authenticated /collections endpoint instead.
+  const response = await fetch(`${QDRANT_URL}/collections`, { headers });
   if (!response.ok) {
-    throw new Error(`Qdrant is not healthy: ${response.status}`);
+    throw new Error(`Qdrant unreachable: ${response.status}`);
   }
-  const data = await response.json();
-  console.log(`✅ Qdrant is healthy (version ${data.version || 'unknown'})`);
+  console.log(`✅ Qdrant reachable`);
 }
 
 async function collectionExists(collectionName) {

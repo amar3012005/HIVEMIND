@@ -75,11 +75,23 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
   console.log(`[enterprise-extract] model=${model} tokens=${usage?.total_tokens}`);
 
   if (json_mode) {
-    try {
-      return JSON.parse(content);
-    } catch {
-      throw new Error(`[enterprise-extract] Failed to parse JSON response: ${content.slice(0, 200)}`);
+    // Robust parse: try direct, then strip code fences, then salvage first {...}/[...]
+    const tryParse = (s) => {
+      try { return JSON.parse(s); } catch { return null; }
+    };
+    let parsed = tryParse(content);
+    if (parsed === null) {
+      // Strip ```json ... ``` fences if present
+      const fenced = content.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+      parsed = tryParse(fenced);
     }
+    if (parsed === null) {
+      // Salvage first balanced object/array
+      const m = content.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
+      if (m) parsed = tryParse(m[0]);
+    }
+    if (parsed !== null) return parsed;
+    throw new Error(`[enterprise-extract] Failed to parse JSON response: ${content.slice(0, 200)}`);
   }
 
   return content;

@@ -76,7 +76,8 @@ export async function parseWithDocling(filePath, filename) {
  */
 export async function chunkWithDocling(filePath, filename) {
   const formData = new FormData();
-  formData.append('file', new Blob([fs.readFileSync(filePath)]), filename);
+  // Docling hybrid chunker expects "files" (plural), unlike /v1/convert which uses "file"
+  formData.append('files', new Blob([fs.readFileSync(filePath)]), filename);
   try {
     const res = await fetch(`${DOCLING_URL}/v1/chunk/hybrid/file`, {
       method: 'POST',
@@ -94,11 +95,19 @@ export async function chunkWithDocling(filePath, filename) {
     const chunks = rawChunks.map(c => {
       const text = c.text || c.content || c.body || (typeof c === 'string' ? c : '');
       const meta = c.meta || c.metadata || {};
-      const headings = Array.isArray(meta.headings) ? meta.headings
-        : Array.isArray(c.headings) ? c.headings
+      const headings = Array.isArray(c.headings) ? c.headings
+        : Array.isArray(meta.headings) ? meta.headings
         : [];
-      const page = meta.page || meta.page_no || c.page || null;
-      return { text, headings, page, meta };
+      // Docling returns page_numbers: number[] — pick first if present
+      const page = Array.isArray(c.page_numbers) && c.page_numbers.length
+        ? c.page_numbers[0]
+        : (meta.page || meta.page_no || c.page || null);
+      return {
+        text,
+        headings,
+        page,
+        meta: { ...meta, num_tokens: c.num_tokens || null, doc_items: c.doc_items || null },
+      };
     }).filter(c => c.text && c.text.trim().length > 0);
     return { chunks, error: null };
   } catch (err) {

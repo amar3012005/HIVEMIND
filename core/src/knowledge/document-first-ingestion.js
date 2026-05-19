@@ -112,16 +112,22 @@ export class DocumentFirstIngestionService {
       update: {}
     });
 
-    // Step 4: Create segments from parsed structure
-    const segments = await this._createSegments({
-      documentId: knowledgeDoc.id,
-      userId,
-      orgId,
-      parseResult
+    // Step 4: Create segments from parsed structure (idempotent — re-uploads
+    // of identical content reuse existing segments)
+    let segments = await this.db.knowledgeSegment.findMany({
+      where: { documentId: knowledgeDoc.id },
+      orderBy: { segmentIndex: 'asc' },
     });
-
-    // Step 5: Embed segments
-    await this._embedSegments(segments);
+    if (!segments.length) {
+      segments = await this._createSegments({
+        documentId: knowledgeDoc.id,
+        userId,
+        orgId,
+        parseResult
+      });
+      // Step 5: Embed segments (only on first-time creation)
+      await this._embedSegments(segments);
+    }
 
     this._extractEntitiesAsync({ segments, userId, orgId, documentId: knowledgeDoc.id });
     // Step 6: Promote candidate memories

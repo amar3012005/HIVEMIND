@@ -1055,18 +1055,48 @@ if (process.env.DOCLING_URL) {
 
       try {
         fs.writeFileSync(tempPath, fileBuffer);
-        // Smart Extract = OCR + tables + chart enrichment. 10x slower (180s on
-        // an 8 MB PDF). KB upload defaults to FAST text-extract; smart is opt-in
-        // via /api/enterprise/upload/* OR explicit caller flag.
-        const useSmart = smart === true;
-        // Parse + chunk in parallel — chunker provides structure-aware
-        // segmentation (respects headings, paragraphs, tables).
+        const ext = (filename || '').split('.').pop()?.toLowerCase();
         const tParse = Date.now();
+
+        // ── Tier 1: pdf-parse (text-native PDFs, 1-2s) ──
+        if (ext === 'pdf') {
+          try {
+            const { fastPdfExtract } = await import('./knowledge/enterprise/fast-pdf-parser.js');
+            const fast = await fastPdfExtract(tempPath);
+            if (!fast.error && !fast.isImageHeavy && fast.text.length > 200) {
+              console.log(`[docling-adapter] tier=fast-pdf file=${filename} pages=${fast.pages} chars=${fast.text.length} ms=${Date.now() - tParse}`);
+              return {
+                text: fast.text, markdown: fast.text, json: null,
+                tables: [], pages: fast.pages, confidence: null, error: null,
+                hybridChunks: [], chunkerError: null, engine: 'pdf-parse',
+              };
+            }
+            // ── Tier 3: Groq vision OCR (image-heavy PDFs) ──
+            if (fast.isImageHeavy && process.env.GROQ_API_KEY && !smart) {
+              const { parsePdfWithGroqVision } = await import('./knowledge/enterprise/groq-vision-parser.js');
+              const vision = await parsePdfWithGroqVision(tempPath);
+              if (!vision.error && vision.text.length > 200) {
+                console.log(`[docling-adapter] tier=groq-vision file=${filename} pages=${vision.pages} chars=${vision.text.length} ms=${Date.now() - tParse}`);
+                return {
+                  text: vision.text, markdown: vision.markdown, json: null,
+                  tables: [], pages: vision.pages, confidence: null, error: null,
+                  hybridChunks: [], chunkerError: null, engine: 'groq-vision',
+                };
+              }
+              console.warn(`[docling-adapter] groq-vision failed: ${vision.error || 'empty'} — falling back to Docling`);
+            }
+          } catch (tierErr) {
+            console.warn(`[docling-adapter] tier1/3 error: ${tierErr.message}`);
+          }
+        }
+
+        // ── Tier 2: Docling (smart=true via enterprise upload only) ──
+        const useSmart = smart === true;
         const [parseResult, chunkResult] = await Promise.all([
           parseWithDocling(tempPath, filename, { smart: useSmart }),
           chunkWithDocling(tempPath, filename).catch(e => ({ chunks: [], error: e.message })),
         ]);
-        console.log(`[docling-adapter] file=${filename} smart=${useSmart} chunks=${chunkResult?.chunks?.length || 0} ms=${Date.now() - tParse} parseError=${parseResult?.error || 'none'} chunkerError=${chunkResult?.error || 'none'}`);
+        console.log(`[docling-adapter] tier=docling file=${filename} smart=${useSmart} chunks=${chunkResult?.chunks?.length || 0} ms=${Date.now() - tParse} parseError=${parseResult?.error || 'none'} chunkerError=${chunkResult?.error || 'none'}`);
         // Merge: surface hybridChunks alongside parsed text
         return {
           ...parseResult,

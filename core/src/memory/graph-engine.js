@@ -991,7 +991,11 @@ export class MemoryGraphEngine {
         await this._enqueueDeriveCandidates(store, baseMemory, latestMemories);
 
         // Detect contradictions and reconcile: determine correct edge type BEFORE creating
-        if (this.conflictDetector && latestMemories.length > 0) {
+        // Document-first promotion can opt out via skip_contradiction_detection:true
+        // (catalog pages aren't contradicting your beliefs — pure noise).
+        const skipContradictions = input.skip_contradiction_detection === true
+          || input.skipContradictionDetection === true;
+        if (this.conflictDetector && latestMemories.length > 0 && !skipContradictions) {
           try {
             const EVOLUTION_RE = /\b(now|switched|changed|moved to|migrating|replaced|updated|corrected|actually|no longer|stopped|used to|formerly|previously|instead)\b/i;
             const ADDITIVE_RE = /\b(also|additionally|furthermore|plus|as well|on top of|in addition|moreover|and also)\b/i;

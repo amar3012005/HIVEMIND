@@ -391,6 +391,97 @@ if (persistentMemoryEngine && persistentMemoryStore && prisma) {
   console.log('[webhook-processor] started');
 }
 
+// ─── Memory Promotion Jobs cron (Wave 5 / P1 #5) ────────────────────────────
+// Background re-evaluation: scans recent unprocessed segments and promotes
+// candidates that scored borderline at ingest time. Also marks memories stale
+// when their source segments age out of relevance.
+if (process.env.ENABLE_MEMORY_PROMOTION_JOBS === 'true' && documentFirstIngestion && prisma) {
+  const PROMOTION_INTERVAL_MS = Number(process.env.PROMOTION_INTERVAL_MS || 6 * 60 * 60 * 1000); // 6h
+  const PROMOTION_BATCH = Number(process.env.PROMOTION_BATCH || 50);
+  const STALE_AFTER_DAYS = Number(process.env.MEMORY_STALE_AFTER_DAYS || 90);
+  const runPromotion = async () => {
+    try {
+      // Find segments without any linked memory_evidence_link — re-evaluate them
+      const orphans = await prisma.knowledgeSegment.findMany({
+        where: { memoryLinks: { none: {} } },
+        select: { id: true, documentId: true, userId: true, orgId: true, content: true },
+        take: PROMOTION_BATCH,
+        orderBy: { createdAt: 'desc' },
+      });
+      let promoted = 0;
+      for (const seg of orphans) {
+        try {
+          const result = await documentFirstIngestion._promoteMemories({
+            documentId: seg.documentId,
+            segments: [{ id: seg.id, content: seg.content, segmentIndex: 0 }],
+            userId: seg.userId,
+            orgId: seg.orgId,
+            metadata: {},
+            promotionStrategy: 'background_reevaluation',
+          });
+          promoted += result.memories.filter(m => m?.id).length;
+        } catch (err) {
+          console.warn(`[promotion-cron] segment ${seg.id} failed: ${err.message}`);
+        }
+      }
+      // Mark memories without recent reinforcement as stale
+      const cutoff = new Date(Date.now() - STALE_AFTER_DAYS * 24 * 60 * 60 * 1000);
+      const stale = await prisma.memory.updateMany({
+        where: { isLatest: true, updatedAt: { lt: cutoff }, strength: { gt: 0.2 } },
+        data: { strength: { decrement: 0.1 } },
+      }).catch(() => ({ count: 0 }));
+      console.log(`[promotion-cron] ${orphans.length} orphan segments scanned, ${promoted} promoted, ${stale.count} memories aged`);
+    } catch (err) {
+      console.error('[promotion-cron] tick failed:', err.message);
+    }
+  };
+  setTimeout(runPromotion, 10 * 60 * 1000); // first run +10min
+  setInterval(runPromotion, PROMOTION_INTERVAL_MS);
+  console.log(`[promotion-cron] scheduled — every ${PROMOTION_INTERVAL_MS / 3600000}h`);
+}
+
+// ─── Contradiction Scanner cron (Wave 5 / P1 5.2) ───────────────────────────
+if (process.env.ENABLE_CONTRADICTION_SCAN === 'true' && prisma) {
+  const CONTRADICTION_INTERVAL_MS = Number(process.env.CONTRADICTION_INTERVAL_MS || 24 * 60 * 60 * 1000);
+  let contradictionScanner = null;
+  const runContradictions = async () => {
+    try {
+      if (!contradictionScanner) {
+        const { ContradictionScanner } = await import('./resident/contradiction-scanner.js');
+        contradictionScanner = new ContradictionScanner({ prisma, logger: console });
+      }
+      const since = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
+      const orgs = await prisma.memory.groupBy({
+        by: ['orgId'],
+        where: { deletedAt: null, isLatest: true, updatedAt: { gte: since } },
+        _count: { _all: true },
+        orderBy: { _count: { orgId: 'desc' } },
+        take: 20,
+      });
+      let totalProposals = 0;
+      let totalEmitted = 0;
+      for (const { orgId: oid } of orgs) {
+        try {
+          const proposals = await contradictionScanner.scanForOrg(oid);
+          if (proposals.length) {
+            totalProposals += proposals.length;
+            const written = await contradictionScanner.emitProposals(proposals);
+            totalEmitted += written;
+          }
+        } catch (err) {
+          console.warn(`[contradiction-cron] org ${oid} failed: ${err.message}`);
+        }
+      }
+      console.log(`[contradiction-cron] ${orgs.length} orgs scanned, ${totalProposals} proposed, ${totalEmitted} Contradicts edges emitted`);
+    } catch (err) {
+      console.error('[contradiction-cron] tick failed:', err.message);
+    }
+  };
+  setTimeout(runContradictions, 15 * 60 * 1000);
+  setInterval(runContradictions, CONTRADICTION_INTERVAL_MS);
+  console.log(`[contradiction-cron] scheduled — every ${CONTRADICTION_INTERVAL_MS / 3600000}h`);
+}
+
 // ─── Hygiene Scanner cron (P1 #7) ────────────────────────────────────────────
 // Runs nightly across recently active tenants. Generates proposals only —
 // nothing auto-executes (executeProposals still requires admin approval).

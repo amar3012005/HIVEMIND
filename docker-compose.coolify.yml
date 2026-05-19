@@ -909,6 +909,38 @@ services:
             - qdrant
         env_file:
             - .env
+
+    docling:
+        image: 'ghcr.io/docling-project/docling-serve:latest'
+        container_name: docling-s0k0s0k40wo44w4w8gcs8ow0
+        hostname: docling
+        restart: unless-stopped
+        environment:
+            DOCLING_SERVE_HOST: 0.0.0.0
+            DOCLING_SERVE_PORT: '5001'
+            OMP_NUM_THREADS: '4'
+        deploy:
+            resources:
+                limits:
+                    cpus: '2'
+                    memory: 4G
+                reservations:
+                    cpus: '0.5'
+                    memory: 1G
+        healthcheck:
+            test: ['CMD', 'curl', '-fsS', 'http://localhost:5001/health']
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 60s
+        networks:
+            hivemind-network: null
+            s0k0s0k40wo44w4w8gcs8ow0: null
+        labels:
+            - hivemind.component=docling
+            - hivemind.tier=ingest
+            - coolify.managed=true
+
 volumes:
     hivemind-logs:
         driver: local

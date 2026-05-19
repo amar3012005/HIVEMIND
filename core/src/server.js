@@ -1058,6 +1058,48 @@ if (process.env.DOCLING_URL) {
         const ext = (filename || '').split('.').pop()?.toLowerCase();
         const tParse = Date.now();
 
+        // ── Plain text (txt/md/markdown/html) → skip Docling entirely ──
+        // Saves the 2s Docling round-trip on already-readable formats.
+        if (['txt', 'md', 'markdown', 'html', 'htm'].includes(ext)) {
+          try {
+            const raw = fileBuffer.toString('utf-8');
+            if (raw.length > 0) {
+              const CHUNK = 1500;
+              const OVERLAP = 200;
+              const hybridChunks = [];
+              // Split on headings (markdown # or ## or ###); fall back to size.
+              const headingRe = /^(#{1,6})\s+(.+)$/m;
+              if (headingRe.test(raw)) {
+                const parts = raw.split(/^(#{1,6}\s+.+)$/m);
+                let curHeading = filename;
+                for (const part of parts) {
+                  if (!part || !part.trim()) continue;
+                  const m = part.match(/^(#{1,6})\s+(.+)$/);
+                  if (m) { curHeading = m[2].trim().slice(0, 120); continue; }
+                  hybridChunks.push({ text: part.trim(), headings: [curHeading], page: 1 });
+                }
+              } else {
+                for (let i = 0; i < raw.length; i += (CHUNK - OVERLAP)) {
+                  const piece = raw.slice(i, i + CHUNK).trim();
+                  if (piece.length < 20) continue;
+                  hybridChunks.push({ text: piece, headings: [filename], page: 1 });
+                }
+                if (!hybridChunks.length && raw.trim().length >= 1) {
+                  hybridChunks.push({ text: raw.trim(), headings: [filename], page: 1 });
+                }
+              }
+              console.log(`[docling-adapter] tier=plain-text file=${filename} chars=${raw.length} chunks=${hybridChunks.length} ms=${Date.now() - tParse}`);
+              return {
+                text: raw, markdown: raw, json: null,
+                tables: [], pages: 1, confidence: null, error: null,
+                hybridChunks, chunkerError: null, engine: 'plain-text',
+              };
+            }
+          } catch (txtErr) {
+            console.warn(`[docling-adapter] plain-text parse failed: ${txtErr.message}`);
+          }
+        }
+
         // ── Image-only files (PNG/JPG/TIFF/WebP) → direct Groq vision OCR ──
         // Cheaper + faster than full Docling pipeline for a single bitmap.
         if (['png', 'jpg', 'jpeg', 'tiff', 'tif', 'webp'].includes(ext) && process.env.GROQ_API_KEY) {

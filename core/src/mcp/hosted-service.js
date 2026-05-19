@@ -2154,6 +2154,8 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
             project: args.project || null,
             source_platforms: args.source_type ? [args.source_type] : [],
             max_memories: recallLimit,
+            // Recall v2 orchestrator: attach evidence + fallback when sparse/citation intent
+            mode: args.evidence_mode || 'auto',
             ...(resolvedProjectId ? { project_id: resolvedProjectId, project_ids: resolvedProjectIds } : {}),
           });
 
@@ -2164,6 +2166,10 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
             search_method: recallResult.search_method || 'persisted-recall',
             mode: args.mode || 'quick',
             count: (recallResult.memories || []).length,
+            // Surface evidence inline + fallback bucket for transparency
+            evidence_count: (recallResult.evidence || []).length,
+            evidence: (recallResult.evidence || []).slice(0, 10),
+            mode_used: recallResult.mode_used || 'auto',
           };
 
           // Quick: return base as-is

@@ -11380,6 +11380,76 @@ const server = http.createServer(async (req, res) => {
                 stripped: rewritten.stripped,
               };
 
+              // ─── Recall v2: orchestrator (memories-first → evidence on demand) ───
+              const mode = body.mode || 'auto';
+              const wantEvidence = mode === 'evidence' || mode === 'hybrid' || mode === 'auto';
+              const citationIntent =
+                /(\b(cite|source|proof|where|why|evidence|reference)\b)/i.test(body.query_context || '');
+              const memoryHits = Array.isArray(result.memories) ? result.memories : [];
+              const sparseMemories = memoryHits.length < 3;
+              result.mode_used = mode;
+
+              if (wantEvidence && mode !== 'memory') {
+                // 1. Attach evidence_links inline for each memory (SQL join, cheap)
+                try {
+                  const memIds = memoryHits.map(m => m.id).filter(Boolean);
+                  if (memIds.length) {
+                    const links = await prisma.memoryEvidenceLink.findMany({
+                      where: { memoryId: { in: memIds } },
+                      select: {
+                        memoryId: true,
+                        segmentId: true,
+                        documentId: true,
+                        linkType: true,
+                        confidence: true,
+                        excerpt: true,
+                        document: { select: { id: true, title: true, sourcePlatform: true } },
+                      },
+                    });
+                    const byMemory = new Map();
+                    for (const l of links) {
+                      if (!byMemory.has(l.memoryId)) byMemory.set(l.memoryId, []);
+                      byMemory.get(l.memoryId).push({
+                        segment_id: l.segmentId,
+                        document_id: l.documentId,
+                        document_title: l.document?.title || null,
+                        source_platform: l.document?.sourcePlatform || null,
+                        link_type: l.linkType,
+                        confidence: l.confidence,
+                        excerpt: l.excerpt,
+                      });
+                    }
+                    for (const mem of memoryHits) {
+                      mem.evidence = byMemory.get(mem.id) || [];
+                    }
+                  }
+                } catch (evErr) {
+                  console.warn(`[recall] evidence attach failed: ${evErr.message}`);
+                }
+
+                // 2. Fallback evidence-only search when memories sparse OR citation intent
+                const shouldFallback = mode === 'evidence' || mode === 'hybrid' ||
+                  (mode === 'auto' && (sparseMemories || citationIntent));
+                if (shouldFallback && evidenceRetrieval) {
+                  try {
+                    const evResults = await evidenceRetrieval.retrieveEvidence({
+                      query: body.query_context || body.context || '',
+                      userId, orgId,
+                      limit: 10,
+                    });
+                    // Dedup against segments already attached inline
+                    const attachedSegIds = new Set(
+                      memoryHits.flatMap(m => (m.evidence || []).map(e => e.segment_id))
+                    );
+                    result.evidence = (evResults || []).filter(e => !attachedSegIds.has(e.segmentId));
+                    result.evidence_count = result.evidence.length;
+                  } catch (evSearchErr) {
+                    console.warn(`[recall] evidence fallback failed: ${evSearchErr.message}`);
+                    result.evidence = [];
+                  }
+                }
+              }
+
               // Record search usage after successful recall
               if (planEnforcer && orgId) {
                 planEnforcer.recordUsage(orgId, 'searches', 1);

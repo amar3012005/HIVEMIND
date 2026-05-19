@@ -1064,16 +1064,47 @@ if (process.env.DOCLING_URL) {
             const { fastPdfExtract } = await import('./knowledge/enterprise/fast-pdf-parser.js');
             const fast = await fastPdfExtract(tempPath);
             if (!fast.error && !fast.isImageHeavy && fast.text.length > 200) {
-              // Send extracted text to Docling chunker for structure-aware splits
+              // Page-aware chunking: pdf-parse v2 inserts `-- N of M --` page markers.
+              // Split by page → smaller mid-page chunks (~1500 chars) so segments
+              // map cleanly to pages. Heading derived from first line of each page.
               let hybridChunks = [];
               try {
-                const tmpTxt = path.join(tempDir, `${crypto.randomUUID()}.txt`);
-                fs.writeFileSync(tmpTxt, fast.text);
-                const ckRes = await chunkWithDocling(tmpTxt, `${filename}.txt`).catch(() => ({ chunks: [] }));
-                hybridChunks = ckRes?.chunks || [];
-                try { fs.unlinkSync(tmpTxt); } catch {}
+                const PAGE_SPLIT = /\n?-- (\d+) of \d+ --\n?/;
+                const parts = fast.text.split(PAGE_SPLIT);
+                // parts = [pre, '1', 'pageText', '2', 'pageText', ...]
+                const pageBlocks = [];
+                for (let i = 1; i < parts.length; i += 2) {
+                  const pageNum = Number(parts[i]);
+                  const pageText = (parts[i + 1] || '').trim();
+                  if (pageText.length < 20) continue;
+                  pageBlocks.push({ page: pageNum, text: pageText });
+                }
+                // Fallback: no page markers → treat whole doc as one block
+                if (pageBlocks.length === 0) {
+                  pageBlocks.push({ page: 1, text: fast.text.trim() });
+                }
+                const CHUNK_TARGET = 1500;
+                const CHUNK_OVERLAP = 200;
+                for (const block of pageBlocks) {
+                  // Heading = first non-empty line of page (truncated)
+                  const firstLine = (block.text.split('\n').find(l => l.trim().length > 0) || '').trim().slice(0, 120);
+                  const heading = firstLine || `Page ${block.page}`;
+                  if (block.text.length <= CHUNK_TARGET) {
+                    hybridChunks.push({ text: block.text, headings: [heading], page: block.page });
+                  } else {
+                    for (let i = 0; i < block.text.length; i += (CHUNK_TARGET - CHUNK_OVERLAP)) {
+                      const piece = block.text.slice(i, i + CHUNK_TARGET).trim();
+                      if (piece.length < 50) continue;
+                      hybridChunks.push({
+                        text: piece,
+                        headings: [heading],
+                        page: block.page,
+                      });
+                    }
+                  }
+                }
               } catch (chkErr) {
-                console.warn(`[fast-pdf] chunker re-call failed: ${chkErr.message}`);
+                console.warn(`[fast-pdf] page-chunk failed: ${chkErr.message}`);
               }
               console.log(`[docling-adapter] tier=fast-pdf file=${filename} pages=${fast.pages} chars=${fast.text.length} chunks=${hybridChunks.length} ms=${Date.now() - tParse}`);
               return {

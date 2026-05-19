@@ -557,9 +557,53 @@ export class DocumentFirstIngestionService {
     const candidates = [];
     const memories = [];
 
-    // Strategy: promote only first and last segments as memories for now
-    // Future: use LLM to identify candidate memories, fact extraction, entity-centric promotion
-    const promotableSegments = [segments[0], segments[segments.length - 1]].filter(Boolean);
+    // Strategy: diversity-sampled promotion
+    // 1. Always include first + last (document boundaries)
+    // 2. Always include heading-rooted segments (Docling structure)
+    // 3. Add evenly-spaced samples to fill up to MAX_PROMOTE
+    // 4. Dedup by heading + content-prefix hash
+    const MAX_PROMOTE = Number(process.env.PHASE1_MAX_PROMOTE || 20);
+    const MIN_PROMOTE = Number(process.env.PHASE1_MIN_PROMOTE || 5);
+    const promotableSegments = (() => {
+      if (!Array.isArray(segments) || segments.length === 0) return [];
+      if (segments.length <= MIN_PROMOTE) return segments.slice();
+
+      const picked = new Map(); // segmentId -> segment
+      const dedupKeys = new Set();
+      const keyFor = (s) => {
+        const h = (s.metadata?.heading || '').toLowerCase().trim();
+        const prefix = (s.content || '').slice(0, 80).toLowerCase().replace(/\s+/g, ' ').trim();
+        return h ? `h:${h}` : `p:${prefix}`;
+      };
+      const tryAdd = (s) => {
+        if (!s || picked.has(s.id)) return false;
+        const k = keyFor(s);
+        if (dedupKeys.has(k)) return false;
+        dedupKeys.add(k);
+        picked.set(s.id, s);
+        return true;
+      };
+
+      // Boundaries first
+      tryAdd(segments[0]);
+      tryAdd(segments[segments.length - 1]);
+
+      // All distinct-heading segments
+      for (const s of segments) {
+        if (picked.size >= MAX_PROMOTE) break;
+        if (s.metadata?.heading) tryAdd(s);
+      }
+
+      // Even sampling to fill remaining
+      const target = Math.min(MAX_PROMOTE, Math.max(MIN_PROMOTE, Math.ceil(segments.length / 10)));
+      if (picked.size < target) {
+        const step = Math.max(1, Math.floor(segments.length / target));
+        for (let i = 0; i < segments.length && picked.size < target; i += step) {
+          tryAdd(segments[i]);
+        }
+      }
+      return Array.from(picked.values());
+    })();
 
     for (const segment of promotableSegments) {
       candidates.push({

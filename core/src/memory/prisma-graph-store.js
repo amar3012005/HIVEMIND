@@ -388,7 +388,7 @@ export class PrismaGraphStore {
           const ftsResults = await this.client.$queryRawUnsafe(`
             SELECT m.id, m.content, m.title, m.tags, m.memory_type, m.project,
                    m.importance_score, m.is_latest, m.created_at, m.updated_at,
-                   m.document_date, m.event_dates, m.source, m.visibility,
+                   m.document_date, m.event_dates, m.source_platform AS source, m.visibility,
                    ts_rank(to_tsvector('english', COALESCE(m.content, '') || ' ' || COALESCE(m.title, '')),
                            to_tsquery('english', $1)) as fts_score
             FROM memories m

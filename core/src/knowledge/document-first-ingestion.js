@@ -97,6 +97,7 @@ export class DocumentFirstIngestionService {
     const _tParse = Date.now();
     const parseResult = await this._parseDocument(fileBuffer, contentType, filename, {
       smart: metadata?.smart === true,
+      picture_descriptions: metadata?.picture_descriptions === true,
     });
     const _msParse = Date.now() - _tParse;
 
@@ -376,6 +377,7 @@ export class DocumentFirstIngestionService {
           filename,
           contentType,
           smart: opts.smart === true,
+          picture_descriptions: opts.picture_descriptions === true,
         });
 
         if (doclingResult) {

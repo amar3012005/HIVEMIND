@@ -1048,7 +1048,7 @@ let evidenceRetrieval = null;
 let doclingAdapter = null;
 if (process.env.DOCLING_URL) {
   doclingAdapter = {
-    parseBuffer: async (fileBuffer, { filename, contentType, smart = false } = {}) => {
+    parseBuffer: async (fileBuffer, { filename, contentType, smart = false, picture_descriptions = false } = {}) => {
       const tempDir = '/tmp/hivemind-docling';
       fs.mkdirSync(tempDir, { recursive: true });
       const tempPath = path.join(tempDir, `${crypto.randomUUID()}_${filename}`);
@@ -1237,11 +1237,30 @@ if (process.env.DOCLING_URL) {
         // ── Tier 2: Docling (smart=true via enterprise upload only) ──
         const useSmart = smart === true;
         const [parseResult, chunkResult] = await Promise.all([
-          parseWithDocling(tempPath, filename, { smart: useSmart }),
+          parseWithDocling(tempPath, filename, { smart: useSmart, picture_descriptions }),
           chunkWithDocling(tempPath, filename).catch(e => ({ chunks: [], error: e.message })),
         ]);
         console.log(`[docling-adapter] tier=docling file=${filename} smart=${useSmart} chunks=${chunkResult?.chunks?.length || 0} ms=${Date.now() - tParse} parseError=${parseResult?.error || 'none'} chunkerError=${chunkResult?.error || 'none'}`);
-        // Merge: surface hybridChunks alongside parsed text
+        // Smart-mode timeout fallback: if Docling failed AND we still have a
+        // PDF, try Tier 1 fast-pdf so the upload isn't lost.
+        if ((parseResult?.error || (parseResult?.text || '').length < 200) && ext === 'pdf') {
+          try {
+            const { fastPdfExtract } = await import('./knowledge/enterprise/fast-pdf-parser.js');
+            const fb = await fastPdfExtract(tempPath);
+            if (!fb.error && fb.text.length > 200) {
+              console.warn(`[docling-adapter] tier=docling failed/empty → falling back to fast-pdf for ${filename}`);
+              return {
+                text: fb.text, markdown: fb.text, json: null,
+                tables: [], pages: fb.pages, confidence: null, error: null,
+                hybridChunks: chunkResult?.chunks?.length ? chunkResult.chunks : [],
+                chunkerError: chunkResult?.error || null,
+                engine: 'docling-fallback-fastpdf',
+              };
+            }
+          } catch (fbErr) {
+            console.warn(`[docling-adapter] fallback fast-pdf also failed: ${fbErr.message}`);
+          }
+        }
         return {
           ...parseResult,
           hybridChunks: chunkResult?.chunks || [],
@@ -8845,6 +8864,7 @@ const server = http.createServer(async (req, res) => {
               // (full enrichment: tables, charts, picture descriptions via
               // Groq VLM, code/formula extraction). Default false = fast tiers.
               const smartFlag = (parts.find(p => p.name === 'smart')?.value || '').toLowerCase() === 'true';
+              const pictureDescFlag = (parts.find(p => p.name === 'picture_descriptions')?.value || '').toLowerCase() === 'true';
 
               // ─── Phase 1: Document-First Ingestion Path (feature-flagged) ───
               if (documentFirstIngestion) {
@@ -8864,6 +8884,7 @@ const server = http.createServer(async (req, res) => {
                       primary_team_id: primaryTeamId,
                       visibility: targetScope === 'organization' ? 'organization' : 'private',
                       smart: smartFlag,
+                      picture_descriptions: pictureDescFlag,
                     }
                   });
                   console.log(`[knowledge] ✓ Phase1 complete: file=${filePart.filename} docId=${result.documentId} segments=${result.segmentCount} promoted=${result.promotedCount} ms=${Date.now() - tPhase1}`);

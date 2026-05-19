@@ -39,6 +39,9 @@ export async function parseWithDocling(filePath, filename, opts = {}) {
   // Activated when user toggles Smart Extract OR for PDF/DOCX/XLSX which
   // benefit from layout-aware parsing.
   const smart = opts.smart === true;
+  // Per-image VLM descriptions are SLOW (sequential remote calls in Docling).
+  // Only enable when caller explicitly asks via opts.picture_descriptions=true.
+  const wantPictureDesc = opts.picture_descriptions === true;
   if (smart) {
     formData.append('do_ocr', 'true');
     formData.append('do_table_structure', 'true');
@@ -52,9 +55,7 @@ export async function parseWithDocling(filePath, filename, opts = {}) {
     // Multi-language OCR (German+English by default — SOLVIS-class docs)
     const ocrLangs = (process.env.DOCLING_OCR_LANGS || 'de,en').split(',').map(s => s.trim()).filter(Boolean);
     for (const lang of ocrLangs) formData.append('ocr_lang', lang);
-    // Picture descriptions via remote VLM (Groq llama-4-scout) — inline
-    // captions for diagrams/charts/photos so they survive into markdown.
-    if (process.env.GROQ_API_KEY) {
+    if (wantPictureDesc && process.env.GROQ_API_KEY) {
       formData.append('do_picture_description', 'true');
       formData.append('enable_remote_services', 'true');
       formData.append('picture_description_custom_config', JSON.stringify({
@@ -65,9 +66,8 @@ export async function parseWithDocling(filePath, filename, opts = {}) {
         prompt: 'Describe this figure in 1 short sentence (max 25 words). Focus on what is depicted, not styling.',
         timeout: 30,
       }));
-      formData.append('picture_description_area_threshold', '0.03');
+      formData.append('picture_description_area_threshold', '0.05');
     }
-    // Preserve page anchors in markdown output (mirrors Tier 1 page markers)
     formData.append('md_page_break_placeholder', '\n-- {page} of {total} --\n');
   }
 
@@ -75,7 +75,9 @@ export async function parseWithDocling(filePath, filename, opts = {}) {
   // at DOCLING_SERVE_MAX_SYNC_WAIT seconds internally).
   const fileSize = fs.statSync(filePath).size;
   const useAsync = smart || fileSize > 4 * 1024 * 1024; // >4 MB
-  const overallTimeout = smart ? 600_000 : 240_000;
+  // Hard ceiling: 180s smart, 120s non-smart. Beyond that the caller falls
+  // back to fast-pdf Tier 1 instead of waiting.
+  const overallTimeout = smart ? 180_000 : 120_000;
 
   try {
     if (useAsync) {

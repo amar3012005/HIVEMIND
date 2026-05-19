@@ -1026,7 +1026,24 @@ async function proxyToCore(req, res, { session, method, path, body, query, rawBo
       }
     }
 
-    const coreResp = await fetch(coreUrl.toString(), fetchOpts);
+    // 90s timeout for slow Phase1 ingest (Docling parse + chunk + embed + promote)
+    fetchOpts.signal = AbortSignal.timeout(90_000);
+
+    // Retry once on transient network failure (ECONNREFUSED / aborted) —
+    // most common cause of 502 during hm-core restart windows.
+    let coreResp;
+    try {
+      coreResp = await fetch(coreUrl.toString(), fetchOpts);
+    } catch (netErr) {
+      if (method === 'GET') {
+        await new Promise(r => setTimeout(r, 500));
+        // Renew AbortSignal — original is consumed
+        const retryOpts = { ...fetchOpts, signal: AbortSignal.timeout(90_000) };
+        coreResp = await fetch(coreUrl.toString(), retryOpts);
+      } else {
+        throw netErr;
+      }
+    }
     const contentType = coreResp.headers.get('content-type') || 'application/json';
 
     // SSE streaming: pipe through without buffering

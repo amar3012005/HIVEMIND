@@ -1048,17 +1048,21 @@ let evidenceRetrieval = null;
 let doclingAdapter = null;
 if (process.env.DOCLING_URL) {
   doclingAdapter = {
-    parseBuffer: async (fileBuffer, { filename, contentType }) => {
+    parseBuffer: async (fileBuffer, { filename, contentType, smart = false } = {}) => {
       const tempDir = '/tmp/hivemind-docling';
       fs.mkdirSync(tempDir, { recursive: true });
       const tempPath = path.join(tempDir, `${crypto.randomUUID()}_${filename}`);
 
       try {
         fs.writeFileSync(tempPath, fileBuffer);
+        // Smart Extract auto-enables for PDF/DOCX/XLSX where layout matters
+        const ext = (filename || '').split('.').pop()?.toLowerCase();
+        const autoSmart = ['pdf', 'docx', 'xlsx', 'xls'].includes(ext);
+        const useSmart = smart || autoSmart;
         // Parse + chunk in parallel — chunker provides structure-aware
         // segmentation (respects headings, paragraphs, tables).
         const [parseResult, chunkResult] = await Promise.all([
-          parseWithDocling(tempPath, filename),
+          parseWithDocling(tempPath, filename, { smart: useSmart }),
           chunkWithDocling(tempPath, filename).catch(e => ({ chunks: [], error: e.message })),
         ]);
         console.log(`[docling-adapter] file=${filename} chunks=${chunkResult?.chunks?.length || 0} parseError=${parseResult?.error || 'none'} chunkerError=${chunkResult?.error || 'none'}`);

@@ -27,18 +27,33 @@ const DOCLING_URL = process.env.DOCLING_URL || 'http://docling:5001';
  *   error: string | null
  * }>}
  */
-export async function parseWithDocling(filePath, filename) {
+export async function parseWithDocling(filePath, filename, opts = {}) {
   const ext = path.extname(filename).toLowerCase();
   const formData = new FormData();
 
   // Docling expects "files" (plural) on both /v1/convert/file and /v1/chunk/hybrid/file
   formData.append('files', new Blob([fs.readFileSync(filePath)]), filename);
 
+  // Smart-extract mode unlocks Docling's rich features: OCR, table structure,
+  // code/formula/chart enrichment, picture classification.
+  // Activated when user toggles Smart Extract OR for PDF/DOCX/XLSX which
+  // benefit from layout-aware parsing.
+  const smart = opts.smart === true;
+  if (smart) {
+    formData.append('do_ocr', 'true');
+    formData.append('do_table_structure', 'true');
+    formData.append('do_chart_extraction', 'true');
+    formData.append('do_picture_classification', 'true');
+    formData.append('do_code_enrichment', 'true');
+    formData.append('do_formula_enrichment', 'true');
+    formData.append('table_mode', 'accurate');
+  }
+
   try {
     const res = await fetch(`${DOCLING_URL}/v1/convert/file`, {
       method: 'POST',
       body: formData,
-      signal: AbortSignal.timeout(120_000),
+      signal: AbortSignal.timeout(smart ? 240_000 : 120_000),
     });
 
     if (!res.ok) {

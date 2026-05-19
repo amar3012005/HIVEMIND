@@ -590,10 +590,11 @@ export class DocumentFirstIngestionService {
 
       const picked = new Map(); // segmentId -> segment
       const dedupKeys = new Set();
+      // Dedup by (heading + content-prefix) so single-H1 docs aren't squashed.
       const keyFor = (s) => {
         const h = (s.metadata?.heading || '').toLowerCase().trim();
-        const prefix = (s.content || '').slice(0, 80).toLowerCase().replace(/\s+/g, ' ').trim();
-        return h ? `h:${h}` : `p:${prefix}`;
+        const prefix = (s.content || '').slice(0, 100).toLowerCase().replace(/\s+/g, ' ').trim();
+        return `${h}|${prefix}`;
       };
       const tryAdd = (s) => {
         if (!s || picked.has(s.id)) return false;

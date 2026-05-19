@@ -7,7 +7,7 @@ generator client {
 datasource db {
   provider   = "postgresql"
   url        = env("DATABASE_URL")
-  extensions = [uuid_ossp(map: "uuid-ossp", schema: "public")]
+  extensions = [uuid_ossp(map: "uuid-ossp", schema: "hivemind")]
 }
 
 /// User accounts with ZITADEL IAM integration and HYOK encryption keys

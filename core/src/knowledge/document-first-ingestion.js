@@ -388,10 +388,17 @@ export class DocumentFirstIngestionService {
 
         for (const routed of routedPayloads) {
           const result = await this.memoryGraphEngine.ingestMemory(routed);
-          // graph-engine returns { memoryId, operation, ... } — not .id
+          // graph-engine returns { memoryId, operation, ... }
+          // operation = 'skipped_*' means memory NOT persisted to DB -> FK would fail
           const memoryId = result?.memoryId || result?.id || null;
-          if (!memoryId) {
-            // Skipped (redundant/duplicate) — don't create evidence link
+          const persisted = memoryId && !(result?.operation || '').startsWith('skipped');
+          if (!persisted) {
+            memories.push(result);
+            continue;
+          }
+          // Defense-in-depth: verify row actually exists before FK insert
+          const exists = await this.db.memory.findUnique({ where: { id: memoryId }, select: { id: true } });
+          if (!exists) {
             memories.push(result);
             continue;
           }

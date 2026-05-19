@@ -5442,7 +5442,12 @@ const server = http.createServer(async (req, res) => {
       }
 
       // GET /api/documents/:documentId — get single document with segments and promoted memories
-      if (pathname.match(/^\/api\/documents\/[^/]+$/) && req.method === 'GET') {
+      // (Exclude reserved sub-routes that look like ids but aren't UUIDs)
+      if (
+        pathname.match(/^\/api\/documents\/[^/]+$/) &&
+        req.method === 'GET' &&
+        !pathname.endsWith('/search')
+      ) {
         if (!ensurePersistedMemoryOrFail(res, '/api/documents/:id')) return;
         if (!documentFirstIngestion) {
           return jsonResponse(res, { error: 'Document-first ingestion not enabled' }, 501);
@@ -8000,6 +8005,49 @@ const server = http.createServer(async (req, res) => {
               }
 
               if (memoryIds.length === 0) {
+                // Fallback: Phase1 knowledge_document delete (cascades segments + evidence links via FK)
+                const tryDocId = rawMemoryId || rawId;
+                if (tryDocId && UUID_RE.test(tryDocId)) {
+                  try {
+                    const doc = await prisma.knowledgeDocument.findFirst({
+                      where: { id: tryDocId, userId, orgId },
+                      select: { id: true, sourceArtifactId: true },
+                    });
+                    if (doc) {
+                      // Best-effort: remove Qdrant evidence points first
+                      try {
+                        const segs = await prisma.knowledgeSegment.findMany({
+                          where: { documentId: doc.id },
+                          select: { id: true },
+                        });
+                        if (segs.length) {
+                          const qUrl = process.env.QDRANT_URL || 'http://qdrant:6333';
+                          const qKey = process.env.QDRANT_API_KEY || '';
+                          const hdrs = { 'Content-Type': 'application/json' };
+                          if (qKey) hdrs['api-key'] = qKey;
+                          const coll = process.env.EVIDENCE_QDRANT_COLLECTION || 'hivemind_evidence';
+                          await fetch(`${qUrl}/collections/${coll}/points/delete?wait=true`, {
+                            method: 'POST', headers: hdrs,
+                            body: JSON.stringify({ points: segs.map(s => s.id) }),
+                          }).catch(() => {});
+                        }
+                      } catch { /* noop */ }
+                      // Delete document — cascades segments + memory_evidence_links via FK
+                      await prisma.knowledgeDocument.delete({ where: { id: doc.id } });
+                      // Try also delete source_artifact (orphaned if no other docs reference it)
+                      if (doc.sourceArtifactId) {
+                        await prisma.sourceArtifact.delete({ where: { id: doc.sourceArtifactId } }).catch(() => {});
+                      }
+                      return jsonResponse(res, {
+                        success: true,
+                        mode: 'phase1_document_delete',
+                        documentId: doc.id,
+                      });
+                    }
+                  } catch (phase1Err) {
+                    console.warn(`[knowledge-delete] phase1 fallback failed: ${phase1Err.message}`);
+                  }
+                }
                 return jsonResponse(res, { error: 'No memories found for this document' }, 404);
               }
               // De-dup

@@ -2736,10 +2736,13 @@ const server = http.createServer(async (req, res) => {
         webhook_processor: process.env.ENABLE_WEBHOOK_RECEIVER !== 'false',
         hygiene_cron: process.env.ENABLE_HYGIENE_CRON === 'true',
         memory_promotion_jobs: process.env.ENABLE_MEMORY_PROMOTION_JOBS === 'true',
+        contradiction_scan: process.env.ENABLE_CONTRADICTION_SCAN === 'true',
       },
       features: {
         evidence_recall: process.env.ENABLE_EVIDENCE_RECALL === 'true',
         document_first_ingest: process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true',
+        entity_extraction: process.env.ENABLE_ENTITY_EXTRACTION === 'true',
+        topic_state: process.env.ENABLE_TOPIC_STATE === 'true',
       },
     });
   }

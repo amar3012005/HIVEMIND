@@ -229,7 +229,13 @@ export class EntityExtractor {
     }
 
     const out = new Map(); // dedup
-    for (const c of candidates) {
+    // Process LLM canonicals first so winners exist in `out` before regex
+    // variants are folded in.
+    const sorted = [...candidates].sort((a, b) => {
+      const score = c => (c.source === 'llm' ? 0 : c.source === 'resolved_existing' ? 1 : 2);
+      return score(a) - score(b);
+    });
+    for (const c of sorted) {
       const lower = c.name.toLowerCase();
       // 1. Already known entity in DB — pin to it
       const known = existingByAlias.get(lower);

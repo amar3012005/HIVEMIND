@@ -39,22 +39,24 @@ export async function parseWithDocling(filePath, filename, opts = {}) {
   // Activated when user toggles Smart Extract OR for PDF/DOCX/XLSX which
   // benefit from layout-aware parsing.
   const smart = opts.smart === true;
-  // Per-image VLM descriptions are SLOW (sequential remote calls in Docling).
-  // Only enable when caller explicitly asks via opts.picture_descriptions=true.
+  // Each of these toggles downloads / runs a separate model. Tables+OCR are
+  // fast and warm; the rest can balloon latency 5-10x. Opt-in individually.
   const wantPictureDesc = opts.picture_descriptions === true;
+  const wantCharts = opts.charts === true;
+  const wantCode = opts.code === true;
+  const wantFormulas = opts.formulas === true;
+  const wantPicClass = opts.picture_classification === true;
   if (smart) {
     formData.append('do_ocr', 'true');
     formData.append('do_table_structure', 'true');
-    formData.append('do_chart_extraction', 'true');
-    formData.append('do_picture_classification', 'true');
-    formData.append('do_code_enrichment', 'true');
-    formData.append('do_formula_enrichment', 'true');
     formData.append('table_mode', 'accurate');
-    // Newer dlparse_v4 backend ~20% faster than legacy docling_parse
     formData.append('pdf_backend', process.env.DOCLING_PDF_BACKEND || 'dlparse_v4');
-    // Multi-language OCR (German+English by default — SOLVIS-class docs)
     const ocrLangs = (process.env.DOCLING_OCR_LANGS || 'de,en').split(',').map(s => s.trim()).filter(Boolean);
     for (const lang of ocrLangs) formData.append('ocr_lang', lang);
+    if (wantCharts)   formData.append('do_chart_extraction', 'true');
+    if (wantPicClass) formData.append('do_picture_classification', 'true');
+    if (wantCode)     formData.append('do_code_enrichment', 'true');
+    if (wantFormulas) formData.append('do_formula_enrichment', 'true');
     if (wantPictureDesc && process.env.GROQ_API_KEY) {
       formData.append('do_picture_description', 'true');
       formData.append('enable_remote_services', 'true');

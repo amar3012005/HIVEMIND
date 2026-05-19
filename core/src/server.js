@@ -5490,7 +5490,7 @@ const server = http.createServer(async (req, res) => {
                   title: true,
                   content: true,
                   memoryType: true,
-                  importance: true,
+                  importanceScore: true,
                   tags: true,
                   createdAt: true
                 }

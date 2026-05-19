@@ -169,11 +169,17 @@ export class WhatsAppBridge extends EventEmitter {
         executablePath:
           process.env.PUPPETEER_EXECUTABLE_PATH ||
           (fs.existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : undefined),
+        protocolTimeout: 180000,
+        timeout: 180000,
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
           '--disable-dev-shm-usage',
           '--disable-gpu',
+          '--disable-extensions',
+          '--no-first-run',
+          '--no-zygote',
+          '--single-process',
         ],
       },
     });

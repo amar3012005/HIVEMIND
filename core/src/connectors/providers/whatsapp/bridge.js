@@ -166,7 +166,9 @@ export class WhatsAppBridge extends EventEmitter {
       authStrategy: new LocalAuth({ dataPath: sessionDir }),
       puppeteer: {
         headless: true,
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+        executablePath:
+          process.env.PUPPETEER_EXECUTABLE_PATH ||
+          (fs.existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : undefined),
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',

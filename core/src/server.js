@@ -848,9 +848,8 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
       doclingAdapter, // Pass Docling adapter if DOCLING_URL is set, null otherwise
       embeddingService: {
         embed: async (text) => {
-          // Use the same embedding pipeline as the existing system
-          const { embedText } = await import('./vector/embedding-service.js');
-          return embedText(text);
+          // Use the existing Qdrant client's embedding pipeline
+          return qdrantClient.generateEmbedding(String(text).slice(0, 8000));
         },
         storeVector: async ({ collectionName, id, vector, payload }) => {
           await qdrantClient.upsert(collectionName, {

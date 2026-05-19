@@ -142,6 +142,31 @@ export class SlackAdapter extends BaseConnectorAdapter {
   }
 
   /**
+   * Convert normalized Slack records into canonical memory payloads.
+   * @param {import('../../framework/base-connector-adapter.js').NormalizedRecord} record
+   * @param {Object} context
+   * @returns {Object[]}
+   */
+  toMemoryPayloads(record, context) {
+    const channel = record?.refs?.channel || 'unknown';
+    const tags = ['slack', `channel:${channel}`];
+    if (record?.refs?.thread_ts) tags.push('threaded');
+
+    return [this.buildMemoryPayload(record, context, {
+      memory_type: 'event',
+      tags,
+      source_type: 'message',
+      metadata: {
+        source_type_normalized: 'slack',
+        slack_channel: channel,
+        slack_user: record?.refs?.user || null,
+        thread_ts: record?.refs?.thread_ts || null,
+        slack_ts: record?.refs?.slack_ts || null,
+      },
+    })];
+  }
+
+  /**
    * Verify a Slack Events API webhook request.
    * Uses HMAC-SHA256 over `v0:${timestamp}:${rawBody}`.
    * Rejects requests older than 5 minutes to prevent replay attacks.

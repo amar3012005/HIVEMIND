@@ -371,6 +371,10 @@ if (persistentMemoryEngine && persistentMemoryStore && prisma) {
   // Self-register adapters (triggers registry.register at bottom of each file)
   await import('./connectors/adapters/notion/notion-adapter.js');
   await import('./connectors/adapters/slack/slack-adapter.js');
+  await import('./connectors/adapters/github/github-adapter.js');
+  await import('./connectors/adapters/linear/linear-adapter.js');
+  await import('./connectors/adapters/jira/jira-adapter.js');
+  await import('./connectors/adapters/confluence/confluence-adapter.js');
 
   const webhookProcessor = new WebhookProcessor({
     prisma,
@@ -1275,6 +1279,7 @@ function ensurePersistedMemoryOrFail(res, endpoint) {
 // This helper ensures payloads get deterministic relationship enrichment
 // (thread/session/document edges) before persistence.
 async function buildRoutedIngestPayloads(payload, { smartIngestRouter, enableSmartRouting = true } = {}) {
+  payload = await resolveScopedIngestPayload(payload);
   if (!enableSmartRouting || !smartIngestRouter) {
     return [payload];
   }
@@ -1285,6 +1290,76 @@ async function buildRoutedIngestPayloads(payload, { smartIngestRouter, enableSma
     console.warn('[smart-ingest] route failed (falling back to raw payload):', routeErr.message);
     return [payload];
   }
+}
+
+async function resolveScopedIngestPayload(payload) {
+  if (!payload?.user_id || !payload?.org_id) return payload;
+
+  const accessContext = await buildAccessContext(payload.user_id, payload.org_id);
+  const projectIds = normalizeScopeIds([
+    ...(Array.isArray(payload.project_ids) ? payload.project_ids : []),
+    payload.project_id,
+    payload.metadata?.project_id,
+    ...(Array.isArray(payload.metadata?.project_ids) ? payload.metadata.project_ids : []),
+    payload.source_metadata?.project_id,
+  ]);
+  const explicitTeamId = payload.primary_team_id
+    || payload.metadata?.primary_team_id
+    || payload.metadata?.team_id
+    || payload.source_metadata?.team_id
+    || null;
+
+  let scopedProjectIds = projectIds;
+  if (scopedProjectIds.length > 0 && accessContext?.projectIds?.length) {
+    scopedProjectIds = scopedProjectIds.filter(id => accessContext.projectIds.includes(id));
+    if (scopedProjectIds.length === 0) {
+      throw new Error('Project scope is invalid or inaccessible for this user');
+    }
+  }
+
+  let primaryTeamId = explicitTeamId;
+  if (primaryTeamId && accessContext?.teamIds?.length && !accessContext.teamIds.includes(primaryTeamId)) {
+    throw new Error('Team scope is invalid or inaccessible for this user');
+  }
+
+  if (!primaryTeamId && scopedProjectIds.length > 0 && prisma?.project) {
+    const projectRows = await prisma.project.findMany({
+      where: { id: { in: scopedProjectIds }, orgId: payload.org_id },
+      select: { id: true, teamId: true },
+    });
+    const teamIds = Array.from(new Set(projectRows.map(row => row.teamId).filter(Boolean)));
+    if (teamIds.length === 1) {
+      primaryTeamId = teamIds[0];
+    }
+  }
+
+  const nextScope = payload.scope
+    || (scopedProjectIds.length > 0 ? 'project' : primaryTeamId ? 'team' : undefined);
+
+  return {
+    ...payload,
+    scope: nextScope,
+    primary_team_id: primaryTeamId || null,
+    project_ids: scopedProjectIds,
+    metadata: {
+      ...(payload.metadata || {}),
+      primary_team_id: primaryTeamId || null,
+      project_id: scopedProjectIds.length === 1 ? scopedProjectIds[0] : payload.metadata?.project_id || null,
+      project_ids: scopedProjectIds,
+    },
+    source_metadata: {
+      ...(payload.source_metadata || {}),
+      team_id: primaryTeamId || payload.source_metadata?.team_id || null,
+    },
+  };
+}
+
+function normalizeScopeIds(values = []) {
+  return Array.from(new Set(
+    values
+      .filter(value => typeof value === 'string' && value.trim())
+      .map(value => value.trim())
+  ));
 }
 
 function countTopValues(values = [], limit = 5) {
@@ -2282,6 +2357,8 @@ const server = http.createServer(async (req, res) => {
           slack: './connectors/adapters/slack/slack-adapter.js',
           github: './connectors/adapters/github/github-adapter.js',
           linear: './connectors/adapters/linear/linear-adapter.js',
+          jira: './connectors/adapters/jira/jira-adapter.js',
+          confluence: './connectors/adapters/confluence/confluence-adapter.js',
         };
         if (providerModuleMap[provider]) {
           await import(providerModuleMap[provider]);
@@ -5767,6 +5844,8 @@ const server = http.createServer(async (req, res) => {
                   slack: './connectors/adapters/slack/slack-adapter.js',
                   github: './connectors/adapters/github/github-adapter.js',
                   linear: './connectors/adapters/linear/linear-adapter.js',
+                  jira: './connectors/adapters/jira/jira-adapter.js',
+                  confluence: './connectors/adapters/confluence/confluence-adapter.js',
                 };
                 if (providerModuleMap[providerKey]) {
                   await import(providerModuleMap[providerKey]);
@@ -7650,6 +7729,11 @@ const server = http.createServer(async (req, res) => {
             const userTags = ingestTags ? (Array.isArray(ingestTags) ? ingestTags : ingestTags.split(',').map(t => t.trim()).filter(Boolean)) : [];
             const visibility = targetScope === 'organization' ? 'organization' : 'private';
             const project = containerTag || null;
+            const projectIds = normalizeScopeIds([
+              body.projectId || null,
+              ...(Array.isArray(body.project_ids) ? body.project_ids : []),
+            ]);
+            const primaryTeamId = body.primary_team_id || null;
 
             // ─── Phase 1: Document-First Enterprise Ingestion (feature-flagged) ───
             if (documentFirstIngestion && pending.buffer) {
@@ -7660,7 +7744,14 @@ const server = http.createServer(async (req, res) => {
                   fileBuffer: pending.buffer,
                   contentType: pending.mimeType || 'application/octet-stream',
                   schema: { documentType: confirmed_type, title: pending.filename },
-                  metadata: { tags: userTags, project, visibility }
+                  metadata: {
+                    tags: userTags,
+                    project,
+                    project_id: projectIds[0] || null,
+                    project_ids: projectIds,
+                    primary_team_id: primaryTeamId,
+                    visibility
+                  }
                 });
                 console.log(`[enterprise] Phase1 upload file=${pending.filename} docId=${result.documentId} segments=${result.segmentCount} promoted=${result.promotedCount}`);
                 return jsonResponse(res, {
@@ -7938,6 +8029,13 @@ const server = http.createServer(async (req, res) => {
                 : 'personal';
               const customTags = parts.find(p => p.name === 'tags')?.value || '';
               const userTags = customTags ? customTags.split(',').map(t => t.trim()).filter(Boolean) : [];
+              const projectId = parts.find(p => p.name === 'projectId')?.value || null;
+              const projectIdsRaw = parts.find(p => p.name === 'projectIds')?.value || '';
+              const primaryTeamId = parts.find(p => p.name === 'primaryTeamId')?.value || null;
+              const projectIds = normalizeScopeIds([
+                projectId,
+                ...projectIdsRaw.split(',').map(value => value.trim()).filter(Boolean),
+              ]);
 
               // Validate file size (max 100MB)
               if (filePart.data.length > 100 * 1024 * 1024) {
@@ -7961,7 +8059,14 @@ const server = http.createServer(async (req, res) => {
                     filename: filePart.filename,
                     fileBuffer: filePart.data,
                     contentType: filePart.contentType || `text/${ext}`,
-                    metadata: { tags: userTags, project: containerTag, visibility: targetScope === 'organization' ? 'organization' : 'private' }
+                    metadata: {
+                      tags: userTags,
+                      project: containerTag,
+                      project_id: projectIds[0] || null,
+                      project_ids: projectIds,
+                      primary_team_id: primaryTeamId,
+                      visibility: targetScope === 'organization' ? 'organization' : 'private'
+                    }
                   });
                   console.log(`[knowledge] ✓ Phase1 complete: file=${filePart.filename} docId=${result.documentId} segments=${result.segmentCount} promoted=${result.promotedCount}`);
                   return jsonResponse(res, {
@@ -9367,14 +9472,10 @@ const server = http.createServer(async (req, res) => {
               };
 
               // Smart type-aware routing: enrich payload with triple operator
-              let ingestPayloads = [ingestPayload];
-              if (smartIngestRouter && body.smartIngest !== false && !body.skipProcessing) {
-                try {
-                  ingestPayloads = await smartIngestRouter.route(ingestPayload);
-                } catch (routerErr) {
-                  console.warn('[smart-ingest-router] Routing failed, using raw payload:', routerErr.message);
-                }
-              }
+              const ingestPayloads = await buildRoutedIngestPayloads(ingestPayload, {
+                smartIngestRouter,
+                enableSmartRouting: body.smartIngest !== false && !body.skipProcessing,
+              });
 
               // Determine sync vs async mode
               const syncMode = url.searchParams.get('sync') === 'true' || body.sync === true;

@@ -224,6 +224,8 @@ export class NotionAdapter extends BaseConnectorAdapter {
   normalize(raw, type) {
     return {
       id: raw.id,
+      resource_id: raw.id,
+      resource_type: type,
       title: extractTitle(raw.properties),
       body: '',           // populated only by fetchResource
       ts: raw.last_edited_time ?? raw.created_time ?? null,
@@ -233,6 +235,30 @@ export class NotionAdapter extends BaseConnectorAdapter {
         parent: raw.parent ?? null,
       },
     };
+  }
+
+  /**
+   * Convert normalized Notion records into canonical knowledge payloads.
+   * @param {import('../../framework/base-connector-adapter.js').NormalizedRecord} record
+   * @param {Object} context
+   * @returns {Object[]}
+   */
+  toMemoryPayloads(record, context) {
+    const tags = ['notion', 'knowledge'];
+    const url = record?.refs?.url || null;
+    if (url) tags.push('document');
+
+    return [this.buildMemoryPayload(record, context, {
+      content: record?.body || record?.title || '',
+      memory_type: 'fact',
+      tags,
+      source_type: 'page',
+      metadata: {
+        source_type_normalized: 'knowledge_base',
+        notion_url: url,
+        notion_parent: record?.refs?.parent || null,
+      },
+    })];
   }
 
   // ── Webhook stubs (not_supported) ─────────────────────────────────────────

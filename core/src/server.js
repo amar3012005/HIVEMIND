@@ -1085,10 +1085,17 @@ if (process.env.DOCLING_URL) {
                 }
                 const CHUNK_TARGET = 1500;
                 const CHUNK_OVERLAP = 200;
+                // Heading detector: skip running-header/footer noise (date stamps,
+                // doc IDs, "Technische Änderungen", etc.) and pick first
+                // semantically interesting line.
+                const NOISE_RE = /^(dokument[-\s]?nr|technische|preisliste|seite|page|stand|art\.?-nr|©|copyright|all rights|alle rechte|tabelle|table\b)/i;
+                const looksLikeRunningText = (l) => l.length >= 10 && l.length <= 100 && !NOISE_RE.test(l.trim()) && /[a-zA-ZäöüÄÖÜß]/.test(l);
                 for (const block of pageBlocks) {
-                  // Heading = first non-empty line of page (truncated)
-                  const firstLine = (block.text.split('\n').find(l => l.trim().length > 0) || '').trim().slice(0, 120);
-                  const heading = firstLine || `Page ${block.page}`;
+                  const lines = block.text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+                  // Prefer a line that looks like a title (short, non-noise);
+                  // fall back to first non-empty line, then "Page N".
+                  let heading = lines.find(looksLikeRunningText) || lines[0] || `Page ${block.page}`;
+                  heading = heading.slice(0, 120);
                   if (block.text.length <= CHUNK_TARGET) {
                     hybridChunks.push({ text: block.text, headings: [heading], page: block.page });
                   } else {

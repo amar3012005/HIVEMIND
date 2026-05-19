@@ -65,6 +65,7 @@ model Organization {
   currentPeriodEnd     DateTime?          @map("current_period_end") @db.Timestamptz(6)
   trialEndsAt          DateTime?          @map("trial_ends_at") @db.Timestamptz(6)
   billingEmail         String?            @map("billing_email") @db.VarChar(255)
+  defaultProjectPolicy String             @default("private") @map("default_project_policy") @db.VarChar(50)
   apiKeys              ApiKey[]           @relation("OrgApiKeys")
   auditLogs            AuditLog[]         @relation("OrgAuditLogs")
   memories             Memory[]           @relation("OrgMemories")
@@ -108,6 +109,7 @@ model OrgInvite {
   role      String       @default("member")
   roles     String[]     @default([]) @map("roles")
   teamIds   String[]     @default([]) @map("team_ids")
+  projectIds String[]   @default([]) @map("project_ids")
   token     String       @unique
   expiresAt DateTime     @map("expires_at") @db.Timestamptz(6)
   usedAt    DateTime?    @map("used_at") @db.Timestamptz(6)
@@ -900,6 +902,8 @@ model ApiKey {
   lastUsedAt         DateTime?     @map("last_used_at") @db.Timestamptz(6)
   usageCount         Int?          @default(0) @map("usage_count")
   scopes             String[]      @default(["read", "write"])
+  projectId          String?       @map("project_id") @db.Uuid
+  teamId             String?       @map("team_id") @db.Uuid
   rateLimitPerMinute Int?          @default(60) @map("rate_limit_per_minute")
   description        String?
   createdByIp        String?       @map("created_by_ip") @db.Inet

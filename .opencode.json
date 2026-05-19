@@ -8,6 +8,10 @@
       ],
       "type": "stdio",
       "env": []
+    },
+    "nango-docs": {
+      "type": "http",
+      "url": "https://nango.dev/docs/mcp"
     }
   }
 }

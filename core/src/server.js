@@ -178,7 +178,7 @@ const { isTaraRoute } = await import('./tara/routes.js');
 // Phase 1: Document-Backed Memory Architecture
 const { DocumentFirstIngestionService } = await import('./knowledge/document-first-ingestion.js');
 const { EvidenceRetrievalService } = await import('./knowledge/evidence-retrieval.js');
-const { parseWithDocling } = await import('./knowledge/enterprise/docling-adapter.js');
+const { parseWithDocling, chunkWithDocling } = await import('./knowledge/enterprise/docling-adapter.js');
 
 // Session analytics instance (lazy init)
 let taraAnalytics = null;
@@ -1059,15 +1059,9 @@ if (process.env.DOCLING_URL) {
         // segmentation (respects headings, paragraphs, tables).
         const [parseResult, chunkResult] = await Promise.all([
           parseWithDocling(tempPath, filename),
-          (async () => {
-            try {
-              const { chunkWithDocling } = await import('./knowledge/enterprise/docling-adapter.js');
-              return await chunkWithDocling(tempPath, filename);
-            } catch (e) {
-              return { chunks: [], error: e.message };
-            }
-          })(),
+          chunkWithDocling(tempPath, filename).catch(e => ({ chunks: [], error: e.message })),
         ]);
+        console.log(`[docling-adapter] file=${filename} chunks=${chunkResult?.chunks?.length || 0} parseError=${parseResult?.error || 'none'} chunkerError=${chunkResult?.error || 'none'}`);
         // Merge: surface hybridChunks alongside parsed text
         return {
           ...parseResult,

@@ -472,7 +472,16 @@ function generateToolsManifest(userId, orgId, options = {}) {
   const tools = [
     {
       name: 'hivemind_save_memory',
-      description: 'Save information to HIVE-MIND persistent memory. Use this to store important facts, code snippets, decisions, or context that should be remembered across conversations.',
+      description: `Save information to HIVE-MIND persistent memory.
+
+PROJECT SCOPING (IMPORTANT):
+The org has ONE shared HIVEMIND by default. Admins can create sub-HIVEMINDs called projects (e.g. "SOLVIS", "Q2-Planning"). Choose the right scope:
+  • If the user mentions a project ("save this to SOLVIS", "in my Q2 project"), pass project="<name>" or project_id="<uuid>".
+  • If the content is clearly about a known project (e.g. references that project's docs, code, or team), pick that project automatically.
+  • If the org policy is "ask" OR the project is ambiguous, ASK the user which project before saving.
+  • If genuinely org-wide (general fact, personal preference), omit project — saves org-wide.
+
+Call hivemind_list_projects first if you don't yet know which projects exist.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -482,7 +491,7 @@ function generateToolsManifest(userId, orgId, options = {}) {
           },
           content: {
             type: 'string',
-            description: 'The content to remember - can be text, code, conversation summary, etc.'
+            description: 'The content to remember — text, code, conversation summary, decision rationale.'
           },
           source_type: {
             type: 'string',
@@ -493,28 +502,36 @@ function generateToolsManifest(userId, orgId, options = {}) {
           tags: {
             type: 'array',
             items: { type: 'string' },
-            description: 'Tags for categorizing the memory (e.g., ["react", "api-design", "bug-fix"])'
+            description: 'Tags for categorizing (e.g., ["react", "api-design", "bug-fix"]).'
           },
           project: {
             type: 'string',
-            description: 'Project or domain this memory belongs to'
+            description: 'Project NAME or slug (e.g. "SOLVIS"). Server resolves to project_id. Use this when the user mentions a project by name. Omit for org-wide.'
+          },
+          project_id: {
+            type: 'string',
+            description: 'Project UUID. Use this only when you already have the canonical id (e.g. from hivemind_list_projects). Otherwise use the project field with the name.'
           },
           relationship: {
             type: 'string',
             enum: ['update', 'extend', 'derive'],
-            description: 'How this relates to existing memories: update (replaces old), extend (adds to), derive (infers from)'
+            description: 'How this relates to an existing memory: update (replaces), extend (adds nuance), derive (inferred from).'
           },
           related_to: {
             type: 'string',
-            description: 'Memory ID this relates to (for update/extend/derive relationships)'
-          },
-          project_id: {
-            type: 'string',
-            description: 'Optional HIVEMIND project ID to scope this memory. Omit for org-wide storage.'
+            description: 'Memory ID this relates to (required when relationship is set).'
           }
         },
         required: ['title', 'content']
       }
+    },
+    {
+      name: 'hivemind_list_projects',
+      description: 'List all projects (sub-HIVEMINDs) in the current org. Use this before saving a memory if you need to know which project to scope to.',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+      },
     },
     {
       name: 'hivemind_recall',
@@ -2079,16 +2096,49 @@ function buildRelationship(relationship, relatedTo) {
 export async function handleToolCall(params, userId, orgId, apiClient) {
   const { name, arguments: args } = params;
 
-  // Resolve optional project_id into validated scope fields.
-  // When project_id is provided: validate membership, resolve team, stamp scope.
-  // When omitted: leave null → backend defaults to org-wide.
-  const requestedProjectId = typeof args.project_id === 'string' && args.project_id.trim()
+  // Resolve optional project scope. Two modes:
+  //   1. project_id (UUID) → validate membership
+  //   2. project (name/slug) → look up by name in org, then validate
+  // Either path → server-side mapping to validated scope fields. Falls back
+  // to org-wide when neither is set or both fail.
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  let requestedProjectId = typeof args.project_id === 'string' && args.project_id.trim()
     ? args.project_id.trim()
     : null;
+  const requestedProjectName = typeof args.project === 'string' && args.project.trim()
+    ? args.project.trim()
+    : null;
+
+  // Name → ID resolution. Look up project by case-insensitive name match
+  // within the caller's org. If multiple matches, pick the most recently
+  // updated (admins typically use the latest naming).
+  if (!requestedProjectId && requestedProjectName && userId && orgId) {
+    try {
+      const { getPrismaClient } = await import('../db/prisma.js');
+      const prisma = getPrismaClient();
+      if (prisma) {
+        const proj = await prisma.project.findFirst({
+          where: {
+            orgId,
+            OR: [
+              { name: { equals: requestedProjectName, mode: 'insensitive' } },
+              { slug: { equals: requestedProjectName.toLowerCase().replace(/\s+/g, '-') } },
+            ],
+          },
+          orderBy: { updatedAt: 'desc' },
+          select: { id: true },
+        });
+        if (proj?.id) requestedProjectId = proj.id;
+      }
+    } catch (lookupErr) {
+      // Fall through — project name lookup is best-effort.
+    }
+  }
+
   let resolvedProjectId = null;
   let resolvedProjectIds = [];
   let resolvedTeamId = null;
-  if (requestedProjectId && userId && orgId) {
+  if (requestedProjectId && UUID_RE.test(requestedProjectId) && userId && orgId) {
     try {
       const { resolveScopedIngestPayload } = await import('../server.js');
       const scoped = await resolveScopedIngestPayload({
@@ -2145,6 +2195,42 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
           smartIngest: relationship ? true : false,
           ...SCOPE_FIELDS,
         }));
+      }
+
+      case 'hivemind_list_projects': {
+        try {
+          const { getPrismaClient } = await import('../db/prisma.js');
+          const prisma = getPrismaClient();
+          const projects = await prisma.project.findMany({
+            where: { orgId },
+            orderBy: { updatedAt: 'desc' },
+            select: {
+              id: true,
+              name: true,
+              slug: true,
+              description: true,
+              visibility: true,
+              createdAt: true,
+            },
+            take: 50,
+          });
+          return formatToolContent({
+            org_id: orgId,
+            count: projects.length,
+            projects: projects.map(p => ({
+              id: p.id,
+              name: p.name,
+              slug: p.slug,
+              description: p.description,
+              visibility: p.visibility,
+            })),
+            hint: projects.length === 0
+              ? 'No projects yet — memories save org-wide. Admin can create a project in the HIVEMIND web UI.'
+              : 'Pass the project name (case-insensitive) or id as the `project` / `project_id` arg on hivemind_save_memory.',
+          });
+        } catch (err) {
+          return formatToolContent({ error: err.message, projects: [] });
+        }
       }
 
       case 'hivemind_recall':

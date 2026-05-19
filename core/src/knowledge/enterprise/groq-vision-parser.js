@@ -19,7 +19,7 @@ import crypto from 'crypto';
 const GROQ_KEY = process.env.GROQ_API_KEY || '';
 const VISION_MODEL = process.env.GROQ_VISION_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct';
 const CONCURRENCY = Number(process.env.GROQ_VISION_CONCURRENCY || 8);
-const MAX_PAGES = Number(process.env.GROQ_VISION_MAX_PAGES || 100);
+const MAX_PAGES = Number(process.env.GROQ_VISION_MAX_PAGES || 200);
 const PAGE_DENSITY = process.env.GROQ_VISION_DENSITY || '150'; // DPI for convert
 
 const SYSTEM_PROMPT = `You are an OCR + layout extractor. Read the entire page image and output clean Markdown:
@@ -56,7 +56,12 @@ export async function parsePdfWithGroqVision(pdfPath) {
       .sort();
     if (!pages.length) return { text: '', pages: 0, markdown: '', error: 'No pages rendered' };
 
+    const totalRendered = pages.length;
     const usePages = pages.slice(0, MAX_PAGES);
+    const truncated = totalRendered > MAX_PAGES;
+    if (truncated) {
+      console.warn(`[groq-vision] truncating to ${MAX_PAGES} of ${totalRendered} pages (override via GROQ_VISION_MAX_PAGES)`);
+    }
 
     // Step 2: parallel vision OCR with concurrency limit
     const results = new Array(usePages.length);
@@ -80,7 +85,9 @@ export async function parsePdfWithGroqVision(pdfPath) {
       text: markdown,
       markdown,
       pages: usePages.length,
-      error: null,
+      totalPages: totalRendered,
+      truncated,
+      error: truncated ? `Truncated to ${MAX_PAGES} of ${totalRendered} pages — raise GROQ_VISION_MAX_PAGES to ingest more.` : null,
     };
   } finally {
     // Cleanup tmp dir

@@ -1,0 +1,194 @@
+/**
+ * Entity Extractor — extracts entities (people, orgs, projects, topics,
+ * locations, products) from knowledge segments and writes them to the
+ * canonical Entity + EntityMention tables.
+ *
+ * Strategy:
+ *   1. Cheap regex pre-pass (emails, @mentions, URLs, hashtags)
+ *   2. LLM extraction via existing litellm-client (JSON mode)
+ *   3. Entity resolution: upsert by canonical name within tenant
+ *
+ * Designed to run async (fire-and-forget) after segment ingestion so it
+ * never blocks the document-first pipeline.
+ */
+
+import { chatCompletion, getDefaultModel } from './enterprise/litellm-client.js';
+
+const EMAIL_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
+const URL_RE = /\bhttps?:\/\/[^\s)]+/g;
+const MENTION_RE = /(?:^|[^A-Z0-9_])@([A-Z0-9_.-]{2,40})/gi;
+const HASHTAG_RE = /(?:^|\s)#([A-Z0-9_-]{2,40})/gi;
+
+const ENTITY_TYPES = ['person', 'organization', 'project', 'topic', 'location', 'product', 'event'];
+
+const SYSTEM_PROMPT = `You extract named entities from text.
+
+Return ONLY a JSON object: { "entities": [...] }
+Each entity: { "name": string, "type": one_of(${ENTITY_TYPES.map(t => `"${t}"`).join(',')}), "aliases": string[]?, "confidence": number_0_to_1 }
+
+Rules:
+- Canonical name = most common written form. Strip titles ("Mr.", "Dr.") for people.
+- Skip generic words ("user", "the team", "company").
+- Combine same-entity variants under one canonical with aliases.
+- Maximum 25 entities per call.
+- Empty list ok if no clear entities.`;
+
+export class EntityExtractor {
+  constructor({ prisma, logger = console, model = null }) {
+    this.prisma = prisma;
+    this.logger = logger;
+    this.model = model || getDefaultModel();
+  }
+
+  /**
+   * Extract entities from a single segment and persist mentions.
+   * Returns { entities: [], mentions: [], skipped: false }
+   */
+  async extractFromSegment({ segment, userId, orgId, documentId }) {
+    if (!segment?.content || segment.content.trim().length < 20) {
+      return { entities: [], mentions: [], skipped: true, reason: 'too_short' };
+    }
+
+    // 1. Regex pre-pass — cheap candidates
+    const regexCandidates = this._regexCandidates(segment.content);
+
+    // 2. LLM extraction
+    let llmCandidates = [];
+    try {
+      llmCandidates = await this._llmExtract(segment.content);
+    } catch (err) {
+      this.logger.warn(`[entity-extractor] LLM failed: ${err.message}`);
+    }
+
+    // 3. Merge + dedup by (type, lowercased canonical)
+    const merged = this._mergeCandidates(regexCandidates, llmCandidates);
+
+    // 4. Upsert entities + write mentions
+    const entities = [];
+    const mentions = [];
+    for (const cand of merged) {
+      try {
+        const entity = await this.prisma.entity.upsert({
+          where: {
+            orgId_entityType_canonicalName: {
+              orgId,
+              entityType: cand.type,
+              canonicalName: cand.name,
+            },
+          },
+          create: {
+            orgId,
+            entityType: cand.type,
+            canonicalName: cand.name,
+            aliases: cand.aliases || [],
+            confidence: cand.confidence ?? 0.7,
+            mentionCount: 1,
+            lastSeenAt: new Date(),
+          },
+          update: {
+            mentionCount: { increment: 1 },
+            lastSeenAt: new Date(),
+            aliases: { set: Array.from(new Set([...(cand.aliases || [])])) },
+          },
+        });
+        entities.push(entity);
+
+        const mention = await this.prisma.entityMention.create({
+          data: {
+            entityId: entity.id,
+            documentId,
+            segmentId: segment.id,
+            mentionText: cand.surfaceForm || cand.name,
+            confidence: cand.confidence ?? 0.7,
+            context: segment.content.slice(0, 200),
+          },
+        });
+        mentions.push(mention);
+      } catch (err) {
+        this.logger.warn(`[entity-extractor] upsert failed for "${cand.name}": ${err.message}`);
+      }
+    }
+    return { entities, mentions, skipped: false };
+  }
+
+  _regexCandidates(text) {
+    const cands = [];
+    for (const m of text.matchAll(EMAIL_RE)) {
+      const email = m[0];
+      cands.push({
+        name: email.toLowerCase(),
+        type: 'person',
+        surfaceForm: email,
+        confidence: 0.95,
+        source: 'regex_email',
+      });
+    }
+    for (const m of text.matchAll(MENTION_RE)) {
+      cands.push({
+        name: m[1],
+        type: 'person',
+        surfaceForm: `@${m[1]}`,
+        confidence: 0.85,
+        source: 'regex_mention',
+      });
+    }
+    for (const m of text.matchAll(HASHTAG_RE)) {
+      cands.push({
+        name: m[1].toLowerCase(),
+        type: 'topic',
+        surfaceForm: `#${m[1]}`,
+        confidence: 0.75,
+        source: 'regex_hashtag',
+      });
+    }
+    return cands;
+  }
+
+  async _llmExtract(text) {
+    // Truncate to keep cost predictable
+    const input = String(text).slice(0, 4000);
+    const raw = await chatCompletion({
+      model: this.model,
+      json_mode: true,
+      temperature: 0.1,
+      max_tokens: 800,
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'user', content: input },
+      ],
+    });
+    let parsed;
+    try {
+      parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch {
+      return [];
+    }
+    const list = Array.isArray(parsed?.entities) ? parsed.entities : [];
+    return list
+      .filter(e => e?.name && ENTITY_TYPES.includes(e.type))
+      .map(e => ({
+        name: String(e.name).trim().slice(0, 500),
+        type: e.type,
+        aliases: Array.isArray(e.aliases) ? e.aliases.map(a => String(a).slice(0, 200)).slice(0, 10) : [],
+        confidence: Number.isFinite(e.confidence) ? Math.min(Math.max(e.confidence, 0), 1) : 0.7,
+        source: 'llm',
+      }));
+  }
+
+  _mergeCandidates(regexC, llmC) {
+    const byKey = new Map();
+    for (const c of [...regexC, ...llmC]) {
+      const key = `${c.type}|${c.name.toLowerCase()}`;
+      const prev = byKey.get(key);
+      if (!prev) {
+        byKey.set(key, c);
+      } else {
+        // Keep highest confidence, merge aliases
+        prev.confidence = Math.max(prev.confidence, c.confidence);
+        prev.aliases = Array.from(new Set([...(prev.aliases || []), ...(c.aliases || [])]));
+        if (c.surfaceForm && !prev.surfaceForm) prev.surfaceForm = c.surfaceForm;
+      }
+    }
+    return Array.from(byKey.values());
+  }
+}

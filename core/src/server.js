@@ -906,6 +906,16 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
         },
       }
     });
+    // P1 #9 entity extractor — wired only if ENABLE_ENTITY_EXTRACTION=true
+    if (process.env.ENABLE_ENTITY_EXTRACTION === 'true') {
+      try {
+        const { EntityExtractor } = await import('./knowledge/entity-extractor.js');
+        documentFirstIngestion.entityExtractor = new EntityExtractor({ prisma, logger: console });
+        console.log('[Phase1] EntityExtractor enabled');
+      } catch (err) {
+        console.warn('[Phase1] EntityExtractor failed to init:', err.message);
+      }
+    }
     console.log('[Phase1] DocumentFirstIngestionService enabled');
   } catch (err) {
     console.warn('[Phase1] DocumentFirstIngestionService failed to init:', err.message);

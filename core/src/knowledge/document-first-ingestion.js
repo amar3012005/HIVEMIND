@@ -13,12 +13,28 @@
 import crypto from 'crypto';
 
 export class DocumentFirstIngestionService {
-  constructor({ db, smartIngestRouter, memoryGraphEngine, doclingAdapter, embeddingService }) {
+  constructor({ db, smartIngestRouter, memoryGraphEngine, doclingAdapter, embeddingService, entityExtractor = null, logger = console }) {
     this.db = db;
     this.smartIngestRouter = smartIngestRouter;
     this.memoryGraphEngine = memoryGraphEngine;
     this.doclingAdapter = doclingAdapter;
     this.embeddingService = embeddingService;
+    this.entityExtractor = entityExtractor;
+    this.logger = logger;
+  }
+
+  /** Fire-and-forget entity extraction over segments (P1 #9) */
+  _extractEntitiesAsync({ segments, userId, orgId, documentId }) {
+    if (!this.entityExtractor || process.env.ENABLE_ENTITY_EXTRACTION !== 'true') return;
+    (async () => {
+      for (const segment of segments) {
+        try {
+          await this.entityExtractor.extractFromSegment({ segment, userId, orgId, documentId });
+        } catch (err) {
+          this.logger.warn(`[entity-extractor] segment ${segment.id} failed: ${err.message}`);
+        }
+      }
+    })().catch(err => this.logger.warn(`[entity-extractor] batch failed: ${err.message}`));
   }
 
   /**
@@ -95,6 +111,7 @@ export class DocumentFirstIngestionService {
     // Step 5: Embed segments
     await this._embedSegments(segments);
 
+    this._extractEntitiesAsync({ segments, userId, orgId, documentId: knowledgeDoc.id });
     // Step 6: Promote candidate memories
     const promoted = await this._promoteMemories({
       documentId: knowledgeDoc.id,
@@ -180,6 +197,7 @@ export class DocumentFirstIngestionService {
     // Step 5: Embed segments
     await this._embedSegments(segments);
 
+    this._extractEntitiesAsync({ segments, userId, orgId, documentId: parentDoc.id });
     // Step 6: Promote canonical memories (more selective for enterprise)
     const promoted = await this._promoteMemories({
       documentId: parentDoc.id,
@@ -282,6 +300,7 @@ export class DocumentFirstIngestionService {
     // Step 4: embed segment
     await this._embedSegments(segments);
 
+    this._extractEntitiesAsync({ segments, userId, orgId, documentId: knowledgeDoc.id });
     // Step 5: promote memories
     const promoted = await this._promoteMemories({
       documentId: knowledgeDoc.id,

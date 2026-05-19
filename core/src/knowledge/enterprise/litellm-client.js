@@ -11,15 +11,28 @@ import fetch from 'node-fetch';
 
 // Default routes through Groq direct (gpt-oss-20b — fast, cheap, JSON-mode).
 // LITELLM_BASE_URL still wins when explicitly set (preserves backward compat).
+// Routing logic:
+// - If GROQ_API_KEY + model looks like a Groq model (openai/*, meta-llama/*,
+//   llama-*, mixtral-*), route DIRECT to Groq even when LITELLM_BASE_URL is set.
+// - Else fall back to LiteLLM proxy (or OpenAI-compatible base URL).
+// This lets us mix LiteLLM (gemini/etc) + Groq (gpt-oss-20b) on the same box.
 const GROQ_KEY = process.env.GROQ_API_KEY || '';
-const USE_GROQ = !process.env.LITELLM_BASE_URL && !process.env.OPENAI_API_BASE_URL && GROQ_KEY;
+const FORCE_GROQ_FOR_MODELS = /^(openai\/gpt-oss|meta-llama\/|llama-|mixtral-|gemma|qwen)/i;
 
 const DEFAULT_MODEL = process.env.ENTERPRISE_EXTRACTION_MODEL
-  || (USE_GROQ ? 'openai/gpt-oss-20b' : 'gemini-2.5-flash-lite');
-const API_KEY = USE_GROQ ? GROQ_KEY : (process.env.LITELLM_API_KEY || process.env.OPENAI_API_KEY || '');
-const BASE_URL = (process.env.LITELLM_BASE_URL
+  || (GROQ_KEY ? 'openai/gpt-oss-20b' : 'gemini-2.5-flash-lite');
+const LITELLM_API_KEY = process.env.LITELLM_API_KEY || process.env.OPENAI_API_KEY || '';
+const LITELLM_BASE_URL = (process.env.LITELLM_BASE_URL
   || process.env.OPENAI_API_BASE_URL
-  || (USE_GROQ ? 'https://api.groq.com/openai/v1' : 'https://api.blaiq.ai/v1')).replace(/\/+$/, '');
+  || 'https://api.blaiq.ai/v1').replace(/\/+$/, '');
+const GROQ_BASE_URL = 'https://api.groq.com/openai/v1';
+
+function pickRoute(model) {
+  if (GROQ_KEY && FORCE_GROQ_FOR_MODELS.test(model || '')) {
+    return { base: GROQ_BASE_URL, key: GROQ_KEY, provider: 'groq' };
+  }
+  return { base: LITELLM_BASE_URL, key: LITELLM_API_KEY, provider: 'litellm' };
+}
 const TIMEOUT_MS = 60_000;
 
 /**
@@ -50,13 +63,14 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
+  const route = pickRoute(model);
   let res;
   try {
-    res = await fetch(`${BASE_URL}/chat/completions`, {
+    res = await fetch(`${route.base}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...(API_KEY ? { Authorization: `Bearer ${API_KEY}` } : {}),
+        ...(route.key ? { Authorization: `Bearer ${route.key}` } : {}),
       },
       body: JSON.stringify(body),
       signal: controller.signal,
@@ -80,7 +94,7 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
   const usage = json.usage;
   const content = json.choices?.[0]?.message?.content || '';
 
-  console.log(`[enterprise-extract] model=${model} tokens=${usage?.total_tokens}`);
+  console.log(`[enterprise-extract] provider=${route.provider} model=${model} tokens=${usage?.total_tokens}`);
 
   if (json_mode) {
     // Robust parse: try direct, then strip code fences, then salvage first {...}/[...]

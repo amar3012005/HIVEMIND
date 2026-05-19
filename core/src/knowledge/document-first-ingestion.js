@@ -402,6 +402,7 @@ export class DocumentFirstIngestionService {
     }
     // Try structure-aware chunks first (provided by parseResult.metadata.hybridChunks)
     const hybridChunks = parseResult?.metadata?.hybridChunks;
+    console.log(`[segments] hybridChunks=${Array.isArray(hybridChunks) ? hybridChunks.length : 'none'} for doc ${documentId}`);
     if (Array.isArray(hybridChunks) && hybridChunks.length > 0) {
       const segments = [];
       let segmentIndex = 0;

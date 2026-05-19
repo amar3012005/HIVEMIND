@@ -8121,10 +8121,13 @@ const server = http.createServer(async (req, res) => {
                     })
                   );
                   if (memoryIds.length === 0) {
-                    return jsonResponse(res, { error: 'Document not found' }, 404);
+                    // Don't 404 here — fall through to Phase1 knowledgeDocument
+                    // lookup below. Catches the common case where the FE sent
+                    // a knowledge_document.id under memory_id.
+                  } else {
+                    deleteUploadId = fallbackUploadId;
+                    resolutionStrategy = 'upload-id-fallback';
                   }
-                  deleteUploadId = fallbackUploadId;
-                  resolutionStrategy = 'upload-id-fallback';
                 } else {
                   const docMeta = docMemory.versions?.[0]?.metadata || docMemory.sourceMetadata?.metadata || {};
 

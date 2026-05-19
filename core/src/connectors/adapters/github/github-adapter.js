@@ -6,7 +6,16 @@ const GITHUB_API = 'https://api.github.com';
 const REQUEST_TIMEOUT_MS = 15000;
 const WEBHOOK_REPLAY_WINDOW_MS = 5 * 60 * 1000;
 
+// Per-token rate-limit tracker (P3 #24) — respects GitHub 5000/h quota
+const _ghRate = new Map(); // token -> { remaining, reset }
+
 async function githubRequest(token, path, { method = 'GET', body } = {}) {
+  // Pre-emptively pause when remaining quota is low
+  const r = _ghRate.get(token);
+  if (r && r.remaining < 50 && r.reset && r.reset > Date.now() / 1000) {
+    const waitMs = Math.min((r.reset - Date.now() / 1000) * 1000, 60000);
+    if (waitMs > 0) await new Promise(rs => setTimeout(rs, waitMs));
+  }
   const res = await fetch(`${GITHUB_API}${path}`, {
     method,
     headers: {
@@ -18,6 +27,13 @@ async function githubRequest(token, path, { method = 'GET', body } = {}) {
     body: body ? JSON.stringify(body) : undefined,
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
+
+  // Cache quota for next call
+  const remaining = Number(res.headers.get('x-ratelimit-remaining'));
+  const reset = Number(res.headers.get('x-ratelimit-reset'));
+  if (Number.isFinite(remaining) && Number.isFinite(reset)) {
+    _ghRate.set(token, { remaining, reset });
+  }
 
   if (!res.ok) {
     const text = await res.text().catch(() => '');

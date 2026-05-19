@@ -256,11 +256,18 @@ const persistentMemoryStore = prisma ? new PrismaGraphStore(prisma) : null;
 
 // Lazy TeamStore singleton — used by all recall paths to build access_context
 let _teamStoreCache = null;
+let _teamStoreHooked = false;
 async function getTeamStore() {
   if (!prisma) return null;
   if (_teamStoreCache) return _teamStoreCache;
   const mod = await import('./teams/team-store.js');
   _teamStoreCache = new mod.TeamStore(prisma);
+  if (!_teamStoreHooked && typeof _teamStoreCache.onMembershipChange === 'function') {
+    _teamStoreCache.onMembershipChange((userId, orgId) => {
+      invalidateAccessContextCache(userId, orgId);
+    });
+    _teamStoreHooked = true;
+  }
   return _teamStoreCache;
 }
 
@@ -286,6 +293,22 @@ async function buildAccessContext(userId, orgId) {
   } catch (err) {
     console.warn('[access-context] build failed:', err.message);
     return null;
+  }
+}
+
+/**
+ * Invalidate cached access context for a user.
+ * Call after membership changes (team join/leave, project add/remove).
+ */
+export function invalidateAccessContextCache(userId, orgId) {
+  if (!userId) return;
+  const key = orgId ? `${userId}:${orgId}` : null;
+  if (key) {
+    _accessContextCache.delete(key);
+  } else {
+    for (const k of _accessContextCache.keys()) {
+      if (k.startsWith(`${userId}:`)) _accessContextCache.delete(k);
+    }
   }
 }
 
@@ -433,6 +456,10 @@ if (process.env.ENABLE_MEMORY_PROMOTION_JOBS === 'true' && prisma) {
         where: { isLatest: true, updatedAt: { lt: cutoff }, strength: { gt: 0.2 } },
         data: { strength: { decrement: 0.1 } },
       }).catch(() => ({ count: 0 }));
+      globalThis.__hmMetrics = globalThis.__hmMetrics || {};
+      globalThis.__hmMetrics.promotion_runs_total = (globalThis.__hmMetrics.promotion_runs_total || 0) + 1;
+      globalThis.__hmMetrics.promotion_promoted_total = (globalThis.__hmMetrics.promotion_promoted_total || 0) + promoted;
+      globalThis.__hmMetrics.promotion_stale_total = (globalThis.__hmMetrics.promotion_stale_total || 0) + (stale.count || 0);
       console.log(`[promotion-cron] ${orphans.length} orphan segments scanned, ${promoted} promoted, ${stale.count} memories aged`);
     } catch (err) {
       console.error('[promotion-cron] tick failed:', err.message);
@@ -441,6 +468,43 @@ if (process.env.ENABLE_MEMORY_PROMOTION_JOBS === 'true' && prisma) {
   setTimeout(runPromotion, 10 * 60 * 1000); // first run +10min
   setInterval(runPromotion, PROMOTION_INTERVAL_MS);
   console.log(`[promotion-cron] scheduled — every ${PROMOTION_INTERVAL_MS / 3600000}h`);
+}
+
+// ─── Memory Synthesizer cron (P3 #21) ────────────────────────────────────────
+if (process.env.ENABLE_MEMORY_SYNTHESIS === 'true' && prisma) {
+  const SYNTH_INTERVAL_MS = Number(process.env.SYNTHESIS_INTERVAL_MS || 24 * 60 * 60 * 1000);
+  let synthesizer = null;
+  const runSynth = async () => {
+    if (!persistentMemoryEngine) {
+      console.warn('[memory-synth] memoryGraphEngine not ready');
+      return;
+    }
+    try {
+      if (!synthesizer) {
+        const { MemorySynthesizer } = await import('./resident/memory-synthesizer.js');
+        synthesizer = new MemorySynthesizer({ prisma, memoryGraphEngine: persistentMemoryEngine, logger: console });
+      }
+      const since = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
+      const orgs = await prisma.memory.groupBy({
+        by: ['orgId'],
+        where: { deletedAt: null, isLatest: true, updatedAt: { gte: since } },
+        _count: { _all: true },
+        orderBy: { _count: { orgId: 'desc' } },
+        take: 10,
+      });
+      let totalSynthesized = 0;
+      for (const { orgId: oid } of orgs) {
+        const n = await synthesizer.synthesizeForOrg(oid).catch(() => 0);
+        totalSynthesized += n;
+      }
+      console.log(`[memory-synth] ${orgs.length} orgs scanned, ${totalSynthesized} synthesis memories created`);
+    } catch (err) {
+      console.error('[memory-synth] tick failed:', err.message);
+    }
+  };
+  setTimeout(runSynth, 20 * 60 * 1000);
+  setInterval(runSynth, SYNTH_INTERVAL_MS);
+  console.log(`[memory-synth] scheduled — every ${SYNTH_INTERVAL_MS / 3600000}h`);
 }
 
 // ─── Contradiction Scanner cron (Wave 5 / P1 5.2) ───────────────────────────
@@ -475,6 +539,9 @@ if (process.env.ENABLE_CONTRADICTION_SCAN === 'true' && prisma) {
           console.warn(`[contradiction-cron] org ${oid} failed: ${err.message}`);
         }
       }
+      globalThis.__hmMetrics = globalThis.__hmMetrics || {};
+      globalThis.__hmMetrics.contradiction_runs_total = (globalThis.__hmMetrics.contradiction_runs_total || 0) + 1;
+      globalThis.__hmMetrics.contradiction_emitted_total = (globalThis.__hmMetrics.contradiction_emitted_total || 0) + totalEmitted;
       console.log(`[contradiction-cron] ${orgs.length} orgs scanned, ${totalProposals} proposed, ${totalEmitted} Contradicts edges emitted`);
     } catch (err) {
       console.error('[contradiction-cron] tick failed:', err.message);
@@ -511,6 +578,24 @@ if (process.env.ENABLE_HYGIENE_CRON === 'true' && hygieneScanner && prisma) {
           console.warn(`[hygiene-cron] scan failed for ${userId}/${orgId}: ${err.message}`);
         }
       }
+      // Cross-source entity resolution sweep (#8) — alongside hygiene
+      if (process.env.ENABLE_ENTITY_EXTRACTION === 'true') {
+        try {
+          const { CrossSourceEntityResolver } = await import('./knowledge/cross-source-entity-resolver.js');
+          const resolver = new CrossSourceEntityResolver({ prisma, logger: console });
+          let totalMerged = 0;
+          for (const { orgId: oid } of recent) {
+            const merged = await resolver.resolveOrg(oid).catch(() => 0);
+            totalMerged += merged;
+          }
+          console.log(`[entity-resolver] cross-source sweep merged ${totalMerged} entities`);
+        } catch (err) {
+          console.warn(`[entity-resolver] sweep failed: ${err.message}`);
+        }
+      }
+      globalThis.__hmMetrics = globalThis.__hmMetrics || {};
+      globalThis.__hmMetrics.hygiene_runs_total = (globalThis.__hmMetrics.hygiene_runs_total || 0) + 1;
+      globalThis.__hmMetrics.hygiene_proposals_total = (globalThis.__hmMetrics.hygiene_proposals_total || 0) + totalProposals;
       console.log(`[hygiene-cron] done — ${totalProposals} proposals generated`);
     } catch (err) {
       console.error('[hygiene-cron] tick failed:', err.message);
@@ -1396,7 +1481,7 @@ async function buildRoutedIngestPayloads(payload, { smartIngestRouter, enableSma
   }
 }
 
-async function resolveScopedIngestPayload(payload) {
+export async function resolveScopedIngestPayload(payload) {
   if (!payload?.user_id || !payload?.org_id) return payload;
 
   const accessContext = await buildAccessContext(payload.user_id, payload.org_id);
@@ -1458,7 +1543,7 @@ async function resolveScopedIngestPayload(payload) {
   };
 }
 
-function normalizeScopeIds(values = []) {
+export function normalizeScopeIds(values = []) {
   return Array.from(new Set(
     values
       .filter(value => typeof value === 'string' && value.trim())
@@ -2659,6 +2744,12 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === '/metrics' && req.method === 'GET') {
+    // Initialize metrics namespace if missing
+    globalThis.__hmMetrics = globalThis.__hmMetrics || {
+      promotion_runs_total: 0, promotion_promoted_total: 0, promotion_stale_total: 0,
+      contradiction_runs_total: 0, contradiction_emitted_total: 0,
+      hygiene_runs_total: 0, hygiene_proposals_total: 0,
+    };
     // P3 #27 — Prometheus exposition format for ingest stats
     try {
       const [docs, segs, memEvLinks, entities, mentions, webhookFailed, webhookReceived, srcArt] = await Promise.all([
@@ -2696,6 +2787,24 @@ const server = http.createServer(async (req, res) => {
         '# HELP hivemind_inbound_webhook_failed Failed webhook events',
         '# TYPE hivemind_inbound_webhook_failed gauge',
         `hivemind_inbound_webhook_failed ${webhookFailed}`,
+        '# HELP hivemind_promotion_runs_total Memory promotion cron ticks since boot',
+        '# TYPE hivemind_promotion_runs_total counter',
+        `hivemind_promotion_runs_total ${globalThis.__hmMetrics.promotion_runs_total}`,
+        '# HELP hivemind_promotion_promoted_total Memories promoted via background scan',
+        '# TYPE hivemind_promotion_promoted_total counter',
+        `hivemind_promotion_promoted_total ${globalThis.__hmMetrics.promotion_promoted_total}`,
+        '# HELP hivemind_contradiction_runs_total Contradiction scanner ticks since boot',
+        '# TYPE hivemind_contradiction_runs_total counter',
+        `hivemind_contradiction_runs_total ${globalThis.__hmMetrics.contradiction_runs_total}`,
+        '# HELP hivemind_contradiction_emitted_total Contradicts edges written',
+        '# TYPE hivemind_contradiction_emitted_total counter',
+        `hivemind_contradiction_emitted_total ${globalThis.__hmMetrics.contradiction_emitted_total}`,
+        '# HELP hivemind_hygiene_runs_total Hygiene scanner ticks since boot',
+        '# TYPE hivemind_hygiene_runs_total counter',
+        `hivemind_hygiene_runs_total ${globalThis.__hmMetrics.hygiene_runs_total}`,
+        '# HELP hivemind_hygiene_proposals_total Hygiene proposals generated',
+        '# TYPE hivemind_hygiene_proposals_total counter',
+        `hivemind_hygiene_proposals_total ${globalThis.__hmMetrics.hygiene_proposals_total}`,
       ];
       res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4' });
       res.end(lines.join('\n') + '\n');
@@ -5620,6 +5729,165 @@ const server = http.createServer(async (req, res) => {
               return jsonResponse(res, { success: true, ...status });
             } catch (error) {
               return jsonResponse(res, { error: error.message }, 400);
+            }
+          }
+          break;
+
+        case '/api/admin/backfill':
+          // P3 #20 — re-process historical segments through current pipeline
+          if (req.method === 'POST') {
+            try {
+              if (!documentFirstIngestion) {
+                return jsonResponse(res, { error: 'Document-first not enabled' }, 503);
+              }
+              const since = body.since ? new Date(body.since) : new Date(Date.now() - 30 * 86400000);
+              const limit = Math.min(Number(body.limit || 100), 500);
+              const segments = await prisma.knowledgeSegment.findMany({
+                where: { orgId, createdAt: { gte: since }, memoryLinks: { none: {} } },
+                take: limit,
+                orderBy: { createdAt: 'asc' },
+              });
+              let reprocessed = 0;
+              for (const seg of segments) {
+                try {
+                  const r = await documentFirstIngestion._promoteMemories({
+                    documentId: seg.documentId, userId: seg.userId, orgId: seg.orgId,
+                    segments: [{ id: seg.id, content: seg.content, segmentIndex: 0 }],
+                    metadata: {}, promotionStrategy: 'admin_backfill',
+                  });
+                  reprocessed += r.memories.filter(m => m?.id).length;
+                } catch (err) {
+                  console.warn(`[backfill] segment ${seg.id} failed: ${err.message}`);
+                }
+              }
+              return jsonResponse(res, { success: true, scanned: segments.length, promoted: reprocessed });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/admin/entities/merge':
+          // P3 #22 — manual entity merge tool
+          if (req.method === 'POST') {
+            try {
+              const { canonical_id, duplicate_ids } = body;
+              if (!canonical_id || !Array.isArray(duplicate_ids) || !duplicate_ids.length) {
+                return jsonResponse(res, { error: 'canonical_id + duplicate_ids[] required' }, 400);
+              }
+              const canonical = await prisma.entity.findFirst({ where: { id: canonical_id, orgId } });
+              if (!canonical) return jsonResponse(res, { error: 'canonical not found' }, 404);
+              const dupes = await prisma.entity.findMany({ where: { id: { in: duplicate_ids }, orgId } });
+              const aliases = new Set([...(canonical.aliases || [])]);
+              let mentionsRepointed = 0;
+              for (const d of dupes) {
+                aliases.add(d.canonicalName);
+                for (const a of d.aliases || []) aliases.add(a);
+                const r = await prisma.entityMention.updateMany({ where: { entityId: d.id }, data: { entityId: canonical_id } });
+                mentionsRepointed += r.count;
+                await prisma.entity.update({
+                  where: { id: d.id },
+                  data: { isActive: false, mergedFromIds: { push: canonical_id } },
+                });
+              }
+              await prisma.entity.update({
+                where: { id: canonical_id },
+                data: {
+                  aliases: { set: Array.from(aliases).slice(0, 50) },
+                  mentionCount: { increment: dupes.reduce((s, d) => s + (d.mentionCount || 0), 0) },
+                },
+              });
+              return jsonResponse(res, { success: true, merged: dupes.length, mentions_repointed: mentionsRepointed });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/admin/contradictions':
+          // P3 #23 — review pending Contradicts edges
+          if (req.method === 'GET') {
+            try {
+              const limit = Math.min(Number(url.searchParams.get('limit') || 50), 200);
+              const rows = await prisma.relationship.findMany({
+                where: { type: 'Contradicts' },
+                orderBy: { createdAt: 'desc' },
+                take: limit,
+                select: {
+                  id: true, fromId: true, toId: true, confidence: true, metadata: true, createdAt: true,
+                  fromMemory: { select: { id: true, content: true, orgId: true } },
+                  toMemory: { select: { id: true, content: true, orgId: true } },
+                },
+              });
+              const filtered = rows.filter(r => r.fromMemory?.orgId === orgId && r.toMemory?.orgId === orgId);
+              return jsonResponse(res, { count: filtered.length, contradictions: filtered });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          if (req.method === 'DELETE') {
+            try {
+              const relId = body.id || url.searchParams.get('id');
+              if (!relId) return jsonResponse(res, { error: 'id required' }, 400);
+              const rel = await prisma.relationship.findUnique({
+                where: { id: relId },
+                select: { id: true, fromMemory: { select: { orgId: true } } },
+              });
+              if (!rel || rel.fromMemory?.orgId !== orgId) {
+                return jsonResponse(res, { error: 'not found' }, 404);
+              }
+              await prisma.relationship.delete({ where: { id: relId } });
+              return jsonResponse(res, { success: true });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/admin/webhook-subscriptions/health':
+          // P3 #19 — webhook subscription health for org
+          if (req.method === 'GET') {
+            try {
+              const subs = await prisma.inboundWebhookSubscription.findMany({
+                where: { orgId },
+                select: {
+                  id: true, providerKey: true, externalId: true, status: true,
+                  consecutiveFailures: true, lastEventAt: true, registeredAt: true,
+                  _count: { select: { events: true } },
+                },
+              });
+              const stale = subs.filter(s => {
+                if (!s.lastEventAt) return false;
+                const days = (Date.now() - new Date(s.lastEventAt).getTime()) / 86400000;
+                return days > 7;
+              });
+              const failing = subs.filter(s => s.consecutiveFailures >= 5);
+              return jsonResponse(res, { count: subs.length, subscriptions: subs, stale, failing });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/admin/topic-states':
+          // P3 #6 — surface rolling topic state summaries
+          if (req.method === 'GET') {
+            try {
+              const limit = Math.min(Number(url.searchParams.get('limit') || 50), 200);
+              const entityType = url.searchParams.get('entity_type') || null;
+              const where = { orgId };
+              const topics = await prisma.topicState.findMany({
+                where,
+                orderBy: { lastUpdatedAt: 'desc' },
+                take: limit,
+                include: entityType ? { entity: { where: { entityType } } } : { entity: true },
+              });
+              return jsonResponse(res, {
+                count: topics.length,
+                topics: topics.filter(t => !entityType || t.entity?.entityType === entityType),
+              });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
             }
           }
           break;

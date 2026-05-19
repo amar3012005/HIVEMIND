@@ -1052,11 +1052,28 @@ if (process.env.DOCLING_URL) {
       const tempDir = '/tmp/hivemind-docling';
       fs.mkdirSync(tempDir, { recursive: true });
       const tempPath = path.join(tempDir, `${crypto.randomUUID()}_${filename}`);
-      
+
       try {
         fs.writeFileSync(tempPath, fileBuffer);
-        const result = await parseWithDocling(tempPath, filename);
-        return result;
+        // Parse + chunk in parallel — chunker provides structure-aware
+        // segmentation (respects headings, paragraphs, tables).
+        const [parseResult, chunkResult] = await Promise.all([
+          parseWithDocling(tempPath, filename),
+          (async () => {
+            try {
+              const { chunkWithDocling } = await import('./knowledge/enterprise/docling-adapter.js');
+              return await chunkWithDocling(tempPath, filename);
+            } catch (e) {
+              return { chunks: [], error: e.message };
+            }
+          })(),
+        ]);
+        // Merge: surface hybridChunks alongside parsed text
+        return {
+          ...parseResult,
+          hybridChunks: chunkResult?.chunks || [],
+          chunkerError: chunkResult?.error || null,
+        };
       } finally {
         // Cleanup temp file
         try {

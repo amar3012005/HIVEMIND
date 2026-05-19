@@ -148,23 +148,40 @@ export class EntityExtractor {
   }
 
   async _llmExtract(text) {
-    // Truncate to keep cost predictable
     const input = String(text).slice(0, 4000);
-    const raw = await chatCompletion({
-      model: this.model,
-      json_mode: true,
-      temperature: 0.1,
-      max_tokens: 800,
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: input },
-      ],
-    });
+    let raw = null;
+    // Retry once on transient failure
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        raw = await chatCompletion({
+          model: this.model,
+          json_mode: true,
+          temperature: 0.1,
+          max_tokens: 800,
+          messages: [
+            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'user', content: input },
+          ],
+        });
+        break;
+      } catch (err) {
+        if (attempt === 1) {
+          this.logger?.warn?.(`[entity-extractor] LLM exhausted retries: ${err.message}`);
+          return [];
+        }
+        await new Promise(r => setTimeout(r, 500));
+      }
+    }
     let parsed;
     try {
       parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
     } catch {
-      return [];
+      // Salvage: try to extract first {...} block
+      const m = typeof raw === 'string' ? raw.match(/\{[\s\S]*\}/) : null;
+      if (m) {
+        try { parsed = JSON.parse(m[0]); } catch { parsed = null; }
+      }
+      if (!parsed) return [];
     }
     const list = Array.isArray(parsed?.entities) ? parsed.entities : [];
     return list

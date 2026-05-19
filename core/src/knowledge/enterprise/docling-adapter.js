@@ -67,6 +67,46 @@ export async function parseWithDocling(filePath, filename) {
 }
 
 /**
+ * Structure-aware chunking via Docling's hybrid chunker.
+ * Returns array of chunks with heading + metadata.
+ *
+ * @param {string} filePath
+ * @param {string} filename
+ * @returns {Promise<{chunks: Array<{text: string, headings: string[], page: number|null, meta: object}>, error: string|null}>}
+ */
+export async function chunkWithDocling(filePath, filename) {
+  const formData = new FormData();
+  formData.append('file', new Blob([fs.readFileSync(filePath)]), filename);
+  try {
+    const res = await fetch(`${DOCLING_URL}/v1/chunk/hybrid/file`, {
+      method: 'POST',
+      body: formData,
+      signal: AbortSignal.timeout(180_000),
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => 'unknown');
+      return { chunks: [], error: `chunker ${res.status}: ${errText.slice(0, 200)}` };
+    }
+    const data = await res.json();
+    const rawChunks = Array.isArray(data?.chunks) ? data.chunks
+      : Array.isArray(data?.document?.chunks) ? data.document.chunks
+      : Array.isArray(data) ? data : [];
+    const chunks = rawChunks.map(c => {
+      const text = c.text || c.content || c.body || (typeof c === 'string' ? c : '');
+      const meta = c.meta || c.metadata || {};
+      const headings = Array.isArray(meta.headings) ? meta.headings
+        : Array.isArray(c.headings) ? c.headings
+        : [];
+      const page = meta.page || meta.page_no || c.page || null;
+      return { text, headings, page, meta };
+    }).filter(c => c.text && c.text.trim().length > 0);
+    return { chunks, error: null };
+  } catch (err) {
+    return { chunks: [], error: `chunker error: ${err.message}` };
+  }
+}
+
+/**
  * Parse via Docling, but only for text+dumb markdown extraction.
  * Falls back to plain file read if Docling call fails.
  * Used for non-smart (standard) uploads.

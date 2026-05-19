@@ -362,7 +362,9 @@ export class DocumentFirstIngestionService {
             wordCount: (doclingResult.text || '').split(/\s+/).length,
             metadata: {
               confidence: doclingResult.confidence,
-              pages: doclingResult.pages?.length
+              pages: doclingResult.pages?.length,
+              hybridChunks: Array.isArray(doclingResult.hybridChunks) ? doclingResult.hybridChunks : [],
+              chunkerError: doclingResult.chunkerError || null,
             }
           };
         }
@@ -389,14 +391,53 @@ export class DocumentFirstIngestionService {
   }
 
   /**
-   * Create knowledge segments from parse result
+   * Create knowledge segments from parse result.
+   * Preferred path: Docling hybrid chunker (structure-aware: respects
+   * headings, paragraphs, tables). Fallback: sliding window.
    * @private
    */
   async _createSegments({ documentId, userId, orgId, parseResult }) {
     if (!parseResult.success || !parseResult.text) {
       return [];
     }
+    // Try structure-aware chunks first (provided by parseResult.metadata.hybridChunks)
+    const hybridChunks = parseResult?.metadata?.hybridChunks;
+    if (Array.isArray(hybridChunks) && hybridChunks.length > 0) {
+      const segments = [];
+      let segmentIndex = 0;
+      let previousSegmentId = null;
+      for (const hc of hybridChunks) {
+        const text = String(hc.text || '').trim();
+        if (text.length < 20) continue;
+        const contentHash = crypto.createHash('sha256').update(text).digest('hex');
+        const heading = Array.isArray(hc.headings) && hc.headings.length
+          ? hc.headings.join(' › ').slice(0, 500) : null;
+        try {
+          const segment = await this.db.knowledgeSegment.create({
+            data: {
+              documentId, userId, orgId,
+              segmentType: 'structured',
+              content: text,
+              contentHash,
+              segmentIndex,
+              previousSegmentId,
+              depth: Array.isArray(hc.headings) ? hc.headings.length : 0,
+              startOffset: null, endOffset: null,
+              wordCount: text.split(/\s+/).length,
+              metadata: { heading, page: hc.page || null, source: 'docling_hybrid' },
+            },
+          });
+          segments.push(segment);
+          previousSegmentId = segment.id;
+          segmentIndex++;
+        } catch (err) {
+          console.warn(`[segments] hybrid chunk insert failed: ${err.message}`);
+        }
+      }
+      if (segments.length) return segments;
+    }
 
+    // Fallback: sliding window chunking
     const segments = [];
     const text = parseResult.text;
     const chunkSize = 1000;
@@ -405,7 +446,6 @@ export class DocumentFirstIngestionService {
     let segmentIndex = 0;
     let previousSegmentId = null;
 
-    // Simple chunking with overlap
     for (let i = 0; i < text.length; i += (chunkSize - overlap)) {
       const chunk = text.slice(i, i + chunkSize);
       if (chunk.trim().length === 0) continue;
@@ -519,13 +559,24 @@ export class DocumentFirstIngestionService {
           primary_team_id: metadata.primary_team_id || null,
           project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
           content: segment.content,
-          title: `Extracted from ${documentId.slice(0, 8)}`,
+          title: segment.metadata?.heading
+            ? String(segment.metadata.heading).slice(0, 200)
+            : `Extracted from ${documentId.slice(0, 8)}`,
           source_type: 'knowledge_segment',
           source_metadata: {
             segment_id: segment.id,
-            document_id: documentId
+            document_id: documentId,
+            heading: segment.metadata?.heading || null,
+            page: segment.metadata?.page || null,
           },
-          tags: [...(metadata.tags || []), 'promoted-from-segment'],
+          tags: [
+            ...(metadata.tags || []),
+            'promoted-from-segment',
+            ...(segment.metadata?.heading
+              ? [`heading:${String(segment.metadata.heading).toLowerCase().replace(/\s+/g, '-').slice(0, 50)}`]
+              : []),
+            ...(segment.metadata?.page ? [`page:${segment.metadata.page}`] : []),
+          ],
           skip_fact_extraction: false, // Enable fact extraction for promoted memories
           documentDate: new Date(),
           metadata: {
@@ -619,6 +670,34 @@ export class DocumentFirstIngestionService {
           })),
           skipDuplicates: true,
         });
+
+        // Auto-tag the memory with entity tags for fast filtered recall
+        try {
+          const entityIds = [...new Set(segMentions.map(m => m.entityId))];
+          const entitiesForTags = await this.db.entity.findMany({
+            where: { id: { in: entityIds } },
+            select: { canonicalName: true, entityType: true },
+          });
+          const newTags = entitiesForTags
+            .map(e => `${e.entityType}:${e.canonicalName.toLowerCase().replace(/\s+/g, '-').slice(0, 80)}`)
+            .slice(0, 25);
+          if (newTags.length) {
+            const existing = await this.db.memory.findUnique({
+              where: { id: memoryId },
+              select: { tags: true },
+            });
+            if (existing) {
+              const merged = Array.from(new Set([...(existing.tags || []), ...newTags])).slice(0, 80);
+              await this.db.memory.update({
+                where: { id: memoryId },
+                data: { tags: merged },
+              });
+            }
+          }
+        } catch (tagErr) {
+          this.logger.warn?.(`[entity-memory-tags] ${memoryId}: ${tagErr.message}`);
+        }
+
         // P1 #11 — update rolling topic state per linked entity
         if (this.topicStateWriter && process.env.ENABLE_TOPIC_STATE === 'true') {
           for (const m of segMentions) {

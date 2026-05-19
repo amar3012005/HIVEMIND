@@ -327,6 +327,14 @@ let syncScheduler = null;
 // Shared module-level ConnectorStore — used by both the scheduler and the
 // per-request handlers for /api/connectors/* dispatch. Single instance is
 // safe because ConnectorStore is stateless (all state lives in Prisma).
+// Hoisted Nango token resolver — used by syncScheduler + webhookProcessor
+const nangoTokenResolver = async ({ userId, orgId, providerKey }) => {
+  const { getConnectionId, fetchBearerFromNango } = await import('./connectors/mcp/nango-service.js');
+  const connId = await getConnectionId({ userId, orgId, providerKey }, { db: prisma });
+  if (!connId) throw new Error(`no nango connection for ${providerKey}`);
+  return fetchBearerFromNango(providerKey, connId);
+};
+
 let connectorStore = null;
 if (persistentMemoryEngine && persistentMemoryStore && prisma) {
   const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
@@ -360,13 +368,6 @@ if (persistentMemoryEngine && persistentMemoryStore && prisma) {
   // Self-register adapters (triggers registry.register at bottom of each file)
   await import('./connectors/adapters/notion/notion-adapter.js');
   await import('./connectors/adapters/slack/slack-adapter.js');
-
-  const nangoTokenResolver = async ({ userId, orgId, providerKey }) => {
-    const { getConnectionId, fetchBearerFromNango } = await import('./connectors/mcp/nango-service.js');
-    const connId = await getConnectionId({ userId, orgId, providerKey }, { db: prisma });
-    if (!connId) throw new Error(`no nango connection for ${providerKey}`);
-    return fetchBearerFromNango(providerKey, connId);
-  };
 
   const webhookProcessor = new WebhookProcessor({
     prisma,

@@ -2209,7 +2209,7 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
               name: true,
               slug: true,
               description: true,
-              visibility: true,
+              status: true,
               createdAt: true,
             },
             take: 50,
@@ -2222,7 +2222,7 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
               name: p.name,
               slug: p.slug,
               description: p.description,
-              visibility: p.visibility,
+              status: p.status,
             })),
             hint: projects.length === 0
               ? 'No projects yet — memories save org-wide. Admin can create a project in the HIVEMIND web UI.'

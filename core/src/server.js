@@ -852,14 +852,17 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
           return qdrantClient.generateEmbedding(String(text).slice(0, 8000));
         },
         storeVector: async ({ collectionName, id, vector, payload }) => {
-          await qdrantClient.upsert(collectionName, {
-            points: [{
-              id,
-              vector,
-              payload
-            }]
+          // qdrantClient has no .upsert() method — call REST endpoint directly
+          const qUrl = process.env.QDRANT_URL || 'http://qdrant:6333';
+          const qKey = process.env.QDRANT_API_KEY || '';
+          const hdrs = { 'Content-Type': 'application/json' };
+          if (qKey) hdrs['api-key'] = qKey;
+          const r = await fetch(`${qUrl}/collections/${collectionName}/points?wait=true`, {
+            method: 'PUT', headers: hdrs,
+            body: JSON.stringify({ points: [{ id, vector, payload }] })
           });
-        }
+          if (!r.ok) throw new Error(`Qdrant upsert ${r.status}: ${await r.text()}`);
+        },
       }
     });
     console.log('[Phase1] DocumentFirstIngestionService enabled');

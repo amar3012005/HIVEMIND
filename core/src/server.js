@@ -1064,11 +1064,22 @@ if (process.env.DOCLING_URL) {
             const { fastPdfExtract } = await import('./knowledge/enterprise/fast-pdf-parser.js');
             const fast = await fastPdfExtract(tempPath);
             if (!fast.error && !fast.isImageHeavy && fast.text.length > 200) {
-              console.log(`[docling-adapter] tier=fast-pdf file=${filename} pages=${fast.pages} chars=${fast.text.length} ms=${Date.now() - tParse}`);
+              // Send extracted text to Docling chunker for structure-aware splits
+              let hybridChunks = [];
+              try {
+                const tmpTxt = path.join(tempDir, `${crypto.randomUUID()}.txt`);
+                fs.writeFileSync(tmpTxt, fast.text);
+                const ckRes = await chunkWithDocling(tmpTxt, `${filename}.txt`).catch(() => ({ chunks: [] }));
+                hybridChunks = ckRes?.chunks || [];
+                try { fs.unlinkSync(tmpTxt); } catch {}
+              } catch (chkErr) {
+                console.warn(`[fast-pdf] chunker re-call failed: ${chkErr.message}`);
+              }
+              console.log(`[docling-adapter] tier=fast-pdf file=${filename} pages=${fast.pages} chars=${fast.text.length} chunks=${hybridChunks.length} ms=${Date.now() - tParse}`);
               return {
                 text: fast.text, markdown: fast.text, json: null,
                 tables: [], pages: fast.pages, confidence: null, error: null,
-                hybridChunks: [], chunkerError: null, engine: 'pdf-parse',
+                hybridChunks, chunkerError: null, engine: 'pdf-parse',
               };
             }
             // ── Tier 3: Groq vision OCR (image-heavy PDFs) ──

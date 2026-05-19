@@ -2463,6 +2463,17 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === '/health') {
+    // Probe Docling sidecar (non-blocking, short timeout)
+    let doclingOk = null;
+    if (process.env.DOCLING_URL) {
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 1500);
+        const r = await fetch(`${process.env.DOCLING_URL}/health`, { signal: ctrl.signal });
+        clearTimeout(t);
+        doclingOk = r.ok;
+      } catch { doclingOk = false; }
+    }
     return jsonResponse(res, {
       ok: true,
       service: 'hivemind-api',
@@ -2470,9 +2481,21 @@ const server = http.createServer(async (req, res) => {
       phase1: {
         document_first_ingestion: !!documentFirstIngestion,
         evidence_retrieval: !!evidenceRetrieval,
+        docling_adapter: !!doclingAdapter,
+        docling_reachable: doclingOk,
         evidence_collection: process.env.EVIDENCE_QDRANT_COLLECTION || null,
-        memory_collection: process.env.MEMORY_QDRANT_COLLECTION || process.env.QDRANT_COLLECTION || null
-      }
+        memory_collection: process.env.MEMORY_QDRANT_COLLECTION || process.env.QDRANT_COLLECTION || null,
+      },
+      schedulers: {
+        sync_scheduler: !!syncScheduler,
+        webhook_processor: process.env.ENABLE_WEBHOOK_RECEIVER !== 'false',
+        hygiene_cron: process.env.ENABLE_HYGIENE_CRON === 'true',
+        memory_promotion_jobs: process.env.ENABLE_MEMORY_PROMOTION_JOBS === 'true',
+      },
+      features: {
+        evidence_recall: process.env.ENABLE_EVIDENCE_RECALL === 'true',
+        document_first_ingest: process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true',
+      },
     });
   }
 

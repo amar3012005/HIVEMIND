@@ -81,15 +81,26 @@ export class DocumentFirstIngestionService {
     const parseResult = await this._parseDocument(fileBuffer, contentType, filename);
 
     // Step 3: Create knowledge document
-    const knowledgeDoc = await this.db.knowledgeDocument.create({
-      data: {
+    // sourceId scoped per checksum so identical re-uploads dedupe via source_artifact
+    // (checksum upsert above), while different content with same filename creates
+    // a new document row.
+    const knowledgeDoc = await this.db.knowledgeDocument.upsert({
+      where: {
+        userId_orgId_sourcePlatform_sourceId: {
+          userId,
+          orgId,
+          sourcePlatform: 'knowledge_upload',
+          sourceId: `${filename}#${checksum.slice(0, 12)}`,
+        }
+      },
+      create: {
         userId,
         orgId,
         sourceArtifactId: sourceArtifact.id,
         documentType: 'file',
         title: filename,
         sourcePlatform: 'knowledge_upload',
-        sourceId: filename,
+        sourceId: `${filename}#${checksum.slice(0, 12)}`,
         documentDate: new Date(),
         wordCount: parseResult.wordCount,
         parseStatus: parseResult.success ? 'parsed' : 'failed',
@@ -97,7 +108,8 @@ export class DocumentFirstIngestionService {
         parseMetadata: parseResult.metadata || {},
         structureExtracted: parseResult.success,
         tags: metadata.tags || []
-      }
+      },
+      update: {}
     });
 
     // Step 4: Create segments from parsed structure

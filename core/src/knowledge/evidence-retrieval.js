@@ -29,7 +29,7 @@ export class EvidenceRetrievalService {
 
     try {
       // Step 1: Vector search in evidence collection
-      const vectorResults = await this.qdrantClient.search({
+      const vectorResults = await this.qdrantClient.searchMemories({
         collectionName,
         query,
         filter: {
@@ -246,7 +246,7 @@ export class EvidenceRetrievalService {
     const memoryCollectionName = process.env.MEMORY_QDRANT_COLLECTION || process.env.QDRANT_COLLECTION || 'hivemind_memories';
 
     try {
-      const vectorResults = await this.qdrantClient.search({
+      const vectorResults = await this.qdrantClient.searchMemories({
         collectionName: memoryCollectionName,
         query,
         filter: {

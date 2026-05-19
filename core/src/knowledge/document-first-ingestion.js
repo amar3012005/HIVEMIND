@@ -387,13 +387,20 @@ export class DocumentFirstIngestionService {
         const routedPayloads = await this.smartIngestRouter.route(payload);
 
         for (const routed of routedPayloads) {
-          const memory = await this.memoryGraphEngine.ingestMemory(routed);
-          memories.push(memory);
+          const result = await this.memoryGraphEngine.ingestMemory(routed);
+          // graph-engine returns { memoryId, operation, ... } — not .id
+          const memoryId = result?.memoryId || result?.id || null;
+          if (!memoryId) {
+            // Skipped (redundant/duplicate) — don't create evidence link
+            memories.push(result);
+            continue;
+          }
+          memories.push({ ...result, id: memoryId });
 
           // Link memory to evidence
           await this.db.memoryEvidenceLink.create({
             data: {
-              memoryId: memory.id,
+              memoryId,
               segmentId: segment.id,
               documentId,
               linkType: 'supports',
@@ -405,7 +412,7 @@ export class DocumentFirstIngestionService {
           // Record derivation
           await this.db.memoryDerivation.create({
             data: {
-              memoryId: memory.id,
+              memoryId,
               derivationMethod: 'promoted_from_segment',
               derivationAgent: 'document_first_ingestion_v1',
               confidence: 0.8,

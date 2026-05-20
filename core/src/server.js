@@ -71,7 +71,8 @@ const {
   authenticatePersistedApiKey,
   createPersistedApiKey,
   hasEntitlement,
-  hashApiKey: hashPersistedApiKey
+  hashApiKey: hashPersistedApiKey,
+  resolveKeyAccess
 } = await import('./auth/api-keys.js');
 const { encryptToken, decryptToken } = await import('./connectors/framework/connector-store.js');
 const {
@@ -2680,13 +2681,17 @@ async function authenticateApiKey(req) {
         // description is plain text, not JSON — no containerTags
       }
     }
+    
+    // Resolve key access: if key is scoped to project/team, use those; otherwise fetch all accessible
+    const userId = persistedRecord.userId || DEFAULT_USER;
+    const orgId = persistedRecord.orgId || DEFAULT_ORG;
+    const accessContext = await buildAccessContext(userId, orgId);
+    const resolvedAccess = await resolveKeyAccess(prisma, persistedRecord, accessContext);
+    
     return {
       ok: true,
       principal: {
-        keyId: persistedRecord.id,
-        userId: persistedRecord.userId || DEFAULT_USER,
-        orgId: persistedRecord.orgId || DEFAULT_ORG,
-        scopes: persistedRecord.scopes || [],
+        ...resolvedAccess,
         containerTags: persistedContainerTags,
         oauth: oauthMetadata,
         rawKey: apiKey,
@@ -3137,6 +3142,95 @@ const server = http.createServer(async (req, res) => {
       orgId: authResult.principal.orgId,
       scopes: authResult.principal.scopes || [],
     });
+  }
+
+  // POST /api/auth/claim-invites — claim all pending email-based invites on first login
+  if (pathname === '/api/auth/claim-invites' && req.method === 'POST') {
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    try {
+      // Get user's email
+      const user = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
+      if (!user || !user.email) return jsonResponse(res, { error: 'User email not found' }, 404);
+      
+      // Find all pending invites for this email
+      const pendingInvites = await prisma.orgInvite.findMany({
+        where: {
+          email: user.email,
+          usedAt: null,
+          expiresAt: { gt: new Date() }
+        }
+      });
+      
+      if (pendingInvites.length === 0) {
+        return jsonResponse(res, { claimed: 0, orgs: [] });
+      }
+      
+      const results = [];
+      for (const invite of pendingInvites) {
+        // Check if already member
+        const existing = await prisma.userOrganization.findFirst({
+          where: { userId, orgId: invite.orgId }
+        });
+        if (existing) {
+          // Skip if already a member
+          await prisma.orgInvite.update({
+            where: { id: invite.id },
+            data: { usedAt: new Date(), usedBy: userId }
+          });
+          continue;
+        }
+        
+        // Create org membership
+        await prisma.userOrganization.create({
+          data: { userId, orgId: invite.orgId, role: invite.role, joinedAt: new Date() }
+        });
+        
+        // Create team memberships
+        const teamIds = invite.teamIds || [];
+        if (teamIds.length > 0) {
+          const teamMemberships = teamIds.map(teamId => ({
+            teamId,
+            userId,
+            role: 'member',
+            joinedAt: new Date()
+          }));
+          await prisma.teamMember.createMany({ data: teamMemberships, skipDuplicates: true });
+        }
+        
+        // Create project memberships
+        const projectIds = invite.projectIds || [];
+        if (projectIds.length > 0) {
+          const projectMemberships = projectIds.map(projectId => ({
+            projectId,
+            userId,
+            role: 'member',
+            grantedAt: new Date()
+          }));
+          await prisma.projectMember.createMany({ data: projectMemberships, skipDuplicates: true });
+        }
+        
+        // Mark invite as used
+        await prisma.orgInvite.update({
+          where: { id: invite.id },
+          data: { usedAt: new Date(), usedBy: userId }
+        });
+        
+        // Invalidate access context cache
+        invalidateAccessContextCache(userId, invite.orgId);
+        
+        results.push({
+          orgId: invite.orgId,
+          role: invite.role,
+          teamsJoined: teamIds.length,
+          projectsGranted: projectIds.length
+        });
+      }
+      
+      return jsonResponse(res, { claimed: results.length, orgs: results });
+    } catch (err) {
+      console.error('[auth] claim-invites failed:', err.message);
+      return jsonResponse(res, { error: err.message }, 500);
+    }
   }
 
   // Serve client.html at root
@@ -5437,11 +5531,62 @@ const server = http.createServer(async (req, res) => {
           if (invite.expiresAt < new Date()) return jsonResponse(res, { error: 'Invite expired' }, 410);
           const existing = await prisma.userOrganization.findFirst({ where: { userId, orgId: invite.orgId } });
           if (existing) return jsonResponse(res, { error: 'Already a member of this organization' }, 409);
+          
+          // Create org membership
           await prisma.userOrganization.create({
             data: { userId, orgId: invite.orgId, role: invite.role, joinedAt: new Date() }
           });
+          
+          // Create team memberships from invite.teamIds
+          const teamIds = invite.teamIds || [];
+          if (teamIds.length > 0) {
+            const teamMemberships = teamIds.map(teamId => ({
+              teamId,
+              userId,
+              role: 'member',
+              joinedAt: new Date()
+            }));
+            await prisma.teamMember.createMany({ data: teamMemberships, skipDuplicates: true });
+          }
+          
+          // Create project memberships from invite.projectIds
+          const projectIds = invite.projectIds || [];
+          if (projectIds.length > 0) {
+            const projectMemberships = projectIds.map(projectId => ({
+              projectId,
+              userId,
+              role: 'member',
+              grantedAt: new Date()
+            }));
+            await prisma.projectMember.createMany({ data: projectMemberships, skipDuplicates: true });
+          }
+          
+          // Mark invite as used
           await prisma.orgInvite.update({ where: { id: invite.id }, data: { usedAt: new Date(), usedBy: userId } });
-          return jsonResponse(res, { success: true, orgId: invite.orgId, role: invite.role });
+          
+          // Invalidate access context cache
+          invalidateAccessContextCache(userId, invite.orgId);
+          
+          // Audit log
+          await writeAuditLog(prisma, {
+            userId,
+            orgId: invite.orgId,
+            eventType: 'invite_accepted',
+            action: 'accept',
+            resourceType: 'invite',
+            resourceId: invite.id,
+            metadata: { role: invite.role, teamsJoined: teamIds.length, projectsGranted: projectIds.length },
+            ipAddress: req.headers['x-forwarded-for'] || req.socket?.remoteAddress || null,
+            userAgent: req.headers['user-agent'] || null
+          });
+          
+          return jsonResponse(res, { 
+            success: true, 
+            orgId: invite.orgId, 
+            role: invite.role,
+            teamsJoined: teamIds.length,
+            projectsGranted: projectIds.length
+          });
         } catch (err) {
           console.error('[team] accept invite failed:', err.message);
           return jsonResponse(res, { error: err.message }, 500);
@@ -6153,6 +6298,63 @@ const server = http.createServer(async (req, res) => {
             }
           }
           break;
+
+        case '/api/admin/org/policy': {
+          // GET: returns the org's default_project_policy + meta.
+          // PUT: admin-only setter (requires org owner/admin role).
+          if (req.method === 'GET') {
+            try {
+              const org = await prisma.organization.findUnique({
+                where: { id: orgId },
+                select: { id: true, name: true, defaultProjectPolicy: true },
+              });
+              if (!org) return jsonResponse(res, { error: 'Org not found' }, 404);
+              return jsonResponse(res, {
+                org_id: org.id,
+                name: org.name,
+                default_project_policy: org.defaultProjectPolicy,
+                allowed: ['private', 'org-wide', 'ask'],
+                description: {
+                  'private': 'Memories save to caller-default project; org-wide if none.',
+                  'org-wide': 'Memories save org-wide unless caller explicitly passes a project.',
+                  'ask': 'Server hints Claude to ask which project on every save with no explicit scope.',
+                },
+              });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          if (req.method === 'PUT') {
+            try {
+              // Admin gate: must be member with role admin/owner in this org.
+              const membership = await prisma.organizationMembership.findFirst({
+                where: { userId, orgId, role: { in: ['admin', 'owner'] } },
+                select: { role: true },
+              }).catch(() => null);
+              if (!membership && !principal.master) {
+                return jsonResponse(res, { error: 'admin role required' }, 403);
+              }
+              const policy = String(body?.default_project_policy || '').toLowerCase().trim();
+              const ALLOWED = ['private', 'org-wide', 'ask'];
+              if (!ALLOWED.includes(policy)) {
+                return jsonResponse(res, { error: `default_project_policy must be one of ${ALLOWED.join(', ')}` }, 400);
+              }
+              const updated = await prisma.organization.update({
+                where: { id: orgId },
+                data: { defaultProjectPolicy: policy },
+                select: { id: true, defaultProjectPolicy: true },
+              });
+              return jsonResponse(res, {
+                org_id: updated.id,
+                default_project_policy: updated.defaultProjectPolicy,
+                changed_by: userId,
+              });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+        }
 
         case '/api/admin/webhook-events/dead-letter':
           // P2 #25 — list webhook events that failed processing (admin)
@@ -8821,6 +9023,95 @@ const server = http.createServer(async (req, res) => {
         // KNOWLEDGE BASE — Document Upload
         // ==========================================
 
+        case '/api/knowledge/upload-bulk': {
+          // True multi-file multipart endpoint. Accepts N file parts +
+          // shared tags/project. Concurrency-limited fanout (default 3).
+          if (req.method !== 'POST') break;
+          if (!persistentMemoryEngine || !documentFirstIngestion) {
+            return jsonResponse(res, { error: 'Bulk ingest requires Phase1' }, 503);
+          }
+          try {
+            const ct = req.headers['content-type'] || '';
+            if (!ct.includes('multipart/form-data')) {
+              return jsonResponse(res, { error: 'Content-Type must be multipart/form-data' }, 400);
+            }
+            const bm = ct.match(/boundary=(.+)/);
+            if (!bm) return jsonResponse(res, { error: 'Missing boundary' }, 400);
+            const raw = await new Promise((resolve) => {
+              const c = []; req.on('data', x => c.push(x)); req.on('end', () => resolve(Buffer.concat(c)));
+            });
+            const parts = parseMultipart(raw, bm[1].trim());
+            const fileParts = parts.filter(p => p.filename);
+            if (fileParts.length === 0) {
+              return jsonResponse(res, { error: 'No files uploaded' }, 400);
+            }
+            const tagsRaw = parts.find(p => p.name === 'tags')?.value || '';
+            const userTags = tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean) : [];
+            const containerTag = parts.find(p => p.name === 'containerTag')?.value || null;
+            const projectIdRaw = parts.find(p => p.name === 'projectId')?.value || null;
+            const primaryTeamId = parts.find(p => p.name === 'primaryTeamId')?.value || null;
+            const targetScope = parts.find(p => p.name === 'targetScope')?.value === 'organization' ? 'organization' : 'personal';
+            const smartFlag = (parts.find(p => p.name === 'smart')?.value || '').toLowerCase() === 'true';
+
+            const CONC = Number(process.env.BULK_INGEST_CONCURRENCY || 3);
+            const results = new Array(fileParts.length);
+            let i = 0;
+            const workers = Array.from({ length: Math.min(CONC, fileParts.length) }, async () => {
+              while (true) {
+                const idx = i++;
+                if (idx >= fileParts.length) return;
+                const fp = fileParts[idx];
+                try {
+                  if (planEnforcer && orgId) {
+                    const est = Math.max(1, Math.ceil(fp.data.length / 50_000));
+                    const ck = await planEnforcer.checkLimit(orgId, 'kbPages', est);
+                    if (!ck.allowed) {
+                      results[idx] = { filename: fp.filename, status: 'rejected', reason: ck.reason };
+                      continue;
+                    }
+                  }
+                  const r = await documentFirstIngestion.ingestKnowledgeDocument({
+                    userId, orgId,
+                    filename: fp.filename,
+                    fileBuffer: fp.data,
+                    contentType: fp.contentType || 'application/octet-stream',
+                    metadata: {
+                      tags: userTags,
+                      project: containerTag,
+                      project_id: projectIdRaw,
+                      project_ids: projectIdRaw ? [projectIdRaw] : [],
+                      primary_team_id: primaryTeamId,
+                      visibility: targetScope === 'organization' ? 'organization' : 'private',
+                      smart: smartFlag,
+                    },
+                  });
+                  if (planEnforcer && orgId) {
+                    planEnforcer.recordUsage(orgId, 'kbPages', r.pages || r.segmentCount || 1);
+                    planEnforcer.recordUsage(orgId, 'uploads', 1);
+                  }
+                  results[idx] = {
+                    filename: fp.filename, status: 'ingested',
+                    documentId: r.documentId, segmentCount: r.segmentCount,
+                    promotedCount: r.promotedCount,
+                  };
+                } catch (perFileErr) {
+                  results[idx] = { filename: fp.filename, status: 'error', error: perFileErr.message };
+                }
+              }
+            });
+            await Promise.all(workers);
+            const summary = {
+              total: fileParts.length,
+              ingested: results.filter(r => r?.status === 'ingested').length,
+              rejected: results.filter(r => r?.status === 'rejected').length,
+              errored: results.filter(r => r?.status === 'error').length,
+            };
+            return jsonResponse(res, { summary, files: results });
+          } catch (err) {
+            return jsonResponse(res, { error: err.message }, 500);
+          }
+        }
+
         case '/api/knowledge/upload':
           if (req.method === 'POST') {
             if (!persistentMemoryEngine) {
@@ -9836,19 +10127,37 @@ const server = http.createServer(async (req, res) => {
             try {
               const membership = await prisma.userOrganization.findFirst({ where: { userId, orgId } });
               if (!membership || membership.role !== 'admin') return jsonResponse(res, { error: 'Admin access required' }, 403);
-              const { email, role = 'member', expiresInDays = 7 } = body;
+              const { email, role = 'member', expiresInDays = 7, teamIds = [], projectIds = [] } = body;
               if (!['member', 'admin'].includes(role)) return jsonResponse(res, { error: 'Valid role required: member or admin' }, 400);
+              if (!Array.isArray(teamIds)) return jsonResponse(res, { error: 'teamIds must be an array' }, 400);
+              if (!Array.isArray(projectIds)) return jsonResponse(res, { error: 'projectIds must be an array' }, 400);
               const token = crypto.randomUUID().replace(/-/g, '');
               const expiresAt = new Date(Date.now() + expiresInDays * 24 * 3600 * 1000);
               const org = await prisma.organization.findUnique({ where: { id: orgId }, select: { slug: true } });
               const invite = await prisma.orgInvite.create({
-                data: { orgId, email: email || null, role, token, expiresAt, createdBy: userId }
+                data: { orgId, email: email || null, role, token, expiresAt, createdBy: userId, teamIds, projectIds }
               });
+              
+              // Audit log
+              await writeAuditLog(prisma, {
+                userId,
+                orgId,
+                eventType: 'invite_created',
+                action: 'create',
+                resourceType: 'invite',
+                resourceId: invite.id,
+                metadata: { email: email || 'link-only', role, teamIds, projectIds, expiresAt },
+                ipAddress: req.headers['x-forwarded-for'] || req.socket?.remoteAddress || null,
+                userAgent: req.headers['user-agent'] || null
+              });
+              
               return jsonResponse(res, {
                 id: invite.id,
                 token: invite.token,
                 url: `/join/${org?.slug || orgId}/${token}`,
-                expiresAt: invite.expiresAt
+                expiresAt: invite.expiresAt,
+                teamIds: invite.teamIds,
+                projectIds: invite.projectIds
               });
             } catch (err) {
               console.error('[team] create invite failed:', err.message);
@@ -9908,12 +10217,76 @@ const server = http.createServer(async (req, res) => {
           if (req.method === 'POST') {
             // POST /api/team/projects — create project
             try {
-              const { name, slug, description } = body;
+              const { name, slug, description, teamId = null, policy = null } = body;
               if (!name || !slug) return jsonResponse(res, { error: 'name and slug are required' }, 400);
-              const project = await prisma.project.create({
-                data: { orgId, name, slug, description: description || null, createdBy: userId }
+              
+              // Get org policy
+              const org = await prisma.organization.findUnique({
+                where: { id: orgId },
+                select: { defaultProjectPolicy: true }
               });
-              return jsonResponse(res, { project });
+              const effectivePolicy = policy || org?.defaultProjectPolicy || 'private';
+              
+              // Create project
+              const project = await prisma.project.create({
+                data: { 
+                  orgId, 
+                  name, 
+                  slug, 
+                  description: description || null, 
+                  createdBy: userId,
+                  teamId
+                }
+              });
+              
+              // Auto-grant access based on policy
+              if (effectivePolicy === 'team_inherited' && teamId) {
+                // Grant access to all team members
+                const teamMembers = await prisma.teamMember.findMany({
+                  where: { teamId },
+                  select: { userId: true }
+                });
+                if (teamMembers.length > 0) {
+                  const projectMemberships = teamMembers.map(m => ({
+                    projectId: project.id,
+                    userId: m.userId,
+                    role: m.userId === userId ? 'owner' : 'member',
+                    grantedAt: new Date()
+                  }));
+                  await prisma.projectMember.createMany({ data: projectMemberships, skipDuplicates: true });
+                  
+                  // Invalidate access context cache for all team members
+                  for (const member of teamMembers) {
+                    invalidateAccessContextCache(member.userId, orgId);
+                  }
+                }
+              } else {
+                // Private: grant creator only
+                await prisma.projectMember.create({
+                  data: {
+                    projectId: project.id,
+                    userId,
+                    role: 'owner',
+                    grantedAt: new Date()
+                  }
+                });
+                invalidateAccessContextCache(userId, orgId);
+              }
+              
+              // Audit log
+              await writeAuditLog(prisma, {
+                userId,
+                orgId,
+                eventType: 'project_created',
+                action: 'create',
+                resourceType: 'project',
+                resourceId: project.id,
+                metadata: { name: project.name, slug: project.slug, policy: effectivePolicy, teamId },
+                ipAddress: req.headers['x-forwarded-for'] || req.socket?.remoteAddress || null,
+                userAgent: req.headers['user-agent'] || null
+              });
+              
+              return jsonResponse(res, { project, policy: effectivePolicy });
             } catch (err) {
               console.error('[team] create project failed:', err.message);
               return jsonResponse(res, { error: err.message }, 500);
@@ -14772,6 +15145,42 @@ ${injectionText}`;
   res.writeHead(404);
   res.end('Not found');
 });
+
+async function writeAuditLog(prisma, {
+  userId,
+  orgId,
+  eventType,
+  action,
+  resourceType = null,
+  resourceId = null,
+  metadata = {},
+  oldValue = null,
+  newValue = null,
+  ipAddress = null,
+  userAgent = null
+}) {
+  try {
+    await prisma.auditLog.create({
+      data: {
+        userId,
+        organizationId: orgId,
+        eventType,
+        action,
+        eventCategory: 'access_management',
+        resourceType,
+        resourceId,
+        metadata,
+        oldValue,
+        newValue,
+        ipAddress,
+        userAgent,
+        createdAt: new Date()
+      }
+    });
+  } catch (err) {
+    console.error('[audit] Failed to write log:', err.message);
+  }
+}
 
 function jsonResponse(res, data, status = 200) {
   res.setHeader('Content-Type', 'application/json');

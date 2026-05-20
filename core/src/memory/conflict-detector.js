@@ -166,7 +166,18 @@ export class ConflictDetector {
    * Targets the similarity band 0.40-0.85 (same topic, different content).
    * Returns an array of { memory, contradictionType, confidence } objects.
    */
-  detectContradictions(newMemory, existingMemories = []) {
+  detectContradictions(newMemory, existingMemories = [], opts = {}) {
+    // Strict mode raises the similarity floor + requires negation language on
+    // BOTH sides + bumps the value-divergence confidence floor. Used by KB
+    // promotion so catalog rows don't spam edges.
+    const strict = opts.strictMode === true;
+    const minSimilarity = typeof opts.minSimilarity === 'number'
+      ? opts.minSimilarity
+      : (strict ? 0.65 : 0.40);
+    const maxSimilarity = typeof opts.maxSimilarity === 'number' ? opts.maxSimilarity : 0.85;
+    const minConfidence = strict ? 0.75 : 0.0;
+    const requireBothSideSignal = strict || opts.requireBothSideSignal === true;
+
     const NEGATION_PATTERNS = [
       { pattern: /\b(not|no longer|stopped|quit|never|don't|doesn't|didn't|isn't|aren't|wasn't|weren't|can't|won't|haven't|hasn't)\b/i, type: 'negation', weight: 0.7 },
       { pattern: /\b(changed|switched|moved|replaced|updated|corrected|revised)\b.*\b(from|to)\b/i, type: 'change', weight: 0.8 },
@@ -181,8 +192,8 @@ export class ConflictDetector {
       const existingContent = existing.content || '';
       const similarity = computeTokenSimilarity(newContent, existingContent);
 
-      // Only consider the "same topic, different content" band
-      if (similarity < 0.40 || similarity > 0.85) continue;
+      // Same-topic-different-content band (configurable via opts)
+      if (similarity < minSimilarity || similarity > maxSimilarity) continue;
 
       let bestMatch = null;
 
@@ -190,8 +201,8 @@ export class ConflictDetector {
         const newHas = pattern.test(newContent);
         const existingHas = pattern.test(existingContent);
 
-        // Contradiction signal: one or both contain negation/change language
-        if (newHas || existingHas) {
+        const signalOk = requireBothSideSignal ? (newHas && existingHas) : (newHas || existingHas);
+        if (signalOk) {
           // Higher confidence when both sides show contradictory language
           const confidence = (newHas && existingHas) ? Math.min(weight + 0.1, 0.95) : weight;
           if (!bestMatch || confidence > bestMatch.confidence) {
@@ -214,7 +225,7 @@ export class ConflictDetector {
         }
       }
 
-      if (bestMatch) {
+      if (bestMatch && bestMatch.confidence >= minConfidence) {
         contradictions.push({
           memory: existing,
           contradictionType: bestMatch.type,

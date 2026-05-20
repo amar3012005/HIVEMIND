@@ -991,16 +991,23 @@ export class MemoryGraphEngine {
         await this._enqueueDeriveCandidates(store, baseMemory, latestMemories);
 
         // Detect contradictions and reconcile: determine correct edge type BEFORE creating
-        // Document-first promotion can opt out via skip_contradiction_detection:true
-        // (catalog pages aren't contradicting your beliefs — pure noise).
+        // Two opt-outs:
+        //   - skip_contradiction_detection: hard skip (legacy)
+        //   - strict_contradictions: high-bar mode (KB promotion uses this)
         const skipContradictions = input.skip_contradiction_detection === true
           || input.skipContradictionDetection === true;
+        const strictMode = input.strict_contradictions === true
+          || input.strictContradictions === true;
         if (this.conflictDetector && latestMemories.length > 0 && !skipContradictions) {
           try {
             const EVOLUTION_RE = /\b(now|switched|changed|moved to|migrating|replaced|updated|corrected|actually|no longer|stopped|used to|formerly|previously|instead)\b/i;
             const ADDITIVE_RE = /\b(also|additionally|furthermore|plus|as well|on top of|in addition|moreover|and also)\b/i;
 
-            const contradictions = this.conflictDetector.detectContradictions(baseMemory, latestMemories);
+            const contradictions = this.conflictDetector.detectContradictions(
+              baseMemory,
+              latestMemories,
+              { strictMode }
+            );
             for (const c of contradictions) {
               // Reconcile: is this a real contradiction, or an evolution/extension?
               const newContent = (baseMemory.content || '').toLowerCase();

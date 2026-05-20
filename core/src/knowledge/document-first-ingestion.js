@@ -670,9 +670,11 @@ export class DocumentFirstIngestionService {
           skip_fact_extraction: metadata.force_fact_extraction === true
             ? false
             : (Array.isArray(segments) && segments.length >= 30),
-          // Knowledge-base catalog pages don't contradict user beliefs —
-          // skip contradiction detection to save 1-2s per promoted memory.
-          skip_contradiction_detection: true,
+          // Strict contradiction mode for KB: only fires when BOTH sides
+          // carry negation/change language AND token-similarity ≥0.65.
+          // Catches real "value updated" cases (e.g. price change in newer
+          // catalog), skips noise from unrelated facts.
+          strict_contradictions: true,
           documentDate: new Date(),
           metadata: {
             ...(metadata || {}),

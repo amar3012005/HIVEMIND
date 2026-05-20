@@ -10354,7 +10354,17 @@ const server = http.createServer(async (req, res) => {
             // POST /api/team/invites — create invite link (admin only)
             try {
               const membership = await prisma.userOrganization.findFirst({ where: { userId, orgId } });
-              if (!membership || membership.role !== 'admin') return jsonResponse(res, { error: 'Admin access required' }, 403);
+              const memberRoles = new Set([
+                ...(membership?.role ? [membership.role] : []),
+                ...(Array.isArray(membership?.roles) ? membership.roles : []),
+              ]);
+              const isAdmin = membership?.isActive !== false && (
+                memberRoles.has('admin') || memberRoles.has('owner') ||
+                memberRoles.has('org_admin') || memberRoles.has('org_owner')
+              );
+              if (!isAdmin && !principal?.master) {
+                return jsonResponse(res, { error: 'Admin/owner role required to send invites' }, 403);
+              }
               const { email, role = 'member', expiresInDays = 7, teamIds = [], projectIds = [] } = body;
               if (!['member', 'admin'].includes(role)) return jsonResponse(res, { error: 'Valid role required: member or admin' }, 400);
               if (!Array.isArray(teamIds)) return jsonResponse(res, { error: 'teamIds must be an array' }, 400);

@@ -226,16 +226,20 @@ export class TeamStore {
       n += 1;
       slug = `${baseSlug}-${n}`;
     }
+    // Belt-and-braces: Project.id has @default(gen_random_uuid()) in schema
+    // but some prod DBs were created without that default. Generate
+    // explicitly so insertion never fails on null id even on stale schemas.
+    const { randomUUID } = await import('node:crypto');
     return this.prisma.project.create({
       data: {
+        id: randomUUID(),
         orgId,
         teamId,
         name,
         slug,
         description,
         createdBy,
-        // Auto-add creator as owner if explicit ProjectMember model needed
-        members: { create: [{ userId: createdBy, role: 'owner', addedById: createdBy }] },
+        members: { create: [{ id: randomUUID(), userId: createdBy, role: 'owner', addedById: createdBy }] },
       },
       include: { members: true },
     });

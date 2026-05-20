@@ -8739,6 +8739,8 @@ const server = http.createServer(async (req, res) => {
                 sheets: sheetDetections || null,
                 model: getDefaultModel(),
                 available_types: (await import('./knowledge/enterprise/schemas/index.js')).DOCUMENT_TYPES,
+                // Soft-deprecation hint — consolidated path needs only one request.
+                deprecation_hint: 'For new code, POST /api/knowledge/upload with form field enterprise=auto|true (single-shot, returns segments+schema fields together).',
               });
             } catch (err) {
               console.error('[enterprise] Detect failed:', err.message);
@@ -9201,6 +9203,12 @@ const server = http.createServer(async (req, res) => {
               // Groq VLM, code/formula extraction). Default false = fast tiers.
               const smartFlag = (parts.find(p => p.name === 'smart')?.value || '').toLowerCase() === 'true';
               const pictureDescFlag = (parts.find(p => p.name === 'picture_descriptions')?.value || '').toLowerCase() === 'true';
+              // enterprise = 'auto' | 'true' | 'false'  (default 'auto')
+              //   auto  → detect type; if confidence≥0.7 run schema extract
+              //   true  → force schema extract even on low confidence
+              //   false → skip enterprise pipeline entirely (legacy behavior)
+              const enterpriseFlag = (parts.find(p => p.name === 'enterprise')?.value || 'auto').toLowerCase();
+              const confirmedType = parts.find(p => p.name === 'confirmed_type')?.value || null;
 
               // Pre-flight pages quota: rough estimate by file size (1 page ≈ 50KB
               // PDF / 5KB text). Real page count comes after parse; we record
@@ -9248,6 +9256,49 @@ const server = http.createServer(async (req, res) => {
                     planEnforcer.recordUsage(orgId, 'kbPages', realPages);
                     planEnforcer.recordUsage(orgId, 'uploads', 1);
                   }
+                  // ─── Enterprise schema extraction (auto|true) ───
+                  let enterprise = null;
+                  if (enterpriseFlag !== 'false') {
+                    try {
+                      const [{ detectDocumentType }, { extractSchema }] = await Promise.all([
+                        import('./knowledge/enterprise/detector.js'),
+                        import('./knowledge/enterprise/extractor.js'),
+                      ]);
+                      // Pull representative text from segments
+                      const segText = (await prisma.knowledgeSegment.findMany({
+                        where: { documentId: result.documentId },
+                        orderBy: { segmentIndex: 'asc' },
+                        take: 4,
+                        select: { content: true },
+                      })).map(s => s.content).join('\n\n');
+                      const detection = confirmedType
+                        ? { type: confirmedType, confidence: 1.0, reasoning: 'caller-confirmed' }
+                        : await detectDocumentType(segText, { filename: filePart.filename });
+                      const shouldExtract = enterpriseFlag === 'true'
+                        || (enterpriseFlag === 'auto' && detection.type !== 'general' && (detection.confidence ?? 0) >= 0.7);
+                      if (shouldExtract) {
+                        const extracted = await extractSchema(segText, detection.type, {
+                          filename: filePart.filename,
+                        });
+                        enterprise = {
+                          detected_type: detection.type,
+                          confidence: detection.confidence,
+                          reasoning: detection.reasoning,
+                          schema_fields: extracted,
+                        };
+                        console.log(`[knowledge] enterprise extract type=${detection.type} conf=${detection.confidence.toFixed(2)} fields=${Object.keys(extracted || {}).length}`);
+                      } else {
+                        enterprise = {
+                          detected_type: detection.type,
+                          confidence: detection.confidence,
+                          extracted: false,
+                          reason: 'confidence below 0.7 — pass enterprise=true to force',
+                        };
+                      }
+                    } catch (entErr) {
+                      console.warn(`[knowledge] enterprise extract failed (non-fatal): ${entErr.message}`);
+                    }
+                  }
                   return jsonResponse(res, {
                     upload_id: crypto.randomUUID(),
                     filename: filePart.filename,
@@ -9256,7 +9307,8 @@ const server = http.createServer(async (req, res) => {
                     segmentCount: result.segmentCount,
                     candidateCount: result.candidateCount,
                     promotedCount: result.promotedCount,
-                    promotedMemoryIds: result.promotedMemoryIds
+                    promotedMemoryIds: result.promotedMemoryIds,
+                    ...(enterprise ? { enterprise } : {}),
                   });
                 } catch (phase1Err) {
                   console.error('[knowledge] ✗ Phase1 failed, falling back to legacy:', phase1Err.message, phase1Err.stack);
@@ -11958,6 +12010,17 @@ const server = http.createServer(async (req, res) => {
               const recallProject = body.project || effectiveContainerTag || null;
 
               const recallAccessCtx = await buildAccessContext(userId, orgId);
+
+              // Bi-temporal filter: when valid_at is set, return only memories
+              // that were valid at that timestamp (valid_from <= valid_at AND
+              // (valid_to IS NULL OR valid_to > valid_at)). Caller can also
+              // pass transaction_at to filter by when the system learned them.
+              const validAt = body.valid_at ? new Date(body.valid_at) : null;
+              const transactionAt = body.transaction_at ? new Date(body.transaction_at) : null;
+              const bitemporalFilter = (validAt || transactionAt)
+                ? { valid_at: validAt, transaction_at: transactionAt }
+                : null;
+
               const result = await recallPersistedMemories(persistentMemoryStore, {
                 query_context: effectiveRecallQuery,
                 user_id: userId,
@@ -11979,7 +12042,31 @@ const server = http.createServer(async (req, res) => {
                 include_superseded: body.include_superseded,  // boolean — traverse Updates chain for version history
                 access_context: recallAccessCtx,
                 scope_filter: body.scope_filter || null,
+                bitemporal: bitemporalFilter,
               });
+
+              // Post-filter for bi-temporal when retriever doesn't honor it
+              // natively. Drops memories whose creation post-dates transaction_at
+              // OR whose valid_from is after valid_at.
+              if (bitemporalFilter && Array.isArray(result?.memories)) {
+                const filtered = result.memories.filter(m => {
+                  const created = m.created_at ? new Date(m.created_at) : null;
+                  const validFrom = m.metadata?.valid_from ? new Date(m.metadata.valid_from) : created;
+                  const validTo = m.metadata?.valid_to ? new Date(m.metadata.valid_to) : null;
+                  if (bitemporalFilter.transaction_at && created && created > bitemporalFilter.transaction_at) return false;
+                  if (bitemporalFilter.valid_at) {
+                    if (validFrom && validFrom > bitemporalFilter.valid_at) return false;
+                    if (validTo && validTo <= bitemporalFilter.valid_at) return false;
+                  }
+                  return true;
+                });
+                result.memories = filtered;
+                result.bitemporal_filter_applied = {
+                  valid_at: bitemporalFilter.valid_at?.toISOString() || null,
+                  transaction_at: bitemporalFilter.transaction_at?.toISOString() || null,
+                  kept: filtered.length,
+                };
+              }
 
               // Apply memory type boosts from Operator Layer
               if (cognitiveOperator && result.memories) {

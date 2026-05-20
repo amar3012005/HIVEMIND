@@ -474,6 +474,12 @@ function generateToolsManifest(userId, orgId, options = {}) {
       name: 'hivemind_save_memory',
       description: `Save information to HIVE-MIND persistent memory.
 
+BI-TEMPORAL VERSIONING (every save = a new version row):
+Every call writes a versioned snapshot. Past versions stay queryable via hivemind_at / hivemind_diff / hivemind_timeline. When relationship="update" the prior version is marked superseded but stays in the ledger — you can still answer "what did we believe on date X". Treat saves like git commits on a fact, not destructive updates.
+
+SELF-EVOLVING GRAPH:
+On every save the server runs semantic recall against past memories + a triple-operator detector. If the new content updates / extends / contradicts a prior memory the right edge type (Updates / Extends / Derives / Contradicts) is auto-added. No manual relationship needed for most cases.
+
 PROJECT SCOPING (IMPORTANT):
 The org has ONE shared HIVEMIND by default. Admins can create sub-HIVEMINDs called projects (e.g. "SOLVIS", "Q2-Planning"). Choose the right scope:
   • If the user mentions a project ("save this to SOLVIS", "in my Q2 project"), pass project="<name>" or project_id="<uuid>".
@@ -572,6 +578,14 @@ Call hivemind_list_projects first if you don't yet know which projects exist.`,
             type: 'string',
             enum: ['quick', 'panorama', 'insight'],
             description: 'Search mode: quick (fast semantic), panorama (temporal/historical), insight (AI-powered sub-queries)'
+          },
+          valid_at: {
+            type: 'string',
+            description: 'Bi-temporal filter: only return memories that were valid in the world at this ISO timestamp. Use to answer "what did we know about X on date Y" / "what was the price/policy/contract clause on date Y".'
+          },
+          transaction_at: {
+            type: 'string',
+            description: 'Bi-temporal filter: only return memories the system had learned by this ISO timestamp (excludes future writes that happened after the cutoff).'
           }
         },
         required: ['query']
@@ -1044,8 +1058,65 @@ Call hivemind_list_projects first if you don't yet know which projects exist.`,
       }
     },
     {
+      name: 'hivemind_at',
+      description: `Bi-temporal time-travel: return any memory (contracts, catalogs, SOPs, code, decisions, meeting notes) as the system knew it at a given timestamp.
+
+ENTERPRISE EXAMPLES:
+  • "What did our supplier contract say on Nov 1?" → hivemind_at({transaction_time:"2025-11-01T00:00:00Z", memory_query:"supplier contract"})
+  • "Price of SolvisLea Pro in Q2 2025?" → hivemind_at({valid_time:"2025-06-30T00:00:00Z", memory_query:"SolvisLea Pro price"})
+  • "Incident response SOP before March update?" → hivemind_at({transaction_time:"2026-02-28T00:00:00Z", memory_query:"incident response"})
+
+transaction_time = when WE learned it. valid_time = when it was TRUE in the world.`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          transaction_time: { type: 'string', description: 'ISO timestamp — when the system learned the fact.' },
+          valid_time: { type: 'string', description: 'ISO timestamp — when the fact was true in the world.' },
+          memory_query: { type: 'string', description: 'Optional semantic filter on the time-traveled set (e.g. "supplier contract").' },
+          file_path: { type: 'string', description: 'Optional file:<path> tag filter (code use).' },
+          project: { type: 'string' },
+          project_id: { type: 'string' },
+        }
+      }
+    },
+    {
+      name: 'hivemind_diff',
+      description: `Bi-temporal diff: what changed between two timestamps across any memory class.
+
+ENTERPRISE EXAMPLES:
+  • "What changed in our vendor agreement Oct 2024 → Oct 2025?" → hivemind_diff({time_a:"2024-10-01", time_b:"2025-10-01", tags:["vendor","agreement"]})
+  • "Catalog price delta PL Neuheiten 2024 vs 2025?" → hivemind_diff({time_a:"2024-12-31", time_b:"2025-12-31", tags:["catalog"]})
+  • "What policy clauses were added in the new HR handbook?" → hivemind_diff({time_a:"2025-01-01", time_b:"2026-01-01", tags:["hr","policy"]})`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          time_a: { type: 'string', description: 'Earlier ISO timestamp' },
+          time_b: { type: 'string', description: 'Later ISO timestamp' },
+          file_path: { type: 'string' },
+          tags: { type: 'array', items: { type: 'string' }, description: 'Tag intersection filter, e.g. ["contract","vendor"]' },
+        },
+        required: ['time_a', 'time_b']
+      }
+    },
+    {
+      name: 'hivemind_timeline',
+      description: `Full version chain for a single memory — every revision with valid_from / valid_to / superseded_by / reason.
+
+ENTERPRISE EXAMPLES:
+  • "Show every revision of the SolvisLea Pro datasheet from launch → today"
+  • "Meeting decision chain for the Q2 architecture pivot"
+  • "Contract amendment chain for vendor X"`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          memory_id: { type: 'string', description: 'Memory UUID — direct.' },
+          file_path: { type: 'string', description: 'Or resolve via file:<path> tag (code use).' },
+        }
+      }
+    },
+    {
       name: 'hivemind_code_at',
-      description: 'Bi-temporal time-travel query — return the codebase / memories as the system knew them at a given transaction time, optionally filtered to what was valid in the world at a given valid time. Use to answer "what did the code look like on X date".',
+      description: '[ALIAS of hivemind_at — kept for back-compat] Bi-temporal time-travel query.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1074,7 +1145,7 @@ Call hivemind_list_projects first if you don't yet know which projects exist.`,
     },
     {
       name: 'hivemind_code_diff',
-      description: 'Bi-temporal diff between two timestamps — returns added / removed / modified memories with tags. Use to answer "what changed between date A and date B". Filter to a specific file with file_path or to arbitrary tag intersection with tags.',
+      description: '[ALIAS of hivemind_diff — kept for back-compat] Bi-temporal diff between two timestamps.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1101,7 +1172,7 @@ Call hivemind_list_projects first if you don't yet know which projects exist.`,
     },
     {
       name: 'hivemind_code_timeline',
-      description: 'Full version chain (MemoryVersion ledger) for a single memory — every revision, supersession, and reason. Use to trace how one file or decision evolved.',
+      description: '[ALIAS of hivemind_timeline — kept for back-compat] Full MemoryVersion ledger.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -2272,6 +2343,9 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
             max_memories: recallLimit,
             // Recall v2 orchestrator: attach evidence + fallback when sparse/citation intent
             mode: args.evidence_mode || 'auto',
+            // Bi-temporal: "what did we know on date X / what was valid then"
+            ...(args.valid_at ? { valid_at: args.valid_at } : {}),
+            ...(args.transaction_at ? { transaction_at: args.transaction_at } : {}),
             ...(resolvedProjectId ? { project_id: resolvedProjectId, project_ids: resolvedProjectIds } : {}),
           });
 
@@ -2908,6 +2982,9 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
         });
       }
 
+      // ── Bi-temporal aliases (work on ANY memory — docs, contracts, SOPs,
+      // catalogs, code). Coding-prefixed names below kept for back-compat.
+      case 'hivemind_at':
       case 'hivemind_code_at': {
         if (!args.transaction_time && !args.valid_time) {
           throw new Error('hivemind_code_at requires transaction_time and/or valid_time');
@@ -2928,6 +3005,17 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
         if (args.project) {
           memories = memories.filter(m => m.project === args.project);
         }
+        // Enterprise semantic filter (post-filter on title+content tokens)
+        if (args.memory_query && typeof args.memory_query === 'string') {
+          const q = args.memory_query.toLowerCase();
+          const tokens = q.split(/\s+/).filter(t => t.length >= 3);
+          if (tokens.length > 0) {
+            memories = memories.filter(m => {
+              const haystack = `${m.title || ''} ${m.content || ''}`.toLowerCase();
+              return tokens.some(t => haystack.includes(t));
+            });
+          }
+        }
         const polished = polishMemories(memories);
         const hint = (polished.length === 0 && txTime)
           ? `No memories exist at transaction_time=${txTime}${args.file_path ? ` for file ${args.file_path}` : ''}. The system may not have learned anything by that time, or the file did not yet exist. Try a later timestamp or omit the filter.`
@@ -2940,6 +3028,7 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
         });
       }
 
+      case 'hivemind_diff':
       case 'hivemind_code_diff': {
         if (!args.time_a || !args.time_b) {
           throw new Error('hivemind_code_diff requires time_a and time_b');
@@ -2956,6 +3045,7 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
         return formatToolContent({ ...diff, file_path: args.file_path || null });
       }
 
+      case 'hivemind_timeline':
       case 'hivemind_code_timeline': {
         let memoryId = args.memory_id;
         if (!memoryId && args.file_path) {

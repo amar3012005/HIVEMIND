@@ -99,14 +99,28 @@ export class SyncScheduler {
       // live under providers/google/{service}-adapter.js with different
       // export names + constructor dependencies (workspace-mcp bridge needs
       // prisma + decryptToken).
+      // Adapter lookup table. Keys cover BOTH hyphen ('google-drive') and
+      // underscore ('google_drive') forms so DB rows written by either
+      // historical OAuth callback path resolve to the same adapter.
+      const _googleDocsAdapter = { path: '../providers/google/drive-docs-adapter.js', exportName: 'GoogleDriveDocsAdapter', mcpBridge: true };
+      const _googleCalAdapter  = { path: '../providers/google/calendar-adapter.js',   exportName: 'GoogleCalendarAdapter', mcpBridge: true };
+      const _googleContAdapter = { path: '../providers/google/contacts-adapter.js',   exportName: 'GoogleContactsAdapter', mcpBridge: true };
       const ADAPTER_DISPATCH = {
         gmail:            { path: '../providers/gmail/adapter.js', exportName: 'GmailAdapter', mcpBridge: false },
-        google_drive:     { path: '../providers/google/drive-docs-adapter.js', exportName: 'GoogleDriveDocsAdapter', mcpBridge: true },
-        google_docs:      { path: '../providers/google/drive-docs-adapter.js', exportName: 'GoogleDriveDocsAdapter', mcpBridge: true },
-        google_sheets:    { path: '../providers/google/drive-docs-adapter.js', exportName: 'GoogleDriveDocsAdapter', mcpBridge: true },
-        google_slides:    { path: '../providers/google/drive-docs-adapter.js', exportName: 'GoogleDriveDocsAdapter', mcpBridge: true },
-        google_calendar:  { path: '../providers/google/calendar-adapter.js',   exportName: 'GoogleCalendarAdapter', mcpBridge: true },
-        google_contacts:  { path: '../providers/google/contacts-adapter.js',   exportName: 'GoogleContactsAdapter', mcpBridge: true },
+        // Underscore form (legacy)
+        google_drive:     _googleDocsAdapter,
+        google_docs:      _googleDocsAdapter,
+        google_sheets:    _googleDocsAdapter,
+        google_slides:    _googleDocsAdapter,
+        google_calendar:  _googleCalAdapter,
+        google_contacts:  _googleContAdapter,
+        // Hyphen form (canonical — matches connector catalog)
+        'google-drive':    _googleDocsAdapter,
+        'google-docs':     _googleDocsAdapter,
+        'google-sheets':   _googleDocsAdapter,
+        'google-slides':   _googleDocsAdapter,
+        'google-calendar': _googleCalAdapter,
+        'google-contacts': _googleContAdapter,
         slack:            { path: '../adapters/slack/slack-adapter.js',        exportName: 'SlackAdapter', nango: true },
         notion:           { path: '../adapters/notion/notion-adapter.js',      exportName: 'NotionAdapter', nango: true },
         github:           { path: '../adapters/github/github-adapter.js',      exportName: 'GitHubAdapter', nango: true },

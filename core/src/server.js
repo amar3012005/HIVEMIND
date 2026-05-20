@@ -6726,25 +6726,29 @@ const server = http.createServer(async (req, res) => {
               const grantedScopes = (tokens.scope || '').split(' ').filter(Boolean);
 
               // Map each granted scope to the service it represents
+              // CANONICAL provider key form is hyphen (`google-drive`) to match
+              // the connector catalog + /api/connectors/status lookups.
+              // Underscore form (`google_drive`) was an older variant that
+              // caused split-brain rows. Don't reintroduce it.
               const SCOPE_TO_SERVICE = {
-                'https://www.googleapis.com/auth/gmail.readonly':     'gmail',
-                'https://www.googleapis.com/auth/gmail.modify':        'gmail',
-                'https://www.googleapis.com/auth/drive.readonly':      'google_drive',
-                'https://www.googleapis.com/auth/drive':               'google_drive',
-                'https://www.googleapis.com/auth/calendar.readonly':   'google_calendar',
-                'https://www.googleapis.com/auth/calendar':            'google_calendar',
-                'https://www.googleapis.com/auth/documents.readonly':  'google_docs',
-                'https://www.googleapis.com/auth/documents':           'google_docs',
-                'https://www.googleapis.com/auth/spreadsheets.readonly':'google_sheets',
-                'https://www.googleapis.com/auth/spreadsheets':        'google_sheets',
-                'https://www.googleapis.com/auth/presentations.readonly':'google_slides',
-                'https://www.googleapis.com/auth/presentations':       'google_slides',
-                'https://www.googleapis.com/auth/contacts.readonly':   'google_contacts',
-                'https://www.googleapis.com/auth/contacts':            'google_contacts',
-                'https://www.googleapis.com/auth/chat.messages.readonly':'google_chat',
-                'https://www.googleapis.com/auth/tasks.readonly':      'google_tasks',
-                'https://www.googleapis.com/auth/tasks':               'google_tasks',
-                'https://www.googleapis.com/auth/forms.body.readonly': 'google_forms',
+                'https://www.googleapis.com/auth/gmail.readonly':         'gmail',
+                'https://www.googleapis.com/auth/gmail.modify':           'gmail',
+                'https://www.googleapis.com/auth/drive.readonly':         'google-drive',
+                'https://www.googleapis.com/auth/drive':                  'google-drive',
+                'https://www.googleapis.com/auth/calendar.readonly':      'google-calendar',
+                'https://www.googleapis.com/auth/calendar':               'google-calendar',
+                'https://www.googleapis.com/auth/documents.readonly':     'google-docs',
+                'https://www.googleapis.com/auth/documents':              'google-docs',
+                'https://www.googleapis.com/auth/spreadsheets.readonly':  'google-sheets',
+                'https://www.googleapis.com/auth/spreadsheets':           'google-sheets',
+                'https://www.googleapis.com/auth/presentations.readonly': 'google-slides',
+                'https://www.googleapis.com/auth/presentations':          'google-slides',
+                'https://www.googleapis.com/auth/contacts.readonly':      'google-contacts',
+                'https://www.googleapis.com/auth/contacts':               'google-contacts',
+                'https://www.googleapis.com/auth/chat.messages.readonly': 'google-chat',
+                'https://www.googleapis.com/auth/tasks.readonly':         'google-tasks',
+                'https://www.googleapis.com/auth/tasks':                  'google-tasks',
+                'https://www.googleapis.com/auth/forms.body.readonly':    'google-forms',
               };
 
               const grantedServices = [...new Set(

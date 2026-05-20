@@ -44,7 +44,12 @@ export class WorkspaceMcpBridge {
     // recently updated one (Gmail is always present if any Google service is
     // connected because we always upsert gmail as the primary row).
     const googleProviders = [
-      'gmail', 'google_drive', 'google_calendar', 'google_docs',
+      // Hyphen form (canonical)
+      'gmail', 'google-drive', 'google-calendar', 'google-docs',
+      'google-sheets', 'google-slides', 'google-contacts', 'google-chat',
+      'google-tasks', 'google-forms', 'google-workspace',
+      // Underscore form (legacy, kept for back-compat with old rows)
+      'google_drive', 'google_calendar', 'google_docs',
       'google_sheets', 'google_slides', 'google_contacts', 'google_chat',
       'google_tasks', 'google_forms', 'google_workspace',
     ];

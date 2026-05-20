@@ -415,6 +415,28 @@ if (persistentMemoryEngine && persistentMemoryStore && prisma) {
   console.log('[webhook-processor] started');
 }
 
+// ─── Cognition Loop (continuous synthesis + drift compaction) ────────────
+// Hourly cron. Walks recent memories + edges, asks LLM for emergent insights,
+// compresses oversized clusters into canonical summaries.
+let cognitionLoop = null;
+if (process.env.ENABLE_COGNITION_LOOP === 'true' && prisma) {
+  setImmediate(async () => {
+    try {
+      const { CognitionLoop } = await import('./memory/cognition-loop.js');
+      cognitionLoop = new CognitionLoop({
+        prisma,
+        memoryGraphEngine: persistentMemoryEngine,
+        persistentMemoryStore,
+        logger: console,
+      });
+      cognitionLoop.start();
+      console.log('[cognition] loop started');
+    } catch (err) {
+      console.warn('[cognition] init failed:', err.message);
+    }
+  });
+}
+
 // ─── Memory Promotion Jobs cron (Wave 5 / P1 #5) ────────────────────────────
 // Late-resolution: documentFirstIngestion is initialized later (line ~1028).
 // Use setImmediate so this block runs after module-init completes.
@@ -6298,6 +6320,58 @@ const server = http.createServer(async (req, res) => {
             }
           }
           break;
+
+        case '/api/cognition/status':
+          // Read-only — any authenticated caller can see loop health.
+          try {
+            const { getCognitionStatus } = await import('./memory/cognition-loop.js');
+            const st = getCognitionStatus();
+            return jsonResponse(res, {
+              enabled: process.env.ENABLE_COGNITION_LOOP === 'true',
+              interval_ms: Number(process.env.COGNITION_INTERVAL_MS || 60 * 60 * 1000),
+              lookback_hours: Number(process.env.SYNTHESIS_LOOKBACK_HOURS || 24),
+              cluster_min: Number(process.env.SYNTHESIS_CLUSTER_MIN || 4),
+              cluster_max: Number(process.env.SYNTHESIS_CLUSTER_MAX || 30),
+              drift_threshold: Number(process.env.DRIFT_COMPACT_THRESHOLD || 12),
+              model: process.env.SYNTHESIS_MODEL || 'llama-3.3-70b-versatile',
+              ...st,
+            });
+          } catch (err) {
+            return jsonResponse(res, { error: err.message }, 500);
+          }
+
+        case '/api/cognition/synthesize-now':
+          // Admin-gated manual trigger — runs one tick immediately.
+          if (req.method !== 'POST') break;
+          try {
+            const membership = await prisma.userOrganization.findUnique({
+              where: { userId_orgId: { userId, orgId } },
+              select: { role: true, roles: true },
+            }).catch(() => null);
+            const roles = new Set([
+              ...(membership?.role ? [membership.role] : []),
+              ...(Array.isArray(membership?.roles) ? membership.roles : []),
+            ]);
+            if (!roles.has('admin') && !roles.has('owner') && !principal.master) {
+              return jsonResponse(res, { error: 'admin/owner role required' }, 403);
+            }
+            if (!cognitionLoop) {
+              return jsonResponse(res, { error: 'cognition loop not running (ENABLE_COGNITION_LOOP=true required)' }, 503);
+            }
+            // Fire-and-forget — return immediately
+            (async () => {
+              try {
+                const synth = await cognitionLoop.synthesizeForOrg(orgId);
+                const compact = await cognitionLoop.compactDriftForOrg(orgId);
+                console.log(`[cognition] manual run org=${orgId} synth=${synth} compact=${compact}`);
+              } catch (e) {
+                console.warn('[cognition] manual run failed:', e.message);
+              }
+            })();
+            return jsonResponse(res, { triggered: true, org_id: orgId });
+          } catch (err) {
+            return jsonResponse(res, { error: err.message }, 500);
+          }
 
         case '/api/admin/org/policy': {
           // GET: returns the org's default_project_policy + meta.

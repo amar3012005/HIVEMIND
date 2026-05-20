@@ -1,0 +1,1 @@
+-- Postgres has no DROP VALUE for enums — leaving as no-op.

@@ -696,7 +696,8 @@ async function buildBootstrapPayload(user) {
       needs_first_source: apiKeys.length > 0 && !org,
     },
     connectivity: {
-      core_api_base_url: CONFIG.coreApiBaseUrl,
+      // Browser-facing: must be publicly resolvable, not the docker hostname.
+      core_api_base_url: CONFIG.corePublicBaseUrl,
       core_health: coreHealth
     },
     client_support: ['claude', 'antigravity', 'vscode', 'remote-mcp', 'notebooklm'],

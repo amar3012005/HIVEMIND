@@ -14612,6 +14612,18 @@ const server = http.createServer(async (req, res) => {
                   const chatIntent = detectQueryIntent(message);
                   const chatWeights = computeDynamicWeights(chatIntent);
 
+                  // Bi-temporal detection — if user references a date or
+                  // says "as of X" / "back in", flip recall into time-travel
+                  // mode via valid_at. Matches hivemind_at MCP semantics.
+                  let chatValidAt = null;
+                  try {
+                    const m = message.match(/\b(?:as of|back in|on|before|by)\s+([A-Za-z]+\s+\d{1,2}(?:,?\s+\d{4})?|\d{4}-\d{2}-\d{2}|\d{4}-\d{2}|Q[1-4]\s+\d{4})/i);
+                    if (m && m[1]) {
+                      const parsed = new Date(m[1]);
+                      if (!Number.isNaN(parsed.getTime())) chatValidAt = parsed;
+                    }
+                  } catch { /* no temporal hint */ }
+
                   // Auto-infer tags from the query phrasing (decision/bug/refactor/
                   // file:<path>/fn:<name>/...). These are passed as preferred_tags
                   // to the recall layer — soft +0.08 score boost per overlap, never
@@ -14650,8 +14662,17 @@ const server = http.createServer(async (req, res) => {
                         inject_parent_chunks: true,
                         weights: chatWeights,
                         preference_boost: chatIntent.type === 'preference',
-                        preferred_tags: inferredTags,
+                        // Boost cognition-loop canonicals (synthesis + drift-compacted
+                        // summaries) — they're the highest-density truth in the graph.
+                        preferred_tags: [
+                          ...inferredTags,
+                          'canonical-summary',
+                          'synthesized',
+                          'cognition-loop',
+                        ],
                         access_context: chatAccessCtx,
+                        // Bi-temporal time-travel for date-shaped questions
+                        ...(chatValidAt ? { bitemporal: { valid_at: chatValidAt } } : {}),
                       });
                       const recalled = recallResult.memories || [];
                       injectionText = injectionText || recallResult.injectionText || '';
@@ -15093,7 +15114,11 @@ ${injectionText}`;
               }
 
               const groqData = await groqResp.json();
-              const response = (groqData.choices[0]?.message?.content || '')
+              // gpt-oss-* reasoning models put visible output in
+              // reasoning_content on Groq. Coalesce both so chat doesn't
+              // return empty when those models are selected.
+              const _msg = groqData.choices?.[0]?.message || {};
+              const response = String(_msg.content || _msg.reasoning_content || '')
                 .replace(/[\uD800-\uDFFF]/g, '').trim();
 
               // Step 5: Smart fact ingestion — extract clean facts, route through SmartIngestRouter

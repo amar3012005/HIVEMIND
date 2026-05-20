@@ -2174,10 +2174,31 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
           throw new Error('hivemind_save_memory requires non-empty content');
         }
 
-        // Fire-and-acknowledge: skip pre-flight semantic search when no
-        // explicit relationship requested — the async background job runs
-        // smartIngest anyway. Cuts MCP save latency from 5-15s → <500ms.
-        return formatToolContent(await apiClient.post('/api/memories', {
+        // Org-policy hint: if the org's default_project_policy says "ask"
+        // and caller didn't specify a project, return a soft warning so
+        // Claude can ask the user which project to scope to next time.
+        let projectPolicyHint = null;
+        if (!resolvedProjectId && userId && orgId) {
+          try {
+            const { getPrismaClient } = await import('../db/prisma.js');
+            const prisma = getPrismaClient();
+            const org = await prisma.organization.findUnique({
+              where: { id: orgId },
+              select: { defaultProjectPolicy: true },
+            });
+            const policy = org?.defaultProjectPolicy || 'private';
+            if (policy === 'ask') {
+              projectPolicyHint = 'Org policy requires explicit project scope. Please call hivemind_list_projects then re-call this with project="<name>".';
+            }
+          } catch { /* policy lookup best-effort */ }
+        }
+
+        // Smart save: server now runs semantic-recall + triple-operator
+        // enrichment in the async background block (post-202), so we can
+        // keep smartIngest:true without blocking the response.
+        // Result: auto Update/Extend/Derive edges build against existing
+        // memories on every save — no manual relationship arg needed.
+        const saveResp = await apiClient.post('/api/memories', {
           title,
           content,
           memory_type: args.source_type === 'decision' ? 'decision' : 'fact',
@@ -2190,11 +2211,14 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
           },
           user_id: userId,
           org_id: orgId,
-          // Skip synchronous triple-operator enrichment when caller didn't
-          // ask for a relationship. Background ingest still runs.
-          smartIngest: relationship ? true : false,
+          smartIngest: true,
           ...SCOPE_FIELDS,
-        }));
+        });
+        return formatToolContent({
+          ...saveResp,
+          scope: resolvedProjectId ? { project_id: resolvedProjectId } : { scope: 'org-wide' },
+          ...(projectPolicyHint ? { policy_hint: projectPolicyHint } : {}),
+        });
       }
 
       case 'hivemind_list_projects': {

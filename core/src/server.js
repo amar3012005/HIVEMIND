@@ -1058,6 +1058,42 @@ if (process.env.DOCLING_URL) {
         const ext = (filename || '').split('.').pop()?.toLowerCase();
         const tParse = Date.now();
 
+        // ── Audio (mp3/wav/m4a/ogg/flac) → Groq Whisper transcription ──
+        if (['mp3', 'wav', 'm4a', 'ogg', 'flac'].includes(ext) && process.env.GROQ_API_KEY) {
+          try {
+            const fd = new FormData();
+            fd.append('file', new Blob([fs.readFileSync(tempPath)]), filename);
+            fd.append('model', process.env.GROQ_WHISPER_MODEL || 'whisper-large-v3');
+            fd.append('response_format', 'verbose_json');
+            const wRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+              body: fd,
+              signal: AbortSignal.timeout(180_000),
+            });
+            if (!wRes.ok) throw new Error(`Whisper ${wRes.status}: ${(await wRes.text()).slice(0, 200)}`);
+            const wJson = await wRes.json();
+            const transcript = wJson.text || '';
+            const segments = Array.isArray(wJson.segments) ? wJson.segments : [];
+            // One chunk per Whisper segment so timestamps survive into memory.
+            const hybridChunks = segments.length
+              ? segments.map(s => ({
+                  text: s.text.trim(),
+                  headings: [`${Math.round(s.start)}s–${Math.round(s.end)}s`],
+                  page: 1,
+                }))
+              : [{ text: transcript.trim(), headings: [filename], page: 1 }];
+            console.log(`[docling-adapter] tier=whisper file=${filename} chars=${transcript.length} segs=${hybridChunks.length} ms=${Date.now() - tParse}`);
+            return {
+              text: transcript, markdown: transcript, json: { segments: wJson.segments, language: wJson.language },
+              tables: [], pages: 1, confidence: null, error: null,
+              hybridChunks, chunkerError: null, engine: 'groq-whisper',
+            };
+          } catch (audioErr) {
+            console.warn(`[docling-adapter] whisper failed: ${audioErr.message}`);
+          }
+        }
+
         // ── Plain text (txt/md/markdown/html) → skip Docling entirely ──
         // Saves the 2s Docling round-trip on already-readable formats.
         if (['txt', 'md', 'markdown', 'html', 'htm'].includes(ext)) {
@@ -8869,6 +8905,23 @@ const server = http.createServer(async (req, res) => {
               const smartFlag = (parts.find(p => p.name === 'smart')?.value || '').toLowerCase() === 'true';
               const pictureDescFlag = (parts.find(p => p.name === 'picture_descriptions')?.value || '').toLowerCase() === 'true';
 
+              // Pre-flight pages quota: rough estimate by file size (1 page ≈ 50KB
+              // PDF / 5KB text). Real page count comes after parse; we record
+              // exact then. This pre-check is a cheap "blow up obvious overages".
+              if (planEnforcer && orgId) {
+                const estPages = Math.max(1, Math.ceil(filePart.data.length / 50_000));
+                const check = await planEnforcer.checkLimit(orgId, 'kbPages', estPages);
+                if (!check.allowed) {
+                  return jsonResponse(res, {
+                    error: 'page_budget_exceeded',
+                    reason: check.reason,
+                    limit: check.limit,
+                    current: check.current,
+                    estimated_pages: estPages,
+                  }, 402);
+                }
+              }
+
               // ─── Phase 1: Document-First Ingestion Path (feature-flagged) ───
               if (documentFirstIngestion) {
                 console.log(`[knowledge] Using Phase 1 document-first ingestion for ${filePart.filename}${smartFlag ? ' (smart=true)' : ''}`);
@@ -8891,6 +8944,13 @@ const server = http.createServer(async (req, res) => {
                     }
                   });
                   console.log(`[knowledge] ✓ Phase1 complete: file=${filePart.filename} docId=${result.documentId} segments=${result.segmentCount} promoted=${result.promotedCount} ms=${Date.now() - tPhase1}`);
+                  // Record actual page usage. Use segmentCount as a page-proxy
+                  // when real pages unknown (txt/csv/etc).
+                  if (planEnforcer && orgId) {
+                    const realPages = result.pages || result.segmentCount || 1;
+                    planEnforcer.recordUsage(orgId, 'kbPages', realPages);
+                    planEnforcer.recordUsage(orgId, 'uploads', 1);
+                  }
                   return jsonResponse(res, {
                     upload_id: crypto.randomUUID(),
                     filename: filePart.filename,
@@ -10293,14 +10353,9 @@ const server = http.createServer(async (req, res) => {
                 }
               };
 
-              // Smart type-aware routing: enrich payload with triple operator
-              const ingestPayloads = await buildRoutedIngestPayloads(ingestPayload, {
-                smartIngestRouter,
-                enableSmartRouting: body.smartIngest !== false && !body.skipProcessing,
-              });
-
               // Determine sync vs async mode
               const syncMode = url.searchParams.get('sync') === 'true' || body.sync === true;
+              const wantSmartRouting = body.smartIngest !== false && !body.skipProcessing;
 
               if (!syncMode) {
                 // --- Async ingest: return job ID immediately ---
@@ -10310,10 +10365,21 @@ const server = http.createServer(async (req, res) => {
                 res.setHeader('X-Job-Id', jobId);
                 jsonResponse(res, { success: true, job_id: jobId, status: 'queued' }, 202);
 
-                // Process in background
+                // Process in background — smart routing (semantic recall +
+                // triple-operator detection) runs HERE, not before 202, so
+                // saves stay sub-second while still auto-building
+                // Update/Extend/Derive edges against existing memories.
                 (async () => {
                   try {
-                    ingestTracker.updateJob(jobId, { status: 'processing', progress: 10 });
+                    ingestTracker.updateJob(jobId, { status: 'processing', progress: 5 });
+
+                    // Smart type-aware routing (vector recall + triple operator)
+                    const ingestPayloads = await buildRoutedIngestPayloads(ingestPayload, {
+                      smartIngestRouter,
+                      enableSmartRouting: wantSmartRouting,
+                    });
+
+                    ingestTracker.updateJob(jobId, { status: 'processing', progress: 15 });
 
                     // Process all routed payloads (SmartIngestRouter may split docs into chunks)
                     const results = [];
@@ -10397,8 +10463,13 @@ const server = http.createServer(async (req, res) => {
                 return;
               }
 
-              // --- Synchronous ingest (backwards-compatible default with ?sync=true) ---
-              // Process all routed payloads (SmartIngestRouter may split docs into chunks)
+              // --- Synchronous ingest (backwards-compatible with ?sync=true) ---
+              // Smart routing runs inline here (caller explicitly asked for
+              // sync completion, so the wait is acceptable).
+              const ingestPayloads = await buildRoutedIngestPayloads(ingestPayload, {
+                smartIngestRouter,
+                enableSmartRouting: wantSmartRouting,
+              });
               const syncResults = [];
               for (const p of ingestPayloads) {
                 const result = await persistentMemoryEngine.ingestMemory(p);

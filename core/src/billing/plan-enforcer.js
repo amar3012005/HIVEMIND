@@ -139,6 +139,23 @@ export class PlanEnforcer {
       }
     }
 
+    if (type === 'kbPages') {
+      // Per-org page-budget guard. amount = pages in the doc about to ingest.
+      const limit = limits.knowledgeBasePagesPerMonth;
+      if (!limit || limit === -1) return { allowed: true };
+      const used = counters.kbPages || 0;
+      if (used + amount > limit) {
+        if (hasOverage) return { allowed: true, overage: true };
+        return {
+          allowed: false,
+          reason: `Monthly KB pages limit exceeded (${planDef.name} plan: ${limit.toLocaleString()} pages/month)`,
+          limit,
+          current: used,
+          plan: planDef.id,
+        };
+      }
+    }
+
     if (type === 'memories') {
       const limit = limits.maxMemories;
       if (!limit || limit === -1) return { allowed: true };
@@ -252,6 +269,7 @@ export class PlanEnforcer {
       if (type === 'graphQueries') c.graphQueries += amount;
       if (type === 'tara') c.tara += amount;
       if (type === 'connectors') c.connectors += amount;
+      if (type === 'kbPages') c.kbPages = (c.kbPages || 0) + amount;
     }
 
     // Durable recording via UsageTracker (async — fire-and-forget)

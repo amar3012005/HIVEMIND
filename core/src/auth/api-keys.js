@@ -29,6 +29,8 @@ export async function createPersistedApiKey(prisma, {
   name,
   description = null,
   scopes = ['memory:read', 'memory:write', 'mcp', 'web_search', 'web_crawl', 'web_admin'],
+  projectId = null,
+  teamId = null,
   expiresAt = null,
   rateLimitPerMinute = 60,
   createdByIp = null,
@@ -51,6 +53,8 @@ export async function createPersistedApiKey(prisma, {
       keyPrefix,
       description,
       scopes,
+      projectId,
+      teamId,
       expiresAt,
       rateLimitPerMinute,
       createdByIp,
@@ -143,4 +147,50 @@ export async function revokePersistedApiKey(prisma, keyId, userId) {
       revokedAt: new Date()
     }
   });
+}
+
+/**
+ * Resolve live entitlements for an API key by intersecting the key's declared
+ * scopes with the principal's current org/team/project memberships.
+ *
+ * Returns the principal augmented with resolved projectIds, teamIds, and
+ * effective scopes.  Callers should use this instead of trusting the key's
+ * static scopes alone.
+ *
+ * @param {object} prisma - Prisma client
+ * @param {object} keyRecord - Authenticated API key record from DB
+ * @param {object} [accessContext] - Pre-built access context { projectIds, teamIds }
+ * @returns {object} Augmented principal
+ */
+export async function resolveKeyAccess(prisma, keyRecord, accessContext = null) {
+  const principal = {
+    keyId: keyRecord.id,
+    userId: keyRecord.userId,
+    orgId: keyRecord.orgId,
+    scopes: keyRecord.scopes || [],
+    projectId: keyRecord.projectId || null,
+    teamId: keyRecord.teamId || null,
+    projectIds: [],
+    teamIds: [],
+    effectiveScopes: keyRecord.scopes || [],
+  };
+
+  // If key is scoped to a specific project/team, use those directly
+  if (keyRecord.projectId) {
+    principal.projectIds = [keyRecord.projectId];
+  }
+  if (keyRecord.teamId) {
+    principal.teamIds = [keyRecord.teamId];
+  }
+
+  // If access context is provided, intersect with live memberships
+  if (accessContext) {
+    // If key has no project scope, inherit all accessible projects
+    if (!keyRecord.projectId && !keyRecord.teamId) {
+      principal.projectIds = accessContext.projectIds || [];
+      principal.teamIds = accessContext.teamIds || [];
+    }
+  }
+
+  return principal;
 }

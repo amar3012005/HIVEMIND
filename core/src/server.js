@@ -418,8 +418,11 @@ if (persistentMemoryEngine && persistentMemoryStore && prisma) {
 // ─── Cognition Loop (continuous synthesis + drift compaction) ────────────
 // Hourly cron. Walks recent memories + edges, asks LLM for emergent insights,
 // compresses oversized clusters into canonical summaries.
+// Defaults to ON when prisma is wired. Opt out with ENABLE_COGNITION_LOOP=false
+// (was opt-in; legacy ENABLE_COGNITION_LOOP=true still works).
+const COGNITION_LOOP_ENABLED = process.env.ENABLE_COGNITION_LOOP !== 'false';
 let cognitionLoop = null;
-if (process.env.ENABLE_COGNITION_LOOP === 'true' && prisma) {
+if (COGNITION_LOOP_ENABLED && prisma) {
   setImmediate(async () => {
     try {
       const { CognitionLoop } = await import('./memory/cognition-loop.js');
@@ -6352,7 +6355,7 @@ const server = http.createServer(async (req, res) => {
             const { getCognitionStatus } = await import('./memory/cognition-loop.js');
             const st = getCognitionStatus();
             return jsonResponse(res, {
-              enabled: process.env.ENABLE_COGNITION_LOOP === 'true',
+              enabled: COGNITION_LOOP_ENABLED,
               interval_ms: Number(process.env.COGNITION_INTERVAL_MS || 60 * 60 * 1000),
               lookback_hours: Number(process.env.SYNTHESIS_LOOKBACK_HOURS || 24),
               cluster_min: Number(process.env.SYNTHESIS_CLUSTER_MIN || 4),
@@ -6415,7 +6418,7 @@ const server = http.createServer(async (req, res) => {
               return jsonResponse(res, { error: 'admin/owner role required' }, 403);
             }
             if (!cognitionLoop) {
-              return jsonResponse(res, { error: 'cognition loop not running (ENABLE_COGNITION_LOOP=true required)' }, 503);
+              return jsonResponse(res, { error: 'cognition loop not running (set ENABLE_COGNITION_LOOP!=false and ensure prisma is wired)' }, 503);
             }
             // Fire-and-forget — return 202 immediately; runOnce bumps status
             // counters so the FE sees fresh last_run after this completes.

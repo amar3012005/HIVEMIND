@@ -79,8 +79,15 @@ const defaultFrontendBaseUrl = process.env.HIVEMIND_FRONTEND_URL
 const CONFIG = {
   port: Number(process.env.CONTROL_PLANE_PORT || process.env.PORT || 3010),
   publicBaseUrl: process.env.HIVEMIND_CONTROL_PLANE_PUBLIC_URL || `http://localhost:${process.env.CONTROL_PLANE_PORT || process.env.PORT || 3010}`,
+  // INTERNAL — used for server-to-server fetches (control-plane → hm-core).
+  // Defaults to docker hostname.
   coreApiBaseUrl: process.env.HIVEMIND_CORE_API_BASE_URL
     || process.env.HIVEMIND_API_URL
+    || 'https://core.hivemind.davinciai.eu:8050',
+  // PUBLIC — handed to the browser via /v1/bootstrap. Browser cannot reach
+  // docker-internal hostnames; this MUST be a publicly resolvable HTTPS URL.
+  corePublicBaseUrl: process.env.HIVEMIND_CORE_API_PUBLIC_URL
+    || process.env.HIVEMIND_CORE_PUBLIC_URL
     || 'https://core.hivemind.davinciai.eu:8050',
   sessionCookieName: process.env.HIVEMIND_CONTROL_PLANE_SESSION_COOKIE || 'hm_cp_session',
   sessionSecret: process.env.HIVEMIND_CONTROL_PLANE_SESSION_SECRET || process.env.SESSION_SECRET || 'change-me',
@@ -654,7 +661,8 @@ async function buildAnonymousBootstrapPayload() {
     organization: null,
     onboarding: null,
     connectivity: {
-      core_api_base_url: CONFIG.coreApiBaseUrl,
+      // Browser-facing: must be publicly resolvable, not the docker hostname.
+      core_api_base_url: CONFIG.corePublicBaseUrl,
       core_health: await getCoreHealth()
     },
     client_support: ['claude', 'antigravity', 'vscode', 'remote-mcp', 'notebooklm'],

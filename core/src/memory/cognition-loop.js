@@ -150,6 +150,7 @@ export class CognitionLoop {
       select: {
         id: true, title: true, content: true, tags: true,
         memoryType: true, userId: true, project: true,
+        createdAt: true,
       },
     });
     if (recent.length < DEFAULT_CLUSTER_MIN) return 0;
@@ -165,7 +166,13 @@ export class CognitionLoop {
     let writes = 0;
     for (const [tag, members] of buckets.entries()) {
       if (members.length < DEFAULT_CLUSTER_MIN) continue;
-      if (members.length > DEFAULT_CLUSTER_MAX) members.length = DEFAULT_CLUSTER_MAX;
+      // Sort newest-first so the LLM sees the most-recent facts (which
+      // tend to dominate the emergent insight). Then split:
+      //   members        → FULL set, all get Derives edges (attribution kept)
+      //   promptMembers  → newest CLUSTER_MAX, sent to the LLM
+      members.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+      const promptMembers = members.slice(0, DEFAULT_CLUSTER_MAX);
+
       // Skip if a synthesis for this tag already ran in the last cycle.
       const recentSynth = await this.prisma.memory.findFirst({
         where: {
@@ -177,8 +184,10 @@ export class CognitionLoop {
       });
       if (recentSynth) continue;
       try {
-        const insight = await this._llmSynthesize(tag, members);
+        const insight = await this._llmSynthesize(tag, promptMembers, members.length);
         if (!insight || insight.length < 40) continue;
+        // Pass FULL `members` (not promptMembers) so every source gets a
+        // Derives edge even when the cluster exceeded the prompt cap.
         const synthMemory = await this._writeSynthMemory({
           orgId, userId: members[0].userId, project: members[0].project,
           tag, members, content: insight,
@@ -191,28 +200,34 @@ export class CognitionLoop {
     return writes;
   }
 
-  async _llmSynthesize(tag, members) {
+  async _llmSynthesize(tag, members, totalMembers = null) {
     const facts = members.map((m, i) => {
-      const c = (m.content || '').replace(/\s+/g, ' ').slice(0, 400);
-      return `[${i + 1}] ${m.title ? m.title + ' — ' : ''}${c}`;
+      const c = (m.content || '').replace(/\s+/g, ' ').slice(0, 500);
+      const ts = m.createdAt ? new Date(m.createdAt).toISOString().slice(0, 10) : 'unknown-date';
+      return `[${i + 1}] (${ts}) ${m.title ? m.title + ' — ' : ''}${c}`;
     }).join('\n');
-    const prompt = `You are observing a stream of facts the system learned about a topic. Find the SINGLE most important emergent insight that's true ACROSS these facts but NOT stated in any one of them.
+    const overflowNote = totalMembers && totalMembers > members.length
+      ? `\n(Note: ${totalMembers - members.length} older memories on this topic exist but are omitted; reason about the most-recent set.)`
+      : '';
+    const prompt = `Find the single most important EMERGENT INSIGHT across the facts below — something true across the set but not stated in any one fact alone.
 
 Topic: ${tag}
-Facts (${members.length}):
-${facts}
+Facts (${members.length}${totalMembers && totalMembers > members.length ? ` of ${totalMembers} newest-first` : ''}):
+${facts}${overflowNote}
 
 Rules:
-- Output ONE sentence of 15-40 words describing the emergent insight.
+- Output ONE sentence, 15-40 words.
+- Preserve specific entity names, dates, and numbers — never generalize them away.
+- Cite the source facts you connected using inline [N] markers (at least 2 distinct [N]).
 - Do NOT restate any single fact verbatim.
-- Connect 2+ facts. If no real connection exists, output "NO_INSIGHT".
 - Avoid hedging ("might", "could potentially"). State the inference.
-- No preamble. Just the sentence.`;
+- If no real connection exists across at least 2 facts, output exactly: NO_INSIGHT
+- No preamble. Just the sentence with its [N] markers.`;
     const raw = await chatCompletion({
       model: SYNTHESIS_MODEL,
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.2,
-      max_tokens: 200,
+      max_tokens: 300,
     });
     const txt = String(raw || '').trim();
     if (!txt || txt === 'NO_INSIGHT' || /^no[_ ]insight/i.test(txt)) return null;
@@ -221,6 +236,7 @@ Rules:
 
   async _writeSynthMemory({ orgId, userId, project, tag, members, content }) {
     const title = `Synthesis: ${tag} (${members.length} sources)`;
+    const sourceIds = members.map(m => m.id);
     // Insert directly via store so we bypass smart-routing pre-flight.
     const created = await this.prisma.memory.create({
       data: {
@@ -234,6 +250,16 @@ Rules:
         tags: ['synthesized', `topic:${tag}`, 'cognition-loop'],
         isLatest: true,
         importanceScore: 0.75,
+        // Stash the full source set on the memory row so the FE / recall
+        // can show attribution without needing to traverse Derives edges.
+        metadata: {
+          synthesized_at: new Date().toISOString(),
+          topic: tag,
+          source_count: members.length,
+          source_ids: sourceIds,
+          model: SYNTHESIS_MODEL,
+          generator: 'cognition-loop.synthesize',
+        },
         sourceMetadata: {
           create: {
             sourceType: 'cognition-loop',
@@ -285,7 +311,10 @@ Rules:
       },
       take: 500,
       orderBy: { updatedAt: 'desc' },
-      select: { id: true, userId: true, title: true, content: true, tags: true, project: true },
+      select: {
+        id: true, userId: true, title: true, content: true, tags: true,
+        project: true, createdAt: true, updatedAt: true,
+      },
     });
     if (recent.length < DRIFT_COMPACT_THRESHOLD) return 0;
 
@@ -335,32 +364,99 @@ Rules:
     return compactions;
   }
 
+  /**
+   * Build the canonical "as of today" summary for a topic cluster.
+   *
+   * Always feeds ALL members into the LLM in chunks (map-reduce):
+   *   • Small cluster (≤BATCH): single pass.
+   *   • Large cluster (>BATCH): produce one partial summary per BATCH-sized
+   *     window, then run a final reducer over the partials so every source
+   *     fact actually shapes the output. Without this, clusters >25 used to
+   *     get a Derives edge to memories the LLM had never seen.
+   */
   async _llmDriftSummary(tag, members) {
-    const facts = members.slice(0, 25).map((m, i) => {
-      const c = (m.content || '').replace(/\s+/g, ' ').slice(0, 250);
-      return `[${i + 1}] ${m.title ? m.title + ' — ' : ''}${c}`;
+    // Newest-first so the summary reflects the current state of knowledge.
+    const sorted = members.slice().sort(
+      (a, b) => new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0)
+    );
+    const BATCH = 25;
+    const formatBatch = (batch, offset) => batch.map((m, i) => {
+      const c = (m.content || '').replace(/\s+/g, ' ').slice(0, 280);
+      const ts = m.createdAt ? new Date(m.createdAt).toISOString().slice(0, 10) : 'unknown-date';
+      return `[${offset + i + 1}] (${ts}) ${m.title ? m.title + ' — ' : ''}${c}`;
     }).join('\n');
-    const prompt = `Compress ${members.length} memories on the same topic into ONE canonical summary that captures the current state of knowledge.
+
+    const singlePass = async (batch, offset, isFinal = true) => {
+      const facts = formatBatch(batch, offset);
+      const prompt = `Compress the memories below on a single topic into one canonical summary that captures the current state of knowledge.
 
 Topic: ${tag}
-Memories:
+Memories (newest first):
 ${facts}
 
 Rules:
-- Output a SINGLE paragraph (3-6 sentences, 60-180 words) describing what we currently know.
-- Resolve contradictions toward the most recent + most repeated version.
-- Drop noise / one-off mentions.
+- Output a SINGLE paragraph (3-6 sentences, 60-200 words).
+- Preserve specific entity names, dates, numbers, and identifiers verbatim — never generalize them away.
+- Resolve contradictions toward the MOST RECENT and most-repeated version; explicitly note the supersession only if material.
+- Drop one-off mentions that don't recur.
+- Use plain prose. No lists. No preamble. No "Summary:" prefix.${isFinal ? '' : '\n- This is a partial — focus on facts in THIS batch only.'}`;
+      const raw = await chatCompletion({
+        model: SYNTHESIS_MODEL,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.15,
+        max_tokens: 450,
+      });
+      return String(raw || '').trim();
+    };
+
+    // Small cluster — one pass.
+    if (sorted.length <= BATCH) {
+      return singlePass(sorted, 0, true);
+    }
+
+    // Big cluster — map (partial summaries) then reduce (final summary).
+    const partials = [];
+    for (let i = 0; i < sorted.length; i += BATCH) {
+      const batch = sorted.slice(i, i + BATCH);
+      try {
+        const p = await singlePass(batch, i, false);
+        if (p) partials.push(p);
+      } catch (err) {
+        this.logger.warn(`[cognition] drift partial batch=${i} failed: ${err.message}`);
+      }
+    }
+    if (partials.length === 0) return '';
+    if (partials.length === 1) return partials[0];
+
+    // Reducer pass — merge partials into one canonical.
+    const reducerPrompt = `Merge the partial summaries below — each was generated from a slice of memories on the same topic — into ONE canonical summary that captures the current state of knowledge across all ${sorted.length} memories.
+
+Topic: ${tag}
+Partials (newest content prioritized in the first partial):
+${partials.map((p, i) => `[P${i + 1}] ${p}`).join('\n\n')}
+
+Rules:
+- Output a SINGLE paragraph (3-6 sentences, 60-220 words).
+- Preserve specific entity names, dates, numbers, and identifiers from the partials verbatim.
+- Resolve any cross-partial conflicts toward the FIRST partial (newest).
+- Drop redundant phrasing across partials.
 - Use plain prose. No lists. No preamble.`;
-    const raw = await chatCompletion({
-      model: SYNTHESIS_MODEL,
-      messages: [{ role: 'user', content: prompt }],
-      temperature: 0.15,
-      max_tokens: 400,
-    });
-    return String(raw || '').trim();
+    try {
+      const raw = await chatCompletion({
+        model: SYNTHESIS_MODEL,
+        messages: [{ role: 'user', content: reducerPrompt }],
+        temperature: 0.12,
+        max_tokens: 500,
+      });
+      return String(raw || '').trim();
+    } catch (err) {
+      this.logger.warn(`[cognition] drift reducer failed: ${err.message} — returning first partial`);
+      return partials[0];
+    }
   }
 
   async _writeSummaryMemory({ orgId, userId, project, tag, members, content }) {
+    const sourceIds = members.map(m => m.id);
     const created = await this.prisma.memory.create({
       data: {
         id: crypto.randomUUID(),
@@ -373,6 +469,14 @@ Rules:
         tags: ['canonical-summary', `topic:${tag}`, 'cognition-loop', 'drift-compaction'],
         isLatest: true,
         importanceScore: 0.85,
+        metadata: {
+          compacted_at: new Date().toISOString(),
+          topic: tag,
+          source_count: members.length,
+          source_ids: sourceIds,
+          model: SYNTHESIS_MODEL,
+          generator: 'cognition-loop.drift-compact',
+        },
         sourceMetadata: {
           create: {
             sourceType: 'cognition-loop',

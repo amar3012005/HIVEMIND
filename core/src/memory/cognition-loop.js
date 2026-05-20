@@ -250,20 +250,21 @@ Rules:
         tags: ['synthesized', `topic:${tag}`, 'cognition-loop'],
         isLatest: true,
         importanceScore: 0.75,
-        // Stash the full source set on the memory row so the FE / recall
-        // can show attribution without needing to traverse Derives edges.
-        metadata: {
-          synthesized_at: new Date().toISOString(),
-          topic: tag,
-          source_count: members.length,
-          source_ids: sourceIds,
-          model: SYNTHESIS_MODEL,
-          generator: 'cognition-loop.synthesize',
-        },
+        // Attribution lives on the SourceMetadata relation (Memory itself
+        // has no top-level metadata column). FE / recall can read
+        // memory.sourceMetadata.metadata.source_ids to skip a graph walk.
         sourceMetadata: {
           create: {
             sourceType: 'cognition-loop',
             sourceId: `synth:${tag}:${Date.now()}`,
+            metadata: {
+              synthesized_at: new Date().toISOString(),
+              topic: tag,
+              source_count: members.length,
+              source_ids: sourceIds,
+              model: SYNTHESIS_MODEL,
+              generator: 'cognition-loop.synthesize',
+            },
           },
         },
       },
@@ -469,18 +470,18 @@ Rules:
         tags: ['canonical-summary', `topic:${tag}`, 'cognition-loop', 'drift-compaction'],
         isLatest: true,
         importanceScore: 0.85,
-        metadata: {
-          compacted_at: new Date().toISOString(),
-          topic: tag,
-          source_count: members.length,
-          source_ids: sourceIds,
-          model: SYNTHESIS_MODEL,
-          generator: 'cognition-loop.drift-compact',
-        },
         sourceMetadata: {
           create: {
             sourceType: 'cognition-loop',
             sourceId: `compact:${tag}:${Date.now()}`,
+            metadata: {
+              compacted_at: new Date().toISOString(),
+              topic: tag,
+              source_count: members.length,
+              source_ids: sourceIds,
+              model: SYNTHESIS_MODEL,
+              generator: 'cognition-loop.drift-compact',
+            },
           },
         },
       },

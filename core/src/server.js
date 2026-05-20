@@ -10361,12 +10361,50 @@ const server = http.createServer(async (req, res) => {
               if (!Array.isArray(projectIds)) return jsonResponse(res, { error: 'projectIds must be an array' }, 400);
               const token = crypto.randomUUID().replace(/-/g, '');
               const expiresAt = new Date(Date.now() + expiresInDays * 24 * 3600 * 1000);
-              const org = await prisma.organization.findUnique({ where: { id: orgId }, select: { slug: true } });
+              const org = await prisma.organization.findUnique({ where: { id: orgId }, select: { slug: true, name: true } });
               const invite = await prisma.orgInvite.create({
                 data: { orgId, email: email || null, role, token, expiresAt, createdBy: userId, teamIds, projectIds }
               });
-              
-              // Audit log
+
+              // Build the public join URL (frontend-facing).
+              const FRONTEND = process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu';
+              const joinPath = `/hivemind/join/${org?.slug || orgId}/${token}`;
+              const inviteUrl = `${FRONTEND}${joinPath}`;
+
+              // Optional email dispatch — fires only when an explicit email
+              // address is set on the invite AND a mail provider is
+              // configured (RESEND_API_KEY or SMTP_*). Failures are
+              // captured into the response, never block the invite.
+              let emailReport = { attempted: false };
+              if (email) {
+                try {
+                  const [{ sendEmail, buildInviteEmail }, projectRows, teamRows, inviter] = await Promise.all([
+                    import('./services/email-sender.js'),
+                    projectIds.length
+                      ? prisma.project.findMany({ where: { id: { in: projectIds }, orgId }, select: { name: true } })
+                      : Promise.resolve([]),
+                    teamIds.length
+                      ? prisma.team.findMany({ where: { id: { in: teamIds }, orgId }, select: { name: true } }).catch(() => [])
+                      : Promise.resolve([]),
+                    prisma.user.findUnique({ where: { id: userId }, select: { email: true } }).catch(() => null),
+                  ]);
+                  const tpl = buildInviteEmail({
+                    orgName: org?.name || 'your team',
+                    inviteUrl,
+                    inviterEmail: inviter?.email || null,
+                    projectNames: projectRows.map(p => p.name),
+                    teamNames: teamRows.map(t => t.name),
+                    role,
+                    expiresAt,
+                  });
+                  const result = await sendEmail({ to: email, subject: tpl.subject, html: tpl.html, text: tpl.text });
+                  emailReport = { attempted: true, ...result };
+                } catch (mailErr) {
+                  emailReport = { attempted: true, ok: false, error: mailErr.message };
+                }
+              }
+
+              // Audit log — includes whether email was sent.
               await writeAuditLog(prisma, {
                 userId,
                 orgId,
@@ -10374,18 +10412,20 @@ const server = http.createServer(async (req, res) => {
                 action: 'create',
                 resourceType: 'invite',
                 resourceId: invite.id,
-                metadata: { email: email || 'link-only', role, teamIds, projectIds, expiresAt },
+                metadata: { email: email || 'link-only', role, teamIds, projectIds, expiresAt, email_dispatch: emailReport },
                 ipAddress: req.headers['x-forwarded-for'] || req.socket?.remoteAddress || null,
                 userAgent: req.headers['user-agent'] || null
               });
-              
+
               return jsonResponse(res, {
                 id: invite.id,
                 token: invite.token,
-                url: `/join/${org?.slug || orgId}/${token}`,
+                url: joinPath,
+                full_url: inviteUrl,
                 expiresAt: invite.expiresAt,
                 teamIds: invite.teamIds,
-                projectIds: invite.projectIds
+                projectIds: invite.projectIds,
+                email_dispatch: emailReport,
               });
             } catch (err) {
               console.error('[team] create invite failed:', err.message);

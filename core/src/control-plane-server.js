@@ -1635,29 +1635,67 @@ const server = http.createServer(async (req, res) => {
       inviteRoles = [legacyMap[legacyRole] || legacyRole];
     }
 
-    // team_ids: optional array of team UUIDs to auto-join on accept
-    const teamIds = Array.isArray(body.team_ids) ? body.team_ids.filter(id => typeof id === 'string') : [];
+    // team_ids / project_ids — optional arrays of UUIDs to auto-join on accept.
+    const teamIds    = Array.isArray(body.team_ids)    ? body.team_ids.filter(id => typeof id === 'string')    : [];
+    const projectIds = Array.isArray(body.project_ids) ? body.project_ids.filter(id => typeof id === 'string') : [];
 
     const token = crypto.randomBytes(24).toString('hex');
-    // Keep backward-compat `role` column as the first role mapped back to legacy
     const legacyRoleReverse = inviteRoles.includes('org_owner') ? 'owner'
       : inviteRoles.includes('org_admin') ? 'admin'
       : inviteRoles[0] || 'member';
 
+    const inviteEmail = typeof body.email === 'string' && body.email.trim() ? body.email.trim().toLowerCase() : null;
+    const expiresAt   = new Date(Date.now() + 1000 * 60 * 60 * 24 * 7);
+
     const invite = await prisma.orgInvite.create({
       data: {
         orgId,
-        email: typeof body.email === 'string' && body.email.trim() ? body.email.trim().toLowerCase() : null,
+        email: inviteEmail,
         role: legacyRoleReverse,
         roles: inviteRoles,
         teamIds,
+        projectIds,
         token,
-        expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 7),
+        expiresAt,
         createdBy: current.session.userId,
       },
     });
 
-    const joinUrl = `${CONFIG.publicBaseUrl.replace(/\/$/, '')}/hivemind/join/${membership.org.slug}/${invite.token}`;
+    // Build the FE-facing join URL. Use HIVEMIND_FRONTEND_URL when set so the
+    // recipient lands on the React app, not the control-plane API host.
+    const FRONTEND_BASE = (process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu').replace(/\/$/, '');
+    const joinUrl = `${FRONTEND_BASE}/hivemind/join/${membership.org.slug}/${invite.token}`;
+
+    // Send invitation email if address provided AND a mail provider is wired.
+    let emailReport = { attempted: false };
+    if (inviteEmail) {
+      try {
+        const [{ sendEmail, buildInviteEmail }, projectRows, teamRows, inviter] = await Promise.all([
+          import('./services/email-sender.js'),
+          projectIds.length
+            ? prisma.project.findMany({ where: { id: { in: projectIds }, orgId }, select: { name: true } }).catch(() => [])
+            : Promise.resolve([]),
+          teamIds.length
+            ? prisma.team.findMany({ where: { id: { in: teamIds }, orgId }, select: { name: true } }).catch(() => [])
+            : Promise.resolve([]),
+          prisma.user.findUnique({ where: { id: current.session.userId }, select: { email: true } }).catch(() => null),
+        ]);
+        const tpl = buildInviteEmail({
+          orgName: membership.org.name || 'your team',
+          inviteUrl: joinUrl,
+          inviterEmail: inviter?.email || null,
+          projectNames: projectRows.map(p => p.name),
+          teamNames: teamRows.map(t => t.name),
+          role: legacyRoleReverse,
+          expiresAt,
+        });
+        const result = await sendEmail({ to: inviteEmail, subject: tpl.subject, html: tpl.html, text: tpl.text });
+        emailReport = { attempted: true, ...result };
+      } catch (mailErr) {
+        emailReport = { attempted: true, ok: false, error: mailErr.message };
+      }
+    }
+
     return jsonResponse(res, {
       success: true,
       invite: {
@@ -1666,10 +1704,12 @@ const server = http.createServer(async (req, res) => {
         role: invite.role,
         roles: invite.roles,
         team_ids: invite.teamIds,
+        project_ids: invite.projectIds,
         token: invite.token,
         expires_at: invite.expiresAt,
         created_at: invite.createdAt,
         join_url: joinUrl,
+        email_dispatch: emailReport,
       },
     }, 201);
   }

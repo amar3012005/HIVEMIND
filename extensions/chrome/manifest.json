@@ -1,13 +1,21 @@
 {
   "manifest_version": 3,
-  "name": "HIVEMIND — AI Memory Engine",
-  "version": "1.1.0",
-  "description": "Give your AI a perfect memory. Save web pages, auto-extract AI conversations, and recall anything instantly.",
+  "name": "HIVEMIND Chat — AI Memory + Browser Automation",
+  "version": "2.2.1",
+  "description": "AI chat with perfect memory and browser context. See everything, remember everything, do anything.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
   "permissions": [
     "activeTab",
     "storage",
     "contextMenus",
-    "scripting"
+    "scripting",
+    "tabs",
+    "debugger",
+    "sidePanel"
   ],
   "host_permissions": [
     "https://core.hivemind.davinciai.eu:8050/*",
@@ -23,20 +31,34 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_title": "HIVEMIND Chat Settings",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png"
+    }
+  },
+  "side_panel": {
+    "default_path": "side-panel.html"
   },
   "content_scripts": [
     {
-      "matches": [
-        "https://chatgpt.com/*",
-        "https://chat.openai.com/*",
-        "https://claude.ai/*",
-        "https://gemini.google.com/*"
-      ],
-      "js": ["extractors.js", "content-ai-inject.js"],
-      "run_at": "document_idle"
+      "matches": ["<all_urls>"],
+      "js": ["chat-overlay.js"],
+      "css": ["chat-overlay.css"],
+      "run_at": "document_idle",
+      "all_frames": false
     }
   ],
+  "commands": {
+    "toggle-chat": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+H",
+        "mac": "Command+Shift+H"
+      },
+      "description": "Toggle HIVEMIND chat overlay"
+    }
+  },
   "web_accessible_resources": [
     {
       "resources": ["extractors.js"],

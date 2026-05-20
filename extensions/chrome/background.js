@@ -5,7 +5,12 @@
  * 1. Context menu (right-click "Save to HIVEMIND")
  * 2. Message routing between popup/content scripts and HIVEMIND API
  * 3. Page capture and markdown conversion
+ * 4. AI chat session auto-capture (Claude, ChatGPT, Gemini, Perplexity)
  */
+
+// ── Import AI Chat Schemas ──────────────────────────────
+
+importScripts('ai-chat-schemas.js');
 
 // ── Context Menu ────────────────────────────────────────
 
@@ -21,6 +26,39 @@ chrome.runtime.onInstalled.addListener(() => {
     title: 'Save this page to HIVEMIND',
     contexts: ['page'],
   });
+  
+  console.log('[hivemind] Extension installed/updated');
+});
+
+// ── Side Panel Management ───────────────────────────────────
+
+// Open side panel when extension icon is clicked
+chrome.sidePanel
+  .setPanelBehavior({ openPanelOnActionClick: true })
+  .catch((error) => console.error('[hivemind] Side panel setup failed:', error));
+
+// Badge notification system
+let unreadCount = 0;
+
+function updateBadge(count) {
+  if (count > 0) {
+    chrome.action.setBadgeText({ text: count.toString() });
+    chrome.action.setBadgeBackgroundColor({ color: '#667eea' });
+  } else {
+    chrome.action.setBadgeText({ text: '' });
+  }
+}
+
+function clearBadge() {
+  unreadCount = 0;
+  updateBadge(0);
+}
+
+// Clear badge when side panel is opened
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name === 'side-panel') {
+    clearBadge();
+  }
 });
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
@@ -45,7 +83,21 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 
   if (info.menuItemId === 'hivemind-save-page') {
     try {
-      // Inject smart extractor + execute
+      // Check if it's an AI chat platform - use auto-capture if so
+      if (isAIChatPlatform(tab.url)) {
+        console.log('[context-menu] Detected AI chat platform, attempting auto-capture...');
+        
+        try {
+          await captureAIChatSession(tab.id, tab.url, config);
+          showBadge('✓', '#22c55e');
+          return; // Success - no need to fallback
+        } catch (aiErr) {
+          console.warn('[context-menu] AI chat capture failed, falling back to standard extraction:', aiErr.message);
+          // Fallback to standard extraction below
+        }
+      }
+      
+      // Standard page extraction (fallback for AI chats or default for other pages)
       await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['extractors.js'] });
       const results = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => smartExtract() });
       const pageContent = results[0]?.result;
@@ -59,6 +111,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
         showBadge('OK', '#22c55e');
       }
     } catch (err) {
+      console.error('[context-menu] Save page failed:', err);
       showBadge('ERR', '#ef4444');
     }
   }
@@ -101,6 +154,111 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'getConfig') {
     getConfig().then(sendResponse);
     return true;
+  }
+
+  // ── NEW: Chat & CDP Integration ────────────────────────
+
+  if (message.action === 'captureContext') {
+    handleCaptureContext(sender.tab.id).then(sendResponse).catch(err => {
+      sendResponse({ error: err.message });
+    });
+    return true;
+  }
+
+  if (message.action === 'chatMessage') {
+    handleChatMessage(message, sender.tab?.id || message.tabId).then(sendResponse).catch(err => {
+      sendResponse({ error: err.message });
+    });
+    return true;
+  }
+
+  if (message.action === 'captureAISession') {
+    // Explicit request to capture AI chat session
+    getConfig().then(async config => {
+      const tabId = message.tabId || sender.tab?.id;
+      if (!tabId) {
+        sendResponse({ error: 'No tab ID provided' });
+        return;
+      }
+      
+      const tab = await chrome.tabs.get(tabId);
+      const url = tab.url;
+      
+      if (!isAIChatPlatform(url)) {
+        sendResponse({ error: 'Not an AI chat platform' });
+        return;
+      }
+      
+      try {
+        const result = await captureAIChatSession(tabId, url, config);
+        sendResponse(result);
+      } catch (err) {
+        console.warn('[captureAISession] Failed, trying fallback extraction');
+        // Fallback to standard extraction
+        try {
+          await chrome.scripting.executeScript({ target: { tabId }, files: ['extractors.js'] });
+          const results = await chrome.scripting.executeScript({ target: { tabId }, func: () => smartExtract() });
+          const pageContent = results[0]?.result;
+          if (pageContent) {
+            await saveToHivemind(config, {
+              content: pageContent.content,
+              title: pageContent.title || tab.title,
+              tags: ['browser-extension', 'ai-chat-fallback', ...(pageContent.tags || []), `url:${url}`],
+              source: pageContent.platform || 'browser-extension',
+            });
+            sendResponse({ success: true, fallback: true });
+          } else {
+            sendResponse({ error: 'Extraction failed' });
+          }
+        } catch (fallbackErr) {
+          sendResponse({ error: fallbackErr.message });
+        }
+      }
+    });
+    return true;
+  }
+
+  if (message.action === 'executeAction') {
+    handleExecuteAction(message, sender.tab.id).then(sendResponse).catch(err => {
+      sendResponse({ error: err.message });
+    });
+    return true;
+  }
+
+  if (message.action === 'saveToMemory') {
+    getConfig().then(config => {
+      // Route through canonical memory pipeline (smart ingest router)
+      fetch(`${config.apiBase}/api/memories`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': config.apiKey,
+        },
+        body: JSON.stringify({
+          content: message.content,
+          title: message.title || 'Browser chat',
+          tags: message.tags || ['browser-chat', 'browser-extension'],
+          memory_type: 'note',
+          source_metadata: {
+            source_platform: 'browser-extension',
+            url: message.url || '',
+          },
+        }),
+      })
+      .then(r => r.json())
+      .then(sendResponse)
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    });
+    return true;
+  }
+
+  if (message.action === 'toggleChat') {
+    chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+      if (tabs[0]) {
+        chrome.tabs.sendMessage(tabs[0].id, { action: 'toggleChat' });
+      }
+    });
+    return false;
   }
 });
 
@@ -217,3 +375,651 @@ function showBadge(text, color) {
   chrome.action.setBadgeBackgroundColor({ color });
   setTimeout(() => chrome.action.setBadgeText({ text: '' }), 2000);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CDP Integration & Chat Functions (Kimi-inspired architecture)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── CDP Helper Functions ────────────────────────────────
+
+const attachedTabs = new Map(); // Track which tabs have CDP attached
+let contextCache = new Map(); // Cache contexts for 30 seconds
+
+async function attachDebugger(tabId) {
+  if (attachedTabs.has(tabId)) return;
+  
+  try {
+    await chrome.debugger.attach({ tabId }, '1.3');
+    attachedTabs.set(tabId, true);
+    
+    // Auto-detach on debugger disconnect
+    chrome.debugger.onDetach.addListener((source, reason) => {
+      if (source.tabId === tabId) {
+        attachedTabs.delete(tabId);
+      }
+    });
+  } catch (err) {
+    if (!err.message.includes('already attached')) {
+      throw err;
+    }
+  }
+}
+
+async function sendCommand(tabId, method, params = {}) {
+  await attachDebugger(tabId);
+  return new Promise((resolve, reject) => {
+    chrome.debugger.sendCommand({ tabId }, method, params, (result) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+      } else {
+        resolve(result);
+      }
+    });
+  });
+}
+
+// ── AI Chat Session Capture (CDP Automation) ────────────
+
+/**
+ * Execute fill action via CDP (contenteditable or textarea)
+ */
+async function executeFill(tabId, selector, value) {
+  try {
+    const result = await sendCommand(tabId, 'Runtime.evaluate', {
+      expression: `
+        (function() {
+          let el = document.querySelector(${JSON.stringify(selector)});
+          if (!el) return { error: 'Element not found: ${selector}' };
+          
+          el.focus();
+          
+          // Handle contenteditable
+          if (el.isContentEditable) {
+            const sel = window.getSelection();
+            if (sel) {
+              const range = document.createRange();
+              range.selectNodeContents(el);
+              sel.removeAllRanges();
+              sel.addRange(range);
+            }
+            let inserted = false;
+            try {
+              inserted = document.execCommand('insertText', false, ${JSON.stringify(value)});
+            } catch (e) {}
+            if (!inserted) {
+              el.textContent = ${JSON.stringify(value)};
+              el.dispatchEvent(new InputEvent('input', { inputType: 'insertText', data: ${JSON.stringify(value)}, bubbles: true }));
+            }
+            return { success: true, mode: 'contenteditable' };
+          }
+          
+          // Handle textarea/input
+          const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set ||
+                               Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+          if (nativeSetter) {
+            nativeSetter.call(el, ${JSON.stringify(value)});
+          } else {
+            el.value = ${JSON.stringify(value)};
+          }
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          return { success: true, mode: 'value' };
+        })()
+      `,
+      returnByValue: true,
+      awaitPromise: false,
+    });
+    
+    if (result.result?.value?.error) {
+      throw new Error(result.result.value.error);
+    }
+    
+    return result.result?.value || { success: true };
+  } catch (err) {
+    console.error('[executeFill]', err);
+    throw err;
+  }
+}
+
+/**
+ * Execute sendKeys via CDP (press Enter)
+ */
+async function executeSendKeys(tabId, key) {
+  const keyMap = {
+    'Enter': { key: 'Enter', code: 'Enter', keyCode: 13, text: '\r' },
+    'Escape': { key: 'Escape', code: 'Escape', keyCode: 27 },
+  };
+  
+  const spec = keyMap[key];
+  if (!spec) throw new Error(`Unknown key: ${key}`);
+  
+  try {
+    await sendCommand(tabId, 'Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      key: spec.key,
+      code: spec.code,
+      windowsVirtualKeyCode: spec.keyCode,
+      ...(spec.text ? { text: spec.text } : {}),
+    });
+    
+    await sendCommand(tabId, 'Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: spec.key,
+      code: spec.code,
+      windowsVirtualKeyCode: spec.keyCode,
+    });
+    
+    return { success: true };
+  } catch (err) {
+    console.error('[executeSendKeys]', err);
+    throw err;
+  }
+}
+
+/**
+ * Execute JavaScript and return result
+ */
+async function executeEvaluate(tabId, script) {
+  try {
+    const result = await sendCommand(tabId, 'Runtime.evaluate', {
+      expression: script,
+      returnByValue: true,
+      awaitPromise: true,
+    });
+    
+    if (result.exceptionDetails) {
+      throw new Error(result.exceptionDetails.text || 'Evaluation failed');
+    }
+    
+    return result.result?.value;
+  } catch (err) {
+    console.error('[executeEvaluate]', err);
+    throw err;
+  }
+}
+
+/**
+ * Wait for element to appear or change
+ */
+async function waitForNewMessage(tabId, selector, previousCount, timeout = 45000) {
+  const startTime = Date.now();
+  
+  while (Date.now() - startTime < timeout) {
+    const currentCount = await executeEvaluate(tabId, `
+      document.querySelectorAll(${JSON.stringify(selector)}).length
+    `);
+    
+    if (currentCount > previousCount) {
+      // Wait a bit more to ensure message is fully rendered
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      return true;
+    }
+    
+    await new Promise(resolve => setTimeout(resolve, 800));
+  }
+  
+  throw new Error('Timeout waiting for new message');
+}
+
+/**
+ * Capture AI chat session with auto-summary
+ */
+async function captureAIChatSession(tabId, url, config) {
+  const platform = detectAIChatPlatform(url);
+  if (!platform) {
+    throw new Error('Not an AI chat platform');
+  }
+  
+  console.log(`[ai-chat-capture] Starting capture for ${platform.name}`);
+  
+  try {
+    // Show progress
+    chrome.action.setBadgeText({ text: '🤖', tabId });
+    chrome.action.setBadgeBackgroundColor({ color: platform.color, tabId });
+    
+    // Count current messages
+    const messagesBefore = await executeEvaluate(tabId, `
+      document.querySelectorAll(${JSON.stringify(platform.selectors.messages)}).length
+    `);
+    
+    console.log(`[ai-chat-capture] Current message count: ${messagesBefore}`);
+    
+    // Try primary selector first, fallback if needed
+    let fillSuccess = false;
+    for (const selector of [platform.selectors.input, platform.selectors.inputFallback].filter(Boolean)) {
+      try {
+        await executeFill(tabId, selector, platform.summaryPrompt);
+        fillSuccess = true;
+        console.log(`[ai-chat-capture] Filled input with selector: ${selector}`);
+        break;
+      } catch (err) {
+        console.warn(`[ai-chat-capture] Fill failed for ${selector}:`, err.message);
+      }
+    }
+    
+    if (!fillSuccess) {
+      throw new Error('Failed to fill input field');
+    }
+    
+    // Wait a bit for UI to update
+    await new Promise(resolve => setTimeout(resolve, 500));
+    
+    // Submit (press Enter)
+    await executeSendKeys(tabId, 'Enter');
+    console.log('[ai-chat-capture] Submitted prompt');
+    
+    // Update badge
+    chrome.action.setBadgeText({ text: '⏳', tabId });
+    
+    // Wait for AI response (new message appears)
+    await waitForNewMessage(tabId, platform.selectors.messages, messagesBefore);
+    console.log('[ai-chat-capture] New message detected');
+    
+    // Extract summary (last AI message)
+    const summary = await executeEvaluate(tabId, platform.extraction.lastMessageScript);
+    
+    // Extract full chat history
+    const chatHistory = await executeEvaluate(tabId, platform.extraction.chatHistoryScript);
+    
+    console.log(`[ai-chat-capture] Extracted ${chatHistory?.length || 0} messages`);
+    
+    // Format content
+    const content = `## AI-Generated Summary\n\n${summary}\n\n## Full Chat History\n\n${
+      chatHistory.map((msg, i) => `### ${msg.role === 'user' ? '👤 User' : '🤖 AI'}\n\n${msg.content}`).join('\n\n---\n\n')
+    }`;
+    
+    // Save to HIVEMIND
+    await saveToHivemind(config, {
+      content,
+      title: `${platform.name} Session — ${new Date().toLocaleString()}`,
+      tags: ['ai-chat', platform.name.toLowerCase(), 'auto-summary', `url:${url}`],
+      source: platform.name.toLowerCase(),
+      source_metadata: {
+        platform: platform.name,
+        captured_at: new Date().toISOString(),
+        auto_summary: true,
+        message_count: chatHistory?.length || 0,
+      },
+    });
+    
+    // Success
+    chrome.action.setBadgeText({ text: '✅', tabId });
+    chrome.action.setBadgeBackgroundColor({ color: '#22c55e', tabId });
+    setTimeout(() => chrome.action.setBadgeText({ text: '', tabId }), 3000);
+    
+    console.log('[ai-chat-capture] Success!');
+    
+    return { success: true, platform: platform.name, messageCount: chatHistory?.length || 0 };
+    
+  } catch (err) {
+    console.error('[ai-chat-capture] Failed:', err);
+    chrome.action.setBadgeText({ text: '❌', tabId });
+    chrome.action.setBadgeBackgroundColor({ color: '#ef4444', tabId });
+    setTimeout(() => chrome.action.setBadgeText({ text: '', tabId }), 3000);
+    throw err;
+  }
+}
+
+// ── Context Capture (CDP Snapshot) ──────────────────────
+
+async function handleCaptureContext(tabId) {
+  // Check cache first
+  const cached = contextCache.get(tabId);
+  if (cached && (Date.now() - cached.timestamp < 30000)) {
+    return cached.context;
+  }
+  
+  try {
+    await attachDebugger(tabId);
+    
+    // Enable Accessibility domain
+    await sendCommand(tabId, 'Accessibility.enable');
+    
+    // Get accessibility tree
+    const { nodes } = await sendCommand(tabId, 'Accessibility.getFullAXTree');
+    
+    // Get current URL
+    const { result: urlResult } = await sendCommand(tabId, 'Runtime.evaluate', {
+      expression: 'window.location.href',
+      returnByValue: true,
+    });
+    
+    // Get page title
+    const { result: titleResult } = await sendCommand(tabId, 'Runtime.evaluate', {
+      expression: 'document.title',
+      returnByValue: true,
+    });
+    
+    // Extract readable text content (like Kimi does)
+    const { result: textResult } = await sendCommand(tabId, 'Runtime.evaluate', {
+      expression: `
+        (function() {
+          // Extract visible text from main content areas
+          const main = document.querySelector('main, article, [role="main"], .content, #content, .post, .article');
+          const target = main || document.body;
+          
+          // Get all text nodes and visible elements
+          const textContent = [];
+          const walker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT, {
+            acceptNode: function(node) {
+              const parent = node.parentElement;
+              if (!parent) return NodeFilter.FILTER_REJECT;
+              // Skip hidden elements, scripts, styles
+              if (parent.offsetParent === null || 
+                  ['SCRIPT', 'STYLE', 'NOSCRIPT', 'META', 'LINK'].includes(parent.tagName)) {
+                return NodeFilter.FILTER_REJECT;
+              }
+              const text = node.textContent.trim();
+              return text.length > 0 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+            }
+          });
+          
+          let node;
+          while (node = walker.nextNode()) {
+            const text = node.textContent.trim();
+            if (text.length > 3) textContent.push(text);
+          }
+          
+          // Deduplicate and join
+          const uniqueText = [...new Set(textContent)];
+          return uniqueText.join(' ').slice(0, 8000); // Limit to 8KB
+        })()
+      `,
+      returnByValue: true,
+    });
+    
+    // Extract interactive elements
+    const interactiveElements = extractInteractiveElements(nodes);
+    
+    // Build context object
+    const context = {
+      url: urlResult.value,
+      title: titleResult.value,
+      timestamp: new Date().toISOString(),
+      interactiveElements: interactiveElements,
+      elementCount: interactiveElements.length,
+      textContent: textResult.value || '',
+      textLength: (textResult.value || '').length,
+    };
+    
+    // Cache for 30 seconds
+    contextCache.set(tabId, {
+      context: context,
+      timestamp: Date.now(),
+    });
+    
+    return context;
+  } catch (err) {
+    console.error('[CDP] Context capture failed:', err);
+    throw new Error(`Context capture failed: ${err.message}`);
+  }
+}
+
+function extractInteractiveElements(nodes) {
+  const interactive = [];
+  const interactiveRoles = [
+    'button', 'link', 'textbox', 'searchbox', 'combobox',
+    'checkbox', 'radio', 'menuitem', 'tab', 'switch',
+  ];
+  
+  nodes.forEach((node, index) => {
+    if (!node.role) return;
+    
+    const role = node.role.value.toLowerCase();
+    if (interactiveRoles.includes(role)) {
+      interactive.push({
+        ref: `@e${interactive.length + 1}`,
+        role: role,
+        name: node.name?.value || '',
+        description: node.description?.value || '',
+        backendDOMNodeId: node.backendDOMNodeId,
+      });
+    }
+  });
+  
+  return interactive.slice(0, 100); // Limit to 100 elements
+}
+
+// ── Chat Message Handler ────────────────────────────────
+
+async function handleChatMessage(message, tabId) {
+  const config = await getConfig();
+  if (!config.apiKey) {
+    throw new Error('No API key configured. Please click the extension icon to configure your HIVEMIND API key.');
+  }
+  
+  const { message: userMessage, context, history } = message;
+  
+  // Prepare browser context summary for HIVEMIND.
+  // <METADATA> tags tell backend to ignore page context for fact extraction
+  // while still preserving it for response generation.
+  let browserContext = '';
+  if (context) {
+    browserContext = `\n\n<METADATA:BROWSER_CONTEXT>\n━━━ BROWSER PAGE CONTEXT ━━━\nThis is live browser context from the current page. Element references like [el:1] point to page elements in this tab.\n\nURL: ${context.url}\nTitle: ${context.title}\n`;
+    
+    // Add readable text content first (what the user sees)
+    if (context.textContent && context.textContent.length > 50) {
+      browserContext += `\nVisible Page Text:\n${context.textContent.slice(0, 6000)}\n`;
+    }
+    
+    // Add interactive elements for browser actions.
+    if (context.interactiveElements && context.interactiveElements.length > 0) {
+      browserContext += `\n━━━ Interactive Elements (Browser Actions) ━━━\n`;
+      const topElements = context.interactiveElements.slice(0, 15);
+      browserContext += topElements.map((el, idx) => 
+        `[el:${idx + 1}] ${el.role} - "${el.name || el.description}"`
+      ).join('\n');
+      browserContext += '\n\nTo execute browser actions: "ACTION: click [el:5]" or "ACTION: fill [el:3] with text" or "ACTION: navigate URL"';
+    }
+    browserContext += '\n</METADATA:BROWSER_CONTEXT>\n';
+  }
+  
+  // Prepend browser context so the backend can answer with page awareness.
+  const fullMessage = browserContext + '\n\n' + userMessage;
+  
+  // Call HIVEMIND chat API (/api/chat with full memory integration)
+  try {
+    const resp = await fetch(`${config.apiBase}/api/chat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': config.apiKey,
+      },
+      body: JSON.stringify({
+        message: fullMessage,
+        model: 'llama-3.3-70b-versatile',
+        browser_origin: Boolean(context),
+        history: history || [],
+      }),
+    });
+    
+    if (!resp.ok) {
+      const errorText = await resp.text();
+      throw new Error(`API error: ${resp.status} ${errorText.slice(0, 200)}`);
+    }
+    
+    const data = await resp.json();
+    
+    // Parse actions from AI response
+    const actions = parseActions(data.response, context);
+    
+    return {
+      reply: data.response,
+      sources: data.sources || [],
+      actions: actions,
+    };
+  } catch (err) {
+    throw new Error(`Chat failed: ${err.message}`);
+  }
+}
+
+// ── Action Parser ───────────────────────────────────────
+
+function parseActions(reply, context) {
+  if (!context || !reply) return [];
+  
+  // Match ACTION: <type> <target> [value]
+  // Support both @e5 and [el:5] formats.
+  const actionPattern = /ACTION:\s*(\w+)\s+((?:@e|\[el:)\d+\]?|https?:\/\/\S+|\S+)(?:\s+(.+))?/gim;
+  const actions = [];
+  let match;
+  
+  while ((match = actionPattern.exec(reply)) !== null) {
+    const [, type, target, value] = match;
+    // Normalize [el:5] -> @e5 for internal processing.
+    const normalizedTarget = target.replace(/\[el:(\d+)\]/, '@e$1');
+    actions.push({
+      type: type.toLowerCase(),
+      target: normalizedTarget,
+      value: value || '',
+    });
+  }
+  
+  return actions;
+}
+
+// ── Action Executor ─────────────────────────────────────
+
+async function handleExecuteAction(message, tabId) {
+  const { actionType, target, value } = message;
+  
+  await attachDebugger(tabId);
+  
+  try {
+    switch (actionType) {
+      case 'click':
+        return await executeClick(tabId, target);
+      case 'fill':
+        return await executeFill(tabId, target, value);
+      case 'navigate':
+        return await executeNavigate(tabId, target);
+      default:
+        throw new Error(`Unknown action type: ${actionType}`);
+    }
+  } catch (err) {
+    throw new Error(`Action execution failed: ${err.message}`);
+  }
+}
+
+async function executeClick(tabId, target) {
+  // If target is @e reference, resolve to element
+  if (target.startsWith('@e')) {
+    const cached = contextCache.get(tabId);
+    if (!cached) throw new Error('No context available, refresh page context');
+    
+    const elementRef = target;
+    const element = cached.context.interactiveElements.find(el => el.ref === elementRef);
+    if (!element) throw new Error(`Element ${elementRef} not found`);
+    
+    // Resolve backendDOMNodeId to objectId
+    const { object } = await sendCommand(tabId, 'DOM.resolveNode', {
+      backendNodeId: element.backendDOMNodeId,
+    });
+    
+    if (!object || !object.objectId) {
+      throw new Error('Could not resolve element to DOM node');
+    }
+    
+    // Scroll into view
+    await sendCommand(tabId, 'Runtime.callFunctionOn', {
+      objectId: object.objectId,
+      functionDeclaration: `function() { this.scrollIntoView({ block: 'center' }); }`,
+    });
+    
+    // Get element position
+    const { model } = await sendCommand(tabId, 'DOM.getBoxModel', {
+      objectId: object.objectId,
+    });
+    
+    if (!model || !model.content || model.content.length < 8) {
+      throw new Error('Element has no layout box');
+    }
+    
+    const [x1, y1, x2, y2, x3, y3, x4, y4] = model.content;
+    const x = (x1 + x2 + x3 + x4) / 4;
+    const y = (y1 + y2 + y3 + y4) / 4;
+    
+    // Click via CDP
+    await sendCommand(tabId, 'Input.dispatchMouseEvent', {
+      type: 'mousePressed',
+      x: x,
+      y: y,
+      button: 'left',
+      clickCount: 1,
+    });
+    
+    await sendCommand(tabId, 'Input.dispatchMouseEvent', {
+      type: 'mouseReleased',
+      x: x,
+      y: y,
+      button: 'left',
+      clickCount: 1,
+    });
+    
+    return { success: true, x: Math.round(x), y: Math.round(y) };
+  } else {
+    // CSS selector fallback
+    const { result } = await sendCommand(tabId, 'Runtime.evaluate', {
+      expression: `document.querySelector(${JSON.stringify(target)})?.click()`,
+    });
+    
+    return { success: true };
+  }
+}
+
+async function executeFill(tabId, target, value) {
+  // Similar logic to click but uses Input.insertText
+  if (target.startsWith('@e')) {
+    const cached = contextCache.get(tabId);
+    if (!cached) throw new Error('No context available');
+    
+    const element = cached.context.interactiveElements.find(el => el.ref === target);
+    if (!element) throw new Error(`Element ${target} not found`);
+    
+    const { object } = await sendCommand(tabId, 'DOM.resolveNode', {
+      backendNodeId: element.backendDOMNodeId,
+    });
+    
+    // Focus element first
+    await sendCommand(tabId, 'Runtime.callFunctionOn', {
+      objectId: object.objectId,
+      functionDeclaration: `function() { this.focus(); this.value = ''; }`,
+    });
+    
+    // Type text
+    await sendCommand(tabId, 'Input.insertText', { text: value });
+    
+    return { success: true, filled: value.length };
+  } else {
+    // CSS selector fallback
+    await sendCommand(tabId, 'Runtime.evaluate', {
+      expression: `
+        const el = document.querySelector(${JSON.stringify(target)});
+        if (el) {
+          el.focus();
+          el.value = ${JSON.stringify(value)};
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      `,
+    });
+    
+    return { success: true };
+  }
+}
+
+async function executeNavigate(tabId, url) {
+  await chrome.tabs.update(tabId, { url });
+  return { success: true, navigatedTo: url };
+}
+
+// ── Keyboard Shortcut ───────────────────────────────────
+
+chrome.commands.onCommand.addListener((command) => {
+  if (command === 'toggle-chat') {
+    chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+      if (tabs[0]) {
+        chrome.tabs.sendMessage(tabs[0].id, { action: 'toggleChat' });
+      }
+    });
+  }
+});

@@ -115,15 +115,67 @@
       background: #f0fdf4; border: 1px solid #bbf7d0;
       font-size: 9px; color: #16a34a; margin-top: 8px;
     }
+
+    /* NEW: Chat Overlay Banner */
+    .chat-banner {
+      padding: 12px 14px;
+      background: linear-gradient(135deg, #117dff 0%, #0066e0 100%);
+      color: white;
+      border-radius: 10px;
+      margin-bottom: 16px;
+      box-shadow: 0 4px 12px rgba(17, 125, 255, 0.25);
+    }
+    .chat-banner-title {
+      font-size: 13px;
+      font-weight: 700;
+      margin-bottom: 4px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .chat-banner-new {
+      display: inline-block;
+      padding: 2px 6px;
+      background: rgba(255,255,255,0.3);
+      border-radius: 4px;
+      font-size: 9px;
+      font-weight: 800;
+      letter-spacing: 0.5px;
+    }
+    .chat-banner-desc {
+      font-size: 11px;
+      opacity: 0.95;
+      margin-bottom: 8px;
+      line-height: 1.4;
+    }
+    .chat-banner-shortcut {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      background: rgba(255,255,255,0.2);
+      border: 1px solid rgba(255,255,255,0.3);
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      font-family: 'SF Mono', 'Monaco', monospace;
+      backdrop-filter: blur(10px);
+    }
+    .chat-banner-key {
+      padding: 2px 6px;
+      background: rgba(255,255,255,0.3);
+      border-radius: 4px;
+      font-size: 11px;
+    }
   </style>
 </head>
 <body>
   <!-- Header -->
   <div class="header">
-    <div class="logo">🧠</div>
+    <div class="logo"><img src="Hivemind_extension.svg" alt="HIVEMIND" style="width: 24px; height: 24px; display: block;" /></div>
     <div>
-      <div class="title">HIVEMIND</div>
-      <div class="subtitle">Memory Engine</div>
+      <div class="title">HIVEMIND Chat</div>
+      <div class="subtitle">AI Memory + Browser Automation</div>
     </div>
   </div>
 
@@ -140,6 +192,19 @@
 
   <!-- Connected View -->
   <div id="connected" class="section hidden">
+    <!-- NEW: Chat Overlay Feature Banner -->
+    <div class="chat-banner">
+      <div class="chat-banner-title">
+        💬 Chat Panel <span class="chat-banner-new">v2.1 — Glass UI</span>
+      </div>
+      <div class="chat-banner-desc">
+        AI assistant with memory + browser automation. Ask questions, get context-aware answers, automate actions.
+      </div>
+      <div class="chat-banner-shortcut">
+        ⌨️ Press <span class="chat-banner-key">⌘</span> <span class="chat-banner-key">Shift</span> <span class="chat-banner-key">H</span>
+      </div>
+    </div>
+
     <!-- Status -->
     <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 12px;">
       <div class="dot dot-green"></div>

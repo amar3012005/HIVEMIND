@@ -14546,14 +14546,14 @@ const server = http.createServer(async (req, res) => {
             }
 
             // ─── Slack action intent (Talk-to-HIVE write actions) ───
-            // Detect "send msg to #channel: 'hi'" / "react :thumbsup: ..." /
-            // "search slack for X" / "show last 20 messages in #general".
-            // Writes use 2-turn confirm (stage → user confirms → execute).
-            // Reads execute immediately. Falls through to LLM if no match.
+            // Browser-origin requests must never be interpreted as Slack actions.
+            const isBrowserOrigin = Boolean(body?.browser_origin) || /<METADATA:BROWSER_CONTEXT>/i.test(message || '');
             try {
               const { detectSlackAction, stripPendingSentinel } = await import('./connectors/providers/slack/action-detector.js');
               const lastAssistant = [...(history || [])].reverse().find(h => h.role === 'assistant')?.content || null;
-              const slackIntent = detectSlackAction(message, { lastAssistantTurn: lastAssistant });
+              const slackIntent = isBrowserOrigin
+                ? { matched: false }
+                : detectSlackAction(message, { lastAssistantTurn: lastAssistant });
 
               if (slackIntent.matched) {
                 // STAGE — write intent detected, ask user to confirm.
@@ -14678,7 +14678,12 @@ const server = http.createServer(async (req, res) => {
 
             try {
               // --- Classify user intent ---
-              const msgTrimmed = message.trim();
+              let msgTrimmed = message.trim();
+              
+              // Strip <METADATA:*> blocks for fact extraction (browser extension context)
+              // Keep them in the full message for LLM context, but don't extract as facts
+              msgTrimmed = msgTrimmed.replace(/<METADATA:[^>]*>[\s\S]*?<\/METADATA:[^>]*>/gi, '').trim();
+              
               const isQuestion = /^(what|when|where|who|how|why|do |does |did |is |are |can |could |tell me|show me|list |describe )/i.test(msgTrimmed);
               const isMetaQuery = /\b(what do you know|what have (i|you)|tell me about me|who am i|my profile|summarize my|everything about me|about myself)\b/i.test(msgTrimmed);
               const isAggregateQuery = /\b(what products|what services|list all|everything about|all .{0,20} (we|I|you) (have|know|sell|offer|make))\b/i.test(msgTrimmed);
@@ -15061,10 +15066,10 @@ const server = http.createServer(async (req, res) => {
               const voiceSection = voiceFragment ? `\n\n${voiceFragment}\n` : '';
               const displayName = assistantName || 'HIVEMIND';
               const identityLine = assistantName
-                ? `You are ${displayName} — ${orgName}'s second brain. The user gave YOU the name ${displayName}; ${displayName} is YOUR name, NOT the user's. Always introduce yourself as ${displayName} when asked "what is your name". When asked "what is MY name" or "who am I", look up the user's name from Retrieved Memories or User Profile — do NOT answer ${displayName}.`
-                : `You are HIVEMIND — this user's second brain and their organisation's collective memory.`;
+                ? `You are ${displayName}, a HIVEMIND assistant. The user gave YOU the name ${displayName}; ${displayName} is YOUR name, NOT the user's. When asked "what is your name", answer ${displayName}. When asked "what is my name" or "who am I", use Retrieved Memories or User Profile — never answer ${displayName}.`
+                : `You are HIVEMIND, the user's memory-aware assistant.`;
               const systemPrompt = `${identityLine}
-You store, connect, and recall everything the user tells you, and you speak in their voice and the organisation's voice.
+You help the user store, connect, and recall information accurately. Speak clearly and directly as HIVEMIND. Do not claim to work for any company unless the user explicitly asks about a real organisation in retrieved context.
 ${voiceSection}${profileSection}${recencyHint}${metaHint}${aggregateHint}${declarativeHint}${updateHint}
 Rules:
 - BELOW is a section called "Retrieved Memories" — ALWAYS read and use it to answer the user's question

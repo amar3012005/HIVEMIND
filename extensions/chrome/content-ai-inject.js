@@ -10,6 +10,9 @@
  */
 
 (async () => {
+  const LEGACY_AUTO_INJECT_DISABLED = true;
+  if (LEGACY_AUTO_INJECT_DISABLED) return;
+
   // ── Config ──────────────────────────────────────────────
 
   const config = await chrome.storage.local.get(['apiKey', 'apiBase']);
@@ -123,7 +126,7 @@
   function injectIndicator() {
     const indicator = document.createElement('div');
     indicator.id = 'hivemind-indicator';
-    indicator.innerHTML = '🧠';
+    indicator.innerHTML = '<img src="' + chrome.runtime.getURL('Hivemind_extension.svg') + '" alt="HIVEMIND" style="width:20px;height:20px;display:block;" />';
     indicator.title = 'HIVEMIND memory active';
     indicator.style.cssText = `
       position: fixed;
@@ -193,7 +196,7 @@
     const staticFacts = userProfile?.cognitive_profile?.static_facts || [];
 
     popup.innerHTML = `
-      <div style="font-weight:700; margin-bottom:8px; color:#0a0a0a;">🧠 HIVEMIND Active</div>
+      <div style="font-weight:700; margin-bottom:8px; color:#0a0a0a; display:flex; align-items:center; gap:8px;"><img src="${chrome.runtime.getURL('Hivemind_extension.svg')}" alt="HIVEMIND" style="width:18px;height:18px;display:block;" /> <span>HIVEMIND Active</span></div>
       <div style="color:#525252; font-size:12px; margin-bottom:8px;">
         ${memCount} memories · ${obsCount} observations
       </div>

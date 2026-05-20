@@ -2255,9 +2255,9 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
             const prisma = getPrismaClient();
             const org = await prisma.organization.findUnique({
               where: { id: orgId },
-              select: { defaultProjectPolicy: true },
+              select: { memorySavePolicy: true },
             });
-            const policy = org?.defaultProjectPolicy || 'private';
+            const policy = org?.memorySavePolicy || 'private';
             if (policy === 'ask') {
               projectPolicyHint = 'Org policy requires explicit project scope. Please call hivemind_list_projects then re-call this with project="<name>".';
             }

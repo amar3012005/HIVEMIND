@@ -3247,7 +3247,24 @@ const server = http.createServer(async (req, res) => {
         
         // Invalidate access context cache
         invalidateAccessContextCache(userId, invite.orgId);
-        
+
+        // Audit
+        await writeAuditLog(prisma, {
+          userId,
+          orgId: invite.orgId,
+          eventType: 'invite_accepted',
+          action: 'create',
+          resourceType: 'org_invite',
+          resourceId: invite.id,
+          metadata: {
+            via: 'claim-invites',
+            email: user.email,
+            role: invite.role,
+            teams_joined: teamIds.length,
+            projects_granted: projectIds.length,
+          },
+        }).catch(() => {});
+
         results.push({
           orgId: invite.orgId,
           role: invite.role,
@@ -3255,11 +3272,11 @@ const server = http.createServer(async (req, res) => {
           projectsGranted: projectIds.length
         });
       }
-      
+
       return jsonResponse(res, { claimed: results.length, orgs: results });
     } catch (err) {
       console.error('[auth] claim-invites failed:', err.message);
-      return jsonResponse(res, { error: err.message }, 500);
+      return jsonResponse(res, { error: 'Failed to claim invites' }, 500);
     }
   }
 
@@ -6348,6 +6365,40 @@ const server = http.createServer(async (req, res) => {
             return jsonResponse(res, { error: err.message }, 500);
           }
 
+        case '/api/cognition/recent':
+          // Last N synthesis + summary memories the loop produced. Read-only.
+          try {
+            const limit = Math.min(20, Math.max(1, parseInt(url.searchParams.get('limit') || '5', 10)));
+            const rows = await prisma.memory.findMany({
+              where: {
+                orgId,
+                memoryType: { in: ['synthesis', 'summary'] },
+                deletedAt: null,
+              },
+              orderBy: { createdAt: 'desc' },
+              take: limit,
+              select: {
+                id: true, title: true, content: true,
+                memoryType: true, tags: true, createdAt: true,
+              },
+            });
+            return jsonResponse(res, {
+              count: rows.length,
+              items: rows.map(r => ({
+                id: r.id,
+                title: r.title,
+                type: r.memoryType,
+                preview: (r.content || '').slice(0, 280),
+                full_chars: (r.content || '').length,
+                tags: r.tags,
+                created_at: r.createdAt,
+              })),
+            });
+          } catch (err) {
+            console.error('[cognition/recent] failed:', err.message);
+            return jsonResponse(res, { error: 'Failed to load recent cognition output' }, 500);
+          }
+
         case '/api/cognition/synthesize-now':
           // Admin-gated manual trigger — runs one tick immediately.
           if (req.method !== 'POST') break;
@@ -6387,28 +6438,37 @@ const server = http.createServer(async (req, res) => {
             try {
               const org = await prisma.organization.findUnique({
                 where: { id: orgId },
-                select: { id: true, name: true, defaultProjectPolicy: true },
+                select: { id: true, name: true, defaultProjectPolicy: true, memorySavePolicy: true },
               });
               if (!org) return jsonResponse(res, { error: 'Org not found' }, 404);
               return jsonResponse(res, {
                 org_id: org.id,
                 name: org.name,
+                // Project-access policy: who gets access when a NEW project is created.
                 default_project_policy: org.defaultProjectPolicy,
-                allowed: ['private', 'org-wide', 'ask'],
-                description: {
-                  'private': 'Memories save to caller-default project; org-wide if none.',
-                  'org-wide': 'Memories save org-wide unless caller explicitly passes a project.',
-                  'ask': 'Server hints Claude to ask which project on every save with no explicit scope.',
+                default_project_policy_allowed: ['private', 'team_inherited', 'org_visible'],
+                default_project_policy_description: {
+                  'private': 'Only the creator gets access. Add members manually.',
+                  'team_inherited': 'All members of the project\'s team get access on create.',
+                  'org_visible': 'Visible to every org member as read-only.',
+                },
+                // Memory-save policy: where MCP save_memory routes when caller omits project.
+                memory_save_policy: org.memorySavePolicy,
+                memory_save_policy_allowed: ['private', 'org-wide', 'ask'],
+                memory_save_policy_description: {
+                  'private': 'Save to caller default project; falls through to org-wide if none.',
+                  'org-wide': 'Always saves org-wide unless caller explicitly passes a project.',
+                  'ask': 'Server returns a hint asking Claude to pick a project on every save.',
                 },
               });
             } catch (err) {
-              return jsonResponse(res, { error: err.message }, 500);
+              console.error('[admin/org/policy] GET failed:', err.message);
+              return jsonResponse(res, { error: 'Failed to read org policy' }, 500);
             }
           }
           if (req.method === 'PUT') {
             try {
               // Admin gate: must be member with admin/owner role in this org.
-              // UserOrganization stores roles[] (multi-role) + role (legacy single).
               const membership = await prisma.userOrganization.findUnique({
                 where: { userId_orgId: { userId, orgId } },
                 select: { role: true, roles: true, isActive: true },
@@ -6421,23 +6481,48 @@ const server = http.createServer(async (req, res) => {
               if (!isAdmin && !principal.master) {
                 return jsonResponse(res, { error: 'admin/owner role required' }, 403);
               }
-              const policy = String(body?.default_project_policy || '').toLowerCase().trim();
-              const ALLOWED = ['private', 'org-wide', 'ask'];
-              if (!ALLOWED.includes(policy)) {
-                return jsonResponse(res, { error: `default_project_policy must be one of ${ALLOWED.join(', ')}` }, 400);
+              const PROJ_ALLOWED = ['private', 'team_inherited', 'org_visible'];
+              const MEM_ALLOWED  = ['private', 'org-wide', 'ask'];
+              const data = {};
+              if (body?.default_project_policy !== undefined) {
+                const v = String(body.default_project_policy).toLowerCase().trim();
+                if (!PROJ_ALLOWED.includes(v)) {
+                  return jsonResponse(res, { error: `default_project_policy must be one of ${PROJ_ALLOWED.join(', ')}` }, 400);
+                }
+                data.defaultProjectPolicy = v;
+              }
+              if (body?.memory_save_policy !== undefined) {
+                const v = String(body.memory_save_policy).toLowerCase().trim();
+                if (!MEM_ALLOWED.includes(v)) {
+                  return jsonResponse(res, { error: `memory_save_policy must be one of ${MEM_ALLOWED.join(', ')}` }, 400);
+                }
+                data.memorySavePolicy = v;
+              }
+              if (Object.keys(data).length === 0) {
+                return jsonResponse(res, { error: 'pass default_project_policy and/or memory_save_policy' }, 400);
               }
               const updated = await prisma.organization.update({
                 where: { id: orgId },
-                data: { defaultProjectPolicy: policy },
-                select: { id: true, defaultProjectPolicy: true },
+                data,
+                select: { id: true, defaultProjectPolicy: true, memorySavePolicy: true },
               });
+              await writeAuditLog(prisma, {
+                userId, orgId,
+                eventType: 'org_policy_changed',
+                action: 'update',
+                resourceType: 'organization',
+                resourceId: orgId,
+                newValue: data,
+              }).catch(() => {});
               return jsonResponse(res, {
                 org_id: updated.id,
                 default_project_policy: updated.defaultProjectPolicy,
+                memory_save_policy: updated.memorySavePolicy,
                 changed_by: userId,
               });
             } catch (err) {
-              return jsonResponse(res, { error: err.message }, 500);
+              console.error('[admin/org/policy] PUT failed:', err.message);
+              return jsonResponse(res, { error: 'Failed to update org policy' }, 500);
             }
           }
           break;
@@ -10429,7 +10514,11 @@ const server = http.createServer(async (req, res) => {
               return jsonResponse(res, { project, policy: effectivePolicy });
             } catch (err) {
               console.error('[team] create project failed:', err.message);
-              return jsonResponse(res, { error: err.message }, 500);
+              // Sanitize Prisma error — don't leak SQL / stack to client.
+              const code = err?.code || '';
+              if (code === 'P2002') return jsonResponse(res, { error: 'slug already exists in this org' }, 409);
+              if (code === 'P2003') return jsonResponse(res, { error: 'referenced team/org not found' }, 400);
+              return jsonResponse(res, { error: 'Failed to create project' }, 500);
             }
           }
           break;

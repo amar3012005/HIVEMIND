@@ -10366,15 +10366,16 @@ const server = http.createServer(async (req, res) => {
               });
               const effectivePolicy = policy || org?.defaultProjectPolicy || 'private';
               
-              // Create project
+              // Create project (Project.id has no @default — generate explicitly)
               const project = await prisma.project.create({
-                data: { 
-                  orgId, 
-                  name, 
-                  slug, 
-                  description: description || null, 
+                data: {
+                  id: crypto.randomUUID(),
+                  orgId,
+                  name,
+                  slug,
+                  description: description || null,
                   createdBy: userId,
-                  teamId
+                  teamId: teamId || null
                 }
               });
               

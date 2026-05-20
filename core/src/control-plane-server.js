@@ -1178,10 +1178,16 @@ const server = http.createServer(async (req, res) => {
     // Format: <stateId>.<base64_return_to> — Google passes this back unchanged
     const encodedReturnTo = Buffer.from(returnToValue).toString('base64url');
     const compositeState = `${state}.${encodedReturnTo}`;
+    // Pin the redirect URI from env so it matches the value registered in
+    // Google Cloud Console. Falls back to derived cpBase only when the
+    // env override is absent. Dynamic Host-header derivation breaks when
+    // multiple hostnames front the same service (api.* vs core.*).
     const cpBase = `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers.host}`;
+    const googleRedirectUri = process.env.HIVEMIND_GOOGLE_REDIRECT_URI
+      || `${cpBase}/auth/google/callback`;
     const googleParams = new URLSearchParams({
       client_id: googleClientId,
-      redirect_uri: `${cpBase}/auth/google/callback`,
+      redirect_uri: googleRedirectUri,
       response_type: 'code',
       scope: 'openid email profile',
       access_type: 'offline',
@@ -1229,8 +1235,11 @@ const server = http.createServer(async (req, res) => {
     }
 
     try {
-      // Exchange code for tokens
+      // Exchange code for tokens — redirect_uri MUST exactly match the one
+      // sent in the initial /auth/google authorize step (Google strict check).
       const cpBase = `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers.host}`;
+      const googleRedirectUri = process.env.HIVEMIND_GOOGLE_REDIRECT_URI
+        || `${cpBase}/auth/google/callback`;
       const tokenResp = await fetch('https://oauth2.googleapis.com/token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -1238,7 +1247,7 @@ const server = http.createServer(async (req, res) => {
           code,
           client_id: process.env.GOOGLE_CLIENT_ID,
           client_secret: process.env.GOOGLE_CLIENT_SECRET,
-          redirect_uri: `${cpBase}/auth/google/callback`,
+          redirect_uri: googleRedirectUri,
           grant_type: 'authorization_code',
         }),
       });

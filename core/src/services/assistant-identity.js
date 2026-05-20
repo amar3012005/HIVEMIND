@@ -40,24 +40,83 @@ const STOP_WORDS = new Set([
  * @returns {Promise<{name: string|null, memoryId: string|null}>}
  */
 export async function getAssistantName(store, { userId, orgId }) {
-  if (!store || !userId) return { name: null, memoryId: null };
+  if (!userId) return { name: null, memoryId: null };
+  // Direct prisma path — listMemories applies scope filters
+  // (scope=personal, primary_team_id checks) that miss assistant-name rows
+  // saved via skipProcessing. Identity is per-user, scope-irrelevant.
+  const prisma = store?.client || store?.prisma || null;
+  if (!prisma) return { name: null, memoryId: null };
   try {
-    const result = await store.listMemories({
-      tags: [ASSISTANT_NAME_TAG],
-      user_id: userId,
-      org_id: orgId,
-      limit: 5,
-      scope: 'personal',
+    const row = await prisma.memory.findFirst({
+      where: {
+        userId,
+        ...(orgId ? { orgId } : {}),
+        tags: { has: ASSISTANT_NAME_TAG },
+        deletedAt: null,
+      },
+      orderBy: [{ isLatest: 'desc' }, { createdAt: 'desc' }],
+      include: { sourceMetadata: true },
     });
-    const memories = result?.memories || [];
-    // Prefer is_latest=true; fall back to most recent.
-    const latest = memories.find(m => m.is_latest !== false) || memories[0];
-    if (!latest) return { name: null, memoryId: null };
-    const meta = latest.metadata || {};
-    const name = (meta.assistant_name || extractNameFromContent(latest.content) || '').trim();
-    return { name: name || null, memoryId: latest.id };
+    if (!row) return { name: null, memoryId: null };
+    const meta = row.sourceMetadata?.metadata || {};
+    const name = (meta.assistant_name || extractNameFromContent(row.content) || '').trim();
+    return { name: name || null, memoryId: row.id };
   } catch {
     return { name: null, memoryId: null };
+  }
+}
+
+/**
+ * Has the intro prompt already been shown to this user? Persistent
+ * sentinel — survives empty-history sessions so we never re-ask once
+ * the first turn has been delivered.
+ */
+const ONBOARDING_SHOWN_TAG = 'assistant-onboarding-shown';
+export async function hasShownOnboardingIntro(store, { userId, orgId }) {
+  if (!userId) return false;
+  const prisma = store?.client || store?.prisma || null;
+  if (!prisma) return false;
+  try {
+    const row = await prisma.memory.findFirst({
+      where: {
+        userId,
+        ...(orgId ? { orgId } : {}),
+        tags: { has: ONBOARDING_SHOWN_TAG },
+        deletedAt: null,
+      },
+      select: { id: true },
+    });
+    return !!row;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Mark the intro as shown — call right after returning the intro
+ * response so the next chat turn knows the user is mid-onboarding.
+ */
+export async function markOnboardingShown(store, { userId, orgId }) {
+  if (!userId) return;
+  const prisma = store?.client || store?.prisma || null;
+  if (!prisma) return;
+  try {
+    await prisma.memory.create({
+      data: {
+        id: (await import('crypto')).randomUUID(),
+        userId,
+        orgId: orgId || null,
+        memoryType: 'fact',
+        title: 'Assistant onboarding intro shown',
+        content: 'The HIVEMIND intro ("Got a name for me?") has been displayed to this user. Used as a one-shot sentinel.',
+        tags: [ONBOARDING_SHOWN_TAG, 'assistant-identity', 'system'],
+        isLatest: true,
+        importanceScore: 0.1,
+      },
+      select: { id: true },
+    });
+  } catch {
+    // Race: another concurrent turn may have written it. Idempotent skip.
   }
 }
 

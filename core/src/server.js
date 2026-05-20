@@ -14380,8 +14380,10 @@ const server = http.createServer(async (req, res) => {
             let assistantNameMemoryId = null;
             let orgName = 'your organisation';
             try {
-              const { getAssistantName, extractNameFromReply, buildAssistantNamePayload, ASSISTANT_IDENTITY } =
-                await import('./services/assistant-identity.js');
+              const {
+                getAssistantName, extractNameFromReply, buildAssistantNamePayload, ASSISTANT_IDENTITY,
+                hasShownOnboardingIntro, markOnboardingShown,
+              } = await import('./services/assistant-identity.js');
               if (persistentMemoryStore) {
                 const lookup = await getAssistantName(persistentMemoryStore, { userId, orgId });
                 assistantName = lookup.name;
@@ -14398,17 +14400,25 @@ const server = http.createServer(async (req, res) => {
                 } catch {}
               }
 
-              // Detect onboarding state via conversation history.
-              const lastAssistantTurn = [...(history || [])].reverse().find(h => h.role === 'assistant');
-              const wasOnboardingPrompt =
-                lastAssistantTurn &&
-                /(?:second brain|got a name for me|want to give me a name|what should i call myself|pick a name)/i.test(lastAssistantTurn.content || '');
+              // Onboarding state via PERSISTENT sentinel (not history regex):
+              //   • introShown=false, name=null  → STATE 1: ask once, mark shown
+              //   • introShown=true,  name=null  → STATE 2: parse this turn as name reply
+              //   • name=*                       → skip onboarding entirely
+              // Survives empty-history sessions / new tabs / API reconnects.
+              const introShown = persistentMemoryStore
+                ? await hasShownOnboardingIntro(persistentMemoryStore, { userId, orgId })
+                : false;
 
-              // STATE 1: no name set, no onboarding prompt yet → ask now and short-circuit.
-              if (!assistantName && !wasOnboardingPrompt) {
+              // STATE 1: no name set, intro never shown → ask now + persist sentinel.
+              if (!assistantName && !introShown) {
                 const intro =
                   `Hi — I'm ${orgName}'s second brain. I store, connect, and recall everything you and your team tell me.\n\n` +
                   `Got a name for me? Pick something short (max 32 chars). Say "skip" to use the default ("${ASSISTANT_IDENTITY.DEFAULT_NAME}").`;
+                // Persist the "intro shown" sentinel BEFORE responding so a
+                // racing follow-up turn can't re-trigger State 1.
+                if (persistentMemoryStore) {
+                  await markOnboardingShown(persistentMemoryStore, { userId, orgId });
+                }
                 return jsonResponse(res, {
                   response: intro,
                   sources: [],
@@ -14418,8 +14428,8 @@ const server = http.createServer(async (req, res) => {
                 });
               }
 
-              // STATE 2: no name set, last assistant turn was the prompt → user is replying with a name.
-              if (!assistantName && wasOnboardingPrompt) {
+              // STATE 2: no name set, intro was shown → this turn is the name reply.
+              if (!assistantName && introShown) {
                 const extracted = extractNameFromReply(message);
                 const finalName = extracted || ASSISTANT_IDENTITY.DEFAULT_NAME;
                 // Save it via the standard ingest pipeline. Skip processing so

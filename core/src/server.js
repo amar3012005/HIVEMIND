@@ -6358,12 +6358,11 @@ const server = http.createServer(async (req, res) => {
             if (!cognitionLoop) {
               return jsonResponse(res, { error: 'cognition loop not running (ENABLE_COGNITION_LOOP=true required)' }, 503);
             }
-            // Fire-and-forget — return immediately
+            // Fire-and-forget — return 202 immediately; runOnce bumps status
+            // counters so the FE sees fresh last_run after this completes.
             (async () => {
               try {
-                const synth = await cognitionLoop.synthesizeForOrg(orgId);
-                const compact = await cognitionLoop.compactDriftForOrg(orgId);
-                console.log(`[cognition] manual run org=${orgId} synth=${synth} compact=${compact}`);
+                await cognitionLoop.runOnce(orgId);
               } catch (e) {
                 console.warn('[cognition] manual run failed:', e.message);
               }

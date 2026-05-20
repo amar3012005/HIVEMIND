@@ -61,6 +61,35 @@ export class CognitionLoop {
     if (this._timer) { clearTimeout(this._timer); this._timer = null; }
   }
 
+  /**
+   * Manual single-org trigger. Same status-counter update as the auto
+   * tick — call from /api/cognition/synthesize-now so the UI sees fresh
+   * last_run / last_synthesis_count / last_compaction_count.
+   */
+  async runOnce(orgId) {
+    if (_status.running) {
+      return { skipped: true, reason: 'tick already in progress' };
+    }
+    _status.running = true;
+    const tStart = Date.now();
+    try {
+      const synth = await this.synthesizeForOrg(orgId);
+      const compact = await this.compactDriftForOrg(orgId);
+      _status.last_run_at = new Date().toISOString();
+      _status.last_run_ms = Date.now() - tStart;
+      _status.last_synthesis_count = synth;
+      _status.last_compaction_count = compact;
+      _status.next_run_at = new Date(Date.now() + this._intervalMs).toISOString();
+      this.logger.log(`[cognition] manual run org=${orgId} synth=${synth} compact=${compact} ms=${_status.last_run_ms}`);
+      return { synth, compact, ms: _status.last_run_ms };
+    } catch (err) {
+      _status.errors = [..._status.errors.slice(-9), { org_id: orgId, error: err.message, at: new Date().toISOString() }];
+      throw err;
+    } finally {
+      _status.running = false;
+    }
+  }
+
   async _tick() {
     if (_status.running) return; // re-entrancy guard
     _status.running = true;

@@ -48,16 +48,32 @@ export class GmailAdapter extends BaseProviderAdapter {
     const response = await this._gmailFetch(`/threads?${params}`, accessToken);
     const threads = response.threads || [];
 
-    // Fetch full thread details
+    // Fetch full thread details. Track 401s so we can escalate the whole
+    // sync to reauth_required when the token has clearly gone bad — without
+    // this, sync-engine receives an "empty success" and never flips status,
+    // leaving the FE stuck on Error.
     const records = [];
+    let auth401s = 0;
     for (const threadStub of threads) {
       try {
         const thread = await this._gmailFetch(`/threads/${threadStub.id}?format=full`, accessToken);
         records.push(thread);
       } catch (err) {
-        // Skip individual thread failures
-        console.warn(`[gmail-adapter] Failed to fetch thread ${threadStub.id}: ${err.message}`);
+        if (err.status === 401 || /\b401\b/.test(err.message || '')) {
+          auth401s++;
+        } else {
+          console.warn(`[gmail-adapter] Failed to fetch thread ${threadStub.id}: ${err.message}`);
+        }
       }
+    }
+
+    // If the majority of per-thread fetches 401'd, the token is dead.
+    // Throw a 401-shaped error so sync-engine catches it, attempts refresh,
+    // and on failure marks the connector reauth_required.
+    if (auth401s > 0 && (records.length === 0 || auth401s >= Math.ceil(threads.length / 2))) {
+      const e = new Error(`Gmail token rejected (${auth401s}/${threads.length} threads returned 401)`);
+      e.status = 401;
+      throw e;
     }
 
     return {
@@ -106,15 +122,22 @@ export class GmailAdapter extends BaseProviderAdapter {
       }
     }
 
-    // Fetch full threads
+    // Fetch full threads; escalate to 401 when majority of fetches die on auth.
     const records = [];
+    let auth401s = 0;
+    const total = threadIds.size;
     for (const threadId of threadIds) {
       try {
         const thread = await this._gmailFetch(`/threads/${threadId}?format=full`, accessToken);
         records.push(thread);
-      } catch {
-        // Skip
+      } catch (err) {
+        if (err.status === 401 || /\b401\b/.test(err.message || '')) auth401s++;
       }
+    }
+    if (auth401s > 0 && (records.length === 0 || auth401s >= Math.ceil(total / 2))) {
+      const e = new Error(`Gmail token rejected (${auth401s}/${total} incremental threads returned 401)`);
+      e.status = 401;
+      throw e;
     }
 
     return {

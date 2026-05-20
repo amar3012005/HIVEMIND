@@ -3169,6 +3169,14 @@ const server = http.createServer(async (req, res) => {
   // POST /api/auth/claim-invites — claim all pending email-based invites on first login
   if (pathname === '/api/auth/claim-invites' && req.method === 'POST') {
     if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    // Inline auth — this route sits above the global auth wall (intentional:
+    // first-login flow shouldn't require an existing API key principal).
+    // Bearer token is required either way to identify the user.
+    const claimAuth = await authenticateApiKey(req);
+    if (!claimAuth.ok) {
+      return setOAuthUnauthorized(res, { statusCode: claimAuth.status || 401, error: 'unauthorized', errorDescription: claimAuth.error });
+    }
+    const userId = claimAuth.principal.userId;
     try {
       // Get user's email
       const user = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } });

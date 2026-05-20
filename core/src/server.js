@@ -3234,7 +3234,7 @@ const server = http.createServer(async (req, res) => {
             projectId,
             userId,
             role: 'member',
-            grantedAt: new Date()
+            addedAt: new Date()
           }));
           await prisma.projectMember.createMany({ data: projectMemberships, skipDuplicates: true });
         }
@@ -5586,7 +5586,7 @@ const server = http.createServer(async (req, res) => {
               projectId,
               userId,
               role: 'member',
-              grantedAt: new Date()
+              addedAt: new Date()
             }));
             await prisma.projectMember.createMany({ data: projectMemberships, skipDuplicates: true });
           }
@@ -10391,7 +10391,7 @@ const server = http.createServer(async (req, res) => {
                     projectId: project.id,
                     userId: m.userId,
                     role: m.userId === userId ? 'owner' : 'member',
-                    grantedAt: new Date()
+                    addedAt: new Date()
                   }));
                   await prisma.projectMember.createMany({ data: projectMemberships, skipDuplicates: true });
                   
@@ -10407,7 +10407,7 @@ const server = http.createServer(async (req, res) => {
                     projectId: project.id,
                     userId,
                     role: 'owner',
-                    grantedAt: new Date()
+                    addedAt: new Date()
                   }
                 });
                 invalidateAccessContextCache(userId, orgId);

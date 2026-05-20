@@ -125,7 +125,18 @@ export class WorkspaceMcpBridge {
 
     if (!response.ok) {
       const text = await response.text().catch(() => '');
-      throw new Error(`workspace-mcp ${response.status}: ${text}`);
+      const err = new Error(`workspace-mcp ${response.status}: ${text}`);
+      // Surface upstream Google auth failures as proper 401s so sync-engine
+      // catches them, attempts token refresh, and on failure flips the
+      // connector to revoked/needs_reauth. Without this, every google_*
+      // connector stays stuck in 'error' with a stale token.
+      err.status = response.status;
+      err.response = { status: response.status, body: text };
+      if (response.status === 401 || /invalid_token|expired_token|token_expired|invalid_grant/i.test(text)) {
+        err.status = 401;
+        err.code = 'AUTH_REQUIRED';
+      }
+      throw err;
     }
 
     const contentType = response.headers.get('content-type') || '';
@@ -144,7 +155,13 @@ export class WorkspaceMcpBridge {
     }
 
     if (payload.error) {
-      throw new Error(`workspace-mcp tool error: ${JSON.stringify(payload.error)}`);
+      const e = new Error(`workspace-mcp tool error: ${JSON.stringify(payload.error)}`);
+      const errStr = JSON.stringify(payload.error).toLowerCase();
+      if (/invalid_token|expired_token|token_expired|invalid_grant|401|"code"\s*:\s*401/i.test(errStr)) {
+        e.status = 401;
+        e.code = 'AUTH_REQUIRED';
+      }
+      throw e;
     }
     return payload.result;
   }

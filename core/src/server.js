@@ -6326,13 +6326,19 @@ const server = http.createServer(async (req, res) => {
           }
           if (req.method === 'PUT') {
             try {
-              // Admin gate: must be member with role admin/owner in this org.
-              const membership = await prisma.organizationMembership.findFirst({
-                where: { userId, orgId, role: { in: ['admin', 'owner'] } },
-                select: { role: true },
+              // Admin gate: must be member with admin/owner role in this org.
+              // UserOrganization stores roles[] (multi-role) + role (legacy single).
+              const membership = await prisma.userOrganization.findUnique({
+                where: { userId_orgId: { userId, orgId } },
+                select: { role: true, roles: true, isActive: true },
               }).catch(() => null);
-              if (!membership && !principal.master) {
-                return jsonResponse(res, { error: 'admin role required' }, 403);
+              const memberRoles = new Set([
+                ...(membership?.role ? [membership.role] : []),
+                ...(Array.isArray(membership?.roles) ? membership.roles : []),
+              ]);
+              const isAdmin = membership?.isActive && (memberRoles.has('admin') || memberRoles.has('owner'));
+              if (!isAdmin && !principal.master) {
+                return jsonResponse(res, { error: 'admin/owner role required' }, 403);
               }
               const policy = String(body?.default_project_policy || '').toLowerCase().trim();
               const ALLOWED = ['private', 'org-wide', 'ask'];

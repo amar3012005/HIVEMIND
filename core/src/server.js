@@ -6414,22 +6414,40 @@ const server = http.createServer(async (req, res) => {
               ...(membership?.role ? [membership.role] : []),
               ...(Array.isArray(membership?.roles) ? membership.roles : []),
             ]);
-            if (!roles.has('admin') && !roles.has('owner') && !principal.master) {
-              return jsonResponse(res, { error: 'admin/owner role required' }, 403);
+            // Accept both legacy short forms (admin/owner) and the canonical
+            // long forms our invite + RBAC layer issues (org_owner/org_admin).
+            // Same bug pattern fixed in invites commit a9c61dd — keep these
+            // gates in sync until we centralise role parsing.
+            const ADMIN_ROLES = ['admin', 'owner', 'org_admin', 'org_owner'];
+            const isAdmin = ADMIN_ROLES.some(r => roles.has(r));
+            if (!isAdmin && !principal.master) {
+              return jsonResponse(res, {
+                error: 'admin/owner role required',
+                role_seen: Array.from(roles),
+              }, 403);
             }
             if (!cognitionLoop) {
               return jsonResponse(res, { error: 'cognition loop not running (set ENABLE_COGNITION_LOOP!=false and ensure prisma is wired)' }, 503);
             }
-            // Fire-and-forget — return 202 immediately; runOnce bumps status
-            // counters so the FE sees fresh last_run after this completes.
-            (async () => {
-              try {
-                await cognitionLoop.runOnce(orgId);
-              } catch (e) {
-                console.warn('[cognition] manual run failed:', e.message);
-              }
-            })();
-            return jsonResponse(res, { triggered: true, org_id: orgId });
+            // Run inline (await) so we can return the actual synth/compact
+            // counts to the FE. Previous fire-and-forget made the button
+            // look like a no-op when there were simply no eligible
+            // memories — now FE can render "0 new" instead of guessing.
+            try {
+              const result = await cognitionLoop.runOnce(orgId);
+              return jsonResponse(res, {
+                triggered: true,
+                org_id: orgId,
+                synth: result?.synth ?? 0,
+                compact: result?.compact ?? 0,
+                ms: result?.ms ?? 0,
+                skipped: result?.skipped || false,
+                reason: result?.reason || null,
+              });
+            } catch (runErr) {
+              console.warn('[cognition] manual run failed:', runErr.message);
+              return jsonResponse(res, { error: runErr.message }, 500);
+            }
           } catch (err) {
             return jsonResponse(res, { error: err.message }, 500);
           }

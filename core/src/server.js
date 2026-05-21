@@ -3480,42 +3480,67 @@ const server = http.createServer(async (req, res) => {
     // template literal alone via plain string concat.
     const body =
 `#!/usr/bin/env bash
-set -euo pipefail
+# HIVEMIND CLI bootstrap. Deliberately NOT using \`set -e\` — the
+# /dev/tty redirect can fail on hosts without a controlling terminal
+# (CI, agent harnesses) and we want the script to continue anyway,
+# just falling back to non-interactive mode.
+set -uo pipefail
+
 HIVEMIND_BASE="${base}"
 HIVEMIND_API_KEY="\${HIVEMIND_API_KEY:-${apiKey}}"
+
 if ! command -v node >/dev/null 2>&1; then
   echo "Node.js 18+ required. Install from https://nodejs.org and re-run." >&2
   exit 1
 fi
-# Download tarball to a temp dir, extract, exec the bin directly.
-# Skip npx entirely — npx silently prompts on cache misses and hangs
-# when stdin is a pipe even with -y, which broke the 'curl | bash' UX.
-# This approach: no prompts, no cache, deterministic.
+
 HIVEMIND_TMP="\$(mktemp -d 2>/dev/null || mktemp -d -t hivemind)"
-trap 'rm -rf "\$HIVEMIND_TMP"' EXIT
 TARBALL="\$HIVEMIND_TMP/hivemind-cli.tgz"
+
 echo "→ Downloading @hivemind/cli from \$HIVEMIND_BASE …"
-curl -fsSL "\$HIVEMIND_BASE/install/cli.tgz" -o "\$TARBALL"
+curl -fsSL "\$HIVEMIND_BASE/install/cli.tgz" -o "\$TARBALL" || {
+  echo "download failed" >&2; rm -rf "\$HIVEMIND_TMP"; exit 1;
+}
+
 echo "→ Extracting …"
-( cd "\$HIVEMIND_TMP" && tar xzf "\$TARBALL" )
-# npm's pack format places everything under ./package/
+( cd "\$HIVEMIND_TMP" && tar xzf "\$TARBALL" ) || {
+  echo "extract failed" >&2; rm -rf "\$HIVEMIND_TMP"; exit 1;
+}
+
 PKG_DIR="\$HIVEMIND_TMP/package"
 if [ ! -d "\$PKG_DIR" ]; then
   echo "extracted package dir not found at \$PKG_DIR" >&2
   ls -la "\$HIVEMIND_TMP" >&2
+  rm -rf "\$HIVEMIND_TMP"
   exit 1
 fi
-# CLI is zero-deps (v0.3.0+) — no npm install needed, ship straight to node.
-# Re-attach stdin/stdout/stderr to the user's TTY so the picker works
-# even when this shim was piped from curl. The redirect can fail when
-# bash has no controlling terminal (some CI setups, agent harnesses) —
-# guard with || true so 'set -e' doesn't abort the install; the CLI
-# will gracefully fall back to non-interactive mode in that case.
-if [ -e /dev/tty ]; then
-  exec </dev/tty >/dev/tty 2>/dev/tty || true
+
+echo "→ Launching …"
+
+# Run node directly (no \`exec\` replacement) so we can:
+#   - redirect this single command's stdin from /dev/tty when available,
+#     avoiding the previous \`exec </dev/tty ...\` failure on no-ctty hosts.
+#   - clean up the tmp dir after the CLI finishes.
+#
+# The \`< /dev/tty\` redirect is per-command — if /dev/tty doesn't exist
+# the redirect line will fail but we route around it with the if-branch.
+NODE_BIN="\$PKG_DIR/bin/hivemind.js"
+RC=0
+if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+  HIVEMIND_API_KEY="\$HIVEMIND_API_KEY" \\
+  HIVEMIND_ENDPOINT="\$HIVEMIND_BASE/api/mcp" \\
+    node "\$NODE_BIN" setup "\$@" </dev/tty >/dev/tty 2>/dev/tty
+  RC=\$?
+else
+  # No TTY (CI etc) — let node inherit whatever fds bash has.
+  HIVEMIND_API_KEY="\$HIVEMIND_API_KEY" \\
+  HIVEMIND_ENDPOINT="\$HIVEMIND_BASE/api/mcp" \\
+    node "\$NODE_BIN" setup "\$@"
+  RC=\$?
 fi
-exec env HIVEMIND_API_KEY="\$HIVEMIND_API_KEY" HIVEMIND_ENDPOINT="\$HIVEMIND_BASE/api/mcp" \\
-  node "\$PKG_DIR/bin/hivemind.js" setup "\$@"
+
+rm -rf "\$HIVEMIND_TMP"
+exit \$RC
 `;
     res.setHeader('Content-Type', 'text/x-shellscript; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store');

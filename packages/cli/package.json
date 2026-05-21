@@ -1,6 +1,6 @@
 {
   "name": "@hivemind/cli",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "HIVEMIND setup CLI — wires HIVEMIND MCP into Claude Desktop, Claude Code, Cursor, VS Code, Codex, Antigravity in one command.",
   "type": "module",
   "bin": {

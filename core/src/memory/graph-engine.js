@@ -1305,6 +1305,14 @@ export class MemoryGraphEngine {
     // 3. PartOf edges — outside the advisory lock since they touch different rows.
     //    We use the store directly (not in a transaction) so a failed edge doesn't
     //    roll back legit child memories. Each edge is idempotent via uuid.
+    //
+    // NOTE (2026-05-21): the Prisma RelationshipType enum currently only has
+    // [Updates, Extends, Derives, Contradicts]. PartOf isn't in the enum yet,
+    // so we encode it as `type: 'Extends'` with `metadata.subtype: 'PartOf'`
+    // and `metadata.ingest_tree: true`. The graph-cache builder and the
+    // /api/graph endpoint can render these as PartOf via the metadata flag.
+    // When the enum migration lands (extend with PartOf + Mentions), swap
+    // type back to native 'PartOf' and drop the subtype tag.
     const partOfEdgeIds = [];
     for (const childId of childIds) {
       try {
@@ -1312,12 +1320,13 @@ export class MemoryGraphEngine {
           id: uuidv4(),
           from_id: childId,
           to_id: parentId,
-          type: 'PartOf',
+          type: 'Extends',                       // TODO: 'PartOf' after enum migration
           confidence: 1.0,
           created_by: 'ingest_tree',
           created_at: nowIso(),
           metadata: {
             ingest_tree: true,
+            subtype: 'PartOf',
             parent_role: tree.parent.metadata?.semantic_role || 'document',
           },
         });

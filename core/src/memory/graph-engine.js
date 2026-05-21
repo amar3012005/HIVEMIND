@@ -1388,19 +1388,24 @@ Rules:
     console.log(`[entity-co-mention] entities=[${entities.join(',')}] links=${links.length}`);
 
     // Persist extracted entities on the parent so the FE chip can render
-    // them without another LLM pass + the retrieval layer can index them.
+    // them without another LLM pass + retrieval can filter by them.
+    //
+    // Memory model has no metadata JSONB column — we use TAGS instead:
+    //   entity:Rama, entity:Heidelberg, entity:SAP
+    // FE EntityChips reads these tags (filters tags starting with 'entity:').
+    // Filterable via /api/memories?tags=entity:Rama — first-class graph node.
     if (entities.length > 0) {
       try {
-        await store.updateMemory(baseMemory.id, {
-          metadata: {
-            ...(baseMemory.metadata || {}),
-            extracted_entities: entities,
-            extracted_entities_at: nowIso(),
-            extracted_entities_source: 'llm_post_save',
-          },
-        });
-      } catch (mdErr) {
-        console.warn('[entity-co-mention] metadata update failed:', mdErr.message);
+        const cleanEntities = entities
+          .filter(e => typeof e === 'string' && e.length > 0 && e.length < 60)
+          .map(e => `entity:${e.replace(/\s+/g, '_')}`);
+        const newTags = Array.from(new Set([
+          ...(baseMemory.tags || []),
+          ...cleanEntities,
+        ]));
+        await store.updateMemory(baseMemory.id, { tags: newTags });
+      } catch (tagErr) {
+        console.warn('[entity-co-mention] tag update failed:', tagErr.message);
       }
     }
 

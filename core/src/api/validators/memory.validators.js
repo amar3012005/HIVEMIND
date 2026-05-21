@@ -293,7 +293,14 @@ export const memoryQueryParamsSchema = z.object({
     .transform(val => parseInt(val, 10))
     .pipe(z.number().int().min(0))
     .optional()
-    .default('0')
+    .default('0'),
+
+  // Default false → hide auto-extracted child fact memories from flat list.
+  // Set ?include_children=true to surface them again (graph + audit views).
+  include_children: z.union([z.string(), z.boolean()])
+    .transform(val => val === true || val === 'true')
+    .optional()
+    .default(false)
 });
 
 /**

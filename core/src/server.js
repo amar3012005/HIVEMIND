@@ -11051,12 +11051,20 @@ exit \$RC
               user_id: userId,
               org_id: orgId
             };
-            for (const key of ['project', 'memory_type', 'tags', 'is_latest', 'limit', 'offset']) {
+            for (const key of ['project', 'memory_type', 'tags', 'is_latest', 'limit', 'offset', 'include_children']) {
               const value = url.searchParams.get(key);
               if (value !== null) {
                 queryParams[key] = value;
               }
             }
+            // Normalise include_children to a boolean — defaults to false so
+            // the flat list view stays clean of legacy 'extracted-fact'
+            // children. Set ?include_children=true to surface them again
+            // (used by graph + audit views that intentionally show them).
+            const includeChildren = (
+              queryParams.include_children === 'true' ||
+              queryParams.include_children === true
+            );
             // containerTag → project mapping (containerTag is an alias for project)
             if (!queryParams.project && effectiveContainerTag) {
               queryParams.project = effectiveContainerTag;
@@ -11089,7 +11097,8 @@ exit \$RC
               tags: parsedTags,
               is_latest: filters.is_latest,
               offset,
-              limit
+              limit,
+              include_children: includeChildren
             });
 
             return jsonResponse(res, {

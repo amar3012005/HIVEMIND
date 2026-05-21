@@ -851,7 +851,39 @@ export class MemoryGraphEngine {
           return true;
         });
         const factMemoryIds = [];
-        if (factSentences.length > 0) {
+
+        // Gate child fact-memory creation. Default OFF (2026-05-21) because
+        // it 6x-bloats the flat list view — every meaningful save spawned
+        // 5 child "Fact: ..." memories that polluted the main UI without
+        // surfacing the Extends edge that ties them together.
+        // Set MEMORY_FACT_CHILDREN_ENABLED=true to restore legacy behaviour
+        // (kept around for benchmark / Mem0-parity runs that compare child
+        // counts). When OFF we still persist the distilled facts on the
+        // parent's metadata so recall + UI can show them inline.
+        const factChildrenEnabled =
+          (process.env.MEMORY_FACT_CHILDREN_ENABLED || '').toLowerCase() === 'true';
+
+        if (!factChildrenEnabled && factSentences.length > 0) {
+          // Persist distilled facts as parent metadata instead of as
+          // separate child memories. No edges, no extra rows — but the
+          // facts remain searchable on the parent and visible in the UI
+          // via `metadata.extracted_facts.sentences`.
+          try {
+            await store.updateMemory(baseMemory.id, {
+              metadata: {
+                ...(baseMemory.metadata || {}),
+                extracted_facts: {
+                  ...(baseMemory.metadata?.extracted_facts || {}),
+                  sentences: factSentences.slice(0, 10),
+                  extracted_at: new Date().toISOString(),
+                  extraction_source: 'memory_processor',
+                },
+              },
+            });
+          } catch (mdErr) {
+            console.warn('[ingest] failed to attach extracted_facts metadata:', mdErr.message);
+          }
+        } else if (factChildrenEnabled && factSentences.length > 0) {
           for (const fact of factSentences.slice(0, 5)) { // Max 5 facts per parent (production: quality over quantity)
             const factId = crypto.randomUUID ? crypto.randomUUID() : `fact-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
             await store.createMemory({

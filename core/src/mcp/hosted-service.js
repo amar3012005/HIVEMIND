@@ -2210,7 +2210,6 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
   let resolvedProjectId = null;
   let resolvedProjectIds = [];
   let resolvedTeamId = null;
-  console.warn('[mcp:scope-trace] requestedProjectId=', requestedProjectId, 'name=', requestedProjectName, 'userId=', userId, 'orgId=', orgId, 'tool=', name);
   if (requestedProjectId && UUID_RE.test(requestedProjectId) && userId && orgId) {
     try {
       const { resolveScopedIngestPayload } = await import('../server.js');
@@ -2222,9 +2221,8 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
       resolvedProjectId = requestedProjectId;
       resolvedProjectIds = scoped.project_ids || [];
       resolvedTeamId = scoped.primary_team_id || null;
-      console.warn('[mcp:scope-trace] resolved OK scope=', scoped.scope, 'project_ids=', scoped.project_ids, 'team=', scoped.primary_team_id);
-    } catch (scopeErr) {
-      console.warn('[mcp] resolveScopedIngestPayload failed:', scopeErr?.message, scopeErr?.stack?.split('\n')[1]);
+    } catch (_ignored) {
+      // Membership validation failure — leave scope null, fall back to org-wide.
     }
   }
   const SCOPE_FIELDS = resolvedProjectId ? {

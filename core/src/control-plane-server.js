@@ -1356,10 +1356,15 @@ const server = http.createServer(async (req, res) => {
       // straight to Zitadel. Login.jsx handles 'cli_return_to' URL param and
       // uses it as the OAuth returnTo, bringing the browser back here with
       // a session cookie set.
-      const cpBase = CONFIG.corePublicBaseUrl
-        ? `${new URL(CONFIG.corePublicBaseUrl).origin}`
-        : '';
-      const selfFull = `${cpBase || ''}${req.url}`;
+      //
+      // Build the self URL from the incoming request rather than
+      // CONFIG.corePublicBaseUrl — that points at the core MCP host
+      // (core.hivemind.davinciai.eu:8050), not the control plane
+      // (api.hivemind.davinciai.eu:8040). Using the request headers means
+      // we always come back to whichever host actually answered the call.
+      const proto = (req.headers['x-forwarded-proto'] || 'https').toString().split(',')[0].trim();
+      const host = (req.headers['x-forwarded-host'] || req.headers.host || '').toString();
+      const selfFull = `${proto}://${host}${req.url}`;
       const feLoginUrl = `${defaultFrontendBaseUrl}/hivemind/login?cli_return_to=${encodeURIComponent(selfFull)}`;
       return redirect(res, feLoginUrl);
     }
@@ -1410,7 +1415,8 @@ const server = http.createServer(async (req, res) => {
   // the real token, without ever having it in the FE's URL bar.
   // Single-use — once consumed the code is invalidated.
   if (pathname === '/auth/cli/exchange' && req.method === 'POST') {
-    const code = (body?.code || '').toString();
+    const reqBody = await parseBody(req).catch(() => null);
+    const code = (reqBody?.code || '').toString();
     if (!code) {
       return jsonResponse(res, { error: 'code required' }, 400);
     }

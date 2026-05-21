@@ -13,6 +13,13 @@ import { CLIENTS, findClient } from './clients/index.js';
 import { DEFAULT_ENDPOINT } from './lib/config.js';
 import { printBanner } from './lib/banner.js';
 import { verifyEndpoint } from './lib/verify.js';
+import { browserLogin } from './lib/browser-auth.js';
+
+// Default control plane (browser-auth UI host). The MCP endpoint
+// (DEFAULT_ENDPOINT) lives on a different subdomain — control plane handles
+// auth + session keys, core handles MCP RPC.
+const DEFAULT_CONTROL_PLANE =
+  process.env.HIVEMIND_CONTROL_PLANE || 'https://hivemind.davinciai.eu';
 
 export async function main(argv) {
   const args = parseArgs(argv);
@@ -32,6 +39,8 @@ export async function main(argv) {
   switch (cmd) {
     case 'setup':
       return cmdSetup(args);
+    case 'login':
+      return cmdLogin(args);
     case 'verify':
       return cmdVerify(args);
     case 'list':
@@ -97,16 +106,40 @@ async function cmdSetup(args) {
     process.exit(1);
   }
 
+  // Auth resolution priority:
+  //   1. explicit --api-key flag (highest, scriptable)
+  //   2. $HIVEMIND_API_KEY env
+  //   3. browser handshake (gh-style) — default for interactive humans
+  //   4. paste-key fallback when --no-browser is set or browser fails
   let apiKey = args.flags['api-key'] || process.env.HIVEMIND_API_KEY;
+  let userEmail = null;
+
   if (!apiKey) {
-    const ans = await prompts({
-      type: 'password',
-      name: 'apiKey',
-      message: 'Paste your HIVEMIND API key (find one at hivemind.davinciai.eu → Settings → API Keys):',
-      validate: (v) => (v && v.length > 8 ? true : 'API key looks too short'),
-    });
-    apiKey = ans.apiKey;
-    if (!apiKey) return;
+    const controlPlane = args.flags['control-plane'] || DEFAULT_CONTROL_PLANE;
+    const noBrowser = args.flags['no-browser'] === true || args.flags['no-browser'] === 'true';
+
+    if (!noBrowser) {
+      try {
+        const result = await browserLogin({ controlPlane });
+        apiKey = result.token;
+        userEmail = result.userEmail;
+        if (userEmail) console.log(kleur.green('✓') + ` Signed in as ${kleur.bold(userEmail)}`);
+      } catch (err) {
+        console.log(kleur.yellow('!') + ` Browser sign-in failed: ${err.message}`);
+        console.log(kleur.dim('  Falling back to manual API key paste — get one at ' + controlPlane + '/hivemind/app/settings/api-keys'));
+      }
+    }
+
+    if (!apiKey) {
+      const ans = await prompts({
+        type: 'password',
+        name: 'apiKey',
+        message: 'Paste your HIVEMIND API key:',
+        validate: (v) => (v && v.length > 8 ? true : 'API key looks too short'),
+      });
+      apiKey = ans.apiKey;
+      if (!apiKey) return;
+    }
   }
 
   console.log('');
@@ -141,6 +174,31 @@ async function cmdSetup(args) {
 
   if (args.flags.json) {
     console.log(JSON.stringify({ client: clientId, ok: ver.ok, toolCount: ver.toolCount || 0 }));
+  }
+}
+
+// `hivemind login` — browser handshake without installing a client.
+// Prints the resulting key + minimal env-var snippet so users can paste
+// it into shell rc files or re-use for `hivemind verify`.
+async function cmdLogin(args) {
+  printBanner();
+  const controlPlane = args.flags['control-plane'] || DEFAULT_CONTROL_PLANE;
+  try {
+    const { token, userEmail } = await browserLogin({ controlPlane });
+    if (userEmail) console.log(kleur.green('✓') + ` Signed in as ${kleur.bold(userEmail)}`);
+    if (args.flags.json) {
+      console.log(JSON.stringify({ ok: true, token, userEmail }));
+    } else {
+      console.log('');
+      console.log(kleur.bold('Your HIVEMIND API key (treat like a password):'));
+      console.log('  ' + token);
+      console.log('');
+      console.log(kleur.dim('Add to your shell to skip this step next time:'));
+      console.log(kleur.dim('  export HIVEMIND_API_KEY="' + token + '"'));
+    }
+  } catch (err) {
+    console.log(kleur.red('✗') + ' Login failed: ' + err.message);
+    process.exit(1);
   }
 }
 
@@ -187,15 +245,18 @@ function printHelp() {
 ${kleur.bold('hivemind')} — wire HIVEMIND MCP into your AI tools
 
 ${kleur.bold('Usage:')}
-  npx @hivemind/cli setup              ${kleur.dim('# interactive picker')}
+  npx @hivemind/cli setup              ${kleur.dim('# interactive picker — opens browser to sign in')}
   npx @hivemind/cli setup claude-code  ${kleur.dim('# install for a specific client')}
+  npx @hivemind/cli login              ${kleur.dim('# just open browser, print key (gh-style)')}
   npx @hivemind/cli verify             ${kleur.dim('# check endpoint + API key')}
   npx @hivemind/cli list               ${kleur.dim('# show every supported client')}
 
 ${kleur.bold('Flags:')}
-  --api-key <key>     ${kleur.dim('HIVEMIND API key (or set $HIVEMIND_API_KEY)')}
-  --endpoint <url>    ${kleur.dim('override HIVEMIND MCP URL')}
-  --json              ${kleur.dim('emit JSON result on stdout for scripts')}
+  --api-key <key>           ${kleur.dim('skip browser, use this key (or $HIVEMIND_API_KEY)')}
+  --no-browser              ${kleur.dim('disable browser login, force paste-key prompt')}
+  --control-plane <url>     ${kleur.dim('override hivemind.davinciai.eu host (self-hosted)')}
+  --endpoint <url>          ${kleur.dim('override MCP URL (self-hosted core)')}
+  --json                    ${kleur.dim('emit JSON result on stdout for scripts')}
 
 ${kleur.bold('Clients:')}
   claude-code         ${kleur.dim('Anthropic CLI (claude mcp add)')}

@@ -1316,6 +1316,71 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // ─── CLI browser-auth handshake ─────────────────────────────
+  // GET /auth/cli/start?callback=<localhost-url>&state=<rand>
+  //
+  // Used by @hivemind/cli to swap user-paste-key for a one-click
+  // browser login (same UX as `gh auth login --web` / `vercel login`):
+  //
+  //   1. CLI starts http://127.0.0.1:<rand-port>/callback listener
+  //   2. CLI opens browser to /auth/cli/start?callback=...&state=...
+  //   3. If user not logged in: bounce through /auth/login?return_to=...
+  //   4. After auth, mint (or reuse) the auto-session API key and
+  //      302 to the callback with ?state=<echo>&token=<key>&user_email=...
+  //   5. CLI extracts token, kills server, writes config
+  //
+  // Security:
+  //   - Callback MUST be a 127.0.0.1 / localhost URL. Anything else is
+  //     rejected so the token can never leak to an external host.
+  //   - State echoed back so the CLI listener can CSRF-check the
+  //     incoming request.
+  //   - Same revocable API key the FE uses — revoked from the same
+  //     keys UI if the user wants.
+  if (pathname === '/auth/cli/start' && req.method === 'GET') {
+    const callback = url.searchParams.get('callback') || '';
+    const state = url.searchParams.get('state') || '';
+    if (!callback || !state) {
+      return jsonResponse(res, { error: 'callback and state required' }, 400);
+    }
+    // Localhost-only — prevents token exfiltration to external sites.
+    let parsedCb;
+    try { parsedCb = new URL(callback); } catch { return jsonResponse(res, { error: 'invalid callback URL' }, 400); }
+    const cbHost = parsedCb.hostname;
+    if (cbHost !== '127.0.0.1' && cbHost !== 'localhost' && cbHost !== '::1') {
+      return jsonResponse(res, { error: 'callback must be 127.0.0.1/localhost — refusing to redirect token to remote host' }, 400);
+    }
+
+    const current = await getCurrentSession(req);
+    if (!current) {
+      // Not logged in — bounce through Zitadel + come back here.
+      const selfPath = req.url;
+      return redirect(res, `/auth/login?return_to=${encodeURIComponent(selfPath)}`);
+    }
+
+    const userId = current.session.userId;
+    const { org } = await resolveCurrentOrg(userId);
+    if (!org) {
+      // Edge case: legit user with no org yet — finish onboarding first,
+      // then come back. We pass the same URL via return_to.
+      const selfPath = req.url;
+      return redirect(res, `${CONFIG.postLoginRedirect || '/'}?cli_pending=1&return_to=${encodeURIComponent(selfPath)}`);
+    }
+
+    const apiKey = await getOrCreateSessionKey(userId, org.id);
+    if (!apiKey) {
+      return jsonResponse(res, { error: 'failed to mint API key' }, 500);
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } }).catch(() => null);
+    const cbUrl = new URL(callback);
+    cbUrl.searchParams.set('state', state);
+    cbUrl.searchParams.set('token', apiKey);
+    cbUrl.searchParams.set('user_id', userId);
+    if (user?.email) cbUrl.searchParams.set('user_email', user.email);
+    cbUrl.searchParams.set('org_id', org.id);
+    return redirect(res, cbUrl.toString());
+  }
+
   // ─── Zitadel SSO Login ──────────────────────────────────────
   if (pathname === '/auth/login' && req.method === 'GET') {
     if (!zitadelClient) {
@@ -1771,8 +1836,24 @@ const server = http.createServer(async (req, res) => {
       include: { org: true },
     });
 
-    if (!invite || invite.usedAt) {
+    if (!invite) {
       return jsonResponse(res, { error: 'Invite not found' }, 404);
+    }
+    // Already-used invite: treat re-visit by the SAME user (or any user
+    // already in the org) as success, not a 404 — they're already in.
+    if (invite.usedAt) {
+      const existing = await prisma.userOrganization.findFirst({
+        where: { userId: current.session.userId, orgId: invite.orgId, isActive: true },
+      });
+      if (existing) {
+        return jsonResponse(res, {
+          success: true,
+          already_member: true,
+          organization: invite.org ? { id: invite.org.id, name: invite.org.name, slug: invite.org.slug } : null,
+          roles: existing.roles,
+        });
+      }
+      return jsonResponse(res, { error: 'Invite already used' }, 410);
     }
     if (invite.expiresAt.getTime() < Date.now()) {
       return jsonResponse(res, { error: 'Invite expired' }, 410);
@@ -1814,6 +1895,24 @@ const server = http.createServer(async (req, res) => {
           update: {},
           create: { teamId, userId: current.session.userId, role: 'member', addedById: invite.createdBy },
         }).catch(() => null); // silently skip if team doesn't exist
+      }
+    }
+
+    // Auto-add to invited projects (project_ids was previously silently dropped here)
+    const projectIds = Array.isArray(invite.projectIds) ? invite.projectIds : [];
+    if (projectIds.length > 0) {
+      for (const projectId of projectIds) {
+        // ProjectMember has composite PK (projectId, userId) — no `id` column
+        await prisma.projectMember.upsert({
+          where: { projectId_userId: { projectId, userId: current.session.userId } },
+          update: {},
+          create: {
+            projectId,
+            userId: current.session.userId,
+            role: 'member',
+            addedById: invite.createdBy,
+          },
+        }).catch(() => null);
       }
     }
 
@@ -3702,7 +3801,9 @@ const server = http.createServer(async (req, res) => {
             orgId: current.session.orgId,
             teamIds,
           });
-      return jsonResponse(res, { employees });
+      const { enrichEmployeesWithHyperState } = await import('./employees/hyper-state.js');
+      const enrichedEmployees = await enrichEmployeesWithHyperState(employees);
+      return jsonResponse(res, { employees: enrichedEmployees });
     } catch (err) {
       return jsonResponse(res, { error: err.message }, 500);
     }
@@ -3782,7 +3883,9 @@ const server = http.createServer(async (req, res) => {
         newValue: { name: emp.name, slug: emp.slug, scope: emp.scope, model: emp.model },
         ..._reqMeta(req),
       });
-      return jsonResponse(res, { employee: emp }, 201);
+      const { enrichEmployeeWithHyperState } = await import('./employees/hyper-state.js');
+      const enriched = await enrichEmployeeWithHyperState(emp);
+      return jsonResponse(res, { employee: enriched }, 201);
     } catch (err) {
       return jsonResponse(res, { error: err.message }, 500);
     }
@@ -3807,6 +3910,7 @@ const server = http.createServer(async (req, res) => {
       const rows = await store.listForBootstrap({});
       const { decryptToken } = await import('./connectors/framework/connector-store.js');
       const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
+      const { enrichEmployeeWithHyperState } = await import('./employees/hyper-state.js');
       const connStore = new ConnectorStore(prisma);
 
       const out = [];
@@ -3821,7 +3925,7 @@ const server = http.createServer(async (req, res) => {
             slackBotToken = await connStore.getAccessToken(r.createdBy, 'slack');
           } catch {}
         }
-        out.push({
+        const baseEmployee = {
           id: r.id,
           slug: r.slug,
           name: r.name,
@@ -3844,7 +3948,8 @@ const server = http.createServer(async (req, res) => {
           api_key: apiKey,
           slack_bot_token: slackBotToken,
           created_by: r.createdBy,
-        });
+        };
+        out.push(await enrichEmployeeWithHyperState(baseEmployee));
       }
       return jsonResponse(res, { employees: out, generated_at: new Date().toISOString() });
     } catch (err) {
@@ -3902,7 +4007,8 @@ const server = http.createServer(async (req, res) => {
 
     // GET /v1/employees/:id
     if (!sub && req.method === 'GET') {
-      return jsonResponse(res, emp);
+      const { enrichEmployeeWithHyperState } = await import('./employees/hyper-state.js');
+      return jsonResponse(res, await enrichEmployeeWithHyperState(emp));
     }
 
     // PATCH /v1/employees/:id
@@ -3918,7 +4024,8 @@ const server = http.createServer(async (req, res) => {
           resourceType: 'digital_employee', resourceId: empId,
           newValue: body, ..._reqMeta(req),
         });
-        return jsonResponse(res, { employee: updated });
+        const { enrichEmployeeWithHyperState } = await import('./employees/hyper-state.js');
+        return jsonResponse(res, { employee: await enrichEmployeeWithHyperState(updated) });
       } catch (err) {
         return jsonResponse(res, { error: err.message }, 500);
       }
@@ -3954,7 +4061,8 @@ const server = http.createServer(async (req, res) => {
           resourceType: 'digital_employee', resourceId: empId,
           ..._reqMeta(req),
         });
-        return jsonResponse(res, { employee: updated });
+        const { enrichEmployeeWithHyperState } = await import('./employees/hyper-state.js');
+        return jsonResponse(res, { employee: await enrichEmployeeWithHyperState(updated) });
       } catch (err) {
         return jsonResponse(res, { error: err.message }, 500);
       }
@@ -3972,7 +4080,8 @@ const server = http.createServer(async (req, res) => {
           resourceType: 'digital_employee', resourceId: empId,
           ..._reqMeta(req),
         });
-        return jsonResponse(res, { employee: updated });
+        const { enrichEmployeeWithHyperState } = await import('./employees/hyper-state.js');
+        return jsonResponse(res, { employee: await enrichEmployeeWithHyperState(updated) });
       } catch (err) {
         return jsonResponse(res, { error: err.message }, 500);
       }
@@ -3983,7 +4092,8 @@ const server = http.createServer(async (req, res) => {
     if (sub === 'runtime-config' && req.method === 'GET') {
       const cfg = await store.getRuntimeConfig({ id: empId });
       if (!cfg) return jsonResponse(res, { error: 'Not found' }, 404);
-      return jsonResponse(res, cfg);
+      const { enrichEmployeeWithHyperState } = await import('./employees/hyper-state.js');
+      return jsonResponse(res, await enrichEmployeeWithHyperState(cfg));
     }
 
     return jsonResponse(res, { error: 'Not found' }, 404);

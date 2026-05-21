@@ -11392,11 +11392,35 @@ exit \$RC
               });
               const syncResults = [];
               for (const p of ingestPayloads) {
-                const result = await persistentMemoryEngine.ingestMemory(p);
+                const result = await ingestRoutedPayload(p, persistentMemoryEngine);
 
                 // Handle predict-calibrate skipped memories
                 if (result.operation === 'skipped_redundant') {
                   syncResults.push({ skipped: true, ...result });
+                  continue;
+                }
+
+                // Tree path returns aggregated parent + children. Flatten so
+                // the post-ingest Qdrant + pageindex loop runs on every row.
+                if (result.operation === 'tree_ingested') {
+                  const allRows = [
+                    result.parentResult || { memoryId: result.parentId },
+                    ...(result.childResults || []),
+                  ];
+                  for (const r of allRows) {
+                    syncResults.push(r);
+                    const m = await persistentMemoryStore.getMemory(r.memoryId);
+                    if (m) {
+                      await qdrantClient.storeMemory(m, {
+                        collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT'
+                      });
+                      invalidateAggregateCache({ userId, orgId, project: m.project || null });
+                      invalidateAggregateCache({ userId, orgId, project: null });
+                      pageindexHook?.onMemoryIngested(m, {
+                        mutation: { operation: r.operation || 'tree_child', deprecatedIds: r.deprecatedIds || [] }
+                      }).catch(err => console.warn('[pageindex-hook] onMemoryIngested failed:', err.message));
+                    }
+                  }
                   continue;
                 }
 

@@ -223,7 +223,47 @@ export async function runReactAgent({
   if (!message) throw new Error('message required');
 
   const today = new Date().toISOString().slice(0, 10);
-  const systemPrompt = buildSystemPrompt({ assistantName, orgName, today });
+  let systemPrompt = buildSystemPrompt({ assistantName, orgName, today });
+
+  // Browser-context awareness: when the user asks a question about a
+  // page selection / section / whole-page text the chrome extension wraps
+  // the content in <METADATA:SELECTION>/SECTION/BROWSER_CONTEXT tags
+  // before forwarding. The agent should NOT shortcut to a direct answer
+  // even though the system prompt's 'ANSWER DIRECTLY' rule normally allows
+  // it for self-contained questions — the user expects HIVEMIND to first
+  // pull related prior memories about the entities in the selection.
+  const hasBrowserContext =
+    /<METADATA:(SELECTION|SECTION|BROWSER_CONTEXT)>/i.test(message || '');
+  if (hasBrowserContext) {
+    systemPrompt += `\n\n═══════════════════════════════════════════════════════════════════
+BROWSER CONTEXT IS PINNED
+═══════════════════════════════════════════════════════════════════
+
+The user's message includes a <METADATA:SELECTION> / SECTION /
+BROWSER_CONTEXT block. This is text the user highlighted (or the page
+they're reading) inside the chrome extension. They want you to answer
+ABOUT that block.
+
+Mandatory two-step flow for this turn:
+
+  STEP 1 — RECALL. Call hivemind_recall ONCE with a query built from
+           the most distinctive nouns / names / phrases inside the
+           pinned context. Even if the context looks self-explanatory.
+           This is non-negotiable: the user already has the text in
+           front of them — your value is connecting it to their prior
+           memories, not paraphrasing.
+
+  STEP 2 — ANSWER. Combine the pinned text + recalled memories +
+           your knowledge. Reference recalled facts explicitly when
+           they're relevant. If recall returned 0 memories, say so:
+           "I don't have prior notes on this — based on the page
+           itself, [your analysis]."
+
+Do NOT call hivemind_save_memory just to log the question. The
+auto-save in /api/chat already persists the turn as a conversation
+memory. Save only if the user explicitly asks you to remember
+something new.`;
+  }
 
   const messages = [
     { role: 'system', content: systemPrompt },

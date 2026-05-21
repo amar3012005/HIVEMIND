@@ -15417,7 +15417,11 @@ ${injectionText}`;
                   const chatFactPayload = {
                     content: factContent,
                     title: factTitle,
-                    tags: ['chat', 'talk-to-hive', 'extracted-fact'],
+                    // 'extracted-fact' tag was removed (2026-05-21) — chat
+                    // ingests are top-level memories, NOT children of a
+                    // parent doc. Keeping the tag here made the new
+                    // listMemories exclusion swallow legit chat saves.
+                    tags: ['chat', 'talk-to-hive'],
                     memory_type: 'fact',
                     user_id: userId,
                     org_id: orgId,

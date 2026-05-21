@@ -1,0 +1,43 @@
+{
+  "name": "@hivemind/cli",
+  "version": "0.1.0",
+  "description": "HIVEMIND setup CLI — wires HIVEMIND MCP into Claude Desktop, Claude Code, Cursor, VS Code, Codex, Antigravity in one command.",
+  "type": "module",
+  "bin": {
+    "hivemind": "./bin/hivemind.js"
+  },
+  "main": "./src/index.js",
+  "files": [
+    "bin/",
+    "src/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node ./bin/hivemind.js",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "kleur": "^4.1.5",
+    "prompts": "^2.4.2"
+  },
+  "keywords": [
+    "hivemind",
+    "mcp",
+    "claude",
+    "cursor",
+    "vscode",
+    "codex",
+    "memory",
+    "cli"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/amar3012005/HIVEMIND.git",
+    "directory": "packages/cli"
+  },
+  "license": "MIT",
+  "author": "HIVEMIND"
+}

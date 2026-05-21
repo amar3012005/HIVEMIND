@@ -18,20 +18,9 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-// Stopwords for the entity co-mention linker. Skip these capitalized
-// tokens because they're sentence-initial English, not proper nouns.
-// Keep short — exhaustive lists hurt recall on legit names like "The
-// Hague" or "Of Mice and Men" (we'd rather take a noise hit there).
-const STOPWORDS = new Set([
-  'the','a','an','is','are','was','were','be','been','being',
-  'i','you','he','she','it','we','they','me','him','her','us','them',
-  'this','that','these','those','my','your','his','its','our','their',
-  'and','or','but','so','if','then','than','also',
-  'in','on','at','of','to','by','for','from','with','about','as',
-  'today','yesterday','tomorrow','now','later','before','after',
-  'yes','no','ok','okay','sure','please','thanks','thank',
-  'how','what','when','where','why','who','which',
-]);
+// STOPWORDS removed (2026-05-21) — replaced by LLM-based entity linker
+// which handles coreference/pronouns/cross-cultural names without
+// needing a curated stoplist. See _attachEntityCoMentionEdges.
 
 /**
  * Heuristic fact extraction fallback — used when LLM extraction returns too few facts.
@@ -388,6 +377,11 @@ export class MemoryGraphEngine {
       return transactionalStore.transaction(async store => {
         const latestMemories = await store.listLatestMemories(baseMemory);
 
+        // Hoisted so the post-save entity-link LLM step can re-use the
+        // recall set instead of re-querying. Populated inside the
+        // smart-ingest block below.
+        let recallSimilar = [];
+
         // --- Smart Ingest: search-first duplicate/update detection ---
         // Uses Qdrant semantic vector search when available (finds paraphrased/reformulated
         // memories that keyword search misses), falls back to FTS otherwise.
@@ -449,6 +443,10 @@ export class MemoryGraphEngine {
                 is_latest: true,
               });
             }
+
+            // Stash for the post-save LLM entity-linker so it doesn't
+            // re-query Qdrant. Keeps the canonical pipeline single-fetch.
+            recallSimilar = similar;
 
             // Use lower threshold for Qdrant (0.65) vs FTS (0.85) — vector scores
             // are calibrated differently and semantically meaningful at lower values
@@ -985,7 +983,7 @@ export class MemoryGraphEngine {
         // ALL ingest paths (chat, MCP, KB, connectors) producing
         // entity-rich graphs without per-callsite wiring.
         try {
-          await this._attachEntityCoMentionEdges(baseMemory, store);
+          await this._attachEntityCoMentionEdges(baseMemory, store, recallSimilar);
         } catch (entityErr) {
           // Non-fatal — entity linking is best-effort enrichment.
           console.warn('[entity-co-mention] failed:', entityErr.message);
@@ -1287,140 +1285,172 @@ export class MemoryGraphEngine {
    * legacy flat-array routes still hit ingestMemory() per payload unchanged.
    */
   /**
-   * Post-save entity co-mention linker.
+   * Post-save entity co-mention linker — LLM-driven, recall-first.
    *
-   * Why: vector + regex similarity miss entity-based links. "We recovered
-   * from that fight, I promised her to be better" has 0 token overlap with
-   * "Argument with Rama escalated" but they share the entity Rama. To
-   * surface that link we:
+   * Why LLM: regex/stopword extraction misses pronouns ('she'),
+   * paraphrased references ('my partner' → Rama), and cross-cultural
+   * names. The recall step already fetched the top-K semantically similar
+   * memories; we hand them to a 70B model with the new content and ask
+   * for structured entity links.
    *
-   *   1. Pull proper-noun candidates from the new memory's content
-   *      (regex first, optional LLM polish via EntityExtractor).
-   *   2. For each candidate, find ≤3 OTHER recent memories from the same
-   *      user whose content or tags mention the same name.
-   *   3. Write a Mentions edge: new memory → existing memory, with the
-   *      entity name on the edge metadata so retrieval can explain why.
+   * Flow:
+   *   1. Use the `similar` array already produced by Qdrant vector search
+   *      (passed in from ingestMemory). If empty, do nothing.
+   *   2. ONE LLM call (llama-3.3-70b-versatile, JSON mode):
+   *        input  = new memory + indexed candidates
+   *        output = { entities, links: [{ index, entity, confidence, reason }] }
+   *   3. Persist entities[] on baseMemory.metadata.extracted_entities so the
+   *      FE chip renderer can show them without a second LLM pass.
+   *   4. Write up to 3 Mentions edges (confidence >= 0.55).
    *
-   * Runs ASYNC after the parent ingest completes. Never blocks the save
-   * path — best-effort enrichment. Gated by MEMORY_ENTITY_LINKING env
-   * (default 'true' so production gets it; set to 'false' for benchmarks
-   * that need deterministic edge counts).
+   * Gated by MEMORY_ENTITY_LINKING (default 'true'). Soft-fails if
+   * GROQ_API_KEY missing or LLM errors — never blocks the save.
    */
-  async _attachEntityCoMentionEdges(baseMemory, store) {
+  async _attachEntityCoMentionEdges(baseMemory, store, similar = []) {
     if ((process.env.MEMORY_ENTITY_LINKING || 'true').toLowerCase() === 'false') return;
+    if (!process.env.GROQ_API_KEY) {
+      console.warn('[entity-co-mention] GROQ_API_KEY missing — skipping LLM extraction');
+      return;
+    }
     const content = baseMemory.content || '';
     if (content.length < 20) return;
 
-    // Step 1 — cheap proper-noun extraction. Matches:
-    //   - 'Rama', 'Maria Schmidt', 'SOLVIS', 'Q3'
-    //   - capitalized 3+ char tokens NOT at sentence start unless they
-    //     appear elsewhere too (skips first-word noise).
-    const tokens = content
-      .replace(/[^\w\s.-]/g, ' ')
-      .split(/\s+/)
-      .filter(Boolean);
-    const counts = new Map();
-    for (const t of tokens) {
-      if (!/^[A-Z][a-zA-Z0-9-]{2,}$/.test(t)) continue;
-      const lower = t.toLowerCase();
-      if (STOPWORDS.has(lower)) continue;
-      counts.set(t, (counts.get(t) || 0) + 1);
-    }
-    // Pick candidates: appears ≥1 time AND length ≥4 (drops one-letter caps),
-    // OR is two-word phrase. Cap at 5 to avoid runaway tag matches.
-    const candidates = Array.from(counts.entries())
-      .filter(([t, c]) => t.length >= 4)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 5)
-      .map(([t]) => t);
-
-    if (candidates.length === 0) return;
-
-    // Step 2 — find co-mentioning memories. Use Prisma OR clause across
-    // the candidates so this is ONE query, not N. Returns top-10 ordered
-    // by recency, filtered to same user, excluding self.
-    // Use the transactional store's client when present (so the new memory
-    // we just wrote is visible inside the same tx). Falls back to the
-    // outer store's client when no tx-scoped store was passed.
-    const prismaClient = (store && store.client) || this.store.client;
-    if (!prismaClient || !prismaClient.memory) {
-      console.warn('[entity-co-mention] no prisma client available, skipping');
+    // Filter the recall set: drop self, drop empty bodies, cap at 8 to
+    // keep the prompt small + cost predictable.
+    const candidates = (similar || [])
+      .filter(s => s.id && s.id !== baseMemory.id && (s.content || s.title))
+      .slice(0, 8);
+    if (candidates.length === 0) {
+      console.log('[entity-co-mention] no recall candidates — skipping');
       return;
     }
 
+    const candidateBlock = candidates.map((c, i) =>
+      `[${i}] ${(c.title || '').slice(0, 120)}\n    ${(c.content || '').slice(0, 280)}`
+    ).join('\n\n');
+
+    const prompt = `You link memories by shared entities (people, organizations, products, projects, places, events). Use coreference: pronouns and possessives ("she", "my partner", "they") can resolve to a named entity from earlier context.
+
+NEW MEMORY:
+${(baseMemory.title || '').slice(0, 200)}
+${content.slice(0, 1500)}
+
+CANDIDATE MEMORIES (already-recalled, indexed):
+${candidateBlock}
+
+Output JSON only:
+{
+  "entities": ["Rama", "Heidelberg"],
+  "links": [
+    { "index": 0, "entity": "Rama", "confidence": 0.85, "reason": "both refer to same person" }
+  ]
+}
+
+Rules:
+- entity must be a PROPER NOUN (named thing), not a common word.
+- confidence: 0.55–1.0 only emit when reasonably sure; skip uncertain.
+- reason: ≤80 chars, plain English.
+- At most one link per candidate index. Skip candidates with no shared entity.
+- If nothing matches, return { "entities": [], "links": [] }.`;
+
+    let parsed;
     try {
-      const rows = await prismaClient.memory.findMany({
-        where: {
-          userId: baseMemory.user_id,
-          orgId: baseMemory.org_id,
-          deletedAt: null,
-          isLatest: true,
-          id: { not: baseMemory.id },
-          OR: candidates.map(name => ({
-            OR: [
-              { content: { contains: name, mode: 'insensitive' } },
-              { title: { contains: name, mode: 'insensitive' } },
-              { tags: { has: name.toLowerCase() } },
-            ],
-          })),
+      const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
+          'Content-Type': 'application/json',
         },
-        select: { id: true, content: true, title: true, tags: true },
-        orderBy: { createdAt: 'desc' },
-        take: 10,
+        body: JSON.stringify({
+          model: process.env.ENTITY_LINKER_MODEL || 'llama-3.3-70b-versatile',
+          messages: [{ role: 'user', content: prompt }],
+          response_format: { type: 'json_object' },
+          temperature: 0.1,
+          max_tokens: 700,
+        }),
       });
-      console.log(`[entity-co-mention] candidates=[${candidates.join(',')}] hits=${rows.length}`);
+      if (!resp.ok) {
+        const errBody = await resp.text();
+        console.warn(`[entity-co-mention] LLM ${resp.status}: ${errBody.slice(0, 200)}`);
+        return;
+      }
+      const data = await resp.json();
+      const raw = data?.choices?.[0]?.message?.content || '{}';
+      parsed = JSON.parse(raw);
+    } catch (llmErr) {
+      console.warn('[entity-co-mention] LLM failed:', llmErr.message);
+      return;
+    }
 
-      // Step 3 — write Mentions edges. Pick at most 3 strongest matches
-      // (most candidates overlapping). For each, attach the entity names
-      // that appeared in BOTH memories so retrieval can explain the link.
-      const scored = rows
-        .map(r => {
-          const hay = `${r.content || ''} ${r.title || ''} ${(r.tags || []).join(' ')}`.toLowerCase();
-          const shared = candidates.filter(c => hay.includes(c.toLowerCase()));
-          return { id: r.id, shared, score: shared.length };
-        })
-        .filter(x => x.score > 0)
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 3);
+    const entities = Array.isArray(parsed?.entities) ? parsed.entities.map(String).slice(0, 12) : [];
+    const links = Array.isArray(parsed?.links) ? parsed.links : [];
 
-      const writeStore = store || this.store;
-      for (const m of scored) {
+    console.log(`[entity-co-mention] entities=[${entities.join(',')}] links=${links.length}`);
+
+    // Persist extracted entities on the parent so the FE chip can render
+    // them without another LLM pass + the retrieval layer can index them.
+    if (entities.length > 0) {
+      try {
+        await store.updateMemory(baseMemory.id, {
+          metadata: {
+            ...(baseMemory.metadata || {}),
+            extracted_entities: entities,
+            extracted_entities_at: nowIso(),
+            extracted_entities_source: 'llm_post_save',
+          },
+        });
+      } catch (mdErr) {
+        console.warn('[entity-co-mention] metadata update failed:', mdErr.message);
+      }
+    }
+
+    // Top-3 highest-confidence links → Mentions edges.
+    const sorted = links
+      .filter(l => Number.isInteger(l.index) && l.index >= 0 && l.index < candidates.length)
+      .filter(l => typeof l.entity === 'string' && l.entity.length > 0)
+      .filter(l => typeof l.confidence === 'number' && l.confidence >= 0.55)
+      .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))
+      .slice(0, 3);
+
+    const writeStore = store || this.store;
+    for (const l of sorted) {
+      const cand = candidates[l.index];
+      const confidence = Math.min(Math.max(l.confidence, 0.55), 0.95);
+      try {
+        await writeStore.createRelationship({
+          id: uuidv4(),
+          from_id: baseMemory.id,
+          to_id: cand.id,
+          type: 'Mentions',
+          confidence,
+          created_by: 'entity_co_mention_llm',
+          created_at: nowIso(),
+          metadata: {
+            shared_entities: [l.entity],
+            reason: (l.reason || '').slice(0, 200),
+            extraction_model: process.env.ENTITY_LINKER_MODEL || 'llama-3.3-70b-versatile',
+          },
+        });
+      } catch (edgeErr) {
+        // Fallback to Extends + subtype if enum missing (mid-rollout).
         try {
           await writeStore.createRelationship({
             id: uuidv4(),
             from_id: baseMemory.id,
-            to_id: m.id,
-            type: 'Mentions',
-            confidence: Math.min(0.5 + 0.15 * m.score, 0.9),
-            created_by: 'entity_co_mention',
+            to_id: cand.id,
+            type: 'Extends',
+            confidence,
+            created_by: 'entity_co_mention_llm',
             created_at: nowIso(),
             metadata: {
-              shared_entities: m.shared,
-              reason: 'shared_proper_noun',
+              subtype: 'Mentions',
+              shared_entities: [l.entity],
+              reason: (l.reason || '').slice(0, 200),
+              fallback_reason: edgeErr.message,
             },
           });
-        } catch (edgeErr) {
-          // Fallback to Extends + subtype if enum missing (pre-migration containers).
-          try {
-            await writeStore.createRelationship({
-              id: uuidv4(),
-              from_id: baseMemory.id,
-              to_id: m.id,
-              type: 'Extends',
-              confidence: Math.min(0.5 + 0.15 * m.score, 0.9),
-              created_by: 'entity_co_mention',
-              created_at: nowIso(),
-              metadata: {
-                subtype: 'Mentions',
-                shared_entities: m.shared,
-                fallback_reason: edgeErr.message,
-              },
-            });
-          } catch {}
-        }
+        } catch {}
       }
-    } catch (queryErr) {
-      console.warn('[entity-co-mention] query failed:', queryErr.message);
     }
   }
 

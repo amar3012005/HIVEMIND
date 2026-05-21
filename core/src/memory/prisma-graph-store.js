@@ -383,16 +383,17 @@ export class PrismaGraphStore {
     const memoryIds = records.map(r => r.id);
     let edgeStats = new Map(); // id → { out, in, top: [], supersededBy }
     if (memoryIds.length > 0) {
-      // Outgoing edges from these rows (this memory → others).
+      // Outgoing edges from these rows (this memory → others). Metadata
+      // included so the FE can render shared_entities / reason chips.
       const outRels = await this.client.relationship.findMany({
         where: { fromId: { in: memoryIds } },
-        select: { fromId: true, toId: true, type: true, confidence: true, createdBy: true },
+        select: { fromId: true, toId: true, type: true, confidence: true, createdBy: true, metadata: true },
         orderBy: [{ confidence: 'desc' }, { createdAt: 'desc' }],
       });
       // Incoming edges (others → this memory).
       const inRels = await this.client.relationship.findMany({
         where: { toId: { in: memoryIds } },
-        select: { fromId: true, toId: true, type: true, confidence: true, createdBy: true },
+        select: { fromId: true, toId: true, type: true, confidence: true, createdBy: true, metadata: true },
         orderBy: [{ confidence: 'desc' }, { createdAt: 'desc' }],
       });
       for (const r of outRels) {
@@ -400,7 +401,14 @@ export class PrismaGraphStore {
         if (!s) { s = { out: 0, in: 0, top: [], supersededBy: null }; edgeStats.set(r.fromId, s); }
         s.out += 1;
         if (s.top.length < 4) {
-          s.top.push({ direction: 'out', target_id: r.toId, type: r.type, confidence: r.confidence });
+          s.top.push({
+            direction: 'out',
+            target_id: r.toId,
+            type: r.type,
+            confidence: r.confidence,
+            shared_entities: r.metadata?.shared_entities || null,
+            reason: r.metadata?.reason || null,
+          });
         }
         // Capture supersession: an Updates edge OUT means this row updated
         // something else (we are the newer one). The OLDER row's
@@ -414,7 +422,14 @@ export class PrismaGraphStore {
           s.supersededBy = r.fromId; // the newer memory that replaced this row
         }
         if (s.top.length < 4) {
-          s.top.push({ direction: 'in', source_id: r.fromId, type: r.type, confidence: r.confidence });
+          s.top.push({
+            direction: 'in',
+            source_id: r.fromId,
+            type: r.type,
+            confidence: r.confidence,
+            shared_entities: r.metadata?.shared_entities || null,
+            reason: r.metadata?.reason || null,
+          });
         }
       }
     }

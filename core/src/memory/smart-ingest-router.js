@@ -212,7 +212,25 @@ export class SmartIngestRouter {
       || payload.metadata?.auto_detected_type && CHUNK_STRATEGY_MAP[payload.metadata.auto_detected_type]
       || 'heading_hierarchy';
 
-    const rawChunks = this._chunkByStrategy(content, chunkStrategy);
+    let rawChunks = this._chunkByStrategy(content, chunkStrategy);
+
+    // _chunkByHeadings merges multiple small sections up to 2000 chars,
+    // so a 4-heading doc with 250 chars total collapses to 1 chunk and
+    // the tree never emits. For the parent/section graph contract we
+    // want one Section node *per heading*, regardless of merge budget.
+    // Re-split when:
+    //   - strategy is heading_hierarchy (or unset)
+    //   - the document has ≥2 H1/H2 headings
+    //   - we ended up with <2 chunks from the budget-merging chunker
+    if (rawChunks.length < 2 && (chunkStrategy === 'heading_hierarchy' || !chunkStrategy)) {
+      const perHeading = content
+        .split(/(?=^#{1,6}\s)/m)
+        .map(s => s.trim())
+        .filter(s => s.length > 30);
+      if (perHeading.length >= 2) {
+        rawChunks = perHeading;
+      }
+    }
 
     if (rawChunks.length <= 1) {
       // Single-chunk doc — keep legacy flat shape so existing callers

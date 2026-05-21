@@ -1366,7 +1366,13 @@ export class MemoryGraphEngine {
       `[${i}] ${(c.title || '').slice(0, 120)}\n    ${(c.content || '').slice(0, 280)}`
     ).join('\n\n');
 
-    const prompt = `You link memories by shared entities (people, organizations, products, projects, places, events). Use coreference: pronouns and possessives ("she", "my partner", "they") can resolve to a named entity from earlier context.
+    const prompt = `You are a memory graph linker. Given a NEW MEMORY and a list of CANDIDATE memories, you do three things in ONE pass:
+
+  1. extract proper-noun entities from the new memory (people, orgs, products, projects, places, events)
+  2. classify the new memory's TYPE (decision | preference | fact | event | goal | lesson | relationship)
+  3. for each candidate that shares an entity, emit ONE typed edge
+
+Use coreference: pronouns and possessives ("she", "my partner", "it", "they") can resolve to a named entity from earlier turns.
 
 NEW MEMORY:
 ${(baseMemory.title || '').slice(0, 200)}
@@ -1378,17 +1384,33 @@ ${candidateBlock}
 Output JSON only:
 {
   "entities": ["Rama", "Heidelberg"],
+  "memory_type": "decision",
   "links": [
-    { "index": 0, "entity": "Rama", "confidence": 0.85, "reason": "both refer to same person" }
+    { "index": 0, "entity": "Rama", "type": "Updates", "confidence": 0.85, "reason": "new memory supersedes the older decision about Rama" },
+    { "index": 2, "entity": "Rama", "type": "Mentions", "confidence": 0.70, "reason": "same person, different context" }
   ]
 }
 
-Rules:
-- entity must be a PROPER NOUN (named thing), not a common word.
-- confidence: 0.55–1.0 only emit when reasonably sure; skip uncertain.
-- reason: ≤80 chars, plain English.
-- At most one link per candidate index. Skip candidates with no shared entity.
-- If nothing matches, return { "entities": [], "links": [] }.`;
+Edge type rules (pick ONE per link):
+  • Updates     — new memory supersedes the candidate. The user just made a DIFFERENT choice on the same topic, or the same fact changed value. Example: "switching to Gemini Embedding 2" supersedes "user prefers BGE-M3". ALSO writes is_latest=false on the candidate.
+  • Contradicts — new memory disagrees with candidate but is NOT a clear supersession (e.g. competing claims). Use sparingly; prefer Updates when there's evolution language.
+  • Extends     — new memory adds nuance to the candidate without overriding it.
+  • Mentions    — both share an entity but the new memory is unrelated factually (default for plain co-mention).
+
+Memory type rules:
+  • decision    — language like "I decided", "going with", "switching to", "from now on", "we'll use X". This is an active CHOICE.
+  • preference  — "I prefer X", "I like Y better".
+  • fact        — neutral statement, not a choice.
+  • event       — something that happened on a date.
+  • goal        — "I want to", "planning to".
+  • lesson      — extracted insight.
+  • relationship— person/org relationship statement.
+  If the new memory clearly fits one of decision/preference/goal/event, emit it. Otherwise default to "fact" by omitting the field.
+
+Confidence: 0.55–1.0 only. Skip uncertain links.
+Reason: ≤80 chars plain English.
+At most one link per candidate index.
+If nothing matches: { "entities": [], "memory_type": null, "links": [] }.`;
 
     let parsed;
     try {
@@ -1421,8 +1443,24 @@ Rules:
 
     const entities = Array.isArray(parsed?.entities) ? parsed.entities.map(String).slice(0, 12) : [];
     const links = Array.isArray(parsed?.links) ? parsed.links : [];
+    const inferredType = (typeof parsed?.memory_type === 'string' && parsed.memory_type.trim()) || null;
 
-    console.log(`[entity-co-mention] entities=[${entities.join(',')}] links=${links.length}`);
+    console.log(`[entity-co-mention] entities=[${entities.join(',')}] type=${inferredType || '-'} links=${links.length}`);
+
+    // If the LLM inferred a more specific memory_type than the caller
+    // supplied (caller likely defaulted to 'fact'), upgrade it. Only
+    // upgrade in the fact→specific direction; never downgrade a caller
+    // who explicitly set 'decision'/'preference'/etc.
+    const VALID_TYPES = new Set(['fact', 'preference', 'decision', 'lesson', 'goal', 'event', 'relationship']);
+    if (inferredType && VALID_TYPES.has(inferredType) && baseMemory.memory_type === 'fact' && inferredType !== 'fact') {
+      try {
+        await store.updateMemory(baseMemory.id, { memoryType: inferredType });
+        baseMemory.memory_type = inferredType; // keep local copy in sync
+        console.log(`[entity-co-mention] upgraded memory_type: fact → ${inferredType}`);
+      } catch (typeErr) {
+        console.warn('[entity-co-mention] type upgrade failed:', typeErr.message);
+      }
+    }
 
     // Persist extracted entities on the parent so the FE chip can render
     // them without another LLM pass + retrieval can filter by them.
@@ -1446,7 +1484,9 @@ Rules:
       }
     }
 
-    // Top-3 highest-confidence links → Mentions edges.
+    // Top-3 highest-confidence links → typed edges (Mentions / Updates /
+    // Extends / Contradicts based on LLM verdict).
+    const VALID_EDGE_TYPES = new Set(['Updates', 'Extends', 'Mentions', 'Contradicts']);
     const sorted = links
       .filter(l => Number.isInteger(l.index) && l.index >= 0 && l.index < candidates.length)
       .filter(l => typeof l.entity === 'string' && l.entity.length > 0)
@@ -1458,12 +1498,19 @@ Rules:
     for (const l of sorted) {
       const cand = candidates[l.index];
       const confidence = Math.min(Math.max(l.confidence, 0.55), 0.95);
+      // Honor LLM-picked edge type when it's valid; default to Mentions
+      // for plain co-mention. Updates also flips the old memory to
+      // is_latest=false so downstream recall/graph don't surface a
+      // superseded value.
+      const edgeType = VALID_EDGE_TYPES.has(l.type) ? l.type : 'Mentions';
+      const isSupersede = edgeType === 'Updates';
+
       try {
         await writeStore.createRelationship({
           id: uuidv4(),
           from_id: baseMemory.id,
           to_id: cand.id,
-          type: 'Mentions',
+          type: edgeType,
           confidence,
           created_by: 'entity_co_mention_llm',
           created_at: nowIso(),
@@ -1471,6 +1518,7 @@ Rules:
             shared_entities: [l.entity],
             reason: (l.reason || '').slice(0, 200),
             extraction_model: process.env.ENTITY_LINKER_MODEL || 'llama-3.3-70b-versatile',
+            classification_source: 'llm',
           },
         });
       } catch (edgeErr) {
@@ -1485,13 +1533,26 @@ Rules:
             created_by: 'entity_co_mention_llm',
             created_at: nowIso(),
             metadata: {
-              subtype: 'Mentions',
+              subtype: edgeType,
               shared_entities: [l.entity],
               reason: (l.reason || '').slice(0, 200),
               fallback_reason: edgeErr.message,
             },
           });
         } catch {}
+      }
+
+      // When the LLM said "Updates", flip the old memory's is_latest
+      // flag so retrieval + the graph view treat it as superseded.
+      // Same canonical behaviour as the regex-based supersede path in
+      // graph-engine, just driven by LLM intent instead.
+      if (isSupersede) {
+        try {
+          await writeStore.updateMemory(cand.id, { is_latest: false });
+          console.log(`[entity-co-mention] supersede: ${cand.id.slice(0, 8)} → is_latest=false (by ${baseMemory.id.slice(0, 8)})`);
+        } catch (supErr) {
+          console.warn('[entity-co-mention] supersede update failed:', supErr.message);
+        }
       }
     }
   }

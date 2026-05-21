@@ -1339,8 +1339,17 @@ export class MemoryGraphEngine {
     // Step 2 — find co-mentioning memories. Use Prisma OR clause across
     // the candidates so this is ONE query, not N. Returns top-10 ordered
     // by recency, filtered to same user, excluding self.
+    // Use the transactional store's client when present (so the new memory
+    // we just wrote is visible inside the same tx). Falls back to the
+    // outer store's client when no tx-scoped store was passed.
+    const prismaClient = (store && store.client) || this.store.client;
+    if (!prismaClient || !prismaClient.memory) {
+      console.warn('[entity-co-mention] no prisma client available, skipping');
+      return;
+    }
+
     try {
-      const rows = await this.store.client.memory.findMany({
+      const rows = await prismaClient.memory.findMany({
         where: {
           userId: baseMemory.user_id,
           orgId: baseMemory.org_id,
@@ -1359,6 +1368,7 @@ export class MemoryGraphEngine {
         orderBy: { createdAt: 'desc' },
         take: 10,
       });
+      console.log(`[entity-co-mention] candidates=[${candidates.join(',')}] hits=${rows.length}`);
 
       // Step 3 — write Mentions edges. Pick at most 3 strongest matches
       // (most candidates overlapping). For each, attach the entity names
@@ -1373,9 +1383,10 @@ export class MemoryGraphEngine {
         .sort((a, b) => b.score - a.score)
         .slice(0, 3);
 
+      const writeStore = store || this.store;
       for (const m of scored) {
         try {
-          await this.store.createRelationship({
+          await writeStore.createRelationship({
             id: uuidv4(),
             from_id: baseMemory.id,
             to_id: m.id,
@@ -1391,7 +1402,7 @@ export class MemoryGraphEngine {
         } catch (edgeErr) {
           // Fallback to Extends + subtype if enum missing (pre-migration containers).
           try {
-            await this.store.createRelationship({
+            await writeStore.createRelationship({
               id: uuidv4(),
               from_id: baseMemory.id,
               to_id: m.id,

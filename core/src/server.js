@@ -3411,6 +3411,93 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // ── @hivemind/cli tarball (until package is published to npm registry) ──
+  // GET /install/cli.tgz → serves packages/cli/hivemind-cli-<ver>.tgz
+  // GET /install/cli.sh  → renders shim that `npx`s the tarball URL
+  //
+  // Why this exists: until we run `npm publish`, `npx @hivemind/cli` can't
+  // resolve. npx happily accepts a tarball URL directly, so the same UX
+  // works via `npx -y https://core.hivemind.davinciai.eu:8050/install/cli.tgz setup`.
+  // The cli.sh wraps that in a curl|bash for users who don't want to type
+  // the URL.
+  if (pathname === '/install/cli.tgz' && req.method === 'GET') {
+    try {
+      const fs = await import('node:fs');
+      const path = await import('node:path');
+      // In dev REPO_ROOT works fine. In the deployed hm-core container the
+      // bind-mount maps /opt/HIVEMIND/core → /app, so REPO_ROOT resolves to
+      // / which is wrong. Check both, plus an explicit env override for
+      // future redeploys that move things around.
+      const candidates = [
+        process.env.HIVEMIND_CLI_DIR,
+        path.join(REPO_ROOT, 'packages', 'cli'),
+        '/opt/HIVEMIND/packages/cli',
+        path.join(PROJECT_ROOT, 'cli-tarball'),
+      ].filter(Boolean);
+      let cliDir = null;
+      for (const c of candidates) {
+        if (fs.existsSync(c)) { cliDir = c; break; }
+      }
+      if (!cliDir) {
+        res.writeHead(404);
+        res.end('cli tarball dir not found — tried: ' + candidates.join(', '));
+        return;
+      }
+      const files = fs.readdirSync(cliDir).filter(f => f.startsWith('hivemind-cli-') && f.endsWith('.tgz'));
+      if (!files.length) {
+        res.writeHead(404);
+        res.end('cli tarball not built — run `cd packages/cli && npm pack`');
+        return;
+      }
+      // Pick highest-version tarball (lexicographic sort works for semver in our range).
+      files.sort();
+      const tarPath = path.join(cliDir, files[files.length - 1]);
+      const stat = fs.statSync(tarPath);
+      res.setHeader('Content-Type', 'application/gzip');
+      res.setHeader('Content-Length', stat.size);
+      res.setHeader('Content-Disposition', `attachment; filename="${files[files.length - 1]}"`);
+      res.setHeader('Cache-Control', 'public, max-age=60');
+      res.writeHead(200);
+      fs.createReadStream(tarPath).pipe(res);
+      return;
+    } catch (e) {
+      res.writeHead(500);
+      res.end('cli tarball error: ' + e.message);
+      return;
+    }
+  }
+
+  if (pathname === '/install/cli.sh' && req.method === 'GET') {
+    const proto = (req.headers['x-forwarded-proto'] || 'https').toString().split(',')[0].trim();
+    const host = (req.headers['x-forwarded-host'] || req.headers.host || 'core.hivemind.davinciai.eu:8050').toString();
+    const base = `${proto}://${host}`;
+    const apiKey = url.searchParams.get('api_key') || '';
+    // Heredoc-safe — escape $ that should reach bash, leave ${} in the
+    // template literal alone via plain string concat.
+    const body =
+`#!/usr/bin/env bash
+set -euo pipefail
+HIVEMIND_BASE="${base}"
+HIVEMIND_API_KEY="\${HIVEMIND_API_KEY:-${apiKey}}"
+if ! command -v node >/dev/null 2>&1; then
+  echo "Node.js 18+ required. Install from https://nodejs.org and re-run." >&2
+  exit 1
+fi
+if ! command -v npx >/dev/null 2>&1; then
+  echo "npx not found — comes with Node.js, please reinstall." >&2
+  exit 1
+fi
+echo "→ Downloading @hivemind/cli from \$HIVEMIND_BASE …"
+exec env HIVEMIND_API_KEY="\$HIVEMIND_API_KEY" HIVEMIND_ENDPOINT="\$HIVEMIND_BASE/api/mcp" \\
+  npx -y "\$HIVEMIND_BASE/install/cli.tgz" setup "\$@"
+`;
+    res.setHeader('Content-Type', 'text/x-shellscript; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store');
+    res.writeHead(200);
+    res.end(body);
+    return;
+  }
+
   // ── Consumer URL / Meta MCP: auth-less token-based SSE & RPC ──
   const consumerSseMatch = pathname.match(/^\/mcp\/([^\/]+)\/sse$/);
   if (consumerSseMatch && req.method === 'GET') {

@@ -3526,13 +3526,26 @@ echo "→ Launching …"
 # the redirect line will fail but we route around it with the if-branch.
 NODE_BIN="\$PKG_DIR/bin/hivemind.js"
 RC=0
-if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+
+# Detect a usable controlling terminal. \`[ -r /dev/tty ]\` returns true on
+# many hosts that nonetheless reject 'open /dev/tty' with ENOTTY — so we
+# try the actual redirect in a sub-shell first and fall back gracefully.
+HIVEMIND_HAVE_TTY=0
+if ( exec </dev/tty ) >/dev/null 2>&1; then
+  HIVEMIND_HAVE_TTY=1
+fi
+
+if [ "\$HIVEMIND_HAVE_TTY" = "1" ]; then
   HIVEMIND_API_KEY="\$HIVEMIND_API_KEY" \\
   HIVEMIND_ENDPOINT="\$HIVEMIND_BASE/api/mcp" \\
     node "\$NODE_BIN" setup "\$@" </dev/tty >/dev/tty 2>/dev/tty
   RC=\$?
 else
-  # No TTY (CI etc) — let node inherit whatever fds bash has.
+  # No TTY (CI / agent harness) — node will fall back to non-interactive
+  # mode. Setup must have been pre-configured with HIVEMIND_API_KEY +
+  # an explicit client arg, else the picker will silently pick the first
+  # option which is rarely what the user wants. Print a hint.
+  echo "(no TTY detected — running non-interactive. Pass client + HIVEMIND_API_KEY explicitly.)" >&2
   HIVEMIND_API_KEY="\$HIVEMIND_API_KEY" \\
   HIVEMIND_ENDPOINT="\$HIVEMIND_BASE/api/mcp" \\
     node "\$NODE_BIN" setup "\$@"

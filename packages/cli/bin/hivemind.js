@@ -32,8 +32,7 @@ function reattachTTY() {
 
 reattachTTY();
 
-const { main } = await import('../src/index.js');
-main(process.argv.slice(2)).catch((err) => {
+import('../src/index.js').then(({ main }) => main(process.argv.slice(2))).catch((err) => {
   console.error('\nhivemind: fatal:', err?.message || err);
   process.exit(1);
 });

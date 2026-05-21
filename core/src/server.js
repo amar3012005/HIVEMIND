@@ -3487,21 +3487,34 @@ if ! command -v node >/dev/null 2>&1; then
   echo "Node.js 18+ required. Install from https://nodejs.org and re-run." >&2
   exit 1
 fi
-if ! command -v npx >/dev/null 2>&1; then
-  echo "npx not found — comes with Node.js, please reinstall." >&2
+# Download tarball to a temp dir, extract, exec the bin directly.
+# Skip npx entirely — npx silently prompts on cache misses and hangs
+# when stdin is a pipe even with -y, which broke the 'curl | bash' UX.
+# This approach: no prompts, no cache, deterministic.
+HIVEMIND_TMP="\$(mktemp -d 2>/dev/null || mktemp -d -t hivemind)"
+trap 'rm -rf "\$HIVEMIND_TMP"' EXIT
+TARBALL="\$HIVEMIND_TMP/hivemind-cli.tgz"
+echo "→ Downloading @hivemind/cli from \$HIVEMIND_BASE …"
+curl -fsSL "\$HIVEMIND_BASE/install/cli.tgz" -o "\$TARBALL"
+echo "→ Extracting …"
+( cd "\$HIVEMIND_TMP" && tar xzf "\$TARBALL" )
+# npm's pack format places everything under ./package/
+PKG_DIR="\$HIVEMIND_TMP/package"
+if [ ! -d "\$PKG_DIR" ]; then
+  echo "extracted package dir not found at \$PKG_DIR" >&2
+  ls -la "\$HIVEMIND_TMP" >&2
   exit 1
 fi
-echo "→ Downloading @hivemind/cli from \$HIVEMIND_BASE …"
-# When this shim is invoked via 'curl ... | bash', bash's stdin is the curl
-# pipe — so prompts() in the CLI gets EOF immediately and the picker
-# silently quits. Re-attach stdin to the user's TTY (and stdout/stderr too,
-# in case the parent redirected them) so interactive prompts work the same
-# way they would in 'npx -y ...' run directly.
+echo "→ Installing dependencies …"
+# --omit=dev keeps install fast; kleur + prompts are runtime deps.
+( cd "\$PKG_DIR" && npm install --omit=dev --silent --no-audit --no-fund --no-progress >/dev/null 2>&1 )
+# Re-attach stdin/stdout/stderr to the user's TTY so prompts() works
+# even when this shim was piped from curl.
 if [ -e /dev/tty ]; then
   exec </dev/tty >/dev/tty 2>/dev/tty
 fi
 exec env HIVEMIND_API_KEY="\$HIVEMIND_API_KEY" HIVEMIND_ENDPOINT="\$HIVEMIND_BASE/api/mcp" \\
-  npx -y "\$HIVEMIND_BASE/install/cli.tgz" setup "\$@"
+  node "\$PKG_DIR/bin/hivemind.js" setup "\$@"
 `;
     res.setHeader('Content-Type', 'text/x-shellscript; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store');

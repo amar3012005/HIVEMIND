@@ -1317,11 +1317,48 @@ export class MemoryGraphEngine {
 
     // Filter the recall set: drop self, drop empty bodies, cap at 8 to
     // keep the prompt small + cost predictable.
-    const candidates = (similar || [])
+    let candidates = (similar || [])
       .filter(s => s.id && s.id !== baseMemory.id && (s.content || s.title))
       .slice(0, 8);
+
+    // FALLBACK: Qdrant semantic recall can return 0 hits when the new
+    // content is phrased entirely in pronouns ("we recovered from it")
+    // and shares no embedding-meaningful tokens with prior memories. In
+    // that case, pull the top-15 most-recent memories for the same user
+    // — pronouns most often reference RECENT entities, so recency is a
+    // strong heuristic for coreference candidates.
     if (candidates.length === 0) {
-      console.log('[entity-co-mention] no recall candidates — skipping');
+      try {
+        const prismaClient = (store && store.client) || this.store.client;
+        if (prismaClient && prismaClient.memory) {
+          const recent = await prismaClient.memory.findMany({
+            where: {
+              userId: baseMemory.user_id,
+              orgId: baseMemory.org_id,
+              deletedAt: null,
+              isLatest: true,
+              id: { not: baseMemory.id },
+            },
+            select: { id: true, title: true, content: true, tags: true },
+            orderBy: { createdAt: 'desc' },
+            take: 15,
+          });
+          candidates = recent.map(r => ({
+            id: r.id,
+            title: r.title,
+            content: r.content,
+            tags: r.tags,
+            _searchMethod: 'recent_fallback',
+          })).slice(0, 8);
+          console.log(`[entity-co-mention] recall empty → recency fallback: ${candidates.length} candidates`);
+        }
+      } catch (fallbackErr) {
+        console.warn('[entity-co-mention] recency fallback failed:', fallbackErr.message);
+      }
+    }
+
+    if (candidates.length === 0) {
+      console.log('[entity-co-mention] no candidates at all — skipping');
       return;
     }
 

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "HIVEMIND Chat — AI Memory + Browser Automation",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "description": "Talk to HIVE — AI chat with perfect memory and browser context.",
   "icons": {
     "16": "icons/icon16.png",

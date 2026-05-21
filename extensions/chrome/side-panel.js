@@ -115,6 +115,56 @@ function wireEvents() {
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.action === 'sectionContextReady' && msg.section) {
       setContext(msg.section);
+      return;
+    }
+
+    // Context-menu → MCP routing: right-click on a selection produces an
+    // event that prefills the composer (and optionally pins context) so
+    // the user just hits Enter to dispatch the MCP tool through the agent.
+    if (msg.action === 'mcpSelectionPrefill' && msg.selection) {
+      setContext({
+        mode: 'selection',
+        text: msg.selection,
+        url: msg.url,
+        title: msg.title,
+        length: msg.selection.length,
+      });
+      const input = $('input');
+      const verb = msg.op === 'log_decision'
+        ? 'Log a decision based on this selection'
+        : 'Ask Hive: ';
+      input.value = verb;
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+      return;
+    }
+
+    if (msg.action === 'mcpPagePrefill') {
+      setContext({
+        mode: 'page',
+        url: msg.url,
+        title: msg.title,
+        length: 0,
+      });
+      const input = $('input');
+      input.value = 'Tell me about this page: ';
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+      return;
+    }
+
+    // Right-click "Recall similar memories" broadcasts results — render
+    // them as a system-style message so the user sees what HIVEMIND has
+    // for that selection without having to type a query.
+    if (msg.action === 'mcpResultBroadcast' && msg.op === 'recall') {
+      const lines = (msg.memories || []).slice(0, 6).map((m, i) =>
+        `${i + 1}. ${(m.title || (m.content || '').slice(0, 80) || '(untitled)').replace(/\n+/g, ' ')}`
+      ).join('\n');
+      flashHint(
+        `🔎 Recall: "${(msg.query || '').slice(0, 60)}"\n` +
+        (lines || '(no similar memories found)')
+      );
+      return;
     }
   });
 }

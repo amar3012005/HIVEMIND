@@ -15,8 +15,12 @@
 
 import { TOOL_SCHEMAS, dispatchTool } from './tool-registry.js';
 
-const MAX_ITERS = 6;
-const TURN_BUDGET_MS = 60_000;
+// Default 4 iterations — empirically the LLM almost always finishes in
+// 2-3 (iter 1: decide+call tools, iter 2: optionally chain, iter 3:
+// final answer). Bumping to 6 only helped pathological cases and added
+// noticeable lag for idle requests. 4 keeps headroom without the wait.
+const MAX_ITERS = Number(process.env.HIVEMIND_AGENT_MAX_ITERS || 4);
+const TURN_BUDGET_MS = Number(process.env.HIVEMIND_AGENT_TURN_BUDGET_MS || 30_000);
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
 // ── System prompt — verbatim from product spec ───────────────────────────────
@@ -36,6 +40,19 @@ indexed for semantic recall and tag-indexed for surgical filtering.
 
 Your job: use HIVEMIND aggressively. The user pays for personalisation;
 deliver it. The smarter the recall, the smarter you appear.
+
+═══════════════════════════════════════════════════════════════════
+ANSWER DIRECTLY WHEN YOU CAN
+═══════════════════════════════════════════════════════════════════
+
+Cheap rule that saves 1-2 LLM rounds per turn:
+  • Greeting, smalltalk, "what can you do", math, definitions,
+    grammar, explanation of public facts → NO tool calls. Just answer.
+  • Anything involving the user's past, their work, files, projects,
+    people, decisions, contradictions, updates → CALL TOOLS first.
+
+If unsure → call tools. The latency cost of one extra recall is
+smaller than the embarrassment of inventing context that's wrong.
 
 ═══════════════════════════════════════════════════════════════════
 THE THREE REFLEXES (DO THESE WITHOUT BEING ASKED)
@@ -192,7 +209,10 @@ function compressIfNeeded(messages, { maxChars = 30_000 } = {}) {
 export async function runReactAgent({
   message,
   history = [],
-  model = 'openai/gpt-oss-120b',
+  // Default to 20b — ~3x faster, still reliable on tool-call tasks.
+  // Override via HIVEMIND_AGENT_MODEL or req body { model } for the
+  // pathological "I need the 120b's reasoning" case.
+  model = process.env.HIVEMIND_AGENT_MODEL || 'openai/gpt-oss-20b',
   apiKey,
   assistantName,
   orgName,

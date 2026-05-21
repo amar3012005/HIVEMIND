@@ -14,20 +14,49 @@ importScripts('ai-chat-schemas.js');
 
 // ── Context Menu ────────────────────────────────────────
 
+// On install — wipe old menus then build the new MCP-aware tree.
+// Three top-level entries (per context):
+//   • Selection right-click → 4 actions backed by MCP tools
+//   • Page right-click      → 2 actions (save page, ask Hive)
+//   • Talk-to-HIVE side panel opener (always available)
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({
-    id: 'hivemind-save-selection',
-    title: 'Save to HIVEMIND',
-    contexts: ['selection'],
-  });
+  chrome.contextMenus.removeAll(() => {
+    // Selection — fires when user has highlighted text.
+    chrome.contextMenus.create({
+      id: 'hm-sel-save',
+      title: 'HIVEMIND · Save selection as memory',
+      contexts: ['selection'],
+    });
+    chrome.contextMenus.create({
+      id: 'hm-sel-recall',
+      title: 'HIVEMIND · Recall similar memories',
+      contexts: ['selection'],
+    });
+    chrome.contextMenus.create({
+      id: 'hm-sel-ask',
+      title: 'HIVEMIND · Ask Hive about this',
+      contexts: ['selection'],
+    });
+    chrome.contextMenus.create({
+      id: 'hm-sel-log-decision',
+      title: 'HIVEMIND · Log as decision',
+      contexts: ['selection'],
+    });
 
-  chrome.contextMenus.create({
-    id: 'hivemind-save-page',
-    title: 'Save this page to HIVEMIND',
-    contexts: ['page'],
+    // Page — fires anywhere on the page (no selection).
+    chrome.contextMenus.create({
+      id: 'hm-page-save',
+      title: 'HIVEMIND · Save this page',
+      contexts: ['page'],
+    });
+    chrome.contextMenus.create({
+      id: 'hm-page-ask',
+      title: 'HIVEMIND · Ask Hive about this page',
+      contexts: ['page'],
+    });
+
+    console.log('[hivemind] Context menus installed');
   });
-  
-  console.log('[hivemind] Extension installed/updated');
 });
 
 // ── Side Panel Management ───────────────────────────────────
@@ -68,20 +97,72 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     return;
   }
 
-  if (info.menuItemId === 'hivemind-save-selection') {
-    const selectedText = info.selectionText;
-    if (selectedText && selectedText.length > 10) {
+  // ── Selection-scoped MCP actions ─────────────────────────
+  if (info.menuItemId?.startsWith('hm-sel-')) {
+    const selectedText = (info.selectionText || '').trim();
+    if (!selectedText || selectedText.length < 4) {
+      showBadge('!', '#f59e0b');
+      return;
+    }
+    const id = info.menuItemId;
+    if (id === 'hm-sel-save') {
       await saveToHivemind(config, {
         content: selectedText,
-        title: `Web Selection: ${selectedText.slice(0, 50)}`,
+        title: `Selection: ${selectedText.slice(0, 60)}`,
         tags: ['browser-extension', 'selection', `url:${tab.url}`],
         source: 'browser-extension',
       });
-      showBadge('OK', '#22c55e');
+      showBadge('✓', '#22c55e');
+      return;
+    }
+    if (id === 'hm-sel-recall') {
+      const out = await recallFromHivemind(config, selectedText);
+      // Surface result count in the side panel — open it and broadcast.
+      try { await chrome.sidePanel.open({ tabId: tab.id }); } catch {}
+      try {
+        chrome.runtime.sendMessage({
+          action: 'mcpResultBroadcast',
+          op: 'recall',
+          query: selectedText.slice(0, 200),
+          memories: out.memories || [],
+        });
+      } catch {}
+      showBadge(String((out.memories || []).length), '#117dff');
+      return;
+    }
+    if (id === 'hm-sel-ask' || id === 'hm-sel-log-decision') {
+      // Open side panel with the selection pre-loaded so the user can
+      // type their question, OR trigger an MCP log_decision tool call.
+      try { await chrome.sidePanel.open({ tabId: tab.id }); } catch {}
+      const op = id === 'hm-sel-ask' ? 'ask' : 'log_decision';
+      try {
+        chrome.runtime.sendMessage({
+          action: 'mcpSelectionPrefill',
+          op,
+          selection: selectedText.slice(0, 6000),
+          url: tab.url,
+          title: tab.title,
+        });
+      } catch {}
+      showBadge('»', '#117dff');
+      return;
     }
   }
 
-  if (info.menuItemId === 'hivemind-save-page') {
+  if (info.menuItemId === 'hm-page-ask') {
+    try { await chrome.sidePanel.open({ tabId: tab.id }); } catch {}
+    try {
+      chrome.runtime.sendMessage({
+        action: 'mcpPagePrefill',
+        url: tab.url,
+        title: tab.title,
+      });
+    } catch {}
+    showBadge('»', '#117dff');
+    return;
+  }
+
+  if (info.menuItemId === 'hm-page-save') {
     try {
       // Always use the DOM extractors (reliable, no CDP needed).
       // CDP auto-summary was flaky — typing into AI chat inputs often fails.
@@ -437,23 +518,36 @@ async function handleChatStream(message, sender) {
 
 async function handleSignIn(apiBaseOverride) {
   const apiBase = apiBaseOverride || 'https://api.hivemind.davinciai.eu:8040';
+  // Use a stable redirect URL per extension installation. Chrome guarantees
+  // https://<extension-id>.chromiumapp.org/<path> — append /cb so the server
+  // sees a predictable callback path. Make sure the control plane allow-list
+  // accepts *.chromiumapp.org HTTPS hosts (it does, since 2026-05-21).
   const redirectUri = chrome.identity.getRedirectURL('cb');
   const state = crypto.randomUUID().replace(/-/g, '');
 
   const startUrl = `${apiBase}/auth/cli/start?callback=${encodeURIComponent(redirectUri)}&state=${state}`;
+  console.log('[hivemind:auth] launching webAuthFlow', { redirectUri, startUrl });
 
-  const finalUrl = await new Promise((resolve, reject) => {
-    chrome.identity.launchWebAuthFlow(
-      { url: startUrl, interactive: true },
-      (responseUrl) => {
-        if (chrome.runtime.lastError || !responseUrl) {
-          reject(new Error(chrome.runtime.lastError?.message || 'auth cancelled'));
-        } else {
-          resolve(responseUrl);
+  let finalUrl;
+  try {
+    finalUrl = await new Promise((resolve, reject) => {
+      chrome.identity.launchWebAuthFlow(
+        { url: startUrl, interactive: true },
+        (responseUrl) => {
+          if (chrome.runtime.lastError || !responseUrl) {
+            reject(new Error(chrome.runtime.lastError?.message || 'auth cancelled'));
+          } else {
+            resolve(responseUrl);
+          }
         }
-      }
-    );
-  });
+      );
+    });
+  } catch (err) {
+    console.warn('[hivemind:auth] webAuthFlow failed:', err.message);
+    throw new Error(`sign-in failed: ${err.message}`);
+  }
+
+  console.log('[hivemind:auth] webAuthFlow returned', { finalUrl });
 
   const parsed = new URL(finalUrl);
   const token = parsed.searchParams.get('token');
@@ -461,9 +555,11 @@ async function handleSignIn(apiBaseOverride) {
   const userEmail = parsed.searchParams.get('user_email') || '';
   const userId = parsed.searchParams.get('user_id') || '';
   const orgId = parsed.searchParams.get('org_id') || '';
+  const errMsg = parsed.searchParams.get('error');
 
-  if (!token) throw new Error('no token in callback');
-  if (echoState !== state) throw new Error('state mismatch — possible CSRF');
+  if (errMsg) throw new Error(`server: ${errMsg}`);
+  if (!token) throw new Error('no token in callback URL — server may have lost session mid-flow');
+  if (echoState !== state) throw new Error('state mismatch — possible CSRF, ignoring');
 
   // core API base for memory/chat ops
   const coreApiBase = 'https://core.hivemind.davinciai.eu:8050';
@@ -476,6 +572,7 @@ async function handleSignIn(apiBaseOverride) {
     orgId,
   });
 
+  console.log('[hivemind:auth] signed in', { userEmail, userId, orgId });
   return { success: true, userEmail, userId, orgId };
 }
 

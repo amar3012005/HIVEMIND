@@ -364,15 +364,28 @@ export class PrismaGraphStore {
     // Showing them bloats the list 6x and obscures the real graph. Pass
     // include_children=true (or the legacy tag filter) to opt back in.
     //
+    // 2026-05-22: TARA voice sessions persist per-turn rows
+    // ('tara-turn') and per-turn clinical insights ('tara-insight') so
+    // the graph view can show the full conversational structure. These
+    // would flood Memories.jsx — one card per turn × N turns × M
+    // sessions. Same canonical exclusion pattern: hide from the flat
+    // list, keep in the graph + recall pipeline. A single
+    // 'tara-session-summary' memory per session anchors them on the
+    // flat list and PartOf edges link the children.
+    //
     // Postgres String[] columns don't support `{ tags: { not: { has } } }`
     // in Prisma — only top-level `NOT { tags: { has } }` works. So we
     // compose the exclusion as a sibling NOT clause on the where root.
+    const HIDDEN_CHILD_TAGS = ['extracted-fact', 'tara-turn', 'tara-insight'];
+    const childExclusion = include_children
+      ? {}
+      : { AND: HIDDEN_CHILD_TAGS.map(t => ({ NOT: { tags: { has: t } } })) };
     const baseWhere = {
       ...scopedMemoryWhere({ user_id, org_id, project, scope }),
       memoryType: memory_type || undefined,
       isLatest: typeof is_latest === 'boolean' ? is_latest : undefined,
       ...(tags?.length ? { tags: { hasEvery: tags } } : {}),
-      ...(include_children ? {} : { NOT: { tags: { has: 'extracted-fact' } } }),
+      ...childExclusion,
     };
 
     const records = await this.client.memory.findMany({
@@ -396,7 +409,7 @@ export class PrismaGraphStore {
       memoryType: memory_type || undefined,
       isLatest: typeof is_latest === 'boolean' ? is_latest : undefined,
       ...(tags?.length ? { tags: { hasSome: tags } } : {}),
-      ...(include_children ? {} : { NOT: { tags: { has: 'extracted-fact' } } }),
+      ...childExclusion,
     };
 
     const total = await this.client.memory.count({ where: countWhere });

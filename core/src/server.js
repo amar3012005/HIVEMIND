@@ -15187,6 +15187,93 @@ exit \$RC
               return jsonResponse(res, { error: 'Analytics failed' }, 500);
             }
 
+            // Persist a single rollup memory per session so the Memories
+            // flat list shows ONE card per conversation instead of N
+            // turn cards. Turn + insight rows are kept (and excluded
+            // from the flat list by tag) so MemoryGraph.jsx can still
+            // render the full structure. PartOf edges anchor the
+            // children to this summary.
+            try {
+              const sUserId = sessionData.userId || userId;
+              const sOrgId  = sessionData.orgId  || orgId;
+              const briefContext = analytics.brief_context || '';
+              const analysisObj  = analytics.analysis || {};
+              const sigObj       = analytics.business_signals || {};
+              const metricsObj   = analytics.metrics || {};
+              const topicSnippet = (sessionData.turns?.[0]?.content || '').slice(0, 80);
+
+              const summaryLines = [
+                briefContext,
+                analysisObj.user_type ? `\n**User type:** ${analysisObj.user_type}` : null,
+                analysisObj.dominant_emotion ? `**Emotion:** ${analysisObj.dominant_emotion}` : null,
+                analysisObj.resolution_status ? `**Resolution:** ${analysisObj.resolution_status}` : null,
+                analysisObj.key_topics?.length ? `**Topics:** ${analysisObj.key_topics.join(', ')}` : null,
+                Array.isArray(sigObj.opportunities) && sigObj.opportunities.length
+                  ? `**Opportunities:** ${sigObj.opportunities.slice(0, 3).join('; ')}`
+                  : null,
+                metricsObj.sentiment_trend ? `**Sentiment:** ${metricsObj.sentiment_trend}` : null,
+              ].filter(Boolean).join('\n');
+
+              const summaryContent = summaryLines || `Voice session ${session_id} (no narrated summary).`;
+              const summaryTitle = topicSnippet
+                ? `Voice session — ${topicSnippet}${topicSnippet.length === 80 ? '…' : ''}`
+                : `Voice session ${session_id.slice(0, 8)}`;
+
+              const saved = await persistentMemoryStore.createMemory({
+                user_id: sUserId,
+                org_id: sOrgId,
+                title: summaryTitle,
+                content: summaryContent,
+                memory_type: 'summary',
+                tags: ['tara-session-summary', `sid:${session_id}`],
+                source_metadata: {
+                  source_platform: 'tara-voice',
+                  source_id: session_id,
+                },
+                metadata: {
+                  tara_session_id: session_id,
+                  turn_count: sessionData.turns?.length || 0,
+                  metrics: metricsObj,
+                  user_type: analysisObj.user_type,
+                  resolution_status: analysisObj.resolution_status,
+                },
+              });
+
+              // Link every turn + insight memory of this session under
+              // the summary via PartOf so the graph view shows the
+              // session as a single rooted tree.
+              try {
+                const summaryId = saved?.id || saved?.memoryId;
+                if (summaryId) {
+                  const { memories: turnRows } = await persistentMemoryStore.listMemories({
+                    user_id: sUserId,
+                    org_id: sOrgId,
+                    tags: [`sid:${session_id}`],
+                    include_children: true,
+                    limit: 200,
+                  });
+                  for (const t of (turnRows || [])) {
+                    if (t.id === summaryId) continue;
+                    if (!(t.tags || []).some(tag => tag === 'tara-turn' || tag === 'tara-insight')) continue;
+                    try {
+                      await persistentMemoryStore.createRelationship({
+                        from_id: t.id,
+                        to_id: summaryId,
+                        type: 'PartOf',
+                        confidence: 1.0,
+                        metadata: { reason: 'voice-session-rollup' },
+                        created_by: 'tara-end-session',
+                      });
+                    } catch { /* idempotency conflicts are fine */ }
+                  }
+                }
+              } catch (linkErr) {
+                console.warn('[tara/end_session] PartOf link failed:', linkErr.message);
+              }
+            } catch (summaryErr) {
+              console.warn('[tara/end_session] Summary memory write failed:', summaryErr.message);
+            }
+
             // Format for orchestrator contract
             const orchestratorReport = {
               brief_context: analytics.brief_context,

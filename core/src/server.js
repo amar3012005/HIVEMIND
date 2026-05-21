@@ -14821,6 +14821,7 @@ exit \$RC
                     persistentMemoryStore, persistentMemoryEngine,
                     smartIngestRouter,
                     buildRoutedIngestPayloads,
+                    ingestRoutedPayload,                 // tree-aware dispatch
                     accessContext: agentAccessCtx,
                     webIntelligence: globalThis.webIntelligence || null,
                   },
@@ -14840,7 +14841,7 @@ exit \$RC
                       source_metadata: { source_platform: 'talk-to-hive', via: 'react-agent' },
                     };
                     buildRoutedIngestPayloads(convoPayload, { smartIngestRouter })
-                      .then(([routed]) => persistentMemoryEngine.ingestMemory(routed))
+                      .then(([routed]) => ingestRoutedPayload(routed, persistentMemoryEngine))
                       .catch((e) => console.warn('[chat:react-agent] auto-save failed:', e.message));
                   }
                 } catch {}

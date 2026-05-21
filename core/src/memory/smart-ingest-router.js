@@ -13,6 +13,11 @@ import { deduplicateResults } from '../search/result-dedup.js';
 import { ContentNormalizer } from './content-normalizer.js';
 import { detectContentType, CHUNK_STRATEGY_MAP } from './content-type-detector.js';
 import { buildSemanticMetadata, inferMemorySemanticRole, normalizeRelationshipDescriptor } from './relationship-semantics.js';
+import { getNormalizer, detectBucket as detectIngestBucket } from './normalizers/index.js';
+
+// Re-export so callers (and future bucket-aware code paths) can import
+// the same helpers from one place.
+export { detectIngestBucket };
 
 const SIMILARITY_UPDATE_THRESHOLD = 0.88;   // >this → Updates (supersede)
 const SIMILARITY_EXTEND_THRESHOLD = 0.65;   // >this → Extends (augment)
@@ -31,10 +36,38 @@ export class SmartIngestRouter {
   async route(payload) {
     const sourceType = this._detectSourceType(payload);
 
-    // Step 1: Normalize content based on source type (cleanup + metadata extraction)
+    // Step 0: Provider-specific noise stripping via normalizers/ registry.
+    // Each provider has its own file under memory/normalizers/ — adding a
+    // new connector = drop one file + map it in normalizers/index.js. No
+    // changes to this router needed. The legacy ContentNormalizer below
+    // still runs after for cross-cutting cleanup (whitespace, unicode).
+    if (payload.content) {
+      const platform =
+        payload.source_metadata?.source_platform ||
+        payload.metadata?.source_platform ||
+        sourceType;
+      const provNormalizer = getNormalizer(platform);
+      if (provNormalizer && provNormalizer.name !== 'default') {
+        const out = provNormalizer.normalize(payload.content, payload.metadata || {});
+        payload = {
+          ...payload,
+          content: out.content,
+          metadata: { ...payload.metadata, ...out.metadata },
+        };
+      }
+    }
+
+    // Step 1: Cross-cutting normalization (whitespace, unicode, base64 hygiene)
     if (payload.content) {
       const normalized = this.normalizer.normalize(payload.content, sourceType, payload.metadata);
       payload = { ...payload, content: normalized.content, metadata: { ...payload.metadata, ...normalized.metadata } };
+    }
+
+    // Stash the canonical bucket on the payload metadata so downstream
+    // code (e.g. graph-engine, retrieval, audit) can reason in terms of
+    // the 4 buckets instead of N providers.
+    if (payload.metadata) {
+      payload.metadata.ingest_bucket = detectIngestBucket(payload);
     }
 
     // Step 2: Apply type-specific routing.
@@ -131,9 +164,64 @@ export class SmartIngestRouter {
   }
 
   // --- Gmail ---
+  // Email threads with multiple messages → Thread parent + Message children tree.
+  // Single emails or already-structured single-message payloads → flat.
+  // The gmail normalizer (memory/normalizers/gmail.js) already ran in
+  // route() above and stripped headers/sig/quotes, so we work with clean
+  // content here.
   async _routeGmail(payload) {
     const content = payload.content || '';
-    // Extract structured fields if raw email format
+    // Thread mode: payload.metadata.messages is an array of message bodies
+    // (set by the gmail bridge when ingesting a multi-message thread).
+    // Build Thread parent + Message children tree.
+    const threadMsgs = Array.isArray(payload.metadata?.messages) ? payload.metadata.messages : null;
+    if (threadMsgs && threadMsgs.length >= 2) {
+      const threadSubject =
+        payload.metadata.thread_subject
+        || payload.metadata.email_subject
+        || payload.title
+        || 'Email thread';
+      const threadId = payload.metadata?.thread_id || payload.source_metadata?.thread_id || null;
+
+      const parent = {
+        ...payload,
+        id: undefined,
+        title: `Thread: ${threadSubject}`,
+        content: `Email thread "${threadSubject}" (${threadMsgs.length} messages).`,
+        memory_type: payload.memory_type || 'event',
+        metadata: {
+          ...payload.metadata,
+          source_type_normalized: 'gmail',
+          semantic_role: 'thread',
+          ingest_tree_role: 'parent',
+          thread_id: threadId,
+          message_count: threadMsgs.length,
+        },
+      };
+      const children = threadMsgs.map((msg, i) => ({
+        ...payload,
+        id: undefined,
+        content: typeof msg === 'string' ? msg : (msg.content || msg.body || ''),
+        title: typeof msg === 'object'
+          ? (msg.subject || `Message ${i + 1}/${threadMsgs.length}`)
+          : `Message ${i + 1}/${threadMsgs.length}`,
+        memory_type: payload.memory_type || 'event',
+        metadata: {
+          ...payload.metadata,
+          source_type_normalized: 'gmail',
+          semantic_role: 'message',
+          ingest_tree_role: 'child',
+          thread_id: threadId,
+          message_index: i,
+          message_total: threadMsgs.length,
+          email_from: typeof msg === 'object' ? (msg.from || null) : null,
+          email_date: typeof msg === 'object' ? (msg.date || null) : null,
+        },
+      }));
+      return { parent, children };
+    }
+
+    // Single-message path (legacy + most Gmail webhooks).
     const subject = this._extractEmailField(content, 'Subject') || payload.title || '';
     const from = this._extractEmailField(content, 'From') || '';
     const date = this._extractEmailField(content, 'Date') || '';
@@ -307,9 +395,64 @@ export class SmartIngestRouter {
   }
 
   // --- Chat (Talk to HIVE) ---
+  // Single-turn ingests stay flat (most common — one declarative
+  // statement). Multi-turn sessions (payload.metadata.turns is an array)
+  // emit a Session parent + Turn children tree so the conversation
+  // becomes a connected graph instead of orphan facts.
   async _routeChat(payload) {
-    // Chat facts are already clean statements from the user
-    // Mark as fact type and ensure proper metadata for triple operator matching
+    const turns = Array.isArray(payload.metadata?.turns) ? payload.metadata.turns : null;
+    if (turns && turns.length >= 2) {
+      const sessionId =
+        payload.metadata.session_id
+        || payload.source_metadata?.session_id
+        || `sess-${Date.now().toString(36)}`;
+      const sessionTitle =
+        payload.metadata.session_title
+        || payload.title
+        || `Chat session ${sessionId.slice(0, 8)}`;
+
+      const parent = {
+        ...payload,
+        id: undefined,
+        title: sessionTitle,
+        content: `Talk-to-HIVE session "${sessionTitle}" with ${turns.length} turns.`,
+        memory_type: 'fact',
+        tags: Array.from(new Set([...(payload.tags || []), 'chat', 'talk-to-hive', 'session'])),
+        metadata: {
+          ...payload.metadata,
+          source_type_normalized: 'chat',
+          semantic_role: 'session',
+          ingest_tree_role: 'parent',
+          session_id: sessionId,
+          turn_count: turns.length,
+        },
+      };
+
+      const children = turns.map((t, i) => ({
+        ...payload,
+        id: undefined,
+        content: typeof t === 'string' ? t : (t.content || t.text || ''),
+        title: typeof t === 'object'
+          ? (t.title || `Turn ${i + 1}/${turns.length}`)
+          : `Turn ${i + 1}/${turns.length}`,
+        memory_type: 'fact',
+        tags: Array.from(new Set([...(payload.tags || []), 'chat', 'talk-to-hive'])),
+        metadata: {
+          ...payload.metadata,
+          source_type_normalized: 'chat',
+          semantic_role: 'turn',
+          ingest_tree_role: 'child',
+          session_id: sessionId,
+          turn_index: i,
+          turn_total: turns.length,
+          turn_role: typeof t === 'object' ? (t.role || null) : null, // 'user' | 'assistant'
+          turn_ts: typeof t === 'object' ? (t.ts || null) : null,
+        },
+      }));
+
+      return { parent, children };
+    }
+
     return [{
       ...payload,
       memory_type: payload.memory_type || 'fact',
@@ -321,7 +464,55 @@ export class SmartIngestRouter {
   }
 
   // --- Slack / Teams ---
+  // Same conversation contract: multi-message threads become Thread+Message
+  // trees; single messages stay flat.
   async _routeSlack(payload) {
+    const msgs = Array.isArray(payload.metadata?.messages) ? payload.metadata.messages : null;
+    if (msgs && msgs.length >= 2) {
+      const threadTs = payload.metadata.thread_ts || payload.source_metadata?.thread_ts || null;
+      const channel = payload.metadata.channel || payload.source_metadata?.channel || null;
+      const threadLabel = channel ? `${channel} · ${threadTs || 'thread'}` : (threadTs || 'thread');
+
+      const parent = {
+        ...payload,
+        id: undefined,
+        title: `Slack thread: ${threadLabel}`,
+        content: `Slack thread in ${channel || 'unknown channel'} with ${msgs.length} messages.`,
+        memory_type: payload.memory_type || 'event',
+        metadata: {
+          ...payload.metadata,
+          source_type_normalized: 'slack',
+          semantic_role: 'thread',
+          ingest_tree_role: 'parent',
+          channel,
+          thread_ts: threadTs,
+          message_count: msgs.length,
+        },
+      };
+      const children = msgs.map((m, i) => ({
+        ...payload,
+        id: undefined,
+        content: typeof m === 'string' ? m : (m.text || m.content || ''),
+        title: typeof m === 'object'
+          ? (m.user ? `${m.user}: ${(m.text || '').slice(0, 40)}` : `Msg ${i + 1}/${msgs.length}`)
+          : `Msg ${i + 1}/${msgs.length}`,
+        memory_type: payload.memory_type || 'event',
+        metadata: {
+          ...payload.metadata,
+          source_type_normalized: 'slack',
+          semantic_role: 'message',
+          ingest_tree_role: 'child',
+          channel,
+          thread_ts: threadTs,
+          message_index: i,
+          message_total: msgs.length,
+          slack_user: typeof m === 'object' ? (m.user || m.user_id || null) : null,
+          slack_ts: typeof m === 'object' ? (m.ts || null) : null,
+        },
+      }));
+      return { parent, children };
+    }
+
     return [{
       ...payload,
       memory_type: payload.memory_type || 'event',

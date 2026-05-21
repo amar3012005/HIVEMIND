@@ -1352,9 +1352,16 @@ const server = http.createServer(async (req, res) => {
 
     const current = await getCurrentSession(req);
     if (!current) {
-      // Not logged in — bounce through Zitadel + come back here.
-      const selfPath = req.url;
-      return redirect(res, `/auth/login?return_to=${encodeURIComponent(selfPath)}`);
+      // Not logged in — send user to HIVEMIND-branded LoginPage instead of
+      // straight to Zitadel. Login.jsx handles 'cli_return_to' URL param and
+      // uses it as the OAuth returnTo, bringing the browser back here with
+      // a session cookie set.
+      const cpBase = CONFIG.corePublicBaseUrl
+        ? `${new URL(CONFIG.corePublicBaseUrl).origin}`
+        : '';
+      const selfFull = `${cpBase || ''}${req.url}`;
+      const feLoginUrl = `${defaultFrontendBaseUrl}/hivemind/login?cli_return_to=${encodeURIComponent(selfFull)}`;
+      return redirect(res, feLoginUrl);
     }
 
     const userId = current.session.userId;
@@ -1372,13 +1379,56 @@ const server = http.createServer(async (req, res) => {
     }
 
     const user = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } }).catch(() => null);
-    const cbUrl = new URL(callback);
-    cbUrl.searchParams.set('state', state);
-    cbUrl.searchParams.set('token', apiKey);
-    cbUrl.searchParams.set('user_id', userId);
-    if (user?.email) cbUrl.searchParams.set('user_email', user.email);
-    cbUrl.searchParams.set('org_id', org.id);
-    return redirect(res, cbUrl.toString());
+
+    // Instead of 302-ing straight to the localhost callback (token-in-URL),
+    // park the token under a short-lived one-shot exchange code and bounce
+    // the user to a HIVEMIND-branded confirmation page. The page shows
+    // "Verified as <email>" and a Continue button that POSTs to
+    // /auth/cli/exchange to redeem the code — only then does the localhost
+    // callback fire. Token never appears in any URL the user sees, and the
+    // exchange code is single-use + 60s TTL.
+    const exchangeCode = await sessionStore.createAuthState({
+      kind: 'cli_exchange',
+      token: apiKey,
+      callback,
+      state,
+      userId,
+      userEmail: user?.email || null,
+      orgId: org.id,
+      expiresAt: Date.now() + 60_000,
+    });
+
+    const feVerifiedUrl = `${defaultFrontendBaseUrl}/hivemind/cli-verified?code=${encodeURIComponent(exchangeCode)}&email=${encodeURIComponent(user?.email || '')}`;
+    return redirect(res, feVerifiedUrl);
+  }
+
+  // ─── CLI exchange: redeem one-shot code for the actual token ─────────
+  // POST /auth/cli/exchange { code }
+  //
+  // Returns { callback, state, token, user_email, user_id, org_id } so the
+  // FE confirmation page can window.location to the localhost callback with
+  // the real token, without ever having it in the FE's URL bar.
+  // Single-use — once consumed the code is invalidated.
+  if (pathname === '/auth/cli/exchange' && req.method === 'POST') {
+    const code = (body?.code || '').toString();
+    if (!code) {
+      return jsonResponse(res, { error: 'code required' }, 400);
+    }
+    const stored = await sessionStore.consumeAuthState(code);
+    if (!stored || stored.kind !== 'cli_exchange') {
+      return jsonResponse(res, { error: 'invalid or expired code' }, 400);
+    }
+    if (stored.expiresAt && Date.now() > stored.expiresAt) {
+      return jsonResponse(res, { error: 'code expired' }, 400);
+    }
+    return jsonResponse(res, {
+      callback: stored.callback,
+      state: stored.state,
+      token: stored.token,
+      user_email: stored.userEmail,
+      user_id: stored.userId,
+      org_id: stored.orgId,
+    });
   }
 
   // ─── Zitadel SSO Login ──────────────────────────────────────

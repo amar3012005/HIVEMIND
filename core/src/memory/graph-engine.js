@@ -1306,13 +1306,7 @@ export class MemoryGraphEngine {
     //    We use the store directly (not in a transaction) so a failed edge doesn't
     //    roll back legit child memories. Each edge is idempotent via uuid.
     //
-    // NOTE (2026-05-21): the Prisma RelationshipType enum currently only has
-    // [Updates, Extends, Derives, Contradicts]. PartOf isn't in the enum yet,
-    // so we encode it as `type: 'Extends'` with `metadata.subtype: 'PartOf'`
-    // and `metadata.ingest_tree: true`. The graph-cache builder and the
-    // /api/graph endpoint can render these as PartOf via the metadata flag.
-    // When the enum migration lands (extend with PartOf + Mentions), swap
-    // type back to native 'PartOf' and drop the subtype tag.
+    // Native PartOf edge (enum migration 20260521120000 added the value).
     const partOfEdgeIds = [];
     for (const childId of childIds) {
       try {
@@ -1320,20 +1314,42 @@ export class MemoryGraphEngine {
           id: uuidv4(),
           from_id: childId,
           to_id: parentId,
-          type: 'Extends',                       // TODO: 'PartOf' after enum migration
+          type: 'PartOf',
           confidence: 1.0,
           created_by: 'ingest_tree',
           created_at: nowIso(),
           metadata: {
             ingest_tree: true,
-            subtype: 'PartOf',
             parent_role: tree.parent.metadata?.semantic_role || 'document',
           },
         });
         partOfEdgeIds.push(edge?.id || null);
       } catch (edgeErr) {
         // Edge already exists or constraint violation — non-fatal.
-        console.warn('[ingest-tree] PartOf edge failed:', edgeErr.message);
+        // If this is a stale Prisma client without the new enum, fall back
+        // to legacy Extends + metadata.subtype='PartOf' so ingest never
+        // crashes mid-deploy. Once all containers reload the new client,
+        // this fallback is dead code.
+        try {
+          const edge2 = await this.store.createRelationship({
+            id: uuidv4(),
+            from_id: childId,
+            to_id: parentId,
+            type: 'Extends',
+            confidence: 1.0,
+            created_by: 'ingest_tree',
+            created_at: nowIso(),
+            metadata: {
+              ingest_tree: true,
+              subtype: 'PartOf',
+              parent_role: tree.parent.metadata?.semantic_role || 'document',
+              fallback_reason: edgeErr.message,
+            },
+          });
+          partOfEdgeIds.push(edge2?.id || null);
+        } catch (edge2Err) {
+          console.warn('[ingest-tree] PartOf edge failed (both native + fallback):', edge2Err.message);
+        }
       }
     }
 

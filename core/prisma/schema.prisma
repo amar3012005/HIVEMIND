@@ -1196,6 +1196,8 @@ enum RelationshipType {
   Extends
   Derives
   Contradicts
+  PartOf
+  Mentions
 }
 
 enum VisibilityScope {

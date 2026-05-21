@@ -823,27 +823,40 @@ export class DocumentFirstIngestionService {
         docParentId = parentRes?.memoryId || parentRes?.id || null;
 
         if (docParentId) {
-          // PartOf edges: each promoted child → Document parent.
-          // Encoded as Extends + metadata.subtype='PartOf' until enum migrates.
-          const edgeTasks = persistedChildIds.map(childId =>
-            this.memoryGraphEngine.store.createRelationship({
-              id: crypto.randomUUID(),
-              from_id: childId,
-              to_id: docParentId,
-              type: 'Extends',
-              confidence: 1.0,
-              created_by: 'document_first_ingestion',
-              created_at: new Date().toISOString(),
-              metadata: {
-                ingest_tree: true,
-                subtype: 'PartOf',
-                document_id: documentId,
-                parent_role: 'document',
-              },
-            }).catch(err => {
-              console.warn(`[doc-first] PartOf edge ${childId.slice(0, 8)}→${docParentId.slice(0, 8)} failed:`, err.message);
-            })
-          );
+          // Native PartOf edge (enum migration 20260521120000 added it).
+          // Falls back to Extends + metadata.subtype='PartOf' if the
+          // running Prisma client predates the migration so KB ingest
+          // never crashes mid-rollout.
+          const createPartOf = async (childId) => {
+            try {
+              await this.memoryGraphEngine.store.createRelationship({
+                id: crypto.randomUUID(),
+                from_id: childId,
+                to_id: docParentId,
+                type: 'PartOf',
+                confidence: 1.0,
+                created_by: 'document_first_ingestion',
+                created_at: new Date().toISOString(),
+                metadata: { ingest_tree: true, document_id: documentId, parent_role: 'document' },
+              });
+            } catch (err) {
+              try {
+                await this.memoryGraphEngine.store.createRelationship({
+                  id: crypto.randomUUID(),
+                  from_id: childId,
+                  to_id: docParentId,
+                  type: 'Extends',
+                  confidence: 1.0,
+                  created_by: 'document_first_ingestion',
+                  created_at: new Date().toISOString(),
+                  metadata: { ingest_tree: true, subtype: 'PartOf', document_id: documentId, parent_role: 'document', fallback_reason: err.message },
+                });
+              } catch (err2) {
+                console.warn(`[doc-first] PartOf edge ${childId.slice(0, 8)}→${docParentId.slice(0, 8)} failed (native + fallback):`, err2.message);
+              }
+            }
+          };
+          const edgeTasks = persistedChildIds.map(childId => createPartOf(childId));
           await Promise.all(edgeTasks);
 
           memories.push({ id: docParentId, operation: 'document_parent', isParent: true });

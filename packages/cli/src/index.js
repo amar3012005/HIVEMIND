@@ -16,6 +16,17 @@ import { verifyEndpoint } from './lib/verify.js';
 
 export async function main(argv) {
   const args = parseArgs(argv);
+
+  // Handle global flags (--version / --help) before falling into the
+  // default setup-picker. parseArgs puts dash-prefixed tokens into flags,
+  // not _, so we need to check both shapes.
+  if (args.flags.version || args.flags.v) {
+    return printVersion();
+  }
+  if (args.flags.help || args.flags.h) {
+    return printHelp();
+  }
+
   const cmd = args._[0] || 'setup';
 
   switch (cmd) {
@@ -29,12 +40,8 @@ export async function main(argv) {
     case '--help':
     case '-h':
       return printHelp();
-    case '--version':
-    case '-v':
-      // Read version from package.json at runtime so we never lie about it.
-      const { default: pkg } = await import('../package.json', { with: { type: 'json' } });
-      console.log(pkg.version);
-      return;
+    case 'version':
+      return printVersion();
     default:
       console.error(kleur.red(`Unknown command: ${cmd}`));
       printHelp();
@@ -163,6 +170,16 @@ function cmdList() {
     console.log('  ' + ' '.repeat(16) + kleur.dim('→ ' + c.configPath()));
     console.log('');
   }
+}
+
+async function printVersion() {
+  // fs read (not import-attributes) to keep Node 18 compat.
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const { dirname, join } = await import('node:path');
+  const here = dirname(fileURLToPath(import.meta.url));
+  const pkg = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf-8'));
+  console.log(pkg.version);
 }
 
 function printHelp() {

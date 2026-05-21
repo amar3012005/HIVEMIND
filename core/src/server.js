@@ -1796,10 +1796,13 @@ async function ingestRoutedPayload(routedPayload, engine) {
   return engine.ingestMemory(cleanPayload);
 }
 
-export async function resolveScopedIngestPayload(payload) {
+export async function resolveScopedIngestPayload(payload, options = {}) {
   if (!payload?.user_id || !payload?.org_id) return payload;
 
-  const accessContext = await buildAccessContext(payload.user_id, payload.org_id);
+  const bypassMembership = options.bypassMembership === true || payload.__bypass_membership === true;
+  const accessContext = bypassMembership
+    ? null
+    : await buildAccessContext(payload.user_id, payload.org_id);
   const projectIds = normalizeScopeIds([
     ...(Array.isArray(payload.project_ids) ? payload.project_ids : []),
     payload.project_id,
@@ -3676,7 +3679,7 @@ exit \$RC
         result = handleToolsList(userId, orgId, { scopes: consumer.scopes || ['*'] });
         break;
       case 'tools/call':
-        result = await handleToolCall(body.params || {}, userId, orgId, apiClient);
+        result = await handleToolCall(body.params || {}, userId, orgId, apiClient, { isMaster: !!consumer.master });
         break;
       case 'resources/list':
         result = handleResourcesList(userId, orgId);
@@ -4410,7 +4413,7 @@ exit \$RC
             result = handleToolsList(pathUserId, connectionOrgId, { scopes: connection?.scopes || ['*'] });
             break;
           case 'tools/call':
-            result = await handleToolCall(body.params || {}, pathUserId, connectionOrgId, apiClient);
+            result = await handleToolCall(body.params || {}, pathUserId, connectionOrgId, apiClient, { isMaster: !!connection?.master });
             break;
           case 'resources/list':
             result = handleResourcesList(pathUserId, connectionOrgId);
@@ -4750,7 +4753,7 @@ exit \$RC
             result = handleToolsList(userId, orgId, { scopes: principal.scopes || [] });
             break;
           case 'tools/call':
-            result = await handleToolCall(body.params || {}, userId, orgId, apiClient);
+            result = await handleToolCall(body.params || {}, userId, orgId, apiClient, { isMaster: !!principal?.master });
             break;
           case 'resources/list':
             result = handleResourcesList(userId, orgId);

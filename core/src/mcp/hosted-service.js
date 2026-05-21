@@ -2164,8 +2164,9 @@ function buildRelationship(relationship, relatedTo) {
  * @param {Object} apiClient - API client for making requests
  * @returns {Promise<Object>} Tool call result
  */
-export async function handleToolCall(params, userId, orgId, apiClient) {
+export async function handleToolCall(params, userId, orgId, apiClient, options = {}) {
   const { name, arguments: args } = params;
+  const isMaster = options.isMaster === true;
 
   // Resolve optional project scope. Two modes:
   //   1. project_id (UUID) → validate membership
@@ -2217,7 +2218,7 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
         user_id: userId,
         org_id: orgId,
         project_ids: [requestedProjectId],
-      });
+      }, { bypassMembership: isMaster });
       resolvedProjectId = requestedProjectId;
       resolvedProjectIds = scoped.project_ids || [];
       resolvedTeamId = scoped.primary_team_id || null;

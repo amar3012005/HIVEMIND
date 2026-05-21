@@ -1788,14 +1788,6 @@ async function ingestRoutedPayload(routedPayload, engine) {
   if (!engine) {
     throw new Error('ingestRoutedPayload requires a memory engine');
   }
-  // TEMP TRACE — 2026-05-21, remove after KB tree e2e is green.
-  console.log('[ingest-dispatch]', {
-    __ingest_tree: routedPayload?.__ingest_tree,
-    hasTree: !!routedPayload?.tree,
-    hasMethod: typeof engine.ingestMemoryTree === 'function',
-    title: routedPayload?.title?.slice(0, 40),
-    childCount: routedPayload?.tree?.children?.length,
-  });
   if (routedPayload?.__ingest_tree && routedPayload.tree && typeof engine.ingestMemoryTree === 'function') {
     return engine.ingestMemoryTree(routedPayload.tree);
   }

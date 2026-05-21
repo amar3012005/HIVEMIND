@@ -18,6 +18,21 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+// Stopwords for the entity co-mention linker. Skip these capitalized
+// tokens because they're sentence-initial English, not proper nouns.
+// Keep short — exhaustive lists hurt recall on legit names like "The
+// Hague" or "Of Mice and Men" (we'd rather take a noise hit there).
+const STOPWORDS = new Set([
+  'the','a','an','is','are','was','were','be','been','being',
+  'i','you','he','she','it','we','they','me','him','her','us','them',
+  'this','that','these','those','my','your','his','its','our','their',
+  'and','or','but','so','if','then','than','also',
+  'in','on','at','of','to','by','for','from','with','about','as',
+  'today','yesterday','tomorrow','now','later','before','after',
+  'yes','no','ok','okay','sure','please','thanks','thank',
+  'how','what','when','where','why','who','which',
+]);
+
 /**
  * Heuristic fact extraction fallback — used when LLM extraction returns too few facts.
  * Extracts personal-statement sentences from user-side content.
@@ -959,6 +974,23 @@ export class MemoryGraphEngine {
           });
         }
 
+        // Post-save: entity co-mention linker fires AFTER createMemory +
+        // sourceMetadata + codeMetadata persist, so the new row exists by
+        // the time we search for co-mentioning peers. Awaited inside the
+        // transaction so the edges land in the same atomic batch — if
+        // ingest fails everything rolls back together.
+        //
+        // For high-throughput callers (bulk KB promotion), this adds
+        // 1 extra query per save. We accept that cost in exchange for
+        // ALL ingest paths (chat, MCP, KB, connectors) producing
+        // entity-rich graphs without per-callsite wiring.
+        try {
+          await this._attachEntityCoMentionEdges(baseMemory, store);
+        } catch (entityErr) {
+          // Non-fatal — entity linking is best-effort enrichment.
+          console.warn('[entity-co-mention] failed:', entityErr.message);
+        }
+
         const result = {
           memoryId: baseMemory.id,
           factMemoryIds,
@@ -1254,6 +1286,133 @@ export class MemoryGraphEngine {
    * here automatically when SmartIngestRouter.route returns an IngestTree shape;
    * legacy flat-array routes still hit ingestMemory() per payload unchanged.
    */
+  /**
+   * Post-save entity co-mention linker.
+   *
+   * Why: vector + regex similarity miss entity-based links. "We recovered
+   * from that fight, I promised her to be better" has 0 token overlap with
+   * "Argument with Rama escalated" but they share the entity Rama. To
+   * surface that link we:
+   *
+   *   1. Pull proper-noun candidates from the new memory's content
+   *      (regex first, optional LLM polish via EntityExtractor).
+   *   2. For each candidate, find ≤3 OTHER recent memories from the same
+   *      user whose content or tags mention the same name.
+   *   3. Write a Mentions edge: new memory → existing memory, with the
+   *      entity name on the edge metadata so retrieval can explain why.
+   *
+   * Runs ASYNC after the parent ingest completes. Never blocks the save
+   * path — best-effort enrichment. Gated by MEMORY_ENTITY_LINKING env
+   * (default 'true' so production gets it; set to 'false' for benchmarks
+   * that need deterministic edge counts).
+   */
+  async _attachEntityCoMentionEdges(baseMemory, store) {
+    if ((process.env.MEMORY_ENTITY_LINKING || 'true').toLowerCase() === 'false') return;
+    const content = baseMemory.content || '';
+    if (content.length < 20) return;
+
+    // Step 1 — cheap proper-noun extraction. Matches:
+    //   - 'Rama', 'Maria Schmidt', 'SOLVIS', 'Q3'
+    //   - capitalized 3+ char tokens NOT at sentence start unless they
+    //     appear elsewhere too (skips first-word noise).
+    const tokens = content
+      .replace(/[^\w\s.-]/g, ' ')
+      .split(/\s+/)
+      .filter(Boolean);
+    const counts = new Map();
+    for (const t of tokens) {
+      if (!/^[A-Z][a-zA-Z0-9-]{2,}$/.test(t)) continue;
+      const lower = t.toLowerCase();
+      if (STOPWORDS.has(lower)) continue;
+      counts.set(t, (counts.get(t) || 0) + 1);
+    }
+    // Pick candidates: appears ≥1 time AND length ≥4 (drops one-letter caps),
+    // OR is two-word phrase. Cap at 5 to avoid runaway tag matches.
+    const candidates = Array.from(counts.entries())
+      .filter(([t, c]) => t.length >= 4)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([t]) => t);
+
+    if (candidates.length === 0) return;
+
+    // Step 2 — find co-mentioning memories. Use Prisma OR clause across
+    // the candidates so this is ONE query, not N. Returns top-10 ordered
+    // by recency, filtered to same user, excluding self.
+    try {
+      const rows = await this.store.client.memory.findMany({
+        where: {
+          userId: baseMemory.user_id,
+          orgId: baseMemory.org_id,
+          deletedAt: null,
+          isLatest: true,
+          id: { not: baseMemory.id },
+          OR: candidates.map(name => ({
+            OR: [
+              { content: { contains: name, mode: 'insensitive' } },
+              { title: { contains: name, mode: 'insensitive' } },
+              { tags: { has: name.toLowerCase() } },
+            ],
+          })),
+        },
+        select: { id: true, content: true, title: true, tags: true },
+        orderBy: { createdAt: 'desc' },
+        take: 10,
+      });
+
+      // Step 3 — write Mentions edges. Pick at most 3 strongest matches
+      // (most candidates overlapping). For each, attach the entity names
+      // that appeared in BOTH memories so retrieval can explain the link.
+      const scored = rows
+        .map(r => {
+          const hay = `${r.content || ''} ${r.title || ''} ${(r.tags || []).join(' ')}`.toLowerCase();
+          const shared = candidates.filter(c => hay.includes(c.toLowerCase()));
+          return { id: r.id, shared, score: shared.length };
+        })
+        .filter(x => x.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 3);
+
+      for (const m of scored) {
+        try {
+          await this.store.createRelationship({
+            id: uuidv4(),
+            from_id: baseMemory.id,
+            to_id: m.id,
+            type: 'Mentions',
+            confidence: Math.min(0.5 + 0.15 * m.score, 0.9),
+            created_by: 'entity_co_mention',
+            created_at: nowIso(),
+            metadata: {
+              shared_entities: m.shared,
+              reason: 'shared_proper_noun',
+            },
+          });
+        } catch (edgeErr) {
+          // Fallback to Extends + subtype if enum missing (pre-migration containers).
+          try {
+            await this.store.createRelationship({
+              id: uuidv4(),
+              from_id: baseMemory.id,
+              to_id: m.id,
+              type: 'Extends',
+              confidence: Math.min(0.5 + 0.15 * m.score, 0.9),
+              created_by: 'entity_co_mention',
+              created_at: nowIso(),
+              metadata: {
+                subtype: 'Mentions',
+                shared_entities: m.shared,
+                fallback_reason: edgeErr.message,
+              },
+            });
+          } catch {}
+        }
+      }
+    } catch (queryErr) {
+      console.warn('[entity-co-mention] query failed:', queryErr.message);
+    }
+  }
+
   async ingestMemoryTree(tree) {
     if (!tree || typeof tree !== 'object' || !tree.parent) {
       throw new Error('ingestMemoryTree requires a tree with a .parent payload');

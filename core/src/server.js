@@ -1748,11 +1748,52 @@ async function buildRoutedIngestPayloads(payload, { smartIngestRouter, enableSma
   }
   try {
     const routed = await smartIngestRouter.route(payload);
+    // Tree shape: { parent, children, entities?, edges? }
+    //
+    // Returned wrapped as a single-element array carrying `__ingest_tree:true`
+    // so existing callers (`for (const p of routed) ingestMemory(p)`) still
+    // work — the wrapper spreads the parent payload at the top level. Callers
+    // that want the *full* tree-aware path (parent + children + PartOf edges
+    // in one transaction) should pass each item through `ingestRoutedPayload()`
+    // below, which dispatches to `engine.ingestMemoryTree()` when the marker
+    // is present.
+    if (routed && !Array.isArray(routed) && routed.parent) {
+      const treeItem = {
+        __ingest_tree: true,
+        tree: routed,
+        ...routed.parent, // legacy-compat spread
+      };
+      return [treeItem];
+    }
     return Array.isArray(routed) && routed.length > 0 ? routed : [payload];
   } catch (routeErr) {
     console.warn('[smart-ingest] route failed (falling back to raw payload):', routeErr.message);
     return [payload];
   }
+}
+
+/**
+ * Canonical dispatcher for routed payloads. Detects the `__ingest_tree`
+ * marker and calls `engine.ingestMemoryTree(tree)` for hierarchical
+ * sources (KB docs, Talk-to-HIVE sessions, Gmail/Slack threads). Falls
+ * back to `engine.ingestMemory(p)` for legacy flat payloads.
+ *
+ * New ingest callsites should use this helper instead of bare
+ * `persistentMemoryEngine.ingestMemory(p)` so the parent+children+edges
+ * contract flows end-to-end. Existing callsites keep working unchanged
+ * because the routed payload still spreads the parent fields at the top
+ * level for legacy iteration.
+ */
+async function ingestRoutedPayload(routedPayload, engine) {
+  if (!engine) {
+    throw new Error('ingestRoutedPayload requires a memory engine');
+  }
+  if (routedPayload?.__ingest_tree && routedPayload.tree && typeof engine.ingestMemoryTree === 'function') {
+    return engine.ingestMemoryTree(routedPayload.tree);
+  }
+  // Strip the tree marker if it slipped through.
+  const { __ingest_tree, tree, ...cleanPayload } = routedPayload || {};
+  return engine.ingestMemory(cleanPayload);
 }
 
 export async function resolveScopedIngestPayload(payload) {
@@ -11246,13 +11287,27 @@ exit \$RC
 
                     ingestTracker.updateJob(jobId, { status: 'processing', progress: 15 });
 
-                    // Process all routed payloads (SmartIngestRouter may split docs into chunks)
+                    // Process all routed payloads. ingestRoutedPayload dispatches
+                    // tree-shaped payloads (parent + sections + PartOf edges) to
+                    // engine.ingestMemoryTree(); flat payloads go through the
+                    // legacy ingestMemory() path unchanged.
                     const results = [];
                     for (const p of ingestPayloads) {
-                      const result = await persistentMemoryEngine.ingestMemory(p);
+                      const result = await ingestRoutedPayload(p, persistentMemoryEngine);
 
                       // Handle predict-calibrate skipped memories
                       if (result.operation === 'skipped_redundant') {
+                        continue;
+                      }
+
+                      // Tree path returns {parentId, childIds[]} — flatten so the
+                      // post-ingest Qdrant + pageindex hooks still run on every row.
+                      if (result.operation === 'tree_ingested') {
+                        const parentResult = result.parentResult || { memoryId: result.parentId };
+                        results.push(parentResult);
+                        for (const childRes of (result.childResults || [])) {
+                          results.push(childRes);
+                        }
                         continue;
                       }
 
@@ -14629,7 +14684,7 @@ exit \$RC
         // ==========================================
         case '/api/chat':
           if (req.method === 'POST') {
-            const { message, model = 'gpt-oss-120b', history = [] } = body;
+            const { message, model = 'openai/gpt-oss-120b', history = [], stream: wantStream = false } = body;
             if (!message || typeof message !== 'string') {
               return jsonResponse(res, { error: 'message is required' }, 400);
             }
@@ -14637,6 +14692,140 @@ exit \$RC
             const groqKey = process.env.GROQ_API_KEY;
             if (!groqKey) {
               return jsonResponse(res, { error: 'Chat not available — no LLM API key configured' }, 503);
+            }
+
+            // ─── Two-Loop ReAct Agent (default path) ─────────────────────
+            // The agent uses Groq tool-calling to pick from ~19 HIVEMIND
+            // tools dynamically (recall, save, update, traverse_graph, at,
+            // diff, timeline, web_search, ...). Falls back to legacy
+            // recall-then-LLM flow on HIVEMIND_AGENT_MODE=off or on error.
+            const agentEnabled = process.env.HIVEMIND_AGENT_MODE !== 'off';
+            if (agentEnabled) {
+              try {
+                // Still honour the onboarding state machine — it cannot be
+                // LLM-picked because it needs to gate the very first turn
+                // before the LLM ever runs.
+                let agentAssistantName = null;
+                let agentOrgName = 'your organisation';
+                try {
+                  const {
+                    getAssistantName, extractNameFromReply, buildAssistantNamePayload, ASSISTANT_IDENTITY,
+                    hasShownOnboardingIntro, markOnboardingShown,
+                  } = await import('./services/assistant-identity.js');
+                  if (persistentMemoryStore) {
+                    const lookup = await getAssistantName(persistentMemoryStore, { userId, orgId });
+                    agentAssistantName = lookup.name;
+                  }
+                  if (orgId && prisma) {
+                    try {
+                      const org = await prisma.organization.findUnique({ where: { id: orgId }, select: { name: true } });
+                      if (org?.name) agentOrgName = org.name;
+                    } catch {}
+                  }
+                  const introShown = persistentMemoryStore
+                    ? await hasShownOnboardingIntro(persistentMemoryStore, { userId, orgId })
+                    : false;
+                  if (!agentAssistantName && !introShown) {
+                    if (persistentMemoryStore) await markOnboardingShown(persistentMemoryStore, { userId, orgId });
+                    return jsonResponse(res, {
+                      response: `Hi — I'm ${agentOrgName}'s second brain. I store, connect, and recall everything you and your team tell me.\n\nGot a name for me? Pick something short (max 32 chars). Say "skip" to use the default ("${ASSISTANT_IDENTITY.DEFAULT_NAME}").`,
+                      sources: [], usage: null, assistant_name: null,
+                      onboarding: { step: 'ask_name', org_name: agentOrgName },
+                    });
+                  }
+                  if (!agentAssistantName && introShown) {
+                    const extracted = extractNameFromReply(message);
+                    const finalName = extracted || ASSISTANT_IDENTITY.DEFAULT_NAME;
+                    try {
+                      const payload = buildAssistantNamePayload({ name: finalName, userId, orgId });
+                      if (persistentMemoryEngine?.ingestMemory) {
+                        await persistentMemoryEngine.ingestMemory({ ...payload, skipProcessing: true, smartIngest: false });
+                      }
+                    } catch {}
+                    agentAssistantName = finalName;
+                    return jsonResponse(res, {
+                      response: extracted
+                        ? `Got it — I'll go by **${finalName}** from now on. What can I help you with?`
+                        : `Going with the default — call me **${finalName}**. What can I help you with?`,
+                      sources: [], usage: null, assistant_name: finalName,
+                      onboarding: { step: 'name_saved', name: finalName, org_name: agentOrgName },
+                    });
+                  }
+                } catch {}
+
+                const { runReactAgent } = await import('./agent/react-agent.js');
+                const agentAccessCtx = await buildAccessContext(userId, orgId);
+
+                // SSE branch — for browser ext + in-app streaming tool timeline.
+                if (wantStream) {
+                  res.writeHead(200, {
+                    'Content-Type': 'text/event-stream',
+                    'Cache-Control': 'no-cache',
+                    Connection: 'keep-alive',
+                    'X-Accel-Buffering': 'no',
+                  });
+                  const emit = (evt) => {
+                    try { res.write(`data: ${JSON.stringify(evt)}\n\n`); } catch {}
+                  };
+                  try {
+                    const result = await runReactAgent({
+                      message, history, model, apiKey: groqKey,
+                      assistantName: agentAssistantName, orgName: agentOrgName,
+                      ctx: {
+                        userId, orgId,
+                        persistentMemoryStore, persistentMemoryEngine,
+                        smartIngestRouter,
+                        buildRoutedIngestPayloads,
+                        accessContext: agentAccessCtx,
+                        webIntelligence: globalThis.webIntelligence || null,
+                      },
+                      onEvent: emit,
+                    });
+                    emit({ type: 'done', ...result });
+                  } catch (agentErr) {
+                    emit({ type: 'error', error: agentErr.message });
+                  }
+                  try { res.end(); } catch {}
+                  return;
+                }
+
+                const result = await runReactAgent({
+                  message, history, model, apiKey: groqKey,
+                  assistantName: agentAssistantName, orgName: agentOrgName,
+                  ctx: {
+                    userId, orgId,
+                    persistentMemoryStore, persistentMemoryEngine,
+                    smartIngestRouter,
+                    buildRoutedIngestPayloads,
+                    accessContext: agentAccessCtx,
+                    webIntelligence: globalThis.webIntelligence || null,
+                  },
+                });
+
+                // Auto-save the turn so the conversation lands in HIVEMIND
+                // even when the LLM forgot to call hivemind_save_memory.
+                try {
+                  if (persistentMemoryEngine?.ingestMemory && result.response) {
+                    const convoPayload = {
+                      title: `Chat turn — ${new Date().toISOString().slice(0, 10)}`,
+                      content: `User: ${message}\n\nAssistant: ${result.response}`,
+                      tags: ['chat', 'talk-to-hive', 'react-agent'],
+                      memory_type: 'conversation',
+                      user_id: userId,
+                      org_id: orgId,
+                      source_metadata: { source_platform: 'talk-to-hive', via: 'react-agent' },
+                    };
+                    buildRoutedIngestPayloads(convoPayload, { smartIngestRouter })
+                      .then(([routed]) => persistentMemoryEngine.ingestMemory(routed))
+                      .catch((e) => console.warn('[chat:react-agent] auto-save failed:', e.message));
+                  }
+                } catch {}
+
+                return jsonResponse(res, result);
+              } catch (agentErr) {
+                console.warn('[chat:react-agent] failed, falling back to legacy:', agentErr.message);
+                // Fall through to legacy implementation below.
+              }
             }
 
             // ─── Assistant identity onboarding ───

@@ -1226,6 +1226,118 @@ export class MemoryGraphEngine {
     };
   }
 
+  /**
+   * Ingest a hierarchical tree of memories (parent + children + edges).
+   *
+   * Contract (IngestTree):
+   *   {
+   *     parent:    Payload                      ← canonical doc / session / thread root
+   *     children:  Payload[]                    ← sections / turns / messages, ORDERED
+   *     entities?: Array<{ name, type, mentions_in?: 'parent'|'all'|number[] }>   (reserved)
+   *     edges?:    Array<{ from, to, type, confidence?, metadata? }> (reserved — extra edges
+   *                beyond the automatic child→parent PartOf links this method creates)
+   *   }
+   *
+   * Behaviour:
+   *   1. Ingest parent via ingestMemory() → parentId (full smart-router/conflict/edge logic still fires).
+   *   2. For each child, stamp metadata.parent_memory_id = parentId, then ingestMemory().
+   *      • Pass skip_fact_extraction:true on children by default — the parent owns the
+   *        distilled facts, children carry the raw content. Caller can override per child.
+   *   3. Write PartOf edge per child:  child.id → parent.id, confidence=1.0,
+   *      created_by='ingest_tree'.
+   *   4. (Reserved) entities + extra edges from the tree payload.
+   *
+   * Returns: { parentId, childIds, partOfEdgeIds, parentResult, childResults }
+   *
+   * This is the new canonical entry for hierarchical sources (KB docs, Talk-to-HIVE
+   * sessions, Gmail/Slack threads, web pages). buildRoutedIngestPayloads dispatches
+   * here automatically when SmartIngestRouter.route returns an IngestTree shape;
+   * legacy flat-array routes still hit ingestMemory() per payload unchanged.
+   */
+  async ingestMemoryTree(tree) {
+    if (!tree || typeof tree !== 'object' || !tree.parent) {
+      throw new Error('ingestMemoryTree requires a tree with a .parent payload');
+    }
+    const children = Array.isArray(tree.children) ? tree.children : [];
+
+    // 1. Parent ingest — full canonical pipeline (smart-router, conflict, edges).
+    const parentResult = await this.ingestMemory({
+      ...tree.parent,
+      // Tag parent so retrieval can identify roots easily without inspecting children.
+      metadata: {
+        ...(tree.parent.metadata || {}),
+        ingest_tree_role: 'parent',
+        child_count: children.length,
+      },
+    });
+    const parentId = parentResult.memoryId;
+    const childIds = [];
+    const childResults = [];
+
+    // 2. Children — sequential to keep order + share the same advisory lock window.
+    //    Each child's metadata gets parent_memory_id set so the FE / list filter
+    //    can hide them from default views via include_children=false.
+    for (let i = 0; i < children.length; i++) {
+      const c = children[i];
+      const childPayload = {
+        ...c,
+        skip_fact_extraction: c.skip_fact_extraction !== false, // default true for children
+        metadata: {
+          ...(c.metadata || {}),
+          parent_memory_id: parentId,
+          ingest_tree_role: 'child',
+          chunk_index: typeof c.metadata?.chunk_index === 'number' ? c.metadata.chunk_index : i,
+          chunk_total: children.length,
+        },
+        // Auto-tag children with 'extracted-fact' so the default list view hides them.
+        // Caller-supplied tags preserved.
+        tags: Array.from(new Set([...(c.tags || []), 'extracted-fact'])),
+      };
+      try {
+        const r = await this.ingestMemory(childPayload);
+        childIds.push(r.memoryId);
+        childResults.push(r);
+      } catch (childErr) {
+        console.warn(`[ingest-tree] child ${i} failed:`, childErr.message);
+      }
+    }
+
+    // 3. PartOf edges — outside the advisory lock since they touch different rows.
+    //    We use the store directly (not in a transaction) so a failed edge doesn't
+    //    roll back legit child memories. Each edge is idempotent via uuid.
+    const partOfEdgeIds = [];
+    for (const childId of childIds) {
+      try {
+        const edge = await this.store.createRelationship({
+          id: uuidv4(),
+          from_id: childId,
+          to_id: parentId,
+          type: 'PartOf',
+          confidence: 1.0,
+          created_by: 'ingest_tree',
+          created_at: nowIso(),
+          metadata: {
+            ingest_tree: true,
+            parent_role: tree.parent.metadata?.semantic_role || 'document',
+          },
+        });
+        partOfEdgeIds.push(edge?.id || null);
+      } catch (edgeErr) {
+        // Edge already exists or constraint violation — non-fatal.
+        console.warn('[ingest-tree] PartOf edge failed:', edgeErr.message);
+      }
+    }
+
+    return {
+      parentId,
+      childIds,
+      partOfEdgeIds,
+      parentResult,
+      childResults,
+      operation: 'tree_ingested',
+    };
+  }
+
   async applyUpdate(sourceId, targetId, { store: storeOverride, user_id, org_id, confidence = 1.0, startedAt = Date.now() } = {}) {
     const activeStore = storeOverride || this.store;
     return activeStore.transaction(async store => {

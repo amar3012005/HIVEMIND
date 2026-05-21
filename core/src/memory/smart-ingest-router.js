@@ -37,32 +37,55 @@ export class SmartIngestRouter {
       payload = { ...payload, content: normalized.content, metadata: { ...payload.metadata, ...normalized.metadata } };
     }
 
-    // Step 2: Apply type-specific routing → returns array of payloads
-    let payloads;
+    // Step 2: Apply type-specific routing.
+    //
+    // Routers may return either:
+    //   • Payload[]          (legacy flat shape — each item becomes one memory)
+    //   • IngestTree         { parent, children, entities?, edges? }
+    //                        (graph-engine.ingestMemoryTree handles it)
+    let result;
     switch (sourceType) {
       case 'gmail':
-        payloads = await this._routeGmail(payload);
+        result = await this._routeGmail(payload);
         break;
       case 'claude':
-        payloads = await this._routeClaude(payload);
+        result = await this._routeClaude(payload);
         break;
       case 'knowledge_base':
-        payloads = await this._routeKnowledgeBase(payload);
+        result = await this._routeKnowledgeBase(payload);
         break;
       case 'github':
-        payloads = await this._routeGithub(payload);
+        result = await this._routeGithub(payload);
         break;
       case 'slack':
-        payloads = await this._routeSlack(payload);
+        result = await this._routeSlack(payload);
         break;
       case 'chat':
-        payloads = await this._routeChat(payload);
+        result = await this._routeChat(payload);
         break;
       default:
-        payloads = [payload];
+        result = [payload];
     }
 
-    // For each payload, do semantic pre-flight and annotate with triple operator
+    // Detect tree vs flat array. IngestTree is identified by a top-level
+    // `.parent` field (object, not array). All other shapes are treated
+    // as flat Payload[].
+    if (result && !Array.isArray(result) && result.parent) {
+      // Tree: enrich parent + each child with triple-operator. Children
+      // intentionally do NOT get the operator (they're co-ingested as
+      // sections of the same doc, not standalone facts) — only the
+      // parent is checked against existing memories for Updates/Extends.
+      const enrichedParent = await this._enrichWithTripleOperator(result.parent);
+      return {
+        parent: enrichedParent,
+        children: result.children || [],
+        entities: result.entities || [],
+        edges: result.edges || [],
+      };
+    }
+
+    // Flat array path (unchanged from before).
+    const payloads = Array.isArray(result) ? result : [result];
     const enriched = await Promise.all(payloads.map(p => this._enrichWithTripleOperator(p)));
     return enriched;
   }
@@ -174,6 +197,15 @@ export class SmartIngestRouter {
   }
 
   // --- Knowledge base documents ---
+  //
+  // Returns either:
+  //   • flat Payload[]              (single-chunk docs — legacy shape)
+  //   • IngestTree { parent, children }  (multi-chunk docs — new shape)
+  //
+  // buildRoutedIngestPayloads detects the shape and dispatches to
+  // graph-engine.ingestMemoryTree() vs ingestMemory().  Trees produce a
+  // Document parent + N Section children connected by PartOf edges, fixing
+  // the long-standing 'KB chunks have no parent edge' complaint.
   async _routeKnowledgeBase(payload) {
     const content = payload.content || '';
     const chunkStrategy = payload.metadata?.suggestedChunkStrategy
@@ -183,18 +215,51 @@ export class SmartIngestRouter {
     const rawChunks = this._chunkByStrategy(content, chunkStrategy);
 
     if (rawChunks.length <= 1) {
+      // Single-chunk doc — keep legacy flat shape so existing callers
+      // that expect Payload[] still work.
       return [{
         ...payload,
         memory_type: payload.memory_type || 'fact',
-        metadata: { ...payload.metadata, source_type_normalized: 'knowledge_base', chunk_strategy: chunkStrategy }
+        metadata: {
+          ...payload.metadata,
+          source_type_normalized: 'knowledge_base',
+          chunk_strategy: chunkStrategy,
+          semantic_role: 'document',
+          ingest_tree_role: 'standalone',
+        },
       }];
     }
 
-    return rawChunks.map((chunk, i) => ({
+    // Multi-chunk doc → emit a Document parent + Section children tree.
+    // Parent carries: title, full content (for vector search across the
+    // whole doc), document_date, source_metadata. Children carry their
+    // chunk text + position in the doc.
+    const parent = {
+      ...payload,
+      id: undefined,
+      // Parent's content stays as the full doc text so semantic search
+      // can hit the doc-level intent (e.g. "the SOLVIS contract").
+      // Children get the chunk text for fine-grained retrieval.
+      memory_type: payload.memory_type || 'fact',
+      metadata: {
+        ...payload.metadata,
+        source_type_normalized: 'knowledge_base',
+        chunk_strategy: chunkStrategy,
+        semantic_role: 'document',
+        ingest_tree_role: 'parent',
+        chunk_total: rawChunks.length,
+      },
+    };
+
+    const children = rawChunks.map((chunk, i) => ({
       ...payload,
       id: undefined,
       content: chunk,
-      title: payload.title ? `${payload.title} (part ${i + 1}/${rawChunks.length})` : undefined,
+      // Section title: take first non-empty line as heading hint when
+      // chunking by heading_hierarchy, else use 'Section i/N' fallback.
+      title: payload.title
+        ? `${payload.title} · §${i + 1}/${rawChunks.length}`
+        : `Section ${i + 1}/${rawChunks.length}`,
       memory_type: payload.memory_type || 'fact',
       metadata: {
         ...payload.metadata,
@@ -203,8 +268,12 @@ export class SmartIngestRouter {
         chunk_index: i,
         chunk_total: rawChunks.length,
         parent_title: payload.title || null,
-      }
+        semantic_role: 'section',
+        ingest_tree_role: 'child',
+      },
     }));
+
+    return { parent, children };
   }
 
   // --- GitHub ---

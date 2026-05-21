@@ -12888,15 +12888,21 @@ exit \$RC
               const useLayeredBudget = graphLimit <= 2000;
               const includeEdges = url.searchParams.get('include_edges') !== 'false';
               const includeResidents = url.searchParams.get('include_residents') !== 'false';
-              // Only LATEST versions render in the graph. Without isLatest
-              // filter, every Update edge effectively doubles the node
-              // count (old + new version both show up), producing the
-              // 406-vs-221 mismatch the user reported between graph and
-              // profile pages. Profile already filters isLatest=true.
+              // Only LATEST versions render in the graph by default.
+              // Without isLatest filter, every Update edge effectively
+              // doubles the node count (old + new version both show up).
+              //
+              // ?include_superseded=true (2026-05-21) keeps superseded
+              // versions in the node set so Supermemory-style "you said
+              // X, then updated to Y" chains render with both endpoints
+              // visible. FE can dim the older nodes via the is_latest
+              // flag that ships on each node payload.
+              const includeSuperseded =
+                url.searchParams.get('include_superseded') === 'true';
               const baseWhere = {
                 orgId: orgId,
                 deletedAt: null,
-                isLatest: true,
+                ...(includeSuperseded ? {} : { isLatest: true }),
                 ...(graphProject ? { project: graphProject } : {}),
               };
               const scopeWhere = graphScope === 'team'

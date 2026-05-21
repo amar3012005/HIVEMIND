@@ -373,8 +373,64 @@ export class PrismaGraphStore {
 
     const total = await this.client.memory.count({ where: countWhere });
 
+    // Surface relationship structure so FE can show "linked to N" + a
+    // preview list without an N+1 per row. One batched fetch covers
+    // every memory in this page (typically ≤50). Each row gets:
+    //   edges_out_count
+    //   edges_in_count
+    //   superseded_by  (id of newer memory if this row is is_latest=false)
+    //   top_edges      (up to 4 outgoing edges with type + target id)
+    const memoryIds = records.map(r => r.id);
+    let edgeStats = new Map(); // id → { out, in, top: [], supersededBy }
+    if (memoryIds.length > 0) {
+      // Outgoing edges from these rows (this memory → others).
+      const outRels = await this.client.relationship.findMany({
+        where: { fromId: { in: memoryIds } },
+        select: { fromId: true, toId: true, type: true, confidence: true, createdBy: true },
+        orderBy: [{ confidence: 'desc' }, { createdAt: 'desc' }],
+      });
+      // Incoming edges (others → this memory).
+      const inRels = await this.client.relationship.findMany({
+        where: { toId: { in: memoryIds } },
+        select: { fromId: true, toId: true, type: true, confidence: true, createdBy: true },
+        orderBy: [{ confidence: 'desc' }, { createdAt: 'desc' }],
+      });
+      for (const r of outRels) {
+        let s = edgeStats.get(r.fromId);
+        if (!s) { s = { out: 0, in: 0, top: [], supersededBy: null }; edgeStats.set(r.fromId, s); }
+        s.out += 1;
+        if (s.top.length < 4) {
+          s.top.push({ direction: 'out', target_id: r.toId, type: r.type, confidence: r.confidence });
+        }
+        // Capture supersession: an Updates edge OUT means this row updated
+        // something else (we are the newer one). The OLDER row's
+        // supersededBy is filled by the IN loop below.
+      }
+      for (const r of inRels) {
+        let s = edgeStats.get(r.toId);
+        if (!s) { s = { out: 0, in: 0, top: [], supersededBy: null }; edgeStats.set(r.toId, s); }
+        s.in += 1;
+        if (r.type === 'Updates' && !s.supersededBy) {
+          s.supersededBy = r.fromId; // the newer memory that replaced this row
+        }
+        if (s.top.length < 4) {
+          s.top.push({ direction: 'in', source_id: r.fromId, type: r.type, confidence: r.confidence });
+        }
+      }
+    }
+
+    const memories = records.map(rec => {
+      const mapped = mapMemoryRecord(rec);
+      const stats = edgeStats.get(rec.id) || { out: 0, in: 0, top: [], supersededBy: null };
+      mapped.edges_out_count = stats.out;
+      mapped.edges_in_count = stats.in;
+      mapped.superseded_by = stats.supersededBy;
+      mapped.top_edges = stats.top;
+      return mapped;
+    });
+
     return {
-      memories: records.map(mapMemoryRecord),
+      memories,
       total
     };
   }

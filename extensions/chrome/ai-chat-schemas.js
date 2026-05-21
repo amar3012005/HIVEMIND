@@ -1,9 +1,130 @@
 /**
  * AI Chat Platform Schemas
- * 
+ *
  * Defines platform-specific selectors and prompts for auto-capturing
  * AI chat sessions from Claude, ChatGPT, Gemini, etc.
+ *
+ * STRUCTURED INGESTION PROMPT
+ *   Same template across all 4 platforms — asks the host LLM to emit a
+ *   markdown document HIVEMIND can parse deterministically. No JSON (some
+ *   platforms refuse; markdown survives ChatGPT's safety formatting).
+ *
+ *   parseStructuredSummary(text) → { title, summary, memories[], open_questions[] }
  */
+
+function buildStructuredIngestPrompt(platformName) {
+  const today = new Date().toISOString().slice(0, 10);
+  const platformTag = (platformName || 'chat').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  return `You are helping HIVEMIND (a persistent memory engine) ingest this conversation.
+
+Today: ${today}. Source platform: ${platformName}.
+
+Output ONLY a markdown document with this EXACT structure — no preamble,
+no explanation, no apology, no acknowledgement. Start directly with "## TITLE".
+
+## TITLE
+<3-8 words, searchable, captures the gist of the conversation>
+
+## SUMMARY
+<2-3 sentence narrative of what was discussed>
+
+## MEMORIES
+For each durable claim the user revealed (fact, decision, preference,
+goal, deadline, person, project, opinion, identity), output one block.
+Skip chitchat, greetings, transient state, generic public facts.
+
+### {memory_type}: {short title (3-8 words)}
+- content: <one atomic claim in present tense; ONE fact per memory — split compound claims>
+- tags: <comma-separated, MINIMUM 2 tags from: topic (ai/design/marketing/…), type (preference/decision/fact/…), person:<name>, project:<name>, time (q4-2026/this-week), source:from-${platformTag}>
+- memory_type: fact | preference | decision | goal | event | lesson | relationship | note
+
+## OPEN_QUESTIONS
+<bullet list — anything the user wanted to follow up on, or unresolved>
+
+## END
+
+NEVER include:
+- Passwords, API keys, .env contents, full credit card numbers
+- Chitchat ("hi", "thanks", "ok")
+- Information already covered by a previous memory in this list
+- Speculation — only what was actually said
+
+Tag every memory with at least one topic + one type. Always include
+source:from-${platformTag}. Output the document now:`;
+}
+
+/**
+ * Parse the structured ingest markdown emitted by the host LLM.
+ * Returns { title, summary, memories[], open_questions[] }.
+ */
+function parseStructuredSummary(rawMarkdown) {
+  const result = { title: '', summary: '', memories: [], open_questions: [] };
+  if (!rawMarkdown || typeof rawMarkdown !== 'string') return result;
+
+  // Host LLMs (esp. Claude) often strip the `##` markdown prefix and emit
+  // bare section labels like "TITLE" / "SUMMARY" / "MEMORIES". Accept both
+  // forms by building a regex that treats `##` as optional and the section
+  // boundary as either "##|###" OR an UPPERCASE bare-label-on-its-own-line.
+  const SECTION_BOUNDARY = String.raw`(?=\n(?:#{1,3}\s*)?(?:TITLE|SUMMARY|MEMORIES|OPEN[_ ]?QUESTIONS|END)\b|$)`;
+
+  const grab = (label) => {
+    const re = new RegExp(
+      String.raw`(?:^|\n)(?:#{1,3}\s*)?${label}\s*\n+([\s\S]*?)${SECTION_BOUNDARY}`,
+      'i'
+    );
+    const m = rawMarkdown.match(re);
+    return m ? m[1].trim() : '';
+  };
+
+  result.title = grab('TITLE').split('\n')[0].trim();
+  result.summary = grab('SUMMARY');
+
+  const memText = grab('MEMORIES');
+  if (memText) {
+    // Memories begin with "### type: title" OR bare "type: title" line.
+    const chunks = memText.split(/(?=^(?:#{2,3}\s*)?(?:fact|preference|decision|goal|event|lesson|relationship|note)\s*:)/im)
+      .filter((c) => /\b(content|tags|memory_type)\s*:/i.test(c));
+    for (const raw of chunks) {
+      const headerMatch = raw.match(/^(?:#{2,3}\s*)?([a-z]+)\s*:\s*([^\n]+)/i);
+      if (!headerMatch) continue;
+      const memory_type = headerMatch[1].trim().toLowerCase();
+      const title = headerMatch[2].trim().replace(/[*_`]+/g, '');
+      const contentMatch = raw.match(/^[-*]?\s*content:\s*([\s\S]*?)(?=\n[-*]?\s*(?:tags|memory_type)\s*:|\n#{2,3}|$)/im);
+      const tagsMatch = raw.match(/^[-*]?\s*tags:\s*([^\n]+)/im);
+      const typeOverride = raw.match(/^[-*]?\s*memory_type:\s*([^\n]+)/im);
+      const content = (contentMatch?.[1] || '').trim().replace(/[*_`]+/g, '');
+      const tags = (tagsMatch?.[1] || '')
+        .split(/[,;]/)
+        .map((t) => t.trim().replace(/^["'`]|["'`]$/g, ''))
+        .filter((t) => t.length > 0 && t.length < 60);
+      if (!content || content.length < 5) continue;
+      result.memories.push({
+        title: title.slice(0, 80) || `${memory_type} memory`,
+        content,
+        tags,
+        memory_type: (typeOverride?.[1]?.trim().toLowerCase()) || memory_type || 'fact',
+      });
+    }
+  }
+
+  const oqText = grab('OPEN_QUESTIONS') || grab('OPEN QUESTIONS');
+  if (oqText) {
+    result.open_questions = oqText
+      .split(/\n/)
+      .map((l) => l.replace(/^[-*•]\s*/, '').trim())
+      .filter((l) => l.length > 3);
+  }
+
+  return result;
+}
+
+// Expose to background service-worker scope (importScripts).
+try {
+  if (typeof self !== 'undefined') {
+    self.buildStructuredIngestPrompt = buildStructuredIngestPrompt;
+    self.parseStructuredSummary = parseStructuredSummary;
+  }
+} catch {}
 
 const AI_CHAT_SCHEMAS = {
   claude: {
@@ -16,11 +137,11 @@ const AI_CHAT_SCHEMAS = {
       inputFallback: 'div.ProseMirror',
       submit: 'button[aria-label="Send Message"]',
       submitFallback: 'button[aria-label="Send"]',
-      messages: '[data-test-render-count], [class*="font-claude-message"], article',
-      lastMessage: '[class*="assistant"] [class*="content"], .prose:last-of-type',
-      userMessages: '[class*="user-message"], [class*="human"]',
-      assistantMessages: '[class*="assistant-message"], [class*="claude"]',
-      thinkingIndicator: '[class*="thinking"]',
+      messages: '[class*="font-claude-message"], [class*="font-user-message"]',
+      lastMessage: '[class*="font-claude-message"]:last-of-type',
+      userMessages: '[class*="font-user-message"]',
+      assistantMessages: '[class*="font-claude-message"]',
+      thinkingIndicator: '[data-streaming="true"], [class*="thinking"]',
     },
     summaryPrompt: 'summarize this chat briefly',
     waitForResponse: {
@@ -32,14 +153,15 @@ const AI_CHAT_SCHEMAS = {
       chatHistoryScript: `
         (function() {
           const messages = [];
+          const isHive = (el) => !!(el && el.closest && el.closest('[id*="hivemind"],[class*="hivemind"],#__hivemind-section-overlay'));
           // Claude wraps user/assistant turns in article-like containers.
           // Primary: find all text blocks inside the chat scroll container.
           const chatContainer = document.querySelector('[class*="mx-auto"][class*="max-w"], [class*="chat"], main');
           if (!chatContainer) return [];
-          
+
           // Claude uses font-user-message / font-claude-message class patterns
-          const userBlocks = chatContainer.querySelectorAll('[class*="font-user-message"], [class*="user"]');
-          const assistantBlocks = chatContainer.querySelectorAll('[class*="font-claude-message"], [class*="assistant"]');
+          const userBlocks = Array.from(chatContainer.querySelectorAll('[class*="font-user-message"]')).filter((el) => !isHive(el));
+          const assistantBlocks = Array.from(chatContainer.querySelectorAll('[class*="font-claude-message"]')).filter((el) => !isHive(el));
           
           // If class-based detection fails, fallback to structure-based
           const allTextBlocks = chatContainer.querySelectorAll('.prose, [class*="message"], p');
@@ -76,7 +198,11 @@ const AI_CHAT_SCHEMAS = {
       `,
       lastMessageScript: `
         (function() {
-          const blocks = document.querySelectorAll('[class*="font-claude-message"]');
+          // Filter out anything inside HIVEMIND's own overlay so we never
+          // bleed our extension UI into the captured summary.
+          const isHive = (el) => !!(el && el.closest && el.closest('[id*="hivemind"],[class*="hivemind"],#__hivemind-section-overlay'));
+          const blocks = Array.from(document.querySelectorAll('[class*="font-claude-message"]'))
+            .filter((el) => !isHive(el));
           const last = blocks[blocks.length - 1];
           return last ? (last.innerText || last.textContent || '').trim() : null;
         })()

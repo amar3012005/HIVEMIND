@@ -62,6 +62,198 @@
     }
     .topbar .icon-btn:hover { background: rgba(0,0,0,0.04); color: var(--text); }
 
+    /* AI platform badge — static indicator only (no click, no animation) */
+    .platform-badge {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 4px 9px;
+      background: #f0fdf4;
+      border: 1px solid #bbf7d0;
+      color: #16a34a;
+      font-size: 11px; font-weight: 700;
+      letter-spacing: 0.02em;
+      border-radius: 999px;
+      font-family: inherit;
+      pointer-events: none;
+    }
+    .platform-badge .pb-tick { font-size: 11px; font-weight: 800; line-height: 1; }
+    .platform-badge .pb-name { letter-spacing: 0.04em; text-transform: uppercase; }
+
+    /* Save-session dropdown bar — sits under topbar when platform recognized */
+    .save-session-bar {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 10px;
+      padding: 10px 14px;
+      background: linear-gradient(180deg, rgba(17,125,255,0.04) 0%, rgba(17,125,255,0.02) 100%);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .save-session-bar .ssb-label {
+      display: inline-flex; align-items: center; gap: 8px;
+      font-size: 12.5px; font-weight: 600;
+      color: var(--text);
+    }
+    .save-session-bar .ssb-icon {
+      width: 22px; height: 22px;
+      display: inline-flex; align-items: center; justify-content: center;
+      border-radius: 6px;
+      background: rgba(17,125,255,0.1);
+      color: var(--primary);
+      flex-shrink: 0;
+    }
+    .save-session-bar .ssb-icon svg { width: 13px; height: 13px; display: block; }
+    .save-session-bar .ssb-platform {
+      font-weight: 800;
+      color: var(--primary);
+    }
+    .save-session-bar .ssb-sub {
+      font-size: 10.5px; color: var(--muted);
+      font-family: 'SF Mono', monospace;
+    }
+    .save-session-bar .ssb-btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 6px 12px;
+      background: var(--primary);
+      color: white;
+      border: none;
+      border-radius: 999px;
+      font: inherit; font-size: 11.5px; font-weight: 700;
+      cursor: pointer;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      box-shadow: 0 1px 3px rgba(17,125,255,0.3);
+      transition: all 0.12s;
+    }
+    .save-session-bar .ssb-btn:hover { background: #0066e0; transform: translateY(-1px); }
+    .save-session-bar .ssb-btn:disabled { opacity: 0.55; cursor: wait; transform: none; }
+    .save-session-bar.busy .ssb-btn {
+      background: linear-gradient(120deg, #117dff 0%, #4f9eff 50%, #117dff 100%);
+      background-size: 200% 100%;
+      animation: ssb-shimmer 1.4s linear infinite;
+    }
+    @keyframes ssb-shimmer { 0% { background-position: 0% 0; } 100% { background-position: -200% 0; } }
+
+    /* persistent stage cards (the live ingest pipeline) */
+    .stage-card {
+      align-self: stretch;
+      display: flex; align-items: flex-start; gap: 10px;
+      padding: 10px 14px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      font-size: 12.5px;
+      line-height: 1.45;
+      box-shadow: 0 1px 1px rgba(0,0,0,0.02);
+    }
+    .stage-card .sg-icon {
+      width: 28px; height: 28px;
+      display: inline-flex; align-items: center; justify-content: center;
+      border-radius: 8px;
+      background: var(--ic-bg, rgba(17,125,255,0.08));
+      color: var(--ic-fg, var(--primary));
+      flex-shrink: 0;
+    }
+    .stage-card .sg-icon svg { width: 14px; height: 14px; display: block; stroke-width: 2; }
+
+    /* per-icon pastel palette — matches HIVEMIND dashboard tool tiles */
+    .ic-search   { --ic-bg: rgba(17,125,255,0.10);  --ic-fg: #117dff; }
+    .ic-pen      { --ic-bg: rgba(245,158,11,0.12);  --ic-fg: #d97706; }
+    .ic-clock    { --ic-bg: rgba(139,92,246,0.12);  --ic-fg: #7c3aed; }
+    .ic-camera   { --ic-bg: rgba(20,184,166,0.12);  --ic-fg: #0d9488; }
+    .ic-brain    { --ic-bg: rgba(17,125,255,0.10);  --ic-fg: #117dff; }
+    .ic-help     { --ic-bg: rgba(245,158,11,0.12);  --ic-fg: #d97706; }
+    .ic-warn     { --ic-bg: rgba(239,68,68,0.10);   --ic-fg: #dc2626; }
+    .ic-file     { --ic-bg: rgba(100,116,139,0.12); --ic-fg: #475569; }
+    .ic-check    { --ic-bg: rgba(34,197,94,0.12);   --ic-fg: #16a34a; }
+    .ic-send     { --ic-bg: rgba(17,125,255,0.10);  --ic-fg: #117dff; }
+    .ic-bookmark { --ic-bg: rgba(17,125,255,0.10);  --ic-fg: #117dff; }
+    .ic-zap      { --ic-bg: rgba(245,158,11,0.12);  --ic-fg: #d97706; }
+    .ic-code     { --ic-bg: rgba(17,125,255,0.10);  --ic-fg: #117dff; }
+    .ic-handshake{ --ic-bg: rgba(245,158,11,0.12);  --ic-fg: #d97706; }
+    .ic-flask    { --ic-bg: rgba(34,197,94,0.12);   --ic-fg: #16a34a; }
+    .ic-branch   { --ic-bg: rgba(139,92,246,0.12);  --ic-fg: #7c3aed; }
+
+    /* memory-trace card — list of saved memories after a successful ingest */
+    .mem-trace {
+      align-self: stretch;
+      display: flex; flex-direction: column;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    .mem-trace-header {
+      display: flex; align-items: center; gap: 8px;
+      padding: 10px 14px;
+      background: #f0fdf4;
+      border-bottom: 1px solid #bbf7d0;
+      font-size: 11.5px; font-weight: 700;
+      letter-spacing: 0.04em; text-transform: uppercase;
+      color: #16a34a;
+    }
+    .mem-trace-header svg { width: 13px; height: 13px; flex-shrink: 0; }
+    .mem-row {
+      display: flex; align-items: flex-start; gap: 10px;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      font-size: 12.5px;
+      line-height: 1.4;
+    }
+    .mem-row:last-child { border-bottom: none; }
+    .mem-row .mr-icon {
+      width: 26px; height: 26px;
+      display: inline-flex; align-items: center; justify-content: center;
+      border-radius: 7px;
+      flex-shrink: 0;
+      background: var(--mr-bg, rgba(17,125,255,0.08));
+      color: var(--mr-fg, var(--primary));
+    }
+    .mem-row .mr-icon svg { width: 13px; height: 13px; }
+    .mem-row .mr-body { flex: 1; min-width: 0; }
+    .mem-row .mr-title { font-weight: 700; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .mem-row .mr-meta { font-size: 10.5px; color: var(--muted); font-family: 'SF Mono', monospace; margin-top: 2px; }
+    .mem-row .mr-action {
+      font-size: 9.5px; font-weight: 800;
+      letter-spacing: 0.04em;
+      padding: 2px 7px;
+      border-radius: 999px;
+      flex-shrink: 0;
+      align-self: center;
+    }
+    .mem-row .mr-action.saved   { background: #f0fdf4; color: #16a34a; border: 1px solid #bbf7d0; }
+    .mem-row .mr-action.updated { background: #eff6ff; color: #117dff; border: 1px solid #bfdbfe; }
+    .mem-row .mr-action.deduped { background: #f1f5f9; color: #64748b; border: 1px solid #cbd5e1; }
+
+    /* memory-type tile colors (mirror dashboard) */
+    .mt-fact         { --mr-bg: rgba(17,125,255,0.10);  --mr-fg: #117dff; }
+    .mt-preference   { --mr-bg: rgba(245,158,11,0.12);  --mr-fg: #d97706; }
+    .mt-decision     { --mr-bg: rgba(245,158,11,0.12);  --mr-fg: #d97706; }
+    .mt-goal         { --mr-bg: rgba(34,197,94,0.12);   --mr-fg: #16a34a; }
+    .mt-event        { --mr-bg: rgba(139,92,246,0.12);  --mr-fg: #7c3aed; }
+    .mt-lesson       { --mr-bg: rgba(20,184,166,0.12);  --mr-fg: #0d9488; }
+    .mt-relationship { --mr-bg: rgba(239,68,68,0.10);   --mr-fg: #dc2626; }
+    .mt-note         { --mr-bg: rgba(100,116,139,0.12); --mr-fg: #475569; }
+    .mt-conversation { --mr-bg: rgba(17,125,255,0.10);  --mr-fg: #117dff; }
+    .stage-card .sg-body { flex: 1; min-width: 0; }
+    .stage-card .sg-title { font-weight: 700; color: var(--text); }
+    .stage-card .sg-detail { font-size: 11px; color: var(--muted); margin-top: 2px; font-family: 'SF Mono', monospace; word-break: break-word; }
+    .stage-card.in-flight {
+      background: linear-gradient(120deg, #eff6ff 0%, #dbeafe 50%, #eff6ff 100%);
+      background-size: 200% 100%;
+      border-color: #bfdbfe;
+      animation: ssb-shimmer 1.6s linear infinite;
+    }
+    .stage-card.done { background: #f0fdf4; border-color: #bbf7d0; }
+    .stage-card.done .sg-icon { background: #dcfce7; color: #16a34a; }
+    .stage-card.error { background: #fef2f2; border-color: #fecaca; }
+    .stage-card.error .sg-icon { background: #fee2e2; color: #b91c1c; }
+    .stage-group-header {
+      align-self: stretch;
+      font-size: 10.5px; font-weight: 700;
+      letter-spacing: 0.08em; text-transform: uppercase;
+      color: var(--muted);
+      padding: 14px 4px 0;
+    }
+
     /* ── Messages area ─────────── */
     .messages {
       flex: 1;
@@ -96,6 +288,45 @@
       box-shadow: 0 2px 8px rgba(17,125,255,0.25);
     }
     .hero-btn:hover { background: #0066e0; }
+
+    /* welcome block */
+    .welcome {
+      padding: 24px 6px 8px;
+      display: flex; flex-direction: column;
+      gap: 14px;
+    }
+    .welcome-title {
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: var(--text);
+    }
+    .welcome-sub {
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.55;
+      margin-bottom: 4px;
+    }
+    .welcome-prompts {
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .wp {
+      text-align: left;
+      padding: 12px 14px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      font: inherit;
+      font-size: 13px;
+      color: var(--text);
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .wp:hover {
+      border-color: #c0d8ff;
+      background: rgba(17,125,255,0.04);
+      transform: translateY(-1px);
+    }
 
     /* user bubble (right) */
     .msg-user {
@@ -296,6 +527,55 @@
     }
     .ctx-clear:hover { color: var(--text); }
 
+    /* char counter pill */
+    .char-counter {
+      font-size: 10px;
+      color: var(--muted);
+      font-family: 'SF Mono', monospace;
+      padding: 0 6px;
+      align-self: center;
+      flex-shrink: 0;
+    }
+    .char-counter.near { color: #f59e0b; }
+    .char-counter.over { color: #dc2626; font-weight: 700; }
+
+    /* saving-memory animated chip — appears in stream while save tool fires */
+    .saving-chip {
+      align-self: flex-start;
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 7px 14px;
+      background: linear-gradient(120deg, #eff6ff 0%, #dbeafe 50%, #eff6ff 100%);
+      background-size: 200% 100%;
+      animation: saving-shimmer 1.5s linear infinite, saving-pulse 1.5s ease-in-out infinite;
+      border: 1px solid #bfdbfe;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--primary);
+    }
+    .saving-chip .sc-icon {
+      width: 14px; height: 14px;
+      display: inline-flex; align-items: center; justify-content: center;
+      animation: sc-spin 1.4s linear infinite;
+    }
+    .saving-chip .sc-icon svg { width: 12px; height: 12px; }
+    .saving-chip.done {
+      animation: none;
+      background: #f0fdf4;
+      border-color: #bbf7d0;
+      color: #16a34a;
+    }
+    .saving-chip.done .sc-icon { animation: none; }
+    .saving-chip .sc-detail {
+      font-size: 11px;
+      color: var(--muted);
+      font-weight: 500;
+      font-family: 'SF Mono', monospace;
+    }
+    @keyframes saving-shimmer { 0% { background-position: 0% 0; } 100% { background-position: -200% 0; } }
+    @keyframes saving-pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(17,125,255,0.18); } 50% { box-shadow: 0 0 0 6px rgba(17,125,255,0); } }
+    @keyframes sc-spin { to { transform: rotate(360deg); } }
+
     /* ── Composer ───────────── */
     .composer {
       flex-shrink: 0;
@@ -357,12 +637,29 @@
       <div class="brand-icon"><img src="Hivemind_extension.png" alt="" /></div>
       Talk to HIVE
     </div>
+
+    <!-- AI platform badge — green tick + name when active tab matches -->
+    <button id="platformBadge" class="platform-badge hidden" title="Ingest this AI chat session">
+      <span class="pb-tick">✓</span>
+      <span class="pb-name" id="pbName">—</span>
+    </button>
+
     <span class="user" id="userPill"></span>
     <button class="icon-btn" id="newChatBtn" title="New chat">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M12 5v14M5 12h14"/>
       </svg>
     </button>
+  </div>
+
+  <!-- Save-session dropdown bar — shown when active tab is a recognised AI chat -->
+  <div id="saveSessionBar" class="save-session-bar hidden">
+    <div class="ssb-label">
+      <span class="ssb-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></span>
+      <span>Save <span class="ssb-platform" id="ssbPlatform">—</span> chat session</span>
+      <span class="ssb-sub" id="ssbSub"></span>
+    </div>
+    <button id="ssbBtn" class="ssb-btn">Save session</button>
   </div>
 
   <!-- Signed-out hero -->
@@ -376,7 +673,18 @@
   </div>
 
   <!-- Chat messages -->
-  <div id="messages" class="messages hidden"></div>
+  <div id="messages" class="messages hidden">
+    <!-- Welcome block — shown when history is empty -->
+    <div id="welcome" class="welcome">
+      <div class="welcome-title">Ask Me Anything</div>
+      <div class="welcome-sub">Your second brain — always on, always remembering. Recalls context across tabs, sessions, and tools, then answers like you've known each other for years.</div>
+      <div class="welcome-prompts">
+        <button class="wp" data-prompt="What have I been working on lately?">What have I been working on lately?</button>
+        <button class="wp" data-prompt="Summarize my recent decisions">Summarize my recent decisions</button>
+        <button class="wp" data-prompt="What are my key preferences?">What are my key preferences?</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Composer -->
   <div id="composer" class="composer hidden">
@@ -401,6 +709,10 @@
       <button id="pageBtn" class="ctx-btn" title="Send whole page as context">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
         Page
+      </button>
+      <button id="saveMemBtn" class="ctx-btn" title="Save active selection / section / page directly to HIVEMIND">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+        Save memory
       </button>
     </div>
 

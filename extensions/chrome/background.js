@@ -1072,7 +1072,17 @@ async function captureAIChatSession(tabId, url, config) {
           return { success: true, mode: 'textarea', tag };
         }
       },
-      args: [platform.selectors.input, platform.selectors.inputFallback, platform.summaryPrompt],
+      args: [
+        platform.selectors.input,
+        platform.selectors.inputFallback,
+        // Prefer the structured ingest prompt — it forces the host LLM to
+        // emit a markdown document we can parse deterministically into
+        // memories. Fall back to legacy per-platform string if helper
+        // isn't loaded (older schema).
+        (typeof buildStructuredIngestPrompt === 'function'
+          ? buildStructuredIngestPrompt(platform.name)
+          : platform.summaryPrompt),
+      ],
     });
     
     if (fillResult?.error) {
@@ -1107,97 +1117,240 @@ async function captureAIChatSession(tabId, url, config) {
     }
     console.log('[ai-chat-capture] Send button clicked');
     
-    // ── Step 5: Wait for AI response ────────────────────
+    // ── Step 5: Wait for AI response — STABILITY-BASED ──
+    //
+    // Old approach: exit when (messagesCount > messagesBefore) AND
+    // (thinkingIndicator gone). Both signals fire BEFORE streaming
+    // finishes on ChatGPT/Claude — the assistant bubble appears empty,
+    // then text streams in. Result: we extracted "(No summary received)".
+    //
+    // New approach: poll the last assistant message's innerText length.
+    // Streaming is "done" when text length stops growing for STABLE_MS
+    // continuous and no thinking indicator is present. Hard timeout
+    // remains as a safety net.
     chrome.action.setBadgeText({ text: '⏳', tabId });
-    
+
     const startTime = Date.now();
-    const timeout = platform.waitForResponse?.timeout || 30000;
-    const interval = platform.waitForResponse?.checkInterval || 1000;
+    const timeout = platform.waitForResponse?.timeout || 60000;
+    const interval = Math.min(platform.waitForResponse?.checkInterval || 600, 1000);
+    const STABLE_MS = 3000;   // text must be unchanged this long
+    const MIN_GROWTH_MS = 800; // require at least one growth tick before declaring stable
+    let lastLen = -1;
+    let stableSince = null;
+    let firstGrowthAt = null;
     let gotResponse = false;
-    
+
+    const lastAssistantSel = platform.selectors.lastMessage
+      || platform.selectors.assistantMessages
+      || `${platform.selectors.messages}:last-of-type`;
+
     while (Date.now() - startTime < timeout) {
       await new Promise(r => setTimeout(r, interval));
-      
-      const [{ result: currentCount }] = await chrome.scripting.executeScript({
+
+      // 1. Last assistant message text length (primary signal)
+      const [{ result: probe }] = await chrome.scripting.executeScript({
         target: { tabId },
-        func: (selector) => document.querySelectorAll(selector).length,
-        args: [platform.selectors.messages],
+        func: (lastSel, msgsSel, thinkSel) => {
+          // Never let the HIVEMIND overlay leak into the probe.
+          const isHive = (el) => !!(el && el.closest && el.closest('[id*="hivemind"],[class*="hivemind"],#__hivemind-section-overlay'));
+          const filterHive = (list) => Array.from(list).filter((el) => !isHive(el));
+          const allMsgs = filterHive(document.querySelectorAll(msgsSel));
+          const lastByQuery = filterHive(document.querySelectorAll(lastSel));
+          const last = lastByQuery[lastByQuery.length - 1] || allMsgs[allMsgs.length - 1] || null;
+          const text = last ? (last.innerText || last.textContent || '').trim() : '';
+          const thinking = thinkSel ? !!document.querySelector(thinkSel) : false;
+          // Also check for a "stop generating" button which is the most
+          // reliable cross-platform "still streaming" signal.
+          const stopBtn = !!(
+            document.querySelector('button[aria-label*="Stop" i]') ||
+            document.querySelector('button[aria-label*="stop generating" i]') ||
+            document.querySelector('[data-testid*="stop"]')
+          );
+          return { len: text.length, thinking, stopBtn, msgCount: allMsgs.length };
+        },
+        args: [
+          lastAssistantSel,
+          platform.selectors.messages,
+          platform.waitForResponse?.thinkingIndicator || null,
+        ],
       });
-      
-      // Also check if thinking indicator disappeared
-      if (platform.waitForResponse?.thinkingIndicator) {
-        const [{ result: thinkingGone }] = await chrome.scripting.executeScript({
-          target: { tabId },
-          func: (sel) => !document.querySelector(sel),
-          args: [platform.waitForResponse.thinkingIndicator],
-        });
-        if (!thinkingGone) continue; // Still thinking
+
+      const curLen = probe?.len || 0;
+      const stillStreaming = probe?.thinking || probe?.stopBtn;
+
+      // bootstrap — wait until we even have an assistant bubble.
+      if (curLen === 0 && (probe?.msgCount || 0) <= messagesBefore) {
+        continue;
       }
-      
-      if (currentCount > messagesBefore) {
-        // Wait a bit more for full render
-        await new Promise(r => setTimeout(r, 1500));
+
+      if (firstGrowthAt === null && curLen > 20) {
+        firstGrowthAt = Date.now();
+      }
+
+      // If text grew → reset stability window.
+      if (curLen !== lastLen) {
+        lastLen = curLen;
+        stableSince = Date.now();
+        continue;
+      }
+
+      // Text unchanged this tick — check stability + no streaming signals.
+      const stableFor = Date.now() - (stableSince || Date.now());
+      const grownFor = firstGrowthAt ? (Date.now() - firstGrowthAt) : 0;
+      if (!stillStreaming && stableFor >= STABLE_MS && grownFor >= MIN_GROWTH_MS && curLen > 30) {
         gotResponse = true;
         break;
       }
     }
-    
+
     if (!gotResponse) {
-      console.warn('[ai-chat-capture] Timed out waiting for response — grabbing current state');
+      console.warn('[ai-chat-capture] Timed out waiting for stable response — extracting current state');
+    } else {
+      console.log(`[ai-chat-capture] Response stable at ${lastLen} chars`);
     }
-    
+
+    // Final settle so DOM commits the very last token.
+    await new Promise((r) => setTimeout(r, 800));
+
     // ── Step 6: Extract chat history + summary ───────────
+    // Schema "*Script" fields are bare statement bodies (not function
+    // expressions). Wrap them in a Function body — not in an IIFE — so the
+    // bare `return` inside the script is what produces the value.
     const [{ result: extractionResult }] = await chrome.scripting.executeScript({
       target: { tabId },
       func: (chatHistoryScript, lastMessageScript) => {
+        // Schema scripts come in two shapes:
+        //   (a) bare body w/ `return ...`     — needs raw fn body
+        //   (b) IIFE expression "(function(){...})()" — needs explicit `return`
+        // Detect (b) by leading `(` and prepend `return` so both work.
+        const wrap = (src) => {
+          const trimmed = (src || '').trim();
+          if (trimmed.startsWith('(')) return `return ${trimmed};`;
+          return trimmed;
+        };
+        const out = { chatHistory: [], lastMessage: null, errors: [] };
         try {
-          const chatHistoryFn = new Function(`return (${chatHistoryScript})();`);
-          const lastMsgFn = new Function(`return (${lastMessageScript})();`);
-          return {
-            chatHistory: chatHistoryFn(),
-            lastMessage: lastMsgFn(),
-          };
+          const chatHistoryFn = new Function(wrap(chatHistoryScript));
+          out.chatHistory = chatHistoryFn() || [];
         } catch (e) {
-          return { chatHistory: [], lastMessage: null, error: e.message };
+          out.errors.push(`chatHistory: ${e.message}`);
         }
+        try {
+          const lastMsgFn = new Function(wrap(lastMessageScript));
+          out.lastMessage = lastMsgFn() || null;
+        } catch (e) {
+          out.errors.push(`lastMessage: ${e.message}`);
+        }
+        return out;
       },
       args: [platform.extraction.chatHistoryScript, platform.extraction.lastMessageScript],
     });
-    
-    const chatHistory = extractionResult?.chatHistory || [];
-    const summary = extractionResult?.lastMessage || '(No summary received)';
+
+    if (extractionResult?.errors?.length) {
+      console.warn('[ai-chat-capture] extraction errors:', extractionResult.errors);
+    }
+
+    let chatHistory = extractionResult?.chatHistory || [];
+    let summary = extractionResult?.lastMessage || '';
+
+    // Fallback — if schema selectors miss, try platform-agnostic capture
+    // by grabbing the last big text block on the page.
+    if ((!summary || summary.length < 10) && (!chatHistory || chatHistory.length === 0)) {
+      const [{ result: fb }] = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => {
+          const isHive = (el) => !!(el && el.closest && el.closest('[id*="hivemind"],[class*="hivemind"],#__hivemind-section-overlay'));
+          const candidates = Array.from(document.querySelectorAll(
+            '[data-message-author-role="assistant"], [class*="font-claude-message"], [class*="markdown"], article'
+          )).filter((el) => !isHive(el));
+          const visible = candidates.filter((el) => {
+            const r = el.getBoundingClientRect();
+            const t = (el.innerText || '').trim();
+            return r.width > 0 && r.height > 0 && t.length > 30;
+          });
+          const last = visible[visible.length - 1];
+          return { text: last ? (last.innerText || '').trim().slice(0, 8000) : '' };
+        },
+      });
+      if (fb?.text) summary = fb.text;
+    }
+
+    if (!summary || summary.length < 5) summary = '(No summary received)';
     
     console.log(`[ai-chat-capture] Extracted ${chatHistory.length} messages`);
     
-    // ── Step 7: Format and save ─────────────────────────
-    const content = [
-      `## 🤖 AI-Generated Session Summary`,
-      ``,
-      summary,
-      ``,
-      `## 📜 Full Conversation (${chatHistory.length} messages)`,
-      ``,
-      ...chatHistory.map((msg, i) => 
-        `### ${msg.role === 'user' ? '👤 User' : '🤖 AI'}\n\n${msg.content}\n`
-      ),
-    ].join('\n').slice(0, 32000);
-    
-    await saveToHivemind(config, {
-      content,
-      title: `${platform.name} Session — ${new Date().toLocaleString()}`,
-      tags: ['ai-chat', platform.name.toLowerCase(), 'auto-summary', `url:${url}`],
-      source: platform.name.toLowerCase(),
-    });
-    
-    // Success badge
+    // ── Step 7: Parse structured summary + send to distill endpoint ──
+    // Host LLM was asked to emit a markdown doc with TITLE/SUMMARY/MEMORIES.
+    // Parse it, POST to /api/ingest/chat-session, server bulk-distills
+    // (dedupe / update / save).
+    const parsed = (typeof parseStructuredSummary === 'function')
+      ? parseStructuredSummary(summary)
+      : { title: '', summary: '', memories: [], open_questions: [] };
+
+    console.log(`[ai-chat-capture] Parsed ${parsed.memories?.length || 0} candidate memories from structured prompt`);
+
+    let distillResult = null;
+    try {
+      const resp = await fetch(`${config.apiBase}/api/ingest/chat-session`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': config.apiKey },
+        body: JSON.stringify({
+          platform: platform.name.toLowerCase(),
+          url,
+          transcript: chatHistory,
+          parsed,
+          raw_summary: summary,
+        }),
+      });
+      if (resp.ok) {
+        distillResult = await resp.json();
+      } else {
+        const text = await resp.text();
+        console.warn('[ai-chat-capture] distill endpoint failed:', resp.status, text.slice(0, 200));
+      }
+    } catch (postErr) {
+      console.warn('[ai-chat-capture] distill POST failed:', postErr.message);
+    }
+
+    // Fallback — if no parsed memories OR endpoint unavailable, save the
+    // raw transcript so nothing is lost.
+    if (!distillResult || ((distillResult.saved || 0) + (distillResult.updated || 0)) === 0) {
+      const content = [
+        `## AI Chat Session — ${platform.name}`,
+        ``,
+        summary,
+        ``,
+        `## Full Conversation (${chatHistory.length} messages)`,
+        ``,
+        ...chatHistory.map((msg) =>
+          `### ${msg.role === 'user' ? 'User' : 'AI'}\n\n${msg.content}\n`
+        ),
+      ].join('\n').slice(0, 32000);
+      await saveToHivemind(config, {
+        content,
+        title: parsed.title || `${platform.name} Session — ${new Date().toLocaleString()}`,
+        tags: ['ai-chat', platform.name.toLowerCase(), 'raw-transcript', `url:${url}`],
+        source: platform.name.toLowerCase(),
+      });
+    }
+
     chrome.action.setBadgeText({ text: '✅', tabId });
     chrome.action.setBadgeBackgroundColor({ color: '#22c55e', tabId });
     setTimeout(() => chrome.action.setBadgeText({ text: '', tabId }), 3000);
-    
-    return { 
-      success: true, 
-      platform: platform.name, 
+
+    return {
+      success: true,
+      platform: platform.name,
       messageCount: chatHistory.length,
+      candidates: parsed.memories?.length || 0,
+      saved: distillResult?.saved || 0,
+      updated: distillResult?.updated || 0,
+      deduped: distillResult?.deduped || 0,
+      memory_ids: distillResult?.memory_ids || [],
+      open_questions: parsed.open_questions || [],
+      rows: distillResult?.rows || [],
+      raw_summary_preview: (summary || '').slice(0, 600),
+      parsed_title: parsed.title || '',
     };
     
   } catch (err) {

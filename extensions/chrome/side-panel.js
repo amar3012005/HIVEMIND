@@ -27,6 +27,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   wireEvents();
+  refreshPlatformBadge();
 });
 
 function renderSignedOut() {
@@ -68,15 +69,43 @@ function wireEvents() {
 
   $('newChatBtn').addEventListener('click', () => {
     state.history = [];
-    $('messages').innerHTML = '';
+    // Rebuild welcome block (innerHTML wipe would lose listeners; just re-add).
+    const msgs = $('messages');
+    msgs.innerHTML = `
+      <div id="welcome" class="welcome">
+        <div class="welcome-title">Ask Me Anything</div>
+        <div class="welcome-sub">Your second brain — always on, always remembering. Recalls context across tabs, sessions, and tools, then answers like you've known each other for years.</div>
+        <div class="welcome-prompts">
+          <button class="wp" data-prompt="What have I been working on lately?">What have I been working on lately?</button>
+          <button class="wp" data-prompt="Summarize my recent decisions">Summarize my recent decisions</button>
+          <button class="wp" data-prompt="What are my key preferences?">What are my key preferences?</button>
+        </div>
+      </div>`;
+    msgs.querySelectorAll('.wp').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        $('input').value = btn.dataset.prompt || btn.textContent.trim();
+        send();
+      });
+    });
     $('input').focus();
   });
 
   const input = $('input');
+  const counter = $('charCounter');
+  const updateCounter = () => {
+    const n = input.value.length;
+    if (counter) {
+      counter.textContent = `${n}/2000`;
+      counter.classList.toggle('near', n >= 1700 && n < 2000);
+      counter.classList.toggle('over', n >= 2000);
+    }
+  };
   input.addEventListener('input', () => {
     input.style.height = 'auto';
     input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+    updateCounter();
   });
+  updateCounter();
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -111,8 +140,28 @@ function wireEvents() {
 
   $('ctxClear').addEventListener('click', () => setContext(null));
 
+  $('saveMemBtn').addEventListener('click', saveCurrentContextAsMemory);
+
+  // Welcome example prompts → fill composer + auto-send
+  document.querySelectorAll('.wp').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const prompt = btn.dataset.prompt || btn.textContent.trim();
+      const input = $('input');
+      input.value = prompt;
+      input.focus();
+      send();
+    });
+  });
+
+  // Save-session button (the actual interactive entry point)
+  $('ssbBtn').addEventListener('click', ingestActiveChat);
+
   // Section pick broadcast from background → content-script
   chrome.runtime.onMessage.addListener((msg) => {
+    if (msg.action === 'platformChanged') {
+      renderPlatformBadge(msg);
+      return;
+    }
     if (msg.action === 'sectionContextReady' && msg.section) {
       setContext(msg.section);
       return;
@@ -240,8 +289,15 @@ async function send() {
       stepsCountEl.textContent = stepCount;
       const li = document.createElement('div');
       li.className = 'step-item';
+      li.dataset.tool = evt.name;
       li.innerHTML = `<span class="step-icon">🔧</span> <code>${escapeHtml(evt.name)}</code> <span class="step-args">${escapeHtml(briefArgs(evt.arguments))}</span> <span class="step-status">…</span>`;
       stepsList.appendChild(li);
+
+      // Inline saving chip — only for memory write ops so the user sees
+      // HIVE actually committing memory while the answer is still streaming.
+      if (/^hivemind_(save_memory|update_memory|log_decision|delete_memory|set_assistant_name)$/.test(evt.name)) {
+        showSavingChip(evt.name, briefArgs(evt.arguments));
+      }
     }
     if (evt.type === 'tool_result') {
       const items = stepsList.querySelectorAll('.step-item');
@@ -249,6 +305,10 @@ async function send() {
       if (last) {
         const status = last.querySelector('.step-status');
         if (status) status.textContent = '→ ' + (evt.summary || 'ok');
+        const toolName = last.dataset.tool;
+        if (/^hivemind_(save_memory|update_memory|log_decision|delete_memory|set_assistant_name)$/.test(toolName)) {
+          finalizeSavingChip(toolName, evt.summary || 'saved');
+        }
       }
     }
     if (evt.type === 'done' || evt.type === 'finish') {
@@ -291,7 +351,120 @@ async function send() {
   }
 }
 
+// ── Saving-memory animated chip ─────────────────────────────────────────────
+// Pulses while a save_memory / update_memory tool call is in flight. Turns
+// green-checked when the tool_result event lands.
+
+const SAVE_LABELS = {
+  hivemind_save_memory: 'Saving to memory',
+  hivemind_update_memory: 'Updating memory',
+  hivemind_log_decision: 'Logging decision',
+  hivemind_delete_memory: 'Forgetting',
+  hivemind_set_assistant_name: 'Setting name',
+};
+
+const _savingChipQueue = [];
+
+function showSavingChip(toolName, detail) {
+  const wrap = document.createElement('div');
+  wrap.className = 'saving-chip';
+  wrap.dataset.tool = toolName;
+  wrap.innerHTML = `
+    <span class="sc-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+      </svg>
+    </span>
+    <span>${SAVE_LABELS[toolName] || 'Saving'}…</span>
+    ${detail ? `<span class="sc-detail">${escapeHtml(detail)}</span>` : ''}
+  `;
+  $('messages').appendChild(wrap);
+  _savingChipQueue.push(wrap);
+  scrollBottom();
+}
+
+function finalizeSavingChip(toolName, summary) {
+  // Match the FIFO order — finalize the oldest unfinished chip for this tool.
+  const idx = _savingChipQueue.findIndex((c) => c.dataset.tool === toolName && !c.classList.contains('done'));
+  const chip = idx >= 0 ? _savingChipQueue[idx] : _savingChipQueue.find((c) => !c.classList.contains('done'));
+  if (!chip) return;
+  chip.classList.add('done');
+  const labelSpan = chip.querySelector('span:nth-of-type(2)');
+  if (labelSpan) {
+    labelSpan.textContent =
+      toolName === 'hivemind_update_memory' ? 'Memory updated'
+      : toolName === 'hivemind_delete_memory' ? 'Memory forgotten'
+      : toolName === 'hivemind_log_decision' ? 'Decision logged'
+      : 'Saved to memory';
+  }
+  // Replace spinning bookmark with green check.
+  const icon = chip.querySelector('.sc-icon');
+  if (icon) icon.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>`;
+  const detail = chip.querySelector('.sc-detail');
+  if (detail && summary) detail.textContent = summary.slice(0, 40);
+  setTimeout(() => {
+    if (idx >= 0) _savingChipQueue.splice(idx, 1);
+  }, 100);
+}
+
+function hideWelcome() {
+  const w = $('welcome');
+  if (w) w.classList.add('hidden');
+}
+
+async function saveCurrentContextAsMemory() {
+  const btn = $('saveMemBtn');
+  const ctx = state.context;
+  let payload;
+
+  if (ctx && ctx.mode === 'selection' && ctx.text) {
+    payload = {
+      content: ctx.text,
+      title: `Selection: ${ctx.text.slice(0, 60)}`,
+      tags: ['browser-extension', 'selection', `url:${(ctx.url || '').split('/').slice(0, 3).join('/')}`],
+    };
+  } else if (ctx && ctx.mode === 'section' && ctx.text) {
+    payload = {
+      content: ctx.text,
+      title: ctx.heading ? `Section: ${ctx.heading}` : `Section from ${ctx.title || ctx.url}`,
+      tags: ['browser-extension', 'section', `url:${(ctx.url || '').split('/').slice(0, 3).join('/')}`],
+    };
+  } else if (ctx && ctx.mode === 'page') {
+    // Trigger background savePage on active tab.
+    btn.disabled = true;
+    btn.textContent = 'Saving page…';
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const result = await chrome.runtime.sendMessage({ action: 'savePage', tabId: tab.id });
+      flashHint(result?.success ? '✅ Page saved to HIVE' : `⚠️ ${result?.error || 'save failed'}`);
+    } catch (e) {
+      flashHint(`⚠️ ${e.message}`);
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg> Save memory';
+    }
+    return;
+  } else {
+    flashHint('Pick context first (Selection / Section / Page) before saving.');
+    return;
+  }
+
+  btn.disabled = true;
+  const prevHTML = btn.innerHTML;
+  btn.textContent = 'Saving…';
+  try {
+    const result = await chrome.runtime.sendMessage({ action: 'saveText', ...payload });
+    flashHint(result?.success ? '✅ Saved to HIVE' : `⚠️ ${result?.error || 'save failed'}`);
+  } catch (e) {
+    flashHint(`⚠️ ${e.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = prevHTML;
+  }
+}
+
 function appendUser(text) {
+  hideWelcome();
   const wrap = document.createElement('div');
   wrap.className = 'msg-user';
   const b = document.createElement('div');
@@ -499,4 +672,270 @@ function escapeHtml(s) {
 
 function formatReply(s) {
   return escapeHtml(s);
+}
+
+// ── AI Platform badge (live-updates from background broadcasts) ──────────────
+
+async function refreshPlatformBadge() {
+  try {
+    const info = await chrome.runtime.sendMessage({ action: 'detectActivePlatform' });
+    renderPlatformBadge(info);
+  } catch {
+    renderPlatformBadge({ matched: false });
+  }
+}
+
+function renderPlatformBadge(info) {
+  const badge = $('platformBadge');
+  const bar = $('saveSessionBar');
+  if (!badge || !bar) return;
+
+  if (!info || !info.matched) {
+    badge.classList.add('hidden');
+    bar.classList.add('hidden');
+    return;
+  }
+
+  badge.classList.remove('hidden');
+  const nameEl = $('pbName');
+  if (nameEl) nameEl.textContent = info.name || info.id || 'AI CHAT';
+  badge.title = info.sessionId ? `${info.name} · session ${String(info.sessionId).slice(0, 8)}` : info.name;
+
+  // Save-session bar
+  bar.classList.remove('hidden');
+  bar.dataset.platformId = info.id || '';
+  bar.dataset.sessionId = info.sessionId || '';
+  $('ssbPlatform').textContent = (info.name || 'this').toUpperCase();
+  $('ssbSub').textContent = info.sessionId ? `· session ${String(info.sessionId).slice(0, 8)}` : '';
+}
+
+// ── Ingest stage pipeline ───────────────────────────────────────────────────
+// Each stage is an independent persistent card in #messages so the user can
+// scroll back through history of every chat-session ingest they've run.
+
+const _activeStages = new Map(); // stage_id → element
+
+// Lucide icon per memory_type — matches dashboard tile palette.
+const MEM_TYPE_ICON = {
+  fact:         '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>',
+  preference:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>',
+  decision:     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 21h-1l1-7H6.5c-.88 0-.33-.75-.31-.78C7.48 10.94 9.61 7.54 12.91 2h1l-1 7h4.51c.4 0 .62.19.4.66C13.57 14.54 11 21 11 21z"/></svg>',
+  goal:         '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>',
+  event:        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>',
+  lesson:       '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>',
+  relationship: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>',
+  note:         '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></svg>',
+  conversation: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>',
+};
+
+function addMemoryTrace(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return;
+  hideWelcome();
+  const wrap = document.createElement('div');
+  wrap.className = 'mem-trace';
+  const saved = rows.filter((r) => r.action === 'saved').length;
+  const updated = rows.filter((r) => r.action === 'updated').length;
+  const deduped = rows.filter((r) => r.action === 'deduped').length;
+  wrap.innerHTML = `
+    <div class="mem-trace-header">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+      Saved to memory · ${saved} new · ${updated} updated · ${deduped} deduped
+    </div>
+    ${rows.map((r) => `
+      <div class="mem-row">
+        <span class="mr-icon mt-${escapeHtml(r.memory_type || 'note')}">${MEM_TYPE_ICON[r.memory_type] || MEM_TYPE_ICON.note}</span>
+        <div class="mr-body">
+          <div class="mr-title">${escapeHtml(r.title || '(untitled)')}</div>
+          <div class="mr-meta">${escapeHtml(r.memory_type || 'note')}${r.tags?.length ? ' · ' + r.tags.slice(0, 4).map(escapeHtml).join(' · ') : ''}</div>
+        </div>
+        <span class="mr-action ${r.action}">${r.action}</span>
+      </div>
+    `).join('')}
+  `;
+  $('messages').appendChild(wrap);
+  scrollBottom();
+}
+
+function addStageGroupHeader(text) {
+  hideWelcome();
+  const h = document.createElement('div');
+  h.className = 'stage-group-header';
+  h.textContent = text;
+  $('messages').appendChild(h);
+  scrollBottom();
+  return h;
+}
+
+// Lucide SVG icon glyphs — match HIVEMIND dashboard sidebar theme.
+const STAGE_ICONS = {
+  search:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>',
+  pen:     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>',
+  clock:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
+  camera:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="4"/></svg>',
+  brain:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08A2.5 2.5 0 0 1 2.5 13.5a2.5 2.5 0 0 1 1.32-2.2 2.5 2.5 0 0 1 .85-3.95A2.5 2.5 0 0 1 5.5 4.5 2.5 2.5 0 0 1 9.5 2z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 2.5 2.5 0 0 0 1.58-3.36 2.5 2.5 0 0 0-1.32-2.2 2.5 2.5 0 0 0-.85-3.95A2.5 2.5 0 0 0 18.5 4.5 2.5 2.5 0 0 0 14.5 2z"/></svg>',
+  help:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+  warn:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+  file:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>',
+  check:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
+  send:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>',
+  bookmark:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>',
+  zap:     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>',
+};
+
+function addStage({ id, icon, title, detail = '', state = 'in-flight' }) {
+  hideWelcome();
+  const iconKey = icon || 'zap';
+  const iconHtml = STAGE_ICONS[iconKey] || STAGE_ICONS.zap;
+  const el = document.createElement('div');
+  el.className = `stage-card ${state}`;
+  el.dataset.stageId = id;
+  el.dataset.iconKey = iconKey;
+  el.innerHTML = `
+    <span class="sg-icon ic-${iconKey}">${iconHtml}</span>
+    <div class="sg-body">
+      <div class="sg-title">${escapeHtml(title)}</div>
+      ${detail ? `<div class="sg-detail">${escapeHtml(detail)}</div>` : ''}
+    </div>`;
+  $('messages').appendChild(el);
+  _activeStages.set(id, el);
+  scrollBottom();
+  return el;
+}
+
+function updateStage(id, { title, detail, state, icon }) {
+  const el = _activeStages.get(id);
+  if (!el) return;
+  if (typeof state === 'string') {
+    el.classList.remove('in-flight', 'done', 'error');
+    el.classList.add(state);
+  }
+  if (typeof icon === 'string') {
+    const iconEl = el.querySelector('.sg-icon');
+    if (iconEl) {
+      iconEl.innerHTML = STAGE_ICONS[icon] || STAGE_ICONS.zap;
+      // Strip any prior ic-* class, add new one.
+      iconEl.className = iconEl.className.replace(/\bic-\w+/g, '').trim() + ` ic-${icon}`;
+    }
+    el.dataset.iconKey = icon;
+  }
+  if (typeof title === 'string') {
+    const t = el.querySelector('.sg-title');
+    if (t) t.textContent = title;
+  }
+  if (typeof detail === 'string') {
+    let d = el.querySelector('.sg-detail');
+    if (!d) {
+      d = document.createElement('div');
+      d.className = 'sg-detail';
+      el.querySelector('.sg-body').appendChild(d);
+    }
+    d.textContent = detail;
+  }
+  scrollBottom();
+}
+
+async function ingestActiveChat() {
+  const bar = $('saveSessionBar');
+  const btn = $('ssbBtn');
+  if (!bar || bar.classList.contains('hidden')) return;
+  if (btn.disabled) return;
+
+  btn.disabled = true;
+  bar.classList.add('busy');
+  const prevLabel = btn.textContent;
+  btn.textContent = 'Capturing…';
+
+  const platformName = $('ssbPlatform')?.textContent || 'AI CHAT';
+  const sessionTag = $('ssbSub')?.textContent || '';
+  addStageGroupHeader(`Ingest · ${platformName} ${sessionTag}`.trim());
+
+  const detectStage = `detect-${Date.now()}`;
+  const promptStage = `prompt-${Date.now()}`;
+  const waitStage = `wait-${Date.now()}`;
+  const captureStage = `capture-${Date.now()}`;
+  const distillStage = `distill-${Date.now()}`;
+
+  addStage({ id: detectStage, icon: 'search', title: 'Detecting platform', detail: platformName, state: 'done' });
+  addStage({ id: promptStage, icon: 'pen', title: 'Injecting summary prompt', detail: 'sending to chatbox + pressing Enter', state: 'in-flight' });
+
+  try {
+    setTimeout(() => updateStage(promptStage, { state: 'done', detail: 'prompt sent to host LLM' }), 800);
+    addStage({ id: waitStage, icon: 'clock', title: 'Waiting for response', detail: 'polling until text stabilises…', state: 'in-flight' });
+
+    const result = await chrome.runtime.sendMessage({ action: 'ingestActiveChat' });
+
+    if (!result?.success) throw new Error(result?.error || 'capture failed');
+
+    updateStage(waitStage, {
+      state: 'done',
+      icon: 'clock',
+      detail: `response stable · ${result.messageCount || 0} messages on page`,
+    });
+
+    addStage({
+      id: captureStage,
+      icon: 'camera',
+      title: 'Captured summary',
+      detail: `${result.candidates || 0} candidate memories parsed from structured output`,
+      state: (result.candidates || 0) > 0 ? 'done' : 'error',
+    });
+
+    const cand = result.candidates || 0;
+    const saved = result.saved || 0;
+    const updated = result.updated || 0;
+    const deduped = result.deduped || 0;
+
+    if (cand > 0) {
+      addStage({
+        id: distillStage,
+        icon: 'brain',
+        title: 'Distilled into HIVEMIND',
+        detail: `${saved} saved · ${updated} updated · ${deduped} deduped`,
+        state: (saved + updated) > 0 ? 'done' : 'error',
+      });
+      if (Array.isArray(result.rows) && result.rows.length) {
+        addMemoryTrace(result.rows);
+      }
+    } else {
+      addStage({
+        id: distillStage,
+        icon: 'warn',
+        title: 'No structured memories parsed',
+        detail: 'host LLM response did not match expected schema — raw transcript saved as fallback',
+        state: 'error',
+      });
+      if (result.raw_summary_preview) {
+        addStage({
+          id: `raw-${Date.now()}`,
+          icon: 'file',
+          title: 'Raw host response (preview)',
+          detail: result.raw_summary_preview,
+          state: 'error',
+        });
+      }
+    }
+
+    if (result.open_questions?.length) {
+      addStage({
+        id: `oq-${Date.now()}`,
+        icon: 'help',
+        title: `${result.open_questions.length} open questions noted`,
+        detail: result.open_questions.slice(0, 3).join(' · '),
+        state: 'done',
+      });
+    }
+  } catch (e) {
+    updateStage(waitStage, { state: 'error', detail: e.message });
+    addStage({
+      id: `err-${Date.now()}`,
+      icon: 'warn',
+      title: 'Ingest failed',
+      detail: e.message,
+      state: 'error',
+    });
+  } finally {
+    btn.disabled = false;
+    bar.classList.remove('busy');
+    btn.textContent = prevLabel;
+  }
 }

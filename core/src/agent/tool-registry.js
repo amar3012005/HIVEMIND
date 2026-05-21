@@ -40,7 +40,7 @@ export const TOOL_SCHEMAS = [
     function: {
       name: 'hivemind_save_memory',
       description:
-        'Save a durable fact, preference, decision, goal, person, or event to HIVEMIND. Call when the user reveals something durable. ALWAYS tag (≥2 tags). NEVER save chitchat or secrets.',
+        'Save a durable fact, preference, decision, goal, person, or event to HIVEMIND. Call when the user reveals something durable. ALWAYS tag (≥2 tags). NEVER save chitchat or secrets.\n\nPROJECT SCOPING (enterprise multi-tenant):\n  • If the user names a project ("save to SOLVIS", "in my Q2-planning project"), pass project_id (UUID) OR project (name/slug — server resolves).\n  • If unsure which project, FIRST call hivemind_list_projects to see what exists, pick the best match by topic, and use that.\n  • If still ambiguous, ASK the user before saving instead of guessing.\n  • If the org policy is "ask" or no obvious match, omit project_id — server defaults to personal scope.',
       parameters: {
         type: 'object',
         properties: {
@@ -48,6 +48,19 @@ export const TOOL_SCHEMAS = [
           content: { type: 'string', description: 'The fact, one claim per memory.' },
           tags: { type: 'array', items: { type: 'string' }, minItems: 2 },
           memory_type: { type: 'string', enum: ['fact', 'preference', 'decision', 'goal', 'event', 'lesson', 'relationship'] },
+          project_id: {
+            type: 'string',
+            description: 'Project UUID. Use when you already know it (e.g. from a prior hivemind_list_projects call).',
+          },
+          project: {
+            type: 'string',
+            description: 'Project NAME or slug (e.g. "SOLVIS"). Server resolves to project_id. Use when the user mentioned the project by name.',
+          },
+          scope: {
+            type: 'string',
+            enum: ['personal', 'project', 'team', 'organization'],
+            description: 'Memory scope. Defaults to personal. Use "organization" when the user explicitly says "save to the whole company"; use "project" when project_id/project is set; use "team" rarely.',
+          },
         },
         required: ['title', 'content', 'tags'],
       },
@@ -101,6 +114,20 @@ export const TOOL_SCHEMAS = [
       name: 'hivemind_delete_memory',
       description: 'User explicitly says "forget X". Confirm before calling on anything consequential.',
       parameters: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'hivemind_list_projects',
+      description:
+        'List every project (sub-HIVEMIND) the user has access to under the active org. Use BEFORE saving a memory when the user mentions a project by name OR when the topic obviously belongs to a project (e.g. their pitch deck → likely "Pitch Deck" project). Returns [{ id, name, slug, role }]. The agent should pick the best match by name/topic, then pass project_id to hivemind_save_memory. If multiple match → ASK the user which.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Optional name/slug substring to filter results.' },
+        },
+      },
     },
   },
   {
@@ -341,6 +368,49 @@ const TOOL_HANDLERS = {
     if (TYPE_ALIAS[memType]) memType = TYPE_ALIAS[memType];
     if (!ALLOWED.has(memType)) memType = 'fact';
 
+    // Resolve project scoping. The agent may pass:
+    //   • project_id (UUID — direct)
+    //   • project    (name or slug — server-side resolveScopedIngestPayload
+    //                  converts to project_id via the user's access_context)
+    //   • scope      (personal | project | team | organization — defaults
+    //                  to personal when nothing supplied)
+    // When project_id OR project is set, scope auto-elevates to 'project'
+    // unless the caller explicitly chose otherwise.
+    const explicitScope = typeof args.scope === 'string' ? args.scope.toLowerCase() : null;
+
+    // Resolve project name/slug → UUID against the user's access list.
+    // Server-side resolveScopedIngestPayload only understands project_id(s),
+    // so we lift the name lookup up here where we have prisma + accessContext.
+    let resolvedProjectId = args.project_id || null;
+    let resolvedProjectName = null;
+    if (!resolvedProjectId && args.project && ctx.persistentMemoryStore?.client?.project) {
+      const accessProjectIds = (ctx.accessContext?.projectIds) || [];
+      if (accessProjectIds.length > 0) {
+        const q = String(args.project).trim();
+        const hit = await ctx.persistentMemoryStore.client.project.findFirst({
+          where: {
+            id: { in: accessProjectIds },
+            orgId: ctx.orgId,
+            OR: [
+              { slug: { equals: q, mode: 'insensitive' } },
+              { name: { equals: q, mode: 'insensitive' } },
+              { name: { contains: q, mode: 'insensitive' } },
+            ],
+          },
+          select: { id: true, name: true },
+        });
+        if (hit) {
+          resolvedProjectId = hit.id;
+          resolvedProjectName = hit.name;
+        }
+      }
+    }
+
+    const hasProject = Boolean(resolvedProjectId);
+    const scope = ['personal', 'project', 'team', 'organization'].includes(explicitScope)
+      ? explicitScope
+      : (hasProject ? 'project' : 'personal');
+
     const payload = {
       title: args.title,
       content: args.content,
@@ -348,6 +418,8 @@ const TOOL_HANDLERS = {
       memory_type: memType,
       user_id: ctx.userId,
       org_id: ctx.orgId,
+      scope,
+      project_ids: resolvedProjectId ? [resolvedProjectId] : [],
       source_metadata: { source_platform: 'talk-to-hive', via: 'react-agent' },
     };
     const [routed] = await ctx.buildRoutedIngestPayloads(payload, {
@@ -362,7 +434,19 @@ const TOOL_HANDLERS = {
       ? await ctx.ingestRoutedPayload(routed, ctx.persistentMemoryEngine)
       : await ctx.persistentMemoryEngine.ingestMemory(routed);
     const id = saved?.parentId || saved?.id || saved?.memoryId || saved?.memory?.id || null;
-    return { saved: true, id, title: args.title, operation: saved?.operation || null, childCount: saved?.childIds?.length ?? null };
+    return {
+      saved: true,
+      id,
+      title: args.title,
+      operation: saved?.operation || null,
+      childCount: saved?.childIds?.length ?? null,
+      scope,
+      project_id: resolvedProjectId,
+      project: resolvedProjectName || args.project || null,
+      project_resolution: args.project && !args.project_id
+        ? (resolvedProjectId ? 'resolved' : 'not_found_defaulted_personal')
+        : null,
+    };
   },
 
   async hivemind_update_memory(args, ctx) {
@@ -549,6 +633,50 @@ const TOOL_HANDLERS = {
       },
       ctx
     );
+  },
+
+  // List every project the user has access to under the active org.
+  // Returns enough metadata for the agent to pick a match (id, name, slug,
+  // role). The list is small (typically <20 per user) so we don't paginate.
+  // Used by the agent BEFORE saving a memory when the user mentions a
+  // project by name or the topic obviously belongs to one.
+  async hivemind_list_projects(args, ctx) {
+    if (!ctx.persistentMemoryStore?.client?.project) {
+      throw new Error('project store unavailable');
+    }
+    const prisma = ctx.persistentMemoryStore.client;
+    const accessProjectIds = (ctx.accessContext?.projectIds) || [];
+    if (accessProjectIds.length === 0) {
+      // No project access at all — return empty so the agent falls back
+      // to personal scope.
+      return { count: 0, projects: [], note: 'No projects accessible — memory will default to personal scope.' };
+    }
+    const where = { id: { in: accessProjectIds }, orgId: ctx.orgId };
+    if (args?.query && typeof args.query === 'string') {
+      const q = args.query.trim();
+      if (q) {
+        where.OR = [
+          { name: { contains: q, mode: 'insensitive' } },
+          { slug: { contains: q, mode: 'insensitive' } },
+        ];
+      }
+    }
+    const rows = await prisma.project.findMany({
+      where,
+      select: { id: true, name: true, slug: true, status: true, teamId: true, createdAt: true },
+      orderBy: { updatedAt: 'desc' },
+      take: 50,
+    });
+    return {
+      count: rows.length,
+      projects: rows.map(r => ({
+        id: r.id,
+        name: r.name,
+        slug: r.slug,
+        status: r.status,
+        team_id: r.teamId,
+      })),
+    };
   },
 };
 

@@ -10338,11 +10338,11 @@ exit \$RC
               });
 
               setImmediate(async () => {
-                const POLL_INTERVAL_MS = 4000;
-                const POLL_TIMEOUT_MS = 5 * 60 * 1000; // 5min hard cap
+                const STREAM_TIMEOUT_MS = 8 * 60 * 1000; // 8min hard cap
+                const PERSIST_THROTTLE_MS = 800;
                 const started = Date.now();
                 try {
-                  await webJobStore.update(job.id, { status: 'running' });
+                  await webJobStore.update(job.id, { status: 'running', progress: [] });
 
                   const { getTavilyClient } = await import('./web/tavily-client.js');
                   const tv = getTavilyClient();
@@ -10350,33 +10350,97 @@ exit \$RC
                     throw new Error('Tavily API key not configured');
                   }
 
-                  // 1) submit
-                  const submission = await tv.research({ input, model, citationFormat: citation_format });
-                  if (!submission?.requestId) {
-                    throw new Error('Research submission returned no requestId');
+                  // Consume the SSE stream from Tavily Research. Each event
+                  // either: (a) names a tool call (Planning / WebSearch /
+                  // ResearchSubtopic / Generating), (b) carries a tool
+                  // response with discovered sources, (c) streams content
+                  // chunks of the final markdown, or (d) emits a final
+                  // sources array. Persist progress incrementally so the
+                  // FE polling loop can render the run as it happens.
+                  const progress = [];
+                  let contentBuf = '';
+                  let finalSources = [];
+                  let lastPersist = 0;
+
+                  const persist = async (force = false) => {
+                    if (!force && Date.now() - lastPersist < PERSIST_THROTTLE_MS) return;
+                    lastPersist = Date.now();
+                    await webJobStore.update(job.id, {
+                      progress,
+                      partial_content: contentBuf,
+                      partial_sources: finalSources,
+                    });
+                  };
+
+                  const watchdog = setTimeout(() => {
+                    throw new Error('Research stream timeout — 8min cap reached');
+                  }, STREAM_TIMEOUT_MS);
+
+                  try {
+                    for await (const evt of tv.researchStream({
+                      input,
+                      model,
+                      citationFormat: citation_format,
+                    })) {
+                      if (evt?.kind === 'done') break;
+                      const delta = evt?.choices?.[0]?.delta;
+                      if (!delta) continue;
+
+                      // Tool calls / responses → progress timeline rows.
+                      if (delta.tool_calls) {
+                        const tc = delta.tool_calls;
+                        const kind = tc.type; // 'tool_call' | 'tool_response'
+                        const list = (tc.tool_call || tc.tool_response || []);
+                        for (const t of list) {
+                          progress.push({
+                            ts: Date.now(),
+                            kind,
+                            tool: t.name,
+                            id: t.id,
+                            parent_id: t.parent_tool_call_id || null,
+                            arguments: t.arguments || null,
+                            queries: Array.isArray(t.queries) ? t.queries : undefined,
+                            sources: Array.isArray(t.sources) ? t.sources.slice(0, 25) : undefined,
+                          });
+                        }
+                      }
+
+                      // Streaming content chunks.
+                      if (typeof delta.content === 'string') {
+                        contentBuf += delta.content;
+                      } else if (delta.content && typeof delta.content === 'object') {
+                        // Structured output: replace each chunk; usually a
+                        // single object arrives in one event.
+                        contentBuf = JSON.stringify(delta.content, null, 2);
+                      }
+
+                      // Final aggregate sources event.
+                      if (Array.isArray(delta.sources)) {
+                        finalSources = delta.sources;
+                      }
+
+                      await persist(false);
+                    }
+                  } finally {
+                    clearTimeout(watchdog);
                   }
 
-                  // 2) poll until complete or timeout
-                  let final = null;
-                  while (Date.now() - started < POLL_TIMEOUT_MS) {
-                    await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
-                    const polled = await tv.getResearch(submission.requestId);
-                    if (polled?.status === 'completed') { final = polled; break; }
-                    if (polled?.status === 'failed' || polled?.status === 'error') {
-                      throw new Error(`Tavily research failed: ${polled.status}`);
+                  // If the stream ended without emitting an aggregate sources
+                  // event, gather them from the tool_response progress rows.
+                  if (finalSources.length === 0) {
+                    const seen = new Set();
+                    for (const p of progress) {
+                      if (p.kind === 'tool_response' && Array.isArray(p.sources)) {
+                        for (const s of p.sources) {
+                          if (!s?.url || seen.has(s.url)) continue;
+                          seen.add(s.url);
+                          finalSources.push(s);
+                        }
+                      }
                     }
                   }
-                  if (!final) {
-                    throw new Error('Research timeout — Tavily did not complete within 5 minutes');
-                  }
 
-                  // 3) normalize result. The chat UI expects `results` array;
-                  //    we store the full report as a single synthetic result
-                  //    so it round-trips through saveWebResultToMemory cleanly.
-                  const reportText = typeof final.content === 'string'
-                    ? final.content
-                    : JSON.stringify(final.content, null, 2);
-                  const sources = Array.isArray(final.sources) ? final.sources : [];
+                  const reportText = contentBuf || '_No report content returned._';
                   const reportTitle = deriveResearchTitle(input, reportText);
 
                   await webJobStore.update(job.id, {
@@ -10384,12 +10448,15 @@ exit \$RC
                     duration_ms: Date.now() - started,
                     runtime_used: 'tavily-research',
                     fallback_applied: false,
+                    progress,
+                    partial_content: contentBuf,
+                    partial_sources: finalSources,
                     results: [{
                       type: 'research_report',
                       title: reportTitle,
                       content: reportText,
-                      sources,
-                      model: submission.model,
+                      sources: finalSources,
+                      model,
                       citation_format,
                     }],
                   });

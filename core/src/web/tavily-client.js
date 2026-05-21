@@ -432,6 +432,64 @@ export class TavilyClientWrapper {
   }
 
   /**
+   * Streaming variant of research(). Yields parsed event objects as the
+   * Tavily research agent produces them — Planning / WebSearch tool
+   * calls and responses, content chunks, the final Sources event, and a
+   * synthetic { kind: 'done' } sentinel when the stream ends.
+   *
+   * Caller iterates with `for await (const evt of tv.researchStream(...))`.
+   *
+   * @param {Object} params
+   * @param {string} params.input
+   * @param {'mini'|'pro'|'auto'} [params.model='auto']
+   * @param {'numbered'|'mla'|'apa'|'chicago'} [params.citationFormat='numbered']
+   * @param {object} [params.outputSchema]
+   */
+  async *researchStream(params) {
+    if (!this.client) {
+      throw new Error('Tavily API key not configured');
+    }
+    const { input, model = 'auto', citationFormat = 'numbered', outputSchema = null } = params;
+    if (!input || typeof input !== 'string') {
+      throw new Error('Research input is required');
+    }
+
+    const stream = await this.client.research(input, {
+      model,
+      citationFormat,
+      ...(outputSchema ? { outputSchema } : {}),
+      stream: true,
+    });
+
+    // SSE chunks may straddle network frames. Buffer + split on \n\n.
+    let buffer = '';
+    for await (const chunk of stream) {
+      buffer += typeof chunk === 'string' ? chunk : chunk.toString('utf-8');
+      const events = buffer.split('\n\n');
+      buffer = events.pop() || ''; // keep partial trailing frame
+
+      for (const raw of events) {
+        if (!raw.trim()) continue;
+        // Terminal event: `event: done` (no data payload).
+        if (/^event:\s*done/m.test(raw)) {
+          yield { kind: 'done' };
+          continue;
+        }
+        const dataLine = raw.split('\n').find(l => l.startsWith('data:'));
+        if (!dataLine) continue;
+        const payload = dataLine.slice(5).trim();
+        if (!payload || payload === '[DONE]') continue;
+        try {
+          yield JSON.parse(payload);
+        } catch {
+          // Skip malformed frame — keep stream alive.
+        }
+      }
+    }
+    yield { kind: 'done' };
+  }
+
+  /**
    * Poll a research task. Resolves the final report with sources when
    * status === 'completed'. Returns the intermediate status object
    * otherwise so the caller can keep polling.

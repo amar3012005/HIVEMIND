@@ -5117,12 +5117,131 @@ exit \$RC
         }
       }
 
+      // GET /api/memories/:id/relationships
+      // Returns every edge touching this memory, grouped by direction +
+      // type, with target/source memory titles inlined so the FE drawer
+      // doesn't need a second fetch per edge.
+      //
+      // Response shape:
+      //   {
+      //     memory_id,
+      //     out: [{ id, type, confidence, target_id, target_title, ... }],
+      //     in:  [{ id, type, confidence, source_id, source_title, ... }],
+      //     by_type: { Updates: [...], Extends: [...], Mentions: [...], ... },
+      //   }
+      const relsMatch = pathname.match(/^\/api\/memories\/([^/]+)\/relationships$/);
+      if (relsMatch && req.method === 'GET') {
+        if (!ensurePersistedMemoryOrFail(res, '/api/memories/:id/relationships')) return;
+        const memoryId = relsMatch[1];
+        try {
+          // Tenant + ownership check via the canonical store
+          const mem = await persistentMemoryStore.getMemory(memoryId);
+          if (!mem || mem.deleted_at) return jsonResponse(res, { error: 'Not found' }, 404);
+          if (mem.user_id !== userId && !principal.scopes?.includes('admin')) {
+            return jsonResponse(res, { error: 'Not found' }, 404);
+          }
+
+          // Pull edges in both directions in a single round-trip.
+          const [outRels, inRels] = await Promise.all([
+            prisma.relationship.findMany({
+              where: { fromId: memoryId },
+              select: { id: true, fromId: true, toId: true, type: true, confidence: true, createdBy: true, createdAt: true, metadata: true },
+              orderBy: [{ confidence: 'desc' }, { createdAt: 'desc' }],
+              take: 200,
+            }),
+            prisma.relationship.findMany({
+              where: { toId: memoryId },
+              select: { id: true, fromId: true, toId: true, type: true, confidence: true, createdBy: true, createdAt: true, metadata: true },
+              orderBy: [{ confidence: 'desc' }, { createdAt: 'desc' }],
+              take: 200,
+            }),
+          ]);
+
+          // Batch-fetch titles for every referenced peer memory.
+          const peerIds = Array.from(new Set([
+            ...outRels.map(r => r.toId),
+            ...inRels.map(r => r.fromId),
+          ]));
+          const peers = peerIds.length > 0
+            ? await prisma.memory.findMany({
+                where: { id: { in: peerIds } },
+                select: { id: true, title: true, memoryType: true, isLatest: true, deletedAt: true, createdAt: true, content: true },
+              })
+            : [];
+          const peerById = new Map(peers.map(p => [p.id, p]));
+          const peerTitle = (p) => p?.title || (p?.content || '').slice(0, 60) || '(untitled)';
+
+          const enrichOut = outRels.map(r => {
+            const p = peerById.get(r.toId);
+            return {
+              id: r.id,
+              type: r.type,
+              confidence: r.confidence,
+              created_by: r.createdBy,
+              created_at: r.createdAt,
+              metadata: r.metadata || {},
+              direction: 'out',
+              target_id: r.toId,
+              target_title: peerTitle(p),
+              target_memory_type: p?.memoryType || null,
+              target_is_latest: p?.isLatest ?? null,
+              target_deleted: !!p?.deletedAt,
+            };
+          });
+          const enrichIn = inRels.map(r => {
+            const p = peerById.get(r.fromId);
+            return {
+              id: r.id,
+              type: r.type,
+              confidence: r.confidence,
+              created_by: r.createdBy,
+              created_at: r.createdAt,
+              metadata: r.metadata || {},
+              direction: 'in',
+              source_id: r.fromId,
+              source_title: peerTitle(p),
+              source_memory_type: p?.memoryType || null,
+              source_is_latest: p?.isLatest ?? null,
+              source_deleted: !!p?.deletedAt,
+            };
+          });
+
+          // Group by canonical type for the FE side panel sections.
+          const by_type = {};
+          for (const e of [...enrichOut, ...enrichIn]) {
+            const t = e.type || 'Other';
+            (by_type[t] = by_type[t] || []).push(e);
+          }
+
+          return jsonResponse(res, {
+            memory_id: memoryId,
+            out: enrichOut,
+            in: enrichIn,
+            by_type,
+            counts: {
+              out: enrichOut.length,
+              in: enrichIn.length,
+              total: enrichOut.length + enrichIn.length,
+            },
+          });
+        } catch (error) {
+          console.error('[memory-relationships]', error);
+          return jsonResponse(res, { error: error.message }, 500);
+        }
+      }
+
       if (pathname.startsWith('/api/memories/') && pathname !== '/api/memories/search' && pathname !== '/api/memories/query' && pathname !== '/api/memories/code/ingest' && pathname !== '/api/memories/traverse' && pathname !== '/api/memories/decay' && pathname !== '/api/memories/reinforce' && pathname !== '/api/memories/delete-all') {
         if (req.method === 'GET') {
           if (!ensurePersistedMemoryOrFail(res, '/api/memories/:id')) {
             return;
           }
           const memoryId = pathname.split('/api/memories/')[1];
+          // Skip if this is the /relationships sub-route — handler above
+          // already returned. Other sub-routes fall through to plain GET
+          // which will fail the UUID parse — fine, that's existing behaviour.
+          if (memoryId.includes('/')) {
+            return jsonResponse(res, { error: 'Not found' }, 404);
+          }
           try {
             const memory = await persistentMemoryStore.getMemory(memoryId);
             if (!memory || memory.deleted_at) {
@@ -14700,6 +14819,72 @@ exit \$RC
             };
 
             return jsonResponse(res, { report: orchestratorReport });
+          }
+          break;
+
+        // ==========================================
+        // INGEST — distill external AI chat session into memories
+        // ==========================================
+        case '/api/ingest/chat-session':
+          if (req.method === 'POST') {
+            const { platform, url, parsed, transcript = [], raw_summary } = body;
+            if (!parsed || !Array.isArray(parsed.memories) || parsed.memories.length === 0) {
+              return jsonResponse(res, { error: 'parsed.memories[] required (run extension structured-ingest first)' }, 400);
+            }
+            const groqKey = process.env.GROQ_API_KEY;
+            if (!groqKey) {
+              return jsonResponse(res, { error: 'distill not available — no LLM key configured' }, 503);
+            }
+            try {
+              const { distillChatSession } = await import('./services/chat-ingest-distill.js');
+              const distillAccessCtx = await buildAccessContext(userId, orgId);
+              const result = await distillChatSession({
+                candidates: parsed.memories,
+                platform: platform || 'unknown',
+                url: url || '',
+                userId,
+                orgId,
+                apiKey: groqKey,
+                ctx: {
+                  persistentMemoryStore,
+                  persistentMemoryEngine,
+                  smartIngestRouter,
+                  buildRoutedIngestPayloads,
+                  accessContext: distillAccessCtx,
+                },
+              });
+
+              // Also save the session-level rollup so /timeline shows the
+              // whole conversation as one anchor node.
+              try {
+                if (raw_summary && parsed.title && persistentMemoryEngine?.ingestMemory) {
+                  const rollupPayload = {
+                    title: parsed.title.slice(0, 80),
+                    content: `${parsed.summary || ''}\n\n${raw_summary}`.slice(0, 8000),
+                    tags: ['ai-chat-session', `from-${(platform || 'chat').toLowerCase().replace(/[^a-z0-9]+/g, '')}`, 'session-rollup'],
+                    memory_type: 'conversation',
+                    user_id: userId,
+                    org_id: orgId,
+                    source_metadata: { source_platform: 'ai-chat', host_platform: platform, url, via: 'chat-ingest-distill' },
+                  };
+                  const [routed] = await buildRoutedIngestPayloads(rollupPayload, { smartIngestRouter });
+                  persistentMemoryEngine.ingestMemory(routed).catch((e) =>
+                    console.warn('[ingest/chat-session] rollup save failed:', e.message)
+                  );
+                }
+              } catch {}
+
+              return jsonResponse(res, {
+                ok: true,
+                platform,
+                url,
+                ...result,
+                open_questions: parsed.open_questions || [],
+              });
+            } catch (err) {
+              console.error('[ingest/chat-session] failed:', err);
+              return jsonResponse(res, { error: err.message || 'distill failed' }, 500);
+            }
           }
           break;
 

@@ -335,27 +335,20 @@ export class PrismaGraphStore {
     // and have metadata.parent_memory_id pointing at the canonical parent.
     // Showing them bloats the list 6x and obscures the real graph. Pass
     // include_children=true (or the legacy tag filter) to opt back in.
-    const childExclusionTagFilter = include_children
-      ? undefined
-      : { not: { has: 'extracted-fact' } };
-
-    // Compose the tag WHERE: caller-supplied tags require hasEvery match;
-    // when no caller filter we still want to exclude 'extracted-fact'
-    // unless include_children is set.
-    let tagWhere;
-    if (tags?.length) {
-      tagWhere = include_children ? { hasEvery: tags } : { AND: [{ hasEvery: tags }, childExclusionTagFilter] };
-    } else if (!include_children) {
-      tagWhere = childExclusionTagFilter;
-    }
+    //
+    // Postgres String[] columns don't support `{ tags: { not: { has } } }`
+    // in Prisma — only top-level `NOT { tags: { has } }` works. So we
+    // compose the exclusion as a sibling NOT clause on the where root.
+    const baseWhere = {
+      ...scopedMemoryWhere({ user_id, org_id, project, scope }),
+      memoryType: memory_type || undefined,
+      isLatest: typeof is_latest === 'boolean' ? is_latest : undefined,
+      ...(tags?.length ? { tags: { hasEvery: tags } } : {}),
+      ...(include_children ? {} : { NOT: { tags: { has: 'extracted-fact' } } }),
+    };
 
     const records = await this.client.memory.findMany({
-      where: {
-        ...scopedMemoryWhere({ user_id, org_id, project, scope }),
-        memoryType: memory_type || undefined,
-        isLatest: typeof is_latest === 'boolean' ? is_latest : undefined,
-        ...(tagWhere ? { tags: tagWhere } : {}),
-      },
+      where: baseWhere,
       include: {
         sourceMetadata: true,
         codeMetadata: true,
@@ -370,18 +363,15 @@ export class PrismaGraphStore {
     });
 
     // Count uses the same exclusion so pagination stays consistent.
-    const countTagWhere = tags?.length
-      ? (include_children ? { hasSome: tags } : { AND: [{ hasSome: tags }, childExclusionTagFilter] })
-      : (include_children ? undefined : childExclusionTagFilter);
+    const countWhere = {
+      ...scopedMemoryWhere({ user_id, org_id, project }),
+      memoryType: memory_type || undefined,
+      isLatest: typeof is_latest === 'boolean' ? is_latest : undefined,
+      ...(tags?.length ? { tags: { hasSome: tags } } : {}),
+      ...(include_children ? {} : { NOT: { tags: { has: 'extracted-fact' } } }),
+    };
 
-    const total = await this.client.memory.count({
-      where: {
-        ...scopedMemoryWhere({ user_id, org_id, project }),
-        memoryType: memory_type || undefined,
-        isLatest: typeof is_latest === 'boolean' ? is_latest : undefined,
-        ...(countTagWhere ? { tags: countTagWhere } : {}),
-      }
-    });
+    const total = await this.client.memory.count({ where: countWhere });
 
     return {
       memories: records.map(mapMemoryRecord),

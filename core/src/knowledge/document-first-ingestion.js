@@ -163,7 +163,7 @@ export class DocumentFirstIngestionService {
       segments,
       userId,
       orgId,
-      metadata
+      metadata: { ...metadata, filename, documentTitle: filename }
     });
     const _msPromote = Date.now() - _tPromote;
     console.log(`[phase1-timing] parse=${_msParse}ms seg=${_msSeg}ms embed=${_msEmbed}ms promote=${_msPromote}ms segs=${segments.length} memories=${promoted.memories.length}`);
@@ -251,7 +251,7 @@ export class DocumentFirstIngestionService {
       segments,
       userId,
       orgId,
-      metadata,
+      metadata: { ...metadata, filename, documentTitle: filename },
       promotionStrategy: 'enterprise_selective'
     });
 
@@ -353,7 +353,7 @@ export class DocumentFirstIngestionService {
       documentId: knowledgeDoc.id,
       segments,
       userId, orgId,
-      metadata,
+      metadata: { ...metadata, filename: metadata.filename || knowledgeDoc.filename || null, documentTitle: metadata.filename || knowledgeDoc.filename || null },
       promotionStrategy: `connector_${providerKey}`,
     });
 
@@ -755,7 +755,105 @@ export class DocumentFirstIngestionService {
     });
     await Promise.all(workers);
 
-    return { candidates, memories };
+    // ── Canonical Document parent + PartOf edges (Supermemory-shape graph) ──
+    // Per-segment promotion above wrote N standalone Memory rows but no
+    // connection back to a "this is the document" node. Build that node
+    // now and wire every promoted child to it via PartOf-encoded edges
+    // (RelationshipType enum currently lacks PartOf → encode as
+    // Extends + metadata.subtype='PartOf' until the enum migration).
+    //
+    // Net effect: KB upload from FE produces 1 Document + N Sections +
+    // N PartOf edges, matching the contract the /api/memories route
+    // already emits via SmartIngestRouter._routeKnowledgeBase tree.
+    const persistedChildIds = memories
+      .filter(m => m?.id && !(m?.operation || '').startsWith('skipped'))
+      .map(m => m.id);
+
+    let docParentId = null;
+    if (persistedChildIds.length > 0) {
+      try {
+        // Synthesize a short doc summary: title + N section count + first 280
+        // chars from the first child. Cheap, no LLM. Cognition-loop can refine.
+        const firstContent = promotableSegments[0]?.content || '';
+        const docTitle =
+          metadata.documentTitle
+          || metadata.filename
+          || `Document ${documentId.slice(0, 8)}`;
+        const docSummary = [
+          `Document: ${docTitle}`,
+          `Sections promoted: ${persistedChildIds.length}/${segments.length}`,
+          '',
+          firstContent.slice(0, 280),
+        ].join('\n');
+
+        const parentRes = await this.memoryGraphEngine.ingestMemory({
+          user_id: userId,
+          org_id: orgId,
+          scope: Array.isArray(metadata.project_ids) && metadata.project_ids.length > 0
+            ? 'project'
+            : metadata.primary_team_id ? 'team' : undefined,
+          primary_team_id: metadata.primary_team_id || null,
+          project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
+          content: docSummary,
+          title: docTitle,
+          memory_type: 'fact',
+          tags: [
+            ...(metadata.tags || []),
+            'knowledge-base',
+            'document',
+            'document-summary',
+          ],
+          source_metadata: {
+            source_platform: 'knowledge_base',
+            source_type: 'document',
+            document_id: documentId,
+            filename: metadata.filename || null,
+          },
+          metadata: {
+            semantic_role: 'document',
+            ingest_tree_role: 'parent',
+            document_id: documentId,
+            child_count: persistedChildIds.length,
+            total_segments: segments.length,
+          },
+          skip_fact_extraction: true,                // parent is itself a summary
+          skipPredictCalibrate: true,                // never dedup the doc node
+        });
+
+        docParentId = parentRes?.memoryId || parentRes?.id || null;
+
+        if (docParentId) {
+          // PartOf edges: each promoted child → Document parent.
+          // Encoded as Extends + metadata.subtype='PartOf' until enum migrates.
+          const edgeTasks = persistedChildIds.map(childId =>
+            this.memoryGraphEngine.store.createRelationship({
+              id: crypto.randomUUID(),
+              from_id: childId,
+              to_id: docParentId,
+              type: 'Extends',
+              confidence: 1.0,
+              created_by: 'document_first_ingestion',
+              created_at: new Date().toISOString(),
+              metadata: {
+                ingest_tree: true,
+                subtype: 'PartOf',
+                document_id: documentId,
+                parent_role: 'document',
+              },
+            }).catch(err => {
+              console.warn(`[doc-first] PartOf edge ${childId.slice(0, 8)}→${docParentId.slice(0, 8)} failed:`, err.message);
+            })
+          );
+          await Promise.all(edgeTasks);
+
+          memories.push({ id: docParentId, operation: 'document_parent', isParent: true });
+        }
+      } catch (parentErr) {
+        console.warn('[doc-first] Failed to attach Document parent:', parentErr.message);
+      }
+    }
+
+    return { candidates, memories, documentParentId: docParentId };
   }
 
   /** Fire-and-forget: copy segment's entity mentions onto memory + update topic state. */

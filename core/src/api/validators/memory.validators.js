@@ -9,17 +9,50 @@
 import { z } from 'zod';
 
 /**
- * Memory type enumeration matching database schema
+ * Memory type enumeration matching database schema.
+ *
+ * Accepts the locked Prisma enum values verbatim AND a handful of common
+ * LLM-emitted synonyms (note / todo / observation / etc.), which get
+ * pre-mapped to the canonical value so /api/memories never rejects an
+ * LLM save with a 400. Server-side createMemory has the same fallback —
+ * the validator just smooths the API surface for direct REST callers
+ * (Chrome extension, MCP tool, SDK adapters).
  */
-export const memoryTypeEnum = z.enum([
-  'fact',
-  'preference',
-  'decision',
-  'lesson',
-  'goal',
-  'event',
-  'relationship'
-]);
+const MEMORY_TYPE_ALIASES = {
+  note: 'fact',
+  observation: 'fact',
+  idea: 'fact',
+  knowledge: 'fact',
+  context: 'fact',
+  insight: 'lesson',
+  learning: 'lesson',
+  todo: 'goal',
+  task: 'goal',
+  reminder: 'goal',
+  contact: 'relationship',
+  person: 'relationship',
+  user: 'relationship',
+  meeting: 'event',
+  appointment: 'event',
+  deadline: 'event',
+};
+
+export const memoryTypeEnum = z.preprocess(
+  (val) => {
+    if (typeof val !== 'string') return val;
+    const lower = val.toLowerCase().trim();
+    return MEMORY_TYPE_ALIASES[lower] || lower;
+  },
+  z.enum([
+    'fact',
+    'preference',
+    'decision',
+    'lesson',
+    'goal',
+    'event',
+    'relationship',
+  ])
+);
 
 /**
  * Visibility scope enumeration

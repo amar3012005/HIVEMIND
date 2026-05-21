@@ -59,6 +59,46 @@ chrome.runtime.onInstalled.addListener(() => {
   });
 });
 
+// ── Active-tab platform broadcast ──────────────────────────
+// Side panel listens for `platformChanged` and updates the green-tick badge
+// in real time when the user switches tabs or navigates.
+function broadcastPlatformForTab(tab) {
+  try {
+    const platform = tab?.url ? detectAIChatPlatform(tab.url) : null;
+    let sessionId = null;
+    if (platform) {
+      try {
+        const m = platform.sessionIdRegex && new RegExp(platform.sessionIdRegex).exec(tab.url);
+        if (m) sessionId = m[1] || m[0];
+      } catch {}
+    }
+    chrome.runtime.sendMessage({
+      action: 'platformChanged',
+      matched: !!platform,
+      id: platform?.id || null,
+      name: platform?.name || null,
+      color: platform?.color || null,
+      url: tab?.url || '',
+      title: tab?.title || '',
+      sessionId,
+      tabId: tab?.id || null,
+    });
+  } catch {}
+}
+
+chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    broadcastPlatformForTab(tab);
+  } catch {}
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.url || changeInfo.status === 'complete') {
+    broadcastPlatformForTab(tab);
+  }
+});
+
 // ── Side Panel Management ───────────────────────────────────
 
 // Open side panel when extension icon is clicked
@@ -377,6 +417,52 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
+  if (message.action === 'detectActivePlatform') {
+    (async () => {
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        const platform = tab?.url ? detectAIChatPlatform(tab.url) : null;
+        if (!platform) {
+          sendResponse({ matched: false, url: tab?.url || '', title: tab?.title || '' });
+          return;
+        }
+        let sessionId = null;
+        try {
+          const m = (platform.sessionIdRegex && new RegExp(platform.sessionIdRegex).exec(tab.url));
+          if (m) sessionId = m[1] || m[0];
+        } catch {}
+        sendResponse({
+          matched: true,
+          id: platform.id,
+          name: platform.name,
+          color: platform.color,
+          url: tab.url,
+          title: tab.title,
+          sessionId,
+          tabId: tab.id,
+        });
+      } catch (err) {
+        sendResponse({ matched: false, error: err.message });
+      }
+    })();
+    return true;
+  }
+
+  if (message.action === 'ingestActiveChat') {
+    (async () => {
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab?.id) throw new Error('no active tab');
+        const cfg = await getConfig();
+        const result = await captureAIChatSession(tab.id, tab.url, cfg);
+        sendResponse(result);
+      } catch (err) {
+        sendResponse({ success: false, error: err.message });
+      }
+    })();
+    return true;
+  }
+
   if (message.action === 'openSidePanel') {
     (async () => {
       try {
@@ -519,61 +605,89 @@ async function handleChatStream(message, sender) {
 async function handleSignIn(apiBaseOverride) {
   const apiBase = apiBaseOverride || 'https://api.hivemind.davinciai.eu:8040';
   // Use a stable redirect URL per extension installation. Chrome guarantees
-  // https://<extension-id>.chromiumapp.org/<path> — append /cb so the server
-  // sees a predictable callback path. Make sure the control plane allow-list
-  // accepts *.chromiumapp.org HTTPS hosts (it does, since 2026-05-21).
+  // https://<extension-id>.chromiumapp.org/<path>.
   const redirectUri = chrome.identity.getRedirectURL('cb');
   const state = crypto.randomUUID().replace(/-/g, '');
-
   const startUrl = `${apiBase}/auth/cli/start?callback=${encodeURIComponent(redirectUri)}&state=${state}`;
-  console.log('[hivemind:auth] launching webAuthFlow', { redirectUri, startUrl });
 
-  let finalUrl;
-  try {
-    finalUrl = await new Promise((resolve, reject) => {
-      chrome.identity.launchWebAuthFlow(
-        { url: startUrl, interactive: true },
-        (responseUrl) => {
-          if (chrome.runtime.lastError || !responseUrl) {
-            reject(new Error(chrome.runtime.lastError?.message || 'auth cancelled'));
-          } else {
-            resolve(responseUrl);
-          }
-        }
-      );
-    });
-  } catch (err) {
-    console.warn('[hivemind:auth] webAuthFlow failed:', err.message);
-    throw new Error(`sign-in failed: ${err.message}`);
-  }
+  console.log('[hivemind:auth] opening regular tab for sign-in', { redirectUri, startUrl });
 
-  console.log('[hivemind:auth] webAuthFlow returned', { finalUrl });
+  // CRITICAL: do NOT use chrome.identity.launchWebAuthFlow — it runs in an
+  // isolated popup with cookie/storage sandboxing, which blocks Zitadel
+  // from keeping its session ('Access to storage is not allowed from this
+  // context'). Open a normal tab instead so the user's existing
+  // hivemind.davinciai.eu session is reused (if they're already signed in,
+  // they skip Zitadel entirely and the redirect chain completes in <1s).
+  const tab = await chrome.tabs.create({ url: startUrl, active: true });
+  const tabId = tab.id;
 
-  const parsed = new URL(finalUrl);
-  const token = parsed.searchParams.get('token');
-  const echoState = parsed.searchParams.get('state');
-  const userEmail = parsed.searchParams.get('user_email') || '';
-  const userId = parsed.searchParams.get('user_id') || '';
-  const orgId = parsed.searchParams.get('org_id') || '';
-  const errMsg = parsed.searchParams.get('error');
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      chrome.tabs.onRemoved.removeListener(onRemoved);
+      clearTimeout(timer);
+    };
 
-  if (errMsg) throw new Error(`server: ${errMsg}`);
-  if (!token) throw new Error('no token in callback URL — server may have lost session mid-flow');
-  if (echoState !== state) throw new Error('state mismatch — possible CSRF, ignoring');
+    const finalize = async (url) => {
+      cleanup();
+      try { await chrome.tabs.remove(tabId); } catch {}
 
-  // core API base for memory/chat ops
-  const coreApiBase = 'https://core.hivemind.davinciai.eu:8050';
-  await chrome.storage.local.set({
-    apiKey: token,
-    apiBase: coreApiBase,
-    controlPlaneBase: apiBase,
-    userEmail,
-    userId,
-    orgId,
+      let parsed;
+      try { parsed = new URL(url); } catch {
+        return reject(new Error('invalid callback URL: ' + url));
+      }
+      const token = parsed.searchParams.get('token');
+      const echoState = parsed.searchParams.get('state');
+      const userEmail = parsed.searchParams.get('user_email') || '';
+      const userId = parsed.searchParams.get('user_id') || '';
+      const orgId = parsed.searchParams.get('org_id') || '';
+      const errMsg = parsed.searchParams.get('error');
+
+      if (errMsg) return reject(new Error(`server: ${errMsg}`));
+      if (!token) return reject(new Error('no token in callback URL — server may have lost session mid-flow'));
+      if (echoState !== state) return reject(new Error('state mismatch — possible CSRF, ignoring'));
+
+      const coreApiBase = 'https://core.hivemind.davinciai.eu:8050';
+      await chrome.storage.local.set({
+        apiKey: token,
+        apiBase: coreApiBase,
+        controlPlaneBase: apiBase,
+        userEmail,
+        userId,
+        orgId,
+      });
+      console.log('[hivemind:auth] signed in', { userEmail, userId, orgId });
+      resolve({ success: true, userEmail, userId, orgId });
+    };
+
+    const onUpdated = (changedTabId, changeInfo, updTab) => {
+      if (changedTabId !== tabId) return;
+      const candidateUrl = changeInfo.url || updTab?.pendingUrl || updTab?.url;
+      if (!candidateUrl) return;
+      // Chrome tries to navigate to chromiumapp.org but the host doesn't
+      // resolve — onUpdated fires with that URL before the network error,
+      // which is exactly when we capture the redirect.
+      if (candidateUrl.startsWith('https://') && candidateUrl.includes('.chromiumapp.org/')) {
+        finalize(candidateUrl);
+      }
+    };
+
+    const onRemoved = (removedId) => {
+      if (removedId === tabId) {
+        cleanup();
+        reject(new Error('sign-in cancelled (tab closed)'));
+      }
+    };
+
+    const timer = setTimeout(() => {
+      cleanup();
+      try { chrome.tabs.remove(tabId); } catch {}
+      reject(new Error('sign-in timed out after 3 minutes'));
+    }, 180_000);
+
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    chrome.tabs.onRemoved.addListener(onRemoved);
   });
-
-  console.log('[hivemind:auth] signed in', { userEmail, userId, orgId });
-  return { success: true, userEmail, userId, orgId };
 }
 
 // ── API Functions ───────────────────────────────────────

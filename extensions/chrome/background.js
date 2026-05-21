@@ -83,33 +83,28 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 
   if (info.menuItemId === 'hivemind-save-page') {
     try {
-      // Check if it's an AI chat platform - use auto-capture if so
-      if (isAIChatPlatform(tab.url)) {
-        console.log('[context-menu] Detected AI chat platform, attempting auto-capture...');
-        
-        try {
-          await captureAIChatSession(tab.id, tab.url, config);
-          showBadge('✓', '#22c55e');
-          return; // Success - no need to fallback
-        } catch (aiErr) {
-          console.warn('[context-menu] AI chat capture failed, falling back to standard extraction:', aiErr.message);
-          // Fallback to standard extraction below
-        }
-      }
-      
-      // Standard page extraction (fallback for AI chats or default for other pages)
+      // Always use the DOM extractors (reliable, no CDP needed).
+      // CDP auto-summary was flaky — typing into AI chat inputs often fails.
       await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['extractors.js'] });
       const results = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => smartExtract() });
       const pageContent = results[0]?.result;
-      if (pageContent) {
-        await saveToHivemind(config, {
-          content: pageContent.content,
-          title: pageContent.title || tab.title,
-          tags: ['browser-extension', ...(pageContent.tags || []), `url:${tab.url}`],
-          source: pageContent.platform || 'browser-extension',
-        });
-        showBadge('OK', '#22c55e');
+      if (!pageContent) {
+        showBadge('ERR', '#ef4444');
+        return;
       }
+      
+      // If it's an AI chat platform, enrich with metadata
+      if (isAIChatPlatform(tab.url)) {
+        pageContent.tags = [...(pageContent.tags || []), 'ai-chat'];
+      }
+      
+      await saveToHivemind(config, {
+        content: pageContent.content,
+        title: pageContent.title || tab.title,
+        tags: ['browser-extension', ...(pageContent.tags || []), `url:${tab.url}`],
+        source: pageContent.platform || 'browser-extension',
+      });
+      showBadge('✓', '#22c55e');
     } catch (err) {
       console.error('[context-menu] Save page failed:', err);
       showBadge('ERR', '#ef4444');
@@ -562,7 +557,13 @@ async function waitForNewMessage(tabId, selector, previousCount, timeout = 45000
 }
 
 /**
- * Capture AI chat session with auto-summary
+ * Capture AI chat session — inject summary prompt into the page DOM.
+ * No CDP/debugger required — uses chrome.scripting.executeScript to:
+ * 1. Find the chat input field
+ * 2. Type the summary prompt
+ * 3. Click the send button
+ * 4. Wait for the AI response
+ * 5. Extract conversation + summary
  */
 async function captureAIChatSession(tabId, url, config) {
   const platform = detectAIChatPlatform(url);
@@ -570,86 +571,199 @@ async function captureAIChatSession(tabId, url, config) {
     throw new Error('Not an AI chat platform');
   }
   
-  console.log(`[ai-chat-capture] Starting capture for ${platform.name}`);
+  console.log(`[ai-chat-capture] Starting DOM-injection capture for ${platform.name} on tab ${tabId}`);
+  
+  // Update badge
+  chrome.action.setBadgeText({ text: '🤖', tabId });
+  chrome.action.setBadgeBackgroundColor({ color: platform.color, tabId });
   
   try {
-    // Show progress
-    chrome.action.setBadgeText({ text: '🤖', tabId });
-    chrome.action.setBadgeBackgroundColor({ color: platform.color, tabId });
+    // ── Step 1: Count messages before injecting ──────────
+    const [{ result: countResult }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (selector) => document.querySelectorAll(selector).length,
+      args: [platform.selectors.messages],
+    });
+    const messagesBefore = countResult || 0;
+    console.log(`[ai-chat-capture] Messages before: ${messagesBefore}`);
     
-    // Count current messages
-    const messagesBefore = await executeEvaluate(tabId, `
-      document.querySelectorAll(${JSON.stringify(platform.selectors.messages)}).length
-    `);
+    // ── Step 2: Inject summary prompt into input ─────────
+    const [{ result: fillResult }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (inputSelector, fallbackSelector, prompt) => {
+        // Find the chat input — Claude uses contenteditable, ChatGPT uses textarea
+        let input = document.querySelector(inputSelector);
+        if (!input) input = document.querySelector(fallbackSelector);
+        if (!input) {
+          // Last resort: find ANY contenteditable or textarea in the page
+          input = document.querySelector('[contenteditable="true"]') 
+               || document.querySelector('textarea')
+               || document.querySelector('[role="textbox"]');
+        }
+        if (!input) return { error: 'input_not_found' };
+        
+        const tag = input.tagName.toLowerCase();
+        const isEditable = input.isContentEditable || tag === 'div' || tag === 'p';
+        
+        if (isEditable) {
+          // ContentEditable approach
+          input.focus();
+          input.textContent = prompt;
+          // Dispatch input event so React/Vue/etc pick it up
+          input.dispatchEvent(new InputEvent('input', { 
+            inputType: 'insertText', 
+            data: prompt, 
+            bubbles: true 
+          }));
+          // Also try execCommand for fallback
+          document.execCommand('selectAll', false);
+          document.execCommand('insertText', false, prompt);
+          return { success: true, mode: 'contenteditable', tag };
+        } else {
+          // Textarea/input approach
+          input.focus();
+          const nativeSetter = Object.getOwnPropertyDescriptor(
+            window.HTMLTextAreaElement.prototype, 'value'
+          )?.set || Object.getOwnPropertyDescriptor(
+            window.HTMLInputElement.prototype, 'value'
+          )?.set;
+          if (nativeSetter) {
+            nativeSetter.call(input, prompt);
+          } else {
+            input.value = prompt;
+          }
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+          return { success: true, mode: 'textarea', tag };
+        }
+      },
+      args: [platform.selectors.input, platform.selectors.inputFallback, platform.summaryPrompt],
+    });
     
-    console.log(`[ai-chat-capture] Current message count: ${messagesBefore}`);
+    if (fillResult?.error) {
+      throw new Error(`Input not found: ${fillResult.error}`);
+    }
+    console.log(`[ai-chat-capture] Input filled: ${fillResult?.mode} (${fillResult?.tag})`);
     
-    // Try primary selector first, fallback if needed
-    let fillSuccess = false;
-    for (const selector of [platform.selectors.input, platform.selectors.inputFallback].filter(Boolean)) {
-      try {
-        await executeFill(tabId, selector, platform.summaryPrompt);
-        fillSuccess = true;
-        console.log(`[ai-chat-capture] Filled input with selector: ${selector}`);
+    // ── Step 3: Wait briefly for UI to register input ────
+    await new Promise(r => setTimeout(r, 500));
+    
+    // ── Step 4: Click the send button ───────────────────
+    const [{ result: clickResult }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (submitSelector, fallbackSelector) => {
+        let btn = document.querySelector(submitSelector);
+        if (!btn) btn = document.querySelector(fallbackSelector);
+        if (!btn) {
+          // Try to find any submit-looking button
+          btn = document.querySelector('button[aria-label*="Send" i]')
+             || document.querySelector('button[aria-label*="send" i]')
+             || document.querySelector('button:has(svg)');
+        }
+        if (!btn) return { error: 'send_button_not_found' };
+        btn.click();
+        return { success: true };
+      },
+      args: [platform.selectors.submit, platform.selectors.submitFallback],
+    });
+    
+    if (clickResult?.error) {
+      throw new Error(`Send button not found: ${clickResult.error}`);
+    }
+    console.log('[ai-chat-capture] Send button clicked');
+    
+    // ── Step 5: Wait for AI response ────────────────────
+    chrome.action.setBadgeText({ text: '⏳', tabId });
+    
+    const startTime = Date.now();
+    const timeout = platform.waitForResponse?.timeout || 30000;
+    const interval = platform.waitForResponse?.checkInterval || 1000;
+    let gotResponse = false;
+    
+    while (Date.now() - startTime < timeout) {
+      await new Promise(r => setTimeout(r, interval));
+      
+      const [{ result: currentCount }] = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: (selector) => document.querySelectorAll(selector).length,
+        args: [platform.selectors.messages],
+      });
+      
+      // Also check if thinking indicator disappeared
+      if (platform.waitForResponse?.thinkingIndicator) {
+        const [{ result: thinkingGone }] = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: (sel) => !document.querySelector(sel),
+          args: [platform.waitForResponse.thinkingIndicator],
+        });
+        if (!thinkingGone) continue; // Still thinking
+      }
+      
+      if (currentCount > messagesBefore) {
+        // Wait a bit more for full render
+        await new Promise(r => setTimeout(r, 1500));
+        gotResponse = true;
         break;
-      } catch (err) {
-        console.warn(`[ai-chat-capture] Fill failed for ${selector}:`, err.message);
       }
     }
     
-    if (!fillSuccess) {
-      throw new Error('Failed to fill input field');
+    if (!gotResponse) {
+      console.warn('[ai-chat-capture] Timed out waiting for response — grabbing current state');
     }
     
-    // Wait a bit for UI to update
-    await new Promise(resolve => setTimeout(resolve, 500));
+    // ── Step 6: Extract chat history + summary ───────────
+    const [{ result: extractionResult }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (chatHistoryScript, lastMessageScript) => {
+        try {
+          const chatHistoryFn = new Function(`return (${chatHistoryScript})();`);
+          const lastMsgFn = new Function(`return (${lastMessageScript})();`);
+          return {
+            chatHistory: chatHistoryFn(),
+            lastMessage: lastMsgFn(),
+          };
+        } catch (e) {
+          return { chatHistory: [], lastMessage: null, error: e.message };
+        }
+      },
+      args: [platform.extraction.chatHistoryScript, platform.extraction.lastMessageScript],
+    });
     
-    // Submit (press Enter)
-    await executeSendKeys(tabId, 'Enter');
-    console.log('[ai-chat-capture] Submitted prompt');
+    const chatHistory = extractionResult?.chatHistory || [];
+    const summary = extractionResult?.lastMessage || '(No summary received)';
     
-    // Update badge
-    chrome.action.setBadgeText({ text: '⏳', tabId });
+    console.log(`[ai-chat-capture] Extracted ${chatHistory.length} messages`);
     
-    // Wait for AI response (new message appears)
-    await waitForNewMessage(tabId, platform.selectors.messages, messagesBefore);
-    console.log('[ai-chat-capture] New message detected');
+    // ── Step 7: Format and save ─────────────────────────
+    const content = [
+      `## 🤖 AI-Generated Session Summary`,
+      ``,
+      summary,
+      ``,
+      `## 📜 Full Conversation (${chatHistory.length} messages)`,
+      ``,
+      ...chatHistory.map((msg, i) => 
+        `### ${msg.role === 'user' ? '👤 User' : '🤖 AI'}\n\n${msg.content}\n`
+      ),
+    ].join('\n').slice(0, 32000);
     
-    // Extract summary (last AI message)
-    const summary = await executeEvaluate(tabId, platform.extraction.lastMessageScript);
-    
-    // Extract full chat history
-    const chatHistory = await executeEvaluate(tabId, platform.extraction.chatHistoryScript);
-    
-    console.log(`[ai-chat-capture] Extracted ${chatHistory?.length || 0} messages`);
-    
-    // Format content
-    const content = `## AI-Generated Summary\n\n${summary}\n\n## Full Chat History\n\n${
-      chatHistory.map((msg, i) => `### ${msg.role === 'user' ? '👤 User' : '🤖 AI'}\n\n${msg.content}`).join('\n\n---\n\n')
-    }`;
-    
-    // Save to HIVEMIND
     await saveToHivemind(config, {
       content,
       title: `${platform.name} Session — ${new Date().toLocaleString()}`,
       tags: ['ai-chat', platform.name.toLowerCase(), 'auto-summary', `url:${url}`],
       source: platform.name.toLowerCase(),
-      source_metadata: {
-        platform: platform.name,
-        captured_at: new Date().toISOString(),
-        auto_summary: true,
-        message_count: chatHistory?.length || 0,
-      },
     });
     
-    // Success
+    // Success badge
     chrome.action.setBadgeText({ text: '✅', tabId });
     chrome.action.setBadgeBackgroundColor({ color: '#22c55e', tabId });
     setTimeout(() => chrome.action.setBadgeText({ text: '', tabId }), 3000);
     
-    console.log('[ai-chat-capture] Success!');
-    
-    return { success: true, platform: platform.name, messageCount: chatHistory?.length || 0 };
+    return { 
+      success: true, 
+      platform: platform.name, 
+      messageCount: chatHistory.length,
+    };
     
   } catch (err) {
     console.error('[ai-chat-capture] Failed:', err);

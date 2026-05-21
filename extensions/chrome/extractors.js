@@ -66,30 +66,50 @@ function extractChatGPT() {
 
 function extractClaude() {
   const title = document.querySelector('[class*="ConversationTitle"], h1, [data-testid="conversation-title"]')?.textContent?.trim()
-    || document.title.replace(' - Claude', '').trim()
+    || document.title.replace(' - Claude', '').replace('Claude', '').trim()
     || 'Claude Conversation';
 
+  // Modern Claude (May 2026) uses font-claude-message / font-user-message classes
   const messages = [];
-  // Claude uses different class patterns — try multiple selectors
-  const containers = document.querySelectorAll('[class*="Message"], [class*="message-"], [data-testid*="message"]');
-  containers.forEach(el => {
-    const isHuman = el.classList.toString().includes('human') || el.classList.toString().includes('user')
-      || el.closest('[data-testid*="human"]') || el.getAttribute('data-is-human') === 'true';
-    const content = el.innerText?.trim();
-    if (content && content.length > 2) {
-      messages.push({ role: isHuman ? 'User' : 'Claude', content });
-    }
+  
+  // Method 1: Look for font-claude-message / font-user-message blocks
+  const chatContainer = document.querySelector('[class*="mx-auto"][class*="max-w"], main, [role="main"]');
+  const scope = chatContainer || document;
+  
+  const userBlocks = scope.querySelectorAll('[class*="font-user-message"]');
+  const assistantBlocks = scope.querySelectorAll('[class*="font-claude-message"]');
+  
+  userBlocks.forEach(el => {
+    const content = (el.innerText || el.textContent || '').trim();
+    if (content.length > 5) messages.push({ role: 'User', content });
   });
-
+  assistantBlocks.forEach(el => {
+    const content = (el.innerText || el.textContent || '').trim();
+    if (content.length > 5) messages.push({ role: 'Claude', content });
+  });
+  
+  // Method 2: Fallback — look for prose blocks with alternating pattern
   if (messages.length === 0) {
-    // Fallback: try getting all prose blocks
-    document.querySelectorAll('.prose, .font-claude-message').forEach(el => {
-      const content = el.innerText?.trim();
-      if (content && content.length > 5) messages.push({ role: 'Claude', content });
+    const proseBlocks = scope.querySelectorAll('.prose, [class*="message"]');
+    let lastRole = null;
+    proseBlocks.forEach(el => {
+      const content = (el.innerText || el.textContent || '').trim();
+      if (content.length < 10) return;
+      // Heuristic: user messages tend to be shorter and appear before assistant responses
+      const isUser = el.closest('[class*="user"], [class*="human"]') !== null;
+      const role = isUser ? 'User' : 'Claude';
+      if (role !== lastRole || content.length > 200) {
+        messages.push({ role, content });
+        lastRole = role;
+      }
     });
   }
-
-  if (messages.length === 0) return null;
+  
+  // If still empty, grab everything meaningful from the page and skip
+  if (messages.length === 0) {
+    // Just return null — let the generic extractor handle it
+    return null;
+  }
 
   const formatted = messages.map(m => `**${m.role}:** ${m.content}`).join('\n\n---\n\n');
 

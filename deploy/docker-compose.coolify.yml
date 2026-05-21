@@ -1,0 +1,29 @@
+# Auto-generated Coolify deployment file
+# Version: 20260519-002114
+# Build Date: 2026-05-18T22:21:14Z
+
+version: '3.8'
+
+services:
+  app:
+    image: hivemind/core:20260519-002114
+    environment:
+      - NODE_ENV=production
+      - VERSION=20260519-002114
+      - DATABASE_URL=postgresql://hivemind_user:secure_password@postgres:5432/hivemind?schema=public
+      - QDRANT_URL=https://your-cluster.qdrant.io:6333
+      - QDRANT_API_KEY=your-qdrant-api-key
+      - REDIS_URL=redis://redis:6379
+      - GROQ_API_KEY=your-groq-api-key
+      - MISTRAL_API_KEY=your-mistral-api-key
+      - API_MASTER_KEY=your-secure-random-key-min-32-chars
+      - SESSION_SECRET=your-session-secret-min-32-chars
+      - HIVEMIND_MASTER_API_KEY=your-master-api-key
+      - HIVEMIND_ADMIN_SECRET=your-admin-secret
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

@@ -1,0 +1,705 @@
+/**
+ * HIVEMIND Chat Overlay - Styles
+ * Glass morphism design with professional animations
+ */
+
+/* ── Base Container ────────────────────────────────────── */
+
+#hivemind-chat-overlay {
+  position: fixed !important;
+  top: 0 !important;
+  right: 0 !important;
+  bottom: 0 !important;
+  width: 100% !important;
+  z-index: 2147483647 !important; /* Max z-index */
+  pointer-events: none !important;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif !important;
+  transition: opacity 0.3s ease !important;
+}
+
+#hivemind-chat-overlay:not(.hivemind-hidden) {
+  pointer-events: auto !important;
+}
+
+.hivemind-hidden {
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+/* ── Glass Panel ──────────────────────────────────────── */
+
+.hivemind-chat-panel {
+  position: absolute !important;
+  right: 0 !important;
+  top: 0 !important;
+  bottom: 0 !important;
+  width: 420px !important;
+  background: #f7f7f5 !important;
+  border-left: 1px solid rgba(0, 0, 0, 0.06) !important;
+  box-shadow: -4px 0 24px rgba(0, 0, 0, 0.08) !important;
+  display: flex !important;
+  flex-direction: column !important;
+  animation: hivemind-slide-in 0.3s cubic-bezier(0.16, 1, 0.3, 1) !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  .hivemind-chat-panel {
+    background: #0f0f0f !important;
+    border-left-color: rgba(255, 255, 255, 0.08) !important;
+    box-shadow: -4px 0 24px rgba(0, 0, 0, 0.3) !important;
+  }
+}
+
+@keyframes hivemind-slide-in {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+/* ── Header ───────────────────────────────────────────── */
+
+.hivemind-chat-header {
+  padding: 20px !important;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08) !important;
+  display: flex !important;
+  justify-content: space-between !important;
+  align-items: center !important;
+  flex-shrink: 0 !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  .hivemind-chat-header {
+    border-bottom-color: rgba(255, 255, 255, 0.1) !important;
+  }
+}
+
+.hivemind-chat-header-title {
+  display: flex !important;
+  align-items: center !important;
+  gap: 10px !important;
+}
+
+.hivemind-icon {
+  font-size: 24px !important;
+  line-height: 1 !important;
+}
+
+.hivemind-title {
+  font-size: 16px !important;
+  font-weight: 700 !important;
+  color: #000 !important;
+  letter-spacing: 0.5px !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  .hivemind-title {
+    color: #fff !important;
+  }
+}
+
+.hivemind-close-btn {
+  width: 32px !important;
+  height: 32px !important;
+  border: none !important;
+  background: rgba(0, 0, 0, 0.05) !important;
+  border-radius: 8px !important;
+  font-size: 18px !important;
+  color: #666 !important;
+  cursor: pointer !important;
+  transition: all 0.2s ease !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+
+.hivemind-close-btn:hover {
+  background: rgba(0, 0, 0, 0.1) !important;
+  color: #000 !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  .hivemind-close-btn {
+    background: rgba(255, 255, 255, 0.1) !important;
+    color: #aaa !important;
+  }
+  
+  .hivemind-close-btn:hover {
+    background: rgba(255, 255, 255, 0.15) !important;
+    color: #fff !important;
+  }
+}
+
+/* ── Context Status Bar ───────────────────────────────── */
+
+.hivemind-context-status {
+  padding: 10px 20px !important;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08) !important;
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  flex-shrink: 0 !important;
+  background: rgba(0, 0, 0, 0.02) !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  .hivemind-context-status {
+    border-bottom-color: rgba(255, 255, 255, 0.1) !important;
+    background: rgba(255, 255, 255, 0.02) !important;
+  }
+}
+
+.hivemind-status-icon {
+  font-size: 14px !important;
+  line-height: 1 !important;
+}
+
+.hivemind-status-text {
+  color: #666 !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  .hivemind-status-text {
+    color: #aaa !important;
+  }
+}
+
+.hivemind-status-loading .hivemind-status-icon {
+  animation: hivemind-pulse 1.5s infinite !important;
+}
+
+.hivemind-status-ready .hivemind-status-text {
+  color: #22c55e !important;
+}
+
+.hivemind-status-error .hivemind-status-text {
+  color: #ef4444 !important;
+}
+
+@keyframes hivemind-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* ── Messages Container ───────────────────────────────── */
+
+.hivemind-chat-messages {
+  flex: 1 !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  padding: 20px !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 16px !important;
+}
+
+.hivemind-chat-messages::-webkit-scrollbar {
+  width: 6px !important;
+}
+
+.hivemind-chat-messages::-webkit-scrollbar-track {
+  background: transparent !important;
+}
+
+.hivemind-chat-messages::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.2) !important;
+  border-radius: 3px !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  .hivemind-chat-messages::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.2) !important;
+  }
+}
+
+/* ── Welcome Message ──────────────────────────────────── */
+
+.hivemind-welcome-message {
+  text-align: center !important;
+  padding: 40px 20px !important;
+  color: #666 !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  .hivemind-welcome-message {
+    color: #aaa !important;
+  }
+}
+
+.hivemind-welcome-title {
+  font-size: 18px !important;
+  font-weight: 600 !important;
+  margin-bottom: 12px !important;
+  color: #000 !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  .hivemind-welcome-title {
+    color: #fff !important;
+  }
+}
+
+.hivemind-welcome-text {
+  font-size: 14px !important;
+  line-height: 1.6 !important;
+  margin-bottom: 24px !important;
+}
+
+.hivemind-welcome-examples {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 8px !important;
+  align-items: center !important;
+}
+
+.hivemind-example {
+  font-size: 13px !important;
+  padding: 8px 16px !important;
+  background: rgba(0, 0, 0, 0.04) !important;
+  border-radius: 16px !important;
+  display: inline-block !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  .hivemind-example {
+    background: rgba(255, 255, 255, 0.06) !important;
+  }
+}
+
+/* ── Message Bubbles ──────────────────────────────────── */
+
+.hivemind-message {
+  display: flex !important;
+  flex-direction: column !important;
+  max-width: 100% !important;
+  animation: hivemind-fade-up 0.25s ease-out !important;
+}
+
+@keyframes hivemind-fade-up {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.hivemind-message-user {
+  align-self: flex-end !important;
+  align-items: flex-end !important;
+}
+
+.hivemind-message-assistant,
+.hivemind-message-system {
+  align-self: flex-start !important;
+  align-items: flex-start !important;
+  width: 100% !important;
+}
+
+.hivemind-message-content {
+  font-size: 14px !important;
+  line-height: 1.5 !important;
+  word-wrap: break-word !important;
+  white-space: pre-wrap !important;
+}
+
+.hivemind-message-user .hivemind-message-content {
+  background: #007aff !important;
+  color: #fff !important;
+  border-radius: 18px !important;
+  border-bottom-right-radius: 4px !important;
+  padding: 10px 14px !important;
+  box-shadow: 0 1px 2px rgba(0,122,255,0.25) !important;
+}
+
+.hivemind-message-assistant .hivemind-message-content {
+  background: #ffffff !important;
+  color: #1a1a1a !important;
+  border-radius: 12px !important;
+  padding: 14px 16px !important;
+  border: 1px solid rgba(0,0,0,0.06) !important;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04) !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  .hivemind-message-assistant .hivemind-message-content {
+    background: rgba(255,255,255,0.06) !important;
+    color: #fff !important;
+    border-color: rgba(255,255,255,0.08) !important;
+  }
+}
+
+.hivemind-message-system .hivemind-message-content {
+  background: rgba(239, 68, 68, 0.1) !important;
+  color: #ef4444 !important;
+  font-size: 12px !important;
+  border-radius: 8px !important;
+  padding: 6px 12px !important;
+}
+
+.hivemind-message-error .hivemind-message-content {
+  background: rgba(239, 68, 68, 0.1) !important;
+  color: #ef4444 !important;
+  font-size: 12px !important;
+  padding: 8px 12px !important;
+  border-radius: 8px !important;
+}
+
+/* ── AI Header Badge ─────────────────────────────────── */
+
+.hivemind-ai-header {
+  display: flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  margin-bottom: 8px !important;
+  font-size: 11px !important;
+  font-weight: 500 !important;
+  color: #6b6b6b !important;
+  letter-spacing: 0.3px !important;
+  text-transform: uppercase !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  .hivemind-ai-header {
+    color: #aaa !important;
+  }
+}
+
+.hivemind-ai-header-icon {
+  width: 16px !important;
+  height: 16px !important;
+  border-radius: 50% !important;
+  background: #117dff !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  flex-shrink: 0 !important;
+}
+
+.hivemind-ai-header-icon svg {
+  width: 10px !important;
+  height: 10px !important;
+  fill: white !important;
+}
+
+/* ── Metadata Footer ─────────────────────────────────── */
+
+.hivemind-message-meta {
+  margin-top: 10px !important;
+  padding-top: 10px !important;
+  border-top: 1px solid rgba(0,0,0,0.06) !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 6px !important;
+}
+
+.hivemind-sources-row {
+  display: flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  font-size: 11px !important;
+  font-weight: 500 !important;
+  color: #6b6b6b !important;
+}
+
+.hivemind-sources-arrow {
+  margin-left: 2px !important;
+  font-size: 10px !important;
+}
+
+.hivemind-tokens-row {
+  display: flex !important;
+  gap: 14px !important;
+  font-size: 11px !important;
+  color: #6b6b6b !important;
+}
+
+.hivemind-token-dot {
+  display: inline-block !important;
+  width: 6px !important;
+  height: 6px !important;
+  border-radius: 50% !important;
+  margin-right: 4px !important;
+  vertical-align: middle !important;
+}
+
+.hivemind-token-dot.prompt { background: #8ab4f8 !important; }
+.hivemind-token-dot.completion { background: #81c995 !important; }
+.hivemind-token-dot.total { background: #c58af9 !important; }
+
+/* ── Thinking Indicator ───────────────────────────────── */
+
+.hivemind-message-thinking .hivemind-message-content {
+  padding: 12px 16px !important;
+}
+
+.hivemind-thinking-indicator {
+  display: flex !important;
+  gap: 6px !important;
+  align-items: center !important;
+}
+
+.hivemind-thinking-dot {
+  width: 8px !important;
+  height: 8px !important;
+  border-radius: 50% !important;
+  background: #666 !important;
+  animation: hivemind-thinking-bounce 1.4s infinite ease-in-out !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  .hivemind-thinking-dot {
+    background: #aaa !important;
+  }
+}
+
+.hivemind-thinking-dot:nth-child(1) {
+  animation-delay: -0.32s !important;
+}
+
+.hivemind-thinking-dot:nth-child(2) {
+  animation-delay: -0.16s !important;
+}
+
+@keyframes hivemind-thinking-bounce {
+  0%, 80%, 100% {
+    transform: scale(0);
+  }
+  40% {
+    transform: scale(1);
+  }
+}
+
+/* ── Sources ──────────────────────────────────────────── */
+
+.hivemind-message-sources {
+  margin-top: 8px !important;
+  padding: 10px !important;
+  background: rgba(0, 0, 0, 0.04) !important;
+  border-radius: 10px !important;
+  font-size: 12px !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  .hivemind-message-sources {
+    background: rgba(255, 255, 255, 0.04) !important;
+  }
+}
+
+.hivemind-sources-label {
+  font-weight: 600 !important;
+  margin-bottom: 6px !important;
+  color: #666 !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  .hivemind-sources-label {
+    color: #aaa !important;
+  }
+}
+
+.hivemind-source-item {
+  padding: 6px 10px !important;
+  background: rgba(255, 255, 255, 0.8) !important;
+  border-radius: 6px !important;
+  margin-bottom: 4px !important;
+  cursor: pointer !important;
+  transition: background 0.2s ease !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+.hivemind-source-item:hover {
+  background: rgba(255, 255, 255, 1) !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  .hivemind-source-item {
+    background: rgba(255, 255, 255, 0.06) !important;
+  }
+  
+  .hivemind-source-item:hover {
+    background: rgba(255, 255, 255, 0.1) !important;
+  }
+}
+
+/* ── Actions Badge ────────────────────────────────────── */
+
+.hivemind-actions-badge {
+  display: inline-block !important;
+  padding: 4px 10px !important;
+  background: rgba(99, 102, 241, 0.1) !important;
+  color: #6366f1 !important;
+  border-radius: 12px !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+}
+
+/* ── Input Area ──────────────────────────────────────── */
+
+.hivemind-chat-input-area {
+  padding: 8px 16px 12px !important;
+  background: #f7f7f5 !important;
+  border-top: 1px solid rgba(0,0,0,0.06) !important;
+  flex-shrink: 0 !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 6px !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  .hivemind-chat-input-area {
+    background: #0f0f0f !important;
+    border-top-color: rgba(255,255,255,0.06) !important;
+  }
+}
+
+.hivemind-chat-input-wrapper {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  background: #ffffff !important;
+  border: 1px solid rgba(0,0,0,0.08) !important;
+  border-radius: 24px !important;
+  padding: 4px 4px 4px 14px !important;
+  transition: border-color 0.2s, box-shadow 0.2s !important;
+}
+
+.hivemind-chat-input-wrapper:focus-within {
+  border-color: #117dff !important;
+  box-shadow: 0 0 0 3px rgba(17,125,255,0.08) !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  .hivemind-chat-input-wrapper {
+    background: rgba(255,255,255,0.05) !important;
+    border-color: rgba(255,255,255,0.08) !important;
+  }
+}
+
+.hivemind-chat-input {
+  flex: 1 !important;
+  min-height: 36px !important;
+  max-height: 120px !important;
+  padding: 6px 0 !important;
+  border: none !important;
+  background: transparent !important;
+  color: #1a1a1a !important;
+  font-family: inherit !important;
+  font-size: 14px !important;
+  line-height: 1.45 !important;
+  resize: none !important;
+  outline: none !important;
+}
+
+.hivemind-chat-input::placeholder {
+  color: #8e8e93 !important;
+}
+
+.hivemind-send-btn {
+  width: 32px !important;
+  height: 32px !important;
+  border: none !important;
+  border-radius: 50% !important;
+  background: #117dff !important;
+  color: white !important;
+  cursor: pointer !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  flex-shrink: 0 !important;
+  transition: background 0.15s, transform 0.1s !important;
+}
+
+.hivemind-send-btn:hover {
+  background: #006ae6 !important;
+  transform: scale(1.05) !important;
+}
+
+.hivemind-send-btn:active {
+  transform: scale(0.95) !important;
+}
+
+.hivemind-input-hint {
+  text-align: center !important;
+  font-size: 11px !important;
+  color: #8e8e93 !important;
+  letter-spacing: 0.2px !important;
+}
+
+.hivemind-input-hint kbd {
+  font-family: inherit !important;
+  font-size: 10px !important;
+  padding: 1px 4px !important;
+  background: #ffffff !important;
+  border: 1px solid rgba(0,0,0,0.08) !important;
+  border-radius: 4px !important;
+  color: #8e8e93 !important;
+}
+
+/* ── Action Toast ─────────────────────────────────────── */
+
+.hivemind-action-toast {
+  position: fixed !important;
+  bottom: 24px !important;
+  right: 460px !important; /* 420px panel + 40px gap */
+  padding: 12px 20px !important;
+  background: rgba(0, 0, 0, 0.9) !important;
+  color: #fff !important;
+  border-radius: 12px !important;
+  font-size: 14px !important;
+  font-weight: 500 !important;
+  z-index: 2147483646 !important;
+  animation: hivemind-toast-in 0.3s ease !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2) !important;
+}
+
+.hivemind-action-toast-success {
+  background: rgba(34, 197, 94, 0.95) !important;
+}
+
+.hivemind-action-toast-error {
+  background: rgba(239, 68, 68, 0.95) !important;
+}
+
+.hivemind-action-toast-fade {
+  animation: hivemind-toast-out 0.3s ease forwards !important;
+}
+
+@keyframes hivemind-toast-in {
+  from {
+    transform: translateX(100px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes hivemind-toast-out {
+  from {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateX(100px);
+    opacity: 0;
+  }
+}
+
+/* ── Responsive ───────────────────────────────────────── */
+
+@media (max-width: 768px) {
+  .hivemind-chat-panel {
+    width: 100% !important;
+    border-left: none !important;
+  }
+  
+  .hivemind-action-toast {
+    right: 20px !important;
+  }
+}

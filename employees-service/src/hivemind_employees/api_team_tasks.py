@@ -142,7 +142,12 @@ async def _build_roster(slugs: List[str]) -> List[EmployeeWorker]:
         if not api_key:
             log.warning("team-task: no bootstrap api_key for %s — skip", slug)
             continue
-        agent = build_react_agent(emp, api_key)
+        merged_emp = {
+            **emp,
+            "hyper": b.get("hyper"),
+            "active_prompt_version": b.get("active_prompt_version"),
+        }
+        agent = build_react_agent(merged_emp, api_key)
         # Phase 3.3: role_archetype + peer_review_targets are first-class
         # columns. Fall back to legacy policy_rules JSONB for older rows
         # that predate the migration.

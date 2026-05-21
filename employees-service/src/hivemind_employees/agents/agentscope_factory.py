@@ -128,7 +128,11 @@ def build_react_agent(employee_row: dict, hivemind_api_key: str) -> ReActAgent:
     the slackagents path.
     """
     name = employee_row["slug"]  # unique per org
-    persona = employee_row.get("persona") or ""
+    persona = (
+        (employee_row.get("active_prompt_version") or {}).get("system_prompt")
+        or employee_row.get("persona")
+        or ""
+    )
     requested_tools = employee_row.get("tools") or [
         "hivemind_recall",
         "hivemind_save_memory",

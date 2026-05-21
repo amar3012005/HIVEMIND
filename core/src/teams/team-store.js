@@ -239,7 +239,8 @@ export class TeamStore {
         slug,
         description,
         createdBy,
-        members: { create: [{ id: randomUUID(), userId: createdBy, role: 'owner', addedById: createdBy }] },
+        // ProjectMember has composite PK (projectId, userId) — no `id` column
+        members: { create: [{ userId: createdBy, role: 'owner', addedById: createdBy }] },
       },
       include: { members: true },
     });

@@ -73,10 +73,16 @@ async def _get_or_build_agent(emp: Dict, conv_key: str) -> ReActAgent:
     if conv_key in _CHAT_AGENTS:
         return _CHAT_AGENTS[conv_key]
     boot = {b["id"]: b for b in await fetch_bootstrap()}
-    api_key = boot.get(emp["id"], {}).get("api_key")
+    boot_emp = boot.get(emp["id"], {})
+    api_key = boot_emp.get("api_key")
     if not api_key:
         raise HTTPException(412, "employee has no bootstrap api_key")
-    agent = build_react_agent(emp, api_key)
+    merged_emp = {
+        **emp,
+        "hyper": boot_emp.get("hyper"),
+        "active_prompt_version": boot_emp.get("active_prompt_version"),
+    }
+    agent = build_react_agent(merged_emp, api_key)
     _CHAT_AGENTS[conv_key] = agent
     return agent
 

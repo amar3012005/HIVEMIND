@@ -88,7 +88,11 @@ def build_assistant(employee_row: dict, hivemind_api_key: str) -> Assistant:
     """
     name = employee_row["slug"]  # used as agent identifier — slug is unique
     desc = f"{employee_row['name']} — autonomous HIVEMIND agent"
-    persona = employee_row["persona"]
+    active_prompt = (
+        (employee_row.get("active_prompt_version") or {}).get("system_prompt")
+        or employee_row.get("persona")
+        or ""
+    )
     enabled_tools = employee_row.get("tools") or []
     if not enabled_tools:
         # Sensible default if config is empty
@@ -105,7 +109,7 @@ def build_assistant(employee_row: dict, hivemind_api_key: str) -> Assistant:
         name=name,
         desc=desc,
         tools=tools,
-        system_prompt=persona,
+        system_prompt=active_prompt,
         llm=llm,
         max_steps=10,
         verbose=False,

@@ -75,6 +75,13 @@ class SlackGateway:
         self.api_keys: Dict[str, str] = {}                      # employee_id → raw key
         self.workspace_bot_tokens: Dict[str, str] = {}          # team_id → xoxb
 
+    @staticmethod
+    def _assistant_signature(employee: Dict[str, Any]) -> str:
+        tools = ",".join(employee.get("tools") or [])
+        version = ((employee.get("active_prompt_version") or {}).get("version_label")) or "v0"
+        prompt = ((employee.get("active_prompt_version") or {}).get("system_prompt")) or employee.get("persona") or ""
+        return f"{employee.get('model')}|{employee.get('llm_provider')}|{tools}|{version}|{prompt}"
+
     async def start(self):
         """Initial boot — fetch employees, set up workspaces + assistants."""
         await self.reconcile()
@@ -94,6 +101,11 @@ class SlackGateway:
             seen_emp_ids.add(emp["id"])
             wsid = emp.get("slack_team_id")
             boot = snapshot.get(emp["id"], {})
+            merged_emp = {
+                **emp,
+                "hyper": boot.get("hyper"),
+                "active_prompt_version": boot.get("active_prompt_version"),
+            }
 
             if wsid:
                 seen_ws_ids.add(wsid)
@@ -110,16 +122,28 @@ class SlackGateway:
                     await report_sidecar_status(emp["id"], "error", "missing API key")
                     continue
                 try:
-                    self.assistants[emp["id"]] = build_assistant(emp, api_key)
+                    self.assistants[emp["id"]] = build_assistant(merged_emp, api_key)
                     self.api_keys[emp["id"]] = api_key
-                    self.employees[emp["id"]] = emp
+                    self.employees[emp["id"]] = merged_emp
                     log.info("loaded employee %s", emp["slug"])
                     await report_sidecar_status(emp["id"], "running")
                 except Exception as e:
                     log.warning("failed building assistant for %s: %s", emp["slug"], e)
                     await report_sidecar_status(emp["id"], "error", str(e)[:200])
             else:
-                self.employees[emp["id"]] = emp  # refresh row
+                current = self.employees.get(emp["id"], {})
+                signature_changed = self._assistant_signature(current) != self._assistant_signature(merged_emp)
+                self.employees[emp["id"]] = merged_emp
+                if signature_changed:
+                    api_key = boot.get("api_key") or self.api_keys.get(emp["id"]) or self._resolve_api_key_env(emp["id"])
+                    if api_key:
+                        try:
+                            self.assistants[emp["id"]] = build_assistant(merged_emp, api_key)
+                            self.api_keys[emp["id"]] = api_key
+                            log.info("rebuilt employee %s after config/prompt change", emp["slug"])
+                        except Exception as e:
+                            log.warning("failed rebuilding assistant for %s: %s", emp["slug"], e)
+                            await report_sidecar_status(emp["id"], "error", str(e)[:200])
 
         # Remove employees no longer in DB
         for stale in set(self.employees.keys()) - seen_emp_ids:

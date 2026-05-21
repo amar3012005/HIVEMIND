@@ -3492,6 +3492,14 @@ if ! command -v npx >/dev/null 2>&1; then
   exit 1
 fi
 echo "→ Downloading @hivemind/cli from \$HIVEMIND_BASE …"
+# When this shim is invoked via 'curl ... | bash', bash's stdin is the curl
+# pipe — so prompts() in the CLI gets EOF immediately and the picker
+# silently quits. Re-attach stdin to the user's TTY (and stdout/stderr too,
+# in case the parent redirected them) so interactive prompts work the same
+# way they would in 'npx -y ...' run directly.
+if [ -e /dev/tty ]; then
+  exec </dev/tty >/dev/tty 2>/dev/tty
+fi
 exec env HIVEMIND_API_KEY="\$HIVEMIND_API_KEY" HIVEMIND_ENDPOINT="\$HIVEMIND_BASE/api/mcp" \\
   npx -y "\$HIVEMIND_BASE/install/cli.tgz" setup "\$@"
 `;

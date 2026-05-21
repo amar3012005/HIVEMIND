@@ -5985,19 +5985,128 @@ exit \$RC
         }
       }
 
-      // DELETE /api/team/invites/:id
-      if (pathname.startsWith('/api/team/invites/') && !pathname.endsWith('/accept') && req.method === 'DELETE') {
+      // DELETE /api/team/invites/:id — soft-revoke (sets revokedAt; row kept
+      // so the status list can show it as revoked + for audit).
+      if (pathname.startsWith('/api/team/invites/') && !pathname.endsWith('/accept') && !pathname.endsWith('/resend') && req.method === 'DELETE') {
         if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
         const inviteId = pathname.split('/api/team/invites/')[1];
         try {
           const membership = await prisma.userOrganization.findFirst({ where: { userId, orgId } });
-          if (!membership || membership.role !== 'admin') return jsonResponse(res, { error: 'Admin access required' }, 403);
+          const memberRoles = new Set([
+            ...(membership?.role ? [membership.role] : []),
+            ...(Array.isArray(membership?.roles) ? membership.roles : []),
+          ]);
+          const isAdmin = membership?.isActive !== false && (
+            memberRoles.has('admin') || memberRoles.has('owner') ||
+            memberRoles.has('org_admin') || memberRoles.has('org_owner')
+          );
+          if (!isAdmin && !principal?.master) return jsonResponse(res, { error: 'Admin access required' }, 403);
           const invite = await prisma.orgInvite.findFirst({ where: { id: inviteId, orgId } });
           if (!invite) return jsonResponse(res, { error: 'Invite not found' }, 404);
-          await prisma.orgInvite.delete({ where: { id: inviteId } });
-          return jsonResponse(res, { success: true });
+          if (invite.usedAt) return jsonResponse(res, { error: 'Invite already accepted — cannot revoke' }, 409);
+          const updated = await prisma.orgInvite.update({
+            where: { id: inviteId },
+            data: { revokedAt: new Date(), revokedBy: userId },
+          });
+          await writeAuditLog(prisma, {
+            userId, orgId,
+            eventType: 'invite_revoked', action: 'revoke',
+            resourceType: 'invite', resourceId: inviteId,
+            metadata: { email: invite.email, projectIds: invite.projectIds, teamIds: invite.teamIds },
+            ipAddress: req.headers['x-forwarded-for'] || req.socket?.remoteAddress || null,
+            userAgent: req.headers['user-agent'] || null,
+          });
+          return jsonResponse(res, { success: true, invite: updated });
         } catch (err) {
           console.error('[team] revoke invite failed:', err.message);
+          return jsonResponse(res, { error: err.message }, 500);
+        }
+      }
+
+      // POST /api/team/invites/:id/resend — resend email + extend expiry.
+      // Used by the share modal "Resend" action on pending invites.
+      if (pathname.startsWith('/api/team/invites/') && pathname.endsWith('/resend') && req.method === 'POST') {
+        if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+        const inviteId = pathname.split('/api/team/invites/')[1].replace('/resend', '');
+        try {
+          const membership = await prisma.userOrganization.findFirst({ where: { userId, orgId } });
+          const memberRoles = new Set([
+            ...(membership?.role ? [membership.role] : []),
+            ...(Array.isArray(membership?.roles) ? membership.roles : []),
+          ]);
+          const isAdmin = membership?.isActive !== false && (
+            memberRoles.has('admin') || memberRoles.has('owner') ||
+            memberRoles.has('org_admin') || memberRoles.has('org_owner')
+          );
+          if (!isAdmin && !principal?.master) return jsonResponse(res, { error: 'Admin access required' }, 403);
+          const invite = await prisma.orgInvite.findFirst({ where: { id: inviteId, orgId } });
+          if (!invite) return jsonResponse(res, { error: 'Invite not found' }, 404);
+          if (invite.usedAt) return jsonResponse(res, { error: 'Invite already accepted' }, 409);
+          if (invite.revokedAt) return jsonResponse(res, { error: 'Invite was revoked' }, 409);
+          if (!invite.email) return jsonResponse(res, { error: 'Link-only invite — no email to resend. Share the link instead.' }, 400);
+
+          // Bump expiry by 7d from now (or preserve if longer remains).
+          const newExpiresAt = new Date(Math.max(
+            invite.expiresAt?.getTime?.() || 0,
+            Date.now() + 7 * 24 * 3600 * 1000,
+          ));
+
+          const FRONTEND = process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu';
+          const org = await prisma.organization.findUnique({ where: { id: orgId }, select: { slug: true, name: true } });
+          const inviteUrl = `${FRONTEND}/hivemind/join/${org?.slug || orgId}/${invite.token}`;
+
+          let dispatch = { attempted: true };
+          try {
+            const [{ sendEmail, buildInviteEmail }, projectRows, teamRows, inviter] = await Promise.all([
+              import('./services/email-sender.js'),
+              invite.projectIds?.length
+                ? prisma.project.findMany({ where: { id: { in: invite.projectIds }, orgId }, select: { name: true } })
+                : Promise.resolve([]),
+              invite.teamIds?.length
+                ? prisma.team.findMany({ where: { id: { in: invite.teamIds }, orgId }, select: { name: true } }).catch(() => [])
+                : Promise.resolve([]),
+              prisma.user.findUnique({ where: { id: userId }, select: { email: true } }).catch(() => null),
+            ]);
+            const tpl = buildInviteEmail({
+              orgName: org?.name || 'your team',
+              inviteUrl,
+              inviterEmail: inviter?.email || null,
+              projectNames: projectRows.map(p => p.name),
+              teamNames: teamRows.map(t => t.name),
+              role: invite.role,
+              expiresAt: newExpiresAt,
+              resend: true,
+            });
+            const result = await sendEmail({ to: invite.email, subject: tpl.subject, html: tpl.html, text: tpl.text });
+            dispatch = { attempted: true, ...result };
+          } catch (mailErr) {
+            dispatch = { attempted: true, ok: false, error: mailErr.message };
+          }
+
+          const updated = await prisma.orgInvite.update({
+            where: { id: inviteId },
+            data: {
+              expiresAt: newExpiresAt,
+              lastSentAt: new Date(),
+              sendCount: { increment: 1 },
+            },
+          });
+          await writeAuditLog(prisma, {
+            userId, orgId,
+            eventType: 'invite_resent', action: 'resend',
+            resourceType: 'invite', resourceId: inviteId,
+            metadata: { email: invite.email, dispatch },
+            ipAddress: req.headers['x-forwarded-for'] || req.socket?.remoteAddress || null,
+            userAgent: req.headers['user-agent'] || null,
+          });
+          return jsonResponse(res, {
+            success: true,
+            invite: updated,
+            url: inviteUrl,
+            email_dispatch: dispatch,
+          });
+        } catch (err) {
+          console.error('[team] resend invite failed:', err.message);
           return jsonResponse(res, { error: err.message }, 500);
         }
       }
@@ -10806,15 +10915,92 @@ exit \$RC
             }
           }
           if (req.method === 'GET') {
-            // GET /api/team/invites — list pending invites
+            // GET /api/team/invites?status=all|pending|accepted|expired|revoked&project_id=<uuid>
+            // Default returns ALL non-deleted invites so the share-modal status
+            // list can render pending + accepted + expired + revoked groups.
             try {
               const membership = await prisma.userOrganization.findFirst({ where: { userId, orgId } });
-              if (!membership || membership.role !== 'admin') return jsonResponse(res, { error: 'Admin access required' }, 403);
-              const invites = await prisma.orgInvite.findMany({
-                where: { orgId, usedAt: null, expiresAt: { gt: new Date() } },
-                orderBy: { createdAt: 'desc' }
+              const memberRoles = new Set([
+                ...(membership?.role ? [membership.role] : []),
+                ...(Array.isArray(membership?.roles) ? membership.roles : []),
+              ]);
+              const isAdmin = membership?.isActive !== false && (
+                memberRoles.has('admin') || memberRoles.has('owner') ||
+                memberRoles.has('org_admin') || memberRoles.has('org_owner')
+              );
+              if (!isAdmin && !principal?.master) return jsonResponse(res, { error: 'Admin access required' }, 403);
+
+              const status = (url.searchParams.get('status') || 'all').toLowerCase();
+              const projectFilter = url.searchParams.get('project_id');
+              const now = new Date();
+              const where = { orgId };
+              if (status === 'pending') {
+                where.usedAt = null;
+                where.revokedAt = null;
+                where.expiresAt = { gt: now };
+              } else if (status === 'accepted') {
+                where.usedAt = { not: null };
+              } else if (status === 'expired') {
+                where.usedAt = null;
+                where.revokedAt = null;
+                where.expiresAt = { lte: now };
+              } else if (status === 'revoked') {
+                where.revokedAt = { not: null };
+              }
+              if (projectFilter) {
+                where.projectIds = { has: projectFilter };
+              }
+
+              const rows = await prisma.orgInvite.findMany({
+                where,
+                orderBy: { createdAt: 'desc' },
+                take: 200,
               });
-              return jsonResponse(res, { invites });
+
+              // Project + team name hydration for display.
+              const projectIdSet = new Set();
+              const teamIdSet = new Set();
+              const createdBySet = new Set();
+              for (const inv of rows) {
+                (inv.projectIds || []).forEach(id => projectIdSet.add(id));
+                (inv.teamIds || []).forEach(id => teamIdSet.add(id));
+                if (inv.createdBy) createdBySet.add(inv.createdBy);
+              }
+              const [projRows, teamRows, userRows] = await Promise.all([
+                projectIdSet.size
+                  ? prisma.project.findMany({ where: { id: { in: [...projectIdSet] } }, select: { id: true, name: true, slug: true } })
+                  : Promise.resolve([]),
+                teamIdSet.size
+                  ? prisma.team.findMany({ where: { id: { in: [...teamIdSet] } }, select: { id: true, name: true } }).catch(() => [])
+                  : Promise.resolve([]),
+                createdBySet.size
+                  ? prisma.user.findMany({ where: { id: { in: [...createdBySet] } }, select: { id: true, email: true, displayName: true } }).catch(() => [])
+                  : Promise.resolve([]),
+              ]);
+              const projById = Object.fromEntries(projRows.map(p => [p.id, p]));
+              const teamById = Object.fromEntries(teamRows.map(t => [t.id, t]));
+              const userById = Object.fromEntries(userRows.map(u => [u.id, u]));
+
+              const FRONTEND = process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu';
+              const org = await prisma.organization.findUnique({ where: { id: orgId }, select: { slug: true } });
+              const slug = org?.slug || orgId;
+
+              const invites = rows.map(inv => {
+                let derivedStatus = 'pending';
+                if (inv.usedAt) derivedStatus = 'accepted';
+                else if (inv.revokedAt) derivedStatus = 'revoked';
+                else if (inv.expiresAt && inv.expiresAt < now) derivedStatus = 'expired';
+                return {
+                  ...inv,
+                  status: derivedStatus,
+                  url: `/hivemind/join/${slug}/${inv.token}`,
+                  full_url: `${FRONTEND}/hivemind/join/${slug}/${inv.token}`,
+                  projects: (inv.projectIds || []).map(id => projById[id]).filter(Boolean),
+                  teams: (inv.teamIds || []).map(id => teamById[id]).filter(Boolean),
+                  inviter: inv.createdBy ? userById[inv.createdBy] || null : null,
+                };
+              });
+              return jsonResponse(res, { invites, count: invites.length });
             } catch (err) {
               console.error('[team] list invites failed:', err.message);
               return jsonResponse(res, { error: err.message }, 500);

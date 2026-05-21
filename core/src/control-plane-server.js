@@ -1847,21 +1847,89 @@ const server = http.createServer(async (req, res) => {
     const membership = await requireOrgAdmin(req, res, current.session.userId, orgId);
     if (!membership) return;
 
-    const invites = await prisma.orgInvite.findMany({
-      where: { orgId, usedAt: null },
+    // Query: ?status=all|pending|accepted|expired|revoked  (default all)
+    //        &project_id=<uuid>  (filter to invites that grant this project)
+    const status = (url.searchParams.get('status') || 'all').toLowerCase();
+    const projectFilter = url.searchParams.get('project_id');
+    const now = new Date();
+    const where = { orgId };
+    if (status === 'pending') {
+      where.usedAt = null;
+      where.revokedAt = null;
+      where.expiresAt = { gt: now };
+    } else if (status === 'accepted') {
+      where.usedAt = { not: null };
+    } else if (status === 'expired') {
+      where.usedAt = null;
+      where.revokedAt = null;
+      where.expiresAt = { lte: now };
+    } else if (status === 'revoked') {
+      where.revokedAt = { not: null };
+    }
+    if (projectFilter) where.projectIds = { has: projectFilter };
+
+    const rows = await prisma.orgInvite.findMany({
+      where,
       orderBy: { createdAt: 'desc' },
+      take: 200,
     });
 
+    const projectIdSet = new Set();
+    const teamIdSet    = new Set();
+    const userIdSet    = new Set();
+    for (const inv of rows) {
+      (inv.projectIds || []).forEach(id => projectIdSet.add(id));
+      (inv.teamIds    || []).forEach(id => teamIdSet.add(id));
+      if (inv.createdBy) userIdSet.add(inv.createdBy);
+      if (inv.usedBy)    userIdSet.add(inv.usedBy);
+    }
+    const [projRows, teamRows, userRows] = await Promise.all([
+      projectIdSet.size
+        ? prisma.project.findMany({ where: { id: { in: [...projectIdSet] } }, select: { id: true, name: true, slug: true } })
+        : Promise.resolve([]),
+      teamIdSet.size
+        ? prisma.team.findMany({ where: { id: { in: [...teamIdSet] } }, select: { id: true, name: true } }).catch(() => [])
+        : Promise.resolve([]),
+      userIdSet.size
+        ? prisma.user.findMany({ where: { id: { in: [...userIdSet] } }, select: { id: true, email: true, displayName: true } }).catch(() => [])
+        : Promise.resolve([]),
+    ]);
+    const projById = Object.fromEntries(projRows.map(p => [p.id, p]));
+    const teamById = Object.fromEntries(teamRows.map(t => [t.id, t]));
+    const userById = Object.fromEntries(userRows.map(u => [u.id, u]));
+
+    const FRONTEND_BASE = (process.env.HIVEMIND_FRONTEND_URL || CONFIG.publicBaseUrl).replace(/\/$/, '');
+
     return jsonResponse(res, {
-      invites: invites.map((invite) => ({
-        id: invite.id,
-        email: invite.email,
-        role: invite.role,
-        token: invite.token,
-        expires_at: invite.expiresAt,
-        created_at: invite.createdAt,
-        join_url: `${CONFIG.publicBaseUrl.replace(/\/$/, '')}/hivemind/join/${membership.org.slug}/${invite.token}`,
-      })),
+      invites: rows.map((invite) => {
+        let derivedStatus = 'pending';
+        if (invite.usedAt) derivedStatus = 'accepted';
+        else if (invite.revokedAt) derivedStatus = 'revoked';
+        else if (invite.expiresAt && invite.expiresAt < now) derivedStatus = 'expired';
+
+        const fullUrl = `${FRONTEND_BASE}/hivemind/join/${membership.org.slug}/${invite.token}`;
+        return {
+          id: invite.id,
+          email: invite.email,
+          role: invite.role,
+          roles: invite.roles,
+          token: invite.token,
+          status: derivedStatus,
+          expires_at: invite.expiresAt,
+          created_at: invite.createdAt,
+          used_at: invite.usedAt,
+          revoked_at: invite.revokedAt,
+          last_sent_at: invite.lastSentAt,
+          send_count: invite.sendCount,
+          team_ids: invite.teamIds,
+          project_ids: invite.projectIds,
+          projects: (invite.projectIds || []).map(id => projById[id]).filter(Boolean),
+          teams:    (invite.teamIds    || []).map(id => teamById[id]).filter(Boolean),
+          inviter:  invite.createdBy ? userById[invite.createdBy] || null : null,
+          accepted_by: invite.usedBy ? userById[invite.usedBy] || null : null,
+          join_url: fullUrl,
+        };
+      }),
     });
   }
 
@@ -1874,15 +1942,92 @@ const server = http.createServer(async (req, res) => {
     const membership = await requireOrgAdmin(req, res, current.session.userId, orgId);
     if (!membership) return;
 
-    const deleted = await prisma.orgInvite.deleteMany({
-      where: { id: inviteId, orgId, usedAt: null },
+    const invite = await prisma.orgInvite.findFirst({ where: { id: inviteId, orgId } });
+    if (!invite)           return jsonResponse(res, { error: 'Invite not found' }, 404);
+    if (invite.usedAt)     return jsonResponse(res, { error: 'Invite already accepted — cannot revoke' }, 409);
+
+    // Soft-revoke so the row stays for audit + status list.
+    const updated = await prisma.orgInvite.update({
+      where: { id: inviteId },
+      data: { revokedAt: new Date(), revokedBy: current.session.userId },
     });
 
-    if (!deleted.count) {
-      return jsonResponse(res, { error: 'Invite not found' }, 404);
+    return jsonResponse(res, { success: true, invite_id: inviteId, invite: updated });
+  }
+
+  // POST /v1/orgs/:orgId/invites/:id/resend — re-send email + bump expiry.
+  const inviteResendMatch = pathname.match(/^\/v1\/orgs\/([^/]+)\/invites\/([^/]+)\/resend$/);
+  if (inviteResendMatch && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const orgId = inviteResendMatch[1];
+    const inviteId = inviteResendMatch[2];
+    const membership = await requireOrgAdmin(req, res, current.session.userId, orgId);
+    if (!membership) return;
+
+    const invite = await prisma.orgInvite.findFirst({ where: { id: inviteId, orgId } });
+    if (!invite)        return jsonResponse(res, { error: 'Invite not found' }, 404);
+    if (invite.usedAt)  return jsonResponse(res, { error: 'Invite already accepted' }, 409);
+    if (invite.revokedAt) return jsonResponse(res, { error: 'Invite was revoked' }, 409);
+    if (!invite.email)  return jsonResponse(res, { error: 'Link-only invite — no email to resend. Share the link instead.' }, 400);
+
+    const newExpiresAt = new Date(Math.max(
+      invite.expiresAt?.getTime?.() || 0,
+      Date.now() + 7 * 24 * 3600 * 1000,
+    ));
+
+    const FRONTEND_BASE = (process.env.HIVEMIND_FRONTEND_URL || CONFIG.publicBaseUrl).replace(/\/$/, '');
+    const joinUrl = `${FRONTEND_BASE}/hivemind/join/${membership.org.slug}/${invite.token}`;
+
+    let dispatch = { attempted: true };
+    try {
+      const [{ sendEmail, buildInviteEmail }, projectRows, teamRows, inviter] = await Promise.all([
+        import('./services/email-sender.js'),
+        invite.projectIds?.length
+          ? prisma.project.findMany({ where: { id: { in: invite.projectIds }, orgId }, select: { name: true } }).catch(() => [])
+          : Promise.resolve([]),
+        invite.teamIds?.length
+          ? prisma.team.findMany({ where: { id: { in: invite.teamIds }, orgId }, select: { name: true } }).catch(() => [])
+          : Promise.resolve([]),
+        prisma.user.findUnique({ where: { id: current.session.userId }, select: { email: true } }).catch(() => null),
+      ]);
+      const tpl = buildInviteEmail({
+        orgName: membership.org.name || 'your team',
+        inviteUrl: joinUrl,
+        inviterEmail: inviter?.email || null,
+        projectNames: projectRows.map(p => p.name),
+        teamNames: teamRows.map(t => t.name),
+        role: invite.role,
+        expiresAt: newExpiresAt,
+        resend: true,
+      });
+      const result = await sendEmail({ to: invite.email, subject: tpl.subject, html: tpl.html, text: tpl.text });
+      dispatch = { attempted: true, ...result };
+    } catch (mailErr) {
+      dispatch = { attempted: true, ok: false, error: mailErr.message };
     }
 
-    return jsonResponse(res, { success: true, invite_id: inviteId });
+    const updated = await prisma.orgInvite.update({
+      where: { id: inviteId },
+      data: {
+        expiresAt: newExpiresAt,
+        lastSentAt: new Date(),
+        sendCount: { increment: 1 },
+      },
+    });
+
+    return jsonResponse(res, {
+      success: true,
+      invite: {
+        id: updated.id,
+        email: updated.email,
+        expires_at: updated.expiresAt,
+        last_sent_at: updated.lastSentAt,
+        send_count: updated.sendCount,
+        join_url: joinUrl,
+      },
+      email_dispatch: dispatch,
+    });
   }
 
   const joinMatch = pathname.match(/^\/v1\/join\/([^/]+)$/);

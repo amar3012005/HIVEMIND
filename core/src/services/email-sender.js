@@ -94,14 +94,16 @@ export async function sendEmail({ to, subject, html, text, from }) {
  * @param {string} opts.role           'member' | 'admin'
  * @param {Date}   opts.expiresAt
  */
-export function buildInviteEmail({ orgName, inviteUrl, inviterEmail, projectNames = [], teamNames = [], role = 'member', expiresAt }) {
+export function buildInviteEmail({ orgName, inviteUrl, inviterEmail, projectNames = [], teamNames = [], role = 'member', expiresAt, resend = false }) {
   const expires = expiresAt ? new Date(expiresAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'soon';
   const scopeLine = [
     projectNames.length ? `Projects: <strong>${projectNames.join(', ')}</strong>` : null,
     teamNames.length ? `Teams: <strong>${teamNames.join(', ')}</strong>` : null,
   ].filter(Boolean).join('<br/>');
 
-  const subject = `You're invited to ${orgName} on HIVEMIND`;
+  const subject = resend
+    ? `Reminder: your ${orgName} HIVEMIND invitation`
+    : `You're invited to ${orgName} on HIVEMIND`;
   const text = `${inviterEmail || 'Your team'} invited you to join ${orgName} on HIVEMIND as ${role}.\n\nAccept here: ${inviteUrl}\n\nLink expires ${expires}.`;
   const html = `<!DOCTYPE html>
 <html><head><meta charset="utf-8"/></head>

@@ -115,6 +115,10 @@ model OrgInvite {
   expiresAt DateTime     @map("expires_at") @db.Timestamptz(6)
   usedAt    DateTime?    @map("used_at") @db.Timestamptz(6)
   usedBy    String?      @map("used_by") @db.Uuid
+  revokedAt DateTime?    @map("revoked_at") @db.Timestamptz(6)
+  revokedBy String?      @map("revoked_by") @db.Uuid
+  lastSentAt DateTime?   @map("last_sent_at") @db.Timestamptz(6)
+  sendCount  Int         @default(1) @map("send_count")
   createdBy String       @map("created_by") @db.Uuid
   createdAt DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
   org       Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)

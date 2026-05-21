@@ -84,6 +84,18 @@ const { ZitadelOidcClient } = await import('./control-plane/zitadel.js');
 const { WebJobStore } = await import('./web/web-job-store.js');
 const { BrowserRuntime, getTelemetry } = await import('./web/browser-runtime.js');
 const { validateDomain, filterContent, UserRateLimiter, detectAbuse, getRobotsWarning, normalizeWebUrl } = await import('./web/web-policy.js');
+
+// Derive a one-line title for a Tavily research report. Prefer the first
+// non-empty H1/H2 in the markdown; fall back to the original input
+// trimmed to a sane length.
+function deriveResearchTitle(input, markdown) {
+  if (typeof markdown === 'string') {
+    const m = markdown.match(/^\s*#{1,2}\s+(.+?)\s*$/m);
+    if (m?.[1] && m[1].length <= 140) return m[1].replace(/[*_`]/g, '').trim();
+  }
+  const fallback = (input || '').trim().replace(/\s+/g, ' ');
+  return fallback.length > 120 ? fallback.slice(0, 117) + '…' : fallback;
+}
 const webRateLimiter = new UserRateLimiter({ maxPerMinute: 60, maxPerHour: 500 });
 const { getQdrantClient } = await import('./vector/qdrant-client.js');
 const { getQdrantCollections } = await import('./vector/collections.js');
@@ -10283,6 +10295,115 @@ exit \$RC
                 }
               });
               return jsonResponse(res, { job_id: job.id, status: 'queued', type: 'search' }, 202);
+            } catch (error) {
+              return jsonResponse(res, { error: error.message }, 500);
+            }
+          }
+          break;
+
+        // Tavily Research — async comprehensive report with citations.
+        // Submits a research task, polls Tavily until status='completed',
+        // stores final markdown report + sources[] in job.results so the
+        // existing job list/polling FE keeps working unchanged.
+        case '/api/web/research/jobs':
+          if (req.method === 'POST') {
+            try {
+              const rlCheck = webRateLimiter.check(userId);
+              if (!rlCheck.allowed) {
+                return jsonResponse(res, { error: 'Rate limit exceeded', code: 'rate_limited', retry_after_ms: rlCheck.retryAfterMs }, 429);
+              }
+              if (planEnforcer && orgId) {
+                const webIntelCheck = await planEnforcer.checkLimit(orgId, 'webIntel', 1);
+                if (!webIntelCheck.allowed) {
+                  return jsonResponse(res, { error: 'Plan limit exceeded', message: webIntelCheck.reason, limit: webIntelCheck.limit, current: webIntelCheck.current, plan: webIntelCheck.plan }, 403);
+                }
+              }
+              // Reuse the search quota (research counts as a heavier search).
+              const usage = await webJobStore.getUsage(userId);
+              if (usage.web_search_requests >= WEB_SEARCH_DAILY_LIMIT) {
+                return jsonResponse(res, { error: 'Daily research quota exceeded', code: 'quota_exceeded', limit: WEB_SEARCH_DAILY_LIMIT, used: usage.web_search_requests }, 429);
+              }
+
+              const { input, model = 'auto', citation_format = 'numbered' } = body;
+              if (!input || typeof input !== 'string') {
+                return jsonResponse(res, { error: 'input is required' }, 400);
+              }
+
+              webRateLimiter.record(userId);
+              const job = await webJobStore.create({
+                type: 'research',
+                params: { input, model, citation_format },
+                userId,
+                orgId,
+              });
+
+              setImmediate(async () => {
+                const POLL_INTERVAL_MS = 4000;
+                const POLL_TIMEOUT_MS = 5 * 60 * 1000; // 5min hard cap
+                const started = Date.now();
+                try {
+                  await webJobStore.update(job.id, { status: 'running' });
+
+                  const { getTavilyClient } = await import('./web/tavily-client.js');
+                  const tv = getTavilyClient();
+                  if (!tv.isAvailable()) {
+                    throw new Error('Tavily API key not configured');
+                  }
+
+                  // 1) submit
+                  const submission = await tv.research({ input, model, citationFormat: citation_format });
+                  if (!submission?.requestId) {
+                    throw new Error('Research submission returned no requestId');
+                  }
+
+                  // 2) poll until complete or timeout
+                  let final = null;
+                  while (Date.now() - started < POLL_TIMEOUT_MS) {
+                    await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+                    const polled = await tv.getResearch(submission.requestId);
+                    if (polled?.status === 'completed') { final = polled; break; }
+                    if (polled?.status === 'failed' || polled?.status === 'error') {
+                      throw new Error(`Tavily research failed: ${polled.status}`);
+                    }
+                  }
+                  if (!final) {
+                    throw new Error('Research timeout — Tavily did not complete within 5 minutes');
+                  }
+
+                  // 3) normalize result. The chat UI expects `results` array;
+                  //    we store the full report as a single synthetic result
+                  //    so it round-trips through saveWebResultToMemory cleanly.
+                  const reportText = typeof final.content === 'string'
+                    ? final.content
+                    : JSON.stringify(final.content, null, 2);
+                  const sources = Array.isArray(final.sources) ? final.sources : [];
+                  const reportTitle = deriveResearchTitle(input, reportText);
+
+                  await webJobStore.update(job.id, {
+                    status: 'succeeded',
+                    duration_ms: Date.now() - started,
+                    runtime_used: 'tavily-research',
+                    fallback_applied: false,
+                    results: [{
+                      type: 'research_report',
+                      title: reportTitle,
+                      content: reportText,
+                      sources,
+                      model: submission.model,
+                      citation_format,
+                    }],
+                  });
+
+                  if (planEnforcer && orgId) {
+                    planEnforcer.recordUsage(orgId, 'webIntel', 1);
+                  }
+                } catch (err) {
+                  await webJobStore.update(job.id, { status: 'failed', error: err.message });
+                  console.error(`[web-research] job ${job.id} failed:`, err.message);
+                }
+              });
+
+              return jsonResponse(res, { job_id: job.id, status: 'queued', type: 'research' }, 202);
             } catch (error) {
               return jsonResponse(res, { error: error.message }, 500);
             }

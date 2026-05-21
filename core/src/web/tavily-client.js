@@ -373,6 +373,95 @@ export class TavilyClientWrapper {
   }
 
   /**
+   * Submit a research task using Tavily Research API.
+   * Async — returns request_id + status. Poll with getResearch() until
+   * status === 'completed'. Research aggregates multiple searches +
+   * source analysis into a single comprehensive report with citations.
+   *
+   * @param {Object} params
+   * @param {string} params.input - Research question / task.
+   * @param {'mini'|'pro'|'auto'} [params.model='auto']
+   * @param {'numbered'|'mla'|'apa'|'chicago'} [params.citationFormat='numbered']
+   * @param {object} [params.outputSchema] - Optional JSON Schema for structured output.
+   * @returns {Promise<{ requestId, createdAt, status, input, model, responseTime }>}
+   */
+  async research(params) {
+    const startTime = Date.now();
+
+    if (!this.client) {
+      throw new Error('Tavily API key not configured');
+    }
+
+    const {
+      input,
+      model = 'auto',
+      citationFormat = 'numbered',
+      outputSchema = null,
+    } = params;
+
+    if (!input || typeof input !== 'string') {
+      throw new Error('Research input is required');
+    }
+
+    try {
+      const response = await this.client.research(input, {
+        model,
+        citationFormat,
+        ...(outputSchema ? { outputSchema } : {}),
+        stream: false,
+      });
+
+      const responseTime = Date.now() - startTime;
+      // Submission only counts as one request; credit accounting happens
+      // when the final report is fetched via getResearch.
+      telemetry.recordRequest('search', true, 0, responseTime);
+
+      return {
+        requestId: response.requestId,
+        createdAt: response.createdAt,
+        status: response.status,
+        input: response.input,
+        model: response.model,
+        responseTime: response.responseTime,
+      };
+    } catch (error) {
+      const responseTime = Date.now() - startTime;
+      telemetry.recordRequest('search', false, 0, responseTime);
+      throw this._wrapError(error, 'research');
+    }
+  }
+
+  /**
+   * Poll a research task. Resolves the final report with sources when
+   * status === 'completed'. Returns the intermediate status object
+   * otherwise so the caller can keep polling.
+   *
+   * @param {string} requestId
+   * @returns {Promise<{ requestId, createdAt, status, content?, sources?, responseTime }>}
+   */
+  async getResearch(requestId) {
+    if (!this.client) {
+      throw new Error('Tavily API key not configured');
+    }
+    if (!requestId) {
+      throw new Error('requestId is required');
+    }
+    try {
+      const response = await this.client.getResearch(requestId);
+      return {
+        requestId: response.requestId,
+        createdAt: response.createdAt,
+        status: response.status,
+        content: response.content ?? null,
+        sources: Array.isArray(response.sources) ? response.sources : [],
+        responseTime: response.responseTime,
+      };
+    } catch (error) {
+      throw this._wrapError(error, 'research');
+    }
+  }
+
+  /**
    * Map/discover URLs from a domain using Tavily Map API
    *
    * @param {Object} params

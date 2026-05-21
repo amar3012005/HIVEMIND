@@ -252,6 +252,18 @@ export class PrismaGraphStore {
     if (patch.supersedesId !== undefined) data.supersedesId = patch.supersedesId;
     if (patch.memoryType !== undefined) data.memoryType = patch.memoryType;
 
+    // Memory.metadata is a JSONB column on the row itself (distinct from
+    // SourceMetadata table). Patch is treated as a SHALLOW MERGE: caller
+    // can override individual keys (e.g. extracted_entities) without
+    // wiping the rest of the metadata blob set at create time.
+    if (patch.metadata !== undefined && patch.metadata !== null) {
+      const existing = await this.client.memory.findUnique({
+        where: { id },
+        select: { metadata: true },
+      });
+      data.metadata = { ...(existing?.metadata || {}), ...patch.metadata };
+    }
+
     await this.client.memory.update({
       where: { id },
       data,

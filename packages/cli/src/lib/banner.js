@@ -1,12 +1,10 @@
-// Compact ASCII banner used at the top of interactive flows.
-// Kept intentionally small so it doesn't dominate the terminal.
-import kleur from 'kleur';
+import { c } from './ui.js';
 
 export function printBanner() {
   const line = (s) => process.stdout.write(s + '\n');
   line('');
-  line(kleur.cyan('  ╭─ ') + kleur.bold().white('HIVEMIND') + kleur.cyan(' ─╮'));
-  line(kleur.cyan('  │ ') + kleur.dim('persistent memory · ') + kleur.dim('mcp ready') + kleur.cyan('  │'));
-  line(kleur.cyan('  ╰─────────────────────────╯'));
+  line(c.cyan('  ╭─ ') + c.bold(c.white('HIVEMIND')) + c.cyan(' ─╮'));
+  line(c.cyan('  │ ') + c.dim('persistent memory · ') + c.dim('mcp ready') + c.cyan('  │'));
+  line(c.cyan('  ╰─────────────────────────╯'));
   line('');
 }

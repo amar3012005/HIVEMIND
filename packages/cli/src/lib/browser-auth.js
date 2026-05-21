@@ -20,7 +20,7 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
-import kleur from 'kleur';
+import { c } from './ui.js';
 
 const SUCCESS_HTML = `<!doctype html>
 <html><head>
@@ -104,11 +104,11 @@ export async function browserLogin({ controlPlane, timeoutMs = 300_000 }) {
       startUrl.searchParams.set('state', state);
 
       console.log('');
-      console.log(kleur.cyan('Opening browser to sign you in…'));
-      console.log(kleur.dim('  if the browser does not open, paste this URL manually:'));
-      console.log('  ' + kleur.underline(startUrl.toString()));
+      console.log(c.cyan('Opening browser to sign you in…'));
+      console.log(c.dim('  if the browser does not open, paste this URL manually:'));
+      console.log('  ' + c.underline(startUrl.toString()));
       console.log('');
-      console.log(kleur.dim('Waiting for sign-in (press Ctrl-C to cancel)…'));
+      console.log(c.dim('Waiting for sign-in (press Ctrl-C to cancel)…'));
 
       openBrowser(startUrl.toString());
     });

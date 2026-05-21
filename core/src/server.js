@@ -3505,10 +3505,8 @@ if [ ! -d "\$PKG_DIR" ]; then
   ls -la "\$HIVEMIND_TMP" >&2
   exit 1
 fi
-echo "→ Installing dependencies …"
-# --omit=dev keeps install fast; kleur + prompts are runtime deps.
-( cd "\$PKG_DIR" && npm install --omit=dev --silent --no-audit --no-fund --no-progress >/dev/null 2>&1 )
-# Re-attach stdin/stdout/stderr to the user's TTY so prompts() works
+# CLI is zero-deps (v0.3.0+) — no npm install needed, ship straight to node.
+# Re-attach stdin/stdout/stderr to the user's TTY so the picker works
 # even when this shim was piped from curl.
 if [ -e /dev/tty ]; then
   exec </dev/tty >/dev/tty 2>/dev/tty

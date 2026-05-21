@@ -6,6 +6,28 @@ import { normalizeRelationshipType } from './relationship-semantics.js';
  * Strip null bytes (\u0000) from strings — Postgres text columns reject them (code 22P05).
  * Common in web-scraped content from DuckDuckGo, PDF extracts, and LLM outputs.
  */
+// Allowed Prisma MemoryType enum values. Keep in sync with schema.prisma.
+const VALID_MEMORY_TYPES = new Set([
+  'fact', 'preference', 'decision', 'lesson', 'goal',
+  'event', 'relationship', 'synthesis', 'summary',
+]);
+// Common english synonyms LLMs emit. Map back to a valid enum value so
+// the save never fails with "Invalid value for argument memoryType".
+const MEMORY_TYPE_ALIAS = {
+  note: 'fact', observation: 'fact', idea: 'fact', knowledge: 'fact',
+  context: 'fact', insight: 'lesson', learning: 'lesson',
+  todo: 'goal', task: 'goal', reminder: 'goal',
+  contact: 'relationship', person: 'relationship', user: 'relationship',
+  meeting: 'event', appointment: 'event', deadline: 'event',
+};
+function coerceMemoryType(value) {
+  if (!value) return 'fact';
+  const v = String(value).toLowerCase().trim();
+  if (VALID_MEMORY_TYPES.has(v)) return v;
+  if (MEMORY_TYPE_ALIAS[v]) return MEMORY_TYPE_ALIAS[v];
+  return 'fact';
+}
+
 function stripNullBytes(val) {
   if (typeof val === 'string') {
     // Strip null bytes AND other invalid UTF-8 sequences (cause 22021 Postgres errors + garbled streaming)
@@ -194,7 +216,13 @@ export class PrismaGraphStore {
         sourceUrl: memory.source_metadata?.source_url || null,
         documentDate: memory.document_date ? new Date(memory.document_date) : null,
         eventDates: (memory.event_dates || []).map(value => new Date(value)),
-        memoryType: memory.memory_type || 'fact',
+        // Coerce memory_type to a valid MemoryType enum. LLM-driven callers
+        // (ReAct agent tool calls, MCP save_memory from external Claude
+        // sessions) often emit english-y synonyms like 'note' / 'observation'
+        // / 'todo' that aren't in the Prisma enum. Map known synonyms,
+        // fall back to 'fact' so the save never fails with
+        // "Invalid value for argument memoryType. Expected MemoryType".
+        memoryType: coerceMemoryType(memory.memory_type),
         title,
         importanceScore: memory.importance_score ?? 0.5,
         strength: memory.strength ?? 1.0,

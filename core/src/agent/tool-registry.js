@@ -47,7 +47,7 @@ export const TOOL_SCHEMAS = [
           title: { type: 'string', description: '3-8 words, searchable.' },
           content: { type: 'string', description: 'The fact, one claim per memory.' },
           tags: { type: 'array', items: { type: 'string' }, minItems: 2 },
-          memory_type: { type: 'string', enum: ['fact', 'preference', 'decision', 'goal', 'event', 'lesson', 'relationship', 'note'] },
+          memory_type: { type: 'string', enum: ['fact', 'preference', 'decision', 'goal', 'event', 'lesson', 'relationship'] },
         },
         required: ['title', 'content', 'tags'],
       },
@@ -325,11 +325,27 @@ const TOOL_HANDLERS = {
     if (!ctx.persistentMemoryEngine || !ctx.buildRoutedIngestPayloads) {
       throw new Error('ingest pipeline unavailable');
     }
+    // Coerce memory_type to a valid Prisma enum value. Models routinely
+    // emit 'note', 'observation', 'todo' etc — they're sensible English
+    // but not in our locked enum. Map known synonyms; fall back to 'fact'.
+    const ALLOWED = new Set(['fact', 'preference', 'decision', 'goal', 'event', 'lesson', 'relationship']);
+    const TYPE_ALIAS = {
+      note: 'fact', observation: 'fact', todo: 'goal', task: 'goal',
+      reminder: 'goal', insight: 'lesson', learning: 'lesson',
+      idea: 'fact', knowledge: 'fact', context: 'fact',
+      contact: 'relationship', person: 'relationship', user: 'relationship',
+      meeting: 'event', appointment: 'event',
+      synthesis: 'fact', summary: 'fact', // canonical-summary cognition rows
+    };
+    let memType = (args.memory_type || 'fact').toString().toLowerCase().trim();
+    if (TYPE_ALIAS[memType]) memType = TYPE_ALIAS[memType];
+    if (!ALLOWED.has(memType)) memType = 'fact';
+
     const payload = {
       title: args.title,
       content: args.content,
       tags: args.tags || [],
-      memory_type: args.memory_type || 'fact',
+      memory_type: memType,
       user_id: ctx.userId,
       org_id: ctx.orgId,
       source_metadata: { source_platform: 'talk-to-hive', via: 'react-agent' },

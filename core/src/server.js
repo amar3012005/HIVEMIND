@@ -11354,6 +11354,7 @@ exit \$RC
                 scope: body.scope || undefined,
                 primary_team_id: body.primary_team_id || null,
                 project_ids: Array.isArray(body.project_ids) ? body.project_ids : [],
+                __bypass_membership: body.__bypass_membership === true ? true : undefined,
                 content: validation.data.content,
                 tags: validation.data.tags,
                 memory_type: validation.data.memory_type,

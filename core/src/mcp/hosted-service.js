@@ -2287,6 +2287,7 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
           org_id: orgId,
           smartIngest: true,
           ...SCOPE_FIELDS,
+          __bypass_membership: isMaster && resolvedProjectId ? true : undefined,
         });
         return formatToolContent({
           ...saveResp,

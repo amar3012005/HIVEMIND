@@ -1,183 +1,77 @@
 /**
- * HIVEMIND Chrome Extension — Popup Script
+ * HIVEMIND Popup — sign-in via browser OAuth (same flow as @hivemind/cli).
  */
 
 const $ = (id) => document.getElementById(id);
 
-// ── Init ────────────────────────────────────────────────
-
 document.addEventListener('DOMContentLoaded', async () => {
-  const config = await chrome.storage.local.get(['apiKey', 'apiBase']);
-
-  if (config.apiKey) {
-    showConnected(config);
+  const cfg = await chrome.storage.local.get(['apiKey', 'apiBase', 'userEmail']);
+  if (cfg.apiKey) {
+    renderSignedIn(cfg);
   } else {
-    showSetup();
+    renderSignedOut();
   }
 });
 
-// ── Setup View ──────────────────────────────────────────
+function renderSignedOut() {
+  $('signedOut').classList.remove('hidden');
+  $('signedIn').classList.add('hidden');
 
-function showSetup() {
-  $('setup').classList.remove('hidden');
-  $('connected').classList.add('hidden');
-
-  $('connectBtn').addEventListener('click', async () => {
-    const apiKey = $('apiKeyInput').value.trim();
-    const apiBase = $('apiBaseInput').value.trim() || 'https://core.hivemind.davinciai.eu:8050';
-
-    if (!apiKey) {
-      showStatus('setupStatus', 'Enter your API key', 'error');
-      return;
-    }
-
-    $('connectBtn').disabled = true;
-    $('connectBtn').textContent = 'Connecting...';
+  $('signInBtn').addEventListener('click', async () => {
+    const btn = $('signInBtn');
+    const err = $('signInErr');
+    err.classList.add('hidden');
+    btn.disabled = true;
+    btn.textContent = 'Opening browser…';
 
     try {
-      // Test connection
-      const resp = await fetch(`${apiBase}/health`, {
-        headers: { 'X-API-Key': apiKey },
+      const resp = await chrome.runtime.sendMessage({
+        action: 'signIn',
+        apiBase: 'https://api.hivemind.davinciai.eu:8040',
       });
+      if (!resp?.success) throw new Error(resp?.error || 'sign-in failed');
 
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-
-      await chrome.storage.local.set({ apiKey, apiBase });
-      showStatus('setupStatus', 'Connected!', 'success');
-
-      setTimeout(() => showConnected({ apiKey, apiBase }), 500);
-    } catch (err) {
-      showStatus('setupStatus', `Connection failed: ${err.message}`, 'error');
-      $('connectBtn').disabled = false;
-      $('connectBtn').textContent = 'Connect';
+      const cfg = await chrome.storage.local.get(['apiKey', 'apiBase', 'userEmail']);
+      renderSignedIn(cfg);
+    } catch (e) {
+      err.textContent = e.message || 'Sign-in failed';
+      err.classList.remove('hidden');
+      btn.disabled = false;
+      btn.textContent = 'Sign in with browser';
     }
   });
 }
 
-// ── Connected View ──────────────────────────────────────
+async function renderSignedIn(cfg) {
+  $('signedOut').classList.add('hidden');
+  $('signedIn').classList.remove('hidden');
 
-async function showConnected(config) {
-  $('setup').classList.add('hidden');
-  $('connected').classList.remove('hidden');
+  const email = cfg.userEmail || '—';
+  $('email').textContent = email;
+  $('avatar').textContent = (email[0] || '?').toUpperCase();
 
-  // Load profile stats
+  // Profile stats
   try {
-    const resp = await fetch(`${config.apiBase}/api/profile`, {
-      headers: { 'X-API-Key': config.apiKey },
+    const resp = await fetch(`${cfg.apiBase}/api/profile`, {
+      headers: { 'X-API-Key': cfg.apiKey },
     });
     if (resp.ok) {
       const data = await resp.json();
-      const profile = data.profile || data;
-      $('memoryCount').textContent = profile.memory_count?.toLocaleString() || '0';
-      $('obsCount').textContent = profile.observation_count || '0';
+      const p = data.profile || data;
+      $('memoryCount').textContent = (p.memory_count ?? 0).toLocaleString();
+      $('obsCount').textContent = (p.observation_count ?? 0).toLocaleString();
     }
   } catch {}
 
-  // Save Page button
-  $('savePageBtn').addEventListener('click', async () => {
-    $('savePageBtn').disabled = true;
-    $('savePageBtn').textContent = '⏳ Saving...';
-
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    const result = await chrome.runtime.sendMessage({ action: 'savePage', tabId: tab.id });
-
-    if (result?.success) {
-      showStatus('actionStatus', '✅ Page saved to HIVEMIND', 'success');
-      $('savePageBtn').textContent = '✅ Saved!';
-    } else {
-      showStatus('actionStatus', `❌ ${result?.error || 'Failed'}`, 'error');
-      $('savePageBtn').textContent = '📄 Save This Page';
-    }
-    $('savePageBtn').disabled = false;
-    setTimeout(() => { $('savePageBtn').textContent = '📄 Save This Page'; }, 2000);
+  $('openChatBtn').addEventListener('click', async () => {
+    await chrome.runtime.sendMessage({ action: 'openSidePanel' });
+    window.close();
   });
 
-  // Save Selection button
-  $('saveSelectionBtn').addEventListener('click', async () => {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-
-    try {
-      const results = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: () => window.getSelection()?.toString() || '',
-      });
-      const selection = results[0]?.result;
-
-      if (!selection || selection.length < 5) {
-        showStatus('actionStatus', 'Select some text on the page first', 'info');
-        return;
-      }
-
-      $('saveSelectionBtn').disabled = true;
-      const result = await chrome.runtime.sendMessage({
-        action: 'saveText',
-        content: selection,
-        title: `Selection: ${selection.slice(0, 50)}`,
-        tags: ['browser-extension', 'selection'],
-      });
-
-      if (result?.success) {
-        showStatus('actionStatus', '✅ Selection saved', 'success');
-      } else {
-        showStatus('actionStatus', `❌ ${result?.error || 'Failed'}`, 'error');
-      }
-      $('saveSelectionBtn').disabled = false;
-    } catch (err) {
-      showStatus('actionStatus', `❌ ${err.message}`, 'error');
-    }
+  $('signOutBtn').addEventListener('click', async () => {
+    await chrome.runtime.sendMessage({ action: 'signOut' });
+    renderSignedOut();
+    $('signedOut').classList.remove('hidden');
+    $('signedIn').classList.add('hidden');
   });
-
-  // Quick Recall
-  $('recallBtn').addEventListener('click', doRecall);
-  $('recallInput').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') doRecall();
-  });
-
-  async function doRecall() {
-    const query = $('recallInput').value.trim();
-    if (!query) return;
-
-    $('recallBtn').disabled = true;
-    const result = await chrome.runtime.sendMessage({ action: 'recall', query });
-    $('recallBtn').disabled = false;
-
-    const container = $('recallResults');
-    container.innerHTML = '';
-
-    if (result?.memories?.length > 0) {
-      result.memories.slice(0, 5).forEach((m) => {
-        const div = document.createElement('div');
-        div.className = 'recall-item';
-        div.innerHTML = `
-          <div class="recall-item-title">${escHtml(m.title || m.content?.slice(0, 60) || 'Untitled')}</div>
-          <div class="recall-item-score">score: ${(m.score || 0).toFixed(2)}</div>
-        `;
-        container.appendChild(div);
-      });
-    } else {
-      container.innerHTML = '<div class="recall-item" style="color:#a3a3a3;">No memories found</div>';
-    }
-  }
-
-  // Disconnect
-  $('disconnectBtn').addEventListener('click', async () => {
-    await chrome.storage.local.remove(['apiKey', 'apiBase', 'userId']);
-    showSetup();
-  });
-}
-
-// ── Helpers ─────────────────────────────────────────────
-
-function showStatus(elementId, message, type) {
-  const el = $(elementId);
-  el.className = `status status-${type}`;
-  el.textContent = message;
-  el.classList.remove('hidden');
-  setTimeout(() => el.classList.add('hidden'), 4000);
-}
-
-function escHtml(s) {
-  const div = document.createElement('div');
-  div.textContent = s;
-  return div.innerHTML;
 }

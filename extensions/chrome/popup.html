@@ -5,255 +5,198 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
-      width: 360px;
-      font-family: 'Segoe UI', -apple-system, sans-serif;
+      width: 340px;
+      font-family: 'Inter', 'Segoe UI', -apple-system, sans-serif;
       background: #faf9f4;
       color: #0a0a0a;
     }
     .header {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 16px;
-      border-bottom: 1px solid #e3e0db;
-      background: white;
+      display: flex; align-items: center; gap: 10px;
+      padding: 18px 18px 14px;
+      border-bottom: 1px solid #ece9e2;
     }
     .logo {
-      width: 32px; height: 32px;
-      background: rgba(17,125,255,0.1);
-      border: 1px solid rgba(17,125,255,0.2);
-      border-radius: 8px;
+      width: 36px; height: 36px;
+      border-radius: 10px;
+      background: rgba(17,125,255,0.08);
+      border: 1px solid rgba(17,125,255,0.18);
       display: flex; align-items: center; justify-content: center;
-      font-size: 16px;
     }
-    .title { font-weight: 700; font-size: 15px; }
-    .subtitle { font-size: 10px; color: #a3a3a3; font-family: monospace; }
+    .logo img { width: 22px; height: 22px; display: block; }
+    .title { font-weight: 700; font-size: 16px; letter-spacing: -0.01em; }
+    .subtitle { font-size: 10.5px; color: #8a8a8a; font-family: 'SF Mono', monospace; margin-top: 2px; }
 
-    .section { padding: 16px; }
-    .section-title { font-size: 11px; color: #525252; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px; }
+    .section { padding: 18px; }
 
-    /* Setup */
-    .setup-form { display: flex; flex-direction: column; gap: 8px; }
-    .input {
-      width: 100%;
-      padding: 10px 12px;
-      border: 1px solid #e3e0db;
-      border-radius: 8px;
-      font-size: 13px;
-      background: white;
-      outline: none;
-      transition: border-color 0.2s;
+    /* signed-out hero */
+    .hero h2 {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-bottom: 6px;
     }
-    .input:focus { border-color: #117dff; }
-    .input::placeholder { color: #d4d0ca; }
+    .hero p {
+      font-size: 12.5px;
+      color: #6b6b6b;
+      line-height: 1.5;
+      margin-bottom: 16px;
+    }
 
-    /* Buttons */
     .btn {
-      display: flex; align-items: center; justify-content: center; gap: 6px;
+      display: flex; align-items: center; justify-content: center; gap: 8px;
       width: 100%;
-      padding: 10px;
-      border: none; border-radius: 8px;
+      padding: 11px 14px;
+      border: none; border-radius: 10px;
       font-size: 13px; font-weight: 600;
-      cursor: pointer; transition: all 0.2s;
+      cursor: pointer; transition: all 0.15s;
+      font-family: inherit;
     }
-    .btn-primary { background: #117dff; color: white; }
+    .btn-primary {
+      background: #117dff; color: white;
+      box-shadow: 0 1px 2px rgba(17,125,255,0.25);
+    }
     .btn-primary:hover { background: #0066e0; }
-    .btn-secondary { background: white; color: #0a0a0a; border: 1px solid #e3e0db; }
-    .btn-secondary:hover { background: #f3f1ec; }
-    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
-
-    /* Actions */
-    .actions { display: flex; flex-direction: column; gap: 8px; }
-
-    /* Status */
-    .status {
-      display: flex; align-items: center; gap: 6px;
-      padding: 8px 12px;
-      border-radius: 8px;
-      font-size: 12px;
-      margin-top: 8px;
+    .btn-primary:disabled { background: #b7d4ff; cursor: wait; }
+    .btn-ghost {
+      background: white; color: #0a0a0a;
+      border: 1px solid #ece9e2;
     }
-    .status-success { background: #f0fdf4; color: #16a34a; border: 1px solid #bbf7d0; }
-    .status-error { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
-    .status-info { background: #eff6ff; color: #117dff; border: 1px solid #bfdbfe; }
+    .btn-ghost:hover { background: #f3f1ec; }
+    .btn-text {
+      background: transparent; color: #8a8a8a;
+      font-size: 11.5px; font-weight: 500;
+      padding: 8px;
+    }
+    .btn-text:hover { color: #0a0a0a; }
 
-    .dot { width: 6px; height: 6px; border-radius: 50%; }
-    .dot-green { background: #22c55e; }
-    .dot-red { background: #ef4444; }
+    .status-pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: #f0fdf4;
+      border: 1px solid #bbf7d0;
+      font-size: 11px; color: #16a34a;
+      font-weight: 600;
+    }
+    .status-pill .dot { width: 6px; height: 6px; border-radius: 50%; background: #22c55e; }
 
-    /* Stats */
-    .stats { display: flex; gap: 12px; margin-top: 8px; }
-    .stat { flex: 1; text-align: center; padding: 8px; background: white; border: 1px solid #e3e0db; border-radius: 8px; }
-    .stat-value { font-size: 18px; font-weight: 700; color: #117dff; }
-    .stat-label { font-size: 9px; color: #a3a3a3; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px; }
-
-    /* Quick Recall */
-    .recall-input { display: flex; gap: 6px; }
-    .recall-input .input { flex: 1; }
-    .recall-input .btn { width: auto; padding: 10px 14px; }
-    .recall-results { margin-top: 8px; }
-    .recall-item {
-      padding: 8px 10px;
+    .profile {
+      display: flex; align-items: center; gap: 10px;
+      padding: 12px;
       background: white;
-      border: 1px solid #eae7e1;
-      border-radius: 8px;
-      margin-bottom: 4px;
-      font-size: 12px;
-      color: #525252;
+      border: 1px solid #ece9e2;
+      border-radius: 10px;
+      margin-bottom: 14px;
     }
-    .recall-item-title { font-weight: 600; color: #0a0a0a; margin-bottom: 2px; }
-    .recall-item-score { font-size: 10px; color: #a3a3a3; font-family: monospace; }
+    .avatar {
+      width: 36px; height: 36px; border-radius: 50%;
+      background: linear-gradient(135deg, #117dff, #0066e0);
+      display: flex; align-items: center; justify-content: center;
+      color: white; font-weight: 700; font-size: 14px;
+    }
+    .profile-meta { flex: 1; min-width: 0; }
+    .profile-email {
+      font-size: 12.5px; font-weight: 600; color: #0a0a0a;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .profile-org { font-size: 10.5px; color: #8a8a8a; margin-top: 2px; }
 
-    .hidden { display: none; }
-    .footer { padding: 12px 16px; border-top: 1px solid #e3e0db; text-align: center; }
-    .footer a { color: #117dff; text-decoration: none; font-size: 11px; }
-    .footer a:hover { text-decoration: underline; }
+    .stats { display: flex; gap: 8px; margin-bottom: 14px; }
+    .stat {
+      flex: 1; padding: 10px;
+      background: white;
+      border: 1px solid #ece9e2;
+      border-radius: 10px;
+      text-align: center;
+    }
+    .stat-value { font-size: 18px; font-weight: 700; color: #117dff; letter-spacing: -0.02em; }
+    .stat-label {
+      font-size: 9.5px; color: #8a8a8a; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px;
+    }
+
+    .err {
+      padding: 10px 12px;
+      background: #fef2f2;
+      border: 1px solid #fecaca;
+      color: #b91c1c;
+      border-radius: 8px;
+      font-size: 12px;
+      margin-top: 10px;
+    }
 
     .eu-badge {
       display: inline-flex; align-items: center; gap: 4px;
       padding: 4px 8px; border-radius: 6px;
       background: #f0fdf4; border: 1px solid #bbf7d0;
-      font-size: 9px; color: #16a34a; margin-top: 8px;
+      font-size: 9.5px; color: #16a34a; font-weight: 600;
+      margin-top: 14px;
     }
 
-    /* NEW: Chat Overlay Banner */
-    .chat-banner {
-      padding: 12px 14px;
-      background: linear-gradient(135deg, #117dff 0%, #0066e0 100%);
-      color: white;
-      border-radius: 10px;
-      margin-bottom: 16px;
-      box-shadow: 0 4px 12px rgba(17, 125, 255, 0.25);
+    .footer {
+      padding: 12px 18px;
+      border-top: 1px solid #ece9e2;
+      text-align: center;
     }
-    .chat-banner-title {
-      font-size: 13px;
-      font-weight: 700;
-      margin-bottom: 4px;
-      display: flex;
-      align-items: center;
-      gap: 6px;
+    .footer a {
+      color: #117dff; text-decoration: none;
+      font-size: 11px; font-weight: 500;
     }
-    .chat-banner-new {
-      display: inline-block;
-      padding: 2px 6px;
-      background: rgba(255,255,255,0.3);
-      border-radius: 4px;
-      font-size: 9px;
-      font-weight: 800;
-      letter-spacing: 0.5px;
-    }
-    .chat-banner-desc {
-      font-size: 11px;
-      opacity: 0.95;
-      margin-bottom: 8px;
-      line-height: 1.4;
-    }
-    .chat-banner-shortcut {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 6px 10px;
-      background: rgba(255,255,255,0.2);
-      border: 1px solid rgba(255,255,255,0.3);
-      border-radius: 6px;
-      font-size: 12px;
-      font-weight: 600;
-      font-family: 'SF Mono', 'Monaco', monospace;
-      backdrop-filter: blur(10px);
-    }
-    .chat-banner-key {
-      padding: 2px 6px;
-      background: rgba(255,255,255,0.3);
-      border-radius: 4px;
-      font-size: 11px;
-    }
+    .footer a:hover { text-decoration: underline; }
+    .hidden { display: none !important; }
   </style>
 </head>
 <body>
-  <!-- Header -->
   <div class="header">
-    <div class="logo"><img src="Hivemind_extension.png" alt="HIVEMIND" style="width: 24px; height: 24px; display: block;" /></div>
+    <div class="logo"><img src="Hivemind_extension.png" alt="HIVE" /></div>
     <div>
-      <div class="title">HIVEMIND Chat</div>
-      <div class="subtitle">AI Memory + Browser Automation</div>
+      <div class="title">HIVEMIND</div>
+      <div class="subtitle">persistent memory · mcp ready</div>
     </div>
   </div>
 
-  <!-- Setup (shown when no API key) -->
-  <div id="setup" class="section">
-    <div class="section-title">Connect to HIVEMIND</div>
-    <div class="setup-form">
-      <input id="apiKeyInput" class="input" type="password" placeholder="Paste your API key (hmk_live_...)" />
-      <input id="apiBaseInput" class="input" type="text" placeholder="API URL (default: core.hivemind.davinciai.eu:8050)" />
-      <button id="connectBtn" class="btn btn-primary">Connect</button>
-    </div>
-    <div id="setupStatus"></div>
+  <!-- Signed-out -->
+  <div id="signedOut" class="section hero hidden">
+    <h2>Talk to HIVE</h2>
+    <p>Sign in with your browser to chat with your memory engine. Same flow as the CLI — no API key needed.</p>
+    <button id="signInBtn" class="btn btn-primary">
+      Sign in with browser
+    </button>
+    <div id="signInErr" class="err hidden"></div>
+    <div class="eu-badge">🇪🇺 EU Sovereign — Frankfurt</div>
   </div>
 
-  <!-- Connected View -->
-  <div id="connected" class="section hidden">
-    <!-- NEW: Chat Overlay Feature Banner -->
-    <div class="chat-banner">
-      <div class="chat-banner-title">
-        💬 Chat Panel <span class="chat-banner-new">v2.1 — Glass UI</span>
-      </div>
-      <div class="chat-banner-desc">
-        AI assistant with memory + browser automation. Ask questions, get context-aware answers, automate actions.
-      </div>
-      <div class="chat-banner-shortcut">
-        ⌨️ Press <span class="chat-banner-key">⌘</span> <span class="chat-banner-key">Shift</span> <span class="chat-banner-key">H</span>
+  <!-- Signed-in -->
+  <div id="signedIn" class="section hidden">
+    <div class="profile">
+      <div class="avatar" id="avatar">?</div>
+      <div class="profile-meta">
+        <div class="profile-email" id="email">—</div>
+        <div class="profile-org">
+          <span class="status-pill"><span class="dot"></span>Connected</span>
+        </div>
       </div>
     </div>
 
-    <!-- Status -->
-    <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 12px;">
-      <div class="dot dot-green"></div>
-      <span style="font-size: 12px; color: #16a34a; font-weight: 600;">Connected</span>
-      <span id="userEmail" style="font-size: 11px; color: #a3a3a3; margin-left: auto;"></span>
-    </div>
-
-    <!-- Stats -->
     <div class="stats">
       <div class="stat">
-        <div class="stat-value" id="memoryCount">-</div>
+        <div class="stat-value" id="memoryCount">—</div>
         <div class="stat-label">Memories</div>
       </div>
       <div class="stat">
-        <div class="stat-value" id="obsCount">-</div>
+        <div class="stat-value" id="obsCount">—</div>
         <div class="stat-label">Observations</div>
       </div>
     </div>
 
-    <!-- Actions -->
-    <div class="section-title" style="margin-top: 16px;">Quick Actions</div>
-    <div class="actions">
-      <button id="savePageBtn" class="btn btn-primary">
-        📄 Save This Page
-      </button>
-      <button id="saveSelectionBtn" class="btn btn-secondary">
-        ✂️ Save Selection
-      </button>
-    </div>
-
-    <!-- Quick Recall -->
-    <div class="section-title" style="margin-top: 16px;">Quick Recall</div>
-    <div class="recall-input">
-      <input id="recallInput" class="input" placeholder="Search your memories..." />
-      <button id="recallBtn" class="btn btn-primary">🔍</button>
-    </div>
-    <div id="recallResults" class="recall-results"></div>
-
-    <div id="actionStatus"></div>
-
-    <div class="eu-badge">🇪🇺 EU Sovereign — Frankfurt, Germany</div>
-
-    <!-- Disconnect -->
-    <button id="disconnectBtn" class="btn btn-secondary" style="margin-top: 12px; font-size: 11px; color: #a3a3a3;">
-      Disconnect
+    <button id="openChatBtn" class="btn btn-primary">
+      💬 Open Talk to HIVE
+    </button>
+    <button id="signOutBtn" class="btn btn-text" style="margin-top:6px;">
+      Sign out
     </button>
   </div>
 
-  <!-- Footer -->
   <div class="footer">
     <a href="https://hivemind.davinciai.eu" target="_blank">hivemind.davinciai.eu</a>
   </div>

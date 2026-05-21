@@ -1,569 +1,452 @@
-// ══════════════════════════════════════════════════════════════
-// HIVEMIND Side Panel — Persistent Chat with Memory
-// ══════════════════════════════════════════════════════════════
+/**
+ * Talk to HIVE — side-panel chat.
+ * Uses /api/chat via background.js. Sources collapsible. Token counters.
+ */
 
-// ── State Management ──────────────────────────────────────────
-let chatHistory = [];
-let currentPageContext = null;
-let currentTabId = null;
-let isCapturing = false;
+const $ = (id) => document.getElementById(id);
 
-// ── DOM Elements ──────────────────────────────────────────────
-const messagesContainer = document.getElementById('messages');
-const messageInput = document.getElementById('message-input');
-const sendButton = document.getElementById('send-button');
-const captureButton = document.getElementById('capture-button');
-const saveSessionButton = document.getElementById('save-session-button');
-const contextUrl = document.getElementById('context-url');
-const statusIndicator = document.getElementById('status-indicator');
-const statusText = document.getElementById('status-text');
+const state = {
+  history: [],
+  sending: false,
+  signedIn: false,
+  email: '',
+  model: 'GPT-OSS 120B',
+  context: null, // { mode: 'selection'|'section'|'page', text, heading?, url, title }
+};
 
-// Setup modal elements
-const setupModal = document.getElementById('setup-modal');
-const setupApiKey = document.getElementById('setup-api-key');
-const setupApiBase = document.getElementById('setup-api-base');
-const setupConnectButton = document.getElementById('setup-connect-button');
-const setupStatus = document.getElementById('setup-status');
+document.addEventListener('DOMContentLoaded', async () => {
+  try { chrome.runtime.connect({ name: 'side-panel' }); } catch {}
 
-// ── Initialization ────────────────────────────────────────────
-async function init() {
-  // Check if API key is configured
-  const hasConfig = await checkConfig();
-  
-  if (!hasConfig) {
-    // Show setup modal
-    setupModal.classList.remove('hidden');
-    
-    // Set up setup form handler
-    setupConnectButton.addEventListener('click', handleSetup);
-    setupApiKey.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') handleSetup();
-    });
-    setupApiBase.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') handleSetup();
-    });
-    
-    // Disable chat until configured
-    messageInput.disabled = true;
-    messageInput.placeholder = 'Configure API key first...';
-    sendButton.disabled = true;
-    captureButton.disabled = true;
-    saveSessionButton.disabled = true;
-    
-    console.log('[side-panel] Awaiting API key configuration');
-    return; // Don't proceed with initialization
+  const cfg = await chrome.storage.local.get(['apiKey', 'userEmail']);
+  if (cfg.apiKey) {
+    state.signedIn = true;
+    state.email = cfg.userEmail || '';
+    renderSignedIn();
+  } else {
+    renderSignedOut();
   }
-  
-  // Load chat history from storage
-  await loadChatHistory();
-  
-  // Get current tab info
-  await updateCurrentTab();
-  
-  // Set up event listeners
-  sendButton.addEventListener('click', handleSend);
-  messageInput.addEventListener('keydown', handleKeydown);
-  captureButton.addEventListener('click', handleCapture);
-  saveSessionButton.addEventListener('click', handleSaveSession);
-  
-  // Auto-resize textarea
-  messageInput.addEventListener('input', autoResize);
-  
-  // Listen for tab changes
-  chrome.tabs.onActivated.addListener(handleTabChange);
-  chrome.tabs.onUpdated.addListener(handleTabUpdate);
-  
-  // Listen for messages from background
-  chrome.runtime.onMessage.addListener(handleBackgroundMessage);
-  
-  // Listen for storage changes (API key configuration)
-  chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName === 'local' && changes.apiKey) {
-      console.log('[side-panel] API key configured, reloading...');
-      location.reload(); // Reload side panel to re-initialize
+
+  wireEvents();
+});
+
+function renderSignedOut() {
+  $('hero').classList.remove('hidden');
+  $('messages').classList.add('hidden');
+  $('composer').classList.add('hidden');
+  $('userPill').textContent = '';
+}
+
+function renderSignedIn() {
+  $('hero').classList.add('hidden');
+  $('messages').classList.remove('hidden');
+  $('composer').classList.remove('hidden');
+  $('userPill').textContent = state.email;
+  $('input').focus();
+}
+
+function wireEvents() {
+  $('heroSignIn').addEventListener('click', async () => {
+    const btn = $('heroSignIn');
+    btn.disabled = true;
+    btn.textContent = 'Opening browser…';
+    try {
+      const resp = await chrome.runtime.sendMessage({
+        action: 'signIn',
+        apiBase: 'https://api.hivemind.davinciai.eu:8040',
+      });
+      if (!resp?.success) throw new Error(resp?.error || 'sign-in failed');
+      const cfg = await chrome.storage.local.get(['apiKey', 'userEmail']);
+      state.signedIn = true;
+      state.email = cfg.userEmail || '';
+      renderSignedIn();
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = 'Sign in with browser';
+      appendError(e.message);
     }
   });
-  
-  // Check connection status
-  updateConnectionStatus();
-  
-  console.log('[side-panel] Initialized');
+
+  $('newChatBtn').addEventListener('click', () => {
+    state.history = [];
+    $('messages').innerHTML = '';
+    $('input').focus();
+  });
+
+  const input = $('input');
+  input.addEventListener('input', () => {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      send();
+    }
+    if (e.key === 'Escape') {
+      window.close();
+    }
+  });
+
+  $('sendBtn').addEventListener('click', send);
+
+  // ── Context controls ──
+  $('selBtn').addEventListener('click', async () => {
+    const ctx = await chrome.runtime.sendMessage({ action: 'getSelectionContext' });
+    if (!ctx) {
+      appendError('No text selected on the page. Highlight something first.');
+      return;
+    }
+    setContext(ctx);
+  });
+
+  $('sectionBtn').addEventListener('click', async () => {
+    await chrome.runtime.sendMessage({ action: 'startSectionPicker' });
+    flashHint('Drawer active on page — hover & click a section. Esc to cancel.');
+  });
+
+  $('pageBtn').addEventListener('click', async () => {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    setContext({ mode: 'page', url: tab?.url || '', title: tab?.title || '', text: '' });
+  });
+
+  $('ctxClear').addEventListener('click', () => setContext(null));
+
+  // Section pick broadcast from background → content-script
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg.action === 'sectionContextReady' && msg.section) {
+      setContext(msg.section);
+    }
+  });
 }
 
-// ── Config Check ──────────────────────────────────────────────
-async function checkConfig() {
-  try {
-    const response = await chrome.runtime.sendMessage({ action: 'getConfig' });
-    return response?.apiKey && response.apiKey.length > 0;
-  } catch (err) {
-    console.error('[side-panel] Config check failed:', err);
-    return false;
-  }
-}
-
-// ── Setup Handler ─────────────────────────────────────────────
-async function handleSetup() {
-  const apiKey = setupApiKey.value.trim();
-  const apiBase = setupApiBase.value.trim() || 'https://core.hivemind.davinciai.eu:8050';
-  
-  if (!apiKey) {
-    setupStatus.innerHTML = '<div class="hivemind-setup-error">Please enter an API key</div>';
+function setContext(ctx) {
+  state.context = ctx;
+  const pill = $('ctxPill');
+  if (!ctx) {
+    pill.classList.add('hidden');
+    document.querySelectorAll('.ctx-btn').forEach(b => b.classList.remove('active'));
     return;
   }
-  
-  // Disable form during save
-  setupConnectButton.disabled = true;
-  setupConnectButton.textContent = 'Connecting...';
-  setupStatus.innerHTML = '';
-  
-  try {
-    // Save configuration
-    await chrome.storage.local.set({ 
-      apiKey, 
-      apiBase,
-      userId: '' 
-    });
-    
-    // Show success message
-    setupStatus.innerHTML = '<div class="hivemind-setup-success">✓ Connected! Initializing...</div>';
-    
-    // Wait a moment then reload
-    setTimeout(() => {
-      location.reload();
-    }, 800);
-    
-  } catch (err) {
-    console.error('[side-panel] Setup failed:', err);
-    setupStatus.innerHTML = `<div class="hivemind-setup-error">Failed to save: ${err.message}</div>`;
-    setupConnectButton.disabled = false;
-    setupConnectButton.textContent = 'Connect to HIVEMIND';
-  }
-}
+  pill.classList.remove('hidden');
+  document.querySelectorAll('.ctx-btn').forEach(b => b.classList.remove('active'));
+  if (ctx.mode === 'selection') $('selBtn').classList.add('active');
+  if (ctx.mode === 'section') $('sectionBtn').classList.add('active');
+  if (ctx.mode === 'page') $('pageBtn').classList.add('active');
 
-// ── Chat History Management ───────────────────────────────────
-async function loadChatHistory() {
-  try {
-    const result = await chrome.storage.local.get(['chatHistory']);
-    if (result.chatHistory && Array.isArray(result.chatHistory)) {
-      chatHistory = result.chatHistory;
-      
-      // Clear welcome message
-      messagesContainer.innerHTML = '';
-      
-      // Render all messages
-      chatHistory.forEach(msg => {
-        addMessage(msg.role, msg.content, msg.metadata);
-      });
-      
-      scrollToBottom();
-    }
-  } catch (err) {
-    console.error('[side-panel] Failed to load history:', err);
-  }
-}
-
-async function saveChatHistory() {
-  try {
-    await chrome.storage.local.set({ chatHistory });
-  } catch (err) {
-    console.error('[side-panel] Failed to save history:', err);
-  }
-}
-
-function clearWelcome() {
-  const welcome = messagesContainer.querySelector('.hivemind-welcome');
-  if (welcome) {
-    welcome.remove();
-  }
-}
-
-// ── Tab Management ────────────────────────────────────────────
-async function updateCurrentTab() {
-  try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tab) {
-      currentTabId = tab.id;
-      updateContextBar(tab.url, tab.title);
-    }
-  } catch (err) {
-    console.error('[side-panel] Failed to get current tab:', err);
-  }
-}
-
-async function handleTabChange(activeInfo) {
-  currentTabId = activeInfo.tabId;
-  const tab = await chrome.tabs.get(currentTabId);
-  updateContextBar(tab.url, tab.title);
-  
-  // Reset context when tab changes
-  currentPageContext = null;
-  captureButton.classList.remove('captured');
-  captureButton.textContent = 'Capture Context';
-}
-
-async function handleTabUpdate(tabId, changeInfo, tab) {
-  if (tabId === currentTabId && changeInfo.url) {
-    updateContextBar(tab.url, tab.title);
-    
-    // Reset context when URL changes
-    currentPageContext = null;
-    captureButton.classList.remove('captured');
-    captureButton.textContent = 'Capture Context';
-  }
-}
-
-function updateContextBar(url, title) {
-  if (url) {
-    try {
-      const urlObj = new URL(url);
-      contextUrl.textContent = `${urlObj.hostname}${urlObj.pathname}`;
-      contextUrl.title = title || url;
-    } catch {
-      contextUrl.textContent = url;
-      contextUrl.title = title || url;
-    }
+  let label = '';
+  if (ctx.mode === 'selection') {
+    label = `"${(ctx.text || '').slice(0, 60).replace(/\s+/g, ' ')}${(ctx.text || '').length > 60 ? '…' : ''}"`;
+  } else if (ctx.mode === 'section') {
+    label = ctx.heading ? `§ ${ctx.heading}` : `§ ${ctx.selector || 'section'}`;
   } else {
-    contextUrl.textContent = 'No page selected';
-    contextUrl.title = '';
+    label = ctx.title || ctx.url || 'Page';
   }
+  $('ctxLabel').textContent = label;
+  $('ctxMeta').textContent = ctx.length ? `${ctx.length}c` : (ctx.mode === 'page' ? 'page' : '');
 }
 
-// ── Page Context Capture ──────────────────────────────────────
-async function handleCapture() {
-  if (isCapturing) return;
-  
-  isCapturing = true;
-  captureButton.disabled = true;
-  captureButton.textContent = 'Capturing...';
-  
-  try {
-    const response = await chrome.runtime.sendMessage({
-      action: 'captureContext',
-      tabId: currentTabId,
-    });
-    
-    if (response?.context) {
-      currentPageContext = response.context;
-      captureButton.classList.add('captured');
-      captureButton.textContent = '✓ Captured';
-      
-      addMessage('system', `Captured page context: ${response.context.elementCount} interactive elements`);
-    } else {
-      throw new Error(response?.error || 'Failed to capture context');
+function flashHint(text) {
+  const el = document.createElement('div');
+  el.className = 'err-msg';
+  el.style.background = '#eff6ff';
+  el.style.borderColor = '#bfdbfe';
+  el.style.color = '#117dff';
+  el.textContent = text;
+  $('messages').appendChild(el);
+  scrollBottom();
+  setTimeout(() => el.remove(), 4000);
+}
+
+async function send() {
+  if (state.sending) return;
+  if (!state.signedIn) return;
+  const input = $('input');
+  const text = input.value.trim();
+  if (!text) return;
+
+  state.sending = true;
+  input.value = '';
+  input.style.height = 'auto';
+  $('sendBtn').disabled = true;
+
+  appendUser(text);
+  state.history.push({ role: 'user', content: text });
+
+  const streamId = 'sm-' + Math.random().toString(36).slice(2, 10);
+  const aiEl = appendStreamingAi();
+  const stepsList = aiEl.querySelector('.steps-list');
+  const stepsToggle = aiEl.querySelector('.steps-toggle');
+  const stepsCountEl = aiEl.querySelector('.steps-count');
+  let stepCount = 0;
+
+  const listener = (msg) => {
+    if (msg.action !== 'chatStreamChunk' || msg.streamId !== streamId) return;
+    const evt = msg.event;
+    if (!evt) return;
+
+    if (evt.type === 'tool_call') {
+      stepCount++;
+      stepsToggle.classList.remove('hidden');
+      stepsCountEl.textContent = stepCount;
+      const li = document.createElement('div');
+      li.className = 'step-item';
+      li.innerHTML = `<span class="step-icon">🔧</span> <code>${escapeHtml(evt.name)}</code> <span class="step-args">${escapeHtml(briefArgs(evt.arguments))}</span> <span class="step-status">…</span>`;
+      stepsList.appendChild(li);
     }
-  } catch (err) {
-    console.error('[side-panel] Capture failed:', err);
-    addMessage('system', `Capture failed: ${err.message}`, { isError: true });
-    captureButton.textContent = 'Retry';
-  } finally {
-    isCapturing = false;
-    captureButton.disabled = false;
-  }
-}
-
-// ── Save Session ──────────────────────────────────────────────
-async function handleSaveSession() {
-  if (!currentTabId) {
-    addMessage('system', 'No active tab', { isError: true });
-    return;
-  }
-  
-  saveSessionButton.disabled = true;
-  saveSessionButton.textContent = '💾 Saving...';
-  
-  try {
-    // Get current tab info
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab) {
-      throw new Error('No active tab found');
-    }
-    
-    // Try AI chat auto-capture first
-    const response = await chrome.runtime.sendMessage({
-      action: 'captureAISession',
-      tabId: tab.id,
-    });
-    
-    if (response.success) {
-      saveSessionButton.textContent = '✓ Saved';
-      if (response.fallback) {
-        addMessage('system', `Session saved (fallback mode)`);
-      } else {
-        addMessage('system', `Session saved: ${response.platform} with ${response.messageCount} messages`);
-      }
-    } else {
-      throw new Error(response.error || 'Failed to save session');
-    }
-  } catch (err) {
-    console.error('[side-panel] Save session failed:', err);
-    addMessage('system', `Save failed: ${err.message}`, { isError: true });
-    saveSessionButton.textContent = '💾 Retry';
-  } finally {
-    setTimeout(() => {
-      saveSessionButton.disabled = false;
-      saveSessionButton.textContent = '💾 Save Session';
-    }, 2000);
-  }
-}
-
-// ── Message Handling ──────────────────────────────────────────
-function handleKeydown(e) {
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    handleSend();
-  }
-}
-
-async function handleSend() {
-  const message = messageInput.value.trim();
-  if (!message || sendButton.disabled) return;
-  
-  clearWelcome();
-  
-  // Add user message
-  addMessage('user', message);
-  chatHistory.push({ role: 'user', content: message });
-  await saveChatHistory();
-  
-  // Clear input
-  messageInput.value = '';
-  autoResize();
-  
-  // Disable input during request
-  sendButton.disabled = true;
-  messageInput.disabled = true;
-  
-  // Show thinking indicator
-  const thinkingId = addThinkingMessage();
-  
-  try {
-    // Send to background
-    const response = await chrome.runtime.sendMessage({
-      action: 'chatMessage',
-      message: message,
-      context: currentPageContext,
-      history: chatHistory.slice(-6), // Last 6 messages for context
-      tabId: currentTabId,
-    });
-    
-    // Remove thinking indicator
-    removeMessage(thinkingId);
-    
-    if (response?.error) {
-      addMessage('system', `Error: ${response.error}`, { isError: true });
-    } else if (response?.reply) {
-      // Add assistant message
-      const metadata = {
-        sources: response.sources,
-        actions: response.actions,
-      };
-      
-      addMessage('assistant', response.reply, metadata);
-      chatHistory.push({ role: 'assistant', content: response.reply, metadata });
-      await saveChatHistory();
-      
-      // Execute actions if any
-      if (response.actions && response.actions.length > 0) {
-        await executeActions(response.actions);
+    if (evt.type === 'tool_result') {
+      const items = stepsList.querySelectorAll('.step-item');
+      const last = items[items.length - 1];
+      if (last) {
+        const status = last.querySelector('.step-status');
+        if (status) status.textContent = '→ ' + (evt.summary || 'ok');
       }
     }
-  } catch (err) {
-    removeMessage(thinkingId);
-    addMessage('system', `Connection error: ${err.message}`, { isError: true });
-  } finally {
-    sendButton.disabled = false;
-    messageInput.disabled = false;
-    messageInput.focus();
+    if (evt.type === 'done' || evt.type === 'finish') {
+      const reply = evt.type === 'done' ? evt : { reply: evt.text };
+      reply.reply = reply.response || reply.reply || evt.text;
+      reply.sources = reply.sources || [];
+      reply.usage = reply.usage;
+      finalizeStreamingAi(aiEl, reply);
+      state.history.push({ role: 'assistant', content: reply.reply });
+      cleanup();
+    }
+    if (evt.type === 'error') {
+      aiEl.remove();
+      appendError(evt.error || 'agent error');
+      cleanup();
+    }
+  };
+
+  const cleanup = () => {
+    chrome.runtime.onMessage.removeListener(listener);
+    state.sending = false;
+    $('sendBtn').disabled = false;
+    $('input').focus();
+  };
+
+  chrome.runtime.onMessage.addListener(listener);
+
+  try {
+    await chrome.runtime.sendMessage({
+      action: 'chatMessageStream',
+      streamId,
+      message: text,
+      history: state.history.slice(-12),
+      context: state.context,
+    });
+  } catch (e) {
+    aiEl.remove();
+    appendError(e.message);
+    cleanup();
   }
 }
 
-// ── Message UI ────────────────────────────────────────────────
-function addMessage(role, content, metadata = {}) {
-  clearWelcome();
-  
-  const messageDiv = document.createElement('div');
-  messageDiv.className = `hivemind-message ${role}`;
-  if (metadata.isError) messageDiv.classList.add('error');
-  messageDiv.dataset.id = Date.now();
+function appendUser(text) {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg-user';
+  const b = document.createElement('div');
+  b.className = 'bubble-user';
+  b.textContent = text;
+  wrap.appendChild(b);
+  $('messages').appendChild(wrap);
+  scrollBottom();
+}
 
-  // ── Assistant: AI header badge + card + metadata ──────────
-  if (role === 'assistant') {
-    const header = document.createElement('div');
-    header.className = 'hivemind-ai-header';
-    header.innerHTML = `
-      <div class="hivemind-ai-header-icon">
-        <svg viewBox="0 0 10 10"><path d="M5 0l1.5 3.5L10 5 6.5 6.5 5 10 3.5 6.5 0 5l3.5-1.5z"/></svg>
+function appendStreamingAi() {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg-ai';
+  wrap.innerHTML = `
+    <div class="ai-header">
+      <div class="ai-avatar"><img src="Hivemind_extension.png" alt="" /></div>
+      <span class="ai-name">HIVE</span>
+      <span class="ai-dot">·</span>
+      <span class="ai-model">${escapeHtml(state.model)}</span>
+    </div>
+    <div class="ai-card">
+      <div class="steps-toggle hidden" data-open="0">
+        <span>⚙</span> <span class="steps-count">0</span> steps
+        <span class="steps-caret">›</span>
       </div>
-      <span>HIVE</span>
-      <span style="opacity:0.5">·</span>
-      <span style="opacity:0.6">GPT-OSS 120B</span>
-    `;
-    messageDiv.appendChild(header);
-  }
+      <div class="steps-list hidden"></div>
+      <div class="ai-text">
+        <div class="thinking">
+          <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+        </div>
+      </div>
+    </div>`;
+  $('messages').appendChild(wrap);
 
-  const contentDiv = document.createElement('div');
-  contentDiv.className = 'hivemind-message-content';
-  contentDiv.textContent = content;
-  messageDiv.appendChild(contentDiv);
+  const toggle = wrap.querySelector('.steps-toggle');
+  toggle.addEventListener('click', () => {
+    const list = wrap.querySelector('.steps-list');
+    list.classList.toggle('hidden');
+    toggle.dataset.open = list.classList.contains('hidden') ? '0' : '1';
+  });
 
-  // ── Metadata footer for assistant ────────────────────────
-  if (role === 'assistant' && (metadata.sources || metadata.tokenInfo)) {
-    const metaDiv = document.createElement('div');
-    metaDiv.className = 'hivemind-message-meta';
-
-    // Sources row
-    if (metadata.sources && metadata.sources.length > 0) {
-      const sourcesRow = document.createElement('div');
-      sourcesRow.className = 'hivemind-sources-row';
-      const sourceCount = metadata.sources.length;
-      sourcesRow.innerHTML = `
-        <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 6h8M2 3h8M2 9h5"/></svg>
-        <span>${sourceCount} SOURCE${sourceCount > 1 ? 'S' : ''} USED</span>
-        <span class="hivemind-sources-arrow">›</span>
-      `;
-      metaDiv.appendChild(sourcesRow);
-    }
-
-    // Token row
-    const tokensRow = document.createElement('div');
-    tokensRow.className = 'hivemind-tokens-row';
-    const promptTokens = metadata.promptTokens || Math.round(content.length / 4);
-    const completionTokens = metadata.completionTokens || Math.round(content.length / 3.5);
-    const totalTokens = metadata.totalTokens || (promptTokens + completionTokens);
-    tokensRow.innerHTML = `
-      <span><span class="hivemind-token-dot prompt"></span>${promptTokens} prompt</span>
-      <span><span class="hivemind-token-dot completion"></span>${completionTokens} completion</span>
-      <span><span class="hivemind-token-dot total"></span>${totalTokens} total</span>
-    `;
-    metaDiv.appendChild(tokensRow);
-
-    messageDiv.appendChild(metaDiv);
-  }
-
-  // ── Legacy sources badge (fallback) ───────────────────────
-  if (metadata.sources && metadata.sources.length > 0 && !messageDiv.querySelector('.hivemind-message-meta')) {
-  messagesContainer.appendChild(messageDiv);
-  scrollToBottom();
-  
-  return messageDiv.dataset.id;
+  scrollBottom();
+  return wrap;
 }
 
-function addThinkingMessage() {
-  const thinkingDiv = document.createElement('div');
-  thinkingDiv.className = 'hivemind-message assistant';
-  const thinkingId = Date.now();
-  thinkingDiv.dataset.id = thinkingId;
-  
-  const contentDiv = document.createElement('div');
-  contentDiv.className = 'hivemind-thinking';
-  contentDiv.innerHTML = '<div class="hivemind-thinking-dot"></div><div class="hivemind-thinking-dot"></div><div class="hivemind-thinking-dot"></div>';
-  
-  thinkingDiv.appendChild(contentDiv);
-  messagesContainer.appendChild(thinkingDiv);
-  scrollToBottom();
-  
-  return thinkingId;
-}
+function finalizeStreamingAi(wrap, reply) {
+  const text = (reply.reply || reply.response || '').trim();
+  const sources = Array.isArray(reply?.sources) ? reply.sources : [];
+  const promptTok = reply?.usage?.prompt_tokens ?? null;
+  const compTok = reply?.usage?.completion_tokens ?? null;
+  const totalTok = (promptTok != null && compTok != null) ? promptTok + compTok : (reply?.usage?.total_tokens ?? null);
 
-function removeMessage(messageId) {
-  const message = messagesContainer.querySelector(`[data-id="${messageId}"]`);
-  if (message) {
-    message.remove();
-  }
-}
+  wrap.querySelector('.ai-text').innerHTML = escapeHtml(text);
 
-function scrollToBottom() {
-  messagesContainer.scrollTop = messagesContainer.scrollHeight;
-}
+  if (sources.length || totalTok != null) {
+    const card = wrap.querySelector('.ai-card');
+    const sourcesId = 'src-' + Math.random().toString(36).slice(2, 8);
+    const metaHtml = `
+      <hr class="ai-divider" />
+      <div class="ai-meta">
+        ${sources.length ? `
+          <span class="sources-toggle" data-target="${sourcesId}">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+            ${sources.length} sources used <span style="font-size:9px;">›</span>
+          </span>
+        ` : ''}
+        ${promptTok != null ? `<span><span class="tok-dot blue"></span> ${promptTok} prompt</span>` : ''}
+        ${compTok != null ? `<span><span class="tok-dot green"></span> ${compTok} completion</span>` : ''}
+        ${totalTok != null ? `<span>· ${totalTok} total</span>` : ''}
+      </div>
+      ${sources.length ? `<div class="sources-list hidden" id="${sourcesId}">
+        ${sources.slice(0, 10).map(s => `
+          <div class="source-item">
+            <div class="source-title">${escapeHtml(s.title || 'Memory')}</div>
+            ${s.snippet ? `<div>${escapeHtml((s.snippet || '').slice(0, 160))}</div>` : ''}
+          </div>
+        `).join('')}
+      </div>` : ''}`;
+    const div = document.createElement('div');
+    div.innerHTML = metaHtml;
+    while (div.firstChild) card.appendChild(div.firstChild);
 
-function autoResize() {
-  messageInput.style.height = 'auto';
-  messageInput.style.height = Math.min(messageInput.scrollHeight, 120) + 'px';
-}
-
-// ── Action Execution ──────────────────────────────────────────
-async function executeActions(actions) {
-  for (const action of actions) {
-    addMessage('system', `Executing: ${action.type} ${action.target || ''}`);
-    
-    try {
-      const result = await chrome.runtime.sendMessage({
-        action: 'executeAction',
-        actionType: action.type,
-        target: action.target,
-        value: action.value,
-        tabId: currentTabId,
+    const toggle = wrap.querySelector('.sources-toggle');
+    if (toggle) {
+      toggle.addEventListener('click', () => {
+        const list = wrap.querySelector('#' + toggle.dataset.target);
+        if (list) list.classList.toggle('hidden');
       });
-      
-      if (result?.success) {
-        addMessage('system', `✓ Action completed: ${action.type}`);
-      } else {
-        throw new Error(result?.error || 'Action failed');
-      }
-    } catch (err) {
-      addMessage('system', `✗ Action failed: ${err.message}`, { isError: true });
     }
   }
+
+  scrollBottom();
 }
 
-// ── Background Message Handler ────────────────────────────────
-function handleBackgroundMessage(message, sender, sendResponse) {
-  switch (message.action) {
-    case 'newMessage':
-      // Background notifying of new message (for badge update)
-      if (message.message) {
-        addMessage(message.role || 'assistant', message.message);
-      }
-      sendResponse({ received: true });
-      break;
-    
-    case 'contextCaptured':
-      // Background notifying context was captured
-      if (message.context) {
-        currentPageContext = message.context;
-        captureButton.classList.add('captured');
-        captureButton.textContent = '✓ Captured';
-      }
-      sendResponse({ received: true });
-      break;
-    
-    default:
-      sendResponse({ error: 'Unknown action' });
+function briefArgs(rawArgs) {
+  if (!rawArgs) return '';
+  let obj = rawArgs;
+  if (typeof rawArgs === 'string') {
+    try { obj = JSON.parse(rawArgs); } catch { return rawArgs.slice(0, 60); }
   }
-  
-  return true; // Keep channel open for async response
+  if (obj && typeof obj === 'object') {
+    if (obj.query) return `"${String(obj.query).slice(0, 50)}"`;
+    if (obj.url) return obj.url;
+    if (obj.title) return `"${obj.title.slice(0, 40)}"`;
+    if (obj.memory_id) return obj.memory_id.slice(0, 8);
+    if (obj.id) return obj.id.slice(0, 8);
+  }
+  return '';
 }
 
-// ── Connection Status ─────────────────────────────────────────
-function updateConnectionStatus() {
-  // First check if API key is configured
-  chrome.runtime.sendMessage({ action: 'getConfig' })
-    .then(config => {
-      if (!config?.apiKey || config.apiKey.length === 0) {
-        statusIndicator.classList.add('disconnected');
-        statusText.textContent = 'Not Configured';
-        return;
-      }
-      
-      // Check if backend is reachable
-      return fetch('https://core.hivemind.davinciai.eu:8050/health')
-        .then(res => {
-          if (res.ok) {
-            statusIndicator.classList.remove('disconnected');
-            statusText.textContent = 'Connected';
-          } else {
-            throw new Error('Backend unhealthy');
-          }
-        });
-    })
-    .catch(() => {
-      statusIndicator.classList.add('disconnected');
-      statusText.textContent = 'Offline';
+function appendThinking() {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg-ai';
+  wrap.innerHTML = `
+    <div class="ai-header">
+      <div class="ai-avatar"><img src="Hivemind_extension.png" alt="" /></div>
+      <span class="ai-name">HIVE</span>
+      <span class="ai-dot">·</span>
+      <span class="ai-model">${escapeHtml(state.model)}</span>
+    </div>
+    <div class="ai-card">
+      <div class="thinking">
+        <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+      </div>
+    </div>`;
+  $('messages').appendChild(wrap);
+  scrollBottom();
+  return wrap;
+}
+
+function appendAssistant(reply) {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg-ai';
+
+  const sources = Array.isArray(reply?.sources) ? reply.sources : [];
+  const promptTok = reply?.usage?.prompt_tokens ?? reply?.prompt_tokens ?? null;
+  const compTok = reply?.usage?.completion_tokens ?? reply?.completion_tokens ?? null;
+  const totalTok = (promptTok != null && compTok != null) ? promptTok + compTok : (reply?.usage?.total_tokens ?? null);
+
+  const sourcesId = 'src-' + Math.random().toString(36).slice(2, 8);
+
+  wrap.innerHTML = `
+    <div class="ai-header">
+      <div class="ai-avatar"><img src="Hivemind_extension.png" alt="" /></div>
+      <span class="ai-name">HIVE</span>
+      <span class="ai-dot">·</span>
+      <span class="ai-model">${escapeHtml(state.model)}</span>
+    </div>
+    <div class="ai-card">
+      <div class="ai-text">${formatReply(reply?.reply || '')}</div>
+      ${(sources.length || totalTok != null) ? `
+        <hr class="ai-divider" />
+        <div class="ai-meta">
+          ${sources.length ? `
+            <span class="sources-toggle" data-target="${sourcesId}">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+              ${sources.length} sources used <span style="font-size:9px;">›</span>
+            </span>
+          ` : ''}
+          ${promptTok != null ? `<span><span class="tok-dot blue"></span> ${promptTok} prompt</span>` : ''}
+          ${compTok != null ? `<span><span class="tok-dot green"></span> ${compTok} completion</span>` : ''}
+          ${totalTok != null ? `<span>· ${totalTok} total</span>` : ''}
+        </div>
+        ${sources.length ? `<div class="sources-list hidden" id="${sourcesId}">
+          ${sources.slice(0, 10).map(s => `
+            <div class="source-item">
+              <div class="source-title">${escapeHtml(s.title || s.memory_title || 'Memory')}</div>
+              ${s.snippet || s.content ? `<div>${escapeHtml((s.snippet || s.content).slice(0, 160))}</div>` : ''}
+            </div>
+          `).join('')}
+        </div>` : ''}
+      ` : ''}
+    </div>`;
+
+  $('messages').appendChild(wrap);
+
+  const toggle = wrap.querySelector('.sources-toggle');
+  if (toggle) {
+    toggle.addEventListener('click', () => {
+      const list = wrap.querySelector('#' + toggle.dataset.target);
+      if (list) list.classList.toggle('hidden');
     });
-  
-  // Re-check every 30 seconds
-  setTimeout(updateConnectionStatus, 30000);
+  }
+  scrollBottom();
 }
 
-// ── Initialize on Load ────────────────────────────────────────
-init();
+function appendError(msg) {
+  const el = document.createElement('div');
+  el.className = 'err-msg';
+  el.textContent = msg;
+  $('messages').appendChild(el);
+  scrollBottom();
+}
+
+function scrollBottom() {
+  const m = $('messages');
+  m.scrollTop = m.scrollHeight;
+}
+
+function escapeHtml(s) {
+  const div = document.createElement('div');
+  div.textContent = s == null ? '' : String(s);
+  return div.innerHTML;
+}
+
+function formatReply(s) {
+  return escapeHtml(s);
+}

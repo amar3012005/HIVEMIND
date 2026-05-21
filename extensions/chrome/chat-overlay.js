@@ -481,6 +481,8 @@
       throw err;
     }
   }
+
+  async function saveChatToMemory(userMessage, aiResponse) {
     try {
       const context = currentPageContext;
       const content = `Q: ${userMessage}\nA: ${aiResponse.reply}`;
@@ -523,6 +525,125 @@
     return 'web';
   }
   
+  // ── Section Picker (drawer mode) ─────────────────────
+  const SECTION_TAGS = new Set(['ARTICLE','SECTION','MAIN','ASIDE','NAV','LI','BLOCKQUOTE','PRE','TABLE','FIGURE']);
+  const BLOCK_ROLES = new Set(['article','region','main','complementary','listitem','figure']);
+  let pickerActive = false;
+  let hoverEl = null;
+  let overlay = null;
+
+  function ensureOverlay() {
+    if (overlay) return overlay;
+    overlay = document.createElement('div');
+    overlay.id = '__hivemind-section-overlay';
+    overlay.style.cssText = 'position:fixed;pointer-events:none;border:2px dashed #117dff;border-radius:6px;background:rgba(17,125,255,0.06);z-index:2147483646;transition:all 0.08s ease-out;display:none;';
+    document.documentElement.appendChild(overlay);
+    const label = document.createElement('div');
+    label.id = '__hivemind-section-label';
+    label.style.cssText = 'position:fixed;z-index:2147483647;pointer-events:none;background:#117dff;color:white;font:600 11px/1.4 -apple-system,sans-serif;padding:4px 10px;border-radius:999px;box-shadow:0 2px 8px rgba(17,125,255,0.4);display:none;';
+    label.textContent = '📌 Click to capture · Esc to cancel';
+    document.documentElement.appendChild(label);
+    return overlay;
+  }
+
+  function isBlockCandidate(el) {
+    if (!el || !el.tagName) return false;
+    if (SECTION_TAGS.has(el.tagName)) return true;
+    const role = el.getAttribute('role');
+    if (role && BLOCK_ROLES.has(role.toLowerCase())) return true;
+    if (el.tagName === 'DIV' || el.tagName === 'P') {
+      const r = el.getBoundingClientRect();
+      const text = (el.innerText || '').trim();
+      if (r.height >= 60 && r.width >= 100 && text.length >= 40 && text.length <= 8000) return true;
+    }
+    return false;
+  }
+
+  function findBlockAncestor(el) {
+    let cur = el; let hops = 0;
+    while (cur && cur !== document.body && hops < 8) {
+      if (isBlockCandidate(cur)) return cur;
+      cur = cur.parentElement; hops++;
+    }
+    return el;
+  }
+
+  function paintOverlay(el) {
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    overlay.style.display = 'block';
+    overlay.style.left = r.left + 'px';
+    overlay.style.top = r.top + 'px';
+    overlay.style.width = r.width + 'px';
+    overlay.style.height = r.height + 'px';
+    const label = document.getElementById('__hivemind-section-label');
+    label.style.display = 'block';
+    label.style.left = Math.max(8, r.left) + 'px';
+    label.style.top = Math.max(8, r.top - 30) + 'px';
+  }
+
+  function clearOverlay() {
+    if (overlay) overlay.style.display = 'none';
+    const label = document.getElementById('__hivemind-section-label');
+    if (label) label.style.display = 'none';
+  }
+
+  function onMove(e) {
+    if (!pickerActive) return;
+    const target = document.elementFromPoint(e.clientX, e.clientY);
+    if (!target || target === overlay) return;
+    const block = findBlockAncestor(target);
+    if (block !== hoverEl) { hoverEl = block; paintOverlay(hoverEl); }
+  }
+
+  function nearestHeading(el) {
+    let cur = el;
+    while (cur && cur !== document.body) {
+      const h = cur.querySelector?.('h1, h2, h3, h4');
+      if (h && h.innerText) return h.innerText.trim();
+      cur = cur.parentElement;
+    }
+    return null;
+  }
+
+  function onClick(e) {
+    if (!pickerActive) return;
+    e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+    if (!hoverEl) { stopPicker(); return; }
+    const text = (hoverEl.innerText || '').trim().slice(0, 8000);
+    const heading = nearestHeading(hoverEl) || document.title;
+    const tag = hoverEl.tagName.toLowerCase();
+    const id = hoverEl.id || null;
+    const cls = (hoverEl.className && typeof hoverEl.className === 'string')
+      ? hoverEl.className.split(/\s+/).filter(Boolean).slice(0, 3).join('.') : null;
+    const selector = id ? `#${id}` : (cls ? `${tag}.${cls}` : tag);
+    const section = { mode: 'section', text, heading, url: location.href, title: document.title, selector, length: text.length };
+    try { chrome.runtime.sendMessage({ action: 'sectionPicked', section }); } catch {}
+    stopPicker();
+  }
+
+  function onKey(e) { if (e.key === 'Escape' && pickerActive) stopPicker(); }
+
+  function startPicker() {
+    if (pickerActive) return;
+    pickerActive = true;
+    ensureOverlay();
+    document.addEventListener('mousemove', onMove, true);
+    document.addEventListener('click', onClick, true);
+    document.addEventListener('keydown', onKey, true);
+    document.body.style.cursor = 'crosshair';
+  }
+
+  function stopPicker() {
+    pickerActive = false; hoverEl = null; clearOverlay();
+    document.removeEventListener('mousemove', onMove, true);
+    document.removeEventListener('click', onClick, true);
+    document.removeEventListener('keydown', onKey, true);
+    document.body.style.cursor = '';
+  }
+
+  window.__hivemindStartSectionPicker = startPicker;
+
   // ── Initialize on Load ───────────────────────────────
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);

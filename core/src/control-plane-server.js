@@ -1342,12 +1342,16 @@ const server = http.createServer(async (req, res) => {
     if (!callback || !state) {
       return jsonResponse(res, { error: 'callback and state required' }, 400);
     }
-    // Localhost-only — prevents token exfiltration to external sites.
+    // Loopback-only or Chrome extension chromiumapp.org redirect.
+    // Both are safe targets the OS/browser routes back to the originating
+    // process — token cannot leak to a remote host.
     let parsedCb;
     try { parsedCb = new URL(callback); } catch { return jsonResponse(res, { error: 'invalid callback URL' }, 400); }
     const cbHost = parsedCb.hostname;
-    if (cbHost !== '127.0.0.1' && cbHost !== 'localhost' && cbHost !== '::1') {
-      return jsonResponse(res, { error: 'callback must be 127.0.0.1/localhost — refusing to redirect token to remote host' }, 400);
+    const isLoopback = cbHost === '127.0.0.1' || cbHost === 'localhost' || cbHost === '::1';
+    const isChromeExt = cbHost.endsWith('.chromiumapp.org') && parsedCb.protocol === 'https:';
+    if (!isLoopback && !isChromeExt) {
+      return jsonResponse(res, { error: 'callback must be 127.0.0.1/localhost or *.chromiumapp.org — refusing to redirect token to remote host' }, 400);
     }
 
     const current = await getCurrentSession(req);

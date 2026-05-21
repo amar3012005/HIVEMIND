@@ -167,6 +167,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.action === 'chatMessageStream') {
+    // SSE chat — side panel listens for chunks via runtime.onMessage
+    handleChatStream(message, sender).catch(err => {
+      try { chrome.runtime.sendMessage({ action: 'chatStreamChunk', streamId: message.streamId, event: { type: 'error', error: err.message } }); } catch {}
+    });
+    sendResponse({ ok: true });
+    return false;
+  }
+
   if (message.action === 'captureAISession') {
     // Explicit request to capture AI chat session
     getConfig().then(async config => {
@@ -255,7 +264,220 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     });
     return false;
   }
+
+  if (message.action === 'signIn') {
+    handleSignIn(message.apiBase).then(sendResponse).catch(err => {
+      sendResponse({ success: false, error: err.message });
+    });
+    return true;
+  }
+
+  if (message.action === 'signOut') {
+    chrome.storage.local.remove(['apiKey', 'apiBase', 'userId', 'userEmail', 'orgId']).then(() => {
+      sendResponse({ success: true });
+    });
+    return true;
+  }
+
+  if (message.action === 'getSelectionContext') {
+    getSelectionContext().then(sendResponse).catch(() => sendResponse(null));
+    return true;
+  }
+
+  if (message.action === 'startSectionPicker') {
+    startSectionPicker().then(sendResponse).catch(err => sendResponse({ error: err.message }));
+    return true;
+  }
+
+  if (message.action === 'sectionPicked') {
+    // Forwarded from content script — broadcast to side panel.
+    try { chrome.runtime.sendMessage({ action: 'sectionContextReady', section: message.section }); } catch {}
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message.action === 'openSidePanel') {
+    (async () => {
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (tab) await chrome.sidePanel.open({ tabId: tab.id });
+        sendResponse({ success: true });
+      } catch (err) {
+        sendResponse({ success: false, error: err.message });
+      }
+    })();
+    return true;
+  }
 });
+
+// ── Selection + Section context capture ───────────────────
+
+async function getSelectionContext() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) return null;
+  try {
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => {
+        const sel = (window.getSelection?.() || '').toString().trim();
+        if (!sel || sel.length < 12) return null;
+        return {
+          mode: 'selection',
+          text: sel.slice(0, 6000),
+          url: location.href,
+          title: document.title,
+          length: sel.length,
+        };
+      },
+    });
+    return result || null;
+  } catch {
+    return null;
+  }
+}
+
+async function startSectionPicker() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) throw new Error('no active tab');
+  await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: () => { try { window.__hivemindStartSectionPicker?.(); } catch (e) {} },
+  });
+  return { ok: true };
+}
+
+// ── Chat SSE stream (ReAct agent tool timeline) ───────────
+
+async function handleChatStream(message, sender) {
+  const config = await getConfig();
+  if (!config.apiKey) throw new Error('Not signed in');
+
+  const { streamId, message: userMessage, history = [], context = null } = message;
+
+  const emit = (event) => {
+    try {
+      chrome.runtime.sendMessage({ action: 'chatStreamChunk', streamId, event });
+    } catch {}
+  };
+
+  let fullMessage = userMessage;
+  if (context) {
+    if (context.mode === 'selection') {
+      fullMessage =
+        `<METADATA:SELECTION>\n` +
+        `URL: ${context.url}\nTitle: ${context.title}\n` +
+        `User is asking about THIS SELECTED TEXT only (not the full page):\n${(context.text || '').slice(0, 6000)}\n` +
+        `</METADATA:SELECTION>\n\n${userMessage}`;
+    } else if (context.mode === 'section') {
+      fullMessage =
+        `<METADATA:SECTION>\n` +
+        `URL: ${context.url}\nTitle: ${context.title}\n` +
+        `Section: ${context.heading || context.selector || 'unnamed'}\n` +
+        `User is asking about THIS PAGE SECTION only:\n${(context.text || '').slice(0, 6000)}\n` +
+        `</METADATA:SECTION>\n\n${userMessage}`;
+    } else if (context.mode === 'page' || context.url) {
+      // Whole page — re-extract live to keep payload fresh
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (tab?.id) {
+          await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['extractors.js'] });
+          const [{ result: ex }] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => smartExtract() });
+          fullMessage =
+            `<METADATA:BROWSER_CONTEXT>\n` +
+            `URL: ${tab.url}\nTitle: ${tab.title}\n` +
+            `Page:\n${(ex?.content || '').slice(0, 6000)}\n` +
+            `</METADATA:BROWSER_CONTEXT>\n\n${userMessage}`;
+        }
+      } catch {}
+    } else if (context.textContent) {
+      fullMessage = `<METADATA:BROWSER_CONTEXT>\nURL: ${context.url}\nTitle: ${context.title}\nPage:\n${context.textContent.slice(0, 4000)}\n</METADATA:BROWSER_CONTEXT>\n\n${userMessage}`;
+    }
+  }
+
+  const resp = await fetch(`${config.apiBase}/api/chat`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-API-Key': config.apiKey,
+      Accept: 'text/event-stream',
+    },
+    body: JSON.stringify({
+      message: fullMessage,
+      history,
+      stream: true,
+      browser_origin: Boolean(context),
+    }),
+  });
+
+  if (!resp.ok || !resp.body) {
+    emit({ type: 'error', error: `HTTP ${resp.status}` });
+    return;
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf('\n\n')) >= 0) {
+      const frame = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      const line = frame.split('\n').find((l) => l.startsWith('data:'));
+      if (!line) continue;
+      const payload = line.slice(5).trim();
+      try { emit(JSON.parse(payload)); } catch {}
+    }
+  }
+}
+
+// ── OAuth Sign-in (browser flow, like @hivemind/cli) ───────
+
+async function handleSignIn(apiBaseOverride) {
+  const apiBase = apiBaseOverride || 'https://api.hivemind.davinciai.eu:8040';
+  const redirectUri = chrome.identity.getRedirectURL('cb');
+  const state = crypto.randomUUID().replace(/-/g, '');
+
+  const startUrl = `${apiBase}/auth/cli/start?callback=${encodeURIComponent(redirectUri)}&state=${state}`;
+
+  const finalUrl = await new Promise((resolve, reject) => {
+    chrome.identity.launchWebAuthFlow(
+      { url: startUrl, interactive: true },
+      (responseUrl) => {
+        if (chrome.runtime.lastError || !responseUrl) {
+          reject(new Error(chrome.runtime.lastError?.message || 'auth cancelled'));
+        } else {
+          resolve(responseUrl);
+        }
+      }
+    );
+  });
+
+  const parsed = new URL(finalUrl);
+  const token = parsed.searchParams.get('token');
+  const echoState = parsed.searchParams.get('state');
+  const userEmail = parsed.searchParams.get('user_email') || '';
+  const userId = parsed.searchParams.get('user_id') || '';
+  const orgId = parsed.searchParams.get('org_id') || '';
+
+  if (!token) throw new Error('no token in callback');
+  if (echoState !== state) throw new Error('state mismatch — possible CSRF');
+
+  // core API base for memory/chat ops
+  const coreApiBase = 'https://core.hivemind.davinciai.eu:8050';
+  await chrome.storage.local.set({
+    apiKey: token,
+    apiBase: coreApiBase,
+    controlPlaneBase: apiBase,
+    userEmail,
+    userId,
+    orgId,
+  });
+
+  return { success: true, userEmail, userId, orgId };
+}
 
 // ── API Functions ───────────────────────────────────────
 
@@ -416,9 +638,11 @@ async function sendCommand(tabId, method, params = {}) {
 // ── AI Chat Session Capture (CDP Automation) ────────────
 
 /**
- * Execute fill action via CDP (contenteditable or textarea)
+ * Execute fill action via CDP using a CSS selector (contenteditable or textarea).
+ * Pure-selector form. The action dispatcher uses executeFill (defined below) which
+ * also resolves @e<N> element-refs.
  */
-async function executeFill(tabId, selector, value) {
+async function executeFillSelector(tabId, selector, value) {
   try {
     const result = await sendCommand(tabId, 'Runtime.evaluate', {
       expression: `
@@ -471,7 +695,7 @@ async function executeFill(tabId, selector, value) {
     
     return result.result?.value || { success: true };
   } catch (err) {
-    console.error('[executeFill]', err);
+    console.error('[executeFillSelector]', err);
     throw err;
   }
 }

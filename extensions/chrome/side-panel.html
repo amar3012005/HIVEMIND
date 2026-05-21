@@ -1,853 +1,418 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>HIVEMIND Chat</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Talk to HIVE</title>
   <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-
+    * { margin: 0; padding: 0; box-sizing: border-box; }
     :root {
-      --primary: #117dff;
-      --primary-dark: #006ae6;
-      --bg: #f7f7f5;
+      --bg: #faf9f4;
       --surface: #ffffff;
-      --border: #e5e5e0;
-      --text: #1a1a1a;
-      --text-secondary: #6b6b6b;
-      --error: #ef4444;
-      --success: #22c55e;
-      --user-bg: #007aff;
+      --border: #ece9e2;
+      --text: #0a0a0a;
+      --muted: #8a8a8a;
+      --primary: #117dff;
+      --user-bg: #117dff;
       --user-text: #ffffff;
-      --assistant-bg: #ffffff;
-      --assistant-text: #1a1a1a;
-      --system-bg: #fef3c7;
-      --system-text: #92400e;
     }
-
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --primary: #117dff;
-        --primary-dark: #006ae6;
-        --bg: #0a0a0a;
-        --surface: #171717;
-        --border: #262626;
-        --text: #fafafa;
-        --text-secondary: #a3a3a3;
-        --error: #f87171;
-        --success: #34d399;
-        --user-bg: #117dff;
-        --user-text: #ffffff;
-        --assistant-bg: #171717;
-        --assistant-text: #fafafa;
-        --system-bg: #451a03;
-        --system-text: #fef3c7;
-      }
-    }
-
+    html, body { height: 100%; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-      background: transparent;
+      font-family: 'Inter', 'Segoe UI', -apple-system, sans-serif;
+      background: var(--bg);
       color: var(--text);
-      height: 100vh;
       display: flex;
       flex-direction: column;
+      height: 100vh;
       overflow: hidden;
-      animation: slideIn 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+      font-size: 14px;
+      -webkit-font-smoothing: antialiased;
     }
 
-    @keyframes slideIn {
-      from {
-        transform: translateX(100%);
-        opacity: 0;
-      }
-      to {
-        transform: translateX(0);
-        opacity: 1;
-      }
-    }
-
-    /* Header */
-    .hivemind-header {
-      background: var(--bg);
+    /* ── Header ───────────────── */
+    .topbar {
+      display: flex; align-items: center; gap: 10px;
+      padding: 12px 16px;
       border-bottom: 1px solid var(--border);
-      padding: 10px 14px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
+      background: rgba(255,255,255,0.6);
+      backdrop-filter: blur(8px);
       flex-shrink: 0;
     }
-
-    .hivemind-logo {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      font-weight: 600;
-      font-size: 14px;
-      color: var(--text);
+    .topbar .brand {
+      display: flex; align-items: center; gap: 8px;
+      font-weight: 700; font-size: 13px;
+      letter-spacing: -0.01em;
     }
-
-    .hivemind-logo-icon {
-      width: 22px;
-      height: 22px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
+    .brand-icon {
+      width: 24px; height: 24px; border-radius: 7px;
+      background: rgba(17,125,255,0.08);
+      border: 1px solid rgba(17,125,255,0.18);
+      display: flex; align-items: center; justify-content: center;
     }
-
-    .hivemind-logo-icon img {
-      width: 22px;
-      height: 22px;
-      display: block;
-      border-radius: 4px;
+    .brand-icon img { width: 14px; height: 14px; }
+    .topbar .user {
+      margin-left: auto;
+      font-size: 11px; color: var(--muted);
+      font-family: 'SF Mono', monospace;
     }
-
-    .hivemind-status {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 11px;
-      font-weight: 500;
-      color: var(--text-secondary);
+    .topbar .icon-btn {
+      background: transparent; border: none; cursor: pointer;
+      color: var(--muted); padding: 4px;
+      border-radius: 6px;
     }
+    .topbar .icon-btn:hover { background: rgba(0,0,0,0.04); color: var(--text); }
 
-    .hivemind-status-indicator {
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: var(--success);
-      animation: pulse 2s infinite;
-    }
-
-    .hivemind-status-indicator.disconnected {
-      background: var(--error);
-      animation: none;
-    }
-
-    /* Messages Container */
-    .hivemind-messages {
+    /* ── Messages area ─────────── */
+    .messages {
       flex: 1;
       overflow-y: auto;
-      padding: 16px;
+      padding: 20px 18px;
       display: flex;
       flex-direction: column;
-      gap: 16px;
-      background: var(--bg);
+      gap: 18px;
     }
+    .messages::-webkit-scrollbar { width: 6px; }
+    .messages::-webkit-scrollbar-thumb { background: #d4d0ca; border-radius: 3px; }
 
-    .hivemind-messages::-webkit-scrollbar {
-      width: 4px;
-    }
-
-    .hivemind-messages::-webkit-scrollbar-track {
-      background: transparent;
-    }
-
-    .hivemind-messages::-webkit-scrollbar-thumb {
-      background: var(--border);
-      border-radius: 2px;
-    }
-
-    /* Welcome Message */
-    .hivemind-welcome {
-      text-align: center;
-      padding: 40px 20px;
-      color: var(--text-secondary);
-    }
-
-    .hivemind-welcome-title {
-      font-size: 18px;
-      font-weight: 600;
-      color: var(--text);
-      margin-bottom: 8px;
-    }
-
-    .hivemind-welcome-text {
-      font-size: 13px;
-      margin-bottom: 20px;
-      line-height: 1.5;
-    }
-
-    .hivemind-welcome-examples {
+    /* signed-out / empty hero */
+    .hero {
+      flex: 1;
       display: flex;
       flex-direction: column;
-      gap: 8px;
-      text-align: left;
-      max-width: 300px;
-      margin: 0 auto;
-    }
-
-    .hivemind-example {
-      font-size: 12px;
-      padding: 8px 12px;
-      background: var(--surface);
-      border-radius: 8px;
-      border: 1px solid var(--border);
-    }
-
-    /* ── Message Structure ─────────────────────────── */
-
-    .hivemind-message {
-      display: flex;
-      flex-direction: column;
-      max-width: 100%;
-      animation: fadeUp 0.25s ease-out;
-    }
-
-    @keyframes fadeUp {
-      from { opacity: 0; transform: translateY(6px); }
-      to   { opacity: 1; transform: translateY(0); }
-    }
-
-    /* User message — right aligned blue pill */
-    .hivemind-message.user {
-      align-items: flex-end;
-      align-self: flex-end;
-    }
-
-    .hivemind-message.user .hivemind-message-content {
-      background: var(--user-bg);
-      color: var(--user-text);
-      border-radius: 18px;
-      border-bottom-right-radius: 4px;
-      padding: 10px 14px;
-      font-size: 14px;
-      line-height: 1.45;
-      word-wrap: break-word;
-      max-width: 85%;
-      box-shadow: 0 1px 2px rgba(0,122,255,0.25);
-    }
-
-    /* Assistant message — left aligned white card */
-    .hivemind-message.assistant {
-      align-items: flex-start;
-      align-self: flex-start;
-      width: 100%;
-    }
-
-    .hivemind-message.assistant .hivemind-message-content {
-      background: var(--assistant-bg);
-      color: var(--assistant-text);
-      border-radius: 12px;
-      padding: 14px 16px;
-      font-size: 14px;
-      line-height: 1.5;
-      word-wrap: break-word;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
-      border: 1px solid var(--border);
-    }
-
-    /* AI Header Badge */
-    .hivemind-ai-header {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      margin-bottom: 8px;
-      font-size: 11px;
-      font-weight: 500;
-      color: var(--text-secondary);
-      letter-spacing: 0.3px;
-      text-transform: uppercase;
-    }
-
-    .hivemind-ai-header-icon {
-      width: 16px;
-      height: 16px;
-      border-radius: 50%;
-      background: var(--primary);
-      display: flex;
       align-items: center;
       justify-content: center;
-      flex-shrink: 0;
-    }
-
-    .hivemind-ai-header-icon svg {
-      width: 10px;
-      height: 10px;
-      fill: white;
-    }
-
-    /* Metadata Footer (sources, tokens) */
-    .hivemind-message-meta {
-      margin-top: 10px;
-      padding-top: 10px;
-      border-top: 1px solid var(--border);
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-
-    .hivemind-sources-row {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 11px;
-      font-weight: 500;
-      color: var(--text-secondary);
-      cursor: pointer;
-      transition: color 0.15s;
-    }
-
-    .hivemind-sources-row:hover {
-      color: var(--text);
-    }
-
-    .hivemind-sources-row svg {
-      width: 12px;
-      height: 12px;
-      opacity: 0.6;
-    }
-
-    .hivemind-sources-arrow {
-      margin-left: 2px;
-      font-size: 10px;
-    }
-
-    .hivemind-tokens-row {
-      display: flex;
       gap: 14px;
+      padding: 32px 24px;
+      text-align: center;
+    }
+    .hero-title { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
+    .hero-sub { font-size: 13px; color: var(--muted); line-height: 1.55; max-width: 280px; }
+    .hero-btn {
+      margin-top: 8px;
+      background: var(--primary); color: white;
+      border: none; padding: 11px 20px;
+      border-radius: 10px; font-weight: 600;
+      cursor: pointer; font-size: 13px;
+      box-shadow: 0 2px 8px rgba(17,125,255,0.25);
+    }
+    .hero-btn:hover { background: #0066e0; }
+
+    /* user bubble (right) */
+    .msg-user {
+      align-self: flex-end;
+      max-width: 80%;
+    }
+    .bubble-user {
+      background: var(--user-bg);
+      color: var(--user-text);
+      padding: 10px 16px;
+      border-radius: 20px;
+      font-size: 14px;
+      line-height: 1.5;
+      word-wrap: break-word;
+      box-shadow: 0 1px 2px rgba(17,125,255,0.18);
+    }
+
+    /* assistant card (left) */
+    .msg-ai { align-self: flex-start; max-width: 92%; width: 100%; }
+    .ai-header {
+      display: flex; align-items: center; gap: 8px;
+      margin-bottom: 6px;
+      padding: 0 4px;
+    }
+    .ai-avatar {
+      width: 22px; height: 22px; border-radius: 50%;
+      background: rgba(17,125,255,0.1);
+      border: 1px solid rgba(17,125,255,0.2);
+      display: flex; align-items: center; justify-content: center;
+    }
+    .ai-avatar img { width: 12px; height: 12px; }
+    .ai-name { font-size: 11px; font-weight: 700; letter-spacing: 0.04em; }
+    .ai-model { font-size: 10.5px; color: var(--muted); font-family: 'SF Mono', monospace; }
+    .ai-dot { color: #d4d0ca; }
+
+    .ai-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 14px 16px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+    }
+    .ai-text {
+      font-size: 14px;
+      line-height: 1.6;
+      color: var(--text);
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+    .ai-divider {
+      border: none; border-top: 1px solid var(--border);
+      margin: 10px -16px 8px;
+    }
+    .ai-meta {
+      display: flex; align-items: center; gap: 10px;
+      flex-wrap: wrap;
+      font-size: 10.5px;
+      color: var(--muted);
+      font-family: 'SF Mono', monospace;
+    }
+    .sources-toggle {
+      display: inline-flex; align-items: center; gap: 5px;
+      cursor: pointer; user-select: none;
+      color: var(--muted);
+      font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+    }
+    .sources-toggle:hover { color: var(--text); }
+    .tok-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+    .tok-dot.blue { background: #93c5fd; }
+    .tok-dot.green { background: #86efac; }
+
+    .sources-list {
+      margin-top: 8px;
+      display: flex; flex-direction: column; gap: 4px;
+    }
+    .source-item {
       font-size: 11px;
-      color: var(--text-secondary);
+      padding: 6px 8px;
+      background: #f7f6f1;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: #525252;
     }
+    .source-title { font-weight: 600; color: var(--text); }
 
-    .hivemind-token-dot {
-      display: inline-block;
-      width: 6px;
-      height: 6px;
-      border-radius: 50%;
-      margin-right: 4px;
-      vertical-align: middle;
+    /* steps timeline */
+    .steps-toggle {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 11px; color: var(--muted);
+      cursor: pointer; user-select: none;
+      padding: 4px 10px; background: #f7f6f1;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      margin-bottom: 8px;
+      font-weight: 600;
     }
-
-    .hivemind-token-dot.prompt { background: #8ab4f8; }
-    .hivemind-token-dot.completion { background: #81c995; }
-    .hivemind-token-dot.total { background: #c58af9; }
-
-    /* System / Error messages */
-    .hivemind-message.system {
-      align-items: center;
-      align-self: center;
-    }
-
-    .hivemind-message.system .hivemind-message-content {
-      background: var(--system-bg);
-      color: var(--system-text);
-      font-size: 12px;
-      padding: 6px 12px;
+    .steps-toggle:hover { color: var(--text); background: #efece5; }
+    .steps-toggle[data-open="1"] .steps-caret { transform: rotate(90deg); }
+    .steps-caret { transition: transform 0.2s; display: inline-block; }
+    .steps-list {
+      display: flex; flex-direction: column; gap: 4px;
+      margin-bottom: 10px;
+      padding: 8px 10px;
+      background: #fafaf6;
+      border: 1px solid var(--border);
       border-radius: 8px;
-      max-width: 90%;
+    }
+    .step-item {
+      font-size: 11px;
+      color: #525252;
+      display: flex; gap: 6px;
+      align-items: baseline;
+      flex-wrap: wrap;
+      font-family: 'SF Mono', monospace;
+    }
+    .step-item code {
+      background: rgba(17,125,255,0.08);
+      color: #0066e0;
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-size: 10.5px;
+    }
+    .step-args { color: var(--muted); font-style: italic; }
+    .step-status { color: #16a34a; margin-left: auto; }
+
+    /* thinking */
+    .thinking {
+      display: inline-flex; gap: 4px; align-items: center;
+      padding: 6px 0;
+    }
+    .thinking .dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: #c0bcb4;
+      animation: bounce 1.2s infinite ease-in-out;
+    }
+    .thinking .dot:nth-child(2) { animation-delay: 0.15s; }
+    .thinking .dot:nth-child(3) { animation-delay: 0.3s; }
+    @keyframes bounce {
+      0%, 80%, 100% { transform: translateY(0); opacity: 0.4; }
+      40% { transform: translateY(-4px); opacity: 1; }
     }
 
-    .hivemind-message.error .hivemind-message-content {
-      background: #fee2e2;
-      color: #991b1b;
+    .err-msg {
+      align-self: center;
       font-size: 12px;
+      color: #b91c1c;
+      background: #fef2f2;
+      border: 1px solid #fecaca;
       padding: 8px 12px;
       border-radius: 8px;
     }
 
-    /* Thinking Indicator */
-    .hivemind-thinking {
-      display: flex;
-      gap: 4px;
-      padding: 14px 16px;
-      background: var(--surface);
-      border-radius: 12px;
+    /* context pill + toolbar */
+    .ctx-toolbar {
+      display: flex; gap: 6px;
+      margin-bottom: 8px;
+      flex-wrap: wrap;
+    }
+    .ctx-btn {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 5px 10px;
       border: 1px solid var(--border);
-      width: fit-content;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+      background: white;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+      color: #525252;
+      cursor: pointer;
+      font-family: inherit;
+      transition: all 0.12s;
     }
-
-    .hivemind-thinking-dot {
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: var(--text-secondary);
-      animation: bounce 1.4s infinite ease-in-out;
+    .ctx-btn:hover { border-color: #c0d8ff; color: var(--primary); }
+    .ctx-btn.active {
+      background: rgba(17,125,255,0.08);
+      border-color: rgba(17,125,255,0.3);
+      color: var(--primary);
     }
-
-    .hivemind-thinking-dot:nth-child(1) { animation-delay: -0.32s; }
-    .hivemind-thinking-dot:nth-child(2) { animation-delay: -0.16s; }
-
-    @keyframes bounce {
-      0%, 80%, 100% { transform: scale(0.4); opacity: 0.4; }
-      40% { transform: scale(1); opacity: 1; }
+    .ctx-pill {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 12px;
+      background: rgba(17,125,255,0.06);
+      border: 1px solid rgba(17,125,255,0.2);
+      border-radius: 10px;
+      margin-bottom: 8px;
+      font-size: 12px;
     }
+    .ctx-icon { flex-shrink: 0; }
+    .ctx-label {
+      flex: 1;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      font-weight: 600; color: var(--text);
+    }
+    .ctx-meta { font-size: 10.5px; color: var(--muted); font-family: 'SF Mono', monospace; }
+    .ctx-clear {
+      background: transparent; border: none; cursor: pointer;
+      color: var(--muted); font-size: 14px;
+      padding: 0 4px; line-height: 1;
+    }
+    .ctx-clear:hover { color: var(--text); }
 
-    /* Input Area — Rounded pill with inline send */
-    .hivemind-input-container {
-      padding: 8px 12px 12px;
-      background: var(--bg);
+    /* ── Composer ───────────── */
+    .composer {
       flex-shrink: 0;
+      padding: 12px 16px 16px;
+      background: var(--bg);
       border-top: 1px solid var(--border);
     }
-
-    .hivemind-input-wrapper {
-      display: flex;
-      align-items: center;
-      gap: 8px;
+    .composer-row {
+      display: flex; align-items: center; gap: 8px;
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: 24px;
-      padding: 4px 4px 4px 14px;
-      transition: border-color 0.2s, box-shadow 0.2s;
+      padding: 6px 6px 6px 16px;
+      transition: border-color 0.15s;
     }
-
-    .hivemind-input-wrapper:focus-within {
-      border-color: var(--primary);
-      box-shadow: 0 0 0 3px rgba(17,125,255,0.08);
-    }
-
-    .hivemind-textarea {
+    .composer-row:focus-within { border-color: #c0d8ff; }
+    .composer textarea {
       flex: 1;
-      min-height: 36px;
-      max-height: 120px;
-      padding: 6px 0;
-      border: none;
+      border: none; outline: none; resize: none;
       background: transparent;
+      font: inherit; font-size: 14px;
       color: var(--text);
-      font-family: inherit;
-      font-size: 14px;
-      line-height: 1.45;
-      resize: none;
-      outline: none;
-    }
-
-    .hivemind-textarea::placeholder {
-      color: var(--text-secondary);
-    }
-
-    .hivemind-send-button {
-      width: 32px;
-      height: 32px;
-      border: none;
-      border-radius: 50%;
-      background: var(--primary);
-      color: white;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      flex-shrink: 0;
-      transition: background 0.15s, transform 0.1s;
-    }
-
-    .hivemind-send-button:hover:not(:disabled) {
-      background: var(--primary-dark);
-      transform: scale(1.05);
-    }
-
-    .hivemind-send-button:active:not(:disabled) {
-      transform: scale(0.95);
-    }
-
-    .hivemind-send-button:disabled {
-      opacity: 0.4;
-      cursor: not-allowed;
-    }
-
-    .hivemind-send-icon {
-      width: 16px;
-      height: 16px;
-    }
-
-    /* Keyboard hint below input */
-    .hivemind-input-hint {
-      text-align: center;
-      font-size: 11px;
-      color: var(--text-secondary);
-      margin-top: 6px;
-      letter-spacing: 0.2px;
-    }
-
-    .hivemind-input-hint kbd {
-      font-family: inherit;
-      font-size: 10px;
-      padding: 1px 4px;
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      color: var(--text-secondary);
-    }
-
-    /* Context Bar */
-    .hivemind-context-bar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 8px 12px;
-      font-size: 11px;
-      color: var(--text-secondary);
-      border-bottom: 1px solid rgba(255, 255, 255, 0.15);
-      background: rgba(248, 249, 250, 0.7);
-      backdrop-filter: blur(15px);
-      -webkit-backdrop-filter: blur(15px);
-    }
-
-    @media (prefers-color-scheme: dark) {
-      .hivemind-context-bar {
-        background: rgba(31, 41, 55, 0.7);
-        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-      }
-    }
-
-    .hivemind-context-url {
-      flex: 1;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      margin-right: 8px;
-    }
-
-    .hivemind-capture-button {
-      padding: 4px 8px;
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      background: var(--bg);
-      color: var(--text);
-      font-size: 11px;
-      cursor: pointer;
-      transition: background 0.2s;
-    }
-
-    .hivemind-capture-button:hover {
-      background: var(--surface);
-    }
-
-    .hivemind-capture-button.captured {
-      border-color: var(--success);
-      color: var(--success);
-    }
-    
-    /* Setup Modal */
-    .hivemind-setup-modal {
-      position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      background: rgba(248, 246, 242, 0.95);
-      backdrop-filter: blur(20px);
-      z-index: 1000;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      animation: fadeIn 0.3s ease-out;
-    }
-    
-    @keyframes fadeIn {
-      from { opacity: 0; }
-      to { opacity: 1; }
-    }
-    
-    .hivemind-setup-box {
-      padding: 28px;
-      max-width: 420px;
-      width: calc(100% - 32px);
-      animation: slideUp 0.4s ease-out;
-    }
-    
-    @keyframes slideUp {
-      from {
-        opacity: 0;
-        transform: translateY(30px);
-      }
-      to {
-        opacity: 1;
-        transform: translateY(0);
-      }
-    }
-    
-    .hivemind-setup-icon {
-      width: 72px;
-      height: 72px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      margin: 0 auto 24px;
-      background: rgba(17, 125, 255, 0.05);
-      border-radius: 16px;
-    }
-
-    .hivemind-setup-icon img {
-      width: 48px;
-      height: 48px;
-      display: block;
-    }
-    
-    .hivemind-setup-title {
-      font-size: 20px;
-      font-weight: 700;
-      color: #0a0a0a;
-      text-align: center;
-      margin-bottom: 8px;
-      font-family: 'Space Grotesk', sans-serif;
-    }
-    
-    .hivemind-setup-subtitle {
-      font-size: 13px;
-      color: #737373;
-      text-align: center;
-      margin-bottom: 24px;
-      line-height: 1.5;
-    }
-    
-    .hivemind-setup-form {
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-    
-    .hivemind-setup-label {
-      font-size: 12px;
-      font-weight: 600;
-      color: #525252;
-      margin-bottom: 4px;
-    }
-    
-    .hivemind-setup-input {
-      width: 100%;
-      padding: 12px 14px;
-      border: 1.5px solid #e5e5e5;
-      border-radius: 10px;
-      font-size: 13px;
-      font-family: 'JetBrains Mono', 'Monaco', monospace;
-      background: white;
-      transition: all 0.2s;
-    }
-    
-    .hivemind-setup-input:focus {
-      outline: none;
-      border-color: #117dff;
-      box-shadow: 0 0 0 3px rgba(17, 125, 255, 0.1);
-    }
-    
-    .hivemind-setup-button {
-      width: 100%;
-      padding: 14px;
-      background: #117dff;
-      color: white;
-      border: none;
-      border-radius: 10px;
-      font-size: 14px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all 0.2s;
-      margin-top: 8px;
-    }
-    
-    .hivemind-setup-button:hover {
-      background: #006ae6;
-      transform: translateY(-1px);
-      box-shadow: 0 4px 12px rgba(17, 125, 255, 0.2);
-    }
-    
-    .hivemind-setup-button:active {
-      transform: translateY(0);
-    }
-    
-    .hivemind-setup-button:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-      transform: none;
-    }
-    
-    .hivemind-setup-help {
-      font-size: 11px;
-      color: #a3a3a3;
-      text-align: center;
-      margin-top: 16px;
+      max-height: 120px;
+      min-height: 24px;
+      padding: 6px 0;
       line-height: 1.4;
+      font-family: inherit;
     }
-    
-    .hivemind-setup-link {
-      color: #667eea;
-      text-decoration: none;
-      font-weight: 600;
+    .composer textarea::placeholder { color: #c0bcb4; }
+    .send-btn {
+      width: 32px; height: 32px;
+      border: none; cursor: pointer;
+      border-radius: 50%;
+      background: rgba(17,125,255,0.12);
+      color: var(--primary);
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+      transition: all 0.15s;
     }
-    
-    .hivemind-setup-link:hover {
-      text-decoration: underline;
-    }
-    
-    .hivemind-setup-error {
-      background: #fee;
-      border: 1px solid #fcc;
-      color: #c33;
-      padding: 10px;
-      border-radius: 8px;
-      font-size: 12px;
-      margin-bottom: 12px;
-      text-align: center;
-    }
-    
-    .hivemind-setup-success {
-      background: #efe;
-      border: 1px solid #cfc;
-      color: #3a3;
-      padding: 10px;
-      border-radius: 8px;
-      font-size: 12px;
-      margin-bottom: 12px;
-      text-align: center;
-    }
-    
-    .hidden {
-      display: none !important;
-    }
-    
-    /* Dark mode support for setup modal */
-    @media (prefers-color-scheme: dark) {
-      .hivemind-setup-modal {
-        background: rgba(10, 10, 10, 0.95);
-      }
-      
-      .hivemind-setup-box {
-        background: transparent;
-        box-shadow: none;
-      }
-      
-      .hivemind-setup-icon {
-        background: rgba(17, 125, 255, 0.1);
-      }
+    .send-btn:hover { background: rgba(17,125,255,0.2); }
+    .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .send-btn svg { width: 16px; height: 16px; }
 
-      .hivemind-setup-title {
-        color: #fafafa;
-      }
-      
-      .hivemind-setup-subtitle {
-        color: #a3a3a3;
-      }
-      
-      .hivemind-setup-label {
-        color: #d4d4d4;
-      }
-      
-      .hivemind-setup-input {
-        background: rgba(38, 38, 38, 0.8);
-        border-color: rgba(255, 255, 255, 0.1);
-        color: #fafafa;
-      }
-      
-      .hivemind-setup-input:focus {
-        border-color: #117dff;
-        background: rgba(45, 45, 45, 0.9);
-      }
-      
-      .hivemind-setup-help {
-        color: #737373;
-      }
-
-      .hivemind-setup-link {
-        color: #117dff;
-      }
+    .hint {
+      text-align: center;
+      font-size: 10.5px;
+      color: var(--muted);
+      margin-top: 8px;
+      font-family: 'SF Mono', monospace;
     }
+
+    .hidden { display: none !important; }
   </style>
 </head>
 <body>
-  <!-- Setup Modal (shown when no API key) -->
-  <div class="hivemind-setup-modal hidden" id="setup-modal">
-    <div class="hivemind-setup-box">
-      <div class="hivemind-setup-icon"><img src="Hivemind_extension.png" alt="HIVEMIND" /></div>
-      <div class="hivemind-setup-title">Welcome to HIVEMIND</div>
-      <div class="hivemind-setup-subtitle">
-        Connect your AI memory assistant to get started
-      </div>
-      
-      <div id="setup-status"></div>
-      
-      <div class="hivemind-setup-form">
-        <div>
-          <div class="hivemind-setup-label">API Key</div>
-          <input
-            type="password"
-            id="setup-api-key"
-            class="hivemind-setup-input"
-            placeholder="hmk_live_..."
-          />
-        </div>
-        
-        <div>
-          <div class="hivemind-setup-label">API Endpoint (optional)</div>
-          <input
-            type="text"
-            id="setup-api-base"
-            class="hivemind-setup-input"
-            placeholder="https://core.hivemind.davinciai.eu:8050"
-          />
-        </div>
-        
-        <button id="setup-connect-button" class="hivemind-setup-button">
-          Connect to HIVEMIND
-        </button>
-      </div>
-      
-      <div class="hivemind-setup-help">
-        Get your API key from<br>
-        <a href="https://hivemind.davinciai.eu" target="_blank" class="hivemind-setup-link">
-          hivemind.davinciai.eu
-        </a>
-      </div>
+  <!-- Topbar -->
+  <div class="topbar">
+    <div class="brand">
+      <div class="brand-icon"><img src="Hivemind_extension.png" alt="" /></div>
+      Talk to HIVE
     </div>
+    <span class="user" id="userPill"></span>
+    <button class="icon-btn" id="newChatBtn" title="New chat">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 5v14M5 12h14"/>
+      </svg>
+    </button>
   </div>
 
-  <!-- Header -->
-  <div class="hivemind-header">
-    <div class="hivemind-logo">
-      <div class="hivemind-logo-icon"><img src="Hivemind_extension.png" alt="HIVEMIND" /></div>
-      <span>HIVEMIND</span>
+  <!-- Signed-out hero -->
+  <div id="hero" class="hero hidden">
+    <div class="brand-icon" style="width:48px;height:48px;border-radius:14px;">
+      <img src="Hivemind_extension.png" style="width:28px;height:28px;" />
     </div>
-    <div class="hivemind-status">
-      <div class="hivemind-status-indicator" id="status-indicator"></div>
-      <span id="status-text">Ready</span>
-    </div>
+    <div class="hero-title">Talk to HIVE</div>
+    <div class="hero-sub">Sign in with your browser to chat with your persistent memory engine.</div>
+    <button id="heroSignIn" class="hero-btn">Sign in with browser</button>
   </div>
 
-  <!-- Context Bar -->
-  <div class="hivemind-context-bar">
-    <div class="hivemind-context-url" id="context-url">No page selected</div>
-    <button class="hivemind-capture-button" id="capture-button">Capture Context</button>
-    <button class="hivemind-capture-button" id="save-session-button" style="margin-left: 8px;">💾 Save Session</button>
-  </div>
+  <!-- Chat messages -->
+  <div id="messages" class="messages hidden"></div>
 
-  <!-- Messages -->
-  <div class="hivemind-messages" id="messages">
-    <div class="hivemind-welcome">
-      <div class="hivemind-welcome-title">Welcome to HIVEMIND</div>
-      <div class="hivemind-welcome-text">
-        I can see everything on this page and remember what you tell me.
-      </div>
-      <div class="hivemind-welcome-examples">
-        <div class="hivemind-example">💬 Ask about this page</div>
-        <div class="hivemind-example">🔍 Search memories: "what do you know about X?"</div>
-        <div class="hivemind-example">💾 Save: "remember this" or "save this to memory"</div>
-        <div class="hivemind-example">⚡ Execute: "click the login button"</div>
-      </div>
+  <!-- Composer -->
+  <div id="composer" class="composer hidden">
+    <!-- context pill (selection or section) -->
+    <div id="ctxPill" class="ctx-pill hidden">
+      <span class="ctx-icon">📌</span>
+      <span class="ctx-label" id="ctxLabel"></span>
+      <span class="ctx-meta" id="ctxMeta"></span>
+      <button class="ctx-clear" id="ctxClear" title="Remove context">✕</button>
     </div>
-  </div>
 
-  <!-- Input Area -->
-  <div class="hivemind-input-container">
-    <div class="hivemind-input-wrapper">
-      <textarea
-        class="hivemind-textarea"
-        id="message-input"
-        placeholder="Ask HIVE anything..."
-        rows="1"
-      ></textarea>
-      <button class="hivemind-send-button" id="send-button" title="Send">
-        <svg class="hivemind-send-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M2 10l16-6-6 6 6 6-16-6z"/>
+    <!-- context toolbar -->
+    <div class="ctx-toolbar">
+      <button id="selBtn" class="ctx-btn" title="Use current text selection on page">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/></svg>
+        Selection
+      </button>
+      <button id="sectionBtn" class="ctx-btn" title="Pick a section on the page">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+        Section
+      </button>
+      <button id="pageBtn" class="ctx-btn" title="Send whole page as context">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+        Page
+      </button>
+    </div>
+
+    <div class="composer-row">
+      <textarea id="input" rows="1" placeholder="Ask HIVE anything…"></textarea>
+      <button id="sendBtn" class="send-btn" title="Send">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/>
         </svg>
       </button>
     </div>
-    <div class="hivemind-input-hint">
-      <kbd>Enter</kbd> to send · <kbd>Shift+Enter</kbd> for newline · <kbd>Esc</kbd> to close
-    </div>
+    <div class="hint">Enter to send · Shift+Enter for newline · Esc to close</div>
   </div>
 
   <script src="side-panel.js"></script>

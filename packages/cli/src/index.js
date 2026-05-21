@@ -15,11 +15,13 @@ import { printBanner } from './lib/banner.js';
 import { verifyEndpoint } from './lib/verify.js';
 import { browserLogin } from './lib/browser-auth.js';
 
-// Default control plane (browser-auth UI host). The MCP endpoint
+// Default control plane (browser-auth host). The MCP endpoint
 // (DEFAULT_ENDPOINT) lives on a different subdomain — control plane handles
-// auth + session keys, core handles MCP RPC.
+// auth + session keys (issues /auth/login → Zitadel + /auth/cli/start), core
+// handles MCP RPC. The FE at hivemind.davinciai.eu is a Vercel static build
+// that talks to api.hivemind.davinciai.eu:8040 for everything auth-related.
 const DEFAULT_CONTROL_PLANE =
-  process.env.HIVEMIND_CONTROL_PLANE || 'https://hivemind.davinciai.eu';
+  process.env.HIVEMIND_CONTROL_PLANE || 'https://api.hivemind.davinciai.eu:8040';
 
 export async function main(argv) {
   const args = parseArgs(argv);

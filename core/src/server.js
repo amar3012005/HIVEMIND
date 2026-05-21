@@ -3507,9 +3507,12 @@ if [ ! -d "\$PKG_DIR" ]; then
 fi
 # CLI is zero-deps (v0.3.0+) — no npm install needed, ship straight to node.
 # Re-attach stdin/stdout/stderr to the user's TTY so the picker works
-# even when this shim was piped from curl.
+# even when this shim was piped from curl. The redirect can fail when
+# bash has no controlling terminal (some CI setups, agent harnesses) —
+# guard with || true so 'set -e' doesn't abort the install; the CLI
+# will gracefully fall back to non-interactive mode in that case.
 if [ -e /dev/tty ]; then
-  exec </dev/tty >/dev/tty 2>/dev/tty
+  exec </dev/tty >/dev/tty 2>/dev/tty || true
 fi
 exec env HIVEMIND_API_KEY="\$HIVEMIND_API_KEY" HIVEMIND_ENDPOINT="\$HIVEMIND_BASE/api/mcp" \\
   node "\$PKG_DIR/bin/hivemind.js" setup "\$@"

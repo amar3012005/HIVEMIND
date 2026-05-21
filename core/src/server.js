@@ -4496,6 +4496,34 @@ const server = http.createServer(async (req, res) => {
         });
       }
 
+      // MCP Streamable HTTP transport: clients (mcp-remote, Claude Desktop,
+      // VS Code, Cursor) open a GET on the same URL with Accept:text/event-stream
+      // for server-initiated notifications. We don't push server→client events
+      // — per spec
+      // (https://spec.modelcontextprotocol.io/specification/basic/transports/#streamable-http)
+      // the server MUST return 405 in that case so the client stops retrying.
+      // Without this we 404'd, which mcp-remote logs as
+      // "StreamableHTTPError: Failed to open SSE stream: Not Found" — looked
+      // like a broken server even though POST RPC worked fine.
+      if ((pathname === '/api/mcp' || pathname === '/api/mcp/rpc' || pathname === '/api/mcp/message') && req.method === 'GET') {
+        res.setHeader('Allow', 'POST');
+        res.writeHead(405);
+        res.end();
+        return;
+      }
+
+      // OPTIONS preflight for browser-based MCP clients (Cursor, etc.) — quick
+      // ACK with the canonical CORS triple. Global CORS already adds the
+      // *-Allow-Origin header, this just short-circuits the preflight.
+      if ((pathname === '/api/mcp' || pathname === '/api/mcp/rpc' || pathname === '/api/mcp/message') && req.method === 'OPTIONS') {
+        res.setHeader('Allow', 'POST, OPTIONS');
+        res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, Accept, Mcp-Session-Id, Last-Event-ID');
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+
       if ((pathname === '/api/mcp' || pathname === '/api/mcp/rpc' || pathname === '/api/mcp/message') && req.method === 'POST') {
         const apiClient = createHostedApiClient({
           baseUrl: getHostedApiBaseUrl(req),

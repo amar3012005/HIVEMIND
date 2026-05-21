@@ -291,28 +291,66 @@ export class TaraStreamHandler {
     }
   }
 
-  // ── Fast KB-only recall — stripped for voice latency ──
-  // Vector search only (Qdrant ~30ms) + KB tag filter, no tsvector/scoring pipeline
-  // Target: <100ms total recall vs 850ms full pipeline
+  // ── Recall — parity with MCP hivemind_recall ──
+  // Uses the same `recallPersistedMemories` pipeline that backs the MCP
+  // hivemind_recall tool and Talk-to-HIVE chat, so a voice turn sees the
+  // exact same memories the agent would surface in chat. Previously this
+  // was a KB-tag-only Qdrant scan (~50ms) which made TARA see <10% of
+  // the corpus and diverge from Talk-to-HIVE.
+  //
+  // Latency trade-off: full pipeline runs ~150-300ms vs 50ms KB-only.
+  // Set TARA_FAST_RECALL=true to fall back to the legacy KB-only path
+  // for latency-critical deployments.
 
   async _fastKBRecall(query, { userId, orgId }) {
     if (!query || query.length < 5) return [];
 
-    // Skip recall entirely for greetings / trivial turns
+    // Skip recall entirely for greetings / trivial turns — these waste
+    // budget and the prompt builder already handles cold-start phrasing.
     const trivial = /^(hi|hey|hello|thanks|ok|yes|no|sure|bye|good|great)\b/i.test(query.trim());
     if (trivial) return [];
 
+    const useFastPath = String(process.env.TARA_FAST_RECALL || '').toLowerCase() === 'true';
+
+    // ── Default path: full semantic recall (matches MCP) ──
+    if (!useFastPath && typeof this.recallFn === 'function' && this.memoryStore) {
+      try {
+        const recall = await this.recallFn(this.memoryStore, {
+          query_context: query,
+          user_id: userId,
+          org_id: orgId,
+          max_memories: 6,
+        });
+        const rows = recall?.combined || recall?.memories || recall || [];
+        return rows.slice(0, 8).map(r => ({
+          id: r.id,
+          content: r.content || r.text || '',
+          title: r.title || '',
+          tags: Array.isArray(r.tags) ? r.tags : [],
+          memory_type: r.memory_type || r.memoryType || 'fact',
+          document_date: r.document_date || r.documentDate,
+          created_at: r.created_at || r.createdAt,
+          score: r.score || r.score_value || r.relevance,
+          source_platform: r.source_metadata?.source_platform || r.source,
+        }));
+      } catch (err) {
+        console.warn('[tara/recall] Full pipeline failed, falling back to Qdrant:', err.message);
+        // fall through to Qdrant path
+      }
+    }
+
     try {
-      // Path 1: Qdrant vector search with KB filter (fast: embed ~30ms + search ~20ms)
+      // ── Fallback path: Qdrant-only, no KB tag restriction ──
+      // Still respects user_id + is_latest so superseded memories don't
+      // surface, but otherwise scans the whole personal+project corpus.
       if (this.qdrantClient) {
         const results = await this.qdrantClient.searchMemories({
           query,
-          limit: 5,
-          score_threshold: 0.25,
+          limit: 8,
+          score_threshold: 0.22,
           filter: {
             must: [
               { key: 'user_id', match: { value: userId } },
-              { key: 'tags', match: { any: ['knowledge-base'] } },
               { key: 'is_latest', match: { value: true } },
             ],
           },
@@ -327,10 +365,11 @@ export class TaraStreamHandler {
           document_date: r.payload?.document_date,
           created_at: r.payload?.created_at,
           score: r.score,
+          source_platform: r.payload?.source_platform,
         }));
       }
 
-      // Path 2: Fallback to Prisma ILIKE if Qdrant unavailable
+      // ── Last-resort path: Prisma ILIKE over all memories ──
       if (this.memoryStore?.client) {
         const tokens = query.toLowerCase()
           .replace(/[^a-z0-9äöüß\s]/g, ' ')
@@ -348,10 +387,9 @@ export class TaraStreamHandler {
           WHERE m.deleted_at IS NULL
             AND m.user_id = $1::uuid
             AND m.is_latest = true
-            AND 'knowledge-base' = ANY(m.tags)
             AND (${ilikeConditions})
           ORDER BY m.created_at DESC
-          LIMIT 5
+          LIMIT 8
         `, userId);
 
         return results.map(r => ({
@@ -367,7 +405,7 @@ export class TaraStreamHandler {
 
       return [];
     } catch (err) {
-      console.warn('[tara/fast-recall] KB search failed:', err.message);
+      console.warn('[tara/recall] All paths failed:', err.message);
       return [];
     }
   }

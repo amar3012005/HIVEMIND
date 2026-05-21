@@ -2220,8 +2220,8 @@ export async function handleToolCall(params, userId, orgId, apiClient) {
       resolvedProjectId = requestedProjectId;
       resolvedProjectIds = scoped.project_ids || [];
       resolvedTeamId = scoped.primary_team_id || null;
-    } catch (_ignored) {
-      // Membership validation failure — leave scope null, fall back to org-wide.
+    } catch (scopeErr) {
+      console.warn('[mcp] resolveScopedIngestPayload failed:', scopeErr?.message, scopeErr?.stack?.split('\n')[1]);
     }
   }
   const SCOPE_FIELDS = resolvedProjectId ? {

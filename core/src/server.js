@@ -3430,9 +3430,13 @@ const server = http.createServer(async (req, res) => {
       // future redeploys that move things around.
       const candidates = [
         process.env.HIVEMIND_CLI_DIR,
+        // Inside the hm-core container the bind mount is core/ → /app,
+        // so /app/data/cli is the canonical in-container location. Keep
+        // it first so prod resolves fast.
+        path.join(PROJECT_ROOT, 'data', 'cli'),
         path.join(REPO_ROOT, 'packages', 'cli'),
         '/opt/HIVEMIND/packages/cli',
-        path.join(PROJECT_ROOT, 'cli-tarball'),
+        '/opt/HIVEMIND/core/data/cli',
       ].filter(Boolean);
       let cliDir = null;
       for (const c of candidates) {

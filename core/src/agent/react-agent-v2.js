@@ -32,10 +32,13 @@ import { TOOL_SCHEMAS, dispatchTool } from './tool-registry.js';
 
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
-// LLM budgets per step. Plan + reflect are tiny; answer is the heavy step.
-const PLAN_MAX_TOKENS    = 600;
-const REFLECT_MAX_TOKENS = 400;
-const ANSWER_MAX_TOKENS  = 1600;
+// LLM budgets per step. gpt-oss reasoning models consume hidden
+// reasoning_tokens before content tokens; budgets are sized so even
+// chatty reasoning leaves room for the actual JSON output.
+const PLAN_MAX_TOKENS    = 1500;
+const REFLECT_MAX_TOKENS = 1000;
+const ANSWER_MAX_TOKENS  = 3000;
+const DIRECT_MAX_TOKENS  = 800;
 const TURN_BUDGET_MS     = Number(process.env.HIVEMIND_AGENT_TURN_BUDGET_MS || 45_000);
 
 // ISO 639-1 → human-readable name. Same map as v1 — keep in sync.
@@ -108,13 +111,13 @@ async function answerDirectly({ message, gateKind, language, assistantName, orgN
   const name = assistantName || 'HIVE';
 
   const prompts = {
-    greeting: `Reply with a warm one-line greeting in ${lang}. Echo the user's greeting style. Then ONE short offer-to-help. No questions, no tool talk.`,
-    smalltalk: `Reply with one short polite sentence in ${lang}. No tool talk, no follow-up question.`,
-    self_q: `Briefly describe what you do in ${lang}, in 2-3 sentences:\n` +
-            `  - You are ${name}, the internal voice of ${orgLabel}.\n` +
-            `  - You carry persistent memory of the team's facts, decisions, projects, people.\n` +
+    greeting: `You are ${name}. Reply with a warm one-line greeting in ${lang}, echoing the user's greeting style. Then ONE short offer-to-help. Plain text only. No JSON, no tool talk.`,
+    smalltalk: `You are ${name}. Reply with one short polite sentence in ${lang}. Plain text only. No JSON, no tool talk, no follow-up question.`,
+    self_q: `You are ${name}, the internal voice of ${orgLabel}. Reply in ${lang}, plain text, 2-3 sentences:\n` +
+            `  - You carry persistent memory of our team's facts, decisions, projects, people.\n` +
             `  - You can recall, save, link, time-travel through that memory, and pull live web results when needed.\n` +
-            `Do NOT cite memories. Do NOT mention internal tool names.`,
+            `Do NOT cite memories. Do NOT mention internal tool names. Plain text only.`,
+    general: `You are ${name}. Reply in ${lang}, plain text. Keep it concise. No JSON, no tool talk.`,
   };
 
   const resp = await fetch(GROQ_URL, {
@@ -126,7 +129,7 @@ async function answerDirectly({ message, gateKind, language, assistantName, orgN
         { role: 'system', content: prompts[gateKind] },
         { role: 'user', content: message },
       ],
-      max_completion_tokens: 200,
+      max_completion_tokens: DIRECT_MAX_TOKENS,
       temperature: 0.3,
     }),
     signal,
@@ -501,21 +504,43 @@ export async function runReactAgentV2({
     if (planResult.usage) usages.push(planResult.usage);
     const plan = planResult.plan;
 
-    // Direct answer if planner left sub_queries empty AND no save intent
+    // Pure save intent (no recall needed) — write the memory then ack.
+    if (plan.save_intent && plan.sub_queries.length === 0) {
+      const saveStep = await maybeSaveOrUpdate({ plan, ctx, onEvent });
+      if (saveStep) steps.push(saveStep);
+      const lang = languageName(language);
+      const ackText = lang === 'English' ? 'Got it — saved.' :
+                      lang === 'German'  ? 'Verstanden — gespeichert.' :
+                      lang === 'Spanish' ? 'Entendido — guardado.' :
+                      lang === 'French'  ? 'Compris — enregistré.' :
+                      `Got it — saved (${lang}).`;
+      onEvent?.({ type: 'finish', text: ackText });
+      return {
+        response: ackText, sources: [], steps,
+        evidence_used: [], confidence: 1.0, gaps: [],
+        usage: sumUsage(usages),
+        assistant_name: assistantName || null,
+      };
+    }
+
+    // Direct answer if planner left sub_queries empty AND no side-effects.
+    // Skip the evidence-gated answer step — its grounding rules cause
+    // the model to refuse / return empty for self-contained questions
+    // like '2+2' that have no recall context to lean on.
     if (plan.sub_queries.length === 0 && !plan.save_intent && !plan.needs_web) {
-      const { response, usage } = await answerStep({
-        message, history, evidence: { memories: [] }, plan, language, assistantName, orgName,
+      const { response, usage } = await answerDirectly({
+        message, gateKind: 'general', language, assistantName, orgName,
         model, apiKey, signal: abortCtrl.signal,
       });
       if (usage) usages.push(usage);
-      onEvent?.({ type: 'finish', text: response.response });
+      onEvent?.({ type: 'finish', text: response });
       return {
-        response: response.response,
+        response,
         sources: [],
         steps,
-        evidence_used: response.evidence_used,
-        confidence: response.confidence,
-        gaps: response.gaps,
+        evidence_used: [],
+        confidence: 1.0,
+        gaps: [],
         usage: sumUsage(usages),
         assistant_name: assistantName || null,
       };

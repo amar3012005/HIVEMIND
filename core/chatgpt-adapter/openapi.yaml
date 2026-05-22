@@ -10,8 +10,8 @@ info:
     org_id) is resolved server-side from the OAuth access token — clients
     never pass it.
 servers:
-  - url: https://core.hivemind.davinciai.eu:8050
-    description: HIVEMIND core API (production)
+  - url: https://hivemind.davinciai.eu
+    description: HIVEMIND production (proxied to core via Vercel rewrites)
 security:
   - oauth2: [memory:read]
   - oauth2: [memory:write]
@@ -227,13 +227,14 @@ paths:
                         published: { type: string }
 
 components:
+  schemas: {}
   securitySchemes:
     oauth2:
       type: oauth2
       flows:
         authorizationCode:
-          authorizationUrl: https://core.hivemind.davinciai.eu:8050/oauth/authorize
-          tokenUrl: https://core.hivemind.davinciai.eu:8050/oauth/token
+          authorizationUrl: https://hivemind.davinciai.eu/oauth/authorize
+          tokenUrl: https://hivemind.davinciai.eu/oauth/token
           scopes:
             memory:read: Read user's memory graph
             memory:write: Save new memories

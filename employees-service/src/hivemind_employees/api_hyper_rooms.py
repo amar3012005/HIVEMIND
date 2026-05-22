@@ -424,6 +424,8 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         "t": "typing", "agent": lead.get("slug"), "kind": "lead",
     })
     lead_text = ""
+    lead_agent = None
+    lead_prompt = ""
     try:
         lead_agent = await _build_agent_for_room(req.room_id, lead)
         # Provide CSI persona framing in the user-prompt wrapper so we
@@ -447,14 +449,44 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         reply = await lead_agent(Msg(name="user", content=lead_prompt, role="user"))
         lead_text = _msg_to_text(reply) or "(no response)"
     except Exception as exc:  # noqa: BLE001
-        log.exception("lead failure: %s", exc)
-        await _emit_event(req.callback_url, req.turn_id, {
-            "t": "error", "agent": lead.get("slug"), "message": str(exc), "retryable": True,
-        })
-        await _emit_event(req.callback_url, req.turn_id, {
-            "t": "seal", "cost_tokens": cost_tokens, "status": "failed",
-        })
-        return RoomTurnResponse(ok=False, cost_tokens=cost_tokens, status="failed")
+        msg = str(exc)
+        # Groq strict-mode validator rejects stringy ints sometimes —
+        # the LLM emits `"limit": "10"`. Retry once telling it to stop
+        # quoting numbers; on second failure, fall back to a no-tool pass
+        # so the turn at least delivers a lead bubble.
+        is_tool_schema = "tool_use_failed" in msg or "did not match schema" in msg
+        retried = False
+        if is_tool_schema and lead_agent:
+            try:
+                log.warning("lead tool-schema failure; retrying with explicit hint: %s", msg[:200])
+                retry_prompt = lead_prompt + (
+                    "\n\nIMPORTANT: when calling tools, pass numeric params as JSON numbers "
+                    "(e.g. 10) NOT strings (e.g. \"10\"). If unsure, skip the tool call."
+                )
+                reply2 = await lead_agent(Msg(name="user", content=retry_prompt, role="user"))
+                lead_text = _msg_to_text(reply2) or "(no response)"
+                retried = True
+            except Exception as exc2:  # noqa: BLE001
+                log.warning("lead retry also failed: %s", str(exc2)[:200])
+                # Final fallback — no tools, plain answer
+                try:
+                    plain_agent = await _build_agent_for_room(
+                        req.room_id + ":notools", {**lead, "tools": []},
+                    )
+                    reply3 = await plain_agent(Msg(name="user", content=req.user_message, role="user"))
+                    lead_text = _msg_to_text(reply3) or "(no response)"
+                    retried = True
+                except Exception as exc3:  # noqa: BLE001
+                    log.exception("lead plain fallback failed: %s", exc3)
+        if not retried:
+            log.exception("lead failure: %s", exc)
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "error", "agent": lead.get("slug"), "message": msg, "retryable": True,
+            })
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "seal", "cost_tokens": cost_tokens, "status": "failed",
+            })
+            return RoomTurnResponse(ok=False, cost_tokens=cost_tokens, status="failed")
 
     # Estimate tokens — agentscope hides counts; use 4 chars ≈ 1 token.
     lead_tokens = max(200, len(lead_text) // 4)

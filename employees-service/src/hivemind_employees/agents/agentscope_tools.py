@@ -124,6 +124,14 @@ def build_hivemind_toolkit(api_key: str, enabled_tool_names: List[str]) -> Toolk
             return _tool_response(res)
         tk.register_tool_function(slack_history)
 
+    # ── Helper: coerce string-int params (Groq sometimes returns strings) ─
+    def _ci(v, default):
+        if v is None: return default
+        try: return int(v)
+        except Exception:
+            try: return int(float(v))
+            except Exception: return default
+
     if "hivemind_recall" in enabled_tool_names:
         def recall(query: str, max_memories: int = 5) -> ToolResponse:
             """Recall memories from HIVEMIND knowledge graph.

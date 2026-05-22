@@ -45,6 +45,7 @@ from .agents.agentscope_factory import build_react_agent
 from .bootstrap_client import fetch_bootstrap
 from .config import get_settings
 from .db import list_running_employees
+from .hivemind_client import HivemindClient
 
 log = logging.getLogger(__name__)
 
@@ -275,8 +276,17 @@ def _msg_to_text(reply: Optional[Msg]) -> str:
                 parts.append(blk.get("text") or "")
             else:
                 parts.append(str(blk))
-        return "\n".join(p for p in parts if p).strip()
-    return (content or "").strip()
+        text = "\n".join(p for p in parts if p).strip()
+    else:
+        text = (content or "").strip()
+    # Strip any leaked llama-3 function-call syntax that the runtime
+    # failed to lift into a structured tool call. Users should never
+    # see <function=name>{...}</function> as plain text.
+    if "<function=" in text:
+        text = re.sub(r"<function=[\s\S]*?</function>", "", text).strip()
+        # Also nuke residual single-line variants
+        text = re.sub(r"<function=[^\n>]+>", "", text).strip()
+    return text
 
 
 # ─── Reactor "quiet-check" — cheap JSON pass ───────────────────────────
@@ -425,6 +435,42 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         "lanes": {p.get("slug"): p["_lane"] for p in participants},
     })
 
+    # ── Pre-fetch HIVEMIND context (grounded RAG) ───────────────────
+    # Don't rely on the agent's tool calls — Groq/llama function-call
+    # reliability varies. Pull recall results server-side and inject
+    # them into the lead prompt so the agent ALWAYS sees relevant
+    # memories without needing to emit a tool call first.
+    memory_context = ""
+    try:
+        boot_map = {b["id"]: b for b in await fetch_bootstrap()}
+        lead_boot = boot_map.get(lead["id"], {}) or {}
+        lead_api_key = lead_boot.get("api_key")
+        if lead_api_key:
+            hm_client = HivemindClient(api_key=lead_api_key)
+            try:
+                recall_resp = await hm_client.recall(req.user_message, max_memories=8)
+                rows = recall_resp.get("memories") or recall_resp.get("combined") or []
+                if rows:
+                    lines_out = []
+                    for r in rows[:8]:
+                        title = (r.get("title") or "").strip()
+                        content = (r.get("content") or "").replace("\n", " ").strip()
+                        if not content:
+                            continue
+                        snippet = content[:240] + ("…" if len(content) > 240 else "")
+                        prefix = f'"{title}" — ' if title else ""
+                        lines_out.append(f"- {prefix}{snippet}")
+                    if lines_out:
+                        memory_context = (
+                            "RELEVANT HIVEMIND MEMORIES (already pulled for you — quote these when relevant):\n"
+                            + "\n".join(lines_out)
+                            + "\n"
+                        )
+            finally:
+                await hm_client.aclose()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("hyper-rooms pre-fetch recall failed: %s", exc)
+
     # ── Lead generates full response ─────────────────────────────────
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "typing", "agent": lead.get("slug"), "kind": "lead",
@@ -440,11 +486,12 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         lead_prompt = (
             f"[CSI swarm — you are an EMPLOYEE at the HIVEMIND organisation. "
             f"You're the LEAD speaking up this turn. Your lane: {lead['_lane']}.]\n\n"
-            f"WHO YOU ARE:\n"
+            + (memory_context + "\n" if memory_context else "")
+            + f"WHO YOU ARE:\n"
             f"- You work AT HIVEMIND. The 'HIVEMIND' in this room = our org / our product. "
             f"It is NOT 'Hivemind Capital', NOT any NFT fund, NOT any other unrelated company with the same name.\n"
             f"- Speak from inside the company. Use 'we' / 'our' / 'the team'.\n"
-            f"- Reference colleagues + projects by name when they appear in your recall results.\n\n"
+            f"- Reference colleagues + projects by name when they appear in the memory context above.\n\n"
             f"HARD ANTI-HALLUCINATION RULES:\n"
             f"1. Call hivemind_recall (or hivemind_query_with_ai for multi-hop) BEFORE you make any claim of fact about us, our people, our projects, decisions, or history. If recall returns nothing relevant, SAY SO — do not invent.\n"
             f"2. Walk connections with hivemind_traverse_graph or hivemind_list_memories to find linked people, decisions, prior projects when the topic touches an entity already in memory.\n"

@@ -110,14 +110,16 @@ async function answerDirectly({ message, gateKind, language, assistantName, orgN
   const orgLabel = (!orgName || /^Local Org\b/i.test(orgName)) ? 'this HIVEMIND workspace' : orgName;
   const name = assistantName || 'HIVE';
 
+  const LANG_BLOCK = `LANGUAGE: ALL OUTPUT MUST BE IN ${lang.toUpperCase()}. Even if the user wrote in another language, you reply ONLY in ${lang}. This is non-negotiable.`;
+
   const prompts = {
-    greeting: `You are ${name}. Reply with a warm one-line greeting in ${lang}, echoing the user's greeting style. Then ONE short offer-to-help. Plain text only. No JSON, no tool talk.`,
-    smalltalk: `You are ${name}. Reply with one short polite sentence in ${lang}. Plain text only. No JSON, no tool talk, no follow-up question.`,
-    self_q: `You are ${name}, the internal voice of ${orgLabel}. Reply in ${lang}, plain text, 2-3 sentences:\n` +
+    greeting: `${LANG_BLOCK}\n\nYou are ${name}. Reply with a warm one-line greeting + ONE short offer-to-help. Plain text only. No JSON, no tool talk.`,
+    smalltalk: `${LANG_BLOCK}\n\nYou are ${name}. Reply with one short polite sentence. Plain text only. No follow-up question.`,
+    self_q: `${LANG_BLOCK}\n\nYou are ${name}, the internal voice of ${orgLabel}. Reply in 2-3 sentences:\n` +
             `  - You carry persistent memory of our team's facts, decisions, projects, people.\n` +
             `  - You can recall, save, link, time-travel through that memory, and pull live web results when needed.\n` +
             `Do NOT cite memories. Do NOT mention internal tool names. Plain text only.`,
-    general: `You are ${name}. Reply in ${lang}, plain text. Keep it concise. No JSON, no tool talk.`,
+    general: `${LANG_BLOCK}\n\nYou are ${name}. Reply concisely. Plain text only. No JSON, no tool talk.`,
   };
 
   const resp = await fetch(GROQ_URL, {
@@ -359,7 +361,9 @@ function answerPrompt({ language, assistantName, orgName }) {
   const lang = languageName(language);
   const orgLabel = (!orgName || /^Local Org\b/i.test(orgName)) ? 'this HIVEMIND workspace' : orgName;
   const name = assistantName || 'HIVE';
-  return `You are ${name} — the internal voice of ${orgLabel}'s collective brain.
+  return `LANGUAGE: ALL OUTPUT MUST BE IN ${lang.toUpperCase()}. Even if the user wrote in another language, the "response" field is written in ${lang}. Sub-queries and tool args may stay English (already executed); the user-facing prose is ${lang} only.
+
+You are ${name} — the internal voice of ${orgLabel}'s collective brain.
 
 You will be given a user message + a numbered EVIDENCE block of memories
 already retrieved for you. Compose the final answer using ONLY those

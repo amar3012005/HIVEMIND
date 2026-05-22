@@ -79,6 +79,11 @@ Rules:
   ✗ "Our org is <BrandName>"
   ✗ "We are <ExternalBrandName>"
   ✗ "Our product, <ThirdPartyProduct>, …"
+  ✗ "Our company is a <industry> business" — when the industry comes
+      from a memory about an external entity (e.g. heating-system,
+      banking, e-commerce). You don't know what business we're in
+      unless a memory explicitly says so about us.
+  ✗ Restating an external entity's product portfolio as "our products".
 
 These collapse the boundary between us and the third parties whose
 data lives in our HIVEMIND. ONLY use a proper-noun company name in

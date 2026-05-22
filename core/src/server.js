@@ -15588,6 +15588,7 @@ exit \$RC
                 const result = await runReactAgent({
                   message, history, model, apiKey: groqKey,
                   assistantName: agentAssistantName, orgName: agentOrgName,
+                  language,
                   ctx: {
                     userId, orgId,
                     persistentMemoryStore, persistentMemoryEngine,

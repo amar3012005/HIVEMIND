@@ -15579,6 +15579,7 @@ exit \$RC
                       ctx: {
                         userId, orgId,
                         projectId: requestProjectId,
+                        prisma,
                         persistentMemoryStore, persistentMemoryEngine,
                         smartIngestRouter,
                         buildRoutedIngestPayloads,
@@ -15602,6 +15603,7 @@ exit \$RC
                   ctx: {
                     userId, orgId,
                     projectId: requestProjectId,
+                    prisma,
                     persistentMemoryStore, persistentMemoryEngine,
                     smartIngestRouter,
                     buildRoutedIngestPayloads,

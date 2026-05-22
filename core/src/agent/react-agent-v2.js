@@ -216,6 +216,7 @@ async function planStep({ message, history, language, assistantName, orgName, ha
 async function gatherEvidence({ plan, ctx, onEvent }) {
   const steps = [];
   const memoriesById = new Map();
+  const liveItems = [];
 
   const recordTool = (tool, args, summary, payload) => {
     steps.push({ tool, args, result_summary: summary });
@@ -230,7 +231,12 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
       plan.sub_queries.map(async (q) => {
         try {
           const r = await dispatchTool('hivemind_recall', { query: q, mode: 'quick', limit: 5 }, ctx);
-          recordTool('hivemind_recall', { query: q, mode: 'quick' }, `${(r?.memories?.length || 0)} memories`, r);
+          const memCount = r?.memories?.length || 0;
+          const liveCount = r?.live_count || 0;
+          const summary = liveCount > 0
+            ? `${memCount} memories + ${liveCount} live`
+            : `${memCount} memories`;
+          recordTool('hivemind_recall', { query: q, mode: 'quick' }, summary, r);
           return r;
         } catch (err) {
           recordTool('hivemind_recall', { query: q }, `error: ${err.message}`, null);
@@ -242,6 +248,9 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
       for (const m of (r?.memories || [])) {
         if (!m?.id) continue;
         if (!memoriesById.has(m.id)) memoriesById.set(m.id, m);
+      }
+      for (const li of (r?.live || [])) {
+        liveItems.push(li);
       }
     }
   }
@@ -305,6 +314,7 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
 
   return {
     memories: [...memoriesById.values()],
+    live: liveItems,
     steps,
     webJob,
   };
@@ -380,7 +390,9 @@ OUTPUT — STRICT JSON (no prose, no code fence):
 CORE RULES:
 
 1. GROUND every factual claim about the user / their people / projects /
-   decisions / history in the EVIDENCE block. Don't invent.
+   decisions / history in the EVIDENCE block OR the LIVE WORKSPACE block.
+   Don't invent. When citing a LIVE WORKSPACE item, reference it naturally
+   (e.g. "your last email from X on <date> said…"); don't paste raw IDs.
 2. If EVIDENCE is empty or doesn't cover the question, say so plainly
    in the response ("I don't have notes on X yet"). Set confidence low.
 3. NEVER paste a memory's content verbatim as the entire answer. NEVER
@@ -409,12 +421,24 @@ async function answerStep({ message, history, evidence, plan, language, assistan
     return `[${id8}] "${title}" — ${content}${tags ? ' :: ' + tags : ''}`;
   }).join('\n');
 
+  // Live Workspace block — Gmail / Drive / Calendar fetched in this turn.
+  // Fresher than memory snapshots; agent should cite these when the user asks
+  // about recent emails, meetings, or docs.
+  const liveLines = (evidence.live || []).slice(0, 10).map((li) => {
+    const src = (li.source || '?').toUpperCase();
+    const date = li.date ? ` (${String(li.date).slice(0, 19)})` : '';
+    const from = li.from ? ` from ${li.from}` : '';
+    const title = (li.title || '').replace(/\n/g, ' ').slice(0, 100);
+    const body = (li.snippet || '').replace(/\n/g, ' ').slice(0, 320);
+    return `[LIVE/${src}]${date}${from} "${title}" — ${body}`;
+  }).join('\n');
+
   const tail = (history || []).slice(-6)
     .filter(h => h && (h.role === 'user' || h.role === 'assistant') && h.content)
     .map(h => ({ role: h.role, content: typeof h.content === 'string' ? h.content : JSON.stringify(h.content) }));
 
   const userBlock = `EVIDENCE (${evidence.memories.length} memories):
-${evidenceLines || '(none)'}
+${evidenceLines || '(none)'}${liveLines ? `\n\nLIVE WORKSPACE (${(evidence.live || []).length} fresh items — Gmail / Drive / Calendar):\n${liveLines}` : ''}
 
 PLANNER INTENT: ${(plan.intents || []).join(' / ') || '(unspecified)'}
 

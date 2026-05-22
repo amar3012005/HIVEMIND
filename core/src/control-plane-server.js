@@ -1396,6 +1396,23 @@ const server = http.createServer(async (req, res) => {
     // /auth/cli/exchange to redeem the code — only then does the localhost
     // callback fire. Token never appears in any URL the user sees, and the
     // exchange code is single-use + 60s TTL.
+    // Chrome extension flow — skip the cli-verified frontend page entirely.
+    // chrome.identity.launchWebAuthFlow catches the chromiumapp.org redirect
+    // BEFORE the page renders, so we can 302 directly to the callback with
+    // the token. User sees the auth tab flash for a split second, then it
+    // closes and the side panel renders the "Verified as X" card inline.
+    if (isChromeExt) {
+      const cbUrl = new URL(callback);
+      cbUrl.searchParams.set('state', state);
+      cbUrl.searchParams.set('token', apiKey);
+      cbUrl.searchParams.set('user_email', user?.email || '');
+      cbUrl.searchParams.set('user_id', userId);
+      cbUrl.searchParams.set('org_id', org.id);
+      return redirect(res, cbUrl.toString());
+    }
+
+    // CLI / loopback flow — keep the branded confirmation page so the
+    // token never appears in any URL the user sees in their normal browser.
     const exchangeCode = await sessionStore.createAuthState({
       kind: 'cli_exchange',
       token: apiKey,
@@ -4009,6 +4026,58 @@ const server = http.createServer(async (req, res) => {
       const { enrichEmployeesWithHyperState } = await import('./employees/hyper-state.js');
       const enrichedEmployees = await enrichEmployeesWithHyperState(employees);
       return jsonResponse(res, { employees: enrichedEmployees });
+    } catch (err) {
+      return jsonResponse(res, { error: err.message }, 500);
+    }
+  }
+
+  // POST /v1/employees/optimize-persona — LLM expands a short brief into a
+  // full persona system-prompt so the create-employee UI can stay one-step.
+  // Inputs: brief (required), name, age, gender, role, team, experience_years
+  // Output: { persona: "<system prompt>" }
+  if (pathname === '/v1/employees/optimize-persona' && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const body = await parseBody(req);
+    const brief = (body.brief || '').trim();
+    if (!brief) return jsonResponse(res, { error: 'brief is required' }, 400);
+    const name = (body.name || '').trim() || 'the employee';
+    const role = (body.role || '').trim() || 'generalist';
+    const team = (body.team || '').trim();
+    const age = body.age || null;
+    const gender = (body.gender || '').trim();
+    const exp = body.experience_years ?? 0;
+
+    const apiKey = process.env.GROQ_API_KEY;
+    if (!apiKey) return jsonResponse(res, { error: 'GROQ_API_KEY not configured' }, 503);
+
+    const sys = `You write concise, human-sounding system prompts for AI digital employees. Output ONLY the persona system-prompt as plain text — no preamble, no markdown, no headers. 3-6 sentences. Address the employee in second person ("You are ..."). Include: role, communication style, what they prioritise, and one tasteful quirk. Reflect the requested age/gender/experience subtly through voice, not biography.`;
+    const user = `Brief: ${brief}
+Name: ${name}
+Role: ${role}${team ? `\nTeam: ${team}` : ''}${age ? `\nAge: ${age}` : ''}${gender ? `\nGender: ${gender}` : ''}
+Experience years: ${exp}
+
+Write the persona now.`;
+
+    try {
+      const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        body: JSON.stringify({
+          model: 'llama-3.3-70b-versatile',
+          messages: [{ role: 'system', content: sys }, { role: 'user', content: user }],
+          temperature: 0.6,
+          max_tokens: 400,
+        }),
+      });
+      if (!r.ok) {
+        const errBody = await r.text().catch(() => '');
+        return jsonResponse(res, { error: `Groq error: ${r.status} ${errBody.slice(0, 200)}` }, 502);
+      }
+      const data = await r.json();
+      const persona = (data.choices?.[0]?.message?.content || '').trim();
+      if (!persona) return jsonResponse(res, { error: 'empty persona' }, 502);
+      return jsonResponse(res, { persona });
     } catch (err) {
       return jsonResponse(res, { error: err.message }, 500);
     }

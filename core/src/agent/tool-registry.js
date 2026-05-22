@@ -351,7 +351,55 @@ const TOOL_HANDLERS = {
       created_at: m.created_at,
       valid_at: m.valid_at || m.document_date,
     }));
-    return { mode: args.mode || 'quick', count: mems.length, memories: mems };
+
+    // ── Live Workspace fan-out ────────────────────────────────────────────
+    // Persisted recall misses fresh items not yet ingested (recent emails,
+    // calendar invites, new Drive docs). Route via LiveQueryRouter when the
+    // query intent points at Gmail / Drive / Calendar so the agent gets
+    // ground-truth fresh results in the same tool call.
+    let live = [];
+    try {
+      if (ctx.prisma && args.include_live !== false) {
+        const { LiveQueryRouter } = await import('../connectors/providers/google/live-query-router.js');
+        const { decryptToken, refreshOAuthToken } = await import('../connectors/framework/connector-store.js');
+        const router = new LiveQueryRouter({
+          prisma: ctx.prisma,
+          decryptToken,
+          refreshOAuthToken: refreshOAuthToken || null,
+        });
+        const c = router.classify(args.query, mems);
+        const services = args.include_live === true
+          ? (c.services.length > 0 ? c.services : ['gmail', 'google_drive', 'google_calendar'])
+          : (c.needsLive ? c.services : null);
+        if (services && services.length > 0) {
+          const fetched = await router.fetch(ctx.userId, args.query, services);
+          live = (fetched || []).slice(0, 10).map((item) => ({
+            source: item._source,
+            tool: item._tool,
+            title: item.subject || item.name || item.summary || '(untitled)',
+            snippet: typeof item.text === 'string'
+              ? item.text.slice(0, 600)
+              : (item.snippet || item.summary || '').slice(0, 600),
+            from: item.from || null,
+            to: item.to || null,
+            date: item.date || item.internalDate || item.start || null,
+            url: item.url || item.webViewLink || null,
+            id: item.id || null,
+          }));
+        }
+      }
+    } catch (liveErr) {
+      // Live failure must not break memory recall — return memories alone.
+      live = [];
+    }
+
+    return {
+      mode: args.mode || 'quick',
+      count: mems.length,
+      memories: mems,
+      live_count: live.length,
+      live,
+    };
   },
 
   async hivemind_save_memory(args, ctx) {

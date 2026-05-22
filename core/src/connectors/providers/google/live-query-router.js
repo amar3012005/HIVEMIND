@@ -25,6 +25,8 @@ const QUERY_INTENT_PATTERNS = [
   { pattern: /\b(file|files|document|documents|doc|docs|drive|folder|folders|sharing|attachment|spreadsheet|sheet|sheets|slide|slides|presentation)\b/i, services: ['google_drive', 'google_docs'] },
   // Tasks intents
   { pattern: /\b(task|tasks|todo|todos|to-do|action\s+item|pending)\b/i, services: ['google_tasks'] },
+  // Gmail intents — last/recent/unread email, inbox, message, reply, sender
+  { pattern: /\b(email|emails|e-mail|gmail|inbox|mail|message\s+from|reply|replied|sender|subject\s+line)\b/i, services: ['gmail'] },
   // Contact intents
   { pattern: /\b(contact|contacts|email\s+address|phone|who\s+is)\b/i, services: ['google_contacts'] },
 ];

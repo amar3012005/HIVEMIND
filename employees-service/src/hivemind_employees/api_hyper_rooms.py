@@ -354,7 +354,7 @@ async def _run_reactor(
             "react": True,
             "agreement": parsed.get("agreement") or "extend",
             "confidence": float(parsed.get("confidence") or 0.5),
-            "line": line[:600],
+            "line": line[:2000],
         }
     except Exception as exc:  # noqa: BLE001
         log.warning("reactor failed: %s", exc)
@@ -453,7 +453,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                         content = (r.get("content") or "").replace("\n", " ").strip()
                         if not content:
                             continue
-                        snippet = content[:240] + ("…" if len(content) > 240 else "")
+                        snippet = content[:1200] + ("…" if len(content) > 1200 else "")
                         prefix = f'"{title}" — ' if title else ""
                         lines_out.append(f"- {prefix}{snippet}")
                     if lines_out:
@@ -661,7 +661,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                     if isinstance(parsed, dict):
                         verdict_obj = {
                             "verdict": parsed.get("verdict") or "resolved",
-                            "line": (parsed.get("line") or "").strip()[:500],
+                            "line": (parsed.get("line") or "").strip()[:2000],
                         }
             except Exception:  # noqa: BLE001
                 pass

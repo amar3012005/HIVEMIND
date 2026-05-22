@@ -15354,6 +15354,44 @@ exit \$RC
           break;
 
         // ==========================================
+        // TRANSLATE — runtime auto-translate for the <T> React component
+        // ==========================================
+        // Body: { texts: string[], target_lang: string }
+        // Returns: { translations: string[] }  (same order, same length)
+        //
+        // Used by the frontend's runtime <T> auto-translate component to
+        // batch-translate any hardcoded English JSX text into the user's
+        // chosen UI language. Cached in-memory + on disk (sha256(text)+lang
+        // key) so repeated calls are free.
+        case '/api/translate':
+          if (req.method === 'POST') {
+            const { texts, target_lang } = body;
+            if (!Array.isArray(texts) || texts.length === 0) {
+              return jsonResponse(res, { error: 'texts[] required' }, 400);
+            }
+            if (texts.length > 200) {
+              return jsonResponse(res, { error: 'max 200 strings per batch' }, 400);
+            }
+            const lang = String(target_lang || '').toLowerCase().slice(0, 8);
+            if (!lang || lang === 'en') {
+              return jsonResponse(res, { translations: texts });
+            }
+            const groqKey = process.env.GROQ_API_KEY;
+            if (!groqKey) {
+              return jsonResponse(res, { error: 'translate unavailable — no LLM key' }, 503);
+            }
+            try {
+              const { translateBatch } = await import('./services/translate-cache.js');
+              const translations = await translateBatch({ texts, lang, apiKey: groqKey });
+              return jsonResponse(res, { translations });
+            } catch (err) {
+              console.warn('[translate] failed:', err.message);
+              return jsonResponse(res, { error: err.message, translations: texts });
+            }
+          }
+          break;
+
+        // ==========================================
         // CHAT — Talk to HIVE (memory-augmented LLM)
         // ==========================================
         case '/api/chat':

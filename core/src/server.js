@@ -2242,12 +2242,20 @@ function normalizeOAuthClientRecord(rawClient = {}) {
   if (redirectUris.length === 0) return null;
   const allowedScopesRaw = Array.isArray(rawClient.allowed_scopes) ? rawClient.allowed_scopes : OAUTH_SCOPES_SUPPORTED;
   const allowedScopes = normalizeRequestedScopes(allowedScopesRaw.join(' '), OAUTH_SCOPES_SUPPORTED);
+  // client_secret_hash is sha256 of the raw secret. Absent → public client
+  // (PKCE-only). Present → confidential client; /oauth/token enforces
+  // client_secret on the token exchange (matches ChatGPT GPT Actions
+  // requirement which always sends client_secret).
+  const secretHash = typeof rawClient.client_secret_hash === 'string' && rawClient.client_secret_hash
+    ? rawClient.client_secret_hash
+    : null;
   return {
     client_id: clientId,
     client_name: String(rawClient.client_name || rawClient.clientName || clientId),
     redirect_uris: redirectUris,
     allowed_scopes: allowedScopes,
-    is_public: rawClient.is_public !== false,
+    client_secret_hash: secretHash,
+    is_public: secretHash ? false : (rawClient.is_public !== false),
     status: String(rawClient.status || 'active')
   };
 }
@@ -4269,10 +4277,38 @@ exit \$RC
     }
 
     const grantType = tokenParams.grant_type;
-    const clientId = String(tokenParams.client_id || '').trim();
+    // client_id + client_secret can arrive via Basic auth (token_endpoint_auth_method=client_secret_basic)
+    // or in the body (client_secret_post). Accept both.
+    let clientId = String(tokenParams.client_id || '').trim();
+    let clientSecretFromCaller = String(tokenParams.client_secret || '').trim();
+    const basicAuth = (req.headers['authorization'] || '').match(/^Basic\s+([A-Za-z0-9+/=]+)\s*$/i);
+    if (basicAuth) {
+      try {
+        const decoded = Buffer.from(basicAuth[1], 'base64').toString('utf8');
+        const idx = decoded.indexOf(':');
+        if (idx > 0) {
+          const basicId = decoded.slice(0, idx);
+          const basicSecret = decoded.slice(idx + 1);
+          if (basicId) clientId = clientId || basicId;
+          if (basicSecret) clientSecretFromCaller = clientSecretFromCaller || basicSecret;
+        }
+      } catch { /* ignore — fall through to body params */ }
+    }
     const client = await getOAuthClientById(clientId);
     if (!client) {
       return jsonResponse(res, { error: 'unauthorized_client' }, 401);
+    }
+    // Confidential client → require client_secret on every token request.
+    // ChatGPT GPT Actions always sends client_secret, so a secret-bearing
+    // HIVEMIND client matches that flow.
+    if (!client.is_public) {
+      if (!clientSecretFromCaller) {
+        return jsonResponse(res, { error: 'invalid_client', error_description: 'client_secret is required for this client.' }, 401);
+      }
+      const callerHash = crypto.createHash('sha256').update(clientSecretFromCaller).digest('hex');
+      if (!client.client_secret_hash || callerHash !== client.client_secret_hash) {
+        return jsonResponse(res, { error: 'invalid_client', error_description: 'client_secret mismatch.' }, 401);
+      }
     }
 
     if (grantType === 'authorization_code') {

@@ -4091,12 +4091,21 @@ const server = http.createServer(async (req, res) => {
     try {
       const crypto = await import('node:crypto');
       const clientId = 'hmc_' + crypto.randomBytes(12).toString('hex');
+      // Confidential client (default) → mint client_secret for ChatGPT GPT
+      // Actions OAuth (which requires Client Secret). Public flag set true
+      // only when caller explicitly opts out (e.g. CLI / extension PKCE).
+      const confidential = body?.confidential !== false;
+      const clientSecret = confidential ? ('hms_' + crypto.randomBytes(24).toString('hex')) : null;
+      const clientSecretHash = clientSecret
+        ? crypto.createHash('sha256').update(clientSecret).digest('hex')
+        : null;
       const newClient = {
         client_id: clientId,
         client_name: clientName,
         redirect_uris: redirectUris,
         allowed_scopes: allowedScopes,
-        is_public: true,
+        is_public: !confidential,
+        client_secret_hash: clientSecretHash,
         status: 'active',
         created_at: new Date().toISOString(),
         created_by: current.session.userId,
@@ -4127,10 +4136,19 @@ const server = http.createServer(async (req, res) => {
         action: 'create',
         resourceType: 'oauth_client',
         resourceId: clientId,
-        newValue: { client_name: clientName, redirect_uris: redirectUris, allowed_scopes: allowedScopes },
+        newValue: { client_name: clientName, redirect_uris: redirectUris, allowed_scopes: allowedScopes, confidential },
         ..._reqMeta(req),
       });
-      return jsonResponse(res, { client: newClient }, 201);
+      // Strip the hash from the response; include the raw secret ONCE so
+      // the operator can paste it into ChatGPT before it disappears.
+      const { client_secret_hash, ...safeClient } = newClient;
+      return jsonResponse(res, {
+        client: safeClient,
+        client_secret: clientSecret,        // one-time — never returned again
+        secret_warning: clientSecret
+          ? 'Copy this client_secret now. It will not be shown again. HIVEMIND only stores a SHA-256 hash.'
+          : null,
+      }, 201);
     } catch (err) {
       return jsonResponse(res, { error: err.message }, 500);
     }

@@ -58,7 +58,7 @@ router = APIRouter(prefix="/internal/hyper", tags=["hyper-rooms"])
 # ~200k). No per-line or per-turn truncation here.
 
 MAX_REACTORS = 2
-ROUND_2_CHALLENGE_THRESHOLD = 0.7
+ROUND_2_CHALLENGE_THRESHOLD = 0.55
 
 # Full toolkit for hyper-room agents — all HIVEMIND read paths + save
 # + time travel; web is gated by prompt ("only when info isn't here").
@@ -637,7 +637,51 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             await _emit_event(req.callback_url, req.turn_id, event)
 
 
-    # ── Round 2 (only if challenger > 0.7) ───────────────────────────
+    # ── Synthesis round (always when reactors spoke) ────────────────
+    # Reactors emit suggestion lines ("we should recall X", "what's the next
+    # step"). Without a closer, the turn ends on those suggestions — the
+    # user sees prompts to do work, not the work itself. Synthesis lets the
+    # lead absorb the reactor lines + actually exercise tools (recall /
+    # traverse) and produce one final actionable bubble.
+    if reactions:
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "typing", "agent": lead.get("slug"), "kind": "synthesis",
+        })
+        try:
+            reactor_summary = "\n".join(
+                f"- {r['emp'].get('name', r['emp'].get('slug'))} ({r['emp']['_lane']}): \"{r['content']}\""
+                for r in reactions
+            )
+            synth_prompt = (
+                f"[CSI synthesis pass — you're still the HIVEMIND employee. Lane: {lead['_lane']}.]\n\n"
+                + (memory_context + "\n" if memory_context else "")
+                + f"YOUR EARLIER LEAD LINE:\n\"{lead_text}\"\n\n"
+                f"REACTOR SUGGESTIONS (what your teammates want you to do next):\n{reactor_summary}\n\n"
+                f"NOW EXECUTE THE WORK. Don't just acknowledge the suggestions — DO them.\n"
+                f"  • If a reactor said 'we should recall X' → call hivemind_recall right now and quote the hits.\n"
+                f"  • If 'we should traverse the graph' → call hivemind_traverse_graph on the right seed memory.\n"
+                f"  • If 'what's the next step' → propose 2-3 concrete next steps with names + dates from memory.\n"
+                f"  • If a reactor disagreed → defend with evidence or concede explicitly.\n\n"
+                f"OUTPUT: 3-6 short sentences, chat tone, 'we / our'. Lead with the new fact / action / answer\n"
+                f"the reactors were asking for. Quote memory titles inline. No 'happy to help' fluff."
+            )
+            synth_reply = await lead_agent(Msg(name="user", content=synth_prompt, role="user"))
+            synth_text = _msg_to_text(synth_reply) or ""
+            if synth_text.strip():
+                synth_tokens = max(200, len(synth_text) // 4)
+                cost_tokens += synth_tokens
+                await _emit_event(req.callback_url, req.turn_id, {
+                    "t": "line",
+                    "agent": lead.get("slug"),
+                    "round": 2,
+                    "content": synth_text,
+                    "tokens": synth_tokens,
+                    "kind": "synthesis",
+                })
+        except Exception as exc:  # noqa: BLE001
+            log.warning("synthesis failed: %s", exc)
+
+    # ── Round 2 challenger debate (only if reactor explicitly challenged) ──
     challenger_reaction = next(
         (r for r in reactions if r["agreement"] == "challenge" and r.get("confidence", 0) >= ROUND_2_CHALLENGE_THRESHOLD),
         None,

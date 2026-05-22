@@ -46,6 +46,27 @@ function renderSignedIn() {
   $('input').focus();
 }
 
+/**
+ * Inline post-OAuth confirmation. Replaces the hero "Sign in with browser"
+ * with a "Verified as <email>" green-checked card so the user never feels
+ * like auth happened on a different page. The card auto-dismisses into
+ * the chat surface ~1.5s later (handled by caller).
+ */
+function showVerifiedCard(email) {
+  const hero = $('hero');
+  if (!hero) return;
+  hero.classList.remove('hidden');
+  hero.innerHTML = `
+    <div class="verified-icon" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="20 6 9 17 4 12"/>
+      </svg>
+    </div>
+    <div class="hero-title">Verified</div>
+    <div class="hero-sub">Signed in as <strong>${escapeHtml(email || 'your account')}</strong>. Bringing you in…</div>
+  `;
+}
+
 function wireEvents() {
   $('heroSignIn').addEventListener('click', async () => {
     const btn = $('heroSignIn');
@@ -60,7 +81,11 @@ function wireEvents() {
       const cfg = await chrome.storage.local.get(['apiKey', 'userEmail']);
       state.signedIn = true;
       state.email = cfg.userEmail || '';
-      renderSignedIn();
+      // Show inline "Verified as X" card for ~1.5s before flipping to the
+      // signed-in chat surface. Feels like a real handshake completed
+      // inside the panel — no extra browser tabs, no flashing UI.
+      showVerifiedCard(state.email);
+      setTimeout(() => renderSignedIn(), 1400);
     } catch (e) {
       btn.disabled = false;
       btn.textContent = 'Sign in with browser';
@@ -81,6 +106,14 @@ function wireEvents() {
           <button class="wp" data-prompt="Summarize my recent decisions">Summarize my recent decisions</button>
           <button class="wp" data-prompt="What are my key preferences?">What are my key preferences?</button>
         </div>
+        <div class="qr-card" id="qrCard">
+          <div class="qr-card-text">
+            <div class="qr-card-title">Use on your phone</div>
+            <div class="qr-card-sub">Scan to open Talk to HIVE on mobile — same memory, save from anywhere.</div>
+            <div class="qr-card-url" id="qrCardUrl"></div>
+          </div>
+          <div class="qr-code" id="qrCanvas"></div>
+        </div>
       </div>`;
     msgs.querySelectorAll('.wp').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -88,6 +121,7 @@ function wireEvents() {
         send();
       });
     });
+    renderMobileQR();
     $('input').focus();
   });
 
@@ -160,6 +194,9 @@ function wireEvents() {
       send();
     });
   });
+
+  // Mobile QR pairing — paints once the welcome surface is visible.
+  renderMobileQR();
 
   // Save-session button (the actual interactive entry point)
   $('ssbBtn').addEventListener('click', ingestActiveChat);
@@ -469,6 +506,34 @@ function finalizeSavingChip(toolName, summary) {
   setTimeout(() => {
     if (idx >= 0) _savingChipQueue.splice(idx, 1);
   }, 100);
+}
+
+// ── Mobile QR pairing (welcome state) ──────────────────────────────────────
+
+const MOBILE_DEEP_LINK_BASE = 'https://hivemind.davinciai.eu/hivemind/m/chat';
+
+function renderMobileQR() {
+  const card = document.getElementById('qrCard');
+  const canvas = document.getElementById('qrCanvas');
+  const urlEl = document.getElementById('qrCardUrl');
+  if (!card || !canvas) return;
+  if (typeof qrcode === 'undefined') {
+    // Library failed to load — silently hide the card.
+    card.style.display = 'none';
+    return;
+  }
+  const link = `${MOBILE_DEEP_LINK_BASE}?from=ext`;
+  try {
+    const qr = qrcode(0, 'M'); // type=auto, error-correction medium
+    qr.addData(link);
+    qr.make();
+    // 4-px cell, no margin — fits 88px tile cleanly.
+    canvas.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 0 });
+    if (urlEl) urlEl.textContent = link.replace(/^https?:\/\//, '');
+  } catch (e) {
+    console.warn('[qr] render failed:', e?.message);
+    card.style.display = 'none';
+  }
 }
 
 function hideWelcome() {

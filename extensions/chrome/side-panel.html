@@ -401,6 +401,23 @@
       text-align: center;
     }
     .hero-title { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
+
+    /* Post-OAuth "Verified as X" card — inline confirmation inside the panel. */
+    .verified-icon {
+      width: 56px; height: 56px;
+      border-radius: 50%;
+      background: #f0fdf4;
+      border: 1.5px solid #bbf7d0;
+      color: #16a34a;
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 4px 14px rgba(22,163,74,0.18);
+      animation: verifiedPop 0.45s cubic-bezier(0.2,0.9,0.4,1.2) both;
+    }
+    .verified-icon svg { width: 28px; height: 28px; }
+    @keyframes verifiedPop {
+      0% { transform: scale(0.4); opacity: 0; }
+      100% { transform: scale(1); opacity: 1; }
+    }
     .hero-sub { font-size: 13px; color: var(--muted); line-height: 1.55; max-width: 280px; }
     .hero-btn {
       margin-top: 8px;
@@ -450,6 +467,48 @@
       background: rgba(17,125,255,0.04);
       transform: translateY(-1px);
     }
+
+    /* QR pairing card — shown in welcome state */
+    .qr-card {
+      margin-top: 18px;
+      display: flex; align-items: center; gap: 12px;
+      padding: 14px;
+      background: linear-gradient(135deg, rgba(17,125,255,0.04) 0%, rgba(17,125,255,0.01) 100%);
+      border: 1px solid rgba(17,125,255,0.18);
+      border-radius: 14px;
+    }
+    .qr-card-text { flex: 1; min-width: 0; }
+    .qr-card-title {
+      font-size: 13px; font-weight: 700;
+      color: var(--text);
+      letter-spacing: -0.01em;
+    }
+    .qr-card-sub {
+      font-size: 11.5px;
+      color: var(--muted);
+      line-height: 1.45;
+      margin-top: 3px;
+    }
+    .qr-card-url {
+      font-size: 10px;
+      color: var(--primary);
+      font-family: 'SF Mono', ui-monospace, monospace;
+      margin-top: 6px;
+      word-break: break-all;
+      opacity: 0.75;
+    }
+    .qr-code {
+      width: 88px; height: 88px;
+      background: white;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 4px;
+      flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .qr-code img,
+    .qr-code canvas,
+    .qr-code svg { width: 100%; height: 100%; display: block; image-rendering: pixelated; }
 
     /* user bubble (right) */
     .msg-user {
@@ -837,6 +896,16 @@
         <button class="wp" data-prompt="Summarize my recent decisions">Summarize my recent decisions</button>
         <button class="wp" data-prompt="What are my key preferences?">What are my key preferences?</button>
       </div>
+
+      <!-- QR pairing card — scan to use HIVEMIND on phone -->
+      <div class="qr-card" id="qrCard">
+        <div class="qr-card-text">
+          <div class="qr-card-title">Use on your phone</div>
+          <div class="qr-card-sub">Scan to open Talk to HIVE on mobile — same memory, save from anywhere.</div>
+          <div class="qr-card-url" id="qrCardUrl"></div>
+        </div>
+        <div class="qr-code" id="qrCanvas"></div>
+      </div>
     </div>
   </div>
 
@@ -881,6 +950,7 @@
     <div class="hint">Enter to send · Shift+Enter for newline · Esc to close</div>
   </div>
 
+  <script src="qrcode.min.js"></script>
   <script src="side-panel.js"></script>
 </body>
 </html>

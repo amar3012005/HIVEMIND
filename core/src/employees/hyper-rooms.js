@@ -41,10 +41,32 @@ const ROLE_LANE_HINTS = {
  * Deterministic — same inputs always pick the same lane. Used when
  * roleArchetype is null and we need a lane for room logic.
  */
+const LEGACY_ROLE_MAP = {
+  coordinator:  'Strategist',
+  strategist:   'Strategist',
+  operator:     'Strategist',
+  investigator: 'Researcher',
+  researcher:   'Researcher',
+  analyst:      'Researcher',
+  skeptic:      'Skeptic',
+  critic:       'Skeptic',
+  challenger:   'Skeptic',
+  auditor:      'Skeptic',
+  builder:      'Builder',
+  engineer:     'Builder',
+  developer:    'Builder',
+  architect:    'Builder',
+  communicator: 'Communicator',
+  writer:       'Communicator',
+  marketer:     'Communicator',
+};
+
 export function deriveCsiLane(employee) {
   if (!employee) return 'Communicator';
   const existing = String(employee.roleArchetype || '').trim();
   if (existing && ROLE_LANES.includes(existing)) return existing;
+  const mapped = LEGACY_ROLE_MAP[existing.toLowerCase()];
+  if (mapped) return mapped;
 
   const haystack = [
     employee.roleArchetype || '',

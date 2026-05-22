@@ -91,11 +91,40 @@ def _require_master_key(token: Optional[str]) -> None:
         raise HTTPException(401, "Invalid admin token")
 
 
+LEGACY_ROLE_MAP = {
+    "coordinator":  "Strategist",
+    "strategist":   "Strategist",
+    "operator":     "Strategist",
+    "investigator": "Researcher",
+    "researcher":   "Researcher",
+    "analyst":      "Researcher",
+    "skeptic":      "Skeptic",
+    "critic":       "Skeptic",
+    "challenger":   "Skeptic",
+    "auditor":      "Skeptic",
+    "builder":      "Builder",
+    "engineer":     "Builder",
+    "developer":    "Builder",
+    "architect":    "Builder",
+    "communicator": "Communicator",
+    "writer":       "Communicator",
+    "marketer":     "Communicator",
+}
+
+
 def derive_lane(employee: Dict[str, Any]) -> str:
-    """Pick a CSI lane from roleArchetype + persona/name. Deterministic."""
+    """Pick a CSI lane from roleArchetype + persona/name. Deterministic.
+
+    1. If roleArchetype is already a canonical lane → use it.
+    2. If it's a legacy role name we can map → map.
+    3. Keyword score over name+slug+persona.
+    """
     existing = (employee.get("roleArchetype") or "").strip()
     if existing in ROLE_LANES:
         return existing
+    mapped = LEGACY_ROLE_MAP.get(existing.lower())
+    if mapped:
+        return mapped
     haystack = " ".join(
         str(employee.get(k, "") or "") for k in ("roleArchetype", "name", "slug", "persona")
     ).lower()
@@ -225,24 +254,26 @@ def _msg_to_text(reply: Optional[Msg]) -> str:
 # ─── Reactor "quiet-check" — cheap JSON pass ───────────────────────────
 
 REACTOR_INSTRUCTIONS = """\
-You are participating in a workspace chat alongside other expert agents.
-The Lead just answered the user. Decide if YOU — given your role and
-expertise — would speak up. Default to silence unless you add value.
+You are participating in a Slack-style workspace chat alongside other expert
+agents. The Lead just answered the user. Decide if YOU — given your role and
+expertise — would speak up. Default to silence unless you add real value.
 
-Reply in STRICT JSON only:
+Reply in STRICT JSON ONLY (no preamble, no code fence):
 {
-  "react": true | false,        // true if you would speak up
+  "react": true | false,         // true if you would speak up
   "agreement": "agree" | "extend" | "challenge",  // omit if react=false
-  "confidence": 0.0 - 1.0,       // your confidence in the position
-  "line": "..."                  // 1-2 sentences max, conversational tone
+  "confidence": 0.0 - 1.0,        // your confidence in the position
+  "line": "..."                   // ONE sentence, max ~25 words, Slack tone
 }
 
-Rules:
-- Use "challenge" only if you have a substantive counterpoint or risk.
-- Use "extend" if you build on the Lead's point.
-- Use "agree" only if you add a concrete +1 (not "I agree").
-- Stay in character — match your role's voice.
-- If silent, return {"react": false}.
+Hard rules:
+- ONE sentence. Conversational, lowercase first word OK, no headers, no bullets.
+- "challenge" only if you have a substantive counterpoint or risk.
+- "extend" if you concretely build on the Lead's point.
+- "agree" only if you add a real +1 (skip if you'd just say 'I agree').
+- Match your role's voice — Skeptic challenges, Researcher cites data,
+  Builder asks "how", Communicator translates, Strategist re-frames.
+- If silent, return {"react": false} and nothing else.
 """
 
 
@@ -369,9 +400,16 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         lead_agent = await _build_agent_for_room(req.room_id, lead)
         # Provide CSI persona framing in the user-prompt wrapper so we
         # don't have to mutate the agent's underlying system prompt.
+        # Chat-tone constraints — this is a Slack-style room, NOT a memo.
         lead_prompt = (
-            f"[CSI swarm — your lane: {lead['_lane']}. You're the LEAD this turn.]\n"
-            f"{req.user_message}"
+            f"[CSI swarm — your lane: {lead['_lane']}. You're the LEAD this turn.]\n\n"
+            f"WRITE LIKE A CHAT MESSAGE:\n"
+            f"- Maximum 3-4 short sentences, OR a brief structured answer if the user asks for a plan/list.\n"
+            f"- Speak in first person, conversational tone — no 'Dear team', no formal opener.\n"
+            f"- Bullets / numbered lists are OK only when the user explicitly asks for them; max 5 items.\n"
+            f"- No 'Next steps:' boilerplate, no 'How would you like to proceed?' closer.\n"
+            f"- Skip preamble. Get to the substance in sentence one.\n\n"
+            f"User said:\n{req.user_message}"
         )
         reply = await lead_agent(Msg(name="user", content=lead_prompt, role="user"))
         lead_text = _msg_to_text(reply) or "(no response)"

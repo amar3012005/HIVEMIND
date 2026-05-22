@@ -246,8 +246,25 @@ async def _build_agent_for_room(room_id: str, emp: Dict[str, Any]) -> ReActAgent
     boot = {b["id"]: b for b in await fetch_bootstrap()}
     boot_emp = boot.get(emp["id"], {}) or {}
     api_key = boot_emp.get("api_key")
+    # When the employee has no scoped HIVEMIND key (legacy rows where the
+    # mint failed at create-time), don't fail the turn — strip tools so the
+    # agent still produces a chat reply with no recall/save reach. Caller
+    # already pre-fetches memory context into the lead prompt, so the
+    # bubble stays grounded even without tool access.
     if not api_key:
-        raise HTTPException(412, f"employee {emp.get('slug')} has no bootstrap api_key")
+        log.warning(
+            "employee %s missing scoped api_key — building tool-less agent",
+            emp.get("slug"),
+        )
+        merged = {
+            **emp,
+            "tools": [],
+            "hyper": boot_emp.get("hyper"),
+            "active_prompt_version": boot_emp.get("active_prompt_version"),
+        }
+        agent = build_react_agent(merged, "")
+        _ROOM_AGENTS[key] = agent
+        return agent
     merged = {
         **emp,
         # Force the full hyper toolkit regardless of what's stored on the
@@ -536,6 +553,19 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                     log.exception("lead plain fallback failed: %s", exc3)
         if not retried:
             log.exception("lead failure: %s", exc)
+            # Surface a placeholder line so the UI doesn't end up with the
+            # ghost-bubble symptom ("0 tok · 1 turn" with no agent output).
+            placeholder = f"(I hit an error and couldn't respond — {msg[:140]})"
+            placeholder_tokens = max(80, len(placeholder) // 4)
+            cost_tokens += placeholder_tokens
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "line",
+                "agent": lead.get("slug"),
+                "round": 1,
+                "content": placeholder,
+                "tokens": placeholder_tokens,
+                "kind": "lead-error",
+            })
             await _emit_event(req.callback_url, req.turn_id, {
                 "t": "error", "agent": lead.get("slug"), "message": msg, "retryable": True,
             })

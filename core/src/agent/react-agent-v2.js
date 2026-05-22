@@ -164,7 +164,7 @@ Output STRICT JSON (no prose, no code fence):
   "needs_time_travel": false,     // true ONLY for explicit temporal: "as of X", "before Y", "what changed between"
   "time_travel": { "transaction_time": null, "valid_time": null }, // ISO timestamps if needs_time_travel
   "needs_web": false,             // true ONLY if user explicitly asks for current external info NOT in HIVEMIND
-  "save_intent": null,            // {"title": "...", "content": "...", "tags": [...]} if user said "save X"
+  "save_intent": null,            // {"title": "...", "content": "...", "tags": [...]} if user said "save X". CONTENT MUST be a fully self-contained note — if the user used a pronoun ("save this", "save that"), resolve it by reading the previous turn in conversation history and copy the actual facts into content. NEVER emit save_intent with empty / pronoun-only content. If the referent is unrecoverable, set save_intent to null instead.
   "update_intent": null,          // {"target_hint": "...", "new_value": "..."} if user corrected a prior fact
   "expected_evidence_types": []  // hint: ["fact"], ["decision"], ["preference"], etc
 }
@@ -461,19 +461,42 @@ ${message}`;
 
 // ── Save / update side-effects (best-effort, async-fire-and-forget) ───
 
-async function maybeSaveOrUpdate({ plan, ctx, onEvent }) {
+async function maybeSaveOrUpdate({ plan, ctx, onEvent, message, history }) {
   if (plan.save_intent && typeof plan.save_intent === 'object') {
+    // Resolve empty / pronoun-only content by harvesting conversation
+    // history. User says "save this" → grab the most recent assistant turn
+    // (their proposed text) OR the last substantive user message.
+    let content = (plan.save_intent.content || '').trim();
+    let title   = (plan.save_intent.title   || '').trim();
+
+    const PRONOUN_ONLY = /^(this|that|it|the\s+(?:above|previous|prior))\.?$/i;
+    if (!content || PRONOUN_ONLY.test(content)) {
+      const turns = Array.isArray(history) ? history.slice(-6) : [];
+      // Prefer last assistant draft (often the thing being saved)
+      const lastAssistant = [...turns].reverse().find(h => h?.role === 'assistant' && typeof h.content === 'string' && h.content.trim().length > 20);
+      const lastUserPrior = [...turns].reverse().find(h => h?.role === 'user' && typeof h.content === 'string' && h.content.trim() !== (message || '').trim() && h.content.trim().length > 20);
+      content = (lastAssistant?.content || lastUserPrior?.content || '').trim();
+    }
+
+    if (!content) {
+      // Nothing to save — log and skip.
+      onEvent?.({ type: 'tool_result', name: 'hivemind_save_memory', summary: 'skipped (empty content)' });
+      return { tool: 'hivemind_save_memory', args: plan.save_intent, result_summary: 'skipped (empty content)' };
+    }
+    if (!title) title = content.slice(0, 60).replace(/\s+/g, ' ').trim();
+
+    const args = {
+      title,
+      content,
+      tags: Array.isArray(plan.save_intent.tags) ? plan.save_intent.tags : [],
+    };
     try {
-      const r = await dispatchTool('hivemind_save_memory', {
-        title: plan.save_intent.title,
-        content: plan.save_intent.content,
-        tags: Array.isArray(plan.save_intent.tags) ? plan.save_intent.tags : [],
-      }, ctx);
-      onEvent?.({ type: 'tool_call', name: 'hivemind_save_memory', arguments: JSON.stringify(plan.save_intent) });
+      const r = await dispatchTool('hivemind_save_memory', args, ctx);
+      onEvent?.({ type: 'tool_call', name: 'hivemind_save_memory', arguments: JSON.stringify(args) });
       onEvent?.({ type: 'tool_result', name: 'hivemind_save_memory', summary: r?.id ? `saved ${(r.id || '').slice(0, 8)}` : 'saved' });
-      return { tool: 'hivemind_save_memory', args: plan.save_intent, result_summary: r?.id ? `saved ${(r.id || '').slice(0, 8)}` : 'saved' };
+      return { tool: 'hivemind_save_memory', args, result_summary: r?.id ? `saved ${(r.id || '').slice(0, 8)}` : 'saved' };
     } catch (err) {
-      return { tool: 'hivemind_save_memory', args: plan.save_intent, result_summary: `error: ${err.message}` };
+      return { tool: 'hivemind_save_memory', args, result_summary: `error: ${err.message}` };
     }
   }
   return null;
@@ -534,7 +557,7 @@ export async function runReactAgentV2({
 
     // Pure save intent (no recall needed) — write the memory then ack.
     if (plan.save_intent && plan.sub_queries.length === 0) {
-      const saveStep = await maybeSaveOrUpdate({ plan, ctx, onEvent });
+      const saveStep = await maybeSaveOrUpdate({ plan, ctx, onEvent, message, history });
       if (saveStep) steps.push(saveStep);
       const lang = languageName(language);
       const ackText = lang === 'English' ? 'Got it — saved.' :
@@ -622,7 +645,7 @@ export async function runReactAgentV2({
 
     // STEP 6 — Save intent fire-and-forget (don't block response)
     if (plan.save_intent) {
-      const saveStep = await maybeSaveOrUpdate({ plan, ctx, onEvent });
+      const saveStep = await maybeSaveOrUpdate({ plan, ctx, onEvent, message, history });
       if (saveStep) steps.push(saveStep);
     }
 

@@ -2828,6 +2828,62 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const pathname = url.pathname;
 
+  // ─── ChatGPT Connector adapter (one-click integration layer) ─
+  // Public spec at /v1/chatgpt/openapi.yaml; tool endpoints under
+  // /v1/chatgpt/* authed via existing Bearer / API key pipeline.
+  if (pathname === '/v1/chatgpt/openapi.yaml' && req.method === 'GET') {
+    try {
+      const fs = await import('node:fs/promises');
+      const path = await import('node:path');
+      const yamlPath = path.resolve(process.cwd(), 'chatgpt-adapter/openapi.yaml');
+      const yaml = await fs.readFile(yamlPath, 'utf8');
+      res.writeHead(200, {
+        'Content-Type': 'text/yaml; charset=utf-8',
+        'Cache-Control': 'public, max-age=300',
+        'Access-Control-Allow-Origin': '*',
+      });
+      res.end(yaml);
+      return;
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'openapi.yaml not found', detail: err.message }));
+      return;
+    }
+  }
+
+  if (pathname.startsWith('/v1/chatgpt/')) {
+    // Reuse existing Bearer / API key auth (OAuth tokens issued via
+    // /oauth/token land in the apiKey table with kind='oauth_access_token').
+    const auth = await authenticateApiKey(req);
+    if (!auth.ok) {
+      res.writeHead(auth.status || 401, {
+        'Content-Type': 'application/json',
+        'WWW-Authenticate': buildOAuthWwwAuthenticate({ description: auth.error }),
+      });
+      res.end(JSON.stringify({ error: auth.error || 'unauthorized' }));
+      return;
+    }
+    const { handleChatgptRequest } = await import('./services/chatgpt-adapter.js');
+    const deps = {
+      persistentMemoryStore,
+      persistentMemoryEngine,
+      smartIngestRouter,
+      buildRoutedIngestPayloads,
+      ingestRoutedPayload,
+      webIntelligence: globalThis.webIntelligence || null,
+      prisma,
+      accessContext: null,
+    };
+    const queryObj = Object.fromEntries(url.searchParams.entries());
+    const handled = await handleChatgptRequest({
+      req, res, pathname, query: queryObj, principal: auth.principal, deps,
+    });
+    if (handled) return;
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: `unknown route ${req.method} ${pathname}` }));
+    return;
+  }
+
   // ─── Inbound webhook receiver (Nango-bridged connectors) ──────
   // POST /webhooks/:provider — no user auth; provider HMAC signature only.
   if (pathname.startsWith('/webhooks/') && req.method === 'POST') {

@@ -1,0 +1,240 @@
+openapi: 3.1.0
+info:
+  title: HIVEMIND ChatGPT Connector
+  version: 1.0.0
+  description: |
+    Persistent memory + web research surface for ChatGPT custom GPTs and the
+    ChatGPT plugin / connector framework.
+
+    HIVEMIND exposes 5 deliberately narrow operations. Tenancy (user_id /
+    org_id) is resolved server-side from the OAuth access token — clients
+    never pass it.
+servers:
+  - url: https://core.hivemind.davinciai.eu:8050
+    description: HIVEMIND core API (production)
+security:
+  - oauth2: [memory:read]
+  - oauth2: [memory:write]
+  - oauth2: [web:search]
+paths:
+  /v1/chatgpt/memory/search:
+    post:
+      operationId: searchMemory
+      summary: Search HIVEMIND memories for the authenticated user
+      description: |
+        Semantic + lexical recall against the user's persistent memory graph.
+        Returns the most relevant memories with id, title, content, tags,
+        score, created_at. Use this BEFORE answering any user question about
+        the user's own life, work, decisions, projects, or contacts.
+      security:
+        - oauth2: [memory:read]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query:
+                  type: string
+                  description: Natural-language query
+                  maxLength: 2000
+                limit:
+                  type: integer
+                  default: 10
+                  minimum: 1
+                  maximum: 50
+                tags:
+                  type: array
+                  items: { type: string }
+                  description: Filter by tag (any-match)
+                mode:
+                  type: string
+                  enum: [quick, panorama, insight]
+                  default: quick
+      responses:
+        '200':
+          description: Recall results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count: { type: integer }
+                  memories:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        title: { type: string }
+                        content: { type: string }
+                        memory_type: { type: string }
+                        tags:
+                          type: array
+                          items: { type: string }
+                        score: { type: number }
+                        created_at: { type: string, format: date-time }
+
+  /v1/chatgpt/memory/save:
+    post:
+      operationId: saveMemory
+      summary: Save a durable memory
+      description: |
+        Persist a fact, preference, decision, goal, person, or event to the
+        user's HIVEMIND graph. Call when the user reveals something durable
+        the assistant should remember. ALWAYS include ≥2 tags. NEVER save
+        chitchat, transient state, or secrets.
+      security:
+        - oauth2: [memory:write]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, content]
+              properties:
+                title: { type: string, maxLength: 200 }
+                content: { type: string, maxLength: 8000 }
+                memory_type:
+                  type: string
+                  enum: [fact, preference, decision, goal, event, lesson, relationship]
+                  default: fact
+                tags:
+                  type: array
+                  items: { type: string }
+                  minItems: 2
+      responses:
+        '200':
+          description: Saved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  saved: { type: boolean }
+                  id: { type: string }
+                  title: { type: string }
+
+  /v1/chatgpt/memory/list:
+    get:
+      operationId: listMemories
+      summary: List recent memories (newest first)
+      security:
+        - oauth2: [memory:read]
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, default: 20, minimum: 1, maximum: 100 }
+        - in: query
+          name: memory_type
+          schema:
+            type: string
+            enum: [fact, preference, decision, goal, event, lesson, relationship]
+        - in: query
+          name: tag
+          schema: { type: string }
+      responses:
+        '200':
+          description: Memory list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count: { type: integer }
+                  memories:
+                    type: array
+                    items: { type: object }
+
+  /v1/chatgpt/memory/query:
+    post:
+      operationId: queryMemoryWithAI
+      summary: Ask a natural-language question over the user's memory
+      description: |
+        Runs HIVEMIND's internal RAG agent — recall + traverse + synthesis —
+        and returns a grounded answer with citations to the source memory
+        ids. Use for multi-hop questions ("who was at the dinner last
+        spring?") rather than single-fact lookups.
+      security:
+        - oauth2: [memory:read]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [question]
+              properties:
+                question: { type: string, maxLength: 2000 }
+      responses:
+        '200':
+          description: Synthesized answer
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  answer: { type: string }
+                  citations:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        memory_id: { type: string }
+                        title: { type: string }
+
+  /v1/chatgpt/web/search:
+    post:
+      operationId: webSearch
+      summary: Run a web search and return synchronous results
+      description: |
+        Submits a web search job to HIVEMIND's web intelligence layer and
+        polls until done (typically 3-15 seconds). Returns ranked results.
+        Use only when the user explicitly asks for current / external
+        information not in their memory.
+      security:
+        - oauth2: [web:search]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query: { type: string, maxLength: 500 }
+                limit: { type: integer, default: 5, minimum: 1, maximum: 20 }
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  query: { type: string }
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        title: { type: string }
+                        url: { type: string }
+                        snippet: { type: string }
+                        published: { type: string }
+
+components:
+  securitySchemes:
+    oauth2:
+      type: oauth2
+      flows:
+        authorizationCode:
+          authorizationUrl: https://core.hivemind.davinciai.eu:8050/oauth/authorize
+          tokenUrl: https://core.hivemind.davinciai.eu:8050/oauth/token
+          scopes:
+            memory:read: Read user's memory graph
+            memory:write: Save new memories
+            web:search: Run web searches

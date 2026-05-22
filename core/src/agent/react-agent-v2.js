@@ -493,8 +493,13 @@ async function maybeSaveOrUpdate({ plan, ctx, onEvent, message, history }) {
       tags: Array.isArray(plan.save_intent.tags) ? plan.save_intent.tags : [],
       // Pass project_hint as `project` (name/slug); tool-registry resolves
       // it to project_id against the user's access list. ctx.projectId is
-      // the implicit fallback handled inside the handler.
+      // the implicit fallback handled inside the handler, but we also
+      // forward it explicitly here as project_id so audit-logged args (and
+      // any downstream code that bypasses the fallback) carry the scope.
       ...(plan.save_intent.project_hint ? { project: plan.save_intent.project_hint } : {}),
+      ...(ctx.projectId && !plan.save_intent.project_id && !plan.save_intent.project_hint
+        ? { project_id: ctx.projectId, scope: 'project' }
+        : {}),
     };
     try {
       const r = await dispatchTool('hivemind_save_memory', args, ctx);

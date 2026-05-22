@@ -4669,7 +4669,7 @@ const server = http.createServer(async (req, res) => {
         // Kick the sidecar to execute the turn. Fire-and-forget; the
         // sidecar will write events back via the callback hook.
         try {
-          const sidecarBase = process.env.EMPLOYEES_SIDECAR_URL || 'http://hm-employees:8080';
+          const sidecarBase = process.env.EMPLOYEES_SIDECAR_URL || 'http://hm-employees:8060';
           fetch(`${sidecarBase}/internal/hyper/room-turn`, {
             method: 'POST',
             headers: {

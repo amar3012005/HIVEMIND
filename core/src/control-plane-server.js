@@ -4370,7 +4370,114 @@ Write the persona now.`;
       return jsonResponse(res, await enrichEmployeeWithHyperState(cfg));
     }
 
+    // POST /v1/employees/:id/remint-key — re-issue scoped HIVEMIND api_key
+    // for legacy employees where the create-time mint silently failed
+    // (symptom: hyper-rooms turn seals at 0 tok because the agent can't
+    // bootstrap tools). Idempotent: deactivates the old key before mint.
+    if (sub === 'remint-key' && req.method === 'POST') {
+      if (!isOrgAdmin) return jsonResponse(res, { error: 'Forbidden' }, 403);
+      try {
+        const crypto = await import('node:crypto');
+        const { encryptToken } = await import('./connectors/framework/connector-store.js');
+        // Deactivate any prior scoped key linked to this employee.
+        if (emp.hivemindApiKeyId) {
+          try {
+            await prisma.apiKey.update({
+              where: { id: emp.hivemindApiKeyId },
+              data: { isActive: false },
+            });
+          } catch (_) { /* ignore — key might have been hard-deleted */ }
+        }
+        const raw = 'hmk_emp_' + crypto.randomBytes(24).toString('hex');
+        const keyHash = crypto.createHash('sha256').update(raw).digest('hex');
+        const apiKey = await prisma.apiKey.create({
+          data: {
+            userId: emp.createdBy || userId,
+            orgId,
+            name: `${emp.name} (employee, reminted)`,
+            keyHash,
+            keyPrefix: raw.slice(0, 12),
+            scopes: ['memory:read', 'memory:write', 'mcp', 'slack:act'],
+            isActive: true,
+          },
+        });
+        await store.setScopedApiKey({ id: emp.id, apiKeyId: apiKey.id, encryptedKey: encryptToken(raw) });
+        _notifyEmployeesReload();
+        audit({
+          organizationId: orgId, userId,
+          eventType: 'employee.key_reminted', eventCategory: 'employee', action: 'update',
+          resourceType: 'digital_employee', resourceId: empId,
+          ..._reqMeta(req),
+        });
+        return jsonResponse(res, { success: true, api_key_id: apiKey.id });
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+
     return jsonResponse(res, { error: 'Not found' }, 404);
+  }
+
+  // POST /v1/orgs/:id/employees/remint-all-keys — bulk back-fill for legacy
+  // employees in this org missing scoped HIVEMIND keys. Org-admin only.
+  const remintAllMatch = pathname.match(/^\/v1\/orgs\/([0-9a-f-]{36})\/employees\/remint-all-keys$/);
+  if (remintAllMatch && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const targetOrgId = remintAllMatch[1];
+    if (current.session.orgId !== targetOrgId) {
+      return jsonResponse(res, { error: 'Forbidden' }, 403);
+    }
+    const admin = await requireOrgAdmin(req, res, current.session.userId, targetOrgId);
+    if (!admin) return;
+    const store = await _getEmployeeStore();
+    if (!store) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    try {
+      const rows = await prisma.digitalEmployee.findMany({
+        where: { orgId: targetOrgId, scopedApiKeyEncrypted: null },
+        select: { id: true, name: true, createdBy: true },
+      });
+      const crypto = await import('node:crypto');
+      const { encryptToken } = await import('./connectors/framework/connector-store.js');
+      const results = [];
+      for (const r of rows) {
+        try {
+          const raw = 'hmk_emp_' + crypto.randomBytes(24).toString('hex');
+          const keyHash = crypto.createHash('sha256').update(raw).digest('hex');
+          const apiKey = await prisma.apiKey.create({
+            data: {
+              userId: r.createdBy || current.session.userId,
+              orgId: targetOrgId,
+              name: `${r.name} (employee, backfill)`,
+              keyHash,
+              keyPrefix: raw.slice(0, 12),
+              scopes: ['memory:read', 'memory:write', 'mcp', 'slack:act'],
+              isActive: true,
+            },
+          });
+          await store.setScopedApiKey({ id: r.id, apiKeyId: apiKey.id, encryptedKey: encryptToken(raw) });
+          results.push({ employee_id: r.id, name: r.name, ok: true });
+        } catch (err) {
+          results.push({ employee_id: r.id, name: r.name, ok: false, error: err.message });
+        }
+      }
+      _notifyEmployeesReload();
+      audit({
+        organizationId: targetOrgId, userId: current.session.userId,
+        eventType: 'employees.keys_backfilled', eventCategory: 'employee', action: 'update',
+        resourceType: 'organization', resourceId: targetOrgId,
+        newValue: { count: results.length, succeeded: results.filter(r => r.ok).length },
+        ..._reqMeta(req),
+      });
+      return jsonResponse(res, {
+        total: rows.length,
+        succeeded: results.filter(r => r.ok).length,
+        failed: results.filter(r => !r.ok).length,
+        results,
+      });
+    } catch (err) {
+      return jsonResponse(res, { error: err.message }, 500);
+    }
   }
 
   // POST /v1/orgs/:id/employees/pause-all — kill switch (org_admin only)

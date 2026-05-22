@@ -1477,18 +1477,23 @@ const aggregateCache = new Map();
 
 // OAuth 2.1 authorization code + refresh token stores
 const OAUTH_BASE_URL = process.env.HIVEMIND_OAUTH_BASE_URL || 'https://core.hivemind.davinciai.eu:8050';
-const OAUTH_SCOPES_SUPPORTED = ['memory.read', 'memory.write', 'tools.invoke', 'workspace.connect', 'mcp.connect'];
+const OAUTH_SCOPES_SUPPORTED = ['memory.read', 'memory.write', 'web.search', 'tools.invoke', 'workspace.connect', 'mcp.connect'];
 const OAUTH_SCOPE_TO_INTERNAL = {
   'memory.read': 'memory:read',
   'memory.write': 'memory:write',
+  'web.search': 'web:search',
   'tools.invoke': 'mcp',
   'workspace.connect': 'mcp',
   'mcp.connect': 'mcp'
 };
+// Accept both dot-style (memory.read) and colon-style (memory:read) on the
+// authorization request so ChatGPT / Custom GPTs (colon convention) work
+// alongside the original MCP clients (dot convention).
 const OAUTH_SCOPE_ALIASES = {
   'memory:read': 'memory.read',
   'memory:write': 'memory.write',
-  mcp: 'mcp.connect'
+  'web:search': 'web.search',
+  mcp: 'mcp.connect',
 };
 const OAUTH_ACCESS_TOKEN_TTL_SECONDS = Number(process.env.HIVEMIND_OAUTH_ACCESS_TOKEN_TTL_SECONDS || 15 * 60);
 const OAUTH_REFRESH_TOKEN_TTL_SECONDS = Number(process.env.HIVEMIND_OAUTH_REFRESH_TOKEN_TTL_SECONDS || 30 * 24 * 60 * 60);

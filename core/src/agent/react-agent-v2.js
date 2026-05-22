@@ -164,7 +164,8 @@ Output STRICT JSON (no prose, no code fence):
   "needs_time_travel": false,     // true ONLY for explicit temporal: "as of X", "before Y", "what changed between"
   "time_travel": { "transaction_time": null, "valid_time": null }, // ISO timestamps if needs_time_travel
   "needs_web": false,             // true ONLY if user explicitly asks for current external info NOT in HIVEMIND
-  "save_intent": null,            // {"title": "...", "content": "...", "tags": [...]} if user said "save X". CONTENT MUST be a fully self-contained note — if the user used a pronoun ("save this", "save that"), resolve it by reading the previous turn in conversation history and copy the actual facts into content. NEVER emit save_intent with empty / pronoun-only content. If the referent is unrecoverable, set save_intent to null instead.
+  "save_intent": null,            // {"title": "...", "content": "...", "tags": [...], "project_hint": "..."} if user said "save X". CONTENT MUST be a fully self-contained note — if the user used a pronoun ("save this", "save that"), resolve it by reading the previous turn in conversation history and copy the actual facts into content. NEVER emit save_intent with empty / pronoun-only content. If the referent is unrecoverable, set save_intent to null instead. If the user named a project ("save to Ashley", "in the SOLVIS project"), put that name in project_hint so the server can resolve it to a project_id.
+  "ask_for_project": false,       // true if the user asked to save but did NOT specify a project AND no active project is set in the session. Server will respond by asking which project before saving.
   "update_intent": null,          // {"target_hint": "...", "new_value": "..."} if user corrected a prior fact
   "expected_evidence_types": []  // hint: ["fact"], ["decision"], ["preference"], etc
 }
@@ -204,6 +205,7 @@ async function planStep({ message, history, language, assistantName, orgName, ha
     time_travel:           parsed.time_travel || null,
     needs_web:             !!parsed.needs_web,
     save_intent:           parsed.save_intent || null,
+    ask_for_project:       !!parsed.ask_for_project,
     update_intent:         parsed.update_intent || null,
     expected_evidence_types: Array.isArray(parsed.expected_evidence_types) ? parsed.expected_evidence_types : [],
   };
@@ -489,6 +491,10 @@ async function maybeSaveOrUpdate({ plan, ctx, onEvent, message, history }) {
       title,
       content,
       tags: Array.isArray(plan.save_intent.tags) ? plan.save_intent.tags : [],
+      // Pass project_hint as `project` (name/slug); tool-registry resolves
+      // it to project_id against the user's access list. ctx.projectId is
+      // the implicit fallback handled inside the handler.
+      ...(plan.save_intent.project_hint ? { project: plan.save_intent.project_hint } : {}),
     };
     try {
       const r = await dispatchTool('hivemind_save_memory', args, ctx);
@@ -555,16 +561,56 @@ export async function runReactAgentV2({
     if (planResult.usage) usages.push(planResult.usage);
     const plan = planResult.plan;
 
+    // Save intent without a resolvable project scope → ASK first.
+    // Triggered when: planner flagged ask_for_project, no project_hint, no
+    // session project (ctx.projectId), and the user's accessContext has
+    // multiple projects to choose from. We respond with a question instead
+    // of guessing or silently dropping into org scope.
+    if (plan.save_intent && (plan.ask_for_project || (!plan.save_intent.project_hint && !ctx.projectId))) {
+      const accessProjectIds = (ctx.accessContext?.projectIds) || [];
+      if (!plan.save_intent.project_hint && !ctx.projectId && accessProjectIds.length > 1) {
+        const lang = languageName(language);
+        let projects = [];
+        try {
+          if (ctx.persistentMemoryStore?.client?.project) {
+            projects = await ctx.persistentMemoryStore.client.project.findMany({
+              where: { id: { in: accessProjectIds }, orgId: ctx.orgId },
+              select: { id: true, name: true },
+              take: 12,
+            });
+          }
+        } catch {}
+        const list = projects.map(p => `• ${p.name}`).join('\n') || '(no projects found)';
+        const ask = lang === 'German'
+          ? `In welches Projekt soll ich das speichern?\n${list}\n\nOder sag "org" für die ganze Organisation.`
+          : lang === 'Spanish'
+          ? `¿En qué proyecto guardo esto?\n${list}\n\nO di "org" para guardarlo a nivel de organización.`
+          : lang === 'French'
+          ? `Dans quel projet dois-je l'enregistrer ?\n${list}\n\nOu dis "org" pour l'enregistrer au niveau de l'organisation.`
+          : `Which project should I save this to?\n${list}\n\nOr say "org" to save it at the organisation level.`;
+        onEvent?.({ type: 'finish', text: ask });
+        return {
+          response: ask, sources: [], steps,
+          evidence_used: [], confidence: 1.0, gaps: ['project scope unresolved'],
+          usage: sumUsage(usages),
+          assistant_name: assistantName || null,
+        };
+      }
+    }
+
     // Pure save intent (no recall needed) — write the memory then ack.
     if (plan.save_intent && plan.sub_queries.length === 0) {
       const saveStep = await maybeSaveOrUpdate({ plan, ctx, onEvent, message, history });
       if (saveStep) steps.push(saveStep);
       const lang = languageName(language);
-      const ackText = lang === 'English' ? 'Got it — saved.' :
-                      lang === 'German'  ? 'Verstanden — gespeichert.' :
-                      lang === 'Spanish' ? 'Entendido — guardado.' :
-                      lang === 'French'  ? 'Compris — enregistré.' :
-                      `Got it — saved (${lang}).`;
+      const scopeNote = saveStep?.args?.project_id || saveStep?.args?.project
+        ? ` (project: ${saveStep.args.project || saveStep.args.project_id.slice(0, 8)})`
+        : '';
+      const ackText = lang === 'English' ? `Got it — saved${scopeNote}.` :
+                      lang === 'German'  ? `Verstanden — gespeichert${scopeNote}.` :
+                      lang === 'Spanish' ? `Entendido — guardado${scopeNote}.` :
+                      lang === 'French'  ? `Compris — enregistré${scopeNote}.` :
+                      `Got it — saved${scopeNote} (${lang}).`;
       onEvent?.({ type: 'finish', text: ackText });
       return {
         response: ackText, sources: [], steps,

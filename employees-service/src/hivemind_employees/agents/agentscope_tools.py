@@ -158,5 +158,162 @@ def build_hivemind_toolkit(api_key: str, enabled_tool_names: List[str]) -> Toolk
                 return _tool_response(r.json())
         tk.register_tool_function(save_memory)
 
+    # ── Read-only graph + temporal tools ─────────────────────────────
+
+    if "hivemind_list_memories" in enabled_tool_names:
+        def list_memories(tags: Optional[str] = None, memory_type: Optional[str] = None, limit: int = 20) -> ToolResponse:
+            """List recent memories with optional filters.
+
+            Args:
+                tags: Comma-separated tag filter (any-match).
+                memory_type: e.g. 'fact'|'decision'|'preference'|'goal'|'summary'.
+                limit: Max rows (default 20, max 100).
+            """
+            params: dict = {"limit": min(max(limit, 1), 100)}
+            if tags: params["tags"] = tags
+            if memory_type: params["memory_type"] = memory_type
+            with _client(api_key) as c:
+                r = c.get("/api/memories", params=params)
+                r.raise_for_status()
+                return _tool_response(r.json())
+        tk.register_tool_function(list_memories)
+
+    if "hivemind_get_memory" in enabled_tool_names:
+        def get_memory(memory_id: str) -> ToolResponse:
+            """Fetch one memory's full content + metadata by id."""
+            with _client(api_key) as c:
+                r = c.get(f"/api/memories/{memory_id}")
+                r.raise_for_status()
+                return _tool_response(r.json())
+        tk.register_tool_function(get_memory)
+
+    if "hivemind_traverse_graph" in enabled_tool_names:
+        def traverse_graph(memory_id: str, depth: int = 2, relationship: str = "all") -> ToolResponse:
+            """Walk the relationship graph from a starting memory.
+
+            Args:
+                memory_id: Start node.
+                depth: 1-3 hops.
+                relationship: 'all'|'Updates'|'Extends'|'Derives'|'Contradicts'|'PartOf'|'Mentions'.
+            """
+            with _client(api_key) as c:
+                r = c.post("/api/memories/traverse", json={
+                    "memory_id": memory_id,
+                    "depth": min(max(depth, 1), 3),
+                    "relationship": relationship,
+                })
+                r.raise_for_status()
+                return _tool_response(r.json())
+        tk.register_tool_function(traverse_graph)
+
+    if "hivemind_query_with_ai" in enabled_tool_names:
+        def query_with_ai(question: str, context_limit: int = 8) -> ToolResponse:
+            """Ask a natural-language question; HIVEMIND retrieves + synthesizes.
+
+            Use for complex multi-hop questions. Cheaper to use hivemind_recall
+            for narrow lookups.
+            """
+            with _client(api_key) as c:
+                r = c.post("/api/query", json={
+                    "question": question, "context_limit": context_limit,
+                })
+                r.raise_for_status()
+                return _tool_response(r.json())
+        tk.register_tool_function(query_with_ai)
+
+    if "hivemind_recall_bugs" in enabled_tool_names:
+        def recall_bugs(context: str, limit: int = 5) -> ToolResponse:
+            """Recall past bugs / gotchas matching the context."""
+            with _client(api_key) as c:
+                r = c.post("/api/recall_bugs", json={"context": context, "limit": limit})
+                r.raise_for_status()
+                return _tool_response(r.json())
+        tk.register_tool_function(recall_bugs)
+
+    if "hivemind_why_code" in enabled_tool_names:
+        def why_code(query: str, file_path: Optional[str] = None) -> ToolResponse:
+            """Explain why a piece of code/decision exists (links to past decisions)."""
+            body: dict = {"query": query}
+            if file_path: body["file_path"] = file_path
+            with _client(api_key) as c:
+                r = c.post("/api/why_code", json=body)
+                r.raise_for_status()
+                return _tool_response(r.json())
+        tk.register_tool_function(why_code)
+
+    if "hivemind_at" in enabled_tool_names:
+        def hivemind_at(transaction_time: Optional[str] = None, valid_time: Optional[str] = None, memory_query: Optional[str] = None) -> ToolResponse:
+            """Time-travel — return memory state as it was known/true at a timestamp."""
+            body = {k: v for k, v in {"transaction_time": transaction_time, "valid_time": valid_time, "memory_query": memory_query}.items() if v}
+            with _client(api_key) as c:
+                r = c.post("/api/time/at", json=body)
+                r.raise_for_status()
+                return _tool_response(r.json())
+        tk.register_tool_function(hivemind_at)
+
+    if "hivemind_list_projects" in enabled_tool_names:
+        def list_projects() -> ToolResponse:
+            """List projects (sub-HIVEMINDs) accessible to the caller's org."""
+            with _client(api_key) as c:
+                r = c.get("/api/projects")
+                r.raise_for_status()
+                return _tool_response(r.json())
+        tk.register_tool_function(list_projects)
+
+    # ── Web intelligence (use only when info isn't in HIVEMIND) ───────
+
+    if "hivemind_web_search" in enabled_tool_names:
+        def web_search(query: str, limit: int = 5) -> ToolResponse:
+            """Search the live web. USE SPARINGLY — try hivemind_recall first.
+            Submits a Tavily search job, polls for result, returns top hits.
+
+            Args:
+                query: Search query (be specific, 5-10 words).
+                limit: Max results (default 5, max 10).
+            """
+            import time
+            with _client(api_key) as c:
+                r = c.post("/api/web/search/jobs", json={"query": query, "limit": min(max(limit, 1), 10)})
+                r.raise_for_status()
+                job_id = r.json().get("job_id")
+                if not job_id: return _tool_response({"error": "no job_id"})
+                # Poll up to ~20s
+                for _ in range(20):
+                    time.sleep(1)
+                    g = c.get(f"/api/web/jobs/{job_id}")
+                    if g.status_code != 200: continue
+                    payload = g.json()
+                    if payload.get("status") in {"succeeded", "failed"}:
+                        return _tool_response(payload)
+                return _tool_response({"status": "timeout", "job_id": job_id})
+        tk.register_tool_function(web_search)
+
+    if "hivemind_web_research" in enabled_tool_names:
+        def web_research(input: str, model: str = "mini") -> ToolResponse:
+            """Comprehensive Tavily Research report with citations. Use for
+            broad, multi-source questions where a single search isn't enough.
+            Heavier than hivemind_web_search — use sparingly.
+
+            Args:
+                input: Research question / task.
+                model: 'mini' (fast, narrow) | 'pro' (deep, multi-subtopic) | 'auto'.
+            """
+            import time
+            with _client(api_key) as c:
+                r = c.post("/api/web/research/jobs", json={"input": input, "model": model})
+                r.raise_for_status()
+                job_id = r.json().get("job_id")
+                if not job_id: return _tool_response({"error": "no job_id"})
+                # Poll up to 4 min for pro mode
+                for _ in range(120):
+                    time.sleep(2)
+                    g = c.get(f"/api/web/jobs/{job_id}")
+                    if g.status_code != 200: continue
+                    payload = g.json()
+                    if payload.get("status") in {"succeeded", "failed"}:
+                        return _tool_response(payload)
+                return _tool_response({"status": "timeout", "job_id": job_id})
+        tk.register_tool_function(web_research)
+
     log.info("Built AgentScope toolkit (tools=%s)", enabled_tool_names)
     return tk

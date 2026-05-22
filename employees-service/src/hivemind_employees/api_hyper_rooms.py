@@ -51,14 +51,34 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/internal/hyper", tags=["hyper-rooms"])
 
 
-# ─── Cost + budget constants — mirror core/src/employees/hyper-rooms.js ─
+# ─── Budget constants ────────────────────────────────────────────────
+# User requested unlimited — using very large caps as a runaway safety
+# net only. Effectively no per-line constraint at typical LLM context
+# windows (128k Groq / 200k Anthropic).
 
-LEAD_MAX_TOKENS = 8192
-REACTOR_MAX_TOKENS = 1500
-REVISE_MAX_TOKENS = 4096
-TURN_COST_CAP = 12_000
+LEAD_MAX_TOKENS = 100_000
+REACTOR_MAX_TOKENS = 100_000
+REVISE_MAX_TOKENS = 100_000
+TURN_COST_CAP = 10_000_000  # 10M = effectively unlimited per turn
 MAX_REACTORS = 2
 ROUND_2_CHALLENGE_THRESHOLD = 0.7
+
+# Full toolkit for hyper-room agents — all HIVEMIND read paths + save
+# + time travel; web is gated by prompt ("only when info isn't here").
+DEFAULT_HYPER_TOOLS = [
+    "hivemind_recall",
+    "hivemind_list_memories",
+    "hivemind_get_memory",
+    "hivemind_traverse_graph",
+    "hivemind_query_with_ai",
+    "hivemind_recall_bugs",
+    "hivemind_why_code",
+    "hivemind_at",
+    "hivemind_list_projects",
+    "hivemind_save_memory",
+    "hivemind_web_search",
+    "hivemind_web_research",
+]
 
 ROLE_LANES = ("Strategist", "Builder", "Skeptic", "Researcher", "Communicator")
 
@@ -217,7 +237,12 @@ async def _emit_event(callback_url: str, turn_id: str, event: Dict[str, Any]) ->
 
 
 async def _build_agent_for_room(room_id: str, emp: Dict[str, Any]) -> ReActAgent:
-    """Cache one agent per (room, employee) so memory carries across turns."""
+    """Cache one agent per (room, employee) so memory carries across turns.
+
+    Overrides the employee's `tools` list with the full HIVEMIND toolset
+    (read paths + save + time-travel + web) so swarm agents have the
+    same reach as the MCP-driven Talk-to-HIVE assistant.
+    """
     key = f"{room_id}:{emp['id']}"
     if key in _ROOM_AGENTS:
         return _ROOM_AGENTS[key]
@@ -228,6 +253,9 @@ async def _build_agent_for_room(room_id: str, emp: Dict[str, Any]) -> ReActAgent
         raise HTTPException(412, f"employee {emp.get('slug')} has no bootstrap api_key")
     merged = {
         **emp,
+        # Force the full hyper toolkit regardless of what's stored on the
+        # employee row — gives every swarm participant equal reach.
+        "tools": DEFAULT_HYPER_TOOLS,
         "hyper": boot_emp.get("hyper"),
         "active_prompt_version": boot_emp.get("active_prompt_version"),
     }
@@ -403,12 +431,17 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         # Chat-tone constraints — this is a Slack-style room, NOT a memo.
         lead_prompt = (
             f"[CSI swarm — your lane: {lead['_lane']}. You're the LEAD this turn.]\n\n"
+            f"GROUND YOUR ANSWER IN HIVEMIND FIRST:\n"
+            f"- Call hivemind_recall (or hivemind_query_with_ai for multi-hop) BEFORE you answer if the user is asking about facts, preferences, projects, decisions, or history.\n"
+            f"- Use hivemind_list_memories / hivemind_traverse_graph to pull connected context when the topic is a known entity.\n"
+            f"- Call hivemind_web_search or hivemind_web_research ONLY when the answer is clearly not in HIVEMIND (e.g. live news, current pricing, public companies you haven't tracked).\n"
+            f"- Save durable conclusions with hivemind_save_memory at the end of your turn when warranted.\n\n"
             f"WRITE LIKE A CHAT MESSAGE:\n"
             f"- Maximum 3-4 short sentences, OR a brief structured answer if the user asks for a plan/list.\n"
-            f"- Speak in first person, conversational tone — no 'Dear team', no formal opener.\n"
-            f"- Bullets / numbered lists are OK only when the user explicitly asks for them; max 5 items.\n"
-            f"- No 'Next steps:' boilerplate, no 'How would you like to proceed?' closer.\n"
-            f"- Skip preamble. Get to the substance in sentence one.\n\n"
+            f"- First person, conversational, no formal opener.\n"
+            f"- Bullets only if the user asked for a list; max 5 items.\n"
+            f"- No 'Next steps:' boilerplate or 'How would you like to proceed?' closers.\n"
+            f"- Skip preamble — substance in sentence one.\n\n"
             f"User said:\n{req.user_message}"
         )
         reply = await lead_agent(Msg(name="user", content=lead_prompt, role="user"))

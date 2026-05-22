@@ -180,11 +180,12 @@ export function preflightTurn({ room, userMessage }) {
 }
 
 export const HYPER_CONFIG = {
-  // Cost caps (Q9 lock)
-  TURN_COST_CAP: 12_000,
-  LEAD_MAX_TOKENS: 8192,
-  REACTOR_MAX_TOKENS: 1500,
-  REVISE_MAX_TOKENS: 4096,
+  // Cost caps — effectively unlimited per user request; large numbers
+  // only as runaway safety net.
+  TURN_COST_CAP: 10_000_000,
+  LEAD_MAX_TOKENS: 100_000,
+  REACTOR_MAX_TOKENS: 100_000,
+  REVISE_MAX_TOKENS: 100_000,
   // Reactors (Q9)
   MAX_REACTORS: 2,
   // Rounds (Q9)

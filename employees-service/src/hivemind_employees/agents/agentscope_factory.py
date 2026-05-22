@@ -133,8 +133,14 @@ def build_react_agent(employee_row: dict, hivemind_api_key: str) -> ReActAgent:
         or employee_row.get("persona")
         or ""
     )
+    # Default fallback is wider than before — gives a fresh employee
+    # the full HIVEMIND reach. Hyper-room agents override via merged_emp.
     requested_tools = employee_row.get("tools") or [
         "hivemind_recall",
+        "hivemind_list_memories",
+        "hivemind_get_memory",
+        "hivemind_traverse_graph",
+        "hivemind_query_with_ai",
         "hivemind_save_memory",
     ]
     enabled_tools = list(requested_tools)
@@ -157,7 +163,10 @@ def build_react_agent(employee_row: dict, hivemind_api_key: str) -> ReActAgent:
         formatter=formatter,
         toolkit=toolkit,
         memory=InMemoryMemory(),
-        max_iters=10,
+        # Bumped from 10 -> 25. Hyper-room agents chain hivemind_recall +
+        # graph traversal + occasional web search, plus the final
+        # synthesis turn. Each tool round eats one iter.
+        max_iters=25,
         # Sequential tool calls keep transcripts deterministic for
         # multi-agent reasoning. Parallel tool calls can be re-enabled
         # per-employee later if we want speedups for trusted roles.

@@ -4683,7 +4683,7 @@ const server = http.createServer(async (req, res) => {
               org_id: current.session.orgId,
               user_message: userMessage,
               participant_ids: room.participantIds || [],
-              callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://control-plane:8080')}/internal/hyper/turn-event`,
+              callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
             }),
           }).catch(err => console.warn('[hyper-rooms] sidecar kick failed:', err.message));
         } catch (err) {

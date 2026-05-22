@@ -496,8 +496,14 @@ async function vectorCandidatesForRecall(store, {
 
   return hydrated.filter(item => {
     if (!item) return false;
+    const mt = item.memory?.tags || [];
     // Exclude benchmark data from production recall when no specific project is set
-    if (!project && (item.memory?.tags || []).includes('longmemeval')) return false;
+    if (!project && mt.includes('longmemeval')) return false;
+    // Drop cognition-loop canonical-summary nodes from default recall —
+    // they outscore specific facts because their content is a mash-up
+    // that vectors close to almost any query. Opt back in by passing
+    // tags=['canonical-summary'] explicitly.
+    if (!tags.includes('canonical-summary') && mt.includes('canonical-summary')) return false;
     return true;
   });
 }
@@ -926,10 +932,18 @@ export async function recallPersistedMemories(store, {
   });
 
   const filteredLexical = lexicalCandidates.filter(memory => {
+    const memTags = memory.tags || [];
     // Exclude benchmark data from production recall when no specific project is set
-    if (!project && (memory.tags || []).includes('longmemeval')) return false;
+    if (!project && memTags.includes('longmemeval')) return false;
     if (!isMemoryInDateRange(memory, effectiveDateRange)) return false;
     if (scope_filter && memory.scope && memory.scope !== scope_filter) return false;
+    // Exclude canonical-summary rows from default recall. These are
+    // cognition-loop compaction nodes ("Canonical: chat (compacted 21)")
+    // that have high cosine to almost any query because their content
+    // is a generic mash-up. They consistently rank above real specific
+    // facts and drown the agent's view. Callers wanting them can pass
+    // tags=['canonical-summary'] explicitly.
+    if (!tags.includes('canonical-summary') && memTags.includes('canonical-summary')) return false;
     if (source_platforms.length === 0) return true;
     const sourcePlatform = memory.source_metadata?.source_platform || memory.source || null;
     return source_platforms.includes(sourcePlatform);

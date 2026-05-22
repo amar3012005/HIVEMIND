@@ -697,7 +697,7 @@ function finalizeStreamingAi(wrap, reply) {
   const compTok = reply?.usage?.completion_tokens ?? null;
   const totalTok = (promptTok != null && compTok != null) ? promptTok + compTok : (reply?.usage?.total_tokens ?? null);
 
-  wrap.querySelector('.ai-text').innerHTML = escapeHtml(text);
+  wrap.querySelector('.ai-text').innerHTML = renderMarkdownLite(text);
 
   if (sources.length || totalTok != null) {
     const card = wrap.querySelector('.ai-card');
@@ -737,6 +737,142 @@ function finalizeStreamingAi(wrap, reply) {
   }
 
   scrollBottom();
+}
+
+// ── Markdown-lite renderer (HTML string) ────────────────────────────────
+// Mirrors the React renderMarkdownMobile in TalkToHiveMobile.jsx. Escapes
+// input first then applies markdown patterns so user content can't inject
+// HTML. Handles: code fences, pipe tables, headings, lists, blockquotes,
+// inline bold / italic / code / links, paragraphs.
+
+function _escHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function _mdInline(escaped) {
+  // Operate on already-escaped text. Markdown chars (* ` [ ]) are not
+  // affected by escapeHtml, so patterns still match.
+  let s = escaped;
+  // Bold (must run before italic so ** isn't consumed as two *)
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  // Italic — single * not preceded/followed by *
+  s = s.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>');
+  // Inline code
+  s = s.replace(/`([^`]+)`/g, '<code class="md-code">$1</code>');
+  // Links [text](url)
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_m, t, u) =>
+    `<a href="${u}" target="_blank" rel="noreferrer noopener">${t}</a>`);
+  return s;
+}
+
+function _isTableRow(line) { return /^\s*\|.*\|\s*$/.test(line); }
+function _isTableSep(line) { return /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/.test(line); }
+function _parseTableRow(line) {
+  return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+}
+
+function renderMarkdownLite(raw) {
+  if (!raw) return '';
+  const lines = String(raw).replace(/^\s+|\s+$/g, '').split(/\r?\n/);
+  const out = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    // Code fence
+    if (/^```/.test(trimmed)) {
+      const buf = [];
+      i++;
+      while (i < lines.length && !/^```/.test(lines[i].trim())) {
+        buf.push(lines[i]);
+        i++;
+      }
+      if (i < lines.length) i++; // closing fence
+      out.push(`<pre class="md-pre"><code>${_escHtml(buf.join('\n'))}</code></pre>`);
+      continue;
+    }
+
+    if (!trimmed) { i++; continue; }
+
+    // Pipe table
+    if (_isTableRow(line) && i + 1 < lines.length && _isTableSep(lines[i + 1])) {
+      const header = _parseTableRow(line);
+      i += 2;
+      const rows = [];
+      while (i < lines.length && _isTableRow(lines[i])) {
+        rows.push(_parseTableRow(lines[i]));
+        i++;
+      }
+      const thead = header.map(h => `<th>${_mdInline(_escHtml(h))}</th>`).join('');
+      const tbody = rows.map(r =>
+        `<tr>${r.map(c => `<td>${_mdInline(_escHtml(c))}</td>`).join('')}</tr>`
+      ).join('');
+      out.push(`<div class="md-table-wrap"><table class="md-table"><thead><tr>${thead}</tr></thead><tbody>${tbody}</tbody></table></div>`);
+      continue;
+    }
+
+    // Heading
+    const h = trimmed.match(/^(#{1,4})\s+(.+)$/);
+    if (h) {
+      const lvl = h[1].length;
+      out.push(`<div class="md-h md-h${lvl}">${_mdInline(_escHtml(h[2]))}</div>`);
+      i++;
+      continue;
+    }
+
+    // Bullet list
+    if (/^\s*[*-]\s+/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^\s*[*-]\s+/.test(lines[i])) {
+        items.push(lines[i].replace(/^\s*[*-]\s+/, ''));
+        i++;
+      }
+      out.push(`<ul class="md-ul">${items.map(it => `<li>${_mdInline(_escHtml(it))}</li>`).join('')}</ul>`);
+      continue;
+    }
+
+    // Numbered list
+    if (/^\s*\d+\.\s+/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
+        items.push(lines[i].replace(/^\s*\d+\.\s+/, ''));
+        i++;
+      }
+      out.push(`<ol class="md-ol">${items.map(it => `<li>${_mdInline(_escHtml(it))}</li>`).join('')}</ol>`);
+      continue;
+    }
+
+    // Blockquote
+    if (/^\s*>\s?/.test(line)) {
+      const buf = [];
+      while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
+        buf.push(lines[i].replace(/^\s*>\s?/, ''));
+        i++;
+      }
+      out.push(`<blockquote class="md-bq">${_mdInline(_escHtml(buf.join(' ')))}</blockquote>`);
+      continue;
+    }
+
+    // Paragraph
+    const para = [];
+    while (
+      i < lines.length &&
+      lines[i].trim() &&
+      !/^(#{1,4}\s|\s*[*-]\s+|\s*\d+\.\s+|```|>\s?)/.test(lines[i]) &&
+      !(_isTableRow(lines[i]) && i + 1 < lines.length && _isTableSep(lines[i + 1]))
+    ) {
+      para.push(lines[i].trim());
+      i++;
+    }
+    if (para.length) out.push(`<p class="md-p">${_mdInline(_escHtml(para.join(' ')))}</p>`);
+  }
+  return out.join('');
 }
 
 function briefArgs(rawArgs) {

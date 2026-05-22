@@ -555,9 +555,30 @@
       font-size: 14px;
       line-height: 1.6;
       color: var(--text);
-      white-space: pre-wrap;
       word-wrap: break-word;
     }
+    /* Markdown-lite styling — keep close to plain prose so chat doesn't
+       feel like a doc viewer. */
+    .ai-text .md-p { margin: 4px 0; }
+    .ai-text .md-h { margin: 8px 0 4px; font-weight: 700; color: var(--text); }
+    .ai-text .md-h1 { font-size: 16px; }
+    .ai-text .md-h2 { font-size: 15px; }
+    .ai-text .md-h3 { font-size: 14px; }
+    .ai-text .md-h4 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+    .ai-text .md-ul, .ai-text .md-ol { margin: 4px 0; padding-left: 20px; }
+    .ai-text .md-ul li, .ai-text .md-ol li { margin: 2px 0; }
+    .ai-text .md-bq { margin: 6px 0; padding: 2px 10px; border-left: 2px solid rgba(17,125,255,0.35); color: var(--muted); font-style: italic; }
+    .ai-text .md-code { background: rgba(0,0,0,0.05); padding: 1px 5px; border-radius: 4px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .ai-text .md-pre { background: #0a0a0a; color: #e5e5e5; padding: 10px; border-radius: 8px; overflow-x: auto; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 6px 0; }
+    .ai-text .md-pre code { background: transparent; padding: 0; color: inherit; }
+    .ai-text strong { font-weight: 700; }
+    .ai-text em { font-style: italic; }
+    .ai-text a { color: var(--primary); text-decoration: underline; text-underline-offset: 2px; word-break: break-all; }
+    .ai-text .md-table-wrap { margin: 6px -4px; overflow-x: auto; }
+    .ai-text .md-table { border-collapse: collapse; min-width: 100%; font-size: 13px; }
+    .ai-text .md-table th, .ai-text .md-table td { border: 1px solid var(--border); padding: 5px 8px; text-align: left; vertical-align: top; }
+    .ai-text .md-table th { background: #f3f1ec; font-weight: 600; }
+    .ai-text .md-table tr:nth-child(even) td { background: #fafaf6; }
     .ai-divider {
       border: none; border-top: 1px solid var(--border);
       margin: 10px -16px 8px;

@@ -4031,6 +4031,150 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // ─── OAuth client registry (CRUD for org-admins) ─────────────
+  // Backs the same prisma.metaParameter['oauth_client_registry'] row that
+  // core/src/server.js reads. Used to register ChatGPT's callback URL,
+  // Claude Desktop, CLI, browser-extension custom clients, etc.
+  if (pathname === '/v1/oauth/clients' && req.method === 'GET') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const admin = await requireOrgAdmin(req, res, current.session.userId, current.session.orgId);
+    if (!admin) return;
+    try {
+      const row = await prisma.metaParameter.findUnique({ where: { key: 'oauth_client_registry' } });
+      const clients = Array.isArray(row?.value) ? row.value : [];
+      return jsonResponse(res, {
+        clients: clients.map((c) => ({
+          client_id: c.client_id,
+          client_name: c.client_name || c.client_id,
+          redirect_uris: c.redirect_uris || [],
+          allowed_scopes: c.allowed_scopes || [],
+          is_public: c.is_public !== false,
+          status: c.status || 'active',
+          created_at: c.created_at || null,
+          created_by: c.created_by || null,
+        })),
+      });
+    } catch (err) {
+      return jsonResponse(res, { error: err.message }, 500);
+    }
+  }
+
+  if (pathname === '/v1/oauth/clients' && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const admin = await requireOrgAdmin(req, res, current.session.userId, current.session.orgId);
+    if (!admin) return;
+    const body = await parseBody(req);
+    const clientName = String(body?.client_name || '').trim();
+    const redirectUris = Array.isArray(body?.redirect_uris)
+      ? body.redirect_uris.map((u) => String(u || '').trim()).filter(Boolean)
+      : [];
+    if (!clientName) return jsonResponse(res, { error: 'client_name is required' }, 400);
+    if (redirectUris.length === 0) return jsonResponse(res, { error: 'at least one redirect_uri is required' }, 400);
+    // Sanity-check URIs
+    for (const uri of redirectUris) {
+      try {
+        const u = new URL(uri);
+        if (!/^https?:$/.test(u.protocol)) {
+          return jsonResponse(res, { error: `redirect_uri must be http(s): ${uri}` }, 400);
+        }
+      } catch {
+        return jsonResponse(res, { error: `invalid redirect_uri: ${uri}` }, 400);
+      }
+    }
+    const allowedScopesRaw = Array.isArray(body?.allowed_scopes) && body.allowed_scopes.length
+      ? body.allowed_scopes
+      : ['memory:read', 'memory:write', 'web:search'];
+    const allowedScopes = allowedScopesRaw.map((s) => String(s).trim()).filter(Boolean);
+
+    try {
+      const crypto = await import('node:crypto');
+      const clientId = 'hmc_' + crypto.randomBytes(12).toString('hex');
+      const newClient = {
+        client_id: clientId,
+        client_name: clientName,
+        redirect_uris: redirectUris,
+        allowed_scopes: allowedScopes,
+        is_public: true,
+        status: 'active',
+        created_at: new Date().toISOString(),
+        created_by: current.session.userId,
+        org_id: current.session.orgId,
+      };
+      // Read-modify-write the registry row.
+      const row = await prisma.metaParameter.findUnique({ where: { key: 'oauth_client_registry' } });
+      const existing = Array.isArray(row?.value) ? row.value : [];
+      const next = [...existing, newClient];
+      await prisma.metaParameter.upsert({
+        where: { key: 'oauth_client_registry' },
+        update: { value: next },
+        create: { key: 'oauth_client_registry', value: next },
+      });
+      // Best-effort cache bust on core — fire-and-forget HEAD to nudge it
+      // (cache TTL is 60s anyway, so this is just to make UI feel instant).
+      try {
+        await fetch(`${CONFIG.coreApiBaseUrl}/.well-known/oauth-protected-resource`, {
+          method: 'GET',
+          headers: { 'X-Cache-Bust': '1' },
+        });
+      } catch {}
+      audit({
+        organizationId: current.session.orgId,
+        userId: current.session.userId,
+        eventType: 'oauth.client_registered',
+        eventCategory: 'oauth',
+        action: 'create',
+        resourceType: 'oauth_client',
+        resourceId: clientId,
+        newValue: { client_name: clientName, redirect_uris: redirectUris, allowed_scopes: allowedScopes },
+        ..._reqMeta(req),
+      });
+      return jsonResponse(res, { client: newClient }, 201);
+    } catch (err) {
+      return jsonResponse(res, { error: err.message }, 500);
+    }
+  }
+
+  // DELETE /v1/oauth/clients/:client_id
+  const oauthDeleteMatch = pathname.match(/^\/v1\/oauth\/clients\/([a-zA-Z0-9_-]+)$/);
+  if (oauthDeleteMatch && req.method === 'DELETE') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const admin = await requireOrgAdmin(req, res, current.session.userId, current.session.orgId);
+    if (!admin) return;
+    const clientId = oauthDeleteMatch[1];
+    try {
+      const row = await prisma.metaParameter.findUnique({ where: { key: 'oauth_client_registry' } });
+      const existing = Array.isArray(row?.value) ? row.value : [];
+      const target = existing.find((c) => c.client_id === clientId);
+      if (!target) return jsonResponse(res, { error: 'client not found' }, 404);
+      // Only allow deleting clients created by this org (or any if owner is master).
+      if (target.org_id && target.org_id !== current.session.orgId) {
+        return jsonResponse(res, { error: 'forbidden — client belongs to another org' }, 403);
+      }
+      const next = existing.filter((c) => c.client_id !== clientId);
+      await prisma.metaParameter.update({
+        where: { key: 'oauth_client_registry' },
+        data: { value: next },
+      });
+      audit({
+        organizationId: current.session.orgId,
+        userId: current.session.userId,
+        eventType: 'oauth.client_revoked',
+        eventCategory: 'oauth',
+        action: 'delete',
+        resourceType: 'oauth_client',
+        resourceId: clientId,
+        oldValue: { client_name: target.client_name },
+        ..._reqMeta(req),
+      });
+      return jsonResponse(res, { success: true });
+    } catch (err) {
+      return jsonResponse(res, { error: err.message }, 500);
+    }
+  }
+
   // POST /v1/employees/optimize-persona — LLM expands a short brief into a
   // full persona system-prompt so the create-employee UI can stay one-step.
   // Inputs: brief (required), name, age, gender, role, team, experience_years

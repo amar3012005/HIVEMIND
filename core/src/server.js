@@ -15369,6 +15369,8 @@ exit \$RC
         case '/api/ingest/chat-session':
           if (req.method === 'POST') {
             const { platform, url, parsed, transcript = [], raw_summary } = body;
+            // Project scope from caller (extension scope pill).
+            const ingestProjectId = (body?.project_id || (Array.isArray(body?.project_ids) ? body.project_ids[0] : null)) || null;
             if (!parsed || !Array.isArray(parsed.memories) || parsed.memories.length === 0) {
               return jsonResponse(res, { error: 'parsed.memories[] required (run extension structured-ingest first)' }, 400);
             }
@@ -15385,6 +15387,7 @@ exit \$RC
                 url: url || '',
                 userId,
                 orgId,
+                projectId: ingestProjectId,
                 apiKey: groqKey,
                 ctx: {
                   persistentMemoryStore,
@@ -15392,6 +15395,7 @@ exit \$RC
                   smartIngestRouter,
                   buildRoutedIngestPayloads,
                   accessContext: distillAccessCtx,
+                  projectId: ingestProjectId,
                 },
               });
 
@@ -15406,6 +15410,7 @@ exit \$RC
                     memory_type: 'conversation',
                     user_id: userId,
                     org_id: orgId,
+                    ...(ingestProjectId ? { project_id: ingestProjectId, project_ids: [ingestProjectId] } : {}),
                     source_metadata: { source_platform: 'ai-chat', host_platform: platform, url, via: 'chat-ingest-distill' },
                   };
                   const [routed] = await buildRoutedIngestPayloads(rollupPayload, { smartIngestRouter });
@@ -15473,6 +15478,10 @@ exit \$RC
         case '/api/chat':
           if (req.method === 'POST') {
             const { message, model = 'openai/gpt-oss-120b', history = [], stream: wantStream = false, language = null } = body;
+            // Project scope from caller — when set, all recall/save tool
+            // calls dispatched by the ReAct agent are auto-bound to this
+            // project, and the auto-saved conversation memory inherits it.
+            const requestProjectId = (body?.project_id || (Array.isArray(body?.project_ids) ? body.project_ids[0] : null)) || null;
             if (!message || typeof message !== 'string') {
               return jsonResponse(res, { error: 'message is required' }, 400);
             }
@@ -15569,6 +15578,7 @@ exit \$RC
                       language,
                       ctx: {
                         userId, orgId,
+                        projectId: requestProjectId,
                         persistentMemoryStore, persistentMemoryEngine,
                         smartIngestRouter,
                         buildRoutedIngestPayloads,
@@ -15591,6 +15601,7 @@ exit \$RC
                   language,
                   ctx: {
                     userId, orgId,
+                    projectId: requestProjectId,
                     persistentMemoryStore, persistentMemoryEngine,
                     smartIngestRouter,
                     buildRoutedIngestPayloads,
@@ -15611,6 +15622,7 @@ exit \$RC
                       memory_type: 'conversation',
                       user_id: userId,
                       org_id: orgId,
+                      ...(requestProjectId ? { project_id: requestProjectId, project_ids: [requestProjectId] } : {}),
                       source_metadata: { source_platform: 'talk-to-hive', via: 'react-agent' },
                     };
                     buildRoutedIngestPayloads(convoPayload, { smartIngestRouter })

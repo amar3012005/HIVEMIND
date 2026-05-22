@@ -78,6 +78,129 @@
     .platform-badge .pb-tick { font-size: 11px; font-weight: 800; line-height: 1; }
     .platform-badge .pb-name { letter-spacing: 0.04em; text-transform: uppercase; }
 
+    /* Project scope pill */
+    .scope-wrap { position: relative; }
+    .scope-pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 4px 9px;
+      background: #f7f6f1;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      font: inherit; font-size: 11px; font-weight: 600;
+      color: var(--text);
+      cursor: pointer;
+      transition: border-color 0.12s, background 0.12s;
+    }
+    .scope-pill:hover { border-color: #c0d8ff; background: rgba(17,125,255,0.04); }
+    .scope-pill .sp-icon { color: var(--muted); display: inline-flex; }
+    .scope-pill .sp-label { letter-spacing: 0.02em; }
+    .scope-pill .sp-caret { color: var(--muted); }
+    .scope-pill.is-project { background: rgba(17,125,255,0.08); border-color: rgba(17,125,255,0.25); color: var(--primary); }
+    .scope-pill.is-project .sp-icon, .scope-pill.is-project .sp-caret { color: var(--primary); }
+
+    .scope-menu {
+      position: absolute;
+      top: calc(100% + 6px);
+      left: 0;
+      min-width: 240px;
+      max-width: 280px;
+      max-height: 380px;
+      overflow-y: auto;
+      background: white;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: 0 12px 28px rgba(0,0,0,0.08);
+      padding: 6px;
+      z-index: 1000;
+    }
+    .sm-header {
+      padding: 6px 10px 4px;
+      font-size: 10px; color: var(--muted); font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.08em;
+    }
+    .sm-section-label {
+      padding: 8px 10px 4px;
+      font-size: 10px; color: var(--muted); font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.06em;
+    }
+    .sm-item {
+      display: flex; align-items: center; gap: 8px;
+      width: 100%;
+      padding: 7px 10px;
+      background: transparent; border: none;
+      font: inherit; font-size: 12.5px; color: var(--text);
+      border-radius: 8px;
+      cursor: pointer;
+      text-align: left;
+    }
+    .sm-item:hover { background: #f5f3ee; }
+    .sm-item.active { background: rgba(17,125,255,0.06); color: var(--primary); font-weight: 600; }
+    .sm-item .sm-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .sm-item .sm-check { color: var(--primary); font-weight: 700; visibility: hidden; }
+    .sm-item.active .sm-check { visibility: visible; }
+    .sm-divider { height: 1px; background: var(--border); margin: 4px 0; }
+    .sm-empty {
+      padding: 8px 10px; font-size: 11px; color: var(--muted); font-style: italic;
+    }
+    .sm-create { color: var(--primary); font-weight: 600; }
+    .sm-create:hover { background: rgba(17,125,255,0.08); }
+
+    /* Create-project modal (inline overlay) */
+    .scope-modal-backdrop {
+      position: fixed; inset: 0;
+      background: rgba(10,10,10,0.32);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 2000;
+    }
+    .scope-modal {
+      background: white;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      box-shadow: 0 18px 50px rgba(0,0,0,0.18);
+      padding: 18px;
+      width: min(360px, calc(100% - 32px));
+    }
+    .scope-modal h3 {
+      font-size: 15px; font-weight: 700; margin-bottom: 6px; color: var(--text);
+    }
+    .scope-modal p {
+      font-size: 12px; color: var(--muted); margin-bottom: 14px;
+    }
+    .scope-modal label {
+      display: block; font-size: 11px; font-weight: 600;
+      color: var(--text); margin-bottom: 4px;
+      text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    .scope-modal input {
+      width: 100%; padding: 9px 12px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font: inherit; font-size: 13px;
+      margin-bottom: 12px;
+      outline: none;
+    }
+    .scope-modal input:focus { border-color: var(--primary); }
+    .scope-modal .sm-actions {
+      display: flex; gap: 8px; justify-content: flex-end;
+    }
+    .scope-modal button {
+      padding: 8px 14px;
+      border-radius: 8px;
+      font: inherit; font-size: 12.5px; font-weight: 600;
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: white;
+      color: var(--text);
+    }
+    .scope-modal button.primary {
+      background: var(--primary); color: white; border-color: var(--primary);
+    }
+    .scope-modal button.primary:disabled { opacity: 0.6; cursor: wait; }
+    .scope-modal .sm-error {
+      font-size: 11.5px; color: #b91c1c; margin-bottom: 10px;
+      padding: 6px 10px; background: #fef2f2; border: 1px solid #fecaca; border-radius: 6px;
+    }
+
     /* Save-session dropdown bar — sits under topbar when platform recognized */
     .save-session-bar {
       display: flex; align-items: center; justify-content: space-between;
@@ -636,6 +759,37 @@
     <div class="brand">
       <div class="brand-icon"><img src="Hivemind_extension.png" alt="" /></div>
       Talk to HIVE
+    </div>
+
+    <!-- Scope pill (Org default | Project) -->
+    <div class="scope-wrap">
+      <button id="scopePill" class="scope-pill" title="Memory scope" aria-haspopup="true" aria-expanded="false">
+        <span class="sp-icon" id="spIcon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="13" height="13">
+            <circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+          </svg>
+        </span>
+        <span class="sp-label" id="spLabel">Org</span>
+        <svg class="sp-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="11" height="11"><polyline points="6 9 12 15 18 9"/></svg>
+      </button>
+      <div id="scopeMenu" class="scope-menu hidden" role="menu">
+        <div class="sm-header">Scope memories to</div>
+        <button class="sm-item" data-scope-kind="org">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="13" height="13"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+          <span class="sm-name">Organization</span>
+          <span class="sm-check" id="smCheckOrg">✓</span>
+        </button>
+        <div class="sm-divider"></div>
+        <div class="sm-section-label">Projects</div>
+        <div class="sm-projects" id="smProjects">
+          <div class="sm-empty">Loading…</div>
+        </div>
+        <div class="sm-divider"></div>
+        <button class="sm-item sm-create" id="smCreateBtn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="13" height="13"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          <span>Create new project</span>
+        </button>
+      </div>
     </div>
 
     <!-- AI platform badge — green tick + name when active tab matches -->

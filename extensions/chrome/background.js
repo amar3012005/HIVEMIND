@@ -272,6 +272,70 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  // ── Project scope (Org default | Project) ─────────────────
+  if (message.action === 'getScope') {
+    getScope().then(sendResponse);
+    return true;
+  }
+
+  if (message.action === 'setScope') {
+    setScope(message.scope).then((s) => sendResponse({ ok: true, scope: s }));
+    return true;
+  }
+
+  if (message.action === 'listProjects') {
+    (async () => {
+      try {
+        const cfg = await getConfig();
+        if (!cfg.apiKey) { sendResponse({ projects: [], error: 'not signed in' }); return; }
+        const cpBase = cfg.controlPlaneBase || 'https://api.hivemind.davinciai.eu:8040';
+        // Prefer core API first (cookies + api-key already wired); fall back
+        // to control-plane if core route is absent in older builds.
+        let resp = await fetch(`${cfg.apiBase}/api/team/projects`, {
+          headers: { 'X-API-Key': cfg.apiKey, Accept: 'application/json' },
+        });
+        if (!resp.ok) {
+          resp = await fetch(`${cpBase}/api/team/projects`, {
+            headers: { 'X-API-Key': cfg.apiKey, Accept: 'application/json' },
+          });
+        }
+        if (!resp.ok) { sendResponse({ projects: [], error: `HTTP ${resp.status}` }); return; }
+        const data = await resp.json();
+        sendResponse({ projects: Array.isArray(data.projects) ? data.projects : [] });
+      } catch (err) {
+        sendResponse({ projects: [], error: err.message });
+      }
+    })();
+    return true;
+  }
+
+  if (message.action === 'createProject') {
+    (async () => {
+      try {
+        const cfg = await getConfig();
+        if (!cfg.apiKey) { sendResponse({ error: 'not signed in' }); return; }
+        const name = (message.name || '').toString().trim();
+        if (!name) { sendResponse({ error: 'name required' }); return; }
+        const slug = (message.slug || name.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40)).replace(/^-+|-+$/g, '');
+        const resp = await fetch(`${cfg.apiBase}/api/team/projects`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-API-Key': cfg.apiKey },
+          body: JSON.stringify({ name, slug, description: message.description || '' }),
+        });
+        if (!resp.ok) {
+          const text = await resp.text();
+          sendResponse({ error: `HTTP ${resp.status}: ${text.slice(0, 200)}` });
+          return;
+        }
+        const data = await resp.json();
+        sendResponse({ project: data.project || data });
+      } catch (err) {
+        sendResponse({ error: err.message });
+      }
+    })();
+    return true;
+  }
+
   // ── NEW: Chat & CDP Integration ────────────────────────
 
   if (message.action === 'captureContext') {
@@ -351,15 +415,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === 'saveToMemory') {
-    getConfig().then(config => {
-      // Route through canonical memory pipeline (smart ingest router)
-      fetch(`${config.apiBase}/api/memories`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-API-Key': config.apiKey,
-        },
-        body: JSON.stringify({
+    (async () => {
+      try {
+        const config = await getConfig();
+        const payload = await withScope({
           content: message.content,
           title: message.title || 'Browser chat',
           tags: message.tags || ['browser-chat', 'browser-extension'],
@@ -368,12 +427,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             source_platform: 'browser-extension',
             url: message.url || '',
           },
-        }),
-      })
-      .then(r => r.json())
-      .then(sendResponse)
-      .catch(err => sendResponse({ success: false, error: err.message }));
-    });
+        });
+        const r = await fetch(`${config.apiBase}/api/memories`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-API-Key': config.apiKey },
+          body: JSON.stringify(payload),
+        });
+        sendResponse(await r.json());
+      } catch (err) {
+        sendResponse({ success: false, error: err.message });
+      }
+    })();
     return true;
   }
 
@@ -706,6 +770,12 @@ async function handleChatStream(message, sender) {
     }
   }
 
+  const chatBody = await withScope({
+    message: fullMessage,
+    history,
+    stream: true,
+    browser_origin: Boolean(context),
+  });
   const resp = await fetch(`${config.apiBase}/api/chat`, {
     method: 'POST',
     headers: {
@@ -713,12 +783,7 @@ async function handleChatStream(message, sender) {
       'X-API-Key': config.apiKey,
       Accept: 'text/event-stream',
     },
-    body: JSON.stringify({
-      message: fullMessage,
-      history,
-      stream: true,
-      browser_origin: Boolean(context),
-    }),
+    body: JSON.stringify(chatBody),
   });
 
   if (!resp.ok || !resp.body) {
@@ -846,24 +911,55 @@ async function getConfig() {
   };
 }
 
+// ── Scope (Org default | Project) ──────────────────────────────────────────
+// Persisted to chrome.storage.local under `scope`. Every outgoing save/recall/
+// chat/ingest call carries `project_id` when scope.kind === 'project'.
+
+async function getScope() {
+  const { scope } = await chrome.storage.local.get(['scope']);
+  return scope && scope.kind === 'project'
+    ? { kind: 'project', projectId: scope.projectId, projectName: scope.projectName }
+    : { kind: 'org' };
+}
+
+async function setScope(scope) {
+  await chrome.storage.local.set({ scope });
+  try { chrome.runtime.sendMessage({ action: 'scopeChanged', scope }); } catch {}
+  return scope;
+}
+
+/** Append project_id + project_ids to a JSON payload when scope is a project. */
+async function withScope(payload = {}) {
+  const scope = await getScope();
+  if (scope?.projectId) {
+    return {
+      ...payload,
+      project_id: scope.projectId,
+      project_ids: [scope.projectId],
+    };
+  }
+  return payload;
+}
+
 async function saveToHivemind(config, memory) {
   try {
+    const payload = await withScope({
+      content: memory.content.slice(0, 8000),
+      title: memory.title,
+      tags: memory.tags,
+      memory_type: 'fact',
+      source_metadata: {
+        source_type: 'browser-extension',
+        source_platform: memory.source || 'browser-extension',
+      },
+    });
     const resp = await fetch(`${config.apiBase}/api/memories`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'X-API-Key': config.apiKey,
       },
-      body: JSON.stringify({
-        content: memory.content.slice(0, 8000),
-        title: memory.title,
-        tags: memory.tags,
-        memory_type: 'fact',
-        source_metadata: {
-          source_type: 'browser-extension',
-          source_platform: memory.source || 'browser-extension',
-        },
-      }),
+      body: JSON.stringify(payload),
     });
 
     if (!resp.ok) {
@@ -880,16 +976,17 @@ async function saveToHivemind(config, memory) {
 
 async function recallFromHivemind(config, query) {
   try {
+    const payload = await withScope({
+      query_context: query,
+      max_memories: 5,
+    });
     const resp = await fetch(`${config.apiBase}/api/recall`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'X-API-Key': config.apiKey,
       },
-      body: JSON.stringify({
-        query_context: query,
-        max_memories: 5,
-      }),
+      body: JSON.stringify(payload),
     });
 
     if (!resp.ok) return { memories: [], injectionText: '' };
@@ -1449,16 +1546,17 @@ async function captureAIChatSession(tabId, url, config) {
 
     let distillResult = null;
     try {
+      const distillBody = await withScope({
+        platform: platform.name.toLowerCase(),
+        url,
+        transcript: chatHistory,
+        parsed,
+        raw_summary: summary,
+      });
       const resp = await fetch(`${config.apiBase}/api/ingest/chat-session`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-API-Key': config.apiKey },
-        body: JSON.stringify({
-          platform: platform.name.toLowerCase(),
-          url,
-          transcript: chatHistory,
-          parsed,
-          raw_summary: summary,
-        }),
+        body: JSON.stringify(distillBody),
       });
       if (resp.ok) {
         distillResult = await resp.json();
@@ -1679,18 +1777,19 @@ async function handleChatMessage(message, tabId) {
   
   // Call HIVEMIND chat API (/api/chat with full memory integration)
   try {
+    const chatBody = await withScope({
+      message: fullMessage,
+      model: 'llama-3.3-70b-versatile',
+      browser_origin: Boolean(context),
+      history: history || [],
+    });
     const resp = await fetch(`${config.apiBase}/api/chat`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'X-API-Key': config.apiKey,
       },
-      body: JSON.stringify({
-        message: fullMessage,
-        model: 'llama-3.3-70b-versatile',
-        browser_origin: Boolean(context),
-        history: history || [],
-      }),
+      body: JSON.stringify(chatBody),
     });
     
     if (!resp.ok) {

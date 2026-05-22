@@ -325,6 +325,11 @@ const TOOL_HANDLERS = {
   async hivemind_recall(args, ctx) {
     if (!ctx.persistentMemoryStore) throw new Error('memory store unavailable');
     const valid_at = args.valid_at ? new Date(args.valid_at) : null;
+    // When the request is scoped to a project (ctx.projectId), narrow the
+    // access_context so recall only sees memories tagged with that project.
+    const scopedAccessCtx = ctx.projectId
+      ? { ...(ctx.accessContext || {}), projectIds: [ctx.projectId] }
+      : ctx.accessContext;
     const result = await recallPersistedMemories(ctx.persistentMemoryStore, {
       query_context: args.query,
       user_id: ctx.userId,
@@ -332,7 +337,8 @@ const TOOL_HANDLERS = {
       max_memories: Math.min(args.limit || 10, 50),
       tags: args.tags || undefined,
       source_type: args.source_type,
-      access_context: ctx.accessContext,
+      access_context: scopedAccessCtx,
+      ...(ctx.projectId ? { project_id: ctx.projectId, project_ids: [ctx.projectId] } : {}),
       ...(valid_at && !Number.isNaN(valid_at.getTime()) ? { bitemporal: { valid_at } } : {}),
     });
     const mems = (result.memories || []).map((m) => ({
@@ -382,6 +388,11 @@ const TOOL_HANDLERS = {
     // Server-side resolveScopedIngestPayload only understands project_id(s),
     // so we lift the name lookup up here where we have prisma + accessContext.
     let resolvedProjectId = args.project_id || null;
+    // Fall back to ctx.projectId (the request-level scope set by the caller
+    // e.g. browser-extension scope pill) when the LLM didn't supply one.
+    if (!resolvedProjectId && ctx.projectId) {
+      resolvedProjectId = ctx.projectId;
+    }
     let resolvedProjectName = null;
     if (!resolvedProjectId && args.project && ctx.persistentMemoryStore?.client?.project) {
       const accessProjectIds = (ctx.accessContext?.projectIds) || [];

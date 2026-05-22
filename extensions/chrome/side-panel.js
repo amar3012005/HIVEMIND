@@ -28,6 +28,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   wireEvents();
   refreshPlatformBadge();
+  refreshScopePill();
 });
 
 function renderSignedOut() {
@@ -163,10 +164,66 @@ function wireEvents() {
   // Save-session button (the actual interactive entry point)
   $('ssbBtn').addEventListener('click', ingestActiveChat);
 
+  // Scope pill — toggle dropdown menu w/ project list + create.
+  const scopePill = $('scopePill');
+  const scopeMenu = $('scopeMenu');
+  if (scopePill && scopeMenu) {
+    scopePill.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const opening = scopeMenu.classList.contains('hidden');
+      scopeMenu.classList.toggle('hidden');
+      scopePill.setAttribute('aria-expanded', String(opening));
+      if (opening) await populateScopeMenu();
+    });
+    document.addEventListener('click', (e) => {
+      if (!scopeMenu.classList.contains('hidden') && !scopeMenu.contains(e.target) && e.target !== scopePill) {
+        scopeMenu.classList.add('hidden');
+        scopePill.setAttribute('aria-expanded', 'false');
+      }
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !scopeMenu.classList.contains('hidden')) {
+        scopeMenu.classList.add('hidden');
+        scopePill.setAttribute('aria-expanded', 'false');
+      }
+    });
+
+    scopeMenu.addEventListener('click', async (e) => {
+      const item = e.target.closest('.sm-item');
+      if (!item) return;
+      if (item.id === 'smCreateBtn') {
+        openCreateProjectModal();
+        return;
+      }
+      const kind = item.dataset.scopeKind;
+      if (kind === 'org') {
+        await chrome.runtime.sendMessage({ action: 'setScope', scope: { kind: 'org' } });
+        renderScopePill({ kind: 'org' });
+        scopeMenu.classList.add('hidden');
+        return;
+      }
+      if (kind === 'project') {
+        const pid = item.dataset.projectId;
+        const pname = item.dataset.projectName;
+        if (!pid) return;
+        await chrome.runtime.sendMessage({
+          action: 'setScope',
+          scope: { kind: 'project', projectId: pid, projectName: pname },
+        });
+        renderScopePill({ kind: 'project', projectId: pid, projectName: pname });
+        scopeMenu.classList.add('hidden');
+      }
+    });
+  }
+
   // Section pick broadcast from background → content-script
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.action === 'platformChanged') {
       renderPlatformBadge(msg);
+      return;
+    }
+    if (msg.action === 'scopeChanged') {
+      renderScopePill(msg.scope || { kind: 'org' });
       return;
     }
     if (msg.action === 'sectionContextReady' && msg.section) {
@@ -972,4 +1029,152 @@ async function ingestActiveChat() {
     bar.classList.remove('busy');
     btn.textContent = prevLabel;
   }
+}
+
+// ── Scope pill (Org default | Project) ─────────────────────────────────────
+
+async function refreshScopePill() {
+  try {
+    const scope = await chrome.runtime.sendMessage({ action: 'getScope' });
+    renderScopePill(scope);
+  } catch {
+    renderScopePill({ kind: 'org' });
+  }
+}
+
+function renderScopePill(scope) {
+  const pill = $('scopePill');
+  const label = $('spLabel');
+  if (!pill || !label) return;
+  if (scope?.kind === 'project' && scope.projectName) {
+    pill.classList.add('is-project');
+    label.textContent = scope.projectName.length > 22 ? scope.projectName.slice(0, 21) + '…' : scope.projectName;
+    pill.title = `Memories are scoped to "${scope.projectName}". Click to switch.`;
+  } else {
+    pill.classList.remove('is-project');
+    label.textContent = 'Org';
+    pill.title = 'Memories are org-wide. Click to scope to a project.';
+  }
+}
+
+async function populateScopeMenu() {
+  const container = $('smProjects');
+  if (!container) return;
+  container.innerHTML = '<div class="sm-empty">Loading projects…</div>';
+
+  const currentScope = await chrome.runtime.sendMessage({ action: 'getScope' });
+  const isOrg = currentScope?.kind !== 'project';
+  const checkOrg = $('smCheckOrg');
+  if (checkOrg) {
+    const orgItem = checkOrg.closest('.sm-item');
+    if (orgItem) orgItem.classList.toggle('active', isOrg);
+  }
+
+  let projects = [];
+  try {
+    const resp = await chrome.runtime.sendMessage({ action: 'listProjects' });
+    projects = Array.isArray(resp?.projects) ? resp.projects : [];
+  } catch (e) {
+    container.innerHTML = `<div class="sm-empty">Couldn't load — ${escapeHtml(e.message)}</div>`;
+    return;
+  }
+
+  if (projects.length === 0) {
+    container.innerHTML = '<div class="sm-empty">No projects yet. Create one below.</div>';
+    return;
+  }
+
+  container.innerHTML = projects
+    .map((p) => {
+      const active = !isOrg && currentScope.projectId === p.id;
+      const name = escapeHtml(p.name || p.slug || 'Untitled');
+      return `
+        <button class="sm-item ${active ? 'active' : ''}" data-scope-kind="project" data-project-id="${p.id}" data-project-name="${name.replace(/"/g, '&quot;')}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="13" height="13"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+          <span class="sm-name">${name}</span>
+          <span class="sm-check">✓</span>
+        </button>`;
+    })
+    .join('');
+}
+
+function openCreateProjectModal() {
+  // Close menu
+  const menu = $('scopeMenu');
+  if (menu) menu.classList.add('hidden');
+
+  // Inject modal once.
+  let backdrop = document.getElementById('scopeModalBackdrop');
+  if (backdrop) backdrop.remove();
+  backdrop = document.createElement('div');
+  backdrop.id = 'scopeModalBackdrop';
+  backdrop.className = 'scope-modal-backdrop';
+  backdrop.innerHTML = `
+    <div class="scope-modal" role="dialog" aria-modal="true">
+      <h3>Create new project</h3>
+      <p>Memories saved while this project is selected will be scoped to it.</p>
+      <div class="sm-error hidden" id="scopeModalErr"></div>
+      <label for="scopeProjName">Project name</label>
+      <input id="scopeProjName" type="text" placeholder="e.g. Q3 Research" maxlength="60" />
+      <label for="scopeProjSlug">Slug (auto)</label>
+      <input id="scopeProjSlug" type="text" placeholder="auto from name" maxlength="40" />
+      <div class="sm-actions">
+        <button id="scopeProjCancel">Cancel</button>
+        <button class="primary" id="scopeProjCreate">Create</button>
+      </div>
+    </div>`;
+  document.body.appendChild(backdrop);
+
+  const nameInput = backdrop.querySelector('#scopeProjName');
+  const slugInput = backdrop.querySelector('#scopeProjSlug');
+  const errEl = backdrop.querySelector('#scopeModalErr');
+  const cancelBtn = backdrop.querySelector('#scopeProjCancel');
+  const createBtn = backdrop.querySelector('#scopeProjCreate');
+
+  const close = () => backdrop.remove();
+  cancelBtn.addEventListener('click', close);
+  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+  document.addEventListener('keydown', function onKey(e) {
+    if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); }
+  });
+
+  // Auto-slug from name.
+  nameInput.addEventListener('input', () => {
+    if (!slugInput.dataset.touched) {
+      slugInput.value = nameInput.value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+    }
+  });
+  slugInput.addEventListener('input', () => { slugInput.dataset.touched = '1'; });
+
+  setTimeout(() => nameInput.focus(), 50);
+
+  createBtn.addEventListener('click', async () => {
+    const name = nameInput.value.trim();
+    const slug = (slugInput.value.trim() || name.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40)).replace(/^-+|-+$/g, '');
+    if (!name || !slug) {
+      errEl.textContent = 'Name and slug required.';
+      errEl.classList.remove('hidden');
+      return;
+    }
+    createBtn.disabled = true;
+    createBtn.textContent = 'Creating…';
+    try {
+      const resp = await chrome.runtime.sendMessage({ action: 'createProject', name, slug });
+      if (resp?.error) throw new Error(resp.error);
+      const proj = resp.project || resp;
+      // Auto-switch scope to the new project.
+      await chrome.runtime.sendMessage({
+        action: 'setScope',
+        scope: { kind: 'project', projectId: proj.id, projectName: proj.name },
+      });
+      renderScopePill({ kind: 'project', projectId: proj.id, projectName: proj.name });
+      close();
+      flashHint(`Scope switched to project "${proj.name}".`);
+    } catch (e) {
+      errEl.textContent = e.message || 'Create failed.';
+      errEl.classList.remove('hidden');
+      createBtn.disabled = false;
+      createBtn.textContent = 'Create';
+    }
+  });
 }

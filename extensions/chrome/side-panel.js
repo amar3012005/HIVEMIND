@@ -253,6 +253,57 @@ function wireEvents() {
     });
   }
 
+  // Language pill — picks reply language, persisted to chrome.storage.local
+  // under `lang`. Each /api/chat call appends `language` + the wire-only
+  // strict directive (mirrors dashboard Talk-to-HIVE behaviour).
+  const langPill = $('langPill');
+  const langMenu = $('langMenu');
+  if (langPill && langMenu) {
+    const renderLang = (code) => {
+      const c = (code || 'en').toLowerCase();
+      const lp = document.getElementById('lpLabel');
+      if (lp) lp.textContent = c.toUpperCase();
+      langMenu.querySelectorAll('.sm-item').forEach((el) => {
+        el.classList.toggle('active', el.dataset.lang === c);
+      });
+    };
+
+    // Hydrate from storage
+    chrome.storage.local.get(['lang']).then(({ lang }) => renderLang(lang || 'en'));
+
+    langPill.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const opening = langMenu.classList.contains('hidden');
+      // Close scope menu if open
+      if (scopeMenu) scopeMenu.classList.add('hidden');
+      langMenu.classList.toggle('hidden');
+      langPill.setAttribute('aria-expanded', String(opening));
+    });
+    document.addEventListener('click', (e) => {
+      if (!langMenu.classList.contains('hidden') && !langMenu.contains(e.target) && e.target !== langPill) {
+        langMenu.classList.add('hidden');
+        langPill.setAttribute('aria-expanded', 'false');
+      }
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !langMenu.classList.contains('hidden')) {
+        langMenu.classList.add('hidden');
+        langPill.setAttribute('aria-expanded', 'false');
+      }
+    });
+    langMenu.addEventListener('click', async (e) => {
+      const item = e.target.closest('.sm-item');
+      if (!item) return;
+      const code = item.dataset.lang;
+      if (!code) return;
+      await chrome.storage.local.set({ lang: code });
+      renderLang(code);
+      langMenu.classList.add('hidden');
+      langPill.setAttribute('aria-expanded', 'false');
+      try { chrome.runtime.sendMessage({ action: 'langChanged', lang: code }); } catch {}
+    });
+  }
+
   // Section pick broadcast from background → content-script
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.action === 'platformChanged') {

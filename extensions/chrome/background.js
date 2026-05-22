@@ -611,25 +611,41 @@ async function ensureSelectionTracker(tabId) {
       target: { tabId, allFrames: true },
       injectImmediately: true,
       func: () => {
-        if (window.__hivemindSelTrackerInstalled) return;
-        window.__hivemindSelTrackerInstalled = true;
-        const push = () => {
+        const send = (reason) => {
           try {
             const sel = (window.getSelection?.() || '').toString();
-            // Send to background — it persists to chrome.storage.session.
+            if (!sel || sel.trim().length < 1) return;
             chrome.runtime.sendMessage({
               action: '__selectionUpdate',
               text: sel,
               url: location.href,
               title: document.title,
+              reason: reason || 'event',
             }).catch(() => {});
           } catch {}
         };
-        document.addEventListener('selectionchange', push, true);
-        document.addEventListener('mouseup', push, true);
-        document.addEventListener('keyup', push, true);
-        // Send immediately so an already-selected range is captured.
-        push();
+        // Expose a force-push so the background can refresh storage on every
+        // ensureSelectionTracker() call — fixes the "highlighted but storage
+        // empty" race when the user opens the side panel before any
+        // selectionchange event fired (e.g. selection made before tracker
+        // attached, or attached but no change since).
+        window.__hivemindForcePushSelection = () => send('force');
+
+        if (window.__hivemindSelTrackerInstalled) {
+          // Listeners already bound — just re-emit current selection.
+          send('reinstall');
+          return;
+        }
+        window.__hivemindSelTrackerInstalled = true;
+
+        document.addEventListener('selectionchange', () => send('selectionchange'), true);
+        document.addEventListener('mouseup', () => setTimeout(() => send('mouseup'), 30), true);
+        document.addEventListener('keyup', () => setTimeout(() => send('keyup'), 30), true);
+        document.addEventListener('mouseleave', () => send('mouseleave'), true);
+        // Window blur fires when user clicks the extension icon → last chance
+        // to capture the live selection before focus moves.
+        window.addEventListener('blur', () => send('blur'), true);
+        setTimeout(() => send('install'), 60);
       },
     });
     _selTrackerInjected.add(tabId);
@@ -642,6 +658,26 @@ async function ensureSelectionTracker(tabId) {
 chrome.tabs.onRemoved.addListener((tabId) => _selTrackerInjected.delete(tabId));
 chrome.webNavigation?.onCommitted?.addListener?.((det) => {
   if (det.frameId === 0) _selTrackerInjected.delete(det.tabId);
+});
+
+// Eagerly inject the tracker on tab focus + page load so the very first
+// user selection is captured even when they open the side panel right
+// after highlighting text (no prior interaction → no lazy injection).
+function safeEnsureTracker(tabId, url) {
+  if (!tabId) return;
+  if (!url || /^(chrome|edge|brave|opera|about|file|view-source):/.test(url)) return;
+  ensureSelectionTracker(tabId);
+}
+chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    safeEnsureTracker(tabId, tab?.url);
+  } catch {}
+});
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === 'complete') {
+    safeEnsureTracker(tabId, tab?.url);
+  }
 });
 
 async function readSelectionFromStorage(tabId) {
@@ -667,6 +703,18 @@ async function getSelectionContext() {
 
   // Make sure tracker is live so future selections are captured.
   await ensureSelectionTracker(tab.id);
+
+  // Force-push the tracker's view of the current selection NOW. This bridges
+  // the gap where the user highlighted text but no selectionchange / mouseup
+  // had fired into the tracker yet (e.g. tracker attached after the highlight).
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id, allFrames: true },
+      func: () => { try { window.__hivemindForcePushSelection?.(); } catch {} },
+    });
+    // Small delay so the runtime.sendMessage round-trip lands before we read.
+    await new Promise((r) => setTimeout(r, 90));
+  } catch {}
 
   // 1. Live DOM read (works when side panel hasn't stolen focus yet).
   try {
@@ -770,11 +818,20 @@ async function handleChatStream(message, sender) {
     }
   }
 
+  // Language enforcement — same belt-and-braces as the dashboard. Pulls
+  // user's chosen reply language from chrome.storage.local (set by the
+  // side-panel language pill). Prepends a strict directive to the wire
+  // message when non-EN so the LLM can't drift back to English mid-stream.
+  const { lang: storedLang } = await chrome.storage.local.get(['lang']);
+  const lang2 = (storedLang || 'en').slice(0, 2).toLowerCase();
+  const wireMessage = wrapWithLanguageDirective(fullMessage, lang2);
+
   const chatBody = await withScope({
-    message: fullMessage,
+    message: wireMessage,
     history,
     stream: true,
     browser_origin: Boolean(context),
+    language: lang2,
   });
   const resp = await fetch(`${config.apiBase}/api/chat`, {
     method: 'POST',
@@ -939,6 +996,27 @@ async function withScope(payload = {}) {
     };
   }
   return payload;
+}
+
+// ── Language enforcement ──────────────────────────────────────────────────
+// Mirrors the dashboard's Talk-to-HIVE wrapper. When the reply language is
+// anything other than English, prepend a strict directive so the LLM can't
+// silently drift back to English mid-stream. UI history stays clean; only
+// the wire message carries the wrapper.
+const LANG_FULL = {
+  en: 'English', de: 'German', es: 'Spanish', fr: 'French', it: 'Italian',
+  pt: 'Portuguese', nl: 'Dutch', pl: 'Polish', cs: 'Czech', sv: 'Swedish',
+  no: 'Norwegian', fi: 'Finnish', el: 'Greek', hu: 'Hungarian', ro: 'Romanian',
+  sl: 'Slovenian', ar: 'Arabic', he: 'Hebrew', tr: 'Turkish', ru: 'Russian',
+  uk: 'Ukrainian', hi: 'Hindi', bn: 'Bengali', ta: 'Tamil', te: 'Telugu',
+  ja: 'Japanese', ko: 'Korean', zh: 'Chinese', vi: 'Vietnamese', th: 'Thai',
+  id: 'Indonesian', ms: 'Malay', sk: 'Slovak',
+};
+function wrapWithLanguageDirective(message, lang2) {
+  const code = (lang2 || 'en').slice(0, 2).toLowerCase();
+  if (code === 'en') return message;
+  const langName = LANG_FULL[code] || 'English';
+  return `[STRICT LANGUAGE: Respond ONLY in ${langName}. Even one English word fails the test.]\n\n${message}`;
 }
 
 async function saveToHivemind(config, memory) {
@@ -1777,11 +1855,15 @@ async function handleChatMessage(message, tabId) {
   
   // Call HIVEMIND chat API (/api/chat with full memory integration)
   try {
+    const { lang: storedLang } = await chrome.storage.local.get(['lang']);
+    const lang2 = (storedLang || 'en').slice(0, 2).toLowerCase();
+    const wireMessage = wrapWithLanguageDirective(fullMessage, lang2);
     const chatBody = await withScope({
-      message: fullMessage,
+      message: wireMessage,
       model: 'llama-3.3-70b-versatile',
       browser_origin: Boolean(context),
       history: history || [],
+      language: lang2,
     });
     const resp = await fetch(`${config.apiBase}/api/chat`, {
       method: 'POST',

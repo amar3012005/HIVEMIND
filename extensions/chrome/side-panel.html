@@ -851,6 +851,46 @@
       </div>
     </div>
 
+    <!-- Language pill — toggles UI language for replies -->
+    <div class="scope-wrap">
+      <button id="langPill" class="scope-pill" title="Reply language" aria-haspopup="true" aria-expanded="false">
+        <span class="sp-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="13" height="13">
+            <path d="M5 8h14M5 8a4 4 0 0 1 4-4h0a4 4 0 0 1 4 4v12M5 8v0a4 4 0 0 0 4 4h2"/>
+            <path d="M14 14l3 7 3-7M14 19h6"/>
+          </svg>
+        </span>
+        <span class="sp-label" id="lpLabel">EN</span>
+        <svg class="sp-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="11" height="11"><polyline points="6 9 12 15 18 9"/></svg>
+      </button>
+      <div id="langMenu" class="scope-menu hidden" role="menu" style="max-height: 320px; overflow-y: auto;">
+        <div class="sm-header">Reply language</div>
+        <div class="sm-projects" id="langList">
+          <button class="sm-item" data-lang="en"><span class="sm-name">English</span><span class="sm-check" data-check="en">✓</span></button>
+          <button class="sm-item" data-lang="de"><span class="sm-name">Deutsch</span><span class="sm-check" data-check="de">✓</span></button>
+          <button class="sm-item" data-lang="es"><span class="sm-name">Español</span><span class="sm-check" data-check="es">✓</span></button>
+          <button class="sm-item" data-lang="fr"><span class="sm-name">Français</span><span class="sm-check" data-check="fr">✓</span></button>
+          <button class="sm-item" data-lang="it"><span class="sm-name">Italiano</span><span class="sm-check" data-check="it">✓</span></button>
+          <button class="sm-item" data-lang="pt"><span class="sm-name">Português</span><span class="sm-check" data-check="pt">✓</span></button>
+          <button class="sm-item" data-lang="nl"><span class="sm-name">Nederlands</span><span class="sm-check" data-check="nl">✓</span></button>
+          <button class="sm-item" data-lang="pl"><span class="sm-name">Polski</span><span class="sm-check" data-check="pl">✓</span></button>
+          <button class="sm-item" data-lang="sv"><span class="sm-name">Svenska</span><span class="sm-check" data-check="sv">✓</span></button>
+          <button class="sm-item" data-lang="ru"><span class="sm-name">Русский</span><span class="sm-check" data-check="ru">✓</span></button>
+          <button class="sm-item" data-lang="uk"><span class="sm-name">Українська</span><span class="sm-check" data-check="uk">✓</span></button>
+          <button class="sm-item" data-lang="tr"><span class="sm-name">Türkçe</span><span class="sm-check" data-check="tr">✓</span></button>
+          <button class="sm-item" data-lang="ar"><span class="sm-name">العربية</span><span class="sm-check" data-check="ar">✓</span></button>
+          <button class="sm-item" data-lang="he"><span class="sm-name">עברית</span><span class="sm-check" data-check="he">✓</span></button>
+          <button class="sm-item" data-lang="hi"><span class="sm-name">हिन्दी</span><span class="sm-check" data-check="hi">✓</span></button>
+          <button class="sm-item" data-lang="ja"><span class="sm-name">日本語</span><span class="sm-check" data-check="ja">✓</span></button>
+          <button class="sm-item" data-lang="ko"><span class="sm-name">한국어</span><span class="sm-check" data-check="ko">✓</span></button>
+          <button class="sm-item" data-lang="zh"><span class="sm-name">中文</span><span class="sm-check" data-check="zh">✓</span></button>
+          <button class="sm-item" data-lang="vi"><span class="sm-name">Tiếng Việt</span><span class="sm-check" data-check="vi">✓</span></button>
+          <button class="sm-item" data-lang="th"><span class="sm-name">ไทย</span><span class="sm-check" data-check="th">✓</span></button>
+          <button class="sm-item" data-lang="id"><span class="sm-name">Indonesia</span><span class="sm-check" data-check="id">✓</span></button>
+        </div>
+      </div>
+    </div>
+
     <!-- AI platform badge — green tick + name when active tab matches -->
     <button id="platformBadge" class="platform-badge hidden" title="Ingest this AI chat session">
       <span class="pb-tick">✓</span>

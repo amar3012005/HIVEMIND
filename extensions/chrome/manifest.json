@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "HIVEMIND Chat — AI Memory + Browser Automation",
-  "version": "2.4.0",
+  "name": "HIVEMIND — Persistent Memory for AI",
+  "version": "1.0.2",
   "description": "Talk to HIVE — AI chat with perfect memory and browser context.",
   "icons": {
     "16": "icons/icon16.png",
@@ -14,20 +14,19 @@
     "contextMenus",
     "scripting",
     "tabs",
-    "debugger",
     "sidePanel",
     "identity"
   ],
   "host_permissions": [
     "https://core.hivemind.davinciai.eu:8050/*",
     "https://api.hivemind.davinciai.eu:8040/*",
-    "https://hivemind.davinciai.eu/*",
+    "https://hivemind.davinciai.eu/*"
+  ],
+  "optional_host_permissions": [
     "https://chatgpt.com/*",
     "https://claude.ai/*",
-    "https://chat.openai.com/*",
     "https://gemini.google.com/*",
-    "https://www.perplexity.ai/*",
-    "https://github.com/*"
+    "https://www.perplexity.ai/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -43,15 +42,6 @@
   "side_panel": {
     "default_path": "side-panel.html"
   },
-  "content_scripts": [
-    {
-      "matches": ["<all_urls>"],
-      "js": ["chat-overlay.js"],
-      "css": ["chat-overlay.css"],
-      "run_at": "document_idle",
-      "all_frames": false
-    }
-  ],
   "commands": {
     "toggle-chat": {
       "suggested_key": {
@@ -60,11 +50,5 @@
       },
       "description": "Toggle Talk to HIVE side panel"
     }
-  },
-  "web_accessible_resources": [
-    {
-      "resources": ["extractors.js"],
-      "matches": ["<all_urls>"]
-    }
-  ]
+  }
 }

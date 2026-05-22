@@ -120,9 +120,16 @@ function wireEvents() {
 
   // ── Context controls ──
   $('selBtn').addEventListener('click', async () => {
-    const ctx = await chrome.runtime.sendMessage({ action: 'getSelectionContext' });
-    if (!ctx) {
-      appendError('No text selected on the page. Highlight something first.');
+    // Try a couple of times — first click also kicks off tracker injection,
+    // and the tracker fires `selectionchange` once it lands which writes
+    // the current selection to chrome.storage.session.
+    let ctx = await chrome.runtime.sendMessage({ action: 'getSelectionContext' });
+    if (!ctx?.text) {
+      await new Promise((r) => setTimeout(r, 180));
+      ctx = await chrome.runtime.sendMessage({ action: 'getSelectionContext' });
+    }
+    if (!ctx?.text) {
+      appendError('No text selected on the page. Highlight something then click again.');
       return;
     }
     setContext(ctx);
@@ -856,6 +863,33 @@ async function ingestActiveChat() {
   const distillStage = `distill-${Date.now()}`;
 
   addStage({ id: detectStage, icon: 'search', title: 'Detecting platform', detail: platformName, state: 'done' });
+
+  // First-time permission grant for this AI chat origin (must run inside
+  // the user-gesture click handler, not in background.js).
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab?.url) {
+      const u = new URL(tab.url);
+      const origin = `${u.protocol}//${u.host}/*`;
+      const already = await chrome.permissions.contains({ origins: [origin] });
+      if (!already) {
+        const permStage = `perm-${Date.now()}`;
+        addStage({ id: permStage, icon: 'help', title: 'Requesting permission', detail: `one-time grant for ${u.host}`, state: 'in-flight' });
+        const granted = await chrome.permissions.request({ origins: [origin] });
+        if (!granted) {
+          updateStage(permStage, { state: 'error', icon: 'warn', detail: `denied — re-click "Save session" and choose Allow` });
+          btn.disabled = false;
+          bar.classList.remove('busy');
+          btn.textContent = prevLabel;
+          return;
+        }
+        updateStage(permStage, { state: 'done', icon: 'check', detail: `granted for ${u.host}` });
+      }
+    }
+  } catch (permErr) {
+    // Non-fatal — proceed; the bg-side check will catch it.
+  }
+
   addStage({ id: promptStage, icon: 'pen', title: 'Injecting summary prompt', detail: 'sending to chatbox + pressing Enter', state: 'in-flight' });
 
   try {

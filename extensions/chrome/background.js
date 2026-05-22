@@ -400,6 +400,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.action === '__selectionUpdate') {
+    const tabId = sender?.tab?.id;
+    const text = (message.text || '').trim();
+    if (tabId) {
+      if (text.length > 0) {
+        writeSelectionToStorage(tabId, {
+          mode: 'selection',
+          text: text.slice(0, 6000),
+          url: message.url || '',
+          title: message.title || '',
+          length: text.length,
+        });
+      } else {
+        // Don't clear on empty — keep last good selection in case the user
+        // clicks an extension button which itself blurs the source frame.
+      }
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+
   if (message.action === 'getSelectionContext') {
     getSelectionContext().then(sendResponse).catch(() => sendResponse(null));
     return true;
@@ -448,11 +469,41 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.action === 'checkHostPermission') {
+    // Pure check (no prompt). Caller decides whether to invoke request from
+    // a user-gesture context (the side panel button click).
+    (async () => {
+      try {
+        const url = new URL(message.url || '');
+        const origin = `${url.protocol}//${url.host}/*`;
+        const granted = await chrome.permissions.contains({ origins: [origin] });
+        sendResponse({ granted, origin });
+      } catch (err) {
+        sendResponse({ granted: false, error: err.message });
+      }
+    })();
+    return true;
+  }
+
   if (message.action === 'ingestActiveChat') {
     (async () => {
       try {
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (!tab?.id) throw new Error('no active tab');
+
+        // Verify host permission already granted. Side panel calls
+        // chrome.permissions.request from its own click handler (user
+        // gesture); if user denied we bail here.
+        try {
+          const url = new URL(tab.url);
+          const origin = `${url.protocol}//${url.host}/*`;
+          const granted = await chrome.permissions.contains({ origins: [origin] });
+          if (!granted) {
+            sendResponse({ success: false, error: `permission required for ${url.host} — click the badge again and click Allow`, needsPermission: origin });
+            return;
+          }
+        } catch {}
+
         const cfg = await getConfig();
         const result = await captureAIChatSession(tab.id, tab.url, cfg);
         sendResponse(result);
@@ -479,33 +530,127 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // ── Selection + Section context capture ───────────────────
 
-async function getSelectionContext() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id) return null;
+// ── Persistent selection tracker ───────────────────────────────────────────
+// Side panel takes focus when clicked → window.getSelection() in the source
+// tab returns empty in many browsers. Workaround: inject a content script
+// once that listens to `selectionchange` + `mouseup` + `keyup` and stashes
+// the latest non-empty selection into chrome.storage.session keyed by tab.
+// getSelectionContext() then reads that cache instead of re-querying DOM
+// after focus has already moved away.
+
+const _selTrackerInjected = new Set(); // tabIds w/ tracker live
+
+async function ensureSelectionTracker(tabId) {
+  if (_selTrackerInjected.has(tabId)) return;
   try {
-    const [{ result }] = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      injectImmediately: true,
       func: () => {
-        const sel = (window.getSelection?.() || '').toString().trim();
-        if (!sel || sel.length < 12) return null;
-        return {
-          mode: 'selection',
-          text: sel.slice(0, 6000),
-          url: location.href,
-          title: document.title,
-          length: sel.length,
+        if (window.__hivemindSelTrackerInstalled) return;
+        window.__hivemindSelTrackerInstalled = true;
+        const push = () => {
+          try {
+            const sel = (window.getSelection?.() || '').toString();
+            // Send to background — it persists to chrome.storage.session.
+            chrome.runtime.sendMessage({
+              action: '__selectionUpdate',
+              text: sel,
+              url: location.href,
+              title: document.title,
+            }).catch(() => {});
+          } catch {}
         };
+        document.addEventListener('selectionchange', push, true);
+        document.addEventListener('mouseup', push, true);
+        document.addEventListener('keyup', push, true);
+        // Send immediately so an already-selected range is captured.
+        push();
       },
     });
-    return result || null;
+    _selTrackerInjected.add(tabId);
+  } catch (err) {
+    // Likely a restricted page (chrome://, store, etc) — fall back to one-shot.
+  }
+}
+
+// Clear tracker bookkeeping on tab close + on navigation so re-inject runs.
+chrome.tabs.onRemoved.addListener((tabId) => _selTrackerInjected.delete(tabId));
+chrome.webNavigation?.onCommitted?.addListener?.((det) => {
+  if (det.frameId === 0) _selTrackerInjected.delete(det.tabId);
+});
+
+async function readSelectionFromStorage(tabId) {
+  try {
+    const key = `hivemind:sel:${tabId}`;
+    const stored = await chrome.storage.session.get(key);
+    return stored?.[key] || null;
   } catch {
     return null;
   }
 }
 
+async function writeSelectionToStorage(tabId, payload) {
+  try {
+    const key = `hivemind:sel:${tabId}`;
+    await chrome.storage.session.set({ [key]: payload });
+  } catch {}
+}
+
+async function getSelectionContext() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) return null;
+
+  // Make sure tracker is live so future selections are captured.
+  await ensureSelectionTracker(tab.id);
+
+  // 1. Live DOM read (works when side panel hasn't stolen focus yet).
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id, allFrames: true },
+      func: () => {
+        const sel = (window.getSelection?.() || '').toString().trim();
+        if (!sel) return null;
+        return { text: sel, url: location.href, title: document.title };
+      },
+    });
+    // Pick the longest non-empty result across frames.
+    const hits = (results || [])
+      .map((r) => r?.result)
+      .filter(Boolean)
+      .sort((a, b) => (b.text?.length || 0) - (a.text?.length || 0));
+    if (hits.length > 0 && hits[0].text) {
+      const top = hits[0];
+      const payload = {
+        mode: 'selection',
+        text: top.text.slice(0, 6000),
+        url: top.url,
+        title: top.title,
+        length: top.text.length,
+      };
+      await writeSelectionToStorage(tab.id, payload);
+      return payload;
+    }
+  } catch {
+    /* fall through to storage */
+  }
+
+  // 2. Fall back to the most recent tracked selection from chrome.storage.session.
+  const cached = await readSelectionFromStorage(tab.id);
+  if (cached && cached.text && cached.text.length > 0) {
+    return cached;
+  }
+  return null;
+}
+
 async function startSectionPicker() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id) throw new Error('no active tab');
+  // Lazy-inject overlay (no more auto-content-script on <all_urls>).
+  try {
+    await chrome.scripting.insertCSS({ target: { tabId: tab.id }, files: ['chat-overlay.css'] });
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['chat-overlay.js'] });
+  } catch {}
   await chrome.scripting.executeScript({
     target: { tabId: tab.id },
     func: () => { try { window.__hivemindStartSectionPicker?.(); } catch (e) {} },
@@ -812,6 +957,19 @@ function showBadge(text, color) {
 
 const attachedTabs = new Map(); // Track which tabs have CDP attached
 let contextCache = new Map(); // Cache contexts for 30 seconds
+
+// chrome.debugger has been removed from manifest permissions for the
+// public Web Store build. The CDP helpers below remain in the file but
+// will throw a clear error if invoked instead of silently being undefined.
+const _hasDebugger = typeof chrome !== 'undefined' && !!chrome.debugger;
+if (!_hasDebugger) {
+  globalThis.chrome = globalThis.chrome || {};
+  globalThis.chrome.debugger = {
+    attach: () => Promise.reject(new Error('chrome.debugger permission not granted in this build — use chrome.scripting path instead')),
+    sendCommand: (_t, _m, _p, cb) => cb && cb(),
+    onDetach: { addListener: () => {} },
+  };
+}
 
 async function attachDebugger(tabId) {
   if (attachedTabs.has(tabId)) return;

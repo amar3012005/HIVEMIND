@@ -39,6 +39,7 @@ model User {
   projectMemberships   ProjectMember[]       @relation("UserProjectMemberships")
   memoryProjects       MemoryProject[]       @relation("UserMemoryProjects")
   digitalEmployees     DigitalEmployee[]     @relation("UserCreatedEmployees")
+  hyperRooms           HyperRoom[]           @relation("UserHyperRooms")
 
   @@map("users")
 }
@@ -78,6 +79,7 @@ model Organization {
   users                UserOrganization[] @relation("OrgUserOrganizations")
   pageIndexNodes       PageIndexNode[]    @relation("OrgPageIndexNodes")
   ssoConfig            OrgSsoConfig?      @relation("OrgSsoConfig")
+  hyperRooms           HyperRoom[]        @relation("OrgHyperRooms")
 
   @@map("organizations")
 }
@@ -1275,6 +1277,74 @@ model DigitalEmployee {
   @@index([status])
   @@index([slackTeamId])
   @@map("digital_employees")
+}
+
+/// HyperRoom — a per-user WhatsApp-style multi-agent workspace.
+/// All assigned employees are always present in the room. Each user
+/// message kicks off a Lead + Reactors turn that lives in HyperTurn.
+/// Per-user (not per-org) for v1. summaryMemoryId is set on archive
+/// when the transcript is distilled into a canonical Memory.
+model HyperRoom {
+  id                String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId            String       @map("user_id") @db.Uuid
+  orgId             String       @map("org_id") @db.Uuid
+  name              String       @db.VarChar(120)
+  participantIds    String[]     @default([]) @map("participant_ids") @db.Uuid
+  createdAt         DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  archivedAt        DateTime?    @map("archived_at") @db.Timestamptz(6)
+  summaryMemoryId   String?      @map("summary_memory_id") @db.Uuid
+  user              User         @relation("UserHyperRooms", fields: [userId], references: [id], onDelete: Cascade)
+  org               Organization @relation("OrgHyperRooms", fields: [orgId], references: [id], onDelete: Cascade)
+  turns             HyperTurn[]
+
+  @@index([userId, orgId])
+  @@index([archivedAt])
+  @@map("hyper_rooms")
+}
+
+/// HyperTurn — one user message + lead + reactors + (optional) round-2
+/// debate, sealed atomically. lines holds the JSONL event log
+/// (router, line, react, revise, validate, seal). idempotencyKey makes
+/// double-clicks return the same turn instead of running a second time.
+model HyperTurn {
+  id              String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  roomId          String     @map("room_id") @db.Uuid
+  seq             Int
+  userMessage     String     @map("user_message")
+  status          String     @default("live") @db.VarChar(20)
+  // live | complete | failed | cost_capped
+  lines           Json       @default("[]")
+  costTokens      Int        @default(0) @map("cost_tokens")
+  startedAt       DateTime   @default(now()) @map("started_at") @db.Timestamptz(6)
+  sealedAt        DateTime?  @map("sealed_at") @db.Timestamptz(6)
+  idempotencyKey  String     @unique @map("idempotency_key") @db.VarChar(64)
+  room            HyperRoom  @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  evals           AgentEval[]
+
+  @@unique([roomId, seq])
+  @@index([roomId])
+  @@index([status])
+  @@map("hyper_turns")
+}
+
+/// AgentEval — one row per (agent, turn-line) scored by the CSI judge.
+/// scores is { helpful, role_fit, evidence, opposition } in [0,1].
+/// total is the weighted sum. usedForTuningAt is set when consumed by
+/// a tuner run so each tune cycle waits for 20 fresh evals.
+model AgentEval {
+  id                String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  agentId           String     @map("agent_id") @db.Uuid
+  turnId            String     @map("turn_id") @db.Uuid
+  scores            Json
+  total             Float
+  createdAt         DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  usedForTuningAt   DateTime?  @map("used_for_tuning_at") @db.Timestamptz(6)
+  turn              HyperTurn  @relation(fields: [turnId], references: [id], onDelete: Cascade)
+
+  @@index([agentId, usedForTuningAt])
+  @@index([turnId])
+  @@map("agent_evals")
 }
 
 /// SlackEvent — deduped inbound event from a Slack workspace, routed

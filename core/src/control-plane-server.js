@@ -4403,6 +4403,424 @@ const server = http.createServer(async (req, res) => {
   }
   // ─── End Team Tasks ───────────────────────────────────────
 
+  // ═══════════════════════════════════════════════════════════
+  // Hyper Agents — Rooms (Slack/WhatsApp-style CSI swarm)
+  // ───────────────────────────────────────────────────────────
+  // /v1/hyper-rooms/*
+  //   - list/create rooms per user
+  //   - post a turn (idempotent on user_message)
+  //   - SSE stream for live turn lines
+  //   - archive: distill transcript → one summary memory
+  //   - human-gated prompt promotion path
+  // ═══════════════════════════════════════════════════════════
+  {
+    const { deriveCsiLane, buildIdempotencyKey, preflightTurn } = await import('./employees/hyper-rooms.js');
+
+    // GET /v1/hyper-rooms — list current user's rooms
+    if (pathname === '/v1/hyper-rooms' && req.method === 'GET') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      try {
+        const rooms = await prisma.hyperRoom.findMany({
+          where: { userId: current.session.userId, orgId: current.session.orgId },
+          orderBy: [{ archivedAt: 'asc' }, { updatedAt: 'desc' }],
+          take: 200,
+        });
+        // Hydrate participants for the rail
+        const allIds = Array.from(new Set(rooms.flatMap(r => r.participantIds || [])));
+        const employees = allIds.length
+          ? await prisma.digitalEmployee.findMany({
+              where: { id: { in: allIds } },
+              select: { id: true, slug: true, name: true, avatarUrl: true, roleArchetype: true, status: true },
+            })
+          : [];
+        const empById = Object.fromEntries(employees.map(e => [e.id, { ...e, lane: deriveCsiLane(e) }]));
+        return jsonResponse(res, {
+          rooms: rooms.map(r => ({
+            id: r.id,
+            name: r.name,
+            participant_ids: r.participantIds,
+            participants: (r.participantIds || []).map(id => empById[id]).filter(Boolean),
+            created_at: r.createdAt,
+            updated_at: r.updatedAt,
+            archived_at: r.archivedAt,
+            summary_memory_id: r.summaryMemoryId,
+          })),
+        });
+      } catch (err) {
+        console.warn('[hyper-rooms] list failed:', err.message);
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+
+    // POST /v1/hyper-rooms — create
+    if (pathname === '/v1/hyper-rooms' && req.method === 'POST') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const body = await parseBody(req);
+      const name = typeof body.name === 'string' ? body.name.trim().slice(0, 120) : '';
+      const participantIds = Array.isArray(body.participant_ids)
+        ? body.participant_ids.filter(s => typeof s === 'string')
+        : [];
+      if (!name) return jsonResponse(res, { error: 'name is required' }, 400);
+      try {
+        // Restrict participants to employees in this org
+        const valid = participantIds.length
+          ? await prisma.digitalEmployee.findMany({
+              where: { id: { in: participantIds }, orgId: current.session.orgId },
+              select: { id: true },
+            })
+          : [];
+        const validIds = valid.map(v => v.id);
+        const room = await prisma.hyperRoom.create({
+          data: {
+            userId: current.session.userId,
+            orgId: current.session.orgId,
+            name,
+            participantIds: validIds,
+          },
+        });
+        return jsonResponse(res, { room }, 201);
+      } catch (err) {
+        console.warn('[hyper-rooms] create failed:', err.message);
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+
+    // /v1/hyper-rooms/:id/turns(/:turnId)(/stream)
+    const roomTurnMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/turns(?:\/([0-9a-f-]{36})(\/stream)?)?$/);
+    const roomMetaMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})$/);
+
+    // GET /v1/hyper-rooms/:id — metadata + recent turns
+    if (roomMetaMatch && req.method === 'GET') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const roomId = roomMetaMatch[1];
+      const room = await prisma.hyperRoom.findFirst({
+        where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId },
+      });
+      if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
+      const turns = await prisma.hyperTurn.findMany({
+        where: { roomId },
+        orderBy: { seq: 'asc' },
+        take: 50,
+      });
+      const employees = (room.participantIds || []).length
+        ? await prisma.digitalEmployee.findMany({
+            where: { id: { in: room.participantIds } },
+            select: { id: true, slug: true, name: true, avatarUrl: true, roleArchetype: true, status: true },
+          })
+        : [];
+      return jsonResponse(res, {
+        room: {
+          ...room,
+          participants: employees.map(e => ({ ...e, lane: deriveCsiLane(e) })),
+        },
+        turns,
+      });
+    }
+
+    // PATCH /v1/hyper-rooms/:id — rename or update participants
+    if (roomMetaMatch && req.method === 'PATCH') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const body = await parseBody(req);
+      const roomId = roomMetaMatch[1];
+      const room = await prisma.hyperRoom.findFirst({
+        where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId },
+      });
+      if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
+      const data = {};
+      if (typeof body.name === 'string' && body.name.trim()) data.name = body.name.trim().slice(0, 120);
+      if (Array.isArray(body.participant_ids)) {
+        const valid = body.participant_ids.length
+          ? await prisma.digitalEmployee.findMany({
+              where: { id: { in: body.participant_ids }, orgId: current.session.orgId },
+              select: { id: true },
+            })
+          : [];
+        data.participantIds = valid.map(v => v.id);
+      }
+      const updated = await prisma.hyperRoom.update({ where: { id: roomId }, data });
+      return jsonResponse(res, { room: updated });
+    }
+
+    // DELETE /v1/hyper-rooms/:id — soft archive + distill summary memory
+    if (roomMetaMatch && req.method === 'DELETE') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const roomId = roomMetaMatch[1];
+      const room = await prisma.hyperRoom.findFirst({
+        where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId },
+      });
+      if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
+      if (room.archivedAt) return jsonResponse(res, { room });
+
+      // Pull turns to feed the distill prompt
+      const turns = await prisma.hyperTurn.findMany({
+        where: { roomId, status: 'complete' },
+        orderBy: { seq: 'asc' },
+        take: 200,
+      });
+
+      // Build a compact transcript for the summary memory
+      const lines = [];
+      for (const t of turns) {
+        lines.push(`USER: ${t.userMessage}`);
+        for (const evt of (t.lines || [])) {
+          if (evt.t === 'line' || evt.t === 'revise') {
+            lines.push(`${evt.agent} (lead): ${evt.content || ''}`);
+          } else if (evt.t === 'react' || evt.t === 'validate') {
+            lines.push(`${evt.agent} (${evt.agreement || 'react'}): ${evt.content || ''}`);
+          }
+        }
+      }
+      const transcript = lines.join('\n').slice(0, 30_000);
+
+      // Best-effort summary memory write via control-plane proxy → core.
+      // Stays inside the canonical pipeline by hitting /api/memories.
+      let summaryMemoryId = null;
+      try {
+        const corePath = '/api/memories';
+        const url = new URL(corePath, CONFIG.coreApiBaseUrl);
+        const resp = await fetch(url.toString(), {
+          method: 'POST',
+          headers: {
+            'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+            'X-HM-User-Id': current.session.userId,
+            'X-HM-Org-Id': current.session.orgId,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            title: `Hyper room — ${room.name}`,
+            content: transcript || 'Empty room.',
+            memory_type: 'summary',
+            tags: ['hyper-room', `room:${roomId}`],
+            source_metadata: { source_platform: 'hyper-agents', source_id: roomId },
+            metadata: { hyper_room_id: roomId, turn_count: turns.length },
+          }),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          summaryMemoryId = data?.memory?.id || data?.id || null;
+        }
+      } catch (err) {
+        console.warn('[hyper-rooms] archive summary write failed:', err.message);
+      }
+
+      const updated = await prisma.hyperRoom.update({
+        where: { id: roomId },
+        data: { archivedAt: new Date(), summaryMemoryId },
+      });
+      return jsonResponse(res, { room: updated, summary_memory_id: summaryMemoryId });
+    }
+
+    // POST /v1/hyper-rooms/:id/turns — submit user message, kick a turn
+    if (roomTurnMatch && roomTurnMatch[2] == null && req.method === 'POST') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const body = await parseBody(req);
+      const roomId = roomTurnMatch[1];
+      const userMessage = typeof body.user_message === 'string' ? body.user_message : '';
+
+      const room = await prisma.hyperRoom.findFirst({
+        where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId },
+      });
+      const pre = preflightTurn({ room, userMessage });
+      if (pre) return jsonResponse(res, pre, 400);
+
+      // Sequence is monotonic per room. Atomic via SELECT max + insert
+      // wrapped in serializable transaction.
+      try {
+        const turn = await prisma.$transaction(async (tx) => {
+          const last = await tx.hyperTurn.findFirst({
+            where: { roomId },
+            orderBy: { seq: 'desc' },
+            select: { seq: true },
+          });
+          const nextSeq = (last?.seq ?? 0) + 1;
+          const key = body.idempotency_key
+            && typeof body.idempotency_key === 'string'
+            && body.idempotency_key.length <= 64
+              ? body.idempotency_key
+              : buildIdempotencyKey({ roomId, seq: nextSeq, userMessage });
+
+          // Idempotency: if a turn with this key already exists, return it.
+          const existing = await tx.hyperTurn.findUnique({ where: { idempotencyKey: key } });
+          if (existing) return existing;
+
+          const created = await tx.hyperTurn.create({
+            data: {
+              roomId,
+              seq: nextSeq,
+              userMessage,
+              status: 'live',
+              idempotencyKey: key,
+              lines: [],
+            },
+          });
+          await tx.hyperRoom.update({
+            where: { id: roomId },
+            data: { updatedAt: new Date() },
+          });
+          return created;
+        });
+
+        // Kick the sidecar to execute the turn. Fire-and-forget; the
+        // sidecar will write events back via the callback hook.
+        try {
+          const sidecarBase = process.env.EMPLOYEES_SIDECAR_URL || 'http://hm-employees:8080';
+          fetch(`${sidecarBase}/internal/hyper/room-turn`, {
+            method: 'POST',
+            headers: {
+              'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              room_id: roomId,
+              turn_id: turn.id,
+              user_id: current.session.userId,
+              org_id: current.session.orgId,
+              user_message: userMessage,
+              participant_ids: room.participantIds || [],
+              callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://control-plane:8080')}/internal/hyper/turn-event`,
+            }),
+          }).catch(err => console.warn('[hyper-rooms] sidecar kick failed:', err.message));
+        } catch (err) {
+          console.warn('[hyper-rooms] sidecar dispatch threw:', err.message);
+        }
+
+        return jsonResponse(res, { turn_id: turn.id, status: turn.status }, 202);
+      } catch (err) {
+        console.warn('[hyper-rooms] turn create failed:', err.message);
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+
+    // GET /v1/hyper-rooms/:id/turns/:turnId — sealed turn DB read
+    if (roomTurnMatch && roomTurnMatch[2] && !roomTurnMatch[3] && req.method === 'GET') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const [_, roomId, turnId] = roomTurnMatch;
+      const room = await prisma.hyperRoom.findFirst({
+        where: { id: roomId, userId: current.session.userId },
+      });
+      if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
+      const turn = await prisma.hyperTurn.findFirst({ where: { id: turnId, roomId } });
+      if (!turn) return jsonResponse(res, { error: 'Turn not found' }, 404);
+      return jsonResponse(res, { turn });
+    }
+
+    // GET /v1/hyper-rooms/:id/turns/:turnId/stream — SSE for live turn
+    if (roomTurnMatch && roomTurnMatch[2] && roomTurnMatch[3] === '/stream' && req.method === 'GET') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const [_, roomId, turnId] = roomTurnMatch;
+      const room = await prisma.hyperRoom.findFirst({
+        where: { id: roomId, userId: current.session.userId },
+      });
+      if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
+
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache, no-transform',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      });
+
+      const lastEventId = req.headers['last-event-id']
+        ? parseInt(req.headers['last-event-id'], 10) || 0
+        : 0;
+
+      let cursor = 0;
+      let alive = true;
+      const POLL_MS = 700;
+      const HEARTBEAT_MS = 15_000;
+
+      const flush = (lines) => {
+        for (let i = cursor; i < lines.length; i++) {
+          const evt = lines[i];
+          if (i < lastEventId) continue;
+          res.write(`id: ${i}\n`);
+          res.write(`event: ${evt.t || 'line'}\n`);
+          res.write(`data: ${JSON.stringify(evt)}\n\n`);
+        }
+        cursor = lines.length;
+      };
+
+      const heartbeat = setInterval(() => {
+        if (!alive) return;
+        try { res.write(`event: heartbeat\ndata: {"ts":${Date.now()}}\n\n`); }
+        catch { alive = false; }
+      }, HEARTBEAT_MS);
+
+      const poll = async () => {
+        if (!alive) return;
+        try {
+          const turn = await prisma.hyperTurn.findFirst({
+            where: { id: turnId, roomId },
+            select: { lines: true, status: true, sealedAt: true },
+          });
+          if (!turn) {
+            res.write(`event: error\ndata: ${JSON.stringify({ message: 'Turn vanished' })}\n\n`);
+            alive = false;
+          } else {
+            flush(Array.isArray(turn.lines) ? turn.lines : []);
+            if (turn.sealedAt || ['complete', 'failed', 'cost_capped'].includes(turn.status)) {
+              alive = false;
+            }
+          }
+        } catch (err) {
+          console.warn('[hyper-rooms] sse poll error:', err.message);
+        }
+        if (alive) setTimeout(poll, POLL_MS);
+        else {
+          clearInterval(heartbeat);
+          try { res.end(); } catch { /* ignore */ }
+        }
+      };
+
+      req.on('close', () => { alive = false; });
+      poll();
+      return;
+    }
+
+    // POST /v1/hyper-rooms/:id/promote-prompt — human-gated promotion
+    const promoteMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/promote-prompt$/);
+    if (promoteMatch && req.method === 'POST') {
+      // Delegated to sidecar tuner (file-based prompt variants)
+      await _forwardSidecar(req, res, '/internal/hyper/promote-prompt');
+      return;
+    }
+
+    // ─── Internal hook: sidecar writes turn events back here ───
+    // Sidecar POSTs each JSONL event during execution; we append it to
+    // the row and let any open SSE subscriber pick it up on next poll.
+    if (pathname === '/internal/hyper/turn-event' && req.method === 'POST') {
+      const apiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace(/^Bearer\s+/i, '') || '';
+      const masterKey = process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811';
+      if (apiKey !== masterKey) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+      const body = await parseBody(req).catch(() => null);
+      if (!body?.turn_id || !body?.event) return jsonResponse(res, { error: 'turn_id and event are required' }, 400);
+      try {
+        const { appendTurnEvent, sealTurn } = await import('./employees/hyper-rooms.js');
+        if (body.event.t === 'seal') {
+          await sealTurn(prisma, body.turn_id, {
+            status: body.event.status || 'complete',
+            costTokens: body.event.cost_tokens || 0,
+          });
+        } else {
+          await appendTurnEvent(prisma, body.turn_id, body.event);
+        }
+        return jsonResponse(res, { ok: true });
+      } catch (err) {
+        console.warn('[hyper-rooms] turn-event append failed:', err.message);
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+  }
+  // ─── End Hyper Agents Rooms ───────────────────────────────
+
   // ─── Billing (Stripe-backed) ──────────────────────────────
   // GET  /v1/billing/plan         — current plan + usage + limits
   // POST /v1/billing/checkout     — create Stripe Checkout session

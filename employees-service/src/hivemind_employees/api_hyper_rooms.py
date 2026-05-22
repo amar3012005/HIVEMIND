@@ -53,14 +53,10 @@ router = APIRouter(prefix="/internal/hyper", tags=["hyper-rooms"])
 
 
 # ─── Budget constants ────────────────────────────────────────────────
-# User requested unlimited — using very large caps as a runaway safety
-# net only. Effectively no per-line constraint at typical LLM context
-# windows (128k Groq / 200k Anthropic).
+# Token caps removed — agents use full model context. The runtime
+# bounds are the model's own context window (Groq llama ~128k, Claude
+# ~200k). No per-line or per-turn truncation here.
 
-LEAD_MAX_TOKENS = 100_000
-REACTOR_MAX_TOKENS = 100_000
-REVISE_MAX_TOKENS = 100_000
-TURN_COST_CAP = 10_000_000  # 10M = effectively unlimited per turn
 MAX_REACTORS = 2
 ROUND_2_CHALLENGE_THRESHOLD = 0.7
 
@@ -561,12 +557,6 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         "tokens": lead_tokens,
     })
 
-    if cost_tokens >= TURN_COST_CAP:
-        status = "cost_capped"
-        await _emit_event(req.callback_url, req.turn_id, {
-            "t": "seal", "cost_tokens": cost_tokens, "status": status,
-        })
-        return RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status=status)
 
     # ── Reactors (parallel) ──────────────────────────────────────────
     reaction_tasks = []
@@ -616,12 +606,6 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             reactions.append({**event, "emp": r_emp})
             await _emit_event(req.callback_url, req.turn_id, event)
 
-    if cost_tokens >= TURN_COST_CAP:
-        status = "cost_capped"
-        await _emit_event(req.callback_url, req.turn_id, {
-            "t": "seal", "cost_tokens": cost_tokens, "status": status,
-        })
-        return RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status=status)
 
     # ── Round 2 (only if challenger > 0.7) ───────────────────────────
     challenger_reaction = next(
@@ -695,17 +679,6 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             log.warning("round-2 failed: %s", exc)
 
     # ── Seal ─────────────────────────────────────────────────────────
-    if cost_tokens >= TURN_COST_CAP:
-        status = "cost_capped"
-
-    await _emit_event(req.callback_url, req.turn_id, {
-        "t": "seal",
-        "cost_tokens": cost_tokens,
-        "status": status,
-        "duration_ms": int((time.time() - started) * 1000),
-    })
-
-    return RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status=status)
 
 
 @router.post("/room-turn", response_model=RoomTurnResponse)

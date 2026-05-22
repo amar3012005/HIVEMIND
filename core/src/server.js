@@ -3476,6 +3476,82 @@ const server = http.createServer(async (req, res) => {
   // works via `npx -y https://core.hivemind.davinciai.eu:8050/install/cli.tgz setup`.
   // The cli.sh wraps that in a curl|bash for users who don't want to type
   // the URL.
+  // ── Chrome extension download ─────────────────────────────────────────
+  // GET /install/chrome-extension.zip → serves the prebuilt extension zip.
+  // Production image bakes it at /app/data/extension/hivemind-chrome-extension.zip.
+  // Local dev: builds on demand from repo's extensions/chrome/.
+  if ((pathname === '/install/chrome-extension.zip' ||
+       pathname === '/install/extension.zip' ||
+       pathname === '/install/hivemind-chrome.zip') && req.method === 'GET') {
+    try {
+      const fs = await import('node:fs');
+      const path = await import('node:path');
+      const candidates = [
+        process.env.HIVEMIND_EXTENSION_DIR,
+        path.join(PROJECT_ROOT, 'data', 'extension'),
+        path.join(REPO_ROOT, 'extensions', 'chrome'),
+        '/opt/HIVEMIND/extensions/chrome',
+      ].filter(Boolean);
+
+      // Try prebuilt zip first.
+      for (const dir of candidates) {
+        if (!fs.existsSync(dir)) continue;
+        const entries = fs.readdirSync(dir);
+        const zips = entries.filter((f) => f.startsWith('hivemind-chrome-extension') && f.endsWith('.zip'));
+        if (zips.length > 0) {
+          zips.sort();
+          const zipPath = path.join(dir, zips[zips.length - 1]);
+          const stat = fs.statSync(zipPath);
+          const filename = `hivemind-chrome-extension.zip`;
+          res.setHeader('Content-Type', 'application/zip');
+          res.setHeader('Content-Length', stat.size);
+          res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+          res.setHeader('Cache-Control', 'public, max-age=300');
+          res.writeHead(200);
+          fs.createReadStream(zipPath).pipe(res);
+          return;
+        }
+      }
+
+      // Fallback: zip on-demand from extensions/chrome (dev mode).
+      const chromeDir = candidates.find((d) =>
+        fs.existsSync(d) && fs.existsSync(path.join(d, 'manifest.json'))
+      );
+      if (!chromeDir) {
+        res.writeHead(404);
+        res.end('chrome extension not found — tried: ' + candidates.join(', '));
+        return;
+      }
+      const { spawn } = await import('node:child_process');
+      const tmpZip = `/tmp/hivemind-chrome-${Date.now()}.zip`;
+      const proc = spawn('zip', [
+        '-r', tmpZip, '.',
+        '-x', '*.md', '-x', '.DS_Store',
+        '-x', 'node_modules/*', '-x', '*.bak',
+        '-x', '.git/*', '-x', '*.test.js',
+        '-x', 'store-assets/*',
+      ], { cwd: chromeDir });
+      await new Promise((resolve, reject) => {
+        proc.on('close', (code) => code === 0 ? resolve() : reject(new Error(`zip exit ${code}`)));
+        proc.on('error', reject);
+      });
+      const stat = fs.statSync(tmpZip);
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader('Content-Length', stat.size);
+      res.setHeader('Content-Disposition', `attachment; filename="hivemind-chrome-extension.zip"`);
+      res.setHeader('Cache-Control', 'no-cache');
+      res.writeHead(200);
+      const stream = fs.createReadStream(tmpZip);
+      stream.pipe(res);
+      stream.on('close', () => { try { fs.unlinkSync(tmpZip); } catch {} });
+      return;
+    } catch (e) {
+      res.writeHead(500);
+      res.end('chrome extension serve error: ' + e.message);
+      return;
+    }
+  }
+
   if (pathname === '/install/cli.tgz' && req.method === 'GET') {
     try {
       const fs = await import('node:fs');

@@ -15,7 +15,7 @@ WORKDIR /app
 FROM base AS builder
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends python3 make g++ git && \
+    apt-get install -y --no-install-recommends python3 make g++ git zip && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy package files
@@ -35,6 +35,21 @@ COPY core/config ./config
 
 # Generate Prisma client
 RUN npx prisma generate
+
+# ── Bake Chrome extension zip for /install/chrome-extension.zip route ──
+# Copies extensions/chrome into the builder, then zips it into
+# /app/data/extension/hivemind-chrome-extension.zip so the production
+# image can serve it directly without runtime zipping.
+COPY extensions ./extensions-src
+RUN mkdir -p /app/data/extension && \
+    cd extensions-src/chrome && \
+    zip -r /app/data/extension/hivemind-chrome-extension.zip . \
+      -x "*.md" -x ".DS_Store" -x "node_modules/*" \
+      -x "*.bak" -x ".git/*" -x "*.test.js" -x "store-assets/*" && \
+    EXT_VERSION=$(node -e "console.log(require('./manifest.json').version)") && \
+    cp /app/data/extension/hivemind-chrome-extension.zip \
+       /app/data/extension/hivemind-chrome-extension-v${EXT_VERSION}.zip && \
+    echo "${EXT_VERSION}" > /app/data/extension/VERSION
 
 # ==========================================
 # PRODUCTION STAGE
@@ -68,6 +83,7 @@ COPY --from=builder --chown=nodejs:nodejs /app/config ./config
 COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=nodejs:nodejs /app/package.json ./
 COPY --from=builder --chown=nodejs:nodejs /app/prisma ./prisma
+COPY --from=builder --chown=nodejs:nodejs /app/data/extension ./data/extension
 
 RUN chmod -R 550 /app && chmod -R 770 /app/logs /app/data
 

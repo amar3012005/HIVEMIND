@@ -15472,7 +15472,7 @@ exit \$RC
         // ==========================================
         case '/api/chat':
           if (req.method === 'POST') {
-            const { message, model = 'openai/gpt-oss-120b', history = [], stream: wantStream = false } = body;
+            const { message, model = 'openai/gpt-oss-120b', history = [], stream: wantStream = false, language = null } = body;
             if (!message || typeof message !== 'string') {
               return jsonResponse(res, { error: 'message is required' }, 400);
             }
@@ -15559,6 +15559,7 @@ exit \$RC
                     const result = await runReactAgent({
                       message, history, model, apiKey: groqKey,
                       assistantName: agentAssistantName, orgName: agentOrgName,
+                      language,
                       ctx: {
                         userId, orgId,
                         persistentMemoryStore, persistentMemoryEngine,

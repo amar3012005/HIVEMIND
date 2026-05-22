@@ -278,6 +278,41 @@ function compressIfNeeded(messages, { maxChars = 30_000 } = {}) {
  * @param {Function} [opts.onEvent] — optional SSE stream callback for tokens/tool-calls
  * @returns {Promise<{response, sources, usage, steps, assistant_name}>}
  */
+// ISO 639-1 → human-readable name. Used to instruct the LLM in the
+// user's selected UI language. Falls back to the code itself.
+const LANGUAGE_NAMES = {
+  en: 'English',  de: 'German',  es: 'Spanish',  fr: 'French',  it: 'Italian',
+  pt: 'Portuguese', nl: 'Dutch', pl: 'Polish',   cs: 'Czech',  sv: 'Swedish',
+  no: 'Norwegian', fi: 'Finnish', el: 'Greek',   hu: 'Hungarian', ro: 'Romanian',
+  sl: 'Slovenian', ar: 'Arabic',  he: 'Hebrew',  tr: 'Turkish',  ru: 'Russian',
+  uk: 'Ukrainian', hi: 'Hindi',   bn: 'Bengali', ta: 'Tamil',    te: 'Telugu',
+  ja: 'Japanese',  ko: 'Korean',  zh: 'Chinese', vi: 'Vietnamese', th: 'Thai',
+  id: 'Indonesian', ms: 'Malay',  sk: 'Slovak',
+};
+
+function languageDirective(code) {
+  if (!code) return '';
+  const normalized = String(code).slice(0, 2).toLowerCase();
+  if (normalized === 'en') return ''; // English is the default; skip
+  const name = LANGUAGE_NAMES[normalized] || normalized;
+  return `\n\n━━━ OUTPUT LANGUAGE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ALL final user-facing text MUST be in ${name} (ISO ${normalized}).
+This overrides any default English tone in earlier sections.
+
+Rules:
+  • Reply fluently and idiomatically in ${name} — not literal translation.
+  • Keep proper nouns, brand names, project codes, and code/identifiers
+    in their original form (do not translate "HIVEMIND", "Slack", file
+    paths, function names, URLs, etc).
+  • Tool call arguments stay in English (queries, tags, titles work
+    better cross-lingual when stored in English) — the user-facing
+    answer alone is in ${name}.
+  • If the user writes in a third language, still reply in ${name}
+    unless they explicitly switch.
+`;
+}
+
 export async function runReactAgent({
   message,
   history = [],
@@ -288,6 +323,7 @@ export async function runReactAgent({
   apiKey,
   assistantName,
   orgName,
+  language,        // ISO 639-1 (from FE i18n) — drives output language
   ctx,
   onEvent,
 }) {
@@ -296,6 +332,7 @@ export async function runReactAgent({
 
   const today = new Date().toISOString().slice(0, 10);
   let systemPrompt = buildSystemPrompt({ assistantName, orgName, today });
+  systemPrompt += languageDirective(language);
 
   // Browser-context awareness: when the user asks a question about a
   // page selection / section / whole-page text the chrome extension wraps

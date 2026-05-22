@@ -679,6 +679,18 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             log.warning("round-2 failed: %s", exc)
 
     # ── Seal ─────────────────────────────────────────────────────────
+    # Earlier patch removed the cost-cap branches and accidentally also
+    # ate this final emit + return — orchestrator was falling off the
+    # end and returning None, which (a) crashed FastAPI's
+    # ResponseValidationError on RoomTurnResponse and (b) never sent
+    # the SSE seal event, leaving the UI stuck on "typing…".
+    await _emit_event(req.callback_url, req.turn_id, {
+        "t": "seal",
+        "cost_tokens": cost_tokens,
+        "status": status,
+        "duration_ms": int((time.time() - started) * 1000),
+    })
+    return RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status=status)
 
 
 @router.post("/room-turn", response_model=RoomTurnResponse)

@@ -6515,6 +6515,77 @@ exit \$RC
           }
           break;
 
+        case '/api/ingest/image':
+          if (req.method === 'POST') {
+            if (!persistentMemoryEngine) {
+              return jsonResponse(res, { error: 'Memory engine unavailable' }, 503);
+            }
+            try {
+              const contentType = req.headers['content-type'] || '';
+              if (!contentType.includes('multipart/form-data')) {
+                return jsonResponse(res, { error: 'Content-Type must be multipart/form-data' }, 400);
+              }
+              const boundaryMatch = contentType.match(/boundary=(.+)/);
+              if (!boundaryMatch) {
+                return jsonResponse(res, { error: 'Missing boundary' }, 400);
+              }
+              const rawBody = await new Promise((resolve) => {
+                const chunks = [];
+                req.on('data', (c) => chunks.push(c));
+                req.on('end', () => resolve(Buffer.concat(chunks)));
+              });
+              const parts = parseMultipart(rawBody, boundaryMatch[1].trim());
+              const filePart = parts.find((p) => p.filename);
+              if (!filePart) {
+                return jsonResponse(res, { error: 'No file uploaded — send a file field' }, 400);
+              }
+              const mime = (filePart.contentType || '').toLowerCase();
+              if (!/^image\/(png|jpe?g|webp|gif)$/i.test(mime)) {
+                return jsonResponse(res, { error: `Unsupported MIME ${mime} — only image/* on this endpoint` }, 415);
+              }
+              // 20MB cap matches Groq Scout file limit.
+              if (filePart.data.length > 20 * 1024 * 1024) {
+                return jsonResponse(res, { error: 'Image too large. Max 20MB.' }, 413);
+              }
+              const hint = parts.find((p) => p.name === 'hint')?.value || null;
+              const projectId = parts.find((p) => p.name === 'projectId')?.value
+                || parts.find((p) => p.name === 'project_id')?.value
+                || null;
+
+              const { buildImageMemoryPayload } = await import('./services/image-ingest.js');
+              const { payload, classification, extraction, usage } = await buildImageMemoryPayload({
+                imageBuffer: filePart.data,
+                mimeType: mime,
+                hint,
+                userId,
+                orgId,
+                projectId,
+                filename: filePart.filename,
+              });
+
+              const [routed] = await buildRoutedIngestPayloads(payload, { smartIngestRouter });
+              const saved = await ingestRoutedPayload(routed, persistentMemoryEngine);
+
+              return jsonResponse(res, {
+                success: true,
+                memory_id: saved?.parentId || saved?.id || saved?.memoryId || null,
+                title: payload.title,
+                classification,
+                extraction_preview: {
+                  description: extraction?.description?.slice(0, 240) || null,
+                  entities: extraction?.entities || [],
+                  key_facts: (extraction?.key_facts || []).slice(0, 5),
+                  has_structured_fields: !!(extraction?.structured_fields && Object.keys(extraction.structured_fields).length),
+                },
+                usage,
+              });
+            } catch (err) {
+              console.warn('[/api/ingest/image] failed:', err.message);
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
         case '/api/ingest':
           if (req.method === 'POST') {
             if (!ensurePersistedMemoryOrFail(res, '/api/ingest')) {

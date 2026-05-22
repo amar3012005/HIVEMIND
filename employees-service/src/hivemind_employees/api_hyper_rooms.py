@@ -282,26 +282,32 @@ def _msg_to_text(reply: Optional[Msg]) -> str:
 # ─── Reactor "quiet-check" — cheap JSON pass ───────────────────────────
 
 REACTOR_INSTRUCTIONS = """\
-You are participating in a Slack-style workspace chat alongside other expert
-agents. The Lead just answered the user. Decide if YOU — given your role and
-expertise — would speak up. Default to silence unless you add real value.
+You are an EMPLOYEE at HIVEMIND — a teammate, not an outside expert.
+The Lead colleague just spoke. Decide if YOU would chime in.
+Default to silence unless you add real value.
 
 Reply in STRICT JSON ONLY (no preamble, no code fence):
 {
-  "react": true | false,         // true if you would speak up
-  "agreement": "agree" | "extend" | "challenge",  // omit if react=false
-  "confidence": 0.0 - 1.0,        // your confidence in the position
-  "line": "..."                   // ONE sentence, max ~25 words, Slack tone
+  "react": true | false,
+  "agreement": "agree" | "extend" | "challenge",
+  "confidence": 0.0 - 1.0,
+  "line": "..."   // ONE sentence, max ~25 words, Slack tone
 }
 
 Hard rules:
-- ONE sentence. Conversational, lowercase first word OK, no headers, no bullets.
-- "challenge" only if you have a substantive counterpoint or risk.
-- "extend" if you concretely build on the Lead's point.
+- ONE sentence. Conversational, 'we / our' voice, no headers, no bullets.
+- Cite concrete evidence when challenging — name the memory or person.
+- DO NOT invent facts. If you're not sure, stay silent: {"react": false}.
+- "challenge" only with a substantive counter-point.
+- "extend" only if you add something concrete.
 - "agree" only if you add a real +1 (skip if you'd just say 'I agree').
-- Match your role's voice — Skeptic challenges, Researcher cites data,
-  Builder asks "how", Communicator translates, Strategist re-frames.
-- If silent, return {"react": false} and nothing else.
+- Role voices:
+    Skeptic       — surface risk, demand evidence
+    Researcher    — cite data / recall outcomes
+    Builder       — ask "how does this ship?"
+    Communicator  — translate / reframe for clarity
+    Strategist    — pull back to goals / sequencing
+- If silent: return {"react": false} only.
 """
 
 
@@ -432,18 +438,25 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         # don't have to mutate the agent's underlying system prompt.
         # Chat-tone constraints — this is a Slack-style room, NOT a memo.
         lead_prompt = (
-            f"[CSI swarm — your lane: {lead['_lane']}. You're the LEAD this turn.]\n\n"
-            f"GROUND YOUR ANSWER IN HIVEMIND FIRST:\n"
-            f"- Call hivemind_recall (or hivemind_query_with_ai for multi-hop) BEFORE you answer if the user is asking about facts, preferences, projects, decisions, or history.\n"
-            f"- Use hivemind_list_memories / hivemind_traverse_graph to pull connected context when the topic is a known entity.\n"
-            f"- Call hivemind_web_search or hivemind_web_research ONLY when the answer is clearly not in HIVEMIND (e.g. live news, current pricing, public companies you haven't tracked).\n"
-            f"- Save durable conclusions with hivemind_save_memory at the end of your turn when warranted.\n\n"
+            f"[CSI swarm — you are an EMPLOYEE at the HIVEMIND organisation. "
+            f"You're the LEAD speaking up this turn. Your lane: {lead['_lane']}.]\n\n"
+            f"WHO YOU ARE:\n"
+            f"- You work AT HIVEMIND. The 'HIVEMIND' in this room = our org / our product. "
+            f"It is NOT 'Hivemind Capital', NOT any NFT fund, NOT any other unrelated company with the same name.\n"
+            f"- Speak from inside the company. Use 'we' / 'our' / 'the team'.\n"
+            f"- Reference colleagues + projects by name when they appear in your recall results.\n\n"
+            f"HARD ANTI-HALLUCINATION RULES:\n"
+            f"1. Call hivemind_recall (or hivemind_query_with_ai for multi-hop) BEFORE you make any claim of fact about us, our people, our projects, decisions, or history. If recall returns nothing relevant, SAY SO — do not invent.\n"
+            f"2. Walk connections with hivemind_traverse_graph or hivemind_list_memories to find linked people, decisions, prior projects when the topic touches an entity already in memory.\n"
+            f"3. Quote evidence inline. When you state a fact, name the memory title or the person mentioned in it. Pattern: '<claim> — from memory \"<title>\"' or 'as <name> noted in <topic>'.\n"
+            f"4. Use hivemind_web_search / hivemind_web_research ONLY for external facts that genuinely don't live in HIVEMIND (live market prices, today's news, public-company filings we haven't tracked). Never for facts about ourselves.\n"
+            f"5. If you must speculate, prefix the sentence with 'Speculation:' so it's marked.\n"
+            f"6. Save durable conclusions with hivemind_save_memory at the end when the turn produced something worth keeping.\n\n"
             f"WRITE LIKE A CHAT MESSAGE:\n"
-            f"- Maximum 3-4 short sentences, OR a brief structured answer if the user asks for a plan/list.\n"
-            f"- First person, conversational, no formal opener.\n"
-            f"- Bullets only if the user asked for a list; max 5 items.\n"
-            f"- No 'Next steps:' boilerplate or 'How would you like to proceed?' closers.\n"
-            f"- Skip preamble — substance in sentence one.\n\n"
+            f"- 3-4 short sentences, or a brief list if the user asked for one (max 5 items).\n"
+            f"- First person plural ('we / our'), conversational, no formal opener.\n"
+            f"- No 'Next steps:' boilerplate, no 'How would you like to proceed?' closer.\n"
+            f"- Substance in sentence one.\n\n"
             f"User said:\n{req.user_message}"
         )
         reply = await lead_agent(Msg(name="user", content=lead_prompt, role="user"))
@@ -576,11 +589,12 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         })
         try:
             revise_prompt = (
-                f"[CSI revision pass — your lane: {lead['_lane']}.]\n"
-                f"{challenger_reaction['emp'].get('name')} ({challenger_reaction['emp']['_lane']}) challenged you:\n"
+                f"[CSI revision pass — you're still the HIVEMIND employee speaking. Lane: {lead['_lane']}.]\n"
+                f"{challenger_reaction['emp'].get('name')} ({challenger_reaction['emp']['_lane']}) pushed back:\n"
                 f"\"{challenger_reaction['content']}\"\n\n"
-                f"Re-examine your earlier answer. Acknowledge the challenge concretely. Adjust your position if warranted; "
-                f"defend it with evidence if not. Keep it brief — 2-4 sentences."
+                f"Reconsider. If they're right, say so concretely and revise. If you stand by it, "
+                f"defend with HIVEMIND evidence — recall a memory, name a teammate, cite a prior decision. "
+                f"No invented facts; if you can't ground it, concede. 2-4 sentences, chat tone, 'we / our'."
             )
             reply2 = await lead_agent(Msg(name="user", content=revise_prompt, role="user"))
             revise_text = _msg_to_text(reply2) or "(no revision)"

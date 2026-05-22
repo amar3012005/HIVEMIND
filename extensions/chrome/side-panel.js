@@ -184,6 +184,20 @@ function wireEvents() {
 
   $('saveMemBtn').addEventListener('click', saveCurrentContextAsMemory);
 
+  // Upload button → opens file picker, routes by MIME (image vs document)
+  const uploadBtn = $('uploadBtn');
+  const uploadInput = $('uploadInput');
+  if (uploadBtn && uploadInput) {
+    uploadBtn.addEventListener('click', () => uploadInput.click());
+    uploadInput.addEventListener('change', async (e) => {
+      const files = Array.from(e.target.files || []);
+      uploadInput.value = ''; // allow same file re-pick
+      for (const f of files) {
+        await handleFileUpload(f);
+      }
+    });
+  }
+
   // Welcome example prompts → fill composer + auto-send
   document.querySelectorAll('.wp').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -873,6 +887,76 @@ function renderMarkdownLite(raw) {
     if (para.length) out.push(`<p class="md-p">${_mdInline(_escHtml(para.join(' ')))}</p>`);
   }
   return out.join('');
+}
+
+// ── File upload (auto-route by MIME) ────────────────────────────────────
+// Image → Groq vision pipeline via /api/ingest/image (server runs classify
+// + extract). Everything else → /api/knowledge/upload (docling pipeline).
+// Renders a compact row in #uploadList showing status + memory id when done.
+
+async function handleFileUpload(file) {
+  const list = $('uploadList');
+  if (!list) return;
+  const mime = (file.type || '').toLowerCase();
+  const isImage = /^image\/(png|jpe?g|webp|gif)$/.test(mime);
+  const cfg = await getConfig();
+  if (!cfg.apiKey) {
+    appendError('Not signed in — upload skipped.');
+    return;
+  }
+
+  const rowId = 'ur-' + Math.random().toString(36).slice(2, 8);
+  const row = document.createElement('div');
+  row.className = 'upload-row';
+  row.id = rowId;
+  row.innerHTML = `
+    <span class="ur-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14">
+        ${isImage
+          ? '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/>'
+          : '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>'}
+      </svg>
+    </span>
+    <span class="ur-name">${escapeHtml(file.name)}</span>
+    <span class="ur-state">uploading…</span>
+    <button class="ur-x" title="Dismiss">×</button>
+  `;
+  list.appendChild(row);
+  row.querySelector('.ur-x').addEventListener('click', () => row.remove());
+
+  // Get current project scope so server binds memory to it.
+  let projectIdField = '';
+  try {
+    const { scope } = await chrome.storage.local.get(['scope']);
+    if (scope?.kind === 'project' && scope.projectId) projectIdField = scope.projectId;
+  } catch {}
+
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    if (projectIdField) fd.append('projectId', projectIdField);
+    const endpoint = isImage ? '/api/ingest/image' : '/api/knowledge/upload';
+
+    const resp = await fetch(`${cfg.apiBase}${endpoint}`, {
+      method: 'POST',
+      headers: { 'X-API-Key': cfg.apiKey },
+      body: fd,
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      throw new Error(data.error || `HTTP ${resp.status}`);
+    }
+    const memId = data?.memory_id || data?.id || data?.memory?.id || null;
+    const title = data?.title || data?.classification?.suggested_title || file.name;
+    const kind = data?.classification?.kind ? ` · ${data.classification.kind}` : '';
+    row.classList.add('done');
+    row.querySelector('.ur-name').textContent = title;
+    row.querySelector('.ur-state').textContent = `saved${kind}${memId ? ' · ' + memId.slice(0, 8) : ''}`;
+    setTimeout(() => { if (row.parentNode) row.remove(); }, 6000);
+  } catch (err) {
+    row.classList.add('error');
+    row.querySelector('.ur-state').textContent = (err?.message || 'failed').slice(0, 60);
+  }
 }
 
 function briefArgs(rawArgs) {

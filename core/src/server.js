@@ -15541,7 +15541,14 @@ exit \$RC
                   }
                 } catch {}
 
-                const { runReactAgent } = await import('./agent/react-agent.js');
+                // v2 = plan-then-act pipeline (4 LLM steps, structured
+                // JSON I/O, language-aware, evidence-audited). Default
+                // ON; flip HIVEMIND_AGENT_V1=true to fall back to the
+                // legacy two-loop ReAct path.
+                const useV2 = process.env.HIVEMIND_AGENT_V1 !== 'true';
+                const { runReactAgent } = useV2
+                  ? await import('./agent/react-agent-v2.js').then(m => ({ runReactAgent: m.runReactAgentV2 }))
+                  : await import('./agent/react-agent.js');
                 const agentAccessCtx = await buildAccessContext(userId, orgId);
 
                 // SSE branch — for browser ext + in-app streaming tool timeline.

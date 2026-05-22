@@ -146,10 +146,16 @@ def build_react_agent(employee_row: dict, hivemind_api_key: str) -> ReActAgent:
     enabled_tools = list(requested_tools)
 
     provider = employee_row.get("llm_provider") or "anthropic"
+    # Tool calling works on Groq llama-3.3-70b + all OpenRouter providers
+    # through the OpenAI-compatible chat completions API. Previously we
+    # disabled tools whenever the runtime fell back to Groq — that left
+    # swarm agents blind to HIVEMIND. Re-enable; if a specific model
+    # turns out to be incompatible, set HYPER_DISABLE_GROQ_TOOLS=true.
+    disable_groq_tools = os.environ.get("HYPER_DISABLE_GROQ_TOOLS", "").lower() == "true"
     toolkit = None
-    if _uses_groq_fallback(provider):
+    if disable_groq_tools and _uses_groq_fallback(provider):
         enabled_tools = []
-        log.info("Groq fallback active for employee=%s; disabling AgentScope tools for compatibility", name)
+        log.info("HYPER_DISABLE_GROQ_TOOLS set; tools disabled for employee=%s", name)
     else:
         toolkit = build_hivemind_toolkit(api_key=hivemind_api_key, enabled_tool_names=enabled_tools)
 

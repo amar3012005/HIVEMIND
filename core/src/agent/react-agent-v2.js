@@ -1353,7 +1353,12 @@ export async function runReactAgentV2({
           return haystack.includes(n);
         });
 
-        const shouldAsk = plan.ask_for_project === true || topicMatches.length >= 1;
+        // Only ask when content TOPICALLY MATCHES a project name. Planner's
+        // ask_for_project flag is too eager (defaults to true on every chat
+        // save lacking explicit scope) — without topic match we'd block
+        // every save with the same question. Default-personal is the right
+        // safe behavior; user can move the memory later if needed.
+        const shouldAsk = topicMatches.length >= 1;
 
         if (shouldAsk) {
           const lang = languageName(language);

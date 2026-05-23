@@ -703,11 +703,54 @@ function detectWriteIntent(message) {
  * Returns { response, steps, draftIds } — `response` is the agent's
  * final user-facing summary; `draftIds` lists any pending_writes created.
  */
-async function runActionSubLoop({ toolkit, message, history, model, apiKey, ctx, onEvent }) {
+async function runActionSubLoop({ toolkit, message, history, model, apiKey, ctx, onEvent, provider }) {
   const schemas = toolkit.getJsonSchemas();
   const steps = [];
   const draftIds = [];
-  const sys = `You are HIVE acting on the user's request. Use the available tools to perform the requested action. Tools tagged readOnlyHint:false (post/send/schedule/draft) go through a draft-approval gate — the user must Approve before the action runs. When a tool returns status="draft_created", confirm the draft was created and tell the user it's awaiting their approval. Be concise.`;
+  const toolNames = schemas.map(s => s.function.name);
+
+  // Provider context hint: for Slack, pre-fetch channel directory so the
+  // LLM can map "#all-davinci-ai" → C0AEN1R98BV without inventing a
+  // search tool. Pulled from cached memory rows (channel:<name> tags
+  // include the channel_id in source_metadata). Cheap DB query.
+  let contextHint = '';
+  if (provider === 'slack' && ctx.prisma) {
+    try {
+      const rows = await ctx.prisma.memory.findMany({
+        where: {
+          userId: ctx.userId,
+          deletedAt: null,
+          tags: { hasSome: ['slack'] },
+        },
+        select: { sourceMetadata: true, tags: true },
+        take: 30,
+        orderBy: { createdAt: 'desc' },
+      });
+      const channelMap = new Map();
+      for (const r of rows) {
+        const ch = (r.tags || []).find(t => t.startsWith('channel:'));
+        const id = r.sourceMetadata?.slack_channel_id || r.sourceMetadata?.metadata?.slack_channel_id;
+        if (ch && id) channelMap.set(ch.slice('channel:'.length), id);
+      }
+      if (channelMap.size > 0) {
+        const lines = Array.from(channelMap.entries()).slice(0, 10)
+          .map(([name, id]) => `  #${name} → ${id}`).join('\n');
+        contextHint = `\n\nKNOWN SLACK CHANNELS (use these channel_id values verbatim):\n${lines}\n`;
+      }
+    } catch {}
+  }
+
+  const sys = `You are HIVE acting on the user's request.
+
+AVAILABLE TOOLS (USE ONLY THESE — inventing tool names will fail validation):
+${toolNames.map(n => `- ${n}`).join('\n')}
+
+RULES:
+- Call only the tools listed above. Tool names are case-sensitive.
+- For Slack: the available tools are slack_read_channel, slack_read_thread, slack_send_message, slack_schedule_message, slack_send_message_draft. There is NO slack_search_channels tool — if you need to find a channel ID, ASK the user for the channel name or ID instead of inventing a tool.
+- If the user names a channel like "#all-davinci-ai" without giving you an ID, either (a) reuse a channel_id from prior context in this conversation, or (b) ask the user for it.
+- Write tools (send/schedule/draft) go through a draft-approval gate. When a tool returns status="draft_created", do NOT claim the message was sent. Tell the user the draft was created and is awaiting their approval.
+- Be concise. Output a single sentence after the tool call completes.${contextHint}`;
   const messages = [
     { role: 'system', content: sys },
     ...(Array.isArray(history) ? history.slice(-6).filter(h => (h.role === 'user' || h.role === 'assistant') && h.content) : []),
@@ -728,7 +771,21 @@ async function runActionSubLoop({ toolkit, message, history, model, apiKey, ctx,
         temperature: 0.2,
       }),
     });
-    if (!resp.ok) throw new Error(`Groq ${resp.status}: ${(await resp.text()).slice(0, 300)}`);
+    if (!resp.ok) {
+      const errText = (await resp.text()).slice(0, 500);
+      // Groq returns 400 with code=tool_use_failed when the LLM hallucinated
+      // a tool name. Append a corrective message and retry once.
+      if (resp.status === 400 && /tool_use_failed|was not in request\.tools/i.test(errText) && iter < 2) {
+        const m = errText.match(/'(\w+)' which was not in request\.tools/);
+        const badName = m ? m[1] : 'an unknown tool';
+        messages.push({
+          role: 'system',
+          content: `Last attempt failed — you tried to call '${badName}' but it is not an available tool. ONLY use tools from the list in the system prompt. If you cannot accomplish the task with available tools, tell the user what's missing instead of inventing tools.`,
+        });
+        continue;
+      }
+      throw new Error(`Groq ${resp.status}: ${errText.slice(0, 300)}`);
+    }
     const data = await resp.json();
     const choice = data.choices?.[0];
     const msg = choice?.message;
@@ -902,6 +959,7 @@ export async function runReactAgentV2({
           });
           const sub = await runActionSubLoop({
             toolkit, message, history, model, apiKey, ctx, onEvent,
+            provider: writeIntent.provider,
           });
           steps.push(...sub.steps);
           const finalText = sub.response || 'Done.';

@@ -155,6 +155,8 @@ function planPrompt({ language, assistantName, orgName, hasBrowserContext }) {
 The user spoke in ${lang}. Decompose their request into recall sub-queries
 the orchestrator will execute against HIVEMIND memory.
 
+Today is ${new Date().toISOString().slice(0, 10)} (server clock). NEVER assume a year from your training data — use today's year for bare month/day phrases like "May 13". Date hallucination is the #1 cause of empty recall.
+
 Output STRICT JSON (no prose, no code fence):
 {
   "intent_kind": "lookup",        // REQUIRED. Single label picked by reading the user's message:
@@ -201,6 +203,21 @@ Rules:
   - When the user mentions a filename (anything with .pdf/.docx/.png/etc),
     INCLUDE the literal filename AS A SUB_QUERY verbatim — recall has a
     tag-based exact-match path that needs the literal string.
+  - When the user mentions a CONNECTOR (slack, notion, gmail, github,
+    linear, jira, confluence, drive, calendar, outlook), put that
+    keyword in named_entities AND in at least one sub_query. The
+    orchestrator auto-injects tag filters for these so recall doesn't
+    drown in unrelated FTS hits. Example for "what slack msgs as of May":
+    sub_queries: ["Slack messages", "Slack channel content"], named_entities: ["slack"].
+  - When the user uses TEMPORAL language ("as of X", "before Y", "since",
+    "on date", "yesterday", "last week", any explicit date/month/year),
+    set needs_time_travel=true and put a real ISO timestamp in
+    time_travel.valid_time using TODAY'S YEAR for bare month/day.
+    "as of May 13" → time_travel.valid_time = "${new Date().getUTCFullYear()}-05-13T23:59:59Z".
+    "before March 2025" → valid_time = "2025-03-01T00:00:00Z".
+    The orchestrator validates and rejects dates that look hallucinated;
+    if unsure, leave valid_time=null and the deterministic extractor
+    will fill it.
   - For "what was X before Y" / pronoun anaphora — resolve antecedent
     using the user's literal entity name in sub_queries.
   - Empty sub_queries = direct answer with no recall (greetings,
@@ -232,6 +249,30 @@ async function planStep({ message, history, language, assistantName, orgName, ha
   const save_intent   = intent_kind === 'save'   ? (parsed.save_intent   || null) : null;
   const update_intent = intent_kind === 'update' ? (parsed.update_intent || null) : null;
 
+  // Defensive: reject planner-emitted dates whose year is >18 months
+  // older than today's year. Planner LLMs routinely default to 2024 from
+  // training data, returning empty recall on queries about current data.
+  // Deterministic extractor downstream will fill from server clock.
+  const sanitizeTimeTravel = (tt) => {
+    if (!tt) return null;
+    const nowYear = new Date().getUTCFullYear();
+    const guard = (iso) => {
+      if (!iso) return null;
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return null;
+      // Allow dates from (nowYear - 18 months) to (nowYear + 1)
+      const minYear = nowYear - 2;
+      const maxYear = nowYear + 1;
+      const y = d.getUTCFullYear();
+      if (y < minYear || y > maxYear) return null;
+      return d.toISOString();
+    };
+    return {
+      valid_time: guard(tt.valid_time),
+      transaction_time: guard(tt.transaction_time),
+    };
+  };
+
   const plan = {
     intent_kind,
     user_message:          message,
@@ -240,7 +281,7 @@ async function planStep({ message, history, language, assistantName, orgName, ha
     named_entities:        Array.isArray(parsed.named_entities) ? parsed.named_entities.slice(0, 6) : [],
     needs_traverse:        !!parsed.needs_traverse,
     needs_time_travel:     !!parsed.needs_time_travel,
-    time_travel:           parsed.time_travel || null,
+    time_travel:           sanitizeTimeTravel(parsed.time_travel),
     needs_web:             !!parsed.needs_web,
     save_intent,
     ask_for_project:       intent_kind === 'save' ? !!parsed.ask_for_project : false,
@@ -487,6 +528,12 @@ CORE RULES:
    the EVIDENCE / LIVE / DOC blocks are TRULY empty for that question.
    Saying "I don't have notes" while 10 relevant memories are listed
    above is a hard failure.
+   **Hard rule for connector queries (slack/notion/gmail/github/linear):**
+   if the user asked about that connector AND the EVIDENCE block
+   contains AT LEAST ONE memory carrying the connector tag (slack,
+   notion, gmail, …), you MUST answer using those memories. Do NOT
+   say "I don't have records of Slack messages" while Slack-tagged
+   memories are listed.
    **Tag-anchored matches are real matches.** If the user asks about a
    file or entity by name and ANY memory carries the matching
    filename:<name> or entity:<name> tag, that memory IS about that
@@ -564,8 +611,49 @@ ${message}`;
     model, apiKey, maxTokens: ANSWER_MAX_TOKENS, signal,
   });
 
+  let response = typeof parsed.response === 'string' ? parsed.response.trim() : '';
+
+  // Last-resort guard: if synthesis bailed ("I don't have...") but the
+  // EVIDENCE block has memories tagged with a connector the user named,
+  // re-ask the LLM once with an explicit nudge. Catches LLM stubbornness
+  // when grounding rules are clear but the model gave up anyway.
+  const bailedOut = /\b(i (don'?t|do not) have|no (record|records|memory|memories|notes) (of|about|on|for)|i can'?t find|nothing (in|about) (my )?memor)/i.test(response);
+  if (bailedOut && evidence.memories.length > 0) {
+    const ml = String(message).toLowerCase();
+    const connectorMentioned = ['slack', 'notion', 'gmail', 'github', 'linear', 'jira', 'confluence']
+      .find(k => ml.includes(k));
+    if (connectorMentioned) {
+      const hasConnectorTagged = evidence.memories.some(m =>
+        (m.tags || []).some(t => t.toLowerCase() === connectorMentioned)
+      );
+      if (hasConnectorTagged) {
+        try {
+          const retry = await callJsonLLM({
+            messages: [
+              { role: 'system', content: sys },
+              ...tail,
+              { role: 'user', content: userBlock },
+              { role: 'assistant', content: JSON.stringify(parsed) },
+              {
+                role: 'user',
+                content: `Your previous reply bailed but the EVIDENCE block has ${connectorMentioned}-tagged memories. Re-read it and answer using those memories. Cite specific titles and dates. Same JSON shape.`,
+              },
+            ],
+            model, apiKey, maxTokens: ANSWER_MAX_TOKENS, signal,
+          });
+          if (typeof retry.parsed?.response === 'string' && retry.parsed.response.trim()) {
+            response = retry.parsed.response.trim();
+            console.log(`[agent] retry recovered "${connectorMentioned}" answer (${evidence.memories.length} memories)`);
+          }
+        } catch (err) {
+          console.warn('[agent] retry failed:', err.message);
+        }
+      }
+    }
+  }
+
   return {
-    response:      typeof parsed.response === 'string' ? parsed.response.trim() : '',
+    response,
     evidence_used: Array.isArray(parsed.evidence_used) ? parsed.evidence_used : [],
     confidence:    Number.isFinite(parsed.confidence) ? Math.max(0, Math.min(1, parsed.confidence)) : 0.5,
     gaps:          Array.isArray(parsed.gaps) ? parsed.gaps : [],

@@ -15748,7 +15748,7 @@ exit \$RC
                         userId, orgId,
                         projectId: requestProjectId,
                         prisma,
-                        persistentMemoryStore, persistentMemoryEngine,
+                        persistentMemoryStore, persistentMemoryEngine, evidenceRetrieval,
                         smartIngestRouter,
                         buildRoutedIngestPayloads,
                         accessContext: agentAccessCtx,
@@ -15772,7 +15772,7 @@ exit \$RC
                     userId, orgId,
                     projectId: requestProjectId,
                     prisma,
-                    persistentMemoryStore, persistentMemoryEngine,
+                    persistentMemoryStore, persistentMemoryEngine, evidenceRetrieval,
                     smartIngestRouter,
                     buildRoutedIngestPayloads,
                     ingestRoutedPayload,                 // tree-aware dispatch

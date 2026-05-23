@@ -393,12 +393,44 @@ const TOOL_HANDLERS = {
       live = [];
     }
 
+    // ── Evidence fallback — non-promoted KB segments ─────────────────────
+    // Large PDFs only promote 5-20 segments to memories. The remaining
+    // segments live in knowledge_segment + Qdrant 'hivemind_evidence' and
+    // are searchable via EvidenceRetrievalService. Pull them in when the
+    // memory match is sparse so a 51-segment pitch deck doesn't lose 32
+    // segments to silent invisibility.
+    let evidence = [];
+    try {
+      if (ctx.evidenceRetrieval && mems.length < 3) {
+        const evResults = await ctx.evidenceRetrieval.retrieveEvidence({
+          query: args.query,
+          userId: ctx.userId,
+          orgId: ctx.orgId,
+          limit: 6,
+        });
+        evidence = (evResults || []).map((e) => ({
+          segment_id: e.segmentId,
+          document_id: e.documentId,
+          document_title: e.document?.title || null,
+          content: (e.content || '').slice(0, 600),
+          snippet: e.snippet,
+          score: typeof e.score === 'number' ? Number(e.score.toFixed(3)) : null,
+          page: e.metadata?.startPage || null,
+        }));
+      }
+    } catch (evErr) {
+      // Evidence failure must not break primary recall.
+      evidence = [];
+    }
+
     return {
       mode: args.mode || 'quick',
       count: mems.length,
       memories: mems,
       live_count: live.length,
       live,
+      evidence_count: evidence.length,
+      evidence,
     };
   },
 

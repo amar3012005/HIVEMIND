@@ -219,6 +219,7 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
   const steps = [];
   const memoriesById = new Map();
   const liveItems = [];
+  const evidenceItems = [];
 
   const recordTool = (tool, args, summary, payload) => {
     steps.push({ tool, args, result_summary: summary });
@@ -235,9 +236,11 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
           const r = await dispatchTool('hivemind_recall', { query: q, mode: 'quick', limit: 5 }, ctx);
           const memCount = r?.memories?.length || 0;
           const liveCount = r?.live_count || 0;
-          const summary = liveCount > 0
-            ? `${memCount} memories + ${liveCount} live`
-            : `${memCount} memories`;
+          const evCount = r?.evidence_count || 0;
+          const parts = [`${memCount} memories`];
+          if (liveCount > 0) parts.push(`${liveCount} live`);
+          if (evCount > 0) parts.push(`${evCount} evidence`);
+          const summary = parts.join(' + ');
           recordTool('hivemind_recall', { query: q, mode: 'quick' }, summary, r);
           return r;
         } catch (err) {
@@ -253,6 +256,9 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
       }
       for (const li of (r?.live || [])) {
         liveItems.push(li);
+      }
+      for (const ev of (r?.evidence || [])) {
+        evidenceItems.push(ev);
       }
     }
   }
@@ -317,6 +323,7 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
   return {
     memories: [...memoriesById.values()],
     live: liveItems,
+    evidence: evidenceItems,
     steps,
     webJob,
   };
@@ -435,12 +442,23 @@ async function answerStep({ message, history, evidence, plan, language, assistan
     return `[LIVE/${src}]${date}${from} "${title}" — ${body}`;
   }).join('\n');
 
+  // Doc segments that weren't promoted to memories — pulled from the
+  // knowledge_segment evidence collection. Lets the agent ground on full
+  // pitch decks / catalogs even when only 5-20 chunks made it into the
+  // canonical memory layer.
+  const evLines = (evidence.evidence || []).slice(0, 8).map((e) => {
+    const doc = (e.document_title || 'unknown.pdf').replace(/\n/g, ' ').slice(0, 80);
+    const page = e.page ? ` p.${e.page}` : '';
+    const body = (e.content || e.snippet || '').replace(/\n/g, ' ').slice(0, 320);
+    return `[DOC/${doc}${page}] ${body}`;
+  }).join('\n');
+
   const tail = (history || []).slice(-6)
     .filter(h => h && (h.role === 'user' || h.role === 'assistant') && h.content)
     .map(h => ({ role: h.role, content: typeof h.content === 'string' ? h.content : JSON.stringify(h.content) }));
 
   const userBlock = `EVIDENCE (${evidence.memories.length} memories):
-${evidenceLines || '(none)'}${liveLines ? `\n\nLIVE WORKSPACE (${(evidence.live || []).length} fresh items — Gmail / Drive / Calendar):\n${liveLines}` : ''}
+${evidenceLines || '(none)'}${liveLines ? `\n\nLIVE WORKSPACE (${(evidence.live || []).length} fresh items — Gmail / Drive / Calendar):\n${liveLines}` : ''}${evLines ? `\n\nDOCUMENT SEGMENTS (${(evidence.evidence || []).length} non-promoted KB chunks — full source text):\n${evLines}` : ''}
 
 PLANNER INTENT: ${(plan.intents || []).join(' / ') || '(unspecified)'}
 

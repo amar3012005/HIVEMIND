@@ -996,7 +996,19 @@ export async function recallPersistedMemories(store, {
       return null;
     }
 
-    const similarityScore = computeTokenSimilarity(query_context || '', memory.content || '');
+    // Use FTS score (computed by searchMemories against content+title+tags)
+    // when available — otherwise compute token similarity on content alone.
+    // Old behavior of content-only token-sim dropped memories whose match
+    // was via the title or tag (e.g. filename:Branding Skizze1 (11).png)
+    // because their content body had zero query-token overlap.
+    const ftsScore = typeof memory.score === 'number' && memory.score > 0
+      ? Math.min(memory.score, 1)
+      : null;
+    const tokenSim = computeTokenSimilarity(
+      query_context || '',
+      `${memory.content || ''} ${memory.title || ''} ${(memory.tags || []).join(' ')}`,
+    );
+    const similarityScore = ftsScore != null ? Math.max(ftsScore, tokenSim) : tokenSim;
     const now = Date.now();
     const created = new Date(memory.created_at).getTime();
     const daysAgo = Number.isFinite(created) ? (now - created) / (1000 * 60 * 60 * 24) : 365;

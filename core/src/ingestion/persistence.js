@@ -152,22 +152,32 @@ async function createPersistedMemoryWriter() {
       const contentHash = contentHashSignature(chunk.content, context.org_id, context.user_id);
 
       try {
-        const existing = await prisma.memory.findFirst({
-          where: {
-            orgId: context.org_id || undefined,
-            userId: context.user_id || undefined,
-            metadata: { path: ['content_hash'], equals: contentHash },
-          },
-          select: { id: true },
-        });
-        if (existing) {
-          const memory = await store.getMemory(existing.id);
+        // Memory metadata lives on the joined `source_metadata` table
+        // (Prisma model MemorySourceMetadata @@map "source_metadata").
+        // We look up by content_hash + tenant in a single raw query.
+        const orgFilter = context.org_id ? 'AND m.org_id = $2::uuid' : '';
+        const userFilter = context.user_id ? `AND m.user_id = $${context.org_id ? 3 : 2}::uuid` : '';
+        const sql = `
+          SELECT m.id
+          FROM memories m
+          JOIN source_metadata sm ON sm.memory_id = m.id
+          WHERE sm.metadata->>'content_hash' = $1
+                ${orgFilter}
+                ${userFilter}
+          LIMIT 1
+        `;
+        const params = [contentHash];
+        if (context.org_id) params.push(context.org_id);
+        if (context.user_id) params.push(context.user_id);
+        const rows = await prisma.$queryRawUnsafe(sql, ...params);
+        if (Array.isArray(rows) && rows.length > 0) {
+          const memory = await store.getMemory(rows[0].id);
           if (memory) {
             return { memory, edges_created: 0, deduped: true };
           }
         }
-      } catch {
-        // Index/path-op unsupported — silently fall through to insert.
+      } catch (err) {
+        console.warn('[ingest-persist] dedup lookup failed:', err.message);
       }
 
       const input = {

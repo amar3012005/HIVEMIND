@@ -34,8 +34,15 @@ Rules:
 - If user provided a hint, weight it heavily but don't blindly accept — verify against the image.
 - suggested_title should describe the image specifically, not generically ("Saturn receipt €43.20", not "A receipt").`;
 
-function describePrompt({ kind, hint }) {
-  const hintBlock = hint ? `\nUSER HINT: ${hint}\n` : '';
+function describePrompt({ kind, hint, filename }) {
+  // Filename is a powerful disambiguation signal — e.g. "Branding Skizze1
+  // (11).png" tells Groq this is a branding sketch, not a random drawing
+  // it might otherwise misread as a smart-home diagram. Include it in the
+  // context so the model titles + describes consistent with user intent.
+  const filenameBlock = filename ? `\nORIGINAL FILENAME: ${filename}` : '';
+  const hintBlock = (filename || hint)
+    ? `${filenameBlock}${hint ? `\nUSER HINT: ${hint}` : ''}\n`
+    : '';
   if (['receipt', 'invoice'].includes(kind)) {
     return `You extract a payment receipt / invoice from an image. Return STRICT JSON:
 {
@@ -198,8 +205,13 @@ export async function buildImageMemoryPayload({
   const base64DataUrl = `data:${safeMime};base64,${imageBuffer.toString('base64')}`;
 
   // ── Step 1: classify ──────────────────────────────────────────────
-  const classifyPrompt = hint
-    ? `${CLASSIFY_PROMPT}\n\nUSER HINT: ${hint}`
+  // Filename is a strong prior — feed it to the classifier so a sketch
+  // titled "Branding Skizze1 (11).png" gets classified as a branding
+  // diagram, not whatever Groq vision guesses from raw pixels.
+  const filenameLine = filename ? `\nORIGINAL FILENAME: ${filename}` : '';
+  const hintLine     = hint ? `\nUSER HINT: ${hint}` : '';
+  const classifyPrompt = (filename || hint)
+    ? `${CLASSIFY_PROMPT}${filenameLine}${hintLine}`
     : CLASSIFY_PROMPT;
   const cls = await callGroqVision({
     apiKey, model: VISION_MODEL, base64DataUrl, prompt: classifyPrompt, maxTokens: 300,
@@ -213,17 +225,26 @@ export async function buildImageMemoryPayload({
   };
 
   // ── Step 2: kind-specific extract ─────────────────────────────────
-  const extractPrompt = describePrompt({ kind: classification.kind, hint });
+  const extractPrompt = describePrompt({ kind: classification.kind, hint, filename });
   const ext = await callGroqVision({
     apiKey, model: VISION_MODEL, base64DataUrl, prompt: extractPrompt, maxTokens: 2400,
   });
   const extraction = ext.parsed || {};
 
   // ── Step 3: shape into memory payload ─────────────────────────────
-  const title = (extraction.title || classification.suggested_title || 'Image').slice(0, 200);
+  // Title ALWAYS leads with the original filename when present, so recall
+  // by filename matches via title field even if Groq misread the image.
+  // Vision's interpretation comes as a colon-suffix descriptor.
+  const visionTitle = (extraction.title || classification.suggested_title || 'Image').slice(0, 160);
+  const title = filename
+    ? `${filename} — ${visionTitle}`.slice(0, 220)
+    : visionTitle.slice(0, 200);
 
   // Build markdown-ish content body so search + retrieval gets rich text.
+  // Lead content with filename too — guarantees FTS matches even on
+  // tag-less legacy code paths.
   const contentParts = [];
+  if (filename) contentParts.push(`File: ${filename}`);
   if (extraction.description) contentParts.push(extraction.description);
   if (extraction.key_facts?.length) {
     contentParts.push('\nKey facts:\n' + extraction.key_facts.map(f => `- ${f}`).join('\n'));

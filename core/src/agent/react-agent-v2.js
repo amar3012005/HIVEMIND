@@ -419,6 +419,13 @@ CORE RULES:
    the EVIDENCE / LIVE / DOC blocks are TRULY empty for that question.
    Saying "I don't have notes" while 10 relevant memories are listed
    above is a hard failure.
+   **Tag-anchored matches are real matches.** If the user asks about a
+   file or entity by name and ANY memory carries the matching
+   filename:<name> or entity:<name> tag, that memory IS about that
+   file/entity — describe it accordingly using whatever content the
+   memory has. Even if the memory's TITLE diverges from the user's
+   exact wording (e.g. Groq vision misclassified an image), the tag is
+   the source of truth for identity.
 3. **Synthesize across memories.** Multiple rows about the same entity
    should be combined into one coherent reply, not treated as separate
    silos. Spot patterns: who's involved, what was decided, what's

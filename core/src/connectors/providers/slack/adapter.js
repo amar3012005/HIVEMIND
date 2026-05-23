@@ -111,10 +111,13 @@ export class SlackAdapter extends BaseProviderAdapter {
     const targetScope = context?.target_scope || 'personal';
     const orgScopeMode = targetScope === 'organization' || targetScope === 'team';
 
+    // Nango slack-mcp template grants only channels:read (NOT groups:read,
+    // im:read, mpim:read). Requesting all four types triggers a hard
+    // missing_scope error on conversations.list and the entire sync fails.
+    // Stick to public_channel — the only one we have read scope for.
+    // Org-scope mode also restricts to public_channel for ACL.
     const channelsRes = await this._slackFetch('conversations.list', {
-      // In org-scope mode request only public channels to enforce ACL.
-      // In personal mode include all channel types the bot was invited to.
-      types: orgScopeMode ? 'public_channel' : 'public_channel,private_channel,im,mpim',
+      types: 'public_channel',
       limit: 200,
       exclude_archived: true,
     }, accessToken);

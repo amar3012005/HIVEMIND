@@ -393,13 +393,46 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
     }
   }
 
-  // (b) Time-travel
-  if (plan.needs_time_travel && plan.time_travel && (plan.time_travel.transaction_time || plan.time_travel.valid_time)) {
+  // ─── Event-driven post-recall expansion ──────────────────────────────
+  // Anthropic's "think between tool calls" guidance + the user's complaint
+  // about hallucination boil down to: don't pre-decide tool sequence in
+  // the planner. INSPECT what recall returned, then react.
+  //
+  // Triggers (all driven by hop1 output, no extra LLM):
+  //   1. If any memory carries `slack`+`channel:*` tags and the question
+  //      sounds temporal → fire hivemind_at on the latest slack memory's
+  //      doc-date to anchor "as of now" / "latest".
+  //   2. If any memory carries `entity:*` tags matching named_entities →
+  //      auto-traverse_graph from the top such memory (depth 2).
+  //   3. If filename anchor surfaced (filename:X tag on a memory but the
+  //      caller didn't pass valid_at) → no time-travel, but traverse to
+  //      find updates/derives chain.
+  //   4. If hop1 returned ≤1 memory AND the query has a connector keyword
+  //      → re-recall with looser filters (drop is_latest, widen tags).
+  const allRecallMems = Array.from(memoriesById.values());
+  const hasConnectorTagged = allRecallMems.some(m => (m.tags || []).some(t => CONNECTORS.includes(t)));
+  const hasEntityTagged = allRecallMems.some(m => (m.tags || []).some(t => typeof t === 'string' && t.startsWith('entity:')));
+  const TEMPORAL_HINT = /\b(latest|last|recent|today|yesterday|this week|now|currently|as of)\b/i;
+  const isTemporalQuery = TEMPORAL_HINT.test(plan.user_message || '');
+
+  // (b) Time-travel — planner-flagged OR auto-fire when temporal hint +
+  // connector recall returned data.
+  const wantTimeTravel =
+    (plan.needs_time_travel && plan.time_travel && (plan.time_travel.transaction_time || plan.time_travel.valid_time))
+    || (isTemporalQuery && hasConnectorTagged && !plan.time_travel?.valid_time);
+  if (wantTimeTravel) {
     try {
+      // Derive valid_time: planner first, else "now" (latest snapshot).
+      const validTime = plan.time_travel?.valid_time
+        || plan.time_travel?.transaction_time
+        || new Date().toISOString();
+      const connectorTag = userConnector || (allRecallMems
+        .flatMap(m => m.tags || [])
+        .find(t => CONNECTORS.includes(t)));
       const args = {
-        transaction_time: plan.time_travel.transaction_time || undefined,
-        valid_time:       plan.time_travel.valid_time       || undefined,
-        memory_query:     plan.sub_queries[0] || undefined,
+        valid_at: validTime,
+        query: plan.sub_queries[0] || plan.user_message || 'recent',
+        ...(connectorTag ? { tags: [connectorTag] } : {}),
       };
       const r = await dispatchTool('hivemind_at', args, ctx);
       recordTool('hivemind_at', args, `${(r?.memories?.length || 0)} historical memories`, r);
@@ -407,18 +440,32 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
         if (m?.id && !memoriesById.has(m.id)) memoriesById.set(m.id, m);
       }
     } catch (err) {
-      recordTool('hivemind_at', plan.time_travel, `error: ${err.message}`, null);
+      recordTool('hivemind_at', plan.time_travel || {}, `error: ${err.message}`, null);
     }
   }
 
-  // (c) Graph traversal for named entities (one hop per entity, capped)
-  if (plan.needs_traverse && plan.named_entities.length > 0 && memoriesById.size > 0) {
-    // Pick the top memory whose title/content names the first entity.
-    const firstEnt = plan.named_entities[0].toLowerCase();
-    const seed = [...memoriesById.values()].find(m => {
-      const hay = ((m.title || '') + ' ' + (m.content || '')).toLowerCase();
-      return hay.includes(firstEnt);
-    });
+  // (c) Graph traversal — planner-flagged OR auto-fire when recall surfaced
+  //     entity-tagged memories matching the named_entities.
+  const shouldTraverse =
+    (plan.needs_traverse && plan.named_entities.length > 0 && memoriesById.size > 0)
+    || (hasEntityTagged && memoriesById.size > 0 && memoriesById.size <= 8);
+  if (shouldTraverse) {
+    // Seed selection: prefer a memory matching named_entities; else just
+    // pick the top recall hit (the one with highest fusion score).
+    let seed = null;
+    if (plan.named_entities.length > 0) {
+      const firstEnt = plan.named_entities[0].toLowerCase();
+      seed = [...memoriesById.values()].find(m => {
+        const hay = ((m.title || '') + ' ' + (m.content || '')).toLowerCase();
+        return hay.includes(firstEnt) || (m.tags || []).some(t => typeof t === 'string' && t.toLowerCase().includes(firstEnt));
+      });
+    }
+    if (!seed) {
+      // Fall back to the top memory that carries any entity:* tag.
+      seed = [...memoriesById.values()].find(m =>
+        (m.tags || []).some(t => typeof t === 'string' && t.startsWith('entity:'))
+      ) || [...memoriesById.values()][0];
+    }
     if (seed?.id) {
       try {
         const args = { memory_id: seed.id, depth: 2, relationship: 'all' };
@@ -1123,11 +1170,53 @@ export async function runReactAgentV2({
     }
 
     // STEP 5 — Answer
-    const answer = await answerStep({
+    let answer = await answerStep({
       message, history, evidence, plan, language, assistantName, orgName,
       model, apiKey, signal: abortCtrl.signal,
     });
     if (answer.usage) usages.push(answer.usage);
+
+    // STEP 5b — Confidence-gated re-recall (Gemini / Composio pattern).
+    // If the answer confidence is low AND we have explicit gaps[], re-recall
+    // on those gaps + re-synthesize. Caps at 1 retry to avoid runaway loops.
+    const CONF_THRESHOLD = Number(process.env.HIVEMIND_CONF_RETRY_THRESHOLD || 0.45);
+    if (answer.confidence < CONF_THRESHOLD && Array.isArray(answer.gaps) && answer.gaps.length > 0) {
+      onEvent?.({ type: 'reflect_low_confidence', confidence: answer.confidence, gaps: answer.gaps });
+      try {
+        // Take up to 2 gap phrases as targeted recall queries.
+        const gapQueries = answer.gaps.filter(g => typeof g === 'string' && g.trim().length > 0).slice(0, 2);
+        const extra = await Promise.all(gapQueries.map(async (q) => {
+          try {
+            const r = await dispatchTool('hivemind_recall', { query: q, mode: 'quick', limit: 8 }, ctx);
+            recordTool('hivemind_recall', { query: q, mode: 'retry' }, `${r?.memories?.length || 0} memories`, r);
+            return r;
+          } catch { return null; }
+        }));
+        let mergedNew = 0;
+        for (const r of extra) {
+          for (const m of (r?.memories || [])) {
+            if (m?.id && !evidence.memories.some(e => e.id === m.id)) {
+              evidence.memories.push(m);
+              mergedNew++;
+            }
+          }
+        }
+        if (mergedNew > 0) {
+          // Re-run answer with augmented evidence.
+          const retry = await answerStep({
+            message, history, evidence, plan, language, assistantName, orgName,
+            model, apiKey, signal: abortCtrl.signal,
+          });
+          if (retry.usage) usages.push(retry.usage);
+          if (retry.confidence >= answer.confidence) {
+            answer = retry;
+            onEvent?.({ type: 'reflect_recovered', confidence: retry.confidence });
+          }
+        }
+      } catch (retryErr) {
+        console.warn(`[agent] confidence retry failed: ${retryErr.message}`);
+      }
+    }
 
     // STEP 6 — Save intent fire-and-forget (don't block response).
     // Gated on intent_kind === 'save' so a lookup turn that happens to

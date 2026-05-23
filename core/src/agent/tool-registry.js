@@ -727,24 +727,83 @@ const TOOL_HANDLERS = {
 
 // ── Dispatch entry ───────────────────────────────────────────────────────────
 
-export async function dispatchTool(name, args, ctx, { timeoutMs = 15000 } = {}) {
+// Per-tool timeout contract. Default 15s for unspecified tools.
+// Source: ai-boost/awesome-harness-engineering 2026 recommendations +
+// observed P95 latencies in HIVEMIND production.
+const TOOL_TIMEOUTS_MS = {
+  hivemind_recall:           8_000,
+  hivemind_at:               9_000,   // wraps recall + extra date filter
+  hivemind_diff:            16_000,  // 2x recall
+  hivemind_timeline:         8_000,
+  hivemind_traverse_graph:  12_000,
+  hivemind_query_with_ai:   25_000,  // heavy LLM synthesis
+  hivemind_save_memory:     10_000,
+  hivemind_update_memory:   10_000,
+  hivemind_delete_memory:    5_000,
+  hivemind_get_memory:       3_000,
+  hivemind_list_memories:    6_000,
+  hivemind_list_projects:    3_000,
+  hivemind_web_search:       3_000,  // job submit only
+  hivemind_web_crawl:        3_000,
+  hivemind_web_job_status:   5_000,
+  hivemind_recall_bugs:      8_000,
+  hivemind_code_at:         12_000,
+  hivemind_why_code:        12_000,
+  hivemind_log_decision:     6_000,
+  hivemind_set_assistant_name: 3_000,
+};
+
+// Schema validation: surfaces missing-required errors before handler runs.
+function validateAndSanitize(name, args) {
+  const def = TOOL_SCHEMAS.find(t => t.function.name === name);
+  if (!def) return { ok: false, error: `unknown tool: ${name}` };
+  const required = def.function.parameters?.required || [];
+  const props = def.function.parameters?.properties || {};
+  const clean = {};
+  for (const [k, v] of Object.entries(args || {})) {
+    if (k in props || k.startsWith('_')) clean[k] = v;
+  }
+  for (const r of required) {
+    if (clean[r] === undefined || clean[r] === null || clean[r] === '') {
+      return { ok: false, error: `missing required param '${r}' for ${name}` };
+    }
+  }
+  return { ok: true, args: clean };
+}
+
+export async function dispatchTool(name, args, ctx, { timeoutMs } = {}) {
   const handler = TOOL_HANDLERS[name];
-  if (!handler) return { error: `unknown tool: ${name}` };
+  if (!handler) return { error: `unknown tool: ${name}`, _failure_mode: 'UNKNOWN_TOOL' };
 
   let argsObj = args;
   if (typeof args === 'string') {
     try { argsObj = JSON.parse(args); } catch { argsObj = {}; }
   }
 
+  // Argument validation (Tool Call Validation Layer — OpenReview 2026).
+  const validation = validateAndSanitize(name, argsObj || {});
+  if (!validation.ok) {
+    return { error: validation.error, _failure_mode: 'INVALID_ARGS' };
+  }
+
+  const effectiveTimeout = timeoutMs || TOOL_TIMEOUTS_MS[name] || 15_000;
   try {
     const result = await Promise.race([
-      handler(argsObj || {}, ctx),
-      new Promise((_, rej) => setTimeout(() => rej(new Error(`${name} timed out after ${timeoutMs}ms`)), timeoutMs)),
+      handler(validation.args, ctx),
+      new Promise((_, rej) => setTimeout(() => rej(new Error(`${name} timed out after ${effectiveTimeout}ms`)), effectiveTimeout)),
     ]);
     return result;
   } catch (err) {
-    return { error: err.message || String(err) };
+    const msg = err.message || String(err);
+    // Standardized error-action map for upstream handlers.
+    let mode = 'EXEC_ERROR';
+    if (/timed out/.test(msg)) mode = 'TIMEOUT';
+    else if (/not found|no such|missing/i.test(msg)) mode = 'NOT_FOUND';
+    else if (/unauthorized|forbidden|401|403|invalid token/i.test(msg)) mode = 'AUTH_ERROR';
+    else if (/rate limit|429|quota/i.test(msg)) mode = 'RATE_LIMIT';
+    return { error: msg, _failure_mode: mode };
   }
 }
 
 export const TOOL_NAMES = TOOL_SCHEMAS.map((t) => t.function.name);
+export { TOOL_TIMEOUTS_MS };

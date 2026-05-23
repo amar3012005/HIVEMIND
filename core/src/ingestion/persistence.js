@@ -52,9 +52,14 @@ async function loadCore() {
     return cachedCore;
   }
 
+  // Two layouts exist:
+  //   - dev: <repo>/core/src/ingestion/ → core/src/db/prisma.js lives at ../..
+  //   - container: /app/src/ingestion/ → /app/src/db/prisma.js lives at ..
+  // The old second candidate ('../src') resolved to /app/src/src — bogus.
   const coreBase = resolveFirstExisting([
+    path.resolve(__dirname, '..'),
     path.resolve(__dirname, '../../core/src'),
-    path.resolve(__dirname, '../src')
+    path.resolve(__dirname, '../../src')
   ]);
 
   const [{ getPrismaClient, ensureTenantContext }, { PrismaGraphStore }, { MemoryGraphEngine }] = await Promise.all([

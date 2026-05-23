@@ -485,14 +485,30 @@ async function parseBodyWithRaw(req) {
   return { raw, parsed };
 }
 
+// Cookie domain: parent of every hivemind.davinciai.eu subdomain so the
+// session is visible to:
+//   • hivemind.davinciai.eu     (FE / Vercel — /oauth/authorize lives here)
+//   • api.hivemind.davinciai.eu (control plane — sets the cookie)
+//   • core.hivemind.davinciai.eu (core API)
+// One sign-in propagates to every surface — dashboard, MCP, ChatGPT
+// connector, Claude custom connector — without per-host re-auth.
+const SESSION_COOKIE_DOMAIN = process.env.HIVEMIND_SESSION_COOKIE_DOMAIN
+  || (CONFIG.publicBaseUrl.includes('hivemind.davinciai.eu')
+    ? '.hivemind.davinciai.eu'
+    : null);
+
+function _cookieDomainAttr() {
+  return SESSION_COOKIE_DOMAIN ? `; Domain=${SESSION_COOKIE_DOMAIN}` : '';
+}
+
 function makeSessionCookie(sessionId) {
   const value = buildSessionCookie(CONFIG.sessionSecret, sessionId);
   // SameSite=None; Secure required for cross-site cookie auth
-  return `${CONFIG.sessionCookieName}=${encodeURIComponent(value)}; HttpOnly; Path=/; SameSite=None; Secure; Max-Age=${CONFIG.sessionTtlSeconds}`;
+  return `${CONFIG.sessionCookieName}=${encodeURIComponent(value)}; HttpOnly; Path=/; SameSite=None; Secure${_cookieDomainAttr()}; Max-Age=${CONFIG.sessionTtlSeconds}`;
 }
 
 function clearSessionCookie() {
-  return `${CONFIG.sessionCookieName}=; HttpOnly; Path=/; SameSite=None; Secure; Max-Age=0`;
+  return `${CONFIG.sessionCookieName}=; HttpOnly; Path=/; SameSite=None; Secure${_cookieDomainAttr()}; Max-Age=0`;
 }
 
 function applyCorsHeaders(req, res) {

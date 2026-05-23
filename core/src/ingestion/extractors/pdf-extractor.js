@@ -28,7 +28,12 @@ async function extractPdf(payload) {
       }))
     : [{ page_number: 1, content: String(payload.content || '') }];
 
-  const structural_chunks = await tryDoclingHybridChunks(payload);
+  // Caller may pass structural_chunks directly (e.g. test harness, or an
+  // upstream service that already ran Docling). Use those verbatim when
+  // present; otherwise try Docling ourselves.
+  const structural_chunks = Array.isArray(payload.structural_chunks) && payload.structural_chunks.length > 0
+    ? payload.structural_chunks
+    : await tryDoclingHybridChunks(payload);
 
   return {
     title: payload.title || payload.file_name || 'PDF document',

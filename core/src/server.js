@@ -350,6 +350,13 @@ const profileStore = prisma ? new ProfileStore(prisma) : null;
 let smartIngestRouter = null;
 if (persistentMemoryStore) {
   smartIngestRouter = new SmartIngestRouter({ memoryStore: persistentMemoryStore });
+  // Wire router into engine so EVERY ingestMemory() caller — including
+  // direct callers that don't go through buildRoutedIngestPayloads — gets
+  // canonical recall→operator inference→entity/temporal extraction. Opt-out
+  // via { smartIngest: false } on the payload (used by re-entrant calls).
+  if (persistentMemoryEngine && typeof persistentMemoryEngine.setSmartIngestRouter === 'function') {
+    persistentMemoryEngine.setSmartIngestRouter(smartIngestRouter);
+  }
 }
 
 // Graph Hygiene Scanner

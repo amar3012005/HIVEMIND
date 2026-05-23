@@ -336,7 +336,8 @@ export class MemoryGraphEngine {
     relationshipClassifier = new RelationshipClassifier({ conflictDetector }),
     deriveThreshold = 0.75,
     predictCalibrate = false,
-    predictCalibrateOptions = {}
+    predictCalibrateOptions = {},
+    smartIngestRouter = null,
   } = {}) {
     if (!store) {
       throw new Error('MemoryGraphEngine requires a store');
@@ -351,11 +352,72 @@ export class MemoryGraphEngine {
     this.predictCalibrateFilter = predictCalibrate
       ? new PredictCalibrateFilter(predictCalibrateOptions)
       : null;
+    // SmartIngestRouter is the canonical entry-point for every save: it
+    // normalizes content, recalls similar memories, infers the triple
+    // operator (Updates/Extends/Derives/Contradicts/Mentions), and emits
+    // entity/temporal tags. Setting this on the engine makes ingestMemory
+    // a single gateway — direct callers (server.js, MCP, /api/memories,
+    // connectors) can skip building routedPayloads themselves and the
+    // engine will route automatically.
+    this.smartIngestRouter = smartIngestRouter;
     // Observer is superseded by MemoryProcessor (unified single-call pipeline).
     // this.observer is intentionally not initialized; Observer import kept for backward compat.
   }
 
+  setSmartIngestRouter(router) {
+    this.smartIngestRouter = router;
+  }
+
   async ingestMemory(input) {
+    // Canonical gateway: if a router is attached AND the caller hasn't
+    // pre-routed (no `_smart_routed` flag) AND the caller hasn't explicitly
+    // opted out (smartIngest: false), route through SmartIngestRouter so
+    // recall→operator-inference→tagging fires for EVERY save path (MCP,
+    // chat, talk-to-hive, /api/memories, connectors, direct calls). This
+    // is what makes HIVEMIND a memory engine, not a database — every save
+    // updates/extends/contradicts prior memories instead of accumulating
+    // duplicates.
+    if (this.smartIngestRouter
+        && !input._smart_routed
+        && input.smartIngest !== false
+        && input.skipSmartRouting !== true) {
+      try {
+        const routed = await this.smartIngestRouter.route({ ...input });
+        // Tree shape: route returned { parent, children, ... }
+        if (routed && !Array.isArray(routed) && routed.parent) {
+          return await this.ingestMemoryTree({
+            ...routed,
+            parent: { ...routed.parent, _smart_routed: true },
+            children: (routed.children || []).map((c) => ({ ...c, _smart_routed: true })),
+          });
+        }
+        // Flat-array shape: route returned [enrichedPayload, ...]. If it
+        // collapsed to one payload, ingest that one through the rest of
+        // this method (re-entering with _smart_routed marker so the
+        // gateway doesn't loop). If it expanded into multiple (chunks),
+        // ingest each child and return the first result for backwards
+        // compatibility (legacy callers expect a single result object).
+        const payloads = Array.isArray(routed) ? routed : [routed];
+        if (payloads.length === 0) {
+          // Router stripped everything (e.g. empty content) — skip.
+          return { skipped: true, reason: 'routed-empty' };
+        }
+        if (payloads.length === 1) {
+          input = { ...payloads[0], _smart_routed: true };
+        } else {
+          const results = [];
+          for (const p of payloads) {
+            results.push(await this.ingestMemory({ ...p, _smart_routed: true }));
+          }
+          return { ingested: results.length, results, multi: true };
+        }
+      } catch (routeErr) {
+        // Router failure is non-fatal — degrade to direct save so the
+        // user's data still lands. Surface the error for ops visibility.
+        console.warn('[graph-engine] smart-router fallback:', routeErr.message);
+      }
+    }
+
     const startedAt = Date.now();
     const baseMemory = this._buildMemoryRecord(input);
     if (baseMemory.scope === 'project' && (!Array.isArray(baseMemory.project_ids) || baseMemory.project_ids.length === 0)) {
@@ -1409,13 +1471,19 @@ export class MemoryGraphEngine {
       `[${i}] ${(c.title || '').slice(0, 120)}\n    ${(c.content || '').slice(0, 280)}`
     ).join('\n\n');
 
-    const prompt = `You are a memory graph linker. Given a NEW MEMORY and a list of CANDIDATE memories, you do three things in ONE pass:
+    // Today's date is passed in so the LLM resolves relative temporal refs
+    // ("Tuesday 7pm", "next week", "mañana 19:00") against the actual now,
+    // not the model's training cutoff.
+    const todayIso = new Date().toISOString().slice(0, 10);
 
-  1. extract proper-noun entities from the new memory (people, orgs, products, projects, places, events)
-  2. classify the new memory's TYPE (decision | preference | fact | event | goal | lesson | relationship)
-  3. for each candidate that shares an entity, emit ONE typed edge
+    const prompt = `You are a multilingual memory graph linker. Given a NEW MEMORY and CANDIDATE memories, do FOUR things in ONE pass:
 
-Use coreference: pronouns and possessives ("she", "my partner", "it", "they") can resolve to a named entity from earlier turns.
+  1. extract proper-noun entities from the new memory (people, orgs, products, projects, places). Work in ANY language — Spanish, Hindi, Tamil, German, etc. — return entities in their original form.
+  2. extract TEMPORAL anchors (day-of-week, time-of-day, relative refs like "tomorrow"/"mañana"/"morgen", absolute dates, recurring patterns). Resolve relatives against today=${todayIso}.
+  3. classify the new memory's TYPE (decision | preference | fact | event | goal | lesson | relationship)
+  4. for each candidate that shares an entity OR temporal anchor, emit ONE typed edge
+
+Use coreference: pronouns and possessives ("she", "my partner", "it", "they", "elle", "उसने") can resolve to a named entity from earlier turns.
 
 NEW MEMORY:
 ${(baseMemory.title || '').slice(0, 200)}
@@ -1427,33 +1495,40 @@ ${candidateBlock}
 Output JSON only:
 {
   "entities": ["Rama", "Heidelberg"],
-  "memory_type": "decision",
+  "temporal": {
+    "day_of_week": "tuesday",
+    "time_of_day": "19:00",
+    "date_iso": "2026-05-26",
+    "relative": "next week",
+    "recurring": null
+  },
+  "memory_type": "event",
   "links": [
     { "index": 0, "entity": "Rama", "type": "Updates", "confidence": 0.85, "reason": "new memory supersedes the older decision about Rama" },
     { "index": 2, "entity": "Rama", "type": "Mentions", "confidence": 0.70, "reason": "same person, different context" }
   ]
 }
 
+Temporal rules:
+  • day_of_week  — english lowercase (monday/tuesday/...) or null. Translate from any language.
+  • time_of_day  — 24-hour "HH:MM" string or null. "7 pm" → "19:00", "noon" → "12:00".
+  • date_iso     — "YYYY-MM-DD" if the new memory has an unambiguous absolute or computable-relative date; else null. Today is ${todayIso}.
+  • relative     — original relative-time phrase (e.g. "tomorrow", "next week", "mañana") for audit, or null.
+  • recurring    — "weekly", "monthly", "daily", "every-tuesday", etc., or null.
+
 Edge type rules (pick ONE per link):
-  • Updates     — new memory supersedes the candidate. The user just made a DIFFERENT choice on the same topic, or the same fact changed value. Example: "switching to Gemini Embedding 2" supersedes "user prefers BGE-M3". ALSO writes is_latest=false on the candidate.
-  • Contradicts — new memory disagrees with candidate but is NOT a clear supersession (e.g. competing claims). Use sparingly; prefer Updates when there's evolution language.
+  • Updates     — new memory supersedes the candidate. The user just made a DIFFERENT choice on the same topic, or the same fact changed value. ALSO writes is_latest=false on the candidate.
+  • Contradicts — new memory disagrees with candidate but is NOT a clear supersession (competing claims).
   • Extends     — new memory adds nuance to the candidate without overriding it.
-  • Mentions    — both share an entity but the new memory is unrelated factually (default for plain co-mention).
+  • Mentions    — both share an entity OR temporal anchor but unrelated factually.
 
 Memory type rules:
-  • decision    — language like "I decided", "going with", "switching to", "from now on", "we'll use X". This is an active CHOICE.
-  • preference  — "I prefer X", "I like Y better".
-  • fact        — neutral statement, not a choice.
-  • event       — something that happened on a date.
-  • goal        — "I want to", "planning to".
-  • lesson      — extracted insight.
-  • relationship— person/org relationship statement.
-  If the new memory clearly fits one of decision/preference/goal/event, emit it. Otherwise default to "fact" by omitting the field.
+  • decision/preference/fact/event/goal/lesson/relationship — pick the best fit. If the memory mentions a specific time/date/person-meeting it is usually "event".
 
 Confidence: 0.55–1.0 only. Skip uncertain links.
 Reason: ≤80 chars plain English.
 At most one link per candidate index.
-If nothing matches: { "entities": [], "memory_type": null, "links": [] }.`;
+If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "links": [] }.`;
 
     let parsed;
     try {
@@ -1487,8 +1562,25 @@ If nothing matches: { "entities": [], "memory_type": null, "links": [] }.`;
     const entities = Array.isArray(parsed?.entities) ? parsed.entities.map(String).slice(0, 12) : [];
     const links = Array.isArray(parsed?.links) ? parsed.links : [];
     const inferredType = (typeof parsed?.memory_type === 'string' && parsed.memory_type.trim()) || null;
+    const temporal = (parsed && typeof parsed.temporal === 'object' && parsed.temporal) || {};
 
-    console.log(`[entity-co-mention] entities=[${entities.join(',')}] type=${inferredType || '-'} links=${links.length}`);
+    // Build temporal tags from LLM output. Language-agnostic — the LLM
+    // already normalized to english day names, HH:MM, ISO dates.
+    const temporalTags = [];
+    if (typeof temporal.day_of_week === 'string' && temporal.day_of_week.trim()) {
+      temporalTags.push(`time:${temporal.day_of_week.trim().toLowerCase()}`);
+    }
+    if (typeof temporal.time_of_day === 'string' && /^\d{2}:\d{2}$/.test(temporal.time_of_day.trim())) {
+      temporalTags.push(`time:${temporal.time_of_day.trim()}`);
+    }
+    if (typeof temporal.date_iso === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(temporal.date_iso.trim())) {
+      temporalTags.push(`time:${temporal.date_iso.trim()}`);
+    }
+    if (typeof temporal.recurring === 'string' && temporal.recurring.trim()) {
+      temporalTags.push(`time:recurring-${temporal.recurring.trim().toLowerCase().replace(/\s+/g, '-')}`);
+    }
+
+    console.log(`[entity-co-mention] entities=[${entities.join(',')}] type=${inferredType || '-'} temporal=[${temporalTags.join(',')}] links=${links.length}`);
 
     // If the LLM inferred a more specific memory_type than the caller
     // supplied (caller likely defaulted to 'fact'), upgrade it. Only
@@ -1512,7 +1604,7 @@ If nothing matches: { "entities": [], "memory_type": null, "links": [] }.`;
     //   entity:Rama, entity:Heidelberg, entity:SAP
     // FE EntityChips reads these tags (filters tags starting with 'entity:').
     // Filterable via /api/memories?tags=entity:Rama — first-class graph node.
-    if (entities.length > 0) {
+    if (entities.length > 0 || temporalTags.length > 0) {
       try {
         const cleanEntities = entities
           .filter(e => typeof e === 'string' && e.length > 0 && e.length < 60)
@@ -1520,6 +1612,7 @@ If nothing matches: { "entities": [], "memory_type": null, "links": [] }.`;
         const newTags = Array.from(new Set([
           ...(baseMemory.tags || []),
           ...cleanEntities,
+          ...temporalTags,
         ]));
         await store.updateMemory(baseMemory.id, { tags: newTags });
       } catch (tagErr) {

@@ -868,10 +868,40 @@ const PRONOUN_PLACEHOLDERS = new Set([
   'above', 'previous', 'prior', 'last one',
 ]);
 
+// Imperative save-trigger phrases. When the user message IS one of these
+// (or a confirmation), the save target is NOT the message itself — it's
+// the prior conversation turn. Examples: "save it", "remember this",
+// "ok save it", "yes please", "go ahead", "do it".
+const SAVE_IMPERATIVE_PHRASES = new Set([
+  'save it', 'save this', 'save that', 'save them', 'save these',
+  'remember it', 'remember this', 'remember that', 'remember it please',
+  'keep it', 'keep this', 'keep that', 'store it', 'store this',
+  'note it', 'note this', 'note that', 'note it down', 'log it',
+  'add to memory', 'add to hivemind', 'commit it', 'commit this',
+  // Pure confirmations after the agent already proposed something
+  'yes', 'yes please', 'yes go ahead', 'go ahead', 'do it',
+  'sure', 'sure go ahead', 'ok', 'okay', 'confirmed', 'proceed',
+]);
+
 function _isPronounPlaceholder(s) {
   if (!s) return false;
   const norm = s.trim().replace(/[.!?,;:]+$/, '').toLowerCase();
   return PRONOUN_PLACEHOLDERS.has(norm);
+}
+
+// Returns true when the message is a bare imperative/confirmation that
+// the save tool should NOT use as content. Strips "please", trailing
+// punctuation. Multilingual variants would need translation — we keep
+// English here and rely on _isPronounPlaceholder for cross-locale "it/this".
+function _isSaveImperative(s) {
+  if (!s) return false;
+  let norm = s.trim().replace(/[.!?,;:]+$/, '').toLowerCase();
+  norm = norm.replace(/\bplease\b/g, '').replace(/\s+/g, ' ').trim();
+  if (SAVE_IMPERATIVE_PHRASES.has(norm)) return true;
+  // Match "save X" / "remember X" / "note X" where X is a pronoun.
+  const m = norm.match(/^(save|remember|store|note|keep|log)\s+(.+)$/);
+  if (m && _isPronounPlaceholder(m[2])) return true;
+  return false;
 }
 
 // ── Write-intent detection + toolkit action loop ──────────────────────
@@ -1023,25 +1053,43 @@ RULES:
 
 async function maybeSaveOrUpdate({ plan, ctx, onEvent, message, history }) {
   if (plan.save_intent && typeof plan.save_intent === 'object') {
-    // Resolve empty / pronoun-only content by harvesting conversation
-    // history. User says "save this" → grab the most recent assistant turn
-    // (their proposed text) OR the last substantive user message.
+    // Resolve empty / pronoun-only / imperative content by harvesting
+    // conversation history. User says "save this" / "save it" / "yes" →
+    // grab the most recent assistant turn (their proposed text) OR the
+    // last substantive user message.
     let content = (plan.save_intent.content || '').trim();
     let title   = (plan.save_intent.title   || '').trim();
 
-    if (!content || _isPronounPlaceholder(content)) {
-      const turns = Array.isArray(history) ? history.slice(-6) : [];
+    const msgIsImperative = _isSaveImperative(message);
+    const contentIsBare = !content
+      || _isPronounPlaceholder(content)
+      || _isSaveImperative(content)
+      // Planner echoed the trigger phrase as content — clearly wrong.
+      || (message && content.toLowerCase() === message.trim().toLowerCase());
+
+    if (contentIsBare || msgIsImperative) {
+      const turns = Array.isArray(history) ? history.slice(-8) : [];
       // Prefer last assistant draft (often the thing being saved)
       const lastAssistant = [...turns].reverse().find(h => h?.role === 'assistant' && typeof h.content === 'string' && h.content.trim().length > 20);
-      const lastUserPrior = [...turns].reverse().find(h => h?.role === 'user' && typeof h.content === 'string' && h.content.trim() !== (message || '').trim() && h.content.trim().length > 20);
-      content = (lastAssistant?.content || lastUserPrior?.content || '').trim();
+      const lastUserPrior = [...turns].reverse().find(h => h?.role === 'user'
+        && typeof h.content === 'string'
+        && h.content.trim() !== (message || '').trim()
+        && h.content.trim().length > 10
+        // Don't pick another imperative as the source — the user's *prior*
+        // substantive content is the target.
+        && !_isSaveImperative(h.content)
+      );
+      // Prefer user turn when it carries the fact ("meet Ethan Tuesday 7pm")
+      // and only fall back to assistant draft when no user content exists.
+      content = (lastUserPrior?.content || lastAssistant?.content || '').trim();
     }
 
-    // Reject content that is just the user's message echoed back — that's
-    // the "user dropped a filename and the LLM tried to save it" case.
-    // intent_kind enforcement upstream catches most of these, but defense
-    // in depth: never persist a save whose content === the trigger message.
-    if (content && message && content === message.trim()) {
+    // Final guard: never persist a save whose content equals the trigger.
+    if (content && message && content.toLowerCase() === message.trim().toLowerCase()) {
+      content = '';
+    }
+    // Also reject pure imperatives that slipped through.
+    if (content && _isSaveImperative(content)) {
       content = '';
     }
 
@@ -1216,6 +1264,61 @@ export async function runReactAgentV2({
       } catch (err) {
         console.warn(`[agent] write-intent branch failed: ${err.message}`);
         // Fall through to normal recall flow if toolkit unavailable.
+      }
+    }
+
+    // ── Continuation: prior assistant asked "which project?" ────────────
+    //
+    // When the immediately-previous assistant message asked the user to
+    // choose a project AND the current user message is short (a project
+    // name OR "org" OR a number), reconstruct the original save from the
+    // user turn BEFORE the question, and attach the chosen project hint.
+    // Without this, the planner sees "Ashley" and saves "Ashley" as a new
+    // standalone memory — the bug the user reported.
+    const PROJECT_QUESTION_MARKERS = [
+      'Which project should I save this to',
+      'In welches Projekt soll ich das speichern',
+      '¿En qué proyecto guardo esto',
+      "Dans quel projet dois-je l'enregistrer",
+    ];
+    const priorAssistant = Array.isArray(history) ? [...history].reverse().find(h => h?.role === 'assistant' && typeof h.content === 'string') : null;
+    const isProjectAnswer = priorAssistant
+      && PROJECT_QUESTION_MARKERS.some(m => priorAssistant.content.includes(m))
+      && typeof message === 'string'
+      && message.trim().length > 0
+      && message.trim().length < 80;
+    if (isProjectAnswer) {
+      // Walk further back to find the original user save-request — the
+      // first user turn before the project question that contained
+      // substantive content (not another imperative).
+      const turns = Array.isArray(history) ? history : [];
+      // Find the index of priorAssistant in history (last assistant).
+      let questionIdx = -1;
+      for (let i = turns.length - 1; i >= 0; i--) {
+        if (turns[i] === priorAssistant) { questionIdx = i; break; }
+      }
+      let originalUserTurn = null;
+      for (let i = questionIdx - 1; i >= 0 && i >= questionIdx - 5; i--) {
+        const h = turns[i];
+        if (h?.role === 'user' && typeof h.content === 'string' && h.content.trim().length > 8 && !_isSaveImperative(h.content)) {
+          originalUserTurn = h.content.trim();
+          break;
+        }
+      }
+      const projectAnswer = message.trim();
+      const wantsOrgScope = /^(org|organization|organisation|alle|todos|todas|none)$/i.test(projectAnswer);
+      if (originalUserTurn) {
+        plan.intent_kind = 'save';
+        plan.save_intent = {
+          title: originalUserTurn.slice(0, 60),
+          content: originalUserTurn,
+          tags: [],
+          ...(wantsOrgScope ? {} : { project_hint: projectAnswer }),
+        };
+        // Skip the ask-project gate below — we have the answer now.
+        plan.ask_for_project = false;
+        // No need to recall again — just run the save branch.
+        plan.sub_queries = [];
       }
     }
 

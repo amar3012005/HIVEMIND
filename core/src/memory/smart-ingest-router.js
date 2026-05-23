@@ -109,9 +109,14 @@ export class SmartIngestRouter {
       // sections of the same doc, not standalone facts) — only the
       // parent is checked against existing memories for Updates/Extends.
       const enrichedParent = await this._enrichWithTripleOperator(result.parent);
+      // Stamp _smart_routed on every payload so the engine gateway
+      // (graph-engine.ingestMemory) does NOT re-route — prevents an
+      // infinite loop when the engine itself calls route → engine.
+      enrichedParent._smart_routed = true;
+      const stampedChildren = (result.children || []).map((c) => ({ ...c, _smart_routed: true }));
       return {
         parent: enrichedParent,
-        children: result.children || [],
+        children: stampedChildren,
         entities: result.entities || [],
         edges: result.edges || [],
       };
@@ -120,7 +125,7 @@ export class SmartIngestRouter {
     // Flat array path (unchanged from before).
     const payloads = Array.isArray(result) ? result : [result];
     const enriched = await Promise.all(payloads.map(p => this._enrichWithTripleOperator(p)));
-    return enriched;
+    return enriched.map((p) => ({ ...p, _smart_routed: true }));
   }
 
   _detectSourceType(payload) {
@@ -453,18 +458,14 @@ export class SmartIngestRouter {
       return { parent, children };
     }
 
-    // Single-turn chat save. Extract temporal anchors + boost tags so the
-    // downstream entity-linker has signal to work with for short facts like
-    // "It is on Tuesday 7 pm" or "meet Ethan May 23".
-    const content = payload.content || '';
-    const temporal = _extractTemporalAnchors(content, payload.metadata?.user_timezone);
+    // Single-turn chat save. Entity + temporal extraction now happens via
+    // LLM in graph-engine._attachEntityCoMentionEdges (one call, multilingual).
+    // We only set force_entity_linking so that gate fires even for short
+    // user-typed facts.
     const tagBoost = new Set(payload.tags || []);
-    // Reuse already-present chat platform tags.
     if (isChatLike(payload)) {
       tagBoost.add('talk-to-hive');
     }
-    // Surface every temporal anchor as a tag so retrieval can filter by it.
-    for (const t of temporal.tags) tagBoost.add(t);
 
     return [{
       ...payload,
@@ -473,10 +474,6 @@ export class SmartIngestRouter {
       metadata: {
         ...payload.metadata,
         source_type_normalized: 'chat',
-        temporal_refs: temporal.refs.length ? temporal.refs : undefined,
-        // Force entity-linker to fire even for short content; the linker
-        // also checks content length, but `force_entity_linking` makes the
-        // intent explicit and lets graph-engine override its own gate.
         force_entity_linking: true,
       },
     }];

@@ -4136,12 +4136,19 @@ exit \$RC
     // browser extension use. After login the dashboard sets hm_cp_session
     // on hivemind.davinciai.eu and redirects back to /oauth/authorize,
     // where resolveOAuthSession() recognises the cookie automatically.
+    //
+    // returnTo MUST use the public dashboard origin (hivemind.davinciai.eu)
+    // not the upstream core origin. Vercel rewrites /oauth/authorize back
+    // to core, and the dashboard cookie hm_cp_session is scoped to that
+    // host — so the OAuth flow stays end-to-end on one domain.
     const dashboardFeBase = process.env.HIVEMIND_FRONTEND_BASE_URL
       || process.env.HIVEMIND_DASHBOARD_URL
       || 'https://hivemind.davinciai.eu';
-    const proto = (req.headers['x-forwarded-proto'] || 'https').toString().split(',')[0].trim();
-    const host  = (req.headers['x-forwarded-host'] || req.headers.host || '').toString();
-    const returnTo = `${proto}://${host}${req.url}`;
+    // Strip any upstream-side prefix and force the canonical /oauth/authorize
+    // path on the dashboard origin. req.url already carries the full query
+    // string (response_type, client_id, etc.).
+    const reqUrlPath = req.url.startsWith('/') ? req.url : `/${req.url}`;
+    const returnTo = `${dashboardFeBase}${reqUrlPath}`;
     const dashboardLoginUrl = `${dashboardFeBase}/hivemind/login?cli_return_to=${encodeURIComponent(returnTo)}`;
 
     const dashboardButton = `<a href="${dashboardLoginUrl}" style="display:block;text-align:center;padding:.7rem .8rem;background:#117dff;color:#fff;text-decoration:none;border-radius:10px;font-weight:600;margin-bottom:1rem">Continue with HIVEMIND login</a>`;

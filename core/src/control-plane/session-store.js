@@ -42,15 +42,26 @@ async function getRedisClient(config) {
   if (!redisClientPromise) {
     redisConnectionAttempted = true;
     redisClientPromise = (async () => {
+      // ioredis auto-connects on construction. Calling .connect() again
+      // throws "Redis is already connecting/connected" → catch below
+      // would null the promise and every subsequent getSession() would
+      // return null silently. Use lazyConnect so .connect() is the FIRST
+      // connection attempt and behaves correctly.
+      const baseOpts = { lazyConnect: true };
       const client = Array.isArray(redisConfig)
-        ? new Redis(...redisConfig)
-        : new Redis(redisConfig);
+        ? (typeof redisConfig[0] === 'string'
+            ? new Redis(redisConfig[0], { ...redisConfig[1], ...baseOpts })
+            : new Redis({ ...redisConfig[0], ...baseOpts }))
+        : new Redis({ ...redisConfig, ...baseOpts });
 
       client.on('error', () => {});
       await client.connect();
       await client.ping();
       return client;
-    })().catch(() => {
+    })().catch((err) => {
+      // Log so silent failures show up in observability instead of just
+      // returning null from every subsequent session lookup.
+      try { console.warn('[session-store] Redis init failed:', err?.message || err); } catch {}
       redisClientPromise = null;
       return null;
     });

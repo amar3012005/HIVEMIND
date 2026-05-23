@@ -63,7 +63,7 @@ function createIngestionPipeline(options = {}) {
   }
 
   return {
-    mode: queueSystem.mode,
+    get mode() { return queueSystem.mode; },
     orchestrator,
     async ingest(payload, optionsForJob = {}) {
       return ingest(payload, queueSystem, optionsForJob);

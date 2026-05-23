@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const { classifyRelationships } = require('./relationship-classifier');
 const { createPersistedMemoryWriter } = require('./persistence');
 
@@ -112,8 +113,27 @@ class QdrantVectorStore {
   }
 }
 
-function buildCollectionName(userId) {
+// Tenant-scoped collection naming for multi-tenant isolation + per-tenant
+// Qdrant index size control. Org takes precedence (enterprise tenant), user
+// is the personal scope. Falls back to legacy QDRANT_COLLECTION env so
+// existing data + collection-not-found Qdrant 404s stay backward-compatible
+// until a migration sweeps old data into per-org collections.
+function buildCollectionName(userId, orgId) {
+  if (process.env.QDRANT_PER_TENANT === 'true') {
+    if (orgId) return `org_${orgId}`;
+    if (userId) return `user_${userId}`;
+  }
   return process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
+}
+
+function contentHashPointId(content, scopeKey) {
+  const h = crypto.createHash('sha256');
+  h.update(String(scopeKey || ''));
+  h.update('\0');
+  h.update(String(content || ''));
+  // Qdrant accepts UUID-string or u64 ids. Use UUID v5-shape (32 hex → uuid format).
+  const hex = h.digest('hex').slice(0, 32);
+  return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20, 32)].join('-');
 }
 
 function createDefaultVectorStore() {
@@ -128,13 +148,18 @@ async function indexEmbeddedChunks(chunks, context = {}, deps = {}) {
   const vectorStore = deps.vectorStore || createDefaultVectorStore();
   const memoryWriter = deps.memoryWriter || await createPersistedMemoryWriter();
   const relationships = [];
-  const collectionName = buildCollectionName(context.user_id);
+  const collectionName = buildCollectionName(context.user_id, context.org_id);
   const memoryIds = [];
+  // Per-tenant scope so the same chunk content for different orgs/users
+  // gets distinct point IDs (no cross-tenant collision).
+  const scopeKey = context.org_id || context.user_id || 'global';
 
   const points = [];
 
   for (const chunk of chunks) {
-    let pointId = `${context.request_id}:${chunk.chunk_index}`;
+    // Content-hash point ID gives free dedup on re-upload: same content +
+    // same tenant => same UUID => Qdrant upsert overwrites in place.
+    let pointId = contentHashPointId(chunk.content, scopeKey);
     let edgesCreated = 0;
 
     if (memoryWriter) {

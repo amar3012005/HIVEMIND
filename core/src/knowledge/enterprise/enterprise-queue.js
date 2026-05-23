@@ -102,8 +102,10 @@ class EnterpriseUploadQueue extends EventEmitter {
       this._update(job.jobId, { progress: 'classifying', stage: 'detect' });
 
       // Stage 2: Detect type
-      const detection = await this.pipeline.detect(parseOutput, { filename: job.filename });
-      if (!detection || detection.confidence < 0.3) {
+      let detection = await this.pipeline.detect(parseOutput, { filename: job.filename });
+      if (!detection || typeof detection !== 'object') {
+        detection = { type: 'general', confidence: 0.0, reasoning: 'detector returned null' };
+      } else if (typeof detection.confidence !== 'number' || detection.confidence < 0.3) {
         detection.type = 'general';
       }
 
@@ -126,11 +128,40 @@ class EnterpriseUploadQueue extends EventEmitter {
 
       this._update(job.jobId, { progress: 'ingesting', stage: 'ingest' });
 
-      // Stage 5: Ingest
-      const results = await this.pipeline.ingest(payloads, {
-        userId: job.userId,
-        orgId: job.orgId,
-      });
+      // Stage 5: Ingest — parent first so we can backfill parent_schema_id
+      // on every child chunk. Without this children carry parent_schema_id=null
+      // and hierarchical retrieval (parent expansion on child hit) breaks.
+      let results;
+      if (payloads && payloads.parent && Array.isArray(payloads.chunks)) {
+        const parentResult = await this.pipeline.ingest({ parent: payloads.parent, chunks: [] }, {
+          userId: job.userId,
+          orgId: job.orgId,
+        });
+        const parentId = parentResult?.parent_id
+          || parentResult?.memory_id
+          || (Array.isArray(parentResult?.memory_ids) ? parentResult.memory_ids[0] : null)
+          || (Array.isArray(parentResult) ? parentResult[0]?.id : null);
+        if (parentId) {
+          for (const child of payloads.chunks) {
+            child.metadata = child.metadata || {};
+            child.metadata.parent_schema_id = parentId;
+          }
+        }
+        const childResult = await this.pipeline.ingest({ parent: null, chunks: payloads.chunks }, {
+          userId: job.userId,
+          orgId: job.orgId,
+        });
+        results = {
+          parent: parentResult,
+          children: childResult,
+          memories_created: 1 + (Array.isArray(childResult?.memory_ids) ? childResult.memory_ids.length : payloads.chunks.length),
+        };
+      } else {
+        results = await this.pipeline.ingest(payloads, {
+          userId: job.userId,
+          orgId: job.orgId,
+        });
+      }
 
       const memoryCount = Array.isArray(results) ? results.length : (results?.memories_created || 0);
 
@@ -168,7 +199,7 @@ let __enterpriseQueue = null;
 export function getEnterpriseQueue(pipeline) {
   if (!__enterpriseQueue) {
     __enterpriseQueue = new EnterpriseUploadQueue({
-      concurrency: 2,
+      concurrency: Number(process.env.ENTERPRISE_QUEUE_CONCURRENCY) || 2,
       pipeline,
     });
   }

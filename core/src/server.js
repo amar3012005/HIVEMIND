@@ -1473,6 +1473,8 @@ const TEST_API_KEY = process.env.HIVEMIND_TEST_API_KEY || '';
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 const REQUIRE_PERSISTED_MEMORY = IS_PRODUCTION || process.env.HIVEMIND_REQUIRE_PERSISTED_MEMORY === 'true';
 const INGESTION_MODULE_CANDIDATES = [
+  path.join(__dirname, 'ingestion'),
+  path.join(PROJECT_ROOT, 'src', 'ingestion'),
   path.join(REPO_ROOT, 'src', 'ingestion'),
   path.join(PROJECT_ROOT, 'ingestion')
 ];

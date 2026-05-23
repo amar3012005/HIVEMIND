@@ -18,11 +18,16 @@
 import crypto from 'crypto';
 import { chatCompletion } from '../knowledge/enterprise/litellm-client.js';
 
-const SYNTHESIS_MODEL = process.env.SYNTHESIS_MODEL || 'llama-3.3-70b-versatile';
+const SYNTHESIS_MODEL = process.env.SYNTHESIS_MODEL || 'openai/gpt-oss-120b';
 const DEFAULT_LOOKBACK_HOURS = Number(process.env.SYNTHESIS_LOOKBACK_HOURS || 24);
 const DEFAULT_CLUSTER_MIN = Number(process.env.SYNTHESIS_CLUSTER_MIN || 4);
 const DEFAULT_CLUSTER_MAX = Number(process.env.SYNTHESIS_CLUSTER_MAX || 30);
 const DRIFT_COMPACT_THRESHOLD = Number(process.env.DRIFT_COMPACT_THRESHOLD || 12);
+// Hard cap on members folded into one canonical. Buckets larger than this
+// are split into multiple canonicals, each carrying ≤ MAX members. Stops
+// the old "compacted 394" pathology where one summary tried to represent
+// hundreds of source memories and inevitably lost detail.
+const MAX_MEMBERS_PER_CANONICAL = Number(process.env.DRIFT_MAX_MEMBERS_PER_CANONICAL || 10);
 const MAX_ORGS_PER_TICK = Number(process.env.COGNITION_MAX_ORGS_PER_TICK || 25);
 
 // In-process status (mirrored in DB via cognition_runs row)
@@ -319,7 +324,13 @@ Rules:
     });
     if (recent.length < DRIFT_COMPACT_THRESHOLD) return 0;
 
-    const SYS_TAG_RE = /^(file:|fn:|page:|heading:|upload:|doc-hash:|promoted-from|synthesized|topic:|cognition-loop)/i;
+    // Excluded from bucketing: tags that aren't real topic clusters.
+    // Also excluded: knowledge-base / document / document-summary —
+    // those mark user-uploaded source-of-truth (PDF chunks, segments).
+    // Compacting them loses the original chunks because we set
+    // isLatest=false on every source, which then disappear from default
+    // recall. KB docs are durable facts, not "drifting" beliefs.
+    const SYS_TAG_RE = /^(file:|fn:|page:|heading:|upload:|doc-hash:|promoted-from|synthesized|topic:|cognition-loop|knowledge-base$|document$|document-summary$|entity:|section:|chat$|talk-to-hive$)/i;
     const buckets = new Map();
     for (const m of recent) {
       const primaryTag = (m.tags || []).find(t => !SYS_TAG_RE.test(t));
@@ -330,51 +341,107 @@ Rules:
     let compactions = 0;
     for (const [tag, members] of buckets.entries()) {
       if (members.length < DRIFT_COMPACT_THRESHOLD) continue;
-      try {
-        const summary = await this._llmDriftSummary(tag, members);
-        if (!summary || summary.length < 50) continue;
-        const created = await this._writeSummaryMemory({
-          orgId, userId: members[0].userId, project: members[0].project,
-          tag, members, content: summary,
-        });
-        if (!created) continue;
-        // Supersede granular members with is_latest=false + Derives edge.
-        for (const src of members) {
-          try {
-            await this.prisma.memory.update({
-              where: { id: src.id }, data: { isLatest: false },
-            });
-            await this.prisma.relationship.create({
-              data: {
-                id: crypto.randomUUID(),
-                fromId: created.id,
-                toId: src.id,
-                type: 'Derives',
-                confidence: 0.9,
-                createdBy: 'cognition-drift-compact',
-                metadata: { reason: 'drift_compaction', topic: tag },
-              },
-            });
-          } catch { /* race — skip */ }
+      // Newest-first split into chunks ≤ MAX_MEMBERS_PER_CANONICAL. Each
+      // chunk becomes its OWN canonical so all source memories are covered
+      // and no canonical fans in more than the cap.
+      const sorted = members.slice().sort(
+        (a, b) => new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0)
+      );
+      const chunks = [];
+      for (let i = 0; i < sorted.length; i += MAX_MEMBERS_PER_CANONICAL) {
+        chunks.push(sorted.slice(i, i + MAX_MEMBERS_PER_CANONICAL));
+      }
+      for (let ci = 0; ci < chunks.length; ci++) {
+        const chunk = chunks[ci];
+        try {
+          const content = await this._buildLosslessSummary(tag, chunk, { partIndex: ci, partCount: chunks.length });
+          if (!content || content.length < 20) continue;
+          const created = await this._writeSummaryMemory({
+            orgId, userId: chunk[0].userId, project: chunk[0].project,
+            tag, members: chunk, content,
+            partIndex: ci, partCount: chunks.length,
+          });
+          if (!created) continue;
+          // Derive (NOT supersede). Granular members stay isLatest=true so
+          // the agent still sees the original chunks alongside the canonical.
+          for (const src of chunk) {
+            try {
+              await this.prisma.relationship.create({
+                data: {
+                  id: crypto.randomUUID(),
+                  fromId: created.id,
+                  toId: src.id,
+                  type: 'Derives',
+                  confidence: 0.9,
+                  createdBy: 'cognition-drift-compact',
+                  metadata: { reason: 'drift_compaction', topic: tag, part: ci + 1, parts: chunks.length },
+                },
+              });
+            } catch { /* race — skip */ }
+          }
+          compactions++;
+        } catch (err) {
+          this.logger.warn(`[cognition] compact tag=${tag} part=${ci + 1}/${chunks.length} failed: ${err.message}`);
         }
-        compactions++;
-      } catch (err) {
-        this.logger.warn(`[cognition] compact tag=${tag} failed: ${err.message}`);
       }
     }
     return compactions;
   }
 
   /**
-   * Build the canonical "as of today" summary for a topic cluster.
+   * Build a LOSSLESS canonical for a topic cluster.
    *
-   * Always feeds ALL members into the LLM in chunks (map-reduce):
-   *   • Small cluster (≤BATCH): single pass.
-   *   • Large cluster (>BATCH): produce one partial summary per BATCH-sized
-   *     window, then run a final reducer over the partials so every source
-   *     fact actually shapes the output. Without this, clusters >25 used to
-   *     get a Derives edge to memories the LLM had never seen.
+   * Contract:
+   *   • 100% information retention — every source memory's full content is
+   *     embedded verbatim under a numbered section. No LLM compression.
+   *   • Optionally prepends an LLM-generated header (1-2 sentences) using
+   *     SYNTHESIS_MODEL (gpt-oss-120b by default) for readability; failure
+   *     to generate the header just omits it — never blocks compaction.
+   *   • Caller guarantees `members.length ≤ MAX_MEMBERS_PER_CANONICAL`.
    */
+  async _buildLosslessSummary(tag, members, { partIndex = 0, partCount = 1 } = {}) {
+    const fmtDate = (m) => {
+      const d = m.updatedAt || m.createdAt;
+      return d ? new Date(d).toISOString().slice(0, 10) : 'unknown-date';
+    };
+    const sections = members.map((m, i) => {
+      const date = fmtDate(m);
+      const title = m.title ? ` — ${m.title}` : '';
+      const body = (m.content || '').trim();
+      return `[${i + 1}] (${date})${title}\n${body}`;
+    }).join('\n\n');
+
+    // Header is purely cosmetic. Try LLM; if it fails or is empty, skip.
+    let header = '';
+    try {
+      const peek = members.map((m, i) => {
+        const c = (m.content || '').replace(/\s+/g, ' ').slice(0, 200);
+        return `[${i + 1}] ${m.title ? m.title + ' — ' : ''}${c}`;
+      }).join('\n');
+      const headerPrompt = `Write ONE sentence (max 30 words) describing what these ${members.length} memories on topic "${tag}" collectively cover. No preamble. No "Summary:" prefix. Plain prose.
+
+Memories:
+${peek}`;
+      const raw = await chatCompletion({
+        model: SYNTHESIS_MODEL,
+        messages: [{ role: 'user', content: headerPrompt }],
+        temperature: 0.1,
+        max_tokens: 80,
+      });
+      header = String(raw || '').trim().split('\n')[0].slice(0, 240);
+    } catch (err) {
+      this.logger.warn(`[cognition] header gen failed tag=${tag}: ${err.message}`);
+    }
+
+    const partTag = partCount > 1 ? ` (part ${partIndex + 1}/${partCount})` : '';
+    const head = header
+      ? `Topic: ${tag}${partTag} — ${header}\n\n`
+      : `Topic: ${tag}${partTag}\n\n`;
+    return head + sections;
+  }
+
+  // Legacy lossy summary — kept for reference, no longer called by drift compaction.
+  // eslint-disable-next-line no-unused-vars
   async _llmDriftSummary(tag, members) {
     // Newest-first so the summary reflects the current state of knowledge.
     const sorted = members.slice().sort(
@@ -456,8 +523,26 @@ Rules:
     }
   }
 
-  async _writeSummaryMemory({ orgId, userId, project, tag, members, content }) {
+  async _writeSummaryMemory({ orgId, userId, project, tag, members, content, partIndex = 0, partCount = 1 }) {
     const sourceIds = members.map(m => m.id);
+    // FULL UNION of every tag from every source — no filter. Canonical
+    // inherits all routing oracles (filename:, doc-hash:, entity:, page:,
+    // heading:, kind:, section:, topic:, plus any ad-hoc tags). Tag
+    // explosion is acceptable: GIN index on tags handles it.
+    const unionedTags = new Set();
+    for (const m of members) {
+      for (const t of (m.tags || [])) {
+        if (typeof t === 'string' && t.length > 0) unionedTags.add(t);
+      }
+    }
+    // Canonical identity tags — added last so they always win on dedupe.
+    unionedTags.add('canonical-summary');
+    unionedTags.add(`topic:${tag}`);
+    unionedTags.add('cognition-loop');
+    unionedTags.add('drift-compaction');
+    const summaryTags = Array.from(unionedTags);
+
+    const partSuffix = partCount > 1 ? ` part ${partIndex + 1}/${partCount}` : '';
     const created = await this.prisma.memory.create({
       data: {
         id: crypto.randomUUID(),
@@ -465,22 +550,25 @@ Rules:
         orgId,
         project: project || null,
         memoryType: 'summary',
-        title: `Canonical: ${tag} (compacted ${members.length})`,
+        title: `Canonical: ${tag} (${members.length} memories${partSuffix})`,
         content,
-        tags: ['canonical-summary', `topic:${tag}`, 'cognition-loop', 'drift-compaction'],
+        tags: summaryTags,
         isLatest: true,
         importanceScore: 0.85,
         sourceMetadata: {
           create: {
             sourceType: 'cognition-loop',
-            sourceId: `compact:${tag}:${Date.now()}`,
+            sourceId: `compact:${tag}:${partIndex + 1}of${partCount}:${Date.now()}`,
             metadata: {
               compacted_at: new Date().toISOString(),
               topic: tag,
               source_count: members.length,
               source_ids: sourceIds,
+              part_index: partIndex,
+              part_count: partCount,
               model: SYNTHESIS_MODEL,
               generator: 'cognition-loop.drift-compact',
+              lossless: true,
             },
           },
         },

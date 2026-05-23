@@ -89,7 +89,51 @@ async function hop1Memory({ store, query, options, ctx }) {
       : {}),
   });
 
-  return (result.memories || []).map((m) => ({
+  // Tag-anchored fallback. If FTS returned nothing AND the caller (or
+  // shortcut) supplied tags, fetch directly by tag ordered by document_date
+  // desc. Handles "what was the last slack msg about" where FTS fails the
+  // `@@ to_tsquery` AND-match against memories that don't contain words
+  // like "last" or "msg" verbatim.
+  const effectiveTags = options.tags || inferredTags;
+  let mems = result.memories || [];
+  if (mems.length === 0 && Array.isArray(effectiveTags) && effectiveTags.length > 0 && store.client?.memory) {
+    try {
+      const orFilters = [];
+      if (ctx.orgId) orFilters.push({ orgId: ctx.orgId });
+      if (ctx.userId) orFilters.push({ userId: ctx.userId });
+      const tagOnly = await store.client.memory.findMany({
+        where: {
+          deletedAt: null,
+          isLatest: true,
+          tags: { hasSome: effectiveTags },
+          ...(orFilters.length === 1 ? orFilters[0] : orFilters.length > 1 ? { OR: orFilters } : {}),
+        },
+        orderBy: [{ documentDate: 'desc' }, { createdAt: 'desc' }],
+        take: Math.min(options.limit || HOP1_DEFAULT_LIMIT, 50),
+        select: {
+          id: true, title: true, content: true, memoryType: true, tags: true,
+          createdAt: true, documentDate: true, importanceScore: true, sourceMetadata: true,
+        },
+      });
+      mems = tagOnly.map(m => ({
+        id: m.id,
+        title: m.title,
+        content: m.content,
+        memory_type: m.memoryType,
+        tags: m.tags || [],
+        score: Number(m.importanceScore) || 0.5,
+        created_at: m.createdAt,
+        valid_at: m.documentDate || m.createdAt,
+        source_metadata: m.sourceMetadata || null,
+        _searchMethod: 'tag_fallback',
+      }));
+    } catch (err) {
+      console.warn('[recall-router] tag fallback failed:', err.message);
+    }
+    return mems;
+  }
+
+  return mems.map((m) => ({
     id: m.id,
     title: m.title,
     content: m.content,

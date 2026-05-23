@@ -521,6 +521,14 @@ export class PrismaGraphStore {
           const latestWhere = typeof is_latest === 'boolean' ? `AND m.is_latest = ${is_latest}` : '';
           const dateAfterWhere = created_after ? `AND m.created_at >= '${new Date(created_after).toISOString()}'` : '';
           const dateBeforeWhere = created_before ? `AND m.created_at <= '${new Date(created_before).toISOString()}'` : '';
+          // Tag filter: when caller passes tags=['slack'] etc, require the
+          // memory to carry at least one of those tags (m.tags && ARRAY[...]).
+          // Prevents FTS-rank-only mismatches like 'what was the last slack
+          // msg about' missing the actual slack rows because they don't
+          // contain the noise words.
+          const tagsWhere = Array.isArray(tags) && tags.length > 0
+            ? `AND m.tags && ARRAY[${tags.map(t => `'${String(t).replace(/'/g, "''")}'`).join(',')}]::text[]`
+            : '';
 
           // Use 'simple' lexer + index tags alongside content+title.
           //
@@ -547,7 +555,7 @@ export class PrismaGraphStore {
                    ) as fts_score
             FROM memories m
             WHERE m.deleted_at IS NULL
-              ${scopeWhere} ${projectWhere} ${latestWhere} ${dateAfterWhere} ${dateBeforeWhere}
+              ${scopeWhere} ${projectWhere} ${latestWhere} ${dateAfterWhere} ${dateBeforeWhere} ${tagsWhere}
               AND to_tsvector('simple',
                     COALESCE(m.content, '') || ' ' ||
                     COALESCE(m.title, '')   || ' ' ||

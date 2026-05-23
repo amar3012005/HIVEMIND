@@ -60,6 +60,7 @@ services:
             REDIS_URL: 'redis://:${REDIS_PASSWORD}@redis:6379/0'
             REDIS_HOST: redis
             REDIS_PORT: '6379'
+            REDIS_HOST_FALLBACKS: '${REDIS_HOST_FALLBACKS:-redis-s0k0s0k40wo44w4w8gcs8ow0-223235365936,hivemind-redis}'
             REDIS_PASSWORD: '${REDIS_PASSWORD}'
             GROQ_API_KEY: '${GROQ_API_KEY}'
             GROQ_INFERENCE_MODEL: '${GROQ_INFERENCE_MODEL:-llama-3.3-70b-versatile}'
@@ -212,6 +213,7 @@ services:
             QDRANT_COLLECTION: '${QDRANT_COLLECTION:-hivemind_memories}'
             REDIS_URL: 'redis://:${REDIS_PASSWORD}@redis:6379/0'
             REDIS_HOST: redis
+            REDIS_HOST_FALLBACKS: '${REDIS_HOST_FALLBACKS:-redis-s0k0s0k40wo44w4w8gcs8ow0-223235365936,hivemind-redis}'
             REDIS_PORT: '6379'
             REDIS_PASSWORD: '${REDIS_PASSWORD}'
             GROQ_API_KEY: '${GROQ_API_KEY}'
@@ -351,6 +353,7 @@ services:
             DATABASE_URL: 'postgresql://${POSTGRES_USER:-hivemind_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}?schema=public'
             REDIS_URL: 'redis://:${REDIS_PASSWORD}@redis:6379/0'
             REDIS_HOST: redis
+            REDIS_HOST_FALLBACKS: '${REDIS_HOST_FALLBACKS:-redis-s0k0s0k40wo44w4w8gcs8ow0-223235365936,hivemind-redis}'
             REDIS_PORT: '6379'
             REDIS_PASSWORD: '${REDIS_PASSWORD}'
             HIVEMIND_MASTER_API_KEY: '${HIVEMIND_MASTER_API_KEY}'

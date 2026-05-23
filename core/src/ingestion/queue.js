@@ -136,36 +136,55 @@ function createIngestionQueue(options = {}) {
   // emits unhandled 'error' events on bad hosts which can crash the process.
   // If probe fails, fall back to in-memory queue. Resolved system is the
   // single source of truth after `ready` settles.
-  const probeConn = new IORedis({
-    host: process.env.REDIS_HOST || 'localhost',
-    port: Number(process.env.REDIS_PORT || 6379),
-    password: process.env.REDIS_PASSWORD || undefined,
-    maxRetriesPerRequest: 1,
-    connectTimeout: 1500,
-    lazyConnect: true,
-    enableOfflineQueue: false,
-    retryStrategy: () => null,
-  });
-  probeConn.on('error', () => {});
+  //
+  // Multi-host candidates: Coolify rebuilds containers with hashed names so
+  // the configured REDIS_HOST=redis DNS alias can disappear on `docker
+  // restart`. REDIS_HOST_FALLBACKS lets the runtime recover automatically
+  // without env edits per rebuild.
+  const primaryHost = process.env.REDIS_HOST || 'localhost';
+  const altHosts = (process.env.REDIS_HOST_FALLBACKS || '')
+    .split(',').map((s) => s.trim()).filter(Boolean);
+  const candidateHosts = [primaryHost, ...altHosts.filter((h) => h !== primaryHost)];
 
   let resolvedSystem = null;
   const inMemoryFallback = buildInMemoryQueueSystem(options);
 
   const ready = (async () => {
-    try {
-      await probeConn.connect();
-      await probeConn.ping();
-    } catch {
-      try { await probeConn.quit(); } catch {}
-      try { probeConn.disconnect(); } catch {}
-      console.warn('[ingestion-queue] Redis probe failed — falling back to in-memory queue');
+    let workingHost = null;
+    for (const host of candidateHosts) {
+      const probe = new IORedis({
+        host,
+        port: Number(process.env.REDIS_PORT || 6379),
+        password: process.env.REDIS_PASSWORD || undefined,
+        maxRetriesPerRequest: 1,
+        connectTimeout: 1500,
+        lazyConnect: true,
+        enableOfflineQueue: false,
+        retryStrategy: () => null,
+      });
+      probe.on('error', () => {});
+      try {
+        await probe.connect();
+        await probe.ping();
+        workingHost = host;
+        try { await probe.quit(); } catch {}
+        break;
+      } catch {
+        try { await probe.quit(); } catch {}
+        try { probe.disconnect(); } catch {}
+      }
+    }
+
+    if (!workingHost) {
+      console.warn(`[ingestion-queue] Redis probe failed on all hosts (${candidateHosts.join(', ')}) — falling back to in-memory queue`);
       resolvedSystem = inMemoryFallback;
       return resolvedSystem;
     }
 
-    // Probe succeeded — build a real BullMQ connection for the queues.
+    // Probe succeeded — build a real BullMQ connection for the queues
+    // on the host that actually answered.
     const connection = new IORedis({
-      host: process.env.REDIS_HOST || 'localhost',
+      host: workingHost,
       port: Number(process.env.REDIS_PORT || 6379),
       password: process.env.REDIS_PASSWORD || undefined,
       maxRetriesPerRequest: null,
@@ -177,7 +196,7 @@ function createIngestionQueue(options = {}) {
     const queue = new bullmq.Queue(options.queueName || DEFAULT_QUEUE_NAME, { connection });
     const dlq = new bullmq.Queue(options.dlqName || DEFAULT_DLQ_NAME, { connection });
 
-    try { await probeConn.quit(); } catch {}
+    console.log(`[ingestion-queue] Redis probe OK on ${workingHost} — using BullMQ mode`);
 
     resolvedSystem = {
       mode: 'bullmq',

@@ -4,14 +4,12 @@
  * Offloads heavy document processing (parsing, detection, extraction,
  * chunking, embedding, graph writes) from the Node.js API request thread.
  *
- * Uses a simple BullMQ-style in-process queue backed by the existing Redis.
- * Upgrade to full BullMQ / worker process for production scale.
+ * Uses BullMQ when Redis is reachable (jobs survive process restarts);
+ * falls back to in-memory EventEmitter queue when probe fails. Same
+ * resilience pattern as src/ingestion/queue.js.
  */
 
 import { EventEmitter } from 'events';
-
-// In-memory queue for current version — side-steps external deps.
-// Replace with Bull/BullMQ when throughput demands it.
 
 class EnterpriseUploadQueue extends EventEmitter {
   constructor({ concurrency = 2, pipeline } = {}) {
@@ -191,17 +189,219 @@ class EnterpriseUploadQueue extends EventEmitter {
   }
 }
 
+// ─── BullMQ-backed enterprise queue (persistent) ─────────────────
+
+async function probeRedisHost() {
+  const primary = process.env.REDIS_HOST || 'localhost';
+  const alts = (process.env.REDIS_HOST_FALLBACKS || '').split(',').map((s) => s.trim()).filter(Boolean);
+  const candidates = [primary, ...alts.filter((h) => h !== primary)];
+  let IORedis;
+  try {
+    IORedis = (await import('ioredis')).default;
+  } catch {
+    return null;
+  }
+  for (const host of candidates) {
+    const probe = new IORedis({
+      host,
+      port: Number(process.env.REDIS_PORT || 6379),
+      password: process.env.REDIS_PASSWORD || undefined,
+      maxRetriesPerRequest: 1,
+      connectTimeout: 1500,
+      lazyConnect: true,
+      enableOfflineQueue: false,
+      retryStrategy: () => null,
+    });
+    probe.on('error', () => {});
+    try {
+      await probe.connect();
+      await probe.ping();
+      try { await probe.quit(); } catch {}
+      return host;
+    } catch {
+      try { await probe.quit(); } catch {}
+      try { probe.disconnect(); } catch {}
+    }
+  }
+  return null;
+}
+
+class BullMQEnterpriseQueue extends EventEmitter {
+  constructor({ concurrency, pipeline, host }) {
+    super();
+    this.concurrency = concurrency;
+    this.pipeline = pipeline;
+    this.host = host;
+    this.jobs = new Map(); // local status cache so status() works without round-trip
+    this._init();
+  }
+
+  async _init() {
+    const [{ Queue, Worker }, IORedisMod] = await Promise.all([
+      import('bullmq'),
+      import('ioredis'),
+    ]);
+    const IORedis = IORedisMod.default;
+    const connection = new IORedis({
+      host: this.host,
+      port: Number(process.env.REDIS_PORT || 6379),
+      password: process.env.REDIS_PASSWORD || undefined,
+      maxRetriesPerRequest: null,
+    });
+    connection.on('error', (err) => {
+      console.warn('[enterprise-queue] Redis connection error:', err.message);
+    });
+    this.queue = new Queue('hivemind-enterprise', { connection });
+    this.worker = new Worker('hivemind-enterprise', async (job) => {
+      const record = this.jobs.get(job.id) || { jobId: job.id, ...job.data };
+      this.jobs.set(job.id, record);
+      return await runEnterpriseJob(this.pipeline, record, (patch) => this._update(record.jobId, patch));
+    }, {
+      connection,
+      concurrency: this.concurrency,
+    });
+    this.worker.on('failed', (job, err) => this._update(job?.id, { status: 'failed', stage: 'error', error: err?.message }));
+    this.worker.on('completed', (job, result) => this._update(job?.id, { status: 'completed', progress: 'done', stage: 'done', memoryCount: result?.memoryCount || 0 }));
+  }
+
+  async enqueue(job) {
+    const jobId = job.uploadId || `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const record = {
+      jobId, status: 'queued', progress: 'enqueued', stage: null, startedAt: null, completedAt: null, memoryCount: 0, error: null, ...job,
+    };
+    this.jobs.set(jobId, record);
+    // Persist via BullMQ — survives restart
+    if (!this.queue) {
+      // _init not done yet, queue in-memory pre-init and replay
+      this._preInit = this._preInit || [];
+      this._preInit.push(record);
+      return { jobId, status: 'queued' };
+    }
+    await this.queue.add('enterprise-upload', record, { jobId, attempts: 3, removeOnComplete: false, removeOnFail: false });
+    return { jobId, status: 'queued' };
+  }
+
+  status(jobId) {
+    const j = this.jobs.get(jobId);
+    if (!j) return null;
+    return { jobId: j.jobId, status: j.status, progress: j.progress, stage: j.stage, memoryCount: j.memoryCount, error: j.error };
+  }
+
+  _update(jobId, patch) {
+    if (!jobId) return;
+    const job = this.jobs.get(jobId);
+    if (job) Object.assign(job, patch);
+    this.emit('update', { jobId, ...patch });
+  }
+}
+
+// Pull job-execution body out of the in-memory class so BullMQ worker can
+// share the exact same logic.
+async function runEnterpriseJob(pipeline, job, update) {
+  try {
+    update({ status: 'running', progress: 'parsing', stage: 'parse', startedAt: new Date().toISOString() });
+
+    const parseOutput = await pipeline.parse(job.tempPath, job.filename, { smart: job.smartExtract !== false });
+    if (parseOutput.error && job.smartExtract !== false) {
+      console.warn(`[enterprise-queue] smart parse failed for ${job.filename}: ${parseOutput.error}, falling back`);
+      const fallbackParse = await pipeline.parse(job.tempPath, job.filename, { smart: false });
+      Object.assign(parseOutput, fallbackParse);
+    }
+    update({ progress: 'classifying', stage: 'detect' });
+
+    let detection = await pipeline.detect(parseOutput, { filename: job.filename });
+    if (!detection || typeof detection !== 'object') {
+      detection = { type: 'general', confidence: 0.0, reasoning: 'detector returned null' };
+    } else if (typeof detection.confidence !== 'number' || detection.confidence < 0.3) {
+      detection.type = 'general';
+    }
+    update({ progress: 'extracting', stage: 'extract' });
+
+    const schema = await pipeline.extract(parseOutput, detection.type, { filename: job.filename });
+    update({ progress: 'chunking', stage: 'chunk' });
+
+    const payloads = await pipeline.chunk(schema, parseOutput, {
+      uploadId: job.uploadId, userId: job.userId, orgId: job.orgId, tags: job.tags, scope: job.scope, filename: job.filename,
+    });
+    update({ progress: 'ingesting', stage: 'ingest' });
+
+    let results;
+    if (payloads && payloads.parent && Array.isArray(payloads.chunks)) {
+      const parentResult = await pipeline.ingest({ parent: payloads.parent, chunks: [] }, { userId: job.userId, orgId: job.orgId });
+      const parentId = parentResult?.parent_id || parentResult?.memory_id
+        || (Array.isArray(parentResult?.memory_ids) ? parentResult.memory_ids[0] : null)
+        || (Array.isArray(parentResult) ? parentResult[0]?.id : null);
+      if (parentId) {
+        for (const child of payloads.chunks) {
+          child.metadata = child.metadata || {};
+          child.metadata.parent_schema_id = parentId;
+        }
+      }
+      const childResult = await pipeline.ingest({ parent: null, chunks: payloads.chunks }, { userId: job.userId, orgId: job.orgId });
+      results = { parent: parentResult, children: childResult, memories_created: 1 + (Array.isArray(childResult?.memory_ids) ? childResult.memory_ids.length : payloads.chunks.length) };
+    } else {
+      results = await pipeline.ingest(payloads, { userId: job.userId, orgId: job.orgId });
+    }
+
+    const memoryCount = Array.isArray(results) ? results.length : (results?.memories_created || 0);
+    update({ status: 'completed', progress: 'done', stage: 'done', completedAt: new Date().toISOString(), memoryCount });
+    return { memoryCount };
+  } catch (err) {
+    console.error(`[enterprise-queue] job ${job.jobId} failed:`, err.message);
+    update({ status: 'failed', progress: 'failed', stage: 'error', error: err.message, completedAt: new Date().toISOString() });
+    throw err;
+  }
+}
+
 let __enterpriseQueue = null;
 
 /**
- * Singleton accessor.
+ * Singleton accessor. Returns either BullMQ-backed queue (Redis up) or
+ * the legacy in-memory queue (Redis down). Both expose the same surface:
+ *   - enqueue(job) → { jobId, status }
+ *   - status(jobId) → { jobId, status, progress, stage, memoryCount, error }
  */
-export function getEnterpriseQueue(pipeline) {
-  if (!__enterpriseQueue) {
-    __enterpriseQueue = new EnterpriseUploadQueue({
-      concurrency: Number(process.env.ENTERPRISE_QUEUE_CONCURRENCY) || 2,
-      pipeline,
-    });
+class EnterpriseQueueProxy extends EventEmitter {
+  constructor() {
+    super();
+    this._impl = null;
   }
+  set impl(next) {
+    const prev = this._impl;
+    this._impl = next;
+    next.on?.('update', (e) => this.emit('update', e));
+    if (prev !== next) this.emit('impl-changed', { mode: next.constructor.name });
+  }
+  get impl() { return this._impl; }
+  async enqueue(job) { return this._impl.enqueue(job); }
+  status(jobId) { return this._impl?.status(jobId); }
+}
+
+export function getEnterpriseQueue(pipeline) {
+  if (__enterpriseQueue) return __enterpriseQueue;
+
+  const concurrency = Number(process.env.ENTERPRISE_QUEUE_CONCURRENCY) || 2;
+  __enterpriseQueue = new EnterpriseQueueProxy();
+  __enterpriseQueue.impl = new EnterpriseUploadQueue({ concurrency, pipeline });
+
+  (async () => {
+    const host = await probeRedisHost();
+    if (!host) {
+      console.warn('[enterprise-queue] Redis probe failed — staying on in-memory queue');
+      return;
+    }
+    console.log(`[enterprise-queue] Redis probe OK on ${host} — upgrading to BullMQ mode`);
+    const bq = new BullMQEnterpriseQueue({ concurrency, pipeline, host });
+    // Replay any in-memory pending jobs into Bull.
+    const prev = __enterpriseQueue.impl;
+    if (prev?.pending && prev?.jobs) {
+      for (const jid of prev.pending) {
+        const j = prev.jobs.get(jid);
+        if (j) await bq.enqueue(j);
+      }
+    }
+    __enterpriseQueue.impl = bq;
+  })().catch((e) => console.warn('[enterprise-queue] upgrade failed:', e.message));
+
   return __enterpriseQueue;
 }

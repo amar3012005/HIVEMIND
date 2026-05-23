@@ -56,8 +56,18 @@ export async function fastPdfExtract(filePath) {
       if (pageMatches) pages = Number(pageMatches[1]);
     }
     const avgPerPage = pages > 0 ? text.length / pages : text.length;
-    // Image-heavy if avg <150 chars/page AND total <2000 chars (allows long single-page text PDFs)
-    const isImageHeavy = avgPerPage < 150 && text.length < 2000;
+    // Image-heavy when:
+    //   - avg <300 chars/page (was 150, too strict — header+footer+labels
+    //     could exceed 150 even on a scanned page), OR
+    //   - text extracted has no alphanumeric word longer than 4 chars
+    //     (OCR garbage / glyph-only output), OR
+    //   - total text is very small (<2000 chars) AND avg <500 (catches the
+    //     long-single-page-text-PDF exception while still flagging short
+    //     image-heavy docs).
+    const longAlnumWord = /\b[A-Za-z0-9]{5,}\b/.test(text);
+    const isImageHeavy = !longAlnumWord
+      || avgPerPage < 300
+      || (text.length < 2000 && avgPerPage < 500);
     return { text, pages, isImageHeavy, error: null };
   } catch (err) {
     return { text: '', pages: 0, isImageHeavy: true, error: err.message };

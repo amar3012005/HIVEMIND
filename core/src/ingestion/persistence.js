@@ -1,6 +1,15 @@
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { pathToFileURL } = require('url');
+
+function contentHashSignature(content, orgId, userId) {
+  const h = crypto.createHash('sha256');
+  h.update(String(orgId || userId || 'global'));
+  h.update('\0');
+  h.update(String(content || ''));
+  return h.digest('hex');
+}
 
 let cachedCore = null;
 let cachedWriter = null;
@@ -135,6 +144,32 @@ async function createPersistedMemoryWriter() {
         org_id: context.org_id,
       });
 
+      // Content-hash dedup: same chunk content for same tenant reuses the
+      // existing Memory row instead of creating a duplicate. The hash is
+      // stored on metadata.content_hash and indexed via Prisma's JSON-path
+      // ops. We tolerate the index being absent — fall back to a JSONB
+      // scan, which is still much faster than re-embedding + re-ingesting.
+      const contentHash = contentHashSignature(chunk.content, context.org_id, context.user_id);
+
+      try {
+        const existing = await prisma.memory.findFirst({
+          where: {
+            orgId: context.org_id || undefined,
+            userId: context.user_id || undefined,
+            metadata: { path: ['content_hash'], equals: contentHash },
+          },
+          select: { id: true },
+        });
+        if (existing) {
+          const memory = await store.getMemory(existing.id);
+          if (memory) {
+            return { memory, edges_created: 0, deduped: true };
+          }
+        }
+      } catch {
+        // Index/path-op unsupported — silently fall through to insert.
+      }
+
       const input = {
         user_id: context.user_id,
         org_id: context.org_id,
@@ -150,6 +185,7 @@ async function createPersistedMemoryWriter() {
         metadata: {
           ...(context.metadata || {}),
           ...(chunk.metadata || {}),
+          content_hash: contentHash,
           filepath: context.filepath || null,
           language: context.language || null,
           source_session_id: context.source_session_id || null,

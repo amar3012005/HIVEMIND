@@ -10,7 +10,11 @@
 import { chatCompletion, getDefaultModel } from './litellm-client.js';
 import { DOCUMENT_TYPES, getDetectionPromptContext } from './schemas/index.js';
 
-const PREVIEW_CHARS = 2000;
+// 6000 chars covers cover page + first few content pages, so contracts
+// and spreadsheets whose defining structure (clause headings, line-item
+// tables) appears after a title page get classified correctly. Per-call
+// LLM cost increase ~negligible (still well inside detection max_tokens).
+const PREVIEW_CHARS = 6000;
 const DETECTION_MAX_TOKENS = 1024;
 const FALLBACK_RESULT = { type: 'general', confidence: 0.3, reasoning: 'Detection failed, using fallback' };
 

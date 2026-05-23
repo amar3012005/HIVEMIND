@@ -5718,6 +5718,11 @@ exit \$RC
 
           const adapterModules = {
             gmail: './connectors/providers/gmail/adapter.js',
+            slack: './connectors/providers/slack/adapter.js',
+            notion: './connectors/providers/notion/adapter.js',
+            github: './connectors/providers/github/adapter.js',
+            linear: './connectors/providers/linear/adapter.js',
+            atlassian: './connectors/providers/atlassian/adapter.js',
           };
           const adapterPath = adapterModules[provider];
           if (!adapterPath) {
@@ -5725,7 +5730,12 @@ exit \$RC
           }
 
           const mod = await import(adapterPath);
-          const AdapterClass = mod.GmailAdapter || mod.default;
+          // Adapter class export naming differs per provider: GmailAdapter,
+          // SlackAdapter, NotionAdapter, etc. Fall back to default export.
+          const AdapterClass = Object.values(mod).find(v => typeof v === 'function') || mod.default;
+          if (!AdapterClass) {
+            return jsonResponse(res, { error: `Adapter has no exported class: ${provider}` }, 500);
+          }
           const adapter = new AdapterClass();
 
           const { ConnectorStore } = await import('./connectors/framework/connector-store.js');

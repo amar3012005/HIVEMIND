@@ -1431,6 +1431,42 @@ export class MemoryGraphEngine {
       .filter(s => s.id && s.id !== baseMemory.id && (s.content || s.title))
       .slice(0, 8);
 
+    // Smart-router attaches recall hints when it ran a pre-flight search
+    // (router runs BEFORE engine, so its hints are the freshest). Merge
+    // them in. The LLM then sees the union of vector + entity + temporal
+    // recalled candidates and can decide the operator per pair.
+    const routerHints = Array.isArray(baseMemory.metadata?._llm_recall_hints)
+      ? baseMemory.metadata._llm_recall_hints
+      : [];
+    const existingIds = new Set(candidates.map(c => c.id));
+    for (const h of routerHints) {
+      if (!h?.id || h.id === baseMemory.id || existingIds.has(h.id)) continue;
+      if (candidates.length >= 8) break;
+      candidates.push({
+        id: h.id,
+        title: h.title,
+        content: h.content,
+        tags: h.tags || [],
+        _searchMethod: 'router_hint',
+      });
+      existingIds.add(h.id);
+    }
+    const deriveCandidates = Array.isArray(baseMemory.metadata?._llm_derive_candidates)
+      ? baseMemory.metadata._llm_derive_candidates
+      : [];
+    for (const h of deriveCandidates) {
+      if (!h?.id || h.id === baseMemory.id || existingIds.has(h.id)) continue;
+      if (candidates.length >= 8) break;
+      candidates.push({
+        id: h.id,
+        title: null,
+        content: h.content,
+        tags: [],
+        _searchMethod: 'router_derive_band',
+      });
+      existingIds.add(h.id);
+    }
+
     // Boost: pre-pull memories sharing entity: or time: tags. Short user
     // facts ("meet Ethan Tuesday 7pm") share little embedding signal with
     // older memories about the same person/event but share the same tags,
@@ -1518,14 +1554,29 @@ export class MemoryGraphEngine {
     // not the model's training cutoff.
     const todayIso = new Date().toISOString().slice(0, 10);
 
-    const prompt = `You are a multilingual memory graph linker. Given a NEW MEMORY and CANDIDATE memories, do FOUR things in ONE pass:
+    const prompt = `You are a multilingual memory graph linker. Given a NEW MEMORY and CANDIDATE memories, do FIVE things in ONE pass:
 
   1. extract proper-noun entities from the new memory (people, orgs, products, projects, places). Work in ANY language — Spanish, Hindi, Tamil, German, etc. — return entities in their original form.
   2. extract TEMPORAL anchors (day-of-week, time-of-day, relative refs like "tomorrow"/"mañana"/"morgen", absolute dates, recurring patterns). Resolve relatives against today=${todayIso}.
   3. classify the new memory's TYPE (decision | preference | fact | event | goal | lesson | relationship)
-  4. for each candidate that shares an entity OR temporal anchor, emit ONE typed edge
+  4. for EACH candidate that shares an entity OR temporal anchor OR clear semantic continuity, emit ONE typed edge.
+     Multiple candidates can each get DIFFERENT edge types simultaneously
+     (e.g. Updates A, Extends B, Mentions C in the same save).
+  5. when 2+ candidates together inform a synthesis claim made in the new
+     memory, additionally emit a Derives edge per source candidate. Use
+     Derives ONLY for genuine multi-source synthesis, not for plain
+     co-mention (those are Mentions).
 
 Use coreference: pronouns and possessives ("she", "my partner", "it", "they", "elle", "उसने") can resolve to a named entity from earlier turns.
+
+PICK THE OPERATOR FROM SEMANTICS, NOT WORD OVERLAP:
+  • "I prefer X" then later "switching to Y" → Updates the earlier preference.
+  • "X works for case A" + "X works for case B" → Extends (additive, no
+    contradiction).
+  • "the team prefers X" + "manager actually prefers Y" → Contradicts (two
+    parties hold opposing positions).
+  • "X and Y separately suggested Z, so we'll do Z" → Derives from both X and Y.
+  • two memories mentioning the same person but unrelated facts → Mentions only.
 
 NEW MEMORY:
 ${(baseMemory.title || '').slice(0, 200)}

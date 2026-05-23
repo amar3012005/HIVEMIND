@@ -723,91 +723,65 @@ export class SmartIngestRouter {
         }
       }
 
-      const topMatch = similar[0];
-      if (!topMatch) return payload;
+      // ── LLM-DRIVEN OPERATOR DECISION ────────────────────────────────
+      //
+      // Previously this branch picked an operator from raw cosine similarity:
+      //   ≥0.88 → Updates, ≥0.65 → Extends, ≥0.40 → Derives, else Mentions.
+      // That heuristic mis-fired constantly because:
+      //   • two memories on the same broad topic ("embedding models") look
+      //     ≥0.88 similar even when they share NO entity or claim
+      //   • single-target relationship can't express "this Updates A and
+      //     Mentions B" simultaneously
+      //   • language semantics ("switching to X" vs "X is still useful")
+      //     never enter the decision — only word overlap does
+      //
+      // The canonical multi-edge LLM decider lives in graph-engine's
+      // _attachEntityCoMentionEdges. It already:
+      //   - runs ONE Groq call with entity + temporal + memory_type +
+      //     per-candidate operator (Updates|Extends|Contradicts|Mentions)
+      //   - emits up to EDGE_CAP edges, multilingual, with confidence
+      //   - flips is_latest=false when its operator says Updates
+      // It is the right place for the decision.
+      //
+      // We surface the recall result + extracted entities to it via two
+      // attached hints so the same recall isn't paid for twice downstream.
+      // The router no longer locks a primary operator from similarity.
+      const baseHaystack = `${payload.title || ''} ${payload.content || ''}`.toLowerCase();
+      const recallHints = (similar || [])
+        .filter(m => m && m.id)
+        .slice(0, 8)
+        .map(m => ({
+          id: m.id,
+          title: m.title || null,
+          content: (m.content || '').slice(0, 280),
+          score: typeof m.score === 'number' ? m.score : null,
+          tags: m.tags || [],
+        }));
+      // Soft Derives hint: when 2+ candidates score in the synthesis band
+      // (0.40-0.65) we still mark sourceIds so a Derives edge can be
+      // attached if the LLM agrees the new memory is a synthesis. NOT a
+      // hard primary relationship — just metadata for the downstream LLM.
+      const deriveBand = (similar || []).filter(m => m.score >= 0.40 && m.score < SIMILARITY_EXTEND_THRESHOLD);
+      const derivesFrom = deriveBand.length >= 2
+        ? deriveBand.slice(0, 5).map(m => ({ id: m.id, score: m.score, content: (m.content || '').slice(0, 200) }))
+        : null;
 
-      if (topMatch.score >= SIMILARITY_UPDATE_THRESHOLD) {
-        // Very similar → supersede
-        const relationship = normalizeRelationshipDescriptor({
-          type: 'Updates',
-          targetId: topMatch.id,
-          confidence: topMatch.score,
-          reason: 'high_similarity',
-        });
-        return {
-          ...payload,
-          metadata: {
-            ...(payload.metadata || {}),
-            ...buildSemanticMetadata({
-              semanticRole: inferMemorySemanticRole(payload),
-              relationship,
-              sourceMetadata: payload.source_metadata,
-            }),
-          },
-          relationship: { type: 'Updates', target_id: topMatch.id, confidence: topMatch.score }
-        };
-      }
-
-      if (topMatch.score >= SIMILARITY_EXTEND_THRESHOLD) {
-        // Moderately similar → extend/augment
-        const relationship = normalizeRelationshipDescriptor({
-          type: 'Extends',
-          targetId: topMatch.id,
-          confidence: topMatch.score,
-          reason: 'moderate_similarity',
-        });
-        return {
-          ...payload,
-          metadata: {
-            ...(payload.metadata || {}),
-            ...buildSemanticMetadata({
-              semanticRole: inferMemorySemanticRole(payload),
-              relationship,
-              sourceMetadata: payload.source_metadata,
-            }),
-          },
-          relationship: { type: 'Extends', target_id: topMatch.id, confidence: topMatch.score }
-        };
-      }
-
-      // Check for Derives: multiple memories with moderate similarity → synthesis
-      const deriveSources = similar.filter(m => m.score >= 0.40 && m.score < SIMILARITY_EXTEND_THRESHOLD);
-      if (deriveSources.length >= 2) {
-        const base = this._hasContradictionSignal(payload.content, topMatch.content)
-          ? { ...payload, _contradicts_hint: topMatch.id }
-          : payload;
-        const relationship = normalizeRelationshipDescriptor({
-          type: 'Derives',
-          sourceIds: deriveSources.slice(0, 5).map(m => m.id),
-          confidence: deriveSources[0]?.score ?? topMatch.score ?? 0.6,
-          reason: 'multi_source_synthesis',
-        });
-        return {
-          ...base,
-          metadata: {
-            ...(base.metadata || {}),
-            ...buildSemanticMetadata({
-              semanticRole: inferMemorySemanticRole(base),
-              relationship,
-              sourceIds: deriveSources.slice(0, 5).map(m => m.id),
-              sourceRefs: deriveSources.slice(0, 5),
-              sourceMetadata: base.source_metadata,
-            }),
-          },
-          relationship: { type: 'Derives', sourceIds: deriveSources.slice(0, 5).map(m => m.id), confidence: deriveSources[0]?.score ?? topMatch.score ?? 0.6 },
-          _derives_from: deriveSources.slice(0, 5).map(m => ({ id: m.id, score: m.score })),
-        };
-      }
-
-      // Low similarity: check for contradiction signals
-      if (this._hasContradictionSignal(payload.content, topMatch.content)) {
-        return {
-          ...payload,
-          _contradicts_hint: topMatch.id, // passed to graph-engine contradiction logic
-        };
-      }
-
-      return payload; // no relationship: brand new memory
+      return {
+        ...payload,
+        metadata: {
+          ...(payload.metadata || {}),
+          // Pass recall + derive candidates to graph-engine via hints. The
+          // LLM in _attachEntityCoMentionEdges reads these and picks the
+          // correct operator per candidate; no similarity-thresholding here.
+          _llm_recall_hints: recallHints,
+          _llm_derive_candidates: derivesFrom || undefined,
+          // Top-similarity hint for the contradiction reconciler downstream
+          // (it still consults raw content for "switching"/"actually"
+          // language; keeping this lets that path stay accurate too).
+          _top_similarity_id: similar[0]?.id || null,
+          _top_similarity_score: typeof similar[0]?.score === 'number' ? similar[0].score : null,
+        },
+      };
     } catch (err) {
       console.warn('[smart-ingest-router] Pre-flight check failed:', err.message);
       return payload;

@@ -320,6 +320,31 @@ model NangoConnection {
   @@map("nango_connections")
 }
 
+/// Pending writes from agent — held for explicit user approval before
+/// the write tool actually executes. Created by draft-approval middleware
+/// whenever the agent tries to call a non-readOnly tool
+/// (slack_send_message, slack_schedule_message, etc.). Resolved by FE
+/// when user clicks Approve or Cancel.
+model PendingWrite {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId      String   @map("user_id") @db.Uuid
+  orgId       String?  @map("org_id") @db.Uuid
+  provider    String   @db.VarChar(50)   // slack, notion, gmail, …
+  toolName    String   @map("tool_name") @db.VarChar(120)
+  toolArgs    Json     @map("tool_args") @db.JsonB
+  preview     String?  @db.Text          // short human-readable summary for UI
+  status      String   @default("draft") @db.VarChar(20) // draft | approved | cancelled | sent | failed
+  result      Json?    @db.JsonB         // tool response on send
+  errorMsg    String?  @map("error_msg") @db.Text
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  approvedAt  DateTime? @map("approved_at") @db.Timestamptz(6)
+  sentAt      DateTime? @map("sent_at") @db.Timestamptz(6)
+
+  @@index([userId, status, createdAt])
+  @@index([orgId, createdAt])
+  @@map("pending_writes")
+}
+
 /// Core memory storage with triple-operator versioning (Updates, Extends, Derives)
 /// Supports cognitive scoring for spaced repetition and Ebbinghaus forgetting curve
 /// This model contains an expression index which requires additional setup for migrations. Visit https://pris.ly/d/expression-indexes for more info.

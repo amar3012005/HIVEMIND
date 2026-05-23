@@ -2379,13 +2379,47 @@ function setOAuthUnauthorized(res, {
   return jsonResponse(res, { error, error_description: errorDescription }, statusCode);
 }
 
+// Resolve session for OAuth consent: accept BOTH the local /oauth/login
+// short-lived session AND the dashboard's hm_cp_session cookie set by the
+// control plane after a user signs in via /hivemind/login (Google SSO,
+// email/password, or Zitadel — same flow used by CLI + browser extension).
+//
+// Why both: when Claude / ChatGPT redirects to /oauth/authorize, the user
+// either has a dashboard session already (very common since most users
+// are signed in to the dashboard) or has none. Falling back to the
+// dashboard cookie makes OAuth consent feel like part of the same
+// session, instead of forcing a second "Sign In to HiveMind" screen.
+const CP_SESSION_COOKIE_NAME = process.env.HIVEMIND_CONTROL_PLANE_SESSION_COOKIE || 'hm_cp_session';
+
 async function resolveOAuthSession(req) {
   const cookies = parseCookies(req);
-  const cookieValue = cookies[OAUTH_SESSION_COOKIE_NAME];
-  if (!cookieValue) return null;
-  const sessionId = verifySessionCookie(OAUTH_SESSION_SECRET, cookieValue);
-  if (!sessionId) return null;
-  return oauthSessionStore.getSession(sessionId);
+
+  // 1) Local OAuth session set by /oauth/login (admin-secret or Zitadel
+  //    callback path).
+  const localCookie = cookies[OAUTH_SESSION_COOKIE_NAME];
+  if (localCookie) {
+    const sid = verifySessionCookie(OAUTH_SESSION_SECRET, localCookie);
+    if (sid) {
+      const session = await oauthSessionStore.getSession(sid);
+      if (session?.userId) return session;
+    }
+  }
+
+  // 2) Dashboard session — same Redis store, same key prefix
+  //    (`cp:session:<id>`), same SESSION_SECRET shared via env across
+  //    core + control-plane containers. Treat it as a first-class OAuth
+  //    session so the consent screen renders for users who are already
+  //    signed in to the dashboard.
+  const cpCookie = cookies[CP_SESSION_COOKIE_NAME];
+  if (cpCookie) {
+    const sid = verifySessionCookie(OAUTH_SESSION_SECRET, cpCookie);
+    if (sid) {
+      const session = await oauthSessionStore.getSession(sid);
+      if (session?.userId) return session;
+    }
+  }
+
+  return null;
 }
 
 async function createOAuthSession(res, payload) {
@@ -4096,17 +4130,21 @@ exit \$RC
       return;
     }
 
-    const zitadelButton = oauthZitadelClient
-      ? `<a href="/oauth/login/zitadel?${new URLSearchParams({
-          client_id: clientId,
-          redirect_uri: redirectUri,
-          scope: requestedScopes.join(' '),
-          state,
-          code_challenge: codeChallenge,
-          code_challenge_method: codeChallengeMethod,
-          resource
-        }).toString()}" style="display:block;text-align:center;padding:.6rem .8rem;background:#0ea5e9;color:#fff;text-decoration:none;border-radius:10px;font-weight:600;margin-bottom:1rem">Continue with HiveMind Sign-In</a>`
-      : '';
+    // Primary login button → dashboard branded login page
+    // (/hivemind/login). That page handles Google SSO + email/password +
+    // Zitadel under one HIVEMIND-branded UI, the same flow CLI and the
+    // browser extension use. After login the dashboard sets hm_cp_session
+    // on hivemind.davinciai.eu and redirects back to /oauth/authorize,
+    // where resolveOAuthSession() recognises the cookie automatically.
+    const dashboardFeBase = process.env.HIVEMIND_FRONTEND_BASE_URL
+      || process.env.HIVEMIND_DASHBOARD_URL
+      || 'https://hivemind.davinciai.eu';
+    const proto = (req.headers['x-forwarded-proto'] || 'https').toString().split(',')[0].trim();
+    const host  = (req.headers['x-forwarded-host'] || req.headers.host || '').toString();
+    const returnTo = `${proto}://${host}${req.url}`;
+    const dashboardLoginUrl = `${dashboardFeBase}/hivemind/login?cli_return_to=${encodeURIComponent(returnTo)}`;
+
+    const dashboardButton = `<a href="${dashboardLoginUrl}" style="display:block;text-align:center;padding:.7rem .8rem;background:#117dff;color:#fff;text-decoration:none;border-radius:10px;font-weight:600;margin-bottom:1rem">Continue with HIVEMIND login</a>`;
 
     const loginHtml = `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -4124,8 +4162,8 @@ exit \$RC
 <div class="card">
   <h1>Sign in to HiveMind</h1>
   <p>${sanitizeHtml(client.client_name)} needs your consent to connect.</p>
-  ${zitadelButton}
-  <div class="divider">${oauthZitadelClient ? 'or use local admin login' : 'local admin login'}</div>
+  ${dashboardButton}
+  <div class="divider">or use local admin login</div>
   <form method="POST" action="/oauth/login">
     <input type="hidden" name="client_id" value="${sanitizeHtml(clientId)}">
     <input type="hidden" name="redirect_uri" value="${sanitizeHtml(redirectUri)}">

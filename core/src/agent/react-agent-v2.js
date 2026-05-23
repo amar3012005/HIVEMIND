@@ -274,8 +274,12 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
   const ul = String(plan.user_message || '').toLowerCase();
   const CONNECTORS = ['slack', 'notion', 'gmail', 'github', 'linear', 'jira', 'confluence'];
   const userConnector = CONNECTORS.find(k => ul.includes(k));
-  let derivedValidAt = plan.time_travel?.valid_time || plan.time_travel?.transaction_time || null;
-  if (!derivedValidAt && /\b(as of|before|prior to|on|in|by|until)\b/.test(ul)) {
+  // Deterministic date extraction takes PRIORITY over planner LLM —
+  // planner routinely hallucinates the year (defaults to 2024) when the
+  // user says "May 13" without a year. We use server's current year so
+  // bare month/day phrases resolve to the right calendar year.
+  let derivedValidAt = null;
+  if (/\b(as of|before|prior to|on|in|by|until)\b/.test(ul) || /\d{4}-\d{1,2}-\d{1,2}/.test(ul)) {
     const MONTH = { jan:0, feb:1, mar:2, apr:3, may:4, jun:5, jul:6, aug:7, sep:8, oct:9, nov:10, dec:11, january:0, february:1, march:2, april:3, june:5, july:6, august:7, september:8, october:9, november:10, december:11 };
     const year = new Date().getUTCFullYear();
     let m = ul.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
@@ -285,6 +289,17 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
       if (m && MONTH[m[1]] !== undefined) d = new Date(Date.UTC(+(m[3]||year), MONTH[m[1]], +m[2], 23,59,59));
     }
     if (d && !Number.isNaN(d.getTime())) derivedValidAt = d.toISOString();
+  }
+  // Fall back to planner's valid_time / transaction_time only when our
+  // deterministic extractor found nothing.
+  if (!derivedValidAt) {
+    derivedValidAt = plan.time_travel?.valid_time || plan.time_travel?.transaction_time || null;
+  }
+  // Also overwrite plan.time_travel so the hivemind_at branch below
+  // uses the corrected date (planner often hallucinated year=2024).
+  if (derivedValidAt) {
+    plan.needs_time_travel = true;
+    plan.time_travel = { ...(plan.time_travel || {}), valid_time: derivedValidAt };
   }
   const recallExtras = {
     ...(userConnector ? { tags: [userConnector] } : {}),

@@ -677,6 +677,94 @@ function _isPronounPlaceholder(s) {
   return PRONOUN_PLACEHOLDERS.has(norm);
 }
 
+// ── Write-intent detection + toolkit action loop ──────────────────────
+//
+// Determines whether the user wants to ACT on a connector (post/send/
+// draft a Slack msg, create a Notion page, etc.) vs query their memory.
+// Pure regex — runs before LLM. Avoids spending a planner call on
+// imperative phrasing.
+
+const WRITE_VERB_RE = /\b(post|send|draft|schedule|message|dm|notify|reply|share)\b/i;
+const SLACK_HINT_RE = /\b(slack|channel|#[a-z0-9_-]+)\b/i;
+const NOTION_HINT_RE = /\bnotion\b/i;
+const GMAIL_HINT_RE = /\b(gmail|email)\b/i;
+
+function detectWriteIntent(message) {
+  const m = String(message || '');
+  if (!WRITE_VERB_RE.test(m)) return null;
+  if (SLACK_HINT_RE.test(m)) return { provider: 'slack' };
+  if (NOTION_HINT_RE.test(m)) return { provider: 'notion' };
+  if (GMAIL_HINT_RE.test(m)) return { provider: 'gmail' };
+  return null;
+}
+
+/**
+ * Run a tool-calling sub-loop using the Toolkit + Groq's native tool API.
+ * Returns { response, steps, draftIds } — `response` is the agent's
+ * final user-facing summary; `draftIds` lists any pending_writes created.
+ */
+async function runActionSubLoop({ toolkit, message, history, model, apiKey, ctx, onEvent }) {
+  const schemas = toolkit.getJsonSchemas();
+  const steps = [];
+  const draftIds = [];
+  const sys = `You are HIVE acting on the user's request. Use the available tools to perform the requested action. Tools tagged readOnlyHint:false (post/send/schedule/draft) go through a draft-approval gate — the user must Approve before the action runs. When a tool returns status="draft_created", confirm the draft was created and tell the user it's awaiting their approval. Be concise.`;
+  const messages = [
+    { role: 'system', content: sys },
+    ...(Array.isArray(history) ? history.slice(-6).filter(h => (h.role === 'user' || h.role === 'assistant') && h.content) : []),
+    { role: 'user', content: message },
+  ];
+
+  // Max 3 iterations — enough for tool_call → tool_result → final answer.
+  for (let iter = 0; iter < 3; iter++) {
+    const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model,
+        messages,
+        tools: schemas,
+        tool_choice: 'auto',
+        max_completion_tokens: 1500,
+        temperature: 0.2,
+      }),
+    });
+    if (!resp.ok) throw new Error(`Groq ${resp.status}: ${(await resp.text()).slice(0, 300)}`);
+    const data = await resp.json();
+    const choice = data.choices?.[0];
+    const msg = choice?.message;
+    if (!msg) break;
+
+    if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+      messages.push(msg);
+      for (const tc of msg.tool_calls) {
+        const toolName = tc.function?.name;
+        let toolArgs = {};
+        try { toolArgs = JSON.parse(tc.function?.arguments || '{}'); } catch {}
+        onEvent?.({ type: 'tool_call', name: toolName, arguments: tc.function?.arguments || '{}' });
+        let toolResp;
+        try {
+          toolResp = await toolkit.execute(toolName, toolArgs, ctx);
+        } catch (err) {
+          toolResp = { content: [{ type: 'text', text: `error: ${err.message}` }], status: 'error' };
+        }
+        const text = toolResp.content?.[0]?.text || '';
+        onEvent?.({ type: 'tool_result', name: toolName, summary: text.slice(0, 140) });
+        steps.push({ tool: toolName, args: toolArgs, result_summary: text.slice(0, 200) });
+        if (toolResp.status === 'draft_created' && toolResp.meta?.draft_id) {
+          draftIds.push(toolResp.meta.draft_id);
+        }
+        messages.push({ role: 'tool', tool_call_id: tc.id, content: text });
+      }
+      continue;
+    }
+
+    const final = (msg.content || '').trim();
+    return { response: final, steps, draftIds };
+  }
+
+  return { response: 'Action chain exceeded iteration budget.', steps, draftIds };
+}
+
 async function maybeSaveOrUpdate({ plan, ctx, onEvent, message, history }) {
   if (plan.save_intent && typeof plan.save_intent === 'object') {
     // Resolve empty / pronoun-only content by harvesting conversation
@@ -786,6 +874,55 @@ export async function runReactAgentV2({
     });
     if (planResult.usage) usages.push(planResult.usage);
     const plan = planResult.plan;
+
+    // Write-intent branch (post/send/draft slack message, etc).
+    // Runs BEFORE the evidence/recall flow because the user wants to act,
+    // not query memory. Builds a per-user Toolkit, activates the matching
+    // connector group, runs a tool-calling sub-loop. Writes go through
+    // the draft-approval middleware automatically.
+    const writeIntent = detectWriteIntent(message);
+    if (writeIntent && ctx.prisma) {
+      try {
+        const { buildToolkitForUser } = await import('./toolkit-factory.js');
+        const toolkit = await buildToolkitForUser({
+          prisma: ctx.prisma,
+          userId: ctx.userId,
+          orgId: ctx.orgId,
+          hivemindTools: [],
+        });
+        // Activate the matched connector group.
+        const activation = toolkit.resetEquippedTools([writeIntent.provider]);
+        if (activation.tools.length > 1) {
+          onEvent?.({ type: 'tool_call', name: 'reset_equipped_tools', arguments: JSON.stringify({ group_names: [writeIntent.provider] }) });
+          onEvent?.({ type: 'tool_result', name: 'reset_equipped_tools', summary: `activated ${writeIntent.provider} (${activation.tools.length} tools)` });
+          steps.push({
+            tool: 'reset_equipped_tools',
+            args: { group_names: [writeIntent.provider] },
+            result_summary: `${activation.tools.length} tools active`,
+          });
+          const sub = await runActionSubLoop({
+            toolkit, message, history, model, apiKey, ctx, onEvent,
+          });
+          steps.push(...sub.steps);
+          const finalText = sub.response || 'Done.';
+          onEvent?.({ type: 'finish', text: finalText });
+          return {
+            response: finalText,
+            sources: [],
+            steps,
+            evidence_used: [],
+            confidence: 1.0,
+            gaps: [],
+            usage: sumUsage(usages),
+            assistant_name: assistantName || null,
+            draft_ids: sub.draftIds,
+          };
+        }
+      } catch (err) {
+        console.warn(`[agent] write-intent branch failed: ${err.message}`);
+        // Fall through to normal recall flow if toolkit unavailable.
+      }
+    }
 
     // Save intent without a resolvable project scope → ASK first.
     // Triggered when: planner flagged ask_for_project, no project_hint, no

@@ -89,9 +89,6 @@ async function hop1Memory({ store, query, options, ctx }) {
       : {}),
   };
   const result = await recallPersistedMemories(store, recallArgs);
-  if (process.env.RECALL_TRACE) {
-    console.log('[recall-router] hop1 args=', JSON.stringify({ tags: recallArgs.tags, max_memories: recallArgs.max_memories, has_access_ctx: !!recallArgs.access_context }), 'returned=', result?.memories?.length || 0);
-  }
 
   // Tag-anchored fallback. If FTS returned nothing AND the caller (or
   // shortcut) supplied tags, fetch directly by tag ordered by document_date

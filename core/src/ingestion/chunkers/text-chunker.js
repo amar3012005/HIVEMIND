@@ -18,7 +18,7 @@ function chunkTokens(tokens, size, overlap) {
     // Discard tail chunks under MIN_CHUNK_WORDS unless it's the only chunk —
     // tiny fragments add embedding noise without retrieval value.
     if (piece.split(/\s+/).length >= MIN_CHUNK_WORDS || chunks.length === 0) {
-      chunks.push(piece);
+      chunks.push({ content: piece, token_start: cursor, token_end: end });
     }
     if (end === tokens.length) break;
     cursor = Math.max(end - overlap, cursor + 1);
@@ -60,15 +60,24 @@ function chunkTextDocument(document) {
   const tokens = tokenizeApprox(document.content);
   const slices = chunkTokens(tokens, config.size, config.overlap);
 
-  return slices.map((content, index) => ({
-    chunk_index: index,
-    content,
-    token_count: tokenizeApprox(content).length,
-    metadata: {
-      chunk_strategy: config.strategy,
-      page_number: 1,
-    },
-  }));
+  return slices.map((slice, index) => {
+    // chunkTokens may return either { content, token_start, token_end } or
+    // a bare string (legacy callers). Normalize.
+    const content = typeof slice === 'string' ? slice : slice.content;
+    const token_start = typeof slice === 'string' ? null : slice.token_start;
+    const token_end = typeof slice === 'string' ? null : slice.token_end;
+    return {
+      chunk_index: index,
+      content,
+      token_count: tokenizeApprox(content).length,
+      metadata: {
+        chunk_strategy: config.strategy,
+        page_number: 1,
+        token_start,
+        token_end,
+      },
+    };
+  });
 }
 
 module.exports = {

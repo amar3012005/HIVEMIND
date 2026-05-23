@@ -62,38 +62,38 @@ function chunkBySource(sourceType, extracted) {
       return toChunkObjects(chunkTextDocument(extracted), 1);
     }
 
-    const pageRanges = [];
-    let cursor = 0;
+    // Build merged content + page-word-ranges in the SAME token space the
+    // chunker uses (split on /\s+/). This lets us map each chunk's
+    // token_start (returned by chunkTokens) directly to a page number,
+    // avoiding fragile char-offset heuristics.
     const PAGE_SEPARATOR = '\n\n';
+    const pageWordRanges = [];
+    let wordCursor = 0;
     const mergedParts = [];
     for (const page of pages) {
       const content = String(page.content || '');
-      const start = cursor;
+      const wordCount = tokenizeApprox(content).length;
+      pageWordRanges.push({
+        page_number: page.page_number,
+        word_start: wordCursor,
+        word_end: wordCursor + wordCount,
+      });
+      wordCursor += wordCount;
       mergedParts.push(content);
-      cursor += content.length;
-      pageRanges.push({ page_number: page.page_number, start, end: cursor });
-      cursor += PAGE_SEPARATOR.length;
     }
     const mergedContent = mergedParts.join(PAGE_SEPARATOR);
 
     const mergedChunks = chunkTextDocument({ ...extracted, content: mergedContent });
 
-    // Walk merged text to compute per-chunk char offset → page mapping.
-    // The chunker drops whitespace internally; we re-locate each chunk by
-    // searching from the running offset. This is O(N·M) worst-case but in
-    // practice each chunk is found near `searchFrom`, so cost is ~linear.
-    let searchFrom = 0;
     const chunksWithPages = mergedChunks.map((chunk, idx) => {
-      const content = chunk.content || '';
-      const probe = content.slice(0, 40);
-      const hit = probe ? mergedContent.indexOf(probe, Math.max(0, searchFrom - 200)) : -1;
-      const offset = hit >= 0 ? hit : searchFrom;
-      searchFrom = offset + content.length;
-      const range = pageRanges.find((r) => offset >= r.start && offset < r.end) || pageRanges[0];
+      const tokenStart = chunk.metadata?.token_start ?? null;
+      const range = tokenStart != null
+        ? (pageWordRanges.find((r) => tokenStart >= r.word_start && tokenStart < r.word_end) || pageWordRanges[0])
+        : pageWordRanges[0];
       return {
         chunk_index: idx,
-        content,
-        token_count: tokenizeApprox(content).length,
+        content: chunk.content,
+        token_count: chunk.token_count,
         metadata: {
           ...(chunk.metadata || {}),
           page_number: range.page_number,

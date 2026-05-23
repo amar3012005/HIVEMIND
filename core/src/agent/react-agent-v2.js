@@ -64,11 +64,23 @@ const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 // LLM budgets per step. gpt-oss reasoning models consume hidden
 // reasoning_tokens before content tokens; budgets are sized so even
 // chatty reasoning leaves room for the actual JSON output.
-const PLAN_MAX_TOKENS    = 1500;
-const REFLECT_MAX_TOKENS = 1000;
-const ANSWER_MAX_TOKENS  = 3000;
-const DIRECT_MAX_TOKENS  = 800;
-const TURN_BUDGET_MS     = Number(process.env.HIVEMIND_AGENT_TURN_BUDGET_MS || 45_000);
+// Caps raised per user directive — internal steps and final answer
+// both run on gpt-oss family; cost is acceptable, quality wins.
+const PLAN_MAX_TOKENS    = Number(process.env.HIVEMIND_PLAN_MAX_TOKENS    || 4000);
+const REFLECT_MAX_TOKENS = Number(process.env.HIVEMIND_REFLECT_MAX_TOKENS || 3000);
+const ANSWER_MAX_TOKENS  = Number(process.env.HIVEMIND_ANSWER_MAX_TOKENS  || 8000);
+const DIRECT_MAX_TOKENS  = Number(process.env.HIVEMIND_DIRECT_MAX_TOKENS  || 2000);
+const TURN_BUDGET_MS     = Number(process.env.HIVEMIND_AGENT_TURN_BUDGET_MS || 60_000);
+
+// Model split (per user directive 2026-05-24):
+//   • internal steps (planner, reflection, classification, sub-tools) use
+//     a fast/cheap model — gpt-oss-20b — so deep multi-hop reasoning stays
+//     responsive.
+//   • final user-facing answer uses gpt-oss-120b for top-quality natural
+//     language synthesis.
+// Both are env-overridable so we can A/B without code changes.
+const INTERNAL_MODEL = process.env.HIVEMIND_AGENT_INTERNAL_MODEL || 'openai/gpt-oss-20b';
+const FINAL_MODEL    = process.env.HIVEMIND_AGENT_FINAL_MODEL    || 'openai/gpt-oss-120b';
 
 // ISO 639-1 → human-readable name. Same map as v1 — keep in sync.
 const LANGUAGE_NAMES = {
@@ -1188,8 +1200,9 @@ export async function runReactAgentV2({
     const gateKind = hasBrowserContext ? null : quickGateClassify(message);
     if (gateKind) {
       onEvent?.({ type: 'gate', kind: gateKind });
+      // Quick gate (greeting/math/definition) is user-facing → FINAL_MODEL
       const { response, usage } = await answerDirectly({
-        message, gateKind, language, assistantName, orgName, model, apiKey, signal: abortCtrl.signal,
+        message, gateKind, language, assistantName, orgName, model: FINAL_MODEL, apiKey, signal: abortCtrl.signal,
       });
       if (usage) usages.push(usage);
       onEvent?.({ type: 'finish', text: response });
@@ -1206,10 +1219,10 @@ export async function runReactAgentV2({
       };
     }
 
-    // STEP 2 — Plan
+    // STEP 2 — Plan (runs on INTERNAL_MODEL — fast/cheap reasoning)
     const planResult = await planStep({
       message, history, language, assistantName, orgName, hasBrowserContext,
-      model, apiKey, signal: abortCtrl.signal, onEvent,
+      model: INTERNAL_MODEL, apiKey, signal: abortCtrl.signal, onEvent,
     });
     if (planResult.usage) usages.push(planResult.usage);
     const plan = planResult.plan;
@@ -1241,8 +1254,9 @@ export async function runReactAgentV2({
             args: { group_names: [writeIntent.provider] },
             result_summary: `${activation.tools.length} tools active`,
           });
+          // Tool-call sub-loop is internal reasoning → INTERNAL_MODEL
           const sub = await runActionSubLoop({
-            toolkit, message, history, model, apiKey, ctx, onEvent,
+            toolkit, message, history, model: INTERNAL_MODEL, apiKey, ctx, onEvent,
             provider: writeIntent.provider,
           });
           steps.push(...sub.steps);
@@ -1415,9 +1429,10 @@ export async function runReactAgentV2({
     // the model to refuse / return empty for self-contained questions
     // like '2+2' that have no recall context to lean on.
     if (plan.sub_queries.length === 0 && !plan.save_intent && !plan.needs_web) {
+      // No-recall direct answer is user-facing → FINAL_MODEL
       const { response, usage } = await answerDirectly({
         message, gateKind: 'general', language, assistantName, orgName,
-        model, apiKey, signal: abortCtrl.signal,
+        model: FINAL_MODEL, apiKey, signal: abortCtrl.signal,
       });
       if (usage) usages.push(usage);
       onEvent?.({ type: 'finish', text: response });
@@ -1441,8 +1456,9 @@ export async function runReactAgentV2({
     // STEP 4 — Reflect (only when evidence sparse + plan asked for stuff)
     if (evidence.memories.length < 2 && plan.sub_queries.length > 0) {
       try {
+        // Reflection on sparse evidence → INTERNAL_MODEL (gap analysis)
         const reflect = await reflectStep({
-          message, plan, evidence, language, model, apiKey, signal: abortCtrl.signal,
+          message, plan, evidence, language, model: INTERNAL_MODEL, apiKey, signal: abortCtrl.signal,
         });
         if (reflect.usage) usages.push(reflect.usage);
         if (reflect.needs_more && reflect.extra_queries.length > 0) {
@@ -1473,10 +1489,10 @@ export async function runReactAgentV2({
       }
     }
 
-    // STEP 5 — Answer
+    // STEP 5 — Answer (runs on FINAL_MODEL — high-quality user-facing synthesis)
     let answer = await answerStep({
       message, history, evidence, plan, language, assistantName, orgName,
-      model, apiKey, signal: abortCtrl.signal, ctx,
+      model: FINAL_MODEL, apiKey, signal: abortCtrl.signal, ctx,
     });
     if (answer.usage) usages.push(answer.usage);
 
@@ -1506,10 +1522,10 @@ export async function runReactAgentV2({
           }
         }
         if (mergedNew > 0) {
-          // Re-run answer with augmented evidence.
+          // Re-run answer with augmented evidence (still FINAL_MODEL).
           const retry = await answerStep({
             message, history, evidence, plan, language, assistantName, orgName,
-            model, apiKey, signal: abortCtrl.signal, ctx,
+            model: FINAL_MODEL, apiKey, signal: abortCtrl.signal, ctx,
           });
           if (retry.usage) usages.push(retry.usage);
           if (retry.confidence >= answer.confidence) {

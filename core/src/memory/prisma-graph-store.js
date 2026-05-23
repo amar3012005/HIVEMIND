@@ -518,24 +518,37 @@ export class PrismaGraphStore {
           const dateAfterWhere = created_after ? `AND m.created_at >= '${new Date(created_after).toISOString()}'` : '';
           const dateBeforeWhere = created_before ? `AND m.created_at <= '${new Date(created_before).toISOString()}'` : '';
 
-          // Use 'simple' lexer instead of 'english' so proper nouns,
-          // filenames, foreign-language terms ("Dachmarke", "Solvis",
-          // "Konfigurator") aren't stemmed to forms that drop the prefix
-          // match. English stemming caused recall to miss
-          // "Document: Dachmarke (1).pdf" because Postgres indexed
-          // "dachmark" while the query "dachmarke:*" no longer prefix-
-          // matched the shorter stem. 'simple' preserves tokens verbatim.
+          // Use 'simple' lexer + index tags alongside content+title.
+          //
+          // Why include tags in the tsvector:
+          //   Filenames live as tags ('filename:Dachmarke (1).pdf'). Without
+          //   tag indexing, querying "Dachmarke (1).pdf" against a memory
+          //   whose title is "Infographic of a Smart Home" (Groq vision
+          //   misread) but which carries the filename tag → 0 hits.
+          //   With tags in tsvector, the tag-string tokenizes naturally
+          //   ('filename', 'dachmarke', '1', 'pdf') and matches the query.
+          //
+          // array_to_string with space separator preserves token boundaries.
           const ftsResults = await this.client.$queryRawUnsafe(`
             SELECT m.id, m.content, m.title, m.tags, m.memory_type, m.project,
                    m.importance_score, m.is_latest, m.created_at, m.updated_at,
                    m.document_date, m.event_dates, m.source_platform AS source, m.visibility,
-                   ts_rank(to_tsvector('simple', COALESCE(m.content, '') || ' ' || COALESCE(m.title, '')),
-                           to_tsquery('simple', $1)) as fts_score
+                   ts_rank(
+                     to_tsvector('simple',
+                       COALESCE(m.content, '') || ' ' ||
+                       COALESCE(m.title, '')   || ' ' ||
+                       COALESCE(array_to_string(m.tags, ' '), '')
+                     ),
+                     to_tsquery('simple', $1)
+                   ) as fts_score
             FROM memories m
             WHERE m.deleted_at IS NULL
               ${scopeWhere} ${projectWhere} ${latestWhere} ${dateAfterWhere} ${dateBeforeWhere}
-              AND to_tsvector('simple', COALESCE(m.content, '') || ' ' || COALESCE(m.title, ''))
-                  @@ to_tsquery('simple', $1)
+              AND to_tsvector('simple',
+                    COALESCE(m.content, '') || ' ' ||
+                    COALESCE(m.title, '')   || ' ' ||
+                    COALESCE(array_to_string(m.tags, ' '), '')
+                  ) @@ to_tsquery('simple', $1)
             ORDER BY fts_score DESC
             LIMIT $2
           `, tsQuery, n_results * 3);

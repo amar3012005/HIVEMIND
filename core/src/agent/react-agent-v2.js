@@ -526,13 +526,29 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
   // recall returned <3 hits → activate the toolkit, run that connector's
   // primary search/list tool to back-fill live data. Slack handled via
   // memory-tap + recall already.
+  // Per-connector read-intent dispatch. Triggers on:
+  //   - User explicitly asks to READ/FETCH/GET from that connector
+  //   - AND we have <3 cached memories OR query has 'latest/recent' cue
+  const LIVE_READ_VERB_RE = /\b(read|fetch|get|pull|show|list)\b/i;
   const READ_CONNECTOR_TRIGGERS = {
     notion: { tool: 'notion-search', argMap: q => ({ query: q }) },
+    slack: {
+      tool: 'slack_read_channel',
+      argMap: (q, mems) => {
+        // Pull channel_id from a cached slack memory if present.
+        const ch = mems
+          .flatMap(m => (m.tags || []).filter(t => typeof t === 'string' && t.startsWith('slack-channel-id:')))
+          .map(t => t.slice('slack-channel-id:'.length))[0];
+        return { channel_id: ch || undefined, limit: 5 };
+      },
+      requires: (args) => !!args.channel_id,
+    },
     gmail:  null, // gmail live recall already wired via persistent-retrieval live tier
   };
   const connectorTriggered = userConnector && READ_CONNECTOR_TRIGGERS[userConnector];
+  const liveReadIntent = LIVE_READ_VERB_RE.test(plan.user_message || '');
   const lowRecall = memoriesById.size < 3;
-  if (connectorTriggered && lowRecall && ctx.prisma && !plan.action_intent) {
+  if (connectorTriggered && (lowRecall || (liveReadIntent && userConnector === 'slack')) && ctx.prisma && !plan.action_intent) {
     try {
       const { buildToolkitForUser } = await import('./toolkit-factory.js');
       const tk = await buildToolkitForUser({
@@ -540,20 +556,21 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
       });
       tk.resetEquippedTools([userConnector]);
       const cfg = connectorTriggered;
-      const arg = cfg.argMap(plan.sub_queries[0] || plan.user_message || '');
-      const resp = await tk.execute(cfg.tool, arg, {
-        userId: ctx.userId, orgId: ctx.orgId, prisma: ctx.prisma,
-        persistentMemoryEngine: ctx.persistentMemoryEngine,
-      });
-      const text = resp.content?.[0]?.text || '';
-      recordTool(cfg.tool, arg, `${text.length}b live`, resp);
-      // Add live items so synthesis can cite them.
-      if (text) {
-        liveItems.push({
-          source: userConnector,
-          title: `live ${userConnector} result`,
-          snippet: text.slice(0, 600),
+      const arg = cfg.argMap(plan.sub_queries[0] || plan.user_message || '', [...memoriesById.values()]);
+      if (!cfg.requires || cfg.requires(arg)) {
+        const resp = await tk.execute(cfg.tool, arg, {
+          userId: ctx.userId, orgId: ctx.orgId, prisma: ctx.prisma,
+          persistentMemoryEngine: ctx.persistentMemoryEngine,
         });
+        const text = resp.content?.[0]?.text || '';
+        recordTool(cfg.tool, arg, `${text.length}b live`, resp);
+        if (text) {
+          liveItems.push({
+            source: userConnector,
+            title: `live ${userConnector} result`,
+            snippet: text.slice(0, 600),
+          });
+        }
       }
     } catch (err) {
       recordTool('connector_live_fallback', { provider: userConnector }, `error: ${err.message}`, null);

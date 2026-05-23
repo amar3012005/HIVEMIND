@@ -73,7 +73,36 @@ async function hop1Memory({ store, query, options, ctx }) {
   const CONNECTOR_KW = ['slack', 'notion', 'gmail', 'github', 'linear', 'jira', 'confluence'];
   const matchedConnector = CONNECTOR_KW.find(k => ql.includes(k));
   const isRecentish = /\b(last|latest|recent|today|yesterday|just|now)\b/.test(ql);
-  const hasValidAt = !!(options.valid_at && !Number.isNaN(new Date(options.valid_at).getTime()));
+  let hasValidAt = !!(options.valid_at && !Number.isNaN(new Date(options.valid_at).getTime()));
+  // Inline date detection — pulls "as of May 13", "before March 2025",
+  // "on 2026-04-10", "in October" out of the query when caller didn't
+  // pass valid_at explicitly. Planner often misses these.
+  if (!hasValidAt && /\b(as of|before|prior to|on|in|by|until)\b/.test(ql)) {
+    const MONTH = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11, january: 0, february: 1, march: 2, april: 3, june: 5, july: 6, august: 7, september: 8, october: 9, november: 10, december: 11 };
+    const now = new Date();
+    const year = now.getUTCFullYear();
+    // ISO-style: 2026-05-13
+    let m = ql.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+    let derivedDate = null;
+    if (m) derivedDate = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], 23, 59, 59));
+    if (!derivedDate) {
+      // "May 13" / "May 13 2026" / "13 May"
+      m = ql.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)\s+(\d{1,2})(?:[,\s]+(\d{4}))?/);
+      if (m && MONTH[m[1]] !== undefined) {
+        derivedDate = new Date(Date.UTC(+(m[3] || year), MONTH[m[1]], +m[2], 23, 59, 59));
+      }
+    }
+    if (!derivedDate) {
+      m = ql.match(/\b(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)(?:[,\s]+(\d{4}))?/);
+      if (m && MONTH[m[2]] !== undefined) {
+        derivedDate = new Date(Date.UTC(+(m[3] || year), MONTH[m[2]], +m[1], 23, 59, 59));
+      }
+    }
+    if (derivedDate && !Number.isNaN(derivedDate.getTime())) {
+      options = { ...options, valid_at: derivedDate.toISOString() };
+      hasValidAt = true;
+    }
+  }
   // Infer tag when (a) recency cue + connector keyword OR (b) caller
   // supplies valid_at + connector keyword (time-travel queries don't
   // always carry the word "last").

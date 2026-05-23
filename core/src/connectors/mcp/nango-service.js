@@ -105,7 +105,11 @@ export async function getConnectionId({ userId, orgId, providerKey }, { db }) {
  * @returns {Promise<string>}
  */
 export async function fetchBearerFromNango(providerKey, connectionId) {
-  const creds = await nangoGet(`/connection/${providerKey}/${connectionId}`);
+  // Nango credentials endpoint: /connection/<id>?provider_config_key=<key>
+  // (NOT /connection/<key>/<id> — that path 404s)
+  const creds = await nangoGet(
+    `/connection/${encodeURIComponent(connectionId)}?provider_config_key=${encodeURIComponent(providerKey)}`,
+  );
   const bearer =
     creds?.credentials?.access_token ||
     creds?.credentials?.apiKey ||

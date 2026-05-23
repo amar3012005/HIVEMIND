@@ -312,15 +312,63 @@ export class SlackAdapter extends BaseProviderAdapter {
     // --- Participant names (use cached _resolved_name or fall back to IDs) ---
     const participantNames = participants.map(p => this._userCache.get(p) || p);
 
+    // --- @mentions: extract <@U…> tokens, resolve to names ---
+    const MENTION_RE = /<@([A-Z0-9]+)(?:\|[^>]+)?>/g;
+    const mentionedIds = new Set();
+    for (const m of meaningful) {
+      let match;
+      while ((match = MENTION_RE.exec(m.text || '')) !== null) {
+        if (match[1] !== userSlackId) mentionedIds.add(match[1]);
+      }
+    }
+    const mentionedNames = Array.from(mentionedIds).map(id => this._userCache.get(id) || id);
+
+    // --- Reactions: aggregate across all messages (Slack returns inline) ---
+    const reactionMap = new Map(); // emoji → count
+    const reactionUserSet = new Set();
+    for (const m of meaningful) {
+      for (const r of (m.reactions || [])) {
+        reactionMap.set(r.name, (reactionMap.get(r.name) || 0) + (r.count || 0));
+        for (const u of (r.users || [])) reactionUserSet.add(u);
+      }
+    }
+    const topReactions = Array.from(reactionMap.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3);
+    const reactionsSummary = topReactions.map(([n, c]) => ({ name: n, count: c }));
+    const hasReactions = reactionsSummary.length > 0;
+    const hasPositiveSignal = topReactions.some(([n]) => /thumbsup|heavy_check_mark|white_check_mark|tada|fire|rocket|raised_hands/.test(n));
+    const hasNegativeSignal = topReactions.some(([n]) => /thumbsdown|x|warning|no_entry|red_circle/.test(n));
+
+    // --- File attachments: per-message files[] from conversations.history ---
+    const filesAttached = [];
+    for (const m of meaningful) {
+      for (const f of (m.files || [])) {
+        if (f.id && f.name) filesAttached.push({ id: f.id, name: f.name, mimetype: f.mimetype || null, url: f.url_private || null });
+      }
+    }
+    const hasFiles = filesAttached.length > 0;
+
+    // --- Reply structure (thread units) ---
+    const replyCount = unit_type === 'thread' ? Math.max(0, messages.length - 1) : 0;
+
     // --- Tags ---
     const tags = [
       'slack',
       `channel:${channel_name}`,
       ...participants.slice(0, 5).map(p => `from:${this._userCache.get(p) || p}`),
+      ...mentionedNames.slice(0, 5).map(n => `mention:${n}`),
+      ...topReactions.slice(0, 3).map(([n]) => `reaction:${n}`),
+      ...filesAttached.slice(0, 3).map(f => `file:${f.name}`),
       hasDecision ? 'decision' : null,
       hasCommitment ? 'commitment' : null,
       hasUrl ? 'has-url' : null,
       sentByUser ? 'sent-by-user' : null,
+      hasReactions ? 'has-reactions' : null,
+      hasPositiveSignal ? 'positive-signal' : null,
+      hasNegativeSignal ? 'negative-signal' : null,
+      hasFiles ? 'has-files' : null,
+      unit_type === 'thread' ? `reply-count:${replyCount}` : null,
     ].filter(Boolean);
 
     return [{
@@ -351,6 +399,17 @@ export class SlackAdapter extends BaseProviderAdapter {
         has_commitment: hasCommitment,
         has_url: hasUrl,
         unit_type,
+        // Phase 2 schema enrichment ─────────────────────────────────
+        mentioned_user_ids: Array.from(mentionedIds),
+        mentioned_user_names: mentionedNames,
+        reactions: reactionsSummary,          // top 3 emoji + count
+        reaction_unique_users: reactionUserSet.size,
+        has_reactions: hasReactions,
+        positive_signal: hasPositiveSignal,
+        negative_signal: hasNegativeSignal,
+        files_attached: filesAttached,        // [{id,name,mimetype,url}]
+        has_files: hasFiles,
+        reply_count: replyCount,
       },
     }];
   }
@@ -429,7 +488,16 @@ export class SlackAdapter extends BaseProviderAdapter {
    * Called during fetch so normalize() can use the cached names synchronously.
    */
   async _resolveParticipants(messages, accessToken) {
-    const userIds = [...new Set(messages.map(m => m.user).filter(Boolean))];
+    const userIds = new Set(messages.map(m => m.user).filter(Boolean));
+    // ALSO resolve <@U...> mention ids so normalize() can emit
+    // mention:<name> tags with friendly names.
+    const MENTION_RE = /<@([A-Z0-9]+)/g;
+    for (const m of messages) {
+      let match;
+      while ((match = MENTION_RE.exec(m.text || '')) !== null) {
+        userIds.add(match[1]);
+      }
+    }
     for (const uid of userIds) {
       await this._resolveUserName(uid, accessToken);
     }

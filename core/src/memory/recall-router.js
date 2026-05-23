@@ -63,12 +63,24 @@ async function hop1Memory({ store, query, options, ctx }) {
     ? { ...(ctx.accessContext || {}), projectIds: [ctx.projectId] }
     : ctx.accessContext;
 
+  // Connector-keyword shortcut. Natural-language queries like "what was
+  // the last slack msg about" tokenize into noise (what/was/the/last/…)
+  // and the high-IDF "slack" term gets swamped. When the query clearly
+  // names a connector AND has a recency cue (last/latest/recent), bias
+  // the recall to tag=<connector> + ordered by created_at desc instead
+  // of pure FTS.
+  const ql = String(query || '').toLowerCase();
+  const CONNECTOR_KW = ['slack', 'notion', 'gmail', 'github', 'linear', 'jira', 'confluence'];
+  const matchedConnector = CONNECTOR_KW.find(k => ql.includes(k));
+  const isRecentish = /\b(last|latest|recent|today|yesterday|just|now)\b/.test(ql);
+  const inferredTags = matchedConnector && isRecentish ? [matchedConnector] : null;
+
   const result = await recallPersistedMemories(store, {
     query_context: query,
     user_id: ctx.userId,
     org_id: ctx.orgId,
     max_memories: Math.min(options.limit || HOP1_DEFAULT_LIMIT, 50),
-    tags: options.tags || undefined,
+    tags: options.tags || inferredTags || undefined,
     source_type: options.source_type,
     access_context: scopedAccessCtx,
     ...(ctx.projectId ? { project_id: ctx.projectId, project_ids: [ctx.projectId] } : {}),

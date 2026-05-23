@@ -500,10 +500,15 @@ async function vectorCandidatesForRecall(store, {
     // Exclude benchmark data from production recall when no specific project is set
     if (!project && mt.includes('longmemeval')) return false;
     // Drop cognition-loop canonical-summary nodes from default recall —
-    // they outscore specific facts because their content is a mash-up
-    // that vectors close to almost any query. Opt back in by passing
-    // tags=['canonical-summary'] explicitly.
-    if (!tags.includes('canonical-summary') && mt.includes('canonical-summary')) return false;
+    // BUT only the generic chat compactions. Knowledge-base / document /
+    // entity-scoped compactions ARE the substantive content (originals
+    // get soft-deleted after drift-compaction), so suppressing them
+    // blinds the agent to ingested PDFs.
+    if (
+      !tags.includes('canonical-summary') &&
+      mt.includes('canonical-summary') &&
+      !mt.some(t => t === 'topic:knowledge-base' || t === 'topic:document' || (typeof t === 'string' && t.startsWith('topic:entity:')))
+    ) return false;
     return true;
   });
 }
@@ -937,13 +942,19 @@ export async function recallPersistedMemories(store, {
     if (!project && memTags.includes('longmemeval')) return false;
     if (!isMemoryInDateRange(memory, effectiveDateRange)) return false;
     if (scope_filter && memory.scope && memory.scope !== scope_filter) return false;
-    // Exclude canonical-summary rows from default recall. These are
-    // cognition-loop compaction nodes ("Canonical: chat (compacted 21)")
-    // that have high cosine to almost any query because their content
-    // is a generic mash-up. They consistently rank above real specific
-    // facts and drown the agent's view. Callers wanting them can pass
-    // tags=['canonical-summary'] explicitly.
-    if (!tags.includes('canonical-summary') && memTags.includes('canonical-summary')) return false;
+    // Exclude canonical-summary rows from default recall — BUT ONLY the
+    // generic chat / conversation compactions. Knowledge-base, document,
+    // and entity-scoped compactions are the substantive content (drift
+    // compaction soft-deletes the originals and stores the merged view
+    // in the canonical), so filtering them blinds the agent to ingested
+    // PDFs and to topic-scoped synthesis. Callers wanting the noisy
+    // chat-style canonicals back can pass tags=['canonical-summary']
+    // explicitly.
+    if (
+      !tags.includes('canonical-summary') &&
+      memTags.includes('canonical-summary') &&
+      !memTags.some(t => t === 'topic:knowledge-base' || t === 'topic:document' || (typeof t === 'string' && t.startsWith('topic:entity:')))
+    ) return false;
     if (source_platforms.length === 0) return true;
     const sourcePlatform = memory.source_metadata?.source_platform || memory.source || null;
     return source_platforms.includes(sourcePlatform);

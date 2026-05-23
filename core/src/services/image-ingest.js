@@ -239,6 +239,7 @@ export async function buildImageMemoryPayload({
   const tags = [
     'image',
     `kind:${classification.kind}`,
+    ...(filename ? [`filename:${filename}`] : []),
     ...(Array.isArray(extraction.entities) ? extraction.entities.slice(0, 8).map(e => `entity:${String(e).slice(0, 40)}`) : []),
   ];
 

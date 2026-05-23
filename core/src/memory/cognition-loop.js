@@ -344,12 +344,14 @@ Rules:
           tag, members, content: summary,
         });
         if (!created) continue;
-        // Supersede granular members with is_latest=false + Derives edge.
+        // Derive (NOT supersede). Granular members stay isLatest=true so
+        // the agent still sees the original chunks alongside the canonical
+        // summary. Pruning was destroying KB recall — user uploads a PDF,
+        // chunks get hidden behind a one-paragraph summary that lost most
+        // of the detail. Now the summary is additive: it augments recall,
+        // doesn't replace.
         for (const src of members) {
           try {
-            await this.prisma.memory.update({
-              where: { id: src.id }, data: { isLatest: false },
-            });
             await this.prisma.relationship.create({
               data: {
                 id: crypto.randomUUID(),
@@ -464,6 +466,23 @@ Rules:
 
   async _writeSummaryMemory({ orgId, userId, project, tag, members, content }) {
     const sourceIds = members.map(m => m.id);
+    // Propagate substantive source tags (filename:, doc-hash:, entity:,
+    // section:, kind:, page:) into the canonical so recall on those tags
+    // still finds the summary even after the agent has compacted them.
+    const PROPAGATE_TAG_RE = /^(filename:|doc-hash:|entity:|section:|kind:|page:|heading:|topic:)/i;
+    const propagatedTags = new Set();
+    for (const m of members) {
+      for (const t of (m.tags || [])) {
+        if (typeof t === 'string' && PROPAGATE_TAG_RE.test(t)) propagatedTags.add(t);
+      }
+    }
+    const summaryTags = [
+      'canonical-summary',
+      `topic:${tag}`,
+      'cognition-loop',
+      'drift-compaction',
+      ...propagatedTags,
+    ];
     const created = await this.prisma.memory.create({
       data: {
         id: crypto.randomUUID(),
@@ -473,7 +492,7 @@ Rules:
         memoryType: 'summary',
         title: `Canonical: ${tag} (compacted ${members.length})`,
         content,
-        tags: ['canonical-summary', `topic:${tag}`, 'cognition-loop', 'drift-compaction'],
+        tags: summaryTags,
         isLatest: true,
         importanceScore: 0.85,
         sourceMetadata: {

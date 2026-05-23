@@ -484,7 +484,16 @@ export function buildDocumentPayloads(parsed, mimeType, filename, context = {}) 
     chunks = chunkText(docText);
   }
   const docTitle = metadata.title || filename || 'Untitled Document';
-  const baseTags = ['knowledge-base', 'document', ...(context.tags || [])];
+  // Always tag with the original filename so recall can find the doc by
+  // exact filename regardless of stemmer / vector strength.
+  // Pattern: `filename:<original-with-extension>`.
+  const filenameTag = filename ? `filename:${filename}` : null;
+  const baseTags = [
+    'knowledge-base',
+    'document',
+    ...(filenameTag ? [filenameTag] : []),
+    ...(context.tags || []),
+  ];
 
   // Document summary memory
   const summary = {

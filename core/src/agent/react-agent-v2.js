@@ -173,8 +173,18 @@ Output STRICT JSON (no prose, no code fence):
 Rules:
   - sub_queries MUST be in ENGLISH even if user wrote in another language.
     Memory is stored cross-lingual; English queries hit best.
-  - One entity per sub_query. "Should I add this to the deck with Dipesh?"
-    → ["Dipesh", "pitch deck pricing"], not ["Dipesh pitch deck"].
+  - **Cast a wide net**. Emit 3-4 sub_queries that vary in scope:
+       1) the BROADEST entity-only query (just "Dipesh", just "Dachmarke")
+       2) the entity + closest noun ("Dipesh pitch deck")
+       3) any related side-topic ("pitch deck slides", "Dipesh next steps")
+       4) optional filename-style query if the user mentioned a doc
+    Narrow phrases like "Dipesh pitch deck decision" miss because they
+    constrain on the rarest token. The broad entity query always recovers
+    the long tail. Better to over-recall (de-duped server-side) than
+    return zero.
+  - When the user mentions a filename (anything with .pdf/.docx/.png/etc),
+    INCLUDE the literal filename AS A SUB_QUERY verbatim — recall has a
+    tag-based exact-match path that needs the literal string.
   - For "what was X before Y" / pronoun anaphora — resolve antecedent
     using the user's literal entity name in sub_queries.
   - Empty sub_queries = direct answer with no recall (greetings,
@@ -233,7 +243,7 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
     const recallResults = await Promise.all(
       plan.sub_queries.map(async (q) => {
         try {
-          const r = await dispatchTool('hivemind_recall', { query: q, mode: 'quick', limit: 5 }, ctx);
+          const r = await dispatchTool('hivemind_recall', { query: q, mode: 'quick', limit: 12 }, ctx);
           const memCount = r?.memories?.length || 0;
           const liveCount = r?.live_count || 0;
           const evCount = r?.evidence_count || 0;
@@ -399,21 +409,30 @@ OUTPUT — STRICT JSON (no prose, no code fence):
 CORE RULES:
 
 1. GROUND every factual claim about the user / their people / projects /
-   decisions / history in the EVIDENCE block OR the LIVE WORKSPACE block.
-   Don't invent. When citing a LIVE WORKSPACE item, reference it naturally
-   (e.g. "your last email from X on <date> said…"); don't paste raw IDs.
-2. If EVIDENCE is empty or doesn't cover the question, say so plainly
-   in the response ("I don't have notes on X yet"). Set confidence low.
-3. NEVER paste a memory's content verbatim as the entire answer. NEVER
+   decisions / history in the EVIDENCE block, LIVE WORKSPACE block, or
+   DOCUMENT SEGMENTS block. Don't invent. When citing a LIVE WORKSPACE
+   item, reference it naturally (e.g. "your last email from X on
+   <date> said…"); don't paste raw IDs.
+2. **PARTIAL coverage = USE IT, don't bail.** If even ONE evidence
+   row touches the user's question, build the answer around it. Quote
+   memory titles inline. Only respond "I don't have notes on X" when
+   the EVIDENCE / LIVE / DOC blocks are TRULY empty for that question.
+   Saying "I don't have notes" while 10 relevant memories are listed
+   above is a hard failure.
+3. **Synthesize across memories.** Multiple rows about the same entity
+   should be combined into one coherent reply, not treated as separate
+   silos. Spot patterns: who's involved, what was decided, what's
+   pending, what changed.
+4. NEVER paste a memory's content verbatim as the entire answer. NEVER
    reply with just a citation line or URL.
-4. NEVER claim a third-party brand mentioned in memories IS us. Use
+5. NEVER claim a third-party brand mentioned in memories IS us. Use
    first-person plural ("we", "our") only when an evidence row
    self-identifies our org ("we are X" / "our company is X").
-5. Write in ${lang}, conversational and fluent. Keep brand names,
+6. Write in ${lang}, conversational and fluent. Keep brand names,
    project codes, file paths, URLs in original form.
-6. Length: 2-5 sentences typical, longer only if user asked for a list
+7. Length: 2-5 sentences typical, longer only if user asked for a list
    or plan. No "Next steps:" / "How would you like to proceed?" boilerplate.
-7. If the user message was a pure save/update/log intent (e.g. "save X",
+8. If the user message was a pure save/update/log intent (e.g. "save X",
    "remember Y"), acknowledge briefly ("Got it — saved.") in ${lang}
    without restating the saved content.`;
 }
@@ -681,7 +700,7 @@ export async function runReactAgentV2({
           onEvent?.({ type: 'reflect', extra_queries: reflect.extra_queries, reason: reflect.reason });
           const extras = await Promise.all(reflect.extra_queries.map(async (q) => {
             try {
-              const r = await dispatchTool('hivemind_recall', { query: q, mode: 'quick', limit: 5 }, ctx);
+              const r = await dispatchTool('hivemind_recall', { query: q, mode: 'quick', limit: 12 }, ctx);
               steps.push({ tool: 'hivemind_recall', args: { query: q }, result_summary: `${r?.memories?.length || 0} memories` });
               onEvent?.({ type: 'tool_call', name: 'hivemind_recall', arguments: JSON.stringify({ query: q }) });
               onEvent?.({ type: 'tool_result', name: 'hivemind_recall', summary: `${r?.memories?.length || 0} memories` });

@@ -150,12 +150,14 @@ export const TOOL_SCHEMAS = [
     type: 'function',
     function: {
       name: 'hivemind_at',
-      description: 'Bi-temporal snapshot: what did we know about X on date Y?',
+      description:
+        'Bi-temporal snapshot: what did we know about X on date Y? Filters to memories whose document_date ≤ valid_at AND were already ingested by then.\n\nFor connector-scoped time-travel pass tags. Examples:\n  • Slack: tags=["slack"] (+ optional channel:NAME, from:USER)\n  • Notion: tags=["notion"] (+ optional page:NAME)\n  • Gmail: tags=["gmail"] (+ optional from:EMAIL, thread:ID)',
       parameters: {
         type: 'object',
         properties: {
           query: { type: 'string' },
           valid_at: { type: 'string', description: 'ISO timestamp.' },
+          tags: { type: 'array', items: { type: 'string' }, description: 'Optional tag filter (connector + marker tags).' },
         },
         required: ['query', 'valid_at'],
       },
@@ -165,13 +167,15 @@ export const TOOL_SCHEMAS = [
     type: 'function',
     function: {
       name: 'hivemind_diff',
-      description: 'What changed between two dates for a topic.',
+      description:
+        'What changed between two dates for a topic. Returns memory snapshot at "from" + at "to".\n\nFor connector-scoped diff pass tags (e.g. tags=["slack","channel:product"]).',
       parameters: {
         type: 'object',
         properties: {
           query: { type: 'string' },
           from: { type: 'string' },
           to: { type: 'string' },
+          tags: { type: 'array', items: { type: 'string' } },
         },
         required: ['query', 'from', 'to'],
       },
@@ -181,12 +185,15 @@ export const TOOL_SCHEMAS = [
     type: 'function',
     function: {
       name: 'hivemind_timeline',
-      description: 'Chronological list of memories matching a query.',
+      description:
+        'Chronological list of memories matching a query, ordered by document_date desc.\n\nFor connector-scoped timeline pass tags. Useful for "history of decisions in #X" or "all msgs from @user".',
       parameters: {
         type: 'object',
         properties: {
           query: { type: 'string' },
           limit: { type: 'integer', default: 20 },
+          tags: { type: 'array', items: { type: 'string' } },
+          valid_at: { type: 'string', description: 'Optional upper bound for time-travel.' },
         },
         required: ['query'],
       },
@@ -529,10 +536,19 @@ const TOOL_HANDLERS = {
   },
 
   async hivemind_at(args, ctx) {
-    const valid_at = new Date(args.valid_at);
+    // Accept both `valid_at` (canonical) and `valid_time` / `transaction_time`
+    // (planner's naming). memory_query falls back to query.
+    const rawValidAt = args.valid_at || args.valid_time || args.transaction_time;
+    const valid_at = new Date(rawValidAt);
     if (Number.isNaN(valid_at.getTime())) throw new Error('invalid valid_at date');
+    if (args.memory_query && !args.query) args.query = args.memory_query;
     return TOOL_HANDLERS.hivemind_recall(
-      { query: args.query, valid_at: valid_at.toISOString(), limit: 15 },
+      {
+        query: args.query,
+        valid_at: valid_at.toISOString(),
+        tags: Array.isArray(args.tags) && args.tags.length > 0 ? args.tags : undefined,
+        limit: 15,
+      },
       ctx
     );
   },
@@ -540,15 +556,27 @@ const TOOL_HANDLERS = {
   async hivemind_diff(args, ctx) {
     const from = new Date(args.from);
     const to = new Date(args.to);
+    const tags = Array.isArray(args.tags) && args.tags.length > 0 ? args.tags : undefined;
     const [a, b] = await Promise.all([
-      TOOL_HANDLERS.hivemind_recall({ query: args.query, valid_at: from.toISOString(), limit: 10 }, ctx),
-      TOOL_HANDLERS.hivemind_recall({ query: args.query, valid_at: to.toISOString(), limit: 10 }, ctx),
+      TOOL_HANDLERS.hivemind_recall({ query: args.query, valid_at: from.toISOString(), tags, limit: 10 }, ctx),
+      TOOL_HANDLERS.hivemind_recall({ query: args.query, valid_at: to.toISOString(), tags, limit: 10 }, ctx),
     ]);
     return { from: a, to: b };
   },
 
   async hivemind_timeline(args, ctx) {
-    return TOOL_HANDLERS.hivemind_recall({ query: args.query, mode: 'panorama', limit: args.limit || 20 }, ctx);
+    return TOOL_HANDLERS.hivemind_recall(
+      {
+        query: args.query,
+        mode: 'panorama',
+        limit: args.limit || 20,
+        tags: Array.isArray(args.tags) && args.tags.length > 0 ? args.tags : undefined,
+        ...(args.valid_at && !Number.isNaN(new Date(args.valid_at).getTime())
+          ? { valid_at: new Date(args.valid_at).toISOString() }
+          : {}),
+      },
+      ctx
+    );
   },
 
   async hivemind_query_with_ai(args, ctx) {

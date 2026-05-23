@@ -73,8 +73,22 @@ async function hop1Memory({ store, query, options, ctx }) {
   const CONNECTOR_KW = ['slack', 'notion', 'gmail', 'github', 'linear', 'jira', 'confluence'];
   const matchedConnector = CONNECTOR_KW.find(k => ql.includes(k));
   const isRecentish = /\b(last|latest|recent|today|yesterday|just|now)\b/.test(ql);
-  const inferredTags = matchedConnector && isRecentish ? [matchedConnector] : null;
+  const hasValidAt = !!(options.valid_at && !Number.isNaN(new Date(options.valid_at).getTime()));
+  // Infer tag when (a) recency cue + connector keyword OR (b) caller
+  // supplies valid_at + connector keyword (time-travel queries don't
+  // always carry the word "last").
+  const inferredTags = matchedConnector && (isRecentish || hasValidAt) ? [matchedConnector] : null;
 
+  // Bi-temporal `valid_at` filter: snap recall to a past moment so the
+  // agent sees only memories whose document_date <= valid_at AND that
+  // were already known by then (created_at <= valid_at). recallPersisted
+  // honors a date_range param keyed on created_at; we also rely on the
+  // tag-anchored override below to apply document_date filter for the
+  // connector path. Anything else uses created_at as the bi-temporal
+  // baseline.
+  const validAtDate = options.valid_at && !Number.isNaN(new Date(options.valid_at).getTime())
+    ? new Date(options.valid_at)
+    : null;
   const recallArgs = {
     query_context: query,
     user_id: ctx.userId,
@@ -84,9 +98,7 @@ async function hop1Memory({ store, query, options, ctx }) {
     source_type: options.source_type,
     access_context: scopedAccessCtx,
     ...(ctx.projectId ? { project_id: ctx.projectId, project_ids: [ctx.projectId] } : {}),
-    ...(options.valid_at && !Number.isNaN(new Date(options.valid_at).getTime())
-      ? { bitemporal: { valid_at: new Date(options.valid_at) } }
-      : {}),
+    ...(validAtDate ? { date_range: { end: validAtDate.toISOString() } } : {}),
   };
   const result = await recallPersistedMemories(store, recallArgs);
 
@@ -100,7 +112,11 @@ async function hop1Memory({ store, query, options, ctx }) {
   const effectiveTags = options.tags || inferredTags;
   let mems = result.memories || [];
   const recencyOverride = isRecentish && inferredTags && store.client?.memory;
-  if ((recencyOverride || (mems.length === 0 && Array.isArray(effectiveTags) && effectiveTags.length > 0)) && store.client?.memory) {
+  // Time-travel override: when valid_at is set and we have tags (caller-
+  // supplied or inferred), also drop into the direct-fetch path so the
+  // document_date <= valid_at filter applies AND we order by date.
+  const timeTravelOverride = validAtDate && Array.isArray(effectiveTags) && effectiveTags.length > 0 && store.client?.memory;
+  if ((recencyOverride || timeTravelOverride || (mems.length === 0 && Array.isArray(effectiveTags) && effectiveTags.length > 0)) && store.client?.memory) {
     try {
       const orFilters = [];
       if (ctx.orgId) orFilters.push({ orgId: ctx.orgId });
@@ -108,9 +124,19 @@ async function hop1Memory({ store, query, options, ctx }) {
       const tagOnly = await store.client.memory.findMany({
         where: {
           deletedAt: null,
-          isLatest: true,
+          // valid_at queries need superseded versions too — show what was
+          // current at that past moment (isLatest at valid_at, not now).
+          ...(validAtDate ? {} : { isLatest: true }),
           tags: { hasSome: effectiveTags },
           ...(orFilters.length === 1 ? orFilters[0] : orFilters.length > 1 ? { OR: orFilters } : {}),
+          // Bi-temporal: only show memories already known + already
+          // emitted (document_date) by valid_at.
+          ...(validAtDate ? {
+            AND: [
+              { createdAt: { lte: validAtDate } },
+              { OR: [{ documentDate: null }, { documentDate: { lte: validAtDate } }] },
+            ],
+          } : {}),
         },
         orderBy: [{ documentDate: 'desc' }, { createdAt: 'desc' }],
         take: Math.min((options.limit || HOP1_DEFAULT_LIMIT) * 4, 50),

@@ -31,7 +31,67 @@ function toChunkObjects(chunks, pageNumber = 1) {
   });
 }
 
+// Structure-aware split. When the extractor (Docling or any structural
+// parser) returns pre-computed chunks with headings, use those as the
+// primary unit — the chunker then only enforces a token cap per chunk,
+// preserving heading hierarchy. Yields hierarchical retrieval wins
+// without re-implementing structural detection.
+function chunkFromStructuralChunks(structuralChunks) {
+  const out = [];
+  let idx = 0;
+  for (const sc of structuralChunks) {
+    const content = String(sc.text || sc.content || '').trim();
+    if (!content) continue;
+    const tokens = tokenizeApprox(content);
+    if (tokens.length === 0) continue;
+    // If single section fits inside the embedder ceiling (≈ 512 tokens),
+    // keep it whole — preserves heading context.
+    const STRUCT_CAP = 512;
+    if (tokens.length <= STRUCT_CAP) {
+      out.push({
+        chunk_index: idx++,
+        content,
+        token_count: tokens.length,
+        metadata: {
+          chunk_strategy: 'docling-hybrid',
+          page_number: sc.page || sc.page_number || 1,
+          headings: Array.isArray(sc.headings) ? sc.headings : [],
+          structural_unit: true,
+        },
+      });
+      continue;
+    }
+    // Section too long — fall back to sliding-window WITHIN this section,
+    // keep the heading attached to each sub-chunk.
+    const subChunks = chunkTextDocument({ content, title: (sc.headings || []).join(' / ') });
+    for (const sub of subChunks) {
+      out.push({
+        chunk_index: idx++,
+        content: sub.content,
+        token_count: sub.token_count,
+        metadata: {
+          ...(sub.metadata || {}),
+          chunk_strategy: 'docling-hybrid-sliced',
+          page_number: sc.page || sc.page_number || 1,
+          headings: Array.isArray(sc.headings) ? sc.headings : [],
+          structural_unit: false,
+        },
+      });
+    }
+  }
+  return out;
+}
+
 function chunkBySource(sourceType, extracted) {
+  // Structural chunks short-circuit: when extractor surfaces Docling hybrid
+  // output (or any heading-aware splitter) we use those directly. This
+  // bypasses sliding-window for the common-case "well-structured doc" and
+  // dramatically improves recall@5 per the 2026 hierarchical-chunking
+  // benchmark (84-89% vs 71-74% for flat fixed-size).
+  if (Array.isArray(extracted?.structural_chunks) && extracted.structural_chunks.length > 0) {
+    return chunkFromStructuralChunks(extracted.structural_chunks);
+  }
+
   if (sourceType === 'conversation') {
     const chunks = splitConversationTurns(extracted).map((chunk, index) => ({
       chunk_index: index,

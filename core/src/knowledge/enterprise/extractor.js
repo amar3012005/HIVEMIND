@@ -11,6 +11,11 @@ import { getSchema } from './schemas/index.js';
 import { chatCompletion, getDefaultModel } from './litellm-client.js';
 
 const MAX_DOC_CHARS = 30_000;
+// Multi-pass extraction kicks in above this length. Each window gets its own
+// LLM call; results merged by union for arrays and last-non-null for scalars.
+const MULTIPASS_WINDOW_CHARS = 28_000;
+const MULTIPASS_OVERLAP_CHARS = 2_000;
+const MULTIPASS_MAX_WINDOWS = 8;
 
 /**
  * Build the field description string for a single schema field.
@@ -39,7 +44,11 @@ function buildPrompt(schema, text) {
     .map(name => describeField(name, schema.fields[name]))
     .join('\n');
 
-  const truncated = text.slice(0, MAX_DOC_CHARS);
+  // Caller guarantees text is already windowed when len > MAX_DOC_CHARS
+  // (see multipass branch in extractSchema). If a caller passes oversized
+  // text directly we still cap as a last-resort safety so we never blow
+  // the LLM context window.
+  const safe = text.length > MAX_DOC_CHARS ? text.slice(0, MAX_DOC_CHARS) : text;
 
   return `You are a document data extractor. Extract structured information from the following ${schema.label} document.
 
@@ -54,7 +63,7 @@ If you find other important structured data not listed above, include it in an "
 
 ## Document Content:
 ---
-${truncated}
+${safe}
 ---
 
 Respond with a JSON object containing the extracted fields. For array fields, use arrays of objects. For missing required fields, use null. For dates, use ISO 8601 format (YYYY-MM-DD).`;
@@ -234,20 +243,73 @@ export async function extractSchema(text, documentType, options = {}) {
   const model_used = options.model || getDefaultModel();
 
   try {
-    const prompt = buildPrompt(schema, text);
+    // Multi-pass when document overflows the single-call window. Without
+    // this, contracts/SOPs >30k chars silently lose everything past page ~10.
+    const totalLen = String(text || '').length;
+    let raw;
+    if (totalLen > MAX_DOC_CHARS) {
+      const windows = [];
+      let start = 0;
+      while (start < totalLen && windows.length < MULTIPASS_MAX_WINDOWS) {
+        windows.push(text.slice(start, start + MULTIPASS_WINDOW_CHARS));
+        start += MULTIPASS_WINDOW_CHARS - MULTIPASS_OVERLAP_CHARS;
+      }
+      console.log(`[enterprise-extract] multipass type=${documentType} len=${totalLen} windows=${windows.length}`);
 
-    const messages = [
-      { role: 'system', content: 'You are a precise document data extractor. Output valid JSON only.' },
-      { role: 'user', content: prompt },
-    ];
+      const perWindow = await Promise.all(windows.map((win) =>
+        chatCompletion({
+          messages: [
+            { role: 'system', content: 'You are a precise document data extractor. Output valid JSON only.' },
+            { role: 'user', content: buildPrompt(schema, win) },
+          ],
+          model: options.model,
+          temperature: 0.1,
+          max_tokens: 4096,
+          json_mode: true,
+        }).catch((err) => {
+          console.warn(`[enterprise-extract] window failed: ${err.message}`);
+          return {};
+        })
+      ));
 
-    const raw = await chatCompletion({
-      messages,
-      model: options.model,
-      temperature: 0.1,
-      max_tokens: 4096,
-      json_mode: true,
-    });
+      // Merge: scalar fields = last non-null value; array fields = union
+      // (deduplicated by JSON-shape signature). Preserves coverage across
+      // the full document while not exploding duplicate clauses/line items.
+      raw = perWindow.reduce((acc, w) => {
+        for (const [k, v] of Object.entries(w || {})) {
+          if (Array.isArray(v)) {
+            const prior = Array.isArray(acc[k]) ? acc[k] : [];
+            const seen = new Set(prior.map((p) => JSON.stringify(p)));
+            for (const item of v) {
+              const sig = JSON.stringify(item);
+              if (!seen.has(sig)) {
+                prior.push(item);
+                seen.add(sig);
+              }
+            }
+            acc[k] = prior;
+          } else if (v !== null && v !== undefined) {
+            acc[k] = v;
+          } else if (!(k in acc)) {
+            acc[k] = v;
+          }
+        }
+        return acc;
+      }, {});
+    } else {
+      const prompt = buildPrompt(schema, text);
+      const messages = [
+        { role: 'system', content: 'You are a precise document data extractor. Output valid JSON only.' },
+        { role: 'user', content: prompt },
+      ];
+      raw = await chatCompletion({
+        messages,
+        model: options.model,
+        temperature: 0.1,
+        max_tokens: 4096,
+        json_mode: true,
+      });
+    }
 
     const { fields, missing_required } = validateFields(raw, schema);
     const summary = buildSummary(documentType, fields);

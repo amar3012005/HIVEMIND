@@ -820,8 +820,12 @@ services:
             - coolify.environmentName=production
             - coolify.pullRequestId=0
         networks:
-            hivemind-network: null
-            s0k0s0k40wo44w4w8gcs8ow0: null
+            hivemind-network:
+                aliases:
+                    - redis
+            s0k0s0k40wo44w4w8gcs8ow0:
+                aliases:
+                    - redis
         environment:
             COOLIFY_BRANCH: '"main"'
             COOLIFY_RESOURCE_UUID: s0k0s0k40wo44w4w8gcs8ow0

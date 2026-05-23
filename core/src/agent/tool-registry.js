@@ -522,6 +522,27 @@ const TOOL_HANDLERS = {
   },
 
   async hivemind_traverse_graph(args, ctx) {
+    // PrismaGraphStore exposes getRelatedMemories(id, opts) — wraps the
+    // Relationship table walk. Older tool wrapper called a non-existent
+    // traverseGraph() and silently returned { error: ... }. Fixed.
+    if (!ctx.persistentMemoryStore?.getRelatedMemories) {
+      return { error: 'graph traversal unavailable', _failure_mode: 'UNKNOWN_TOOL' };
+    }
+    const related = await ctx.persistentMemoryStore.getRelatedMemories(args.memory_id, {
+      maxDepth: args.depth || 2,
+      user_id: ctx.userId,
+      org_id: ctx.orgId,
+    });
+    return {
+      memory_id: args.memory_id,
+      count: Array.isArray(related) ? related.length : 0,
+      memories: (related || []).slice(0, 30),
+      related: (related || []).slice(0, 30),
+    };
+  },
+
+  async _hivemind_traverse_graph_OLD_REMOVE(args, ctx) {
+    // legacy — keep for one release in case something still calls it.
     if (!ctx.persistentMemoryStore?.traverseGraph) {
       return { error: 'graph traversal unavailable' };
     }

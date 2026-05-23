@@ -685,7 +685,9 @@ function _isPronounPlaceholder(s) {
 // imperative phrasing.
 
 const WRITE_VERB_RE = /\b(post|send|draft|schedule|message|dm|notify|reply|share)\b/i;
-const SLACK_HINT_RE = /\b(slack|channel|#[a-z0-9_-]+)\b/i;
+// \b doesn't match before '#' (# is not a word char), so the #channel
+// pattern needs whitespace/start-of-string anchor instead.
+const SLACK_HINT_RE = /(?:\b(?:slack|channel)\b|(?:^|\s)#[a-z0-9_-]+)/i;
 const NOTION_HINT_RE = /\bnotion\b/i;
 const GMAIL_HINT_RE = /\b(gmail|email)\b/i;
 

@@ -20,7 +20,7 @@ export const TOOL_SCHEMAS = [
     function: {
       name: 'hivemind_recall',
       description:
-        'Search persistent memory. Use BEFORE answering anything that touches the user\'s prior context, preferences, projects, or history. mode=quick (90% of time, fast vector lookup), panorama (temporal ordering for "what did I do last week"), insight (LLM-synthesized prose for summaries).',
+        `Unified retrieval — the ONLY recall entry point. Memory-first sequential pipeline; you do NOT pick storage tiers, the router does.\n\nReturns three lanes:\n  memories[]  — canonical facts (chat, decisions, people, projects, KB summaries)\n  evidence[]  — full document segments when the query anchors a doc (filename tag, doc-hash, or sparse memory match)\n  live[]      — fresh Gmail / Drive / Calendar items when memory layer hints at workspace data\nPlus trace{} explaining what fired.\n\nHow to call:\n  • query: pass user's literal wording — include filenames verbatim ("Dachmarke (1).pdf") when mentioned\n  • Issue 2-4 broad sub-queries varying in scope (entity-only, entity+topic, side-topic, filename) — the router de-dupes across them\n  • limit: 12 default, 25 for "summarize everything about X"\n\nHow to read:\n  • If memories[] OR evidence[] OR live[] has ANY relevant row, USE IT — don't say "I don't have notes"\n  • Cite memory titles inline, reference evidence as "[Doc Title — p.N]"\n  • Synthesize across rows, don't list silos\n  • trace.tiers_fired tells you which tiers contributed`,
       parameters: {
         type: 'object',
         properties: {
@@ -324,113 +324,39 @@ export const TOOL_SCHEMAS = [
 const TOOL_HANDLERS = {
   async hivemind_recall(args, ctx) {
     if (!ctx.persistentMemoryStore) throw new Error('memory store unavailable');
-    const valid_at = args.valid_at ? new Date(args.valid_at) : null;
-    // When the request is scoped to a project (ctx.projectId), narrow the
-    // access_context so recall only sees memories tagged with that project.
-    const scopedAccessCtx = ctx.projectId
-      ? { ...(ctx.accessContext || {}), projectIds: [ctx.projectId] }
-      : ctx.accessContext;
-    const result = await recallPersistedMemories(ctx.persistentMemoryStore, {
-      query_context: args.query,
-      user_id: ctx.userId,
-      org_id: ctx.orgId,
-      max_memories: Math.min(args.limit || 10, 50),
-      tags: args.tags || undefined,
-      source_type: args.source_type,
-      access_context: scopedAccessCtx,
-      ...(ctx.projectId ? { project_id: ctx.projectId, project_ids: [ctx.projectId] } : {}),
-      ...(valid_at && !Number.isNaN(valid_at.getTime()) ? { bitemporal: { valid_at } } : {}),
+
+    // Single entry point — RecallRouter owns tier orchestration.
+    // Memory-first, event-driven, no regex classifier. Memory layer's tags
+    // are the routing oracle for evidence + live workspace lookups.
+    const { RecallRouter } = await import('../memory/recall-router.js');
+    const router = new RecallRouter({
+      persistentMemoryStore: ctx.persistentMemoryStore,
+      evidenceRetrieval:     ctx.evidenceRetrieval,
+      prisma:                ctx.prisma,
     });
-    const mems = (result.memories || []).map((m) => ({
-      id: m.id,
-      title: m.title,
-      content: (m.content || '').slice(0, 400),
-      memory_type: m.memory_type,
-      tags: m.tags,
-      score: m.score,
-      created_at: m.created_at,
-      valid_at: m.valid_at || m.document_date,
-    }));
 
-    // ── Live Workspace fan-out ────────────────────────────────────────────
-    // Persisted recall misses fresh items not yet ingested (recent emails,
-    // calendar invites, new Drive docs). Route via LiveQueryRouter when the
-    // query intent points at Gmail / Drive / Calendar so the agent gets
-    // ground-truth fresh results in the same tool call.
-    let live = [];
-    try {
-      if (ctx.prisma && args.include_live !== false) {
-        const { LiveQueryRouter } = await import('../connectors/providers/google/live-query-router.js');
-        const { decryptToken, refreshOAuthToken } = await import('../connectors/framework/connector-store.js');
-        const router = new LiveQueryRouter({
-          prisma: ctx.prisma,
-          decryptToken,
-          refreshOAuthToken: refreshOAuthToken || null,
-        });
-        const c = router.classify(args.query, mems);
-        const services = args.include_live === true
-          ? (c.services.length > 0 ? c.services : ['gmail', 'google_drive', 'google_calendar'])
-          : (c.needsLive ? c.services : null);
-        if (services && services.length > 0) {
-          const fetched = await router.fetch(ctx.userId, args.query, services);
-          live = (fetched || []).slice(0, 10).map((item) => ({
-            source: item._source,
-            tool: item._tool,
-            title: item.subject || item.name || item.summary || '(untitled)',
-            snippet: typeof item.text === 'string'
-              ? item.text.slice(0, 600)
-              : (item.snippet || item.summary || '').slice(0, 600),
-            from: item.from || null,
-            to: item.to || null,
-            date: item.date || item.internalDate || item.start || null,
-            url: item.url || item.webViewLink || null,
-            id: item.id || null,
-          }));
-        }
-      }
-    } catch (liveErr) {
-      // Live failure must not break memory recall — return memories alone.
-      live = [];
-    }
-
-    // ── Evidence fallback — non-promoted KB segments ─────────────────────
-    // Large PDFs only promote 5-20 segments to memories. The remaining
-    // segments live in knowledge_segment + Qdrant 'hivemind_evidence' and
-    // are searchable via EvidenceRetrievalService. Pull them in when the
-    // memory match is sparse so a 51-segment pitch deck doesn't lose 32
-    // segments to silent invisibility.
-    let evidence = [];
-    try {
-      if (ctx.evidenceRetrieval && mems.length < 3) {
-        const evResults = await ctx.evidenceRetrieval.retrieveEvidence({
-          query: args.query,
-          userId: ctx.userId,
-          orgId: ctx.orgId,
-          limit: 6,
-        });
-        evidence = (evResults || []).map((e) => ({
-          segment_id: e.segmentId,
-          document_id: e.documentId,
-          document_title: e.document?.title || null,
-          content: (e.content || '').slice(0, 600),
-          snippet: e.snippet,
-          score: typeof e.score === 'number' ? Number(e.score.toFixed(3)) : null,
-          page: e.metadata?.startPage || null,
-        }));
-      }
-    } catch (evErr) {
-      // Evidence failure must not break primary recall.
-      evidence = [];
-    }
+    const result = await router.recall(args.query, {
+      limit:          args.limit,
+      tags:           args.tags,
+      source_type:    args.source_type,
+      valid_at:       args.valid_at,
+      include_live:   args.include_live,
+    }, {
+      userId:        ctx.userId,
+      orgId:         ctx.orgId,
+      projectId:     ctx.projectId,
+      accessContext: ctx.accessContext,
+    });
 
     return {
-      mode: args.mode || 'quick',
-      count: mems.length,
-      memories: mems,
-      live_count: live.length,
-      live,
-      evidence_count: evidence.length,
-      evidence,
+      mode:           args.mode || 'quick',
+      count:          result.memories.length,
+      memories:       result.memories,
+      live_count:     result.live.length,
+      live:           result.live,
+      evidence_count: result.evidence.length,
+      evidence:       result.evidence,
+      trace:          result.trace,
     };
   },
 

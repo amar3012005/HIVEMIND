@@ -24,11 +24,33 @@ export class EvidenceRetrievalService {
    * @param {string} params.documentId - optional: scope to specific document
    * @returns {Promise<Array>} evidence segments with snippets
    */
-  async retrieveEvidence({ query, userId, orgId, limit = 10, documentId = null }) {
+  async retrieveEvidence({
+    query, userId, orgId, limit = 10,
+    documentId = null,        // legacy single-doc filter (kept for backwards compat)
+    documentIds = null,       // NEW: multi-doc filter — used by RecallRouter for tag-anchored evidence
+    scoreThreshold = null,    // override default 0.5; lower for doc-filtered search where we want most chunks
+  }) {
     const collectionName = process.env.EVIDENCE_QDRANT_COLLECTION || 'hivemind_evidence';
+    const docIdSet = Array.isArray(documentIds) && documentIds.length
+      ? [...new Set(documentIds.filter(Boolean))]
+      : (documentId ? [documentId] : null);
+
+    // When a doc is selected, lower threshold so we actually return its
+    // segments (Qdrant cosine on filename-style queries can score below 0.5).
+    const effectiveThreshold = scoreThreshold != null
+      ? scoreThreshold
+      : (docIdSet ? 0.2 : 0.5);
 
     try {
-      // Step 1: Vector search in evidence collection
+      // Step 1: Vector search in evidence collection.
+      // Multi-doc filter uses Qdrant's `match.any` array, single uses
+      // `match.value`. Falls back to no doc filter when docIdSet null.
+      const docFilter = (() => {
+        if (!docIdSet) return [];
+        if (docIdSet.length === 1) return [{ key: 'document_id', match: { value: docIdSet[0] } }];
+        return [{ key: 'document_id', match: { any: docIdSet } }];
+      })();
+
       const vectorResults = await this.qdrantClient.searchMemories({
         collectionName,
         query,
@@ -36,11 +58,11 @@ export class EvidenceRetrievalService {
           must: [
             { key: 'user_id', match: { value: userId } },
             { key: 'org_id', match: { value: orgId } },
-            ...(documentId ? [{ key: 'document_id', match: { value: documentId } }] : [])
+            ...docFilter,
           ]
         },
         limit: limit * 2, // Over-fetch for reranking
-        scoreThreshold: 0.5
+        scoreThreshold: effectiveThreshold,
       });
 
       // Step 2: Hydrate segments from DB

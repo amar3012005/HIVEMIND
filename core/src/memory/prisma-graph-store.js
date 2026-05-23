@@ -501,11 +501,13 @@ export class PrismaGraphStore {
     // Only run outside transactions — $queryRawUnsafe corrupts Prisma interactive transactions
     if (query && this.client.$queryRawUnsafe && !this.inTransaction) {
       try {
-        // Sanitize: tsquery rejects punctuation, special chars, leading digits-only.
-        // Strip everything except a-z0-9, lowercase, drop tokens <2 chars.
-        const tsQuery = query.trim().split(/\s+/)
-          .map(w => w.toLowerCase().replace(/[^a-z0-9]/g, ''))
-          .filter(w => w.length > 1)
+        // Sanitize: tsquery rejects punctuation, special chars, leading
+        // digits-only. Split on whitespace AND punctuation (so "Dachmarke
+        // (1).pdf" → ["Dachmarke", "1", "pdf"], not ["Dachmarke", "1pdf"]),
+        // lowercase, drop tokens <2 chars + pure-numeric tokens.
+        const tsQuery = query.trim().toLowerCase()
+          .split(/[^a-z0-9]+/)
+          .filter(w => w.length > 1 && !/^\d+$/.test(w))
           .map(w => w + ':*').join(' & ');
         if (tsQuery) {
           const scopeWhere = scope === 'personal'
@@ -516,17 +518,24 @@ export class PrismaGraphStore {
           const dateAfterWhere = created_after ? `AND m.created_at >= '${new Date(created_after).toISOString()}'` : '';
           const dateBeforeWhere = created_before ? `AND m.created_at <= '${new Date(created_before).toISOString()}'` : '';
 
+          // Use 'simple' lexer instead of 'english' so proper nouns,
+          // filenames, foreign-language terms ("Dachmarke", "Solvis",
+          // "Konfigurator") aren't stemmed to forms that drop the prefix
+          // match. English stemming caused recall to miss
+          // "Document: Dachmarke (1).pdf" because Postgres indexed
+          // "dachmark" while the query "dachmarke:*" no longer prefix-
+          // matched the shorter stem. 'simple' preserves tokens verbatim.
           const ftsResults = await this.client.$queryRawUnsafe(`
             SELECT m.id, m.content, m.title, m.tags, m.memory_type, m.project,
                    m.importance_score, m.is_latest, m.created_at, m.updated_at,
                    m.document_date, m.event_dates, m.source_platform AS source, m.visibility,
-                   ts_rank(to_tsvector('english', COALESCE(m.content, '') || ' ' || COALESCE(m.title, '')),
-                           to_tsquery('english', $1)) as fts_score
+                   ts_rank(to_tsvector('simple', COALESCE(m.content, '') || ' ' || COALESCE(m.title, '')),
+                           to_tsquery('simple', $1)) as fts_score
             FROM memories m
             WHERE m.deleted_at IS NULL
               ${scopeWhere} ${projectWhere} ${latestWhere} ${dateAfterWhere} ${dateBeforeWhere}
-              AND to_tsvector('english', COALESCE(m.content, '') || ' ' || COALESCE(m.title, ''))
-                  @@ to_tsquery('english', $1)
+              AND to_tsvector('simple', COALESCE(m.content, '') || ' ' || COALESCE(m.title, ''))
+                  @@ to_tsquery('simple', $1)
             ORDER BY fts_score DESC
             LIMIT $2
           `, tsQuery, n_results * 3);

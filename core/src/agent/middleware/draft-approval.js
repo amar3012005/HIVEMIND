@@ -13,18 +13,18 @@
  *      approval_token=<draft_id> bypass the middleware (skip flag).
  */
 
-const WRITE_TOOL_PROVIDER_REGEX = {
-  // Heuristic: derive provider from tool name prefix.
-  slack_: 'slack',
-  notion_: 'notion',
-  gmail_: 'gmail',
-  github_: 'github',
-  linear_: 'linear',
-};
+// Tool name conventions diverge per MCP provider:
+//   slack  → snake_case  (slack_send_message)
+//   notion → kebab-case  (notion-create-pages)
+//   github → snake_case  (github_create_issue)
+//   linear → snake_case  (linear_create_issue)
+//   gmail  → snake_case  (gmail_send_message)
+// Match BOTH separators so provider always resolves regardless of vendor.
+const PROVIDER_PREFIXES = ['slack', 'notion', 'gmail', 'github', 'linear'];
 
 function inferProvider(toolName) {
-  for (const [prefix, prov] of Object.entries(WRITE_TOOL_PROVIDER_REGEX)) {
-    if (toolName.startsWith(prefix)) return prov;
+  for (const prov of PROVIDER_PREFIXES) {
+    if (toolName.startsWith(prov + '_') || toolName.startsWith(prov + '-')) return prov;
   }
   return null;
 }
@@ -37,6 +37,17 @@ function buildPreview(toolName, args) {
   if (toolName === 'slack_schedule_message') {
     const at = args.post_at ? new Date(args.post_at * 1000).toISOString() : '?';
     return `Schedule Slack msg to ${args.channel_id || '?'} at ${at}: ${(args.message || '').slice(0, 140)}`;
+  }
+  if (toolName === 'notion-create-pages') {
+    const pages = Array.isArray(args.pages) ? args.pages : (args.page ? [args.page] : []);
+    const titles = pages.map(p => p?.properties?.title || p?.title || '(untitled)').slice(0, 3);
+    return `Create Notion page${pages.length > 1 ? 's' : ''}: ${titles.join(' / ')}`;
+  }
+  if (toolName === 'notion-update-page') {
+    return `Update Notion page ${args.page_id || '?'}`;
+  }
+  if (toolName === 'notion-create-comment') {
+    return `Comment on Notion ${args.page_id || args.discussion_id || '?'}: ${(args.rich_text?.[0]?.text?.content || '').slice(0, 140)}`;
   }
   return `${provider}/${toolName}: ${JSON.stringify(args || {}).slice(0, 200)}`;
 }

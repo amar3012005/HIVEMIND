@@ -100,6 +100,9 @@ async function hop1Memory({ store, query, options, ctx }) {
   const effectiveTags = options.tags || inferredTags;
   let mems = result.memories || [];
   const recencyOverride = isRecentish && inferredTags && store.client?.memory;
+  if (process.env.RECALL_TRACE) {
+    console.log('[recall-router] q=', JSON.stringify(query), 'matchedConnector=', matchedConnector, 'isRecentish=', isRecentish, 'recencyOverride=', !!recencyOverride, 'mems.length=', mems.length);
+  }
   if ((recencyOverride || (mems.length === 0 && Array.isArray(effectiveTags) && effectiveTags.length > 0)) && store.client?.memory) {
     try {
       const orFilters = [];

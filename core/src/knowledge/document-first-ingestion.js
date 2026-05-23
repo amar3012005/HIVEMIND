@@ -163,7 +163,13 @@ export class DocumentFirstIngestionService {
       segments,
       userId,
       orgId,
-      metadata: { ...metadata, filename, documentTitle: filename }
+      metadata: {
+        ...metadata,
+        filename,
+        documentTitle: filename,
+        documentId: knowledgeDoc.id,
+        documentHash: checksum.slice(0, 16),
+      },
     });
     const _msPromote = Date.now() - _tPromote;
     console.log(`[phase1-timing] parse=${_msParse}ms seg=${_msSeg}ms embed=${_msEmbed}ms promote=${_msPromote}ms segs=${segments.length} memories=${promoted.memories.length}`);
@@ -251,7 +257,13 @@ export class DocumentFirstIngestionService {
       segments,
       userId,
       orgId,
-      metadata: { ...metadata, filename, documentTitle: filename },
+      metadata: {
+        ...metadata,
+        filename,
+        documentTitle: filename,
+        documentId: parentDoc.id,
+        documentHash: checksum.slice(0, 16),
+      },
       promotionStrategy: 'enterprise_selective'
     });
 
@@ -353,7 +365,12 @@ export class DocumentFirstIngestionService {
       documentId: knowledgeDoc.id,
       segments,
       userId, orgId,
-      metadata: { ...metadata, filename: metadata.filename || knowledgeDoc.filename || null, documentTitle: metadata.filename || knowledgeDoc.filename || null },
+      metadata: {
+        ...metadata,
+        filename: metadata.filename || knowledgeDoc.filename || null,
+        documentTitle: metadata.filename || knowledgeDoc.filename || null,
+        documentId: knowledgeDoc.id,
+      },
       promotionStrategy: `connector_${providerKey}`,
     });
 
@@ -659,6 +676,16 @@ export class DocumentFirstIngestionService {
           tags: [
             ...(metadata.tags || []),
             'promoted-from-segment',
+            // Filename + doc-hash anchors so recall can find every chunk
+            // by literal filename via the tag-indexed FTS path. Without
+            // these tags a query for "Branding Skizze1 (1).pdf" never
+            // hits any of its chunks — title contains only the heading
+            // and content is the chunk text. See aebf344.
+            ...(metadata.filename ? [`filename:${metadata.filename}`] : []),
+            ...(metadata.documentTitle && metadata.documentTitle !== metadata.filename
+              ? [`filename:${metadata.documentTitle}`] : []),
+            ...(metadata.documentHash ? [`doc-hash:${metadata.documentHash}`] : []),
+            ...(metadata.documentId ? [`doc-id:${metadata.documentId}`] : []),
             ...(segment.metadata?.heading
               ? [`heading:${String(segment.metadata.heading).toLowerCase().replace(/\s+/g, '-').slice(0, 50)}`]
               : []),

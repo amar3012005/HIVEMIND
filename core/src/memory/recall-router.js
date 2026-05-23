@@ -168,12 +168,19 @@ async function hop1Memory({ store, query, options, ctx }) {
           ...(validAtDate ? {} : { isLatest: true }),
           tags: { hasSome: effectiveTags },
           ...(orFilters.length === 1 ? orFilters[0] : orFilters.length > 1 ? { OR: orFilters } : {}),
-          // Bi-temporal: only show memories already known + already
-          // emitted (document_date) by valid_at.
+          // Time-travel: filter by EVENT TIME (document_date) only —
+          // that's what users mean by "as of May 13" (msgs sent by then),
+          // not "memories known by then". Bi-temporal createdAt filter
+          // was excluding memories ingested today but sent earlier.
           ...(validAtDate ? {
-            AND: [
-              { createdAt: { lte: validAtDate } },
-              { OR: [{ documentDate: null }, { documentDate: { lte: validAtDate } }] },
+            OR: [
+              { documentDate: { lte: validAtDate } },
+              {
+                AND: [
+                  { documentDate: null },
+                  { createdAt: { lte: validAtDate } },
+                ],
+              },
             ],
           } : {}),
         },

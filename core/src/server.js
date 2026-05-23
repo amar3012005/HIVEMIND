@@ -5230,6 +5230,60 @@ exit \$RC
             return jsonResponse(res, { error: 'discard failed', message: err.message }, 500);
           }
         }
+
+        // ── Pending writes: approve / cancel / get-by-id ──────────────
+        // Agent draft-approval workflow. Owner check enforces user_id
+        // matches the session principal; cross-user approval is forbidden.
+        const pwMatch = pathname.match(/^\/api\/pending-writes\/([0-9a-f-]{36})\/(approve|cancel)$/i);
+        if (pwMatch && req.method === 'POST') {
+          if (!prisma) return jsonResponse(res, { error: 'db unavailable' }, 503);
+          const draftId = pwMatch[1];
+          const action = pwMatch[2];
+          try {
+            const row = await prisma.pendingWrite.findUnique({ where: { id: draftId } });
+            if (!row) return jsonResponse(res, { error: 'draft not found' }, 404);
+            if (row.userId !== userId) return jsonResponse(res, { error: 'forbidden' }, 403);
+            if (row.status !== 'draft') {
+              return jsonResponse(res, { error: `draft already ${row.status}` }, 409);
+            }
+            if (action === 'cancel') {
+              await prisma.pendingWrite.update({
+                where: { id: draftId },
+                data: { status: 'cancelled' },
+              });
+              return jsonResponse(res, { ok: true, status: 'cancelled', id: draftId });
+            }
+            // Approve → mark approved, then re-dispatch tool with
+            // _approval_token. Middleware verifies + flips to sent.
+            await prisma.pendingWrite.update({
+              where: { id: draftId },
+              data: { status: 'approved', approvedAt: new Date() },
+            });
+            try {
+              const { buildToolkitForUser } = await import('./agent/toolkit-factory.js');
+              const tk = await buildToolkitForUser({ prisma, userId, orgId, hivemindTools: [] });
+              tk.resetEquippedTools([row.provider]);
+              const execArgs = { ...(row.toolArgs || {}), _approval_token: draftId };
+              const resp = await tk.execute(row.toolName, execArgs, { userId, orgId, prisma });
+              const final = await prisma.pendingWrite.findUnique({ where: { id: draftId } });
+              return jsonResponse(res, {
+                ok: resp.status !== 'error',
+                status: final?.status || resp.status,
+                tool_status: resp.status,
+                text: resp.content?.[0]?.text || null,
+                draft: final,
+              });
+            } catch (execErr) {
+              await prisma.pendingWrite.update({
+                where: { id: draftId },
+                data: { status: 'failed', errorMsg: execErr.message },
+              }).catch(() => {});
+              return jsonResponse(res, { ok: false, error: execErr.message }, 500);
+            }
+          } catch (err) {
+            return jsonResponse(res, { error: 'pending-write action failed', message: err.message }, 500);
+          }
+        }
       }
 
       // ── Generic per-connector dispatch ──────────────────────────────
@@ -15705,6 +15759,36 @@ exit \$RC
             }
           }
           break;
+
+        // ==========================================
+        // PENDING WRITES — agent draft-approval gate
+        // GET    /api/pending-writes               list drafts
+        // POST   /api/pending-writes/:id/approve   approve + execute
+        // POST   /api/pending-writes/:id/cancel    cancel
+        // ==========================================
+        case '/api/pending-writes':
+          if (req.method === 'GET') {
+            if (!prisma) return jsonResponse(res, { error: 'db unavailable' }, 503);
+            const limit = Math.min(parseInt(url.searchParams.get('limit') || '20', 10), 100);
+            const statusFilter = url.searchParams.get('status');
+            const rows = await prisma.pendingWrite.findMany({
+              where: { userId, ...(statusFilter ? { status: statusFilter } : {}) },
+              orderBy: { createdAt: 'desc' },
+              take: limit,
+              select: {
+                id: true, provider: true, toolName: true, toolArgs: true,
+                preview: true, status: true, errorMsg: true,
+                createdAt: true, approvedAt: true, sentAt: true,
+              },
+            });
+            return jsonResponse(res, { drafts: rows });
+          }
+          break;
+
+        // ==========================================
+        // PENDING WRITES — approve / cancel by id
+        // ==========================================
+        // dispatched below via regex match outside the switch
 
         // ==========================================
         // CHAT — Talk to HIVE (memory-augmented LLM)

@@ -492,13 +492,12 @@ export class PrismaGraphStore {
   }
 
   async searchMemories({ query, user_id, org_id, project, memory_type, tags, is_latest, n_results = 10, created_after, created_before, source_platform, scope = 'personal', access_context = null }) {
-    // V2 (Teams + Projects) scope: skip FTS raw branch since it cannot easily
-    // express the multi-tier OR; let Prisma findMany handle it below.
-    if (access_context) {
-      // intentional skip
-    } else
-    // Try PostgreSQL full-text search with stemming (like code-review-graph's FTS5 + Porter)
-    // Only run outside transactions — $queryRawUnsafe corrupts Prisma interactive transactions
+    // FTS branch runs for BOTH access_context (V2 Teams + Projects) and
+    // legacy scopes. Strategy when access_context is set:
+    //   1. FTS query org-scoped → candidate IDs (ranked).
+    //   2. Prisma findMany with full access-context tenancy filter applied
+    //      to those candidate IDs.
+    // Tenancy enforcement happens in step 2; FTS is just a fast ranker.
     if (query && this.client.$queryRawUnsafe && !this.inTransaction) {
       try {
         // Sanitize: tsquery rejects punctuation, special chars, leading
@@ -510,9 +509,14 @@ export class PrismaGraphStore {
           .filter(w => w.length > 1 && !/^\d+$/.test(w))
           .map(w => w + ':*').join(' & ');
         if (tsQuery) {
-          const scopeWhere = scope === 'personal'
-            ? `AND m.user_id = '${user_id}'::uuid`
-            : `AND m.org_id = '${org_id}'::uuid`;
+          // When access_context drives tenancy (V2 multi-tier), the FTS
+          // pass only needs to scope by org; the strict project/team
+          // membership check runs as a Prisma post-filter below.
+          const scopeWhere = access_context
+            ? `AND m.org_id = '${org_id}'::uuid`
+            : scope === 'personal'
+              ? `AND m.user_id = '${user_id}'::uuid`
+              : `AND m.org_id = '${org_id}'::uuid`;
           const projectWhere = project ? `AND m.project = '${project}'` : '';
           const latestWhere = typeof is_latest === 'boolean' ? `AND m.is_latest = ${is_latest}` : '';
           const dateAfterWhere = created_after ? `AND m.created_at >= '${new Date(created_after).toISOString()}'` : '';
@@ -554,23 +558,66 @@ export class PrismaGraphStore {
           `, tsQuery, n_results * 3);
 
           if (ftsResults.length > 0) {
-            return ftsResults.map(r => ({
-              id: r.id,
-              content: r.content,
-              title: r.title,
-              tags: r.tags || [],
-              memory_type: r.memory_type,
-              project: r.project,
-              importance_score: Number(r.importance_score) || 0.5,
-              is_latest: r.is_latest,
-              created_at: r.created_at?.toISOString?.() || r.created_at,
-              updated_at: r.updated_at?.toISOString?.() || r.updated_at,
-              document_date: r.document_date?.toISOString?.() || r.document_date,
-              source: r.source,
-              visibility: r.visibility,
-              score: Number(r.fts_score) || 0,
-              _searchMethod: 'fts_tsvector',
-            })).slice(0, n_results);
+            // When access_context drives tenancy: post-filter the FTS
+            // candidate set through Prisma findMany with the full
+            // multi-tier OR clause (personal | org | project | team).
+            // This drops rows the user can't see, while preserving FTS
+            // rank order.
+            if (access_context) {
+              const candidateIds = ftsResults.map(r => r.id);
+              const allowed = await this.client.memory.findMany({
+                where: {
+                  id: { in: candidateIds },
+                  ...scopedMemoryWhere({ user_id, org_id, project, scope, access_context }),
+                  memoryType: memory_type || undefined,
+                  sourcePlatform: source_platform || undefined,
+                  isLatest: typeof is_latest === 'boolean' ? is_latest : undefined,
+                  tags: tags?.length ? { hasEvery: tags } : undefined,
+                },
+                select: { id: true },
+              });
+              const allowedSet = new Set(allowed.map(r => r.id));
+              const filtered = ftsResults.filter(r => allowedSet.has(r.id));
+              if (filtered.length > 0) {
+                return filtered.map(r => ({
+                  id: r.id,
+                  content: r.content,
+                  title: r.title,
+                  tags: r.tags || [],
+                  memory_type: r.memory_type,
+                  project: r.project,
+                  importance_score: Number(r.importance_score) || 0.5,
+                  is_latest: r.is_latest,
+                  created_at: r.created_at?.toISOString?.() || r.created_at,
+                  updated_at: r.updated_at?.toISOString?.() || r.updated_at,
+                  document_date: r.document_date?.toISOString?.() || r.document_date,
+                  source: r.source,
+                  visibility: r.visibility,
+                  score: Number(r.fts_score) || 0,
+                  _searchMethod: 'fts_tsvector_access_filtered',
+                })).slice(0, n_results);
+              }
+              // No FTS row passed the access filter — fall through to the
+              // Prisma path so the caller still gets something.
+            } else {
+              return ftsResults.map(r => ({
+                id: r.id,
+                content: r.content,
+                title: r.title,
+                tags: r.tags || [],
+                memory_type: r.memory_type,
+                project: r.project,
+                importance_score: Number(r.importance_score) || 0.5,
+                is_latest: r.is_latest,
+                created_at: r.created_at?.toISOString?.() || r.created_at,
+                updated_at: r.updated_at?.toISOString?.() || r.updated_at,
+                document_date: r.document_date?.toISOString?.() || r.document_date,
+                source: r.source,
+                visibility: r.visibility,
+                score: Number(r.fts_score) || 0,
+                _searchMethod: 'fts_tsvector',
+              })).slice(0, n_results);
+            }
           }
         }
       } catch (ftsErr) {

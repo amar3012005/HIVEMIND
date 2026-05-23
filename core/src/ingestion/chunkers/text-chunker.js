@@ -1,3 +1,5 @@
+const MIN_CHUNK_WORDS = 20;
+
 function tokenizeApprox(text) {
   const clean = String(text || '').trim();
   if (!clean) return [];
@@ -13,7 +15,11 @@ function chunkTokens(tokens, size, overlap) {
   while (cursor < tokens.length) {
     const end = Math.min(tokens.length, cursor + size);
     const piece = tokens.slice(cursor, end).join(' ');
-    chunks.push(piece);
+    // Discard tail chunks under MIN_CHUNK_WORDS unless it's the only chunk —
+    // tiny fragments add embedding noise without retrieval value.
+    if (piece.split(/\s+/).length >= MIN_CHUNK_WORDS || chunks.length === 0) {
+      chunks.push(piece);
+    }
     if (end === tokens.length) break;
     cursor = Math.max(end - overlap, cursor + 1);
   }
@@ -27,10 +33,10 @@ function chooseTextChunkConfig(document) {
   const technical = title.includes('api') || title.includes('spec') || title.includes('docs') || sourceHint === 'technical';
 
   if (technical) {
-    return { size: 384, overlap: 50, strategy: 'technical-sliding-window' };
+    return { size: 400, overlap: 100, strategy: 'technical-sliding-window' };
   }
 
-  return { size: 512, overlap: 50, strategy: 'contextual-rag' };
+  return { size: 512, overlap: 150, strategy: 'contextual-rag' };
 }
 
 function splitConversationTurns(document) {

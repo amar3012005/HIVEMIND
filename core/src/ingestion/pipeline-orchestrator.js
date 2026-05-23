@@ -52,15 +52,57 @@ function chunkBySource(sourceType, extracted) {
   }
 
   if (sourceType === 'pdf') {
-    const chunks = [];
-    for (const page of extracted.pages || []) {
-      const pageChunks = chunkTextDocument({
-        ...extracted,
-        content: page.content,
-      });
-      chunks.push(...toChunkObjects(pageChunks, page.page_number));
+    // Merge all pages into a single text body before chunking so sliding
+    // windows span page boundaries. Cross-page sentences and references
+    // (e.g. a clause on page 3 citing a heading on page 2) retain context.
+    // Page numbers are still recoverable per chunk by mapping cumulative
+    // character offsets back to each page's range.
+    const pages = Array.isArray(extracted.pages) ? extracted.pages : [];
+    if (pages.length === 0) {
+      return toChunkObjects(chunkTextDocument(extracted), 1);
     }
-    return chunks;
+
+    const pageRanges = [];
+    let cursor = 0;
+    const PAGE_SEPARATOR = '\n\n';
+    const mergedParts = [];
+    for (const page of pages) {
+      const content = String(page.content || '');
+      const start = cursor;
+      mergedParts.push(content);
+      cursor += content.length;
+      pageRanges.push({ page_number: page.page_number, start, end: cursor });
+      cursor += PAGE_SEPARATOR.length;
+    }
+    const mergedContent = mergedParts.join(PAGE_SEPARATOR);
+
+    const mergedChunks = chunkTextDocument({ ...extracted, content: mergedContent });
+
+    // Walk merged text to compute per-chunk char offset → page mapping.
+    // The chunker drops whitespace internally; we re-locate each chunk by
+    // searching from the running offset. This is O(N·M) worst-case but in
+    // practice each chunk is found near `searchFrom`, so cost is ~linear.
+    let searchFrom = 0;
+    const chunksWithPages = mergedChunks.map((chunk, idx) => {
+      const content = chunk.content || '';
+      const probe = content.slice(0, 40);
+      const hit = probe ? mergedContent.indexOf(probe, Math.max(0, searchFrom - 200)) : -1;
+      const offset = hit >= 0 ? hit : searchFrom;
+      searchFrom = offset + content.length;
+      const range = pageRanges.find((r) => offset >= r.start && offset < r.end) || pageRanges[0];
+      return {
+        chunk_index: idx,
+        content,
+        token_count: tokenizeApprox(content).length,
+        metadata: {
+          ...(chunk.metadata || {}),
+          page_number: range.page_number,
+          merged_from_pages: pages.length,
+        },
+      };
+    });
+
+    return chunksWithPages;
   }
 
   return toChunkObjects(chunkTextDocument(extracted), 1);

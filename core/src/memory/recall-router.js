@@ -116,6 +116,9 @@ async function hop1Memory({ store, query, options, ctx }) {
   // supplied or inferred), also drop into the direct-fetch path so the
   // document_date <= valid_at filter applies AND we order by date.
   const timeTravelOverride = validAtDate && Array.isArray(effectiveTags) && effectiveTags.length > 0 && store.client?.memory;
+  if (process.env.RECALL_TRACE) {
+    console.log('[recall-router] override-check', { matchedConnector, isRecentish, hasValidAt, validAt: validAtDate?.toISOString(), effectiveTags, recencyOverride: !!recencyOverride, timeTravelOverride: !!timeTravelOverride, mems_len: mems.length });
+  }
   if ((recencyOverride || timeTravelOverride || (mems.length === 0 && Array.isArray(effectiveTags) && effectiveTags.length > 0)) && store.client?.memory) {
     try {
       const orFilters = [];
@@ -164,6 +167,9 @@ async function hop1Memory({ store, query, options, ctx }) {
         : tagOnly;
       const finalSet = (ranked.length === 0 ? tagOnly : ranked)
         .slice(0, Math.min(options.limit || HOP1_DEFAULT_LIMIT, 50));
+      if (process.env.RECALL_TRACE) {
+        console.log('[recall-router] override path tagOnly=', tagOnly.length, 'ranked=', ranked.length, 'final=', finalSet.length);
+      }
       mems = finalSet.map(m => ({
         id: m.id,
         title: m.title,

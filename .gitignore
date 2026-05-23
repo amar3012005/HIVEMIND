@@ -74,3 +74,8 @@ benchmarks/memorybench-hivemind/memorybench/.git/
 # Benchmark results may contain API keys
 benchmarks/results/*.md
 !core/data/mcp-connectors.json
+
+# accidental binary artifacts
+hivemind-v*.zip
+extensions/hivemind-v*.zip
+core/src/tara/hivemind-agent/

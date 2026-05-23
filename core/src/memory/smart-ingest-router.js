@@ -1075,8 +1075,10 @@ export class SmartIngestRouter {
 // ── Helpers (module-scope) ─────────────────────────────────────────
 
 function isChatLike(payload) {
-  const p = (payload.source_metadata?.source_platform || ).toLowerCase();
-  return p.includes("talk-to-hive") || p.includes("chat") || p === "manual" && (payload.metadata?.source_type_normalized === "chat");
+  const p = String(payload.source_metadata?.source_platform || '').toLowerCase();
+  return p.includes('talk-to-hive')
+    || p.includes('chat')
+    || (p === 'manual' && payload.metadata?.source_type_normalized === 'chat');
 }
 
 // Extract temporal anchors from short user-typed content. Returns

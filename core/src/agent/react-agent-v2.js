@@ -182,6 +182,12 @@ Output STRICT JSON (no prose, no code fence):
   "needs_time_travel": false,     // true ONLY for explicit temporal: "as of X", "before Y", "what changed between"
   "time_travel": { "transaction_time": null, "valid_time": null }, // ISO timestamps if needs_time_travel
   "needs_web": false,             // true ONLY if user explicitly asks for current external info NOT in HIVEMIND
+  "action_intent": null,          // when user wants to PERFORM an action via a connector (not just recall),
+                                  //   set this to one of: 'slack' | 'notion' | 'gmail' | 'github' | 'linear'.
+                                  //   Triggers: 'post to slack', 'send a slack message', 'create notion page',
+                                  //   'email X', 'open github issue', 'add linear task'. Even when phrased
+                                  //   indirectly ('@channel let them know' → slack), the planner picks the
+                                  //   right provider. Leave null for pure recall / read.
   "save_intent": null,            // ONLY when intent_kind === 'save'. {"title": "...", "content": "...", "tags": [...], "project_hint": "..."}. CONTENT MUST be a fully self-contained note — if the user used a pronoun ("save this", "save that"), resolve it by reading the previous turn in conversation history and copy the actual facts into content. NEVER emit save_intent with empty / pronoun-only content, NEVER emit content that is just the user's own message repeated verbatim, NEVER emit save_intent for a bare filename or entity-only message. If the referent is unrecoverable, set save_intent to null instead. If the user named a project ("save to Ashley", "in the SOLVIS project"), put that name in project_hint so the server can resolve it to a project_id.
   "ask_for_project": false,       // true if the user asked to save but did NOT specify a project AND no active project is set in the session. Server will respond by asking which project before saving.
   "update_intent": null,          // ONLY when intent_kind === 'update'. {"target_hint": "...", "new_value": "..."} if user corrected a prior fact
@@ -273,9 +279,14 @@ async function planStep({ message, history, language, assistantName, orgName, ha
     };
   };
 
+  const VALID_ACTION_PROVIDERS = ['slack', 'notion', 'gmail', 'github', 'linear'];
+  const rawActionIntent = typeof parsed.action_intent === 'string' ? parsed.action_intent.toLowerCase() : null;
+  const action_intent = VALID_ACTION_PROVIDERS.includes(rawActionIntent) ? rawActionIntent : null;
+
   const plan = {
     intent_kind,
     user_message:          message,
+    action_intent,
     intents:               Array.isArray(parsed.intents) ? parsed.intents.slice(0, 4) : [],
     sub_queries:           Array.isArray(parsed.sub_queries) ? parsed.sub_queries.filter(q => typeof q === 'string' && q.trim()).slice(0, 4) : [],
     named_entities:        Array.isArray(parsed.named_entities) ? parsed.named_entities.slice(0, 6) : [],
@@ -936,10 +947,12 @@ export async function runReactAgentV2({
 
     // Write-intent branch (post/send/draft slack message, etc).
     // Runs BEFORE the evidence/recall flow because the user wants to act,
-    // not query memory. Builds a per-user Toolkit, activates the matching
-    // connector group, runs a tool-calling sub-loop. Writes go through
-    // the draft-approval middleware automatically.
-    const writeIntent = detectWriteIntent(message);
+    // not query memory. Planner-emitted action_intent takes priority over
+    // the regex detector — the LLM catches indirect phrasing the regex
+    // misses ("@team heads up", "ping the eng channel").
+    const writeIntent = plan.action_intent
+      ? { provider: plan.action_intent }
+      : detectWriteIntent(message);
     if (writeIntent && ctx.prisma) {
       try {
         const { buildToolkitForUser } = await import('./toolkit-factory.js');

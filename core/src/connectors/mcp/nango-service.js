@@ -32,6 +32,26 @@ async function nangoPost(path, body, opts = {}) {
   return _nangoRequest('POST', path, body, opts);
 }
 
+/** DELETE wrapper. */
+async function nangoDelete(path, opts = {}) {
+  return _nangoRequest('DELETE', path, null, opts);
+}
+
+/**
+ * Delete a Nango connection (revoke OAuth grant at Nango).
+ * Returns true on 200/204, false if connection was already gone.
+ */
+export async function deleteConnection(providerKey, connectionId) {
+  try {
+    await nangoDelete(`/connection/${connectionId}?provider_config_key=${encodeURIComponent(providerKey)}`);
+    return true;
+  } catch (err) {
+    // 404 = already deleted; treat as success
+    if (String(err.message).includes('404')) return false;
+    throw err;
+  }
+}
+
 async function _nangoRequest(method, path, body, { retries = 2 } = {}) {
   const url = `${NANGO_URL}${path}`;
   for (let attempt = 0; attempt <= retries; attempt++) {

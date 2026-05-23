@@ -356,24 +356,76 @@ export class ConnectorStore {
   }
 
   /**
-   * Disconnect a connector — clear tokens, set inactive.
+   * Disconnect a connector — clear tokens, set inactive, AND remove the
+   * Nango connection row for the same provider if present. Without the
+   * Nango cleanup the GET /v1/connectors overlay re-promotes the connector
+   * back to 'connected' on every fetch (the overlay treats any active
+   * nango_connections row as proof of connectivity), so the UI never
+   * reflects the disconnect.
+   *
+   * Returns true if anything was changed (either a platformIntegration
+   * row updated or a nangoConnection row removed).
    */
   async disconnect(userId, provider) {
+    let changed = false;
+
     const existing = await this.prisma.platformIntegration.findUnique({
       where: { userId_platformType: { userId, platformType: provider } },
     });
-    if (!existing) return false;
+    if (existing) {
+      await this.prisma.platformIntegration.update({
+        where: { id: existing.id },
+        data: {
+          isActive: false,
+          accessTokenEncrypted: null,
+          refreshTokenEncrypted: null,
+          syncStatus: 'idle',
+        },
+      });
+      changed = true;
+    }
 
-    await this.prisma.platformIntegration.update({
-      where: { id: existing.id },
-      data: {
-        isActive: false,
-        accessTokenEncrypted: null,
-        refreshTokenEncrypted: null,
-        syncStatus: 'idle',
-      },
-    });
-    return true;
+    // Nango cleanup — provider key is either the same as the registry id
+    // (slack, notion, github, linear) or the mapped value (atlassian→jira,
+    // gmail→google-mail, …). Delete on both sides so neither path survives.
+    const NANGO_KEY_ALIASES = {
+      atlassian: ['atlassian', 'jira'],
+      confluence: ['confluence'],
+      gmail: ['gmail', 'google-mail'],
+      'google-drive': ['google-drive'],
+      'google-calendar': ['google-calendar'],
+    };
+    const nangoKeys = NANGO_KEY_ALIASES[provider] || [provider];
+    if (this.prisma.nangoConnection) {
+      try {
+        const rows = await this.prisma.nangoConnection.findMany({
+          where: { userId, providerKey: { in: nangoKeys } },
+          select: { id: true, providerKey: true, connectionId: true },
+        });
+        // Revoke each at Nango side first (best-effort), then delete locally.
+        if (rows.length > 0) {
+          const { deleteConnection } = await import('../mcp/nango-service.js');
+          for (const r of rows) {
+            try {
+              await deleteConnection(r.providerKey, r.connectionId);
+            } catch (revokeErr) {
+              console.warn(`[connector-store] nango DELETE failed for ${r.providerKey}/${r.connectionId}: ${revokeErr.message}`);
+            }
+          }
+          const del = await this.prisma.nangoConnection.deleteMany({
+            where: { id: { in: rows.map(r => r.id) } },
+          });
+          if (del.count > 0) changed = true;
+        }
+      } catch (err) {
+        // Don't block the disconnect on Nango bookkeeping failure — the
+        // platform_integration update is the source of truth for legacy
+        // OAuth-only providers.
+        console.warn(`[connector-store] nango cleanup failed for ${provider}: ${err.message}`);
+      }
+    }
+
+    return changed;
   }
 
   _mapRecord(record) {

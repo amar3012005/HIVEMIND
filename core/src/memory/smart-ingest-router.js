@@ -1095,14 +1095,14 @@ function _extractTemporalAnchors(content, _tz) {
 
   // Day-of-week
   for (const d of _DAYS) {
-    if (new RegExp(`\b${d}\b`).test(text)) { tags.push(`time:${d}`); refs.push({ kind: "dow", value: d }); }
+    if (new RegExp('\\b' + d + '\\b').test(text)) { tags.push(`time:${d}`); refs.push({ kind: "dow", value: d }); }
   }
   // Relative tokens
   for (const rel of ["today","tomorrow","tonight","yesterday","next week","this week"]) {
-    if (new RegExp(`\b${rel.replace(" ", "\s+")}\b`).test(text)) { tags.push(`time:${rel.replace(/\s+/g, "-")}`); refs.push({ kind: "rel", value: rel }); }
+    if (new RegExp('\\b' + rel.replace(' ', '\\s+') + '\\b').test(text)) { tags.push(`time:${rel.replace(/\s+/g, "-")}`); refs.push({ kind: "rel", value: rel }); }
   }
   // Hour-of-day (e.g. "7 pm", "19:00", "7pm")
-  const hourMatch = text.match(/(\d{1,2})\s*(?::(\d{2}))?\s*(am|pm)/);
+  const hourMatch = text.match(/\b(\d{1,2})\s*(?::(\d{2}))?\s*(am|pm)\b/);
   if (hourMatch) {
     let h = Number(hourMatch[1]);
     const min = hourMatch[2] || "00";
@@ -1113,7 +1113,7 @@ function _extractTemporalAnchors(content, _tz) {
     tags.push(`time:${stamp}`);
     refs.push({ kind: "hod", value: stamp, raw: hourMatch[0] });
   }
-  const hm24 = text.match(/([01]?\d|2[0-3]):([0-5]\d)/);
+  const hm24 = text.match(/\b([01]?\d|2[0-3]):([0-5]\d)\b/);
   if (hm24 && !hourMatch) {
     const stamp = `${String(Number(hm24[1])).padStart(2, "0")}:${hm24[2]}`;
     tags.push(`time:${stamp}`);
@@ -1121,7 +1121,7 @@ function _extractTemporalAnchors(content, _tz) {
   }
   // Month + day ("may 23", "may 12")
   for (const m of _MONTHS) {
-    const re = new RegExp(`\b${m}\s+(\d{1,2})\b`);
+    const re = new RegExp('\\b' + m + '\\s+(\\d{1,2})\\b');
     const mm = text.match(re);
     if (mm) {
       tags.push(`time:${m}-${mm[1]}`);

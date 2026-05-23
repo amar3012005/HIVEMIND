@@ -13394,17 +13394,20 @@ exit \$RC
                 stripped: rewritten.stripped,
               };
 
-              // ─── Recall v2: orchestrator (memories-first → evidence on demand) ───
+              // ─── Recall v3.1: memory-first event-driven fan-out via RecallRouter ───
+              // Keeps /api/recall's enrichment pipeline (bi-temporal, operator
+              // boost, parent-chunk inject, contradictions, profile, dedupe)
+              // and only delegates the evidence/live fan-out to the unified
+              // router so HTTP callers get the same memory-first behavior as
+              // the agent tool (no regex classifier, anchors come from tags).
               const mode = body.mode || 'auto';
               const wantEvidence = mode === 'evidence' || mode === 'hybrid' || mode === 'auto';
-              const citationIntent =
-                /(\b(cite|source|proof|where|why|evidence|reference)\b)/i.test(body.query_context || '');
               const memoryHits = Array.isArray(result.memories) ? result.memories : [];
-              const sparseMemories = memoryHits.length < 3;
               result.mode_used = mode;
 
               if (wantEvidence && mode !== 'memory') {
-                // 1. Attach evidence_links inline for each memory (SQL join, cheap)
+                // 1. Inline evidence_links per memory (SQL join — independent
+                //    of vector search; required for citation UI).
                 try {
                   const memIds = memoryHits.map(m => m.id).filter(Boolean);
                   if (memIds.length) {
@@ -13441,26 +13444,34 @@ exit \$RC
                   console.warn(`[recall] evidence attach failed: ${evErr.message}`);
                 }
 
-                // 2. Fallback evidence-only search when memories sparse OR citation intent
-                const shouldFallback = mode === 'evidence' || mode === 'hybrid' ||
-                  (mode === 'auto' && (sparseMemories || citationIntent));
-                if (shouldFallback && evidenceRetrieval) {
-                  try {
-                    const evResults = await evidenceRetrieval.retrieveEvidence({
-                      query: body.query_context || body.context || '',
-                      userId, orgId,
-                      limit: 10,
-                    });
-                    // Dedup against segments already attached inline
-                    const attachedSegIds = new Set(
-                      memoryHits.flatMap(m => (m.evidence || []).map(e => e.segment_id))
-                    );
-                    result.evidence = (evResults || []).filter(e => !attachedSegIds.has(e.segmentId));
-                    result.evidence_count = result.evidence.length;
-                  } catch (evSearchErr) {
-                    console.warn(`[recall] evidence fallback failed: ${evSearchErr.message}`);
-                    result.evidence = [];
-                  }
+                // 2. Memory-first fan-out via RecallRouter (event-driven).
+                //    Replaces the old "sparseMemories || citationIntent" regex
+                //    heuristic with the tag-driven inspection logic.
+                try {
+                  const { recallEnhance } = await import('./memory/recall-router.js');
+                  const enhanced = await recallEnhance({
+                    memories: memoryHits,
+                    query: body.query_context || body.context || '',
+                    ctx: { userId, orgId },
+                    evidenceService: evidenceRetrieval,
+                    prisma,
+                    includeLive: body.include_live !== false,
+                  });
+                  // Dedup evidence against inline-attached links (same segment
+                  // can't show up twice in the result).
+                  const attachedSegIds = new Set(
+                    memoryHits.flatMap(m => (m.evidence || []).map(e => e.segment_id))
+                  );
+                  result.evidence = (enhanced.evidence || [])
+                    .filter(e => !attachedSegIds.has(e.segmentId));
+                  result.evidence_count = result.evidence.length;
+                  result.live = enhanced.live || [];
+                  result.live_count = result.live.length;
+                  result.recall_trace = enhanced.trace;
+                } catch (enhErr) {
+                  console.warn(`[recall] router enhance failed: ${enhErr.message}`);
+                  result.evidence = [];
+                  result.live = [];
                 }
               }
 

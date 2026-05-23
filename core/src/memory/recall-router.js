@@ -91,8 +91,12 @@ async function hop1Memory({ store, query, options, ctx }) {
 }
 
 // ── Hop 1 inspection — read tags to decide what to do next ─────────────────
+//
+// Exported so other call sites (like /api/recall's HTTP endpoint) can reuse
+// the same memory-first triggering logic without duplicating the regex-free
+// classifier. Pass any memory array, get back the anchors + sparseness flag.
 
-function inspectMemories(memories) {
+export function inspectMemories(memories) {
   const filenames  = new Set();
   const docHashes  = new Set();
   const docIds     = new Set();
@@ -149,7 +153,7 @@ async function resolveDocIdsFromFilenames({ prisma, filenames, userId, orgId }) 
 
 // ── Hop 2 — Evidence segments ──────────────────────────────────────────────
 
-async function hop2Evidence({ evidenceService, query, ctx, inspection, prisma }) {
+export async function hop2Evidence({ evidenceService, query, ctx, inspection, prisma }) {
   if (!evidenceService) return { items: [], reason: null };
 
   // Case A: hop-1 memories carry doc anchors → doc-filtered search.
@@ -184,7 +188,7 @@ async function hop2Evidence({ evidenceService, query, ctx, inspection, prisma })
 
 // ── Hop 3 — Live workspace ─────────────────────────────────────────────────
 
-async function hop3Live({ prisma, query, ctx, inspection }) {
+export async function hop3Live({ prisma, query, ctx, inspection }) {
   if (!prisma) return { items: [], reason: null };
   const wantsLive = inspection.platforms.some((p) => WORKSPACE_PLATFORMS.has(p));
   if (!wantsLive) return { items: [], reason: null };
@@ -236,6 +240,59 @@ function reciprocalRankFusionMemories(memories, docAnchors) {
       return { ...m, _rank_score: base + tagMatchBoost };
     })
     .sort((a, b) => b._rank_score - a._rank_score);
+}
+
+// ── Enhance helper for HTTP callers (e.g. /api/recall) that already ran
+// hop-1 themselves and want the same hop-2 / hop-3 logic appended. Keeps
+// /api/recall's rich enrichment pipeline (bi-temporal, operator boost,
+// parent-chunk injection, contradictions, profile, dedupe) intact while
+// getting the same memory-first event-driven fan-out as the agent tool.
+//
+// @param {object}  args
+// @param {Array}   args.memories         hop-1 result array (already shaped)
+// @param {string}  args.query
+// @param {object}  args.ctx              { userId, orgId }
+// @param {object}  args.evidenceService
+// @param {object}  args.prisma
+// @param {boolean} args.includeLive
+// @returns {Promise<{ evidence, live, trace }>}
+export async function recallEnhance({
+  memories, query, ctx, evidenceService, prisma, includeLive = true,
+}) {
+  const startedAt = Date.now();
+  const inspection = inspectMemories(memories || []);
+
+  const [hop2, hop3] = await Promise.all([
+    withTimeout(
+      hop2Evidence({ evidenceService, query, ctx, inspection, prisma }),
+      HOP2_TIMEOUT_MS,
+      { items: [], reason: 'timeout' },
+    ),
+    !includeLive
+      ? Promise.resolve({ items: [], reason: 'disabled' })
+      : withTimeout(
+          hop3Live({ prisma, query, ctx, inspection }),
+          HOP3_TIMEOUT_MS,
+          { items: [], reason: 'timeout' },
+        ),
+  ]);
+
+  return {
+    evidence: hop2.items,
+    live:     hop3.items,
+    trace: {
+      sparse:            inspection.sparse,
+      anchors: {
+        filenames:  inspection.filenames,
+        doc_hashes: inspection.docHashes,
+        doc_ids:    inspection.docIds,
+        platforms:  inspection.platforms,
+      },
+      evidence_trigger:  hop2.reason,
+      live_trigger:      hop3.reason,
+      latency_ms:        { enhance: Date.now() - startedAt },
+    },
+  };
 }
 
 // ── Public entry ───────────────────────────────────────────────────────────

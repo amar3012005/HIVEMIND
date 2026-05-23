@@ -2,7 +2,10 @@ const { tokenizeApprox } = require('./chunkers/text-chunker');
 
 const EMBEDDING_BATCH_SIZE = 32;
 const MAX_EMBED_TOKENS = 8192;
-const TARGET_VECTOR_DIM = 1536;
+// Match the existing Qdrant collection dimension. Env-driven so we can switch
+// between BGE-small (384), Mistral (1024), and OpenAI text-embedding-3-small
+// (1536) without re-creating the collection.
+const TARGET_VECTOR_DIM = Number(process.env.EMBEDDING_DIMENSION) || 1536;
 
 const PII_PATTERNS = [
   /\b\d{3}-\d{2}-\d{4}\b/g, // SSN

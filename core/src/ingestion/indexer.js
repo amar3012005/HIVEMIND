@@ -30,7 +30,7 @@ class QdrantVectorStore {
   constructor(options = {}) {
     this.url = options.url || process.env.QDRANT_URL;
     this.apiKey = options.apiKey || process.env.QDRANT_API_KEY;
-    this.dimension = Number(options.dimension || 1536);
+    this.dimension = Number(options.dimension || process.env.EMBEDDING_DIMENSION || 1536);
     this.readyCollections = new Set();
   }
 

@@ -89,11 +89,13 @@ async function hop1Memory({ store, query, options, ctx }) {
   const validAtDate = options.valid_at && !Number.isNaN(new Date(options.valid_at).getTime())
     ? new Date(options.valid_at)
     : null;
-  // Fast-path: if we already know we'll use the tag-anchored override
-  // (recency cue + connector tag, OR valid_at + connector tag), skip the
-  // expensive FTS+vector recall — it adds ~1.5s and we'd discard its
-  // output anyway. HOP1_TIMEOUT_MS=1500 was eating these calls otherwise.
-  const willOverride = (isRecentish && inferredTags) || (validAtDate && (options.tags || inferredTags));
+  // Fast-path: if we already know we'll use the tag-anchored override,
+  // skip the expensive FTS+vector recall — it adds ~1.5s and we'd discard
+  // its output anyway. HOP1_TIMEOUT_MS=1500 was eating these calls.
+  // Triggers when: (a) caller explicitly passes tags (intentional filter),
+  // (b) recency cue + connector keyword, (c) valid_at + connector keyword.
+  const callerTags = Array.isArray(options.tags) && options.tags.length > 0;
+  const willOverride = callerTags || (isRecentish && inferredTags) || (validAtDate && (options.tags || inferredTags));
   const recallArgs = {
     query_context: query,
     user_id: ctx.userId,
@@ -123,7 +125,8 @@ async function hop1Memory({ store, query, options, ctx }) {
   // supplied or inferred), also drop into the direct-fetch path so the
   // document_date <= valid_at filter applies AND we order by date.
   const timeTravelOverride = validAtDate && Array.isArray(effectiveTags) && effectiveTags.length > 0 && store.client?.memory;
-  if ((recencyOverride || timeTravelOverride || (mems.length === 0 && Array.isArray(effectiveTags) && effectiveTags.length > 0)) && store.client?.memory) {
+  const callerTagOverride = callerTags && store.client?.memory;
+  if ((recencyOverride || timeTravelOverride || callerTagOverride || (mems.length === 0 && Array.isArray(effectiveTags) && effectiveTags.length > 0)) && store.client?.memory) {
     try {
       const orFilters = [];
       if (ctx.orgId) orFilters.push({ orgId: ctx.orgId });

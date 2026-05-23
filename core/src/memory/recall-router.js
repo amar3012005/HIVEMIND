@@ -90,14 +90,17 @@ async function hop1Memory({ store, query, options, ctx }) {
   };
   const result = await recallPersistedMemories(store, recallArgs);
 
-  // Tag-anchored fallback. If FTS returned nothing AND the caller (or
-  // shortcut) supplied tags, fetch directly by tag ordered by document_date
-  // desc. Handles "what was the last slack msg about" where FTS fails the
-  // `@@ to_tsquery` AND-match against memories that don't contain words
-  // like "last" or "msg" verbatim.
+  // Tag-anchored recency override. When the query carries a recency cue
+  // (last/latest/recent/today/…) AND we inferred a connector tag, FTS-
+  // ranked code-mention memories drown out the actual recent channel
+  // messages. Override with a direct tag fetch ordered by document_date
+  // desc so the freshest tagged memory always wins.
+  //
+  // Also fires as a hard fallback when FTS returned 0 hits.
   const effectiveTags = options.tags || inferredTags;
   let mems = result.memories || [];
-  if (mems.length === 0 && Array.isArray(effectiveTags) && effectiveTags.length > 0 && store.client?.memory) {
+  const recencyOverride = isRecentish && inferredTags && store.client?.memory;
+  if ((recencyOverride || (mems.length === 0 && Array.isArray(effectiveTags) && effectiveTags.length > 0)) && store.client?.memory) {
     try {
       const orFilters = [];
       if (ctx.orgId) orFilters.push({ orgId: ctx.orgId });
@@ -110,13 +113,32 @@ async function hop1Memory({ store, query, options, ctx }) {
           ...(orFilters.length === 1 ? orFilters[0] : orFilters.length > 1 ? { OR: orFilters } : {}),
         },
         orderBy: [{ documentDate: 'desc' }, { createdAt: 'desc' }],
-        take: Math.min(options.limit || HOP1_DEFAULT_LIMIT, 50),
+        take: Math.min((options.limit || HOP1_DEFAULT_LIMIT) * 4, 50),
         select: {
           id: true, title: true, content: true, memoryType: true, tags: true,
           createdAt: true, documentDate: true, importanceScore: true, sourceMetadata: true,
         },
       });
-      mems = tagOnly.map(m => ({
+      // Connector-specific quality filter. A memory tagged "slack" that
+      // doesn't carry "channel:*" is almost certainly a code-mention or
+      // synthesis row referencing Slack — not an actual channel message.
+      // Same shape per provider: notion needs `page:`, gmail needs
+      // `from:` or `thread:`. Filter only fires when the connector emits
+      // its specific marker tag at ingest.
+      const REAL_MEMORY_MARKERS = {
+        slack: t => t.startsWith('channel:'),
+        notion: t => t.startsWith('page:') || t.startsWith('database:'),
+        gmail: t => t.startsWith('from:') || t.startsWith('thread:'),
+        github: t => t.startsWith('repo:') || t.startsWith('issue:') || t.startsWith('pr:'),
+        linear: t => t.startsWith('team:') || t.startsWith('issue:'),
+      };
+      const marker = REAL_MEMORY_MARKERS[matchedConnector];
+      const ranked = marker
+        ? tagOnly.filter(m => (m.tags || []).some(marker))
+        : tagOnly;
+      const finalSet = (ranked.length === 0 ? tagOnly : ranked)
+        .slice(0, Math.min(options.limit || HOP1_DEFAULT_LIMIT, 50));
+      mems = finalSet.map(m => ({
         id: m.id,
         title: m.title,
         content: m.content,

@@ -319,7 +319,13 @@ Rules:
     });
     if (recent.length < DRIFT_COMPACT_THRESHOLD) return 0;
 
-    const SYS_TAG_RE = /^(file:|fn:|page:|heading:|upload:|doc-hash:|promoted-from|synthesized|topic:|cognition-loop)/i;
+    // Excluded from bucketing: tags that aren't real topic clusters.
+    // Also excluded: knowledge-base / document / document-summary —
+    // those mark user-uploaded source-of-truth (PDF chunks, segments).
+    // Compacting them loses the original chunks because we set
+    // isLatest=false on every source, which then disappear from default
+    // recall. KB docs are durable facts, not "drifting" beliefs.
+    const SYS_TAG_RE = /^(file:|fn:|page:|heading:|upload:|doc-hash:|promoted-from|synthesized|topic:|cognition-loop|knowledge-base$|document$|document-summary$|entity:|section:|chat$|talk-to-hive$)/i;
     const buckets = new Map();
     for (const m of recent) {
       const primaryTag = (m.tags || []).find(t => !SYS_TAG_RE.test(t));

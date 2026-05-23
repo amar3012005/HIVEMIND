@@ -234,6 +234,7 @@ async function planStep({ message, history, language, assistantName, orgName, ha
 
   const plan = {
     intent_kind,
+    user_message:          message,
     intents:               Array.isArray(parsed.intents) ? parsed.intents.slice(0, 4) : [],
     sub_queries:           Array.isArray(parsed.sub_queries) ? parsed.sub_queries.filter(q => typeof q === 'string' && q.trim()).slice(0, 4) : [],
     named_entities:        Array.isArray(parsed.named_entities) ? parsed.named_entities.slice(0, 6) : [],
@@ -265,12 +266,37 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
     return payload;
   };
 
+  // Deterministic temporal+connector extraction from user's FULL message.
+  // Sub_queries are short bag-of-keywords ("slack messages") and lose the
+  // 'as of May 13' / 'slack' anchor. Re-attach them to each sub_query call
+  // so hop1's tag-anchored + valid_at override always fires when the user
+  // clearly asked for time-travel or connector-scoped recall.
+  const ul = String(plan.user_message || '').toLowerCase();
+  const CONNECTORS = ['slack', 'notion', 'gmail', 'github', 'linear', 'jira', 'confluence'];
+  const userConnector = CONNECTORS.find(k => ul.includes(k));
+  let derivedValidAt = plan.time_travel?.valid_time || plan.time_travel?.transaction_time || null;
+  if (!derivedValidAt && /\b(as of|before|prior to|on|in|by|until)\b/.test(ul)) {
+    const MONTH = { jan:0, feb:1, mar:2, apr:3, may:4, jun:5, jul:6, aug:7, sep:8, oct:9, nov:10, dec:11, january:0, february:1, march:2, april:3, june:5, july:6, august:7, september:8, october:9, november:10, december:11 };
+    const year = new Date().getUTCFullYear();
+    let m = ul.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+    let d = m ? new Date(Date.UTC(+m[1], +m[2]-1, +m[3], 23,59,59)) : null;
+    if (!d) {
+      m = ul.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)\s+(\d{1,2})(?:[,\s]+(\d{4}))?/);
+      if (m && MONTH[m[1]] !== undefined) d = new Date(Date.UTC(+(m[3]||year), MONTH[m[1]], +m[2], 23,59,59));
+    }
+    if (d && !Number.isNaN(d.getTime())) derivedValidAt = d.toISOString();
+  }
+  const recallExtras = {
+    ...(userConnector ? { tags: [userConnector] } : {}),
+    ...(derivedValidAt ? { valid_at: derivedValidAt } : {}),
+  };
+
   // (a) Parallel recall on each sub_query
   if (plan.sub_queries.length > 0) {
     const recallResults = await Promise.all(
       plan.sub_queries.map(async (q) => {
         try {
-          const r = await dispatchTool('hivemind_recall', { query: q, mode: 'quick', limit: 12 }, ctx);
+          const r = await dispatchTool('hivemind_recall', { query: q, mode: 'quick', limit: 12, ...recallExtras }, ctx);
           const memCount = r?.memories?.length || 0;
           const liveCount = r?.live_count || 0;
           const evCount = r?.evidence_count || 0;
@@ -278,7 +304,7 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
           if (liveCount > 0) parts.push(`${liveCount} live`);
           if (evCount > 0) parts.push(`${evCount} evidence`);
           const summary = parts.join(' + ');
-          recordTool('hivemind_recall', { query: q, mode: 'quick' }, summary, r);
+          recordTool('hivemind_recall', { query: q, ...recallExtras, mode: 'quick' }, summary, r);
           return r;
         } catch (err) {
           recordTool('hivemind_recall', { query: q }, `error: ${err.message}`, null);

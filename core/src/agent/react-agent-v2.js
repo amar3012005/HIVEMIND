@@ -157,6 +157,22 @@ the orchestrator will execute against HIVEMIND memory.
 
 Output STRICT JSON (no prose, no code fence):
 {
+  "intent_kind": "lookup",        // REQUIRED. Single label picked by reading the user's message:
+                                  //   'lookup'   — user wants info about something they already have/know
+                                  //                (default for any question, any bare noun/name/filename,
+                                  //                 any "tell me about X", any "what do you know about X")
+                                  //   'save'     — explicit imperative to remember/log/store/note new info
+                                  //                ("save this", "remember Y", "log decision Z", "store fact W")
+                                  //   'update'   — user corrects or revises a prior fact
+                                  //                ("actually it's X not Y", "no, the price changed to Z")
+                                  //   'recap'    — user asks for a summary of history / sessions / period
+                                  //                ("what did we do last week", "summarize my decisions")
+                                  //   'greeting' — pure greeting / smalltalk / self-question (quick-gate normally handles)
+                                  //   'general'  — public-knowledge / math / code question NOT about user's data
+                                  //
+                                  // STRICT RULE: a bare entity / filename / proper noun WITHOUT an explicit
+                                  // imperative verb is ALWAYS 'lookup'. Never 'save' just because the user
+                                  // dropped a filename — they want to RECALL it, not store it again.
   "intents": ["..."],            // 1-3 short phrases describing what the user actually wants
   "sub_queries": ["..."],        // 1-4 English recall queries, each focused on ONE entity/concept
   "named_entities": ["..."],     // proper nouns the user mentioned (people, projects, files, brands)
@@ -164,9 +180,9 @@ Output STRICT JSON (no prose, no code fence):
   "needs_time_travel": false,     // true ONLY for explicit temporal: "as of X", "before Y", "what changed between"
   "time_travel": { "transaction_time": null, "valid_time": null }, // ISO timestamps if needs_time_travel
   "needs_web": false,             // true ONLY if user explicitly asks for current external info NOT in HIVEMIND
-  "save_intent": null,            // {"title": "...", "content": "...", "tags": [...], "project_hint": "..."} if user said "save X". CONTENT MUST be a fully self-contained note — if the user used a pronoun ("save this", "save that"), resolve it by reading the previous turn in conversation history and copy the actual facts into content. NEVER emit save_intent with empty / pronoun-only content. If the referent is unrecoverable, set save_intent to null instead. If the user named a project ("save to Ashley", "in the SOLVIS project"), put that name in project_hint so the server can resolve it to a project_id.
+  "save_intent": null,            // ONLY when intent_kind === 'save'. {"title": "...", "content": "...", "tags": [...], "project_hint": "..."}. CONTENT MUST be a fully self-contained note — if the user used a pronoun ("save this", "save that"), resolve it by reading the previous turn in conversation history and copy the actual facts into content. NEVER emit save_intent with empty / pronoun-only content, NEVER emit content that is just the user's own message repeated verbatim, NEVER emit save_intent for a bare filename or entity-only message. If the referent is unrecoverable, set save_intent to null instead. If the user named a project ("save to Ashley", "in the SOLVIS project"), put that name in project_hint so the server can resolve it to a project_id.
   "ask_for_project": false,       // true if the user asked to save but did NOT specify a project AND no active project is set in the session. Server will respond by asking which project before saving.
-  "update_intent": null,          // {"target_hint": "...", "new_value": "..."} if user corrected a prior fact
+  "update_intent": null,          // ONLY when intent_kind === 'update'. {"target_hint": "...", "new_value": "..."} if user corrected a prior fact
   "expected_evidence_types": []  // hint: ["fact"], ["decision"], ["preference"], etc
 }
 
@@ -205,8 +221,19 @@ async function planStep({ message, history, language, assistantName, orgName, ha
     messages: [{ role: 'system', content: sys }, ...tail, { role: 'user', content: message }],
     model, apiKey, maxTokens: PLAN_MAX_TOKENS, signal,
   });
-  // Defensive defaults
+  // Defensive defaults + intent_kind invariant enforcement.
+  const VALID_INTENT_KINDS = ['lookup', 'save', 'update', 'recap', 'greeting', 'general'];
+  let intent_kind = typeof parsed.intent_kind === 'string' ? parsed.intent_kind.toLowerCase() : 'lookup';
+  if (!VALID_INTENT_KINDS.includes(intent_kind)) intent_kind = 'lookup';
+
+  // Invariant: save_intent / update_intent only valid when intent_kind matches.
+  // Prevents planner from emitting save_intent on a bare-filename lookup
+  // (e.g. user types "Branding Skizze1 (11).png" → must be lookup, never save).
+  const save_intent   = intent_kind === 'save'   ? (parsed.save_intent   || null) : null;
+  const update_intent = intent_kind === 'update' ? (parsed.update_intent || null) : null;
+
   const plan = {
+    intent_kind,
     intents:               Array.isArray(parsed.intents) ? parsed.intents.slice(0, 4) : [],
     sub_queries:           Array.isArray(parsed.sub_queries) ? parsed.sub_queries.filter(q => typeof q === 'string' && q.trim()).slice(0, 4) : [],
     named_entities:        Array.isArray(parsed.named_entities) ? parsed.named_entities.slice(0, 6) : [],
@@ -214,9 +241,9 @@ async function planStep({ message, history, language, assistantName, orgName, ha
     needs_time_travel:     !!parsed.needs_time_travel,
     time_travel:           parsed.time_travel || null,
     needs_web:             !!parsed.needs_web,
-    save_intent:           parsed.save_intent || null,
-    ask_for_project:       !!parsed.ask_for_project,
-    update_intent:         parsed.update_intent || null,
+    save_intent,
+    ask_for_project:       intent_kind === 'save' ? !!parsed.ask_for_project : false,
+    update_intent,
     expected_evidence_types: Array.isArray(parsed.expected_evidence_types) ? parsed.expected_evidence_types : [],
   };
   onEvent?.({ type: 'plan_done', plan });
@@ -507,6 +534,20 @@ ${message}`;
 
 // ── Save / update side-effects (best-effort, async-fire-and-forget) ───
 
+// Set of pronouns / placeholders that mean "the prior turn". Plain set
+// lookup — no regex — so the rule is auditable and stable across locales.
+const PRONOUN_PLACEHOLDERS = new Set([
+  'this', 'that', 'it', 'these', 'those',
+  'the above', 'the previous', 'the prior', 'the last one',
+  'above', 'previous', 'prior', 'last one',
+]);
+
+function _isPronounPlaceholder(s) {
+  if (!s) return false;
+  const norm = s.trim().replace(/[.!?,;:]+$/, '').toLowerCase();
+  return PRONOUN_PLACEHOLDERS.has(norm);
+}
+
 async function maybeSaveOrUpdate({ plan, ctx, onEvent, message, history }) {
   if (plan.save_intent && typeof plan.save_intent === 'object') {
     // Resolve empty / pronoun-only content by harvesting conversation
@@ -515,13 +556,20 @@ async function maybeSaveOrUpdate({ plan, ctx, onEvent, message, history }) {
     let content = (plan.save_intent.content || '').trim();
     let title   = (plan.save_intent.title   || '').trim();
 
-    const PRONOUN_ONLY = /^(this|that|it|the\s+(?:above|previous|prior))\.?$/i;
-    if (!content || PRONOUN_ONLY.test(content)) {
+    if (!content || _isPronounPlaceholder(content)) {
       const turns = Array.isArray(history) ? history.slice(-6) : [];
       // Prefer last assistant draft (often the thing being saved)
       const lastAssistant = [...turns].reverse().find(h => h?.role === 'assistant' && typeof h.content === 'string' && h.content.trim().length > 20);
       const lastUserPrior = [...turns].reverse().find(h => h?.role === 'user' && typeof h.content === 'string' && h.content.trim() !== (message || '').trim() && h.content.trim().length > 20);
       content = (lastAssistant?.content || lastUserPrior?.content || '').trim();
+    }
+
+    // Reject content that is just the user's message echoed back — that's
+    // the "user dropped a filename and the LLM tried to save it" case.
+    // intent_kind enforcement upstream catches most of these, but defense
+    // in depth: never persist a save whose content === the trigger message.
+    if (content && message && content === message.trim()) {
+      content = '';
     }
 
     if (!content) {
@@ -615,7 +663,7 @@ export async function runReactAgentV2({
     // session project (ctx.projectId), and the user's accessContext has
     // multiple projects to choose from. We respond with a question instead
     // of guessing or silently dropping into org scope.
-    if (plan.save_intent && (plan.ask_for_project || (!plan.save_intent.project_hint && !ctx.projectId))) {
+    if (plan.intent_kind === 'save' && plan.save_intent && (plan.ask_for_project || (!plan.save_intent.project_hint && !ctx.projectId))) {
       const accessProjectIds = (ctx.accessContext?.projectIds) || [];
       if (!plan.save_intent.project_hint && !ctx.projectId && accessProjectIds.length > 1) {
         const lang = languageName(language);
@@ -648,7 +696,11 @@ export async function runReactAgentV2({
     }
 
     // Pure save intent (no recall needed) — write the memory then ack.
-    if (plan.save_intent && plan.sub_queries.length === 0) {
+    // Requires intent_kind === 'save' (enforced upstream in planStep) AND
+    // a populated save_intent payload. Pure-noun / filename-only inputs
+    // never reach this branch because intent_kind is forced to 'lookup'
+    // and save_intent stripped during plan post-processing.
+    if (plan.intent_kind === 'save' && plan.save_intent && plan.sub_queries.length === 0) {
       const saveStep = await maybeSaveOrUpdate({ plan, ctx, onEvent, message, history });
       if (saveStep) steps.push(saveStep);
       const lang = languageName(language);
@@ -738,8 +790,10 @@ export async function runReactAgentV2({
     });
     if (answer.usage) usages.push(answer.usage);
 
-    // STEP 6 — Save intent fire-and-forget (don't block response)
-    if (plan.save_intent) {
+    // STEP 6 — Save intent fire-and-forget (don't block response).
+    // Gated on intent_kind === 'save' so a lookup turn that happens to
+    // include a filename never accidentally writes a memory.
+    if (plan.intent_kind === 'save' && plan.save_intent) {
       const saveStep = await maybeSaveOrUpdate({ plan, ctx, onEvent, message, history });
       if (saveStep) steps.push(saveStep);
     }

@@ -473,11 +473,11 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
     }
   }
 
-  // (c) Graph traversal — planner-flagged OR auto-fire when recall surfaced
-  //     entity-tagged memories matching the named_entities.
-  const shouldTraverse =
-    (plan.needs_traverse && plan.named_entities.length > 0 && memoriesById.size > 0)
-    || (hasEntityTagged && memoriesById.size > 0 && memoriesById.size <= 8);
+  // (c) Graph traversal — fire whenever we got memories. Anthropic /
+  // DeepMind 2026 pattern: always go one hop deeper because the related
+  // memories often hold the answer the user actually wants (e.g. "X
+  // decided to ship Y" only references X; the Y decision is the edge).
+  const shouldTraverse = memoriesById.size > 0;
   if (shouldTraverse) {
     // Smarter seed selection. Build a ranked candidate list:
     //   1. Memories matching ANY named_entity in title/content/tags
@@ -710,11 +710,54 @@ CORE RULES:
    or plan. No "Next steps:" / "How would you like to proceed?" boilerplate.
 8. If the user message was a pure save/update/log intent (e.g. "save X",
    "remember Y"), acknowledge briefly ("Got it — saved.") in ${lang}
-   without restating the saved content.`;
+   without restating the saved content.
+9. **NEVER deny write/post access.** When a user asks to send/post/draft
+   a slack message (or any connector action), do NOT say "I don't have
+   access" or "I can't send messages". The system DOES have write
+   capability via the draft-approval gate — the agent's write-intent
+   branch will create a draft for user approval. If the user's request
+   is ambiguous about WHICH channel or recipient, ask a clarifying
+   question instead of claiming inability.`;
 }
 
-async function answerStep({ message, history, evidence, plan, language, assistantName, orgName, model, apiKey, signal }) {
+async function answerStep({ message, history, evidence, plan, language, assistantName, orgName, model, apiKey, signal, ctx }) {
   const sys = answerPrompt({ language, assistantName, orgName });
+
+  // Connector capability hint — built from active Nango connections so
+  // the LLM knows write access exists + which channels/recipients are
+  // resolvable. Prevents "I don't have access" hallucinations.
+  let capabilityHint = '';
+  if (ctx?.prisma?.nangoConnection) {
+    try {
+      const conns = await ctx.prisma.nangoConnection.findMany({
+        where: { userId: ctx.userId, status: 'active' },
+        select: { providerKey: true },
+      });
+      const providers = conns.map(c => c.providerKey);
+      if (providers.length > 0) {
+        capabilityHint += `\n\nCONNECTED PROVIDERS (write available via draft-approval): ${providers.join(', ')}`;
+      }
+      // Slack channel directory for write-target resolution.
+      if (providers.includes('slack') && ctx.prisma.memory) {
+        const rows = await ctx.prisma.memory.findMany({
+          where: { userId: ctx.userId, deletedAt: null, tags: { hasSome: ['slack'] } },
+          select: { sourceMetadata: true, tags: true },
+          take: 30, orderBy: { createdAt: 'desc' },
+        });
+        const channelMap = new Map();
+        for (const r of rows) {
+          const ch = (r.tags || []).find(t => typeof t === 'string' && t.startsWith('channel:'));
+          const id = r.sourceMetadata?.slack_channel_id || r.sourceMetadata?.metadata?.slack_channel_id;
+          if (ch && id) channelMap.set(ch.slice('channel:'.length), id);
+        }
+        if (channelMap.size > 0) {
+          const lines = Array.from(channelMap.entries()).slice(0, 10)
+            .map(([n, i]) => `  #${n} → ${i}`).join('\n');
+          capabilityHint += `\n\nKNOWN SLACK CHANNELS (resolved channel_id):\n${lines}`;
+        }
+      }
+    } catch {}
+  }
 
   // Build EVIDENCE block (numbered, with short id)
   const evidenceLines = evidence.memories.slice(0, 12).map((m, i) => {
@@ -753,7 +796,7 @@ async function answerStep({ message, history, evidence, plan, language, assistan
     .map(h => ({ role: h.role, content: typeof h.content === 'string' ? h.content : JSON.stringify(h.content) }));
 
   const userBlock = `EVIDENCE (${evidence.memories.length} memories):
-${evidenceLines || '(none)'}${liveLines ? `\n\nLIVE WORKSPACE (${(evidence.live || []).length} fresh items — Gmail / Drive / Calendar):\n${liveLines}` : ''}${evLines ? `\n\nDOCUMENT SEGMENTS (${(evidence.evidence || []).length} non-promoted KB chunks — full source text):\n${evLines}` : ''}
+${evidenceLines || '(none)'}${liveLines ? `\n\nLIVE WORKSPACE (${(evidence.live || []).length} fresh items — Gmail / Drive / Calendar):\n${liveLines}` : ''}${evLines ? `\n\nDOCUMENT SEGMENTS (${(evidence.evidence || []).length} non-promoted KB chunks — full source text):\n${evLines}` : ''}${capabilityHint}
 
 PLANNER INTENT: ${(plan.intents || []).join(' / ') || '(unspecified)'}
 
@@ -838,12 +881,12 @@ function _isPronounPlaceholder(s) {
 // Pure regex — runs before LLM. Avoids spending a planner call on
 // imperative phrasing.
 
-const WRITE_VERB_RE = /\b(post|send|draft|schedule|message|dm|notify|reply|share)\b/i;
-// \b doesn't match before '#' (# is not a word char), so the #channel
-// pattern needs whitespace/start-of-string anchor instead.
-const SLACK_HINT_RE = /(?:\b(?:slack|channel)\b|(?:^|\s)#[a-z0-9_-]+)/i;
-const NOTION_HINT_RE = /\bnotion\b/i;
-const GMAIL_HINT_RE = /\b(gmail|email)\b/i;
+// Wider verb set — catches "let X know", "tell Y", "remind Z", "ping",
+// "ask", "announce", "broadcast" + the original action verbs.
+const WRITE_VERB_RE = /\b(post|send|draft|schedule|message|dm|notify|reply|share|tell|ping|ask|let|inform|remind|announce|broadcast|update|alert|forward)\b/i;
+const SLACK_HINT_RE = /(?:\b(?:slack|channel|@channel|@here|@everyone)\b|(?:^|\s)#[a-z0-9_-]+|(?:^|\s)@[a-z0-9_-]+)/i;
+const NOTION_HINT_RE = /\b(notion|wiki|page|database)\b/i;
+const GMAIL_HINT_RE = /\b(gmail|email|inbox)\b/i;
 
 function detectWriteIntent(message) {
   const m = String(message || '');
@@ -1307,7 +1350,7 @@ export async function runReactAgentV2({
     // STEP 5 — Answer
     let answer = await answerStep({
       message, history, evidence, plan, language, assistantName, orgName,
-      model, apiKey, signal: abortCtrl.signal,
+      model, apiKey, signal: abortCtrl.signal, ctx,
     });
     if (answer.usage) usages.push(answer.usage);
 
@@ -1340,7 +1383,7 @@ export async function runReactAgentV2({
           // Re-run answer with augmented evidence.
           const retry = await answerStep({
             message, history, evidence, plan, language, assistantName, orgName,
-            model, apiKey, signal: abortCtrl.signal,
+            model, apiKey, signal: abortCtrl.signal, ctx,
           });
           if (retry.usage) usages.push(retry.usage);
           if (retry.confidence >= answer.confidence) {

@@ -418,6 +418,35 @@ export class MemoryGraphEngine {
       }
     }
 
+    // Stamp ingest timestamp on EVERY memory regardless of source:
+    //   - tags: `ts:YYYY-MM-DD` (filterable) + `ts:YYYY-MM-DDTHH:MMZ` (precise)
+    //   - content suffix: ` (YYYY-MM-DDTHH:MMZ)` — survives embedding so
+    //     retrieval and the FE chip can surface "when was this saved" without
+    //     a join on createdAt. Idempotent — re-ingests of routed payloads
+    //     (which have _smart_routed=true) skip re-stamping by sniffing the
+    //     marker tag.
+    if (input && !input._ts_stamped) {
+      const stampNow = new Date();
+      const day = stampNow.toISOString().slice(0, 10);                  // 2026-05-24
+      const minute = stampNow.toISOString().slice(0, 16).replace(/:/g, '') + 'Z'; // 2026-05-24T1430Z (no colon — safer in tag string)
+      const dispTs = stampNow.toISOString().slice(0, 16) + 'Z';         // 2026-05-24T14:30Z
+      const dayTag = `ts:${day}`;
+      const minuteTag = `ts:${minute}`;
+      const existing = Array.isArray(input.tags) ? input.tags : [];
+      if (!existing.includes(dayTag) || !existing.includes(minuteTag)) {
+        input = {
+          ...input,
+          tags: Array.from(new Set([...existing, dayTag, minuteTag])),
+        };
+      }
+      const c = String(input.content || '');
+      // Avoid double-stamping when the content already ends with our marker.
+      if (c && !/\(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z\)\s*$/.test(c)) {
+        input = { ...input, content: c.replace(/\s+$/, '') + ` (${dispTs})` };
+      }
+      input._ts_stamped = true;
+    }
+
     const startedAt = Date.now();
     const baseMemory = this._buildMemoryRecord(input);
     if (baseMemory.scope === 'project' && (!Array.isArray(baseMemory.project_ids) || baseMemory.project_ids.length === 0)) {

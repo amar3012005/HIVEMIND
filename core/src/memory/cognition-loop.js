@@ -22,7 +22,14 @@ const SYNTHESIS_MODEL = process.env.SYNTHESIS_MODEL || 'openai/gpt-oss-120b';
 const DEFAULT_LOOKBACK_HOURS = Number(process.env.SYNTHESIS_LOOKBACK_HOURS || 24);
 const DEFAULT_CLUSTER_MIN = Number(process.env.SYNTHESIS_CLUSTER_MIN || 4);
 const DEFAULT_CLUSTER_MAX = Number(process.env.SYNTHESIS_CLUSTER_MAX || 30);
-const DRIFT_COMPACT_THRESHOLD = Number(process.env.DRIFT_COMPACT_THRESHOLD || 12);
+// Raised from 12 → 24 so transient chat spam doesn't trigger compaction
+// every hour. A topic needs to be genuinely active (24+ memories) before
+// we pay the LLM cost to canonicalize it.
+const DRIFT_COMPACT_THRESHOLD = Number(process.env.DRIFT_COMPACT_THRESHOLD || 24);
+// Per-topic cooldown — skip compaction if a canonical-summary for the same
+// tag already exists and was created within COOLDOWN_HOURS. Stops repeated
+// re-compaction every tick once a topic gets summarized.
+const DRIFT_COMPACT_COOLDOWN_HOURS = Number(process.env.DRIFT_COMPACT_COOLDOWN_HOURS || 6);
 // Hard cap on members folded into one canonical. Buckets larger than this
 // are split into multiple canonicals, each carrying ≤ MAX members. Stops
 // the old "compacted 394" pathology where one summary tried to represent
@@ -330,7 +337,13 @@ Rules:
     // Compacting them loses the original chunks because we set
     // isLatest=false on every source, which then disappear from default
     // recall. KB docs are durable facts, not "drifting" beliefs.
-    const SYS_TAG_RE = /^(file:|fn:|page:|heading:|upload:|doc-hash:|promoted-from|synthesized|topic:|cognition-loop|knowledge-base$|document$|document-summary$|entity:|section:|chat$|talk-to-hive$)/i;
+    //
+    // Extended exclusions: agent/surface markers ("react-agent", "via:*",
+    // "agent:*", "assistant:*", "model:*"), platform tags ("manual",
+    // "talk-to-hive", "chat"), and the new auto-stamped tags ("ts:*",
+    // "time:*"). These tags appear on nearly every memory and would
+    // collect huge buckets that don't represent real topics.
+    const SYS_TAG_RE = /^(file:|fn:|page:|heading:|upload:|doc-hash:|promoted-from|synthesized|topic:|cognition-loop|knowledge-base$|document$|document-summary$|entity:|section:|chat$|talk-to-hive$|react-agent$|manual$|via:|agent:|assistant:|model:|ts:|time:|source:|sub-source:)/i;
     const buckets = new Map();
     for (const m of recent) {
       const primaryTag = (m.tags || []).find(t => !SYS_TAG_RE.test(t));
@@ -338,9 +351,37 @@ Rules:
       if (!buckets.has(primaryTag)) buckets.set(primaryTag, []);
       buckets.get(primaryTag).push(m);
     }
+
+    // Pre-fetch recent canonicals for cooldown check. Skip topics that
+    // already have a fresh canonical-summary so we don't re-compact every
+    // hour. The cooldown is per-topic — different topics can still compact.
+    const cooldownCutoff = new Date(Date.now() - DRIFT_COMPACT_COOLDOWN_HOURS * 3600 * 1000);
+    const recentCanonicals = await this.prisma.memory.findMany({
+      where: {
+        orgId,
+        deletedAt: null,
+        tags: { has: 'canonical-summary' },
+        createdAt: { gte: cooldownCutoff },
+      },
+      select: { tags: true },
+      take: 200,
+    });
+    const cooldownTopics = new Set();
+    for (const c of recentCanonicals) {
+      for (const t of (c.tags || [])) {
+        if (typeof t === 'string' && t.startsWith('topic:')) {
+          cooldownTopics.add(t.slice('topic:'.length));
+        }
+      }
+    }
     let compactions = 0;
     for (const [tag, members] of buckets.entries()) {
       if (members.length < DRIFT_COMPACT_THRESHOLD) continue;
+      if (cooldownTopics.has(tag)) {
+        // Recent canonical already exists for this topic — wait for next
+        // cooldown window before re-compacting.
+        continue;
+      }
       // Newest-first split into chunks ≤ MAX_MEMBERS_PER_CANONICAL. Each
       // chunk becomes its OWN canonical so all source memories are covered
       // and no canonical fans in more than the cap.

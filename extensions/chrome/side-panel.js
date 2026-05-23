@@ -704,14 +704,89 @@ function appendStreamingAi() {
   return wrap;
 }
 
+// Draft cards: agent-created pending writes (slack_send_message etc).
+// Polls /api/pending-writes to render, wires Approve/Cancel buttons.
+async function appendDraftCards(wrap, draftIds) {
+  try {
+    const storage = await chrome.storage.local.get(['apiKey']);
+    const config = {
+      apiBase: 'https://core.hivemind.davinciai.eu:8050',
+      apiKey: storage.apiKey,
+    };
+    if (!config.apiKey) return;
+    const resp = await fetch(`${config.apiBase}/api/pending-writes?limit=20`, {
+      headers: { 'X-API-Key': config.apiKey },
+    });
+    if (!resp.ok) return;
+    const { drafts = [] } = await resp.json();
+    const matched = drafts.filter(d => draftIds.includes(d.id));
+    if (matched.length === 0) return;
+    const card = wrap.querySelector('.ai-card');
+    const container = document.createElement('div');
+    container.className = 'draft-cards';
+    container.style.cssText = 'margin-top:10px;display:flex;flex-direction:column;gap:8px;';
+    for (const d of matched) {
+      const item = document.createElement('div');
+      item.dataset.draftId = d.id;
+      item.style.cssText = 'border:1px solid #fcd34d;background:#fef3c7;border-radius:10px;padding:10px;font-size:12px;';
+      item.innerHTML = `
+        <div style="font-family:monospace;font-size:10px;color:#525252;margin-bottom:4px;">${escapeHtml(d.provider)}/${escapeHtml(d.toolName)} · ${escapeHtml(d.status)}</div>
+        <div style="color:#525252;line-height:1.4;">${escapeHtml(d.preview || '')}</div>
+        <div class="draft-actions" style="margin-top:8px;display:flex;gap:6px;">
+          <button class="draft-approve" style="flex:1;padding:6px 10px;border-radius:6px;background:#0a0a0a;color:white;border:0;font-size:11px;font-weight:600;cursor:pointer;">Approve & Send</button>
+          <button class="draft-cancel" style="flex:1;padding:6px 10px;border-radius:6px;background:white;color:#525252;border:1px solid #e3e0db;font-size:11px;font-weight:500;cursor:pointer;">Cancel</button>
+        </div>`;
+      const approve = item.querySelector('.draft-approve');
+      const cancel = item.querySelector('.draft-cancel');
+      const act = async (action) => {
+        approve.disabled = cancel.disabled = true;
+        approve.textContent = action === 'approve' ? 'Sending…' : 'Cancelling…';
+        try {
+          const r = await fetch(`${config.apiBase}/api/pending-writes/${d.id}/${action}`, {
+            method: 'POST',
+            headers: { 'X-API-Key': config.apiKey, 'Content-Type': 'application/json' },
+          });
+          const j = await r.json();
+          const ok = j.ok && (j.status === 'sent' || j.status === 'cancelled');
+          item.style.background = ok && j.status === 'sent' ? '#d1fae5' :
+                                  j.status === 'cancelled' ? '#f3f1ec' : '#fecaca';
+          item.style.borderColor = ok && j.status === 'sent' ? '#6ee7b7' :
+                                   j.status === 'cancelled' ? '#e3e0db' : '#fca5a5';
+          item.querySelector('.draft-actions').innerHTML =
+            j.status === 'sent' ? '<span style="color:#047857;font-weight:600;">✓ Sent successfully.</span>' :
+            j.status === 'cancelled' ? '<span style="color:#525252;">Cancelled.</span>' :
+            `<span style="color:#b91c1c;">Failed: ${escapeHtml(j.error || 'unknown')}</span>`;
+        } catch (err) {
+          approve.disabled = cancel.disabled = false;
+          approve.textContent = 'Approve & Send';
+          item.querySelector('.draft-actions').insertAdjacentHTML('beforeend',
+            `<div style="color:#b91c1c;font-size:10.5px;margin-top:4px;">${escapeHtml(err.message)}</div>`);
+        }
+      };
+      approve.addEventListener('click', () => act('approve'));
+      cancel.addEventListener('click', () => act('cancel'));
+      container.appendChild(item);
+    }
+    card.appendChild(container);
+  } catch (err) {
+    console.warn('[draft-cards] render failed', err);
+  }
+}
+
 function finalizeStreamingAi(wrap, reply) {
   const text = (reply.reply || reply.response || '').trim();
   const sources = Array.isArray(reply?.sources) ? reply.sources : [];
+  const draftIds = Array.isArray(reply?.draft_ids) ? reply.draft_ids : [];
   const promptTok = reply?.usage?.prompt_tokens ?? null;
   const compTok = reply?.usage?.completion_tokens ?? null;
   const totalTok = (promptTok != null && compTok != null) ? promptTok + compTok : (reply?.usage?.total_tokens ?? null);
 
   wrap.querySelector('.ai-text').innerHTML = renderMarkdownLite(text);
+
+  // Draft-approval cards — render before sources/usage.
+  if (draftIds.length > 0) {
+    appendDraftCards(wrap, draftIds);
+  }
 
   if (sources.length || totalTok != null) {
     const card = wrap.querySelector('.ai-card');

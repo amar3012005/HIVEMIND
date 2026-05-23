@@ -67,10 +67,10 @@ export class QdrantClient {
     try {
       const resolvedCollectionName = resolveCollectionName(collectionName);
       const response = await fetch(`${QDRANT_URL}/collections/${resolvedCollectionName}`, { headers });
-      const collections = getQdrantCollections({
-        url: QDRANT_URL,
-        apiKey: API_KEY
-      });
+      // getQdrantCollections takes positional args (url, apiKey, region) —
+      // passing an object made `url` itself an object, blowing up later
+      // with `url.startsWith is not a function`.
+      const collections = getQdrantCollections(QDRANT_URL, API_KEY);
 
       if (response.ok) {
         await collections.ensureMemoriesCollectionIndexes(resolvedCollectionName);

@@ -28,7 +28,36 @@
  * stays cross-lingual searchable.
  */
 
-import { TOOL_SCHEMAS, dispatchTool } from './tool-registry.js';
+import { TOOL_SCHEMAS, dispatchTool as _dispatchTool } from './tool-registry.js';
+
+// Retry router: transient failures (TIMEOUT/RATE_LIMIT) get ONE auto-retry
+// with exponential backoff. AUTH_ERROR / INVALID_ARGS / UNKNOWN_TOOL pass
+// through immediately — those are not transient.
+const RETRYABLE_FAILURES = new Set(['TIMEOUT', 'RATE_LIMIT']);
+
+async function dispatchTool(name, args, ctx, opts = {}) {
+  const t0 = Date.now();
+  const first = await _dispatchTool(name, args, ctx, opts);
+  const logCall = (resp, retried) => {
+    if (!ctx?._trace) return;
+    ctx._trace.tool_calls.push({
+      name, ms: Date.now() - t0,
+      status: resp?.error ? 'error' : 'ok',
+      ...(resp?._failure_mode ? { failure_mode: resp._failure_mode } : {}),
+      ...(retried ? { retried_after: retried } : {}),
+    });
+  };
+  if (!first?._failure_mode || !RETRYABLE_FAILURES.has(first._failure_mode)) {
+    logCall(first, null);
+    return first;
+  }
+  const backoff = first._failure_mode === 'RATE_LIMIT' ? 1500 : 400;
+  await new Promise(r => setTimeout(r, backoff));
+  const second = await _dispatchTool(name, args, ctx, opts);
+  if (second && !second.error) second._retried_after = first._failure_mode;
+  logCall(second, first._failure_mode);
+  return second;
+}
 
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
@@ -450,34 +479,84 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
     (plan.needs_traverse && plan.named_entities.length > 0 && memoriesById.size > 0)
     || (hasEntityTagged && memoriesById.size > 0 && memoriesById.size <= 8);
   if (shouldTraverse) {
-    // Seed selection: prefer a memory matching named_entities; else just
-    // pick the top recall hit (the one with highest fusion score).
-    let seed = null;
-    if (plan.named_entities.length > 0) {
-      const firstEnt = plan.named_entities[0].toLowerCase();
-      seed = [...memoriesById.values()].find(m => {
-        const hay = ((m.title || '') + ' ' + (m.content || '')).toLowerCase();
-        return hay.includes(firstEnt) || (m.tags || []).some(t => typeof t === 'string' && t.toLowerCase().includes(firstEnt));
-      });
-    }
-    if (!seed) {
-      // Fall back to the top memory that carries any entity:* tag.
-      seed = [...memoriesById.values()].find(m =>
-        (m.tags || []).some(t => typeof t === 'string' && t.startsWith('entity:'))
-      ) || [...memoriesById.values()][0];
-    }
-    if (seed?.id) {
+    // Smarter seed selection. Build a ranked candidate list:
+    //   1. Memories matching ANY named_entity in title/content/tags
+    //   2. Memories with entity:* tags
+    //   3. Top-fusion-score memory
+    // Run traverse on UP TO 2 distinct seeds (covers ambiguous "X and Y"
+    // queries where one seed alone misses the answer).
+    const named = plan.named_entities.map(e => e.toLowerCase());
+    const scoreSeed = (m) => {
+      const hay = ((m.title || '') + ' ' + (m.content || '')).toLowerCase();
+      let s = 0;
+      for (const ent of named) {
+        if (hay.includes(ent)) s += 3;
+        if ((m.tags || []).some(t => typeof t === 'string' && t.toLowerCase().includes(ent))) s += 2;
+      }
+      if ((m.tags || []).some(t => typeof t === 'string' && t.startsWith('entity:'))) s += 1;
+      return s;
+    };
+    const seeds = [...memoriesById.values()]
+      .map(m => ({ m, s: scoreSeed(m) }))
+      .sort((a, b) => b.s - a.s)
+      .filter(x => x.s > 0 || memoriesById.size <= 4)
+      .slice(0, 2)
+      .map(x => x.m);
+    if (seeds.length === 0 && memoriesById.size > 0) seeds.push([...memoriesById.values()][0]);
+    const traversedIds = new Set();
+    for (const seed of seeds) {
+      if (!seed?.id || traversedIds.has(seed.id)) continue;
+      traversedIds.add(seed.id);
       try {
         const args = { memory_id: seed.id, depth: 2, relationship: 'all' };
         const r = await dispatchTool('hivemind_traverse_graph', args, ctx);
-        const found = r?.related || r?.memories || [];
-        recordTool('hivemind_traverse_graph', args, `${found.length} related`, r);
+        const found = r?.related || r?.memories || r?.nodes || [];
+        recordTool('hivemind_traverse_graph', args, `seed=${seed.id.slice(0, 8)} → ${found.length} related`, r);
         for (const m of found.slice(0, 8)) {
           if (m?.id && !memoriesById.has(m.id)) memoriesById.set(m.id, m);
         }
       } catch (err) {
         recordTool('hivemind_traverse_graph', { seed: seed.id }, `error: ${err.message}`, null);
       }
+    }
+  }
+
+  // (c2) Connector auto-fetch for read intents.
+  // When user names a connector explicitly (notion/gmail) AND memory
+  // recall returned <3 hits → activate the toolkit, run that connector's
+  // primary search/list tool to back-fill live data. Slack handled via
+  // memory-tap + recall already.
+  const READ_CONNECTOR_TRIGGERS = {
+    notion: { tool: 'notion-search', argMap: q => ({ query: q }) },
+    gmail:  null, // gmail live recall already wired via persistent-retrieval live tier
+  };
+  const connectorTriggered = userConnector && READ_CONNECTOR_TRIGGERS[userConnector];
+  const lowRecall = memoriesById.size < 3;
+  if (connectorTriggered && lowRecall && ctx.prisma && !plan.action_intent) {
+    try {
+      const { buildToolkitForUser } = await import('./toolkit-factory.js');
+      const tk = await buildToolkitForUser({
+        prisma: ctx.prisma, userId: ctx.userId, orgId: ctx.orgId, hivemindTools: [],
+      });
+      tk.resetEquippedTools([userConnector]);
+      const cfg = connectorTriggered;
+      const arg = cfg.argMap(plan.sub_queries[0] || plan.user_message || '');
+      const resp = await tk.execute(cfg.tool, arg, {
+        userId: ctx.userId, orgId: ctx.orgId, prisma: ctx.prisma,
+        persistentMemoryEngine: ctx.persistentMemoryEngine,
+      });
+      const text = resp.content?.[0]?.text || '';
+      recordTool(cfg.tool, arg, `${text.length}b live`, resp);
+      // Add live items so synthesis can cite them.
+      if (text) {
+        liveItems.push({
+          source: userConnector,
+          title: `live ${userConnector} result`,
+          snippet: text.slice(0, 600),
+        });
+      }
+    } catch (err) {
+      recordTool('connector_live_fallback', { provider: userConnector }, `error: ${err.message}`, null);
     }
   }
 
@@ -959,6 +1038,40 @@ export async function runReactAgentV2({
   const budgetTimer = setTimeout(() => abortCtrl.abort(), TURN_BUDGET_MS);
   const usages = [];
   const steps = [];
+  // Structured trace — enterprise observability layer.
+  // Anthropic / DeepMind 2025-26 pattern: every agent turn carries a
+  // unique traceId + per-phase timings + tool durations + cost.
+  // Returned alongside the response so prod dashboards can aggregate.
+  const trace = {
+    traceId: (globalThis.crypto?.randomUUID?.() || `t_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`),
+    started_at: new Date().toISOString(),
+    phases: {},        // { plan_ms, evidence_ms, answer_ms, ... }
+    tool_calls: [],    // [{ name, ms, status, failure_mode? }]
+    cost: {
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: 0,
+      usd: 0,
+    },
+    failure_mode: null,
+    confidence_path: [],
+  };
+  // Wrap dispatchTool so every call lands in the trace.
+  const tracedDispatch = async (name, args, c, opts) => {
+    const t0 = Date.now();
+    const r = await dispatchTool(name, args, c, opts);
+    trace.tool_calls.push({
+      name,
+      ms: Date.now() - t0,
+      status: r?.error ? 'error' : 'ok',
+      ...(r?._failure_mode ? { failure_mode: r._failure_mode } : {}),
+      ...(r?._retried_after ? { retried_after: r._retried_after } : {}),
+    });
+    return r;
+  };
+  // Shim ctx so downstream uses traced dispatch automatically without
+  // having to refactor every call site.
+  ctx = { ...ctx, _tracedDispatch: tracedDispatch, _trace: trace };
 
   try {
     const hasBrowserContext = /<METADATA:(SELECTION|SECTION|BROWSER_CONTEXT)>/i.test(message || '');
@@ -980,6 +1093,7 @@ export async function runReactAgentV2({
         confidence: 1.0,
         gaps: [],
         usage: sumUsage(usages),
+        trace: finalizeTrace(trace, usages),
         assistant_name: assistantName || null,
       };
     }
@@ -1034,6 +1148,7 @@ export async function runReactAgentV2({
             confidence: 1.0,
             gaps: [],
             usage: sumUsage(usages),
+        trace: finalizeTrace(trace, usages),
             assistant_name: assistantName || null,
             draft_ids: sub.draftIds,
           };
@@ -1076,6 +1191,7 @@ export async function runReactAgentV2({
           response: ask, sources: [], steps,
           evidence_used: [], confidence: 1.0, gaps: ['project scope unresolved'],
           usage: sumUsage(usages),
+        trace: finalizeTrace(trace, usages),
           assistant_name: assistantName || null,
         };
       }
@@ -1103,6 +1219,7 @@ export async function runReactAgentV2({
         response: ackText, sources: [], steps,
         evidence_used: [], confidence: 1.0, gaps: [],
         usage: sumUsage(usages),
+        trace: finalizeTrace(trace, usages),
         assistant_name: assistantName || null,
       };
     }
@@ -1126,6 +1243,7 @@ export async function runReactAgentV2({
         confidence: 1.0,
         gaps: [],
         usage: sumUsage(usages),
+        trace: finalizeTrace(trace, usages),
         assistant_name: assistantName || null,
       };
     }
@@ -1238,6 +1356,7 @@ export async function runReactAgentV2({
       confidence:    answer.confidence,
       gaps:          answer.gaps,
       usage:         sumUsage(usages),
+      trace:         finalizeTrace(trace, usages),
       assistant_name: assistantName || null,
     };
   } finally {
@@ -1252,6 +1371,33 @@ function sumUsage(arr) {
     completion_tokens: (acc.completion_tokens || 0) + (u.completion_tokens || 0),
     total_tokens:      (acc.total_tokens      || 0) + (u.total_tokens      || 0),
   }), {});
+}
+
+// Approximate Groq pricing (USD per 1M tokens) for cost telemetry.
+// gpt-oss-120b: $0.15 input / $0.75 output. llama-3.3-70b-versatile:
+// $0.59 input / $0.79 output. Conservative estimates used here for
+// observability; for billing use the actual Groq invoice.
+const COST_USD_PER_1M = {
+  prompt: 0.30,
+  completion: 0.80,
+};
+function estimateCostUsd(usage) {
+  if (!usage) return 0;
+  const pt = (usage.prompt_tokens || 0) / 1_000_000;
+  const ct = (usage.completion_tokens || 0) / 1_000_000;
+  return +(pt * COST_USD_PER_1M.prompt + ct * COST_USD_PER_1M.completion).toFixed(6);
+}
+
+// Finalize trace before returning. Mutates trace in place.
+function finalizeTrace(trace, usages) {
+  const u = sumUsage(usages) || {};
+  trace.cost.prompt_tokens = u.prompt_tokens || 0;
+  trace.cost.completion_tokens = u.completion_tokens || 0;
+  trace.cost.total_tokens = u.total_tokens || 0;
+  trace.cost.usd = estimateCostUsd(u);
+  trace.ended_at = new Date().toISOString();
+  trace.total_ms = new Date(trace.ended_at).getTime() - new Date(trace.started_at).getTime();
+  return trace;
 }
 
 // Re-export TOOL_SCHEMAS so callers stay agnostic of which agent runs.

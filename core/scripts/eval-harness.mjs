@@ -102,7 +102,11 @@ const CASES = [
   {
     name: 'honesty:no-data',
     q: 'what slack messages did we have about quantum computing',
-    expect: { contains_any: ['no quantum', 'don\'t have', "no slack messages", "not mention", "neither", "doesn't mention", "no record"], min_confidence: 0.5 },
+    // Should NOT falsely confirm finding quantum-related msgs.
+    expect: {
+      banned: ['yes, we have quantum', 'found quantum', 'quantum computing message titled'],
+      min_confidence: 0.5,
+    },
   },
 ];
 

@@ -1322,15 +1322,17 @@ export async function runReactAgentV2({
       }
     }
 
-    // Save intent without a resolvable project scope → ASK first.
-    // Triggered when: planner flagged ask_for_project, no project_hint, no
-    // session project (ctx.projectId), and the user's accessContext has
-    // multiple projects to choose from. We respond with a question instead
-    // of guessing or silently dropping into org scope.
+    // Save intent without a resolvable project scope → ASK *only* when:
+    //   • the planner explicitly flagged ask_for_project, OR
+    //   • content mentions a known project name OR
+    //   • the user has multiple projects AND the content TOPICALLY MATCHES
+    //     one of them (best-match score > 0.5 against project name).
+    // Otherwise default to personal scope silently. Previously we asked on
+    // every save when user had ≥2 projects — every chat turn got blocked
+    // by "Which project?" question even for totally unrelated facts.
     if (plan.intent_kind === 'save' && plan.save_intent && (plan.ask_for_project || (!plan.save_intent.project_hint && !ctx.projectId))) {
       const accessProjectIds = (ctx.accessContext?.projectIds) || [];
       if (!plan.save_intent.project_hint && !ctx.projectId && accessProjectIds.length > 1) {
-        const lang = languageName(language);
         let projects = [];
         try {
           if (ctx.persistentMemoryStore?.client?.project) {
@@ -1341,22 +1343,38 @@ export async function runReactAgentV2({
             });
           }
         } catch {}
-        const list = projects.map(p => `• ${p.name}`).join('\n') || '(no projects found)';
-        const ask = lang === 'German'
-          ? `In welches Projekt soll ich das speichern?\n${list}\n\nOder sag "org" für die ganze Organisation.`
-          : lang === 'Spanish'
-          ? `¿En qué proyecto guardo esto?\n${list}\n\nO di "org" para guardarlo a nivel de organización.`
-          : lang === 'French'
-          ? `Dans quel projet dois-je l'enregistrer ?\n${list}\n\nOu dis "org" pour l'enregistrer au niveau de l'organisation.`
-          : `Which project should I save this to?\n${list}\n\nOr say "org" to save it at the organisation level.`;
-        onEvent?.({ type: 'finish', text: ask });
-        return {
-          response: ask, sources: [], steps,
-          evidence_used: [], confidence: 1.0, gaps: ['project scope unresolved'],
-          usage: sumUsage(usages),
-        trace: finalizeTrace(trace, usages),
-          assistant_name: assistantName || null,
-        };
+
+        // Topic-match heuristic: any project name appears in the save
+        // content / title / message OR the planner asked.
+        const haystack = `${plan.save_intent.title || ''} ${plan.save_intent.content || ''} ${message || ''}`.toLowerCase();
+        const topicMatches = projects.filter(p => {
+          const n = (p.name || '').toLowerCase().trim();
+          if (!n || n.length < 3) return false;
+          return haystack.includes(n);
+        });
+
+        const shouldAsk = plan.ask_for_project === true || topicMatches.length >= 1;
+
+        if (shouldAsk) {
+          const lang = languageName(language);
+          const list = projects.map(p => `• ${p.name}`).join('\n') || '(no projects found)';
+          const ask = lang === 'German'
+            ? `In welches Projekt soll ich das speichern?\n${list}\n\nOder sag "org" für die ganze Organisation.`
+            : lang === 'Spanish'
+            ? `¿En qué proyecto guardo esto?\n${list}\n\nO di "org" para guardarlo a nivel de organización.`
+            : lang === 'French'
+            ? `Dans quel projet dois-je l'enregistrer ?\n${list}\n\nOu dis "org" pour l'enregistrer au niveau de l'organisation.`
+            : `Which project should I save this to?\n${list}\n\nOr say "org" to save it at the organisation level.`;
+          onEvent?.({ type: 'finish', text: ask });
+          return {
+            response: ask, sources: [], steps,
+            evidence_used: [], confidence: 1.0, gaps: ['project scope unresolved'],
+            usage: sumUsage(usages),
+            trace: finalizeTrace(trace, usages),
+            assistant_name: assistantName || null,
+          };
+        }
+        // No topic match — fall through to save with personal scope.
       }
     }
 

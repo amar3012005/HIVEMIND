@@ -170,13 +170,26 @@ export class ConflictDetector {
     // Strict mode raises the similarity floor + requires negation language on
     // BOTH sides + bumps the value-divergence confidence floor. Used by KB
     // promotion so catalog rows don't spam edges.
+    //
+    // Defaults rewritten 2026-05: previous defaults (sim≥0.40, single-side
+    // negation, raw-number divergence) generated 100+ false-positive edges
+    // per save because the new ts:* timestamp suffix and shared topic words
+    // collide with every prior memory. New defaults:
+    //   • minSimilarity 0.65 (was 0.40) — must be genuinely same-topic
+    //   • both-side negation required by default
+    //   • entity-overlap required (≥1 shared entity: tag) — same topic by
+    //     LLM definition, not by word overlap
+    //   • numeric divergence ignores ts:* timestamp digits
+    //   • final cap on returned list to keep downstream edge writes bounded
     const strict = opts.strictMode === true;
     const minSimilarity = typeof opts.minSimilarity === 'number'
       ? opts.minSimilarity
-      : (strict ? 0.65 : 0.40);
-    const maxSimilarity = typeof opts.maxSimilarity === 'number' ? opts.maxSimilarity : 0.85;
-    const minConfidence = strict ? 0.75 : 0.0;
-    const requireBothSideSignal = strict || opts.requireBothSideSignal === true;
+      : (strict ? 0.75 : 0.65);
+    const maxSimilarity = typeof opts.maxSimilarity === 'number' ? opts.maxSimilarity : 0.92;
+    const minConfidence = strict ? 0.80 : 0.65;
+    const requireBothSideSignal = opts.requireBothSideSignal !== false;
+    const requireEntityOverlap = opts.requireEntityOverlap !== false;
+    const maxResults = Number.isInteger(opts.maxResults) ? opts.maxResults : 5;
 
     const NEGATION_PATTERNS = [
       { pattern: /\b(not|no longer|stopped|quit|never|don't|doesn't|didn't|isn't|aren't|wasn't|weren't|can't|won't|haven't|hasn't)\b/i, type: 'negation', weight: 0.7 },
@@ -185,12 +198,38 @@ export class ConflictDetector {
       { pattern: /\b(actually|in fact|correction|wrong|incorrect|mistake)\b/i, type: 'explicit_correction', weight: 0.9 },
     ];
 
+    // Strip our auto-stamped timestamp suffix and any ts:*/time:* tokens
+    // from BOTH sides before any numeric-divergence check — those are not
+    // value claims, they're audit metadata.
+    const stripTimestamps = (s) => String(s || '')
+      .replace(/\(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z\)\s*$/, '')
+      .replace(/\bts:\d{4}-\d{2}-\d{2}(T\d{2}\d{2}Z)?\b/gi, '')
+      .replace(/\btime:[\w:-]+\b/gi, '');
+
     const newContent = newMemory.content || '';
+    const newClean = stripTimestamps(newContent);
+    const newEntityTags = new Set((newMemory.tags || []).filter(t => typeof t === 'string' && t.startsWith('entity:')));
+
     const contradictions = [];
 
     for (const existing of existingMemories) {
       const existingContent = existing.content || '';
-      const similarity = computeTokenSimilarity(newContent, existingContent);
+      const existingClean = stripTimestamps(existingContent);
+
+      // Entity-overlap gate: ≥1 shared entity:* tag. The LLM in
+      // entity-co-mention has already extracted entities for both sides;
+      // we use those as the ground-truth same-topic signal instead of
+      // token overlap which spuriously matches via timestamps/connectors.
+      if (requireEntityOverlap && newEntityTags.size > 0) {
+        const existingEntities = new Set((existing.tags || []).filter(t => typeof t === 'string' && t.startsWith('entity:')));
+        let overlap = false;
+        for (const t of newEntityTags) {
+          if (existingEntities.has(t)) { overlap = true; break; }
+        }
+        if (!overlap) continue;
+      }
+
+      const similarity = computeTokenSimilarity(newClean, existingClean);
 
       // Same-topic-different-content band (configurable via opts)
       if (similarity < minSimilarity || similarity > maxSimilarity) continue;
@@ -198,8 +237,8 @@ export class ConflictDetector {
       let bestMatch = null;
 
       for (const { pattern, type, weight } of NEGATION_PATTERNS) {
-        const newHas = pattern.test(newContent);
-        const existingHas = pattern.test(existingContent);
+        const newHas = pattern.test(newClean);
+        const existingHas = pattern.test(existingClean);
 
         const signalOk = requireBothSideSignal ? (newHas && existingHas) : (newHas || existingHas);
         if (signalOk) {
@@ -211,16 +250,20 @@ export class ConflictDetector {
         }
       }
 
-      // Additional check: numeric/date value divergence on same topic
+      // Additional check: numeric/date value divergence on same topic.
+      // Operates on STRIPPED content so ts:*/timestamp suffix never
+      // triggers this. Also requires entity overlap (handled above) so
+      // two unrelated memories that happen to share a number don't match.
       if (!bestMatch) {
-        const newNumbers = (newContent.match(/\b\d+(\.\d+)?\b/g) || []).map(Number);
-        const existingNumbers = (existingContent.match(/\b\d+(\.\d+)?\b/g) || []).map(Number);
+        const newNumbers = (newClean.match(/\b\d+(\.\d+)?\b/g) || []).map(Number);
+        const existingNumbers = (existingClean.match(/\b\d+(\.\d+)?\b/g) || []).map(Number);
         if (newNumbers.length > 0 && existingNumbers.length > 0) {
-          // If there are numbers in both and they differ, flag as potential temporal contradiction
-          const sharedTopic = similarity >= 0.50;
+          const sharedTopic = similarity >= minSimilarity;
           const differentValues = newNumbers.some(n => existingNumbers.length > 0 && !existingNumbers.includes(n));
           if (sharedTopic && differentValues) {
-            bestMatch = { type: 'value_divergence', confidence: 0.6 };
+            // Bumped from 0.6 to 0.65 — value-divergence alone (no negation
+            // language) is a weaker signal than explicit correction.
+            bestMatch = { type: 'value_divergence', confidence: 0.65 };
           }
         }
       }
@@ -234,7 +277,12 @@ export class ConflictDetector {
       }
     }
 
-    return contradictions;
+    // Cap output to top-N highest-confidence so downstream edge creation
+    // never explodes. Five contradictions is plenty — the operator graph
+    // doesn't benefit from more, and stale latestMemories pollute when too
+    // many is_latest=false flips happen at once.
+    contradictions.sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+    return contradictions.slice(0, maxResults);
   }
 
   contentHash(content = '') {

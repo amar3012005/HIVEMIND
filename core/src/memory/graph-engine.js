@@ -1156,10 +1156,23 @@ export class MemoryGraphEngine {
             const EVOLUTION_RE = /\b(now|switched|changed|moved to|migrating|replaced|updated|corrected|actually|no longer|stopped|used to|formerly|previously|instead)\b/i;
             const ADDITIVE_RE = /\b(also|additionally|furthermore|plus|as well|on top of|in addition|moreover|and also)\b/i;
 
+            // Pre-filter latestMemories by entity-overlap with baseMemory
+            // tags before paying for the (token-similarity + regex) loop.
+            // Same-topic by LLM entity definition is the only signal that
+            // matters here; everything else just spams edges.
+            const baseEntityTags = new Set((baseMemory.tags || []).filter(t => typeof t === 'string' && t.startsWith('entity:')));
+            const filteredLatest = baseEntityTags.size > 0
+              ? latestMemories.filter(m => {
+                  const mt = (m.tags || []).filter(t => typeof t === 'string' && t.startsWith('entity:'));
+                  for (const t of mt) if (baseEntityTags.has(t)) return true;
+                  return false;
+                })
+              : latestMemories.slice(0, 20); // entity tags missing — keep it bounded
+
             const contradictions = this.conflictDetector.detectContradictions(
               baseMemory,
-              latestMemories,
-              { strictMode }
+              filteredLatest,
+              { strictMode, maxResults: 5 }
             );
             for (const c of contradictions) {
               // Reconcile: is this a real contradiction, or an evolution/extension?

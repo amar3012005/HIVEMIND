@@ -15946,20 +15946,35 @@ exit \$RC
 
                 // Auto-save the turn so the conversation lands in HIVEMIND
                 // even when the LLM forgot to call hivemind_save_memory.
+                // Skip when the agent ALREADY saved an explicit memory —
+                // duplicating would create a noisy turn-log alongside the
+                // curated fact. Also skip operator inference + contradiction
+                // detection on the conversation log itself: it's an audit
+                // record, not a fact-claim, and treating it as one was
+                // producing the 100+ false-positive contradiction edges.
                 try {
-                  if (persistentMemoryEngine?.ingestMemory && result.response) {
+                  const alreadySaved = Array.isArray(result.steps)
+                    && result.steps.some(s => s?.tool === 'hivemind_save_memory' && /saved\s+[a-f0-9]{4,}/.test(String(s?.result_summary || '')));
+                  if (persistentMemoryEngine?.ingestMemory && result.response && !alreadySaved) {
                     const convoPayload = {
                       title: `Chat turn — ${new Date().toISOString().slice(0, 10)}`,
                       content: `User: ${message}\n\nAssistant: ${result.response}`,
-                      tags: ['chat', 'talk-to-hive', 'react-agent'],
+                      tags: ['chat', 'talk-to-hive', 'react-agent', 'conversation-log'],
                       memory_type: 'conversation',
                       user_id: userId,
                       org_id: orgId,
                       ...(requestProjectId ? { project_id: requestProjectId, project_ids: [requestProjectId] } : {}),
                       source_metadata: { source_platform: 'talk-to-hive', via: 'react-agent' },
+                      // Conversation logs bypass operator inference and
+                      // contradiction detection. They still get timestamp
+                      // tags + indexed for retrieval, but don't fan out
+                      // into Updates/Contradicts edges against every prior
+                      // chat turn.
+                      skipSmartRouting: true,
+                      skip_contradiction_detection: true,
+                      skip_relationship_classification: true,
                     };
-                    buildRoutedIngestPayloads(convoPayload, { smartIngestRouter })
-                      .then(([routed]) => ingestRoutedPayload(routed, persistentMemoryEngine))
+                    persistentMemoryEngine.ingestMemory(convoPayload)
                       .catch((e) => console.warn('[chat:react-agent] auto-save failed:', e.message));
                   }
                 } catch {}

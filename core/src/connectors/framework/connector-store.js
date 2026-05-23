@@ -281,6 +281,36 @@ export class ConnectorStore {
     });
     if (!record || !record.isActive) return null;
 
+    // Nango-bridged provider: no local accessTokenEncrypted, instead pull
+    // a freshly-refreshed bearer from Nango via the connectionId stored
+    // in nango_connections. Slack/Notion/GitHub/Linear/Jira/Confluence all
+    // hit this branch.
+    if (!record.accessTokenEncrypted && this.prisma.nangoConnection) {
+      // Map our provider id → Nango provider_config_key. atlassian/gmail
+      // are the two cases where the keys diverge; everything else matches.
+      const NANGO_KEY_BY_PROVIDER = {
+        atlassian: 'atlassian',
+        jira: 'atlassian',
+        confluence: 'confluence',
+        gmail: 'google-mail',
+        'google-drive': 'google-drive',
+        'google-calendar': 'google-calendar',
+      };
+      const nangoKey = NANGO_KEY_BY_PROVIDER[provider] || provider;
+      try {
+        const nangoRow = await this.prisma.nangoConnection.findFirst({
+          where: { userId, providerKey: nangoKey, status: 'active' },
+          select: { connectionId: true },
+        });
+        if (nangoRow?.connectionId) {
+          const { fetchBearerFromNango } = await import('../mcp/nango-service.js');
+          return await fetchBearerFromNango(nangoKey, nangoRow.connectionId);
+        }
+      } catch (err) {
+        console.warn(`[connector-store] Nango token fetch failed for ${provider}: ${err.message}`);
+      }
+    }
+
     // Check if token is expired (with 5min buffer)
     const isExpired = record.tokenExpiresAt && new Date(record.tokenExpiresAt) < new Date(Date.now() + 5 * 60 * 1000);
 

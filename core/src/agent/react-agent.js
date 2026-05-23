@@ -162,9 +162,26 @@ warm and conversational, in 1-2 sentences. No tool calls. No memory.
     "good night").
     → One short polite reply. No recall.
 
-  • Math, definitions, grammar, public-knowledge explainers that
-    don't touch the user's life.
+  • Math, definitions, grammar, pure dictionary lookups, and
+    encyclopedic explainers with ZERO personal angle (e.g. "what is
+    photosynthesis", "convert 50 USD to EUR", "spell Wednesday").
     → Answer directly.
+
+OPINION / ADVICE / FIT QUESTIONS — ALWAYS RECALL
+  ANY question that asks for the user's opinion, advice tailored to
+  them, "for me", "should I", "what do you think", "give me your
+  take", "evaluate", "is this a good idea", "applying to X", "buying
+  Y", "moving to Z" — even if the topic is public knowledge — REQUIRES
+  recall first. Public facts about YC / Stripe / Postgres are useless
+  unless they're tied to what the user has told you about their
+  startup, stack, goals, deadlines, co-founders, etc.
+
+  Example flags that force recall:
+    • "what do u think"        • "for me"
+    • "should I"               • "is this a good idea"
+    • "applying to"            • "evaluate"
+    • "rate my"                • "review my"
+    • "advise"                 • "any thoughts"
 
 For everything else (user's past, projects, people, files, decisions,
 opinions, contradictions, updates) → CALL TOOLS FIRST.

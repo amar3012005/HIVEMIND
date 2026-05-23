@@ -59,5 +59,9 @@
       "Database: accessible via HIVEMIND_*_URL env vars",
       "API: production endpoints available"
     ]
+  },
+  "enabledPlugins": {
+    "github@claude-plugins-official": true,
+    "claude-hivemind@hivemind-plugins": true
   }
 }

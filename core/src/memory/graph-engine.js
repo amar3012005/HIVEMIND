@@ -1313,13 +1313,56 @@ export class MemoryGraphEngine {
       return;
     }
     const content = baseMemory.content || '';
-    if (content.length < 20) return;
+    // Short content is OK when the caller explicitly forced linking (chat
+    // saves), since user-typed short facts like "meet Ethan Tuesday 7pm"
+    // are exactly what the graph should connect. Otherwise the 10-char
+    // floor is enough to weed out single-word noise.
+    const forceLink = baseMemory.metadata?.force_entity_linking === true;
+    const minLen = forceLink ? 1 : 10;
+    if (content.length < minLen) return;
 
     // Filter the recall set: drop self, drop empty bodies, cap at 8 to
     // keep the prompt small + cost predictable.
     let candidates = (similar || [])
       .filter(s => s.id && s.id !== baseMemory.id && (s.content || s.title))
       .slice(0, 8);
+
+    // Boost: pre-pull memories sharing entity: or time: tags. Short user
+    // facts ("meet Ethan Tuesday 7pm") share little embedding signal with
+    // older memories about the same person/event but share the same tags,
+    // so tag-overlap surfaces the right candidates that vector recall
+    // would miss. Cap at 4 extra so the LLM prompt stays bounded.
+    const tagSignals = (baseMemory.tags || []).filter(t =>
+      typeof t === 'string' && (t.startsWith('entity:') || t.startsWith('time:') || t.startsWith('project:') || t.startsWith('person:'))
+    );
+    if (tagSignals.length > 0) {
+      try {
+        const prismaClient = (store && store.client) || this.store.client;
+        if (prismaClient && prismaClient.memory) {
+          const tagHits = await prismaClient.memory.findMany({
+            where: {
+              userId: baseMemory.user_id,
+              orgId: baseMemory.org_id,
+              deletedAt: null,
+              isLatest: true,
+              id: { not: baseMemory.id },
+              tags: { hasSome: tagSignals },
+            },
+            select: { id: true, title: true, content: true, tags: true },
+            orderBy: { createdAt: 'desc' },
+            take: 6,
+          });
+          const existingIds = new Set(candidates.map(c => c.id));
+          for (const r of tagHits) {
+            if (existingIds.has(r.id) || candidates.length >= 8) continue;
+            candidates.push({ id: r.id, title: r.title, content: r.content, tags: r.tags, _searchMethod: 'tag_overlap' });
+            existingIds.add(r.id);
+          }
+        }
+      } catch (tagErr) {
+        console.warn('[entity-co-mention] tag-overlap pre-pull failed:', tagErr.message);
+      }
+    }
 
     // FALLBACK: Qdrant semantic recall can return 0 hits when the new
     // content is phrased entirely in pronouns ("we recovered from it")
@@ -1484,15 +1527,18 @@ If nothing matches: { "entities": [], "memory_type": null, "links": [] }.`;
       }
     }
 
-    // Top-3 highest-confidence links → typed edges (Mentions / Updates /
-    // Extends / Contradicts based on LLM verdict).
+    // Edge cap. Chat-bucket saves with force_entity_linking get a higher
+    // ceiling (6) since the user explicitly invoked the save and we want
+    // every relevant prior fact connected. Other paths stay at 3 to keep
+    // the graph noise-controlled.
+    const EDGE_CAP = (baseMemory.metadata?.force_entity_linking === true) ? 6 : 3;
     const VALID_EDGE_TYPES = new Set(['Updates', 'Extends', 'Mentions', 'Contradicts']);
     const sorted = links
       .filter(l => Number.isInteger(l.index) && l.index >= 0 && l.index < candidates.length)
       .filter(l => typeof l.entity === 'string' && l.entity.length > 0)
       .filter(l => typeof l.confidence === 'number' && l.confidence >= 0.55)
       .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))
-      .slice(0, 3);
+      .slice(0, EDGE_CAP);
 
     const writeStore = store || this.store;
     for (const l of sorted) {

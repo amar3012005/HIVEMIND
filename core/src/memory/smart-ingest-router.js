@@ -453,13 +453,32 @@ export class SmartIngestRouter {
       return { parent, children };
     }
 
+    // Single-turn chat save. Extract temporal anchors + boost tags so the
+    // downstream entity-linker has signal to work with for short facts like
+    // "It is on Tuesday 7 pm" or "meet Ethan May 23".
+    const content = payload.content || '';
+    const temporal = _extractTemporalAnchors(content, payload.metadata?.user_timezone);
+    const tagBoost = new Set(payload.tags || []);
+    // Reuse already-present chat platform tags.
+    if (isChatLike(payload)) {
+      tagBoost.add('talk-to-hive');
+    }
+    // Surface every temporal anchor as a tag so retrieval can filter by it.
+    for (const t of temporal.tags) tagBoost.add(t);
+
     return [{
       ...payload,
       memory_type: payload.memory_type || 'fact',
+      tags: Array.from(tagBoost),
       metadata: {
         ...payload.metadata,
         source_type_normalized: 'chat',
-      }
+        temporal_refs: temporal.refs.length ? temporal.refs : undefined,
+        // Force entity-linker to fire even for short content; the linker
+        // also checks content length, but `force_entity_linking` makes the
+        // intent explicit and lets graph-engine override its own gate.
+        force_entity_linking: true,
+      },
     }];
   }
 
@@ -545,8 +564,16 @@ export class SmartIngestRouter {
       };
     }
 
-    // Skip for very short content
-    if (payload.content.length < 30) return payload;
+    // Short-content threshold split by source. Chat / talk-to-hive saves are
+    // ALWAYS user-curated durable facts ("meet Ethan Tuesday 7pm") — we want
+    // operator inference even when they are 10–30 chars long. Other sources
+    // (KB chunks, connector rows) keep the higher floor to avoid wasting
+    // LLM calls on auto-ingested noise.
+    const isChatBucket = (payload.source_metadata?.source_platform || '').toLowerCase().includes('talk-to-hive')
+      || (payload.metadata?.source_type_normalized === 'chat')
+      || (payload.source_metadata?.source_type || '').toLowerCase() === 'chat';
+    const minContentLen = isChatBucket ? 10 : 30;
+    if (payload.content.length < minContentLen) return payload;
 
     try {
       const searchQuery = payload.title
@@ -1044,3 +1071,61 @@ export class SmartIngestRouter {
     return chunks.length > 0 ? chunks : [content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()];
   }
 }
+
+// ── Helpers (module-scope) ─────────────────────────────────────────
+
+function isChatLike(payload) {
+  const p = (payload.source_metadata?.source_platform || ).toLowerCase();
+  return p.includes("talk-to-hive") || p.includes("chat") || p === "manual" && (payload.metadata?.source_type_normalized === "chat");
+}
+
+// Extract temporal anchors from short user-typed content. Returns
+//   { tags: ["time:tuesday", "time:19:00", "time:may-23"], refs: [...] }
+// Used at save-time to attach time tags so retrieval can filter by
+// "what did I save about Tuesday" or "find the 7pm meeting".
+const _DAYS = ["sunday","monday","tuesday","wednesday","thursday","friday","saturday"];
+const _MONTHS = ["january","february","march","april","may","june","july","august","september","october","november","december"];
+
+function _extractTemporalAnchors(content, _tz) {
+  const text = String(content || "").toLowerCase();
+  const tags = [];
+  const refs = [];
+
+  // Day-of-week
+  for (const d of _DAYS) {
+    if (new RegExp(`\b${d}\b`).test(text)) { tags.push(`time:${d}`); refs.push({ kind: "dow", value: d }); }
+  }
+  // Relative tokens
+  for (const rel of ["today","tomorrow","tonight","yesterday","next week","this week"]) {
+    if (new RegExp(`\b${rel.replace(" ", "\s+")}\b`).test(text)) { tags.push(`time:${rel.replace(/\s+/g, "-")}`); refs.push({ kind: "rel", value: rel }); }
+  }
+  // Hour-of-day (e.g. "7 pm", "19:00", "7pm")
+  const hourMatch = text.match(/(\d{1,2})\s*(?::(\d{2}))?\s*(am|pm)/);
+  if (hourMatch) {
+    let h = Number(hourMatch[1]);
+    const min = hourMatch[2] || "00";
+    const ampm = hourMatch[3];
+    if (ampm === "pm" && h < 12) h += 12;
+    if (ampm === "am" && h === 12) h = 0;
+    const stamp = `${String(h).padStart(2, "0")}:${min}`;
+    tags.push(`time:${stamp}`);
+    refs.push({ kind: "hod", value: stamp, raw: hourMatch[0] });
+  }
+  const hm24 = text.match(/([01]?\d|2[0-3]):([0-5]\d)/);
+  if (hm24 && !hourMatch) {
+    const stamp = `${String(Number(hm24[1])).padStart(2, "0")}:${hm24[2]}`;
+    tags.push(`time:${stamp}`);
+    refs.push({ kind: "hod", value: stamp, raw: hm24[0] });
+  }
+  // Month + day ("may 23", "may 12")
+  for (const m of _MONTHS) {
+    const re = new RegExp(`\b${m}\s+(\d{1,2})\b`);
+    const mm = text.match(re);
+    if (mm) {
+      tags.push(`time:${m}-${mm[1]}`);
+      refs.push({ kind: "md", value: `${m}-${mm[1]}` });
+    }
+  }
+  return { tags: Array.from(new Set(tags)), refs };
+}
+

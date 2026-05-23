@@ -110,48 +110,110 @@ function tryLoadBullMQ() {
   }
 }
 
+function buildInMemoryQueueSystem(options) {
+  const fallbackQueue = new InMemoryIngestionQueue(options);
+  return {
+    mode: 'in-memory',
+    queue: fallbackQueue,
+    dlq: fallbackQueue,
+    async close() {
+      return undefined;
+    },
+  };
+}
+
 function createIngestionQueue(options = {}) {
   const bullmqDeps = tryLoadBullMQ();
 
   if (!bullmqDeps || options.forceInMemory === true) {
-    const fallbackQueue = new InMemoryIngestionQueue(options);
-
-    return {
-      mode: 'in-memory',
-      queue: fallbackQueue,
-      dlq: fallbackQueue,
-      async close() {
-        return undefined;
-      },
-    };
+    return buildInMemoryQueueSystem(options);
   }
 
   const { bullmq, IORedis } = bullmqDeps;
-  const connection = new IORedis({
+
+  // Probe Redis on a throwaway connection first. Only construct BullMQ
+  // Queue instances if the probe succeeds — BullMQ's internal RedisConnection
+  // emits unhandled 'error' events on bad hosts which can crash the process.
+  // If probe fails, fall back to in-memory queue. Resolved system is the
+  // single source of truth after `ready` settles.
+  const probeConn = new IORedis({
     host: process.env.REDIS_HOST || 'localhost',
     port: Number(process.env.REDIS_PORT || 6379),
     password: process.env.REDIS_PASSWORD || undefined,
-    maxRetriesPerRequest: null,
+    maxRetriesPerRequest: 1,
+    connectTimeout: 1500,
+    lazyConnect: true,
+    enableOfflineQueue: false,
+    retryStrategy: () => null,
   });
+  probeConn.on('error', () => {});
 
-  const queue = new bullmq.Queue(options.queueName || DEFAULT_QUEUE_NAME, { connection });
-  const dlq = new bullmq.Queue(options.dlqName || DEFAULT_DLQ_NAME, { connection });
+  let resolvedSystem = null;
+  const inMemoryFallback = buildInMemoryQueueSystem(options);
+
+  const ready = (async () => {
+    try {
+      await probeConn.connect();
+      await probeConn.ping();
+    } catch {
+      try { await probeConn.quit(); } catch {}
+      try { probeConn.disconnect(); } catch {}
+      console.warn('[ingestion-queue] Redis probe failed — falling back to in-memory queue');
+      resolvedSystem = inMemoryFallback;
+      return resolvedSystem;
+    }
+
+    // Probe succeeded — build a real BullMQ connection for the queues.
+    const connection = new IORedis({
+      host: process.env.REDIS_HOST || 'localhost',
+      port: Number(process.env.REDIS_PORT || 6379),
+      password: process.env.REDIS_PASSWORD || undefined,
+      maxRetriesPerRequest: null,
+    });
+    connection.on('error', (err) => {
+      console.warn('[ingestion-queue] Redis connection error:', err.message);
+    });
+
+    const queue = new bullmq.Queue(options.queueName || DEFAULT_QUEUE_NAME, { connection });
+    const dlq = new bullmq.Queue(options.dlqName || DEFAULT_DLQ_NAME, { connection });
+
+    try { await probeConn.quit(); } catch {}
+
+    resolvedSystem = {
+      mode: 'bullmq',
+      queue,
+      dlq,
+      connection,
+      async close() {
+        await queue.close();
+        await dlq.close();
+        await connection.quit();
+      },
+    };
+    return resolvedSystem;
+  })();
 
   return {
-    mode: 'bullmq',
-    queue,
-    dlq,
-    connection,
+    get mode() { return resolvedSystem ? resolvedSystem.mode : 'pending'; },
+    get queue() { return resolvedSystem ? resolvedSystem.queue : inMemoryFallback.queue; },
+    get dlq() { return resolvedSystem ? resolvedSystem.dlq : inMemoryFallback.dlq; },
+    get connection() { return resolvedSystem?.connection || null; },
+    ready,
     async close() {
-      await queue.close();
-      await dlq.close();
-      await connection.quit();
+      const sys = await ready;
+      await sys.close();
     },
   };
 }
 
 async function ingest(payload, queueSystem, options = {}) {
   validatePayload(payload);
+
+  // Wait for the Redis probe so we don't enqueue on a dead BullMQ that
+  // will silently hang. Resolves quickly (<1.5s) and only on first call.
+  if (queueSystem.ready && typeof queueSystem.ready.then === 'function') {
+    await queueSystem.ready;
+  }
 
   const jobPayload = {
     ...payload,

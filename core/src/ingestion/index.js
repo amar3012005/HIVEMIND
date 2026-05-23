@@ -22,9 +22,14 @@ function createIngestionPipeline(options = {}) {
   orchestrator.pageindexHook = pageindexHook;
   setupIngestionEventListener(orchestrator.eventBus, pageindexHook);
 
-  if (queueSystem.mode === 'in-memory') {
-    queueSystem.queue.process(async (job) => orchestrator.process(job));
-  } else {
+  // Worker attachment deferred until Redis probe settles. If probe falls
+  // back to in-memory, queueSystem.mode flips and we attach the in-memory
+  // .process handler instead of a BullMQ Worker.
+  const attachWorker = () => {
+    if (queueSystem.mode === 'in-memory') {
+      queueSystem.queue.process(async (job) => orchestrator.process(job));
+      return;
+    }
     const { Worker } = require('bullmq');
     const worker = new Worker(
       options.queue?.queueName || 'hivemind-ingestion',
@@ -47,6 +52,14 @@ function createIngestionPipeline(options = {}) {
     });
 
     queueSystem.worker = worker;
+  };
+
+  if (queueSystem.ready && typeof queueSystem.ready.then === 'function') {
+    queueSystem.ready.then(attachWorker).catch((err) => {
+      (options.logger || console).error('[ingestion-pipeline] worker attach failed:', err.message);
+    });
+  } else {
+    attachWorker();
   }
 
   return {

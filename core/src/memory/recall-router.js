@@ -75,7 +75,7 @@ async function hop1Memory({ store, query, options, ctx }) {
   const isRecentish = /\b(last|latest|recent|today|yesterday|just|now)\b/.test(ql);
   const inferredTags = matchedConnector && isRecentish ? [matchedConnector] : null;
 
-  const result = await recallPersistedMemories(store, {
+  const recallArgs = {
     query_context: query,
     user_id: ctx.userId,
     org_id: ctx.orgId,
@@ -87,7 +87,11 @@ async function hop1Memory({ store, query, options, ctx }) {
     ...(options.valid_at && !Number.isNaN(new Date(options.valid_at).getTime())
       ? { bitemporal: { valid_at: new Date(options.valid_at) } }
       : {}),
-  });
+  };
+  const result = await recallPersistedMemories(store, recallArgs);
+  if (process.env.RECALL_TRACE) {
+    console.log('[recall-router] hop1 args=', JSON.stringify({ tags: recallArgs.tags, max_memories: recallArgs.max_memories, has_access_ctx: !!recallArgs.access_context }), 'returned=', result?.memories?.length || 0);
+  }
 
   // Tag-anchored fallback. If FTS returned nothing AND the caller (or
   // shortcut) supplied tags, fetch directly by tag ordered by document_date

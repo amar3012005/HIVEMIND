@@ -1399,7 +1399,11 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
         console.warn('[Phase1] TopicStateWriter failed to init:', err.message);
       }
     }
-    console.log('[Phase1] DocumentFirstIngestionService enabled');
+    // Expose globally so connector adapters (Slack file ingest, etc) can
+    // call into the KB pipeline without dragging the service through ctx
+    // plumbing in sync-engine.
+    globalThis.__hivemindDocumentFirstIngestion = documentFirstIngestion;
+    console.log('[Phase1] DocumentFirstIngestionService enabled (exposed via globalThis)');
   } catch (err) {
     console.warn('[Phase1] DocumentFirstIngestionService failed to init:', err.message);
   }

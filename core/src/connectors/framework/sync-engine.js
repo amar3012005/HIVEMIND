@@ -178,6 +178,11 @@ export class SyncEngine {
                   user_id: userId,
                   org_id: orgId,
                   prisma: this.prisma,
+                  // Slack adapter needs the user-token to download files
+                  // via files.info url_private (auth-gated). Other adapters
+                  // can ignore.
+                  access_token: accessToken,
+                  provider,
                 });
               } catch (extractErr) {
                 console.warn(`[sync-engine] extractStructured failed (non-fatal): ${extractErr.message}`);

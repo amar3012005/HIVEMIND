@@ -423,6 +423,90 @@ export class SlackAdapter extends BaseProviderAdapter {
   }
 
   // ─────────────────────────────────────────────
+  //  File attachment ingestion to KB pipeline
+  // ─────────────────────────────────────────────
+  //
+  // Slack messages can carry files (PDFs, images, docs). For each file:
+  //   1. Skip if already ingested (idempotent on doc-hash from filename+ts).
+  //   2. Download bytes via files.info url_private with user token.
+  //   3. Hand to documentFirstIngestion.ingestKnowledgeDocument which:
+  //      - parses via Docling (when DOCLING_URL set; fallback to text)
+  //      - chunks + embeds + promotes to KB.
+  //   4. Memory rows from THIS slack unit already carry file:<name> tag,
+  //      so recall by filename surfaces the slack origin too.
+
+  async extractStructured(record, ctx) {
+    if (!ctx.access_token) return;
+    const files = record?.files_attached
+      || (Array.isArray(record?.messages)
+        ? record.messages.flatMap(m => m.files || []).filter(f => f.id && f.url_private)
+        : []);
+    if (!files || files.length === 0) return;
+    const docService = globalThis.__hivemindDocumentFirstIngestion;
+    if (!docService || typeof docService.ingestKnowledgeDocument !== 'function') return;
+
+    // Idempotency: dedupe by (slack file_id) — same file shared again =
+    // same id. Cheap pre-check.
+    const seenIds = new Set();
+    const SLACK_FILE_TAG_PREFIX = 'slack-file-id:';
+
+    for (const f of files.slice(0, 10)) {
+      if (!f.id || !f.url_private || !f.name) continue;
+      if (seenIds.has(f.id)) continue;
+      seenIds.add(f.id);
+      try {
+        if (ctx.prisma?.memory) {
+          const existing = await ctx.prisma.memory.findFirst({
+            where: {
+              userId: ctx.user_id,
+              tags: { has: `${SLACK_FILE_TAG_PREFIX}${f.id}` },
+            },
+            select: { id: true },
+          });
+          if (existing) continue;
+        }
+        // url_private requires user bearer token.
+        const resp = await fetch(f.url_private, {
+          headers: { Authorization: `Bearer ${ctx.access_token}` },
+          signal: AbortSignal.timeout(30_000),
+        });
+        if (!resp.ok) {
+          console.warn(`[slack-adapter] file ${f.id} download HTTP ${resp.status}`);
+          continue;
+        }
+        const arrayBuf = await resp.arrayBuffer();
+        const buf = Buffer.from(arrayBuf);
+        if (buf.length === 0 || buf.length > 50 * 1024 * 1024) continue; // 50 MB cap
+
+        await docService.ingestKnowledgeDocument({
+          userId: ctx.user_id,
+          orgId: ctx.org_id,
+          filename: f.name,
+          fileBuffer: buf,
+          contentType: f.mimetype || 'application/octet-stream',
+          metadata: {
+            source: 'slack',
+            slack_file_id: f.id,
+            slack_channel_id: record.channel_id,
+            slack_channel_name: record.channel_name,
+            slack_thread_ts: record.root_ts,
+            connector: 'slack',
+            extra_tags: [
+              `slack-file-id:${f.id}`,
+              `channel:${record.channel_name}`,
+              'slack',
+              'live-tap',
+            ],
+          },
+        });
+        console.log(`[slack-adapter] KB ingest: ${f.name} (${buf.length} bytes) from #${record.channel_name}`);
+      } catch (err) {
+        console.warn(`[slack-adapter] file ingest failed for ${f.name}: ${err.message}`);
+      }
+    }
+  }
+
+  // ─────────────────────────────────────────────
   //  Helpers
   // ─────────────────────────────────────────────
 

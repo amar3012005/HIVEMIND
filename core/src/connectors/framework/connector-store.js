@@ -276,26 +276,28 @@ export class ConnectorStore {
    * Get decrypted access token for a connector. Refreshes if expired.
    */
   async getAccessToken(userId, provider) {
-    const record = await this.prisma.platformIntegration.findUnique({
-      where: { userId_platformType: { userId, platformType: provider } },
-    });
-    if (!record || !record.isActive) return null;
+    // Map our provider id → Nango unique_key (the value in Nango's
+    // _nango_configs.unique_key column — set when the integration is
+    // registered in Nango dashboard). Mismatch here = "Integration does
+    // not exist" 400. Keep ALL providers that have a Nango integration
+    // mapped explicitly; unknown providers fall through to provider name.
+    const NANGO_KEY_BY_PROVIDER = {
+      atlassian: 'atlassian',
+      jira: 'atlassian',
+      confluence: 'confluence',
+      gmail: 'gmail',                  // Nango unique_key is 'gmail' (not 'google-mail')
+      'google-docs': 'google-docs',
+      'google-gemini': 'google-gemini',
+      'google-drive': 'google-drive',
+      'google-calendar': 'google-calendar',
+    };
 
-    // Nango-bridged provider: no local accessTokenEncrypted, instead pull
-    // a freshly-refreshed bearer from Nango via the connectionId stored
-    // in nango_connections. Slack/Notion/GitHub/Linear/Jira/Confluence all
-    // hit this branch.
-    if (!record.accessTokenEncrypted && this.prisma.nangoConnection) {
-      // Map our provider id → Nango provider_config_key. atlassian/gmail
-      // are the two cases where the keys diverge; everything else matches.
-      const NANGO_KEY_BY_PROVIDER = {
-        atlassian: 'atlassian',
-        jira: 'atlassian',
-        confluence: 'confluence',
-        gmail: 'google-mail',
-        'google-drive': 'google-drive',
-        'google-calendar': 'google-calendar',
-      };
+    // Nango-FIRST lookup. If user has a live Nango connection for this
+    // provider, use it regardless of whether a legacy platformIntegration
+    // row exists. This makes the FE switch to Nango-only (Connectors page
+    // shows Nango tile) actually route Gmail/GDocs/etc. through Nango
+    // without requiring a manual disconnect of legacy creds.
+    if (this.prisma.nangoConnection) {
       const nangoKey = NANGO_KEY_BY_PROVIDER[provider] || provider;
       try {
         const nangoRow = await this.prisma.nangoConnection.findFirst({
@@ -310,6 +312,11 @@ export class ConnectorStore {
         console.warn(`[connector-store] Nango token fetch failed for ${provider}: ${err.message}`);
       }
     }
+
+    const record = await this.prisma.platformIntegration.findUnique({
+      where: { userId_platformType: { userId, platformType: provider } },
+    });
+    if (!record || !record.isActive) return null;
 
     // Check if token is expired (with 5min buffer)
     const isExpired = record.tokenExpiresAt && new Date(record.tokenExpiresAt) < new Date(Date.now() + 5 * 60 * 1000);

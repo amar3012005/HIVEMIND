@@ -12583,6 +12583,15 @@ exit \$RC
                         for (const childRes of (result.childResults || [])) {
                           results.push(childRes);
                         }
+                        // Enrich the parent (not children — children are
+                        // extracted facts that inherit parent context).
+                        if (enrichmentQueue && parentResult.memoryId) {
+                          enrichmentQueue.enqueue(parentResult.memoryId, {
+                            content: p.parent?.content || p.content,
+                            title: p.parent?.title || p.title,
+                            tags: p.parent?.tags || p.tags,
+                          });
+                        }
                         continue;
                       }
 
@@ -12602,6 +12611,17 @@ exit \$RC
                         pageindexHook?.onMemoryIngested(memory, {
                           mutation: { operation: result.operation, deprecatedIds: result.deprecatedIds || [] }
                         }).catch(err => console.warn('[pageindex-hook] onMemoryIngested failed:', err.message));
+                      }
+
+                      // Enrichment queue — every save path enqueues for
+                      // structured field extraction (summary/urgency/actions/
+                      // decisions/blockers). Decoupled from this hot path.
+                      if (enrichmentQueue && result.memoryId) {
+                        enrichmentQueue.enqueue(result.memoryId, {
+                          content: p.content,
+                          title: p.title,
+                          tags: p.tags,
+                        });
                       }
 
                       // Auto-extract profile facts from ingested content

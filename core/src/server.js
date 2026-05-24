@@ -8574,8 +8574,15 @@ exit \$RC
 
                   // Single-message thread or per-message mode → flat ingest.
                   for (const p of payloads) {
-                    await persistentMemoryEngine.ingestMemory(p);
+                    const flatResult = await persistentMemoryEngine.ingestMemory(p);
                     ingested += 1;
+                    if (flatResult?.memoryId) {
+                      persistentMemoryEngine.enrichMemoryStructured(flatResult.memoryId, {
+                        content: p.content,
+                        title: p.title,
+                        tags: p.tags,
+                      }).catch((e) => console.warn('[gmail-enrich] failed:', e.message));
+                    }
                   }
                 } catch (err) {
                   // Surface root cause — empty err.message obscures

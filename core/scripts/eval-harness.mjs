@@ -192,6 +192,7 @@ async function runEnrichmentRoundtrip() {
     'X-HM-Org-Id': ORG_ID,
   };
   const stamp = new Date().toISOString();
+  const uniqTag = `eval-roundtrip-${Date.now()}`;
   const content = `[eval-harness] Internal review for project Atlas. Owner: amar. Action items: ship the new pricing review by Friday and schedule a sync with Lennart for next Tuesday at 14:00. Open question: do we need a legal pass before launch? Generated ${stamp}.`;
   let memoryId = null;
   try {
@@ -202,15 +203,28 @@ async function runEnrichmentRoundtrip() {
         content,
         title: 'eval-harness enrichment roundtrip',
         memory_type: 'note',
-        tags: ['eval-harness', 'enrichment-roundtrip'],
+        tags: ['eval-harness', 'enrichment-roundtrip', uniqTag],
       }),
     });
     if (!saveRes.ok) {
       return { ok: false, failures: [`save HTTP ${saveRes.status}: ${(await saveRes.text()).slice(0, 200)}`], dur: Date.now() - t0 };
     }
     const saved = await saveRes.json();
-    memoryId = saved.id || saved.memoryId || saved.memory_id;
-    if (!memoryId) return { ok: false, failures: [`save response missing id: ${JSON.stringify(saved).slice(0, 200)}`], dur: Date.now() - t0 };
+    memoryId = saved.id || saved.memoryId || saved.memory_id || null;
+    // /api/memories returns {job_id, status:'queued'} when async ingestion
+    // is enabled — poll by unique tag instead.
+    if (!memoryId) {
+      const findDeadline = Date.now() + 20000;
+      while (!memoryId && Date.now() < findDeadline) {
+        await new Promise((r) => setTimeout(r, 1500));
+        const lr = await fetch(`${URL}/api/memories?tags=${encodeURIComponent(uniqTag)}&limit=1`, { headers });
+        if (!lr.ok) continue;
+        const lj = await lr.json();
+        const list = Array.isArray(lj) ? lj : (lj.memories || lj.data || []);
+        if (list[0]) memoryId = list[0].id || list[0].memoryId || list[0].memory_id;
+      }
+    }
+    if (!memoryId) return { ok: false, failures: [`memory not found by tag ${uniqTag} after 20s queue wait`], dur: Date.now() - t0 };
 
     // Poll up to 30s. Queue worker concurrency=2 + Groq 20B ~2-4s; 30s
     // is generous even under load.

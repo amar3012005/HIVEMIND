@@ -3939,12 +3939,16 @@ exit \$RC
   // domain back to core, so all endpoint URLs work via either host.
   const _discoveryBase = (() => {
     const xfHost = req.headers['x-forwarded-host'] || req.headers['x-original-host'];
-    const host = (xfHost || req.headers.host || '').toString().split(',')[0].trim();
-    if (!host) return OAUTH_BASE_URL;
-    const proto = (req.headers['x-forwarded-proto'] || 'https').toString().split(',')[0].trim();
-    // Accept both bare apex (hivemind.davinciai.eu) and core domain.
-    if (host.includes('hivemind.davinciai.eu') || host.includes('davinciai.eu')) {
-      return `${proto}://${host}`;
+    const rawHost = (xfHost || req.headers.host || '').toString().split(',')[0].trim();
+    if (!rawHost) return OAUTH_BASE_URL;
+    // Caddy proxies hivemind.davinciai.eu (Vercel-rewritten) to the same
+    // hm-core container as core.hivemind.davinciai.eu:8050. Whichever
+    // host Caddy forwards, normalize to the canonical FE host so issuer
+    // matches what Claude sees in the address bar when it fetched the
+    // discovery doc.
+    if (rawHost.endsWith('davinciai.eu') || rawHost.endsWith('davinciai.eu:8050')) {
+      const FE_HOST = process.env.HIVEMIND_OAUTH_FE_HOST || 'hivemind.davinciai.eu';
+      return `https://${FE_HOST}`;
     }
     return OAUTH_BASE_URL;
   })();

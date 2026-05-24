@@ -162,8 +162,42 @@ export class ConnectorStore {
     const record = await this.prisma.platformIntegration.findUnique({
       where: { userId_platformType: { userId, platformType: provider } },
     });
-    if (!record) return null;
-    return this._mapRecord(record);
+    if (record) return this._mapRecord(record);
+
+    // Nango-only fallback: user OAuthed via Nango Connect popup, no
+    // legacy platformIntegration row exists. Synthesize a virtual record
+    // so downstream sync/preview endpoints see "connected" and proceed.
+    if (this.prisma.nangoConnection) {
+      const NANGO_KEY_BY_PROVIDER = {
+        atlassian: 'atlassian', jira: 'atlassian', confluence: 'confluence',
+        gmail: 'gmail', 'google-docs': 'google-docs', 'google-gemini': 'google-gemini',
+        'google-drive': 'google-drive', 'google-calendar': 'google-calendar',
+      };
+      const nangoKey = NANGO_KEY_BY_PROVIDER[provider] || provider;
+      try {
+        const nangoRow = await this.prisma.nangoConnection.findFirst({
+          where: { userId, providerKey: nangoKey, status: 'active' },
+          select: { id: true, connectionId: true, createdAt: true, updatedAt: true },
+        });
+        if (nangoRow) {
+          return {
+            id: nangoRow.id,
+            userId,
+            platformType: provider,
+            isActive: true,
+            syncStatus: 'connected',
+            target_scope: 'personal',
+            connectorMetadata: { source: 'nango', connection_id: nangoRow.connectionId },
+            createdAt: nangoRow.createdAt,
+            updatedAt: nangoRow.updatedAt,
+            _via_nango: true,
+          };
+        }
+      } catch (err) {
+        console.warn(`[connector-store] Nango getConnector fallback failed for ${provider}: ${err.message}`);
+      }
+    }
+    return null;
   }
 
   /**

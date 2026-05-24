@@ -8514,13 +8514,56 @@ exit \$RC
               };
               let ingested = 0;
               let failed = 0;
+              let treesIngested = 0;
               for (const threadId of threadIds) {
                 try {
                   const thread = await adapter._gmailFetch(`/threads/${threadId}?format=full`, token);
                   const payloads = adapter.normalize(thread, context);
+
+                  // Enterprise schema: multi-message threads ingest as a
+                  // tree (Thread parent + Message children) so the agent
+                  // can recall the whole thread by parent-id and each
+                  // message keeps its own entity/temporal extraction.
+                  // Detect the consolidated thread payload (type=gmail_thread)
+                  // and the per-message payloads from adapter output.
+                  const threadParent = payloads.find(p => p.metadata?.type === 'gmail_thread');
+                  const messageChildren = payloads.filter(p => p.metadata?.gmail_message_id && !p.metadata?.is_thread_summary);
+                  if (threadParent && messageChildren.length >= 2) {
+                    // Stamp force_entity_linking on every child for the
+                    // canonical LLM operator + entity-co-mention pass.
+                    const children = messageChildren.map(c => ({
+                      ...c,
+                      metadata: {
+                        ...(c.metadata || {}),
+                        force_entity_linking: true,
+                        ingest_tree_role: 'child',
+                        parent_title: threadParent.title,
+                      },
+                    }));
+                    const parent = {
+                      ...threadParent,
+                      metadata: {
+                        ...(threadParent.metadata || {}),
+                        force_entity_linking: true,
+                        ingest_tree_role: 'parent',
+                        child_count: children.length,
+                      },
+                    };
+                    await persistentMemoryEngine.ingestMemoryTree({ parent, children });
+                    treesIngested += 1;
+                    ingested += 1 + children.length;
+                    // Skip residual summary memory if adapter also produced one.
+                    const summary = payloads.find(p => p.metadata?.is_thread_summary);
+                    if (summary) {
+                      await persistentMemoryEngine.ingestMemory(summary);
+                      ingested += 1;
+                    }
+                    continue;
+                  }
+
+                  // Single-message thread or per-message mode → flat ingest.
                   for (const p of payloads) {
-                    const [routed] = await buildRoutedIngestPayloads(p, { smartIngestRouter });
-                    await persistentMemoryEngine.ingestMemory(routed);
+                    await persistentMemoryEngine.ingestMemory(p);
                     ingested += 1;
                   }
                 } catch (err) {
@@ -8535,7 +8578,7 @@ exit \$RC
                 action: 'ingest', resourceType: 'gmail_thread', resourceId: 'batch',
                 metadata: { thread_count: threadIds.length, ingested, failed, thread_mode: threadMode },
               });
-              return jsonResponse(res, { ok: true, ingested, failed, requested: threadIds.length });
+              return jsonResponse(res, { ok: true, ingested, failed, trees_ingested: treesIngested, requested: threadIds.length });
             } catch (err) {
               console.error('[gmail-ingest-selected] error:', err);
               return jsonResponse(res, { error: err.message }, 500);
@@ -8875,6 +8918,12 @@ exit \$RC
                             project: container_tag || null,
                             user_id: userId,
                             org_id: orgId,
+                            metadata: {
+                              // Canonical pipeline directive — every gmail
+                              // sync row gets entity + temporal + operator
+                              // LLM extraction, not just tag accumulation.
+                              force_entity_linking: true,
+                            },
                           };
                           const [routedGmailPayload] = await buildRoutedIngestPayloads(gmailPayload, { smartIngestRouter });
                           const gmailResult = await persistentMemoryEngine.ingestMemory(routedGmailPayload);

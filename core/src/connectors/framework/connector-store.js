@@ -422,8 +422,13 @@ export class ConnectorStore {
       atlassian: ['atlassian', 'jira'],
       confluence: ['confluence'],
       gmail: ['gmail', 'google-mail'],
+      'google-mail': ['google-mail', 'gmail'],
       'google-drive': ['google-drive'],
       'google-calendar': ['google-calendar'],
+      'google-docs': ['google-docs', 'gdocs'],
+      gdocs: ['google-docs', 'gdocs'],
+      'google-gemini': ['google-gemini', 'gemini'],
+      gemini: ['google-gemini', 'gemini'],
     };
     const nangoKeys = NANGO_KEY_ALIASES[provider] || [provider];
     if (this.prisma.nangoConnection) {

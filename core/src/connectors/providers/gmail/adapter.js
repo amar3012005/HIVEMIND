@@ -319,6 +319,10 @@ export class GmailAdapter extends BaseProviderAdapter {
           attachments: attachments.length > 0 ? attachments : undefined,
           attachment_count: attachments.length,
           attachment_names: attachments.map(a => a.filename),
+          // Force the canonical entity-linker to fire on every gmail message
+          // — multi-edge LLM operator inference (Updates/Extends/Mentions)
+          // even for short replies. Same flag chat saves use.
+          force_entity_linking: true,
         },
       };
 
@@ -422,6 +426,7 @@ export class GmailAdapter extends BaseProviderAdapter {
           attachment_count: allAttachments.length,
           attachment_names: allAttachments.map(a => a.filename),
           labels: threadLabels,
+          force_entity_linking: true,
         },
       });
 

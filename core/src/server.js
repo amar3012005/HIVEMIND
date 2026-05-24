@@ -5790,6 +5790,13 @@ exit \$RC
             github: './connectors/providers/github/adapter.js',
             linear: './connectors/providers/linear/adapter.js',
             atlassian: './connectors/providers/atlassian/adapter.js',
+            // Nango-routed Google providers — same adapter pattern, mounted
+            // under new keys so sync engine can dispatch by provider id.
+            'google-docs': './connectors/providers/gdocs/adapter.js',
+            gdocs: './connectors/providers/gdocs/adapter.js',
+            'google-gemini': './connectors/providers/gemini/adapter.js',
+            gemini: './connectors/providers/gemini/adapter.js',
+            'google-mail': './connectors/providers/gmail/adapter.js',
           };
           const adapterPath = adapterModules[provider];
           if (!adapterPath) {
@@ -5841,6 +5848,61 @@ exit \$RC
           return jsonResponse(res, { success: true, message: 'Sync enqueued', provider }, 202);
         } catch (error) {
           return jsonResponse(res, { error: error.message }, 500);
+        }
+      }
+
+      // POST /api/connectors/gemini/ingest-paste
+      //   Body: { session_id?, title?, model?, turns: [{role,content,ts?}], exported_at? }
+      //   Or:   { transcript: "User: ...\nAssistant: ..." }
+      // Normalizes via GeminiAdapter → tree → engine.ingestMemoryTree.
+      if (pathname === '/api/connectors/gemini/ingest-paste' && req.method === 'POST') {
+        if (!persistentMemoryEngine) {
+          return jsonResponse(res, { error: 'memory engine unavailable' }, 503);
+        }
+        if (!userId || !orgId) {
+          return jsonResponse(res, { error: 'auth required' }, 401);
+        }
+        try {
+          let turns = Array.isArray(body?.turns) ? body.turns : null;
+          // Plaintext transcript fallback — split on "User:" / "Assistant:".
+          if (!turns && typeof body?.transcript === 'string' && body.transcript.trim()) {
+            const blocks = body.transcript.split(/\n(?=(?:User|Assistant|Gemini|You):)/i);
+            turns = blocks.map(b => {
+              const m = b.match(/^(User|Assistant|Gemini|You):\s*([\s\S]*)/i);
+              if (!m) return null;
+              const role = /^(User|You)$/i.test(m[1]) ? 'user' : 'assistant';
+              return { role, content: m[2].trim() };
+            }).filter(t => t && t.content);
+          }
+          if (!Array.isArray(turns) || turns.length === 0) {
+            return jsonResponse(res, { error: 'turns[] or transcript required' }, 400);
+          }
+          const { GeminiAdapter } = await import('./connectors/providers/gemini/adapter.js');
+          const adapter = new GeminiAdapter();
+          const payloads = adapter.normalize({
+            session_id: body.session_id,
+            title: body.title,
+            model: body.model,
+            exported_at: body.exported_at,
+            turns,
+          }, { user_id: userId, org_id: orgId });
+          let imported = 0;
+          for (const p of payloads) {
+            if (p?._tree?.parent) {
+              const routed = await smartIngestRouter.route(p);
+              if (routed?.parent) {
+                const result = await persistentMemoryEngine.ingestMemoryTree(routed);
+                if (result?.parentId) imported++;
+              }
+            } else {
+              await persistentMemoryEngine.ingestMemory(p);
+              imported++;
+            }
+          }
+          return jsonResponse(res, { success: true, imported, turn_count: turns.length }, 200);
+        } catch (err) {
+          console.warn('[gemini-ingest-paste] failed:', err.message);
+          return jsonResponse(res, { error: err.message }, 500);
         }
       }
 

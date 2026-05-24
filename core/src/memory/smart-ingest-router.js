@@ -96,6 +96,12 @@ export class SmartIngestRouter {
       case 'chat':
         result = await this._routeChat(payload);
         break;
+      case 'google_docs':
+        result = await this._routeGoogleDocs(payload);
+        break;
+      case 'gemini':
+        result = await this._routeGemini(payload);
+        break;
       default:
         result = [payload];
     }
@@ -129,16 +135,25 @@ export class SmartIngestRouter {
   }
 
   _detectSourceType(payload) {
+    // Tree-shape payloads stash source metadata on the parent. Look there
+    // first when present so adapters that emit { _tree: { parent, ... } }
+    // (gdocs, gemini, gmail-thread) still dispatch correctly.
+    const tree = payload?._tree?.parent || null;
     const platform = (
       payload.source_metadata?.source_platform ||
       payload.source_metadata?.source_type ||
       payload.metadata?.source_platform ||
       payload.ingest_type ||
+      tree?.source_metadata?.source_platform ||
+      tree?.source_metadata?.source_type ||
+      tree?.metadata?.source_platform ||
       ''
     ).toLowerCase();
 
     // Explicit platform metadata takes priority
-    if (platform.includes('gmail') || platform.includes('google_mail') || platform.includes('email')) return 'gmail';
+    if (platform.includes('gmail') || platform.includes('google_mail') || platform.includes('google-mail') || platform.includes('email')) return 'gmail';
+    if (platform.includes('google-docs') || platform.includes('google_docs') || platform.includes('gdocs')) return 'google_docs';
+    if (platform.includes('gemini') || platform.includes('google-gemini')) return 'gemini';
     if (platform.includes('claude') || platform.includes('anthropic')) return 'claude';
     if (platform.includes('notion') || platform.includes('obsidian') || platform.includes('document') || platform.includes('pdf') || platform.includes('knowledge')) return 'knowledge_base';
     if (platform.includes('github') || platform.includes('gitlab') || platform.includes('code')) return 'github';
@@ -474,6 +489,82 @@ export class SmartIngestRouter {
       metadata: {
         ...payload.metadata,
         source_type_normalized: 'chat',
+        force_entity_linking: true,
+      },
+    }];
+  }
+
+  // --- Google Docs ---
+  // Adapter returns either { _tree: { parent, children } } for small docs
+  // (heading→section split) OR a single payload for large docs (>5k chars)
+  // which we route through the KB pipeline (Docling hybrid chunker).
+  async _routeGoogleDocs(payload) {
+    if (payload?._tree?.parent) {
+      return {
+        parent: {
+          ...payload._tree.parent,
+          metadata: {
+            ...(payload._tree.parent.metadata || {}),
+            source_type_normalized: 'google-docs',
+            force_entity_linking: true,
+          },
+        },
+        children: (payload._tree.children || []).map(c => ({
+          ...c,
+          metadata: {
+            ...(c.metadata || {}),
+            source_type_normalized: 'google-docs',
+            force_entity_linking: true,
+          },
+        })),
+      };
+    }
+    // Flat payload (large doc routed to KB pipeline) — same path as
+    // _routeKnowledgeBase but with google-docs source markers preserved.
+    return [{
+      ...payload,
+      memory_type: payload.memory_type || 'fact',
+      metadata: {
+        ...payload.metadata,
+        source_type_normalized: 'google-docs',
+        force_entity_linking: true,
+      },
+    }];
+  }
+
+  // --- Gemini ---
+  // Adapter wraps a chat session as { _tree: { parent, children } } where
+  // parent is the session and each turn is a child. Same canonical
+  // operator inference applies — turns Extend the session, cross-session
+  // entities trigger Mentions/Updates.
+  async _routeGemini(payload) {
+    if (payload?._tree?.parent) {
+      return {
+        parent: {
+          ...payload._tree.parent,
+          metadata: {
+            ...(payload._tree.parent.metadata || {}),
+            source_type_normalized: 'gemini',
+            force_entity_linking: true,
+          },
+        },
+        children: (payload._tree.children || []).map(c => ({
+          ...c,
+          metadata: {
+            ...(c.metadata || {}),
+            source_type_normalized: 'gemini',
+            force_entity_linking: true,
+          },
+        })),
+      };
+    }
+    // Single-turn Gemini event (per-turn live log).
+    return [{
+      ...payload,
+      memory_type: payload.memory_type || 'fact',
+      metadata: {
+        ...payload.metadata,
+        source_type_normalized: 'gemini',
         force_entity_linking: true,
       },
     }];

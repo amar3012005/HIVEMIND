@@ -289,6 +289,12 @@ export class SyncEngine {
       if (this.smartIngestRouter) {
         try {
           const routed = await this.smartIngestRouter.route(payload);
+          // Tree-shape: gdocs/gemini/slack-thread/gmail-thread emit
+          //   { parent, children } — engine.ingestMemoryTree handles it.
+          if (routed && !Array.isArray(routed) && routed.parent) {
+            await this.memoryEngine.ingestMemoryTree(routed);
+            return;
+          }
           if (Array.isArray(routed) && routed.length > 0) {
             effective = routed[0];
           }

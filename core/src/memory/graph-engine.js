@@ -1710,6 +1710,14 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
         await store.updateMemory(baseMemory.id, { tags: newTags });
       } catch (tagErr) {
         console.warn('[entity-co-mention] tag update failed:', tagErr.message);
+        // Postgres 25P02 = transaction aborted by earlier failure.
+        // Subsequent DB ops in same transaction will all fail; abort the
+        // rest of entity-co-mention to keep the txn small + let the outer
+        // ingestMemory return cleanly. Memory itself is already saved.
+        if (tagErr.code === '25P02' || /transaction is aborted/.test(String(tagErr.message))) {
+          console.warn('[entity-co-mention] txn aborted — skipping edge writes');
+          return;
+        }
       }
     }
 

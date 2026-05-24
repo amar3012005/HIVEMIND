@@ -8567,7 +8567,13 @@ exit \$RC
                     ingested += 1;
                   }
                 } catch (err) {
-                  console.warn(`[gmail-ingest-selected] thread ${threadId} failed: ${err.message}`);
+                  // Surface root cause — empty err.message obscures
+                  // Postgres 25P02 (aborted transaction) cascades.
+                  const detail = err.message || err.code || String(err).slice(0, 200);
+                  console.warn(`[gmail-ingest-selected] thread ${threadId} failed: ${detail}`, {
+                    stack: err.stack?.split('\n').slice(0, 4).join('\n'),
+                    code: err.code,
+                  });
                   failed += 1;
                 }
               }

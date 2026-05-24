@@ -1622,7 +1622,10 @@ OUTPUT JSON only.`;
             messages: [{ role: 'user', content: prompt }],
             ...(useStrictJsonMode ? { response_format: { type: 'json_object' } } : {}),
             temperature: 0.1,
-            max_tokens: 900,
+            // 900 tokens was cutting gpt-oss-20b mid-JSON (unterminated
+            // string @ pos 913). 1600 covers the full schema with all
+            // optional sections populated for a dense memory.
+            max_tokens: 1600,
           }),
         });
 

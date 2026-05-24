@@ -18,6 +18,20 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+// ── Memory-ingest LLM model (overrides per-stage env vars). ────────────
+// gpt-oss-20b chosen for JSON field extraction over llama-3.3-70b:
+//   • ~5× cheaper ($0.0003 vs $0.0015 / call)
+//   • ~3× higher TPM headroom on Groq tier-1 → fewer 429s
+//   • sufficient quality for structured field extraction (not creative gen)
+// Override per-stage via STRUCTURED_ENRICHER_MODEL / ENTITY_LINKER_MODEL
+// if a specific stage needs different quality vs. cost tradeoff.
+const MEMORY_INGEST_MODEL = process.env.MEMORY_INGEST_MODEL || 'openai/gpt-oss-20b';
+
+// Sleep helper for retry backoff.
+function _sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // STOPWORDS removed (2026-05-21) — replaced by LLM-based entity linker
 // which handles coreference/pronouns/cross-cultural names without
 // needing a curated stoplist. See _attachEntityCoMentionEdges.
@@ -1431,6 +1445,39 @@ export class MemoryGraphEngine {
     const text = String(content || '').slice(0, 4000);
     if (text.length < 80) return null;
 
+    const client = this.store?.client;
+    // ── Idempotency lock ─────────────────────────────────────────────
+    // Read source_metadata.metadata.enrichment_status once. Skip if
+    // 'done' or 'in_progress' (concurrent enricher). Re-run only on
+    // null / 'error:*' (failed previous attempt).
+    let smRow = null;
+    if (client?.sourceMetadata?.findFirst) {
+      try {
+        smRow = await client.sourceMetadata.findFirst({
+          where: { memoryId },
+          select: { id: true, metadata: true },
+        });
+        const status = smRow?.metadata?.enrichment_status;
+        if (status === 'done') return smRow.metadata.enrichment || null;
+        if (status === 'in_progress') {
+          console.log(`[structured-enrich] ${memoryId.slice(0, 8)} skip — already in_progress`);
+          return null;
+        }
+      } catch (lockErr) {
+        console.warn(`[structured-enrich] lock-read failed for ${memoryId.slice(0, 8)}: ${lockErr.message}`);
+      }
+    }
+
+    // Mark in_progress so concurrent enrichers no-op. Best-effort.
+    if (smRow && client?.sourceMetadata?.update) {
+      try {
+        await client.sourceMetadata.update({
+          where: { id: smRow.id },
+          data: { metadata: { ...(smRow.metadata || {}), enrichment_status: 'in_progress', enrichment_started_at: nowIso() } },
+        });
+      } catch {}
+    }
+
     const todayIso = new Date().toISOString().slice(0, 10);
     const prompt = `You enrich a single memory with enterprise-grade structured fields. Read the memory and emit a STRICT JSON object with these keys (omit any field that doesn't apply):
 
@@ -1464,47 +1511,115 @@ ${text}
 
 OUTPUT JSON only.`;
 
-    let parsed;
-    try {
-      const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: process.env.STRUCTURED_ENRICHER_MODEL || 'llama-3.3-70b-versatile',
-          messages: [{ role: 'user', content: prompt }],
-          response_format: { type: 'json_object' },
-          temperature: 0.1,
-          max_tokens: 900,
-        }),
-      });
-      if (!resp.ok) return null;
-      const data = await resp.json();
-      parsed = JSON.parse(data?.choices?.[0]?.message?.content || '{}');
-    } catch {
+    const model = process.env.STRUCTURED_ENRICHER_MODEL || MEMORY_INGEST_MODEL;
+    const maxAttempts = Number(process.env.ENRICH_MAX_ATTEMPTS || 3);
+
+    // Helper to persist failure reason on source_metadata so retries are
+    // targetable + visible. Mirrors success-path persistence.
+    const recordError = async (code, status, bodyExcerpt) => {
+      if (!smRow || !client?.sourceMetadata?.update) return;
+      try {
+        const fresh = await client.sourceMetadata.findUnique({ where: { id: smRow.id }, select: { metadata: true } });
+        const merged = {
+          ...(fresh?.metadata || {}),
+          enrichment_status: `error:${code}`,
+          enrichment_error: {
+            code,
+            http_status: status || null,
+            body_excerpt: (bodyExcerpt || '').slice(0, 400),
+            attempted_at: nowIso(),
+            model,
+          },
+        };
+        await client.sourceMetadata.update({ where: { id: smRow.id }, data: { metadata: merged } });
+      } catch {}
+    };
+
+    let parsed = null;
+    let lastErr = { code: 'unknown', status: null, body: '' };
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model,
+            messages: [{ role: 'user', content: prompt }],
+            response_format: { type: 'json_object' },
+            temperature: 0.1,
+            max_tokens: 900,
+          }),
+        });
+
+        if (!resp.ok) {
+          const bodyText = await resp.text().catch(() => '');
+          lastErr = { code: `http_${resp.status}`, status: resp.status, body: bodyText };
+          // 429 / 5xx transient → retry with exponential backoff. 4xx fatal.
+          const transient = resp.status === 429 || (resp.status >= 500 && resp.status <= 599);
+          console.warn(`[structured-enrich] ${memoryId.slice(0, 8)} attempt ${attempt}/${maxAttempts} HTTP ${resp.status}: ${bodyText.slice(0, 200)}`);
+          if (!transient || attempt === maxAttempts) {
+            await recordError(lastErr.code, lastErr.status, lastErr.body);
+            return null;
+          }
+          await _sleep(1000 * Math.pow(2, attempt - 1));
+          continue;
+        }
+
+        const data = await resp.json();
+        const raw = data?.choices?.[0]?.message?.content || '{}';
+        try {
+          parsed = JSON.parse(raw);
+        } catch (jsonErr) {
+          lastErr = { code: 'parse_error', status: 200, body: raw.slice(0, 400) };
+          console.warn(`[structured-enrich] ${memoryId.slice(0, 8)} JSON parse failed: ${jsonErr.message}; raw=${raw.slice(0, 200)}`);
+          if (attempt === maxAttempts) {
+            await recordError(lastErr.code, lastErr.status, lastErr.body);
+            return null;
+          }
+          await _sleep(500 * attempt);
+          continue;
+        }
+        break; // success
+      } catch (netErr) {
+        lastErr = { code: 'network_error', status: null, body: netErr.message };
+        console.warn(`[structured-enrich] ${memoryId.slice(0, 8)} network err attempt ${attempt}/${maxAttempts}: ${netErr.message}`);
+        if (attempt === maxAttempts) {
+          await recordError(lastErr.code, lastErr.status, lastErr.body);
+          return null;
+        }
+        await _sleep(1000 * Math.pow(2, attempt - 1));
+      }
+    }
+
+    if (!parsed || typeof parsed !== 'object') {
+      await recordError('empty_response', null, '');
       return null;
     }
 
-    if (!parsed || typeof parsed !== 'object') return null;
-
-    // Persist on source_metadata.metadata.enrichment. Uses raw SQL via
-    // Prisma client because Prisma's nested JSON patch syntax is awkward.
+    // Persist on source_metadata.metadata.enrichment + mark status=done.
     try {
-      const client = this.store?.client;
       if (!client) return parsed;
-      // Find the source_metadata row for this memory.
-      const sm = await client.sourceMetadata?.findFirst?.({
+      const fresh = await client.sourceMetadata.findFirst({
         where: { memoryId },
         select: { id: true, metadata: true },
       });
-      if (!sm) return parsed;
-      const merged = { ...(sm.metadata || {}), enrichment: parsed };
+      if (!fresh) return parsed;
+      const merged = {
+        ...(fresh.metadata || {}),
+        enrichment: parsed,
+        enrichment_status: 'done',
+        enrichment_completed_at: nowIso(),
+        enrichment_model: model,
+      };
+      // Clear any prior error fields.
+      delete merged.enrichment_error;
       await client.sourceMetadata.update({
-        where: { id: sm.id },
+        where: { id: fresh.id },
         data: { metadata: merged },
       });
 
-      // Also distill 5 high-signal tags from enrichment so retrieval can
-      // filter by urgency / kind / action-owner without joining JSON.
+      // Distilled high-signal tags from enrichment.
       const enrichTags = [];
       if (parsed.urgency) enrichTags.push(`urgency:${parsed.urgency}`);
       if (parsed.memory_kind) enrichTags.push(`kind:${parsed.memory_kind}`);
@@ -1530,6 +1645,7 @@ OUTPUT JSON only.`;
       return parsed;
     } catch (persistErr) {
       console.warn(`[structured-enrich] persist failed for ${memoryId.slice(0, 8)}: ${persistErr.message}`);
+      await recordError('persist_error', null, persistErr.message);
       return parsed;
     }
   }
@@ -1756,7 +1872,7 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          model: process.env.ENTITY_LINKER_MODEL || 'llama-3.3-70b-versatile',
+          model: process.env.ENTITY_LINKER_MODEL || MEMORY_INGEST_MODEL,
           messages: [{ role: 'user', content: prompt }],
           response_format: { type: 'json_object' },
           temperature: 0.1,
@@ -1938,7 +2054,7 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
           metadata: {
             shared_entities: [l.entity],
             reason: (l.reason || '').slice(0, 200),
-            extraction_model: process.env.ENTITY_LINKER_MODEL || 'llama-3.3-70b-versatile',
+            extraction_model: process.env.ENTITY_LINKER_MODEL || MEMORY_INGEST_MODEL,
             classification_source: 'llm',
           },
         });

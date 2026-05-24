@@ -246,7 +246,7 @@ export class Reflector {
     const maxOutputTokens = Math.max(100, Math.min(Math.ceil(inputTokens * 0.7), 2000));
 
     const response = await this.groqClient.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
+      model: process.env.REFLECTOR_MODEL || process.env.MEMORY_INGEST_MODEL || 'openai/gpt-oss-20b',
       messages: [
         {
           role: 'system',

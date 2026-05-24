@@ -56,6 +56,7 @@ const { captureLogs, streamDockerLogs, getLogBuffer } = await import('./log-stre
 captureLogs('hm-core');
 
 const { MemoryGraphEngine } = await import('./memory/graph-engine.js');
+const { getEnrichmentQueue } = await import('./memory/enrichment-queue.js');
 const { PrismaGraphStore } = await import('./memory/prisma-graph-store.js');
 const { CognitiveOperator, detectQueryIntent, computeDynamicWeights, getMemoryTypeBoost } = await import('./memory/operator-layer.js');
 const { ContextAutopilot, scoreForRetention } = await import('./memory/context-autopilot.js');
@@ -337,6 +338,12 @@ const persistentMemoryEngine = persistentMemoryStore ? new MemoryGraphEngine({
     minSimilarityForComparison: 0.15
   }
 }) : null;
+// Enrichment queue — decouples LLM structured enrichment from save hot path.
+// Concurrency-capped, idempotent via source_metadata.enrichment_status.
+const enrichmentQueue = persistentMemoryEngine ? getEnrichmentQueue(persistentMemoryEngine) : null;
+if (enrichmentQueue) {
+  console.log(`[boot] EnrichmentQueue ready (concurrency=${enrichmentQueue.concurrency})`);
+}
 const cognitiveOperator = persistentMemoryStore ? new CognitiveOperator({ store: persistentMemoryStore }) : null;
 const biTemporalEngine = persistentMemoryStore ? new BiTemporalEngine({ store: persistentMemoryStore, prisma }) : null;
 const stigmergicCoT = persistentMemoryStore ? new StigmergicCoT({ store: persistentMemoryStore, traceTTLMinutes: 30 }) : null;
@@ -8556,12 +8563,12 @@ exit \$RC
                     // — fire-and-forget so HTTP response doesn't wait.
                     // Adds summary / action_items / decisions / urgency
                     // fields + kind:* / urgency:* / owner:* tags.
-                    if (treeResult?.parentId) {
-                      persistentMemoryEngine.enrichMemoryStructured(treeResult.parentId, {
+                    if (treeResult?.parentId && enrichmentQueue) {
+                      enrichmentQueue.enqueue(treeResult.parentId, {
                         content: parent.content,
                         title: parent.title,
                         tags: parent.tags,
-                      }).catch((e) => console.warn('[gmail-enrich] failed:', e.message));
+                      });
                     }
                     // Skip residual summary memory if adapter also produced one.
                     const summary = payloads.find(p => p.metadata?.is_thread_summary);
@@ -8576,12 +8583,12 @@ exit \$RC
                   for (const p of payloads) {
                     const flatResult = await persistentMemoryEngine.ingestMemory(p);
                     ingested += 1;
-                    if (flatResult?.memoryId) {
-                      persistentMemoryEngine.enrichMemoryStructured(flatResult.memoryId, {
+                    if (flatResult?.memoryId && enrichmentQueue) {
+                      enrichmentQueue.enqueue(flatResult.memoryId, {
                         content: p.content,
                         title: p.title,
                         tags: p.tags,
-                      }).catch((e) => console.warn('[gmail-enrich] failed:', e.message));
+                      });
                     }
                   }
                 } catch (err) {
@@ -8952,12 +8959,12 @@ exit \$RC
                           const [routedGmailPayload] = await buildRoutedIngestPayloads(gmailPayload, { smartIngestRouter });
                           const gmailResult = await persistentMemoryEngine.ingestMemory(routedGmailPayload);
                           // Enterprise structured enrichment post-commit.
-                          if (gmailResult?.memoryId) {
-                            persistentMemoryEngine.enrichMemoryStructured(gmailResult.memoryId, {
+                          if (gmailResult?.memoryId && enrichmentQueue) {
+                            enrichmentQueue.enqueue(gmailResult.memoryId, {
                               content: routedGmailPayload.content,
                               title: routedGmailPayload.title,
                               tags: routedGmailPayload.tags,
-                            }).catch((e) => console.warn('[gmail-enrich] failed:', e.message));
+                            });
                           }
                           // Embed thread memory in Qdrant for vector search
                           if (gmailResult?.memoryId && qdrantClient) {
@@ -12246,6 +12253,105 @@ exit \$RC
               });
             } catch (error) {
               return jsonResponse(res, { error: 'Bulk delete by tag failed', message: error.message }, 500);
+            }
+          }
+          break;
+
+        // ── Enrichment backfill ─────────────────────────────────────
+        // POST /api/memory/enrichment/backfill
+        //   Body (optional): { tags?: string[], memory_type?: string, limit?: number,
+        //                      include_errors?: boolean }
+        //   Action: enqueues all caller's memories missing enrichment
+        //           (sourceMetadata.metadata.enrichment IS NULL) into the
+        //           EnrichmentQueue. Orphan recovery: also re-enqueues
+        //           anything stuck in_progress > 5min (likely killed by restart).
+        //           Optional include_errors=true picks up error:* statuses for retry.
+        //   Returns: { enqueued, queue_size, stats }
+        case '/api/memory/enrichment/backfill':
+          if (req.method === 'POST') {
+            if (!ensurePersistedMemoryOrFail(res, '/api/memory/enrichment/backfill')) return;
+            if (!enrichmentQueue) return jsonResponse(res, { error: 'enrichment queue unavailable' }, 503);
+            try {
+              const reqBody = body || {};
+              const limit = Math.min(Number(reqBody.limit) || 2000, 10000);
+              const tagFilter = Array.isArray(reqBody.tags) && reqBody.tags.length ? reqBody.tags : null;
+              const memoryTypeFilter = typeof reqBody.memory_type === 'string' ? reqBody.memory_type : null;
+              const includeErrors = reqBody.include_errors === true;
+
+              // SQL: candidates are memories with no enrichment yet, or stuck
+              // in_progress > 5min (orphan), or include_errors && error:*.
+              // Scoped to caller's userId (per-tenant isolation).
+              const orphanCutoff = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+              const conditions = [
+                `m.user_id = $1::uuid`,
+                `m.deleted_at IS NULL`,
+                `m.is_latest = true`,
+              ];
+              const params = [userId];
+              if (tagFilter) {
+                params.push(tagFilter);
+                conditions.push(`m.tags && $${params.length}::text[]`);
+              }
+              if (memoryTypeFilter) {
+                params.push(memoryTypeFilter);
+                conditions.push(`m.memory_type::text = $${params.length}`);
+              }
+              const statusClauses = [`(sm.metadata->'enrichment') IS NULL AND (sm.metadata->>'enrichment_status') IS NULL`];
+              statusClauses.push(`((sm.metadata->>'enrichment_status') = 'in_progress' AND (sm.metadata->>'enrichment_started_at') < '${orphanCutoff}')`);
+              if (includeErrors) {
+                statusClauses.push(`(sm.metadata->>'enrichment_status') LIKE 'error:%'`);
+              }
+              conditions.push(`(${statusClauses.join(' OR ')})`);
+              params.push(limit);
+              const sql = `
+                SELECT m.id, m.content, m.title, m.tags
+                FROM memories m
+                JOIN source_metadata sm ON sm.memory_id = m.id
+                WHERE ${conditions.join(' AND ')}
+                ORDER BY m.created_at DESC
+                LIMIT $${params.length}::int
+              `;
+              const rows = await prisma.$queryRawUnsafe(sql, ...params);
+              const items = (rows || []).map((r) => ({
+                memoryId: r.id,
+                payload: { content: r.content, title: r.title, tags: r.tags },
+              }));
+              const enqueued = enrichmentQueue.enqueueBatch(items);
+              return jsonResponse(res, {
+                candidates: items.length,
+                enqueued,
+                queue_size: enrichmentQueue.size(),
+                stats: enrichmentQueue.stats(),
+                filter: { tags: tagFilter, memory_type: memoryTypeFilter, include_errors: includeErrors, limit },
+              });
+            } catch (err) {
+              console.error('[enrichment-backfill] error:', err);
+              return jsonResponse(res, { error: 'backfill failed', message: err.message }, 500);
+            }
+          }
+          break;
+
+        // GET /api/memory/enrichment/stats — operator visibility
+        case '/api/memory/enrichment/stats':
+          if (req.method === 'GET') {
+            if (!enrichmentQueue) return jsonResponse(res, { error: 'enrichment queue unavailable' }, 503);
+            try {
+              const counts = await prisma.$queryRawUnsafe(`
+                SELECT
+                  COUNT(*) FILTER (WHERE (sm.metadata->>'enrichment_status') = 'done')::int AS done,
+                  COUNT(*) FILTER (WHERE (sm.metadata->>'enrichment_status') = 'in_progress')::int AS in_progress,
+                  COUNT(*) FILTER (WHERE (sm.metadata->>'enrichment_status') LIKE 'error:%')::int AS errors,
+                  COUNT(*) FILTER (WHERE (sm.metadata->'enrichment') IS NULL AND (sm.metadata->>'enrichment_status') IS NULL)::int AS missing
+                FROM memories m
+                JOIN source_metadata sm ON sm.memory_id = m.id
+                WHERE m.user_id = $1::uuid AND m.deleted_at IS NULL AND m.is_latest = true
+              `, userId);
+              return jsonResponse(res, {
+                queue: enrichmentQueue.stats(),
+                memories: counts?.[0] || {},
+              });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
             }
           }
           break;

@@ -178,6 +178,80 @@ async function runCase(c) {
   };
 }
 
+// ── Enrichment roundtrip (production-fix regression gate) ──────────────
+// Saves a fresh memory, waits ≤30s for the EnrichmentQueue worker to
+// populate source_metadata.metadata.enrichment, then asserts the
+// structured fields are present. Catches regressions in the
+// gpt-oss-20b enrichment path + queue wiring + idempotency lock.
+async function runEnrichmentRoundtrip() {
+  const t0 = Date.now();
+  const headers = {
+    Authorization: `Bearer ${MASTER_KEY}`,
+    'Content-Type': 'application/json',
+    'X-HM-User-Id': USER_ID,
+    'X-HM-Org-Id': ORG_ID,
+  };
+  const stamp = new Date().toISOString();
+  const content = `[eval-harness] Internal review for project Atlas. Owner: amar. Action items: ship the new pricing review by Friday and schedule a sync with Lennart for next Tuesday at 14:00. Open question: do we need a legal pass before launch? Generated ${stamp}.`;
+  let memoryId = null;
+  try {
+    const saveRes = await fetch(`${URL}/api/memories`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        content,
+        title: 'eval-harness enrichment roundtrip',
+        memory_type: 'note',
+        tags: ['eval-harness', 'enrichment-roundtrip'],
+      }),
+    });
+    if (!saveRes.ok) {
+      return { ok: false, failures: [`save HTTP ${saveRes.status}: ${(await saveRes.text()).slice(0, 200)}`], dur: Date.now() - t0 };
+    }
+    const saved = await saveRes.json();
+    memoryId = saved.id || saved.memoryId || saved.memory_id;
+    if (!memoryId) return { ok: false, failures: [`save response missing id: ${JSON.stringify(saved).slice(0, 200)}`], dur: Date.now() - t0 };
+
+    // Poll up to 30s. Queue worker concurrency=2 + Groq 20B ~2-4s; 30s
+    // is generous even under load.
+    const deadline = Date.now() + 30000;
+    let enrichment = null;
+    let lastStatus = null;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 1500));
+      const r = await fetch(`${URL}/api/memories/${memoryId}`, { headers });
+      if (!r.ok) continue;
+      const m = await r.json();
+      const sm = m.source_metadata?.metadata || m.metadata || {};
+      lastStatus = sm.enrichment_status || null;
+      if (sm.enrichment && typeof sm.enrichment === 'object') {
+        enrichment = sm.enrichment;
+        break;
+      }
+    }
+
+    const dur = Date.now() - t0;
+    if (!enrichment) {
+      return { ok: false, failures: [`no enrichment after 30s (last status=${lastStatus || '-'})`], dur };
+    }
+    const failures = [];
+    if (typeof enrichment.summary !== 'string' || enrichment.summary.length < 20) {
+      failures.push(`summary missing/too short: ${String(enrichment.summary).slice(0, 60)}`);
+    }
+    if (!enrichment.urgency || !['low', 'medium', 'high', 'critical'].includes(enrichment.urgency)) {
+      failures.push(`urgency invalid: ${enrichment.urgency}`);
+    }
+    return { ok: failures.length === 0, failures, dur, tools: [], conf: null, drafts: 0 };
+  } catch (err) {
+    return { ok: false, failures: [`exception: ${err.message}`], dur: Date.now() - t0 };
+  } finally {
+    // Cleanup test memory so the user's view stays clean.
+    if (memoryId) {
+      try { await fetch(`${URL}/api/memories/${memoryId}`, { method: 'DELETE', headers }); } catch {}
+    }
+  }
+}
+
 (async () => {
   const results = [];
   for (const c of CASES) {
@@ -189,6 +263,12 @@ async function runCase(c) {
       : r.failures.join(' | ');
     console.log(`[${tag}] ${c.name} — ${tail}`);
   }
+  // Enrichment roundtrip — runs after chat cases since it issues a
+  // direct save + poll loop rather than going through /api/chat.
+  const enrR = await runEnrichmentRoundtrip();
+  results.push({ name: 'enrichment-roundtrip', ...enrR });
+  console.log(`[${enrR.ok ? 'PASS' : 'FAIL'}] enrichment-roundtrip — ${enrR.ok ? `${enrR.dur}ms` : enrR.failures.join(' | ')}`);
+
   const pass = results.filter(r => r.ok).length;
   const fail = results.length - pass;
   const totalCost = results.reduce((a, r) => a + (r.cost_usd || 0), 0);

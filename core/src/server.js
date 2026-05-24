@@ -8408,15 +8408,32 @@ exit \$RC
               };
               const q = adapter._buildGmailQuery(config);
               const maxResults = Math.min(parseInt(body.max_emails, 10) || 50, 200);
-              const params = new URLSearchParams({ maxResults: String(maxResults) });
-              if (q) params.set('q', q);
-              if (body.page_token) params.set('pageToken', body.page_token);
-              if (Array.isArray(config.folders)) {
-                config.folders.forEach((f) => params.append('labelIds', String(f).toUpperCase()));
+              const buildParams = (useQ) => {
+                const p = new URLSearchParams({ maxResults: String(maxResults) });
+                if (useQ && q) p.set('q', q);
+                if (body.page_token) p.set('pageToken', body.page_token);
+                if (Array.isArray(config.folders)) {
+                  config.folders.forEach((f) => p.append('labelIds', String(f).toUpperCase()));
+                }
+                return p;
+              };
+              // List + metadata-only fetch for each thread (no full body).
+              // Gracefully degrade: if Gmail integration has only metadata
+              // scope (gmail.metadata), the q parameter triggers
+              // 403 "Metadata scope does not support 'q' parameter".
+              // Retry without q so users see SOMETHING instead of 500.
+              let listRes;
+              let scopeLimited = false;
+              try {
+                listRes = await adapter._gmailFetch(`/threads?${buildParams(true)}`, token);
+              } catch (err) {
+                if (/Metadata scope does not support 'q' parameter/i.test(String(err.message))) {
+                  scopeLimited = true;
+                  listRes = await adapter._gmailFetch(`/threads?${buildParams(false)}`, token);
+                } else {
+                  throw err;
+                }
               }
-
-              // List + metadata-only fetch for each thread (no full body)
-              const listRes = await adapter._gmailFetch(`/threads?${params}`, token);
               const threadStubs = listRes.threads || [];
               const previews = [];
               await Promise.all(threadStubs.slice(0, maxResults).map(async (stub) => {
@@ -8448,10 +8465,19 @@ exit \$RC
                 next_page_token: listRes.nextPageToken || null,
                 query: q,
                 applied_config: config,
+                scope_limited: scopeLimited,
+                ...(scopeLimited ? {
+                  notice: 'Gmail integration is metadata-only — widen Nango scopes to gmail.readonly to use search query (q) + body retrieval.',
+                } : {}),
               });
             } catch (err) {
               console.error('[gmail-preview] error:', err);
-              return jsonResponse(res, { error: err.message }, 500);
+              const isScope = /Metadata scope|insufficient.*scope|insufficientPermissions|PERMISSION_DENIED/i.test(String(err.message));
+              return jsonResponse(res, {
+                error: err.message,
+                scope_issue: isScope || undefined,
+                hint: isScope ? 'Widen Nango Gmail scopes (gmail.readonly + gmail.send + gmail.modify), then reconnect.' : undefined,
+              }, isScope ? 403 : 500);
             }
           }
           break;

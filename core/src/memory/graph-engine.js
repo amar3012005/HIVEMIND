@@ -1546,7 +1546,35 @@ export class MemoryGraphEngine {
     }
 
     const todayIso = new Date().toISOString().slice(0, 10);
-    const prompt = `You enrich a single memory with enterprise-grade structured fields. Read the memory and emit a STRICT JSON object with these keys (omit any field that doesn't apply):
+
+    // Dispatch CRM-aware schema by Salesforce object type. Encoded as
+    // `sf-object:<type>` tag set by SalesforceAdapter.normalize.
+    let sfObjectType = null;
+    if (Array.isArray(tags)) {
+      const sfTag = tags.find((t) => typeof t === 'string' && t.startsWith('sf-object:'));
+      if (sfTag) {
+        const raw = sfTag.slice('sf-object:'.length);
+        const upper = raw.charAt(0).toUpperCase() + raw.slice(1);
+        sfObjectType = ({
+          Account: 'Account', Contact: 'Contact', Opportunity: 'Opportunity',
+          Opportunityhistory: 'OpportunityHistory', Task: 'Task', Event: 'Event',
+          Emailmessage: 'EmailMessage', Case: 'Case', Casecomment: 'CaseComment',
+        })[upper] || null;
+      }
+    }
+    let prompt;
+    if (sfObjectType) {
+      try {
+        const { pickSalesforceSchema } = await import('../connectors/providers/salesforce/enrichment-schema.js');
+        const schema = pickSalesforceSchema(sfObjectType);
+        if (schema) {
+          prompt = schema.buildPrompt({ todayIso, title, text });
+        }
+      } catch (schemaErr) {
+        console.warn(`[structured-enrich] SF schema load failed for ${sfObjectType}: ${schemaErr.message}`);
+      }
+    }
+    if (!prompt) prompt = `You enrich a single memory with enterprise-grade structured fields. Read the memory and emit a STRICT JSON object with these keys (omit any field that doesn't apply):
 
 {
   "summary": "2-3 sentence executive abstract for someone reopening this memory months later. Lead with WHAT/WHO/WHEN/WHY.",

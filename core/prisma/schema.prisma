@@ -368,6 +368,10 @@ model Memory {
   lastConfirmedAt                                             DateTime?            @default(now()) @map("last_confirmed_at") @db.Timestamptz(6)
   documentDate                                                DateTime?            @map("document_date") @db.Timestamptz(6)
   eventDates                                                  DateTime[]           @map("event_dates") @db.Timestamptz
+  // Bi-temporal valid-time (transaction-time = createdAt). Lets us replay
+  // "what did we know at time T" vs "what was true at time T".
+  validFrom                                                   DateTime?            @map("valid_from") @db.Timestamptz(6)
+  validTo                                                     DateTime?            @map("valid_to") @db.Timestamptz(6)
   visibility                                                  VisibilityScope?     @default(private)
   scope                                                       MemoryScope          @default(personal) @map("scope")
   primaryTeamId                                               String?              @map("primary_team_id") @db.Uuid
@@ -1559,4 +1563,135 @@ model InboundWebhookEvent {
   @@index([subscriptionId, receivedAt(sort: Desc)])
   @@index([orgId, receivedAt(sort: Desc)])
   @@map("inbound_webhook_events")
+}
+
+// ── Salesforce / cross-system memory layer ─────────────────────────────────
+// External refs map a memory to its system-of-record record (Salesforce ID,
+// Slack message ts, Gmail message id, ...). Enables idempotent re-sync and
+// cross-system entity correlation.
+model ExternalRef {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  memoryId       String   @map("memory_id") @db.Uuid
+  system         String   @db.VarChar(50)
+  objectType     String   @map("object_type") @db.VarChar(80)
+  externalId     String   @map("external_id") @db.VarChar(255)
+  externalUrl    String?  @map("external_url")
+  organizationId String   @map("organization_id") @db.Uuid
+  userId         String   @map("user_id") @db.Uuid
+  metadata       Json?    @default("{}")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([organizationId, system, objectType, externalId, memoryId])
+  @@index([organizationId, system, objectType])
+  @@index([memoryId])
+  @@index([externalId])
+  @@map("external_refs")
+}
+
+// Canonical entities are the master IDs for real-world things. Multiple
+// memories + cross-system refs collapse to one canonical entity.
+model CanonicalEntity {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId  String   @map("organization_id") @db.Uuid
+  canonicalName   String   @map("canonical_name")
+  entityKind      String   @map("entity_kind") @db.VarChar(40)
+  aliases         String[] @default([])
+  primaryEmail    String?  @map("primary_email") @db.VarChar(255)
+  emailDomains    String[] @default([]) @map("email_domains")
+  verticalTags    String[] @default([]) @map("vertical_tags")
+  externalRefs    Json     @default("{}") @map("external_refs")
+  metadata        Json     @default("{}")
+  mergedFrom      String[] @default([]) @map("merged_from") @db.Uuid
+  confidence      Decimal  @default(1.00) @db.Decimal(3, 2)
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  memoryLinks     MemoryEntityLink[]
+
+  @@index([organizationId, entityKind])
+  @@index([aliases], type: Gin)
+  @@index([emailDomains], type: Gin)
+  @@index([primaryEmail])
+  @@map("canonical_entities")
+}
+
+model MemoryEntityLink {
+  memoryId   String   @map("memory_id") @db.Uuid
+  entityId   String   @map("entity_id") @db.Uuid
+  role       String   @default("mentioned") @db.VarChar(40)
+  confidence Decimal  @default(1.00) @db.Decimal(3, 2)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  entity     CanonicalEntity @relation(fields: [entityId], references: [id], onDelete: Cascade)
+
+  @@id([memoryId, entityId, role])
+  @@index([entityId])
+  @@map("memory_entity_links")
+}
+
+// Entity review queue — fuzzy match candidates 0.70-0.95 surface here.
+model EntityReviewCandidate {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId  String   @map("organization_id") @db.Uuid
+  proposedEntityId String? @map("proposed_entity_id") @db.Uuid
+  memoryId        String?  @map("memory_id") @db.Uuid
+  candidateName   String   @map("candidate_name")
+  candidateKind   String   @map("candidate_kind") @db.VarChar(40)
+  confidence      Decimal  @db.Decimal(3, 2)
+  reason          String?
+  status          String   @default("pending") @db.VarChar(20)
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  resolvedAt      DateTime? @map("resolved_at") @db.Timestamptz(6)
+
+  @@index([organizationId, status])
+  @@map("entity_review_candidates")
+}
+
+// Decisions — Layer 4. Captures what was decided + why + alternatives.
+model Decision {
+  id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId      String   @map("organization_id") @db.Uuid
+  decisionMakerUserId String?  @map("decision_maker_user_id") @db.Uuid
+  decisionMakerName   String?  @map("decision_maker_name")
+  decisionType        String   @map("decision_type") @db.VarChar(80)
+  decidedAt           DateTime @map("decided_at") @db.Timestamptz(6)
+  whatDecided         String   @map("what_decided")
+  reasoning           String?
+  alternatives        Json     @default("[]")
+  contextSnapshot     Json     @default("{}") @map("context_snapshot")
+  similarPastIds      String[] @default([]) @map("similar_past_ids") @db.Uuid
+  entityRefs          String[] @default([]) @map("entity_refs") @db.Uuid
+  outcomeTracked      Boolean  @default(false) @map("outcome_tracked")
+  outcomeResolvesAt   DateTime? @map("outcome_resolves_at") @db.Timestamptz(6)
+  outcomeStatus       String?  @map("outcome_status") @db.VarChar(40)
+  outcomeDetails      Json?    @map("outcome_details")
+  sourceMemoryId      String?  @map("source_memory_id") @db.Uuid
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([organizationId, decidedAt(sort: Desc)])
+  @@index([outcomeTracked, outcomeResolvesAt])
+  @@index([entityRefs], type: Gin)
+  @@map("decisions")
+}
+
+// Playbooks — Layer 5. Human-curated patterns. Auto-mined patterns flagged
+// status=candidate; humans validate; deployed playbooks fire for agents.
+model Playbook {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId     String   @map("organization_id") @db.Uuid
+  name               String
+  patternType        String   @map("pattern_type") @db.VarChar(40)
+  segmentFilter      Json     @default("{}") @map("segment_filter")
+  triggerSignal      String   @map("trigger_signal")
+  intervention       String
+  supportingEvidence String[] @default([]) @map("supporting_evidence") @db.Uuid
+  status             String   @default("candidate") @db.VarChar(20)
+  confidence         Decimal? @db.Decimal(3, 2)
+  sampleN            Int?     @map("sample_n")
+  curatedByUserId    String?  @map("curated_by_user_id") @db.Uuid
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([organizationId, status])
+  @@map("playbooks")
 }

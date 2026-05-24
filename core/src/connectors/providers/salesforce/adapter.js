@@ -1,4 +1,5 @@
 import { BaseProviderAdapter } from '../../framework/provider-adapter.js';
+import { salesforce as sfNormalizer } from '../../../memory/normalizers/salesforce.js';
 
 const API_VERSION = 'v60.0';
 const PAGE_SIZE = 50;
@@ -17,13 +18,18 @@ const PAGE_SIZE = 50;
  * Incremental sync filters on LastModifiedDate.
  */
 
-const OBJECT_ORDER = ['Account', 'Contact', 'Opportunity', 'Case'];
+const OBJECT_ORDER = ['Account', 'Contact', 'Opportunity', 'OpportunityHistory', 'Task', 'Event', 'EmailMessage', 'Case', 'CaseComment'];
 
 const FIELDS = {
-  Account: 'Id,Name,Type,Industry,Website,Description,AnnualRevenue,NumberOfEmployees,LastModifiedDate',
-  Contact: 'Id,Name,Email,Phone,Title,AccountId,Account.Name,Description,LastModifiedDate',
-  Opportunity: 'Id,Name,StageName,Amount,CloseDate,Probability,AccountId,Account.Name,Description,LastModifiedDate',
-  Case: 'Id,CaseNumber,Subject,Status,Priority,Origin,AccountId,Account.Name,Description,LastModifiedDate',
+  Account: 'Id,Name,Type,Industry,Website,Description,AnnualRevenue,NumberOfEmployees,BillingCountry,BillingCity,Phone,IsPersonAccount,OwnerId,Owner.Name,LastModifiedDate,CreatedDate,CurrencyIsoCode',
+  Contact: 'Id,Name,FirstName,LastName,Email,Phone,MobilePhone,Title,Department,LeadSource,AccountId,Account.Name,MailingCountry,Description,OwnerId,Owner.Name,LastModifiedDate,CreatedDate',
+  Opportunity: 'Id,Name,StageName,Amount,CloseDate,Probability,ForecastCategoryName,NextStep,Type,LeadSource,AccountId,Account.Name,OwnerId,Owner.Name,Description,LastModifiedDate,CreatedDate,CurrencyIsoCode',
+  OpportunityHistory: 'Id,OpportunityId,StageName,Amount,CloseDate,Probability,ForecastCategory,CreatedDate,CreatedById',
+  Task: 'Id,Subject,Status,Priority,ActivityDate,WhoId,Who.Name,WhatId,What.Name,OwnerId,Owner.Name,Description,LastModifiedDate,CreatedDate',
+  Event: 'Id,Subject,StartDateTime,EndDateTime,Location,WhoId,Who.Name,WhatId,What.Name,OwnerId,Owner.Name,Description,LastModifiedDate,CreatedDate',
+  EmailMessage: 'Id,Subject,FromAddress,ToAddress,CcAddress,BccAddress,MessageDate,Status,TextBody,RelatedToId,LastModifiedDate,CreatedDate',
+  Case: 'Id,CaseNumber,Subject,Status,Priority,Origin,Reason,AccountId,Account.Name,ContactId,Contact.Name,OwnerId,Owner.Name,Description,LastModifiedDate,CreatedDate',
+  CaseComment: 'Id,ParentId,CommentBody,CreatedById,CreatedBy.Name,IsPublished,CreatedDate,LastModifiedDate',
 };
 
 export class SalesforceAdapter extends BaseProviderAdapter {
@@ -105,14 +111,105 @@ export class SalesforceAdapter extends BaseProviderAdapter {
   }
 
   normalize(record, context) {
-    const fn = {
-      Account: this._normalizeAccount,
-      Contact: this._normalizeContact,
-      Opportunity: this._normalizeOpportunity,
-      Case: this._normalizeCase,
-    }[record._kind];
-    if (!fn) return [];
-    return [fn.call(this, record.data, context)];
+    const objType = record._kind;
+    const data = record.data || {};
+    const sfId = data.Id;
+    const instanceUrl = context?.provider_metadata?.instance_url;
+    const sourceUrl = instanceUrl ? `${instanceUrl}/lightning/r/${objType}/${sfId}/view` : null;
+
+    // Use unified salesforce normalizer to build content + business-field metadata.
+    const { content, metadata: nm } = sfNormalizer.normalize(JSON.stringify(data), {
+      salesforce_object_type: objType,
+      salesforce_id: sfId,
+      raw_record: data,
+    });
+
+    // Object-specific title + tags.
+    const title = this._buildTitle(objType, data);
+    const tags = this._buildTags(objType, data);
+    const memoryType = this._memoryType(objType);
+    const documentDate = data.LastModifiedDate || data.CreatedDate || null;
+    const parentSfId = this._extractParentId(objType, data);
+
+    return [{
+      user_id: context.user_id,
+      org_id: context.org_id,
+      project: null,
+      content,
+      title,
+      tags,
+      memory_type: memoryType,
+      document_date: documentDate,
+      source_metadata: {
+        source_type: `salesforce_${objType.toLowerCase()}`,
+        source_platform: 'salesforce',
+        source_id: sfId,
+        source_url: sourceUrl,
+      },
+      metadata: {
+        ...nm,
+        force_entity_linking: true,
+        // Hint for _routeSalesforce idempotency + tree parent linking.
+        salesforce_parent_object_id: parentSfId,
+      },
+    }];
+  }
+
+  _buildTitle(objType, d) {
+    switch (objType) {
+      case 'Account': return `Account: ${d.Name || d.Id}`.slice(0, 200);
+      case 'Contact': return `Contact: ${d.Name || `${d.FirstName || ''} ${d.LastName || ''}`.trim() || d.Id}`.slice(0, 200);
+      case 'Opportunity': return `Opp: ${d.Name || d.Id}`.slice(0, 200);
+      case 'OpportunityHistory': return `Opp Stage: ${d.StageName || ''} (${d.OpportunityId || ''})`.slice(0, 200);
+      case 'Task': return `Task: ${d.Subject || d.Id}`.slice(0, 200);
+      case 'Event': return `Event: ${d.Subject || d.Id}`.slice(0, 200);
+      case 'EmailMessage': return `Email: ${d.Subject || ''}`.slice(0, 200);
+      case 'Case': return `Case ${d.CaseNumber || ''}: ${d.Subject || ''}`.slice(0, 200);
+      case 'CaseComment': return `Case Comment on ${d.ParentId || ''}`.slice(0, 200);
+      default: return `${objType}: ${d.Id}`.slice(0, 200);
+    }
+  }
+
+  _buildTags(objType, d) {
+    const tags = ['salesforce', objType.toLowerCase()];
+    if (objType === 'Account') {
+      if (d.Industry) tags.push(`industry:${String(d.Industry).toLowerCase().replace(/\s+/g, '-')}`);
+      if (d.BillingCountry) tags.push(`country:${String(d.BillingCountry).toLowerCase()}`);
+      if (d.IsPersonAccount) tags.push('person-account');
+    }
+    if (objType === 'Contact' && d.Account?.Name) {
+      tags.push(`account:${String(d.Account.Name).toLowerCase().replace(/\s+/g, '-')}`);
+    }
+    if (objType === 'Opportunity' || objType === 'OpportunityHistory') {
+      if (d.StageName) tags.push(`stage:${String(d.StageName).toLowerCase().replace(/\s+/g, '-')}`);
+      if (d.ForecastCategoryName) tags.push(`forecast:${String(d.ForecastCategoryName).toLowerCase()}`);
+    }
+    if (objType === 'Case') {
+      if (d.Status) tags.push(`status:${String(d.Status).toLowerCase().replace(/\s+/g, '-')}`);
+      if (d.Priority) tags.push(`priority:${String(d.Priority).toLowerCase()}`);
+    }
+    return tags;
+  }
+
+  _memoryType(objType) {
+    switch (objType) {
+      case 'Task': case 'Event': case 'EmailMessage': return 'event';
+      case 'OpportunityHistory': return 'event';
+      case 'Case': case 'CaseComment': return 'task';
+      default: return 'fact';
+    }
+  }
+
+  _extractParentId(objType, d) {
+    switch (objType) {
+      case 'OpportunityHistory': return d.OpportunityId || null;
+      case 'CaseComment': return d.ParentId || null;
+      case 'Task': case 'Event': return d.WhatId || d.WhoId || null;
+      case 'Contact': return d.AccountId || null;
+      case 'Opportunity': return d.AccountId || null;
+      case 'Case': return d.AccountId || null;
+      default: return null;
+    }
   }
 
   _baseSourceUrl(context, sobject, id) {
@@ -120,7 +217,9 @@ export class SalesforceAdapter extends BaseProviderAdapter {
     return instanceUrl ? `${instanceUrl}/lightning/r/${sobject}/${id}/view` : null;
   }
 
-  _normalizeAccount(rec, context) {
+  // ── Legacy per-object normalizers (kept private for reference). ───
+  // Active normalize() above uses unified salesforce normalizer.
+  _legacyNormalizeAccount(rec, context) {
     return {
       user_id: context.user_id, org_id: context.org_id, project: null,
       content: [
@@ -144,7 +243,7 @@ export class SalesforceAdapter extends BaseProviderAdapter {
     };
   }
 
-  _normalizeContact(rec, context) {
+  _legacyNormalizeContact(rec, context) {
     return {
       user_id: context.user_id, org_id: context.org_id, project: null,
       content: [
@@ -169,7 +268,7 @@ export class SalesforceAdapter extends BaseProviderAdapter {
     };
   }
 
-  _normalizeOpportunity(rec, context) {
+  _legacyNormalizeOpportunity(rec, context) {
     return {
       user_id: context.user_id, org_id: context.org_id, project: null,
       content: [
@@ -201,7 +300,7 @@ export class SalesforceAdapter extends BaseProviderAdapter {
     };
   }
 
-  _normalizeCase(rec, context) {
+  _legacyNormalizeCase(rec, context) {
     return {
       user_id: context.user_id, org_id: context.org_id, project: null,
       content: [

@@ -15,13 +15,15 @@ export class SyncEngine {
    * @param {import('../../memory/graph-engine.js').MemoryGraphEngine} deps.memoryEngine
    * @param {import('../../memory/prisma-graph-store.js').PrismaGraphStore} deps.memoryStore
    */
-  constructor({ connectorStore, memoryEngine, memoryStore, prisma, trailExecutor, smartIngestRouter }) {
+  constructor({ connectorStore, memoryEngine, memoryStore, prisma, trailExecutor, smartIngestRouter, externalRefStore, entityResolver }) {
     this.connectorStore = connectorStore;
     this.memoryEngine = memoryEngine;
     this.memoryStore = memoryStore;
     this.prisma = prisma;
     this.trailExecutor = trailExecutor || null;
     this.smartIngestRouter = smartIngestRouter || null;
+    this.externalRefStore = externalRefStore || null;
+    this.entityResolver = entityResolver || null;
     this._dedupeCache = new Map(); // in-memory for now; can be Redis later
   }
 
@@ -286,13 +288,15 @@ export class SyncEngine {
       // connector polls produce deterministic edges (thread/session/chunk),
       // same as manual UI ingest paths. Safe fallback to raw payload on error.
       let effective = payload;
+      let ingestResult = null;
       if (this.smartIngestRouter) {
         try {
           const routed = await this.smartIngestRouter.route(payload);
           // Tree-shape: gdocs/gemini/slack-thread/gmail-thread emit
           //   { parent, children } — engine.ingestMemoryTree handles it.
           if (routed && !Array.isArray(routed) && routed.parent) {
-            await this.memoryEngine.ingestMemoryTree(routed);
+            const treeRes = await this.memoryEngine.ingestMemoryTree(routed);
+            await this._postIngestHooks(routed.parent, { memoryId: treeRes?.parentId }, userId);
             return;
           }
           if (Array.isArray(routed) && routed.length > 0) {
@@ -302,7 +306,8 @@ export class SyncEngine {
           console.warn('[sync-engine] route failed, using raw payload:', routeErr.message);
         }
       }
-      await this.memoryEngine.ingestMemory(effective);
+      ingestResult = await this.memoryEngine.ingestMemory(effective);
+      await this._postIngestHooks(effective, ingestResult, userId);
     } catch (error) {
       if (attempt < MAX_RETRIES) {
         const delay = BACKOFF_BASE_MS * Math.pow(2, attempt);
@@ -311,6 +316,109 @@ export class SyncEngine {
       }
       throw error;
     }
+  }
+
+  /**
+   * Post-ingest hooks: write external_ref for re-sync idempotency, run
+   * entity-resolver for canonical-entity linking, enqueue enrichment.
+   *
+   * Fires for every successful ingestion. Errors are logged and never
+   * throw — these hooks are best-effort and must not block the sync.
+   */
+  async _postIngestHooks(payload, ingestResult, userId) {
+    const memoryId = ingestResult?.memoryId;
+    if (!memoryId) return;
+    const orgId = payload.org_id;
+    const meta = payload.metadata || {};
+    const sm = payload.source_metadata || {};
+
+    // External ref — uniformly use source_metadata.source_id when present.
+    const system = (sm.source_platform || sm.source_type || '').toString().toLowerCase();
+    const externalId = sm.source_id || meta.salesforce_id || meta.external_id || null;
+    const objectType = meta.salesforce_object_type || sm.source_type || system;
+    if (this.externalRefStore && system && externalId && objectType && orgId) {
+      try {
+        await this.externalRefStore.create({
+          memoryId,
+          system,
+          objectType,
+          externalId: String(externalId),
+          externalUrl: sm.source_url || null,
+          organizationId: orgId,
+          userId,
+          metadata: { last_modified: meta.salesforce_last_modified || null },
+        });
+      } catch (err) {
+        console.warn(`[sync-engine] external_ref write failed for ${memoryId.slice(0,8)}: ${err.message}`);
+      }
+    }
+
+    // Entity resolution — only for SF objects we can canonicalize cleanly.
+    if (this.entityResolver && orgId && meta.salesforce_object_type) {
+      try {
+        const candidates = this._extractEntityCandidates(payload);
+        if (candidates.length > 0) {
+          await this.entityResolver.resolveAndLink({
+            memoryId,
+            candidates,
+            organizationId: orgId,
+            role: 'subject',
+            userId,
+          });
+        }
+      } catch (err) {
+        console.warn(`[sync-engine] entity resolve failed for ${memoryId.slice(0,8)}: ${err.message}`);
+      }
+    }
+  }
+
+  _extractEntityCandidates(payload) {
+    const meta = payload.metadata || {};
+    const objType = meta.salesforce_object_type;
+    const fields = meta.salesforce_business_fields || {};
+    const sfId = meta.salesforce_id;
+    const candidates = [];
+    if (objType === 'Account') {
+      candidates.push({
+        name: fields.Name || payload.title,
+        kind: meta.salesforce_is_person_account ? 'person' : 'company',
+        externalRefs: { salesforce: sfId },
+        emailDomain: this._domainFromWebsite(fields.Website),
+        metadata: { industry: fields.Industry || null, country: fields.BillingCountry || null },
+      });
+    } else if (objType === 'Contact') {
+      candidates.push({
+        name: fields.Name || `${fields.FirstName || ''} ${fields.LastName || ''}`.trim() || payload.title,
+        kind: 'person',
+        email: fields.Email || null,
+        emailDomain: meta.salesforce_email_domain || null,
+        externalRefs: { salesforce: sfId },
+        metadata: { title: fields.Title || null, account: fields.AccountName || null },
+      });
+      if (meta.salesforce_account_id && meta.salesforce_account_name) {
+        candidates.push({
+          name: meta.salesforce_account_name,
+          kind: 'company',
+          externalRefs: { salesforce: meta.salesforce_account_id },
+        });
+      }
+    } else if (objType === 'Opportunity' && meta.salesforce_account_name) {
+      candidates.push({
+        name: meta.salesforce_account_name,
+        kind: 'company',
+        externalRefs: { salesforce: meta.salesforce_account_id || null },
+      });
+    }
+    return candidates.filter((c) => c.name || c.email);
+  }
+
+  _domainFromWebsite(website) {
+    if (!website || typeof website !== 'string') return null;
+    try {
+      const url = website.match(/^https?:\/\//) ? website : `https://${website}`;
+      const host = new URL(url).hostname.replace(/^www\./, '').toLowerCase();
+      return host || null;
+    } catch { return null; }
   }
 
   /**

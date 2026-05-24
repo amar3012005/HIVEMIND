@@ -344,6 +344,15 @@ const enrichmentQueue = persistentMemoryEngine ? getEnrichmentQueue(persistentMe
 if (enrichmentQueue) {
   console.log(`[boot] EnrichmentQueue ready (concurrency=${enrichmentQueue.concurrency})`);
 }
+
+// External-ref store + entity resolver — Salesforce / cross-system memory.
+const { ExternalRefStore } = await import('./memory/external-ref-store.js');
+const { EntityResolver } = await import('./memory/entity-resolver.js');
+const externalRefStore = prisma ? new ExternalRefStore({ prisma }) : null;
+const entityResolver = prisma ? new EntityResolver({ prisma }) : null;
+if (externalRefStore && entityResolver) {
+  console.log('[boot] ExternalRefStore + EntityResolver ready');
+}
 const cognitiveOperator = persistentMemoryStore ? new CognitiveOperator({ store: persistentMemoryStore }) : null;
 const biTemporalEngine = persistentMemoryStore ? new BiTemporalEngine({ store: persistentMemoryStore, prisma }) : null;
 const stigmergicCoT = persistentMemoryStore ? new StigmergicCoT({ store: persistentMemoryStore, traceTTLMinutes: 30 }) : null;
@@ -400,6 +409,8 @@ if (persistentMemoryEngine && persistentMemoryStore && prisma) {
     memoryStore: persistentMemoryStore,
     prisma,
     smartIngestRouter,
+    externalRefStore,
+    entityResolver,
   });
   syncScheduler = new SyncScheduler({
     connectorStore: schedulerConnStore,
@@ -5555,6 +5566,60 @@ exit \$RC
         }
       }
 
+      // ── Entities dyn routes ─────────────────────────────────────────
+      if (pathname.startsWith('/api/entities/') && pathname !== '/api/entities/stats' && pathname !== '/api/entities/review-queue' && pathname !== '/api/entities/by-external-ref') {
+        if (!prisma || !entityResolver) return jsonResponse(res, { error: 'service unavailable' }, 503);
+        const rest = pathname.slice('/api/entities/'.length);
+        // /review-queue/:id/approve|reject
+        if (rest.startsWith('review-queue/')) {
+          const parts = rest.slice('review-queue/'.length).split('/');
+          const candidateId = parts[0];
+          const action = parts[1];
+          if (req.method === 'POST' && action === 'approve') {
+            try { await entityResolver.approveReview({ candidateId, userId }); return jsonResponse(res, { ok: true }); }
+            catch (e) { return jsonResponse(res, { error: e.message }, 500); }
+          }
+          if (req.method === 'POST' && action === 'reject') {
+            try { await entityResolver.rejectReview({ candidateId }); return jsonResponse(res, { ok: true }); }
+            catch (e) { return jsonResponse(res, { error: e.message }, 500); }
+          }
+          return jsonResponse(res, { error: 'not found' }, 404);
+        }
+        // /:id/merge or /:id (GET detail)
+        const segs = rest.split('/');
+        const entityId = segs[0];
+        if (!entityId) return jsonResponse(res, { error: 'entity id required' }, 400);
+        if (segs[1] === 'merge' && req.method === 'POST') {
+          try {
+            const dstId = body?.target_entity_id || body?.dst_id;
+            if (!dstId) return jsonResponse(res, { error: 'target_entity_id required' }, 400);
+            const r = await entityResolver.mergeEntities({ srcId: entityId, dstId });
+            return jsonResponse(res, r);
+          } catch (e) { return jsonResponse(res, { error: e.message }, 500); }
+        }
+        if (req.method === 'GET') {
+          try {
+            const entity = await prisma.canonicalEntity.findFirst({ where: { id: entityId, organizationId: orgId } });
+            if (!entity) return jsonResponse(res, { error: 'not found' }, 404);
+            const links = await prisma.memoryEntityLink.findMany({ where: { entityId }, take: 200 });
+            const memoryIds = links.map((l) => l.memoryId);
+            const memories = memoryIds.length
+              ? await prisma.memory.findMany({
+                  where: { id: { in: memoryIds }, deletedAt: null },
+                  select: { id: true, title: true, memoryType: true, createdAt: true, tags: true, sourcePlatform: true },
+                  orderBy: { createdAt: 'desc' }, take: 200,
+                })
+              : [];
+            const externalRefs = await prisma.externalRef.findMany({
+              where: { memoryId: { in: memoryIds.length ? memoryIds : ['00000000-0000-0000-0000-000000000000'] } },
+              take: 500,
+            });
+            return jsonResponse(res, { entity, memories, externalRefs, link_count: links.length });
+          } catch (e) { return jsonResponse(res, { error: e.message }, 500); }
+        }
+        return jsonResponse(res, { error: 'method not allowed' }, 405);
+      }
+
       if (pathname.startsWith('/api/memories/') && pathname !== '/api/memories/search' && pathname !== '/api/memories/query' && pathname !== '/api/memories/code/ingest' && pathname !== '/api/memories/traverse' && pathname !== '/api/memories/decay' && pathname !== '/api/memories/reinforce' && pathname !== '/api/memories/delete-all') {
         if (req.method === 'GET') {
           if (!ensurePersistedMemoryOrFail(res, '/api/memories/:id')) {
@@ -5847,6 +5912,8 @@ exit \$RC
             prisma,
             trailExecutor,
             smartIngestRouter,
+            externalRefStore,
+            entityResolver,
           });
 
           const incremental = body.incremental !== false;
@@ -8131,6 +8198,8 @@ exit \$RC
                     memoryStore: persistentMemoryStore,
                     memoryEngine: persistentMemoryEngine,
                     smartIngestRouter,
+                    externalRefStore,
+                    entityResolver,
                   });
                   const result = await engine.runSync({
                     adapter, userId, orgId, provider: nangoProviderKey, mode: 'incremental',
@@ -8166,6 +8235,8 @@ exit \$RC
                     memoryStore: persistentMemoryStore,
                     memoryEngine: persistentMemoryEngine,
                     smartIngestRouter,
+                    externalRefStore,
+                    entityResolver,
                   });
                   const result = await engine.runSync({
                     adapter, userId, orgId, provider: nangoProviderKey, mode: 'incremental',
@@ -8229,6 +8300,8 @@ exit \$RC
                     memoryEngine: persistentMemoryEngine,
                     prisma,
                     smartIngestRouter,
+                    externalRefStore,
+                    entityResolver,
                   });
                   await engine.runSync({
                     adapter,
@@ -9389,7 +9462,7 @@ exit \$RC
               const { SyncEngine } = await import('./connectors/framework/sync-engine.js');
               const { GmailAdapter } = await import('./connectors/providers/gmail/adapter.js');
               const adapter = new GmailAdapter();
-              const engine = new SyncEngine({ connectorStore: cs, memoryStore: persistentMemoryStore, memoryEngine: persistentMemoryEngine, smartIngestRouter });
+              const engine = new SyncEngine({ connectorStore: cs, memoryStore: persistentMemoryStore, memoryEngine: persistentMemoryEngine, smartIngestRouter, externalRefStore, entityResolver });
 
               const cursor = conn.metadata?.cursor || decoded.historyId;
               const accessToken = decryptToken(conn.access_token_encrypted);
@@ -10850,6 +10923,8 @@ exit \$RC
                 memoryStore: persistentMemoryStore,
                 prisma,
                 smartIngestRouter,
+                externalRefStore,
+                entityResolver,
               });
 
               // Run sync in background
@@ -12328,6 +12403,71 @@ exit \$RC
               console.error('[enrichment-backfill] error:', err);
               return jsonResponse(res, { error: 'backfill failed', message: err.message }, 500);
             }
+          }
+          break;
+
+        // ── Canonical entities (Salesforce + cross-system memory layer) ─
+        case '/api/entities':
+          if (req.method === 'GET') {
+            if (!prisma) return jsonResponse(res, { error: 'service unavailable' }, 503);
+            try {
+              const kind = url.searchParams.get('kind') || null;
+              const search = url.searchParams.get('q') || null;
+              const limit = Math.min(parseInt(url.searchParams.get('limit') || '100', 10), 500);
+              const offset = parseInt(url.searchParams.get('offset') || '0', 10);
+              const where = { organizationId: orgId };
+              if (kind) where.entityKind = kind;
+              if (search && search.length >= 2) {
+                where.OR = [
+                  { canonicalName: { contains: search, mode: 'insensitive' } },
+                  { aliases: { has: search } },
+                  { primaryEmail: { contains: search, mode: 'insensitive' } },
+                ];
+              }
+              const [items, total] = await Promise.all([
+                prisma.canonicalEntity.findMany({ where, orderBy: { updatedAt: 'desc' }, take: limit, skip: offset }),
+                prisma.canonicalEntity.count({ where }),
+              ]);
+              return jsonResponse(res, { items, total, limit, offset });
+            } catch (err) { return jsonResponse(res, { error: err.message }, 500); }
+          }
+          break;
+
+        case '/api/entities/stats':
+          if (req.method === 'GET') {
+            if (!entityResolver) return jsonResponse(res, { error: 'entity resolver unavailable' }, 503);
+            try {
+              const stats = await entityResolver.stats({ organizationId: orgId });
+              return jsonResponse(res, stats);
+            } catch (err) { return jsonResponse(res, { error: err.message }, 500); }
+          }
+          break;
+
+        case '/api/entities/review-queue':
+          if (req.method === 'GET') {
+            if (!prisma) return jsonResponse(res, { error: 'service unavailable' }, 503);
+            try {
+              const status = url.searchParams.get('status') || 'pending';
+              const items = await prisma.entityReviewCandidate.findMany({
+                where: { organizationId: orgId, status },
+                orderBy: { createdAt: 'desc' },
+                take: 200,
+              });
+              return jsonResponse(res, { items, count: items.length });
+            } catch (err) { return jsonResponse(res, { error: err.message }, 500); }
+          }
+          break;
+
+        case '/api/entities/by-external-ref':
+          if (req.method === 'GET') {
+            if (!entityResolver) return jsonResponse(res, { error: 'entity resolver unavailable' }, 503);
+            try {
+              const system = url.searchParams.get('system');
+              const externalId = url.searchParams.get('external_id');
+              if (!system || !externalId) return jsonResponse(res, { error: 'system + external_id required' }, 400);
+              const result = await entityResolver.findByExternalRef({ organizationId: orgId, system, externalId });
+              return jsonResponse(res, result || { entity: null });
+            } catch (err) { return jsonResponse(res, { error: err.message }, 500); }
           }
           break;
 

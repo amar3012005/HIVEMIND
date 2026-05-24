@@ -102,6 +102,9 @@ export class SmartIngestRouter {
       case 'gemini':
         result = await this._routeGemini(payload);
         break;
+      case 'salesforce':
+        result = await this._routeSalesforce(payload);
+        break;
       default:
         result = [payload];
     }
@@ -157,6 +160,7 @@ export class SmartIngestRouter {
     if (platform.includes('claude') || platform.includes('anthropic')) return 'claude';
     if (platform.includes('notion') || platform.includes('obsidian') || platform.includes('document') || platform.includes('pdf') || platform.includes('knowledge')) return 'knowledge_base';
     if (platform.includes('github') || platform.includes('gitlab') || platform.includes('code')) return 'github';
+    if (platform.includes('salesforce')) return 'salesforce';
     if (platform.includes('slack') || platform.includes('teams') || platform.includes('discord')) return 'slack';
     if (platform.includes('chat') || platform.includes('talk-to-hive') || platform.includes('conversation')) return 'chat';
 
@@ -566,6 +570,94 @@ export class SmartIngestRouter {
         ...payload.metadata,
         source_type_normalized: 'gemini',
         force_entity_linking: true,
+      },
+    }];
+  }
+
+  // --- Salesforce ---
+  // CRM-aware routing:
+  //   • Idempotency: lookup existing memory by external_ref(salesforce, object_type, sf_id).
+  //     If exists, emit operator=Updates targeting it.
+  //   • Parent linkage: Contact→Account, Opportunity→Account,
+  //     OpportunityHistory→Opportunity, CaseComment→Case.
+  //     Surfaces parent_memory_id as router hint so entity-co-mention can
+  //     attach the right edges.
+  //   • Tree shape only for multi-child cases (Opportunity with bundled
+  //     OpportunityHistory rows). Single records stay flat — they're
+  //     already CRM facts not conversations.
+  async _routeSalesforce(payload) {
+    const objType = payload.metadata?.salesforce_object_type;
+    const sfId = payload.metadata?.salesforce_id;
+    const parentSfId = payload.metadata?.salesforce_parent_object_id;
+
+    if (!objType || !sfId) {
+      return [{ ...payload, metadata: { ...(payload.metadata || {}), source_type_normalized: 'salesforce' } }];
+    }
+
+    // Tag bucket so default views can filter.
+    const baseTags = Array.from(new Set([
+      ...(payload.tags || []),
+      'salesforce',
+      `sf-object:${objType.toLowerCase()}`,
+    ]));
+
+    let hints = [];
+
+    // 1. Idempotent: if existing memory has this external_ref, target it.
+    try {
+      if (this.memoryStore?.client?.externalRef?.findFirst) {
+        const existing = await this.memoryStore.client.externalRef.findFirst({
+          where: {
+            organizationId: payload.org_id,
+            system: 'salesforce',
+            objectType: objType,
+            externalId: String(sfId),
+          },
+          select: { memoryId: true },
+        });
+        if (existing?.memoryId) {
+          // Re-sync = Updates. Caller's enrichment + entity-link still fires
+          // on the new content version.
+          return [{
+            ...payload,
+            tags: baseTags,
+            metadata: { ...(payload.metadata || {}), source_type_normalized: 'salesforce' },
+            relationship: { type: 'Updates', target_id: existing.memoryId },
+          }];
+        }
+      }
+    } catch (lookupErr) {
+      console.warn('[router-salesforce] external_ref lookup failed:', lookupErr.message);
+    }
+
+    // 2. Parent linkage: surface parent memory id as recall hint.
+    if (parentSfId) {
+      try {
+        if (this.memoryStore?.client?.externalRef?.findFirst) {
+          const parentRef = await this.memoryStore.client.externalRef.findFirst({
+            where: {
+              organizationId: payload.org_id,
+              system: 'salesforce',
+              externalId: String(parentSfId),
+            },
+            select: { memoryId: true, objectType: true },
+          });
+          if (parentRef?.memoryId) {
+            hints.push({ id: parentRef.memoryId, content: '', title: `[salesforce ${parentRef.objectType}]`, tags: [] });
+          }
+        }
+      } catch (parentErr) {
+        console.warn('[router-salesforce] parent lookup failed:', parentErr.message);
+      }
+    }
+
+    return [{
+      ...payload,
+      tags: baseTags,
+      metadata: {
+        ...(payload.metadata || {}),
+        source_type_normalized: 'salesforce',
+        _llm_recall_hints: hints.length ? hints : (payload.metadata?._llm_recall_hints || []),
       },
     }];
   }

@@ -16,6 +16,7 @@ import { gmail } from './gmail.js';
 import { slack } from './slack.js';
 import { github } from './github.js';
 import { drive } from './drive.js';
+import { salesforce } from './salesforce.js';
 import { defaultNormalizer } from './default.js';
 
 export const NORMALIZERS = {
@@ -26,6 +27,7 @@ export const NORMALIZERS = {
   google_docs: drive,
   google_sheets: drive,
   google_slides: drive,
+  salesforce,
   knowledge_base: defaultNormalizer,
   chat: defaultNormalizer,
   'talk-to-hive': defaultNormalizer,

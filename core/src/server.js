@@ -5851,6 +5851,36 @@ exit \$RC
         }
       }
 
+      // POST /api/connectors/nango/webhook — unified Nango push handler
+      //   Verifies x-nango-signature, dispatches to handleNangoWebhook which
+      //   triggers an incremental sync for the affected connection via the
+      //   same SyncEngine path as scheduled syncs. Covers all Nango
+      //   providers — gmail, gdocs, gemini, slack, notion, github, linear.
+      if (pathname === '/api/connectors/nango/webhook' && req.method === 'POST') {
+        try {
+          const { handleNangoWebhook } = await import('./webhooks/nango-webhook-handler.js');
+          const rawBody = typeof body === 'string' ? body : JSON.stringify(body || {});
+          const result = await handleNangoWebhook({
+            rawBody,
+            body: typeof body === 'string' ? JSON.parse(body || '{}') : (body || {}),
+            headers: req.headers,
+            deps: {
+              prisma,
+              persistentMemoryStore,
+              persistentMemoryEngine,
+              smartIngestRouter,
+            },
+          });
+          // 200 ack on every accepted event (Nango retries on non-2xx).
+          const status = result.status === 'error' && result.reason === 'invalid-signature' ? 401 : 200;
+          return jsonResponse(res, result, status);
+        } catch (err) {
+          console.warn('[nango-webhook] handler failed:', err.message);
+          // 200 ack to prevent retry storm on internal bugs.
+          return jsonResponse(res, { status: 'error', reason: err.message }, 200);
+        }
+      }
+
       // POST /api/connectors/gemini/ingest-paste
       //   Body: { session_id?, title?, model?, turns: [{role,content,ts?}], exported_at? }
       //   Or:   { transcript: "User: ...\nAssistant: ..." }

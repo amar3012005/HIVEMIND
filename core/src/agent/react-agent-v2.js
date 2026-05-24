@@ -925,10 +925,12 @@ function _isSaveImperative(s) {
 
 // Wider verb set — catches "let X know", "tell Y", "remind Z", "ping",
 // "ask", "announce", "broadcast" + the original action verbs.
-const WRITE_VERB_RE = /\b(post|send|draft|schedule|message|dm|notify|reply|share|tell|ping|ask|let|inform|remind|announce|broadcast|update|alert|forward)\b/i;
+const WRITE_VERB_RE = /\b(post|send|draft|schedule|message|dm|notify|reply|share|tell|ping|ask|let|inform|remind|announce|broadcast|update|alert|forward|compose|create|make|generate|publish)\b/i;
 const SLACK_HINT_RE = /(?:\b(?:slack|channel|@channel|@here|@everyone)\b|(?:^|\s)#[a-z0-9_-]+|(?:^|\s)@[a-z0-9_-]+)/i;
 const NOTION_HINT_RE = /\b(notion|wiki|page|database)\b/i;
-const GMAIL_HINT_RE = /\b(gmail|email|inbox)\b/i;
+const GMAIL_HINT_RE = /\b(gmail|email|inbox|mail)\b/i;
+const GDOCS_HINT_RE = /\b(google\s*docs?|gdocs?|doc\b|document\b|word\s*doc)\b/i;
+const GEMINI_HINT_RE = /\b(gemini|google\s*ai|bard)\b/i;
 
 function detectWriteIntent(message) {
   const m = String(message || '');
@@ -936,7 +938,23 @@ function detectWriteIntent(message) {
   if (SLACK_HINT_RE.test(m)) return { provider: 'slack' };
   if (NOTION_HINT_RE.test(m)) return { provider: 'notion' };
   if (GMAIL_HINT_RE.test(m)) return { provider: 'gmail' };
+  if (GDOCS_HINT_RE.test(m)) return { provider: 'google-docs' };
+  if (GEMINI_HINT_RE.test(m)) return { provider: 'google-gemini' };
   return null;
+}
+
+// Read-intent detection — even when there's no write verb, references to a
+// specific provider should equip its READ tools so the agent can pull live
+// data. Returns a list of groups to activate (read-only intent).
+function detectReadIntents(message) {
+  const m = String(message || '');
+  const groups = [];
+  if (GMAIL_HINT_RE.test(m)) groups.push('gmail');
+  if (GDOCS_HINT_RE.test(m)) groups.push('google-docs');
+  if (GEMINI_HINT_RE.test(m)) groups.push('google-gemini');
+  if (NOTION_HINT_RE.test(m)) groups.push('notion');
+  if (SLACK_HINT_RE.test(m)) groups.push('slack');
+  return groups;
 }
 
 /**
@@ -1232,6 +1250,50 @@ export async function runReactAgentV2({
     // not query memory. Planner-emitted action_intent takes priority over
     // the regex detector — the LLM catches indirect phrasing the regex
     // misses ("@team heads up", "ping the eng channel").
+    // Read-intent connector activation. When the user explicitly names a
+    // provider (Gmail, Google Docs, Gemini, Notion, Slack) without a clear
+    // write verb, equip the READ tools so the agent can pull live data
+    // alongside memory recall. The provider's group becomes active for
+    // THIS turn only; primary system prompt stays small.
+    const readIntents = detectReadIntents(message);
+    let readToolkit = null;
+    if (readIntents.length > 0 && ctx.prisma) {
+      try {
+        const { buildToolkitForUser } = await import('./toolkit-factory.js');
+        readToolkit = await buildToolkitForUser({
+          prisma: ctx.prisma,
+          userId: ctx.userId,
+          orgId: ctx.orgId,
+          hivemindTools: [],
+          persistentMemoryEngine: ctx.persistentMemoryEngine,
+        });
+        const activation = readToolkit.resetEquippedTools(readIntents);
+        if (activation.tools.length > 1) {
+          onEvent?.({
+            type: 'tool_call',
+            name: 'reset_equipped_tools',
+            arguments: JSON.stringify({ group_names: readIntents }),
+          });
+          onEvent?.({
+            type: 'tool_result',
+            name: 'reset_equipped_tools',
+            summary: `activated [${readIntents.join(',')}] (${activation.tools.length} tools, read-intent)`,
+          });
+          steps.push({
+            tool: 'reset_equipped_tools',
+            args: { group_names: readIntents },
+            result_summary: `${activation.tools.length} tools active (read)`,
+          });
+          // Stash toolkit on ctx for later steps (evidence/answer) to call
+          // tools on demand. Tools surface in ctx._readToolkit so the
+          // answer step can invoke them when memory recall is sparse.
+          ctx._readToolkit = readToolkit;
+        }
+      } catch (toolErr) {
+        console.warn('[agent] read-intent toolkit failed:', toolErr.message);
+      }
+    }
+
     const writeIntent = plan.action_intent
       ? { provider: plan.action_intent }
       : detectWriteIntent(message);
@@ -1243,6 +1305,7 @@ export async function runReactAgentV2({
           userId: ctx.userId,
           orgId: ctx.orgId,
           hivemindTools: [],
+          persistentMemoryEngine: ctx.persistentMemoryEngine,
         });
         // Activate the matched connector group.
         const activation = toolkit.resetEquippedTools([writeIntent.provider]);

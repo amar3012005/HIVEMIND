@@ -13,8 +13,20 @@ import { Toolkit, registerMetaTool } from './toolkit.js';
 import { McpClientPool } from './mcp-client-pool.js';
 import { createDraftApprovalMiddleware } from './middleware/draft-approval.js';
 import { createMemoryTapMiddleware } from './middleware/memory-tap.js';
+import { registerGmailTools } from './connector-toolkits/gmail-tools.js';
+import { registerGdocsTools } from './connector-toolkits/gdocs-tools.js';
+import { registerGeminiTools } from './connector-toolkits/gemini-tools.js';
 
-const CONNECTOR_GROUPS = ['slack', 'notion', 'github', 'linear'];
+// MCP-backed groups (run via persistent client pool).
+const MCP_CONNECTOR_GROUPS = ['slack', 'notion', 'github', 'linear'];
+
+// Nango-REST-backed groups (registered directly via tool functions).
+// Each entry: providerKey expected on nangoConnection, register function.
+const NANGO_REST_GROUPS = [
+  { provider: 'google-mail', groupName: 'gmail',          register: (tk) => registerGmailTools(tk) },
+  { provider: 'google-docs', groupName: 'google-docs',    register: (tk) => registerGdocsTools(tk) },
+  { provider: 'google-gemini', groupName: 'google-gemini', register: (tk, deps) => registerGeminiTools(tk, deps) },
+];
 
 /** Singleton pool — one per process. */
 let _pool = null;
@@ -30,7 +42,7 @@ function getPool(prisma) {
  *                  for the existing HIVEMIND-internal tools.
  * @returns {Promise<Toolkit>}
  */
-export async function buildToolkitForUser({ prisma, userId, orgId, hivemindTools = [] }) {
+export async function buildToolkitForUser({ prisma, userId, orgId, hivemindTools = [], persistentMemoryEngine = null }) {
   const tk = new Toolkit();
 
   // 1. Register HIVEMIND-internal tools into 'basic' group (always active).
@@ -52,9 +64,17 @@ export async function buildToolkitForUser({ prisma, userId, orgId, hivemindTools
   tk.registerMiddleware(createDraftApprovalMiddleware({ prisma }));
   tk.registerMiddleware(createMemoryTapMiddleware());
 
-  // 4. Auto-register connector MCP groups when the user has a live
-  //    Nango connection for them. Groups stay INACTIVE until the agent
-  //    explicitly activates via reset_equipped_tools.
+  // 4. Auto-register connector groups when the user has a live Nango
+  //    connection for them. Two flavours:
+  //      (a) MCP-backed (slack, notion, github, linear) — tools come from
+  //          the provider's MCP server via the persistent client pool.
+  //      (b) Nango-REST-backed (gmail, google-docs, google-gemini) — tools
+  //          registered as plain handler functions that proxy through the
+  //          Nango credentials helper.
+  //
+  //    All groups stay INACTIVE until the agent explicitly activates via
+  //    reset_equipped_tools. This keeps the primary system prompt small
+  //    and avoids LLM dilemma/hallucination from a tool-flood.
   if (prisma?.nangoConnection) {
     try {
       const connections = await prisma.nangoConnection.findMany({
@@ -64,7 +84,8 @@ export async function buildToolkitForUser({ prisma, userId, orgId, hivemindTools
       const activeProviders = new Set(connections.map(c => c.providerKey));
       const pool = getPool(prisma);
 
-      for (const provider of CONNECTOR_GROUPS) {
+      // (a) MCP groups.
+      for (const provider of MCP_CONNECTOR_GROUPS) {
         if (!activeProviders.has(provider)) continue;
         tk.createToolGroup({
           name: provider,
@@ -80,6 +101,16 @@ export async function buildToolkitForUser({ prisma, userId, orgId, hivemindTools
           console.warn(`[toolkit] mcp register ${provider} failed: ${err.message}`);
         }
       }
+
+      // (b) Nango-REST groups (gmail / google-docs / google-gemini).
+      for (const cfg of NANGO_REST_GROUPS) {
+        if (!activeProviders.has(cfg.provider)) continue;
+        try {
+          cfg.register(tk, { persistentMemoryEngine });
+        } catch (err) {
+          console.warn(`[toolkit] rest register ${cfg.groupName} failed: ${err.message}`);
+        }
+      }
     } catch (err) {
       console.warn(`[toolkit] connector enumeration failed: ${err.message}`);
     }
@@ -88,4 +119,6 @@ export async function buildToolkitForUser({ prisma, userId, orgId, hivemindTools
   return tk;
 }
 
-export { CONNECTOR_GROUPS };
+export { MCP_CONNECTOR_GROUPS, NANGO_REST_GROUPS };
+// Back-compat re-export.
+export const CONNECTOR_GROUPS = [...MCP_CONNECTOR_GROUPS, ...NANGO_REST_GROUPS.map(g => g.groupName)];

@@ -8072,21 +8072,104 @@ exit \$RC
               const cs = new ConnectorStore(prisma);
               await cs.updateMetadata(userId, provider, { sync_config: config });
 
-              // 2. For Gmail, route through existing /api/connectors/gmail/sync logic
-              //    (per-folder, max_emails, exclude_categories) — has its own
-              //    optimized pipeline with Pub/Sub watch hook.
+              // 2. Detect Nango connection — prefer the Nango-routed adapter
+              //    whenever the user has a live Nango connection for the
+              //    matching provider key. This bypasses the legacy
+              //    workspace-mcp sidecar (taylorwilsdon/google_workspace_mcp)
+              //    which has caused intermittent token-refresh + scope errors.
+              //
+              //    Map UI provider name (gmail / google_docs / google_drive ...)
+              //    to the Nango providerConfigKey set up in the dashboard.
+              const NANGO_PROVIDER_MAP = {
+                gmail: 'google-mail',
+                google_docs: 'google-docs',
+                google_drive: 'google-drive',
+                google_calendar: 'google-calendar',
+                google_contacts: 'google-contacts',
+                google_sheets: 'google-sheets',
+                google_slides: 'google-slides',
+                google_tasks: 'google-tasks',
+                google_chat: 'google-chat',
+                google_forms: 'google-forms',
+              };
+              const nangoProviderKey = NANGO_PROVIDER_MAP[provider] || null;
+              let nangoActive = false;
+              if (nangoProviderKey && prisma?.nangoConnection) {
+                try {
+                  const nrow = await prisma.nangoConnection.findFirst({
+                    where: { userId, providerKey: nangoProviderKey, status: 'active' },
+                    select: { id: true },
+                  });
+                  nangoActive = !!nrow;
+                } catch {}
+              }
+
+              // 2a. Gmail — when Nango is connected use the Nango-routed
+              //     GmailAdapter; otherwise fall through to the legacy
+              //     /api/connectors/gmail/sync (Pub/Sub + watch) path.
+              if (provider === 'gmail' && nangoActive) {
+                console.log(`[google-sync] gmail: routing through Nango (provider=google-mail)`);
+                try {
+                  const { GmailAdapter } = await import('./connectors/providers/gmail/adapter.js');
+                  const adapter = new GmailAdapter();
+                  const { SyncEngine } = await import('./connectors/framework/sync-engine.js');
+                  const engine = new SyncEngine({
+                    connectorStore: cs,
+                    memoryStore: persistentMemoryStore,
+                    memoryEngine: persistentMemoryEngine,
+                    smartIngestRouter,
+                  });
+                  const result = await engine.runSync({
+                    adapter, userId, orgId, provider: nangoProviderKey, mode: 'incremental',
+                  });
+                  return jsonResponse(res, { success: true, provider, via: 'nango', result });
+                } catch (err) {
+                  console.warn(`[google-sync] nango gmail failed: ${err.message}`);
+                  return jsonResponse(res, { error: err.message, via: 'nango' }, 500);
+                }
+              }
               if (provider === 'gmail') {
-                // Defer to existing Gmail sync handler logic
-                console.log(`[google-sync] gmail config saved, advise user to use /api/connectors/gmail/sync for run`);
+                // Defer to existing Gmail sync handler logic (legacy)
+                console.log(`[google-sync] gmail config saved, advise user to use /api/connectors/gmail/sync for run (no Nango connection)`);
                 return jsonResponse(res, {
                   success: true,
                   provider,
                   config_saved: true,
-                  note: 'Gmail uses dedicated sync endpoint — call /api/connectors/gmail/sync to trigger',
+                  note: 'Gmail uses dedicated sync endpoint — call /api/connectors/gmail/sync to trigger (no Nango connection)',
                 });
               }
 
+              // 2b. Google Docs — when Nango is connected use Nango-routed
+              //     GoogleDocsAdapter. Legacy drive-docs-adapter only fires
+              //     if Nango isn't connected.
+              if (provider === 'google_docs' && nangoActive) {
+                console.log(`[google-sync] google_docs: routing through Nango`);
+                try {
+                  const { GoogleDocsAdapter } = await import('./connectors/providers/gdocs/adapter.js');
+                  const adapter = new GoogleDocsAdapter();
+                  const { SyncEngine } = await import('./connectors/framework/sync-engine.js');
+                  const engine = new SyncEngine({
+                    connectorStore: cs,
+                    memoryStore: persistentMemoryStore,
+                    memoryEngine: persistentMemoryEngine,
+                    smartIngestRouter,
+                  });
+                  const result = await engine.runSync({
+                    adapter, userId, orgId, provider: nangoProviderKey, mode: 'incremental',
+                  });
+                  return jsonResponse(res, { success: true, provider, via: 'nango', result });
+                } catch (err) {
+                  console.warn(`[google-sync] nango gdocs failed: ${err.message}`);
+                  return jsonResponse(res, { error: err.message, via: 'nango' }, 500);
+                }
+              }
+
               // 3. For new providers, dispatch via SyncEngine + adapter
+              //    (LEGACY workspace-mcp path — only reached when no Nango
+              //    connection exists for the matched Google provider key).
+              if (nangoActive) {
+                console.log(`[google-sync] ${provider}: Nango connection live but no Nango-native adapter — falling back to workspace-mcp`);
+              }
               const adapterModule = await (async () => {
                 if (provider.startsWith('google_drive') || provider === 'google_docs' || provider === 'google_sheets' || provider === 'google_slides') {
                   return import('./connectors/providers/google/drive-docs-adapter.js');

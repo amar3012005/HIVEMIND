@@ -89,6 +89,7 @@ services:
             BUILD_DATE: '${BUILD_DATE:-unknown}'
             NANGO_URL: 'http://nango:3003'
             NANGO_SECRET_KEY: '${NANGO_SECRET_KEY}'
+            NANGO_WEBHOOK_SECRET: '${NANGO_WEBHOOK_SECRET:-8c78854b-f4b5-41a3-8a33-cfc70d757ed4}'
             DOCLING_URL: 'http://docling:5001'
             POSTGRES_PASSWORD: '${POSTGRES_PASSWORD}'
             COOLIFY_BRANCH: '"main"'
@@ -244,6 +245,7 @@ services:
             POSTGRES_PASSWORD: '${POSTGRES_PASSWORD}'
             NANGO_URL: 'http://nango:3003'
             NANGO_SECRET_KEY: '${NANGO_SECRET_KEY}'
+            NANGO_WEBHOOK_SECRET: '${NANGO_WEBHOOK_SECRET:-8c78854b-f4b5-41a3-8a33-cfc70d757ed4}'
             PUPPETEER_EXECUTABLE_PATH: '${PUPPETEER_EXECUTABLE_PATH:-/usr/bin/chromium}'
             PUPPETEER_SKIP_DOWNLOAD: 'true'
             HIVEMIND_WHATSAPP_SESSIONS_DIR: '${HIVEMIND_WHATSAPP_SESSIONS_DIR:-/app/data/whatsapp-sessions}'
@@ -481,6 +483,7 @@ services:
             NANGO_SERVER_URL: '${NANGO_PUBLIC_URL:-http://nango:3003}'
             NANGO_LOGS_ENABLED: 'true'
             NANGO_SECRET_KEY: '${NANGO_SECRET_KEY}'
+            NANGO_WEBHOOK_SECRET: '${NANGO_WEBHOOK_SECRET:-8c78854b-f4b5-41a3-8a33-cfc70d757ed4}'
             COOLIFY_BRANCH: '"main"'
             COOLIFY_RESOURCE_UUID: s0k0s0k40wo44w4w8gcs8ow0
             COOLIFY_CONTAINER_NAME: nango-s0k0s0k40wo44w4w8gcs8ow0-125656700000

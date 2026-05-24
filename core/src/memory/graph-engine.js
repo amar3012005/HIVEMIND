@@ -32,6 +32,43 @@ function _sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Extract the first JSON object from a raw LLM response. Handles:
+//   • markdown code fences (```json ... ```)
+//   • leading/trailing prose
+//   • trailing commas (replaces with empty)
+// Returns parsed object or throws.
+function extractJsonFromText(raw) {
+  if (!raw || typeof raw !== 'string') throw new Error('empty raw');
+  let text = raw.trim();
+  // Strip markdown fence.
+  const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenceMatch) text = fenceMatch[1].trim();
+  // Find first { ... } block — balanced-brace scan.
+  const start = text.indexOf('{');
+  if (start < 0) throw new Error('no opening brace');
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  let end = -1;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (escape) { escape = false; continue; }
+    if (ch === '\\' && inString) { escape = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === '{') depth += 1;
+    else if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) { end = i; break; }
+    }
+  }
+  if (end < 0) throw new Error('unbalanced braces');
+  let slice = text.slice(start, end + 1);
+  // Repair common LLM mistakes: trailing comma before } or ].
+  slice = slice.replace(/,\s*([}\]])/g, '$1');
+  return JSON.parse(slice);
+}
+
 // STOPWORDS removed (2026-05-21) — replaced by LLM-based entity linker
 // which handles coreference/pronouns/cross-cultural names without
 // needing a curated stoplist. See _attachEntityCoMentionEdges.
@@ -1543,6 +1580,13 @@ OUTPUT JSON only.`;
 
     const model = process.env.STRUCTURED_ENRICHER_MODEL || MEMORY_INGEST_MODEL;
     const maxAttempts = Number(process.env.ENRICH_MAX_ATTEMPTS || 3);
+    // gpt-oss-20b on Groq fails strict JSON-mode schema validation
+    // (response_format: json_object → HTTP 400 json_validate_failed,
+    // failed_generation empty = upstream pre-reject). Other models (llama
+    // 70b, gpt-4o) accept it fine. Probe model name and turn off strict
+    // JSON mode for gpt-oss family — rely on instruction-driven JSON +
+    // extractJsonFromText fallback parser.
+    const useStrictJsonMode = !/gpt-oss/i.test(model);
 
     // Helper to persist failure reason on source_metadata so retries are
     // targetable + visible. Mirrors success-path persistence.
@@ -1576,7 +1620,7 @@ OUTPUT JSON only.`;
           body: JSON.stringify({
             model,
             messages: [{ role: 'user', content: prompt }],
-            response_format: { type: 'json_object' },
+            ...(useStrictJsonMode ? { response_format: { type: 'json_object' } } : {}),
             temperature: 0.1,
             max_tokens: 900,
           }),
@@ -1600,15 +1644,21 @@ OUTPUT JSON only.`;
         const raw = data?.choices?.[0]?.message?.content || '{}';
         try {
           parsed = JSON.parse(raw);
-        } catch (jsonErr) {
-          lastErr = { code: 'parse_error', status: 200, body: raw.slice(0, 400) };
-          console.warn(`[structured-enrich] ${memoryId.slice(0, 8)} JSON parse failed: ${jsonErr.message}; raw=${raw.slice(0, 200)}`);
-          if (attempt === maxAttempts) {
-            await recordError(lastErr.code, lastErr.status, lastErr.body);
-            return null;
+        } catch (strictErr) {
+          // gpt-oss-20b often wraps JSON in markdown fences / adds prose.
+          // Use lenient extractor as fallback before declaring parse failure.
+          try {
+            parsed = extractJsonFromText(raw);
+          } catch (lenientErr) {
+            lastErr = { code: 'parse_error', status: 200, body: raw.slice(0, 400) };
+            console.warn(`[structured-enrich] ${memoryId.slice(0, 8)} JSON parse failed (strict: ${strictErr.message}; lenient: ${lenientErr.message}); raw=${raw.slice(0, 200)}`);
+            if (attempt === maxAttempts) {
+              await recordError(lastErr.code, lastErr.status, lastErr.body);
+              return null;
+            }
+            await _sleep(500 * attempt);
+            continue;
           }
-          await _sleep(500 * attempt);
-          continue;
         }
         break; // success
       } catch (netErr) {
@@ -1904,7 +1954,9 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
         body: JSON.stringify({
           model: process.env.ENTITY_LINKER_MODEL || MEMORY_INGEST_MODEL,
           messages: [{ role: 'user', content: prompt }],
-          response_format: { type: 'json_object' },
+          // gpt-oss-20b fails Groq strict JSON-mode validation — skip
+          // response_format for that family, rely on extractJsonFromText.
+          ...(/gpt-oss/i.test(process.env.ENTITY_LINKER_MODEL || MEMORY_INGEST_MODEL) ? {} : { response_format: { type: 'json_object' } }),
           temperature: 0.1,
           max_tokens: 700,
         }),
@@ -1916,7 +1968,11 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
       }
       const data = await resp.json();
       const raw = data?.choices?.[0]?.message?.content || '{}';
-      parsed = JSON.parse(raw);
+      try {
+        parsed = JSON.parse(raw);
+      } catch (strictErr) {
+        parsed = extractJsonFromText(raw); // lenient fallback for gpt-oss
+      }
     } catch (llmErr) {
       console.warn('[entity-co-mention] LLM failed:', llmErr.message);
       return;

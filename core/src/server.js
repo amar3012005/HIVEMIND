@@ -3932,10 +3932,27 @@ exit \$RC
 
   // ── OAuth 2.1 Discovery & Endpoints ──────────────────────────────────────
 
+  // Discovery base — derive from request Host so a client that reached us
+  // via the FE domain (hivemind.davinciai.eu) gets matching issuer +
+  // endpoints. Claude.ai's custom-connector flow rejects issuer/host
+  // mismatches. Vercel rewrites /oauth/* + /.well-known/oauth-* on the FE
+  // domain back to core, so all endpoint URLs work via either host.
+  const _discoveryBase = (() => {
+    const xfHost = req.headers['x-forwarded-host'] || req.headers['x-original-host'];
+    const host = (xfHost || req.headers.host || '').toString().split(',')[0].trim();
+    if (!host) return OAUTH_BASE_URL;
+    const proto = (req.headers['x-forwarded-proto'] || 'https').toString().split(',')[0].trim();
+    // Accept both bare apex (hivemind.davinciai.eu) and core domain.
+    if (host.includes('hivemind.davinciai.eu') || host.includes('davinciai.eu')) {
+      return `${proto}://${host}`;
+    }
+    return OAUTH_BASE_URL;
+  })();
+
   if (pathname === '/.well-known/oauth-protected-resource' && req.method === 'GET') {
     return jsonResponse(res, {
-      resource: OAUTH_RESOURCE_DEFAULT,
-      authorization_servers: [OAUTH_BASE_URL],
+      resource: _discoveryBase,
+      authorization_servers: [_discoveryBase],
       scopes_supported: OAUTH_SCOPES_SUPPORTED,
       bearer_methods_supported: ['header']
     });
@@ -3943,10 +3960,10 @@ exit \$RC
 
   if (pathname === '/.well-known/oauth-authorization-server' && req.method === 'GET') {
     return jsonResponse(res, {
-      issuer: OAUTH_BASE_URL,
-      authorization_endpoint: `${OAUTH_BASE_URL}/oauth/authorize`,
-      token_endpoint: `${OAUTH_BASE_URL}/oauth/token`,
-      revocation_endpoint: `${OAUTH_BASE_URL}/oauth/revoke`,
+      issuer: _discoveryBase,
+      authorization_endpoint: `${_discoveryBase}/oauth/authorize`,
+      token_endpoint: `${_discoveryBase}/oauth/token`,
+      revocation_endpoint: `${_discoveryBase}/oauth/revoke`,
       scopes_supported: OAUTH_SCOPES_SUPPORTED,
       response_types_supported: ['code'],
       grant_types_supported: ['authorization_code', 'refresh_token'],

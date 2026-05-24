@@ -62,11 +62,23 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     console.log(`[reingest] resolved orgId=${orgId}`);
   }
 
-  // Total count for progress reporting.
-  const total = await prisma.memory.count({
-    where: { userId: USER_ID, deletedAt: null },
-  });
-  console.log(`[reingest] user=${USER_ID} total memories=${total} batch=${BATCH_SIZE} offset=${BATCH_OFFSET} commit=${COMMIT}`);
+  // Scope to memories worth reingesting:
+  //   • undeleted
+  //   • NOT extracted-fact children (those are LLM-extracted sub-rows of
+  //     a canonical parent — reingesting them duplicates parent semantics
+  //     and burns LLM budget on noise).
+  //   • NOT canonical-summary (drift-compaction rollups, regenerate via
+  //     cognition tick if needed).
+  //   • NOT chat conversation-log rows (audit trail, no fact-claim).
+  // Result: targets ~863 top-level memories instead of 4198.
+  const EXCLUDED_TAGS = ['extracted-fact', 'canonical-summary', 'conversation-log'];
+  const baseWhere = {
+    userId: USER_ID,
+    deletedAt: null,
+    NOT: { tags: { hasSome: EXCLUDED_TAGS } },
+  };
+  const total = await prisma.memory.count({ where: baseWhere });
+  console.log(`[reingest] user=${USER_ID} scope=${total} (excluding ${EXCLUDED_TAGS.join(',')}) batch=${BATCH_SIZE} offset=${BATCH_OFFSET} commit=${COMMIT}`);
 
   let offset = BATCH_OFFSET;
   let processed = 0;
@@ -80,7 +92,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   while (offset < total) {
     const memories = await prisma.memory.findMany({
-      where: { userId: USER_ID, deletedAt: null },
+      where: baseWhere,
       orderBy: { createdAt: 'asc' },
       skip: offset,
       take: BATCH_SIZE,

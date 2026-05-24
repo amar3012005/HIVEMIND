@@ -1735,6 +1735,32 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
       .slice(0, EDGE_CAP);
 
     const writeStore = store || this.store;
+    // Pre-flight: drop links pointing at memory IDs that no longer exist
+    // (candidate may have been deleted / superseded between recall and
+    // edge create). One FK violation poisons the outer Postgres txn so
+    // verify existence BEFORE any createRelationship attempt.
+    if (sorted.length > 0) {
+      try {
+        const targetIds = Array.from(new Set(sorted.map((l) => candidates[l.index]?.id).filter(Boolean)));
+        const prismaClient = (writeStore && writeStore.client) || this.store.client;
+        if (prismaClient && prismaClient.memory && targetIds.length > 0) {
+          const live = await prismaClient.memory.findMany({
+            where: { id: { in: targetIds }, deletedAt: null },
+            select: { id: true },
+          });
+          const liveSet = new Set(live.map((m) => m.id));
+          const filtered = sorted.filter((l) => liveSet.has(candidates[l.index]?.id));
+          if (filtered.length < sorted.length) {
+            console.log(`[entity-co-mention] dropped ${sorted.length - filtered.length} edge(s) to deleted/missing candidate memories`);
+          }
+          sorted.length = 0;
+          sorted.push(...filtered);
+        }
+      } catch (preflightErr) {
+        console.warn('[entity-co-mention] pre-flight existence check failed:', preflightErr.message);
+      }
+    }
+
     let txnPoisoned = false;
     for (const l of sorted) {
       if (txnPoisoned) break;

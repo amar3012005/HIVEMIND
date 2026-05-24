@@ -1410,6 +1410,130 @@ export class MemoryGraphEngine {
    * Gated by MEMORY_ENTITY_LINKING (default 'true'). Soft-fails if
    * GROQ_API_KEY missing or LLM errors — never blocks the save.
    */
+  /**
+   * Post-commit structured enrichment. Runs OUTSIDE the ingest transaction
+   * (caller invokes after engine.ingestMemory / ingestMemoryTree returns).
+   * Extracts enterprise-grade fields via LLM and patches them onto the
+   * memory's source_metadata.metadata.enrichment JSON blob:
+   *   - summary       : 2-3 sentence executive abstract
+   *   - urgency       : low | medium | high | critical
+   *   - action_items  : [{ task, owner, deadline?, status }]
+   *   - decisions     : [{ claim, owner, date? }]
+   *   - open_questions: [{ question, blocker?, owner? }]
+   *   - blockers      : [{ what, who_blocks, since? }]
+   *   - canonical_entities : { "<canonical-key>": { display, kind, emails?, aliases? } }
+   *
+   * Fire-and-forget at the caller. Best-effort — never blocks ingestion.
+   */
+  async enrichMemoryStructured(memoryId, { content, title, tags = [] } = {}) {
+    if (!process.env.GROQ_API_KEY) return null;
+    if (!memoryId) return null;
+    const text = String(content || '').slice(0, 4000);
+    if (text.length < 80) return null;
+
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const prompt = `You enrich a single memory with enterprise-grade structured fields. Read the memory and emit a STRICT JSON object with these keys (omit any field that doesn't apply):
+
+{
+  "summary": "2-3 sentence executive abstract for someone reopening this memory months later. Lead with WHAT/WHO/WHEN/WHY.",
+  "urgency": "low|medium|high|critical",
+  "memory_kind": "decision|event|fact|preference|goal|issue|relationship|note",
+  "action_items": [
+    { "task": "...", "owner": "person or email", "deadline": "YYYY-MM-DD|null", "status": "open|done|blocked" }
+  ],
+  "decisions": [
+    { "claim": "what was decided", "owner": "who decided", "date": "YYYY-MM-DD|null" }
+  ],
+  "open_questions": [
+    { "question": "...", "blocker": "what's blocking|null", "owner": "who owes the answer|null" }
+  ],
+  "blockers": [
+    { "what": "...", "who_blocks": "person/team|null", "since": "YYYY-MM-DD|null" }
+  ],
+  "canonical_entities": {
+    "<slug>": { "display": "Lennart Dahms", "kind": "person|org|product|place", "emails": ["..."], "aliases": ["..."] }
+  }
+}
+
+Today is ${todayIso}. Resolve relative dates against it. Multilingual content OK — translate place names to canonical English where unambiguous, keep person names in original script.
+
+TITLE: ${String(title || '').slice(0, 200)}
+
+MEMORY:
+${text}
+
+OUTPUT JSON only.`;
+
+    let parsed;
+    try {
+      const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: process.env.STRUCTURED_ENRICHER_MODEL || 'llama-3.3-70b-versatile',
+          messages: [{ role: 'user', content: prompt }],
+          response_format: { type: 'json_object' },
+          temperature: 0.1,
+          max_tokens: 900,
+        }),
+      });
+      if (!resp.ok) return null;
+      const data = await resp.json();
+      parsed = JSON.parse(data?.choices?.[0]?.message?.content || '{}');
+    } catch {
+      return null;
+    }
+
+    if (!parsed || typeof parsed !== 'object') return null;
+
+    // Persist on source_metadata.metadata.enrichment. Uses raw SQL via
+    // Prisma client because Prisma's nested JSON patch syntax is awkward.
+    try {
+      const client = this.store?.client;
+      if (!client) return parsed;
+      // Find the source_metadata row for this memory.
+      const sm = await client.sourceMetadata?.findFirst?.({
+        where: { memoryId },
+        select: { id: true, metadata: true },
+      });
+      if (!sm) return parsed;
+      const merged = { ...(sm.metadata || {}), enrichment: parsed };
+      await client.sourceMetadata.update({
+        where: { id: sm.id },
+        data: { metadata: merged },
+      });
+
+      // Also distill 5 high-signal tags from enrichment so retrieval can
+      // filter by urgency / kind / action-owner without joining JSON.
+      const enrichTags = [];
+      if (parsed.urgency) enrichTags.push(`urgency:${parsed.urgency}`);
+      if (parsed.memory_kind) enrichTags.push(`kind:${parsed.memory_kind}`);
+      if (Array.isArray(parsed.action_items) && parsed.action_items.length > 0) {
+        enrichTags.push(`has-action:${parsed.action_items.length}`);
+        for (const a of parsed.action_items.slice(0, 3)) {
+          if (a.owner) enrichTags.push(`owner:${String(a.owner).slice(0, 40).replace(/\s+/g, '_')}`);
+        }
+      }
+      if (Array.isArray(parsed.open_questions) && parsed.open_questions.length > 0) {
+        enrichTags.push(`open:${parsed.open_questions.length}`);
+      }
+      if (Array.isArray(parsed.blockers) && parsed.blockers.length > 0) {
+        enrichTags.push(`blocked:${parsed.blockers.length}`);
+      }
+      if (enrichTags.length > 0) {
+        const cur = (tags || []);
+        const newTags = Array.from(new Set([...cur, ...enrichTags]));
+        try {
+          await client.memory.update({ where: { id: memoryId }, data: { tags: newTags } });
+        } catch {}
+      }
+      return parsed;
+    } catch (persistErr) {
+      console.warn(`[structured-enrich] persist failed for ${memoryId.slice(0, 8)}: ${persistErr.message}`);
+      return parsed;
+    }
+  }
+
   async _attachEntityCoMentionEdges(baseMemory, store, similar = []) {
     if ((process.env.MEMORY_ENTITY_LINKING || 'true').toLowerCase() === 'false') return;
     if (!process.env.GROQ_API_KEY) {
@@ -1727,10 +1851,43 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
     // the graph noise-controlled.
     const EDGE_CAP = (baseMemory.metadata?.force_entity_linking === true) ? 6 : 3;
     const VALID_EDGE_TYPES = new Set(['Updates', 'Extends', 'Mentions', 'Contradicts']);
+
+    // Per-type confidence floor. Updates is destructive (flips
+    // is_latest=false on target) so demand high confidence + entity
+    // overlap. Mentions stay permissive — they're just co-mention hints.
+    const MIN_CONFIDENCE_BY_TYPE = {
+      Updates: 0.70,        // raised from 0.55 to kill false-positive supersedes
+      Contradicts: 0.65,
+      Extends: 0.55,
+      Mentions: 0.55,
+    };
+
+    // Pre-compute new memory's entity set for entity-overlap gating.
+    const newEntitiesLower = new Set(
+      entities.map((e) => String(e).toLowerCase())
+    );
+
     const sorted = links
-      .filter(l => Number.isInteger(l.index) && l.index >= 0 && l.index < candidates.length)
-      .filter(l => typeof l.entity === 'string' && l.entity.length > 0)
-      .filter(l => typeof l.confidence === 'number' && l.confidence >= 0.55)
+      .filter((l) => Number.isInteger(l.index) && l.index >= 0 && l.index < candidates.length)
+      .filter((l) => typeof l.entity === 'string' && l.entity.length > 0)
+      .filter((l) => {
+        const type = VALID_EDGE_TYPES.has(l.type) ? l.type : 'Mentions';
+        const floor = MIN_CONFIDENCE_BY_TYPE[type] ?? 0.55;
+        return typeof l.confidence === 'number' && l.confidence >= floor;
+      })
+      // For Updates: require shared entity overlap. Recall by topic-word
+      // similarity is too loose — produced the "Exhibition Hall / Final
+      // Updates" false positive on the Learning Agreement thread. Only
+      // promote to supersede when both memories share at least one
+      // named entity from the new memory's extracted set.
+      .filter((l) => {
+        const type = VALID_EDGE_TYPES.has(l.type) ? l.type : 'Mentions';
+        if (type !== 'Updates') return true;
+        const cand = candidates[l.index];
+        const candTags = (cand?.tags || []).filter((t) => typeof t === 'string' && t.startsWith('entity:'));
+        const candEntities = candTags.map((t) => t.slice('entity:'.length).replace(/_/g, ' ').toLowerCase());
+        return candEntities.some((e) => newEntitiesLower.has(e));
+      })
       .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))
       .slice(0, EDGE_CAP);
 

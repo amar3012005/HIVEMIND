@@ -8549,9 +8549,20 @@ exit \$RC
                         child_count: children.length,
                       },
                     };
-                    await persistentMemoryEngine.ingestMemoryTree({ parent, children });
+                    const treeResult = await persistentMemoryEngine.ingestMemoryTree({ parent, children });
                     treesIngested += 1;
                     ingested += 1 + children.length;
+                    // Post-commit structured enrichment on parent thread
+                    // — fire-and-forget so HTTP response doesn't wait.
+                    // Adds summary / action_items / decisions / urgency
+                    // fields + kind:* / urgency:* / owner:* tags.
+                    if (treeResult?.parentId) {
+                      persistentMemoryEngine.enrichMemoryStructured(treeResult.parentId, {
+                        content: parent.content,
+                        title: parent.title,
+                        tags: parent.tags,
+                      }).catch((e) => console.warn('[gmail-enrich] failed:', e.message));
+                    }
                     // Skip residual summary memory if adapter also produced one.
                     const summary = payloads.find(p => p.metadata?.is_thread_summary);
                     if (summary) {
@@ -8933,6 +8944,14 @@ exit \$RC
                           };
                           const [routedGmailPayload] = await buildRoutedIngestPayloads(gmailPayload, { smartIngestRouter });
                           const gmailResult = await persistentMemoryEngine.ingestMemory(routedGmailPayload);
+                          // Enterprise structured enrichment post-commit.
+                          if (gmailResult?.memoryId) {
+                            persistentMemoryEngine.enrichMemoryStructured(gmailResult.memoryId, {
+                              content: routedGmailPayload.content,
+                              title: routedGmailPayload.title,
+                              tags: routedGmailPayload.tags,
+                            }).catch((e) => console.warn('[gmail-enrich] failed:', e.message));
+                          }
                           // Embed thread memory in Qdrant for vector search
                           if (gmailResult?.memoryId && qdrantClient) {
                             try {

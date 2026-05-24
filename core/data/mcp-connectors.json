@@ -104,7 +104,7 @@
   {
     "name": "gmail-ingestion",
     "mode": "ingestion",
-    "nango_provider": "google-mail",
+    "nango_provider": "gmail",
     "auth_strategy": "nango",
     "transport": "streamable-http",
     "url": "https://gmail.googleapis.com",
@@ -116,7 +116,41 @@
     "default_tags": ["gmail", "ingestion"],
     "args": [],
     "env": {},
-    "updated_at": "2026-05-18T00:00:00.000Z"
+    "updated_at": "2026-05-24T00:00:00.000Z"
+  },
+  {
+    "name": "google-docs-ingestion",
+    "mode": "ingestion",
+    "nango_provider": "google-docs",
+    "auth_strategy": "nango",
+    "transport": "streamable-http",
+    "url": "https://docs.googleapis.com",
+    "adapter_type": "google-docs",
+    "supports_ingestion": true,
+    "supports_live_tools": false,
+    "supports_persistent_client": false,
+    "default_project": "connector-gdocs",
+    "default_tags": ["google-docs", "ingestion"],
+    "args": [],
+    "env": {},
+    "updated_at": "2026-05-24T00:00:00.000Z"
+  },
+  {
+    "name": "google-gemini-live",
+    "mode": "live",
+    "nango_provider": "google-gemini",
+    "auth_strategy": "nango",
+    "transport": "streamable-http",
+    "url": "https://generativelanguage.googleapis.com",
+    "adapter_type": "google-gemini",
+    "supports_ingestion": false,
+    "supports_live_tools": true,
+    "supports_persistent_client": false,
+    "default_project": "connector-gemini",
+    "default_tags": ["google-gemini", "live"],
+    "args": [],
+    "env": {},
+    "updated_at": "2026-05-24T00:00:00.000Z"
   },
   {
     "name": "notion-ingestion",

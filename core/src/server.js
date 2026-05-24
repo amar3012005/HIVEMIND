@@ -2378,14 +2378,26 @@ function sanitizeHtml(value) {
   ));
 }
 
-function buildOAuthWwwAuthenticate({ error = 'invalid_token', description = 'Bearer token missing or invalid', requiredScope = null } = {}) {
+function buildOAuthWwwAuthenticate({ error = 'invalid_token', description = 'Bearer token missing or invalid', requiredScope = null, req = null } = {}) {
+  // Same canonical-FE-host normalization as discovery doc. Claude reads
+  // these URIs from WWW-Authenticate to bootstrap OAuth — must match the
+  // host the client actually used to reach us.
+  let base = OAUTH_BASE_URL;
+  if (req) {
+    const xfHost = req.headers['x-forwarded-host'] || req.headers['x-original-host'];
+    const rawHost = (xfHost || req.headers.host || '').toString().split(',')[0].trim();
+    if (rawHost && (rawHost.endsWith('davinciai.eu') || rawHost.endsWith('davinciai.eu:8050'))) {
+      const FE_HOST = process.env.HIVEMIND_OAUTH_FE_HOST || 'hivemind.davinciai.eu';
+      base = `https://${FE_HOST}`;
+    }
+  }
   const pairs = [
     `realm="hivemind"`,
     `error="${error}"`,
     `error_description="${description.replace(/"/g, "'")}"`,
-    `authorization_uri="${OAUTH_BASE_URL}/oauth/authorize"`,
-    `token_uri="${OAUTH_BASE_URL}/oauth/token"`,
-    `resource_metadata_uri="${OAUTH_BASE_URL}/.well-known/oauth-protected-resource"`
+    `authorization_uri="${base}/oauth/authorize"`,
+    `token_uri="${base}/oauth/token"`,
+    `resource_metadata_uri="${base}/.well-known/oauth-protected-resource"`
   ];
   if (requiredScope) {
     pairs.push(`scope="${requiredScope}"`);
@@ -2397,14 +2409,16 @@ function setOAuthUnauthorized(res, {
   statusCode = 401,
   error = 'unauthorized',
   errorDescription = 'Unauthorized',
-  requiredScope = null
+  requiredScope = null,
+  req = null
 } = {}) {
   res.setHeader(
     'WWW-Authenticate',
     buildOAuthWwwAuthenticate({
       error: statusCode === 403 ? 'insufficient_scope' : 'invalid_token',
       description: errorDescription,
-      requiredScope
+      requiredScope,
+      req
     })
   );
   return jsonResponse(res, { error, error_description: errorDescription }, statusCode);
@@ -2936,7 +2950,7 @@ const server = http.createServer(async (req, res) => {
     if (!auth.ok) {
       res.writeHead(auth.status || 401, {
         'Content-Type': 'application/json',
-        'WWW-Authenticate': buildOAuthWwwAuthenticate({ description: auth.error }),
+        'WWW-Authenticate': buildOAuthWwwAuthenticate({ description: auth.error, req }),
       });
       res.end(JSON.stringify({ error: auth.error || 'unauthorized' }));
       return;
@@ -4916,7 +4930,8 @@ exit \$RC
         return setOAuthUnauthorized(res, {
           statusCode: auth.status || 401,
           error: 'unauthorized',
-          errorDescription: auth.error || 'Missing or invalid bearer token.'
+          errorDescription: auth.error || 'Missing or invalid bearer token.',
+          req,
         });
       }
       const principal = auth.principal;

@@ -1442,8 +1442,38 @@ export class MemoryGraphEngine {
   async enrichMemoryStructured(memoryId, { content, title, tags = [] } = {}) {
     if (!process.env.GROQ_API_KEY) return null;
     if (!memoryId) return null;
-    const text = String(content || '').slice(0, 4000);
-    if (text.length < 80) return null;
+    // Sanitize: strip Gmail MIME headers (Content-Type, boundary=, charset, etc.),
+    // base64 blobs, and non-printable control bytes. gpt-oss-20b in JSON mode
+    // returns HTTP 400 json_validate_failed when the prompt contains stray
+    // control chars or excessive boundary noise.
+    const sanitized = String(content || '')
+      .replace(/Content-(Type|Transfer-Encoding|Disposition):[^\n]*/gi, '')
+      .replace(/boundary=[^\s;]+/gi, '')
+      .replace(/charset="?[^"\s;]+"?/gi, '')
+      .replace(/Content-ID:\s*<[^>]+>/gi, '')
+      .replace(/^--[A-Za-z0-9_=-]+$/gm, '')
+      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, ' ')
+      .replace(/\s{3,}/g, '  ')
+      .trim();
+    const text = sanitized.slice(0, 4000);
+    if (text.length < 80) {
+      // Mark as skipped — distinct from error. Operators can filter these
+      // out of retry sweeps. Skipping silently was the old behavior and
+      // produced misleading "failed" counts in queue stats.
+      try {
+        const c = this.store?.client;
+        if (c?.sourceMetadata?.findFirst && c?.sourceMetadata?.update) {
+          const sm = await c.sourceMetadata.findFirst({ where: { memoryId }, select: { id: true, metadata: true } });
+          if (sm && !sm.metadata?.enrichment_status) {
+            await c.sourceMetadata.update({
+              where: { id: sm.id },
+              data: { metadata: { ...(sm.metadata || {}), enrichment_status: 'skipped:short_content', enrichment_skipped_at: nowIso() } },
+            });
+          }
+        }
+      } catch {}
+      return null;
+    }
 
     const client = this.store?.client;
     // ── Idempotency lock ─────────────────────────────────────────────

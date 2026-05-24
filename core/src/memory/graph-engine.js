@@ -1578,18 +1578,18 @@ ${text}
 
 OUTPUT JSON only.`;
 
-    const model = process.env.STRUCTURED_ENRICHER_MODEL || MEMORY_INGEST_MODEL;
+    const primaryModel = process.env.STRUCTURED_ENRICHER_MODEL || MEMORY_INGEST_MODEL;
+    // Fallback to gpt-oss-120b when 20b returns malformed JSON or http_400.
+    // 120b is more reliable at structured generation. Env override available.
+    const fallbackModel = process.env.STRUCTURED_ENRICHER_FALLBACK_MODEL || 'openai/gpt-oss-120b';
     const maxAttempts = Number(process.env.ENRICH_MAX_ATTEMPTS || 3);
-    // gpt-oss-20b on Groq fails strict JSON-mode schema validation
-    // (response_format: json_object → HTTP 400 json_validate_failed,
-    // failed_generation empty = upstream pre-reject). Other models (llama
-    // 70b, gpt-4o) accept it fine. Probe model name and turn off strict
-    // JSON mode for gpt-oss family — rely on instruction-driven JSON +
-    // extractJsonFromText fallback parser.
-    const useStrictJsonMode = !/gpt-oss/i.test(model);
+    // gpt-oss family fails Groq strict JSON-mode pre-validation.
+    const supportsStrictJson = (m) => !/gpt-oss/i.test(m);
+
+    let usedModel = primaryModel;
 
     // Helper to persist failure reason on source_metadata so retries are
-    // targetable + visible. Mirrors success-path persistence.
+    // targetable + visible.
     const recordError = async (code, status, bodyExcerpt) => {
       if (!smRow || !client?.sourceMetadata?.update) return;
       try {
@@ -1602,81 +1602,83 @@ OUTPUT JSON only.`;
             http_status: status || null,
             body_excerpt: (bodyExcerpt || '').slice(0, 400),
             attempted_at: nowIso(),
-            model,
+            model: usedModel,
           },
         };
         await client.sourceMetadata.update({ where: { id: smRow.id }, data: { metadata: merged } });
       } catch {}
     };
 
-    let parsed = null;
-    let lastErr = { code: 'unknown', status: null, body: '' };
-
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      try {
-        const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model,
-            messages: [{ role: 'user', content: prompt }],
-            ...(useStrictJsonMode ? { response_format: { type: 'json_object' } } : {}),
-            temperature: 0.1,
-            // 900 tokens was cutting gpt-oss-20b mid-JSON (unterminated
-            // string @ pos 913). 1600 covers the full schema with all
-            // optional sections populated for a dense memory.
-            max_tokens: 1600,
-          }),
-        });
-
-        if (!resp.ok) {
-          const bodyText = await resp.text().catch(() => '');
-          lastErr = { code: `http_${resp.status}`, status: resp.status, body: bodyText };
-          // 429 / 5xx transient → retry with exponential backoff. 4xx fatal.
-          const transient = resp.status === 429 || (resp.status >= 500 && resp.status <= 599);
-          console.warn(`[structured-enrich] ${memoryId.slice(0, 8)} attempt ${attempt}/${maxAttempts} HTTP ${resp.status}: ${bodyText.slice(0, 200)}`);
-          if (!transient || attempt === maxAttempts) {
-            await recordError(lastErr.code, lastErr.status, lastErr.body);
-            return null;
-          }
-          await _sleep(1000 * Math.pow(2, attempt - 1));
-          continue;
-        }
-
-        const data = await resp.json();
-        const raw = data?.choices?.[0]?.message?.content || '{}';
+    // Single-model attempt loop. Returns { parsed, err } — parsed=null
+    // on failure with err describing reason. Caller decides whether to
+    // try the fallback model based on err.code.
+    const callModel = async (modelName) => {
+      let parsed = null;
+      let err = { code: 'unknown', status: null, body: '' };
+      const useStrict = supportsStrictJson(modelName);
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
-          parsed = JSON.parse(raw);
-        } catch (strictErr) {
-          // gpt-oss-20b often wraps JSON in markdown fences / adds prose.
-          // Use lenient extractor as fallback before declaring parse failure.
-          try {
-            parsed = extractJsonFromText(raw);
-          } catch (lenientErr) {
-            lastErr = { code: 'parse_error', status: 200, body: raw.slice(0, 400) };
-            console.warn(`[structured-enrich] ${memoryId.slice(0, 8)} JSON parse failed (strict: ${strictErr.message}; lenient: ${lenientErr.message}); raw=${raw.slice(0, 200)}`);
-            if (attempt === maxAttempts) {
-              await recordError(lastErr.code, lastErr.status, lastErr.body);
-              return null;
-            }
-            await _sleep(500 * attempt);
+          const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              model: modelName,
+              messages: [{ role: 'user', content: prompt }],
+              ...(useStrict ? { response_format: { type: 'json_object' } } : {}),
+              temperature: 0.1,
+              max_tokens: 1600,
+            }),
+          });
+          if (!resp.ok) {
+            const bodyText = await resp.text().catch(() => '');
+            err = { code: `http_${resp.status}`, status: resp.status, body: bodyText };
+            const transient = resp.status === 429 || (resp.status >= 500 && resp.status <= 599);
+            console.warn(`[structured-enrich] ${memoryId.slice(0, 8)} ${modelName} attempt ${attempt}/${maxAttempts} HTTP ${resp.status}: ${bodyText.slice(0, 200)}`);
+            if (!transient || attempt === maxAttempts) return { parsed: null, err };
+            await _sleep(1000 * Math.pow(2, attempt - 1));
             continue;
           }
+          const data = await resp.json();
+          const raw = data?.choices?.[0]?.message?.content || '{}';
+          try {
+            parsed = JSON.parse(raw);
+          } catch (strictErr) {
+            try {
+              parsed = extractJsonFromText(raw);
+            } catch (lenientErr) {
+              err = { code: 'parse_error', status: 200, body: raw.slice(0, 400) };
+              console.warn(`[structured-enrich] ${memoryId.slice(0, 8)} ${modelName} parse failed (strict: ${strictErr.message}; lenient: ${lenientErr.message}); raw=${raw.slice(0, 200)}`);
+              if (attempt === maxAttempts) return { parsed: null, err };
+              await _sleep(500 * attempt);
+              continue;
+            }
+          }
+          return { parsed, err: null };
+        } catch (netErr) {
+          err = { code: 'network_error', status: null, body: netErr.message };
+          console.warn(`[structured-enrich] ${memoryId.slice(0, 8)} ${modelName} network err attempt ${attempt}/${maxAttempts}: ${netErr.message}`);
+          if (attempt === maxAttempts) return { parsed: null, err };
+          await _sleep(1000 * Math.pow(2, attempt - 1));
         }
-        break; // success
-      } catch (netErr) {
-        lastErr = { code: 'network_error', status: null, body: netErr.message };
-        console.warn(`[structured-enrich] ${memoryId.slice(0, 8)} network err attempt ${attempt}/${maxAttempts}: ${netErr.message}`);
-        if (attempt === maxAttempts) {
-          await recordError(lastErr.code, lastErr.status, lastErr.body);
-          return null;
-        }
-        await _sleep(1000 * Math.pow(2, attempt - 1));
       }
+      return { parsed: null, err };
+    };
+
+    // Try primary (gpt-oss-20b). On parse_error or http_4xx fall through
+    // to gpt-oss-120b. Transient 429/5xx are already retried inside
+    // callModel — exhausting those still escalates to fallback for
+    // resilience.
+    let { parsed, err: lastErr } = await callModel(primaryModel);
+    if (!parsed && primaryModel !== fallbackModel) {
+      console.log(`[structured-enrich] ${memoryId.slice(0, 8)} primary ${primaryModel} failed (${lastErr?.code}) — escalating to ${fallbackModel}`);
+      usedModel = fallbackModel;
+      const fb = await callModel(fallbackModel);
+      parsed = fb.parsed;
+      lastErr = fb.err || lastErr;
     }
 
     if (!parsed || typeof parsed !== 'object') {
-      await recordError('empty_response', null, '');
+      await recordError(lastErr?.code || 'empty_response', lastErr?.status || null, lastErr?.body || '');
       return null;
     }
 
@@ -1693,7 +1695,7 @@ OUTPUT JSON only.`;
         enrichment: parsed,
         enrichment_status: 'done',
         enrichment_completed_at: nowIso(),
-        enrichment_model: model,
+        enrichment_model: usedModel,
       };
       // Clear any prior error fields.
       delete merged.enrichment_error;

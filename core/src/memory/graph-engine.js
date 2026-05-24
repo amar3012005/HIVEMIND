@@ -1735,13 +1735,11 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
       .slice(0, EDGE_CAP);
 
     const writeStore = store || this.store;
+    let txnPoisoned = false;
     for (const l of sorted) {
+      if (txnPoisoned) break;
       const cand = candidates[l.index];
       const confidence = Math.min(Math.max(l.confidence, 0.55), 0.95);
-      // Honor LLM-picked edge type when it's valid; default to Mentions
-      // for plain co-mention. Updates also flips the old memory to
-      // is_latest=false so downstream recall/graph don't surface a
-      // superseded value.
       const edgeType = VALID_EDGE_TYPES.has(l.type) ? l.type : 'Mentions';
       const isSupersede = edgeType === 'Updates';
 
@@ -1762,6 +1760,22 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
           },
         });
       } catch (edgeErr) {
+        const msg = String(edgeErr.message || '');
+        // Foreign-key violation = candidate memory was deleted between
+        // recall and edge create. Skip this edge but DON'T retry — the
+        // FK failure has poisoned the transaction. Subsequent edge ops
+        // will all fail with 25P02. Abort entity-co-mention immediately
+        // so the outer ingestMemory can commit the parent cleanly.
+        if (/Foreign key constraint violated/i.test(msg) || edgeErr.code === '23503') {
+          console.warn(`[entity-co-mention] FK violation to candidate ${cand?.id?.slice(0,8)} (likely deleted) — aborting edge loop to spare txn`);
+          txnPoisoned = true;
+          break;
+        }
+        if (edgeErr.code === '25P02' || /transaction is aborted/.test(msg)) {
+          console.warn('[entity-co-mention] txn aborted — aborting edge loop');
+          txnPoisoned = true;
+          break;
+        }
         // Fallback to Extends + subtype if enum missing (mid-rollout).
         try {
           await writeStore.createRelationship({
@@ -1779,7 +1793,13 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
               fallback_reason: edgeErr.message,
             },
           });
-        } catch {}
+        } catch (fb) {
+          // If fallback also hits FK or 25P02 → abort loop.
+          if (/Foreign key|transaction is aborted/i.test(String(fb.message)) || fb.code === '23503' || fb.code === '25P02') {
+            txnPoisoned = true;
+            break;
+          }
+        }
       }
 
       // When the LLM said "Updates", flip the old memory's is_latest

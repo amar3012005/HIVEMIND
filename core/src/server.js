@@ -4853,8 +4853,26 @@ exit \$RC
         }
       }
 
-      // Protect all non-key-management API endpoints
-      const auth = await authenticateApiKey(req);
+      // Public webhook bypass. Nango (and Gmail Pub/Sub) verify requests
+      // by signature header, not by API key. For these paths we synthesize
+      // a service principal so downstream code (which references userId/
+      // orgId from `principal`) still has a context — the actual user is
+      // resolved per-event by the webhook handler.
+      const PUBLIC_WEBHOOK_PATHS = new Set([
+        '/api/connectors/nango/webhook',
+        '/api/connectors/gmail/pubsub-webhook',
+        '/api/connectors/slack/event-ingest',
+      ]);
+      const isPublicWebhook = PUBLIC_WEBHOOK_PATHS.has(pathname) && req.method === 'POST';
+
+      // Protect all non-key-management API endpoints (skip for webhooks
+      // verified by provider signature).
+      let auth;
+      if (isPublicWebhook) {
+        auth = { ok: true, principal: { userId: DEFAULT_USER, orgId: DEFAULT_ORG, scopes: ['webhook'], rawKey: null } };
+      } else {
+        auth = await authenticateApiKey(req);
+      }
       if (!auth.ok) {
         return setOAuthUnauthorized(res, {
           statusCode: auth.status || 401,

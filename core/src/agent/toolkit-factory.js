@@ -22,9 +22,10 @@ const MCP_CONNECTOR_GROUPS = ['slack', 'notion', 'github', 'linear'];
 
 // Nango-REST-backed groups (registered directly via tool functions).
 // Each entry: providerKey expected on nangoConnection, register function.
+// provider = Nango unique_key (matches _nango_configs.unique_key)
 const NANGO_REST_GROUPS = [
-  { provider: 'google-mail', groupName: 'gmail',          register: (tk) => registerGmailTools(tk) },
-  { provider: 'google-docs', groupName: 'google-docs',    register: (tk) => registerGdocsTools(tk) },
+  { provider: 'gmail', groupName: 'gmail', register: (tk) => registerGmailTools(tk) },
+  { provider: 'google-docs', groupName: 'google-docs', register: (tk) => registerGdocsTools(tk) },
   { provider: 'google-gemini', groupName: 'google-gemini', register: (tk, deps) => registerGeminiTools(tk, deps) },
 ];
 

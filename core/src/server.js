@@ -8080,9 +8080,15 @@ exit \$RC
               //
               //    Map UI provider name (gmail / google_docs / google_drive ...)
               //    to the Nango providerConfigKey set up in the dashboard.
+              // Maps UI provider name → Nango unique_key (the value in
+              // _nango_configs.unique_key — set when integration registered
+              // in Nango dashboard). Mismatch here = "Integration does not
+              // exist" 400 on /connect/sessions.
               const NANGO_PROVIDER_MAP = {
-                gmail: 'google-mail',
+                gmail: 'gmail',
                 google_docs: 'google-docs',
+                google_gemini: 'google-gemini',
+                // Below await Nango dashboard registration — currently unmapped.
                 google_drive: 'google-drive',
                 google_calendar: 'google-calendar',
                 google_contacts: 'google-contacts',

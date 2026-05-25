@@ -1147,13 +1147,38 @@ export class MemoryGraphEngine {
         };
 
         if (effectiveRelationshipType === 'Updates') {
-          Object.assign(result, await this.applyUpdate(baseMemory.id, classification.relationship.targetId, {
-            store,
-            user_id: baseMemory.user_id,
-            org_id: baseMemory.org_id,
-            confidence: classification.relationship?.confidence ?? semanticRelationship?.confidence,
-            startedAt
-          }));
+          // Confidence floor: low-confidence "Updates" classifications were
+          // flipping is_latest=false on unrelated memories (observed today:
+          // "Dipesh Investor" Updates "Ceyda Co-Founder" at confidence 0.32
+          // simply because both mention Amar). is_latest cascades hide most
+          // memories from the default list view. Treat <0.70 as a Mentions
+          // edge instead — keeps the graph connection, doesn't supersede.
+          const updateConf = classification.relationship?.confidence ?? semanticRelationship?.confidence ?? 0;
+          if (Number(updateConf) >= 0.70) {
+            Object.assign(result, await this.applyUpdate(baseMemory.id, classification.relationship.targetId, {
+              store,
+              user_id: baseMemory.user_id,
+              org_id: baseMemory.org_id,
+              confidence: updateConf,
+              startedAt
+            }));
+          } else {
+            // Downgrade to Mentions edge — connect but don't supersede.
+            try {
+              await store.createRelationship({
+                id: crypto.randomUUID(),
+                from_id: baseMemory.id,
+                to_id: classification.relationship.targetId,
+                type: 'Mentions',
+                confidence: Number(updateConf) || 0.5,
+                created_by: 'updates_floor_downgrade',
+                metadata: { reason: 'updates_below_floor', original_confidence: updateConf, threshold: 0.70 },
+              });
+              console.log(`[graph-engine] Updates → Mentions (conf=${updateConf} < 0.70): ${baseMemory.id.slice(0,8)} → ${classification.relationship.targetId?.slice(0,8)}`);
+            } catch (mentionsErr) {
+              console.warn('[graph-engine] downgrade-to-Mentions failed:', mentionsErr.message);
+            }
+          }
         } else if (effectiveRelationshipType === 'Extends') {
           Object.assign(result, await this.applyExtends(baseMemory.id, classification.relationship.targetId, {
             store,

@@ -56,6 +56,29 @@ const MAX_ORGS_PER_TICK           = Number(process.env.COGNITION_MAX_ORGS_PER_TI
 // Tags that don't form meaningful topic clusters for synthesis purposes
 const SYS_TAG_RE = /^(file:|fn:|page:|heading:|upload:|doc-hash:|promoted-from|synthesized|topic:|cognition-loop|synthesis:|knowledge-base$|document$|document-summary$|entity:|time:|ts:|section:|chat$|talk-to-hive$)/i;
 
+// ─── Entity-key derivation (cluster_index.entity_keys) ───────────────────────
+// Inherited tag prefixes that carry entity identity. Strip prefix to produce
+// a flat entity key. Mirror order with backfill script.
+const ENTITY_TAG_PREFIXES = ['entity:', 'person:', 'project:', 'organization:', 'location:'];
+function deriveEntityKeysFromTags(tags) {
+  if (!Array.isArray(tags)) return [];
+  const keys = new Set();
+  for (const t of tags) {
+    if (typeof t !== 'string') continue;
+    for (const p of ENTITY_TAG_PREFIXES) {
+      if (t.startsWith(p)) { keys.add(t.slice(p.length)); break; }
+    }
+  }
+  // Fallback: proper-noun-like plain tags (CapCase or ACRONYM)
+  if (keys.size === 0) {
+    for (const t of tags) {
+      if (typeof t !== 'string') continue;
+      if (/^[A-Z][A-Za-z0-9]+$/.test(t) || /^[A-Z0-9]{2,}$/.test(t)) keys.add(t);
+    }
+  }
+  return [...keys].slice(0, 15);
+}
+
 // ─── In-process status ────────────────────────────────────────────────────────
 const _status = {
   last_run_at: null,
@@ -375,6 +398,7 @@ export class CognitionLoop {
             clusterHash:       hash,
             clusterType:       'canonical-fact',
             topTags:           [tag],
+            entityKeys:        deriveEntityKeysFromTags(created.tags),
             latestSynthesisId: created.id,
             latestRevision:    1,
             latestConfidence:  result.confidence,
@@ -523,6 +547,7 @@ export class CognitionLoop {
             clusterHash:       hash,
             clusterType:       'synthesis-bridge',
             topTags:           [a.tag, b.tag],
+            entityKeys:        deriveEntityKeysFromTags(created.tags),
             latestSynthesisId: created.id,
             latestRevision:    1,
             latestConfidence:  result.confidence,
@@ -771,7 +796,7 @@ Output JSON only:
             where: { id: { in: newEvidence.slice(0, 20) } },
             select: { tags: true },
           });
-          const INHERITED_PREFIXES = ['entity:', 'project:', 'person:', 'time:', 'topic:'];
+          const INHERITED_PREFIXES = ['entity:', 'project:', 'person:', 'organization:', 'location:', 'time:', 'topic:'];
           const inherited = new Set();
           for (const em of evidenceMems) {
             for (const t of (em.tags || [])) {
@@ -789,11 +814,13 @@ Output JSON only:
       }
 
       // Update cluster-index with latest revision state
+      const reaffirmTags = (await this.prisma.memory.findUnique({ where: { id: existing.id }, select: { tags: true } }))?.tags || [];
       await this.clusterIndex.upsertOnSynthesis({
         organizationId:    orgId,
         userId,
         clusterHash:       hash,
         clusterType:       sourceType,
+        entityKeys:        deriveEntityKeysFromTags(reaffirmTags),
         latestSynthesisId: existing.id,
         latestRevision:    newRev,
         latestConfidence:  finalConf,
@@ -881,7 +908,7 @@ Output JSON only:
               where: { id: { in: evidenceIds.slice(0, 20) } },
               select: { tags: true },
             });
-            const INHERITED_PREFIXES = ['entity:', 'project:', 'person:', 'time:', 'topic:'];
+            const INHERITED_PREFIXES = ['entity:', 'project:', 'person:', 'organization:', 'location:', 'time:', 'topic:'];
             const inherited = new Set();
             for (const em of evidenceMems) {
               for (const t of (em.tags || [])) {
@@ -899,6 +926,7 @@ Output JSON only:
           } catch (inheritErr) {
             this.logger.warn(`[cognition] EXTEND entity-tag inheritance failed: ${inheritErr.message}`);
           }
+          const extendTags = (await this.prisma.memory.findUnique({ where: { id: newId }, select: { tags: true } }))?.tags || [];
 
           // Move 2: demote prior revision so recall doesn't double-surface.
           // Extends edge is preserved for time-travel; isLatest=false removes it
@@ -928,6 +956,7 @@ Output JSON only:
             userId,
             clusterHash:       hash,
             clusterType:       sourceType,
+            entityKeys:        deriveEntityKeysFromTags(extendTags),
             latestSynthesisId: newId,
             latestRevision:    newRev,
             latestConfidence:  finalConf,
@@ -1023,7 +1052,7 @@ Output JSON only:
               where: { id: { in: evidenceIds.slice(0, 20) } },
               select: { tags: true },
             });
-            const INHERITED_PREFIXES = ['entity:', 'project:', 'person:', 'time:', 'topic:'];
+            const INHERITED_PREFIXES = ['entity:', 'project:', 'person:', 'organization:', 'location:', 'time:', 'topic:'];
             const inherited = new Set();
             for (const em of evidenceMems) {
               for (const t of (em.tags || [])) {
@@ -1038,6 +1067,7 @@ Output JSON only:
           } catch (inheritErr) {
             this.logger.warn(`[cognition] CONTRADICT entity-tag inheritance failed: ${inheritErr.message}`);
           }
+          const contradictTags = (await this.prisma.memory.findUnique({ where: { id: newId }, select: { tags: true } }))?.tags || [];
 
           // Force-flip old synthesis to isLatest=false (belt-and-suspenders over smart-router)
           await this.prisma.memory.update({
@@ -1064,6 +1094,7 @@ Output JSON only:
             userId,
             clusterHash:       hash,
             clusterType:       sourceType,
+            entityKeys:        deriveEntityKeysFromTags(contradictTags),
             latestSynthesisId: newId,
             latestRevision:    1,
             latestConfidence:  finalConf,
@@ -1124,6 +1155,7 @@ Output JSON only:
       // (user_id, org_id, memory_type, importance_score). Passing camelCase will
       // silently result in undefined fields and a Prisma rejection.
       // source_metadata must be an object matching { source_type, source_id, ... }.
+      let finalTags = Array.from(unionedTags);
       const result = await this.engine.ingestMemory({
         user_id:         userId,
         org_id:          orgId,
@@ -1177,7 +1209,7 @@ Output JSON only:
             where: { id: { in: evidenceIds.slice(0, 20) } },
             select: { tags: true },
           });
-          const INHERITED_PREFIXES = ['entity:', 'project:', 'person:', 'time:', 'topic:'];
+          const INHERITED_PREFIXES = ['entity:', 'project:', 'person:', 'organization:', 'location:', 'time:', 'topic:'];
           const inherited = new Set();
           for (const em of evidenceMems) {
             for (const t of (em.tags || [])) {
@@ -1198,7 +1230,14 @@ Output JSON only:
               where: { id: newId },
               data: { tags: mergedTags },
             });
+            finalTags = mergedTags;
             this.logger.log?.(`[cognition] inherited ${inherited.size} entity/topic tags from ${evidenceMems.length} evidence → synthesis ${newId.slice(0, 8)}`);
+          } else {
+            const existing = await this.prisma.memory.findUnique({
+              where: { id: newId },
+              select: { tags: true },
+            });
+            finalTags = existing?.tags || Array.from(unionedTags);
           }
         } catch (inheritErr) {
           this.logger.warn(`[cognition] entity-tag inheritance failed: ${inheritErr.message}`);
@@ -1208,7 +1247,7 @@ Output JSON only:
         await this._linkDerivesEdges(newId, members, sourceType, tag);
       }
 
-      return newId ? { id: newId } : null;
+      return newId ? { id: newId, tags: finalTags } : null;
     } catch (err) {
       this.logger.warn(`[cognition] engine.ingestMemory failed (${err.message}), falling back to direct insert`);
       return this._directInsert({ orgId, userId, project, sourceType, tag, members, content, confidence, evidenceIds, hash, title, unionedTags, extraMeta });

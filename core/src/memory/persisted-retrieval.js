@@ -1208,6 +1208,12 @@ export async function recallPersistedMemories(store, {
       // Source-type multiplier
       let mult = srcType === 'canonical-fact' ? 1.35 : 1.50;
 
+      // Phase 2 — revision boost: each confirmed revision adds ×1.05 (capped at rev 6+)
+      // rev1→×1.00, rev2→×1.05, rev3→×1.10, rev4→×1.15, rev5→×1.20, rev6+→×1.25
+      // So canonical-fact rev5 = 1.35 × 1.20 = ×1.62; bridge rev5 = 1.50 × 1.20 = ×1.80
+      const rev = mem.synthesis_revision || mem.synthesisRevision || 1;
+      mult *= (1.0 + 0.05 * Math.min(5, Math.max(0, rev - 1)));
+
       // Recall-count reinforcement: small log boost for heavily-recalled memories
       const recallCount = mem.recall_count || mem.recallCount || 0;
       mult *= Math.max(0.5, Math.pow(recallCount + 1, 0.15));

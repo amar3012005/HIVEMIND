@@ -276,10 +276,54 @@ export class CognitionLoop {
     for (const [tag, members] of buckets.entries()) {
       if (members.length < CANONICAL_CLUSTER_MIN) continue;
       const hash = clusterHash(`canonical:${tag}`);
-      if (await this._onCooldown(orgId, hash)) continue;
+
+      // Phase 2 — look for an existing synthesis on this cluster hash
+      const existingSynth = await this.prisma.memory.findFirst({
+        where: {
+          orgId,
+          synthesisClusterHash: hash,
+          isLatest: true,
+          deletedAt: null,
+        },
+        select: {
+          id: true, content: true, title: true, updatedAt: true,
+          synthesisConfidence: true, synthesisEvidenceIds: true, synthesisRevision: true,
+        },
+      });
 
       members.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
       const promptMembers = members.slice(0, DEFAULT_CLUSTER_MAX);
+
+      if (existingSynth) {
+        // Identify source memories created AFTER the last synthesis update
+        const newMemories = members.filter(
+          m => m.createdAt && new Date(m.createdAt) > new Date(existingSynth.updatedAt)
+        );
+
+        if (newMemories.length > 0) {
+          // Phase 2: delta-update path
+          try {
+            const decision = await this._maybeDeltaUpdate({
+              orgId, userId: members[0].userId, project: members[0].project,
+              sourceType: 'canonical-fact', tag, hash,
+              existing: existingSynth,
+              newMemories,
+              allMembers: members,
+            });
+            if (decision && decision !== 'irrelevant') writes++;
+            this.logger.log(`[cognition] canonical tag=${tag} delta=${decision}`);
+          } catch (err) {
+            this.logger.warn(`[cognition] canonical delta tag=${tag} failed: ${err.message}`);
+          }
+        } else {
+          // No new evidence and synthesis exists — skip if within cooldown
+          if (await this._onCooldown(orgId, hash)) continue;
+        }
+        continue; // existing synthesis handled (either delta or cooldown skip)
+      }
+
+      // No existing synthesis — full cooldown check then fresh synthesis
+      if (await this._onCooldown(orgId, hash)) continue;
 
       try {
         const result = await this._llmCanonicalFact(tag, promptMembers);
@@ -352,6 +396,48 @@ export class CognitionLoop {
     for (const { a, b } of topBridges) {
       const pairKey = [a.tag, b.tag].sort().join('||');
       const hash    = clusterHash(`bridge:${pairKey}`);
+
+      // Phase 2 — look for existing bridge synthesis on this pair hash
+      const existingBridge = await this.prisma.memory.findFirst({
+        where: {
+          orgId,
+          synthesisClusterHash: hash,
+          isLatest: true,
+          deletedAt: null,
+        },
+        select: {
+          id: true, content: true, title: true, updatedAt: true,
+          synthesisConfidence: true, synthesisEvidenceIds: true, synthesisRevision: true,
+        },
+      });
+
+      const allBridgeMembers = [...a.members, ...b.members];
+
+      if (existingBridge) {
+        const newMemories = allBridgeMembers.filter(
+          m => m.createdAt && new Date(m.createdAt) > new Date(existingBridge.updatedAt)
+        );
+        if (newMemories.length > 0) {
+          try {
+            const decision = await this._maybeDeltaUpdate({
+              orgId, userId: a.members[0].userId,
+              project: a.members[0].project || b.members[0].project || null,
+              sourceType: 'synthesis-bridge', tag: pairKey, hash,
+              existing: existingBridge,
+              newMemories,
+              allMembers: allBridgeMembers,
+            });
+            if (decision && decision !== 'irrelevant') writes++;
+            this.logger.log(`[cognition] bridge ${a.tag}||${b.tag} delta=${decision}`);
+          } catch (err) {
+            this.logger.warn(`[cognition] bridge delta ${a.tag}||${b.tag} failed: ${err.message}`);
+          }
+        } else {
+          if (await this._onCooldown(orgId, hash)) continue;
+        }
+        continue;
+      }
+
       if (await this._onCooldown(orgId, hash)) continue;
 
       const aPrompt = a.members.slice(0, 15);
@@ -369,7 +455,6 @@ export class CognitionLoop {
           this.logger.log(`[cognition] bridge ${a.tag}||${b.tag} restatement detected — dropped`);
           continue;
         }
-        const allMembers = [...a.members, ...b.members];
         const evidenceIds = [
           ...(result.evidence_a || []).map(e => e.id),
           ...(result.evidence_b || []).map(e => e.id),
@@ -381,7 +466,7 @@ export class CognitionLoop {
           project:   a.members[0].project || b.members[0].project || null,
           sourceType: 'synthesis-bridge',
           tag:        pairKey,
-          members:    allMembers,
+          members:    allBridgeMembers,
           content:    result.bridge_claim,
           confidence: result.confidence,
           evidenceIds,
@@ -405,18 +490,26 @@ export class CognitionLoop {
   }
 
   // ─── Cooldown check ──────────────────────────────────────────────────────────
+  // Returns true if we should SKIP this cluster entirely.
+  // Phase 2: we no longer skip if new evidence exists — delta-update path takes
+  // over instead. Cooldown only skips if updatedAt is within the window AND
+  // no source memories are newer than the existing synthesis.
   async _onCooldown(orgId, hash) {
     const cutoff = new Date(Date.now() - COOLDOWN_HOURS * 3600 * 1000);
     const existing = await this.prisma.memory.findFirst({
       where: {
         orgId,
         synthesisClusterHash: hash,
-        createdAt: { gte: cutoff },
+        isLatest: true,
         deletedAt: null,
       },
-      select: { id: true },
+      select: { id: true, updatedAt: true },
     });
-    return Boolean(existing);
+    if (!existing) return false;
+    // Only cooldown (skip entirely) if updated recently — delta path will still
+    // fire if new evidence has arrived since then, so we let synthesizeForOrg
+    // call _maybeDeltaUpdate instead of returning true here.
+    return existing.updatedAt >= cutoff;
   }
 
   // ─── Restatement guard ────────────────────────────────────────────────────────
@@ -495,6 +588,312 @@ Output JSON only:
     const parsed = safeParseJSON(raw);
     if (!parsed || !parsed.bridge_claim || parsed.bridge_claim.length < 20) return null;
     return parsed;
+  }
+
+  // ─── Phase 2: Confidence cap per revision ────────────────────────────────────
+  // Prevents overconfidence early in a synthesis's life. The cap loosens as
+  // the same claim is reaffirmed across multiple ticks.
+  _capConfidence(rawConf, revision) {
+    const cap = revision === 1 ? 0.85
+               : revision === 2 ? 0.90
+               : revision === 3 ? 0.94
+               : 0.98;
+    return Math.min(cap, rawConf);
+  }
+
+  // ─── Phase 2: Delta-update existing synthesis with new evidence ───────────────
+  /**
+   * Called when a cluster hash already has a synthesis memory (isLatest=true)
+   * AND source memories have been created AFTER that synthesis was last updated.
+   *
+   * Asks the LLM whether new evidence REAFFIRMS, EXTENDs, CONTRADICTs, or is
+   * IRRELEVANT to the existing claim. DB actions differ per decision:
+   *
+   *   REAFFIRM  → UPDATE synthesis columns in place (revision++, conf++)
+   *   EXTEND    → route new memory through engine, Extends edge to prior
+   *   CONTRADICT → route new memory with operator='Updates' (supersedes prior)
+   *   IRRELEVANT → no-op
+   *
+   * Returns: 'reaffirm' | 'extend' | 'contradict' | 'irrelevant' | null (error/skip)
+   */
+  async _maybeDeltaUpdate({
+    orgId, userId, project, sourceType, tag, hash,
+    existing,      // Prisma Memory row (must include synthesis cols)
+    newMemories,   // source memories created after existing.updatedAt
+    allMembers,    // full cluster (for writing new synthesis if needed)
+  }) {
+    if (!newMemories || newMemories.length === 0) return null;
+
+    // Build delta prompt
+    const priorDate = existing.updatedAt
+      ? new Date(existing.updatedAt).toISOString().slice(0, 10)
+      : 'unknown';
+    const priorConf = (existing.synthesisConfidence || 0).toFixed(2);
+    const priorRev  = existing.synthesisRevision || 1;
+
+    const newEvidenceText = newMemories.map(m => {
+      const ts = m.createdAt ? new Date(m.createdAt).toISOString().slice(0, 10) : 'unknown';
+      const c  = (m.content || '').replace(/\s+/g, ' ').slice(0, 500);
+      return `[${m.id}] (${ts}) ${m.title ? m.title + ' — ' : ''}${c}`;
+    }).join('\n');
+
+    const prompt = `PREVIOUS SYNTHESIS (revision ${priorRev}, confidence ${priorConf}, last_updated ${priorDate}):
+  claim: "${(existing.content || '').slice(0, 800)}"
+  evidence_ids: [${(existing.synthesisEvidenceIds || []).join(', ')}]
+
+NEW EVIDENCE SINCE ${priorDate} (${newMemories.length} memories):
+${newEvidenceText}
+
+Decide ONE of:
+  REAFFIRM     — new evidence supports prior claim → bump confidence, append evidence_ids
+  EXTEND       — new evidence adds nuance, claim still core-true → expand claim text
+  CONTRADICT   — new evidence falsifies → supersede with new claim
+  IRRELEVANT   — new evidence not material → skip
+
+Output JSON only:
+{
+  "decision": "REAFFIRM|EXTEND|CONTRADICT|IRRELEVANT",
+  "new_claim": "<updated claim text, or null if REAFFIRM with no text change, or IRRELEVANT>",
+  "new_confidence": <0.0-1.0>,
+  "rationale": "<one sentence>",
+  "evidence_to_add": [<new_memory_ids_that_support_decision>]
+}`;
+
+    let parsed;
+    try {
+      const raw = await llmWithFallback({
+        messages:    [{ role: 'user', content: prompt }],
+        temperature: 0.10,
+        max_tokens:  400,
+      }, this.logger);
+      parsed = safeParseJSON(raw);
+    } catch (err) {
+      this.logger.warn(`[cognition] delta-update LLM failed hash=${hash}: ${err.message}`);
+      return null;
+    }
+
+    if (!parsed || !parsed.decision) {
+      this.logger.warn(`[cognition] delta-update bad JSON hash=${hash}`);
+      return null;
+    }
+
+    const decision = (parsed.decision || '').toUpperCase();
+    const llmConf  = typeof parsed.new_confidence === 'number' ? parsed.new_confidence : existing.synthesisConfidence || 0.7;
+
+    this.logger.log(`[cognition] delta-update hash=${hash} decision=${decision} rationale=${parsed.rationale}`);
+
+    if (decision === 'IRRELEVANT') {
+      return 'irrelevant';
+    }
+
+    if (decision === 'REAFFIRM') {
+      const newRev    = (existing.synthesisRevision || 1) + 1;
+      // Confidence: take the higher of prior and LLM output, then add 0.05 bump,
+      // then apply the per-revision cap.
+      const rawConf   = Math.min(0.98, Math.max(existing.synthesisConfidence || 0, llmConf) + 0.05);
+      const finalConf = this._capConfidence(rawConf, newRev);
+      const unionIds  = Array.from(new Set([
+        ...(existing.synthesisEvidenceIds || []),
+        ...(parsed.evidence_to_add || []),
+      ]));
+
+      await this.prisma.memory.update({
+        where: { id: existing.id },
+        data: {
+          synthesisConfidence:  finalConf,
+          synthesisEvidenceIds: unionIds,
+          synthesisRevision:    newRev,
+          updatedAt:            new Date(),
+          // If LLM provided a refined claim text keep it; otherwise leave content unchanged
+          ...(parsed.new_claim && parsed.new_claim.length > 20
+            ? { content: parsed.new_claim, title: existing.title }
+            : {}),
+        },
+      }).catch(err => this.logger.warn(`[cognition] reaffirm update failed: ${err.message}`));
+
+      return 'reaffirm';
+    }
+
+    if (decision === 'EXTEND') {
+      const newRev    = (existing.synthesisRevision || 1) + 1;
+      const finalConf = this._capConfidence(llmConf, newRev);
+      const claim     = (parsed.new_claim && parsed.new_claim.length > 20)
+        ? parsed.new_claim
+        : (existing.content || '');
+      const evidenceIds = (parsed.evidence_to_add || []).filter(Boolean);
+
+      // Route new memory through engine with Extends relationship to existing
+      const synthTag = sourceType === 'canonical-fact' ? 'synthesis:canonical' : 'synthesis:bridge';
+      const unionedTags = new Set();
+      for (const m of allMembers) {
+        for (const t of (m.tags || [])) {
+          if (typeof t === 'string' && t.length > 0 && !SYS_TAG_RE.test(t)) unionedTags.add(t);
+        }
+      }
+      unionedTags.add('cognition-loop');
+      unionedTags.add(synthTag);
+      unionedTags.add(`topic:${tag.slice(0, 80)}`);
+
+      const title = sourceType === 'canonical-fact'
+        ? `Canonical fact (ext): ${tag.slice(0, 55)} rev${newRev}`
+        : `Bridge (ext): ${tag.slice(0, 75)} rev${newRev} [conf=${finalConf.toFixed(2)}]`;
+
+      try {
+        const result = await this.engine.ingestMemory({
+          user_id:          userId,
+          org_id:           orgId,
+          content:          claim,
+          title,
+          memory_type:      'synthesis',
+          tags:             Array.from(unionedTags),
+          project:          project || null,
+          importance_score: sourceType === 'canonical-fact' ? 0.85 : 0.90,
+          source_metadata: {
+            source_type: sourceType,
+            source_id:   `${sourceType}:${hash}:extend:${Date.now()}`,
+            metadata: {
+              synthesized_at:         new Date().toISOString(),
+              topic:                  tag,
+              source_count:           allMembers.length,
+              source_ids:             allMembers.map(m => m.id),
+              model:                  PRIMARY_SYNTHESIS_MODEL,
+              generator:              `cognition-loop.${sourceType}.extend`,
+              synthesis_confidence:   finalConf,
+              synthesis_cluster_hash: hash,
+              delta_decision:         'EXTEND',
+              parent_synthesis_id:    existing.id,
+            },
+          },
+          _smart_routed: false,
+        });
+        const newId = result?.id || result?.memoryId || result?.memory?.id || null;
+        if (newId) {
+          await this.prisma.memory.update({
+            where: { id: newId },
+            data: {
+              synthesisConfidence:  finalConf,
+              synthesisEvidenceIds: evidenceIds,
+              synthesisClusterHash: hash,
+              synthesisRevision:    newRev,
+            },
+          }).catch(err => this.logger.warn(`[cognition] extend patch cols failed: ${err.message}`));
+
+          // Extends edge: new → existing (new extends the prior)
+          await this.prisma.relationship.create({
+            data: {
+              id:         crypto.randomUUID(),
+              fromId:     newId,
+              toId:       existing.id,
+              type:       'Extends',
+              confidence: finalConf,
+              createdBy:  'cognition-loop',
+              metadata:   { reason: 'delta_extend', topic: tag, revision: newRev },
+            },
+          }).catch(() => {});
+        }
+      } catch (err) {
+        this.logger.warn(`[cognition] extend engine.ingestMemory failed: ${err.message}`);
+      }
+
+      return 'extend';
+    }
+
+    if (decision === 'CONTRADICT') {
+      // New memory supersedes existing — route via engine with operator=Updates.
+      // smartIngestRouter's _enrichWithTripleOperator will also detect contradiction
+      // and may flip existing.isLatest=false automatically. We force-set it here too
+      // so the flip is guaranteed regardless of entity-overlap gating.
+      const claim     = (parsed.new_claim && parsed.new_claim.length > 20)
+        ? parsed.new_claim
+        : (existing.content || '');
+      // CONTRADICT resets revision to 1, confidence capped at 0.85 (revision-1 cap)
+      const finalConf = this._capConfidence(llmConf, 1);
+      const evidenceIds = (parsed.evidence_to_add || []).filter(Boolean);
+
+      const synthTag = sourceType === 'canonical-fact' ? 'synthesis:canonical' : 'synthesis:bridge';
+      const unionedTags = new Set();
+      for (const m of allMembers) {
+        for (const t of (m.tags || [])) {
+          if (typeof t === 'string' && t.length > 0 && !SYS_TAG_RE.test(t)) unionedTags.add(t);
+        }
+      }
+      unionedTags.add('cognition-loop');
+      unionedTags.add(synthTag);
+      unionedTags.add(`topic:${tag.slice(0, 80)}`);
+
+      const title = sourceType === 'canonical-fact'
+        ? `Canonical fact: ${tag.slice(0, 60)} (superseded rev1)`
+        : `Bridge: ${tag.slice(0, 80)} (superseded rev1) [conf=${finalConf.toFixed(2)}]`;
+
+      try {
+        const result = await this.engine.ingestMemory({
+          user_id:          userId,
+          org_id:           orgId,
+          content:          claim,
+          title,
+          memory_type:      'synthesis',
+          tags:             Array.from(unionedTags),
+          project:          project || null,
+          importance_score: sourceType === 'canonical-fact' ? 0.85 : 0.90,
+          source_metadata: {
+            source_type: sourceType,
+            source_id:   `${sourceType}:${hash}:contradict:${Date.now()}`,
+            metadata: {
+              synthesized_at:         new Date().toISOString(),
+              topic:                  tag,
+              source_count:           allMembers.length,
+              source_ids:             allMembers.map(m => m.id),
+              model:                  PRIMARY_SYNTHESIS_MODEL,
+              generator:              `cognition-loop.${sourceType}.contradict`,
+              synthesis_confidence:   finalConf,
+              synthesis_cluster_hash: hash,
+              delta_decision:         'CONTRADICT',
+              superseded_id:          existing.id,
+            },
+          },
+          // Passing parent_id causes smart-router to attempt Updates operator
+          parent_id:     existing.id,
+          _smart_routed: false,
+        });
+        const newId = result?.id || result?.memoryId || result?.memory?.id || null;
+        if (newId) {
+          await this.prisma.memory.update({
+            where: { id: newId },
+            data: {
+              synthesisConfidence:  finalConf,
+              synthesisEvidenceIds: evidenceIds,
+              synthesisClusterHash: hash,
+              synthesisRevision:    1, // reset on contradiction
+            },
+          }).catch(err => this.logger.warn(`[cognition] contradict patch cols failed: ${err.message}`));
+
+          // Force-flip old synthesis to isLatest=false (belt-and-suspenders over smart-router)
+          await this.prisma.memory.update({
+            where: { id: existing.id },
+            data:  { isLatest: false },
+          }).catch(err => this.logger.warn(`[cognition] contradict flip isLatest failed: ${err.message}`));
+
+          // Explicit Updates edge
+          await this.prisma.relationship.create({
+            data: {
+              id:         crypto.randomUUID(),
+              fromId:     newId,
+              toId:       existing.id,
+              type:       'Updates',
+              confidence: finalConf,
+              createdBy:  'cognition-loop',
+              metadata:   { reason: 'delta_contradict', topic: tag },
+            },
+          }).catch(() => {});
+        }
+      } catch (err) {
+        this.logger.warn(`[cognition] contradict engine.ingestMemory failed: ${err.message}`);
+      }
+
+      return 'contradict';
+    }
+
+    return null;
   }
 
   // ─── Write synthesis memory via engine gateway ───────────────────────────────

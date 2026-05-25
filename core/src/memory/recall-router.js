@@ -474,11 +474,28 @@ export class RecallRouter {
 
     // ── HOP 1 ─────────────────────────────────────────────────────────────
     const t1 = Date.now();
-    const memories = await withTimeout(
+    let memories = await withTimeout(
       hop1Memory({ store: this.store, query, options, ctx }),
       HOP1_TIMEOUT_MS,
       [],
     );
+    // Project-scope fallback: if user has a project active but recall came
+    // back empty, the relevant memories may live outside that project (e.g.
+    // personal-scope or org-wide). Retry once without projectId so chat
+    // doesn't hallucinate "I don't have any notes" when memories exist.
+    let projectFallbackFired = false;
+    if (memories.length === 0 && ctx.projectId) {
+      const ctxBroad = { ...ctx, projectId: null };
+      memories = await withTimeout(
+        hop1Memory({ store: this.store, query, options, ctx: ctxBroad }),
+        HOP1_TIMEOUT_MS,
+        [],
+      );
+      projectFallbackFired = memories.length > 0;
+      if (projectFallbackFired) {
+        console.log(`[recall-router] project-scope empty (${ctx.projectId}) → broad recall found ${memories.length} memories`);
+      }
+    }
     traceLatency.memory = Date.now() - t1;
 
     const inspection = inspectMemories(memories);

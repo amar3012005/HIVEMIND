@@ -1604,7 +1604,7 @@ async function runAuditRetentionPurge() {
 setInterval(runAuditRetentionPurge, AUDIT_PURGE_INTERVAL_MS);
 setTimeout(runAuditRetentionPurge, 60_000); // first run 60s after boot
 
-const ALLOWED_ORIGINS = (process.env.HIVEMIND_ALLOWED_ORIGINS || 'https://hivemind.davinciai.eu,https://www.davinciai.eu,https://davinciai.eu')
+const ALLOWED_ORIGINS = (process.env.HIVEMIND_ALLOWED_ORIGINS || 'https://hivemind.davinciai.eu,https://www.davinciai.eu,https://davinciai.eu,https://claude.ai,https://www.claude.ai,https://anthropic.com,https://chatgpt.com,https://chat.openai.com')
   .split(',')
   .map(origin => origin.trim())
   .filter(Boolean);
@@ -1637,7 +1637,9 @@ function applyCorsHeaders(req, res) {
   }
 
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, X-Admin-Secret, X-User-Id, X-Org-Id');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, X-Admin-Secret, X-User-Id, X-Org-Id, MCP-Protocol-Version, Mcp-Session-Id, Last-Event-ID, Accept');
+  res.setHeader('Access-Control-Expose-Headers', 'WWW-Authenticate, MCP-Protocol-Version, Mcp-Session-Id');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
 }
 
 const ingestionPipeline = loadIngestionPipeline();

@@ -1707,3 +1707,32 @@ model Playbook {
   @@index([organizationId, status])
   @@map("playbooks")
 }
+
+/// Durable cluster-state index — powers dirty-cluster scheduling in cognition-loop
+/// without full-scanning raw memories every tick. One row per (org, user, clusterHash).
+/// dirty_count incremented by cognition-loop discovery; reset to 0 after each tick.
+model ClusterIndex {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId    String    @map("organization_id") @db.Uuid
+  userId            String    @map("user_id") @db.Uuid
+  clusterHash       String    @map("cluster_hash") @db.VarChar(64)
+  clusterType       String    @map("cluster_type") @db.VarChar(40)
+  entityKeys        String[]  @default([]) @map("entity_keys")
+  topTags           String[]  @default([]) @map("top_tags")
+  evidenceCount     Int       @default(0) @map("evidence_count")
+  dirtyCount        Int       @default(0) @map("dirty_count")
+  latestSynthesisId String?   @map("latest_synthesis_id") @db.Uuid
+  latestRevision    Int       @default(0) @map("latest_revision")
+  latestConfidence  Decimal?  @map("latest_confidence") @db.Decimal(3, 2)
+  lastTickAt        DateTime? @map("last_tick_at") @db.Timestamptz(6)
+  lastRecallAt      DateTime? @map("last_recall_at") @db.Timestamptz(6)
+  recallCount30d    Int       @default(0) @map("recall_count_30d")
+  metadata          Json      @default("{}")
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([organizationId, userId, clusterHash])
+  @@index([organizationId, dirtyCount(sort: Desc)])
+  @@index([entityKeys], type: Gin)
+  @@map("cluster_index")
+}

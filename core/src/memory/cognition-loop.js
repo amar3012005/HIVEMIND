@@ -26,6 +26,7 @@
 
 import crypto from 'crypto';
 import { chatCompletion } from '../knowledge/enterprise/litellm-client.js';
+import { ClusterIndex } from './cluster-index.js';
 
 // ─── Model config ──────────────────────────────────────────────────────────────
 const PRIMARY_SYNTHESIS_MODEL   = process.env.SYNTHESIS_MODEL        || 'openai/gpt-oss-120b';
@@ -136,12 +137,14 @@ function safeParseJSON(txt) {
 
 export class CognitionLoop {
   constructor({ prisma, memoryGraphEngine, persistentMemoryStore, logger = console }) {
-    this.prisma  = prisma;
-    this.engine  = memoryGraphEngine;
-    this.store   = persistentMemoryStore;
-    this.logger  = logger;
-    this._timer  = null;
-    this._intervalMs = Number(process.env.COGNITION_INTERVAL_MS || 60 * 60 * 1000); // 1h
+    this.prisma        = prisma;
+    this.engine        = memoryGraphEngine;
+    this.store         = persistentMemoryStore;
+    this.logger        = logger;
+    this._timer        = null;
+    this._intervalMs   = Number(process.env.COGNITION_INTERVAL_MS || 60 * 60 * 1000); // 1h
+    // ClusterIndex: durable cluster-state for dirty-scheduling (Move 1)
+    this.clusterIndex  = new ClusterIndex({ prisma });
   }
 
   start() {
@@ -301,6 +304,14 @@ export class CognitionLoop {
         );
 
         if (newMemories.length > 0) {
+          // Bump dirty count so cluster-index reflects new evidence found this tick
+          await this.clusterIndex.bumpDirty({
+            organizationId: orgId,
+            userId: members[0].userId,
+            clusterHash: hash,
+            clusterType: 'canonical-fact',
+            by: newMemories.length,
+          });
           // Phase 2: delta-update path
           try {
             const decision = await this._maybeDeltaUpdate({
@@ -337,6 +348,7 @@ export class CognitionLoop {
           this.logger.log(`[cognition] canonical tag=${tag} restatement detected — dropped`);
           continue;
         }
+        const evidenceIds = (result.supporting_memory_ids || []).filter(id => id);
         const created = await this._writeSynthMemory({
           orgId,
           userId:    members[0].userId,
@@ -346,7 +358,7 @@ export class CognitionLoop {
           members,
           content:   result.canonical_fact,
           confidence: result.confidence,
-          evidenceIds: (result.supporting_memory_ids || []).filter(id => id),
+          evidenceIds,
           clusterHash: hash,
           extraMeta: {
             valid_from:      result.valid_from || null,
@@ -354,7 +366,21 @@ export class CognitionLoop {
             supporting_ids:  result.supporting_memory_ids || [],
           },
         });
-        if (created) writes++;
+        if (created) {
+          writes++;
+          // Register new cluster in cluster_index (Option A: dirty_count=0, tick just created it)
+          await this.clusterIndex.upsertOnSynthesis({
+            organizationId:    orgId,
+            userId:            members[0].userId,
+            clusterHash:       hash,
+            clusterType:       'canonical-fact',
+            topTags:           [tag],
+            latestSynthesisId: created.id,
+            latestRevision:    1,
+            latestConfidence:  result.confidence,
+            evidenceCountTotal: evidenceIds.length,
+          });
+        }
       } catch (err) {
         this.logger.warn(`[cognition] canonical tag=${tag} failed: ${err.message}`);
       }
@@ -418,6 +444,14 @@ export class CognitionLoop {
           m => m.createdAt && new Date(m.createdAt) > new Date(existingBridge.updatedAt)
         );
         if (newMemories.length > 0) {
+          // Bump dirty count for bridge cluster
+          await this.clusterIndex.bumpDirty({
+            organizationId: orgId,
+            userId: a.members[0].userId,
+            clusterHash: hash,
+            clusterType: 'synthesis-bridge',
+            by: newMemories.length,
+          });
           try {
             const decision = await this._maybeDeltaUpdate({
               orgId, userId: a.members[0].userId,
@@ -480,7 +514,21 @@ export class CognitionLoop {
             evidence_b: result.evidence_b || [],
           },
         });
-        if (created) writes++;
+        if (created) {
+          writes++;
+          // Register bridge cluster in cluster_index
+          await this.clusterIndex.upsertOnSynthesis({
+            organizationId:    orgId,
+            userId:            a.members[0].userId,
+            clusterHash:       hash,
+            clusterType:       'synthesis-bridge',
+            topTags:           [a.tag, b.tag],
+            latestSynthesisId: created.id,
+            latestRevision:    1,
+            latestConfidence:  result.confidence,
+            evidenceCountTotal: evidenceIds.length,
+          });
+        }
       } catch (err) {
         this.logger.warn(`[cognition] bridge ${a.tag}||${b.tag} failed: ${err.message}`);
       }
@@ -692,16 +740,19 @@ Output JSON only:
       // then apply the per-revision cap.
       const rawConf   = Math.min(0.98, Math.max(existing.synthesisConfidence || 0, llmConf) + 0.05);
       const finalConf = this._capConfidence(rawConf, newRev);
-      const unionIds  = Array.from(new Set([
-        ...(existing.synthesisEvidenceIds || []),
-        ...(parsed.evidence_to_add || []),
-      ]));
+
+      // Cap evidence IDs at MAX_HOT_EVIDENCE (Move 2) + track total
+      const MAX_HOT_EVIDENCE = 20;
+      const merged    = [...(existing.synthesisEvidenceIds || []), ...(parsed.evidence_to_add || [])];
+      const dedupe    = [...new Set(merged)];
+      const hot       = dedupe.slice(-MAX_HOT_EVIDENCE);
+      const evidenceCountTotal = dedupe.length;
 
       await this.prisma.memory.update({
         where: { id: existing.id },
         data: {
           synthesisConfidence:  finalConf,
-          synthesisEvidenceIds: unionIds,
+          synthesisEvidenceIds: hot,
           synthesisRevision:    newRev,
           updatedAt:            new Date(),
           // If LLM provided a refined claim text keep it; otherwise leave content unchanged
@@ -710,6 +761,18 @@ Output JSON only:
             : {}),
         },
       }).catch(err => this.logger.warn(`[cognition] reaffirm update failed: ${err.message}`));
+
+      // Update cluster-index with latest revision state
+      await this.clusterIndex.upsertOnSynthesis({
+        organizationId:    orgId,
+        userId,
+        clusterHash:       hash,
+        clusterType:       sourceType,
+        latestSynthesisId: existing.id,
+        latestRevision:    newRev,
+        latestConfidence:  finalConf,
+        evidenceCountTotal,
+      });
 
       return 'reaffirm';
     }
@@ -720,7 +783,14 @@ Output JSON only:
       const claim     = (parsed.new_claim && parsed.new_claim.length > 20)
         ? parsed.new_claim
         : (existing.content || '');
-      const evidenceIds = (parsed.evidence_to_add || []).filter(Boolean);
+
+      // Cap evidence IDs at MAX_HOT_EVIDENCE (Move 2)
+      const MAX_HOT_EVIDENCE = 20;
+      const rawEvidenceIds = (parsed.evidence_to_add || []).filter(Boolean);
+      const mergedEv = [...(existing.synthesisEvidenceIds || []), ...rawEvidenceIds];
+      const dedupeEv = [...new Set(mergedEv)];
+      const evidenceIds      = dedupeEv.slice(-MAX_HOT_EVIDENCE);
+      const evidenceCountTotal = dedupeEv.length;
 
       // Route new memory through engine with Extends relationship to existing
       const synthTag = sourceType === 'canonical-fact' ? 'synthesis:canonical' : 'synthesis:bridge';
@@ -778,6 +848,15 @@ Output JSON only:
             },
           }).catch(err => this.logger.warn(`[cognition] extend patch cols failed: ${err.message}`));
 
+          // Move 2: demote prior revision so recall doesn't double-surface.
+          // Extends edge is preserved for time-travel; isLatest=false removes it
+          // from the default recall set which filters isLatest=true only.
+          await this.prisma.memory.update({
+            where: { id: existing.id },
+            data:  { isLatest: false },
+          }).catch(err => this.logger.warn(`[cognition] EXTEND: demote prior isLatest failed: ${err.message}`));
+          this.logger.log(`[cognition-loop] EXTEND: demoted prior ${existing.id.slice(0, 8)} isLatest=false (rev ${priorRev} → ${newRev})`);
+
           // Extends edge: new → existing (new extends the prior)
           await this.prisma.relationship.create({
             data: {
@@ -790,6 +869,18 @@ Output JSON only:
               metadata:   { reason: 'delta_extend', topic: tag, revision: newRev },
             },
           }).catch(() => {});
+
+          // Update cluster-index with new synthesis id and revision
+          await this.clusterIndex.upsertOnSynthesis({
+            organizationId:    orgId,
+            userId,
+            clusterHash:       hash,
+            clusterType:       sourceType,
+            latestSynthesisId: newId,
+            latestRevision:    newRev,
+            latestConfidence:  finalConf,
+            evidenceCountTotal,
+          });
         }
       } catch (err) {
         this.logger.warn(`[cognition] extend engine.ingestMemory failed: ${err.message}`);
@@ -808,7 +899,14 @@ Output JSON only:
         : (existing.content || '');
       // CONTRADICT resets revision to 1, confidence capped at 0.85 (revision-1 cap)
       const finalConf = this._capConfidence(llmConf, 1);
-      const evidenceIds = (parsed.evidence_to_add || []).filter(Boolean);
+
+      // Cap evidence IDs (Move 2)
+      const MAX_HOT_EVIDENCE = 20;
+      const rawContrEv = (parsed.evidence_to_add || []).filter(Boolean);
+      const mergedContr = [...(existing.synthesisEvidenceIds || []), ...rawContrEv];
+      const dedupeContr = [...new Set(mergedContr)];
+      const evidenceIds = dedupeContr.slice(-MAX_HOT_EVIDENCE);
+      const contrEvidenceCountTotal = dedupeContr.length;
 
       const synthTag = sourceType === 'canonical-fact' ? 'synthesis:canonical' : 'synthesis:bridge';
       const unionedTags = new Set();
@@ -885,6 +983,18 @@ Output JSON only:
               metadata:   { reason: 'delta_contradict', topic: tag },
             },
           }).catch(() => {});
+
+          // Update cluster-index: new synthesis row, revision reset to 1
+          await this.clusterIndex.upsertOnSynthesis({
+            organizationId:    orgId,
+            userId,
+            clusterHash:       hash,
+            clusterType:       sourceType,
+            latestSynthesisId: newId,
+            latestRevision:    1,
+            latestConfidence:  finalConf,
+            evidenceCountTotal: contrEvidenceCountTotal,
+          });
         }
       } catch (err) {
         this.logger.warn(`[cognition] contradict engine.ingestMemory failed: ${err.message}`);

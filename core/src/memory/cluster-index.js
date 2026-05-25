@@ -94,16 +94,18 @@ export class ClusterIndex {
    */
   async bumpDirty({ organizationId, userId, clusterHash, clusterType = 'unknown', by = 1 }) {
     try {
-      // Atomic upsert: create stub row OR add to dirty_count
+      // Atomic upsert: create stub row OR add to dirty_count.
+      // Schema-qualified table name because Prisma $executeRawUnsafe may not
+      // inherit the search_path set by the Prisma datasource.
       await this.prisma.$executeRawUnsafe(
-        `INSERT INTO cluster_index
+        `INSERT INTO hivemind.cluster_index
            (id, organization_id, user_id, cluster_hash, cluster_type,
             dirty_count, latest_revision, created_at, updated_at)
          VALUES
            (gen_random_uuid(), $1, $2, $3, $4, $5, 0, now(), now())
          ON CONFLICT (organization_id, user_id, cluster_hash)
          DO UPDATE SET
-           dirty_count = cluster_index.dirty_count + $5,
+           dirty_count = hivemind.cluster_index.dirty_count + $5,
            updated_at  = now()`,
         organizationId,
         userId,
@@ -195,7 +197,7 @@ export class ClusterIndex {
     if (!clusterHashes.length) return;
     try {
       await this.prisma.$executeRawUnsafe(
-        `UPDATE cluster_index
+        `UPDATE hivemind.cluster_index
          SET last_recall_at   = NOW(),
              recall_count_30d = recall_count_30d + 1
          WHERE cluster_hash = ANY($1::text[])`,

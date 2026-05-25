@@ -8898,6 +8898,94 @@ exit \$RC
           }
           break;
 
+        // ── Claude.ai / ChatGPT / Perplexity remote-MCP connection status ──
+        // Detects whether the user has live OAuth tokens issued to a client
+        // registered via /oauth/register with a redirect_uri matching one of
+        // the remote-MCP origins. Returns aggregated status the FE Connectors
+        // page uses to render "Connected" + Disconnect button without showing
+        // a duplicate card after the user finishes the OAuth dance in Claude.
+        case '/api/connectors/claude-web/status':
+          if (req.method === 'GET') {
+            if (!prisma) return jsonResponse(res, { error: 'service unavailable' }, 503);
+            try {
+              const registry = await loadOAuthClientRegistry();
+              const claudeClientIds = registry
+                .filter((c) => Array.isArray(c.redirect_uris) && c.redirect_uris.some((u) =>
+                  /claude\.ai|anthropic\.com/i.test(String(u || ''))))
+                .map((c) => c.client_id);
+              if (claudeClientIds.length === 0) {
+                return jsonResponse(res, { connected: false, token_count: 0, last_used_at: null, client_ids: [] });
+              }
+              // Pull active oauth_access_token rows for this user issued to any
+              // of the Claude client_ids. apiKey.name format is "oauth:<clientId>".
+              const claudeNames = claudeClientIds.map((id) => `oauth:${id}`);
+              const tokens = await prisma.apiKey.findMany({
+                where: {
+                  userId,
+                  orgId,
+                  name: { in: claudeNames },
+                  OR: [
+                    { expiresAt: null },
+                    { expiresAt: { gt: new Date() } },
+                  ],
+                  revokedAt: null,
+                },
+                select: { id: true, name: true, lastUsedAt: true, createdAt: true, expiresAt: true },
+                orderBy: { lastUsedAt: 'desc' },
+                take: 50,
+              });
+              const lastUsed = tokens.find((t) => t.lastUsedAt)?.lastUsedAt || tokens[0]?.createdAt || null;
+              return jsonResponse(res, {
+                connected: tokens.length > 0,
+                token_count: tokens.length,
+                last_used_at: lastUsed,
+                client_ids: claudeClientIds,
+                client_count: claudeClientIds.length,
+              });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        // POST /api/connectors/claude-web/disconnect
+        // Revokes ALL active oauth tokens issued to any Claude/Anthropic client_id
+        // for this user. Does NOT remove the connector from claude.ai (that lives
+        // server-side on Anthropic) — FE shows instructions to do that step.
+        case '/api/connectors/claude-web/disconnect':
+          if (req.method === 'POST') {
+            if (!prisma) return jsonResponse(res, { error: 'service unavailable' }, 503);
+            try {
+              const registry = await loadOAuthClientRegistry();
+              const claudeClientIds = registry
+                .filter((c) => Array.isArray(c.redirect_uris) && c.redirect_uris.some((u) =>
+                  /claude\.ai|anthropic\.com/i.test(String(u || ''))))
+                .map((c) => c.client_id);
+              if (claudeClientIds.length === 0) return jsonResponse(res, { revoked: 0 });
+              const claudeNames = claudeClientIds.map((id) => `oauth:${id}`);
+              const result = await prisma.apiKey.updateMany({
+                where: {
+                  userId,
+                  orgId,
+                  name: { in: claudeNames },
+                  revokedAt: null,
+                },
+                data: { revokedAt: new Date() },
+              });
+              auditLog({
+                organizationId: orgId, userId,
+                actorType: 'user', actorUserId: userId,
+                eventType: 'connector.claude-web.disconnect', eventCategory: 'connector',
+                action: 'disconnect', resourceType: 'oauth_client', resourceId: claudeClientIds.join(','),
+                metadata: { revoked_count: result.count },
+              });
+              return jsonResponse(res, { revoked: result.count, client_ids: claudeClientIds });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
         case '/api/connectors/gmail/flush':
           if (req.method === 'POST') {
             if (!prisma) return jsonResponse(res, { error: 'service unavailable' }, 503);

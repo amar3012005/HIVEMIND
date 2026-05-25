@@ -14481,16 +14481,47 @@ exit \$RC
                 planEnforcer.recordUsage(orgId, 'searches', 1);
               }
 
+              // ── Promote synthesized[]/raw[] to top-level response ────────────
+              // recallPersistedMemories now returns both synthesized[] + raw[]
+              // alongside the backwards-compat flat memories[].
+              // Expose them at the top level so callers can use rich rendering.
+              if (Array.isArray(result.synthesized)) {
+                // Already set by persisted-retrieval; just ensure it's present
+              } else {
+                result.synthesized = [];
+              }
+              if (!Array.isArray(result.raw)) {
+                result.raw = [];
+              }
+
               // Slim response — default ON for mode=auto/memory/hybrid/evidence
               // Caller can opt back into full payload via body.verbose=true
               if (!body.verbose) {
-                const SLIM_MEM_KEYS = ['id','title','content','memory_type','tags','score','created_at','document_date','project','source','evidence'];
+                const SLIM_MEM_KEYS = ['id','title','content','memory_type','tags','score','created_at','document_date','project','source','evidence','_synthesis_boosted'];
                 const slimMem = (m) => {
                   const out = {};
                   for (const k of SLIM_MEM_KEYS) if (m[k] !== undefined) out[k] = m[k];
                   return out;
                 };
                 result.memories = (result.memories || []).map(slimMem);
+                // Slim synthesized[] — keep claim/type/confidence/evidence/revision
+                result.synthesized = (result.synthesized || []).map(s => ({
+                  id:         s.id,
+                  type:       s.type,
+                  claim:      s.claim,
+                  title:      s.title,
+                  confidence: s.confidence,
+                  revision:   s.revision,
+                  evidence:   (s.evidence || []).map(e => ({
+                    id:      e.id,
+                    title:   e.title,
+                    snippet: (e.snippet || '').slice(0, 200),
+                  })),
+                  score:      s.score,
+                  created_at: s.created_at,
+                }));
+                // Slim raw[] same as memories slim
+                result.raw = (result.raw || []).map(slimMem);
                 // Drop heavy top-level noise
                 delete result.injectionText;
                 delete result.user_profile;

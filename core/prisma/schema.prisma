@@ -408,6 +408,16 @@ model Memory {
   evidenceLinks                                               MemoryEvidenceLink[]
   entityMentions                                              EntityMention[]
 
+  // Phase 1 Cognition Loop: synthesis quality metadata
+  // synthesisConfidence: LLM-scored confidence (0.0–1.0) for canonical-fact / synthesis-bridge outputs
+  // synthesisEvidenceIds: UUIDs of source memories that produced this synthesis
+  // synthesisClusterHash: stable hash of the tag-pair or cluster that produced this synthesis (cooldown key)
+  // synthesisRevision: incremented each time this cluster re-synthesises
+  synthesisConfidence                                         Float?               @map("synthesis_confidence")
+  synthesisEvidenceIds                                        String[]             @map("synthesis_evidence_ids") @db.Uuid
+  synthesisClusterHash                                        String?              @map("synthesis_cluster_hash") @db.VarChar(128)
+  synthesisRevision                                           Int                  @default(1) @map("synthesis_revision")
+
   @@index([userId])
   @@index([orgId])
   @@index([project])
@@ -419,6 +429,8 @@ model Memory {
   @@index([strength(sort: Desc)])
   @@index([tags], type: Gin)
   @@index([version])
+  // Partial index: only index memories that have a cluster hash (synthesis outputs only)
+  @@index([synthesisClusterHash], map: "memories_synthesis_cluster_hash_idx")
   @@map("memories")
 }
 

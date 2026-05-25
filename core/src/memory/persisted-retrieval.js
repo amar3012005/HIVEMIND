@@ -1182,7 +1182,57 @@ export async function recallPersistedMemories(store, {
     return result.sort((a, b) => (b.score || 0) - (a.score || 0));
   };
 
-  const boostedItems = applyItemBoosts(deduped);
+  // ── Phase 1 Cognition Loop: synthesis boost ────────────────────────────────
+  // canonical-fact ×1.35 when confidence ≥ 0.70
+  // synthesis-bridge ×1.50 when confidence ≥ 0.70
+  // Both get a further boost from recall count (reinforcement) and an age-decay
+  // that pins high-recall memories as fresh regardless of age.
+  const applySynthesisBoost = (items) => {
+    return items.map(item => {
+      const mem = item.memory || item;
+      const srcType = mem.source_metadata?.source_type
+        || mem.sourceMetadata?.sourceType
+        || mem.source_type
+        || null;
+      const conf = typeof mem.synthesis_confidence === 'number'
+        ? mem.synthesis_confidence
+        : (typeof mem.synthesisConfidence === 'number' ? mem.synthesisConfidence : null);
+
+      if (!srcType || conf === null) return item;
+      if (srcType !== 'canonical-fact' && srcType !== 'synthesis-bridge') return item;
+      if (conf < SYNTHESIS_CONF_BOOST_FLOOR) return item;
+
+      // Source-type multiplier
+      let mult = srcType === 'canonical-fact' ? 1.35 : 1.50;
+
+      // Recall-count reinforcement: small log boost for heavily-recalled memories
+      const recallCount = mem.recall_count || mem.recallCount || 0;
+      mult *= Math.max(0.5, Math.pow(recallCount + 1, 0.15));
+
+      // Age decay — pin high-recall memories as fresh
+      const created   = mem.created_at || mem.createdAt;
+      const ageDays   = created
+        ? (Date.now() - new Date(created).getTime()) / (1000 * 60 * 60 * 24)
+        : 0;
+      const recentRecalls = mem.recall_count_last_14d || 0;
+      let ageMult;
+      if (ageDays <= 7 || recentRecalls >= 3) {
+        ageMult = 1.0; // fresh or actively recalled — no decay
+      } else if (ageDays >= 60) {
+        ageMult = 0.65; // cap at 60d
+      } else {
+        // linear decay from 1.0 at 7d to 0.65 at 60d
+        ageMult = 1.0 - ((ageDays - 7) / (60 - 7)) * (1.0 - 0.65);
+      }
+      mult *= ageMult;
+
+      return { ...item, score: (item.score || 0) * mult, _synthesis_boosted: true };
+    });
+  };
+
+  const SYNTHESIS_CONF_BOOST_FLOOR = 0.70; // must match CONFIDENCE_FLOOR in cognition-loop.js
+
+  const boostedItems = applySynthesisBoost(applyItemBoosts(deduped));
 
   // Update chain traversal: include older versions when include_superseded is requested
   let finalItems = boostedItems;
@@ -1198,7 +1248,7 @@ export async function recallPersistedMemories(store, {
     }
   }
 
-  const top = finalItems
+  let top = finalItems
     .filter(item => {
       // Exclude benchmark data from production recall
       const tags = (item.memory || item).tags || [];
@@ -1220,6 +1270,33 @@ export async function recallPersistedMemories(store, {
       return b.score - a.score; // default: score descending
     })
     .slice(0, max_memories);
+
+  // ── Head-slot: guarantee top synthesis candidate is first ─────────────────
+  // When mode !== 'date_asc/date_desc' and the top synthesis candidate has a
+  // boosted final score > 0.6 AND confidence ≥ 0.70, splice it to slot[0].
+  // This ensures panorama/quick mode always surfaces the bridge/canonical first.
+  // Guard: do NOT apply when query is date-specific (date_asc/date_desc sort
+  // requested, or query contains an explicit date like "2026-05-14").
+  const DATE_SPECIFIC_RE = /\b\d{4}-\d{2}-\d{2}\b|\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}\b/i;
+  const isDateSpecificQuery = sort === 'date_asc' || sort === 'date_desc'
+    || DATE_SPECIFIC_RE.test(query_context || '');
+
+  if (!isDateSpecificQuery && top.length > 1) {
+    const synthIdx = top.findIndex(item => {
+      if (item._synthesis_boosted) return false; // already at 0 if it already won
+      const mem    = item.memory || item;
+      const srcType = mem.source_metadata?.source_type || mem.sourceMetadata?.sourceType || null;
+      const conf    = typeof mem.synthesis_confidence === 'number' ? mem.synthesis_confidence
+        : (typeof mem.synthesisConfidence === 'number' ? mem.synthesisConfidence : null);
+      return (srcType === 'canonical-fact' || srcType === 'synthesis-bridge')
+        && conf !== null && conf >= 0.70
+        && (item.score || 0) > 0.6;
+    });
+    if (synthIdx > 0) {
+      const [synth] = top.splice(synthIdx, 1);
+      top.unshift(synth);
+    }
+  }
   // Try observation prefix first (Mastra-style stable context)
   let observationPrefix = '';
   let hasObservations = false;
@@ -1273,22 +1350,80 @@ export async function recallPersistedMemories(store, {
     // User profile not available
   }
 
+  // ── Build flat memories[] (backwards-compat) + synthesized[]/raw[] (new) ──
+  const flatMemories = top.map(item => ({
+    ...item.memory,
+    score:            item.score,
+    vector_score:     item.vectorScore || 0,
+    keyword_score:    item.keywordScore || 0,
+    graph_score:      item.graphScore || 0,
+    policy_score:     item.policyScore || 0,
+    graph_expanded:   item.graph_expanded || false,
+    expansion_metadata: item.expansion_metadata || null,
+    _synthesis_boosted: item._synthesis_boosted || false,
+  }));
+
+  // Synthesized array: rich rendering for canonical-fact and synthesis-bridge outputs.
+  // In quick mode: top synthesis entry + top-2 of its synthesisEvidenceIds (3–4 total).
+  const isSynthesisMemory = (m) => {
+    const srcType = m.source_metadata?.source_type || m.sourceMetadata?.sourceType || null;
+    return srcType === 'canonical-fact' || srcType === 'synthesis-bridge';
+  };
+
+  const synthesizedItems = flatMemories.filter(m => isSynthesisMemory(m));
+  const rawItems         = flatMemories.filter(m => !isSynthesisMemory(m));
+
+  // Build evidence snippets for synthesized items from synthesisEvidenceIds
+  const buildEvidenceSnippets = async (synthMem) => {
+    const evidenceIds = synthMem.synthesis_evidence_ids || synthMem.synthesisEvidenceIds || [];
+    if (!evidenceIds.length) return [];
+    try {
+      const evidenceMems = await Promise.all(
+        evidenceIds.slice(0, 5).map(id => store.getMemory(id).catch(() => null))
+      );
+      return evidenceMems.filter(Boolean).map(e => ({
+        id:      e.id,
+        title:   e.title || null,
+        snippet: (e.content || '').slice(0, 200),
+      }));
+    } catch {
+      return [];
+    }
+  };
+
+  // Enrich synthesized items with evidence snippets (async but bounded)
+  const synthesized = await Promise.all(synthesizedItems.map(async m => {
+    const srcType  = m.source_metadata?.source_type || m.sourceMetadata?.sourceType;
+    const conf     = typeof m.synthesis_confidence === 'number' ? m.synthesis_confidence
+      : (typeof m.synthesisConfidence === 'number' ? m.synthesisConfidence : null);
+    const revision = m.synthesis_revision || m.synthesisRevision || 1;
+    const evidence = await buildEvidenceSnippets(m);
+    return {
+      id:         m.id,
+      type:       srcType,
+      claim:      m.content,
+      title:      m.title,
+      confidence: conf,
+      revision,
+      evidence,
+      score:      m.score,
+      tags:       m.tags || [],
+      created_at: m.created_at,
+    };
+  }));
+
   return {
-    memories: top.map(item => ({
-      ...item.memory,
-      score: item.score,
-      vector_score: item.vectorScore || 0,
-      keyword_score: item.keywordScore || 0,
-      graph_score: item.graphScore || 0,
-      policy_score: item.policyScore || 0,
-      graph_expanded: item.graph_expanded || false,
-      expansion_metadata: item.expansion_metadata || null
-    })),
+    // Backwards-compat flat array (synthesized first, then raw so existing clients work)
+    memories: flatMemories,
+    // New rich arrays for v2 clients
+    synthesized,
+    raw: rawItems,
     injectionText,
     search_method: vectorCandidates.length > 0 ? 'persisted-hybrid' : 'persisted-keyword',
     expansion_stats: {
-      expanded_count: expandedCandidates.length,
-      included_count: top.filter(item => item.graph_expanded).length
-    }
+      expanded_count:   expandedCandidates.length,
+      included_count:   top.filter(item => item.graph_expanded).length,
+      synthesis_count:  synthesized.length,
+    },
   };
 }

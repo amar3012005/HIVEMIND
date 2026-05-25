@@ -108,7 +108,104 @@ const CASES = [
       min_confidence: 0.5,
     },
   },
+
+  // ── Phase 1 Cognition Loop synthesis eval cases ─────────────────────────
+  // These three cases gate synthesis quality and the date-specificity guard.
+  {
+    name: 'synthesis:bridge-uwe-offer',
+    // Expects a synthesis-bridge memory to surface at top of recall.
+    // The bridge should connect Uwe LOI offer context to Dipesh/PMF signals.
+    q: 'should Amar accept Uwe offer',
+    expect: {
+      tools_include: ['hivemind_recall'],
+      contains_any: ['Uwe', 'Dipesh', 'LOI', 'offer', 'bridge', 'synthesis'],
+      min_confidence: 0.6,
+      // Custom assertion: synthesized[0].type must be synthesis-bridge
+      // (evaluated in runRecallCase below, not the chat path)
+      _recall_synthesized_type: 'synthesis-bridge',
+    },
+  },
+  {
+    name: 'synthesis:canonical-dipesh-role',
+    // Expects a canonical-fact memory to surface at top of recall.
+    q: 'what is Dipesh role',
+    expect: {
+      tools_include: ['hivemind_recall'],
+      contains_any: ['Dipesh', 'role', 'co-founder', 'CTO', 'canonical'],
+      min_confidence: 0.6,
+      _recall_synthesized_type: 'canonical-fact',
+    },
+  },
+  {
+    name: 'synthesis:date-specific-raw-wins',
+    // Date-specific query: raw LOI memory must win; synthesis head-slot must NOT fire.
+    // The DATE_SPECIFIC_RE guard in persisted-retrieval.js prevents synthesis splice.
+    q: 'what did Uwe say on 2026-05-14',
+    expect: {
+      tools_include: ['hivemind_recall'],
+      contains_any: ['LOI', 'letter of intent', 'Uwe', '2026-05-14', 'May 14'],
+      min_confidence: 0.5,
+      // Custom assertion: first memory in flat memories[] must NOT be a synthesis type
+      _recall_raw_wins: true,
+    },
+  },
 ];
+
+// ── Recall-direct runner (for synthesis eval cases) ─────────────────────
+// Hits /api/recall directly instead of /api/chat so we can inspect
+// synthesized[]/raw[] arrays without going through the chat LLM.
+async function runRecallCase(c) {
+  const t0 = Date.now();
+  const headers = {
+    Authorization: `Bearer ${MASTER_KEY}`,
+    'Content-Type': 'application/json',
+    'X-HM-User-Id': USER_ID,
+    'X-HM-Org-Id': ORG_ID,
+  };
+  const body = { query_context: c.q, max_memories: 5, mode: 'auto' };
+  const res = await fetch(`${URL}/api/recall`, { method: 'POST', headers, body: JSON.stringify(body) });
+  const dur = Date.now() - t0;
+  if (!res.ok) {
+    return { ok: false, reason: `HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`, dur };
+  }
+  const j = await res.json();
+  const memories  = Array.isArray(j.memories)    ? j.memories    : [];
+  const synth     = Array.isArray(j.synthesized)  ? j.synthesized : [];
+  const raw       = Array.isArray(j.raw)          ? j.raw         : [];
+  const e = c.expect || {};
+  const failures = [];
+
+  if (e.contains_any) {
+    const allText = memories.map(m => `${m.title||''} ${m.content||''}`).join(' ').toLowerCase();
+    if (!e.contains_any.some(s => allText.includes(String(s).toLowerCase()))) {
+      failures.push(`none of contains_any matched: ${JSON.stringify(e.contains_any)}`);
+    }
+  }
+
+  if (e._recall_synthesized_type) {
+    const top = synth[0];
+    if (!top) {
+      failures.push(`synthesized[] is empty — expected type=${e._recall_synthesized_type}`);
+    } else if (top.type !== e._recall_synthesized_type) {
+      failures.push(`synthesized[0].type="${top.type}" !== expected "${e._recall_synthesized_type}"`);
+    } else if (typeof top.confidence === 'number' && top.confidence < 0.70) {
+      failures.push(`synthesized[0].confidence=${top.confidence} < 0.70`);
+    }
+  }
+
+  if (e._recall_raw_wins) {
+    const topMem = memories[0];
+    if (topMem) {
+      const srcType = topMem.source_metadata?.source_type || topMem.sourceMetadata?.sourceType || null;
+      const isSynthTop = srcType === 'canonical-fact' || srcType === 'synthesis-bridge';
+      if (isSynthTop) {
+        failures.push(`date-specific query: synthesis type "${srcType}" won slot[0] — date guard failed`);
+      }
+    }
+  }
+
+  return { ok: failures.length === 0, failures, dur, tools: [], conf: null, drafts: 0 };
+}
 
 // ── Runner ──────────────────────────────────────────────────────────────
 
@@ -269,7 +366,9 @@ async function runEnrichmentRoundtrip() {
 (async () => {
   const results = [];
   for (const c of CASES) {
-    const r = await runCase(c);
+    // Synthesis eval cases: hit /api/recall directly to inspect synthesized[]/raw[]
+    const isSynthCase = c.name.startsWith('synthesis:');
+    const r = isSynthCase ? await runRecallCase(c) : await runCase(c);
     results.push({ name: c.name, ...r });
     const tag = r.ok ? 'PASS' : 'FAIL';
     const tail = r.ok

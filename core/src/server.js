@@ -2022,8 +2022,16 @@ async function buildProfileSummary({ userId, orgId, project = null }) {
   }
 
   try {
-    // Fast count queries instead of loading all records
-    const where = { userId, orgId, deletedAt: null, isLatest: true };
+    // Fast count queries instead of loading all records.
+    // Match /api/memories default — exclude 'extracted-fact' children so
+    // Overview counts reconcile with the list view (was 1012 vs visible 346).
+    const where = {
+      userId,
+      orgId,
+      deletedAt: null,
+      isLatest: true,
+      NOT: { tags: { has: 'extracted-fact' } },
+    };
     if (project) where.project = project;
 
     const [memoryCount, recentMemories] = await Promise.all([
@@ -2035,17 +2043,18 @@ async function buildProfileSummary({ userId, orgId, project = null }) {
         select: { id: true, title: true, tags: true, sourcePlatform: true, memoryType: true, content: true, createdAt: true },
       }).catch(() => []),
     ]);
-    // Relationship count — use raw query against mapped table name, scoped to user
+    // Relationship count — use raw query against mapped table name, scoped to user.
+    // Also excludes edges originating from extracted-fact children so the count
+    // reconciles with the graph view.
     let relationships = 0;
     try {
-      // is_latest=true gate matches the graph endpoint exactly so the
-      // numbers reconcile between profile and graph pages. Without it,
-      // every superseded memory's incoming/outgoing edges were counted
-      // (2459 vs ~100 visible mismatch).
       const relRows = await prisma.$queryRawUnsafe(
         `SELECT COUNT(*)::int as c FROM "relationships" r
          JOIN "memories" m ON r."from_id" = m."id"
-         WHERE m."user_id" = $1::uuid AND m."deleted_at" IS NULL AND m."is_latest" = true`,
+         WHERE m."user_id" = $1::uuid
+           AND m."deleted_at" IS NULL
+           AND m."is_latest" = true
+           AND NOT (m."tags" && ARRAY['extracted-fact']::text[])`,
         userId
       );
       relationships = relRows?.[0]?.c || 0;

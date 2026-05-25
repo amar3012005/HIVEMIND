@@ -525,121 +525,195 @@
     return 'web';
   }
   
-  // ── Section Picker (drawer mode) ─────────────────────
-  const SECTION_TAGS = new Set(['ARTICLE','SECTION','MAIN','ASIDE','NAV','LI','BLOCKQUOTE','PRE','TABLE','FIGURE']);
-  const BLOCK_ROLES = new Set(['article','region','main','complementary','listitem','figure']);
+  // ── Section Picker (drag-to-draw rectangle selector) ──────────────────
+  //
+  // Behaviour:
+  //   • Dim the page with a translucent overlay (pointer-events on so the
+  //     user can draw freely without clicking-through into the live DOM).
+  //   • Press + drag to draw a marquee rectangle (like macOS screenshot).
+  //   • On mouseup, collect every DOM node whose bbox intersects the
+  //     marquee, concatenate their innerText, and ship to background.
+  //   • Esc cancels, mousedown on the dim layer outside any drag-state
+  //     starts a new marquee.
+
   let pickerActive = false;
-  let hoverEl = null;
-  let overlay = null;
+  let dimEl = null;     // full-page dim layer (also captures all input)
+  let marqueeEl = null; // the rectangle the user is drawing
+  let hintEl = null;    // floating hint pill
+  let drag = null;      // { startX, startY, x, y }
 
-  function ensureOverlay() {
-    if (overlay) return overlay;
-    overlay = document.createElement('div');
-    overlay.id = '__hivemind-section-overlay';
-    overlay.style.cssText = 'position:fixed;pointer-events:none;border:2px dashed #117dff;border-radius:6px;background:rgba(17,125,255,0.06);z-index:2147483646;transition:all 0.08s ease-out;display:none;';
-    document.documentElement.appendChild(overlay);
-    const label = document.createElement('div');
-    label.id = '__hivemind-section-label';
-    label.style.cssText = 'position:fixed;z-index:2147483647;pointer-events:none;background:#117dff;color:white;font:600 11px/1.4 -apple-system,sans-serif;padding:4px 10px;border-radius:999px;box-shadow:0 2px 8px rgba(17,125,255,0.4);display:none;';
-    label.textContent = '📌 Click to capture · Esc to cancel';
-    document.documentElement.appendChild(label);
-    return overlay;
-  }
+  function ensurePickerDom() {
+    if (dimEl) return;
+    dimEl = document.createElement('div');
+    dimEl.id = '__hivemind-region-dim';
+    dimEl.style.cssText = [
+      'position:fixed', 'inset:0', 'z-index:2147483645',
+      'background:rgba(8,17,32,0.18)',
+      'backdrop-filter:blur(0.5px)',
+      '-webkit-backdrop-filter:blur(0.5px)',
+      'cursor:crosshair',
+      'user-select:none',
+      'animation:hm-fade-in 0.16s ease-out',
+    ].join(';');
+    document.documentElement.appendChild(dimEl);
 
-  function isBlockCandidate(el) {
-    if (!el || !el.tagName) return false;
-    if (SECTION_TAGS.has(el.tagName)) return true;
-    const role = el.getAttribute('role');
-    if (role && BLOCK_ROLES.has(role.toLowerCase())) return true;
-    if (el.tagName === 'DIV' || el.tagName === 'P') {
-      const r = el.getBoundingClientRect();
-      const text = (el.innerText || '').trim();
-      if (r.height >= 60 && r.width >= 100 && text.length >= 40 && text.length <= 8000) return true;
+    marqueeEl = document.createElement('div');
+    marqueeEl.id = '__hivemind-region-marquee';
+    marqueeEl.style.cssText = [
+      'position:fixed', 'z-index:2147483646',
+      'border:2px dashed #117dff',
+      'background:rgba(17,125,255,0.10)',
+      'box-shadow:0 0 0 9999px rgba(8,17,32,0.18), 0 2px 12px rgba(17,125,255,0.35)',
+      'border-radius:6px',
+      'pointer-events:none',
+      'display:none',
+    ].join(';');
+    document.documentElement.appendChild(marqueeEl);
+
+    hintEl = document.createElement('div');
+    hintEl.id = '__hivemind-region-hint';
+    hintEl.style.cssText = [
+      'position:fixed', 'top:18px', 'left:50%', 'transform:translateX(-50%)',
+      'z-index:2147483647',
+      'background:#117dff', 'color:white',
+      'font:600 12px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
+      'padding:8px 14px', 'border-radius:999px',
+      'box-shadow:0 4px 18px rgba(17,125,255,0.45)',
+      'pointer-events:none', 'user-select:none',
+      'letter-spacing:0.01em',
+    ].join(';');
+    hintEl.textContent = 'Drag to select a region · Esc to cancel';
+    document.documentElement.appendChild(hintEl);
+
+    // Style insert for animation (idempotent).
+    if (!document.getElementById('__hivemind-region-style')) {
+      const s = document.createElement('style');
+      s.id = '__hivemind-region-style';
+      s.textContent = '@keyframes hm-fade-in{from{opacity:0}to{opacity:1}}';
+      document.documentElement.appendChild(s);
     }
-    return false;
   }
 
-  function findBlockAncestor(el) {
-    let cur = el; let hops = 0;
-    while (cur && cur !== document.body && hops < 8) {
-      if (isBlockCandidate(cur)) return cur;
-      cur = cur.parentElement; hops++;
+  function teardownPickerDom() {
+    [dimEl, marqueeEl, hintEl].forEach((el) => { try { el?.remove(); } catch {} });
+    dimEl = marqueeEl = hintEl = null;
+  }
+
+  function paintMarquee() {
+    if (!drag || !marqueeEl) return;
+    const x = Math.min(drag.startX, drag.x);
+    const y = Math.min(drag.startY, drag.y);
+    const w = Math.abs(drag.x - drag.startX);
+    const h = Math.abs(drag.y - drag.startY);
+    marqueeEl.style.left = x + 'px';
+    marqueeEl.style.top = y + 'px';
+    marqueeEl.style.width = w + 'px';
+    marqueeEl.style.height = h + 'px';
+    marqueeEl.style.display = 'block';
+  }
+
+  function captureRegion(rect) {
+    // Pull every visible text-bearing element whose centroid is inside rect.
+    // Use TreeWalker for speed across deep DOM trees.
+    const isHive = (el) => !!(el && el.closest && el.closest('#__hivemind-region-dim,#__hivemind-region-marquee,#__hivemind-region-hint'));
+    const collected = [];
+    const seen = new Set();
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, {
+      acceptNode(node) {
+        if (isHive(node)) return NodeFilter.FILTER_REJECT;
+        const tag = node.tagName;
+        if (['SCRIPT', 'STYLE', 'NOSCRIPT', 'LINK', 'META', 'SVG'].includes(tag)) return NodeFilter.FILTER_REJECT;
+        const r = node.getBoundingClientRect();
+        if (r.width === 0 || r.height === 0) return NodeFilter.FILTER_SKIP;
+        // Centroid inside rect = node accepted.
+        const cx = r.left + r.width / 2;
+        const cy = r.top + r.height / 2;
+        if (cx >= rect.left && cx <= rect.right && cy >= rect.top && cy <= rect.bottom) {
+          return NodeFilter.FILTER_ACCEPT;
+        }
+        return NodeFilter.FILTER_SKIP;
+      },
+    });
+    let n;
+    while ((n = walker.nextNode())) {
+      // Only collect leaves to avoid duplicating parent + child text.
+      const hasElemChild = Array.from(n.children || []).some((c) => {
+        const r = c.getBoundingClientRect();
+        const cx = r.left + r.width / 2;
+        const cy = r.top + r.height / 2;
+        return cx >= rect.left && cx <= rect.right && cy >= rect.top && cy <= rect.bottom;
+      });
+      if (hasElemChild) continue;
+      const t = (n.innerText || n.textContent || '').trim();
+      if (!t || t.length < 2) continue;
+      if (seen.has(t)) continue;
+      seen.add(t);
+      collected.push(t);
     }
-    return el;
+    return collected.join('\n').slice(0, 8000);
   }
 
-  function paintOverlay(el) {
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    overlay.style.display = 'block';
-    overlay.style.left = r.left + 'px';
-    overlay.style.top = r.top + 'px';
-    overlay.style.width = r.width + 'px';
-    overlay.style.height = r.height + 'px';
-    const label = document.getElementById('__hivemind-section-label');
-    label.style.display = 'block';
-    label.style.left = Math.max(8, r.left) + 'px';
-    label.style.top = Math.max(8, r.top - 30) + 'px';
+  function onDown(e) {
+    if (!pickerActive) return;
+    if (e.target !== dimEl) return; // only start drag on dim layer
+    e.preventDefault(); e.stopPropagation();
+    drag = { startX: e.clientX, startY: e.clientY, x: e.clientX, y: e.clientY };
+    paintMarquee();
   }
-
-  function clearOverlay() {
-    if (overlay) overlay.style.display = 'none';
-    const label = document.getElementById('__hivemind-section-label');
-    if (label) label.style.display = 'none';
-  }
-
   function onMove(e) {
-    if (!pickerActive) return;
-    const target = document.elementFromPoint(e.clientX, e.clientY);
-    if (!target || target === overlay) return;
-    const block = findBlockAncestor(target);
-    if (block !== hoverEl) { hoverEl = block; paintOverlay(hoverEl); }
+    if (!pickerActive || !drag) return;
+    drag.x = e.clientX; drag.y = e.clientY;
+    paintMarquee();
   }
-
-  function nearestHeading(el) {
-    let cur = el;
-    while (cur && cur !== document.body) {
-      const h = cur.querySelector?.('h1, h2, h3, h4');
-      if (h && h.innerText) return h.innerText.trim();
-      cur = cur.parentElement;
+  function onUp(e) {
+    if (!pickerActive || !drag) return;
+    e.preventDefault(); e.stopPropagation();
+    const rect = {
+      left: Math.min(drag.startX, drag.x),
+      top: Math.min(drag.startY, drag.y),
+      right: Math.max(drag.startX, drag.x),
+      bottom: Math.max(drag.startY, drag.y),
+    };
+    const width = rect.right - rect.left;
+    const height = rect.bottom - rect.top;
+    drag = null;
+    if (width < 12 || height < 12) {
+      // Treat tiny drags as cancel.
+      stopPicker();
+      return;
     }
-    return null;
-  }
-
-  function onClick(e) {
-    if (!pickerActive) return;
-    e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
-    if (!hoverEl) { stopPicker(); return; }
-    const text = (hoverEl.innerText || '').trim().slice(0, 8000);
-    const heading = nearestHeading(hoverEl) || document.title;
-    const tag = hoverEl.tagName.toLowerCase();
-    const id = hoverEl.id || null;
-    const cls = (hoverEl.className && typeof hoverEl.className === 'string')
-      ? hoverEl.className.split(/\s+/).filter(Boolean).slice(0, 3).join('.') : null;
-    const selector = id ? `#${id}` : (cls ? `${tag}.${cls}` : tag);
-    const section = { mode: 'section', text, heading, url: location.href, title: document.title, selector, length: text.length };
+    const text = captureRegion(rect);
+    const section = {
+      mode: 'section',
+      text,
+      heading: document.title,
+      url: location.href,
+      title: document.title,
+      selector: `region(${Math.round(width)}x${Math.round(height)})`,
+      length: text.length,
+      bbox: rect,
+    };
     try { chrome.runtime.sendMessage({ action: 'sectionPicked', section }); } catch {}
     stopPicker();
   }
-
   function onKey(e) { if (e.key === 'Escape' && pickerActive) stopPicker(); }
 
   function startPicker() {
     if (pickerActive) return;
     pickerActive = true;
-    ensureOverlay();
+    ensurePickerDom();
+    document.addEventListener('mousedown', onDown, true);
     document.addEventListener('mousemove', onMove, true);
-    document.addEventListener('click', onClick, true);
+    document.addEventListener('mouseup', onUp, true);
     document.addEventListener('keydown', onKey, true);
-    document.body.style.cursor = 'crosshair';
   }
-
   function stopPicker() {
-    pickerActive = false; hoverEl = null; clearOverlay();
+    pickerActive = false; drag = null;
+    teardownPickerDom();
+    document.removeEventListener('mousedown', onDown, true);
     document.removeEventListener('mousemove', onMove, true);
-    document.removeEventListener('click', onClick, true);
+    document.removeEventListener('mouseup', onUp, true);
     document.removeEventListener('keydown', onKey, true);
-    document.body.style.cursor = '';
   }
 
   window.__hivemindStartSectionPicker = startPicker;

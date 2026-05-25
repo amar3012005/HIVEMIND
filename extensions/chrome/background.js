@@ -611,10 +611,20 @@ async function ensureSelectionTracker(tabId) {
       target: { tabId, allFrames: true },
       injectImmediately: true,
       func: () => {
-        const send = (reason) => {
+        // Persist the last good non-empty selection on the window so the
+        // bg script can read it back even after focus moved to the side
+        // panel (when getSelection() in this frame returns '').
+        const capture = (reason) => {
           try {
             const sel = (window.getSelection?.() || '').toString();
             if (!sel || sel.trim().length < 1) return;
+            window.__hivemindLastSelection = {
+              text: sel,
+              url: location.href,
+              title: document.title,
+              ts: Date.now(),
+              reason: reason || 'event',
+            };
             chrome.runtime.sendMessage({
               action: '__selectionUpdate',
               text: sel,
@@ -624,28 +634,33 @@ async function ensureSelectionTracker(tabId) {
             }).catch(() => {});
           } catch {}
         };
-        // Expose a force-push so the background can refresh storage on every
-        // ensureSelectionTracker() call — fixes the "highlighted but storage
-        // empty" race when the user opens the side panel before any
-        // selectionchange event fired (e.g. selection made before tracker
-        // attached, or attached but no change since).
-        window.__hivemindForcePushSelection = () => send('force');
+        // Force-push helper that reads back any cached selection even if the
+        // live DOM no longer has one (focus moved).
+        window.__hivemindForcePushSelection = () => {
+          capture('force');
+          const c = window.__hivemindLastSelection;
+          if (c && c.text) {
+            chrome.runtime.sendMessage({
+              action: '__selectionUpdate',
+              text: c.text, url: c.url, title: c.title, reason: 'force-cached',
+            }).catch(() => {});
+          }
+        };
 
         if (window.__hivemindSelTrackerInstalled) {
-          // Listeners already bound — just re-emit current selection.
-          send('reinstall');
+          capture('reinstall');
           return;
         }
         window.__hivemindSelTrackerInstalled = true;
 
-        document.addEventListener('selectionchange', () => send('selectionchange'), true);
-        document.addEventListener('mouseup', () => setTimeout(() => send('mouseup'), 30), true);
-        document.addEventListener('keyup', () => setTimeout(() => send('keyup'), 30), true);
-        document.addEventListener('mouseleave', () => send('mouseleave'), true);
-        // Window blur fires when user clicks the extension icon → last chance
-        // to capture the live selection before focus moves.
-        window.addEventListener('blur', () => send('blur'), true);
-        setTimeout(() => send('install'), 60);
+        document.addEventListener('selectionchange', () => capture('selectionchange'), true);
+        document.addEventListener('mouseup', () => setTimeout(() => capture('mouseup'), 30), true);
+        document.addEventListener('keyup', () => setTimeout(() => capture('keyup'), 30), true);
+        document.addEventListener('pointerup', () => setTimeout(() => capture('pointerup'), 30), true);
+        document.addEventListener('mouseleave', () => capture('mouseleave'), true);
+        window.addEventListener('blur', () => capture('blur'), true);
+        document.addEventListener('visibilitychange', () => capture('vis'), true);
+        setTimeout(() => capture('install'), 60);
       },
     });
     _selTrackerInjected.add(tabId);
@@ -716,17 +731,25 @@ async function getSelectionContext() {
     await new Promise((r) => setTimeout(r, 90));
   } catch {}
 
-  // 1. Live DOM read (works when side panel hasn't stolen focus yet).
+  // 1. Read the in-page cache (window.__hivemindLastSelection) which the
+  //    tracker keeps fresh on every event. This survives side-panel focus
+  //    stealing — getSelection() may return '' here but the cached value
+  //    from the last mouseup is still there.
   try {
     const results = await chrome.scripting.executeScript({
       target: { tabId: tab.id, allFrames: true },
       func: () => {
-        const sel = (window.getSelection?.() || '').toString().trim();
-        if (!sel) return null;
-        return { text: sel, url: location.href, title: document.title };
+        const cached = window.__hivemindLastSelection;
+        const live = (window.getSelection?.() || '').toString().trim();
+        if (live) {
+          return { text: live, url: location.href, title: document.title, fresh: true };
+        }
+        if (cached && cached.text) {
+          return { text: cached.text, url: cached.url, title: cached.title, fresh: false };
+        }
+        return null;
       },
     });
-    // Pick the longest non-empty result across frames.
     const hits = (results || [])
       .map((r) => r?.result)
       .filter(Boolean)

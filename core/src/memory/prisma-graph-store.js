@@ -373,11 +373,6 @@ export class PrismaGraphStore {
   }
 
   async searchMemories({ query, user_id, org_id, project, memory_type, tags, is_latest, n_results = 10, created_after, created_before, source_platform, scope = 'personal', access_context = null }) {
-    // V2 (Teams + Projects) scope: skip FTS raw branch since it cannot easily
-    // express the multi-tier OR; let Prisma findMany handle it below.
-    if (access_context) {
-      // intentional skip
-    } else
     // Try PostgreSQL full-text search with stemming (like code-review-graph's FTS5 + Porter)
     // Only run outside transactions — $queryRawUnsafe corrupts Prisma interactive transactions
     if (query && this.client.$queryRawUnsafe && !this.inTransaction) {
@@ -389,9 +384,32 @@ export class PrismaGraphStore {
           .filter(w => w.length > 1)
           .map(w => w + ':*').join(' & ');
         if (tsQuery) {
-          const scopeWhere = scope === 'personal'
-            ? `AND m.user_id = '${user_id}'::uuid`
-            : `AND m.org_id = '${org_id}'::uuid`;
+          // Scope predicate: V2 multi-tier OR when access_context provided,
+          // else legacy personal/org single-scope. Skips FTS only if neither
+          // a usable access_context nor a single-scope param is available.
+          let scopeWhere;
+          if (access_context && (Array.isArray(access_context.projectIds) || Array.isArray(access_context.teamIds))) {
+            const projectIds = Array.isArray(access_context.projectIds) ? access_context.projectIds : [];
+            const teamIds = Array.isArray(access_context.teamIds) ? access_context.teamIds : [];
+            const tiers = [
+              `(m.user_id = '${user_id}'::uuid AND m.scope = 'personal')`,
+              `(m.scope = 'organization' AND m.org_id = '${org_id}'::uuid)`,
+            ];
+            if (projectIds.length > 0) {
+              const idList = projectIds.map(id => `'${id}'::uuid`).join(',');
+              tiers.push(`(m.scope = 'project' AND EXISTS (SELECT 1 FROM memory_projects mp WHERE mp.memory_id = m.id AND mp.project_id IN (${idList})))`);
+            }
+            if (teamIds.length > 0) {
+              const idList = teamIds.map(id => `'${id}'::uuid`).join(',');
+              tiers.push(`(m.scope = 'team' AND m.primary_team_id IN (${idList}))`);
+            }
+            // Always require org scope match for safety
+            scopeWhere = `AND m.org_id = '${org_id}'::uuid AND (${tiers.join(' OR ')})`;
+          } else {
+            scopeWhere = scope === 'personal'
+              ? `AND m.user_id = '${user_id}'::uuid`
+              : `AND m.org_id = '${org_id}'::uuid`;
+          }
           const projectWhere = project ? `AND m.project = '${project}'` : '';
           const latestWhere = typeof is_latest === 'boolean' ? `AND m.is_latest = ${is_latest}` : '';
           const dateAfterWhere = created_after ? `AND m.created_at >= '${new Date(created_after).toISOString()}'` : '';

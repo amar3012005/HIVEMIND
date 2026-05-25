@@ -311,8 +311,16 @@ export const memoryQueryParamsSchema = z.object({
     .transform(val => val ? val.split(',') : undefined)
     .optional(),
   
+  // Tri-state: 'true' → only latest, 'false' → only superseded,
+  // 'all' (or any other value) → no filter (both layers returned, FE renders
+  // superseded badge inline). Default stays 'true' for backwards compat —
+  // callers that want the full timeline pass is_latest=all explicitly.
   is_latest: z.string()
-    .transform(val => val === 'true')
+    .transform(val => {
+      if (val === 'true') return true;
+      if (val === 'false') return false;
+      return undefined; // 'all' / unrecognised → no filter
+    })
     .optional()
     .default('true'),
   

@@ -2091,6 +2091,14 @@ export function createHostedApiClient({ baseUrl, apiKey, userId, orgId }) {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`,
         'X-API-Key': apiKey,
+        // authenticateApiKey() reads X-HM-User-Id / X-HM-Org-Id when the
+        // master key is presented — those are the canonical proxy headers.
+        // The previous X-User-Id / X-Org-Id names were ignored, so every
+        // hosted-service tool call collapsed to DEFAULT_USER and a hosted
+        // user's MCP saves ended up under the wrong principal.
+        'X-HM-User-Id': userId,
+        'X-HM-Org-Id': orgId,
+        // Keep legacy names too for any downstream code still reading them.
         'X-User-Id': userId,
         'X-Org-Id': orgId
       },

@@ -1625,13 +1625,25 @@ function loadIngestionPipeline() {
   return null;
 }
 
+// MCP host-allowlist that is ALWAYS honored — Claude / ChatGPT / Anthropic
+// admin consoles need CORS regardless of operator env-var config. Operators
+// can still extend via HIVEMIND_ALLOWED_ORIGINS but cannot remove these.
+const MCP_REMOTE_ORIGINS = new Set([
+  'https://claude.ai',
+  'https://www.claude.ai',
+  'https://anthropic.com',
+  'https://chatgpt.com',
+  'https://chat.openai.com',
+  'https://platform.openai.com',
+]);
+
 function applyCorsHeaders(req, res) {
   const origin = req.headers.origin;
   if (!origin) {
     return;
   }
 
-  if (ALLOWED_ORIGINS.includes(origin)) {
+  if (ALLOWED_ORIGINS.includes(origin) || MCP_REMOTE_ORIGINS.has(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
   }

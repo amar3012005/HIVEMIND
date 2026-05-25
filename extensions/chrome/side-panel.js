@@ -188,13 +188,44 @@ function wireEvents() {
   const uploadBtn = $('uploadBtn');
   const uploadInput = $('uploadInput');
   if (uploadBtn && uploadInput) {
-    uploadBtn.addEventListener('click', () => uploadInput.click());
+    uploadBtn.addEventListener('click', () => {
+      console.log('[hivemind:upload] clicked attach button');
+      uploadInput.click();
+    });
     uploadInput.addEventListener('change', async (e) => {
-      const files = Array.from(e.target.files || []);
-      uploadInput.value = ''; // allow same file re-pick
-      for (const f of files) {
-        await handleFileUpload(f);
+      // Snapshot the FileList synchronously BEFORE any async work — some
+      // Chromium builds null out e.target.files after the handler yields.
+      const filesList = e.target.files;
+      const files = [];
+      if (filesList) {
+        for (let i = 0; i < filesList.length; i++) files.push(filesList[i]);
       }
+      console.log('[hivemind:upload] picked', files.length, 'files', files.map((f) => f.name));
+
+      if (files.length === 0) {
+        appendError('No files were picked. Pick a file from the dialog and try again.');
+        return;
+      }
+
+      // Append a row IMMEDIATELY for each picked file so the user sees
+      // instant feedback even if signed-out / network is slow.
+      for (const f of files) {
+        try {
+          await handleFileUpload(f);
+        } catch (err) {
+          console.error('[hivemind:upload] unhandled', err);
+          appendError(`Upload error: ${err?.message || err}`);
+        }
+      }
+
+      // Clear AFTER the loop so the input keeps the picked files available
+      // throughout the iteration (re-picking same file later still works).
+      try { uploadInput.value = ''; } catch {}
+    });
+  } else {
+    console.warn('[hivemind:upload] uploadBtn or uploadInput missing in DOM', {
+      btn: !!uploadBtn,
+      input: !!uploadInput,
     });
   }
 
@@ -970,16 +1001,16 @@ function renderMarkdownLite(raw) {
 // Renders a compact row in #uploadList showing status + memory id when done.
 
 async function handleFileUpload(file) {
+  console.log('[hivemind:upload] handleFileUpload start', file?.name, file?.size, file?.type);
   const list = $('uploadList');
-  if (!list) return;
-  const mime = (file.type || '').toLowerCase();
-  const isImage = /^image\/(png|jpe?g|webp|gif)$/.test(mime);
-  const cfg = await getConfig();
-  if (!cfg.apiKey) {
-    appendError('Not signed in — upload skipped.');
+  if (!list) {
+    appendError('Upload list element missing in DOM — reload extension.');
     return;
   }
+  const mime = (file.type || '').toLowerCase();
+  const isImage = /^image\/(png|jpe?g|webp|gif)$/.test(mime);
 
+  // Render row FIRST so the user sees feedback even if auth/cfg fails next.
   const rowId = 'ur-' + Math.random().toString(36).slice(2, 8);
   const row = document.createElement('div');
   row.className = 'upload-row';
@@ -993,11 +1024,28 @@ async function handleFileUpload(file) {
       </svg>
     </span>
     <span class="ur-name">${escapeHtml(file.name)}</span>
-    <span class="ur-state">uploading…</span>
+    <span class="ur-state">preparing…</span>
     <button class="ur-x" title="Dismiss">×</button>
   `;
   list.appendChild(row);
+  list.scrollIntoView({ behavior: 'smooth', block: 'end' });
   row.querySelector('.ur-x').addEventListener('click', () => row.remove());
+
+  // NOW fetch config; if not signed-in, surface in the row instead of toast.
+  let cfg;
+  try {
+    cfg = await getConfig();
+  } catch (e) {
+    row.classList.add('error');
+    row.querySelector('.ur-state').textContent = 'config error: ' + (e?.message || e);
+    return;
+  }
+  if (!cfg.apiKey) {
+    row.classList.add('error');
+    row.querySelector('.ur-state').textContent = 'not signed in — sign in first';
+    return;
+  }
+  row.querySelector('.ur-state').textContent = 'uploading…';
 
   // Get current project scope so server binds memory to it.
   let projectIdField = '';

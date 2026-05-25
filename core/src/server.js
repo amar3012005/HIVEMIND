@@ -2023,14 +2023,16 @@ async function buildProfileSummary({ userId, orgId, project = null }) {
 
   try {
     // Fast count queries instead of loading all records.
-    // Match /api/memories default — exclude 'extracted-fact' children so
+    // Match /api/memories default — exclude all hidden-child tag families so
     // Overview counts reconcile with the list view (was 1012 vs visible 346).
+    // Mirrors HIDDEN_CHILD_TAGS in prisma-graph-store.listMemories.
+    const HIDDEN_CHILD_TAGS = ['extracted-fact', 'tara-turn', 'tara-insight'];
     const where = {
       userId,
       orgId,
       deletedAt: null,
       isLatest: true,
-      NOT: { tags: { has: 'extracted-fact' } },
+      AND: HIDDEN_CHILD_TAGS.map((t) => ({ NOT: { tags: { has: t } } })),
     };
     if (project) where.project = project;
 
@@ -2054,7 +2056,7 @@ async function buildProfileSummary({ userId, orgId, project = null }) {
          WHERE m."user_id" = $1::uuid
            AND m."deleted_at" IS NULL
            AND m."is_latest" = true
-           AND NOT (m."tags" && ARRAY['extracted-fact']::text[])`,
+           AND NOT (m."tags" && ARRAY['extracted-fact','tara-turn','tara-insight']::text[])`,
         userId
       );
       relationships = relRows?.[0]?.c || 0;
@@ -14737,12 +14739,14 @@ exit \$RC
               // facts per memory), which mismatches the list-view total.
               const includeChildren =
                 url.searchParams.get('include_children') === 'true';
+              // Mirrors HIDDEN_CHILD_TAGS in prisma-graph-store.listMemories.
+              const HIDDEN_CHILD_TAGS_GRAPH = ['extracted-fact', 'tara-turn', 'tara-insight'];
               const baseWhere = {
                 orgId: orgId,
                 deletedAt: null,
                 ...(includeSuperseded ? {} : { isLatest: true }),
                 ...(graphProject ? { project: graphProject } : {}),
-                ...(includeChildren ? {} : { NOT: { tags: { has: 'extracted-fact' } } }),
+                ...(includeChildren ? {} : { AND: HIDDEN_CHILD_TAGS_GRAPH.map((t) => ({ NOT: { tags: { has: t } } })) }),
               };
               const scopeWhere = graphScope === 'team'
                 ? {

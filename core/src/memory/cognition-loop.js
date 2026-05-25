@@ -537,6 +537,12 @@ Output JSON only:
     }
 
     try {
+      // IMPORTANT: engine.ingestMemory eventually calls prisma.memory.create().
+      // Only pass fields that are valid Prisma Memory columns + known engine
+      // control flags (_smart_routed). Do NOT pass _synthesis_columns (not a
+      // DB column — it's patched separately after creation via prisma.update).
+      // sourceMetadata is accepted by the engine's smart-ingest-router as a
+      // separate create arg (not forwarded to prisma directly).
       const result = await this.engine.ingestMemory({
         userId,
         orgId,
@@ -546,32 +552,23 @@ Output JSON only:
         tags:       Array.from(unionedTags),
         project:    project || null,
         importanceScore: sourceType === 'canonical-fact' ? 0.85 : 0.90,
-        // Synthesis metadata attached via sourceMetadata
-        sourceMetadata: {
-          sourceType,
-          sourceId:  `${sourceType}:${hash}:${Date.now()}`,
-          metadata: {
-            synthesized_at:       new Date().toISOString(),
-            topic:                tag,
-            source_count:         members.length,
-            source_ids:           members.map(m => m.id),
-            model:                PRIMARY_SYNTHESIS_MODEL,
-            generator:            `cognition-loop.${sourceType}`,
-            synthesis_confidence: confidence,
-            synthesis_evidence_ids: evidenceIds,
-            synthesis_cluster_hash: hash,
-            ...extraMeta,
-          },
+        // sourceMetadata shape expected by graph-engine._buildMemoryRecord
+        source_type: sourceType,
+        source_id:   `${sourceType}:${hash}:${Date.now()}`,
+        metadata: {
+          synthesized_at:         new Date().toISOString(),
+          topic:                  tag,
+          source_count:           members.length,
+          source_ids:             members.map(m => m.id),
+          model:                  PRIMARY_SYNTHESIS_MODEL,
+          generator:              `cognition-loop.${sourceType}`,
+          synthesis_confidence:   confidence,
+          synthesis_cluster_hash: hash,
+          ...extraMeta,
         },
-        // Tell smart-router this is a cognition-loop synthesis (skip re-routing)
+        // _smart_routed: false tells the gateway to run smart-ingest-router
+        // on this payload (operator inference + entity-co-mention + conflict-detector)
         _smart_routed: false,
-        // Phase 1 synthesis columns — written by engine after create
-        _synthesis_columns: {
-          synthesisConfidence:  confidence,
-          synthesisEvidenceIds: evidenceIds,
-          synthesisClusterHash: hash,
-          synthesisRevision:    1,
-        },
       });
 
       const newId = result?.id || result?.memoryId || result?.memory?.id || null;

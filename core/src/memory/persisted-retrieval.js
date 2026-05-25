@@ -944,16 +944,25 @@ export async function recallPersistedMemories(store, {
     if (scope_filter && memory.scope && memory.scope !== scope_filter) return false;
     // Exclude canonical-summary rows from default recall — BUT ONLY the
     // generic chat / conversation compactions. Knowledge-base, document,
-    // and entity-scoped compactions are the substantive content (drift
-    // compaction soft-deletes the originals and stores the merged view
-    // in the canonical), so filtering them blinds the agent to ingested
-    // PDFs and to topic-scoped synthesis. Callers wanting the noisy
-    // chat-style canonicals back can pass tags=['canonical-summary']
-    // explicitly.
+    // entity-scoped, and entity-tagged compactions are the substantive
+    // content (drift compaction soft-deletes the originals and stores the
+    // merged view in the canonical), so filtering them blinds the agent
+    // to ingested PDFs, topic-scoped synthesis, and entity-rich chat
+    // compactions where the entity tag carries the topical signal.
+    // Callers wanting the noisy chat-style canonicals back can pass
+    // tags=['canonical-summary'] explicitly.
     if (
       !tags.includes('canonical-summary') &&
       memTags.includes('canonical-summary') &&
-      !memTags.some(t => t === 'topic:knowledge-base' || t === 'topic:document' || (typeof t === 'string' && t.startsWith('topic:entity:')))
+      !memTags.some(t =>
+        t === 'topic:knowledge-base' ||
+        t === 'topic:document' ||
+        (typeof t === 'string' && (
+          t.startsWith('topic:entity:') ||
+          t.startsWith('entity:') ||
+          t.startsWith('person:')
+        ))
+      )
     ) return false;
     if (source_platforms.length === 0) return true;
     const sourcePlatform = memory.source_metadata?.source_platform || memory.source || null;

@@ -419,7 +419,7 @@ export class PrismaGraphStore {
             SELECT m.id, m.content, m.title, m.tags, m.memory_type, m.project,
                    m.importance_score, m.is_latest, m.created_at, m.updated_at,
                    m.document_date, m.event_dates, m.source_platform AS source, m.visibility,
-                   m.synthesis_confidence, m.synthesis_cluster_hash, m.synthesis_revision,
+                   m.synthesis_confidence, m.synthesis_cluster_hash, m.synthesis_revision, m.synthesis_evidence_ids,
                    ts_rank(to_tsvector('english', COALESCE(m.content, '') || ' ' || COALESCE(m.title, '')),
                            to_tsquery('english', $1)) as fts_score
             FROM memories m
@@ -450,6 +450,7 @@ export class PrismaGraphStore {
               synthesis_confidence: r.synthesis_confidence != null ? Number(r.synthesis_confidence) : null,
               synthesis_cluster_hash: r.synthesis_cluster_hash || null,
               synthesis_revision: r.synthesis_revision != null ? Number(r.synthesis_revision) : 1,
+              synthesis_evidence_ids: Array.isArray(r.synthesis_evidence_ids) ? r.synthesis_evidence_ids : [],
               score: Number(r.fts_score) || 0,
               _searchMethod: 'fts_tsvector',
             })).slice(0, n_results);

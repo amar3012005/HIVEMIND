@@ -541,6 +541,11 @@ export class RecallRouter {
       } catch (boostErr) {
         console.warn('[recall-router] cross-cluster boost failed:', boostErr.message);
       }
+    } else if (this.clusterIndex && !ctx.orgId) {
+      // Surface silent skip — Phase 3 needs orgId to scope cluster_index
+      // lookup. Default user / no-org sessions get plain recall without the
+      // shared-entity boost; without this warn the regression is invisible.
+      console.warn('[recall-router] cross-cluster boost SKIPPED: ctx.orgId missing (recall returned plain RRF, no Phase 3 boost). Pass orgId in ctx to enable.');
     }
 
     // Fire recall-count update asynchronously — don't block response

@@ -729,7 +729,16 @@ CORE RULES:
    capability via the draft-approval gate — the agent's write-intent
    branch will create a draft for user approval. If the user's request
    is ambiguous about WHICH channel or recipient, ask a clarifying
-   question instead of claiming inability.`;
+   question instead of claiming inability.
+10. **PREFER SYNTH-tier memories.** Lines prefixed [SYNTH/CANONICAL] or
+    [SYNTH/BRIDGE] are curated distillations from the cognition loop —
+    they fuse multiple raw memories into one confidence-scored claim
+    with revision history (conf=X.XX, rev=N). When a SYNTH row covers
+    the user's question, cite it directly and treat it as ground truth.
+    Use raw evidence rows only to add detail the SYNTH row omits, or
+    when no SYNTH row is on-topic. \`x-cluster=X.XX\` marks memories
+    reinforced by neighbour clusters sharing entities — these are extra
+    high-confidence cross-domain links worth surfacing in the answer.`;
 }
 
 async function answerStep({ message, history, evidence, plan, language, assistantName, orgName, model, apiKey, signal, ctx }) {
@@ -771,13 +780,31 @@ async function answerStep({ message, history, evidence, plan, language, assistan
     } catch {}
   }
 
-  // Build EVIDENCE block (numbered, with short id)
+  // Build EVIDENCE block (numbered, with short id).
+  // Synthesis-tier memories (canonical-fact / synthesis-bridge from the
+  // cognition loop) are pre-curated multi-source distillations carrying
+  // confidence + revision history. Mark them with a [SYNTH] prefix so the
+  // LLM can preferentially cite them over raw evidence — they reflect what
+  // the system has REASONED about, not just what was logged. Phase 3
+  // cross-cluster boost flag included when present so the LLM sees which
+  // memories were reinforced by neighbour clusters.
   const evidenceLines = evidence.memories.slice(0, 12).map((m, i) => {
     const id8 = (m.id || '').slice(0, 8);
     const title = (m.title || '').replace(/\n/g, ' ').slice(0, 80);
     const content = (m.content || '').replace(/\n/g, ' ').slice(0, 240);
     const tags = (m.tags || []).slice(0, 3).join(', ');
-    return `[${id8}] "${title}" — ${content}${tags ? ' :: ' + tags : ''}`;
+    // Synthesis detection: source_metadata.source_type OR tag fallback (FTS path).
+    const srcType = m.source_metadata?.source_type || null;
+    const memTags = m.tags || [];
+    const isCanonical = srcType === 'canonical-fact' || memTags.includes('synthesis:canonical');
+    const isBridge    = srcType === 'synthesis-bridge' || memTags.includes('synthesis:bridge');
+    const synthTag = isCanonical ? '[SYNTH/CANONICAL] ' : isBridge ? '[SYNTH/BRIDGE] ' : '';
+    const conf = m.synthesis_confidence != null ? ` conf=${Number(m.synthesis_confidence).toFixed(2)}` : '';
+    const rev = m.synthesis_revision && m.synthesis_revision > 1 ? ` rev=${m.synthesis_revision}` : '';
+    const xClusterBoost = m._cross_cluster_boost && m._cross_cluster_boost > 1.0
+      ? ` x-cluster=${Number(m._cross_cluster_boost).toFixed(2)}`
+      : '';
+    return `${synthTag}[${id8}]${conf}${rev}${xClusterBoost} "${title}" — ${content}${tags ? ' :: ' + tags : ''}`;
   }).join('\n');
 
   // Live Workspace block — Gmail / Drive / Calendar fetched in this turn.

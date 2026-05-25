@@ -345,8 +345,9 @@ const TOOL_HANDLERS = {
       prisma:                ctx.prisma,
     });
 
+    const mode = args.mode || 'quick';
     const result = await router.recall(args.query, {
-      mode:           args.mode || 'quick',
+      mode,
       limit:          args.limit,
       tags:           args.tags,
       source_type:    args.source_type,
@@ -359,14 +360,53 @@ const TOOL_HANDLERS = {
       accessContext: ctx.accessContext,
     });
 
+    // mode='insight' expansion: pull every synthesis row's evidence chain so
+    // the agent sees both the curated claim AND its source memories. Quick
+    // mode already returns the top synthesis + 2 evidence ids; insight mode
+    // expands ALL synthesis rows up to 4 evidence ids each. Bound by ctx.prisma.
+    let synthEvidenceChains = null;
+    if (mode === 'insight' && ctx.prisma) {
+      const synthRows = (result.memories || []).filter(m => {
+        const srcType = m.source_metadata?.source_type;
+        const tags = m.tags || [];
+        return srcType === 'canonical-fact' || srcType === 'synthesis-bridge'
+            || tags.includes('synthesis:canonical') || tags.includes('synthesis:bridge');
+      });
+      if (synthRows.length > 0) {
+        synthEvidenceChains = [];
+        for (const synth of synthRows.slice(0, 5)) {
+          const evIds = synth.synthesis_evidence_ids || synth.synthesisEvidenceIds || [];
+          if (!evIds.length) continue;
+          try {
+            const rows = await ctx.prisma.memory.findMany({
+              where: { id: { in: evIds.slice(0, 4) }, deletedAt: null },
+              select: { id: true, title: true, content: true, tags: true, createdAt: true },
+            });
+            synthEvidenceChains.push({
+              synthesis_id: synth.id,
+              synthesis_title: synth.title,
+              evidence: rows.map(r => ({
+                id: r.id, title: r.title,
+                content: (r.content || '').slice(0, 240),
+                created_at: r.createdAt,
+              })),
+            });
+          } catch (chainErr) {
+            console.warn('[hivemind_recall] insight chain fetch failed:', chainErr.message);
+          }
+        }
+      }
+    }
+
     return {
-      mode:           args.mode || 'quick',
+      mode,
       count:          result.memories.length,
       memories:       result.memories,
       live_count:     result.live.length,
       live:           result.live,
       evidence_count: result.evidence.length,
       evidence:       result.evidence,
+      ...(synthEvidenceChains ? { synthesis_evidence_chains: synthEvidenceChains } : {}),
       trace:          result.trace,
     };
   },

@@ -3996,12 +3996,83 @@ exit \$RC
       authorization_endpoint: `${_discoveryBase}/oauth/authorize`,
       token_endpoint: `${_discoveryBase}/oauth/token`,
       revocation_endpoint: `${_discoveryBase}/oauth/revoke`,
+      registration_endpoint: `${_discoveryBase}/oauth/register`,
       scopes_supported: OAUTH_SCOPES_SUPPORTED,
       response_types_supported: ['code'],
       grant_types_supported: ['authorization_code', 'refresh_token'],
       code_challenge_methods_supported: ['S256'],
       token_endpoint_auth_methods_supported: ['none']
     });
+  }
+
+  // ── OAuth 2.0 Dynamic Client Registration (RFC 7591) ───────────────
+  // Required by Claude.ai / ChatGPT MCP custom connectors — they POST
+  // client metadata, get back a client_id (and optional client_secret),
+  // then use that for the authorization flow. Public PKCE clients only:
+  // no client_secret issued. New clients persisted via the oauth_client_registry
+  // metaParameter row (same store loadOAuthClientRegistry reads from).
+  if (pathname === '/oauth/register' && req.method === 'POST') {
+    try {
+      const meta = (typeof body === 'object' && body) ? body : {};
+      const redirectUris = Array.isArray(meta.redirect_uris) ? meta.redirect_uris.filter(u => typeof u === 'string' && u.length > 0) : [];
+      if (redirectUris.length === 0) {
+        return jsonResponse(res, { error: 'invalid_redirect_uri', error_description: 'redirect_uris[] required' }, 400);
+      }
+      const clientName = String(meta.client_name || 'Unnamed Client').slice(0, 200);
+      // Generate public client_id (PKCE only, no secret).
+      const clientId = `hmc_${crypto.randomBytes(12).toString('hex')}`;
+      const record = {
+        client_id: clientId,
+        client_name: clientName,
+        redirect_uris: redirectUris,
+        allowed_scopes: OAUTH_SCOPES_SUPPORTED,
+        is_public: true,
+        client_secret_hash: null,
+        status: 'active',
+        created_at: new Date().toISOString(),
+        metadata: {
+          grant_types: Array.isArray(meta.grant_types) ? meta.grant_types : ['authorization_code', 'refresh_token'],
+          response_types: Array.isArray(meta.response_types) ? meta.response_types : ['code'],
+          token_endpoint_auth_method: meta.token_endpoint_auth_method || 'none',
+          software_id: meta.software_id || null,
+          software_version: meta.software_version || null,
+          client_uri: meta.client_uri || null,
+          logo_uri: meta.logo_uri || null,
+        },
+      };
+      // Persist via metaParameter (same registry loadOAuthClientRegistry reads).
+      if (prisma?.metaParameter) {
+        try {
+          const existing = await prisma.metaParameter.findUnique({ where: { key: 'oauth_client_registry' } });
+          const current = Array.isArray(existing?.value) ? existing.value : [];
+          current.push(record);
+          await prisma.metaParameter.upsert({
+            where: { key: 'oauth_client_registry' },
+            update: { value: current },
+            create: { key: 'oauth_client_registry', value: current },
+          });
+        } catch (dbErr) {
+          console.warn('[oauth/register] DB persist failed, falling back to in-memory:', dbErr.message);
+        }
+      }
+      // Invalidate registry cache so the new client is visible on the
+      // immediately-following /oauth/authorize call.
+      oauthClientRegistryCache = { expiresAt: 0, clients: oauthClientRegistryCache.clients };
+
+      return jsonResponse(res, {
+        client_id: clientId,
+        client_id_issued_at: Math.floor(Date.now() / 1000),
+        client_name: clientName,
+        redirect_uris: redirectUris,
+        grant_types: record.metadata.grant_types,
+        response_types: record.metadata.response_types,
+        token_endpoint_auth_method: 'none',
+        scope: OAUTH_SCOPES_SUPPORTED.join(' '),
+      }, 201);
+    } catch (err) {
+      console.error('[oauth/register] error:', err);
+      return jsonResponse(res, { error: 'server_error', error_description: err.message }, 500);
+    }
   }
 
   if (pathname === '/oauth/login/zitadel' && req.method === 'GET') {

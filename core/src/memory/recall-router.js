@@ -242,6 +242,16 @@ async function hop1Memory({ store, query, options, ctx }) {
     // Pass synthesis cluster hash through so cross-cluster boost can fire (Move 3)
     ...(m.synthesis_cluster_hash ? { synthesis_cluster_hash: m.synthesis_cluster_hash } : {}),
     ...(m.synthesisClusterHash   ? { synthesisClusterHash:   m.synthesisClusterHash   } : {}),
+    // Cognition layer fields — needed by tool-registry insight expansion
+    // + agent answerStep synthesis-tier rendering.
+    ...(m.synthesis_confidence != null    ? { synthesis_confidence:   m.synthesis_confidence }   : {}),
+    ...(m.synthesisConfidence  != null    ? { synthesis_confidence:   m.synthesisConfidence }    : {}),
+    ...(m.synthesis_revision   != null    ? { synthesis_revision:     m.synthesis_revision }     : {}),
+    ...(m.synthesisRevision    != null    ? { synthesis_revision:     m.synthesisRevision }      : {}),
+    ...(Array.isArray(m.synthesis_evidence_ids) && m.synthesis_evidence_ids.length
+        ? { synthesis_evidence_ids: m.synthesis_evidence_ids } : {}),
+    ...(Array.isArray(m.synthesisEvidenceIds) && m.synthesisEvidenceIds.length
+        ? { synthesis_evidence_ids: m.synthesisEvidenceIds } : {}),
   }));
 }
 

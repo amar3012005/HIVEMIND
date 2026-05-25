@@ -95,14 +95,14 @@ export class ClusterIndex {
   async bumpDirty({ organizationId, userId, clusterHash, clusterType = 'unknown', by = 1 }) {
     try {
       // Atomic upsert: create stub row OR add to dirty_count.
-      // Schema-qualified table name because Prisma $executeRawUnsafe may not
-      // inherit the search_path set by the Prisma datasource.
+      // Cast UUID params to ::uuid explicitly — Prisma $executeRawUnsafe binds
+      // all JS strings as 'text' but the column type is uuid, causing PG error 42804.
       await this.prisma.$executeRawUnsafe(
         `INSERT INTO hivemind.cluster_index
            (id, organization_id, user_id, cluster_hash, cluster_type,
             dirty_count, latest_revision, created_at, updated_at)
          VALUES
-           (gen_random_uuid(), $1, $2, $3, $4, $5, 0, now(), now())
+           (gen_random_uuid(), $1::uuid, $2::uuid, $3, $4, $5, 0, now(), now())
          ON CONFLICT (organization_id, user_id, cluster_hash)
          DO UPDATE SET
            dirty_count = hivemind.cluster_index.dirty_count + $5,

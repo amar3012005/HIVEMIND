@@ -764,7 +764,12 @@ async function purgeUserVectors(userId) {
  */
 async function performAccountDeletion({ userId, orgIdsToDelete = [], onProgress }) {
   const t0 = Date.now();
-  const BATCH_SIZE = 5000;
+  // 5000 was hitting the 30s Postgres socket timeout for users with large
+  // memory corpora because each batch fires 7 dependent deleteMany calls
+  // sequentially against indexed FK columns. 800 keeps each batch under ~5s
+  // even when the user has 20k+ memories, and parallelising the dependent
+  // tables (they don't touch each other) recovers the throughput.
+  const BATCH_SIZE = 800;
   let memoryUserTriggersDisabled = false;
   const emit = (pct, step) => {
     console.log(`[account-delete] [${pct}%] ${step}`);
@@ -792,30 +797,25 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [], onProgress 
         const batchNum = Math.floor(i / BATCH_SIZE) + 1;
         const batchPct = Math.round(5 + (batchNum / totalBatches) * memoryProgressRange);
 
-        await prisma.auditLog.updateMany({
-          where: { resourceId: { in: batch } },
-          data: { resourceId: null },
-        });
-        await prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: batch } } });
-        await prisma.codeMemoryMetadata.deleteMany({ where: { memoryId: { in: batch } } });
-        await prisma.vectorEmbedding.deleteMany({ where: { memoryId: { in: batch } } });
-        await prisma.memoryVersion.deleteMany({ where: { memoryId: { in: batch } } });
-        await prisma.relationship.deleteMany({
-          where: {
-            OR: [
-              { fromId: { in: batch } },
-              { toId: { in: batch } },
-            ],
-          },
-        });
-        await prisma.derivationJob.deleteMany({
-          where: {
-            OR: [
-              { sourceMemoryId: { in: batch } },
-              { targetMemoryId: { in: batch } },
-            ],
-          },
-        });
+        // Dependent tables — none of these touch each other, so run them
+        // concurrently. Cuts batch wall time from sum to max.
+        await Promise.all([
+          prisma.auditLog.updateMany({
+            where: { resourceId: { in: batch } },
+            data: { resourceId: null },
+          }),
+          prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: batch } } }),
+          prisma.codeMemoryMetadata.deleteMany({ where: { memoryId: { in: batch } } }),
+          prisma.vectorEmbedding.deleteMany({ where: { memoryId: { in: batch } } }),
+          prisma.memoryVersion.deleteMany({ where: { memoryId: { in: batch } } }),
+          prisma.relationship.deleteMany({
+            where: { OR: [{ fromId: { in: batch } }, { toId: { in: batch } }] },
+          }),
+          prisma.derivationJob.deleteMany({
+            where: { OR: [{ sourceMemoryId: { in: batch } }, { targetMemoryId: { in: batch } }] },
+          }),
+        ]);
+        // memories last — FKs from the parallel deletes must be gone first
         await prisma.memory.deleteMany({ where: { id: { in: batch } } });
 
         emit(batchPct, `Deleted memory batch ${batchNum}/${totalBatches} (${batch.length} memories)`);

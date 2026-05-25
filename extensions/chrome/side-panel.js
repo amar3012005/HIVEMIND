@@ -1008,29 +1008,53 @@ async function handleFileUpload(file) {
 
   try {
     const fd = new FormData();
-    fd.append('file', file);
-    if (projectIdField) fd.append('projectId', projectIdField);
-    const endpoint = isImage ? '/api/ingest/image' : '/api/knowledge/upload';
+    fd.append('file', file, file.name);
+    // Backend accepts containerTag for project scoping (same key the KB
+    // dashboard sends). Also send `targetScope=project` so the routed
+    // ingest pipeline tags the memory correctly.
+    if (projectIdField) {
+      fd.append('containerTag', `project:${projectIdField}`);
+      fd.append('targetScope', 'project');
+    }
+    // Tag every upload from the side panel so KB shows it under a
+    // "browser-extension" filter and so it shows up in the user's
+    // memory graph as ext-sourced.
+    fd.append('tags', 'browser-extension,side-panel');
 
-    const resp = await fetch(`${cfg.apiBase}${endpoint}`, {
+    const endpoint = isImage ? '/api/ingest/image' : '/api/knowledge/upload';
+    const url = `${cfg.apiBase}${endpoint}`;
+    console.log('[hivemind:upload]', { endpoint, url, name: file.name, size: file.size, type: mime });
+    row.querySelector('.ur-state').textContent = `uploading ${(file.size / 1024).toFixed(0)} KB…`;
+
+    const resp = await fetch(url, {
       method: 'POST',
-      headers: { 'X-API-Key': cfg.apiKey },
+      headers: {
+        // Do NOT set Content-Type — browser auto-sets multipart boundary.
+        'X-API-Key': cfg.apiKey,
+        Accept: 'application/json',
+      },
       body: fd,
     });
-    const data = await resp.json().catch(() => ({}));
+    const text = await resp.text();
+    let data = {};
+    try { data = JSON.parse(text); } catch { data = { raw: text.slice(0, 200) }; }
+    console.log('[hivemind:upload] result', resp.status, data);
+
     if (!resp.ok) {
-      throw new Error(data.error || `HTTP ${resp.status}`);
+      const reason = data.error || data.raw || `HTTP ${resp.status}`;
+      throw new Error(reason);
     }
-    const memId = data?.memory_id || data?.id || data?.memory?.id || null;
+    const memId = data?.memory_id || data?.id || data?.memory?.id || data?.documentId || null;
     const title = data?.title || data?.classification?.suggested_title || file.name;
     const kind = data?.classification?.kind ? ` · ${data.classification.kind}` : '';
     row.classList.add('done');
     row.querySelector('.ur-name').textContent = title;
-    row.querySelector('.ur-state').textContent = `saved${kind}${memId ? ' · ' + memId.slice(0, 8) : ''}`;
+    row.querySelector('.ur-state').textContent = `Saved${kind}${memId ? ' · ' + String(memId).slice(0, 8) : ''}`;
     setTimeout(() => { if (row.parentNode) row.remove(); }, 6000);
   } catch (err) {
+    console.warn('[hivemind:upload] failed', err);
     row.classList.add('error');
-    row.querySelector('.ur-state').textContent = (err?.message || 'failed').slice(0, 60);
+    row.querySelector('.ur-state').textContent = (err?.message || 'failed').slice(0, 80);
   }
 }
 

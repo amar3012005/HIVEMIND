@@ -21,7 +21,8 @@
  *   - Cognition-loop canonicals propagate substantive source tags.
  */
 
-import { recallPersistedMemories } from './persisted-retrieval.js';
+import { recallPersistedMemories, crossClusterEntityBoost } from './persisted-retrieval.js';
+import { ClusterIndex } from './cluster-index.js';
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -450,9 +451,11 @@ export async function recallEnhance({
 
 export class RecallRouter {
   constructor({ persistentMemoryStore, evidenceRetrieval, prisma }) {
-    this.store     = persistentMemoryStore;
-    this.evidence  = evidenceRetrieval;
-    this.prisma    = prisma;
+    this.store        = persistentMemoryStore;
+    this.evidence     = evidenceRetrieval;
+    this.prisma       = prisma;
+    // ClusterIndex injected if prisma available — used for cross-cluster entity boost (Move 3)
+    this.clusterIndex = prisma ? new ClusterIndex({ prisma }) : null;
   }
 
   /**
@@ -522,7 +525,32 @@ export class RecallRouter {
     traceLatency.live     = Date.now() - t2Start;
 
     // ── MERGE ─────────────────────────────────────────────────────────────
-    const rankedMemories = reciprocalRankFusionMemories(memories, inspection);
+    let rankedMemories = reciprocalRankFusionMemories(memories, inspection);
+
+    // Move 3: cross-cluster shared-entity boost (after RRF, before slice)
+    // Fire in try/catch — never block recall on boost failure.
+    if (this.clusterIndex && ctx.orgId) {
+      try {
+        rankedMemories = await crossClusterEntityBoost(rankedMemories, {
+          clusterIndex:   this.clusterIndex,
+          organizationId: ctx.orgId,
+        });
+      } catch (boostErr) {
+        console.warn('[recall-router] cross-cluster boost failed:', boostErr.message);
+      }
+    }
+
+    // Fire recall-count update asynchronously — don't block response
+    if (this.clusterIndex) {
+      const clusterHashes = [...new Set(
+        rankedMemories
+          .map(m => m.synthesisClusterHash || m.synthesis_cluster_hash)
+          .filter(Boolean)
+      )];
+      setImmediate(() => {
+        this.clusterIndex.recordRecall({ clusterHashes }).catch(() => {});
+      });
+    }
 
     // Lineage: link evidence segments back to memories when source_metadata
     // points at the same document.
@@ -550,6 +578,11 @@ export class RecallRouter {
         score: typeof m.score === 'number' ? Number(m.score.toFixed(3)) : null,
         created_at: m.created_at,
         valid_at: m.valid_at,
+        // Expose cross-cluster boost metadata when present (Move 3)
+        ...(m._cross_cluster_boost != null ? {
+          _cross_cluster_boost:   Number(m._cross_cluster_boost.toFixed(3)),
+          _cross_cluster_overlap: m._cross_cluster_overlap || 0,
+        } : {}),
       })),
       evidence: evidenceWithLineage.slice(0, HOP2_DOC_LIMIT).map((e) => ({
         segment_id:       e.segmentId,

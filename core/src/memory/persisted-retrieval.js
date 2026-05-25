@@ -1457,3 +1457,71 @@ export async function recallPersistedMemories(store, {
     },
   };
 }
+
+// ─── Cross-cluster shared-entity boost ────────────────────────────────────────
+/**
+ * Post-rerank pass: after RRF merge, before final slice.
+ *
+ * For each candidate memory carrying a synthesisClusterHash, count how many
+ * OTHER clusters in the same result set share at least one entity key.
+ * Boost up to ×1.30, with an extra +0.05 if any overlapping cluster has
+ * latestConfidence ≥ 0.85.
+ *
+ * Uses ClusterIndex.prisma directly (passed as clusterIndex arg) so we avoid
+ * loading ClusterIndex class here — caller injects it.
+ *
+ * Never throws — errors are silently suppressed so recall is never blocked.
+ *
+ * @param {Array}  memories        Ranked memory array (mutated in-place then re-sorted)
+ * @param {object} opts
+ * @param {object} opts.clusterIndex  ClusterIndex instance
+ * @param {string} opts.organizationId
+ * @returns {Promise<Array>}  Same array, re-sorted by score descending
+ */
+export async function crossClusterEntityBoost(memories, { clusterIndex, organizationId }) {
+  try {
+    const withCluster = memories.filter(m => m.synthesisClusterHash || m.synthesis_cluster_hash);
+    if (withCluster.length < 2) return memories;
+
+    const hashes = [...new Set(withCluster.map(m => m.synthesisClusterHash || m.synthesis_cluster_hash))];
+
+    const rows = await clusterIndex.prisma.clusterIndex.findMany({
+      where: { organizationId, clusterHash: { in: hashes } },
+      select: { clusterHash: true, entityKeys: true, latestConfidence: true },
+    });
+
+    if (rows.length < 2) return memories; // no cross-cluster data
+
+    const byHash = new Map(rows.map(r => [r.clusterHash, r]));
+
+    for (const m of memories) {
+      const ch = m.synthesisClusterHash || m.synthesis_cluster_hash;
+      if (!ch) continue;
+      const my = byHash.get(ch);
+      if (!my || !my.entityKeys?.length) continue;
+      const myEntSet = new Set(my.entityKeys);
+      let overlap = 0;
+      let highConfNeighbor = false;
+      for (const other of rows) {
+        if (other.clusterHash === ch) continue;
+        const shared = other.entityKeys.filter(e => myEntSet.has(e));
+        if (shared.length > 0) {
+          overlap += 1;
+          if ((Number(other.latestConfidence) || 0) >= 0.85) highConfNeighbor = true;
+        }
+      }
+      if (overlap === 0) continue;
+      const boost = 1 + Math.min(0.30, 0.10 * overlap) + (highConfNeighbor ? 0.05 : 0);
+      m.score = (m.score || 0) * boost;
+      m._cross_cluster_boost = boost;
+      m._cross_cluster_overlap = overlap;
+    }
+
+    // Re-sort by score descending after mutation
+    return memories.sort((a, b) => (b.score || 0) - (a.score || 0));
+  } catch (err) {
+    // Non-fatal — never block recall on metric/boost failure
+    console.warn('[persisted-retrieval] crossClusterEntityBoost failed:', err.message);
+    return memories;
+  }
+}

@@ -956,19 +956,23 @@ async function validateAccountDeletion(userId) {
       // then continue with the deletion. If promotion fails (no eligible
       // candidate, DB error), fall back to the legacy 409 guard so we never
       // orphan a multi-member org silently.
-      const heir = await prisma.userOrganization.findFirst({
-        where: {
-          orgId: membership.orgId,
-          userId: { not: userId },
-          // Prefer existing admins; if none, pick any member.
-        },
-        orderBy: [
-          // 'admin' first (string ordering puts admin < member alphabetically)
-          { role: 'asc' },
-          { createdAt: 'asc' },
-        ],
-        select: { userId: true, role: true },
-      });
+      // UserOrganization has no createdAt — use joinedAt (falls back to
+      // invitedAt for never-joined invites). Prefer existing admins first
+      // (string ordering: 'admin' < 'member'), then longest-tenured member.
+      let heir = null;
+      try {
+        heir = await prisma.userOrganization.findFirst({
+          where: { orgId: membership.orgId, userId: { not: userId } },
+          orderBy: [
+            { role: 'asc' },
+            { joinedAt: { sort: 'asc', nulls: 'last' } },
+            { invitedAt: 'asc' },
+          ],
+          select: { userId: true, role: true },
+        });
+      } catch (heirErr) {
+        console.error('[account-delete] ✗ Heir lookup failed:', heirErr.message);
+      }
       if (!heir) {
         console.warn('[account-delete] ✗ BLOCKED — sole owner with members but no heir found:', membership.org?.name);
         return {

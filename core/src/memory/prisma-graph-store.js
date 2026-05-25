@@ -516,25 +516,32 @@ export class PrismaGraphStore {
     return records.map(mapRelationshipRecord);
   }
 
-  async getRelatedMemories(memoryId, { maxDepth = 2, minConfidence = 0, user_id, org_id, project, scope = 'personal' } = {}) {
+  async getRelatedMemories(memoryId, { maxDepth = 2, minConfidence = 0, relationship = null, user_id, org_id, project, scope = 'personal' } = {}) {
     const visitedMemoryIds = new Set([memoryId]);
     const visitedEdgeIds = new Set();
     const collected = [];
     let frontier = new Set([memoryId]);
 
+    const normalizedRelType = relationship
+      ? (normalizeRelationshipType(relationship) || relationship)
+      : null;
+
     for (let depth = 0; depth < maxDepth && frontier.size > 0; depth += 1) {
       const frontierIds = Array.from(frontier);
 
+      const where = {
+        confidence: { gte: minConfidence },
+        OR: [
+          { fromId: { in: frontierIds } },
+          { toId: { in: frontierIds } }
+        ],
+        fromMemory: scopedMemoryWhere({ user_id, org_id, project, scope }),
+        toMemory: scopedMemoryWhere({ user_id, org_id, project, scope })
+      };
+      if (normalizedRelType) where.type = normalizedRelType;
+
       const records = await this.client.relationship.findMany({
-        where: {
-          confidence: { gte: minConfidence },
-          OR: [
-            { fromId: { in: frontierIds } },
-            { toId: { in: frontierIds } }
-          ],
-          fromMemory: scopedMemoryWhere({ user_id, org_id, project, scope }),
-          toMemory: scopedMemoryWhere({ user_id, org_id, project, scope })
-        },
+        where,
         orderBy: { createdAt: 'desc' }
       });
 

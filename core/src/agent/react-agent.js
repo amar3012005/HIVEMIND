@@ -372,20 +372,24 @@ function buildSystemPrompt({ assistantName, orgName, today }) {
 // ── Groq tool-calling LLM call ───────────────────────────────────────────────
 
 async function callLLM({ messages, tools, model, apiKey, temperature = 0.1, signal }) {
+  const hasTools = Array.isArray(tools) && tools.length > 0;
+  const body = {
+    model,
+    messages,
+    temperature,
+  };
+  if (hasTools) {
+    body.tools = tools;
+    body.tool_choice = 'auto';
+    body.parallel_tool_calls = true;
+  }
   const resp = await fetch(GROQ_URL, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      model,
-      messages,
-      tools,
-      tool_choice: 'auto',
-      temperature,
-      parallel_tool_calls: true,
-    }),
+    body: JSON.stringify(body),
     signal,
   });
   if (!resp.ok) {
@@ -631,13 +635,16 @@ something new.`;
     }
 
     // Force a final answer if loop exhausted without `finish`.
+    // Do NOT pass `tools` here — re-offering the tool list invites the model
+    // to emit more tool_calls instead of answering, defeating the purpose of
+    // the exhaustion fallback.
     if (!finalText) {
       const finalCall = await callLLM({
         messages: [
           ...compressIfNeeded(messages),
           { role: 'system', content: 'STOP calling tools. Using the observations so far, write your final answer to the user now.' },
         ],
-        tools: TOOL_SCHEMAS,
+        tools: undefined,
         model,
         apiKey,
         signal: abortCtrl.signal,

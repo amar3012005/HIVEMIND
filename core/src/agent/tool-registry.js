@@ -30,6 +30,7 @@ export const TOOL_SCHEMAS = [
           tags: { type: 'array', items: { type: 'string' }, description: 'Optional tag filters.' },
           source_type: { type: 'string', enum: ['text', 'code', 'conversation', 'documentation', 'decision'] },
           valid_at: { type: 'string', description: 'ISO timestamp for bi-temporal time-travel.' },
+          include_live: { type: 'boolean', default: false, description: 'Force live workspace lookup (Gmail/Drive/Calendar) even if memory layer does not hint at it.' },
         },
         required: ['query'],
       },
@@ -158,6 +159,7 @@ export const TOOL_SCHEMAS = [
           query: { type: 'string' },
           valid_at: { type: 'string', description: 'ISO timestamp.' },
           tags: { type: 'array', items: { type: 'string' }, description: 'Optional tag filter (connector + marker tags).' },
+          mode: { type: 'string', enum: ['quick', 'panorama', 'insight'], default: 'quick' },
         },
         required: ['query', 'valid_at'],
       },
@@ -176,6 +178,7 @@ export const TOOL_SCHEMAS = [
           from: { type: 'string' },
           to: { type: 'string' },
           tags: { type: 'array', items: { type: 'string' } },
+          mode: { type: 'string', enum: ['quick', 'panorama', 'insight'], default: 'quick' },
         },
         required: ['query', 'from', 'to'],
       },
@@ -343,6 +346,7 @@ const TOOL_HANDLERS = {
     });
 
     const result = await router.recall(args.query, {
+      mode:           args.mode || 'quick',
       limit:          args.limit,
       tags:           args.tags,
       source_type:    args.source_type,
@@ -530,6 +534,7 @@ const TOOL_HANDLERS = {
     }
     const related = await ctx.persistentMemoryStore.getRelatedMemories(args.memory_id, {
       maxDepth: args.depth || 2,
+      relationship: args.relationship && args.relationship !== 'all' ? args.relationship : null,
       user_id: ctx.userId,
       org_id: ctx.orgId,
     });
@@ -539,21 +544,6 @@ const TOOL_HANDLERS = {
       memories: (related || []).slice(0, 30),
       related: (related || []).slice(0, 30),
     };
-  },
-
-  async _hivemind_traverse_graph_OLD_REMOVE(args, ctx) {
-    // legacy — keep for one release in case something still calls it.
-    if (!ctx.persistentMemoryStore?.traverseGraph) {
-      return { error: 'graph traversal unavailable' };
-    }
-    const nodes = await ctx.persistentMemoryStore.traverseGraph({
-      memory_id: args.memory_id,
-      depth: args.depth || 2,
-      relationship: args.relationship === 'all' ? null : args.relationship,
-      user_id: ctx.userId,
-      org_id: ctx.orgId,
-    });
-    return { count: nodes.length, nodes: nodes.slice(0, 30) };
   },
 
   async hivemind_at(args, ctx) {
@@ -569,6 +559,7 @@ const TOOL_HANDLERS = {
         valid_at: valid_at.toISOString(),
         tags: Array.isArray(args.tags) && args.tags.length > 0 ? args.tags : undefined,
         limit: 15,
+        mode: args.mode || 'quick',
       },
       ctx
     );
@@ -578,11 +569,30 @@ const TOOL_HANDLERS = {
     const from = new Date(args.from);
     const to = new Date(args.to);
     const tags = Array.isArray(args.tags) && args.tags.length > 0 ? args.tags : undefined;
+    const mode = args.mode || 'quick';
     const [a, b] = await Promise.all([
-      TOOL_HANDLERS.hivemind_recall({ query: args.query, valid_at: from.toISOString(), tags, limit: 10 }, ctx),
-      TOOL_HANDLERS.hivemind_recall({ query: args.query, valid_at: to.toISOString(), tags, limit: 10 }, ctx),
+      TOOL_HANDLERS.hivemind_recall({ query: args.query, valid_at: from.toISOString(), tags, limit: 10, mode }, ctx),
+      TOOL_HANDLERS.hivemind_recall({ query: args.query, valid_at: to.toISOString(), tags, limit: 10, mode }, ctx),
     ]);
-    return { from: a, to: b };
+    // Compute structured delta — added/removed/persisted by memory id.
+    const fromIds = new Set((a.memories || []).map(m => m.id));
+    const toIds   = new Set((b.memories || []).map(m => m.id));
+    const added    = (b.memories || []).filter(m => !fromIds.has(m.id));
+    const removed  = (a.memories || []).filter(m => !toIds.has(m.id));
+    const persisted = (b.memories || []).filter(m => fromIds.has(m.id));
+    return {
+      query: args.query,
+      from_date: args.from,
+      to_date: args.to,
+      added_count: added.length,
+      removed_count: removed.length,
+      persisted_count: persisted.length,
+      added,
+      removed,
+      persisted,
+      from: a,
+      to: b,
+    };
   },
 
   async hivemind_timeline(args, ctx) {

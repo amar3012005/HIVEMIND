@@ -17014,8 +17014,16 @@ exit \$RC
                 // record, not a fact-claim, and treating it as one was
                 // producing the 100+ false-positive contradiction edges.
                 try {
+                  // Skip auto-save when agent already saved/logged an explicit
+                  // memory this turn. Match on tool name + "saved"/"logged"
+                  // prefix in summary — covers both hivemind_save_memory and
+                  // hivemind_log_decision. Permissive on the id suffix because
+                  // older summaries occasionally omitted it.
+                  const SAVE_TOOLS = new Set(['hivemind_save_memory', 'hivemind_log_decision']);
                   const alreadySaved = Array.isArray(result.steps)
-                    && result.steps.some(s => s?.tool === 'hivemind_save_memory' && /saved\s+[a-f0-9]{4,}/.test(String(s?.result_summary || '')));
+                    && result.steps.some(s =>
+                      SAVE_TOOLS.has(s?.tool) && /^(saved|logged)\b/i.test(String(s?.result_summary || '').trim())
+                    );
                   if (persistentMemoryEngine?.ingestMemory && result.response && !alreadySaved) {
                     const convoPayload = {
                       title: `Chat turn — ${new Date().toISOString().slice(0, 10)}`,

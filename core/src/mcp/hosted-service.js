@@ -2290,12 +2290,13 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
           } catch { /* policy lookup best-effort */ }
         }
 
-        // Smart save: server now runs semantic-recall + triple-operator
-        // enrichment in the async background block (post-202), so we can
-        // keep smartIngest:true without blocking the response.
-        // Result: auto Update/Extend/Derive edges build against existing
-        // memories on every save — no manual relationship arg needed.
-        const saveResp = await apiClient.post('/api/memories', {
+        // Smart save (sync): the MCP caller expects an actual memory id +
+        // success in the tool response — returning a 202/job_id breaks
+        // chained tool calls that read the memory back. Use sync=true so
+        // smart-ingest + entity_co_mention + relationship edges fire
+        // before we return. Wall time ~3-8s on the canonical pipeline,
+        // acceptable for an interactive save.
+        const saveResp = await apiClient.post('/api/memories?sync=true', {
           title,
           content,
           memory_type: args.source_type === 'decision' ? 'decision' : 'fact',
@@ -2309,6 +2310,7 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
           user_id: userId,
           org_id: orgId,
           smartIngest: true,
+          sync: true,
           ...SCOPE_FIELDS,
           __bypass_membership: isMaster && resolvedProjectId ? true : undefined,
         });

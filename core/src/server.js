@@ -4013,7 +4013,9 @@ exit \$RC
   // metaParameter row (same store loadOAuthClientRegistry reads from).
   if (pathname === '/oauth/register' && req.method === 'POST') {
     try {
-      const meta = (typeof body === 'object' && body) ? body : {};
+      // /oauth/register runs before the main body-parse path; parse inline.
+      const reqBody = await parseBody(req).catch(() => ({}));
+      const meta = (typeof reqBody === 'object' && reqBody) ? reqBody : {};
       const redirectUris = Array.isArray(meta.redirect_uris) ? meta.redirect_uris.filter(u => typeof u === 'string' && u.length > 0) : [];
       if (redirectUris.length === 0) {
         return jsonResponse(res, { error: 'invalid_redirect_uri', error_description: 'redirect_uris[] required' }, 400);

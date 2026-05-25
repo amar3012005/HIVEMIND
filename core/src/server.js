@@ -6431,6 +6431,133 @@ const server = http.createServer(async (req, res) => {
             return jsonResponse(res, { error: err.message }, 500);
           }
 
+        case '/api/synthesis': {
+          // GET — browse synthesis memories for the calling user's org.
+          // Query params: ?type=canonical-fact|synthesis-bridge|all (default all)
+          //               ?limit=50  ?offset=0
+          // Returns synthesis memories sorted by revision DESC, confidence DESC, updated_at DESC.
+          // Each entry includes top-3 evidence snippets fetched from source memories.
+          if (req.method !== 'GET') break;
+          try {
+            const typeFilter = url.searchParams.get('type') || 'all';
+            const limit      = Math.min(200, Math.max(1, parseInt(url.searchParams.get('limit')  || '50', 10)));
+            const offset     = Math.max(0,              parseInt(url.searchParams.get('offset') || '0',  10));
+
+            // Build tag filter for type
+            const tagFilter = typeFilter === 'canonical-fact'
+              ? { hasSome: ['synthesis:canonical'] }
+              : typeFilter === 'synthesis-bridge'
+                ? { hasSome: ['synthesis:bridge'] }
+                : { hasSome: ['synthesis:canonical', 'synthesis:bridge'] };
+
+            // Fetch synthesis memories: isLatest=true, clusterHash NOT NULL, tenant-scoped
+            const [rows, total] = await Promise.all([
+              prisma.memory.findMany({
+                where: {
+                  orgId,
+                  userId,
+                  isLatest:  true,
+                  deletedAt: null,
+                  synthesisClusterHash: { not: null },
+                  tags: tagFilter,
+                },
+                orderBy: [
+                  { synthesisRevision:    'desc' },
+                  { synthesisConfidence:  'desc' },
+                  { updatedAt:            'desc' },
+                ],
+                take:   limit,
+                skip:   offset,
+                select: {
+                  id: true, title: true, content: true, tags: true,
+                  createdAt: true, updatedAt: true,
+                  synthesisConfidence: true,
+                  synthesisRevision: true,
+                  synthesisClusterHash: true,
+                  synthesisEvidenceIds: true,
+                },
+              }),
+              prisma.memory.count({
+                where: {
+                  orgId,
+                  userId,
+                  isLatest:  true,
+                  deletedAt: null,
+                  synthesisClusterHash: { not: null },
+                  tags: tagFilter,
+                },
+              }),
+            ]);
+
+            // Count by type
+            const [canonCount, bridgeCount] = await Promise.all([
+              prisma.memory.count({
+                where: { orgId, userId, isLatest: true, deletedAt: null,
+                  synthesisClusterHash: { not: null }, tags: { hasSome: ['synthesis:canonical'] } },
+              }),
+              prisma.memory.count({
+                where: { orgId, userId, isLatest: true, deletedAt: null,
+                  synthesisClusterHash: { not: null }, tags: { hasSome: ['synthesis:bridge'] } },
+              }),
+            ]);
+
+            // Fetch top-3 evidence snippets for each synthesis memory
+            const evidenceCache = new Map();
+            const allEvidenceIds = rows.flatMap(r => (r.synthesisEvidenceIds || []).slice(0, 3));
+            const uniqueIds = [...new Set(allEvidenceIds)];
+            if (uniqueIds.length > 0) {
+              const evidenceRows = await prisma.memory.findMany({
+                where: { id: { in: uniqueIds }, deletedAt: null },
+                select: { id: true, title: true, content: true, createdAt: true },
+              });
+              for (const ev of evidenceRows) evidenceCache.set(ev.id, ev);
+            }
+
+            const getSynthType = (tags) => {
+              if ((tags || []).includes('synthesis:canonical')) return 'canonical-fact';
+              if ((tags || []).includes('synthesis:bridge'))    return 'synthesis-bridge';
+              return 'unknown';
+            };
+
+            const synthesis = rows.map(r => {
+              const evidenceIds = (r.synthesisEvidenceIds || []).slice(0, 3);
+              const evidenceRecent = evidenceIds
+                .map(eid => evidenceCache.get(eid))
+                .filter(Boolean)
+                .map(ev => ({
+                  id:         ev.id,
+                  title:      ev.title || '',
+                  snippet:    (ev.content || '').slice(0, 200),
+                  created_at: ev.createdAt,
+                }));
+              return {
+                id:             r.id,
+                type:           getSynthType(r.tags),
+                claim:          r.content || '',
+                confidence:     r.synthesisConfidence ?? null,
+                revision:       r.synthesisRevision   ?? 1,
+                evidence_count: (r.synthesisEvidenceIds || []).length,
+                cluster_hash:   r.synthesisClusterHash,
+                created_at:     r.createdAt,
+                updated_at:     r.updatedAt,
+                evidence_recent: evidenceRecent,
+              };
+            });
+
+            return jsonResponse(res, {
+              synthesis,
+              total,
+              by_type: {
+                'canonical-fact':   canonCount,
+                'synthesis-bridge': bridgeCount,
+              },
+            });
+          } catch (err) {
+            console.error('[/api/synthesis] failed:', err.message);
+            return jsonResponse(res, { error: err.message }, 500);
+          }
+        }
+
         case '/api/admin/org/policy': {
           // GET: returns the org's default_project_policy + meta.
           // PUT: admin-only setter (requires org owner/admin role).

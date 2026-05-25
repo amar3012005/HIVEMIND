@@ -69,12 +69,21 @@ async function main() {
                       : tags.includes('synthesis:bridge')   ? 'synthesis-bridge'
                       : 'unknown';
 
-    // Extract entity keys from tags (entity:* tags)
-    const entityKeys = tags.filter(t => t.startsWith('entity:')).map(t => t.slice(7));
-
-    // Top topic tags
+    // Top topic tags (non-system)
     const SYS_TAG_RE = /^(file:|fn:|page:|heading:|upload:|doc-hash:|promoted-from|synthesized|topic:|cognition-loop|synthesis:|knowledge-base$|document$|document-summary$|entity:|time:|ts:|section:|chat$|talk-to-hive$)/i;
     const topTags = tags.filter(t => !SYS_TAG_RE.test(t)).slice(0, 10);
+
+    // Entity keys: prefer entity:* tags; fall back to proper-noun-like topic tags.
+    // Synthesis memories often carry named entities as plain tags (DaVinci, Uwe, CNJE…)
+    // because entity co-mention LLM stamps entity:* on raw memories, not synthesis outputs.
+    const entityFromEntityTags = tags.filter(t => t.startsWith('entity:')).map(t => t.slice(7));
+    const entityFromTopicTags  = topTags.filter(t =>
+      // Likely a named entity: starts with uppercase, or all-caps acronym, or quoted name
+      /^[A-Z]/.test(t) || /^[A-Z0-9]{2,}$/.test(t)
+    );
+    const entityKeys = entityFromEntityTags.length > 0
+      ? entityFromEntityTags
+      : [...new Set(entityFromTopicTags)].slice(0, 15);
 
     const evidenceCount = (m.synthesisEvidenceIds || []).length;
 

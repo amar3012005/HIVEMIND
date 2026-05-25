@@ -334,7 +334,17 @@ function polishMemory(m, opts = {}) {
     new_name: meta.new_name || undefined,
     test_cases: Array.isArray(meta.test_cases) ? meta.test_cases : undefined,
     coverage_pct: typeof meta.coverage_pct === 'number' ? meta.coverage_pct : undefined,
-    parent_memory_id: meta.parent_memory_id || undefined
+    parent_memory_id: meta.parent_memory_id || undefined,
+    // Cognition layer fields — pass through so MCP clients (Claude Desktop,
+    // agents) can prefer synthesis-tier rows and walk evidence chains.
+    ...(m.synthesis_confidence    != null ? { synthesis_confidence:    m.synthesis_confidence    } : {}),
+    ...(m.synthesis_revision      != null ? { synthesis_revision:      m.synthesis_revision      } : {}),
+    ...(m.synthesis_cluster_hash         ? { synthesis_cluster_hash:  m.synthesis_cluster_hash  } : {}),
+    ...(Array.isArray(m.synthesis_evidence_ids) && m.synthesis_evidence_ids.length
+        ? { synthesis_evidence_ids: m.synthesis_evidence_ids } : {}),
+    ...(m._cross_cluster_boost   != null ? { _cross_cluster_boost:    m._cross_cluster_boost    } : {}),
+    ...(m._cross_cluster_overlap != null ? { _cross_cluster_overlap:  m._cross_cluster_overlap  } : {}),
+    ...(m._synthesis_boosted             ? { _synthesis_boosted:      true                       } : {}),
   };
 }
 
@@ -2459,13 +2469,57 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
               }
             }
 
+            // Cognition-layer expansion: every synthesis row in the result
+            // gets its top-4 evidence memories pulled so the caller sees the
+            // curated claim AND its source rows. Bypasses additional LLM
+            // calls — pure DB lookup against synthesis_evidence_ids.
+            let synthesisChains = [];
+            try {
+              const { getPrismaClient } = await import('../db/prisma.js');
+              const prismaClient = getPrismaClient();
+              if (prismaClient) {
+                const synthRows = memories.filter(m => {
+                  const tags = m.tags || [];
+                  return m.source_type === 'canonical-fact'
+                      || m.source_type === 'synthesis-bridge'
+                      || tags.includes('synthesis:canonical')
+                      || tags.includes('synthesis:bridge');
+                });
+                for (const synth of synthRows.slice(0, 5)) {
+                  const evIds = synth.synthesis_evidence_ids || [];
+                  if (!evIds.length) continue;
+                  const rows = await prismaClient.memory.findMany({
+                    where: { id: { in: evIds.slice(0, 4) }, deletedAt: null },
+                    select: { id: true, title: true, content: true, tags: true, createdAt: true },
+                  });
+                  synthesisChains.push({
+                    synthesis_id: synth.id,
+                    synthesis_title: synth.title,
+                    synthesis_confidence: synth.synthesis_confidence,
+                    synthesis_revision: synth.synthesis_revision,
+                    evidence: rows.map(r => ({
+                      id: r.id,
+                      title: r.title,
+                      content: (r.content || '').slice(0, 240),
+                      tags: r.tags || [],
+                      created_at: r.createdAt,
+                    })),
+                  });
+                }
+              }
+            } catch (chainErr) {
+              console.warn('[hivemind_recall/insight] synthesis chain expansion failed:', chainErr.message);
+            }
+
             return formatToolContent({
               ...base,
               entities,
               relationship_chains: chains.slice(0, 10),
+              synthesis_evidence_chains: synthesisChains,
               insight_metadata: {
                 entity_count: entities.length,
                 chain_count: chains.length,
+                synthesis_chain_count: synthesisChains.length,
                 memory_count: memories.length,
               },
             });

@@ -1909,14 +1909,12 @@ OUTPUT JSON only.`;
 
     const prompt = `You are a multilingual memory graph linker. Given a NEW MEMORY and CANDIDATE memories, do FIVE things in ONE pass:
 
-  1. extract proper-noun entities from the new memory (people, orgs, products, projects, places, locations). Work in ANY language — Spanish, Hindi, Tamil, German, etc. — return entities in their original form.
-     CRITICAL: ALWAYS extract every proper-noun entity you can identify, regardless of whether candidates share them. Entity extraction is INDEPENDENT of link generation. An empty entities array is only valid when the new memory truly contains zero proper nouns. Examples that MUST yield entities: "Vinil Haridasan from Amsterdam" → ["Vinil_Haridasan","Amsterdam"]; "Met Rama at SAP HQ" → ["Rama","SAP"]; "DaVinci AI integration with CNJE" → ["DaVinci_AI","CNJE"].
+  1. extract proper-noun entities from the new memory (people, orgs, products, projects, places). Work in ANY language — Spanish, Hindi, Tamil, German, etc. — return entities in their original form.
   2. extract TEMPORAL anchors (day-of-week, time-of-day, relative refs like "tomorrow"/"mañana"/"morgen", absolute dates, recurring patterns). Resolve relatives against today=${todayIso}.
   3. classify the new memory's TYPE (decision | preference | fact | event | goal | lesson | relationship)
   4. for EACH candidate that shares an entity OR temporal anchor OR clear semantic continuity, emit ONE typed edge.
      Multiple candidates can each get DIFFERENT edge types simultaneously
      (e.g. Updates A, Extends B, Mentions C in the same save).
-     If NO candidate shares anything, emit links=[]. Entities still go in entities[].
   5. when 2+ candidates together inform a synthesis claim made in the new
      memory, additionally emit a Derives edge per source candidate. Use
      Derives ONLY for genuine multi-source synthesis, not for plain
@@ -2013,46 +2011,8 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
       return;
     }
 
-    let entities = Array.isArray(parsed?.entities) ? parsed.entities.map(String).slice(0, 12) : [];
+    const entities = Array.isArray(parsed?.entities) ? parsed.entities.map(String).slice(0, 12) : [];
     const links = Array.isArray(parsed?.links) ? parsed.links : [];
-
-    // Deterministic NER fallback. LLMs occasionally return entities=[] for
-    // short content even when proper nouns are obviously present (observed
-    // on llama-3.3-70b for 80-char MCP saves like "Vinil Haridasan from
-    // Amsterdam ..."). Extract CapCase tokens / ALLCAPS acronyms from the
-    // content+title as a safety net so the graph never starts entity-less.
-    if (entities.length === 0) {
-      const STOP = new Set([
-        'I','A','An','The','My','Our','Your','His','Her','Their','This','That','These','Those',
-        'Today','Tomorrow','Yesterday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday',
-        'January','February','March','April','May','June','July','August','September','October','November','December',
-        'AI','API','URL','HTTP','HTTPS','UTC','GMT','PM','AM','OK','TBD','TODO','FYI','CEO','CTO','CFO','VP','HR','IT',
-      ]);
-      const text = `${baseMemory.title || ''} ${content}`;
-      const matches = new Set();
-      // Sequences of CapCase tokens (Vinil Haridasan, SAP Labs, DaVinci AI)
-      const reSeq = /\b([A-Z][a-zA-Z0-9]+(?:[\s\-][A-Z][a-zA-Z0-9]+){0,3})\b/g;
-      let m;
-      while ((m = reSeq.exec(text)) !== null) {
-        const tok = m[1].trim();
-        if (tok.length < 2 || tok.length > 60) continue;
-        // Drop pure-stop-word hits
-        const parts = tok.split(/[\s\-]+/);
-        if (parts.every(p => STOP.has(p))) continue;
-        matches.add(tok);
-      }
-      // ALLCAPS acronyms (CNJE, HIVEMIND, BLAIQ)
-      const reAcr = /\b([A-Z][A-Z0-9]{2,})\b/g;
-      while ((m = reAcr.exec(text)) !== null) {
-        const tok = m[1];
-        if (STOP.has(tok)) continue;
-        matches.add(tok);
-      }
-      entities = [...matches].slice(0, 12);
-      if (entities.length > 0) {
-        console.log(`[entity-co-mention] LLM returned empty entities — regex fallback found: [${entities.join(',')}]`);
-      }
-    }
     const inferredType = (typeof parsed?.memory_type === 'string' && parsed.memory_type.trim()) || null;
     const temporal = (parsed && typeof parsed.temporal === 'object' && parsed.temporal) || {};
 

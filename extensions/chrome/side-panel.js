@@ -1031,10 +1031,14 @@ async function handleFileUpload(file) {
   list.scrollIntoView({ behavior: 'smooth', block: 'end' });
   row.querySelector('.ur-x').addEventListener('click', () => row.remove());
 
-  // NOW fetch config; if not signed-in, surface in the row instead of toast.
-  let cfg;
+  // NOW fetch config from chrome.storage.local (background SW also has
+  // a getConfig() helper but it's not in the side-panel scope; reading
+  // storage directly is the simpler + race-free path here).
+  let cfg = { apiKey: '', apiBase: 'https://core.hivemind.davinciai.eu:8050' };
   try {
-    cfg = await getConfig();
+    const stored = await chrome.storage.local.get(['apiKey', 'apiBase']);
+    cfg.apiKey = stored.apiKey || '';
+    cfg.apiBase = stored.apiBase || cfg.apiBase;
   } catch (e) {
     row.classList.add('error');
     row.querySelector('.ur-state').textContent = 'config error: ' + (e?.message || e);

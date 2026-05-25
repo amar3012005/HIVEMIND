@@ -4023,7 +4023,18 @@ exit \$RC
   // rather than an SVG approximation. Cached aggressively.
   if (pathname === '/oauth/logo.png' && req.method === 'GET') {
     try {
-      const logoPath = path.join(process.cwd(), 'extensions', 'chrome', 'Hivemind_extension.png');
+      // Container bind-mounts only /opt/HIVEMIND/core → /app, so the brand
+      // asset is copied into core/public/brand/ for in-container access.
+      // Fallback to repo root extensions/chrome/ when running outside docker.
+      const candidates = [
+        path.join(process.cwd(), 'public', 'brand', 'hivemind-logo.png'),
+        path.join(process.cwd(), 'core', 'public', 'brand', 'hivemind-logo.png'),
+        path.join(process.cwd(), 'extensions', 'chrome', 'Hivemind_extension.png'),
+        path.join(process.cwd(), '..', 'extensions', 'chrome', 'Hivemind_extension.png'),
+      ];
+      let logoPath = null;
+      for (const p of candidates) { if (fs.existsSync(p)) { logoPath = p; break; } }
+      if (!logoPath) throw new Error(`logo not found in: ${candidates.join(', ')}`);
       const png = fs.readFileSync(logoPath);
       res.writeHead(200, {
         'Content-Type': 'image/png',

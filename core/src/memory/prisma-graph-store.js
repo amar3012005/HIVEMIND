@@ -77,7 +77,14 @@ function mapMemoryRecord(record) {
       ...latestVersionMetadata,
       ...sourceMetadataPayload,
       ...codeMetadataPayload
-    }
+    },
+    // Phase 1+2+3 synthesis fields — required by recall-router crossClusterEntityBoost
+    // + recordRecall. Missing here meant vector-path memories were dropped from
+    // the cross-cluster boost set and cluster_index.recall_count_30d stayed at 0.
+    synthesis_confidence:    record.synthesisConfidence != null ? Number(record.synthesisConfidence) : null,
+    synthesis_cluster_hash:  record.synthesisClusterHash || null,
+    synthesis_revision:      record.synthesisRevision != null ? Number(record.synthesisRevision) : 1,
+    synthesis_evidence_ids:  record.synthesisEvidenceIds || []
   };
 }
 

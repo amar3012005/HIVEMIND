@@ -4017,6 +4017,27 @@ exit \$RC
     return OAUTH_BASE_URL;
   })();
 
+  // ── HIVEMIND logo asset for OAuth pages ────────────────────────
+  // Streams the actual brand PNG (extensions/chrome/Hivemind_extension.png)
+  // so Claude/ChatGPT/Perplexity OAuth consent pages render the real logo
+  // rather than an SVG approximation. Cached aggressively.
+  if (pathname === '/oauth/logo.png' && req.method === 'GET') {
+    try {
+      const logoPath = path.join(process.cwd(), 'extensions', 'chrome', 'Hivemind_extension.png');
+      const png = fs.readFileSync(logoPath);
+      res.writeHead(200, {
+        'Content-Type': 'image/png',
+        'Cache-Control': 'public, max-age=86400, immutable',
+        'Content-Length': png.length,
+      });
+      return res.end(png);
+    } catch (err) {
+      console.warn('[oauth/logo] missing PNG, falling back to 404:', err.message);
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      return res.end('logo not found');
+    }
+  }
+
   if (pathname === '/.well-known/oauth-protected-resource' && req.method === 'GET') {
     return jsonResponse(res, {
       resource: _discoveryBase,
@@ -4243,13 +4264,13 @@ exit \$RC
   body{font-family:'Space Grotesk',system-ui,-apple-system,sans-serif;background:#fafaf6;color:#0a0a0a;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}
   .card{background:#fff;border:1px solid #e3e0db;border-radius:18px;padding:2.2rem;max-width:480px;width:92%;box-shadow:0 20px 60px rgba(10,10,10,.08)}
   .brand{display:flex;flex-direction:column;align-items:center;text-align:center;margin-bottom:1.4rem;padding-bottom:1.2rem;border-bottom:1px solid #f3f1ec}
-  .brand svg{width:72px;height:72px;margin-bottom:.6rem}
+  .brand img,.brand svg{width:72px;height:72px;margin-bottom:.6rem}
   .brand-title{font-size:.78rem;font-weight:700;letter-spacing:.18em;color:#737373;text-transform:uppercase}
   .header{display:flex;align-items:center;justify-content:center;gap:.9rem;margin-bottom:1.2rem}
   .app-icon{width:44px;height:44px;background:#f3f1ec;border-radius:10px;display:flex;align-items:center;justify-content:center;font-weight:700;color:#737373;font-size:1.1rem}
   .sync-icon{color:#a3a3a3;font-size:1.2rem}
   .hm-icon{width:44px;height:44px;border-radius:10px;background:#fafaf6;border:1px solid #e3e0db;display:flex;align-items:center;justify-content:center;overflow:hidden}
-  .hm-icon svg{width:38px;height:38px}
+  .hm-icon img,.hm-icon svg{width:38px;height:38px}
   h1{font-size:1.3rem;margin:0 0 .3rem;color:#0f172a}
   p{font-size:0.95rem;color:#64748b;line-height:1.5;margin:0 0 1.2rem}
   .permissions-box{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:1rem;margin-bottom:1.5rem}
@@ -4269,13 +4290,13 @@ exit \$RC
 </style></head><body>
 <div class="card">
   <div class="brand">
-    ${HIVEMIND_LOGO_SVG}
+    <img src="/oauth/logo.png" alt="HIVEMIND" width="72" height="72" style="border-radius:14px;object-fit:cover">
     <div class="brand-title">HIVEMIND</div>
   </div>
   <div class="header">
     <div class="app-icon">${sanitizeHtml(client.client_name[0])}</div>
     <div class="sync-icon">⇌</div>
-    <div class="hm-icon">${HIVEMIND_LOGO_SVG}</div>
+    <div class="hm-icon"><img src="/oauth/logo.png" alt="HIVEMIND" width="38" height="38" style="border-radius:8px;object-fit:cover"></div>
   </div>
   <h1>Connect ${sanitizeHtml(client.client_name)}</h1>
   <p>Authorize <strong>${sanitizeHtml(client.client_name)}</strong> to securely access your HiveMind account details and tools.</p>
@@ -4357,7 +4378,7 @@ exit \$RC
   body{font-family:'Space Grotesk',system-ui,-apple-system,sans-serif;background:#fafaf6;color:#0a0a0a;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}
   .card{background:#fff;border:1px solid #e3e0db;border-radius:18px;padding:2.2rem;max-width:420px;width:92%;box-shadow:0 20px 60px rgba(10,10,10,.08)}
   .brand{display:flex;flex-direction:column;align-items:center;text-align:center;margin-bottom:1.4rem;padding-bottom:1.2rem;border-bottom:1px solid #f3f1ec}
-  .brand svg{width:72px;height:72px;margin-bottom:.6rem}
+  .brand img,.brand svg{width:72px;height:72px;margin-bottom:.6rem}
   .brand-title{font-size:.78rem;font-weight:700;letter-spacing:.18em;color:#737373;text-transform:uppercase}
   h1{font-size:1.2rem;margin:0 0 .4rem;color:#0a0a0a}
   p{font-size:.9rem;color:#737373;margin:0 0 1rem}
@@ -4370,7 +4391,7 @@ exit \$RC
 </style></head><body>
 <div class="card">
   <div class="brand">
-    ${HIVEMIND_LOGO_SVG}
+    <img src="/oauth/logo.png" alt="HIVEMIND" width="72" height="72" style="border-radius:14px;object-fit:cover">
     <div class="brand-title">HIVEMIND</div>
   </div>
   <h1>Sign in to HiveMind</h1>

@@ -762,6 +762,32 @@ Output JSON only:
         },
       }).catch(err => this.logger.warn(`[cognition] reaffirm update failed: ${err.message}`));
 
+      // Inherit entity:/project:/person:/time:/topic: tags from the NEW evidence
+      // memories so reaffirmation grows the synthesis' entity coverage over time.
+      try {
+        const newEvidence = parsed.evidence_to_add || [];
+        if (newEvidence.length > 0) {
+          const evidenceMems = await this.prisma.memory.findMany({
+            where: { id: { in: newEvidence.slice(0, 20) } },
+            select: { tags: true },
+          });
+          const INHERITED_PREFIXES = ['entity:', 'project:', 'person:', 'time:', 'topic:'];
+          const inherited = new Set();
+          for (const em of evidenceMems) {
+            for (const t of (em.tags || [])) {
+              if (typeof t === 'string' && INHERITED_PREFIXES.some(p => t.startsWith(p))) inherited.add(t);
+            }
+          }
+          if (inherited.size > 0) {
+            const cur = await this.prisma.memory.findUnique({ where: { id: existing.id }, select: { tags: true } });
+            const mergedTags = Array.from(new Set([...(cur?.tags || []), ...inherited]));
+            await this.prisma.memory.update({ where: { id: existing.id }, data: { tags: mergedTags } });
+          }
+        }
+      } catch (inheritErr) {
+        this.logger.warn(`[cognition] REAFFIRM entity-tag inheritance failed: ${inheritErr.message}`);
+      }
+
       // Update cluster-index with latest revision state
       await this.clusterIndex.upsertOnSynthesis({
         organizationId:    orgId,
@@ -847,6 +873,32 @@ Output JSON only:
               synthesisRevision:    newRev,
             },
           }).catch(err => this.logger.warn(`[cognition] extend patch cols failed: ${err.message}`));
+
+          // Inherit entity:/project:/person:/time:/topic: tags from evidence —
+          // same logic as fresh-synthesis path. Drives cluster_index.entity_keys.
+          try {
+            const evidenceMems = await this.prisma.memory.findMany({
+              where: { id: { in: evidenceIds.slice(0, 20) } },
+              select: { tags: true },
+            });
+            const INHERITED_PREFIXES = ['entity:', 'project:', 'person:', 'time:', 'topic:'];
+            const inherited = new Set();
+            for (const em of evidenceMems) {
+              for (const t of (em.tags || [])) {
+                if (typeof t === 'string' && INHERITED_PREFIXES.some(p => t.startsWith(p))) inherited.add(t);
+              }
+            }
+            if (inherited.size > 0) {
+              const existingRow = await this.prisma.memory.findUnique({
+                where: { id: newId },
+                select: { tags: true },
+              });
+              const mergedTags = Array.from(new Set([...(existingRow?.tags || []), ...inherited]));
+              await this.prisma.memory.update({ where: { id: newId }, data: { tags: mergedTags } });
+            }
+          } catch (inheritErr) {
+            this.logger.warn(`[cognition] EXTEND entity-tag inheritance failed: ${inheritErr.message}`);
+          }
 
           // Move 2: demote prior revision so recall doesn't double-surface.
           // Extends edge is preserved for time-travel; isLatest=false removes it
@@ -964,6 +1016,28 @@ Output JSON only:
               synthesisRevision:    1, // reset on contradiction
             },
           }).catch(err => this.logger.warn(`[cognition] contradict patch cols failed: ${err.message}`));
+
+          // Inherit entity tags from new evidence (fresh narrative claim).
+          try {
+            const evidenceMems = await this.prisma.memory.findMany({
+              where: { id: { in: evidenceIds.slice(0, 20) } },
+              select: { tags: true },
+            });
+            const INHERITED_PREFIXES = ['entity:', 'project:', 'person:', 'time:', 'topic:'];
+            const inherited = new Set();
+            for (const em of evidenceMems) {
+              for (const t of (em.tags || [])) {
+                if (typeof t === 'string' && INHERITED_PREFIXES.some(p => t.startsWith(p))) inherited.add(t);
+              }
+            }
+            if (inherited.size > 0) {
+              const cur = await this.prisma.memory.findUnique({ where: { id: newId }, select: { tags: true } });
+              const mergedTags = Array.from(new Set([...(cur?.tags || []), ...inherited]));
+              await this.prisma.memory.update({ where: { id: newId }, data: { tags: mergedTags } });
+            }
+          } catch (inheritErr) {
+            this.logger.warn(`[cognition] CONTRADICT entity-tag inheritance failed: ${inheritErr.message}`);
+          }
 
           // Force-flip old synthesis to isLatest=false (belt-and-suspenders over smart-router)
           await this.prisma.memory.update({
@@ -1091,6 +1165,44 @@ Output JSON only:
             synthesisRevision:    1,
           },
         }).catch(err => this.logger.warn(`[cognition] patch synthesis cols failed: ${err.message}`));
+
+        // Inherit entity:/project:/person:/time: tags from evidence memories.
+        // The entity-co-mention LLM consistently returns entities=[] on dense
+        // synthesis prose (abstract claims don't trigger proper-noun heuristics
+        // reliably). Synthesis is derivative — its entities = union of source
+        // memory entities. Cheaper + more accurate than re-running LLM.
+        // Drives cluster_index.entity_keys + crossClusterEntityBoost match rate.
+        try {
+          const evidenceMems = await this.prisma.memory.findMany({
+            where: { id: { in: evidenceIds.slice(0, 20) } },
+            select: { tags: true },
+          });
+          const INHERITED_PREFIXES = ['entity:', 'project:', 'person:', 'time:', 'topic:'];
+          const inherited = new Set();
+          for (const em of evidenceMems) {
+            for (const t of (em.tags || [])) {
+              if (typeof t !== 'string') continue;
+              if (INHERITED_PREFIXES.some(p => t.startsWith(p))) inherited.add(t);
+            }
+          }
+          if (inherited.size > 0) {
+            const existing = await this.prisma.memory.findUnique({
+              where: { id: newId },
+              select: { tags: true },
+            });
+            const mergedTags = Array.from(new Set([
+              ...(existing?.tags || []),
+              ...inherited,
+            ]));
+            await this.prisma.memory.update({
+              where: { id: newId },
+              data: { tags: mergedTags },
+            });
+            this.logger.log?.(`[cognition] inherited ${inherited.size} entity/topic tags from ${evidenceMems.length} evidence → synthesis ${newId.slice(0, 8)}`);
+          }
+        } catch (inheritErr) {
+          this.logger.warn(`[cognition] entity-tag inheritance failed: ${inheritErr.message}`);
+        }
 
         // Derives edges to evidence sources
         await this._linkDerivesEdges(newId, members, sourceType, tag);

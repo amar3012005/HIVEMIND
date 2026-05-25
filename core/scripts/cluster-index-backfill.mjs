@@ -41,6 +41,47 @@ async function main() {
 
   console.log(`[backfill] found ${synths.length} synthesis memories to index`);
 
+  // ── Pre-pass: inherit entity:/project:/person:/time:/topic: tags from
+  // evidence memories onto each synthesis row. Entity-co-mention LLM
+  // consistently returns entities=[] on dense synthesis prose, so the
+  // synthesis rows never gain entity:* tags at write time. Inheritance
+  // from evidence is the deterministic fix that drives entity_keys
+  // population for cluster_index + crossClusterEntityBoost matching.
+  const INHERITED_PREFIXES = ['entity:', 'project:', 'person:', 'time:', 'topic:'];
+  let tagPatched = 0;
+  for (const m of synths) {
+    const evidence = m.synthesisEvidenceIds || [];
+    if (evidence.length === 0) continue;
+    try {
+      const evMems = await prisma.memory.findMany({
+        where: { id: { in: evidence.slice(0, 20) } },
+        select: { tags: true },
+      });
+      const inherited = new Set();
+      for (const em of evMems) {
+        for (const t of (em.tags || [])) {
+          if (typeof t === 'string' && INHERITED_PREFIXES.some(p => t.startsWith(p))) inherited.add(t);
+        }
+      }
+      const current = new Set(m.tags || []);
+      const before = current.size;
+      for (const t of inherited) current.add(t);
+      if (current.size > before) {
+        const newTags = [...current];
+        if (dryRun) {
+          console.log(`[backfill][dry] synth ${m.id.slice(0,8)} would gain ${current.size - before} inherited tags (entity/topic from ${evMems.length} evidence)`);
+        } else {
+          await prisma.memory.update({ where: { id: m.id }, data: { tags: newTags } });
+          m.tags = newTags; // keep local copy fresh for entity_keys derivation below
+        }
+        tagPatched++;
+      }
+    } catch (err) {
+      console.warn(`[backfill] tag-inherit failed for synth ${m.id.slice(0,8)}: ${err.message}`);
+    }
+  }
+  console.log(`[backfill] tag-inheritance: ${tagPatched}/${synths.length} synthesis memories updated (dry_run=${dryRun})`);
+
   // Group by clusterHash — keep highest revision per hash
   const byHash = new Map();
   for (const m of synths) {

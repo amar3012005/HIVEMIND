@@ -586,6 +586,17 @@ export class RecallRouter {
         score: typeof m.score === 'number' ? Number(m.score.toFixed(3)) : null,
         created_at: m.created_at,
         valid_at: m.valid_at,
+        // Cognition layer signals — agent uses these to prefer synthesis-
+        // tier rows. Pass through when present; null/undefined harmless.
+        ...(m.source_metadata?.source_type
+          ? { source_metadata: { source_type: m.source_metadata.source_type } }
+          : {}),
+        ...(m.synthesis_confidence != null   ? { synthesis_confidence:   m.synthesis_confidence }   : {}),
+        ...(m.synthesis_revision   != null   ? { synthesis_revision:     m.synthesis_revision }     : {}),
+        ...(m.synthesis_cluster_hash         ? { synthesis_cluster_hash: m.synthesis_cluster_hash } : {}),
+        ...(Array.isArray(m.synthesis_evidence_ids) && m.synthesis_evidence_ids.length
+          ? { synthesis_evidence_ids: m.synthesis_evidence_ids }
+          : {}),
         // Expose cross-cluster boost metadata when present (Move 3)
         ...(m._cross_cluster_boost != null ? {
           _cross_cluster_boost:   Number(m._cross_cluster_boost.toFixed(3)),

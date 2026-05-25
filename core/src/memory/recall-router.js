@@ -31,7 +31,7 @@ const HOP2_DOC_LIMIT           = 8;
 const HOP2_UNFILTERED_LIMIT    = 6;
 const HOP3_LIVE_LIMIT          = 5;
 
-const HOP1_TIMEOUT_MS          = 1500;
+const HOP1_TIMEOUT_MS          = 4000;
 const HOP2_TIMEOUT_MS          = 1500;
 const HOP3_TIMEOUT_MS          = 4000;
 

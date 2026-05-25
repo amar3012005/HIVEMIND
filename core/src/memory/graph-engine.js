@@ -1985,11 +1985,19 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          model: process.env.ENTITY_LINKER_MODEL || MEMORY_INGEST_MODEL,
+          // Entity extraction needs proper-noun recall, not just JSON
+          // shaping. gpt-oss-20b (the default MEMORY_INGEST_MODEL) returns
+          // entities=[] for short MCP saves with obvious proper nouns
+          // ("Amar Sai Gadde, Ceyda Sarioglu, Hannover") because the small
+          // model bails when it can't relate them to candidates. Pin to
+          // llama-3.3-70b-versatile by default — same model the memory
+          // processor already uses for relationship classification, so
+          // the entity-side reasoning matches that quality.
+          model: process.env.ENTITY_LINKER_MODEL || 'llama-3.3-70b-versatile',
           messages: [{ role: 'user', content: prompt }],
           // gpt-oss-20b fails Groq strict JSON-mode validation — skip
           // response_format for that family, rely on extractJsonFromText.
-          ...(/gpt-oss/i.test(process.env.ENTITY_LINKER_MODEL || MEMORY_INGEST_MODEL) ? {} : { response_format: { type: 'json_object' } }),
+          ...(/gpt-oss/i.test(process.env.ENTITY_LINKER_MODEL || 'llama-3.3-70b-versatile') ? {} : { response_format: { type: 'json_object' } }),
           temperature: 0.1,
           max_tokens: 700,
         }),

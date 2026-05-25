@@ -2382,6 +2382,42 @@ function parseCookies(req) {
   }, {});
 }
 
+// HIVEMIND brand logo — geometric 3D "jack" of 6 interlocking cylinders.
+// Inline SVG so it works on every OAuth page (consent, login, error) without
+// needing static asset hosting. Same render is reused by Claude / ChatGPT /
+// Perplexity OAuth flows since they all land on /oauth/authorize and /oauth/login.
+const HIVEMIND_LOGO_SVG = `
+<svg width="64" height="64" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <defs>
+    <linearGradient id="ivory" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fafaf6"/>
+      <stop offset="100%" stop-color="#e8e3d8"/>
+    </linearGradient>
+    <linearGradient id="black" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1a1a1a"/>
+      <stop offset="100%" stop-color="#000000"/>
+    </linearGradient>
+  </defs>
+  <!-- back-right black axis -->
+  <g transform="translate(50 50) rotate(35)">
+    <rect x="-7" y="-44" width="14" height="88" rx="7" fill="url(#black)" stroke="#0a0a0a" stroke-width="0.6"/>
+  </g>
+  <!-- vertical ivory axis -->
+  <g transform="translate(50 50)">
+    <rect x="-7" y="-44" width="14" height="88" rx="7" fill="url(#ivory)" stroke="#3a3a3a" stroke-width="0.6"/>
+  </g>
+  <!-- horizontal ivory axis -->
+  <g transform="translate(50 50) rotate(90)">
+    <rect x="-7" y="-44" width="14" height="88" rx="7" fill="url(#ivory)" stroke="#3a3a3a" stroke-width="0.6"/>
+  </g>
+  <!-- diagonal ivory axis -->
+  <g transform="translate(50 50) rotate(-35)">
+    <rect x="-6" y="-42" width="12" height="84" rx="6" fill="url(#ivory)" stroke="#3a3a3a" stroke-width="0.5"/>
+  </g>
+  <!-- center node -->
+  <circle cx="50" cy="50" r="9" fill="url(#ivory)" stroke="#3a3a3a" stroke-width="0.6"/>
+</svg>`;
+
 function sanitizeHtml(value) {
   return String(value || '').replace(/[<>&"']/g, m => (
     m === '<' ? '&lt;'
@@ -4204,12 +4240,16 @@ exit \$RC
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>HiveMind Partner Connection</title>
 <style>
-  body{font-family:system-ui,-apple-system,sans-serif;background:#eff6ff;color:#1e293b;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}
-  .card{background:#fff;border:1px solid #dbe4ee;border-radius:14px;padding:2rem;max-width:480px;width:92%;box-shadow:0 20px 40px rgba(15,23,42,.1)}
-  .header{display:flex;align-items:center;gap:1rem;margin-bottom:1.5rem}
-  .app-icon{width:48px;height:48px;background:#f1f5f9;border-radius:12px;display:flex;align-items:center;justify-content:center;font-weight:bold;color:#64748b}
-  .sync-icon{color:#cbd5e1;font-size:1.5rem}
-  .hm-icon{width:48px;height:48px;background:#0ea5e9;border-radius:12px;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:bold}
+  body{font-family:'Space Grotesk',system-ui,-apple-system,sans-serif;background:#fafaf6;color:#0a0a0a;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}
+  .card{background:#fff;border:1px solid #e3e0db;border-radius:18px;padding:2.2rem;max-width:480px;width:92%;box-shadow:0 20px 60px rgba(10,10,10,.08)}
+  .brand{display:flex;flex-direction:column;align-items:center;text-align:center;margin-bottom:1.4rem;padding-bottom:1.2rem;border-bottom:1px solid #f3f1ec}
+  .brand svg{width:72px;height:72px;margin-bottom:.6rem}
+  .brand-title{font-size:.78rem;font-weight:700;letter-spacing:.18em;color:#737373;text-transform:uppercase}
+  .header{display:flex;align-items:center;justify-content:center;gap:.9rem;margin-bottom:1.2rem}
+  .app-icon{width:44px;height:44px;background:#f3f1ec;border-radius:10px;display:flex;align-items:center;justify-content:center;font-weight:700;color:#737373;font-size:1.1rem}
+  .sync-icon{color:#a3a3a3;font-size:1.2rem}
+  .hm-icon{width:44px;height:44px;border-radius:10px;background:#fafaf6;border:1px solid #e3e0db;display:flex;align-items:center;justify-content:center;overflow:hidden}
+  .hm-icon svg{width:38px;height:38px}
   h1{font-size:1.3rem;margin:0 0 .3rem;color:#0f172a}
   p{font-size:0.95rem;color:#64748b;line-height:1.5;margin:0 0 1.2rem}
   .permissions-box{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:1rem;margin-bottom:1.5rem}
@@ -4228,10 +4268,14 @@ exit \$RC
   .deny{background:#f1f5f9;color:#475569}
 </style></head><body>
 <div class="card">
+  <div class="brand">
+    ${HIVEMIND_LOGO_SVG}
+    <div class="brand-title">HIVEMIND</div>
+  </div>
   <div class="header">
     <div class="app-icon">${sanitizeHtml(client.client_name[0])}</div>
     <div class="sync-icon">⇌</div>
-    <div class="hm-icon">H</div>
+    <div class="hm-icon">${HIVEMIND_LOGO_SVG}</div>
   </div>
   <h1>Connect ${sanitizeHtml(client.client_name)}</h1>
   <p>Authorize <strong>${sanitizeHtml(client.client_name)}</strong> to securely access your HiveMind account details and tools.</p>
@@ -4310,16 +4354,25 @@ exit \$RC
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>HiveMind Sign In</title>
 <style>
-  body{font-family:system-ui,-apple-system,sans-serif;background:#f6f8fb;color:#1e293b;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}
-  .card{background:#fff;border:1px solid #dbe4ee;border-radius:14px;padding:2rem;max-width:420px;width:92%;box-shadow:0 10px 30px rgba(15,23,42,.08)}
-  h1{font-size:1.2rem;margin:0 0 .4rem}
-  p{font-size:.9rem;color:#64748b;margin:0 0 1rem}
-  label{display:block;font-size:.85rem;color:#334155;margin-bottom:.3rem}
-  input[type=password]{width:100%;padding:.58rem;border:1px solid #cbd5e1;border-radius:8px;background:#fff;color:#0f172a;margin-bottom:.8rem;box-sizing:border-box}
-  button{width:100%;padding:.62rem;background:#0f172a;color:#fff;border:none;border-radius:10px;cursor:pointer;font-weight:600}
-  .divider{margin:.8rem 0;text-align:center;color:#94a3b8;font-size:.82rem}
+  body{font-family:'Space Grotesk',system-ui,-apple-system,sans-serif;background:#fafaf6;color:#0a0a0a;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}
+  .card{background:#fff;border:1px solid #e3e0db;border-radius:18px;padding:2.2rem;max-width:420px;width:92%;box-shadow:0 20px 60px rgba(10,10,10,.08)}
+  .brand{display:flex;flex-direction:column;align-items:center;text-align:center;margin-bottom:1.4rem;padding-bottom:1.2rem;border-bottom:1px solid #f3f1ec}
+  .brand svg{width:72px;height:72px;margin-bottom:.6rem}
+  .brand-title{font-size:.78rem;font-weight:700;letter-spacing:.18em;color:#737373;text-transform:uppercase}
+  h1{font-size:1.2rem;margin:0 0 .4rem;color:#0a0a0a}
+  p{font-size:.9rem;color:#737373;margin:0 0 1rem}
+  label{display:block;font-size:.85rem;color:#0a0a0a;margin-bottom:.3rem;font-weight:600}
+  input[type=password]{width:100%;padding:.65rem;border:1px solid #e3e0db;border-radius:10px;background:#fafaf6;color:#0a0a0a;margin-bottom:.8rem;box-sizing:border-box;font-size:.95rem}
+  input[type=password]:focus{outline:none;border-color:#0a0a0a;background:#fff}
+  button{width:100%;padding:.72rem;background:#0a0a0a;color:#fff;border:none;border-radius:10px;cursor:pointer;font-weight:600;font-size:.95rem}
+  button:hover{background:#1a1a1a}
+  .divider{margin:.9rem 0;text-align:center;color:#a3a3a3;font-size:.78rem;letter-spacing:.06em;text-transform:uppercase}
 </style></head><body>
 <div class="card">
+  <div class="brand">
+    ${HIVEMIND_LOGO_SVG}
+    <div class="brand-title">HIVEMIND</div>
+  </div>
   <h1>Sign in to HiveMind</h1>
   <p>${sanitizeHtml(client.client_name)} needs your consent to connect.</p>
   ${dashboardButton}

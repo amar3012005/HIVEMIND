@@ -66,7 +66,8 @@ const { ByzantineConsensus } = await import('./memory/byzantine-consensus.js');
 const { IngestTracker } = await import('./memory/ingest-tracker.js');
 const { rewriteQuery } = await import('./search/query-rewriter.js');
 const { deduplicateResults } = await import('./search/result-dedup.js');
-const { queryPersistedMemories, recallPersistedMemories } = await import('./memory/persisted-retrieval.js');
+const { queryPersistedMemories, recallPersistedMemories, crossClusterEntityBoost } = await import('./memory/persisted-retrieval.js');
+const { ClusterIndex } = await import('./memory/cluster-index.js');
 const { expandTemporalQuery } = await import('./search/time-aware-expander.js');
 const {
   authenticatePersistedApiKey,
@@ -14465,6 +14466,18 @@ exit \$RC
                   result.memories.sort((a, b) => (b.score || 0) - (a.score || 0));
                 }
                 result.intent = intent;
+              }
+
+              // Phase 3: cross-cluster entity-overlap boost for synthesis memories
+              if (result.memories && result.memories.length > 1) {
+                try {
+                  const clusterIndex = new ClusterIndex({ prisma });
+                  result.memories = await crossClusterEntityBoost(result.memories, {
+                    clusterIndex, organizationId: orgId,
+                  });
+                } catch (boostErr) {
+                  console.warn('[api/recall] cross-cluster boost failed:', boostErr.message);
+                }
               }
 
               // Inject parent chunks for fact-memories

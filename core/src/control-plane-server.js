@@ -950,17 +950,51 @@ async function validateAccountDeletion(userId) {
     console.log('[account-delete] Org', membership.org?.name, '(', membership.orgId, '): otherOwners=', otherOwners, 'otherMembers=', otherMembers);
 
     if (otherOwners === 0 && otherMembers > 0) {
-      console.warn('[account-delete] ✗ BLOCKED — sole owner of org with', otherMembers, 'members:', membership.org?.name);
-      return {
-        ok: false,
-        status: 409,
-        error: 'Transfer ownership or remove other members before deleting this account.',
-        org: {
-          id: membership.org.id,
-          name: membership.org.name,
-          slug: membership.org.slug,
+      // GDPR right-to-erasure: don't block account deletion when the user is
+      // the sole owner of an org with other members. Promote the longest-
+      // tenured other member to owner so the org keeps a responsible admin,
+      // then continue with the deletion. If promotion fails (no eligible
+      // candidate, DB error), fall back to the legacy 409 guard so we never
+      // orphan a multi-member org silently.
+      const heir = await prisma.userOrganization.findFirst({
+        where: {
+          orgId: membership.orgId,
+          userId: { not: userId },
+          // Prefer existing admins; if none, pick any member.
         },
-      };
+        orderBy: [
+          // 'admin' first (string ordering puts admin < member alphabetically)
+          { role: 'asc' },
+          { createdAt: 'asc' },
+        ],
+        select: { userId: true, role: true },
+      });
+      if (!heir) {
+        console.warn('[account-delete] ✗ BLOCKED — sole owner with members but no heir found:', membership.org?.name);
+        return {
+          ok: false,
+          status: 409,
+          error: 'Transfer ownership or remove other members before deleting this account.',
+          org: { id: membership.org.id, name: membership.org.name, slug: membership.org.slug },
+        };
+      }
+      try {
+        await prisma.userOrganization.update({
+          where: { userId_orgId: { userId: heir.userId, orgId: membership.orgId } },
+          data: { role: 'owner' },
+        });
+        console.log('[account-delete] ✓ Auto-promoted', heir.userId, 'to owner of', membership.org?.name, '(prior role:', heir.role, ')');
+      } catch (promoteErr) {
+        console.error('[account-delete] ✗ Promote-to-owner failed:', promoteErr.message);
+        return {
+          ok: false,
+          status: 409,
+          error: 'Could not transfer ownership automatically. Please demote yourself or promote another owner from the Members page.',
+          org: { id: membership.org.id, name: membership.org.name, slug: membership.org.slug },
+        };
+      }
+      // Org now has a new owner — leave it intact, don't add to orgIdsToDelete.
+      continue;
     }
 
     if (otherOwners === 0 && otherMembers === 0) {

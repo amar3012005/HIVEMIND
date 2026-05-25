@@ -239,6 +239,9 @@ async function hop1Memory({ store, query, options, ctx }) {
     created_at: m.created_at,
     valid_at: m.valid_at || m.document_date,
     source_metadata: m.source_metadata || null,
+    // Pass synthesis cluster hash through so cross-cluster boost can fire (Move 3)
+    ...(m.synthesis_cluster_hash ? { synthesis_cluster_hash: m.synthesis_cluster_hash } : {}),
+    ...(m.synthesisClusterHash   ? { synthesisClusterHash:   m.synthesisClusterHash   } : {}),
   }));
 }
 

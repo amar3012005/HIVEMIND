@@ -6,28 +6,6 @@ import { normalizeRelationshipType } from './relationship-semantics.js';
  * Strip null bytes (\u0000) from strings — Postgres text columns reject them (code 22P05).
  * Common in web-scraped content from DuckDuckGo, PDF extracts, and LLM outputs.
  */
-// Allowed Prisma MemoryType enum values. Keep in sync with schema.prisma.
-const VALID_MEMORY_TYPES = new Set([
-  'fact', 'preference', 'decision', 'lesson', 'goal',
-  'event', 'relationship', 'synthesis', 'summary',
-]);
-// Common english synonyms LLMs emit. Map back to a valid enum value so
-// the save never fails with "Invalid value for argument memoryType".
-const MEMORY_TYPE_ALIAS = {
-  note: 'fact', observation: 'fact', idea: 'fact', knowledge: 'fact',
-  context: 'fact', insight: 'lesson', learning: 'lesson',
-  todo: 'goal', task: 'goal', reminder: 'goal',
-  contact: 'relationship', person: 'relationship', user: 'relationship',
-  meeting: 'event', appointment: 'event', deadline: 'event',
-};
-function coerceMemoryType(value) {
-  if (!value) return 'fact';
-  const v = String(value).toLowerCase().trim();
-  if (VALID_MEMORY_TYPES.has(v)) return v;
-  if (MEMORY_TYPE_ALIAS[v]) return MEMORY_TYPE_ALIAS[v];
-  return 'fact';
-}
-
 function stripNullBytes(val) {
   if (typeof val === 'string') {
     // Strip null bytes AND other invalid UTF-8 sequences (cause 22021 Postgres errors + garbled streaming)
@@ -216,13 +194,7 @@ export class PrismaGraphStore {
         sourceUrl: memory.source_metadata?.source_url || null,
         documentDate: memory.document_date ? new Date(memory.document_date) : null,
         eventDates: (memory.event_dates || []).map(value => new Date(value)),
-        // Coerce memory_type to a valid MemoryType enum. LLM-driven callers
-        // (ReAct agent tool calls, MCP save_memory from external Claude
-        // sessions) often emit english-y synonyms like 'note' / 'observation'
-        // / 'todo' that aren't in the Prisma enum. Map known synonyms,
-        // fall back to 'fact' so the save never fails with
-        // "Invalid value for argument memoryType. Expected MemoryType".
-        memoryType: coerceMemoryType(memory.memory_type),
+        memoryType: memory.memory_type || 'fact',
         title,
         importanceScore: memory.importance_score ?? 0.5,
         strength: memory.strength ?? 1.0,
@@ -357,39 +329,14 @@ export class PrismaGraphStore {
     return records.map(mapMemoryRecord);
   }
 
-  async listMemories({ user_id, org_id, project, memory_type, tags, is_latest, limit = 50, offset = 0, scope = 'personal', include_children = false }) {
-    // Default behaviour (2026-05-21): hide auto-extracted child fact rows
-    // from the flat list. They tag every legacy save with 'extracted-fact'
-    // and have metadata.parent_memory_id pointing at the canonical parent.
-    // Showing them bloats the list 6x and obscures the real graph. Pass
-    // include_children=true (or the legacy tag filter) to opt back in.
-    //
-    // 2026-05-22: TARA voice sessions persist per-turn rows
-    // ('tara-turn') and per-turn clinical insights ('tara-insight') so
-    // the graph view can show the full conversational structure. These
-    // would flood Memories.jsx — one card per turn × N turns × M
-    // sessions. Same canonical exclusion pattern: hide from the flat
-    // list, keep in the graph + recall pipeline. A single
-    // 'tara-session-summary' memory per session anchors them on the
-    // flat list and PartOf edges link the children.
-    //
-    // Postgres String[] columns don't support `{ tags: { not: { has } } }`
-    // in Prisma — only top-level `NOT { tags: { has } }` works. So we
-    // compose the exclusion as a sibling NOT clause on the where root.
-    const HIDDEN_CHILD_TAGS = ['extracted-fact', 'tara-turn', 'tara-insight'];
-    const childExclusion = include_children
-      ? {}
-      : { AND: HIDDEN_CHILD_TAGS.map(t => ({ NOT: { tags: { has: t } } })) };
-    const baseWhere = {
-      ...scopedMemoryWhere({ user_id, org_id, project, scope }),
-      memoryType: memory_type || undefined,
-      isLatest: typeof is_latest === 'boolean' ? is_latest : undefined,
-      ...(tags?.length ? { tags: { hasEvery: tags } } : {}),
-      ...childExclusion,
-    };
-
+  async listMemories({ user_id, org_id, project, memory_type, tags, is_latest, limit = 50, offset = 0, scope = 'personal' }) {
     const records = await this.client.memory.findMany({
-      where: baseWhere,
+      where: {
+        ...scopedMemoryWhere({ user_id, org_id, project, scope }),
+        memoryType: memory_type || undefined,
+        isLatest: typeof is_latest === 'boolean' ? is_latest : undefined,
+        tags: tags?.length ? { hasEvery: tags } : undefined,
+      },
       include: {
         sourceMetadata: true,
         codeMetadata: true,
@@ -403,229 +350,84 @@ export class PrismaGraphStore {
       take: limit
     });
 
-    // Count uses the same exclusion so pagination stays consistent.
-    const countWhere = {
-      ...scopedMemoryWhere({ user_id, org_id, project }),
-      memoryType: memory_type || undefined,
-      isLatest: typeof is_latest === 'boolean' ? is_latest : undefined,
-      ...(tags?.length ? { tags: { hasSome: tags } } : {}),
-      ...childExclusion,
-    };
-
-    const total = await this.client.memory.count({ where: countWhere });
-
-    // Surface relationship structure so FE can show "linked to N" + a
-    // preview list without an N+1 per row. One batched fetch covers
-    // every memory in this page (typically ≤50). Each row gets:
-    //   edges_out_count
-    //   edges_in_count
-    //   superseded_by  (id of newer memory if this row is is_latest=false)
-    //   top_edges      (up to 4 outgoing edges with type + target id)
-    const memoryIds = records.map(r => r.id);
-    let edgeStats = new Map(); // id → { out, in, top: [], supersededBy }
-    if (memoryIds.length > 0) {
-      // Outgoing edges from these rows (this memory → others). Metadata
-      // included so the FE can render shared_entities / reason chips.
-      const outRels = await this.client.relationship.findMany({
-        where: { fromId: { in: memoryIds } },
-        select: { fromId: true, toId: true, type: true, confidence: true, createdBy: true, metadata: true },
-        orderBy: [{ confidence: 'desc' }, { createdAt: 'desc' }],
-      });
-      // Incoming edges (others → this memory).
-      const inRels = await this.client.relationship.findMany({
-        where: { toId: { in: memoryIds } },
-        select: { fromId: true, toId: true, type: true, confidence: true, createdBy: true, metadata: true },
-        orderBy: [{ confidence: 'desc' }, { createdAt: 'desc' }],
-      });
-      for (const r of outRels) {
-        let s = edgeStats.get(r.fromId);
-        if (!s) { s = { out: 0, in: 0, top: [], supersededBy: null }; edgeStats.set(r.fromId, s); }
-        s.out += 1;
-        if (s.top.length < 4) {
-          s.top.push({
-            direction: 'out',
-            target_id: r.toId,
-            type: r.type,
-            confidence: r.confidence,
-            shared_entities: r.metadata?.shared_entities || null,
-            reason: r.metadata?.reason || null,
-          });
-        }
-        // Capture supersession: an Updates edge OUT means this row updated
-        // something else (we are the newer one). The OLDER row's
-        // supersededBy is filled by the IN loop below.
+    const total = await this.client.memory.count({
+      where: {
+        ...scopedMemoryWhere({ user_id, org_id, project }),
+        memoryType: memory_type || undefined,
+        isLatest: typeof is_latest === 'boolean' ? is_latest : undefined,
+        tags: tags?.length ? { hasSome: tags } : undefined
       }
-      for (const r of inRels) {
-        let s = edgeStats.get(r.toId);
-        if (!s) { s = { out: 0, in: 0, top: [], supersededBy: null }; edgeStats.set(r.toId, s); }
-        s.in += 1;
-        if (r.type === 'Updates' && !s.supersededBy) {
-          s.supersededBy = r.fromId; // the newer memory that replaced this row
-        }
-        if (s.top.length < 4) {
-          s.top.push({
-            direction: 'in',
-            source_id: r.fromId,
-            type: r.type,
-            confidence: r.confidence,
-            shared_entities: r.metadata?.shared_entities || null,
-            reason: r.metadata?.reason || null,
-          });
-        }
-      }
-    }
-
-    const memories = records.map(rec => {
-      const mapped = mapMemoryRecord(rec);
-      const stats = edgeStats.get(rec.id) || { out: 0, in: 0, top: [], supersededBy: null };
-      mapped.edges_out_count = stats.out;
-      mapped.edges_in_count = stats.in;
-      mapped.superseded_by = stats.supersededBy;
-      mapped.top_edges = stats.top;
-      return mapped;
     });
 
     return {
-      memories,
+      memories: records.map(mapMemoryRecord),
       total
     };
   }
 
   async searchMemories({ query, user_id, org_id, project, memory_type, tags, is_latest, n_results = 10, created_after, created_before, source_platform, scope = 'personal', access_context = null }) {
-    // FTS branch runs for BOTH access_context (V2 Teams + Projects) and
-    // legacy scopes. Strategy when access_context is set:
-    //   1. FTS query org-scoped → candidate IDs (ranked).
-    //   2. Prisma findMany with full access-context tenancy filter applied
-    //      to those candidate IDs.
-    // Tenancy enforcement happens in step 2; FTS is just a fast ranker.
+    // V2 (Teams + Projects) scope: skip FTS raw branch since it cannot easily
+    // express the multi-tier OR; let Prisma findMany handle it below.
+    if (access_context) {
+      // intentional skip
+    } else
+    // Try PostgreSQL full-text search with stemming (like code-review-graph's FTS5 + Porter)
+    // Only run outside transactions — $queryRawUnsafe corrupts Prisma interactive transactions
     if (query && this.client.$queryRawUnsafe && !this.inTransaction) {
       try {
-        // Sanitize: tsquery rejects punctuation, special chars, leading
-        // digits-only. Split on whitespace AND punctuation (so "Dachmarke
-        // (1).pdf" → ["Dachmarke", "1", "pdf"], not ["Dachmarke", "1pdf"]),
-        // lowercase, drop tokens <2 chars + pure-numeric tokens.
-        const tsQuery = query.trim().toLowerCase()
-          .split(/[^a-z0-9]+/)
-          .filter(w => w.length > 1 && !/^\d+$/.test(w))
+        // Sanitize: tsquery rejects punctuation, special chars, leading digits-only.
+        // Strip everything except a-z0-9, lowercase, drop tokens <2 chars.
+        const tsQuery = query.trim().split(/\s+/)
+          .map(w => w.toLowerCase().replace(/[^a-z0-9]/g, ''))
+          .filter(w => w.length > 1)
           .map(w => w + ':*').join(' & ');
         if (tsQuery) {
-          // When access_context drives tenancy (V2 multi-tier), the FTS
-          // pass only needs to scope by org; the strict project/team
-          // membership check runs as a Prisma post-filter below.
-          const scopeWhere = access_context
-            ? `AND m.org_id = '${org_id}'::uuid`
-            : scope === 'personal'
-              ? `AND m.user_id = '${user_id}'::uuid`
-              : `AND m.org_id = '${org_id}'::uuid`;
+          const scopeWhere = scope === 'personal'
+            ? `AND m.user_id = '${user_id}'::uuid`
+            : `AND m.org_id = '${org_id}'::uuid`;
           const projectWhere = project ? `AND m.project = '${project}'` : '';
           const latestWhere = typeof is_latest === 'boolean' ? `AND m.is_latest = ${is_latest}` : '';
           const dateAfterWhere = created_after ? `AND m.created_at >= '${new Date(created_after).toISOString()}'` : '';
           const dateBeforeWhere = created_before ? `AND m.created_at <= '${new Date(created_before).toISOString()}'` : '';
-          // Tag filter: when caller passes tags=['slack'] etc, require the
-          // memory to carry at least one of those tags (m.tags && ARRAY[...]).
-          // Prevents FTS-rank-only mismatches like 'what was the last slack
-          // msg about' missing the actual slack rows because they don't
-          // contain the noise words.
-          const tagsWhere = Array.isArray(tags) && tags.length > 0
-            ? `AND m.tags && ARRAY[${tags.map(t => `'${String(t).replace(/'/g, "''")}'`).join(',')}]::text[]`
-            : '';
 
-          // Use 'simple' lexer + index tags alongside content+title.
-          //
-          // Why include tags in the tsvector:
-          //   Filenames live as tags ('filename:Dachmarke (1).pdf'). Without
-          //   tag indexing, querying "Dachmarke (1).pdf" against a memory
-          //   whose title is "Infographic of a Smart Home" (Groq vision
-          //   misread) but which carries the filename tag → 0 hits.
-          //   With tags in tsvector, the tag-string tokenizes naturally
-          //   ('filename', 'dachmarke', '1', 'pdf') and matches the query.
-          //
-          // array_to_string with space separator preserves token boundaries.
           const ftsResults = await this.client.$queryRawUnsafe(`
             SELECT m.id, m.content, m.title, m.tags, m.memory_type, m.project,
                    m.importance_score, m.is_latest, m.created_at, m.updated_at,
                    m.document_date, m.event_dates, m.source_platform AS source, m.visibility,
-                   ts_rank(
-                     to_tsvector('simple',
-                       COALESCE(m.content, '') || ' ' ||
-                       COALESCE(m.title, '')   || ' ' ||
-                       COALESCE(array_to_string(m.tags, ' '), '')
-                     ),
-                     to_tsquery('simple', $1)
-                   ) as fts_score
+                   m.synthesis_confidence, m.synthesis_cluster_hash, m.synthesis_revision,
+                   ts_rank(to_tsvector('english', COALESCE(m.content, '') || ' ' || COALESCE(m.title, '')),
+                           to_tsquery('english', $1)) as fts_score
             FROM memories m
             WHERE m.deleted_at IS NULL
-              ${scopeWhere} ${projectWhere} ${latestWhere} ${dateAfterWhere} ${dateBeforeWhere} ${tagsWhere}
-              AND to_tsvector('simple',
-                    COALESCE(m.content, '') || ' ' ||
-                    COALESCE(m.title, '')   || ' ' ||
-                    COALESCE(array_to_string(m.tags, ' '), '')
-                  ) @@ to_tsquery('simple', $1)
+              ${scopeWhere} ${projectWhere} ${latestWhere} ${dateAfterWhere} ${dateBeforeWhere}
+              AND to_tsvector('english', COALESCE(m.content, '') || ' ' || COALESCE(m.title, ''))
+                  @@ to_tsquery('english', $1)
             ORDER BY fts_score DESC
             LIMIT $2
           `, tsQuery, n_results * 3);
 
           if (ftsResults.length > 0) {
-            // When access_context drives tenancy: post-filter the FTS
-            // candidate set through Prisma findMany with the full
-            // multi-tier OR clause (personal | org | project | team).
-            // This drops rows the user can't see, while preserving FTS
-            // rank order.
-            if (access_context) {
-              const candidateIds = ftsResults.map(r => r.id);
-              const allowed = await this.client.memory.findMany({
-                where: {
-                  id: { in: candidateIds },
-                  ...scopedMemoryWhere({ user_id, org_id, project, scope, access_context }),
-                  memoryType: memory_type || undefined,
-                  sourcePlatform: source_platform || undefined,
-                  isLatest: typeof is_latest === 'boolean' ? is_latest : undefined,
-                  tags: tags?.length ? { hasEvery: tags } : undefined,
-                },
-                select: { id: true },
-              });
-              const allowedSet = new Set(allowed.map(r => r.id));
-              const filtered = ftsResults.filter(r => allowedSet.has(r.id));
-              if (filtered.length > 0) {
-                return filtered.map(r => ({
-                  id: r.id,
-                  content: r.content,
-                  title: r.title,
-                  tags: r.tags || [],
-                  memory_type: r.memory_type,
-                  project: r.project,
-                  importance_score: Number(r.importance_score) || 0.5,
-                  is_latest: r.is_latest,
-                  created_at: r.created_at?.toISOString?.() || r.created_at,
-                  updated_at: r.updated_at?.toISOString?.() || r.updated_at,
-                  document_date: r.document_date?.toISOString?.() || r.document_date,
-                  source: r.source,
-                  visibility: r.visibility,
-                  score: Number(r.fts_score) || 0,
-                  _searchMethod: 'fts_tsvector_access_filtered',
-                })).slice(0, n_results);
-              }
-              // No FTS row passed the access filter — fall through to the
-              // Prisma path so the caller still gets something.
-            } else {
-              return ftsResults.map(r => ({
-                id: r.id,
-                content: r.content,
-                title: r.title,
-                tags: r.tags || [],
-                memory_type: r.memory_type,
-                project: r.project,
-                importance_score: Number(r.importance_score) || 0.5,
-                is_latest: r.is_latest,
-                created_at: r.created_at?.toISOString?.() || r.created_at,
-                updated_at: r.updated_at?.toISOString?.() || r.updated_at,
-                document_date: r.document_date?.toISOString?.() || r.document_date,
-                source: r.source,
-                visibility: r.visibility,
-                score: Number(r.fts_score) || 0,
-                _searchMethod: 'fts_tsvector',
-              })).slice(0, n_results);
-            }
+            return ftsResults.map(r => ({
+              id: r.id,
+              content: r.content,
+              title: r.title,
+              tags: r.tags || [],
+              memory_type: r.memory_type,
+              project: r.project,
+              importance_score: Number(r.importance_score) || 0.5,
+              is_latest: r.is_latest,
+              created_at: r.created_at?.toISOString?.() || r.created_at,
+              updated_at: r.updated_at?.toISOString?.() || r.updated_at,
+              document_date: r.document_date?.toISOString?.() || r.document_date,
+              source: r.source,
+              visibility: r.visibility,
+              // Phase 1 synthesis columns — needed by recall-router boost + synthesized[] shape
+              synthesis_confidence: r.synthesis_confidence != null ? Number(r.synthesis_confidence) : null,
+              synthesis_cluster_hash: r.synthesis_cluster_hash || null,
+              synthesis_revision: r.synthesis_revision != null ? Number(r.synthesis_revision) : 1,
+              score: Number(r.fts_score) || 0,
+              _searchMethod: 'fts_tsvector',
+            })).slice(0, n_results);
           }
         }
       } catch (ftsErr) {

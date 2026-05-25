@@ -14521,9 +14521,11 @@ exit \$RC
               const docFilter = url.searchParams.get('document_id') || null;
 
               // 1. Memories scoped to user/org
+              const includeChildren = url.searchParams.get('include_children') === 'true';
               const memWhere = {
                 userId, orgId, deletedAt: null, isLatest: true,
                 ...(memTypeFilter ? { memoryType: memTypeFilter } : {}),
+                ...(includeChildren ? {} : { NOT: { tags: { has: 'extracted-fact' } } }),
               };
               const memories = await prisma.memory.findMany({
                 where: memWhere,
@@ -14720,11 +14722,18 @@ exit \$RC
               // flag that ships on each node payload.
               const includeSuperseded =
                 url.searchParams.get('include_superseded') === 'true';
+              // Match /api/memories default: exclude 'extracted-fact' children
+              // unless caller asks for them. Without this filter the graph
+              // shows ~3× the user's actual memory count (parent + N child
+              // facts per memory), which mismatches the list-view total.
+              const includeChildren =
+                url.searchParams.get('include_children') === 'true';
               const baseWhere = {
                 orgId: orgId,
                 deletedAt: null,
                 ...(includeSuperseded ? {} : { isLatest: true }),
                 ...(graphProject ? { project: graphProject } : {}),
+                ...(includeChildren ? {} : { NOT: { tags: { has: 'extracted-fact' } } }),
               };
               const scopeWhere = graphScope === 'team'
                 ? {

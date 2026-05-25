@@ -1155,10 +1155,13 @@ export async function recallPersistedMemories(store, {
   const applySynthesisBoost = (items) => {
     return items.map(item => {
       const mem = item.memory || item;
-      const srcType = mem.source_metadata?.source_type
-        || mem.sourceMetadata?.sourceType
-        || mem.source_type
-        || null;
+      // Check both source_metadata.source_type AND tags (lexical path lacks source_metadata)
+      let srcType = mem.source_metadata?.source_type || mem.sourceMetadata?.sourceType || mem.source_type || null;
+      if (!srcType) {
+        const tags = mem.tags || [];
+        if (tags.includes('synthesis:canonical')) srcType = 'canonical-fact';
+        else if (tags.includes('synthesis:bridge')) srcType = 'synthesis-bridge';
+      }
       const conf = typeof mem.synthesis_confidence === 'number'
         ? mem.synthesis_confidence
         : (typeof mem.synthesisConfidence === 'number' ? mem.synthesisConfidence : null);
@@ -1248,10 +1251,14 @@ export async function recallPersistedMemories(store, {
 
   if (!isDateSpecificQuery && top.length > 1) {
     const synthIdx = top.findIndex(item => {
-      if (item._synthesis_boosted) return false; // already at 0 if it already won
-      const mem    = item.memory || item;
-      const srcType = mem.source_metadata?.source_type || mem.sourceMetadata?.sourceType || null;
-      const conf    = typeof mem.synthesis_confidence === 'number' ? mem.synthesis_confidence
+      const mem = item.memory || item;
+      let srcType = mem.source_metadata?.source_type || mem.sourceMetadata?.sourceType || null;
+      if (!srcType) {
+        const tags = mem.tags || [];
+        if (tags.includes('synthesis:canonical')) srcType = 'canonical-fact';
+        else if (tags.includes('synthesis:bridge')) srcType = 'synthesis-bridge';
+      }
+      const conf = typeof mem.synthesis_confidence === 'number' ? mem.synthesis_confidence
         : (typeof mem.synthesisConfidence === 'number' ? mem.synthesisConfidence : null);
       return (srcType === 'canonical-fact' || srcType === 'synthesis-bridge')
         && conf !== null && conf >= 0.70
@@ -1330,9 +1337,26 @@ export async function recallPersistedMemories(store, {
 
   // Synthesized array: rich rendering for canonical-fact and synthesis-bridge outputs.
   // In quick mode: top synthesis entry + top-2 of its synthesisEvidenceIds (3–4 total).
+  //
+  // NOTE: lexical candidates from searchMemories() return a bare object without
+  // source_metadata (the FTS SQL branch only returns content/title/tags/score).
+  // Vector candidates come from store.getMemory() and have source_metadata attached.
+  // To handle both paths reliably, check tags for synthesis:canonical / synthesis:bridge
+  // in addition to source_metadata.source_type.
   const isSynthesisMemory = (m) => {
     const srcType = m.source_metadata?.source_type || m.sourceMetadata?.sourceType || null;
-    return srcType === 'canonical-fact' || srcType === 'synthesis-bridge';
+    if (srcType === 'canonical-fact' || srcType === 'synthesis-bridge') return true;
+    const tags = m.tags || [];
+    return tags.includes('synthesis:canonical') || tags.includes('synthesis:bridge');
+  };
+
+  const getSynthesisSourceType = (m) => {
+    const srcType = m.source_metadata?.source_type || m.sourceMetadata?.sourceType || null;
+    if (srcType === 'canonical-fact' || srcType === 'synthesis-bridge') return srcType;
+    const tags = m.tags || [];
+    if (tags.includes('synthesis:canonical')) return 'canonical-fact';
+    if (tags.includes('synthesis:bridge')) return 'synthesis-bridge';
+    return null;
   };
 
   const synthesizedItems = flatMemories.filter(m => isSynthesisMemory(m));
@@ -1358,7 +1382,7 @@ export async function recallPersistedMemories(store, {
 
   // Enrich synthesized items with evidence snippets (async but bounded)
   const synthesized = await Promise.all(synthesizedItems.map(async m => {
-    const srcType  = m.source_metadata?.source_type || m.sourceMetadata?.sourceType;
+    const srcType  = getSynthesisSourceType(m);
     const conf     = typeof m.synthesis_confidence === 'number' ? m.synthesis_confidence
       : (typeof m.synthesisConfidence === 'number' ? m.synthesisConfidence : null);
     const revision = m.synthesis_revision || m.synthesisRevision || 1;

@@ -413,7 +413,8 @@ if (persistentMemoryEngine && persistentMemoryStore && prisma) {
     smartIngestRouter,
     externalRefStore,
     entityResolver,
-    qdrantClient,
+    // qdrantClient injected post-construction (see below) — not yet defined
+    // at this point in file load order.
   });
   syncScheduler = new SyncScheduler({
     connectorStore: schedulerConnStore,

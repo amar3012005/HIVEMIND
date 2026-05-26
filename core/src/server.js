@@ -6107,6 +6107,7 @@ exit \$RC
             'google-gemini': './connectors/providers/gemini/adapter.js',
             gemini: './connectors/providers/gemini/adapter.js',
             'google-mail': './connectors/providers/gmail/adapter.js',
+            salesforce: './connectors/providers/salesforce/adapter.js',
           };
           const adapterPath = adapterModules[provider];
           if (!adapterPath) {

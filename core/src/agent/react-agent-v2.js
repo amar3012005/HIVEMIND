@@ -231,7 +231,11 @@ Output STRICT JSON (no prose, no code fence):
                                   //   right provider. Leave null for pure recall / read.
   "save_intent": null,            // ONLY when intent_kind === 'save'. {"title": "...", "content": "...", "tags": [...], "project_hint": "..."}. CONTENT MUST be a fully self-contained note enriched with WHO/WHAT/WHEN entities the user mentioned. If the user used a pronoun ("save this"), resolve it from the previous turn. NEVER emit empty / pronoun-only content, NEVER emit content that is just the user's own message verbatim — distill key entities, dates, facts into a structured note. NEVER emit save_intent for a bare filename or entity-only message. If unrecoverable, set null. If user named a project ("save to Ashley", "in the SOLVIS project"), put that name in project_hint.
   "ask_for_project": false,       // true if the user asked to save but did NOT specify a project AND no active project is set in the session. Server will respond by asking which project before saving.
-  "auto_save_intent": null,       // PROACTIVE save when the user has NOT asked you to save but their message contains a NEW DURABLE FACT worth remembering (decision made, person met, plan stated, preference declared, event committed, status changed). Emit {"title": "...", "content": "...", "tags": [...], "memory_type": "fact|decision|preference|event|goal|lesson|relationship", "confidence": 0.0-1.0}. Only fire when confidence >= 0.75. Triggers: user states fact in indicative mood ("I am moving to Berlin", "We decided to ship Friday", "Met X yesterday", "My preferred X is Y"). DO NOT fire on: questions, recall requests, ambiguous statements, "remind me to X" (that's a goal request not a fact). Server runs recall first to skip duplicates, then saves silently. Title MUST be a short noun phrase summarising the fact (not "user said X" — extract the fact itself). Content MUST be self-contained with entities + dates + context written as a third-person fact. Tags MUST include entity:<Name> for each named entity + topic tag. Be conservative — false positives pollute the graph more than false negatives hurt.
+  "auto_save_intent": null,       // PROACTIVE save when the user has NOT explicitly said "save" but their message contains a NEW DURABLE FACT worth memorizing — even when the same message ALSO asks a question. You MUST emit auto_save_intent whenever the user narrates a past event ("I just went to X", "Met Y today", "Yesterday Z called"), states a plan ("I'm flying to Berlin June 5", "We decided to ship Friday"), declares a preference ("I prefer X to Y"), reports a status change ("X moved to Y company"), or commits to a future action ("I'll register the UG next week"). The trigger is INDEPENDENT of intent_kind — a single user turn can be intent_kind='lookup' (they asked a follow-up question) AND emit auto_save_intent simultaneously when the message embeds a fact. Emit {"title": "...", "content": "...", "tags": [...], "memory_type": "fact|decision|preference|event|goal|lesson|relationship", "confidence": 0.0-1.0}. Threshold confidence >= 0.70 fires the save. DO NOT fire on: pure questions ("What is X?"), recall requests ("tell me about Y"), hypotheticals ("what if I did X"), opinions about external topics ("AI is overhyped"). DO FIRE on: any first-person past-event narration, any future commitment, any state declaration about the user / their projects / their people. Title MUST be a short noun phrase extracting the fact (e.g. "Nbank sponsorship appointment 9:00-10:30" — NOT "user said Nbank"). Content MUST be third-person self-contained with entities + dates + duration + outcome. Tags MUST include entity:<Name> for each named entity + topic tag. Examples that MUST trigger auto_save_intent (illustrative):
+  // - "I just went for an Nbank sponsorship appointment from 9-10:30" → {title: "Nbank sponsorship appointment", content: "Amar attended an Nbank sponsorship appointment from 09:00 to 10:30 on YYYY-MM-DD to discuss startup sponsorship registration.", tags: ["entity:Nbank", "topic:sponsorship", "topic:startup-registration"], memory_type: "event", confidence: 0.9}
+  // - "I'll register the UG next week" → {title: "UG registration planned next week", content: "Amar plans to register the German UG within the next week.", tags: ["entity:UG", "topic:legal", "topic:germany"], memory_type: "goal", confidence: 0.85}
+  // - "Felix from Cherry Ventures said he wants a follow-up call" → {title: "Felix at Cherry Ventures requests follow-up", content: "Felix at Cherry Ventures asked for a follow-up call after the Berlin meeting.", tags: ["entity:Felix", "entity:Cherry_Ventures", "topic:investor-pipeline"], memory_type: "fact", confidence: 0.9}
+  // Be liberal — missing an auto-save is worse than over-saving (smart-ingest NOOP detects duplicates).
   "update_intent": null,          // ONLY when intent_kind === 'update'. {"target_hint": "...", "new_value": "..."} if user corrected a prior fact
   "expected_evidence_types": []  // hint: ["fact"], ["decision"], ["preference"], etc
 }
@@ -299,15 +303,15 @@ async function planStep({ message, history, language, assistantName, orgName, ha
 
   // Auto-save intent — can fire on ANY intent_kind. Planner decides if the
   // user's message contains a durable fact worth memorizing unprompted.
-  // Conservative guard: requires structured object + confidence >= 0.75 +
-  // non-empty title + content >= 30 chars. Filters out garbage like
+  // Guard: requires structured object + confidence >= 0.70 + non-empty
+  // title + content >= 30 chars. Filters out garbage like
   // {"title": "X", "content": "X"}.
   let auto_save_intent = null;
   const rawAS = parsed.auto_save_intent;
   if (rawAS && typeof rawAS === 'object'
       && typeof rawAS.title === 'string' && rawAS.title.trim().length >= 5
       && typeof rawAS.content === 'string' && rawAS.content.trim().length >= 30
-      && typeof rawAS.confidence === 'number' && rawAS.confidence >= 0.75) {
+      && typeof rawAS.confidence === 'number' && rawAS.confidence >= 0.70) {
     // Reject when content is just user's message verbatim (cheap dedup).
     const norm = (s) => String(s).toLowerCase().replace(/\s+/g, ' ').trim();
     if (norm(rawAS.content) !== norm(message)) {

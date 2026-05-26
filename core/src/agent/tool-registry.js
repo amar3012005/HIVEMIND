@@ -566,23 +566,67 @@ const TOOL_HANDLERS = {
   },
 
   async hivemind_traverse_graph(args, ctx) {
-    // PrismaGraphStore exposes getRelatedMemories(id, opts) — wraps the
-    // Relationship table walk. Older tool wrapper called a non-existent
-    // traverseGraph() and silently returned { error: ... }. Fixed.
+    // PrismaGraphStore.getRelatedMemories actually returns EDGE records
+    // (from_id, to_id, type, confidence) despite the name — older callers
+    // mistook edges for memories which produced hallucinated relations.
+    // Now we ALSO resolve the connected memories by id so the caller gets
+    // both the edge list AND the memory rows referenced by them.
     if (!ctx.persistentMemoryStore?.getRelatedMemories) {
       return { error: 'graph traversal unavailable', _failure_mode: 'UNKNOWN_TOOL' };
     }
-    const related = await ctx.persistentMemoryStore.getRelatedMemories(args.memory_id, {
+    const edges = await ctx.persistentMemoryStore.getRelatedMemories(args.memory_id, {
       maxDepth: args.depth || 2,
       relationship: args.relationship && args.relationship !== 'all' ? args.relationship : null,
       user_id: ctx.userId,
       org_id: ctx.orgId,
     });
+    const edgeList = (Array.isArray(edges) ? edges : []).slice(0, 50);
+    // Collect unique memory ids referenced by edges (excluding seed).
+    const otherIds = new Set();
+    for (const e of edgeList) {
+      if (e.from_id && e.from_id !== args.memory_id) otherIds.add(e.from_id);
+      if (e.to_id   && e.to_id   !== args.memory_id) otherIds.add(e.to_id);
+    }
+    // Resolve memory rows for the connected ids — bulk lookup.
+    let memories = [];
+    if (otherIds.size > 0 && ctx.prisma?.memory) {
+      try {
+        const rows = await ctx.prisma.memory.findMany({
+          where: { id: { in: [...otherIds] }, deletedAt: null },
+          select: {
+            id: true, title: true, content: true, tags: true, memoryType: true,
+            isLatest: true, createdAt: true, documentDate: true,
+          },
+          take: 30,
+        });
+        memories = rows.map(r => ({
+          id: r.id, title: r.title,
+          content: (r.content || '').slice(0, 400),
+          tags: r.tags || [],
+          memory_type: r.memoryType,
+          is_latest: r.isLatest,
+          created_at: r.createdAt,
+        }));
+      } catch (lookupErr) {
+        console.warn('[hivemind_traverse_graph] member lookup failed:', lookupErr.message);
+      }
+    }
     return {
       memory_id: args.memory_id,
-      count: Array.isArray(related) ? related.length : 0,
-      memories: (related || []).slice(0, 30),
-      related: (related || []).slice(0, 30),
+      edge_count: edgeList.length,
+      // edges[]: typed relationship records — agent MUST use these for any
+      // "relation between X and Y" answers. No edge listed = no recorded
+      // relation in graph (do NOT invent).
+      edges: edgeList.map(e => ({
+        from_id: e.from_id,
+        to_id: e.to_id,
+        type: e.type,
+        confidence: typeof e.confidence === 'number' ? Number(e.confidence.toFixed(3)) : e.confidence,
+        created_at: e.created_at,
+      })),
+      memories,                    // resolved memory rows referenced by edges
+      related: memories,           // backward-compat alias
+      count: memories.length,
     };
   },
 

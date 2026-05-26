@@ -229,8 +229,9 @@ Output STRICT JSON (no prose, no code fence):
                                   //   'email X', 'open github issue', 'add linear task'. Even when phrased
                                   //   indirectly ('@channel let them know' → slack), the planner picks the
                                   //   right provider. Leave null for pure recall / read.
-  "save_intent": null,            // ONLY when intent_kind === 'save'. {"title": "...", "content": "...", "tags": [...], "project_hint": "..."}. CONTENT MUST be a fully self-contained note — if the user used a pronoun ("save this", "save that"), resolve it by reading the previous turn in conversation history and copy the actual facts into content. NEVER emit save_intent with empty / pronoun-only content, NEVER emit content that is just the user's own message repeated verbatim, NEVER emit save_intent for a bare filename or entity-only message. If the referent is unrecoverable, set save_intent to null instead. If the user named a project ("save to Ashley", "in the SOLVIS project"), put that name in project_hint so the server can resolve it to a project_id.
+  "save_intent": null,            // ONLY when intent_kind === 'save'. {"title": "...", "content": "...", "tags": [...], "project_hint": "..."}. CONTENT MUST be a fully self-contained note enriched with WHO/WHAT/WHEN entities the user mentioned. If the user used a pronoun ("save this"), resolve it from the previous turn. NEVER emit empty / pronoun-only content, NEVER emit content that is just the user's own message verbatim — distill key entities, dates, facts into a structured note. NEVER emit save_intent for a bare filename or entity-only message. If unrecoverable, set null. If user named a project ("save to Ashley", "in the SOLVIS project"), put that name in project_hint.
   "ask_for_project": false,       // true if the user asked to save but did NOT specify a project AND no active project is set in the session. Server will respond by asking which project before saving.
+  "auto_save_intent": null,       // PROACTIVE save when the user has NOT asked you to save but their message contains a NEW DURABLE FACT worth remembering (decision made, person met, plan stated, preference declared, event committed, status changed). Emit {"title": "...", "content": "...", "tags": [...], "memory_type": "fact|decision|preference|event|goal|lesson|relationship", "confidence": 0.0-1.0}. Only fire when confidence >= 0.75. Triggers: user states fact in indicative mood ("I am moving to Berlin", "We decided to ship Friday", "Met X yesterday", "My preferred X is Y"). DO NOT fire on: questions, recall requests, ambiguous statements, "remind me to X" (that's a goal request not a fact). Server runs recall first to skip duplicates, then saves silently. Title MUST be a short noun phrase summarising the fact (not "user said X" — extract the fact itself). Content MUST be self-contained with entities + dates + context written as a third-person fact. Tags MUST include entity:<Name> for each named entity + topic tag. Be conservative — false positives pollute the graph more than false negatives hurt.
   "update_intent": null,          // ONLY when intent_kind === 'update'. {"target_hint": "...", "new_value": "..."} if user corrected a prior fact
   "expected_evidence_types": []  // hint: ["fact"], ["decision"], ["preference"], etc
 }
@@ -296,6 +297,30 @@ async function planStep({ message, history, language, assistantName, orgName, ha
   const save_intent   = intent_kind === 'save'   ? (parsed.save_intent   || null) : null;
   const update_intent = intent_kind === 'update' ? (parsed.update_intent || null) : null;
 
+  // Auto-save intent — can fire on ANY intent_kind. Planner decides if the
+  // user's message contains a durable fact worth memorizing unprompted.
+  // Conservative guard: requires structured object + confidence >= 0.75 +
+  // non-empty title + content >= 30 chars. Filters out garbage like
+  // {"title": "X", "content": "X"}.
+  let auto_save_intent = null;
+  const rawAS = parsed.auto_save_intent;
+  if (rawAS && typeof rawAS === 'object'
+      && typeof rawAS.title === 'string' && rawAS.title.trim().length >= 5
+      && typeof rawAS.content === 'string' && rawAS.content.trim().length >= 30
+      && typeof rawAS.confidence === 'number' && rawAS.confidence >= 0.75) {
+    // Reject when content is just user's message verbatim (cheap dedup).
+    const norm = (s) => String(s).toLowerCase().replace(/\s+/g, ' ').trim();
+    if (norm(rawAS.content) !== norm(message)) {
+      auto_save_intent = {
+        title: rawAS.title.trim().slice(0, 200),
+        content: rawAS.content.trim().slice(0, 4000),
+        tags: Array.isArray(rawAS.tags) ? rawAS.tags.filter(t => typeof t === 'string').slice(0, 12) : [],
+        memory_type: ['fact','decision','preference','event','goal','lesson','relationship'].includes(rawAS.memory_type) ? rawAS.memory_type : 'fact',
+        confidence: rawAS.confidence,
+      };
+    }
+  }
+
   // Defensive: reject planner-emitted dates whose year is >18 months
   // older than today's year. Planner LLMs routinely default to 2024 from
   // training data, returning empty recall on queries about current data.
@@ -336,6 +361,7 @@ async function planStep({ message, history, language, assistantName, orgName, ha
     time_travel:           sanitizeTimeTravel(parsed.time_travel),
     needs_web:             !!parsed.needs_web,
     save_intent,
+    auto_save_intent,
     ask_for_project:       intent_kind === 'save' ? !!parsed.ask_for_project : false,
     update_intent,
     expected_evidence_types: Array.isArray(parsed.expected_evidence_types) ? parsed.expected_evidence_types : [],
@@ -351,6 +377,11 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
   const memoriesById = new Map();
   const liveItems = [];
   const evidenceItems = [];
+  // Typed graph edges harvested from hivemind_traverse_graph. Passed to
+  // answerStep so the LLM can ground "relation between X and Y" answers
+  // on actual edge records instead of inventing relations from content
+  // co-occurrence. Anti-hallucination invariant.
+  const edgesByKey = new Map();   // key = `${from_id}|${to_id}|${type}` → edge
 
   const recordTool = (tool, args, summary, payload) => {
     steps.push({ tool, args, result_summary: summary });
@@ -523,9 +554,17 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
         const args = { memory_id: seed.id, depth: 2, relationship: 'all' };
         const r = await dispatchTool('hivemind_traverse_graph', args, ctx);
         const found = r?.related || r?.memories || r?.nodes || [];
-        recordTool('hivemind_traverse_graph', args, `seed=${seed.id.slice(0, 8)} → ${found.length} related`, r);
+        const edges = Array.isArray(r?.edges) ? r.edges : [];
+        recordTool('hivemind_traverse_graph', args, `seed=${seed.id.slice(0, 8)} → ${edges.length} edges, ${found.length} related`, r);
         for (const m of found.slice(0, 8)) {
           if (m?.id && !memoriesById.has(m.id)) memoriesById.set(m.id, m);
+        }
+        // Collect typed edges (dedup by from|to|type). Anchor seed id too —
+        // answerStep needs edges touching ANY memory in the evidence set.
+        for (const e of edges) {
+          if (!e?.from_id || !e?.to_id || !e?.type) continue;
+          const k = `${e.from_id}|${e.to_id}|${e.type}`;
+          if (!edgesByKey.has(k)) edgesByKey.set(k, e);
         }
       } catch (err) {
         recordTool('hivemind_traverse_graph', { seed: seed.id }, `error: ${err.message}`, null);
@@ -609,6 +648,9 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
     memories: [...memoriesById.values()],
     live: liveItems,
     evidence: evidenceItems,
+    // Typed graph edges between memories — used by answerStep to ground
+    // "relation between X and Y" without hallucination.
+    relationships: [...edgesByKey.values()],
     steps,
     webJob,
   };
@@ -722,7 +764,12 @@ CORE RULES:
    or plan. No "Next steps:" / "How would you like to proceed?" boilerplate.
 8. If the user message was a pure save/update/log intent (e.g. "save X",
    "remember Y"), acknowledge briefly ("Got it — saved.") in ${lang}
-   without restating the saved content.
+   without restating the saved content. **NEVER mention the auto-save
+   pipeline.** When the planner silently auto-saved a durable fact from
+   the user's message, do NOT tell them "I saved that for you" — answer
+   the user's actual question (or just answer their statement) as if
+   nothing happened. Auto-save is a background reflex, not a feature
+   the user needs to be told about.
 9. **NEVER deny write/post access.** When a user asks to send/post/draft
    a slack message (or any connector action), do NOT say "I don't have
    access" or "I can't send messages". The system DOES have write
@@ -738,7 +785,24 @@ CORE RULES:
     Use raw evidence rows only to add detail the SYNTH row omits, or
     when no SYNTH row is on-topic. \`x-cluster=X.XX\` marks memories
     reinforced by neighbour clusters sharing entities — these are extra
-    high-confidence cross-domain links worth surfacing in the answer.`;
+    high-confidence cross-domain links worth surfacing in the answer.
+11. **RELATIONS COME FROM EDGES BLOCK ONLY — NEVER INVENT.** When the
+    user asks how memory X relates to memory Y, or what the connection
+    between two people/projects/topics is, you must:
+      (a) look up the GRAPH EDGES block above,
+      (b) report ONLY edges that touch the relevant memory ids,
+      (c) state edge type literally ("Updates", "Extends", "Mentions",
+          "Derives", "Contradicts") with the confidence shown,
+      (d) if NO edge in the EDGES block connects the two memories,
+          answer "no recorded relation in the graph between these
+          memories" — do NOT infer a relation from shared entities,
+          co-occurring tags, or topic overlap. Co-mention in content
+          is NOT a relation.
+    The GRAPH EDGES block reflects what the cognition loop and
+    smart-ingest actually wrote into the Relationship table; everything
+    else is content co-occurrence, which is suggestive but not a
+    relation. Misreporting this is the #1 source of hallucinated
+    history. When in doubt, default to the literal absence of the edge.`;
 }
 
 async function answerStep({ message, history, evidence, plan, language, assistantName, orgName, model, apiKey, signal, ctx }) {
@@ -834,8 +898,26 @@ async function answerStep({ message, history, evidence, plan, language, assistan
     .filter(h => h && (h.role === 'user' || h.role === 'assistant') && h.content)
     .map(h => ({ role: h.role, content: typeof h.content === 'string' ? h.content : JSON.stringify(h.content) }));
 
+  // GRAPH EDGES block — typed relationships between evidence memories.
+  // These come from real Relationship table rows (Updates/Extends/Mentions
+  // /Derives/Contradicts) returned by hivemind_traverse_graph. Agent MUST
+  // ground any "relation between X and Y" claim on these edges. No edge
+  // present = no recorded relation; LLM is NOT allowed to infer relations
+  // from content overlap or co-mentioned entities (rule 11).
+  const evidenceIdSet = new Set(evidence.memories.map(m => m.id));
+  const idToTitle = new Map(evidence.memories.map(m => [m.id, (m.title || '').slice(0, 50)]));
+  const filteredEdges = (evidence.relationships || []).filter(e =>
+    evidenceIdSet.has(e.from_id) || evidenceIdSet.has(e.to_id),
+  );
+  const edgeLines = filteredEdges.slice(0, 20).map(e => {
+    const fromLabel = idToTitle.get(e.from_id) || e.from_id?.slice(0, 8);
+    const toLabel   = idToTitle.get(e.to_id)   || e.to_id?.slice(0, 8);
+    const conf = typeof e.confidence === 'number' ? ` (conf=${e.confidence.toFixed(2)})` : '';
+    return `[${(e.from_id || '').slice(0, 8)}] "${fromLabel}" ─${e.type}${conf}→ [${(e.to_id || '').slice(0, 8)}] "${toLabel}"`;
+  }).join('\n');
+
   const userBlock = `EVIDENCE (${evidence.memories.length} memories):
-${evidenceLines || '(none)'}${liveLines ? `\n\nLIVE WORKSPACE (${(evidence.live || []).length} fresh items — Gmail / Drive / Calendar):\n${liveLines}` : ''}${evLines ? `\n\nDOCUMENT SEGMENTS (${(evidence.evidence || []).length} non-promoted KB chunks — full source text):\n${evLines}` : ''}${capabilityHint}
+${evidenceLines || '(none)'}${edgeLines ? `\n\nGRAPH EDGES (${filteredEdges.length} typed relationships between the memories above — ONLY trust these for relation claims):\n${edgeLines}` : ''}${liveLines ? `\n\nLIVE WORKSPACE (${(evidence.live || []).length} fresh items — Gmail / Drive / Calendar):\n${liveLines}` : ''}${evLines ? `\n\nDOCUMENT SEGMENTS (${(evidence.evidence || []).length} non-promoted KB chunks — full source text):\n${evLines}` : ''}${capabilityHint}
 
 PLANNER INTENT: ${(plan.intents || []).join(' / ') || '(unspecified)'}
 
@@ -1178,6 +1260,35 @@ async function maybeSaveOrUpdate({ plan, ctx, onEvent, message, history }) {
       return { tool: 'hivemind_save_memory', args, result_summary: r?.id ? `saved ${(r.id || '').slice(0, 8)}` : 'saved' };
     } catch (err) {
       return { tool: 'hivemind_save_memory', args, result_summary: `error: ${err.message}` };
+    }
+  }
+
+  // Auto-save path — fires when planner judged the user's message contains
+  // a durable fact even though the user did NOT say "save". Goes through
+  // the same hivemind_save_memory tool (which routes via canonical smart-
+  // ingest pipeline → engine.ingestMemory → entity_co_mention + conflict-
+  // detector + relationship classifier). Smart-ingest's NOOP detector
+  // skips duplicates so unprompted re-saves of known facts are cheap. The
+  // user-facing response acknowledges briefly (rule 8 in answerPrompt).
+  if (plan.auto_save_intent && typeof plan.auto_save_intent === 'object') {
+    const as = plan.auto_save_intent;
+    const args = {
+      title: as.title,
+      content: as.content,
+      tags: Array.isArray(as.tags) ? as.tags : [],
+      source_type: ['decision','preference','event','goal','lesson','relationship'].includes(as.memory_type) ? as.memory_type : 'text',
+      ...(ctx.projectId
+        ? { project_id: ctx.projectId, scope: 'project' }
+        : {}),
+    };
+    try {
+      const r = await dispatchTool('hivemind_save_memory', args, ctx);
+      const summary = r?.id ? `auto-saved ${(r.id || '').slice(0, 8)} (conf=${as.confidence.toFixed(2)})` : 'auto-saved';
+      onEvent?.({ type: 'tool_call', name: 'hivemind_save_memory', arguments: JSON.stringify({ ...args, __auto: true }) });
+      onEvent?.({ type: 'tool_result', name: 'hivemind_save_memory', summary });
+      return { tool: 'hivemind_save_memory', args, result_summary: summary };
+    } catch (err) {
+      return { tool: 'hivemind_save_memory', args, result_summary: `auto-save error: ${err.message}` };
     }
   }
   return null;
@@ -1629,9 +1740,12 @@ export async function runReactAgentV2({
     }
 
     // STEP 6 — Save intent fire-and-forget (don't block response).
-    // Gated on intent_kind === 'save' so a lookup turn that happens to
-    // include a filename never accidentally writes a memory.
-    if (plan.intent_kind === 'save' && plan.save_intent) {
+    // Save dispatch — fires on either:
+    //   (a) explicit save: intent_kind === 'save' + save_intent populated
+    //   (b) proactive auto-save: planner detected durable fact with
+    //       confidence >= 0.75 in any intent_kind. The function checks
+    //       both intents and prefers explicit save when both present.
+    if ((plan.intent_kind === 'save' && plan.save_intent) || plan.auto_save_intent) {
       const saveStep = await maybeSaveOrUpdate({ plan, ctx, onEvent, message, history });
       if (saveStep) steps.push(saveStep);
     }

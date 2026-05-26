@@ -7584,9 +7584,39 @@ exit \$RC
 
         case '/api/cognition/status':
           // Read-only — any authenticated caller can see loop health.
+          // In-memory _status carries current-process state; cognition_status
+          // table carries per-org persistent history that survives restart.
           try {
             const { getCognitionStatus } = await import('./memory/cognition-loop.js');
             const st = getCognitionStatus();
+            // Per-org rows: caller's own org first, then top-5 by recent tick.
+            let perOrg = [];
+            if (prisma?.cognitionStatus) {
+              try {
+                const rows = await prisma.cognitionStatus.findMany({
+                  orderBy: { lastTickAt: 'desc' },
+                  take: 20,
+                  select: {
+                    orgId: true,
+                    lastTickAt: true,
+                    lastRunMs: true,
+                    lastSynthCount: true,
+                    lastCompactCount: true,
+                    nextTickAt: true,
+                    totalTicks: true,
+                    totalSynth: true,
+                    totalCompact: true,
+                    lastError: true,
+                    lastErrorAt: true,
+                  },
+                });
+                perOrg = rows;
+              } catch (dbErr) {
+                console.warn('[/api/cognition/status] db read failed:', dbErr.message);
+              }
+            }
+            // Caller's org-specific row pulled to top of payload.
+            const callerOrg = perOrg.find(r => r.orgId === orgId) || null;
             return jsonResponse(res, {
               enabled: COGNITION_LOOP_ENABLED,
               interval_ms: Number(process.env.COGNITION_INTERVAL_MS || 60 * 60 * 1000),
@@ -7596,6 +7626,8 @@ exit \$RC
               drift_threshold: Number(process.env.DRIFT_COMPACT_THRESHOLD || 12),
               model: process.env.SYNTHESIS_MODEL || 'llama-3.3-70b-versatile',
               ...st,
+              caller_org: callerOrg,
+              per_org_recent: perOrg,
             });
           } catch (err) {
             return jsonResponse(res, { error: err.message }, 500);

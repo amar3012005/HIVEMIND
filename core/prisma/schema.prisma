@@ -1736,3 +1736,25 @@ model ClusterIndex {
   @@index([entityKeys], type: Gin)
   @@map("cluster_index")
 }
+
+/// Persistent per-org cognition tick status. In-memory _status was lost
+/// on every restart, making operators blind to tick coverage across orgs.
+/// One row per org_id. Updated on every runOnce + auto-tick completion.
+model CognitionStatus {
+  orgId             String    @id @map("org_id") @db.Uuid
+  lastTickAt        DateTime? @map("last_tick_at") @db.Timestamptz(6)
+  lastRunMs         Int?      @map("last_run_ms")
+  lastSynthCount    Int       @default(0) @map("last_synth_count")
+  lastCompactCount  Int       @default(0) @map("last_compact_count")
+  nextTickAt        DateTime? @map("next_tick_at") @db.Timestamptz(6)
+  totalTicks        Int       @default(0) @map("total_ticks")
+  totalSynth        Int       @default(0) @map("total_synth")
+  totalCompact      Int       @default(0) @map("total_compact")
+  lastError         String?   @map("last_error")
+  lastErrorAt       DateTime? @map("last_error_at") @db.Timestamptz(6)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([lastTickAt(sort: Desc)])
+  @@map("cognition_status")
+}

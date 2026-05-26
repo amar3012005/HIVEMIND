@@ -201,12 +201,57 @@ export class CognitionLoop {
       _status.last_compaction_count = compact;
       _status.next_run_at           = new Date(Date.now() + this._intervalMs).toISOString();
       this.logger.log(`[cognition] manual run org=${orgId} synth=${synth} compact=${compact} ms=${_status.last_run_ms}`);
+      await this._persistOrgStatus(orgId, { synth, compact, runMs: Date.now() - tStart, error: null });
       return { synth, compact, ms: _status.last_run_ms };
     } catch (err) {
       _status.errors = [..._status.errors.slice(-9), { org_id: orgId, error: err.message, at: new Date().toISOString() }];
+      await this._persistOrgStatus(orgId, { synth: 0, compact: 0, runMs: Date.now() - tStart, error: err.message });
       throw err;
     } finally {
       _status.running = false;
+    }
+  }
+
+  /**
+   * Upsert per-org cognition status row. Restart-safe view of tick history.
+   * Non-fatal — DB write failures log a warn but don't break the tick.
+   */
+  async _persistOrgStatus(orgId, { synth, compact, runMs, error }) {
+    if (!this.prisma?.cognitionStatus) return;
+    try {
+      const now = new Date();
+      const nextTickAt = new Date(now.getTime() + this._intervalMs);
+      await this.prisma.cognitionStatus.upsert({
+        where: { orgId },
+        create: {
+          orgId,
+          lastTickAt: now,
+          lastRunMs: runMs,
+          lastSynthCount: synth,
+          lastCompactCount: compact,
+          nextTickAt,
+          totalTicks: 1,
+          totalSynth: synth,
+          totalCompact: compact,
+          lastError: error || null,
+          lastErrorAt: error ? now : null,
+        },
+        update: {
+          lastTickAt: now,
+          lastRunMs: runMs,
+          lastSynthCount: synth,
+          lastCompactCount: compact,
+          nextTickAt,
+          totalTicks: { increment: 1 },
+          totalSynth: { increment: synth },
+          totalCompact: { increment: compact },
+          ...(error
+            ? { lastError: error, lastErrorAt: now }
+            : {}),
+        },
+      });
+    } catch (writeErr) {
+      this.logger.warn(`[cognition] status persist failed org=${orgId}: ${writeErr.message}`);
     }
   }
 
@@ -223,14 +268,17 @@ export class CognitionLoop {
       let totalSynth = 0;
       let totalCompact = 0;
       for (const org of orgs) {
+        const orgStart = Date.now();
         try {
           const synthN   = await this.synthesizeForOrg(org.id);
           const compactN = await this.compactDriftForOrg(org.id);
           totalSynth   += synthN;
           totalCompact += compactN;
+          await this._persistOrgStatus(org.id, { synth: synthN, compact: compactN, runMs: Date.now() - orgStart, error: null });
         } catch (perOrgErr) {
           this.logger.warn(`[cognition] org=${org.id} failed: ${perOrgErr.message}`);
           _status.errors = [..._status.errors.slice(-9), { org_id: org.id, error: perOrgErr.message, at: new Date().toISOString() }];
+          await this._persistOrgStatus(org.id, { synth: 0, compact: 0, runMs: Date.now() - orgStart, error: perOrgErr.message });
         }
       }
       _status.last_run_at           = new Date().toISOString();

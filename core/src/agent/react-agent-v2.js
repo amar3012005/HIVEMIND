@@ -237,6 +237,7 @@ Output STRICT JSON (no prose, no code fence):
   // - "Felix from Cherry Ventures said he wants a follow-up call" → {title: "Felix at Cherry Ventures requests follow-up", content: "Felix at Cherry Ventures asked for a follow-up call after the Berlin meeting.", tags: ["entity:Felix", "entity:Cherry_Ventures", "topic:investor-pipeline"], memory_type: "fact", confidence: 0.9}
   // Be liberal — missing an auto-save is worse than over-saving (smart-ingest NOOP detects duplicates).
   "update_intent": null,          // ONLY when intent_kind === 'update'. {"target_hint": "...", "new_value": "..."} if user corrected a prior fact
+  "recall_mode": "quick",         // 'quick' (default — fast semantic), 'panorama' (temporal/historical browse), or 'insight' (deep — expands synthesis evidence chains + traverses bridges). Use 'insight' when the user asks about RELATIONSHIPS between memories, multi-entity connections, or cross-topic context ("how is X connected to Y", "what's the relation between X and Y", "what links X to my work on Y", "give me the full story on X"). Use 'panorama' for "what happened last week", "show me my history with X", "timeline of Y". Default 'quick' for direct lookups.
   "expected_evidence_types": []  // hint: ["fact"], ["decision"], ["preference"], etc
 }
 
@@ -368,8 +369,28 @@ async function planStep({ message, history, language, assistantName, orgName, ha
     auto_save_intent,
     ask_for_project:       intent_kind === 'save' ? !!parsed.ask_for_project : false,
     update_intent,
+    // Recall mode — insight expands synthesis chains, panorama gives
+    // temporal browse, quick is default fast semantic. Validated to one
+    // of the three; bad input falls to 'quick'.
+    recall_mode:           ['quick','panorama','insight'].includes(parsed.recall_mode) ? parsed.recall_mode : 'quick',
     expected_evidence_types: Array.isArray(parsed.expected_evidence_types) ? parsed.expected_evidence_types : [],
   };
+
+  // Deterministic relation-query detection — overrides planner choice
+  // when patterns are unambiguous. LLM planners on smaller models miss
+  // these consistently. Forces mode=insight so synthesis chains + edge
+  // expansion fire.
+  const ml = (message || '').toLowerCase();
+  const RELATION_PATTERNS = [
+    /\b(relation|relationship|connection)\s+between\b/,
+    /\bhow\s+(?:is|are)\s+\w+(?:\s+\w+){0,4}\s+(?:connect|relat|link|tie)/,
+    /\bwhat\s+(?:links?|connects?|ties?)\b/,
+    /\bfull\s+story\s+(?:on|about|of)\b/,
+    /\bgive\s+me\s+(?:the\s+)?(?:full|whole|complete)\s+(?:context|picture|story)\b/,
+  ];
+  if (RELATION_PATTERNS.some(re => re.test(ml))) {
+    plan.recall_mode = 'insight';
+  }
   onEvent?.({ type: 'plan_done', plan });
   return { plan, usage };
 }
@@ -386,6 +407,11 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
   // on actual edge records instead of inventing relations from content
   // co-occurrence. Anti-hallucination invariant.
   const edgesByKey = new Map();   // key = `${from_id}|${to_id}|${type}` → edge
+  // Synthesis evidence chains from insight-mode recall. Each chain is a
+  // canonical-fact or synthesis-bridge memory + its top-4 evidence
+  // memories. Passed to answerStep so the LLM can cite synth claims AND
+  // their source rows in the same answer.
+  const synthesisChains = new Map(); // key = synthesis_id → chain
 
   const recordTool = (tool, args, summary, payload) => {
     steps.push({ tool, args, result_summary: summary });
@@ -434,20 +460,26 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
     ...(derivedValidAt ? { valid_at: derivedValidAt } : {}),
   };
 
-  // (a) Parallel recall on each sub_query
+  // (a) Parallel recall on each sub_query — mode chosen by planner (quick
+  // default, insight for relation queries, panorama for time/history).
+  // Insight mode pulls synthesis_evidence_chains so the agent sees the
+  // multi-source claim AND its source memories without a second call.
+  const recallMode = plan.recall_mode || 'quick';
   if (plan.sub_queries.length > 0) {
     const recallResults = await Promise.all(
       plan.sub_queries.map(async (q) => {
         try {
-          const r = await dispatchTool('hivemind_recall', { query: q, mode: 'quick', limit: 12, ...recallExtras }, ctx);
+          const r = await dispatchTool('hivemind_recall', { query: q, mode: recallMode, limit: 12, ...recallExtras }, ctx);
           const memCount = r?.memories?.length || 0;
           const liveCount = r?.live_count || 0;
           const evCount = r?.evidence_count || 0;
+          const chainCount = (r?.synthesis_evidence_chains || []).length;
           const parts = [`${memCount} memories`];
+          if (chainCount > 0) parts.push(`${chainCount} synth chains`);
           if (liveCount > 0) parts.push(`${liveCount} live`);
           if (evCount > 0) parts.push(`${evCount} evidence`);
           const summary = parts.join(' + ');
-          recordTool('hivemind_recall', { query: q, ...recallExtras, mode: 'quick' }, summary, r);
+          recordTool('hivemind_recall', { query: q, ...recallExtras, mode: recallMode }, summary, r);
           return r;
         } catch (err) {
           recordTool('hivemind_recall', { query: q }, `error: ${err.message}`, null);
@@ -465,6 +497,13 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
       }
       for (const ev of (r?.evidence || [])) {
         evidenceItems.push(ev);
+      }
+      // Synthesis evidence chains — pulled when recall_mode='insight'.
+      // Each chain: { synthesis_id, synthesis_title, conf, rev, evidence[] }
+      for (const chain of (r?.synthesis_evidence_chains || [])) {
+        if (!synthesisChains.has(chain.synthesis_id)) {
+          synthesisChains.set(chain.synthesis_id, chain);
+        }
       }
     }
   }
@@ -655,6 +694,8 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
     // Typed graph edges between memories — used by answerStep to ground
     // "relation between X and Y" without hallucination.
     relationships: [...edgesByKey.values()],
+    // Synthesis evidence chains from insight-mode recall.
+    synthesis_chains: [...synthesisChains.values()],
     steps,
     webJob,
   };
@@ -920,8 +961,20 @@ async function answerStep({ message, history, evidence, plan, language, assistan
     return `[${(e.from_id || '').slice(0, 8)}] "${fromLabel}" ─${e.type}${conf}→ [${(e.to_id || '').slice(0, 8)}] "${toLabel}"`;
   }).join('\n');
 
+  // SYNTHESIS CHAINS block — insight-mode recall returns curated
+  // synthesis-tier memories + their evidence chain (top-4 source rows
+  // each). Renders the claim + sources together so the LLM can cite the
+  // synthesis with provenance in one answer.
+  const chainLines = (evidence.synthesis_chains || []).slice(0, 5).map((c) => {
+    const head = `[${(c.synthesis_id || '').slice(0, 8)}] (conf=${c.synthesis_confidence ?? '?'} rev=${c.synthesis_revision ?? '?'}) ${c.synthesis_title || ''}`;
+    const evRows = (c.evidence || []).slice(0, 4).map(e =>
+      `      ▸ [${(e.id || '').slice(0, 8)}] ${(e.title || '').slice(0, 60)} — ${(e.content || '').replace(/\n/g, ' ').slice(0, 180)}`
+    ).join('\n');
+    return `  ▶ ${head}\n${evRows}`;
+  }).join('\n');
+
   const userBlock = `EVIDENCE (${evidence.memories.length} memories):
-${evidenceLines || '(none)'}${edgeLines ? `\n\nGRAPH EDGES (${filteredEdges.length} typed relationships between the memories above — ONLY trust these for relation claims):\n${edgeLines}` : ''}${liveLines ? `\n\nLIVE WORKSPACE (${(evidence.live || []).length} fresh items — Gmail / Drive / Calendar):\n${liveLines}` : ''}${evLines ? `\n\nDOCUMENT SEGMENTS (${(evidence.evidence || []).length} non-promoted KB chunks — full source text):\n${evLines}` : ''}${capabilityHint}
+${evidenceLines || '(none)'}${chainLines ? `\n\nSYNTHESIS CHAINS (${(evidence.synthesis_chains || []).length} curated claims + sources — cite the claim, support with the evidence rows):\n${chainLines}` : ''}${edgeLines ? `\n\nGRAPH EDGES (${filteredEdges.length} typed relationships between the memories above — ONLY trust these for relation claims):\n${edgeLines}` : ''}${liveLines ? `\n\nLIVE WORKSPACE (${(evidence.live || []).length} fresh items — Gmail / Drive / Calendar):\n${liveLines}` : ''}${evLines ? `\n\nDOCUMENT SEGMENTS (${(evidence.evidence || []).length} non-promoted KB chunks — full source text):\n${evLines}` : ''}${capabilityHint}
 
 PLANNER INTENT: ${(plan.intents || []).join(' / ') || '(unspecified)'}
 

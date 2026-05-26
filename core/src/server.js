@@ -399,12 +399,13 @@ const nangoTokenResolver = async ({ userId, orgId, providerKey }) => {
 };
 
 let connectorStore = null;
+let schedulerSyncEngine = null;
 if (persistentMemoryEngine && persistentMemoryStore && prisma) {
   const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
   const { SyncEngine } = await import('./connectors/framework/sync-engine.js');
   const schedulerConnStore = new ConnectorStore(prisma);
   connectorStore = schedulerConnStore;
-  const schedulerSyncEngine = new SyncEngine({
+  schedulerSyncEngine = new SyncEngine({
     connectorStore: schedulerConnStore,
     memoryEngine: persistentMemoryEngine,
     memoryStore: persistentMemoryStore,
@@ -412,6 +413,7 @@ if (persistentMemoryEngine && persistentMemoryStore && prisma) {
     smartIngestRouter,
     externalRefStore,
     entityResolver,
+    qdrantClient,
   });
   syncScheduler = new SyncScheduler({
     connectorStore: schedulerConnStore,
@@ -1103,6 +1105,13 @@ if (taraHandler) taraHandler.qdrantClient = qdrantClient;
 // Inject qdrantClient into MemoryGraphEngine for semantic similarity during ingestion
 // (triple operator detection: Updates/Extends/Derives need vector search, not just FTS)
 if (persistentMemoryEngine) persistentMemoryEngine.vectorStore = qdrantClient;
+
+// Inject qdrantClient into the scheduler-bound SyncEngine (constructed
+// before qdrantClient was initialized). Without this, scheduled connector
+// polls produce memories that never enter the vector store.
+if (schedulerSyncEngine) {
+  schedulerSyncEngine.qdrantClient = qdrantClient;
+}
 
 // ─── Phase 1: Document-Backed Memory Services ───────────────────────────────────
 // Feature-flagged: enabled via ENABLE_DOCUMENT_FIRST_INGEST and ENABLE_EVIDENCE_RECALL env vars
@@ -6135,6 +6144,7 @@ exit \$RC
             smartIngestRouter,
             externalRefStore,
             entityResolver,
+            qdrantClient,
           });
 
           const incremental = body.incremental !== false;
@@ -8580,6 +8590,7 @@ exit \$RC
                     smartIngestRouter,
                     externalRefStore,
                     entityResolver,
+                    qdrantClient,
                   });
                   const result = await engine.runSync({
                     adapter, userId, orgId, provider: nangoProviderKey, mode: 'incremental',
@@ -8617,6 +8628,7 @@ exit \$RC
                     smartIngestRouter,
                     externalRefStore,
                     entityResolver,
+                    qdrantClient,
                   });
                   const result = await engine.runSync({
                     adapter, userId, orgId, provider: nangoProviderKey, mode: 'incremental',
@@ -8682,6 +8694,7 @@ exit \$RC
                     smartIngestRouter,
                     externalRefStore,
                     entityResolver,
+                    qdrantClient,
                   });
                   await engine.runSync({
                     adapter,
@@ -9930,7 +9943,7 @@ exit \$RC
               const { SyncEngine } = await import('./connectors/framework/sync-engine.js');
               const { GmailAdapter } = await import('./connectors/providers/gmail/adapter.js');
               const adapter = new GmailAdapter();
-              const engine = new SyncEngine({ connectorStore: cs, memoryStore: persistentMemoryStore, memoryEngine: persistentMemoryEngine, smartIngestRouter, externalRefStore, entityResolver });
+              const engine = new SyncEngine({ connectorStore: cs, memoryStore: persistentMemoryStore, memoryEngine: persistentMemoryEngine, smartIngestRouter, externalRefStore, entityResolver, qdrantClient });
 
               const cursor = conn.metadata?.cursor || decoded.historyId;
               const accessToken = decryptToken(conn.access_token_encrypted);
@@ -11393,6 +11406,7 @@ exit \$RC
                 smartIngestRouter,
                 externalRefStore,
                 entityResolver,
+                qdrantClient,
               });
 
               // Run sync in background

@@ -15,7 +15,7 @@ export class SyncEngine {
    * @param {import('../../memory/graph-engine.js').MemoryGraphEngine} deps.memoryEngine
    * @param {import('../../memory/prisma-graph-store.js').PrismaGraphStore} deps.memoryStore
    */
-  constructor({ connectorStore, memoryEngine, memoryStore, prisma, trailExecutor, smartIngestRouter, externalRefStore, entityResolver }) {
+  constructor({ connectorStore, memoryEngine, memoryStore, prisma, trailExecutor, smartIngestRouter, externalRefStore, entityResolver, qdrantClient }) {
     this.connectorStore = connectorStore;
     this.memoryEngine = memoryEngine;
     this.memoryStore = memoryStore;
@@ -24,6 +24,12 @@ export class SyncEngine {
     this.smartIngestRouter = smartIngestRouter || null;
     this.externalRefStore = externalRefStore || null;
     this.entityResolver = entityResolver || null;
+    // Optional Qdrant client used to embed + upsert sync-ingested memories
+    // into the vector store. Without this, connector memories live in
+    // Postgres only and never surface via vector recall — they show up only
+    // when the lexical FTS path happens to match the query (poor recall for
+    // exact-name lookups like "Vinil Audit AI" against rich synthesis rows).
+    this.qdrantClient = qdrantClient || null;
     this._dedupeCache = new Map(); // in-memory for now; can be Redis later
   }
 
@@ -331,6 +337,23 @@ export class SyncEngine {
     const orgId = payload.org_id;
     const meta = payload.metadata || {};
     const sm = payload.source_metadata || {};
+
+    // Vector embedding + Qdrant upsert. Without this, connector-synced
+    // memories never enter the vector store and recall falls back to FTS
+    // only. Gmail/Slack adapters call storeMemory explicitly today; we
+    // centralize the hook here so every connector benefits (salesforce,
+    // notion, github, linear, future) without per-adapter plumbing.
+    if (this.qdrantClient && this.memoryStore?.getMemory) {
+      try {
+        const fullMemory = await this.memoryStore.getMemory(memoryId);
+        if (fullMemory) {
+          const collectionName = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
+          await this.qdrantClient.storeMemory(fullMemory, { collectionName });
+        }
+      } catch (embedErr) {
+        console.warn(`[sync-engine] qdrant store failed for ${memoryId.slice(0,8)}: ${embedErr.message}`);
+      }
+    }
 
     // External ref — uniformly use source_metadata.source_id when present.
     const system = (sm.source_platform || sm.source_type || '').toString().toLowerCase();

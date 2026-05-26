@@ -180,6 +180,28 @@ export class ConnectorStore {
           select: { id: true, connectionId: true, createdAt: true, updatedAt: true },
         });
         if (nangoRow) {
+          // Salesforce + similar instance-scoped providers need
+          // provider_metadata.instance_url for SOQL queries. Fetch from
+          // Nango credentials endpoint and stash so SyncEngine + adapter
+          // can read context.provider_metadata.instance_url without a
+          // second round-trip per record. Cached on the connector row
+          // shape — sync-engine line 92 reads this directly.
+          let providerMetadata = {};
+          if (['salesforce', 'salesforce-sandbox'].includes(nangoKey)) {
+            try {
+              const { nangoGet } = await import('../mcp/nango-service.js');
+              const creds = await nangoGet(
+                `/connection/${encodeURIComponent(nangoRow.connectionId)}?provider_config_key=${encodeURIComponent(nangoKey)}`,
+              );
+              const instanceUrl = creds?.connection_config?.instance_url
+                              || creds?.credentials?.instance_url
+                              || creds?.metadata?.instance_url
+                              || null;
+              if (instanceUrl) providerMetadata.instance_url = instanceUrl;
+            } catch (err) {
+              console.warn(`[connector-store] fetch instance_url failed: ${err.message}`);
+            }
+          }
           return {
             id: nangoRow.id,
             userId,
@@ -188,6 +210,7 @@ export class ConnectorStore {
             syncStatus: 'connected',
             target_scope: 'personal',
             connectorMetadata: { source: 'nango', connection_id: nangoRow.connectionId },
+            provider_metadata: providerMetadata,
             createdAt: nangoRow.createdAt,
             updatedAt: nangoRow.updatedAt,
             _via_nango: true,

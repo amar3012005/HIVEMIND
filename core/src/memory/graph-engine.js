@@ -2124,15 +2124,45 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
     // is_latest=false on target) so demand high confidence + entity
     // overlap. Mentions stay permissive — they're just co-mention hints.
     const MIN_CONFIDENCE_BY_TYPE = {
-      Updates: 0.70,        // raised from 0.55 to kill false-positive supersedes
-      Contradicts: 0.65,
-      Extends: 0.55,
+      Updates: 0.85,        // raised from 0.70 — observed false positives
+                            // where two unrelated gmail threads got Updates
+                            // because they shared entity:Amar (owner name).
+                            // 0.85 demands very strong evidence.
+      Contradicts: 0.75,
+      Extends: 0.60,
       Mentions: 0.55,
     };
 
+    // Owner-name filter. The memory owner's first name appears on almost
+    // every memory they save (entity:Amar on every "Amar's" memory).
+    // Counting it as shared-entity overlap produces noise edges between
+    // every pair of memories — defeats the purpose of overlap gating.
+    // Detect by frequency: any entity tag that already covers >40% of
+    // recent latestMemories on the candidate's side is "common" and
+    // contributes ZERO to overlap.
+    const candidateTagCounts = new Map(); // entity (lowercased) → count
+    let candidatesScanned = 0;
+    for (const c of candidates) {
+      candidatesScanned += 1;
+      const ents = (c?.tags || [])
+        .filter(t => typeof t === 'string' && t.startsWith('entity:'))
+        .map(t => t.slice('entity:'.length).replace(/_/g, ' ').toLowerCase());
+      for (const e of new Set(ents)) {
+        candidateTagCounts.set(e, (candidateTagCounts.get(e) || 0) + 1);
+      }
+    }
+    const COMMON_ENTITY_THRESHOLD = 0.40;
+    const commonEntities = new Set();
+    if (candidatesScanned >= 4) {
+      for (const [ent, n] of candidateTagCounts.entries()) {
+        if (n / candidatesScanned >= COMMON_ENTITY_THRESHOLD) commonEntities.add(ent);
+      }
+    }
+
     // Pre-compute new memory's entity set for entity-overlap gating.
+    // Strip common entities (owner name etc) before overlap check.
     const newEntitiesLower = new Set(
-      entities.map((e) => String(e).toLowerCase())
+      entities.map((e) => String(e).toLowerCase()).filter(e => !commonEntities.has(e)),
     );
 
     const sorted = links
@@ -2143,17 +2173,31 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
         const floor = MIN_CONFIDENCE_BY_TYPE[type] ?? 0.55;
         return typeof l.confidence === 'number' && l.confidence >= floor;
       })
-      // For Updates: require shared entity overlap. Recall by topic-word
-      // similarity is too loose — produced the "Exhibition Hall / Final
-      // Updates" false positive on the Learning Agreement thread. Only
-      // promote to supersede when both memories share at least one
-      // named entity from the new memory's extracted set.
+      // For Updates: require ≥2 shared NON-COMMON entities. One shared
+      // entity (often the owner's name) is too loose — produced edges
+      // between unrelated gmail threads. Demand at least 2 entities that
+      // are NOT in commonEntities AND appear in both sides.
       .filter((l) => {
         const type = VALID_EDGE_TYPES.has(l.type) ? l.type : 'Mentions';
         if (type !== 'Updates') return true;
         const cand = candidates[l.index];
-        const candTags = (cand?.tags || []).filter((t) => typeof t === 'string' && t.startsWith('entity:'));
-        const candEntities = candTags.map((t) => t.slice('entity:'.length).replace(/_/g, ' ').toLowerCase());
+        const candEntities = (cand?.tags || [])
+          .filter((t) => typeof t === 'string' && t.startsWith('entity:'))
+          .map((t) => t.slice('entity:'.length).replace(/_/g, ' ').toLowerCase())
+          .filter((e) => !commonEntities.has(e));
+        const sharedCount = candEntities.filter((e) => newEntitiesLower.has(e)).length;
+        return sharedCount >= 2;
+      })
+      // For Mentions: require at least ONE non-common shared entity.
+      // Co-mention of just the owner name is not a real connection.
+      .filter((l) => {
+        const type = VALID_EDGE_TYPES.has(l.type) ? l.type : 'Mentions';
+        if (type !== 'Mentions') return true;
+        const cand = candidates[l.index];
+        const candEntities = (cand?.tags || [])
+          .filter((t) => typeof t === 'string' && t.startsWith('entity:'))
+          .map((t) => t.slice('entity:'.length).replace(/_/g, ' ').toLowerCase())
+          .filter((e) => !commonEntities.has(e));
         return candEntities.some((e) => newEntitiesLower.has(e));
       })
       .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))

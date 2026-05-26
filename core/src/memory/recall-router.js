@@ -387,6 +387,106 @@ export async function hop3Live({ prisma, query, ctx, inspection }) {
 
 // ── Merge — RRF + anchor boost + lineage ───────────────────────────────────
 
+// ── Quality pruning helpers ────────────────────────────────────────────
+//
+// applyScoreFloor:    drop tail rows scoring < ratio × top_score.
+// applyMMRDiversity:  Maximal Marginal Relevance — penalise picks too
+//                     similar to already-selected memories. λ controls
+//                     relevance↔diversity tradeoff (0.7 = relevance-leaning).
+// collapseClusterDuplicates: when multiple memories share a synthesis
+//                     cluster, keep the highest-scoring synth + 1 raw
+//                     evidence row. Drops redundancy without losing
+//                     provenance.
+
+function applyScoreFloor(memories, ratio = 0.40) {
+  if (!Array.isArray(memories) || memories.length === 0) return memories;
+  const top = Math.max(...memories.map(m => Number(m.score) || 0));
+  if (top <= 0) return memories;
+  const floor = top * ratio;
+  const kept = memories.filter(m => (Number(m.score) || 0) >= floor);
+  // Always keep at least 3 even if all but top are below floor.
+  return kept.length >= 3 ? kept : memories.slice(0, 3);
+}
+
+function jaccardTokens(a, b) {
+  const toks = (s) => new Set(
+    String(s || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter(w => w.length >= 3),
+  );
+  const A = toks(a), B = toks(b);
+  if (A.size === 0 || B.size === 0) return 0;
+  let inter = 0;
+  for (const t of A) if (B.has(t)) inter += 1;
+  return inter / (A.size + B.size - inter);
+}
+
+function applyMMRDiversity(memories, lambda = 0.70) {
+  if (!Array.isArray(memories) || memories.length <= 3) return memories;
+  const remaining = [...memories];
+  const picked = [];
+  // Seed with highest-score memory.
+  remaining.sort((a, b) => (Number(b.score) || 0) - (Number(a.score) || 0));
+  picked.push(remaining.shift());
+  while (remaining.length > 0 && picked.length < memories.length) {
+    let bestIdx = 0;
+    let bestScore = -Infinity;
+    for (let i = 0; i < remaining.length; i++) {
+      const cand = remaining[i];
+      const rel = Number(cand.score) || 0;
+      const candText = `${cand.title || ''} ${(cand.content || '').slice(0, 200)}`;
+      let maxSim = 0;
+      for (const p of picked) {
+        const pText = `${p.title || ''} ${(p.content || '').slice(0, 200)}`;
+        const sim = jaccardTokens(candText, pText);
+        if (sim > maxSim) maxSim = sim;
+      }
+      const mmr = lambda * rel - (1 - lambda) * maxSim;
+      if (mmr > bestScore) { bestScore = mmr; bestIdx = i; }
+    }
+    picked.push(remaining.splice(bestIdx, 1)[0]);
+  }
+  return picked;
+}
+
+function collapseClusterDuplicates(memories) {
+  if (!Array.isArray(memories) || memories.length <= 2) return memories;
+  const seen = new Map(); // cluster_hash → { synth: best synth, raw: best raw }
+  const out = [];
+  for (const m of memories) {
+    const hash = m.synthesisClusterHash || m.synthesis_cluster_hash;
+    if (!hash) { out.push(m); continue; }
+    const tags = m.tags || [];
+    const isSynth = (m.source_metadata?.source_type === 'canonical-fact')
+                 || (m.source_metadata?.source_type === 'synthesis-bridge')
+                 || tags.includes('synthesis:canonical')
+                 || tags.includes('synthesis:bridge');
+    const slot = seen.get(hash) || { synth: null, raw: null };
+    const score = Number(m.score) || 0;
+    if (isSynth) {
+      if (!slot.synth || score > (Number(slot.synth.score) || 0)) slot.synth = m;
+    } else {
+      if (!slot.raw || score > (Number(slot.raw.score) || 0)) slot.raw = m;
+    }
+    seen.set(hash, slot);
+  }
+  // Emit: synth (preferred) + raw evidence row (if distinct cluster member).
+  const emittedClusters = new Set();
+  for (const m of memories) {
+    const hash = m.synthesisClusterHash || m.synthesis_cluster_hash;
+    if (!hash) { out.push(m); continue; }
+    if (emittedClusters.has(hash)) continue;
+    emittedClusters.add(hash);
+    const slot = seen.get(hash);
+    if (slot?.synth) out.push(slot.synth);
+    if (slot?.raw && slot.raw !== slot.synth) out.push(slot.raw);
+  }
+  // Preserve original ordering by re-sorting on score desc.
+  return out.sort((a, b) => (Number(b.score) || 0) - (Number(a.score) || 0));
+}
+
 function reciprocalRankFusionMemories(memories, docAnchors) {
   // memories are already ranked by recallPersistedMemories. We re-score with
   // RRF + anchor boost so a memory that explicitly carries the resolved
@@ -557,6 +657,14 @@ export class RecallRouter {
       // shared-entity boost; without this warn the regression is invisible.
       console.warn('[recall-router] cross-cluster boost SKIPPED: ctx.orgId missing (recall returned plain RRF, no Phase 3 boost). Pass orgId in ctx to enable.');
     }
+
+    // ── Quality pruning: score-floor + MMR diversity + cluster collapse ──
+    // Cheap moves that cut answer-step bloat without a reranker. Drops
+    // near-duplicates, kills low-score noise, and collapses redundant
+    // synthesis-cluster siblings down to the canonical synth + 1 source.
+    rankedMemories = applyScoreFloor(rankedMemories, 0.40);
+    rankedMemories = applyMMRDiversity(rankedMemories, 0.70);
+    rankedMemories = collapseClusterDuplicates(rankedMemories);
 
     // Fire recall-count update asynchronously — don't block response
     if (this.clusterIndex) {

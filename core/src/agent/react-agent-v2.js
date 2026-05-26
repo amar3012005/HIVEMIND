@@ -359,7 +359,7 @@ async function planStep({ message, history, language, assistantName, orgName, ha
     user_message:          message,
     action_intent,
     intents:               Array.isArray(parsed.intents) ? parsed.intents.slice(0, 4) : [],
-    sub_queries:           Array.isArray(parsed.sub_queries) ? parsed.sub_queries.filter(q => typeof q === 'string' && q.trim()).slice(0, 4) : [],
+    sub_queries:           Array.isArray(parsed.sub_queries) ? parsed.sub_queries.filter(q => typeof q === 'string' && q.trim()) : [],
     named_entities:        Array.isArray(parsed.named_entities) ? parsed.named_entities.slice(0, 6) : [],
     needs_traverse:        !!parsed.needs_traverse,
     needs_time_travel:     !!parsed.needs_time_travel,
@@ -391,6 +391,22 @@ async function planStep({ message, history, language, assistantName, orgName, ha
   if (RELATION_PATTERNS.some(re => re.test(ml))) {
     plan.recall_mode = 'insight';
   }
+
+  // Sub-query budget by intent — narrows wide-net recall when the question
+  // is unambiguous. Bloat reduction: 4 parallel recalls → 2 for direct
+  // single-entity lookups halves prompt-token cost without losing recall
+  // (server-side dedup handles overlap anyway). Heuristic:
+  //   single named entity + intent_kind=lookup → 2 queries
+  //   relation queries (insight mode) → 3 queries
+  //   recap / panorama → 4 queries
+  //   default → 3 queries
+  const subQueryCap =
+    plan.recall_mode === 'panorama' ? 4 :
+    plan.recall_mode === 'insight'  ? 3 :
+    plan.intent_kind === 'lookup' && plan.named_entities.length <= 1 ? 2 :
+    3;
+  plan.sub_queries = plan.sub_queries.slice(0, subQueryCap);
+
   onEvent?.({ type: 'plan_done', plan });
   return { plan, usage };
 }
@@ -897,7 +913,13 @@ async function answerStep({ message, history, evidence, plan, language, assistan
   // the system has REASONED about, not just what was logged. Phase 3
   // cross-cluster boost flag included when present so the LLM sees which
   // memories were reinforced by neighbour clusters.
-  const evidenceLines = evidence.memories.slice(0, 12).map((m, i) => {
+  //
+  // Top-K bound: quick mode shows 6, insight 10. Was 12 — cut bloat to
+  // halve prompt tokens. Recall-router already applied MMR + score-floor
+  // + cluster-collapse so the trimmed set is the tight relevance core.
+  const recallMode = plan?.recall_mode || 'quick';
+  const evidenceTopK = recallMode === 'insight' ? 10 : (recallMode === 'panorama' ? 12 : 6);
+  const evidenceLines = evidence.memories.slice(0, evidenceTopK).map((m, i) => {
     const id8 = (m.id || '').slice(0, 8);
     const title = (m.title || '').replace(/\n/g, ' ').slice(0, 80);
     const content = (m.content || '').replace(/\n/g, ' ').slice(0, 240);
@@ -973,7 +995,7 @@ async function answerStep({ message, history, evidence, plan, language, assistan
     return `  ▶ ${head}\n${evRows}`;
   }).join('\n');
 
-  const userBlock = `EVIDENCE (${evidence.memories.length} memories):
+  const userBlock = `EVIDENCE (${Math.min(evidence.memories.length, evidenceTopK)} of ${evidence.memories.length} memories):
 ${evidenceLines || '(none)'}${chainLines ? `\n\nSYNTHESIS CHAINS (${(evidence.synthesis_chains || []).length} curated claims + sources — cite the claim, support with the evidence rows):\n${chainLines}` : ''}${edgeLines ? `\n\nGRAPH EDGES (${filteredEdges.length} typed relationships between the memories above — ONLY trust these for relation claims):\n${edgeLines}` : ''}${liveLines ? `\n\nLIVE WORKSPACE (${(evidence.live || []).length} fresh items — Gmail / Drive / Calendar):\n${liveLines}` : ''}${evLines ? `\n\nDOCUMENT SEGMENTS (${(evidence.evidence || []).length} non-promoted KB chunks — full source text):\n${evLines}` : ''}${capabilityHint}
 
 PLANNER INTENT: ${(plan.intents || []).join(' / ') || '(unspecified)'}

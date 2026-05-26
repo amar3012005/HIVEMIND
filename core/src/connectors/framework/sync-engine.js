@@ -343,12 +343,37 @@ export class SyncEngine {
     // only. Gmail/Slack adapters call storeMemory explicitly today; we
     // centralize the hook here so every connector benefits (salesforce,
     // notion, github, linear, future) without per-adapter plumbing.
+    //
+    // Embed an augmented key (title + entity tags + content) instead of
+    // raw content alone. Connector records often have terse, schema-shaped
+    // content ("Name: X\nIndustry: Y") where the natural-language entity
+    // signal lives in the title and entity:* tags — embedding raw content
+    // alone yields poor similarity for direct-name queries.
     if (this.qdrantClient && this.memoryStore?.getMemory) {
       try {
         const fullMemory = await this.memoryStore.getMemory(memoryId);
         if (fullMemory) {
           const collectionName = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
-          await this.qdrantClient.storeMemory(fullMemory, { collectionName });
+          const entityNames = (fullMemory.tags || [])
+            .filter((t) => typeof t === 'string' && (t.startsWith('entity:') || t.startsWith('person:')))
+            .map((t) => t.replace(/^(entity|person):/, '').replace(/_/g, ' '));
+          const titleLine = fullMemory.title || '';
+          const augmented = [
+            titleLine,
+            entityNames.join(', '),
+            fullMemory.content || '',
+          ].filter(Boolean).join('\n\n').slice(0, 8000);
+          let vector = null;
+          try {
+            vector = await this.qdrantClient.generateEmbedding(augmented);
+          } catch (embedFailedErr) {
+            console.warn(`[sync-engine] augmented-embed failed, falling back: ${embedFailedErr.message}`);
+          }
+          if (vector) {
+            await this.qdrantClient.storeMemory(fullMemory, { collectionName, vector });
+          } else {
+            await this.qdrantClient.storeMemory(fullMemory, { collectionName });
+          }
         }
       } catch (embedErr) {
         console.warn(`[sync-engine] qdrant store failed for ${memoryId.slice(0,8)}: ${embedErr.message}`);

@@ -878,6 +878,15 @@ CORE RULES:
    branch will create a draft for user approval. If the user's request
    is ambiguous about WHICH channel or recipient, ask a clarifying
    question instead of claiming inability.
+9b. **TEMPORAL SUMMARY enumeration.** When the user asks "what did I
+   do today / yesterday / this week / last week / on <date>" AND the
+   EVIDENCE block contains memories whose created_at or document_date
+   falls in the requested window, you MUST enumerate them. Sort by
+   created_at descending. Do NOT say "I don't have notes on today"
+   when 5+ memories carry today's ts:* tag or created_at — that is a
+   hard failure. Even minor activity (a purchase, a calendar event,
+   a saved fact) counts; report it. Length: one bullet or sentence
+   per memory, grouped by time-of-day if many.
 10. **PREFER SYNTH-tier memories.** Lines prefixed [SYNTH/CANONICAL] or
     [SYNTH/BRIDGE] are curated distillations from the cognition loop —
     they fuse multiple raw memories into one confidence-scored claim
@@ -1085,6 +1094,37 @@ ${message}`;
         } catch (err) {
           console.warn('[agent] retry failed:', err.message);
         }
+      }
+    }
+
+    // Temporal-summary retry: user asked "what did I do today / yesterday
+    // / this week" AND evidence has memories matching the window, but LLM
+    // bailed. Force enumeration with explicit list-the-memories nudge.
+    const TEMPORAL_SUMMARY_RE = /\b(today|yesterday|this\s+week|last\s+week|on\s+\d{4}-\d{2}-\d{2}|on\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec))/i;
+    if (TEMPORAL_SUMMARY_RE.test(String(message))) {
+      try {
+        const retry = await callJsonLLM({
+          messages: [
+            { role: 'system', content: sys },
+            ...tail,
+            { role: 'user', content: userBlock },
+            { role: 'assistant', content: JSON.stringify(parsed) },
+            {
+              role: 'user',
+              content: `Your previous reply bailed on a temporal-summary question. The EVIDENCE block above lists memories with ts:* tags or recent created_at. ENUMERATE them — title + short context per memory. Even one matching memory means the answer is NOT "I don't have notes". Same JSON shape.`,
+            },
+          ],
+          model, apiKey, maxTokens: ANSWER_MAX_TOKENS, signal,
+        });
+        if (typeof retry.parsed?.response === 'string' && retry.parsed.response.trim()) {
+          response = retry.parsed.response.trim();
+          parsed.response = response;
+          parsed.evidence_used = Array.isArray(retry.parsed.evidence_used) ? retry.parsed.evidence_used : parsed.evidence_used;
+          parsed.confidence = Number.isFinite(retry.parsed.confidence) ? retry.parsed.confidence : parsed.confidence;
+          console.log(`[agent] temporal-summary retry recovered answer (${evidence.memories.length} memories)`);
+        }
+      } catch (err) {
+        console.warn('[agent] temporal-summary retry failed:', err.message);
       }
     }
   }

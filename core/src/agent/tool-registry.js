@@ -352,6 +352,10 @@ const TOOL_HANDLERS = {
       tags:           args.tags,
       source_type:    args.source_type,
       valid_at:       args.valid_at,
+      // Date range — { start, end } ISO timestamps. Filters memories whose
+      // document_date OR created_at falls in window. Used by agent's
+      // today/yesterday/this-week shortcuts.
+      date_range:     args.date_range,
       include_live:   args.include_live,
     }, {
       userId:        ctx.userId,

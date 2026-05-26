@@ -471,9 +471,49 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
     plan.needs_time_travel = true;
     plan.time_travel = { ...(plan.time_travel || {}), valid_time: derivedValidAt };
   }
+  // Today / yesterday / this-week extraction — answer-step bails with
+  // confidence 0.2 when recall returns 15 memories spanning weeks and
+  // the LLM cannot tell which fall on the user's target day. Compute a
+  // hard date_range so recall returns only memories whose document_date
+  // or created_at falls in the requested window. Today = UTC day boundary.
+  let derivedDateRange = null;
+  const ulRaw = String(plan.user_message || '').toLowerCase();
+  const todayUtc = new Date();
+  todayUtc.setUTCHours(0, 0, 0, 0);
+  const dayMs = 24 * 60 * 60 * 1000;
+  if (/\btoday\b/.test(ulRaw)) {
+    derivedDateRange = {
+      start: todayUtc.toISOString(),
+      end: new Date(todayUtc.getTime() + dayMs - 1).toISOString(),
+    };
+  } else if (/\byesterday\b/.test(ulRaw)) {
+    const y = new Date(todayUtc.getTime() - dayMs);
+    derivedDateRange = {
+      start: y.toISOString(),
+      end: new Date(todayUtc.getTime() - 1).toISOString(),
+    };
+  } else if (/\bthis\s+week\b/.test(ulRaw)) {
+    // ISO week (Mon=1). Find Monday of current week.
+    const dow = todayUtc.getUTCDay() || 7; // Sun=0 → 7
+    const monday = new Date(todayUtc.getTime() - (dow - 1) * dayMs);
+    derivedDateRange = {
+      start: monday.toISOString(),
+      end: new Date(todayUtc.getTime() + dayMs - 1).toISOString(),
+    };
+  } else if (/\blast\s+week\b/.test(ulRaw)) {
+    const dow = todayUtc.getUTCDay() || 7;
+    const thisMon = new Date(todayUtc.getTime() - (dow - 1) * dayMs);
+    const lastMon = new Date(thisMon.getTime() - 7 * dayMs);
+    derivedDateRange = {
+      start: lastMon.toISOString(),
+      end: new Date(thisMon.getTime() - 1).toISOString(),
+    };
+  }
+
   const recallExtras = {
     ...(userConnector ? { tags: [userConnector] } : {}),
     ...(derivedValidAt ? { valid_at: derivedValidAt } : {}),
+    ...(derivedDateRange ? { date_range: derivedDateRange } : {}),
   };
 
   // (a) Parallel recall on each sub_query — mode chosen by planner (quick

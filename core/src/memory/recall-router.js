@@ -126,6 +126,12 @@ async function hop1Memory({ store, query, options, ctx }) {
   // (b) recency cue + connector keyword, (c) valid_at + connector keyword.
   const callerTags = Array.isArray(options.tags) && options.tags.length > 0;
   const willOverride = callerTags || (isRecentish && inferredTags) || (validAtDate && (options.tags || inferredTags));
+  // Caller-provided date_range takes priority over derived valid_at end-
+  // cap. Used for today/yesterday/this-week shortcuts where we need a
+  // hard start+end window, not just an upper bound.
+  const explicitDateRange = options.date_range && typeof options.date_range === 'object'
+    ? options.date_range
+    : null;
   const recallArgs = {
     query_context: query,
     user_id: ctx.userId,
@@ -135,7 +141,9 @@ async function hop1Memory({ store, query, options, ctx }) {
     source_type: options.source_type,
     access_context: scopedAccessCtx,
     ...(ctx.projectId ? { project_id: ctx.projectId, project_ids: [ctx.projectId] } : {}),
-    ...(validAtDate ? { date_range: { end: validAtDate.toISOString() } } : {}),
+    ...(explicitDateRange
+      ? { date_range: explicitDateRange }
+      : validAtDate ? { date_range: { end: validAtDate.toISOString() } } : {}),
   };
   const result = willOverride
     ? { memories: [] }

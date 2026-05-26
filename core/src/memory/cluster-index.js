@@ -93,6 +93,14 @@ export class ClusterIndex {
    * @param {{ organizationId: string, userId: string, clusterHash: string, clusterType?: string, by?: number }} opts
    */
   async bumpDirty({ organizationId, userId, clusterHash, clusterType = 'unknown', by = 1 }) {
+    // Guard against undefined/null UUIDs — caller occasionally passes
+    // members[0].userId when a connector-sourced memory has no user (org
+    // scope) or no org (personal scope). Both columns are NOT NULL uuid so
+    // a missing value triggers Postgres 22P02 (invalid input syntax).
+    if (!organizationId || !userId || !clusterHash
+        || organizationId === 'undefined' || userId === 'undefined') {
+      return;
+    }
     try {
       // Atomic upsert: create stub row OR add to dirty_count.
       // Cast UUID params to ::uuid explicitly — Prisma $executeRawUnsafe binds

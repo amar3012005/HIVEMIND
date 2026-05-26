@@ -1147,16 +1147,50 @@ export class MemoryGraphEngine {
         };
 
         if (effectiveRelationshipType === 'Updates') {
-          // Confidence floor: low/mid-confidence "Updates" classifications
-          // were flipping is_latest=false on unrelated memories (observed:
-          // "Dental appointment" Updates "Nbank appointment" at conf 0.81
-          // because both are events mentioning entity:Amar). is_latest
-          // cascades hide memories from default views. Treat <0.85 as a
-          // Mentions edge instead. Matches the _attachEntityCoMentionEdges
-          // floor — a destructive supersede needs strong evidence on
-          // BOTH the smart-ingest classifier AND the entity-overlap path.
+          // Floor + entity-overlap guard: destructive supersede needs
+          // BOTH high confidence (>=0.85) AND shared non-common entities
+          // with the target (≥1). MemoryProcessor LLM is over-aggressive
+          // on "Updates" classification — two purchase events get linked
+          // as Updates because they share the verb "bought" plus
+          // entity:Amar. Demand semantic kinship via actual entity
+          // overlap, not LLM confidence alone.
           const updateConf = classification.relationship?.confidence ?? semanticRelationship?.confidence ?? 0;
-          if (Number(updateConf) >= 0.85) {
+          let entityOverlapOk = false;
+          if (Number(updateConf) >= 0.85 && classification.relationship?.targetId) {
+            try {
+              const targetMem = await store.getMemory(classification.relationship.targetId);
+              if (targetMem) {
+                const newEntsArr = (baseMemory.tags || [])
+                  .filter(t => typeof t === 'string' && t.startsWith('entity:'))
+                  .map(t => t.slice('entity:'.length).toLowerCase());
+                const targetEntsArr = (targetMem.tags || [])
+                  .filter(t => typeof t === 'string' && t.startsWith('entity:'))
+                  .map(t => t.slice('entity:'.length).toLowerCase());
+                // Drop common cross-memory entities (owner name etc).
+                // Compute frequency over recall set as a quick proxy.
+                const candCounts = new Map();
+                for (const c of (recallSimilar || [])) {
+                  for (const t of (c.tags || [])) {
+                    if (typeof t === 'string' && t.startsWith('entity:')) {
+                      const e = t.slice('entity:'.length).toLowerCase();
+                      candCounts.set(e, (candCounts.get(e) || 0) + 1);
+                    }
+                  }
+                }
+                const total = Math.max(1, (recallSimilar || []).length);
+                const isCommon = (e) => (candCounts.get(e) || 0) / total >= 0.40;
+                const newSet = new Set(newEntsArr.filter(e => !isCommon(e)));
+                const sharedNonCommon = targetEntsArr.filter(e => !isCommon(e) && newSet.has(e));
+                entityOverlapOk = sharedNonCommon.length >= 1;
+                if (!entityOverlapOk) {
+                  console.log(`[graph-engine] Updates DROPPED (no shared non-common entity): ${baseMemory.id.slice(0,8)} → ${classification.relationship.targetId.slice(0,8)} (conf=${updateConf})`);
+                }
+              }
+            } catch (overlapErr) {
+              console.warn('[graph-engine] entity-overlap check failed:', overlapErr.message);
+            }
+          }
+          if (Number(updateConf) >= 0.85 && entityOverlapOk) {
             Object.assign(result, await this.applyUpdate(baseMemory.id, classification.relationship.targetId, {
               store,
               user_id: baseMemory.user_id,
@@ -2147,11 +2181,16 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
     }
     const COMMON_ENTITY_THRESHOLD = 0.40;
     const commonEntities = new Set();
-    if (candidatesScanned >= 4) {
+    if (candidatesScanned >= 2) {
       for (const [ent, n] of candidateTagCounts.entries()) {
         if (n / candidatesScanned >= COMMON_ENTITY_THRESHOLD) commonEntities.add(ent);
       }
     }
+    // Hardcoded common entities — owner's own first name + common nouns
+    // sometimes captured as entities by the LLM. These never count as
+    // semantic overlap regardless of frequency.
+    const ALWAYS_COMMON = ['amar', 'amar sai gadde', 'user', 'me', 'i', 'the user'];
+    for (const e of ALWAYS_COMMON) commonEntities.add(e);
 
     // Pre-compute new memory's entity set for entity-overlap gating.
     // Strip common entities (owner name etc) before overlap check.

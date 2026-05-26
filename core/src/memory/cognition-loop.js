@@ -36,8 +36,39 @@ const SYNTHESIS_MODEL           = PRIMARY_SYNTHESIS_MODEL;
 
 // ─── Clustering / quality thresholds ──────────────────────────────────────────
 const DEFAULT_LOOKBACK_HOURS      = Number(process.env.SYNTHESIS_LOOKBACK_HOURS    || 24);
-const CANONICAL_CLUSTER_MIN       = Number(process.env.CANONICAL_CLUSTER_MIN       || 6);
+// Adaptive cluster floor: small orgs (≤50 fact+decision memories) can't
+// reach 6-member clusters. Scale floor with corpus density so sparse
+// tenants get synthesis too.
+//   floor = clamp(floor(latest_fact_decision_count / 50), 3, 6)
+// Examples: 20 fact+decision → 3 ; 100 → 6 ; 300 → 6 (capped).
+// Env override CANONICAL_CLUSTER_MIN still wins when explicitly set.
+const CANONICAL_CLUSTER_MIN_HARD  = Number(process.env.CANONICAL_CLUSTER_MIN_HARD  || 6);
+const CANONICAL_CLUSTER_MIN_SOFT  = Number(process.env.CANONICAL_CLUSTER_MIN_SOFT  || 3);
+const CANONICAL_CLUSTER_MIN_ENV   = process.env.CANONICAL_CLUSTER_MIN != null
+  ? Number(process.env.CANONICAL_CLUSTER_MIN)
+  : null;
+const CANONICAL_CLUSTER_MIN       = CANONICAL_CLUSTER_MIN_ENV ?? CANONICAL_CLUSTER_MIN_HARD;
 const DEFAULT_CLUSTER_MIN         = CANONICAL_CLUSTER_MIN; // alias kept for compaction path
+
+async function deriveClusterMin(prisma, orgId) {
+  // Env override pins value across all orgs — operators may force a
+  // specific floor for benchmarks. Skip the DB lookup.
+  if (CANONICAL_CLUSTER_MIN_ENV != null) return CANONICAL_CLUSTER_MIN_ENV;
+  try {
+    const cnt = await prisma.memory.count({
+      where: {
+        orgId,
+        isLatest: true,
+        deletedAt: null,
+        memoryType: { in: ['fact', 'decision'] },
+      },
+    });
+    const adaptive = Math.floor(cnt / 50);
+    return Math.max(CANONICAL_CLUSTER_MIN_SOFT, Math.min(CANONICAL_CLUSTER_MIN_HARD, adaptive));
+  } catch (err) {
+    return CANONICAL_CLUSTER_MIN_HARD;
+  }
+}
 const DEFAULT_CLUSTER_MAX         = Number(process.env.SYNTHESIS_CLUSTER_MAX       || 30);
 const CONFIDENCE_FLOOR            = Number(process.env.SYNTHESIS_CONFIDENCE_FLOOR  || 0.70);
 const BRIDGE_TOP_K                = Number(process.env.BRIDGE_TOP_K                || 10);
@@ -307,6 +338,12 @@ export class CognitionLoop {
    *   3. For top-K tag-pairs with cosine ∈ [SIM_LOW, SIM_HIGH] → try synthesis-bridge
    */
   async synthesizeForOrg(orgId) {
+    // Adaptive floor per-org based on corpus density. Small tenants
+    // (≤50 fact+decision memories) get floor=3 so they can build
+    // synthesis at all; mature tenants stay at floor=6 to keep quality
+    // high. Capped at the hard default.
+    const clusterMin = await deriveClusterMin(this.prisma, orgId);
+
     const since = new Date(Date.now() - DEFAULT_LOOKBACK_HOURS * 3600 * 1000);
     const recent = await this.prisma.memory.findMany({
       where: {
@@ -325,7 +362,7 @@ export class CognitionLoop {
       },
     });
 
-    if (recent.length < CANONICAL_CLUSTER_MIN) return 0;
+    if (recent.length < clusterMin) return 0;
 
     // ── Build tag→members buckets (tag-intersection: a memory joins every bucket for each topic tag) ──
     const buckets = new Map(); // tag → Memory[]
@@ -348,7 +385,7 @@ export class CognitionLoop {
 
     // ── Sub-pass A: canonical-fact per qualifying cluster ─────────────────────
     for (const [tag, members] of buckets.entries()) {
-      if (members.length < CANONICAL_CLUSTER_MIN) continue;
+      if (members.length < clusterMin) continue;
       const hash = clusterHash(`canonical:${tag}`);
 
       // Phase 2 — look for an existing synthesis on this cluster hash

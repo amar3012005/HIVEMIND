@@ -58,17 +58,37 @@ export class SalesforceAdapter extends BaseProviderAdapter {
     let hasMore = false;
 
     while (sobject) {
-      const { rows, total, done } = await this._queryObject({
-        accessToken, instanceUrl, sobject, offset, sinceIso,
-      });
+      let rows = [];
+      let total = 0;
+      let done = true;
+      try {
+        const result = await this._queryObject({
+          accessToken, instanceUrl, sobject, offset, sinceIso,
+        });
+        rows = result.rows;
+        total = result.total;
+        done = result.done;
+      } catch (queryErr) {
+        // Re-throw 401 so SyncEngine can refresh token. All other errors
+        // (INVALID_FIELD, INSUFFICIENT_ACCESS, NOT_FOUND, feature-not-enabled)
+        // are per-SObject — log and skip to next so one bad object doesn't
+        // kill the whole sync. Org-specific schema differences are the norm,
+        // not the exception, in Salesforce land.
+        if (queryErr.status === 401) throw queryErr;
+        console.warn(`[salesforce-adapter] skip ${sobject}: ${queryErr.message.slice(0, 200)}`);
+        // Advance to next SObject
+        const idx = OBJECT_ORDER.indexOf(sobject);
+        sobject = OBJECT_ORDER[idx + 1] || null;
+        offset = 0;
+        continue;
+      }
+
       for (const row of rows) records.push({ _kind: sobject, data: row });
 
       const newOffset = offset + rows.length;
       if (rows.length === 0 || (done && newOffset >= total)) {
-        // Move to next sobject
         const idx = OBJECT_ORDER.indexOf(sobject);
-        const nextObj = OBJECT_ORDER[idx + 1] || null;
-        sobject = nextObj;
+        sobject = OBJECT_ORDER[idx + 1] || null;
         offset = 0;
         if (!sobject) break;
       } else {
@@ -77,7 +97,6 @@ export class SalesforceAdapter extends BaseProviderAdapter {
         break;
       }
 
-      // Cap per-call batch size
       if (records.length >= PAGE_SIZE) {
         nextCursor = _serializeCursor(sobject, offset);
         hasMore = true;
@@ -92,22 +111,59 @@ export class SalesforceAdapter extends BaseProviderAdapter {
     return { records, nextCursor, hasMore };
   }
 
-  async _queryObject({ accessToken, instanceUrl, sobject, offset, sinceIso }) {
-    const fields = FIELDS[sobject];
-    const where = sinceIso ? `WHERE LastModifiedDate >= ${sinceIso} ` : '';
-    const order = 'ORDER BY LastModifiedDate DESC';
-    const limit = `LIMIT ${PAGE_SIZE}`;
-    const offsetClause = offset > 0 ? `OFFSET ${offset}` : '';
-    const soql = `SELECT ${fields} FROM ${sobject} ${where}${order} ${limit} ${offsetClause}`.trim();
-    const url = `${instanceUrl}/services/data/${API_VERSION}/query?q=${encodeURIComponent(soql)}`;
-    const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' } });
-    if (!res.ok) {
-      if (res.status === 401) { const e = new Error('Salesforce 401'); e.status = 401; throw e; }
+  async _queryObject({ accessToken, instanceUrl, sobject, offset, sinceIso, maxRetries = 3 }) {
+    // Maintain a per-instance mutable field list so once an org rejects a
+    // field, we drop it for the rest of the sync (avoids retry on every page).
+    if (!this._fieldOverrides) this._fieldOverrides = {};
+    let fields = this._fieldOverrides[sobject] || FIELDS[sobject];
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      const where = sinceIso ? `WHERE LastModifiedDate >= ${sinceIso} ` : '';
+      const order = 'ORDER BY LastModifiedDate DESC';
+      const limit = `LIMIT ${PAGE_SIZE}`;
+      const offsetClause = offset > 0 ? `OFFSET ${offset}` : '';
+      const soql = `SELECT ${fields} FROM ${sobject} ${where}${order} ${limit} ${offsetClause}`.trim();
+      const url = `${instanceUrl}/services/data/${API_VERSION}/query?q=${encodeURIComponent(soql)}`;
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' } });
+
+      if (res.ok) {
+        const data = await res.json();
+        return { rows: data.records || [], total: data.totalSize || 0, done: data.done !== false };
+      }
+
+      if (res.status === 401) {
+        const e = new Error('Salesforce 401');
+        e.status = 401;
+        throw e;
+      }
+
       const text = await res.text().catch(() => '');
-      throw new Error(`Salesforce ${sobject} ${res.status} ${text}`);
+
+      // Self-heal INVALID_FIELD by parsing the rejected field and dropping it
+      // from the list, then retrying. Field set per org varies (PersonAccount,
+      // multi-currency, custom features); a static list cannot cover them all.
+      if (res.status === 400 && text.includes('INVALID_FIELD')) {
+        const badField = _parseInvalidField(text);
+        if (badField) {
+          const filtered = fields
+            .split(',')
+            .map((f) => f.trim())
+            .filter((f) => f !== badField && !f.startsWith(`${badField}.`) && !f.endsWith(`.${badField}`));
+          if (filtered.length < fields.split(',').length) {
+            console.warn(`[salesforce-adapter] ${sobject}: dropping unsupported field "${badField}"`);
+            fields = filtered.join(',');
+            this._fieldOverrides[sobject] = fields;
+            continue;
+          }
+        }
+      }
+
+      const err = new Error(`Salesforce ${sobject} ${res.status} ${text.slice(0, 300)}`);
+      err.status = res.status;
+      throw err;
     }
-    const data = await res.json();
-    return { rows: data.records || [], total: data.totalSize || 0, done: data.done !== false };
+
+    throw new Error(`Salesforce ${sobject}: exceeded INVALID_FIELD retry budget`);
   }
 
   normalize(record, context) {
@@ -344,4 +400,13 @@ function _parseCursor(cursor) {
 
 function _serializeCursor(sobject, offset) {
   return `${sobject}:${offset}`;
+}
+
+// Parse Salesforce INVALID_FIELD error body to extract the rejected column.
+// Error shape (truncated):
+//   "[{\"message\":\"\\nA,B,C,BadField,D\\n        ^\\nERROR at Row:1:Column:N\\n
+//     No such column 'BadField' on entity 'Account'. ...\",\"errorCode\":\"INVALID_FIELD\"}]"
+function _parseInvalidField(errBody) {
+  const m = errBody.match(/No such column '([^']+)' on entity/);
+  return m ? m[1] : null;
 }

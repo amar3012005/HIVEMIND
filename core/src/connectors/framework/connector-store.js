@@ -162,7 +162,49 @@ export class ConnectorStore {
     const record = await this.prisma.platformIntegration.findUnique({
       where: { userId_platformType: { userId, platformType: provider } },
     });
-    if (record) return this._mapRecord(record);
+    if (record) {
+      const mapped = this._mapRecord(record);
+      // Hydrate provider_metadata.instance_url from Nango for Salesforce
+      // if missing — handles users connected before instance_url was
+      // captured at OAuth time. Without this, SOQL queries cannot resolve
+      // the org host and adapter returns 0 records.
+      if (
+        (provider === 'salesforce' || provider === 'salesforce-sandbox')
+        && !mapped.provider_metadata?.instance_url
+        && this.prisma.nangoConnection
+      ) {
+        try {
+          const nangoRow = await this.prisma.nangoConnection.findFirst({
+            where: { userId, providerKey: provider, status: 'active' },
+            select: { connectionId: true },
+          });
+          if (nangoRow?.connectionId) {
+            const { nangoGet } = await import('../mcp/nango-service.js');
+            const creds = await nangoGet(
+              `/connection/${encodeURIComponent(nangoRow.connectionId)}?provider_config_key=${encodeURIComponent(provider)}`,
+            );
+            const instanceUrl = creds?.connection_config?.instance_url
+                            || creds?.credentials?.instance_url
+                            || creds?.metadata?.instance_url
+                            || null;
+            if (instanceUrl) {
+              mapped.provider_metadata = { ...(mapped.provider_metadata || {}), instance_url: instanceUrl };
+              // Persist so subsequent syncs don't re-fetch
+              try {
+                await this.updateMetadata(userId, provider, {
+                  provider_metadata: mapped.provider_metadata,
+                });
+              } catch (persistErr) {
+                console.warn(`[connector-store] persist instance_url failed: ${persistErr.message}`);
+              }
+            }
+          }
+        } catch (err) {
+          console.warn(`[connector-store] hydrate instance_url failed: ${err.message}`);
+        }
+      }
+      return mapped;
+    }
 
     // Nango-only fallback: user OAuthed via Nango Connect popup, no
     // legacy platformIntegration row exists. Synthesize a virtual record

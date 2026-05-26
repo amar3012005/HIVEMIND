@@ -111,15 +111,20 @@ export class SalesforceAdapter extends BaseProviderAdapter {
     return { records, nextCursor, hasMore };
   }
 
-  async _queryObject({ accessToken, instanceUrl, sobject, offset, sinceIso, maxRetries = 3 }) {
+  async _queryObject({ accessToken, instanceUrl, sobject, offset, sinceIso, maxRetries = 4 }) {
     // Maintain a per-instance mutable field list so once an org rejects a
     // field, we drop it for the rest of the sync (avoids retry on every page).
     if (!this._fieldOverrides) this._fieldOverrides = {};
+    if (!this._sortOverrides) this._sortOverrides = {};
     let fields = this._fieldOverrides[sobject] || FIELDS[sobject];
+    // OpportunityHistory + CaseHistory + similar history tables are append-only
+    // and have only CreatedDate, not LastModifiedDate. Use a per-object sort
+    // field that self-heals when LastModifiedDate is rejected.
+    let sortField = this._sortOverrides[sobject] || 'LastModifiedDate';
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      const where = sinceIso ? `WHERE LastModifiedDate >= ${sinceIso} ` : '';
-      const order = 'ORDER BY LastModifiedDate DESC';
+      const where = sinceIso ? `WHERE ${sortField} >= ${sinceIso} ` : '';
+      const order = `ORDER BY ${sortField} DESC`;
       const limit = `LIMIT ${PAGE_SIZE}`;
       const offsetClause = offset > 0 ? `OFFSET ${offset}` : '';
       const soql = `SELECT ${fields} FROM ${sobject} ${where}${order} ${limit} ${offsetClause}`.trim();
@@ -145,6 +150,14 @@ export class SalesforceAdapter extends BaseProviderAdapter {
       if (res.status === 400 && text.includes('INVALID_FIELD')) {
         const badField = _parseInvalidField(text);
         if (badField) {
+          // If the rejected field is the current sort field, fall back to
+          // CreatedDate (universally present on every standard SObject).
+          if (badField === sortField) {
+            console.warn(`[salesforce-adapter] ${sobject}: sort field "${badField}" rejected, falling back to CreatedDate`);
+            sortField = 'CreatedDate';
+            this._sortOverrides[sobject] = sortField;
+            continue;
+          }
           const filtered = fields
             .split(',')
             .map((f) => f.trim())

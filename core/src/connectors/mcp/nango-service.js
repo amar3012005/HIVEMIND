@@ -23,7 +23,7 @@ const NANGO_SECRET_KEY = process.env.NANGO_SECRET_KEY || 'dev-secret-change-me';
 // ---------------------------------------------------------------------------
 
 /** GET wrapper. */
-async function nangoGet(path, opts = {}) {
+export async function nangoGet(path, opts = {}) {
   return _nangoRequest('GET', path, null, opts);
 }
 

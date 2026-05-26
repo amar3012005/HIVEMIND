@@ -1147,14 +1147,16 @@ export class MemoryGraphEngine {
         };
 
         if (effectiveRelationshipType === 'Updates') {
-          // Confidence floor: low-confidence "Updates" classifications were
-          // flipping is_latest=false on unrelated memories (observed today:
-          // "Dipesh Investor" Updates "Ceyda Co-Founder" at confidence 0.32
-          // simply because both mention Amar). is_latest cascades hide most
-          // memories from the default list view. Treat <0.70 as a Mentions
-          // edge instead — keeps the graph connection, doesn't supersede.
+          // Confidence floor: low/mid-confidence "Updates" classifications
+          // were flipping is_latest=false on unrelated memories (observed:
+          // "Dental appointment" Updates "Nbank appointment" at conf 0.81
+          // because both are events mentioning entity:Amar). is_latest
+          // cascades hide memories from default views. Treat <0.85 as a
+          // Mentions edge instead. Matches the _attachEntityCoMentionEdges
+          // floor — a destructive supersede needs strong evidence on
+          // BOTH the smart-ingest classifier AND the entity-overlap path.
           const updateConf = classification.relationship?.confidence ?? semanticRelationship?.confidence ?? 0;
-          if (Number(updateConf) >= 0.70) {
+          if (Number(updateConf) >= 0.85) {
             Object.assign(result, await this.applyUpdate(baseMemory.id, classification.relationship.targetId, {
               store,
               user_id: baseMemory.user_id,

@@ -1165,21 +1165,13 @@ export class MemoryGraphEngine {
               startedAt
             }));
           } else {
-            // Downgrade to Mentions edge — connect but don't supersede.
-            try {
-              await store.createRelationship({
-                id: crypto.randomUUID(),
-                from_id: baseMemory.id,
-                to_id: classification.relationship.targetId,
-                type: 'Mentions',
-                confidence: Number(updateConf) || 0.5,
-                created_by: 'updates_floor_downgrade',
-                metadata: { reason: 'updates_below_floor', original_confidence: updateConf, threshold: 0.70 },
-              });
-              console.log(`[graph-engine] Updates → Mentions (conf=${updateConf} < 0.70): ${baseMemory.id.slice(0,8)} → ${classification.relationship.targetId?.slice(0,8)}`);
-            } catch (mentionsErr) {
-              console.warn('[graph-engine] downgrade-to-Mentions failed:', mentionsErr.message);
-            }
+            // Below threshold — drop entirely. Previously downgraded to a
+            // Mentions edge, but that produced noise edges between
+            // unrelated memories (keyboard purchase ↔ tuition email,
+            // both authored by same user). Skip the edge. The dedicated
+            // entity_co_mention_llm path will still create Mentions
+            // edges for memories with REAL shared non-common entities.
+            console.log(`[graph-engine] Updates DROPPED (conf=${updateConf} < 0.85): ${baseMemory.id.slice(0,8)} → ${classification.relationship.targetId?.slice(0,8)}`);
           }
         } else if (effectiveRelationshipType === 'Extends') {
           Object.assign(result, await this.applyExtends(baseMemory.id, classification.relationship.targetId, {

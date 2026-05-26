@@ -1168,7 +1168,37 @@ export async function recallPersistedMemories(store, {
     return true;
   });
 
-  const deduped = collapseNearDuplicates(cleanFiltered, { preserveTemporalDistinctness: temporalComparison });
+  // Pre-dedup entity-match boost. Without this, direct entity hits (e.g.
+  // an SF Account record tagged entity:Vinil_Audit_AI_Inc) get collapsed
+  // into richer-content synthesis memories during collapseNearDuplicates
+  // because the synthesis row has higher base score and longer content.
+  // Lifting the boost above dedup ensures the direct record wins the
+  // preferCandidate tie and survives as the canonical representative.
+  const _earlyQueryEntityTokens = _extractQueryEntityTokens(query_context);
+  const _earlyEntityMatch = (item) => {
+    if (_earlyQueryEntityTokens.length === 0) return item;
+    const tags = item.memory?.tags || item.tags || [];
+    if (!Array.isArray(tags) || tags.length === 0) return item;
+    const entityNames = [];
+    for (const t of tags) {
+      if (typeof t !== 'string') continue;
+      if (t.startsWith('entity:') || t.startsWith('person:')) {
+        entityNames.push(t.replace(/^(entity|person):/, '').replace(/_/g, ' ').toLowerCase());
+      }
+    }
+    if (entityNames.length === 0) return item;
+    for (const tok of _earlyQueryEntityTokens) {
+      for (const en of entityNames) {
+        if (en === tok || en.includes(tok) || (tok.length >= 6 && tok.includes(en))) {
+          return { ...item, score: (item.score || 0) * 1.8, _entity_match: true };
+        }
+      }
+    }
+    return item;
+  };
+  const entityBoostedPreDedup = cleanFiltered.map(_earlyEntityMatch);
+
+  const deduped = collapseNearDuplicates(entityBoostedPreDedup, { preserveTemporalDistinctness: temporalComparison });
 
   // Apply fact-memory boost before slicing to contextLimit
   // Items have shape { memory, score, vectorScore, ... }

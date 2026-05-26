@@ -374,6 +374,17 @@ function buildRelationshipIndex(relationships) {
   return counts;
 }
 
+// Build a set of memory ids that are TARGETS of any Contradicts edge.
+// Used by recall scoring to apply a relevance penalty — a memory the
+// graph flagged as contradicted should rarely beat its successor.
+function buildContradictedIndex(relationships) {
+  const targets = new Set();
+  for (const edge of relationships) {
+    if (edge.type === 'Contradicts' && edge.to_id) targets.add(edge.to_id);
+  }
+  return targets;
+}
+
 function policyBoost(memory, {
   preferred_project = null,
   preferred_source_platforms = [],
@@ -986,6 +997,7 @@ export async function recallPersistedMemories(store, {
   });
   const relationships = await store.listRelationships({ user_id, org_id, project, limit: 1000 });
   const relationshipCounts = buildRelationshipIndex(relationships);
+  const contradictedIds    = buildContradictedIndex(relationships);
 
   // Graph Expansion: Discover related memories through graph traversal
   const expandedCandidates = await expandCandidatesViaGraph(store, {
@@ -1039,6 +1051,13 @@ export async function recallPersistedMemories(store, {
         temporalBoost;
     // Superseded memory penalty
     if (memory.is_latest === false) score *= 0.55;
+    // Stale-superseded penalty: superseded AND >30 days old gets extra
+    // downweight. Catches old revisions that linger after drift compaction.
+    if (memory.is_latest === false && daysAgo > 30) score *= 0.70;
+    // Contradiction penalty: memory was flagged as target of a Contradicts
+    // edge by the conflict-detector. Recall keeps it visible but should
+    // rarely promote it over a non-contradicted alternative.
+    if (contradictedIds.has(memory.id)) score *= 0.40;
     // Content attribution: deprioritize third-party/noise content
     const attribution = memory.metadata?.content_attribution;
     if (attribution === 'newsletter') score *= 0.5;
@@ -1092,6 +1111,9 @@ export async function recallPersistedMemories(store, {
         temporalBoost;
     // Superseded memory penalty
     if (candidate.memory?.is_latest === false) score *= 0.55;
+    // Stale-superseded penalty (>30d) + contradiction penalty.
+    if (candidate.memory?.is_latest === false && daysAgo > 30) score *= 0.70;
+    if (candidate.memory?.id && contradictedIds.has(candidate.memory.id)) score *= 0.40;
     // Content attribution: deprioritize third-party/noise content
     const attribution = candidate.memory?.metadata?.content_attribution;
     if (attribution === 'newsletter') score *= 0.5;

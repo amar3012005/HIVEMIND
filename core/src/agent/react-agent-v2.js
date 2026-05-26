@@ -1833,9 +1833,46 @@ export async function runReactAgentV2({
 
     return {
       response:      answer.response,
-      sources:       evidence.memories.slice(0, 10).map(m => ({
-        id: m.id, title: m.title, snippet: m.content, score: m.score, tags: m.tags,
+      // Sources include recall-trace metadata so the FE can render WHY a
+      // memory ranked (synth boost, x-cluster overlap, raw score). Helps
+      // users trust the answer + spot mis-ranking.
+      sources:       evidence.memories.slice(0, 10).map(m => {
+        const tags = m.tags || [];
+        const isSynth = (m.source_metadata?.source_type === 'canonical-fact')
+                     || (m.source_metadata?.source_type === 'synthesis-bridge')
+                     || tags.includes('synthesis:canonical')
+                     || tags.includes('synthesis:bridge');
+        const synthType = tags.includes('synthesis:canonical') ? 'canonical-fact'
+                        : tags.includes('synthesis:bridge')    ? 'synthesis-bridge'
+                        : null;
+        return {
+          id: m.id,
+          title: m.title,
+          snippet: m.content,
+          score: typeof m.score === 'number' ? Number(m.score.toFixed(3)) : null,
+          tags,
+          memory_type: m.memory_type,
+          // Recall-trace metadata — FE renders chips per memory.
+          rank_trace: {
+            is_synthesis: !!isSynth,
+            synthesis_type: synthType,
+            synthesis_confidence: m.synthesis_confidence ?? null,
+            synthesis_revision: m.synthesis_revision ?? null,
+            cross_cluster_boost: m._cross_cluster_boost != null ? Number(Number(m._cross_cluster_boost).toFixed(3)) : null,
+            cross_cluster_overlap: m._cross_cluster_overlap ?? null,
+            synthesis_boosted: !!m._synthesis_boosted,
+          },
+        };
+      }),
+      // Typed graph edges between sources — FE renders edge chips.
+      relationships: (evidence.relationships || []).slice(0, 30).map(e => ({
+        from_id: e.from_id,
+        to_id: e.to_id,
+        type: e.type,
+        confidence: typeof e.confidence === 'number' ? Number(e.confidence.toFixed(2)) : null,
       })),
+      // Synthesis chains (insight-mode only) — FE renders claim + sources tree.
+      synthesis_chains: (evidence.synthesis_chains || []).slice(0, 5),
       steps,
       evidence_used: answer.evidence_used,
       confidence:    answer.confidence,

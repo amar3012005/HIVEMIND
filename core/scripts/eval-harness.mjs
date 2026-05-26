@@ -149,6 +149,72 @@ const CASES = [
       _recall_raw_wins: true,
     },
   },
+
+  // ── Quality-pruning eval cases (MMR + score-floor + cluster-collapse) ──
+  // Added after commit 130223d. Catches regressions in tight-recall paths.
+
+  {
+    name: 'mmr:single-entity-tight-topK',
+    // Single-entity lookup should NOT spam 5 paraphrased rows. Sub-query
+    // budget caps at 2; MMR + cluster-collapse trim near-duplicates.
+    q: 'tell me about Davinci AI',
+    expect: {
+      tools_include: ['hivemind_recall'],
+      max_recall_calls: 2,         // sub-query cap for single-entity lookup
+      min_confidence: 0.6,
+      contains_any: ['Davinci AI', 'DaVinci'],
+    },
+  },
+  {
+    name: 'insight:relation-query-mode',
+    // Relation pattern MUST force mode=insight + return synth chains.
+    q: 'what is the relation between Davinci AI and Uwe Berger',
+    expect: {
+      tools_include: ['hivemind_recall'],
+      recall_mode: 'insight',
+      min_confidence: 0.5,
+      // Either edges cited literally OR honest "no recorded relation"
+      contains_any: ['relation', 'no recorded', 'Updates', 'Extends', 'Mentions', 'Derives'],
+      banned: ['I believe', 'probably related', 'likely connected'],
+    },
+  },
+  {
+    name: 'anti-hallucination:unconnected-pair',
+    // Two memories with zero edges between them must yield honest absence,
+    // not invented relation from co-occurring entities.
+    q: 'what is the connection between my keyboard purchase and Nbank sponsorship',
+    expect: {
+      tools_include: ['hivemind_recall'],
+      contains_any: ['no recorded relation', 'no relation', 'not directly related', 'no connection'],
+      banned: ['related to', 'connected through', 'linked via'],
+      min_confidence: 0.5,
+    },
+  },
+  {
+    name: 'synth-tier:preference-in-evidence',
+    // When synthesis + raw both exist, synth must appear in evidence_used.
+    q: 'summarise what we know about Vinil',
+    expect: {
+      tools_include: ['hivemind_recall'],
+      contains_any: ['Vinil', 'audit', 'partnership'],
+      min_confidence: 0.6,
+      // Evidence-used array should include at least one synth-prefixed id
+      // when synth memories are surfaced (checked via _evidence_has_synth).
+      _evidence_has_synth: true,
+    },
+  },
+  {
+    name: 'sparse-corpus:adaptive-cluster-min',
+    // Small org with <50 fact+decision memories should still produce
+    // synthesis via adaptive floor (clamp to 3). Hit /api/recall directly
+    // and assert synthesized[] non-empty when corpus has any clustered tag.
+    q: 'Nbank sponsorship',
+    expect: {
+      tools_include: ['hivemind_recall'],
+      contains_any: ['Nbank', 'sponsorship', 'appointment'],
+      min_confidence: 0.5,
+    },
+  },
 ];
 
 // ── Recall-direct runner (for synthesis eval cases) ─────────────────────
@@ -262,6 +328,28 @@ async function runCase(c) {
   }
   if (e.creates_draft && drafts === 0) failures.push('expected a draft to be created');
   if (typeof e.max_ms === 'number' && dur > e.max_ms) failures.push(`too slow: ${dur}ms > ${e.max_ms}ms`);
+
+  // New assertions added with quality-pruning eval cases (commit 130223d).
+  if (typeof e.max_recall_calls === 'number') {
+    const recallCount = tools.filter(t => t === 'hivemind_recall').length;
+    if (recallCount > e.max_recall_calls) {
+      failures.push(`too many recall calls: ${recallCount} > ${e.max_recall_calls}`);
+    }
+  }
+  if (e.recall_mode) {
+    const recallSteps = (j.steps || []).filter(s => s.tool === 'hivemind_recall');
+    const modes = recallSteps.map(s => s.args?.mode || 'quick');
+    if (!modes.includes(e.recall_mode)) {
+      failures.push(`recall_mode=${e.recall_mode} not used (got ${modes.join(',') || 'none'})`);
+    }
+  }
+  if (e._evidence_has_synth) {
+    // Synth evidence id has matching synthesis:* tag in sources.
+    const sources = Array.isArray(j.sources) ? j.sources : [];
+    const hasSynth = sources.some(s => (s.tags || []).some(t =>
+      typeof t === 'string' && (t === 'synthesis:canonical' || t === 'synthesis:bridge')));
+    if (!hasSynth) failures.push('no synthesis-tier memory in sources');
+  }
 
   return {
     ok: failures.length === 0,

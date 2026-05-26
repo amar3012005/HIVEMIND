@@ -21,9 +21,9 @@ const PAGE_SIZE = 50;
 const OBJECT_ORDER = ['Account', 'Contact', 'Opportunity', 'OpportunityHistory', 'Task', 'Event', 'EmailMessage', 'Case', 'CaseComment'];
 
 const FIELDS = {
-  Account: 'Id,Name,Type,Industry,Website,Description,AnnualRevenue,NumberOfEmployees,BillingCountry,BillingCity,Phone,IsPersonAccount,OwnerId,Owner.Name,LastModifiedDate,CreatedDate,CurrencyIsoCode',
+  Account: 'Id,Name,Type,Industry,Website,Description,AnnualRevenue,NumberOfEmployees,BillingCountry,BillingCity,Phone,OwnerId,Owner.Name,LastModifiedDate,CreatedDate',
   Contact: 'Id,Name,FirstName,LastName,Email,Phone,MobilePhone,Title,Department,LeadSource,AccountId,Account.Name,MailingCountry,Description,OwnerId,Owner.Name,LastModifiedDate,CreatedDate',
-  Opportunity: 'Id,Name,StageName,Amount,CloseDate,Probability,ForecastCategoryName,NextStep,Type,LeadSource,AccountId,Account.Name,OwnerId,Owner.Name,Description,LastModifiedDate,CreatedDate,CurrencyIsoCode',
+  Opportunity: 'Id,Name,StageName,Amount,CloseDate,Probability,ForecastCategoryName,NextStep,Type,LeadSource,AccountId,Account.Name,OwnerId,Owner.Name,Description,LastModifiedDate,CreatedDate',
   OpportunityHistory: 'Id,OpportunityId,StageName,Amount,CloseDate,Probability,ForecastCategory,CreatedDate,CreatedById',
   Task: 'Id,Subject,Status,Priority,ActivityDate,WhoId,Who.Name,WhatId,What.Name,OwnerId,Owner.Name,Description,LastModifiedDate,CreatedDate',
   Event: 'Id,Subject,StartDateTime,EndDateTime,Location,WhoId,Who.Name,WhatId,What.Name,OwnerId,Owner.Name,Description,LastModifiedDate,CreatedDate',

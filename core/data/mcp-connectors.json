@@ -202,5 +202,22 @@
     "args": [],
     "env": {},
     "updated_at": "2026-05-18T00:00:00.000Z"
+  },
+  {
+    "name": "salesforce-ingestion",
+    "mode": "ingestion",
+    "nango_provider": "salesforce",
+    "auth_strategy": "nango",
+    "transport": "streamable-http",
+    "url": null,
+    "adapter_type": "salesforce",
+    "supports_ingestion": true,
+    "supports_live_tools": false,
+    "supports_persistent_client": false,
+    "default_project": "connector-salesforce",
+    "default_tags": ["salesforce", "crm", "ingestion"],
+    "args": [],
+    "env": {},
+    "updated_at": "2026-05-27T00:00:00.000Z"
   }
 ]

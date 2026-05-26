@@ -1189,12 +1189,43 @@ export async function recallPersistedMemories(store, {
     return { ...item, score: (item.score || 0) * mult };
   };
 
+  // Query-entity-tag match boost.
+  // Surface direct entity hits above synthesis-bridge generic boosts. Without
+  // this, a query like "Vinil Audit AI" returns canonical-fact + bridge
+  // memories (1.35–1.50× synthesis boost) ahead of the actual Account /
+  // Contact / Opportunity records, because those have no synthesis multiplier.
+  // We extract proper-noun-shaped tokens from the query and check whether the
+  // memory carries a matching `entity:<Name>` or `person:<Name>` tag. Exact
+  // (or substring) match → ×1.8, which keeps named-entity recall sharp.
+  const queryEntityTokens = _extractQueryEntityTokens(query_context);
+  const applyEntityMatchBoost = (item) => {
+    if (queryEntityTokens.length === 0) return item;
+    const tags = item.memory?.tags || item.tags || [];
+    if (!Array.isArray(tags) || tags.length === 0) return item;
+    const entityNames = [];
+    for (const t of tags) {
+      if (typeof t !== 'string') continue;
+      if (t.startsWith('entity:') || t.startsWith('person:')) {
+        entityNames.push(t.replace(/^(entity|person):/, '').replace(/_/g, ' ').toLowerCase());
+      }
+    }
+    if (entityNames.length === 0) return item;
+    for (const tok of queryEntityTokens) {
+      for (const en of entityNames) {
+        if (en === tok || en.includes(tok) || (tok.length >= 6 && tok.includes(en))) {
+          return { ...item, score: (item.score || 0) * 1.8, _entity_match: true };
+        }
+      }
+    }
+    return item;
+  };
+
   const applyItemBoosts = (items) => {
     let result = items.map(item => {
       const tags = item.memory?.tags || item.tags || [];
       const isFactMemory = Array.isArray(tags) && tags.includes('extracted-fact');
       const boosted = isFactMemory ? { ...item, score: (item.score || 0) * 1.15 } : item;
-      return applyClusterBoost(boosted);
+      return applyEntityMatchBoost(applyClusterBoost(boosted));
     });
 
     if (preference_boost) {
@@ -1555,4 +1586,39 @@ export async function crossClusterEntityBoost(memories, { clusterIndex, organiza
     console.warn('[persisted-retrieval] crossClusterEntityBoost failed:', err.message);
     return memories;
   }
+}
+
+// Extract proper-noun-shaped tokens from a query string for entity-tag
+// matching. Handles:
+//   • multi-word capitalized phrases  → "Vinil Audit AI"  → "vinil audit ai"
+//   • single capitalized 4+ char tokens → "Salesforce" → "salesforce"
+//   • bare lowercase 4+ char tokens when the query has no capitalization
+//     (covers all-lowercase user input like "vinil audit ai pilot")
+function _extractQueryEntityTokens(query) {
+  if (!query || typeof query !== 'string') return [];
+  const out = new Set();
+
+  // Multi-word capitalized phrases
+  const capPhrases = query.match(/[A-Z][\w&]+(?:\s+[A-Z][\w&]+)+/g) || [];
+  for (const p of capPhrases) out.add(p.toLowerCase());
+
+  // Singleton capitalized 4+ chars
+  const singletons = query.match(/\b[A-Z][\w&]{3,}\b/g) || [];
+  for (const s of singletons) out.add(s.toLowerCase());
+
+  // Fallback for all-lowercase queries: bigrams + 4+ char content tokens
+  if (out.size === 0) {
+    const STOP = new Set(['what','when','where','which','that','this','with','from',
+      'about','have','their','they','then','show','find','tell','give','status',
+      'pilot','project','update','recent','latest','current','please','help']);
+    const words = query.toLowerCase().match(/[a-z][a-z0-9&]{3,}/g) || [];
+    const meaningful = words.filter((w) => !STOP.has(w));
+    for (const w of meaningful) out.add(w);
+    // Adjacent bigrams (catches "vinil audit", "cherry ventures")
+    for (let i = 0; i < meaningful.length - 1; i++) {
+      out.add(`${meaningful[i]} ${meaningful[i + 1]}`);
+    }
+  }
+
+  return Array.from(out);
 }

@@ -14720,7 +14720,7 @@ exit \$RC
               // Slim response — default ON for mode=auto/memory/hybrid/evidence
               // Caller can opt back into full payload via body.verbose=true
               if (!body.verbose) {
-                const SLIM_MEM_KEYS = ['id','title','content','memory_type','tags','score','created_at','document_date','project','source','evidence','_synthesis_boosted','_cross_cluster_boost','_cross_cluster_overlap','synthesis_cluster_hash','synthesis_revision','synthesis_confidence','synthesis_evidence_ids','source_metadata','tier','last_accessed_at','promoted_at','_ws_match','_entity_match'];
+                const SLIM_MEM_KEYS = ['id','title','content','memory_type','tags','score','created_at','document_date','project','source','evidence','_synthesis_boosted','_cross_cluster_boost','_cross_cluster_overlap','synthesis_cluster_hash','synthesis_revision','synthesis_confidence','synthesis_evidence_ids','source_metadata','tier','last_accessed_at','promoted_at','_ws_match','_entity_match','cognitive_layer_role','_cognitive_role'];
                 const slimMem = (m) => {
                   const out = {};
                   for (const k of SLIM_MEM_KEYS) if (m[k] !== undefined) out[k] = m[k];

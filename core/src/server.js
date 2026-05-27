@@ -16926,6 +16926,23 @@ exit \$RC
               return jsonResponse(res, { error: 'message is required' }, 400);
             }
 
+            // WorkingSet auto-extract — fire-and-forget. Pulls proper-noun
+            // entities from the message + threads/projects referenced and
+            // upserts to working_sets. Recall router reads this to boost
+            // memories tagged with active entities/threads. Non-blocking;
+            // failures are logged + swallowed so chat hot-path isn't delayed.
+            if (prisma) {
+              import('./memory/working-set.js').then(({ tapChatMessage }) => {
+                tapChatMessage(prisma, {
+                  userId,
+                  orgId,
+                  message,
+                  threadId: body?.thread_id || body?.conversation_id || null,
+                  projectId: requestProjectId,
+                }).catch(() => {});
+              }).catch(() => {});
+            }
+
             const groqKey = process.env.GROQ_API_KEY;
             if (!groqKey) {
               return jsonResponse(res, { error: 'Chat not available — no LLM API key configured' }, 503);

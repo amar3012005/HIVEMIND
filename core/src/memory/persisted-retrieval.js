@@ -934,6 +934,24 @@ export async function recallPersistedMemories(store, {
   // is_latest: undefined = default true, false = include superseded versions
   const effectiveIsLatest = is_latest !== undefined ? is_latest : true;
 
+  // Load WorkingSet for this user (rolling spotlight on active context).
+  // Used downstream to boost memories whose entity/thread/project tags
+  // overlap what the user is currently working on. Read-only; non-fatal on
+  // failure — empty set just means no boost fires.
+  let _workingSet = { activeEntities: [], activeThreads: [], activeProjects: [], pinnedMemoryIds: [] };
+  if (store?.client?.workingSet && user_id) {
+    try {
+      const ws = await store.client.workingSet.findUnique({ where: { userId: user_id } });
+      if (ws) _workingSet = ws;
+    } catch (wsErr) {
+      // Non-fatal — proceed without boost
+    }
+  }
+  const _wsEntitiesLower = new Set((_workingSet.activeEntities || []).map((e) => String(e).toLowerCase()));
+  const _wsThreads = new Set(_workingSet.activeThreads || []);
+  const _wsProjects = new Set(_workingSet.activeProjects || []);
+  const _wsPinned = new Set((_workingSet.pinnedMemoryIds || []).map((id) => String(id)));
+
   const lexicalCandidates = await store.searchMemories({
     query: query_context,
     user_id,
@@ -1250,12 +1268,67 @@ export async function recallPersistedMemories(store, {
     return item;
   };
 
+  // WorkingSet boost — surface memories aligned with what the user is
+  // currently working on. Reads from the WorkingSet loaded earlier:
+  //   - memory has entity tag in active_entities → ×1.30
+  //   - memory tagged with active thread/channel/conversation → ×1.50
+  //   - memory in active project → ×1.20
+  //   - memory id is pinned → ×2.00 (hard pin)
+  // Multiplicative with existing boosts. Cap stack at ×3.0 to avoid
+  // pinned + entity + thread compounding into runaway scores.
+  const applyWorkingSetBoost = (item) => {
+    const mem = item.memory || item;
+    const tags = mem.tags || [];
+    let mult = 1.0;
+    let matched = false;
+
+    // Pinned wins everything else
+    if (_wsPinned.size > 0 && mem.id && _wsPinned.has(String(mem.id))) {
+      mult *= 2.0;
+      matched = true;
+    }
+
+    if (_wsEntitiesLower.size > 0 && Array.isArray(tags)) {
+      for (const t of tags) {
+        if (typeof t !== 'string') continue;
+        if (!t.startsWith('entity:') && !t.startsWith('person:')) continue;
+        const norm = t.replace(/^(entity|person):/, '').replace(/_/g, ' ').toLowerCase();
+        if (_wsEntitiesLower.has(norm)) { mult *= 1.3; matched = true; break; }
+      }
+    }
+
+    if (_wsThreads.size > 0 && Array.isArray(tags)) {
+      for (const t of tags) {
+        if (typeof t !== 'string') continue;
+        if (t.startsWith('thread:') || t.startsWith('channel:') || t.startsWith('conversation:')) {
+          const id = t.split(':').slice(1).join(':');
+          if (_wsThreads.has(id)) { mult *= 1.5; matched = true; break; }
+        }
+      }
+    }
+
+    if (_wsProjects.size > 0 && mem.project && _wsProjects.has(mem.project)) {
+      mult *= 1.2;
+      matched = true;
+    }
+
+    // Tier 1 (thin) deboost — when both Tier 1 and Tier 2 share the same
+    // anchor, the hot-cache row should win. Tier 1 stays in pool for
+    // discovery but ranks below its hydrated counterpart.
+    if (mem.tier === 1) mult *= 0.9;
+
+    if (mult >= 3.0) mult = 3.0;
+    return matched || mem.tier === 1
+      ? { ...item, score: (item.score || 0) * mult, _ws_match: matched || undefined }
+      : item;
+  };
+
   const applyItemBoosts = (items) => {
     let result = items.map(item => {
       const tags = item.memory?.tags || item.tags || [];
       const isFactMemory = Array.isArray(tags) && tags.includes('extracted-fact');
       const boosted = isFactMemory ? { ...item, score: (item.score || 0) * 1.15 } : item;
-      return applyEntityMatchBoost(applyClusterBoost(boosted));
+      return applyWorkingSetBoost(applyEntityMatchBoost(applyClusterBoost(boosted)));
     });
 
     if (preference_boost) {

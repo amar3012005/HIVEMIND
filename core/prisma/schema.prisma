@@ -418,6 +418,14 @@ model Memory {
   synthesisClusterHash                                        String?              @map("synthesis_cluster_hash") @db.VarChar(128)
   synthesisRevision                                           Int                  @default(1) @map("synthesis_revision")
 
+  // Phase A tiered cache.
+  //   tier 1 = thin index (title + entities + small embedding, body may be sparse)
+  //   tier 2 = hot cache (full content + full embedding, lazy-hydrated)
+  //   default 2 preserves existing behavior for memories created before this column existed.
+  tier                                                        Int                  @default(2) @map("tier")
+  lastAccessedAt                                              DateTime?            @map("last_accessed_at") @db.Timestamptz(6)
+  promotedAt                                                  DateTime?            @map("promoted_at") @db.Timestamptz(6)
+
   @@index([userId])
   @@index([orgId])
   @@index([project])
@@ -431,7 +439,28 @@ model Memory {
   @@index([version])
   // Partial index: only index memories that have a cluster hash (synthesis outputs only)
   @@index([synthesisClusterHash], map: "memories_synthesis_cluster_hash_idx")
+  @@index([tier], map: "memories_tier_idx")
+  @@index([userId, tier, lastAccessedAt(sort: Desc)], map: "memories_user_tier_lastaccess_idx")
   @@map("memories")
+}
+
+/// WorkingSet — rolling spotlight on what user cares about NOW.
+/// Populated by chat ingest path (last 10 messages → entities + threads).
+/// Used by recall router to boost relevance for active entities/threads.
+/// One row per (userId, orgId). active_entities = ["Vinil","B&B"] last 7d.
+model WorkingSet {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId          String    @unique @map("user_id") @db.Uuid
+  orgId           String?   @map("org_id") @db.Uuid
+  activeEntities  String[]  @map("active_entities")
+  activeThreads   String[]  @map("active_threads")
+  activeProjects  String[]  @map("active_projects")
+  pinnedMemoryIds String[]  @map("pinned_memory_ids") @db.Uuid
+  updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([orgId])
+  @@map("working_sets")
 }
 
 /// Persisted version history for state transitions and temporal audits

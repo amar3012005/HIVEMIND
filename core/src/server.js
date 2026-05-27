@@ -7795,6 +7795,37 @@ exit \$RC
             return jsonResponse(res, { error: 'Failed to load recent cognition output' }, 500);
           }
 
+        case '/api/cognition/stop':
+          // Phase 4 — runtime cognition-loop kill switch. Governance owns
+          // the cognitive layer post-Turing-emit; this endpoint lets ops
+          // stop the loop without a redeploy. Admin/master only.
+          if (req.method !== 'POST') break;
+          {
+            const m = await prisma.userOrganization.findUnique({
+              where: { userId_orgId: { userId, orgId } },
+              select: { role: true, roles: true },
+            }).catch(() => null);
+            const rs = new Set([
+              ...(m?.role ? [m.role] : []),
+              ...(Array.isArray(m?.roles) ? m.roles : []),
+            ]);
+            const adminOk = ['admin','owner','org_admin','org_owner'].some((r) => rs.has(r));
+            if (!adminOk && !principal.master) {
+              return jsonResponse(res, { error: 'admin/owner role required' }, 403);
+            }
+            if (!cognitionLoop) {
+              return jsonResponse(res, { stopped: true, was_running: false });
+            }
+            try {
+              cognitionLoop.stop();
+              const wasRunning = !!cognitionLoop.timer;
+              cognitionLoop = null;
+              return jsonResponse(res, { stopped: true, was_running: wasRunning, note: 'restart will re-arm if ENABLE_COGNITION_LOOP still true in env' });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+
         case '/api/cognition/synthesize-now':
           // Admin-gated manual trigger — runs one tick immediately.
           if (req.method !== 'POST') break;

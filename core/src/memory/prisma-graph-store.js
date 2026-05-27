@@ -84,7 +84,11 @@ function mapMemoryRecord(record) {
     synthesis_confidence:    record.synthesisConfidence != null ? Number(record.synthesisConfidence) : null,
     synthesis_cluster_hash:  record.synthesisClusterHash || null,
     synthesis_revision:      record.synthesisRevision != null ? Number(record.synthesisRevision) : 1,
-    synthesis_evidence_ids:  record.synthesisEvidenceIds || []
+    synthesis_evidence_ids:  record.synthesisEvidenceIds || [],
+    // Phase B tiered cache surface fields
+    tier:                    typeof record.tier === 'number' ? record.tier : 2,
+    last_accessed_at:        record.lastAccessedAt instanceof Date ? record.lastAccessedAt.toISOString() : record.lastAccessedAt,
+    promoted_at:             record.promotedAt instanceof Date ? record.promotedAt.toISOString() : record.promotedAt
   };
 }
 

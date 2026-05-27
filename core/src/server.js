@@ -14729,6 +14729,36 @@ exit \$RC
                 }
               }
 
+              // Phase B tiered cache: fire-and-forget hydration + access stamp.
+              //   - Tier 1 row with score ≥ threshold → fetch full body via live tool
+              //   - Every returned memory → bump lastAccessedAt for tier-promotion heuristics
+              try {
+                const hits = Array.isArray(result.memories) ? result.memories : [];
+                if (hits.length > 0 && prisma) {
+                  const ids = hits.map((m) => m.id).filter(Boolean);
+                  if (ids.length > 0) {
+                    prisma.memory.updateMany({
+                      where: { id: { in: ids } },
+                      data: { lastAccessedAt: new Date() },
+                    }).catch(() => {});
+                  }
+                  const HYDRATE_THRESHOLD = 0.6;
+                  const tier1Hits = hits.filter((m) => m.tier === 1 && (m.score || 0) >= HYDRATE_THRESHOLD);
+                  if (tier1Hits.length > 0) {
+                    import('./memory/tier-hydrate.js').then(({ hydrateMemory }) => {
+                      for (const hit of tier1Hits) {
+                        hydrateMemory(
+                          { prisma, qdrantClient },
+                          { memoryId: hit.id, userId, orgId },
+                        ).catch(() => {});
+                      }
+                    }).catch(() => {});
+                  }
+                }
+              } catch (hydrateErr) {
+                console.warn('[recall] tier hydration tap failed:', hydrateErr.message);
+              }
+
               jsonResponse(res, result);
             } catch (error) {
               console.error('Auto recall failed:', error);

@@ -728,6 +728,8 @@ export class RecallRouter {
           _cross_cluster_boost:   Number(m._cross_cluster_boost.toFixed(3)),
           _cross_cluster_overlap: m._cross_cluster_overlap || 0,
         } : {}),
+        // Phase B tier surfaced for hydration tap + UI ("hot"/"thin"/"live")
+        ...(typeof m.tier === 'number' ? { tier: m.tier } : {}),
       })),
       evidence: evidenceWithLineage.slice(0, HOP2_DOC_LIMIT).map((e) => ({
         segment_id:       e.segmentId,

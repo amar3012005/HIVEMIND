@@ -792,20 +792,36 @@ export class ResidentRunManager {
 
     const batchId = randomUUID();
     const cycleStartedAt = Date.now();
-    const lockKey = { orgId, agentName: 'governance-cycle' };
-    let lockHandle = null;
+    let lockAcquired = false;
+    const LOCK_HOLD_MS = 10 * 60 * 1000; // 10 min cycle ceiling
 
-    // Acquire lock if prisma available; otherwise proceed best-effort.
+    // Row-level cycle lock on governance_agent_state. Pool-safe (no session affinity).
+    // Atomic UPDATE returns 1 row if no other cycle is holding it.
     if (this.prisma) {
       try {
-        const { tryAcquireGovernanceLock } = await import('./advisory-lock.js');
-        lockHandle = await tryAcquireGovernanceLock(this.prisma, lockKey);
-        if (!lockHandle.acquired) {
-          this.logger?.warn?.(`[gov-cycle] lock busy for ${orgId} — skipping`);
-          return { batch_id: batchId, status: 'skipped_lock_busy', reason: 'busy' };
+        const until = new Date(Date.now() + LOCK_HOLD_MS);
+        const updated = await this.prisma.$executeRawUnsafe(
+          `UPDATE hivemind.governance_agent_state
+             SET circuit_breaker_until = $1::timestamptz
+           WHERE agent_name = 'governance-cycle'
+             AND (circuit_breaker_until IS NULL OR circuit_breaker_until < now())`,
+          until.toISOString()
+        );
+        if (updated === 0) {
+          // Row may not exist yet — try to insert. If conflict + still locked, busy.
+          try {
+            await this.prisma.governanceAgentState.create({
+              data: { agentName: 'governance-cycle', circuitBreakerUntil: until },
+            });
+            lockAcquired = true;
+          } catch {
+            return { batch_id: batchId, status: 'skipped_lock_busy', reason: 'busy' };
+          }
+        } else {
+          lockAcquired = true;
         }
       } catch (err) {
-        this.logger?.warn?.(`[gov-cycle] lock acquire failed: ${err.message}`);
+        this.logger?.warn?.(`[gov-cycle] row-lock acquire failed: ${err.message}`);
       }
     }
 
@@ -921,11 +937,14 @@ export class ResidentRunManager {
         }
       }
 
-      // ── 6. Release advisory lock ──────────────────────────────────
-      if (lockHandle?.acquired && this.prisma) {
+      // ── 6. Release row-level cycle lock ────────────────────────────
+      if (lockAcquired && this.prisma) {
         try {
-          const { releaseGovernanceLock } = await import('./advisory-lock.js');
-          await releaseGovernanceLock(this.prisma, lockHandle);
+          await this.prisma.$executeRawUnsafe(
+            `UPDATE hivemind.governance_agent_state
+               SET circuit_breaker_until = NULL
+             WHERE agent_name = 'governance-cycle'`
+          );
         } catch {}
       }
     }

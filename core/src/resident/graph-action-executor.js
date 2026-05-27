@@ -84,9 +84,111 @@ export class GraphActionExecutor {
         return this._promoteRisk(targetIds, content, confidence, dryRun);
       case 'relationship_candidate':
         return this._createRelationship(targetIds, confidence, dryRun, content);
+      // Phase 4 — synthesis ownership. Governance can now write cognitive
+      // layer memories directly, removing cognition-loop's exclusive ownership.
+      case 'canonical_synthesis':
+        return this._synthesizeCanonical(targetIds, content, confidence, dryRun);
+      case 'bridge_synthesis':
+        return this._synthesizeBridge(targetIds, content, confidence, dryRun);
+      case 'compression':
+        return this._compressCluster(targetIds, content, confidence, dryRun);
       default:
         return { status: 'skipped', reason: `unknown_action: ${recommendation}` };
     }
+  }
+
+  async _getCognitionLoop() {
+    if (!this._cognitionLoop) {
+      const { CognitionLoop } = await import('../memory/cognition-loop.js');
+      // memoryStore = graph store from run-manager. cognition-loop expects
+      // prisma + engine. Pull engine off graph store if available.
+      this._cognitionLoop = new CognitionLoop({
+        prisma: this.memoryStore?.client || this.memoryStore?.prisma || null,
+        memoryGraphEngine: this.memoryStore?.engine || null,
+        persistentMemoryStore: this.memoryStore || null,
+        logger: this.logger,
+      });
+    }
+    return this._cognitionLoop;
+  }
+
+  async _synthesizeCanonical(memoryIds, content, confidence, dryRun) {
+    if (!Array.isArray(memoryIds) || memoryIds.length < 2) {
+      return { status: 'skipped', reason: 'need_at_least_2_evidence_ids' };
+    }
+    if (dryRun) return { status: 'dry_run', would_synthesize: memoryIds.length };
+    const loop = await this._getCognitionLoop();
+    const members = await this._fetchMemories(memoryIds);
+    if (members.length < 2) return { status: 'skipped', reason: 'evidence_not_found' };
+    const tag = content?.topic || content?.tag || members[0]?.tags?.find?.((t) => /^topic:/.test(t))?.slice(6) || 'canonical';
+    const written = await loop._writeSynthMemory({
+      orgId: members[0].org_id,
+      userId: members[0].user_id,
+      project: members[0].project,
+      sourceType: 'canonical-fact',
+      tag,
+      members,
+      content: content?.text || content?.summary || `Canonical fact derived from ${members.length} sources.`,
+      confidence,
+      evidenceIds: memoryIds,
+      clusterHash: content?.cluster_hash || null,
+      extraMeta: { generator: 'governance.turing', actor: 'GraphActionExecutor' },
+    }).catch((err) => ({ error: err.message }));
+    return written?.error
+      ? { status: 'failed', error: written.error }
+      : { status: 'executed', memory_id: written?.id || null, evidence_count: members.length };
+  }
+
+  async _synthesizeBridge(memoryIds, content, confidence, dryRun) {
+    if (!Array.isArray(memoryIds) || memoryIds.length < 2) {
+      return { status: 'skipped', reason: 'need_at_least_2_evidence_ids' };
+    }
+    if (dryRun) return { status: 'dry_run', would_bridge: memoryIds.length };
+    const loop = await this._getCognitionLoop();
+    const members = await this._fetchMemories(memoryIds);
+    if (members.length < 2) return { status: 'skipped', reason: 'evidence_not_found' };
+    const tag = content?.bridge_tag || content?.topic || 'cross-cluster';
+    const written = await loop._writeSynthMemory({
+      orgId: members[0].org_id,
+      userId: members[0].user_id,
+      project: members[0].project,
+      sourceType: 'synthesis-bridge',
+      tag,
+      members,
+      content: content?.text || content?.summary || `Bridge linking ${members.length} memories across clusters.`,
+      confidence,
+      evidenceIds: memoryIds,
+      clusterHash: content?.cluster_hash || null,
+      extraMeta: { generator: 'governance.turing', actor: 'GraphActionExecutor' },
+    }).catch((err) => ({ error: err.message }));
+    return written?.error
+      ? { status: 'failed', error: written.error }
+      : { status: 'executed', memory_id: written?.id || null, evidence_count: members.length };
+  }
+
+  async _compressCluster(memoryIds, content, confidence, dryRun) {
+    if (!Array.isArray(memoryIds) || memoryIds.length < 3) {
+      return { status: 'skipped', reason: 'need_at_least_3_memories_to_compress' };
+    }
+    if (dryRun) return { status: 'dry_run', would_compress: memoryIds.length };
+    const loop = await this._getCognitionLoop();
+    const members = await this._fetchMemories(memoryIds);
+    if (members.length < 3) return { status: 'skipped', reason: 'evidence_not_found' };
+    const tag = content?.topic || content?.tag || 'compressed';
+    const summaryText = content?.text || content?.summary || `Compression of ${members.length} memories.`;
+    const written = await loop._writeSummaryMemory({
+      orgId: members[0].org_id,
+      userId: members[0].user_id,
+      project: members[0].project,
+      tag,
+      members,
+      content: summaryText,
+      partIndex: 0,
+      partCount: 1,
+    }).catch((err) => ({ error: err.message }));
+    return written?.error
+      ? { status: 'failed', error: written.error }
+      : { status: 'executed', memory_id: written?.id || null, evidence_count: members.length };
   }
 
   // ── action handlers ──────────────────────────────────────────────

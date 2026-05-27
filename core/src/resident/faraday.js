@@ -617,6 +617,9 @@ CRITICAL: Use the COMPLETE memory IDs exactly as shown in brackets. They are ful
       if (!resp.ok) return null;
       const data = await resp.json();
       const output = data.choices?.[0]?.message?.content || '';
+      const tokensUsed = data.usage?.total_tokens || 0;
+      // Surface tokens for run-manager to fold into governance_agent_state.
+      globalThis.__faradayLastTokens = (globalThis.__faradayLastTokens || 0) + tokensUsed;
 
       // Parse LLM output into structured actions
       const actions = [];

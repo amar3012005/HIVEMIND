@@ -63,7 +63,12 @@ export function getPrismaClient() {
  * model API. Callers using $queryRaw must scope by org_id themselves.
  */
 function installTenantIsolationMiddleware(client) {
-  const GUARDED_MODELS = new Set(['GovernanceActionLog', 'GovernanceMetric']);
+  // Strict-mode models: throw on unscoped query (audit data).
+  const STRICT_MODELS = new Set(['GovernanceActionLog', 'GovernanceMetric']);
+  // Warn-mode models: log unscoped query but don't throw. After 1 week of
+  // clean logs, promote to STRICT_MODELS. Set MEMORY_TENANT_STRICT=true to
+  // promote Memory eagerly.
+  const WARN_MODELS = new Set(['Memory', 'Relationship', 'SourceMetadata']);
   const READ_ACTIONS = new Set([
     'findFirst', 'findFirstOrThrow', 'findMany', 'findUnique', 'findUniqueOrThrow',
     'aggregate', 'count', 'groupBy',
@@ -73,44 +78,63 @@ function installTenantIsolationMiddleware(client) {
     'upsert', 'delete', 'deleteMany',
   ]);
 
+  // Counters surfaced via /api/tenant-isolation/stats for ops review.
+  const stats = global.__tenantIsolationStats || (global.__tenantIsolationStats = {
+    warns: 0,
+    blocks: 0,
+    byModel: {},
+  });
+
+  const hasOrgScope = (where) => {
+    if (!where || typeof where !== 'object') return false;
+    if (where.orgId !== undefined) return true;
+    if (where.userId !== undefined) return true; // user-scoped also acceptable
+    if (where.user?.orgId !== undefined) return true;
+    if (where.AND?.some?.((c) => c?.orgId !== undefined || c?.userId !== undefined)) return true;
+    if (where.OR?.some?.((c) => c?.orgId !== undefined || c?.userId !== undefined)) return true;
+    return false;
+  };
+
+  const dataHasOrg = (data) => {
+    const records = Array.isArray(data) ? data : [data].filter(Boolean);
+    if (records.length === 0) return true; // delete/update with where-only
+    return records.every((r) => r?.orgId !== undefined || r?.userId !== undefined);
+  };
+
   client.$use(async (params, next) => {
     if (process.env.TENANT_ISOLATION_DISABLE === 'true') {
       return next(params);
     }
-    if (!GUARDED_MODELS.has(params.model)) {
-      return next(params);
+    const model = params.model;
+    const action = params.action;
+    const isStrict = STRICT_MODELS.has(model)
+      || (WARN_MODELS.has(model) && process.env.MEMORY_TENANT_STRICT === 'true');
+    const isWarn  = !isStrict && WARN_MODELS.has(model);
+    if (!isStrict && !isWarn) return next(params);
+
+    let scoped = true;
+    if (READ_ACTIONS.has(action)) {
+      scoped = hasOrgScope(params.args?.where);
+    } else if (WRITE_ACTIONS.has(action)) {
+      scoped = hasOrgScope(params.args?.where) || dataHasOrg(params.args?.data);
     }
 
-    const action = params.action;
-    if (READ_ACTIONS.has(action)) {
-      const where = params.args?.where || {};
-      const hasOrg =
-        where.orgId !== undefined ||
-        where.AND?.some?.((c) => c?.orgId !== undefined) ||
-        where.OR?.some?.((c) => c?.orgId !== undefined);
-      if (!hasOrg) {
-        const err = new Error(
-          `[tenant-isolation] ${params.model}.${action} requires orgId in where{}`
-        );
+    if (!scoped) {
+      stats.byModel[model] = (stats.byModel[model] || 0) + 1;
+      if (isStrict) {
+        stats.blocks += 1;
+        const err = new Error(`[tenant-isolation] ${model}.${action} requires orgId/userId scope`);
         err.code = 'TENANT_ISOLATION_VIOLATION';
         throw err;
       }
-    } else if (WRITE_ACTIONS.has(action)) {
-      const data = params.args?.data;
-      const where = params.args?.where || {};
-      const records = Array.isArray(data) ? data : [data].filter(Boolean);
-      const writeHasOrg = records.length === 0
-        ? true // delete/update with where-only
-        : records.every((r) => r?.orgId !== undefined);
-      const whereHasOrg =
-        where.orgId !== undefined ||
-        where.AND?.some?.((c) => c?.orgId !== undefined);
-      if (!writeHasOrg && !whereHasOrg) {
-        const err = new Error(
-          `[tenant-isolation] ${params.model}.${action} requires orgId in data/where`
-        );
-        err.code = 'TENANT_ISOLATION_VIOLATION';
-        throw err;
+      // Warn mode: log once per minute per model+action to avoid spam.
+      stats.warns += 1;
+      const key = `${model}.${action}`;
+      const lastWarn = (stats._lastWarn = stats._lastWarn || {});
+      const now = Date.now();
+      if (!lastWarn[key] || now - lastWarn[key] > 60_000) {
+        lastWarn[key] = now;
+        console.warn(`[tenant-isolation:warn] ${model}.${action} unscoped (warn-mode)`);
       }
     }
     return next(params);

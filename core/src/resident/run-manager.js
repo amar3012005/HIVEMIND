@@ -969,11 +969,15 @@ export class ResidentRunManager {
       // ── 5. Update per-agent state + daily metric rollup ───────────
       if (this.prisma) {
         try {
+          // Pull real Faraday token usage (set by groq fetch). Reset for next cycle.
+          const faradayTokens = Number(globalThis.__faradayLastTokens || 0) | 0;
+          globalThis.__faradayLastTokens = 0;
           await this._updateAgentStateAfterCycle({
             orgId,
             status: summary.status,
             proposalsPersisted: summary.proposals_persisted,
             latencyMs: Date.now() - cycleStartedAt,
+            tokenUsageByAgent: { faraday: faradayTokens },
           });
         } catch (err) {
           this.logger?.warn?.(`[gov-cycle] state update failed: ${err.message}`);

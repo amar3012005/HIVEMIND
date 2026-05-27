@@ -11,6 +11,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
+import { allowOrgRequest as rateLimitAllowOrgRequest, getRateLimitStats as getRateLimitStatsImpl } from './middleware/rate-limit.js';
 import { createRequire } from 'module';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -3409,10 +3410,43 @@ const server = http.createServer(async (req, res) => {
         doclingOk = r.ok;
       } catch { doclingOk = false; }
     }
+    // Phase 4 — strict health: probe DB + Qdrant + Docling. Coolify health
+    // check uses HTTP 200 vs 503 to decide replica restart. Returns 503 if
+    // any critical dep is down so orchestrator can route around the pod.
+    let dbOk = null;
+    if (prisma) {
+      try {
+        const r = await prisma.$queryRawUnsafe('SELECT 1 AS ok');
+        dbOk = Array.isArray(r) && r[0]?.ok === 1;
+      } catch { dbOk = false; }
+    }
+    let qdrantOk = null;
+    if (process.env.QDRANT_URL) {
+      try {
+        const ctrl2 = new AbortController();
+        const t2 = setTimeout(() => ctrl2.abort(), 1500);
+        const headers = process.env.QDRANT_API_KEY ? { 'api-key': process.env.QDRANT_API_KEY } : {};
+        const qr = await fetch(`${process.env.QDRANT_URL}/healthz`, { signal: ctrl2.signal, headers });
+        clearTimeout(t2);
+        qdrantOk = qr.ok;
+      } catch { qdrantOk = false; }
+    }
+    const criticalOk = dbOk !== false && qdrantOk !== false;
+    const memUsage = process.memoryUsage();
     return jsonResponse(res, {
-      ok: true,
+      ok: criticalOk,
       service: 'hivemind-api',
       port: process.env.PORT || 3000,
+      uptime_seconds: Math.round(process.uptime()),
+      memory: {
+        rss_mb: Math.round(memUsage.rss / 1024 / 1024),
+        heap_used_mb: Math.round(memUsage.heapUsed / 1024 / 1024),
+      },
+      dependencies: {
+        db: dbOk,
+        qdrant: qdrantOk,
+        docling: doclingOk,
+      },
       phase1: {
         document_first_ingestion: !!documentFirstIngestion,
         evidence_retrieval: !!evidenceRetrieval,
@@ -3428,6 +3462,7 @@ const server = http.createServer(async (req, res) => {
         memory_promotion_jobs: process.env.ENABLE_MEMORY_PROMOTION_JOBS === 'true',
         contradiction_scan: process.env.ENABLE_CONTRADICTION_SCAN === 'true',
         memory_synthesis: process.env.ENABLE_MEMORY_SYNTHESIS === 'true',
+        governance_scheduler: process.env.ENABLE_GOVERNANCE_SCHEDULER === 'true',
       },
       features: {
         evidence_recall: process.env.ENABLE_EVIDENCE_RECALL === 'true',
@@ -3435,7 +3470,7 @@ const server = http.createServer(async (req, res) => {
         entity_extraction: process.env.ENABLE_ENTITY_EXTRACTION === 'true',
         topic_state: process.env.ENABLE_TOPIC_STATE === 'true',
       },
-    });
+    }, criticalOk ? 200 : 503);
   }
 
   // ── DR Server auth relay: verify an API key and return userId/orgId ──
@@ -5045,6 +5080,48 @@ exit \$RC
           revoked_at: k.revokedAt
         }));
         return jsonResponse(res, { keys });
+      }
+
+      // Connector health — surfaces last-refresh + stale flag per provider.
+      // Lets ops + FE detect Nango token expiry before downstream sync fails.
+      if (pathname === '/api/connectors/health' && req.method === 'GET') {
+        if (!prisma) return jsonResponse(res, { error: 'prisma_unavailable' }, 503);
+        if (!orgId) return jsonResponse(res, { error: 'orgId_required' }, 400);
+        try {
+          const rows = await prisma.nangoConnection.findMany({
+            where: { orgId },
+            select: {
+              providerKey: true, connectionId: true, status: true,
+              lastRefreshAt: true, refreshError: true, createdAt: true, updatedAt: true,
+            },
+          });
+          const STALE_MS = Number(process.env.CONNECTOR_STALE_MS || 24 * 60 * 60 * 1000);
+          const now = Date.now();
+          const connectors = rows.map((r) => {
+            const lastTs = r.lastRefreshAt ? new Date(r.lastRefreshAt).getTime() : new Date(r.updatedAt || r.createdAt).getTime();
+            const ageMs = now - lastTs;
+            return {
+              provider: r.providerKey,
+              connection_id: r.connectionId,
+              status: r.status,
+              last_refresh_at: r.lastRefreshAt || r.updatedAt || r.createdAt,
+              age_ms: ageMs,
+              stale: r.status !== 'active' || ageMs > STALE_MS,
+              error: r.refreshError || null,
+            };
+          });
+          const unhealthy = connectors.filter((c) => c.stale).length;
+          return jsonResponse(res, {
+            org_id: orgId,
+            connector_count: connectors.length,
+            unhealthy_count: unhealthy,
+            overall_status: unhealthy === 0 ? 'healthy' : (unhealthy < connectors.length ? 'degraded' : 'down'),
+            stale_threshold_ms: STALE_MS,
+            connectors,
+          });
+        } catch (err) {
+          return jsonResponse(res, { error: err.message }, 500);
+        }
       }
 
       // Gmail OAuth callback — browser redirect from Google, no API key possible
@@ -14457,6 +14534,10 @@ exit \$RC
             if (!ensurePersistedMemoryOrFail(res, '/api/recall')) {
               return;
             }
+            // Per-org rate limit. Default 120 rpm with 2× burst.
+            if (orgId && !rateLimitAllowOrgRequest(orgId)) {
+              return jsonResponse(res, { error: 'rate_limited', retry_after_seconds: 1 }, 429);
+            }
             try {
               // Apply dynamic weights from Operator Layer if available
               let recallWeights = body.weights;
@@ -16982,6 +17063,11 @@ exit \$RC
         // ==========================================
         case '/api/chat':
           if (req.method === 'POST') {
+            // Per-org rate limit. Chat is more expensive than recall so we
+            // share the same bucket — protects token spend at the door.
+            if (orgId && !rateLimitAllowOrgRequest(orgId)) {
+              return jsonResponse(res, { error: 'rate_limited', retry_after_seconds: 1 }, 429);
+            }
             const { message, model = 'openai/gpt-oss-120b', history = [], stream: wantStream = false, language = null } = body;
             // Project scope from caller — when set, all recall/save tool
             // calls dispatched by the ReAct agent are auto-bound to this

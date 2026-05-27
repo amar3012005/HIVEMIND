@@ -1596,6 +1596,9 @@ export async function recallPersistedMemories(store, {
     graph_expanded:   item.graph_expanded || false,
     expansion_metadata: item.expansion_metadata || null,
     _synthesis_boosted: item._synthesis_boosted || false,
+    // Phase A/B observability — surface so caller can see which boosts fired
+    ...(item._entity_match ? { _entity_match: true } : {}),
+    ...(typeof item._ws_match === 'boolean' ? { _ws_match: item._ws_match } : {}),
   }));
 
   // Synthesized array: rich rendering for canonical-fact and synthesis-bridge outputs.

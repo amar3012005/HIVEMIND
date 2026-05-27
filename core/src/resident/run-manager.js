@@ -68,11 +68,12 @@ function buildAgentDescriptor(agentId) {
 }
 
 export class ResidentRunManager {
-  constructor({ executorStore, memoryStore, store, graphStore, reputationEngine, chainMiner, logger = console } = {}) {
+  constructor({ executorStore, memoryStore, store, graphStore, reputationEngine, chainMiner, prisma = null, logger = console } = {}) {
     this.executorStore = executorStore || store || null;
     this.memoryStore = memoryStore || graphStore || null;
     this.reputationEngine = reputationEngine || null;
     this.chainMiner = chainMiner || null;
+    this.prisma = prisma;
     this.logger = logger;
     this.runs = new Map();
     this.agentDescriptors = RESIDENT_AGENT_IDS.map(buildAgentDescriptor);
@@ -763,6 +764,248 @@ export class ResidentRunManager {
       user_id: context.userId || null,
       org_id: context.orgId || null,
     };
+  }
+
+  /**
+   * Run a full governance cycle: Faraday → Feynman → Turing.
+   *
+   * Phase 1 semantics: ALWAYS dry_run / propose-only. All candidate actions
+   * persisted to governance_action_log with status='proposed'. No memory
+   * mutation occurs. Real mutation lands in Phase 2 (approve-then-apply).
+   *
+   * Concurrency: gated by Postgres advisory lock on (orgId, 'governance-cycle').
+   * Multiple hm-core instances cannot run a cycle for the same org in parallel.
+   *
+   * Returns { batch_id, status, faraday, feynman, turing, proposals_persisted }.
+   */
+  async runFullCycle({ orgId, userId, scope = 'project', project = null, region = null, trigger = 'manual' } = {}) {
+    if (!orgId) {
+      const err = new Error('runFullCycle requires orgId');
+      err.code = 'MISSING_ORG_ID';
+      throw err;
+    }
+    if (!this.prisma) {
+      this.logger?.warn?.('[gov-cycle] no prisma client — skipping persistence');
+    }
+
+    const batchId = randomUUID();
+    const cycleStartedAt = Date.now();
+    const lockKey = { orgId, agentName: 'governance-cycle' };
+    let lockHandle = null;
+
+    // Acquire lock if prisma available; otherwise proceed best-effort.
+    if (this.prisma) {
+      try {
+        const { tryAcquireGovernanceLock } = await import('./advisory-lock.js');
+        lockHandle = await tryAcquireGovernanceLock(this.prisma, lockKey);
+        if (!lockHandle.acquired) {
+          this.logger?.warn?.(`[gov-cycle] lock busy for ${orgId} — skipping`);
+          return { batch_id: batchId, status: 'skipped_lock_busy', reason: 'busy' };
+        }
+      } catch (err) {
+        this.logger?.warn?.(`[gov-cycle] lock acquire failed: ${err.message}`);
+      }
+    }
+
+    const ctx = { userId, orgId };
+    const summary = {
+      batch_id: batchId,
+      trigger,
+      org_id: orgId,
+      status: 'running',
+      faraday: null,
+      feynman: null,
+      turing: null,
+      proposals_persisted: 0,
+      started_at: new Date(cycleStartedAt).toISOString(),
+    };
+
+    try {
+      // ── 1. Faraday ─────────────────────────────────────────────────
+      const fRun = await this.runAgent('faraday', { scope, project, region, dry_run: true }, ctx);
+      const fFinal = await this._waitForCompletion(fRun.run_id, 120_000);
+      summary.faraday = {
+        run_id: fFinal?.run_id,
+        status: fFinal?.status,
+        observations_count: fFinal?.observations_count || 0,
+      };
+
+      // ── 2. Feynman (chained off Faraday) ───────────────────────────
+      const feRun = await this.runAgent('feynman', { scope, project, region, dry_run: true, run_id: fFinal?.run_id }, ctx);
+      const feFinal = await this._waitForCompletion(feRun.run_id, 120_000);
+      summary.feynman = {
+        run_id: feFinal?.run_id,
+        status: feFinal?.status,
+        observations_count: feFinal?.observations_count || 0,
+      };
+
+      // ── 3. Turing (chained off Feynman) ────────────────────────────
+      const tRun = await this.runAgent('turing', { scope, project, region, dry_run: true, run_id: feFinal?.run_id }, ctx);
+      const tFinal = await this._waitForCompletion(tRun.run_id, 120_000);
+      summary.turing = {
+        run_id: tFinal?.run_id,
+        status: tFinal?.status,
+        observations_count: tFinal?.observations_count || 0,
+      };
+
+      // ── 4. Persist all queued proposals from each run ──────────────
+      if (this.prisma) {
+        const persisted = await this._persistCycleProposals({
+          batchId,
+          orgId,
+          userId,
+          runs: [
+            { agentName: 'faraday', runId: fFinal?.run_id },
+            { agentName: 'feynman', runId: feFinal?.run_id },
+            { agentName: 'turing',  runId: tFinal?.run_id },
+          ],
+        });
+        summary.proposals_persisted = persisted;
+      }
+
+      summary.status = 'completed';
+    } catch (err) {
+      summary.status = 'failed';
+      summary.error = err?.message || String(err);
+      this.logger?.warn?.(`[gov-cycle] failed: ${summary.error}`);
+    } finally {
+      // ── 5. Update per-agent state + daily metric rollup ───────────
+      if (this.prisma) {
+        try {
+          await this._updateAgentStateAfterCycle({
+            orgId,
+            status: summary.status,
+            proposalsPersisted: summary.proposals_persisted,
+            latencyMs: Date.now() - cycleStartedAt,
+          });
+        } catch (err) {
+          this.logger?.warn?.(`[gov-cycle] state update failed: ${err.message}`);
+        }
+      }
+
+      // ── 6. Release advisory lock ──────────────────────────────────
+      if (lockHandle?.acquired && this.prisma) {
+        try {
+          const { releaseGovernanceLock } = await import('./advisory-lock.js');
+          await releaseGovernanceLock(this.prisma, lockHandle);
+        } catch {}
+      }
+    }
+
+    summary.finished_at = new Date().toISOString();
+    summary.latency_ms = Date.now() - cycleStartedAt;
+    return summary;
+  }
+
+  async _waitForCompletion(runId, timeoutMs = 60_000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const run = this.runs.get(runId);
+      if (!run) return null;
+      if (['completed', 'failed', 'cancelled'].includes(run.status)) {
+        return this._publicRun(run);
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    return this._publicRun(this.runs.get(runId)) || null;
+  }
+
+  async _persistCycleProposals({ batchId, orgId, userId, runs }) {
+    let count = 0;
+    for (const { agentName, runId } of runs) {
+      if (!runId) continue;
+      const run = this.runs.get(runId);
+      const proposals = Array.isArray(run?.pending_proposals) ? run.pending_proposals : [];
+      for (const p of proposals) {
+        try {
+          const actionType = this._normalizeActionType(p.recommendation);
+          if (!actionType) continue;
+          const targetMemoryId = Array.isArray(p.target_memory_ids) && p.target_memory_ids[0]
+            ? p.target_memory_ids[0]
+            : null;
+          await this.prisma.governanceActionLog.create({
+            data: {
+              batchId,
+              agentName,
+              userId: userId || null,
+              orgId,
+              targetMemoryId,
+              actionType,
+              reasoning: p.reason || null,
+              evidenceIds: Array.isArray(p.target_memory_ids) ? p.target_memory_ids.slice(0, 64) : [],
+              confidence: typeof p.confidence === 'number' ? p.confidence : null,
+              status: 'proposed',
+              reversible: true,
+            },
+          });
+          count += 1;
+        } catch (err) {
+          // Idempotent unique violation → skip silently. Other errors → log.
+          if (err?.code !== 'P2002') {
+            this.logger?.warn?.(`[gov-cycle] proposal persist failed (${agentName}): ${err.message}`);
+          }
+        }
+      }
+    }
+    return count;
+  }
+
+  _normalizeActionType(recommendation) {
+    const ALLOWED = new Set([
+      'link_update_chain',
+      'merge_duplicate_cluster',
+      'archive_duplicate',
+      'merge_evidence',
+      'suppress_noise_cluster',
+      'promote_known_risk',
+      'relationship_candidate',
+      'canonical_synthesis',
+      'bridge_synthesis',
+      'compression',
+      'role_assignment',
+    ]);
+    if (!recommendation) return null;
+    return ALLOWED.has(recommendation) ? recommendation : null;
+  }
+
+  async _updateAgentStateAfterCycle({ orgId, status, proposalsPersisted, latencyMs }) {
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    for (const agentName of ['faraday', 'feynman', 'turing']) {
+      await this.prisma.governanceAgentState.update({
+        where: { agentName },
+        data: {
+          lastRunAt: now,
+          lastCompletedAt: status === 'completed' ? now : undefined,
+        },
+      }).catch(() => null);
+
+      // Upsert daily metric (composite PK = agent + org + day)
+      await this.prisma.governanceMetric.upsert({
+        where: {
+          agentName_orgId_day: { agentName, orgId, day: today },
+        },
+        create: {
+          agentName,
+          orgId,
+          day: today,
+          actionsProposed: agentName === 'faraday' ? proposalsPersisted : 0,
+          latencyMsP95: latencyMs,
+        },
+        update: {
+          actionsProposed: { increment: 0 },
+          latencyMsP95: latencyMs,
+        },
+      }).catch(() => null);
+    }
+
+    // Roll the proposal counter onto Turing (consolidator) so we don't triple-count.
+    if (proposalsPersisted > 0) {
+      await this.prisma.governanceMetric.update({
+        where: { agentName_orgId_day: { agentName: 'turing', orgId, day: today } },
+        data: { actionsProposed: { increment: proposalsPersisted } },
+      }).catch(() => null);
+    }
   }
 
   _publicRun(run) {

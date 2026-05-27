@@ -1072,12 +1072,24 @@ const residentRunManager = new ResidentRunManager({
   graphStore: persistentMemoryStore,
   reputationEngine: trailExecutor?._reputationEngine || null,
   chainMiner: trailExecutor?._chainMiner || null,
+  prisma,
   logger: console,
 });
 residentRunManager.seedAgents().catch((error) => {
   console.warn('[Resident] Failed to seed resident agents:', error.message);
 });
 const residentRoutes = createResidentRoutes(residentRunManager);
+
+// Phase 1: governance scheduler. ENV-GATED OFF by default — see scheduler.js.
+{
+  const { ResidentAgentScheduler } = await import('./resident/scheduler.js');
+  const governanceScheduler = new ResidentAgentScheduler({
+    runManager: residentRunManager,
+    intervalMs: Number(process.env.GOVERNANCE_SCHEDULER_INTERVAL_MS || 30 * 60 * 1000),
+    logger: console,
+  });
+  governanceScheduler.start();
+}
 const enterpriseChatService = persistentMemoryStore ? new EnterpriseChatService({
   memoryStore: persistentMemoryStore,
 }) : null;

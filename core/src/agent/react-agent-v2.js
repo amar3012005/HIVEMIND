@@ -699,13 +699,23 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
           .flatMap(m => (m.tags || []).filter(t => typeof t === 'string' && t.startsWith('slack-channel-id:')))
           .map(t => t.slice('slack-channel-id:'.length))[0];
         // Fallback: extract channel name from query — Nango Slack proxy
-        // accepts either id or #name in `channel` field.
+        // accepts either id or name in `channel` field. Priority order:
+        //   1. #channel hashtag
+        //   2. "channel <name>" / "in #<name>"
+        //   3. "in <name>" — only if <name> looks like a real channel slug
+        //      (kebab/snake with at least one separator) to avoid matching
+        //      "in slack" → name="slack".
+        const STOP_WORDS = /^(the|that|this|a|an|slack|notion|gmail|github|linear|jira|drive|calendar|outlook|channel|thread|message|messages|msg|msgs)$/i;
         let channelName = null;
-        const nameMatch = (q || '').match(/#([a-z0-9][a-z0-9._-]+)/i);
-        if (nameMatch) channelName = nameMatch[1];
-        else {
-          const m2 = (q || '').match(/\b(?:channel|in)\s+([a-z0-9][a-z0-9._-]{2,40})\b/i);
-          if (m2 && !/^(the|that|this|a|an)$/i.test(m2[1])) channelName = m2[1];
+        const hash = (q || '').match(/#([a-z0-9][a-z0-9._-]+)/i);
+        if (hash) channelName = hash[1];
+        if (!channelName) {
+          const m2 = (q || '').match(/\bchannel\s+#?([a-z0-9][a-z0-9._-]{2,40})\b/i);
+          if (m2 && !STOP_WORDS.test(m2[1])) channelName = m2[1];
+        }
+        if (!channelName) {
+          const m3 = (q || '').match(/\bin\s+([a-z0-9][a-z0-9._-]*[-_][a-z0-9][a-z0-9._-]*)\b/i);
+          if (m3 && !STOP_WORDS.test(m3[1])) channelName = m3[1];
         }
         return {
           channel_id: ch || undefined,

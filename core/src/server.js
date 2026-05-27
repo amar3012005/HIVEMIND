@@ -1080,6 +1080,13 @@ residentRunManager.seedAgents().catch((error) => {
 });
 const residentRoutes = createResidentRoutes(residentRunManager);
 
+const { createGovernanceRoutes } = await import('./resident/governance-routes.js');
+const governanceRoutes = createGovernanceRoutes({
+  prisma,
+  memoryStore: persistentMemoryStore,
+  logger: console,
+});
+
 // Phase 1: governance scheduler. ENV-GATED OFF by default — see scheduler.js.
 {
   const { ResidentAgentScheduler } = await import('./resident/scheduler.js');
@@ -6593,6 +6600,22 @@ exit \$RC
         });
         if (residentResult) {
           return jsonResponse(res, residentResult.body, residentResult.statusCode);
+        }
+      }
+
+      if (governanceRoutes && pathname.startsWith('/api/governance/')) {
+        const url = new URL(req.url, 'http://x');
+        const query = Object.fromEntries(url.searchParams.entries());
+        const governanceResult = await governanceRoutes.dispatch({
+          pathname,
+          method: req.method,
+          body,
+          query,
+          userId,
+          orgId,
+        });
+        if (governanceResult) {
+          return jsonResponse(res, governanceResult.body, governanceResult.statusCode);
         }
       }
 

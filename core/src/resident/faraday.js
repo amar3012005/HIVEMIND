@@ -190,17 +190,25 @@ function mapRawMemoryRecord(record = {}) {
   };
 }
 
-async function loadOrgScopedMemories(memoryStore, { userId, orgId, project, limit = 100 } = {}) {
+async function loadOrgScopedMemories(memoryStore, { userId, orgId, project, limit = 100, cursorAfter = null } = {}) {
   const client = getRawPrismaClient(memoryStore);
   if (!client?.memory?.findMany) return [];
 
+  // Phase 3 sliding window: cap absolute scan size + optional cursor for
+  // resume-from-where-you-left-off. Prevents unbounded scan on large orgs.
+  const cappedLimit = Math.min(limit, 500);
+  const where = {
+    orgId,
+    deletedAt: null,
+    visibility: 'organization',
+    ...(project ? { project } : {}),
+  };
+  if (cursorAfter) {
+    where.updatedAt = { lt: new Date(cursorAfter) };
+  }
+
   const records = await client.memory.findMany({
-    where: {
-      orgId,
-      deletedAt: null,
-      visibility: 'organization',
-      ...(project ? { project } : {}),
-    },
+    where,
     include: {
       sourceMetadata: true,
       codeMetadata: true,
@@ -210,7 +218,7 @@ async function loadOrgScopedMemories(memoryStore, { userId, orgId, project, limi
       },
     },
     orderBy: { updatedAt: 'desc' },
-    take: limit,
+    take: cappedLimit,
   });
 
   return records.map(mapRawMemoryRecord).filter(Boolean);
@@ -680,6 +688,7 @@ CRITICAL: Use the COMPLETE memory IDs exactly as shown in brackets. They are ful
     goal = '',
     dryRun = false,
     runId,
+    cursorAfter = null,
     onProgress = async () => {},
     isCancelled = () => false,
   } = {}) {
@@ -724,6 +733,7 @@ CRITICAL: Use the COMPLETE memory IDs exactly as shown in brackets. They are ful
         orgId,
         project,
         limit: Math.min(Math.max(scanBudget * 2, 600), 2000),
+        cursorAfter,
       });
       if (memories.length === 0) {
         memories = await searchOrgScopedMemories(this.memoryStore, {

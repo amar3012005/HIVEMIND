@@ -193,6 +193,7 @@ export class ResidentRunManager {
       goal: run.goal,
       dryRun: run.dry_run,
       runId: run.run_id,
+      cursorAfter: run.cursor_after || null,
       onProgress: async (progress) => {
         run.current_step = progress.current_step;
         run.progress = progress;
@@ -758,6 +759,7 @@ export class ResidentRunManager {
       observations_count: 0,
       observations: [],
       progress: { step: 0, total_steps: 4, percent: 0 },
+      cursor_after: payload.cursor_after || null,
       result: null,
       error: null,
       cancel_requested: false,
@@ -822,13 +824,49 @@ export class ResidentRunManager {
 
     try {
       // ── 1. Faraday ─────────────────────────────────────────────────
-      const fRun = await this.runAgent('faraday', { scope, project, region, dry_run: true }, ctx);
+      // Sliding window: read cursor from governance_agent_state. Faraday
+      // scans memories older than cursor; new cursor saved after run.
+      let cursorAfter = null;
+      if (this.prisma) {
+        try {
+          const fState = await this.prisma.governanceAgentState.findUnique({
+            where: { agentName: 'faraday' },
+          });
+          // cursor_memory_id holds last scanned memory's id; we resume from
+          // the timestamp on subsequent runs. For Phase 3 minimal impl we
+          // skip the lookup join and just pass null (full scan) when no
+          // cursor; the cap inside loadOrgScopedMemories prevents runaway.
+          if (fState?.cursorMemoryId) {
+            const cursorMem = await this.prisma.memory.findUnique({
+              where: { id: fState.cursorMemoryId },
+              select: { updatedAt: true },
+            });
+            cursorAfter = cursorMem?.updatedAt || null;
+          }
+        } catch {}
+      }
+      const fRun = await this.runAgent('faraday', { scope, project, region, dry_run: true, cursor_after: cursorAfter }, ctx);
       const fFinal = await this._waitForCompletion(fRun.run_id, 120_000);
       summary.faraday = {
         run_id: fFinal?.run_id,
         status: fFinal?.status,
         observations_count: fFinal?.observations_count || 0,
       };
+
+      // Update Faraday cursor to oldest memory it scanned (for next-run resume).
+      if (this.prisma && fFinal?.status === 'completed') {
+        try {
+          const lastScannedId = fFinal?.result?.summary?.last_scanned_memory_id
+            || fFinal?.result?.observations?.[fFinal.result.observations.length - 1]?.content?.memory_id
+            || null;
+          if (lastScannedId) {
+            await this.prisma.governanceAgentState.update({
+              where: { agentName: 'faraday' },
+              data: { cursorMemoryId: lastScannedId },
+            }).catch(() => null);
+          }
+        } catch {}
+      }
 
       // ── 2. Feynman (chained off Faraday) ───────────────────────────
       const feRun = await this.runAgent('feynman', { scope, project, region, dry_run: true, run_id: fFinal?.run_id }, ctx);
@@ -980,7 +1018,10 @@ export class ResidentRunManager {
         },
       }).catch(() => null);
 
-      // Upsert daily metric (composite PK = agent + org + day)
+      // Upsert daily metric (composite PK = agent + org + day).
+      // Proposed count lands on turing only (consolidator). Faraday/Feynman
+      // rows still created with 0 so the metrics dashboard shows full row set.
+      const proposedDelta = (agentName === 'turing') ? proposalsPersisted : 0;
       await this.prisma.governanceMetric.upsert({
         where: {
           agentName_orgId_day: { agentName, orgId, day: today },
@@ -989,21 +1030,13 @@ export class ResidentRunManager {
           agentName,
           orgId,
           day: today,
-          actionsProposed: agentName === 'faraday' ? proposalsPersisted : 0,
+          actionsProposed: proposedDelta,
           latencyMsP95: latencyMs,
         },
         update: {
-          actionsProposed: { increment: 0 },
+          actionsProposed: { increment: proposedDelta },
           latencyMsP95: latencyMs,
         },
-      }).catch(() => null);
-    }
-
-    // Roll the proposal counter onto Turing (consolidator) so we don't triple-count.
-    if (proposalsPersisted > 0) {
-      await this.prisma.governanceMetric.update({
-        where: { agentName_orgId_day: { agentName: 'turing', orgId, day: today } },
-        data: { actionsProposed: { increment: proposalsPersisted } },
       }).catch(() => null);
     }
   }

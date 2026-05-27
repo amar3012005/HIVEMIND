@@ -1,0 +1,8 @@
+{
+  "recorded_at": "2026-05-27T18:30:00.000Z",
+  "passed": 13,
+  "total": 23,
+  "cost": 0.047221,
+  "p95": 8830,
+  "notes": "Phase 1 foundation baseline. Refresh via: node scripts/eval-gate.mjs --baseline"
+}

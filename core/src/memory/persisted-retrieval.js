@@ -1325,9 +1325,12 @@ export async function recallPersistedMemories(store, {
     if (mem.tier === 1) mult *= 0.9;
 
     if (mult >= 3.0) mult = 3.0;
-    return matched || mem.tier === 1
-      ? { ...item, score: (item.score || 0) * mult, _ws_match: matched || undefined }
-      : item;
+    if (!matched && mem.tier !== 1) return item;
+    return {
+      ...item,
+      score: (item.score || 0) * mult,
+      _ws_match: !!matched,
+    };
   };
 
   const applyItemBoosts = (items) => {

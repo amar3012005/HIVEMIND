@@ -15,7 +15,7 @@
  *
  * Baseline written to: scripts/eval-baseline.json
  */
-import { execSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,7 +30,11 @@ const tolIdx = args.indexOf('--tolerance');
 const tolerance = tolIdx >= 0 ? Math.max(0, parseInt(args[tolIdx + 1] || '0', 10)) : 0;
 
 function runHarness() {
-  const raw = execSync(`node ${HARNESS_PATH}`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+  // Harness exits non-zero when individual cases fail; we still want its
+  // summary lines. spawnSync returns stdout regardless of exit code.
+  const result = spawnSync('node', [HARNESS_PATH], { encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024 });
+  const raw = (result.stdout || '') + '\n' + (result.stderr || '');
+  if (result.error) throw result.error;
   // Parse summary lines from harness output
   const lines = raw.split('\n');
   let passed = null, total = null, cost = null, p95 = null;

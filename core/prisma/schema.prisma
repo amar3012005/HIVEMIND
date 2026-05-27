@@ -39,6 +39,7 @@ model User {
   projectMemberships   ProjectMember[]       @relation("UserProjectMemberships")
   memoryProjects       MemoryProject[]       @relation("UserMemoryProjects")
   digitalEmployees     DigitalEmployee[]     @relation("UserCreatedEmployees")
+  hyperRooms           HyperRoom[]           @relation("UserHyperRooms")
 
   @@map("users")
 }
@@ -78,6 +79,7 @@ model Organization {
   users                UserOrganization[] @relation("OrgUserOrganizations")
   pageIndexNodes       PageIndexNode[]    @relation("OrgPageIndexNodes")
   ssoConfig            OrgSsoConfig?      @relation("OrgSsoConfig")
+  hyperRooms           HyperRoom[]        @relation("OrgHyperRooms")
 
   @@map("organizations")
 }
@@ -104,20 +106,24 @@ model UserOrganization {
 }
 
 model OrgInvite {
-  id        String       @id @default(uuid()) @db.Uuid
-  orgId     String       @map("org_id") @db.Uuid
-  email     String?
-  role      String       @default("member")
-  roles     String[]     @default([]) @map("roles")
-  teamIds   String[]     @default([]) @map("team_ids")
-  projectIds String[]   @default([]) @map("project_ids")
-  token     String       @unique
-  expiresAt DateTime     @map("expires_at") @db.Timestamptz(6)
-  usedAt    DateTime?    @map("used_at") @db.Timestamptz(6)
-  usedBy    String?      @map("used_by") @db.Uuid
-  createdBy String       @map("created_by") @db.Uuid
-  createdAt DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
-  org       Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  id         String       @id @default(uuid()) @db.Uuid
+  orgId      String       @map("org_id") @db.Uuid
+  email      String?
+  role       String       @default("member")
+  roles      String[]     @default([]) @map("roles")
+  teamIds    String[]     @default([]) @map("team_ids")
+  projectIds String[]     @default([]) @map("project_ids")
+  token      String       @unique
+  expiresAt  DateTime     @map("expires_at") @db.Timestamptz(6)
+  usedAt     DateTime?    @map("used_at") @db.Timestamptz(6)
+  usedBy     String?      @map("used_by") @db.Uuid
+  revokedAt  DateTime?    @map("revoked_at") @db.Timestamptz(6)
+  revokedBy  String?      @map("revoked_by") @db.Uuid
+  lastSentAt DateTime?    @map("last_sent_at") @db.Timestamptz(6)
+  sendCount  Int          @default(1) @map("send_count")
+  createdBy  String       @map("created_by") @db.Uuid
+  createdAt  DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  org        Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
   @@index([orgId])
   @@index([email])
@@ -314,6 +320,31 @@ model NangoConnection {
   @@map("nango_connections")
 }
 
+/// Pending writes from agent — held for explicit user approval before
+/// the write tool actually executes. Created by draft-approval middleware
+/// whenever the agent tries to call a non-readOnly tool
+/// (slack_send_message, slack_schedule_message, etc.). Resolved by FE
+/// when user clicks Approve or Cancel.
+model PendingWrite {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  orgId      String?   @map("org_id") @db.Uuid
+  provider   String    @db.VarChar(50) // slack, notion, gmail, …
+  toolName   String    @map("tool_name") @db.VarChar(120)
+  toolArgs   Json      @map("tool_args") @db.JsonB
+  preview    String?   @db.Text // short human-readable summary for UI
+  status     String    @default("draft") @db.VarChar(20) // draft | approved | cancelled | sent | failed
+  result     Json?     @db.JsonB // tool response on send
+  errorMsg   String?   @map("error_msg") @db.Text
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  approvedAt DateTime? @map("approved_at") @db.Timestamptz(6)
+  sentAt     DateTime? @map("sent_at") @db.Timestamptz(6)
+
+  @@index([userId, status, createdAt])
+  @@index([orgId, createdAt])
+  @@map("pending_writes")
+}
+
 /// Core memory storage with triple-operator versioning (Updates, Extends, Derives)
 /// Supports cognitive scoring for spaced repetition and Ebbinghaus forgetting curve
 /// This model contains an expression index which requires additional setup for migrations. Visit https://pris.ly/d/expression-indexes for more info.
@@ -337,6 +368,10 @@ model Memory {
   lastConfirmedAt                                             DateTime?            @default(now()) @map("last_confirmed_at") @db.Timestamptz(6)
   documentDate                                                DateTime?            @map("document_date") @db.Timestamptz(6)
   eventDates                                                  DateTime[]           @map("event_dates") @db.Timestamptz
+  // Bi-temporal valid-time (transaction-time = createdAt). Lets us replay
+  // "what did we know at time T" vs "what was true at time T".
+  validFrom                                                   DateTime?            @map("valid_from") @db.Timestamptz(6)
+  validTo                                                     DateTime?            @map("valid_to") @db.Timestamptz(6)
   visibility                                                  VisibilityScope?     @default(private)
   scope                                                       MemoryScope          @default(personal) @map("scope")
   primaryTeamId                                               String?              @map("primary_team_id") @db.Uuid
@@ -378,16 +413,26 @@ model Memory {
   // synthesisEvidenceIds: UUIDs of source memories that produced this synthesis
   // synthesisClusterHash: stable hash of the tag-pair or cluster that produced this synthesis (cooldown key)
   // synthesisRevision: incremented each time this cluster re-synthesises
-  synthesisConfidence                                         Float?               @map("synthesis_confidence")
-  synthesisEvidenceIds                                        String[]             @map("synthesis_evidence_ids") @db.Uuid
-  synthesisClusterHash                                        String?              @map("synthesis_cluster_hash") @db.VarChar(128)
-  synthesisRevision                                           Int                  @default(1) @map("synthesis_revision")
+  synthesisConfidence  Float?   @map("synthesis_confidence")
+  synthesisEvidenceIds String[] @map("synthesis_evidence_ids") @db.Uuid
+  synthesisClusterHash String?  @map("synthesis_cluster_hash") @db.VarChar(128)
+  synthesisRevision    Int      @default(1) @map("synthesis_revision")
 
-  // Phase A tier cache (retro-declared) + Phase 1 cognitive_layer_role
-  tier                                                        Int                  @default(2) @map("tier")
-  lastAccessedAt                                              DateTime?            @map("last_accessed_at") @db.Timestamptz(6)
-  promotedAt                                                  DateTime?            @map("promoted_at") @db.Timestamptz(6)
-  cognitiveLayerRole                                          String?              @map("cognitive_layer_role")
+  // Phase A tiered cache.
+  //   tier 1 = thin index (title + entities + small embedding, body may be sparse)
+  //   tier 2 = hot cache (full content + full embedding, lazy-hydrated)
+  //   default 2 preserves existing behavior for memories created before this column existed.
+  tier           Int       @default(2) @map("tier")
+  lastAccessedAt DateTime? @map("last_accessed_at") @db.Timestamptz(6)
+  promotedAt     DateTime? @map("promoted_at") @db.Timestamptz(6)
+
+  // Phase 1 Cognitive layer:
+  //   canonical  = stable fact promoted by governance (Turing-verified)
+  //   bridge     = cross-cluster synthesis edge
+  //   compression= summary of compacted cluster
+  //   reflection = governance self-evaluation memory
+  //   NULL       = ordinary evidence/memory tier (default)
+  cognitiveLayerRole String? @map("cognitive_layer_role")
 
   @@index([userId])
   @@index([orgId])
@@ -406,6 +451,25 @@ model Memory {
   @@index([userId, tier, lastAccessedAt(sort: Desc)], map: "memories_user_tier_lastaccess_idx")
   @@index([cognitiveLayerRole], map: "memories_cognitive_layer_role_idx")
   @@map("memories")
+}
+
+/// WorkingSet — rolling spotlight on what user cares about NOW.
+/// Populated by chat ingest path (last 10 messages → entities + threads).
+/// Used by recall router to boost relevance for active entities/threads.
+/// One row per (userId, orgId). active_entities = ["Vinil","B&B"] last 7d.
+model WorkingSet {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId          String   @unique @map("user_id") @db.Uuid
+  orgId           String?  @map("org_id") @db.Uuid
+  activeEntities  String[] @map("active_entities")
+  activeThreads   String[] @map("active_threads")
+  activeProjects  String[] @map("active_projects")
+  pinnedMemoryIds String[] @map("pinned_memory_ids") @db.Uuid
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([orgId])
+  @@map("working_sets")
 }
 
 /// Persisted version history for state transitions and temporal audits
@@ -1217,6 +1281,8 @@ enum RelationshipType {
   Extends
   Derives
   Contradicts
+  PartOf
+  Mentions
 }
 
 enum VisibilityScope {
@@ -1290,6 +1356,74 @@ model DigitalEmployee {
   @@index([status])
   @@index([slackTeamId])
   @@map("digital_employees")
+}
+
+/// HyperRoom — a per-user WhatsApp-style multi-agent workspace.
+/// All assigned employees are always present in the room. Each user
+/// message kicks off a Lead + Reactors turn that lives in HyperTurn.
+/// Per-user (not per-org) for v1. summaryMemoryId is set on archive
+/// when the transcript is distilled into a canonical Memory.
+model HyperRoom {
+  id              String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId          String       @map("user_id") @db.Uuid
+  orgId           String       @map("org_id") @db.Uuid
+  name            String       @db.VarChar(120)
+  participantIds  String[]     @default([]) @map("participant_ids") @db.Uuid
+  createdAt       DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  archivedAt      DateTime?    @map("archived_at") @db.Timestamptz(6)
+  summaryMemoryId String?      @map("summary_memory_id") @db.Uuid
+  user            User         @relation("UserHyperRooms", fields: [userId], references: [id], onDelete: Cascade)
+  org             Organization @relation("OrgHyperRooms", fields: [orgId], references: [id], onDelete: Cascade)
+  turns           HyperTurn[]
+
+  @@index([userId, orgId])
+  @@index([archivedAt])
+  @@map("hyper_rooms")
+}
+
+/// HyperTurn — one user message + lead + reactors + (optional) round-2
+/// debate, sealed atomically. lines holds the JSONL event log
+/// (router, line, react, revise, validate, seal). idempotencyKey makes
+/// double-clicks return the same turn instead of running a second time.
+model HyperTurn {
+  id             String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  roomId         String      @map("room_id") @db.Uuid
+  seq            Int
+  userMessage    String      @map("user_message")
+  status         String      @default("live") @db.VarChar(20)
+  // live | complete | failed | cost_capped
+  lines          Json        @default("[]")
+  costTokens     Int         @default(0) @map("cost_tokens")
+  startedAt      DateTime    @default(now()) @map("started_at") @db.Timestamptz(6)
+  sealedAt       DateTime?   @map("sealed_at") @db.Timestamptz(6)
+  idempotencyKey String      @unique @map("idempotency_key") @db.VarChar(64)
+  room           HyperRoom   @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  evals          AgentEval[]
+
+  @@unique([roomId, seq])
+  @@index([roomId])
+  @@index([status])
+  @@map("hyper_turns")
+}
+
+/// AgentEval — one row per (agent, turn-line) scored by the CSI judge.
+/// scores is { helpful, role_fit, evidence, opposition } in [0,1].
+/// total is the weighted sum. usedForTuningAt is set when consumed by
+/// a tuner run so each tune cycle waits for 20 fresh evals.
+model AgentEval {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  agentId         String    @map("agent_id") @db.Uuid
+  turnId          String    @map("turn_id") @db.Uuid
+  scores          Json
+  total           Float
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  usedForTuningAt DateTime? @map("used_for_tuning_at") @db.Timestamptz(6)
+  turn            HyperTurn @relation(fields: [turnId], references: [id], onDelete: Cascade)
+
+  @@index([agentId, usedForTuningAt])
+  @@index([turnId])
+  @@map("agent_evals")
 }
 
 /// SlackEvent — deduped inbound event from a Slack workspace, routed
@@ -1481,22 +1615,186 @@ model InboundWebhookEvent {
   @@map("inbound_webhook_events")
 }
 
-// ─────────────────────────────────────────────────────────────
-// Phase A: WorkingSet (rolling spotlight per user)
-// ─────────────────────────────────────────────────────────────
-model WorkingSet {
-  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId          String   @unique @map("user_id") @db.Uuid
-  orgId           String?  @map("org_id") @db.Uuid
-  activeEntities  String[] @map("active_entities")
-  activeThreads   String[] @map("active_threads")
-  activeProjects  String[] @map("active_projects")
-  pinnedMemoryIds String[] @map("pinned_memory_ids") @db.Uuid
-  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+// ── Salesforce / cross-system memory layer ─────────────────────────────────
+// External refs map a memory to its system-of-record record (Salesforce ID,
+// Slack message ts, Gmail message id, ...). Enables idempotent re-sync and
+// cross-system entity correlation.
+model ExternalRef {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  memoryId       String   @map("memory_id") @db.Uuid
+  system         String   @db.VarChar(50)
+  objectType     String   @map("object_type") @db.VarChar(80)
+  externalId     String   @map("external_id") @db.VarChar(255)
+  externalUrl    String?  @map("external_url")
+  organizationId String   @map("organization_id") @db.Uuid
+  userId         String   @map("user_id") @db.Uuid
+  metadata       Json?    @default("{}")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  @@index([orgId], map: "working_sets_org_id_idx")
-  @@map("working_sets")
+  @@unique([organizationId, system, objectType, externalId, memoryId])
+  @@index([organizationId, system, objectType])
+  @@index([memoryId])
+  @@index([externalId])
+  @@map("external_refs")
+}
+
+// Canonical entities are the master IDs for real-world things. Multiple
+// memories + cross-system refs collapse to one canonical entity.
+model CanonicalEntity {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  canonicalName  String   @map("canonical_name")
+  entityKind     String   @map("entity_kind") @db.VarChar(40)
+  aliases        String[] @default([])
+  primaryEmail   String?  @map("primary_email") @db.VarChar(255)
+  emailDomains   String[] @default([]) @map("email_domains")
+  verticalTags   String[] @default([]) @map("vertical_tags")
+  externalRefs   Json     @default("{}") @map("external_refs")
+  metadata       Json     @default("{}")
+  mergedFrom     String[] @default([]) @map("merged_from") @db.Uuid
+  confidence     Decimal  @default(1.00) @db.Decimal(3, 2)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  memoryLinks MemoryEntityLink[]
+
+  @@index([organizationId, entityKind])
+  @@index([aliases], type: Gin)
+  @@index([emailDomains], type: Gin)
+  @@index([primaryEmail])
+  @@map("canonical_entities")
+}
+
+model MemoryEntityLink {
+  memoryId   String   @map("memory_id") @db.Uuid
+  entityId   String   @map("entity_id") @db.Uuid
+  role       String   @default("mentioned") @db.VarChar(40)
+  confidence Decimal  @default(1.00) @db.Decimal(3, 2)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  entity CanonicalEntity @relation(fields: [entityId], references: [id], onDelete: Cascade)
+
+  @@id([memoryId, entityId, role])
+  @@index([entityId])
+  @@map("memory_entity_links")
+}
+
+// Entity review queue — fuzzy match candidates 0.70-0.95 surface here.
+model EntityReviewCandidate {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId   String    @map("organization_id") @db.Uuid
+  proposedEntityId String?   @map("proposed_entity_id") @db.Uuid
+  memoryId         String?   @map("memory_id") @db.Uuid
+  candidateName    String    @map("candidate_name")
+  candidateKind    String    @map("candidate_kind") @db.VarChar(40)
+  confidence       Decimal   @db.Decimal(3, 2)
+  reason           String?
+  status           String    @default("pending") @db.VarChar(20)
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  resolvedAt       DateTime? @map("resolved_at") @db.Timestamptz(6)
+
+  @@index([organizationId, status])
+  @@map("entity_review_candidates")
+}
+
+// Decisions — Layer 4. Captures what was decided + why + alternatives.
+model Decision {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId      String    @map("organization_id") @db.Uuid
+  decisionMakerUserId String?   @map("decision_maker_user_id") @db.Uuid
+  decisionMakerName   String?   @map("decision_maker_name")
+  decisionType        String    @map("decision_type") @db.VarChar(80)
+  decidedAt           DateTime  @map("decided_at") @db.Timestamptz(6)
+  whatDecided         String    @map("what_decided")
+  reasoning           String?
+  alternatives        Json      @default("[]")
+  contextSnapshot     Json      @default("{}") @map("context_snapshot")
+  similarPastIds      String[]  @default([]) @map("similar_past_ids") @db.Uuid
+  entityRefs          String[]  @default([]) @map("entity_refs") @db.Uuid
+  outcomeTracked      Boolean   @default(false) @map("outcome_tracked")
+  outcomeResolvesAt   DateTime? @map("outcome_resolves_at") @db.Timestamptz(6)
+  outcomeStatus       String?   @map("outcome_status") @db.VarChar(40)
+  outcomeDetails      Json?     @map("outcome_details")
+  sourceMemoryId      String?   @map("source_memory_id") @db.Uuid
+  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([organizationId, decidedAt(sort: Desc)])
+  @@index([outcomeTracked, outcomeResolvesAt])
+  @@index([entityRefs], type: Gin)
+  @@map("decisions")
+}
+
+// Playbooks — Layer 5. Human-curated patterns. Auto-mined patterns flagged
+// status=candidate; humans validate; deployed playbooks fire for agents.
+model Playbook {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId     String   @map("organization_id") @db.Uuid
+  name               String
+  patternType        String   @map("pattern_type") @db.VarChar(40)
+  segmentFilter      Json     @default("{}") @map("segment_filter")
+  triggerSignal      String   @map("trigger_signal")
+  intervention       String
+  supportingEvidence String[] @default([]) @map("supporting_evidence") @db.Uuid
+  status             String   @default("candidate") @db.VarChar(20)
+  confidence         Decimal? @db.Decimal(3, 2)
+  sampleN            Int?     @map("sample_n")
+  curatedByUserId    String?  @map("curated_by_user_id") @db.Uuid
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([organizationId, status])
+  @@map("playbooks")
+}
+
+/// Durable cluster-state index — powers dirty-cluster scheduling in cognition-loop
+/// without full-scanning raw memories every tick. One row per (org, user, clusterHash).
+/// dirty_count incremented by cognition-loop discovery; reset to 0 after each tick.
+model ClusterIndex {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId    String    @map("organization_id") @db.Uuid
+  userId            String    @map("user_id") @db.Uuid
+  clusterHash       String    @map("cluster_hash") @db.VarChar(64)
+  clusterType       String    @map("cluster_type") @db.VarChar(40)
+  entityKeys        String[]  @default([]) @map("entity_keys")
+  topTags           String[]  @default([]) @map("top_tags")
+  evidenceCount     Int       @default(0) @map("evidence_count")
+  dirtyCount        Int       @default(0) @map("dirty_count")
+  latestSynthesisId String?   @map("latest_synthesis_id") @db.Uuid
+  latestRevision    Int       @default(0) @map("latest_revision")
+  latestConfidence  Decimal?  @map("latest_confidence") @db.Decimal(3, 2)
+  lastTickAt        DateTime? @map("last_tick_at") @db.Timestamptz(6)
+  lastRecallAt      DateTime? @map("last_recall_at") @db.Timestamptz(6)
+  recallCount30d    Int       @default(0) @map("recall_count_30d")
+  metadata          Json      @default("{}")
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([organizationId, userId, clusterHash])
+  @@index([organizationId, dirtyCount(sort: Desc)])
+  @@index([entityKeys], type: Gin)
+  @@map("cluster_index")
+}
+
+/// Persistent per-org cognition tick status. In-memory _status was lost
+/// on every restart, making operators blind to tick coverage across orgs.
+/// One row per org_id. Updated on every runOnce + auto-tick completion.
+model CognitionStatus {
+  orgId            String    @id @map("org_id") @db.Uuid
+  lastTickAt       DateTime? @map("last_tick_at") @db.Timestamptz(6)
+  lastRunMs        Int?      @map("last_run_ms")
+  lastSynthCount   Int       @default(0) @map("last_synth_count")
+  lastCompactCount Int       @default(0) @map("last_compact_count")
+  nextTickAt       DateTime? @map("next_tick_at") @db.Timestamptz(6)
+  totalTicks       Int       @default(0) @map("total_ticks")
+  totalSynth       Int       @default(0) @map("total_synth")
+  totalCompact     Int       @default(0) @map("total_compact")
+  lastError        String?   @map("last_error")
+  lastErrorAt      DateTime? @map("last_error_at") @db.Timestamptz(6)
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([lastTickAt(sort: Desc)])
+  @@map("cognition_status")
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1529,9 +1827,6 @@ model GovernanceActionLog {
   @@map("governance_action_log")
 }
 
-// ─────────────────────────────────────────────────────────────
-// Phase 1 Governance: per-agent state + token budget
-// ─────────────────────────────────────────────────────────────
 model GovernanceAgentState {
   agentName            String    @id @map("agent_name")
   lastRunAt            DateTime? @map("last_run_at") @db.Timestamptz(6)
@@ -1548,9 +1843,6 @@ model GovernanceAgentState {
   @@map("governance_agent_state")
 }
 
-// ─────────────────────────────────────────────────────────────
-// Phase 1 Governance: daily metric rollup
-// ─────────────────────────────────────────────────────────────
 model GovernanceMetric {
   agentName        String   @map("agent_name")
   orgId            String   @map("org_id") @db.Uuid

@@ -345,7 +345,15 @@ export class CognitionLoop {
     const clusterMin = await deriveClusterMin(this.prisma, orgId);
 
     const since = new Date(Date.now() - DEFAULT_LOOKBACK_HOURS * 3600 * 1000);
-    const recent = await this.prisma.memory.findMany({
+    // Structured connector sources: their schema IS already canonical.
+    // Re-synthesizing produces tautological canonicals ("OrgFarm owns 16
+    // accounts") and trivial bridges ("US contacts share country:usa with
+    // US accounts"). Skip them — recall surfaces the records directly.
+    const STRUCTURED_SOURCES = [
+      'salesforce', 'salesforce-sandbox', 'hubspot', 'pipedrive',
+      'github', 'linear', 'jira', 'confluence',
+    ];
+    const recentRaw = await this.prisma.memory.findMany({
       where: {
         orgId,
         createdAt:  { gte: since },
@@ -359,8 +367,18 @@ export class CognitionLoop {
       select: {
         id: true, title: true, content: true, tags: true,
         memoryType: true, userId: true, project: true, createdAt: true,
+        sourceMetadata: { select: { sourcePlatform: true } },
       },
     });
+    // Drop memories sourced from structured connectors. They get recalled
+    // directly by source_id / entity-tag without synthesis layer.
+    const recent = recentRaw.filter((m) => {
+      const sp = m.sourceMetadata?.sourcePlatform;
+      return !sp || !STRUCTURED_SOURCES.includes(sp);
+    });
+    if (recent.length < recentRaw.length) {
+      this.logger.log(`[cognition] structured-source gate: ${recentRaw.length - recent.length} memories skipped (${STRUCTURED_SOURCES.join(',')})`);
+    }
 
     if (recent.length < clusterMin) return 0;
 
@@ -641,6 +659,44 @@ export class CognitionLoop {
           ...(result.evidence_a || []).map(e => e.id),
           ...(result.evidence_b || []).map(e => e.id),
         ].filter(id => id);
+
+        // Duplicate-bridge guard: tag-pair clustering produces near-identical
+        // bridges when tags only differ in spelling (country:usa vs
+        // country:united-states) or when same evidence set co-occurs across
+        // multiple tag pairings. Skip when ≥80% of evidence overlaps an
+        // existing recent bridge for the same user/org.
+        if (evidenceIds.length > 0) {
+          const evidenceSet = new Set(evidenceIds);
+          try {
+            const recentBridges = await this.prisma.memory.findMany({
+              where: {
+                orgId,
+                userId: a.members[0].userId,
+                tags: { has: 'synthesis:bridge' },
+                isLatest: true,
+                deletedAt: null,
+                createdAt: { gte: new Date(Date.now() - 7 * 24 * 3600 * 1000) },
+              },
+              select: { id: true, title: true, synthesisEvidenceIds: true },
+              take: 100,
+            });
+            let skip = false;
+            for (const eb of recentBridges) {
+              const otherIds = eb.synthesisEvidenceIds || [];
+              if (otherIds.length === 0) continue;
+              const overlap = otherIds.filter((id) => evidenceSet.has(id)).length;
+              const minSize = Math.min(otherIds.length, evidenceIds.length);
+              if (minSize > 0 && (overlap / minSize) >= 0.8) {
+                this.logger.log(`[cognition] bridge ${a.tag}||${b.tag} skipped — evidence set duplicates ${eb.id.slice(0,8)} (${eb.title?.slice(0,40)})`);
+                skip = true;
+                break;
+              }
+            }
+            if (skip) continue;
+          } catch (dupErr) {
+            this.logger.warn(`[cognition] bridge dup-check failed (proceeding): ${dupErr.message}`);
+          }
+        }
 
         const created = await this._writeSynthMemory({
           orgId,

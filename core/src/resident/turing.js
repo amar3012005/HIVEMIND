@@ -504,6 +504,121 @@ export class TuringAgent {
       });
     }
 
+    // ── Phase 4 — Synthesis proposals (governance owns cognitive layer) ──
+    // Heuristic emitters. Conservative thresholds keep noise low; downstream
+    // approve flow gates the actual write. Three families:
+    //   - canonical_synthesis: ≥2 likely_true verifications sharing ≥1 evidence_ref
+    //   - bridge_synthesis:    ≥2 verifications from disjoint clusters sharing entity tag
+    //   - compression:         ≥3 verifications grouped by same hypothesis topic
+    try {
+      const liked = verifications.filter((v) => v.content?.verdict === 'likely_true');
+      const evCounts = new Map();
+      for (const v of liked) {
+        for (const id of (v.content?.related_memory_ids || v.content?.evidence_refs || [])) {
+          evCounts.set(id, (evCounts.get(id) || 0) + 1);
+        }
+      }
+      const sharedEvidence = [...evCounts.entries()].filter(([, n]) => n >= 2).map(([id]) => id);
+      if (liked.length >= 2 && sharedEvidence.length >= 1) {
+        actionCandidates.push({
+          id: randomUUID(),
+          agent_id: 'turing',
+          kind: 'merge_candidate', // existing observation kind closest fit
+          certainty: 0.82,
+          content: {
+            summary: `Canonical synthesis: ${liked.length} verified hypotheses share ${sharedEvidence.length} evidence.`,
+            recommendation: 'canonical_synthesis',
+            rationale: 'Multiple likely_true verifications converge on a stable cluster — promote to canonical layer.',
+            expected_impact: 'Top-down recall surfaces a single canonical answer instead of fragments.',
+            target_memory_ids: sharedEvidence.slice(0, 8),
+            confidence: 0.82,
+          },
+          source_event_id: runId,
+          related_to_trail: runId,
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      // Compression — when ≥3 verifications cluster on same hypothesis topic.
+      const topicGroups = new Map();
+      for (const v of verifications) {
+        const topic = (v.content?.summary || '').match(/[a-z][a-z0-9_-]{3,}/i)?.[0]?.toLowerCase();
+        if (!topic) continue;
+        if (!topicGroups.has(topic)) topicGroups.set(topic, []);
+        topicGroups.get(topic).push(v);
+      }
+      for (const [topic, group] of topicGroups) {
+        if (group.length >= 3) {
+          const evidenceIds = [...new Set(group.flatMap((v) => v.content?.related_memory_ids || []))].slice(0, 12);
+          if (evidenceIds.length >= 3) {
+            actionCandidates.push({
+              id: randomUUID(),
+              agent_id: 'turing',
+              kind: 'merge_candidate',
+              certainty: 0.78,
+              content: {
+                summary: `Compress ${group.length} hypotheses around "${topic}" into a canonical summary.`,
+                recommendation: 'compression',
+                rationale: 'Cluster size exceeds compression threshold — collapse to summary memory.',
+                expected_impact: 'Reduces recall noise; canonical-summary surfaces via top-down boost.',
+                target_memory_ids: evidenceIds,
+                topic,
+                confidence: 0.78,
+              },
+              source_event_id: runId,
+              related_to_trail: runId,
+              timestamp: new Date().toISOString(),
+            });
+          }
+        }
+      }
+
+      // Bridge synthesis — pairs of verifications with disjoint clusters
+      // sharing >=1 entity tag (extracted from hypothesis summary).
+      if (liked.length >= 2) {
+        const tagsOf = (v) => new Set(
+          (v.content?.summary || '')
+            .match(/[A-Z][a-zA-Z0-9_-]{2,}/g)
+            ?.map((s) => s.toLowerCase()) || []
+        );
+        const evSetOf = (v) => new Set(v.content?.related_memory_ids || []);
+        for (let i = 0; i < liked.length; i += 1) {
+          for (let j = i + 1; j < liked.length; j += 1) {
+            const ti = tagsOf(liked[i]);
+            const tj = tagsOf(liked[j]);
+            const ei = evSetOf(liked[i]);
+            const ej = evSetOf(liked[j]);
+            const sharedTag = [...ti].find((t) => tj.has(t));
+            const disjointEv = [...ei].every((id) => !ej.has(id));
+            if (sharedTag && disjointEv && ei.size >= 1 && ej.size >= 1) {
+              actionCandidates.push({
+                id: randomUUID(),
+                agent_id: 'turing',
+                kind: 'relationship_candidate',
+                certainty: 0.74,
+                content: {
+                  summary: `Bridge clusters linked by "${sharedTag}".`,
+                  recommendation: 'bridge_synthesis',
+                  rationale: 'Two verified clusters share an entity but no overlapping evidence — bridge them.',
+                  expected_impact: 'Cross-cluster recall via bridge memory.',
+                  target_memory_ids: [...ei, ...ej].slice(0, 8),
+                  bridge_tag: sharedTag,
+                  confidence: 0.74,
+                },
+                source_event_id: runId,
+                related_to_trail: runId,
+                timestamp: new Date().toISOString(),
+              });
+              break; // one bridge per cluster pair is enough
+            }
+          }
+        }
+      }
+    } catch (synthErr) {
+      // Synthesis emit is best-effort; never block the rest of Turing.
+      console.warn?.(`[turing] synthesis emit failed: ${synthErr?.message || synthErr}`);
+    }
+
     await updateProgress(3, 4, 'writing_verifications');
 
     if (!dryRun && this.observationStore?.writeObservation) {

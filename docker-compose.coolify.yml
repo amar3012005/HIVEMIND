@@ -81,6 +81,19 @@ services:
             LOG_FORMAT: '${LOG_FORMAT:-json}'
             RATE_LIMIT_WINDOW_MS: '${RATE_LIMIT_WINDOW_MS:-60000}'
             RATE_LIMIT_MAX_REQUESTS: '${RATE_LIMIT_MAX_REQUESTS:-100}'
+            # Phase 4 — Governance + cognitive layer ownership
+            ENABLE_COGNITION_LOOP: '${ENABLE_COGNITION_LOOP:-false}'
+            ENABLE_GOVERNANCE_SCHEDULER: '${ENABLE_GOVERNANCE_SCHEDULER:-true}'
+            GOVERNANCE_INTERVAL_MS: '${GOVERNANCE_INTERVAL_MS:-14400000}'
+            # Phase 4 — Tenant guard. warn → strict cutover after audit.
+            MEMORY_TENANT_STRICT: '${MEMORY_TENANT_STRICT:-false}'
+            # Phase 4 — Per-org rate limit. Redis-backed when REDIS_HOST present.
+            RATE_LIMIT_RPM_PER_ORG: '${RATE_LIMIT_RPM_PER_ORG:-120}'
+            RATE_LIMIT_BURST_X: '${RATE_LIMIT_BURST_X:-2}'
+            RATE_LIMIT_BACKEND: '${RATE_LIMIT_BACKEND:-auto}'
+            # Phase 4 — Governance per-agent daily token budget heuristic
+            GOV_FALLBACK_TOKENS_PER_RUN: '${GOV_FALLBACK_TOKENS_PER_RUN:-5000}'
+            CONNECTOR_STALE_MS: '${CONNECTOR_STALE_MS:-86400000}'
             EU_REGION: '${EU_REGION:-eu-central-1}'
             DATA_RESIDENCY: EU
             GDPR_MODE: 'true'

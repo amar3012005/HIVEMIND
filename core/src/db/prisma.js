@@ -85,20 +85,25 @@ function installTenantIsolationMiddleware(client) {
     byModel: {},
   });
 
+  // Tenant scope can come from orgId, userId, OR an FK that transitively
+  // resolves to a tenant (SourceMetadata.memoryId → Memory.orgId,
+  // Relationship.fromId/toId → Memory.orgId). Accepts unique-id lookups
+  // (id, where.id) since those are tenant-irrelevant by definition.
+  const TENANT_FK_KEYS = ['orgId', 'userId', 'memoryId', 'fromId', 'toId', 'id'];
   const hasOrgScope = (where) => {
     if (!where || typeof where !== 'object') return false;
-    if (where.orgId !== undefined) return true;
-    if (where.userId !== undefined) return true; // user-scoped also acceptable
+    for (const k of TENANT_FK_KEYS) if (where[k] !== undefined) return true;
     if (where.user?.orgId !== undefined) return true;
-    if (where.AND?.some?.((c) => c?.orgId !== undefined || c?.userId !== undefined)) return true;
-    if (where.OR?.some?.((c) => c?.orgId !== undefined || c?.userId !== undefined)) return true;
+    if (where.memory?.orgId !== undefined) return true;
+    if (where.AND?.some?.((c) => TENANT_FK_KEYS.some((k) => c?.[k] !== undefined))) return true;
+    if (where.OR?.some?.((c) => TENANT_FK_KEYS.some((k) => c?.[k] !== undefined))) return true;
     return false;
   };
 
   const dataHasOrg = (data) => {
     const records = Array.isArray(data) ? data : [data].filter(Boolean);
     if (records.length === 0) return true; // delete/update with where-only
-    return records.every((r) => r?.orgId !== undefined || r?.userId !== undefined);
+    return records.every((r) => TENANT_FK_KEYS.some((k) => r?.[k] !== undefined));
   };
 
   client.$use(async (params, next) => {

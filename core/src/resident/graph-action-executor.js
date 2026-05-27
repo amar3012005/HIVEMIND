@@ -100,11 +100,22 @@ export class GraphActionExecutor {
   async _getCognitionLoop() {
     if (!this._cognitionLoop) {
       const { CognitionLoop } = await import('../memory/cognition-loop.js');
-      // memoryStore = graph store from run-manager. cognition-loop expects
-      // prisma + engine. Pull engine off graph store if available.
+      // Resolve prisma via multiple paths — memoryStore wraps Prisma, but
+      // exposes it under different keys depending on caller. Fall back to
+      // the shared singleton in src/db/prisma.js.
+      let prisma = this.memoryStore?.client
+        || this.memoryStore?.prisma
+        || this.memoryStore?._client
+        || null;
+      if (!prisma) {
+        try {
+          const { getPrismaClient } = await import('../db/prisma.js');
+          prisma = getPrismaClient();
+        } catch { /* ignore */ }
+      }
       this._cognitionLoop = new CognitionLoop({
-        prisma: this.memoryStore?.client || this.memoryStore?.prisma || null,
-        memoryGraphEngine: this.memoryStore?.engine || null,
+        prisma,
+        memoryGraphEngine: this.memoryStore?.engine || this.memoryStore || null,
         persistentMemoryStore: this.memoryStore || null,
         logger: this.logger,
       });

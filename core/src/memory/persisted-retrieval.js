@@ -1274,6 +1274,33 @@ export async function recallPersistedMemories(store, {
     return result.sort((a, b) => (b.score || 0) - (a.score || 0));
   };
 
+  // Phase 1 cognition rework: query-aware synthesis gate.
+  // Pre-compute query entity tokens once (reuse _earlyQueryEntityTokens
+  // logic via _extractQueryEntityTokens). Synthesis boost only fires when
+  // ≥1 query token overlaps a memory's entity tag — otherwise the boost
+  // is the same flat multiplier regardless of relevance, which drowns
+  // direct hits for unrelated topics (observed in 12h audit: bridges about
+  // country:usa scored 1.5× for a Vinil query).
+  const _querySynthTokens = _extractQueryEntityTokens(query_context);
+  const _synthRelevant = (mem) => {
+    if (_querySynthTokens.length === 0) return true; // no tokens → don't gate
+    const tags = mem.tags || [];
+    const names = [];
+    for (const t of tags) {
+      if (typeof t !== 'string') continue;
+      if (t.startsWith('entity:') || t.startsWith('person:') || t.startsWith('topic:')) {
+        names.push(t.replace(/^(entity|person|topic):/, '').replace(/_/g, ' ').toLowerCase());
+      }
+    }
+    if (names.length === 0) return false; // synthesis with no entity anchors → no boost
+    for (const tok of _querySynthTokens) {
+      for (const n of names) {
+        if (n === tok || n.includes(tok) || (tok.length >= 6 && tok.includes(n))) return true;
+      }
+    }
+    return false;
+  };
+
   // ── Phase 1 Cognition Loop: synthesis boost ────────────────────────────────
   // canonical-fact ×1.35 when confidence ≥ 0.70
   // synthesis-bridge ×1.50 when confidence ≥ 0.70
@@ -1296,6 +1323,26 @@ export async function recallPersistedMemories(store, {
       if (!srcType || conf === null) return item;
       if (srcType !== 'canonical-fact' && srcType !== 'synthesis-bridge') return item;
       if (conf < SYNTHESIS_CONF_BOOST_FLOOR) return item;
+
+      // Query-relevance gate. Synthesis boost only fires when query overlaps
+      // synthesis cluster entities. Off-topic synthesis stays at base score.
+      if (!_synthRelevant(mem)) return item;
+
+      // Bridge stop-phrase gate. Reject schema-restatement confabulation.
+      // Real bridges use contradict/confirm/extend/supersede verbs; LLM
+      // confabulation uses "lack information", "available in cluster",
+      // "data not present in". Bridges containing these phrases drop to
+      // base score (no synthesis multiplier).
+      if (srcType === 'synthesis-bridge') {
+        const content = String(mem.content || '').toLowerCase();
+        const STOP_PHRASES = [
+          'lack information', 'lacks information', 'lack the information',
+          'data is not present', 'not present in cluster',
+          'available in cluster b', 'available in cluster a',
+          'missing from cluster', 'creating an enabling gap',
+        ];
+        if (STOP_PHRASES.some((p) => content.includes(p))) return item;
+      }
 
       // Source-type multiplier
       let mult = srcType === 'canonical-fact' ? 1.35 : 1.50;

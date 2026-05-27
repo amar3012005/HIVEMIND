@@ -5086,10 +5086,13 @@ exit \$RC
       // Lets ops + FE detect Nango token expiry before downstream sync fails.
       if (pathname === '/api/connectors/health' && req.method === 'GET') {
         if (!prisma) return jsonResponse(res, { error: 'prisma_unavailable' }, 503);
-        if (!orgId) return jsonResponse(res, { error: 'orgId_required' }, 400);
+        // Route fires before the outer auth's orgId is declared (TDZ). Pull
+        // org from headers directly. Caller still needs API key to reach here.
+        const hcOrgId = req.headers['x-hm-org-id'] || null;
+        if (!hcOrgId) return jsonResponse(res, { error: 'orgId_required' }, 400);
         try {
           const rows = await prisma.nangoConnection.findMany({
-            where: { orgId },
+            where: { orgId: hcOrgId },
             select: {
               providerKey: true, connectionId: true, status: true,
               lastRefreshAt: true, refreshError: true, createdAt: true, updatedAt: true,
@@ -5112,7 +5115,7 @@ exit \$RC
           });
           const unhealthy = connectors.filter((c) => c.stale).length;
           return jsonResponse(res, {
-            org_id: orgId,
+            org_id: hcOrgId,
             connector_count: connectors.length,
             unhealthy_count: unhealthy,
             overall_status: unhealthy === 0 ? 'healthy' : (unhealthy < connectors.length ? 'degraded' : 'down'),

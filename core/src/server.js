@@ -5095,22 +5095,23 @@ exit \$RC
             where: { orgId: hcOrgId },
             select: {
               providerKey: true, connectionId: true, status: true,
-              lastRefreshAt: true, refreshError: true, createdAt: true, updatedAt: true,
+              connectedAt: true, updatedAt: true, metadata: true,
             },
           });
           const STALE_MS = Number(process.env.CONNECTOR_STALE_MS || 24 * 60 * 60 * 1000);
           const now = Date.now();
           const connectors = rows.map((r) => {
-            const lastTs = r.lastRefreshAt ? new Date(r.lastRefreshAt).getTime() : new Date(r.updatedAt || r.createdAt).getTime();
+            const lastTs = new Date(r.updatedAt || r.connectedAt).getTime();
             const ageMs = now - lastTs;
             return {
               provider: r.providerKey,
               connection_id: r.connectionId,
               status: r.status,
-              last_refresh_at: r.lastRefreshAt || r.updatedAt || r.createdAt,
+              connected_at: r.connectedAt,
+              last_refresh_at: r.updatedAt || r.connectedAt,
               age_ms: ageMs,
               stale: r.status !== 'active' || ageMs > STALE_MS,
-              error: r.refreshError || null,
+              error: r.metadata?.refresh_error || null,
             };
           });
           const unhealthy = connectors.filter((c) => c.stale).length;

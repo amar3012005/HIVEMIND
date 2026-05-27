@@ -457,6 +457,45 @@ export class CognitionLoop {
           continue;
         }
         const evidenceIds = (result.supporting_memory_ids || []).filter(id => id);
+
+        // Duplicate-canonical guard: a memory carrying multiple topic tags
+        // (e.g. [url:claude.ai, ai-chat-ingest, from-claude, source:from-claude])
+        // joins every per-tag bucket; without this check, a single source
+        // set produces N identical canonical-fact memories — one per tag.
+        // Skip when ≥80% of evidence overlaps an existing recent canonical
+        // for the same user/org (regardless of cluster_hash). The first tag
+        // wins; later duplicates short-circuit.
+        if (evidenceIds.length > 0) {
+          const evidenceSet = new Set(evidenceIds);
+          try {
+            const recentCanonicals = await this.prisma.memory.findMany({
+              where: {
+                orgId,
+                userId: members[0].userId,
+                tags: { has: 'synthesis:canonical' },
+                isLatest: true,
+                deletedAt: null,
+                createdAt: { gte: new Date(Date.now() - 7 * 24 * 3600 * 1000) },
+              },
+              select: { id: true, title: true, synthesisEvidenceIds: true },
+              take: 100,
+            });
+            for (const ec of recentCanonicals) {
+              const otherIds = ec.synthesisEvidenceIds || [];
+              if (otherIds.length === 0) continue;
+              const overlap = otherIds.filter(id => evidenceSet.has(id)).length;
+              const minSize = Math.min(otherIds.length, evidenceIds.length);
+              if (minSize > 0 && (overlap / minSize) >= 0.8) {
+                this.logger.log(`[cognition] canonical tag=${tag} skipped — evidence set duplicates ${ec.id.slice(0,8)} (${ec.title?.slice(0,40)})`);
+                throw new Error('__SKIP_DUPLICATE_CANONICAL__');
+              }
+            }
+          } catch (dupErr) {
+            if (dupErr.message === '__SKIP_DUPLICATE_CANONICAL__') continue;
+            this.logger.warn(`[cognition] dup-check failed (proceeding): ${dupErr.message}`);
+          }
+        }
+
         const created = await this._writeSynthMemory({
           orgId,
           userId:    members[0].userId,

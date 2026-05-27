@@ -1289,11 +1289,18 @@ export async function recallPersistedMemories(store, {
     }
 
     if (_wsEntitiesLower.size > 0 && Array.isArray(tags)) {
-      for (const t of tags) {
+      outer: for (const t of tags) {
         if (typeof t !== 'string') continue;
         if (!t.startsWith('entity:') && !t.startsWith('person:')) continue;
         const norm = t.replace(/^(entity|person):/, '').replace(/_/g, ' ').toLowerCase();
-        if (_wsEntitiesLower.has(norm)) { mult *= 1.3; matched = true; break; }
+        for (const we of _wsEntitiesLower) {
+          // Fuzzy: exact OR substring either direction (handles "Vinil" ↔ "Vinil Audit AI Anomalies")
+          if (norm === we || norm.includes(we) || (we.length >= 4 && we.includes(norm))) {
+            mult *= 1.3;
+            matched = true;
+            break outer;
+          }
+        }
       }
     }
 

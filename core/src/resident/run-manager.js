@@ -942,6 +942,21 @@ export class ResidentRunManager {
             { agentName: 'turing',  runId: tFinal?.run_id },
           ],
         });
+
+        // Reflection memory: Turing self-evaluation. Marks cycle outcome
+        // as a cognitive-layer reflection so future recall surfaces it.
+        try {
+          await this._writeReflectionMemory({
+            batchId, orgId, userId,
+            faraday: summary.faraday,
+            feynman: summary.feynman,
+            turing: summary.turing,
+            proposalsPersisted: persisted,
+            latencyMs: Date.now() - cycleStartedAt,
+          });
+        } catch (err) {
+          this.logger?.warn?.(`[gov-cycle] reflection write failed: ${err.message}`);
+        }
         summary.proposals_persisted = persisted;
       }
 
@@ -1053,15 +1068,68 @@ export class ResidentRunManager {
     return ALLOWED.has(recommendation) ? recommendation : null;
   }
 
-  async _updateAgentStateAfterCycle({ orgId, status, proposalsPersisted, latencyMs }) {
+  async _writeReflectionMemory({ batchId, orgId, userId, faraday, feynman, turing, proposalsPersisted, latencyMs }) {
+    if (!this.prisma || !orgId) return;
+    // Reflection memories are org-scoped audit. Anchor to triggering user
+    // if known; otherwise pick any active member so Memory.userId NOT NULL
+    // constraint holds.
+    let anchorUserId = userId;
+    if (!anchorUserId) {
+      const member = await this.prisma.userOrganization.findFirst({
+        where: { orgId, isActive: true },
+        select: { userId: true },
+      }).catch(() => null);
+      anchorUserId = member?.userId || null;
+    }
+    if (!anchorUserId) return;
+    const observationsTotal = (faraday?.observations_count || 0)
+      + (feynman?.observations_count || 0)
+      + (turing?.observations_count || 0);
+    const cycleOk = [faraday, feynman, turing].every((r) => r?.status === 'completed');
+    const content = [
+      `Governance cycle ${batchId.slice(0, 8)} ${cycleOk ? 'completed' : 'partial'}.`,
+      `Faraday observed ${faraday?.observations_count || 0}, Feynman hypothesized ${feynman?.observations_count || 0}, Turing verified ${turing?.observations_count || 0}.`,
+      `Proposals persisted: ${proposalsPersisted}. Latency ${latencyMs}ms.`,
+    ].join(' ');
+    await this.prisma.memory.create({
+      data: {
+        userId: anchorUserId,
+        orgId,
+        memoryType: 'fact',
+        title: `Reflection: governance cycle ${new Date().toISOString().slice(0, 10)}`,
+        content,
+        tags: [
+          'governance',
+          'reflection',
+          'cognition-loop',
+          `batch:${batchId}`,
+          `cycle:${cycleOk ? 'ok' : 'partial'}`,
+        ],
+        isLatest: true,
+        importanceScore: 0.6,
+        cognitiveLayerRole: 'reflection',
+        visibility: 'organization',
+        scope: 'organization',
+      },
+    }).catch((err) => {
+      this.logger?.warn?.(`[reflection] insert failed: ${err.message}`);
+    });
+  }
+
+  async _updateAgentStateAfterCycle({ orgId, status, proposalsPersisted, latencyMs, tokenUsageByAgent = {} }) {
     const now = new Date();
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    // Heuristic token cost when LLM doesn't surface usage. Conservative
+    // overestimate so circuit-breaker fires before real overrun.
+    const FALLBACK_TOKENS_PER_RUN = Number(process.env.GOV_FALLBACK_TOKENS_PER_RUN || 5000);
     for (const agentName of ['faraday', 'feynman', 'turing']) {
+      const tokensSpent = Number(tokenUsageByAgent[agentName] ?? FALLBACK_TOKENS_PER_RUN) | 0;
       await this.prisma.governanceAgentState.update({
         where: { agentName },
         data: {
           lastRunAt: now,
           lastCompletedAt: status === 'completed' ? now : undefined,
+          tokensSpentToday: { increment: tokensSpent },
         },
       }).catch(() => null);
 
@@ -1079,10 +1147,12 @@ export class ResidentRunManager {
           day: today,
           actionsProposed: proposedDelta,
           latencyMsP95: latencyMs,
+          tokensSpent: BigInt(tokensSpent),
         },
         update: {
           actionsProposed: { increment: proposedDelta },
           latencyMsP95: latencyMs,
+          tokensSpent: { increment: BigInt(tokensSpent) },
         },
       }).catch(() => null);
     }

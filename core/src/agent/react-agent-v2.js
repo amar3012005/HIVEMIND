@@ -731,7 +731,10 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
   const connectorTriggered = userConnector && READ_CONNECTOR_TRIGGERS[userConnector];
   const liveReadIntent = LIVE_READ_VERB_RE.test(plan.user_message || '');
   const lowRecall = memoriesById.size < 3;
-  if (connectorTriggered && (lowRecall || (liveReadIntent && userConnector === 'slack')) && ctx.prisma && !plan.action_intent) {
+  // NB: removed !plan.action_intent gate — planner sometimes flags read
+  // queries as action_intent. Live-read should always fire when query has
+  // explicit read verb + connector keyword + extractable target.
+  if (connectorTriggered && (lowRecall || (liveReadIntent && userConnector === 'slack')) && ctx.prisma) {
     try {
       const { buildToolkitForUser } = await import('./toolkit-factory.js');
       const tk = await buildToolkitForUser({

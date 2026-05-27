@@ -1274,6 +1274,7 @@ enum MemoryType {
   relationship
   synthesis
   summary
+  conversation
 }
 
 enum RelationshipType {

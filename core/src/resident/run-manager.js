@@ -795,6 +795,34 @@ export class ResidentRunManager {
     let lockAcquired = false;
     const LOCK_HOLD_MS = 10 * 60 * 1000; // 10 min cycle ceiling
 
+    // Token-budget circuit breaker: reset day, check spend, refuse if exhausted.
+    if (this.prisma) {
+      try {
+        await this.prisma.$executeRawUnsafe(
+          `UPDATE hivemind.governance_agent_state
+             SET tokens_spent_today = 0,
+                 token_budget_reset_at = CURRENT_DATE
+           WHERE token_budget_reset_at < CURRENT_DATE`
+        );
+        const exhausted = await this.prisma.$queryRawUnsafe(
+          `SELECT agent_name, tokens_spent_today, daily_token_budget
+             FROM hivemind.governance_agent_state
+            WHERE agent_name IN ('faraday','feynman','turing')
+              AND tokens_spent_today >= daily_token_budget`
+        );
+        if (Array.isArray(exhausted) && exhausted.length > 0) {
+          this.logger?.warn?.(`[gov-cycle] token budget exhausted for: ${exhausted.map(e => e.agent_name).join(',')}`);
+          return {
+            batch_id: batchId,
+            status: 'skipped_budget_exhausted',
+            agents_over_budget: exhausted.map((e) => e.agent_name),
+          };
+        }
+      } catch (err) {
+        this.logger?.warn?.(`[gov-cycle] token-budget check failed: ${err.message}`);
+      }
+    }
+
     // Row-level cycle lock on governance_agent_state. Pool-safe (no session affinity).
     // Atomic UPDATE returns 1 row if no other cycle is holding it.
     if (this.prisma) {

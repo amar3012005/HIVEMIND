@@ -216,6 +216,7 @@ export class PrismaGraphStore {
         embeddingVersion: memory.embedding_version ?? 1,
         processingBasis: memory.processing_basis || 'consent',
         sharedWithOrgs: memory.shared_with_orgs || [],
+        cognitiveLayerRole: memory.cognitive_layer_role || null,
       },
     });
 

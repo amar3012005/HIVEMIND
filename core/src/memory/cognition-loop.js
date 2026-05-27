@@ -1336,6 +1336,7 @@ Output JSON only:
       // silently result in undefined fields and a Prisma rejection.
       // source_metadata must be an object matching { source_type, source_id, ... }.
       let finalTags = Array.from(unionedTags);
+      const cognitiveLayerRole = sourceType === 'canonical-fact' ? 'canonical' : 'bridge';
       const result = await this.engine.ingestMemory({
         user_id:         userId,
         org_id:          orgId,
@@ -1345,6 +1346,7 @@ Output JSON only:
         tags:            Array.from(unionedTags),
         project:         project || null,
         importance_score: sourceType === 'canonical-fact' ? 0.85 : 0.90,
+        cognitive_layer_role: cognitiveLayerRole,
         source_metadata: {
           source_type: sourceType,
           source_id:   `${sourceType}:${hash}:${Date.now()}`,
@@ -1644,6 +1646,7 @@ Output JSON only:
         tags:           summaryTags,
         isLatest:       true,
         importanceScore: 0.85,
+        cognitiveLayerRole: 'compression',
         sourceMetadata: {
           create: {
             sourceType: 'cognition-loop',

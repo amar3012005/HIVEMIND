@@ -1083,6 +1083,18 @@ export class ResidentRunManager {
 
   async _writeReflectionMemory({ batchId, orgId, userId, faraday, feynman, turing, proposalsPersisted, latencyMs }) {
     if (!this.prisma || !orgId) return;
+    const observationsTotal = (faraday?.observations_count || 0)
+      + (feynman?.observations_count || 0)
+      + (turing?.observations_count || 0);
+
+    // Suppress empty cycles. If no observations were made AND no proposals
+    // persisted, the cycle was a no-op — writing a memory just for the
+    // metrics pollutes recall. Log to ops channel instead.
+    if (observationsTotal === 0 && (proposalsPersisted || 0) === 0) {
+      this.logger?.info?.(`[reflection] skip empty cycle batch=${batchId.slice(0, 8)} latency=${latencyMs}ms`);
+      return;
+    }
+
     // Reflection memories are org-scoped audit. Anchor to triggering user
     // if known; otherwise pick any active member so Memory.userId NOT NULL
     // constraint holds.
@@ -1095,31 +1107,57 @@ export class ResidentRunManager {
       anchorUserId = member?.userId || null;
     }
     if (!anchorUserId) return;
-    const observationsTotal = (faraday?.observations_count || 0)
-      + (feynman?.observations_count || 0)
-      + (turing?.observations_count || 0);
     const cycleOk = [faraday, feynman, turing].every((r) => r?.status === 'completed');
-    const content = [
+
+    // Build a content body that reflects WHAT happened, not just counts.
+    // Pull a sample of touched entities / hypotheses from each agent if
+    // they surface them in `summary`. Falls back to count-only if not.
+    const parts = [
       `Governance cycle ${batchId.slice(0, 8)} ${cycleOk ? 'completed' : 'partial'}.`,
-      `Faraday observed ${faraday?.observations_count || 0}, Feynman hypothesized ${feynman?.observations_count || 0}, Turing verified ${turing?.observations_count || 0}.`,
-      `Proposals persisted: ${proposalsPersisted}. Latency ${latencyMs}ms.`,
-    ].join(' ');
+    ];
+    const observed = faraday?.observations || faraday?.sample || [];
+    const hypotheses = feynman?.hypotheses || feynman?.sample || [];
+    const verifications = turing?.verifications || turing?.sample || [];
+    if (Array.isArray(observed) && observed.length) {
+      parts.push(`Faraday observed: ${observed.slice(0, 3).map((o) => String(o).slice(0, 80)).join(' | ')}.`);
+    } else {
+      parts.push(`Faraday observations: ${faraday?.observations_count || 0}.`);
+    }
+    if (Array.isArray(hypotheses) && hypotheses.length) {
+      parts.push(`Feynman hypothesised: ${hypotheses.slice(0, 3).map((o) => String(o).slice(0, 80)).join(' | ')}.`);
+    } else {
+      parts.push(`Feynman hypotheses: ${feynman?.observations_count || 0}.`);
+    }
+    if (Array.isArray(verifications) && verifications.length) {
+      parts.push(`Turing verified: ${verifications.slice(0, 3).map((o) => String(o).slice(0, 80)).join(' | ')}.`);
+    } else {
+      parts.push(`Turing verifications: ${turing?.observations_count || 0}.`);
+    }
+    parts.push(`Persisted ${proposalsPersisted} proposal(s). Latency ${latencyMs}ms.`);
+    const content = parts.join(' ');
+
     await this.prisma.memory.create({
       data: {
         userId: anchorUserId,
         orgId,
+        // Keep memoryType='fact' — adding 'reflection' to the MemoryType
+        // enum requires a separate migration. Recall-side filtering uses
+        // tags (internal-audit) + cognitiveLayerRole instead.
         memoryType: 'fact',
-        title: `Reflection: governance cycle ${new Date().toISOString().slice(0, 10)}`,
+        title: `Governance reflection · ${observationsTotal} obs · ${proposalsPersisted} proposal(s) · ${new Date().toISOString().slice(0, 10)}`,
         content,
         tags: [
           'governance',
           'reflection',
           'cognition-loop',
+          'internal-audit',
           `batch:${batchId}`,
           `cycle:${cycleOk ? 'ok' : 'partial'}`,
         ],
         isLatest: true,
-        importanceScore: 0.6,
+        // Drop importance well below user-facing memories (0.6 -> 0.25)
+        // so recall ranking buries these unless explicitly queried.
+        importanceScore: 0.25,
         cognitiveLayerRole: 'reflection',
         visibility: 'organization',
         scope: 'organization',

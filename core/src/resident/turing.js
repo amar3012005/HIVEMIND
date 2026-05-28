@@ -510,8 +510,17 @@ export class TuringAgent {
     // Executor (on approve) re-uses the same tool to do LLM rewrite + write.
     try {
       const { getCognitiveToolRegistry } = await import('../cognitive-tools/registry.js');
+      let prisma = this.observationStore?.prisma
+        || this.observationStore?.client
+        || this.memoryStore?.client
+        || this.memoryStore?.prisma
+        || null;
+      if (!prisma) {
+        const { getPrismaClient } = await import('../db/prisma.js');
+        prisma = getPrismaClient();
+      }
       const registry = getCognitiveToolRegistry({
-        prisma: this.observationStore?.prisma || this.observationStore?.client || null,
+        prisma,
         memoryStore: this.memoryStore || null,
         logger: this.logger,
       });

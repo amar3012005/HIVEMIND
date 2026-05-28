@@ -58,7 +58,7 @@ router = APIRouter(prefix="/internal/hyper", tags=["hyper-rooms"])
 # ~200k). No per-line or per-turn truncation here.
 
 MAX_REACTORS = 2
-ROUND_2_CHALLENGE_THRESHOLD = 0.55
+ROUND_2_CHALLENGE_THRESHOLD = 0.45
 
 # Full toolkit for hyper-room agents — all HIVEMIND read paths + save
 # + time travel; web is gated by prompt ("only when info isn't here").
@@ -314,8 +314,11 @@ def _msg_to_text(reply: Optional[Msg]) -> str:
 
 REACTOR_INSTRUCTIONS = """\
 You are an EMPLOYEE at HIVEMIND — a teammate, not an outside expert.
-The Lead colleague just spoke. Decide if YOU would chime in.
-Default to silence unless you add real value.
+The Lead colleague just spoke. ENGAGE when the topic touches your lane —
+silence only when the topic is clearly outside your expertise AND you have
+no memory evidence to add. The room expects active multi-voice debate, not
+a monologue. Use your hivemind tools (recall / traverse / web) if you need
+to ground a counter-point.
 
 Reply in STRICT JSON ONLY (no preamble, no code fence):
 {
@@ -677,6 +680,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     # user sees prompts to do work, not the work itself. Synthesis lets the
     # lead absorb the reactor lines + actually exercise tools (recall /
     # traverse) and produce one final actionable bubble.
+    synth_text = ""
     if reactions:
         await _emit_event(req.callback_url, req.turn_id, {
             "t": "typing", "agent": lead.get("slug"), "kind": "synthesis",
@@ -715,6 +719,45 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 })
         except Exception as exc:  # noqa: BLE001
             log.warning("synthesis failed: %s", exc)
+
+        # ── Post-synthesis reactor pass (MiroFish-style forward motion) ──
+        # After the lead synthesises, reactors get one more turn to push back
+        # against the synthesis. This is what makes the room MOVE FORWARD
+        # instead of capping after a single lead bubble + one extend. Mirrors
+        # MiroFish CSI loop: propose -> review -> revise.
+        post_synth_tasks = []
+        for r in reactors:
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "typing", "agent": r.get("slug"), "kind": "react",
+            })
+            agent2 = await _build_agent_for_room(req.room_id, r, user_id=req.user_id, org_id=req.org_id)
+            is_opp2 = r["_lane"] in opposing_lanes(lead["_lane"])
+            post_synth_tasks.append(asyncio.create_task(_run_reactor(
+                agent=agent2,
+                user_message=req.user_message,
+                lead_line=synth_text or lead_text,
+                lead_name=lead.get("name", lead.get("slug", "lead")),
+                reactor_lane=r["_lane"],
+                is_opposing=is_opp2,
+            )))
+        post_synth_results = await asyncio.gather(*post_synth_tasks, return_exceptions=True)
+        for r_emp, result in zip(reactors, post_synth_results):
+            if isinstance(result, Exception) or not result.get("react"):
+                continue
+            line = result["line"]
+            r_tokens = max(80, len(line) // 4)
+            cost_tokens += r_tokens
+            event = {
+                "t": "react",
+                "agent": r_emp.get("slug"),
+                "round": 2,
+                "agreement": result.get("agreement", "extend"),
+                "confidence": float(result.get("confidence", 0.5)),
+                "content": line,
+                "tokens": r_tokens,
+            }
+            reactions.append({**event, "emp": r_emp})
+            await _emit_event(req.callback_url, req.turn_id, event)
 
     # ── Round 2 challenger debate (only if reactor explicitly challenged) ──
     challenger_reaction = next(

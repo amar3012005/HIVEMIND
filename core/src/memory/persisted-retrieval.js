@@ -1489,11 +1489,17 @@ export async function recallPersistedMemories(store, {
     }
   }
 
+  // Caller-opts-in audit pass-through (e.g. /v1/governance UI). Else drop.
+  const callerWantsAudit = Array.isArray(tags) && tags.some((t) => t === 'internal-audit');
+
   let top = finalItems
     .filter(item => {
       // Exclude benchmark data from production recall
       const tags = (item.memory || item).tags || [];
       if (!project && tags.includes('longmemeval')) return false;
+      // Drop internal-audit (governance reflection rows etc.) unless
+      // caller explicitly asked for them.
+      if (!callerWantsAudit && tags.includes('internal-audit')) return false;
       return true;
     })
     .sort((a, b) => {

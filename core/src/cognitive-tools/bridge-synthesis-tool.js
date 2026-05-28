@@ -25,16 +25,39 @@ export class BridgeSynthesisTool extends CognitiveTool {
     const liked = inWindow.filter((v) => v.content?.verdict === 'likely_true');
     if (liked.length < 2) return { applicable: false, reason: 'fewer_than_2_likely_true' };
 
+    const evidenceOf = (v) => new Set(v.content?.related_memory_ids || v.content?.evidence_refs || []);
+
+    // Pull real entity:* tags from the referenced memories. Verifications'
+    // synthetic 'verification' tokens are useless for cluster matching.
+    const allEvidenceIds = [...new Set(liked.flatMap((v) => [...evidenceOf(v)]))];
+    let tagMap = new Map(); // memId -> entity tag set
+    if (this.prisma && allEvidenceIds.length) {
+      try {
+        const rows = await this.prisma.memory.findMany({
+          where: { id: { in: allEvidenceIds }, deletedAt: null },
+          select: { id: true, tags: true },
+        });
+        for (const r of rows) {
+          const ents = (r.tags || [])
+            .filter((t) => typeof t === 'string' && t.startsWith('entity:'))
+            .map((t) => t.slice(7).toLowerCase());
+          tagMap.set(r.id, new Set(ents));
+        }
+      } catch (err) {
+        this.logger?.warn?.(`[bridge] tag fetch failed: ${err.message}`);
+      }
+    }
     const entitiesOf = (v) => {
-      // Prefer real entity tags (entity:Name) on related memories — fall back
-      // to capitalized tokens in summary.
-      const tags = v.content?.related_tags || [];
-      const fromTags = tags.filter((t) => typeof t === 'string' && t.startsWith('entity:')).map((t) => t.slice(7).toLowerCase());
-      if (fromTags.length) return new Set(fromTags);
+      const out = new Set();
+      for (const memId of evidenceOf(v)) {
+        const ents = tagMap.get(memId);
+        if (ents) for (const e of ents) out.add(e);
+      }
+      if (out.size > 0) return out;
+      // Last-resort fallback only when memories have no entity tags at all.
       const tokens = (v.content?.summary || '').match(/\b[A-Z][a-zA-Z0-9_-]{2,}\b/g) || [];
       return new Set(tokens.map((t) => t.toLowerCase()));
     };
-    const evidenceOf = (v) => new Set(v.content?.related_memory_ids || v.content?.evidence_refs || []);
 
     let best = null;
     for (let i = 0; i < liked.length; i += 1) {

@@ -98,6 +98,150 @@ ADVERSARIAL_PAIRS = (
 
 _ROOM_AGENTS: Dict[str, ReActAgent] = {}
 
+# ─── B3 repeat-guard: rolling per-room normalized line history ───
+# Bounded in-memory dedup. Keys: room_id. Values: list of normalised
+# tokens-fingerprints from prior reactor lines. Prevents 'we re-litigate
+# the same risk every turn' anti-pattern.
+_ROOM_PRIOR_LINES: Dict[str, List[str]] = {}
+_REPEAT_GUARD_MAX = 80  # rolling window per room
+
+# ─── A1 decision sink — explicit save-intent regex ───
+_SAVE_INTENT_RE = re.compile(
+    r"\b(save (this|that|it)|remember (this|that)|log (this|that)|"
+    r"write (this|that) (down|to memory)|capture this)\b",
+    re.IGNORECASE,
+)
+
+# Decision-template flag — set via room metadata later. For now: any
+# turn that closes with verdict=resolved OR explicit save-intent.
+
+
+def _normalize_for_dedup(text: str) -> str:
+    """Strip punctuation/case for shingle dedup. 4-gram key."""
+    t = re.sub(r"[^\w\s]", " ", (text or "").lower())
+    toks = [w for w in t.split() if len(w) > 3]
+    return " ".join(toks[:12])  # first 12 substantive tokens = fingerprint
+
+
+def _line_already_raised(room_id: str, line: str) -> bool:
+    """B3: cheap repeat-detection. True if this reactor line restates a
+    prior one in the same room."""
+    fp = _normalize_for_dedup(line)
+    if not fp or len(fp) < 12:  # too-short fingerprints unreliable
+        return False
+    prior = _ROOM_PRIOR_LINES.get(room_id, [])
+    # Substantial overlap: shared 4+ consecutive tokens
+    fp_words = fp.split()
+    for p in prior:
+        p_words = p.split()
+        # Sliding 4-gram intersect
+        if len(p_words) < 4 or len(fp_words) < 4:
+            continue
+        fp_grams = {" ".join(fp_words[i:i+4]) for i in range(len(fp_words) - 3)}
+        p_grams = {" ".join(p_words[i:i+4]) for i in range(len(p_words) - 3)}
+        if fp_grams & p_grams:
+            return True
+    return False
+
+
+def _remember_line(room_id: str, line: str) -> None:
+    if not line:
+        return
+    fp = _normalize_for_dedup(line)
+    if not fp:
+        return
+    buf = _ROOM_PRIOR_LINES.setdefault(room_id, [])
+    buf.append(fp)
+    # Trim
+    if len(buf) > _REPEAT_GUARD_MAX:
+        del buf[: len(buf) - _REPEAT_GUARD_MAX]
+
+
+# ─── A2 completion verifier ───
+def _is_substantive_lead(text: str, had_memory_context: bool) -> bool:
+    """True if lead/synth text passes the no-empty-seal gate.
+
+    Rules:
+    - non-trivial length (>=120 chars)
+    - AND (cites a memory title via "<...>" OR contains "from \"" pattern
+      OR explicit 'nothing on file' acknowledgement when no memory context)
+    """
+    if not text or len(text.strip()) < 120:
+        return False
+    cite_patterns = (
+        re.search(r'from\s+["“][^"”]{6,}["”]', text),
+        re.search(r'["“][^"”]{6,}["”]\s*(?:memo|brief|doc|note)', text, re.IGNORECASE),
+        re.search(r'(?:per|see)\s+["“][^"”]{6,}["”]', text, re.IGNORECASE),
+    )
+    if any(cite_patterns):
+        return True
+    if not had_memory_context and re.search(r'nothing on file', text, re.IGNORECASE):
+        return True
+    return False
+
+
+# ─── A1 decision sink — POST to /api/memories with master key + emulation ─
+async def _save_room_decision(
+    *,
+    user_id: str,
+    org_id: str,
+    room_id: str,
+    turn_id: str,
+    user_message: str,
+    decision_text: str,
+    trigger: str,
+) -> Optional[str]:
+    """Persist a room decision as a HIVEMIND memory. Returns memory id
+    or None on failure. Uses master key + X-HM-User-Id/Org-Id emulation
+    so we don't require per-employee scoped keys."""
+    settings = get_settings()
+    master = settings.hivemind_master_api_key
+    if not master:
+        log.warning("decision-sink: no master key; skipping save room=%s", room_id)
+        return None
+    title = f"Room decision · {user_message[:80]}"
+    body = (
+        f"Trigger: {trigger}\n"
+        f"User asked: {user_message}\n\n"
+        f"Decision / closing line:\n{decision_text.strip()}\n"
+    )
+    tags = [
+        "room-decision",
+        f"room:{room_id}",
+        f"turn:{turn_id}",
+        "hyper-rooms",
+    ]
+    try:
+        async with httpx.AsyncClient(
+            base_url=settings.hivemind_core_url,
+            timeout=httpx.Timeout(15.0, connect=5.0),
+            headers={
+                "Authorization": f"Bearer {master}",
+                "X-API-Key": master,
+                "X-HM-User-Id": user_id,
+                "X-HM-Org-Id": org_id,
+                "Content-Type": "application/json",
+            },
+        ) as c:
+            r = await c.post(
+                "/api/memories",
+                json={
+                    "title": title,
+                    "content": body,
+                    "tags": tags,
+                    "memory_type": "decision",
+                    "sync": True,
+                },
+            )
+            r.raise_for_status()
+            data = r.json()
+            mid = data.get("id") or (data.get("memory") or {}).get("id")
+            log.info("decision-sink: saved room=%s memory=%s trigger=%s", room_id, mid, trigger)
+            return mid
+    except Exception as exc:  # noqa: BLE001
+        log.warning("decision-sink: save failed room=%s err=%s", room_id, exc)
+        return None
+
 
 def _require_master_key(token: Optional[str]) -> None:
     settings = get_settings()
@@ -676,6 +820,19 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 })
                 continue
             line = result["line"]
+            # B3: suppress lines that restate prior reactor points in this room.
+            if _line_already_raised(req.room_id, line):
+                log.info("repeat-guard: suppressed reactor=%s line=%s", r_emp.get("slug"), line[:60])
+                await _emit_event(req.callback_url, req.turn_id, {
+                    "t": "react",
+                    "agent": r_emp.get("slug"),
+                    "round": 1,
+                    "agreement": "abstain",
+                    "content": "",
+                    "reason": "duplicate",
+                })
+                continue
+            _remember_line(req.room_id, line)
             r_tokens = max(80, len(line) // 4)
             cost_tokens += r_tokens
             event = {
@@ -764,6 +921,10 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             if isinstance(result, Exception) or not result.get("react"):
                 continue
             line = result["line"]
+            if _line_already_raised(req.room_id, line):
+                log.info("repeat-guard r2: suppressed reactor=%s", r_emp.get("slug"))
+                continue
+            _remember_line(req.room_id, line)
             r_tokens = max(80, len(line) // 4)
             cost_tokens += r_tokens
             event = {
@@ -791,6 +952,9 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     MAX_DEBATE_ROUNDS = 3
     debate_round = 2
     current_challenge_text = challenger_reaction["content"] if challenger_reaction else ""
+    final_verdict: Optional[str] = None
+    open_question: str = ""
+    last_revise_text: str = ""
     while challenger_reaction and debate_round <= MAX_DEBATE_ROUNDS:
         await _emit_event(req.callback_url, req.turn_id, {
             "t": "typing", "agent": lead.get("slug"), "kind": "revise",
@@ -807,6 +971,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             )
             reply2 = await lead_agent(Msg(name="user", content=revise_prompt, role="user"))
             revise_text = _msg_to_text(reply2) or "(no revision)"
+            last_revise_text = revise_text
             revise_tokens = max(150, len(revise_text) // 4)
             cost_tokens += revise_tokens
             await _emit_event(req.callback_url, req.turn_id, {
@@ -855,6 +1020,8 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 "tokens": v_tokens,
             })
 
+            final_verdict = verdict_obj["verdict"]
+            open_question = verdict_obj["line"] or current_challenge_text
             if verdict_obj["verdict"] != "escalate":
                 break
             # Escalating — feed challenger's new line as next round's
@@ -865,17 +1032,90 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             log.warning("round-%s debate failed: %s", debate_round, exc)
             break
 
+    # ── A2 completion verifier ───────────────────────────────────────
+    # Pick the most recent substantive lead-side output for grounding +
+    # save eligibility. Order: revise > synth > lead.
+    final_text = last_revise_text or synth_text or lead_text or ""
+    quality_low = not _is_substantive_lead(final_text, bool(memory_context))
+
+    if quality_low and final_text and lead_agent:
+        # One-shot rescue retry. Don't loop — bounded cost.
+        try:
+            rescue_prompt = (
+                "You produced no concrete grounded substance in the prior turn.\n"
+                f"USER QUESTION: {req.user_message}\n"
+                f"Available memories above. Answer DIRECTLY in 3-4 sentences. "
+                f"Quote at least one memory title inline. If memory truly silent, "
+                f"say 'nothing on file about X yet' in one sentence then give a "
+                f"concrete take. NEVER invent owners/dates."
+            )
+            rescue_reply = await lead_agent(Msg(name="user", content=rescue_prompt, role="user"))
+            rescue_text = _msg_to_text(rescue_reply) or ""
+            if rescue_text and len(rescue_text) > 80:
+                final_text = rescue_text
+                quality_low = not _is_substantive_lead(rescue_text, bool(memory_context))
+                rescue_tokens = max(120, len(rescue_text) // 4)
+                cost_tokens += rescue_tokens
+                await _emit_event(req.callback_url, req.turn_id, {
+                    "t": "line",
+                    "agent": lead.get("slug"),
+                    "round": debate_round,
+                    "kind": "rescue",
+                    "content": rescue_text,
+                    "tokens": rescue_tokens,
+                })
+        except Exception as exc:  # noqa: BLE001
+            log.warning("rescue retry failed: %s", exc)
+
+    # ── A3 tool-exec proof (measure only, don't block) ───────────────
+    if memory_context and final_text and not re.search(r'["“][^"”]{6,}["”]', final_text):
+        log.info("low-grounding flag turn=%s — memory_context present but lead cited no title", req.turn_id)
+
+    # ── B2 conclusion gate ──────────────────────────────────────────
+    if final_verdict == "escalate":
+        # Debate hit MAX_DEBATE_ROUNDS without consensus. Don't fake
+        # 'complete' — surface the open question as an action item.
+        status = "escalated"
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "decision_required",
+            "open_question": open_question or req.user_message,
+            "raised_by": (challenger_reaction or {}).get("emp", {}).get("slug") if challenger_reaction else None,
+            "rounds_run": debate_round,
+        })
+
+    # ── A1 decision sink — save iff verdict=resolved OR save-intent ─
+    save_intent = bool(_SAVE_INTENT_RE.search(req.user_message))
+    should_save = (
+        (final_verdict == "resolved" and not quality_low)
+        or save_intent
+    )
+    saved_memory_id: Optional[str] = None
+    if should_save and final_text:
+        trigger = "save-intent" if save_intent else "verdict-resolved"
+        saved_memory_id = await _save_room_decision(
+            user_id=req.user_id,
+            org_id=req.org_id,
+            room_id=req.room_id,
+            turn_id=req.turn_id,
+            user_message=req.user_message,
+            decision_text=final_text,
+            trigger=trigger,
+        )
+        if saved_memory_id:
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "decision_saved",
+                "memory_id": saved_memory_id,
+                "trigger": trigger,
+            })
+
     # ── Seal ─────────────────────────────────────────────────────────
-    # Earlier patch removed the cost-cap branches and accidentally also
-    # ate this final emit + return — orchestrator was falling off the
-    # end and returning None, which (a) crashed FastAPI's
-    # ResponseValidationError on RoomTurnResponse and (b) never sent
-    # the SSE seal event, leaving the UI stuck on "typing…".
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "seal",
         "cost_tokens": cost_tokens,
         "status": status,
         "duration_ms": int((time.time() - started) * 1000),
+        "quality_low": quality_low,
+        "saved_memory_id": saved_memory_id,
     })
     return RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status=status)
 

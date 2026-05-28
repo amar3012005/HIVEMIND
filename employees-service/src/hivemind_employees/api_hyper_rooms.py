@@ -776,20 +776,26 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         None,
     )
 
-    if challenger_reaction:
-        # Lead revises
+    # Loop revise+validate while challenger keeps escalating. Caps at
+    # MAX_DEBATE_ROUNDS so cost stays bounded. MiroFish pattern: do not
+    # seal on unresolved 'escalate' — keep the debate moving until the
+    # challenger accepts or the cap hits.
+    MAX_DEBATE_ROUNDS = 3
+    debate_round = 2
+    current_challenge_text = challenger_reaction["content"] if challenger_reaction else ""
+    while challenger_reaction and debate_round <= MAX_DEBATE_ROUNDS:
         await _emit_event(req.callback_url, req.turn_id, {
             "t": "typing", "agent": lead.get("slug"), "kind": "revise",
         })
         try:
             revise_prompt = (
-                f"[CSI revision pass — you're still the HIVEMIND employee speaking. Lane: {lead['_lane']}.]\n"
+                f"[CSI revision pass round {debate_round} — HIVEMIND employee. Lane: {lead['_lane']}.]\n"
                 f"USER'S ORIGINAL QUESTION: \"{req.user_message}\"\n"
                 f"{challenger_reaction['emp'].get('name')} ({challenger_reaction['emp']['_lane']}) pushed back:\n"
-                f"\"{challenger_reaction['content']}\"\n\n"
-                f"Reconsider. If right, concede and revise. If standing by, defend with a memory "
-                f"hit — quote the title. No invented owners / dates / assignments. Stay on the "
-                f"user's question. 2-4 sentences, chat tone, 'we / our'."
+                f"\"{current_challenge_text}\"\n\n"
+                f"Reconsider. If right, concede + revise. If standing by, defend with a memory "
+                f"hit — quote the title. No invented owners / dates. Stay on the user's question. "
+                f"2-4 sentences, chat tone, 'we / our'."
             )
             reply2 = await lead_agent(Msg(name="user", content=revise_prompt, role="user"))
             revise_text = _msg_to_text(reply2) or "(no revision)"
@@ -798,22 +804,23 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             await _emit_event(req.callback_url, req.turn_id, {
                 "t": "revise",
                 "agent": lead.get("slug"),
-                "round": 2,
+                "round": debate_round,
                 "content": revise_text,
                 "tokens": revise_tokens,
             })
 
-            # Challenger validates or escalates once
             await _emit_event(req.callback_url, req.turn_id, {
                 "t": "typing", "agent": challenger_reaction["emp"].get("slug"), "kind": "validate",
             })
             ch_agent = await _build_agent_for_room(req.room_id, challenger_reaction["emp"], user_id=req.user_id, org_id=req.org_id)
             validate_prompt = (
-                f"[CSI validation pass — your lane: {challenger_reaction['emp']['_lane']}.]\n"
+                f"[CSI validation pass round {debate_round} — lane: {challenger_reaction['emp']['_lane']}.]\n"
                 f"{lead.get('name')} responded to your challenge:\n"
                 f"\"{revise_text}\"\n\n"
+                f"Did the lead resolve your concern with concrete memory evidence, or is the gap "
+                f"still real?\n"
                 f"Reply in STRICT JSON:\n"
-                f'{{"verdict": "resolved" | "escalate", "line": "1-2 sentences"}}'
+                f'{{"verdict": "resolved" | "escalate", "line": "1-2 sentences (cite a memory if escalating)"}}'
             )
             r3 = await ch_agent(Msg(name="user", content=validate_prompt, role="user"))
             validate_raw = _msg_to_text(r3)
@@ -834,13 +841,21 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             await _emit_event(req.callback_url, req.turn_id, {
                 "t": "validate",
                 "agent": challenger_reaction["emp"].get("slug"),
-                "round": 2,
+                "round": debate_round,
                 "verdict": verdict_obj["verdict"],
                 "content": verdict_obj["line"],
                 "tokens": v_tokens,
             })
+
+            if verdict_obj["verdict"] != "escalate":
+                break
+            # Escalating — feed challenger's new line as next round's
+            # challenge text and loop. Cost cap still in play.
+            current_challenge_text = verdict_obj["line"] or current_challenge_text
+            debate_round += 1
         except Exception as exc:  # noqa: BLE001
-            log.warning("round-2 failed: %s", exc)
+            log.warning("round-%s debate failed: %s", debate_round, exc)
+            break
 
     # ── Seal ─────────────────────────────────────────────────────────
     # Earlier patch removed the cost-cap branches and accidentally also

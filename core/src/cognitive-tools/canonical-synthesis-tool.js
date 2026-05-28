@@ -1,7 +1,10 @@
 import { CognitiveTool, clusterHash, isRestatement, capConfidence, jaccard } from './base-tool.js';
 
 const CONFIDENCE_FLOOR = Number(process.env.CANONICAL_CONFIDENCE_FLOOR || 0.7);
-const COOLDOWN_HOURS   = Number(process.env.CANONICAL_COOLDOWN_HOURS   || 6);
+const COOLDOWN_HOURS   = Number(process.env.CANONICAL_COOLDOWN_HOURS   || 1);
+// Tier window: only assess verifications from the last N hours so 1h ticks
+// don't reprocess the same backlog every cycle.
+const WINDOW_HOURS     = Number(process.env.CANONICAL_WINDOW_HOURS     || 1);
 
 /**
  * Canonical fact synthesizer.
@@ -19,7 +22,15 @@ export class CanonicalSynthesisTool extends CognitiveTool {
     if (!Array.isArray(verifications) || verifications.length === 0) {
       return { applicable: false, reason: 'no_verifications' };
     }
-    const liked = verifications.filter((v) => v.content?.verdict === 'likely_true');
+    // Tier window filter: only verifications created within WINDOW_HOURS.
+    const windowMs = WINDOW_HOURS * 60 * 60 * 1000;
+    const sinceTs = Date.now() - windowMs;
+    const inWindow = verifications.filter((v) => {
+      const ts = v?.timestamp ? new Date(v.timestamp).getTime() : Date.now();
+      return ts >= sinceTs;
+    });
+    if (inWindow.length === 0) return { applicable: false, reason: 'no_verifications_in_window' };
+    const liked = inWindow.filter((v) => v.content?.verdict === 'likely_true');
     if (liked.length < 2) return { applicable: false, reason: 'fewer_than_2_likely_true' };
 
     // Find shared evidence ids appearing in ≥2 liked verifications.

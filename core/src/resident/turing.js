@@ -400,6 +400,7 @@ export class TuringAgent {
     feynmanRun = null,
     feynmanTrail = null,
     hypotheses = [],
+    enabledCognitiveTools = null,
     onProgress = async () => {},
     isCancelled = () => false,
   } = {}) {
@@ -564,6 +565,7 @@ export class TuringAgent {
       const proposals = await registry.assessAll({
         verifications: aggregatedVerifications,
         orgId,
+        enabledTools: enabledCognitiveTools,
       });
       for (const p of proposals) {
         actionCandidates.push({

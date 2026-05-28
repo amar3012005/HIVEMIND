@@ -343,6 +343,7 @@ export class ResidentRunManager {
       feynmanRun: source.run,
       feynmanTrail: source.trail,
       hypotheses: source.hypotheses,
+      enabledCognitiveTools: payload.enabled_cognitive_tools || null,
       onProgress: async (progress) => {
         run.current_step = progress.current_step;
         run.progress = progress;
@@ -783,7 +784,7 @@ export class ResidentRunManager {
    *
    * Returns { batch_id, status, faraday, feynman, turing, proposals_persisted }.
    */
-  async runFullCycle({ orgId, userId, scope = 'project', project = null, region = null, trigger = 'manual' } = {}) {
+  async runFullCycle({ orgId, userId, scope = 'project', project = null, region = null, trigger = 'manual', enabledCognitiveTools = null } = {}) {
     if (!orgId) {
       const err = new Error('runFullCycle requires orgId');
       err.code = 'MISSING_ORG_ID';
@@ -936,7 +937,7 @@ export class ResidentRunManager {
       };
 
       // ── 3. Turing (chained off Feynman) ────────────────────────────
-      const tRun = await this.runAgent('turing', { scope, project, region, dry_run: true, run_id: feFinal?.run_id }, ctx);
+      const tRun = await this.runAgent('turing', { scope, project, region, dry_run: true, run_id: feFinal?.run_id, enabled_cognitive_tools: enabledCognitiveTools }, ctx);
       const tFinal = await this._waitForCompletion(tRun.run_id, 120_000);
       summary.turing = {
         run_id: tFinal?.run_id,

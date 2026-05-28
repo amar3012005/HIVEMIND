@@ -38,10 +38,13 @@ export function getCognitiveToolRegistry({ prisma, memoryStore, logger = console
     tools,
     get(name) { return tools[name] || null; },
     list() { return Object.keys(tools); },
-    /** Run all tools' assess() and return list of applicable proposals. */
-    async assessAll({ verifications, orgId }) {
+    /** Run enabled tools' assess() and return list of applicable proposals.
+     *  enabledTools = null/undefined → run all. Otherwise only matching names. */
+    async assessAll({ verifications, orgId, enabledTools = null }) {
       const out = [];
+      const filter = Array.isArray(enabledTools) ? new Set(enabledTools) : null;
       for (const tool of Object.values(tools)) {
+        if (filter && !filter.has(tool.name)) continue;
         try {
           const r = await tool.assess({ verifications, orgId });
           if (r?.applicable) {

@@ -10,14 +10,26 @@
  */
 
 export class ResidentAgentScheduler {
-  constructor({ runManager, prisma = null, intervalMs = 30 * 60 * 1000, logger = console } = {}) {
+  constructor({ runManager, prisma = null, intervalMs = 60 * 60 * 1000, logger = console } = {}) {
     this.runManager = runManager;
     this.prisma = prisma;
+    // Default tick = 1h (synthesis cadence). Compression / bridge fire on
+    // multiples of 1h (4h / 12h) via tier flags in this._tickTier().
     this.intervalMs = intervalMs;
     this.logger = logger;
     this.timer = null;
     this.enabled = process.env.ENABLE_GOVERNANCE_SCHEDULER === 'true';
     this.tickInFlight = false;
+    this.tickCount = 0;
+  }
+
+  _tickTier() {
+    // Tier hint: every tick = synthesis; every 4 ticks = bridge; every 12
+    // ticks = compression. Returns enabled tool names for this tick.
+    const tools = ['canonical_synthesis'];
+    if (this.tickCount % 4 === 0) tools.push('bridge_synthesis');
+    if (this.tickCount % 12 === 0) tools.push('compression');
+    return tools;
   }
 
   start() {
@@ -54,13 +66,16 @@ export class ResidentAgentScheduler {
         this.logger?.log?.('[gov-scheduler] no active orgs — tick noop');
         return;
       }
-      this.logger?.log?.(`[gov-scheduler] tick: ${orgs.length} org(s)`);
+      this.tickCount += 1;
+      const enabledTools = this._tickTier();
+      this.logger?.log?.(`[gov-scheduler] tick ${this.tickCount}: ${orgs.length} org(s), tools=${enabledTools.join(',')}`);
       for (const o of orgs) {
         try {
           const res = await this.runManager.runFullCycle({
             orgId: o.id,
             scope: 'organization',
             trigger: 'scheduler',
+            enabledCognitiveTools: enabledTools,
           });
           if (res?.status === 'skipped_lock_busy') {
             this.logger?.log?.(`[gov-scheduler] org=${o.id.slice(0,8)} busy — skipped`);

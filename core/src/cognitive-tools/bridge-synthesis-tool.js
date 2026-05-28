@@ -1,7 +1,8 @@
 import { CognitiveTool, clusterHash, isRestatement, capConfidence } from './base-tool.js';
 
 const CONFIDENCE_FLOOR = Number(process.env.BRIDGE_CONFIDENCE_FLOOR || 0.7);
-const COOLDOWN_HOURS   = Number(process.env.BRIDGE_COOLDOWN_HOURS   || 12);
+const COOLDOWN_HOURS   = Number(process.env.BRIDGE_COOLDOWN_HOURS   || 4);
+const WINDOW_HOURS     = Number(process.env.BRIDGE_WINDOW_HOURS     || 4);
 
 /**
  * Cross-cluster bridge synthesizer.
@@ -15,7 +16,13 @@ export class BridgeSynthesisTool extends CognitiveTool {
   get cognitiveRole() { return 'bridge'; }
 
   async assess({ verifications, orgId }) {
-    const liked = (verifications || []).filter((v) => v.content?.verdict === 'likely_true');
+    // Tier window filter: only verifications from last WINDOW_HOURS.
+    const sinceTs = Date.now() - WINDOW_HOURS * 60 * 60 * 1000;
+    const inWindow = (verifications || []).filter((v) => {
+      const ts = v?.timestamp ? new Date(v.timestamp).getTime() : Date.now();
+      return ts >= sinceTs;
+    });
+    const liked = inWindow.filter((v) => v.content?.verdict === 'likely_true');
     if (liked.length < 2) return { applicable: false, reason: 'fewer_than_2_likely_true' };
 
     const entitiesOf = (v) => {

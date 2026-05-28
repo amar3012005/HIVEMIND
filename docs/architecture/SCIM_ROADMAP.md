@@ -1,11 +1,15 @@
-# SCIM 2.0 Provisioning — Roadmap
+# SCIM 2.0 Provisioning — Status
 
-**Status**: deferred. Config storage works (AdminSso UI + `OrgSsoConfig`
-+ SCIM token gen/revoke). The actual SCIM endpoints that receive
-provisioning calls from Okta/Azure AD are not yet implemented.
+**Status**: MVP shipped (alpha — untested against real Okta/Azure sandbox).
+Bearer auth + Users + Groups CRUD live on the control plane.
+See `core/src/scim/scim-routes.js`.
 
-Real SCIM = 5-10 days of work. This document captures the surface so a
-future session can implement it without rediscovery.
+What's deferred:
+ - Okta/Azure sandbox integration testing
+ - Complex PATCH path expressions (e.g. `emails[type eq "work"].value`)
+ - Bulk endpoint (RFC 7644 §3.7)
+ - Enterprise extensions (manager, department)
+ - SCIM filter ops beyond `eq` (`co`, `sw`, `pr`, `gt`, etc.)
 
 ## What works today
 

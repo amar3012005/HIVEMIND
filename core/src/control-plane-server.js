@@ -3501,33 +3501,21 @@ const server = http.createServer(async (req, res) => {
     };
   }
 
-  // SCIM 2.0 stub. Real impl deferred — see docs/architecture/SCIM_ROADMAP.md.
-  // Returning a documented stub on ServiceProviderConfig prevents IdP
-  // discovery 404s while keeping the surface explicit.
-  if (pathname === '/scim/v2/ServiceProviderConfig' && req.method === 'GET') {
-    return jsonResponse(res, {
-      schemas: ['urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig'],
-      implementation_status: 'stub',
-      implementation_eta_days: 5,
-      documentationUri: 'https://github.com/amar3012005/HIVEMIND/blob/main/docs/architecture/SCIM_ROADMAP.md',
-      patch: { supported: false },
-      bulk:  { supported: false, maxOperations: 0, maxPayloadSize: 0 },
-      filter:{ supported: false, maxResults: 0 },
-      changePassword: { supported: false },
-      sort:  { supported: false },
-      etag:  { supported: false },
-      authenticationSchemes: [{
-        type: 'oauthbearertoken', name: 'Bearer Token', description: 'Per-org SCIM token generated via AdminSso UI', primary: true,
-      }],
-    });
-  }
-  // Any other /scim/v2/* — explicit 501 with hint.
-  if (pathname.startsWith('/scim/v2/') && pathname !== '/scim/v2/ServiceProviderConfig') {
-    return jsonResponse(res, {
-      error: 'scim_not_implemented',
-      message: 'SCIM provisioning endpoints are not yet implemented. Use AdminSso UI for SSO config; bulk provisioning roadmap in docs/architecture/SCIM_ROADMAP.md.',
-      stub: true,
-    }, 501);
+  // SCIM 2.0 — Users + Groups CRUD. Bearer token verified per-request
+  // against OrgSsoConfig.scimTokenHash. See core/src/scim/scim-routes.js.
+  if (pathname.startsWith('/scim/v2/')) {
+    const { handleScimRequest } = await import('./scim/scim-routes.js');
+    try {
+      return await handleScimRequest({ prisma, req, res, pathname, url });
+    } catch (err) {
+      console.error('[scim] handler crashed:', err);
+      res.writeHead(500, { 'Content-Type': 'application/scim+json' });
+      res.end(JSON.stringify({
+        schemas: ['urn:ietf:params:scim:api:messages:2.0:Error'],
+        status: '500', detail: err.message || 'Internal SCIM error',
+      }));
+      return;
+    }
   }
 
   // GET /v1/teams — list teams current user belongs to in current org

@@ -314,11 +314,11 @@ Reply in STRICT JSON ONLY (no preamble, no code fence):
   "react": true | false,
   "agreement": "agree" | "extend" | "challenge",
   "confidence": 0.0 - 1.0,
-  "line": "..."   // 1-3 sentences with substance, Slack tone
+  "line": "..."   // ONE sentence, max ~25 words, Slack tone
 }
 
 Hard rules:
-- 1-3 sentences max. Conversational, 'we / our' voice, no headers, no bullets.
+- ONE sentence, ~25 words max. Conversational, 'we / our' voice, no headers, no bullets.
 - The line must be a CONCRETE point, fact, risk, or counter — NOT a suggestion to do
   something later. BANNED: "let's recall", "we should consider", "let's clarify",
   "let's also look at", "we need to check". If all you have is a process suggestion,
@@ -514,12 +514,17 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             )
         else:
             grounding = (
-                "GROUNDING — recall found nothing on file for this topic.\n"
-                "- Say that plainly in ONE sentence ('We have nothing on file about X yet'), "
-                "then give your best direct, concrete take.\n"
-                "- Do NOT narrate what you 'would' recall or traverse. No future-tense planning.\n"
-                "- You MAY call hivemind_recall ONCE silently if you believe context exists under "
-                "different words — but if it returns nothing, answer directly. Never invent facts.\n"
+                "GROUNDING — pre-fetch found no obvious match. DO NOT bail with 'nothing on file' yet.\n"
+                "- FIRST, silently call hivemind_recall 2-3 times with DIFFERENT queries before answering:\n"
+                "    • the user's exact phrasing\n"
+                "    • likely entity names (people, projects, places, companies in the question)\n"
+                "    • a broader related topic (e.g. 'Amsterdam audit firms' → try 'audit', 'Amsterdam', 'finance team')\n"
+                "- If ANY recall hits, answer from those memories and quote titles inline: '<claim> — from \"<title>\"'.\n"
+                "- If you find a related entity, call hivemind_traverse_graph on its memory_id to pull neighbours.\n"
+                "- For time-anchored questions ('what did we decide last week'), try hivemind_at.\n"
+                "- ONLY if all silent tool calls return empty: say 'nothing on file about X yet' in ONE sentence, "
+                "then give a concrete take in 2-3 more sentences. Never invent facts.\n"
+                "- NEVER narrate the search ('let me check', 'we should recall', 'I'll look') — just call the tools.\n"
             )
         lead_prompt = (
             f"[CSI swarm — you are an EMPLOYEE at the HIVEMIND organisation. "
@@ -532,8 +537,8 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             f"- Reference colleagues + projects by name when they appear in the memory context above.\n\n"
             + grounding
             + f"\nWRITE LIKE A CHAT MESSAGE:\n"
-            f"- As long as needed to cover the question completely — no artificial brevity.\n"
-            f"- Use a numbered list or sub-bullets when reasoning has steps; otherwise prose.\n"
+            f"- 3-4 short sentences, or a brief numbered list (max 5 items) if reasoning has steps.\n"
+            f"- Human Slack tone — tight, no filler, no formal opener.\n"
             f"- First person plural ('we / our'), conversational, no formal opener.\n"
             f"- Substance + a real answer in sentence one. No 'Next steps:' boilerplate, "
             f"no 'How would you like to proceed?' closer.\n\n"
@@ -682,7 +687,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 f"  • If 'we should traverse the graph' → call hivemind_traverse_graph on the right seed memory.\n"
                 f"  • If 'what's the next step' → propose 2-3 concrete next steps with names + dates from memory.\n"
                 f"  • If a reactor disagreed → defend with evidence or concede explicitly.\n\n"
-                f"OUTPUT: as long as needed for completeness — no artificial brevity. Chat tone, 'we / our'.\n"
+                f"OUTPUT: 3-6 short sentences total. Chat tone, 'we / our'.\n"
                 f"Lead with the new fact / action / answer the reactors were asking for. Use a numbered list\n"
                 f"when proposing multiple steps. Quote memory titles inline. No 'happy to help' fluff."
             )

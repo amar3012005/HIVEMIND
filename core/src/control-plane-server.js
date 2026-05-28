@@ -630,7 +630,13 @@ async function upsertUserFromZitadel(userInfo) {
   }
 
   if (existing) {
-    return prisma.user.update({
+    // SCIM-binding hook: a User row created via SCIM has a synthetic
+    // zitadelUserId like 'scim:<orgId>:<email>'. When that user later
+    // signs in via SSO, we replace the placeholder with the real Zitadel
+    // sub and audit the crossover so admins can see "this account was
+    // pre-provisioned by SCIM and just bound to a real IdP login."
+    const wasScimSeed = typeof existing.zitadelUserId === 'string' && existing.zitadelUserId.startsWith('scim:');
+    const updated = await prisma.user.update({
       where: { id: existing.id },
       data: {
         zitadelUserId: userInfo.sub,
@@ -641,6 +647,22 @@ async function upsertUserFromZitadel(userInfo) {
         lastActiveAt: new Date()
       }
     });
+    if (wasScimSeed) {
+      try {
+        const auditLoggerInst = await _getAuditLogger();
+        auditLoggerInst?.log({
+          userId: updated.id,
+          eventType: 'sso.scim_binding_completed',
+          eventCategory: 'provisioning',
+          action: 'update',
+          resourceType: 'user',
+          oldValue: { zitadelUserId: existing.zitadelUserId },
+          newValue: { zitadelUserId: userInfo.sub },
+          metadata: { source: 'sso_login', via_email_fallback: true },
+        }).catch(() => {});
+      } catch { /* audit best-effort */ }
+    }
+    return updated;
   }
 
   return prisma.user.create({

@@ -31,6 +31,8 @@
  */
 
 import crypto from 'node:crypto';
+import { scimFilterToPrisma } from './scim-filter.js';
+import { applyScimPatch } from './scim-patch.js';
 
 // ────────────────────────────────────────────────────────────────────────────
 // Token auth
@@ -109,23 +111,7 @@ function teamToScim(team, memberRows) {
   };
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Filter parser (minimal subset)
-// ────────────────────────────────────────────────────────────────────────────
-//   userName eq "alice@x.com"
-//   displayName eq "Alice"
-//   externalId eq "..."  (treated as id)
-function parseFilter(filter) {
-  if (!filter) return null;
-  const m = String(filter).match(/^(\w+)\s+eq\s+"([^"]+)"$/i);
-  if (!m) return null;
-  const [, field, value] = m;
-  const lower = field.toLowerCase();
-  if (lower === 'username' || lower === 'emails.value') return { email: value };
-  if (lower === 'displayname') return { displayName: value };
-  if (lower === 'externalid' || lower === 'id') return { id: value };
-  return null;
-}
+// Filter parsing now lives in scim-filter.js (RFC 7644 §3.4.2 subset).
 
 // ────────────────────────────────────────────────────────────────────────────
 // Body reader (limited; mirrors control-plane parseBody but tolerant of
@@ -177,7 +163,7 @@ const SERVICE_PROVIDER_CONFIG = {
   schemas: ['urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig'],
   documentationUri: 'https://github.com/amar3012005/HIVEMIND/blob/main/docs/architecture/SCIM_ROADMAP.md',
   patch: { supported: true },
-  bulk: { supported: false, maxOperations: 0, maxPayloadSize: 0 },
+  bulk: { supported: true, maxOperations: 100, maxPayloadSize: 5242880 },
   filter: { supported: true, maxResults: 200 },
   changePassword: { supported: false },
   sort: { supported: false },
@@ -227,15 +213,18 @@ export async function handleScimRequest({ prisma, req, res, pathname, url }) {
   const userDetailMatch = pathname.match(/^\/scim\/v2\/Users\/([0-9a-f-]{36})$/);
 
   if (usersCollection && req.method === 'GET') {
-    const filter = parseFilter(url.searchParams.get('filter'));
     const startIndex = Math.max(1, parseInt(url.searchParams.get('startIndex') || '1', 10) | 0);
     const count = Math.min(200, Math.max(0, parseInt(url.searchParams.get('count') || '100', 10) | 0));
+    const filterRaw = url.searchParams.get('filter');
+    const { where: filterWhere, error: filterErr } = scimFilterToPrisma(filterRaw, 'user');
+    if (filterErr) return scimError(res, 400, `Invalid filter: ${filterRaw}`, 'invalidFilter');
+    // Active flag handled via UserOrganization.isActive separately.
+    const wantActive = filterWhere?._uoActive;
+    if (filterWhere && '_uoActive' in filterWhere) delete filterWhere._uoActive;
     const where = {
-      organizations: { some: { orgId, isActive: true } },
+      organizations: { some: { orgId, ...(typeof wantActive === 'boolean' ? { isActive: wantActive } : { isActive: true }) } },
       deletedAt: null,
-      ...(filter?.email ? { email: filter.email } : {}),
-      ...(filter?.displayName ? { displayName: filter.displayName } : {}),
-      ...(filter?.id ? { id: filter.id } : {}),
+      ...(filterWhere || {}),
     };
     const [total, users] = await Promise.all([
       prisma.user.count({ where }),
@@ -295,24 +284,32 @@ export async function handleScimRequest({ prisma, req, res, pathname, url }) {
     const userId = userDetailMatch[1];
     const user = await prisma.user.findFirst({
       where: { id: userId, organizations: { some: { orgId } } },
+      include: { organizations: { where: { orgId }, take: 1 } },
     });
     if (!user) return scimError(res, 404, 'User not found');
     let body;
     try { body = await readScimBody(req); } catch (e) { return scimError(res, 400, `Invalid JSON: ${e.message}`); }
-    // PATCH with Operations[] (RFC 7644 §3.5.2) — handle simple replace ops.
-    let active = body.active;
-    let displayName = body.displayName;
-    if (Array.isArray(body.Operations)) {
-      for (const op of body.Operations) {
-        const path = (op.path || '').toLowerCase();
-        if (op.op?.toLowerCase() === 'replace') {
-          if (path === 'active' || (!path && typeof op.value?.active === 'boolean')) active = op.value?.active ?? op.value;
-          if (path === 'displayname' || (!path && op.value?.displayName)) displayName = op.value?.displayName || op.value;
-        }
-      }
+
+    // For PATCH apply RFC 7644 §3.5.2 ops via scim-patch.js; for PUT the
+    // body IS the full resource.
+    let merged;
+    if (req.method === 'PATCH' && Array.isArray(body.Operations)) {
+      const scimUser = userToScim(user, user.organizations[0]);
+      merged = applyScimPatch(scimUser, body.Operations);
+    } else {
+      merged = body;
     }
-    if (typeof displayName === 'string' && displayName !== user.displayName) {
-      await prisma.user.update({ where: { id: userId }, data: { displayName } });
+
+    // Extract effective values from merged SCIM resource.
+    const displayName = merged.displayName || merged.name?.formatted || user.displayName;
+    const newEmail = merged.userName || merged.emails?.find?.((e) => e.primary)?.value || merged.emails?.[0]?.value || user.email;
+    const active = typeof merged.active === 'boolean' ? merged.active : undefined;
+
+    const userPatch = {};
+    if (displayName !== user.displayName) userPatch.displayName = displayName;
+    if (newEmail && newEmail !== user.email) userPatch.email = newEmail.toLowerCase();
+    if (Object.keys(userPatch).length) {
+      await prisma.user.update({ where: { id: userId }, data: userPatch });
     }
     if (typeof active === 'boolean') {
       await prisma.userOrganization.update({
@@ -344,14 +341,12 @@ export async function handleScimRequest({ prisma, req, res, pathname, url }) {
   const groupDetailMatch = pathname.match(/^\/scim\/v2\/Groups\/([0-9a-f-]{36})$/);
 
   if (groupsCollection && req.method === 'GET') {
-    const filter = parseFilter(url.searchParams.get('filter'));
     const startIndex = Math.max(1, parseInt(url.searchParams.get('startIndex') || '1', 10) | 0);
     const count = Math.min(200, Math.max(0, parseInt(url.searchParams.get('count') || '100', 10) | 0));
-    const where = {
-      orgId,
-      ...(filter?.displayName ? { name: filter.displayName } : {}),
-      ...(filter?.id ? { id: filter.id } : {}),
-    };
+    const filterRaw = url.searchParams.get('filter');
+    const { where: gw, error: gErr } = scimFilterToPrisma(filterRaw, 'group');
+    if (gErr) return scimError(res, 400, `Invalid filter: ${filterRaw}`, 'invalidFilter');
+    const where = { orgId, ...(gw || {}) };
     const [total, teams] = await Promise.all([
       prisma.team.count({ where }),
       prisma.team.findMany({
@@ -448,6 +443,113 @@ export async function handleScimRequest({ prisma, req, res, pathname, url }) {
     res.writeHead(204); res.end(); return;
   }
 
+  // ── Bulk (RFC 7644 §3.7) ──────────────────────────────────────────────
+  if (pathname === '/scim/v2/Bulk' && req.method === 'POST') {
+    let body;
+    try { body = await readScimBody(req, 5 * 1024 * 1024); }
+    catch (e) {
+      if (e.code === 'PAYLOAD_TOO_LARGE') return scimError(res, 413, 'payload too large');
+      return scimError(res, 400, `Invalid JSON: ${e.message}`);
+    }
+    const ops = Array.isArray(body.Operations) ? body.Operations : [];
+    if (ops.length === 0) return scimError(res, 400, 'Operations[] required', 'invalidValue');
+    if (ops.length > 100) return scimError(res, 413, 'too many operations (max 100)', 'tooMany');
+
+    const failOnErrors = Number(body.failOnErrors || 0);
+    const results = [];
+    let errCount = 0;
+
+    // Sequential apply — each op re-enters the SCIM dispatcher with a
+    // synthetic request so semantics match standalone calls.
+    for (let i = 0; i < ops.length; i += 1) {
+      const op = ops[i];
+      const bulkId = op.bulkId || `op-${i}`;
+      const method = String(op.method || '').toUpperCase();
+      const opPath = String(op.path || '');
+      const data = op.data || {};
+      try {
+        const result = await dispatchBulkSubOp({ prisma, orgId, method, path: opPath, data });
+        results.push({ method, bulkId, location: result.location || null, status: String(result.status) });
+        if (result.status >= 400) errCount += 1;
+      } catch (e) {
+        results.push({ method, bulkId, status: '500', response: { schemas: ['urn:ietf:params:scim:api:messages:2.0:Error'], detail: e.message } });
+        errCount += 1;
+      }
+      if (failOnErrors > 0 && errCount >= failOnErrors) break;
+    }
+
+    return scimReply(res, 200, {
+      schemas: ['urn:ietf:params:scim:api:messages:2.0:BulkResponse'],
+      Operations: results,
+    });
+  }
+
   // Unknown SCIM path.
   return scimError(res, 404, `SCIM resource not found: ${pathname}`);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Bulk sub-op dispatcher — replays Users/Groups create/update/delete against
+// Prisma directly. Keeps logic close to the main handler so the same
+// resource model is used.
+// ────────────────────────────────────────────────────────────────────────────
+async function dispatchBulkSubOp({ prisma, orgId, method, path, data }) {
+  // Only Users + Groups paths supported in bulk.
+  if (method === 'POST' && path === '/Users') {
+    const email = (data.userName || data.emails?.[0]?.value || '').toLowerCase();
+    if (!email) return { status: 400 };
+    const displayName = data.displayName || data.name?.formatted || email;
+    const user = await prisma.user.upsert({
+      where: { email },
+      update: { displayName },
+      create: { email, displayName, zitadelUserId: `scim:${orgId}:${email}` },
+    });
+    await prisma.userOrganization.upsert({
+      where: { userId_orgId: { userId: user.id, orgId } },
+      update: { isActive: data.active !== false, role: 'member', roles: ['member'] },
+      create: { userId: user.id, orgId, role: 'member', roles: ['member'], isActive: data.active !== false, invitedAt: new Date(), joinedAt: new Date() },
+    });
+    return { status: 201, location: `/scim/v2/Users/${user.id}` };
+  }
+
+  if (method === 'POST' && path === '/Groups') {
+    if (!data.displayName) return { status: 400 };
+    const slug = data.displayName.trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').slice(0, 80);
+    const team = await prisma.team.create({
+      data: { orgId, name: data.displayName, slug: `${slug}-${crypto.randomBytes(3).toString('hex')}` },
+    });
+    if (Array.isArray(data.members)) {
+      for (const m of data.members) {
+        if (!m.value) continue;
+        await prisma.teamMember.upsert({
+          where: { teamId_userId: { teamId: team.id, userId: m.value } },
+          update: {},
+          create: { teamId: team.id, userId: m.value, role: 'member' },
+        }).catch(() => null);
+      }
+    }
+    return { status: 201, location: `/scim/v2/Groups/${team.id}` };
+  }
+
+  const usersDetail = path.match(/^\/Users\/([0-9a-f-]{36})$/);
+  if (usersDetail && method === 'DELETE') {
+    const userId = usersDetail[1];
+    const updated = await prisma.userOrganization.updateMany({
+      where: { userId, orgId },
+      data: { isActive: false, deactivatedAt: new Date() },
+    });
+    return { status: updated.count > 0 ? 204 : 404 };
+  }
+
+  const groupsDetail = path.match(/^\/Groups\/([0-9a-f-]{36})$/);
+  if (groupsDetail && method === 'DELETE') {
+    const teamId = groupsDetail[1];
+    const team = await prisma.team.findFirst({ where: { id: teamId, orgId } });
+    if (!team) return { status: 404 };
+    await prisma.teamMember.deleteMany({ where: { teamId } });
+    await prisma.team.delete({ where: { id: teamId } });
+    return { status: 204 };
+  }
+
+  return { status: 400 };
 }

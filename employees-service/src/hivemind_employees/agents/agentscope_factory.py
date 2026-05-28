@@ -55,8 +55,23 @@ def _resolve_openai_compatible_target(
 
     groq_key = llm_api_key or os.environ.get("GROQ_API_KEY") or os.environ.get("LLM_API_KEY", "")
     groq_model = model
+    # Groq-hosted Llama-3.x models emit Llama-tag <function=NAME{...}> format
+    # under strict-mode tool validation → tool_use_failed (400). Force a
+    # tool-call-reliable model (openai/gpt-oss-20b by default, overridable
+    # via GROQ_INFERENCE_MODEL). Applies whenever we fall back to Groq AND
+    # the requested model is a known-broken Llama family.
+    env_default = os.environ.get("GROQ_INFERENCE_MODEL", "")
+    # If the env-provided default is itself a Llama-3 (known broken for
+    # OpenAI tool_calls under Groq strict validation), drop it.
+    if not env_default or "llama-3" in env_default.lower() or "llama3" in env_default.lower():
+        fallback_default = "openai/gpt-oss-20b"
+    else:
+        fallback_default = env_default
     if provider != "groq" or "/" in model:
-        groq_model = os.environ.get("GROQ_INFERENCE_MODEL") or "llama-3.3-70b-versatile"
+        groq_model = fallback_default
+    elif "llama-3" in model.lower() or "llama3" in model.lower():
+        log.info("Swapping Groq tool-unreliable model %s -> %s", model, fallback_default)
+        groq_model = fallback_default
     base_url = os.environ.get("GROQ_BASE_URL", GROQ_BASE)
     return groq_model, groq_key, base_url
 
@@ -117,7 +132,12 @@ def _resolve_formatter(provider: str) -> FormatterBase:
     return OpenAIMultiAgentFormatter()
 
 
-def build_react_agent(employee_row: dict, hivemind_api_key: str) -> ReActAgent:
+def build_react_agent(
+    employee_row: dict,
+    hivemind_api_key: str,
+    user_id: Optional[str] = None,
+    org_id: Optional[str] = None,
+) -> ReActAgent:
     """Construct an AgentScope ReActAgent for one DigitalEmployee.
 
     employee_row required keys:
@@ -157,7 +177,12 @@ def build_react_agent(employee_row: dict, hivemind_api_key: str) -> ReActAgent:
         enabled_tools = []
         log.info("HYPER_DISABLE_GROQ_TOOLS set; tools disabled for employee=%s", name)
     else:
-        toolkit = build_hivemind_toolkit(api_key=hivemind_api_key, enabled_tool_names=enabled_tools)
+        toolkit = build_hivemind_toolkit(
+            api_key=hivemind_api_key,
+            enabled_tool_names=enabled_tools,
+            user_id=user_id,
+            org_id=org_id,
+        )
 
     model = _resolve_model(employee_row)
     formatter = _resolve_formatter(provider)

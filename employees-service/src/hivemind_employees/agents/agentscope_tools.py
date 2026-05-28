@@ -33,21 +33,56 @@ def _tool_response(payload: object) -> ToolResponse:
     )
 
 
-def _client(api_key: str) -> httpx.Client:
+def _client(
+    api_key: str,
+    user_id: Optional[str] = None,
+    org_id: Optional[str] = None,
+) -> httpx.Client:
+    """Build an authenticated HIVEMIND client.
+
+    Preferred path: per-employee scoped api_key (Bearer).
+    Fallback (when employee row has no minted key): master key + emulation
+    headers (X-HM-User-Id / X-HM-Org-Id) so tools still execute as the
+    room owner. Empty-Bearer requests trip httpx 'Illegal header value'.
+    """
+    effective_key = api_key
+    extra_headers: dict[str, str] = {}
+    if not effective_key:
+        master = (
+            os.environ.get("HIVEMIND_MASTER_API_KEY")
+            or os.environ.get("API_MASTER_KEY")
+            or ""
+        )
+        if master:
+            effective_key = master
+            if user_id:
+                extra_headers["X-HM-User-Id"] = user_id
+            if org_id:
+                extra_headers["X-HM-Org-Id"] = org_id
     base = os.environ.get("HIVEMIND_CORE_URL", "http://hm-core:3000")
+    headers = {
+        "Authorization": f"Bearer {effective_key}" if effective_key else "",
+        "X-API-Key": effective_key,
+        "Content-Type": "application/json",
+    }
+    # Strip empty-value headers — httpx rejects them at request time.
+    headers = {k: v for k, v in headers.items() if v}
+    headers.update(extra_headers)
     return httpx.Client(
         base_url=base,
         timeout=httpx.Timeout(HIVEMIND_TIMEOUT_S, connect=5.0),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "X-API-Key": api_key,
-            "Content-Type": "application/json",
-        },
+        headers=headers,
     )
 
 
-def _post_slack_action(api_key: str, action_type: str, payload: dict) -> dict:
-    with _client(api_key) as c:
+def _post_slack_action(
+    api_key: str,
+    action_type: str,
+    payload: dict,
+    user_id: Optional[str] = None,
+    org_id: Optional[str] = None,
+) -> dict:
+    with _client(api_key, user_id, org_id) as c:
         r = c.post(
             "/api/employees/slack-action",
             json={"action_type": action_type, "payload": payload},
@@ -56,7 +91,12 @@ def _post_slack_action(api_key: str, action_type: str, payload: dict) -> dict:
         return r.json()
 
 
-def build_hivemind_toolkit(api_key: str, enabled_tool_names: List[str]) -> Toolkit:
+def build_hivemind_toolkit(
+    api_key: str,
+    enabled_tool_names: List[str],
+    user_id: Optional[str] = None,
+    org_id: Optional[str] = None,
+) -> Toolkit:
     """Return an AgentScope Toolkit populated with HIVEMIND tools.
 
     enabled_tool_names mirrors the schema used by `tools.py`:
@@ -74,7 +114,7 @@ def build_hivemind_toolkit(api_key: str, enabled_tool_names: List[str]) -> Toolk
                 text: Message body.
                 thread_ts: Optional thread timestamp to reply in-thread.
             """
-            res = _post_slack_action(api_key, "slack_post", {
+            res = _post_slack_action(api_key,"slack_post", {
                 "channel": channel, "text": text, "thread_ts": thread_ts,
             })
             return _tool_response(res)
@@ -89,7 +129,7 @@ def build_hivemind_toolkit(api_key: str, enabled_tool_names: List[str]) -> Toolk
                 ts: Message timestamp to react to.
                 emoji: Emoji name without colons (e.g. "thumbsup").
             """
-            res = _post_slack_action(api_key, "slack_react", {
+            res = _post_slack_action(api_key,"slack_react", {
                 "channel": channel, "ts": ts, "emoji": emoji,
             })
             return _tool_response(res)
@@ -103,7 +143,7 @@ def build_hivemind_toolkit(api_key: str, enabled_tool_names: List[str]) -> Toolk
                 query: Search query string.
                 count: Max results (default 10).
             """
-            res = _post_slack_action(api_key, "slack_search", {
+            res = _post_slack_action(api_key,"slack_search", {
                 "query": query, "count": count,
             })
             return _tool_response(res)
@@ -118,7 +158,7 @@ def build_hivemind_toolkit(api_key: str, enabled_tool_names: List[str]) -> Toolk
                 limit: Max messages (default 50).
                 since: Optional ISO-8601 timestamp lower bound.
             """
-            res = _post_slack_action(api_key, "slack_history", {
+            res = _post_slack_action(api_key,"slack_history", {
                 "channel": channel, "limit": limit, "since": since,
             })
             return _tool_response(res)
@@ -140,7 +180,7 @@ def build_hivemind_toolkit(api_key: str, enabled_tool_names: List[str]) -> Toolk
                 query: What to search for.
                 max_memories: Max memories to return (default 5).
             """
-            with _client(api_key) as c:
+            with _client(api_key, user_id, org_id) as c:
                 r = c.post("/api/recall", json={
                     "query_context": query, "max_memories": max_memories,
                 })
@@ -158,7 +198,7 @@ def build_hivemind_toolkit(api_key: str, enabled_tool_names: List[str]) -> Toolk
                 tags: Comma-separated tags (e.g. "decision,pricing,q1").
             """
             tag_list = [t.strip() for t in (tags or "").split(",") if t.strip()]
-            with _client(api_key) as c:
+            with _client(api_key, user_id, org_id) as c:
                 r = c.post("/api/memories", json={
                     "title": title, "content": content, "tags": tag_list, "sync": True,
                 })
@@ -180,7 +220,7 @@ def build_hivemind_toolkit(api_key: str, enabled_tool_names: List[str]) -> Toolk
             params: dict = {"limit": min(max(limit, 1), 100)}
             if tags: params["tags"] = tags
             if memory_type: params["memory_type"] = memory_type
-            with _client(api_key) as c:
+            with _client(api_key, user_id, org_id) as c:
                 r = c.get("/api/memories", params=params)
                 r.raise_for_status()
                 return _tool_response(r.json())
@@ -189,7 +229,7 @@ def build_hivemind_toolkit(api_key: str, enabled_tool_names: List[str]) -> Toolk
     if "hivemind_get_memory" in enabled_tool_names:
         def get_memory(memory_id: str) -> ToolResponse:
             """Fetch one memory's full content + metadata by id."""
-            with _client(api_key) as c:
+            with _client(api_key, user_id, org_id) as c:
                 r = c.get(f"/api/memories/{memory_id}")
                 r.raise_for_status()
                 return _tool_response(r.json())
@@ -204,7 +244,7 @@ def build_hivemind_toolkit(api_key: str, enabled_tool_names: List[str]) -> Toolk
                 depth: 1-3 hops.
                 relationship: 'all'|'Updates'|'Extends'|'Derives'|'Contradicts'|'PartOf'|'Mentions'.
             """
-            with _client(api_key) as c:
+            with _client(api_key, user_id, org_id) as c:
                 r = c.post("/api/memories/traverse", json={
                     "memory_id": memory_id,
                     "depth": min(max(depth, 1), 3),
@@ -221,7 +261,7 @@ def build_hivemind_toolkit(api_key: str, enabled_tool_names: List[str]) -> Toolk
             Use for complex multi-hop questions. Cheaper to use hivemind_recall
             for narrow lookups.
             """
-            with _client(api_key) as c:
+            with _client(api_key, user_id, org_id) as c:
                 r = c.post("/api/query", json={
                     "question": question, "context_limit": context_limit,
                 })
@@ -232,7 +272,7 @@ def build_hivemind_toolkit(api_key: str, enabled_tool_names: List[str]) -> Toolk
     if "hivemind_recall_bugs" in enabled_tool_names:
         def recall_bugs(context: str, limit: int = 5) -> ToolResponse:
             """Recall past bugs / gotchas matching the context."""
-            with _client(api_key) as c:
+            with _client(api_key, user_id, org_id) as c:
                 r = c.post("/api/recall_bugs", json={"context": context, "limit": limit})
                 r.raise_for_status()
                 return _tool_response(r.json())
@@ -243,7 +283,7 @@ def build_hivemind_toolkit(api_key: str, enabled_tool_names: List[str]) -> Toolk
             """Explain why a piece of code/decision exists (links to past decisions)."""
             body: dict = {"query": query}
             if file_path: body["file_path"] = file_path
-            with _client(api_key) as c:
+            with _client(api_key, user_id, org_id) as c:
                 r = c.post("/api/why_code", json=body)
                 r.raise_for_status()
                 return _tool_response(r.json())
@@ -253,7 +293,7 @@ def build_hivemind_toolkit(api_key: str, enabled_tool_names: List[str]) -> Toolk
         def hivemind_at(transaction_time: Optional[str] = None, valid_time: Optional[str] = None, memory_query: Optional[str] = None) -> ToolResponse:
             """Time-travel — return memory state as it was known/true at a timestamp."""
             body = {k: v for k, v in {"transaction_time": transaction_time, "valid_time": valid_time, "memory_query": memory_query}.items() if v}
-            with _client(api_key) as c:
+            with _client(api_key, user_id, org_id) as c:
                 r = c.post("/api/time/at", json=body)
                 r.raise_for_status()
                 return _tool_response(r.json())
@@ -262,7 +302,7 @@ def build_hivemind_toolkit(api_key: str, enabled_tool_names: List[str]) -> Toolk
     if "hivemind_list_projects" in enabled_tool_names:
         def list_projects() -> ToolResponse:
             """List projects (sub-HIVEMINDs) accessible to the caller's org."""
-            with _client(api_key) as c:
+            with _client(api_key, user_id, org_id) as c:
                 r = c.get("/api/projects")
                 r.raise_for_status()
                 return _tool_response(r.json())
@@ -280,7 +320,7 @@ def build_hivemind_toolkit(api_key: str, enabled_tool_names: List[str]) -> Toolk
                 limit: Max results (default 5, max 10).
             """
             import time
-            with _client(api_key) as c:
+            with _client(api_key, user_id, org_id) as c:
                 r = c.post("/api/web/search/jobs", json={"query": query, "limit": min(max(limit, 1), 10)})
                 r.raise_for_status()
                 job_id = r.json().get("job_id")
@@ -307,7 +347,7 @@ def build_hivemind_toolkit(api_key: str, enabled_tool_names: List[str]) -> Toolk
                 model: 'mini' (fast, narrow) | 'pro' (deep, multi-subtopic) | 'auto'.
             """
             import time
-            with _client(api_key) as c:
+            with _client(api_key, user_id, org_id) as c:
                 r = c.post("/api/web/research/jobs", json={"input": input, "model": model})
                 r.raise_for_status()
                 job_id = r.json().get("job_id")

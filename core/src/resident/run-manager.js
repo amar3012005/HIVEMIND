@@ -68,11 +68,12 @@ function buildAgentDescriptor(agentId) {
 }
 
 export class ResidentRunManager {
-  constructor({ executorStore, memoryStore, store, graphStore, reputationEngine, chainMiner, logger = console } = {}) {
+  constructor({ executorStore, memoryStore, store, graphStore, reputationEngine, chainMiner, prisma = null, logger = console } = {}) {
     this.executorStore = executorStore || store || null;
     this.memoryStore = memoryStore || graphStore || null;
     this.reputationEngine = reputationEngine || null;
     this.chainMiner = chainMiner || null;
+    this.prisma = prisma;
     this.logger = logger;
     this.runs = new Map();
     this.agentDescriptors = RESIDENT_AGENT_IDS.map(buildAgentDescriptor);
@@ -192,6 +193,7 @@ export class ResidentRunManager {
       goal: run.goal,
       dryRun: run.dry_run,
       runId: run.run_id,
+      cursorAfter: run.cursor_after || null,
       onProgress: async (progress) => {
         run.current_step = progress.current_step;
         run.progress = progress;
@@ -330,6 +332,8 @@ export class ResidentRunManager {
 
     const result = await this.turing.run({
       agentId: run.agent_id,
+      orgId: context.orgId,
+      userId: context.userId,
       scope: run.scope,
       project: run.project,
       region: run.region,
@@ -339,6 +343,7 @@ export class ResidentRunManager {
       feynmanRun: source.run,
       feynmanTrail: source.trail,
       hypotheses: source.hypotheses,
+      enabledCognitiveTools: payload.enabled_cognitive_tools || null,
       onProgress: async (progress) => {
         run.current_step = progress.current_step;
         run.progress = progress;
@@ -527,6 +532,7 @@ export class ResidentRunManager {
         reason: action.reason || null,
         status: 'pending',                   // pending | approved | rejected
         created_at: new Date().toISOString(),
+        content: action.content || null,    // carries cluster_hash, topic, etc
       });
     };
 
@@ -757,12 +763,474 @@ export class ResidentRunManager {
       observations_count: 0,
       observations: [],
       progress: { step: 0, total_steps: 4, percent: 0 },
+      cursor_after: payload.cursor_after || null,
       result: null,
       error: null,
       cancel_requested: false,
       user_id: context.userId || null,
       org_id: context.orgId || null,
     };
+  }
+
+  /**
+   * Run a full governance cycle: Faraday → Feynman → Turing.
+   *
+   * Phase 1 semantics: ALWAYS dry_run / propose-only. All candidate actions
+   * persisted to governance_action_log with status='proposed'. No memory
+   * mutation occurs. Real mutation lands in Phase 2 (approve-then-apply).
+   *
+   * Concurrency: gated by Postgres advisory lock on (orgId, 'governance-cycle').
+   * Multiple hm-core instances cannot run a cycle for the same org in parallel.
+   *
+   * Returns { batch_id, status, faraday, feynman, turing, proposals_persisted }.
+   */
+  async runFullCycle({ orgId, userId, scope = 'project', project = null, region = null, trigger = 'manual', enabledCognitiveTools = null } = {}) {
+    if (!orgId) {
+      const err = new Error('runFullCycle requires orgId');
+      err.code = 'MISSING_ORG_ID';
+      throw err;
+    }
+    if (!this.prisma) {
+      this.logger?.warn?.('[gov-cycle] no prisma client — skipping persistence');
+    }
+
+    const batchId = randomUUID();
+    const cycleStartedAt = Date.now();
+    let lockAcquired = false;
+    const LOCK_HOLD_MS = 10 * 60 * 1000; // 10 min cycle ceiling
+
+    // Token-budget circuit breaker: reset day, check spend, refuse if exhausted.
+    if (this.prisma) {
+      try {
+        await this.prisma.$executeRawUnsafe(
+          `UPDATE hivemind.governance_agent_state
+             SET tokens_spent_today = 0,
+                 token_budget_reset_at = CURRENT_DATE
+           WHERE token_budget_reset_at < CURRENT_DATE`
+        );
+        const exhausted = await this.prisma.$queryRawUnsafe(
+          `SELECT agent_name, tokens_spent_today, daily_token_budget
+             FROM hivemind.governance_agent_state
+            WHERE agent_name IN ('faraday','feynman','turing')
+              AND tokens_spent_today >= daily_token_budget`
+        );
+        if (Array.isArray(exhausted) && exhausted.length > 0) {
+          this.logger?.warn?.(`[gov-cycle] token budget exhausted for: ${exhausted.map(e => e.agent_name).join(',')}`);
+          return {
+            batch_id: batchId,
+            status: 'skipped_budget_exhausted',
+            agents_over_budget: exhausted.map((e) => e.agent_name),
+          };
+        }
+      } catch (err) {
+        this.logger?.warn?.(`[gov-cycle] token-budget check failed: ${err.message}`);
+      }
+    }
+
+    // Row-level cycle lock. Single atomic INSERT ... ON CONFLICT DO UPDATE
+    // so we acquire on first-ever cycle AND steal an expired lock — without
+    // ever raising a UNIQUE constraint error. Returns rows-affected (1 = got
+    // the lock, 0 = another holder still active).
+    if (this.prisma) {
+      try {
+        const until = new Date(Date.now() + LOCK_HOLD_MS).toISOString();
+        const affected = await this.prisma.$executeRawUnsafe(
+          `INSERT INTO hivemind.governance_agent_state
+             (agent_name, circuit_breaker_until, updated_at)
+           VALUES ('governance-cycle', $1::timestamptz, now())
+           ON CONFLICT (agent_name) DO UPDATE
+             SET circuit_breaker_until = EXCLUDED.circuit_breaker_until,
+                 updated_at = now()
+             WHERE governance_agent_state.circuit_breaker_until IS NULL
+                OR governance_agent_state.circuit_breaker_until < now()`,
+          until
+        );
+        if (affected === 0) {
+          return { batch_id: batchId, status: 'skipped_lock_busy', reason: 'busy' };
+        }
+        lockAcquired = true;
+      } catch (err) {
+        this.logger?.warn?.(`[gov-cycle] row-lock acquire failed: ${err.message}`);
+      }
+    }
+
+    const ctx = { userId, orgId };
+    const summary = {
+      batch_id: batchId,
+      trigger,
+      org_id: orgId,
+      status: 'running',
+      faraday: null,
+      feynman: null,
+      turing: null,
+      proposals_persisted: 0,
+      started_at: new Date(cycleStartedAt).toISOString(),
+    };
+
+    try {
+      // ── 1. Faraday ─────────────────────────────────────────────────
+      // Sliding window: read cursor from governance_agent_state. Faraday
+      // scans memories older than cursor; new cursor saved after run.
+      let cursorAfter = null;
+      if (this.prisma) {
+        try {
+          const fState = await this.prisma.governanceAgentState.findUnique({
+            where: { agentName: 'faraday' },
+          });
+          // cursor_memory_id holds last scanned memory's id; we resume from
+          // the timestamp on subsequent runs. For Phase 3 minimal impl we
+          // skip the lookup join and just pass null (full scan) when no
+          // cursor; the cap inside loadOrgScopedMemories prevents runaway.
+          if (fState?.cursorMemoryId) {
+            const cursorMem = await this.prisma.memory.findUnique({
+              where: { id: fState.cursorMemoryId },
+              select: { updatedAt: true },
+            });
+            cursorAfter = cursorMem?.updatedAt || null;
+          }
+        } catch {}
+      }
+      const fRun = await this.runAgent('faraday', { scope, project, region, dry_run: true, cursor_after: cursorAfter }, ctx);
+      const fFinal = await this._waitForCompletion(fRun.run_id, 120_000);
+      summary.faraday = {
+        run_id: fFinal?.run_id,
+        status: fFinal?.status,
+        observations_count: fFinal?.observations_count || 0,
+        // Sample observations for richer reflection content. summary/title
+        // first, then fall back to kind+memory_id.
+        observations: (fFinal?.result?.observations || []).slice(0, 5).map((o) => {
+          return o?.content?.summary
+            || o?.content?.title
+            || o?.content?.cluster_label
+            || `${o?.kind}: ${o?.content?.memory_id || o?.id || ''}`.slice(0, 100);
+        }).filter(Boolean),
+      };
+
+      // Update Faraday cursor to oldest memory it scanned (for next-run resume).
+      if (this.prisma && fFinal?.status === 'completed') {
+        try {
+          const lastScannedId = fFinal?.result?.summary?.last_scanned_memory_id
+            || fFinal?.result?.observations?.[fFinal.result.observations.length - 1]?.content?.memory_id
+            || null;
+          if (lastScannedId) {
+            await this.prisma.governanceAgentState.update({
+              where: { agentName: 'faraday' },
+              data: { cursorMemoryId: lastScannedId },
+            }).catch(() => null);
+          }
+        } catch {}
+      }
+
+      // ── 2. Feynman (chained off Faraday) ───────────────────────────
+      const feRun = await this.runAgent('feynman', { scope, project, region, dry_run: true, run_id: fFinal?.run_id }, ctx);
+      const feFinal = await this._waitForCompletion(feRun.run_id, 120_000);
+      summary.feynman = {
+        run_id: feFinal?.run_id,
+        status: feFinal?.status,
+        observations_count: feFinal?.observations_count || 0,
+        hypotheses: (feFinal?.result?.observations || []).slice(0, 5).map((o) => {
+          return o?.content?.hypothesis
+            || o?.content?.summary
+            || o?.content?.title
+            || `${o?.kind}`.slice(0, 100);
+        }).filter(Boolean),
+      };
+
+      // ── 3. Turing (chained off Feynman) ────────────────────────────
+      const tRun = await this.runAgent('turing', { scope, project, region, dry_run: true, run_id: feFinal?.run_id, enabled_cognitive_tools: enabledCognitiveTools }, ctx);
+      const tFinal = await this._waitForCompletion(tRun.run_id, 120_000);
+      summary.turing = {
+        run_id: tFinal?.run_id,
+        status: tFinal?.status,
+        observations_count: tFinal?.observations_count || 0,
+        verifications: (tFinal?.result?.observations || [])
+          .filter((o) => o?.kind === 'verification')
+          .slice(0, 5)
+          .map((o) => {
+            return o?.content?.summary
+              || o?.content?.verified_hypothesis
+              || o?.content?.title
+              || 'verification';
+          }).filter(Boolean),
+      };
+
+      // ── 4. Persist all queued proposals from each run ──────────────
+      if (this.prisma) {
+        const persisted = await this._persistCycleProposals({
+          batchId,
+          orgId,
+          userId,
+          runs: [
+            { agentName: 'faraday', runId: fFinal?.run_id },
+            { agentName: 'feynman', runId: feFinal?.run_id },
+            { agentName: 'turing',  runId: tFinal?.run_id },
+          ],
+        });
+
+        // Reflection memory: Turing self-evaluation. Marks cycle outcome
+        // as a cognitive-layer reflection so future recall surfaces it.
+        try {
+          await this._writeReflectionMemory({
+            batchId, orgId, userId,
+            faraday: summary.faraday,
+            feynman: summary.feynman,
+            turing: summary.turing,
+            proposalsPersisted: persisted,
+            latencyMs: Date.now() - cycleStartedAt,
+          });
+        } catch (err) {
+          this.logger?.warn?.(`[gov-cycle] reflection write failed: ${err.message}`);
+        }
+        summary.proposals_persisted = persisted;
+      }
+
+      summary.status = 'completed';
+    } catch (err) {
+      summary.status = 'failed';
+      summary.error = err?.message || String(err);
+      this.logger?.warn?.(`[gov-cycle] failed: ${summary.error}`);
+    } finally {
+      // ── 5. Update per-agent state + daily metric rollup ───────────
+      if (this.prisma) {
+        try {
+          // Pull real Faraday token usage (set by groq fetch). Reset for next cycle.
+          const faradayTokens = Number(globalThis.__faradayLastTokens || 0) | 0;
+          globalThis.__faradayLastTokens = 0;
+          await this._updateAgentStateAfterCycle({
+            orgId,
+            status: summary.status,
+            proposalsPersisted: summary.proposals_persisted,
+            latencyMs: Date.now() - cycleStartedAt,
+            tokenUsageByAgent: { faraday: faradayTokens },
+          });
+        } catch (err) {
+          this.logger?.warn?.(`[gov-cycle] state update failed: ${err.message}`);
+        }
+      }
+
+      // ── 6. Release row-level cycle lock ────────────────────────────
+      if (lockAcquired && this.prisma) {
+        try {
+          await this.prisma.$executeRawUnsafe(
+            `UPDATE hivemind.governance_agent_state
+               SET circuit_breaker_until = NULL
+             WHERE agent_name = 'governance-cycle'`
+          );
+        } catch {}
+      }
+    }
+
+    summary.finished_at = new Date().toISOString();
+    summary.latency_ms = Date.now() - cycleStartedAt;
+    return summary;
+  }
+
+  async _waitForCompletion(runId, timeoutMs = 60_000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const run = this.runs.get(runId);
+      if (!run) return null;
+      if (['completed', 'failed', 'cancelled'].includes(run.status)) {
+        return this._publicRun(run);
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    return this._publicRun(this.runs.get(runId)) || null;
+  }
+
+  async _persistCycleProposals({ batchId, orgId, userId, runs }) {
+    let count = 0;
+    for (const { agentName, runId } of runs) {
+      if (!runId) continue;
+      const run = this.runs.get(runId);
+      const proposals = Array.isArray(run?.pending_proposals) ? run.pending_proposals : [];
+      for (const p of proposals) {
+        try {
+          const actionType = this._normalizeActionType(p.recommendation);
+          if (!actionType) continue;
+          const targetMemoryId = Array.isArray(p.target_memory_ids) && p.target_memory_ids[0]
+            ? p.target_memory_ids[0]
+            : null;
+          // Carry cluster_hash + topic + bridge_tag into beforeSnapshot so
+          // assess-side dedup (hasOpenProposal) can match on subsequent ticks.
+          const snapshot = {};
+          if (p.content?.cluster_hash) snapshot.cluster_hash = p.content.cluster_hash;
+          if (p.content?.topic) snapshot.topic = p.content.topic;
+          if (p.content?.bridge_tag) snapshot.bridge_tag = p.content.bridge_tag;
+          if (Array.isArray(p.content?.evidence_ids_a)) snapshot.evidence_ids_a = p.content.evidence_ids_a;
+          if (Array.isArray(p.content?.evidence_ids_b)) snapshot.evidence_ids_b = p.content.evidence_ids_b;
+          await this.prisma.governanceActionLog.create({
+            data: {
+              batchId,
+              agentName,
+              userId: userId || null,
+              orgId,
+              targetMemoryId,
+              actionType,
+              reasoning: p.reason || null,
+              evidenceIds: Array.isArray(p.target_memory_ids) ? p.target_memory_ids.slice(0, 64) : [],
+              confidence: typeof p.confidence === 'number' ? p.confidence : null,
+              status: 'proposed',
+              reversible: true,
+              beforeSnapshot: Object.keys(snapshot).length ? snapshot : null,
+            },
+          });
+          count += 1;
+        } catch (err) {
+          // Idempotent unique violation → skip silently. Other errors → log.
+          if (err?.code !== 'P2002') {
+            this.logger?.warn?.(`[gov-cycle] proposal persist failed (${agentName}): ${err.message}`);
+          }
+        }
+      }
+    }
+    return count;
+  }
+
+  _normalizeActionType(recommendation) {
+    const ALLOWED = new Set([
+      'link_update_chain',
+      'merge_duplicate_cluster',
+      'archive_duplicate',
+      'merge_evidence',
+      'suppress_noise_cluster',
+      'promote_known_risk',
+      'relationship_candidate',
+      'canonical_synthesis',
+      'bridge_synthesis',
+      'compression',
+      'role_assignment',
+    ]);
+    if (!recommendation) return null;
+    return ALLOWED.has(recommendation) ? recommendation : null;
+  }
+
+  async _writeReflectionMemory({ batchId, orgId, userId, faraday, feynman, turing, proposalsPersisted, latencyMs }) {
+    if (!this.prisma || !orgId) return;
+    const observationsTotal = (faraday?.observations_count || 0)
+      + (feynman?.observations_count || 0)
+      + (turing?.observations_count || 0);
+
+    // Suppress empty cycles. If no observations were made AND no proposals
+    // persisted, the cycle was a no-op — writing a memory just for the
+    // metrics pollutes recall. Log to ops channel instead.
+    if (observationsTotal === 0 && (proposalsPersisted || 0) === 0) {
+      this.logger?.info?.(`[reflection] skip empty cycle batch=${batchId.slice(0, 8)} latency=${latencyMs}ms`);
+      return;
+    }
+
+    // Reflection memories are org-scoped audit. Anchor to triggering user
+    // if known; otherwise pick any active member so Memory.userId NOT NULL
+    // constraint holds.
+    let anchorUserId = userId;
+    if (!anchorUserId) {
+      const member = await this.prisma.userOrganization.findFirst({
+        where: { orgId, isActive: true },
+        select: { userId: true },
+      }).catch(() => null);
+      anchorUserId = member?.userId || null;
+    }
+    if (!anchorUserId) return;
+    const cycleOk = [faraday, feynman, turing].every((r) => r?.status === 'completed');
+
+    // Build a content body that reflects WHAT happened, not just counts.
+    // Pull a sample of touched entities / hypotheses from each agent if
+    // they surface them in `summary`. Falls back to count-only if not.
+    const parts = [
+      `Governance cycle ${batchId.slice(0, 8)} ${cycleOk ? 'completed' : 'partial'}.`,
+    ];
+    const observed = faraday?.observations || faraday?.sample || [];
+    const hypotheses = feynman?.hypotheses || feynman?.sample || [];
+    const verifications = turing?.verifications || turing?.sample || [];
+    if (Array.isArray(observed) && observed.length) {
+      parts.push(`Faraday observed: ${observed.slice(0, 3).map((o) => String(o).slice(0, 80)).join(' | ')}.`);
+    } else {
+      parts.push(`Faraday observations: ${faraday?.observations_count || 0}.`);
+    }
+    if (Array.isArray(hypotheses) && hypotheses.length) {
+      parts.push(`Feynman hypothesised: ${hypotheses.slice(0, 3).map((o) => String(o).slice(0, 80)).join(' | ')}.`);
+    } else {
+      parts.push(`Feynman hypotheses: ${feynman?.observations_count || 0}.`);
+    }
+    if (Array.isArray(verifications) && verifications.length) {
+      parts.push(`Turing verified: ${verifications.slice(0, 3).map((o) => String(o).slice(0, 80)).join(' | ')}.`);
+    } else {
+      parts.push(`Turing verifications: ${turing?.observations_count || 0}.`);
+    }
+    parts.push(`Persisted ${proposalsPersisted} proposal(s). Latency ${latencyMs}ms.`);
+    const content = parts.join(' ');
+
+    await this.prisma.memory.create({
+      data: {
+        userId: anchorUserId,
+        orgId,
+        // Keep memoryType='fact' — adding 'reflection' to the MemoryType
+        // enum requires a separate migration. Recall-side filtering uses
+        // tags (internal-audit) + cognitiveLayerRole instead.
+        memoryType: 'fact',
+        title: `Governance reflection · ${observationsTotal} obs · ${proposalsPersisted} proposal(s) · ${new Date().toISOString().slice(0, 10)}`,
+        content,
+        tags: [
+          'governance',
+          'reflection',
+          'cognition-loop',
+          'internal-audit',
+          `batch:${batchId}`,
+          `cycle:${cycleOk ? 'ok' : 'partial'}`,
+        ],
+        isLatest: true,
+        // Drop importance well below user-facing memories (0.6 -> 0.25)
+        // so recall ranking buries these unless explicitly queried.
+        importanceScore: 0.25,
+        cognitiveLayerRole: 'reflection',
+        visibility: 'organization',
+        scope: 'organization',
+      },
+    }).catch((err) => {
+      this.logger?.warn?.(`[reflection] insert failed: ${err.message}`);
+    });
+  }
+
+  async _updateAgentStateAfterCycle({ orgId, status, proposalsPersisted, latencyMs, tokenUsageByAgent = {} }) {
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    // Heuristic token cost when LLM doesn't surface usage. Conservative
+    // overestimate so circuit-breaker fires before real overrun.
+    const FALLBACK_TOKENS_PER_RUN = Number(process.env.GOV_FALLBACK_TOKENS_PER_RUN || 5000);
+    for (const agentName of ['faraday', 'feynman', 'turing']) {
+      const tokensSpent = Number(tokenUsageByAgent[agentName] ?? FALLBACK_TOKENS_PER_RUN) | 0;
+      await this.prisma.governanceAgentState.update({
+        where: { agentName },
+        data: {
+          lastRunAt: now,
+          lastCompletedAt: status === 'completed' ? now : undefined,
+          tokensSpentToday: { increment: tokensSpent },
+        },
+      }).catch(() => null);
+
+      // Upsert daily metric (composite PK = agent + org + day).
+      // Proposed count lands on turing only (consolidator). Faraday/Feynman
+      // rows still created with 0 so the metrics dashboard shows full row set.
+      const proposedDelta = (agentName === 'turing') ? proposalsPersisted : 0;
+      await this.prisma.governanceMetric.upsert({
+        where: {
+          agentName_orgId_day: { agentName, orgId, day: today },
+        },
+        create: {
+          agentName,
+          orgId,
+          day: today,
+          actionsProposed: proposedDelta,
+          latencyMsP95: latencyMs,
+          tokensSpent: BigInt(tokensSpent),
+        },
+        update: {
+          actionsProposed: { increment: proposedDelta },
+          latencyMsP95: latencyMs,
+          tokensSpent: { increment: BigInt(tokensSpent) },
+        },
+      }).catch(() => null);
+    }
   }
 
   _publicRun(run) {

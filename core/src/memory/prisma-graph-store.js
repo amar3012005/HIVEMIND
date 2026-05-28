@@ -41,6 +41,9 @@ function mapMemoryRecord(record) {
     user_id: record.userId,
     org_id: record.orgId,
     project: record.project,
+    // Phase P.2: surface formal Project FK when populated. project (string)
+    // stays for legacy free-text label compatibility.
+    project_id: record.projectId || null,
     visibility: record.visibility,
     scope: record.scope || 'personal',
     primary_team_id: record.primaryTeamId || null,
@@ -88,7 +91,9 @@ function mapMemoryRecord(record) {
     // Phase B tiered cache surface fields
     tier:                    typeof record.tier === 'number' ? record.tier : 2,
     last_accessed_at:        record.lastAccessedAt instanceof Date ? record.lastAccessedAt.toISOString() : record.lastAccessedAt,
-    promoted_at:             record.promotedAt instanceof Date ? record.promotedAt.toISOString() : record.promotedAt
+    promoted_at:             record.promotedAt instanceof Date ? record.promotedAt.toISOString() : record.promotedAt,
+    // Phase 2 governance cognitive layer role
+    cognitive_layer_role:    record.cognitiveLayerRole || null,
   };
 }
 
@@ -214,6 +219,7 @@ export class PrismaGraphStore {
         embeddingVersion: memory.embedding_version ?? 1,
         processingBasis: memory.processing_basis || 'consent',
         sharedWithOrgs: memory.shared_with_orgs || [],
+        cognitiveLayerRole: memory.cognitive_layer_role || null,
       },
     });
 
@@ -340,10 +346,21 @@ export class PrismaGraphStore {
     return records.map(mapMemoryRecord);
   }
 
-  async listMemories({ user_id, org_id, project, memory_type, tags, is_latest, limit = 50, offset = 0, scope = 'personal' }) {
+  async listMemories({ user_id, org_id, project, project_id, memory_type, tags, is_latest, limit = 50, offset = 0, scope = 'personal' }) {
+    // Phase P.3: prefer formal projectId FK when caller passes it; falls back
+    // to legacy free-text `project` string. Both forms allowed simultaneously
+    // (logical AND) to support FE clients sending both during transition.
+    const baseWhere = scopedMemoryWhere({ user_id, org_id, project, scope });
+    if (project_id) baseWhere.projectId = project_id;
+    // Internal-audit suppression: governance reflection rows etc. are
+    // operational noise — drop from default listing. Caller opts in by
+    // passing tags=['internal-audit'].
+    const callerWantsAudit = Array.isArray(tags) && tags.includes('internal-audit');
+    const auditExclusion = callerWantsAudit ? {} : { NOT: { tags: { has: 'internal-audit' } } };
     const records = await this.client.memory.findMany({
       where: {
-        ...scopedMemoryWhere({ user_id, org_id, project, scope }),
+        ...baseWhere,
+        ...auditExclusion,
         memoryType: memory_type || undefined,
         isLatest: typeof is_latest === 'boolean' ? is_latest : undefined,
         tags: tags?.length ? { hasEvery: tags } : undefined,
@@ -361,9 +378,12 @@ export class PrismaGraphStore {
       take: limit
     });
 
+    const countWhere = scopedMemoryWhere({ user_id, org_id, project });
+    if (project_id) countWhere.projectId = project_id;
     const total = await this.client.memory.count({
       where: {
-        ...scopedMemoryWhere({ user_id, org_id, project }),
+        ...countWhere,
+        ...auditExclusion,
         memoryType: memory_type || undefined,
         isLatest: typeof is_latest === 'boolean' ? is_latest : undefined,
         tags: tags?.length ? { hasSome: tags } : undefined
@@ -424,7 +444,7 @@ export class PrismaGraphStore {
                    m.importance_score, m.is_latest, m.created_at, m.updated_at,
                    m.document_date, m.event_dates, m.source_platform AS source, m.visibility,
                    m.synthesis_confidence, m.synthesis_cluster_hash, m.synthesis_revision, m.synthesis_evidence_ids,
-                   m.tier, m.last_accessed_at, m.promoted_at,
+                   m.tier, m.last_accessed_at, m.promoted_at, m.cognitive_layer_role,
                    ts_rank(to_tsvector('english', COALESCE(m.content, '') || ' ' || COALESCE(m.title, '')),
                            to_tsquery('english', $1)) as fts_score
             FROM memories m
@@ -459,6 +479,7 @@ export class PrismaGraphStore {
               tier: typeof r.tier === 'number' ? r.tier : 2,
               last_accessed_at: r.last_accessed_at?.toISOString?.() || r.last_accessed_at || null,
               promoted_at: r.promoted_at?.toISOString?.() || r.promoted_at || null,
+              cognitive_layer_role: r.cognitive_layer_role || null,
               score: Number(r.fts_score) || 0,
               _searchMethod: 'fts_tsvector',
             })).slice(0, n_results);

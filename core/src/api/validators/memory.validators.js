@@ -304,7 +304,12 @@ export const memoryQueryParamsSchema = z.object({
   project: z.string()
     .max(255)
     .optional(),
-  
+
+  // Phase P.3 formal project FK. Recall prefers project_id over project string.
+  project_id: z.string()
+    .uuid('project_id must be a valid UUID')
+    .optional(),
+
   memory_type: memoryTypeEnum.optional(),
   
   tags: z.string()

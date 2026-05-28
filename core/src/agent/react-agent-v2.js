@@ -229,6 +229,12 @@ Output STRICT JSON (no prose, no code fence):
                                   //   'email X', 'open github issue', 'add linear task'. Even when phrased
                                   //   indirectly ('@channel let them know' → slack), the planner picks the
                                   //   right provider. Leave null for pure recall / read.
+                                  //   CRITICAL: an imperative verb (send/schedule/post/draft/email/notify/
+                                  //   message/dm/ping/announce/broadcast/share/forward/compose) addressed
+                                  //   at a connector is ALWAYS action_intent. Ambiguity about channel /
+                                  //   recipient is NOT a reason to skip — the downstream sub-loop will ask
+                                  //   the user OR create a draft awaiting approval. Asking clarification
+                                  //   here is WRONG; emit action_intent and let the action path handle it.
   "save_intent": null,            // ONLY when intent_kind === 'save'. {"title": "...", "content": "...", "tags": [...], "project_hint": "..."}. CONTENT MUST be a fully self-contained note enriched with WHO/WHAT/WHEN entities the user mentioned. If the user used a pronoun ("save this"), resolve it from the previous turn. NEVER emit empty / pronoun-only content, NEVER emit content that is just the user's own message verbatim — distill key entities, dates, facts into a structured note. NEVER emit save_intent for a bare filename or entity-only message. If unrecoverable, set null. If user named a project ("save to Ashley", "in the SOLVIS project"), put that name in project_hint.
   "ask_for_project": false,       // true if the user asked to save but did NOT specify a project AND no active project is set in the session. Server will respond by asking which project before saving.
   "auto_save_intent": null,       // PROACTIVE save when the user has NOT explicitly said "save" but their message contains a NEW DURABLE FACT worth memorizing — even when the same message ALSO asks a question. You MUST emit auto_save_intent whenever the user narrates a past event ("I just went to X", "Met Y today", "Yesterday Z called"), states a plan ("I'm flying to Berlin June 5", "We decided to ship Friday"), declares a preference ("I prefer X to Y"), reports a status change ("X moved to Y company"), or commits to a future action ("I'll register the UG next week"). The trigger is INDEPENDENT of intent_kind — a single user turn can be intent_kind='lookup' (they asked a follow-up question) AND emit auto_save_intent simultaneously when the message embeds a fact. Emit {"title": "...", "content": "...", "tags": [...], "memory_type": "fact|decision|preference|event|goal|lesson|relationship", "confidence": 0.0-1.0}. Threshold confidence >= 0.70 fires the save. DO NOT fire on: pure questions ("What is X?"), recall requests ("tell me about Y"), hypotheticals ("what if I did X"), opinions about external topics ("AI is overhyped"). DO FIRE on: any first-person past-event narration, any future commitment, any state declaration about the user / their projects / their people. Title MUST be a short noun phrase extracting the fact (e.g. "Nbank sponsorship appointment 9:00-10:30" — NOT "user said Nbank"). Content MUST be third-person self-contained with entities + dates + duration + outcome. Tags MUST include entity:<Name> for each named entity + topic tag. Examples that MUST trigger auto_save_intent (illustrative):
@@ -587,10 +593,13 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
   const isTemporalQuery = TEMPORAL_HINT.test(plan.user_message || '');
 
   // (b) Time-travel — planner-flagged OR auto-fire when temporal hint +
-  // connector recall returned data.
+  // connector recall returned data OR deterministic date extractor produced
+  // a valid_at (catches "as of May 13" even when planner missed it).
+  const ASOF_RE = /\b(as of|before|prior to|on or before|until|by)\b/i;
   const wantTimeTravel =
     (plan.needs_time_travel && plan.time_travel && (plan.time_travel.transaction_time || plan.time_travel.valid_time))
-    || (isTemporalQuery && hasConnectorTagged && !plan.time_travel?.valid_time);
+    || (isTemporalQuery && hasConnectorTagged && !plan.time_travel?.valid_time)
+    || (derivedValidAt && ASOF_RE.test(plan.user_message || ''));
   if (wantTimeTravel) {
     try {
       // Derive valid_time: planner first, else "now" (latest snapshot).
@@ -689,16 +698,43 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
         const ch = mems
           .flatMap(m => (m.tags || []).filter(t => typeof t === 'string' && t.startsWith('slack-channel-id:')))
           .map(t => t.slice('slack-channel-id:'.length))[0];
-        return { channel_id: ch || undefined, limit: 5 };
+        // Fallback: extract channel name from query — Nango Slack proxy
+        // accepts either id or name in `channel` field. Priority order:
+        //   1. #channel hashtag
+        //   2. "channel <name>" / "in #<name>"
+        //   3. "in <name>" — only if <name> looks like a real channel slug
+        //      (kebab/snake with at least one separator) to avoid matching
+        //      "in slack" → name="slack".
+        const STOP_WORDS = /^(the|that|this|a|an|slack|notion|gmail|github|linear|jira|drive|calendar|outlook|channel|thread|message|messages|msg|msgs)$/i;
+        let channelName = null;
+        const hash = (q || '').match(/#([a-z0-9][a-z0-9._-]+)/i);
+        if (hash) channelName = hash[1];
+        if (!channelName) {
+          const m2 = (q || '').match(/\bchannel\s+#?([a-z0-9][a-z0-9._-]{2,40})\b/i);
+          if (m2 && !STOP_WORDS.test(m2[1])) channelName = m2[1];
+        }
+        if (!channelName) {
+          const m3 = (q || '').match(/\bin\s+([a-z0-9][a-z0-9._-]*[-_][a-z0-9][a-z0-9._-]*)\b/i);
+          if (m3 && !STOP_WORDS.test(m3[1])) channelName = m3[1];
+        }
+        return {
+          channel_id: ch || undefined,
+          channel: !ch && channelName ? channelName : undefined,
+          limit: 5,
+        };
       },
-      requires: (args) => !!args.channel_id,
+      // Allow live call if EITHER id or channel name resolved.
+      requires: (args) => !!(args.channel_id || args.channel),
     },
     gmail:  null, // gmail live recall already wired via persistent-retrieval live tier
   };
   const connectorTriggered = userConnector && READ_CONNECTOR_TRIGGERS[userConnector];
   const liveReadIntent = LIVE_READ_VERB_RE.test(plan.user_message || '');
   const lowRecall = memoriesById.size < 3;
-  if (connectorTriggered && (lowRecall || (liveReadIntent && userConnector === 'slack')) && ctx.prisma && !plan.action_intent) {
+  // NB: removed !plan.action_intent gate — planner sometimes flags read
+  // queries as action_intent. Live-read should always fire when query has
+  // explicit read verb + connector keyword + extractable target.
+  if (connectorTriggered && (lowRecall || (liveReadIntent && userConnector === 'slack')) && ctx.prisma) {
     try {
       const { buildToolkitForUser } = await import('./toolkit-factory.js');
       const tk = await buildToolkitForUser({

@@ -84,9 +84,100 @@ export class GraphActionExecutor {
         return this._promoteRisk(targetIds, content, confidence, dryRun);
       case 'relationship_candidate':
         return this._createRelationship(targetIds, confidence, dryRun, content);
+      // Phase 4 — synthesis ownership. Delegates to cognitive-tool registry
+      // so cluster_hash + cooldown + LLM rewrite + dedup + derives edges
+      // all live in one place.
+      case 'canonical_synthesis':
+      case 'bridge_synthesis':
+      case 'compression':
+        return this._runCognitiveTool(recommendation, targetIds, content, confidence, dryRun);
       default:
         return { status: 'skipped', reason: `unknown_action: ${recommendation}` };
     }
+  }
+
+  async _getCognitionLoop() {
+    if (!this._cognitionLoop) {
+      const { CognitionLoop } = await import('../memory/cognition-loop.js');
+      // Resolve prisma via multiple paths — memoryStore wraps Prisma, but
+      // exposes it under different keys depending on caller. Fall back to
+      // the shared singleton in src/db/prisma.js.
+      let prisma = this.memoryStore?.client
+        || this.memoryStore?.prisma
+        || this.memoryStore?._client
+        || null;
+      if (!prisma) {
+        try {
+          const { getPrismaClient } = await import('../db/prisma.js');
+          prisma = getPrismaClient();
+        } catch { /* ignore */ }
+      }
+      this._cognitionLoop = new CognitionLoop({
+        prisma,
+        memoryGraphEngine: this.memoryStore?.engine || this.memoryStore || null,
+        persistentMemoryStore: this.memoryStore || null,
+        logger: this.logger,
+      });
+    }
+    return this._cognitionLoop;
+  }
+
+  /**
+   * Delegates to cognitive-tool registry. Tool owns cluster_hash + cooldown
+   * + LLM rewrite + dedup + derives edges + cognitive_layer_role stamping.
+   */
+  async _runCognitiveTool(toolName, memoryIds, content, confidence, dryRun) {
+    let prisma = this.memoryStore?.client
+      || this.memoryStore?.prisma
+      || this.memoryStore?._client
+      || null;
+    if (!prisma) {
+      try {
+        const { getPrismaClient } = await import('../db/prisma.js');
+        prisma = getPrismaClient();
+      } catch { /* ignore */ }
+    }
+    if (!prisma) return { status: 'failed', error: 'prisma_unavailable' };
+
+    const { getCognitiveToolRegistry } = await import('../cognitive-tools/registry.js');
+    const registry = getCognitiveToolRegistry({ prisma, memoryStore: this.memoryStore, logger: this.logger });
+    const tool = registry.get(toolName);
+    if (!tool) return { status: 'failed', error: `unknown_tool: ${toolName}` };
+
+    // Resolve a representative member for orgId/userId fallback.
+    const sample = memoryIds?.length
+      ? await prisma.memory.findFirst({ where: { id: { in: memoryIds.slice(0, 1) } }, select: { orgId: true, userId: true } })
+      : null;
+    const orgId = content?.org_id || sample?.orgId;
+    const userId = content?.user_id || sample?.userId;
+    if (!orgId) return { status: 'failed', error: 'org_id_unresolvable' };
+
+    const args = {
+      orgId,
+      userId,
+      cluster_hash: content?.cluster_hash || null,
+      confidence: content?.confidence ?? confidence,
+      dryRun,
+    };
+    if (toolName === 'canonical_synthesis' || toolName === 'compression') {
+      args.topic = content?.topic || content?.bridge_tag || null;
+      args.evidence_ids = content?.evidence_ids?.length ? content.evidence_ids : memoryIds;
+    } else if (toolName === 'bridge_synthesis') {
+      args.bridge_tag = content?.bridge_tag || content?.topic;
+      // Bridge expects A+B sets — derive heuristically if not given.
+      if (content?.evidence_ids_a?.length && content?.evidence_ids_b?.length) {
+        args.evidence_ids_a = content.evidence_ids_a;
+        args.evidence_ids_b = content.evidence_ids_b;
+      } else if (Array.isArray(memoryIds) && memoryIds.length >= 2) {
+        const half = Math.ceil(memoryIds.length / 2);
+        args.evidence_ids_a = memoryIds.slice(0, half);
+        args.evidence_ids_b = memoryIds.slice(half);
+      } else {
+        return { status: 'failed', error: 'bridge_needs_two_clusters' };
+      }
+    }
+
+    return tool.execute(args);
   }
 
   // ── action handlers ──────────────────────────────────────────────

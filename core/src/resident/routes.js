@@ -12,6 +12,7 @@ export const RESIDENT_ROUTE_TEMPLATES = [
   '/api/swarm/resident/runs/:run_id',
   '/api/swarm/resident/runs/:run_id/observations',
   '/api/swarm/resident/runs/:run_id/cancel',
+  '/api/swarm/resident/cycle',
 ];
 
 export function createResidentRoutes(manager) {
@@ -43,6 +44,26 @@ export function createResidentRoutes(manager) {
         const result = await manager.getRunObservations(runId);
         if (!result) return ok({ error: 'Run not found' }, 404);
         return ok(result);
+      }
+
+      // Phase 1 manual trigger: run a full Faraday→Feynman→Turing cycle
+      // and persist proposals to governance_action_log. Always dry-run.
+      if (pathname === '/api/swarm/resident/cycle' && method === 'POST') {
+        if (!orgId) return ok({ error: 'orgId required (X-HM-Org-Id header)' }, 400);
+        try {
+          const result = await manager.runFullCycle({
+            orgId,
+            userId,
+            scope: body.scope || 'project',
+            project: body.project || null,
+            region: body.region || null,
+            trigger: body.trigger || 'manual',
+          });
+          const statusCode = result.status === 'completed' ? 200 : (result.status === 'skipped_lock_busy' ? 409 : 500);
+          return ok(result, statusCode);
+        } catch (err) {
+          return ok({ error: 'runFullCycle failed', message: err?.message || String(err) }, 500);
+        }
       }
 
       const cancelMatch = pathname.match(/^\/api\/swarm\/resident\/runs\/([^/]+)\/cancel$/);

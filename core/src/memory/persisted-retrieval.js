@@ -1324,12 +1324,22 @@ export async function recallPersistedMemories(store, {
     // discovery but ranks below its hydrated counterpart.
     if (mem.tier === 1) mult *= 0.9;
 
+    // Phase 2 top-down recall: boost governance-promoted cognitive layer
+    // memories so they surface FIRST. canonical/bridge are Turing-verified
+    // facts/edges — they encode the most distilled knowledge.
+    const role = mem.cognitive_layer_role || mem.cognitiveLayerRole;
+    if (role === 'canonical')   mult *= 1.6;
+    else if (role === 'bridge') mult *= 1.4;
+    else if (role === 'compression') mult *= 1.3;
+    else if (role === 'reflection')  mult *= 1.1;
+
     if (mult >= 3.0) mult = 3.0;
-    if (!matched && mem.tier !== 1) return item;
+    if (!matched && mem.tier !== 1 && !role) return item;
     return {
       ...item,
       score: (item.score || 0) * mult,
       _ws_match: !!matched,
+      _cognitive_role: role || null,
     };
   };
 
@@ -1479,11 +1489,17 @@ export async function recallPersistedMemories(store, {
     }
   }
 
+  // Caller-opts-in audit pass-through (e.g. /v1/governance UI). Else drop.
+  const callerWantsAudit = Array.isArray(tags) && tags.some((t) => t === 'internal-audit');
+
   let top = finalItems
     .filter(item => {
       // Exclude benchmark data from production recall
       const tags = (item.memory || item).tags || [];
       if (!project && tags.includes('longmemeval')) return false;
+      // Drop internal-audit (governance reflection rows etc.) unless
+      // caller explicitly asked for them.
+      if (!callerWantsAudit && tags.includes('internal-audit')) return false;
       return true;
     })
     .sort((a, b) => {

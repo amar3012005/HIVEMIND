@@ -630,7 +630,13 @@ async function upsertUserFromZitadel(userInfo) {
   }
 
   if (existing) {
-    return prisma.user.update({
+    // SCIM-binding hook: a User row created via SCIM has a synthetic
+    // zitadelUserId like 'scim:<orgId>:<email>'. When that user later
+    // signs in via SSO, we replace the placeholder with the real Zitadel
+    // sub and audit the crossover so admins can see "this account was
+    // pre-provisioned by SCIM and just bound to a real IdP login."
+    const wasScimSeed = typeof existing.zitadelUserId === 'string' && existing.zitadelUserId.startsWith('scim:');
+    const updated = await prisma.user.update({
       where: { id: existing.id },
       data: {
         zitadelUserId: userInfo.sub,
@@ -641,6 +647,22 @@ async function upsertUserFromZitadel(userInfo) {
         lastActiveAt: new Date()
       }
     });
+    if (wasScimSeed) {
+      try {
+        const auditLoggerInst = await _getAuditLogger();
+        auditLoggerInst?.log({
+          userId: updated.id,
+          eventType: 'sso.scim_binding_completed',
+          eventCategory: 'provisioning',
+          action: 'update',
+          resourceType: 'user',
+          oldValue: { zitadelUserId: existing.zitadelUserId },
+          newValue: { zitadelUserId: userInfo.sub },
+          metadata: { source: 'sso_login', via_email_fallback: true },
+        }).catch(() => {});
+      } catch { /* audit best-effort */ }
+    }
+    return updated;
   }
 
   return prisma.user.create({
@@ -2102,6 +2124,82 @@ const server = http.createServer(async (req, res) => {
   }
 
   const joinMatch = pathname.match(/^\/v1\/join\/([^/]+)$/);
+
+  // GET /v1/join/:token — preview invite (does NOT accept). Used by the
+  // consent screen so the recipient sees org + project metadata before
+  // clicking Accept.
+  if (joinMatch && req.method === 'GET') {
+    const token = joinMatch[1];
+    const invite = await prisma.orgInvite.findUnique({
+      where: { token },
+      include: { org: true },
+    });
+    if (!invite) return jsonResponse(res, { error: 'Invite not found' }, 404);
+
+    const now = new Date();
+    let status = 'pending';
+    if (invite.usedAt) status = 'accepted';
+    else if (invite.revokedAt) status = 'revoked';
+    else if (invite.expiresAt < now) status = 'expired';
+
+    const projectIds = Array.isArray(invite.projectIds) ? invite.projectIds : [];
+    const teamIds    = Array.isArray(invite.teamIds)    ? invite.teamIds    : [];
+
+    const [projects, teams, inviter] = await Promise.all([
+      projectIds.length
+        ? prisma.project.findMany({
+            where: { id: { in: projectIds }, orgId: invite.orgId },
+            select: { id: true, name: true, slug: true, description: true },
+          }).catch(() => [])
+        : Promise.resolve([]),
+      teamIds.length
+        ? prisma.team.findMany({
+            where: { id: { in: teamIds }, orgId: invite.orgId },
+            select: { id: true, name: true },
+          }).catch(() => [])
+        : Promise.resolve([]),
+      invite.createdBy
+        ? prisma.user.findUnique({
+            where: { id: invite.createdBy },
+            select: { email: true, displayName: true },
+          }).catch(() => null)
+        : Promise.resolve(null),
+    ]);
+
+    return jsonResponse(res, {
+      token,
+      status,
+      email: invite.email,
+      role: invite.role,
+      roles: invite.roles,
+      expires_at: invite.expiresAt,
+      organization: invite.org ? {
+        id: invite.org.id,
+        name: invite.org.name,
+        slug: invite.org.slug,
+      } : null,
+      projects,
+      teams,
+      inviter,
+    });
+  }
+
+  // POST /v1/join/:token/decline — recipient declines an invite (soft-revoke).
+  const declineMatch = pathname.match(/^\/v1\/join\/([^/]+)\/decline$/);
+  if (declineMatch && req.method === 'POST') {
+    const token = declineMatch[1];
+    const invite = await prisma.orgInvite.findUnique({ where: { token } });
+    if (!invite)          return jsonResponse(res, { error: 'Invite not found' }, 404);
+    if (invite.usedAt)    return jsonResponse(res, { error: 'Invite already accepted' }, 409);
+    if (invite.revokedAt) return jsonResponse(res, { success: true, already_declined: true });
+
+    await prisma.orgInvite.update({
+      where: { id: invite.id },
+      data: { revokedAt: new Date() },
+    });
+    return jsonResponse(res, { success: true });
+  }
+
   if (joinMatch && req.method === 'POST') {
     const current = await requireSession(req, res);
     if (!current) return;
@@ -3425,6 +3523,23 @@ const server = http.createServer(async (req, res) => {
     };
   }
 
+  // SCIM 2.0 — Users + Groups CRUD. Bearer token verified per-request
+  // against OrgSsoConfig.scimTokenHash. See core/src/scim/scim-routes.js.
+  if (pathname.startsWith('/scim/v2/')) {
+    const { handleScimRequest } = await import('./scim/scim-routes.js');
+    try {
+      return await handleScimRequest({ prisma, req, res, pathname, url });
+    } catch (err) {
+      console.error('[scim] handler crashed:', err);
+      res.writeHead(500, { 'Content-Type': 'application/scim+json' });
+      res.end(JSON.stringify({
+        schemas: ['urn:ietf:params:scim:api:messages:2.0:Error'],
+        status: '500', detail: err.message || 'Internal SCIM error',
+      }));
+      return;
+    }
+  }
+
   // GET /v1/teams — list teams current user belongs to in current org
   if (pathname === '/v1/teams' && req.method === 'GET') {
     const current = await requireSession(req, res);
@@ -3721,18 +3836,53 @@ const server = http.createServer(async (req, res) => {
       }
     }
     // POST /v1/projects/:id/members
+    const PROJECT_ROLES = ['owner', 'contributor', 'viewer'];
     if (sub === 'members' && req.method === 'POST') {
       try {
         await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'owner' });
         const body = await parseBody(req);
         if (!body.user_id) return jsonResponse(res, { error: 'user_id required' }, 400);
+        const role = body.role || 'contributor';
+        if (!PROJECT_ROLES.includes(role)) {
+          return jsonResponse(res, { error: `role must be one of ${PROJECT_ROLES.join('|')}` }, 400);
+        }
         const m = await ts.store.addProjectMember({
           projectId,
           userId: body.user_id,
-          role: body.role || 'contributor',
+          role,
           addedById: userId,
         });
         return jsonResponse(res, { member: m }, 201);
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, err.status || 500);
+      }
+    }
+    // PATCH /v1/projects/:id/members/:userId — change project-member role.
+    const projMemberPatch = sub && sub.match(/^members\/([0-9a-f-]{36})$/);
+    if (projMemberPatch && req.method === 'PATCH') {
+      try {
+        await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'owner' });
+        const targetUserId = projMemberPatch[1];
+        const body = await parseBody(req);
+        if (!body.role || !PROJECT_ROLES.includes(body.role)) {
+          return jsonResponse(res, { error: `role must be one of ${PROJECT_ROLES.join('|')}` }, 400);
+        }
+        const updated = await prisma.projectMember.update({
+          where: { projectId_userId: { projectId, userId: targetUserId } },
+          data: { role: body.role },
+        });
+        audit({
+          organizationId: orgId,
+          userId,
+          eventType: 'project.member_role_changed',
+          eventCategory: 'auth',
+          action: 'update',
+          resourceType: 'project_member',
+          resourceId: `${projectId}:${targetUserId}`,
+          newValue: { role: body.role },
+          ..._reqMeta(req),
+        });
+        return jsonResponse(res, { member: updated });
       } catch (err) {
         return jsonResponse(res, { error: err.message }, err.status || 500);
       }

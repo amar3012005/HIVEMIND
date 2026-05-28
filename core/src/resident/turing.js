@@ -390,6 +390,8 @@ export class TuringAgent {
 
   async run({
     runId,
+    orgId = null,
+    userId = null,
     scope = 'project',
     project = null,
     region = null,
@@ -398,6 +400,7 @@ export class TuringAgent {
     feynmanRun = null,
     feynmanTrail = null,
     hypotheses = [],
+    enabledCognitiveTools = null,
     onProgress = async () => {},
     isCancelled = () => false,
   } = {}) {
@@ -504,6 +507,101 @@ export class TuringAgent {
       });
     }
 
+    // ── Phase 4 — Cognitive-tool emit ───────────────────────────────
+    // Replaced inline heuristics with cognitive-tool registry. Each tool
+    // owns: cluster_hash computation, cooldown check, applicability rules.
+    // Executor (on approve) re-uses the same tool to do LLM rewrite + write.
+    try {
+      const { getCognitiveToolRegistry } = await import('../cognitive-tools/registry.js');
+      let prisma = this.observationStore?.prisma
+        || this.observationStore?.client
+        || this.memoryStore?.client
+        || this.memoryStore?.prisma
+        || null;
+      if (!prisma) {
+        const { getPrismaClient } = await import('../db/prisma.js');
+        prisma = getPrismaClient();
+      }
+      const registry = getCognitiveToolRegistry({
+        prisma,
+        memoryStore: this.memoryStore || null,
+        logger: this.logger,
+      });
+      // Widen assess window: per-cycle verifications average 2-3 — far
+      // below compression/bridge/synthesis MIN_MEMBERS thresholds. Pull
+      // the last ASSESS_WINDOW_HOURS of verifications from observation
+      // store so clusters accumulate across cycles.
+      const ASSESS_WINDOW_HOURS = Number(process.env.COG_ASSESS_WINDOW_HOURS || 48);
+      let aggregatedVerifications = verifications;
+      try {
+        if (this.observationStore?.listRecentByKind) {
+          const recent = await this.observationStore.listRecentByKind({
+            kind: 'verification',
+            sinceHours: ASSESS_WINDOW_HOURS,
+            limit: 200,
+          });
+          if (Array.isArray(recent) && recent.length > 0) {
+            // Dedup by id — current cycle's verifications may already be in DB.
+            const seen = new Set(verifications.map((v) => v.id));
+            const extra = recent.filter((r) => !seen.has(r.id));
+            aggregatedVerifications = [...verifications, ...extra];
+          }
+        } else if (prisma?.opObservation?.findMany) {
+          const since = new Date(Date.now() - ASSESS_WINDOW_HOURS * 3600 * 1000);
+          const rows = await prisma.opObservation.findMany({
+            where: { kind: 'verification', timestamp: { gte: since } },
+            orderBy: { timestamp: 'desc' },
+            take: 200,
+          });
+          const seen = new Set(verifications.map((v) => v.id));
+          const extra = rows
+            .filter((r) => !seen.has(r.id))
+            .map((r) => ({ id: r.id, kind: 'verification', content: r.content, certainty: r.certainty }));
+          aggregatedVerifications = [...verifications, ...extra];
+        }
+      } catch (winErr) {
+        this.logger?.warn?.(`[turing] assess window pull failed: ${winErr?.message || winErr}`);
+      }
+      const proposals = await registry.assessAll({
+        verifications: aggregatedVerifications,
+        orgId,
+        enabledTools: enabledCognitiveTools,
+      });
+      for (const p of proposals) {
+        actionCandidates.push({
+          id: randomUUID(),
+          agent_id: 'turing',
+          kind: p.tool_name === 'bridge_synthesis' ? 'relationship_candidate' : 'merge_candidate',
+          certainty: p.confidence ?? 0.75,
+          content: {
+            summary: p.tool_name === 'canonical_synthesis'
+              ? `Canonical synthesis on topic "${p.topic}" (${p.evidence_ids?.length || 0} evidence).`
+              : p.tool_name === 'bridge_synthesis'
+                ? `Bridge clusters linked by entity "${p.bridge_tag}".`
+                : `Compress ${p.evidence_ids?.length || 0} memories under topic "${p.topic}".`,
+            recommendation: p.tool_name,
+            rationale: 'Cognitive-tool assess() applicable — Turing approved.',
+            cluster_hash: p.cluster_hash,
+            topic: p.topic,
+            bridge_tag: p.bridge_tag,
+            evidence_ids: p.evidence_ids,
+            evidence_ids_a: p.evidence_ids_a,
+            evidence_ids_b: p.evidence_ids_b,
+            // Carry across to executor — single source of truth.
+            target_memory_ids: p.evidence_ids
+              || [...(p.evidence_ids_a || []), ...(p.evidence_ids_b || [])],
+            confidence: p.confidence ?? 0.75,
+          },
+          source_event_id: runId,
+          related_to_trail: runId,
+          timestamp: new Date().toISOString(),
+        });
+      }
+    } catch (synthErr) {
+      // Synthesis emit is best-effort; never block the rest of Turing.
+      console.warn?.(`[turing] cognitive-tool assess failed: ${synthErr?.message || synthErr}`);
+    }
+
     await updateProgress(3, 4, 'writing_verifications');
 
     if (!dryRun && this.observationStore?.writeObservation) {
@@ -547,6 +645,9 @@ export class TuringAgent {
         target_memory_ids: item.content.target_memory_ids || [],
         rationale: item.content.rationale || '',
         expected_impact: item.content.expected_impact || '',
+        // Forward full content so run-manager queueProposal can carry
+        // cluster_hash, topic, bridge_tag, evidence_ids_a/b into persistence.
+        content: item.content,
       })),
       summary: {
         scope,

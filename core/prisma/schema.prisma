@@ -106,24 +106,24 @@ model UserOrganization {
 }
 
 model OrgInvite {
-  id        String       @id @default(uuid()) @db.Uuid
-  orgId     String       @map("org_id") @db.Uuid
-  email     String?
-  role      String       @default("member")
-  roles     String[]     @default([]) @map("roles")
-  teamIds   String[]     @default([]) @map("team_ids")
-  projectIds String[]   @default([]) @map("project_ids")
-  token     String       @unique
-  expiresAt DateTime     @map("expires_at") @db.Timestamptz(6)
-  usedAt    DateTime?    @map("used_at") @db.Timestamptz(6)
-  usedBy    String?      @map("used_by") @db.Uuid
-  revokedAt DateTime?    @map("revoked_at") @db.Timestamptz(6)
-  revokedBy String?      @map("revoked_by") @db.Uuid
-  lastSentAt DateTime?   @map("last_sent_at") @db.Timestamptz(6)
-  sendCount  Int         @default(1) @map("send_count")
-  createdBy String       @map("created_by") @db.Uuid
-  createdAt DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
-  org       Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  id         String       @id @default(uuid()) @db.Uuid
+  orgId      String       @map("org_id") @db.Uuid
+  email      String?
+  role       String       @default("member")
+  roles      String[]     @default([]) @map("roles")
+  teamIds    String[]     @default([]) @map("team_ids")
+  projectIds String[]     @default([]) @map("project_ids")
+  token      String       @unique
+  expiresAt  DateTime     @map("expires_at") @db.Timestamptz(6)
+  usedAt     DateTime?    @map("used_at") @db.Timestamptz(6)
+  usedBy     String?      @map("used_by") @db.Uuid
+  revokedAt  DateTime?    @map("revoked_at") @db.Timestamptz(6)
+  revokedBy  String?      @map("revoked_by") @db.Uuid
+  lastSentAt DateTime?    @map("last_sent_at") @db.Timestamptz(6)
+  sendCount  Int          @default(1) @map("send_count")
+  createdBy  String       @map("created_by") @db.Uuid
+  createdAt  DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  org        Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
   @@index([orgId])
   @@index([email])
@@ -326,19 +326,19 @@ model NangoConnection {
 /// (slack_send_message, slack_schedule_message, etc.). Resolved by FE
 /// when user clicks Approve or Cancel.
 model PendingWrite {
-  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId      String   @map("user_id") @db.Uuid
-  orgId       String?  @map("org_id") @db.Uuid
-  provider    String   @db.VarChar(50)   // slack, notion, gmail, …
-  toolName    String   @map("tool_name") @db.VarChar(120)
-  toolArgs    Json     @map("tool_args") @db.JsonB
-  preview     String?  @db.Text          // short human-readable summary for UI
-  status      String   @default("draft") @db.VarChar(20) // draft | approved | cancelled | sent | failed
-  result      Json?    @db.JsonB         // tool response on send
-  errorMsg    String?  @map("error_msg") @db.Text
-  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  approvedAt  DateTime? @map("approved_at") @db.Timestamptz(6)
-  sentAt      DateTime? @map("sent_at") @db.Timestamptz(6)
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  orgId      String?   @map("org_id") @db.Uuid
+  provider   String    @db.VarChar(50) // slack, notion, gmail, …
+  toolName   String    @map("tool_name") @db.VarChar(120)
+  toolArgs   Json      @map("tool_args") @db.JsonB
+  preview    String?   @db.Text // short human-readable summary for UI
+  status     String    @default("draft") @db.VarChar(20) // draft | approved | cancelled | sent | failed
+  result     Json?     @db.JsonB // tool response on send
+  errorMsg   String?   @map("error_msg") @db.Text
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  approvedAt DateTime? @map("approved_at") @db.Timestamptz(6)
+  sentAt     DateTime? @map("sent_at") @db.Timestamptz(6)
 
   @@index([userId, status, createdAt])
   @@index([orgId, createdAt])
@@ -386,6 +386,9 @@ model Memory {
   updatedAt                                                   DateTime?            @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   deletedAt                                                   DateTime?            @map("deleted_at") @db.Timestamptz(6)
   project                                                     String?              @map("project")
+  // Phase P.3: formal Project FK. Backfilled from `project` string by name/slug
+  // match. Recall filters by projectId (preferred) OR free-text `project` (legacy).
+  projectId                                                   String?              @map("project_id") @db.Uuid
   version                                                     Int                  @default(1)
   auditLogs                                                   AuditLog[]           @relation("MemoryAuditLogs")
   codeMetadata                                                CodeMemoryMetadata?
@@ -413,22 +416,31 @@ model Memory {
   // synthesisEvidenceIds: UUIDs of source memories that produced this synthesis
   // synthesisClusterHash: stable hash of the tag-pair or cluster that produced this synthesis (cooldown key)
   // synthesisRevision: incremented each time this cluster re-synthesises
-  synthesisConfidence                                         Float?               @map("synthesis_confidence")
-  synthesisEvidenceIds                                        String[]             @map("synthesis_evidence_ids") @db.Uuid
-  synthesisClusterHash                                        String?              @map("synthesis_cluster_hash") @db.VarChar(128)
-  synthesisRevision                                           Int                  @default(1) @map("synthesis_revision")
+  synthesisConfidence  Float?   @map("synthesis_confidence")
+  synthesisEvidenceIds String[] @map("synthesis_evidence_ids") @db.Uuid
+  synthesisClusterHash String?  @map("synthesis_cluster_hash") @db.VarChar(128)
+  synthesisRevision    Int      @default(1) @map("synthesis_revision")
 
   // Phase A tiered cache.
   //   tier 1 = thin index (title + entities + small embedding, body may be sparse)
   //   tier 2 = hot cache (full content + full embedding, lazy-hydrated)
   //   default 2 preserves existing behavior for memories created before this column existed.
-  tier                                                        Int                  @default(2) @map("tier")
-  lastAccessedAt                                              DateTime?            @map("last_accessed_at") @db.Timestamptz(6)
-  promotedAt                                                  DateTime?            @map("promoted_at") @db.Timestamptz(6)
+  tier           Int       @default(2) @map("tier")
+  lastAccessedAt DateTime? @map("last_accessed_at") @db.Timestamptz(6)
+  promotedAt     DateTime? @map("promoted_at") @db.Timestamptz(6)
+
+  // Phase 1 Cognitive layer:
+  //   canonical  = stable fact promoted by governance (Turing-verified)
+  //   bridge     = cross-cluster synthesis edge
+  //   compression= summary of compacted cluster
+  //   reflection = governance self-evaluation memory
+  //   NULL       = ordinary evidence/memory tier (default)
+  cognitiveLayerRole String? @map("cognitive_layer_role")
 
   @@index([userId])
   @@index([orgId])
   @@index([project])
+  @@index([projectId], map: "memories_project_id_idx")
   @@index([scope])
   @@index([primaryTeamId])
   @@index([memoryType])
@@ -441,6 +453,7 @@ model Memory {
   @@index([synthesisClusterHash], map: "memories_synthesis_cluster_hash_idx")
   @@index([tier], map: "memories_tier_idx")
   @@index([userId, tier, lastAccessedAt(sort: Desc)], map: "memories_user_tier_lastaccess_idx")
+  @@index([cognitiveLayerRole], map: "memories_cognitive_layer_role_idx")
   @@map("memories")
 }
 
@@ -449,15 +462,15 @@ model Memory {
 /// Used by recall router to boost relevance for active entities/threads.
 /// One row per (userId, orgId). active_entities = ["Vinil","B&B"] last 7d.
 model WorkingSet {
-  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId          String    @unique @map("user_id") @db.Uuid
-  orgId           String?   @map("org_id") @db.Uuid
-  activeEntities  String[]  @map("active_entities")
-  activeThreads   String[]  @map("active_threads")
-  activeProjects  String[]  @map("active_projects")
-  pinnedMemoryIds String[]  @map("pinned_memory_ids") @db.Uuid
-  updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId          String   @unique @map("user_id") @db.Uuid
+  orgId           String?  @map("org_id") @db.Uuid
+  activeEntities  String[] @map("active_entities")
+  activeThreads   String[] @map("active_threads")
+  activeProjects  String[] @map("active_projects")
+  pinnedMemoryIds String[] @map("pinned_memory_ids") @db.Uuid
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   @@index([orgId])
   @@map("working_sets")
@@ -1265,6 +1278,7 @@ enum MemoryType {
   relationship
   synthesis
   summary
+  conversation
 }
 
 enum RelationshipType {
@@ -1355,22 +1369,40 @@ model DigitalEmployee {
 /// Per-user (not per-org) for v1. summaryMemoryId is set on archive
 /// when the transcript is distilled into a canonical Memory.
 model HyperRoom {
-  id                String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId            String       @map("user_id") @db.Uuid
-  orgId             String       @map("org_id") @db.Uuid
-  name              String       @db.VarChar(120)
-  participantIds    String[]     @default([]) @map("participant_ids") @db.Uuid
-  createdAt         DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt         DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  archivedAt        DateTime?    @map("archived_at") @db.Timestamptz(6)
-  summaryMemoryId   String?      @map("summary_memory_id") @db.Uuid
-  user              User         @relation("UserHyperRooms", fields: [userId], references: [id], onDelete: Cascade)
-  org               Organization @relation("OrgHyperRooms", fields: [orgId], references: [id], onDelete: Cascade)
-  turns             HyperTurn[]
+  id              String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId          String       @map("user_id") @db.Uuid
+  orgId           String       @map("org_id") @db.Uuid
+  name            String       @db.VarChar(120)
+  participantIds  String[]     @default([]) @map("participant_ids") @db.Uuid
+  template        String       @default("debate") @db.VarChar(40)
+  createdAt       DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  archivedAt      DateTime?    @map("archived_at") @db.Timestamptz(6)
+  summaryMemoryId String?      @map("summary_memory_id") @db.Uuid
+  user            User         @relation("UserHyperRooms", fields: [userId], references: [id], onDelete: Cascade)
+  org             Organization @relation("OrgHyperRooms", fields: [orgId], references: [id], onDelete: Cascade)
+  turns           HyperTurn[]
 
   @@index([userId, orgId])
   @@index([archivedAt])
   @@map("hyper_rooms")
+}
+
+/// AgentTrust — per-org meritocracy ledger. score in [0,1], starts 0.5.
+/// Updated post-seal: lead-success +0.05, challenger-correct +0.05,
+/// unresolved-escalate -0.05. Display-only in v1; routing weight wiring
+/// in _pick_lead is phase-2 (observe 50-100 turns first).
+model AgentTrust {
+  orgId       String   @map("org_id") @db.Uuid
+  employeeId  String   @map("employee_id") @db.Uuid
+  trustScore  Float    @default(0.5) @map("trust_score")
+  wins        Int      @default(0)
+  losses      Int      @default(0)
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@id([orgId, employeeId])
+  @@index([orgId, trustScore])
+  @@map("agent_trust")
 }
 
 /// HyperTurn — one user message + lead + reactors + (optional) round-2
@@ -1378,19 +1410,19 @@ model HyperRoom {
 /// (router, line, react, revise, validate, seal). idempotencyKey makes
 /// double-clicks return the same turn instead of running a second time.
 model HyperTurn {
-  id              String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  roomId          String     @map("room_id") @db.Uuid
-  seq             Int
-  userMessage     String     @map("user_message")
-  status          String     @default("live") @db.VarChar(20)
+  id             String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  roomId         String      @map("room_id") @db.Uuid
+  seq            Int
+  userMessage    String      @map("user_message")
+  status         String      @default("live") @db.VarChar(20)
   // live | complete | failed | cost_capped
-  lines           Json       @default("[]")
-  costTokens      Int        @default(0) @map("cost_tokens")
-  startedAt       DateTime   @default(now()) @map("started_at") @db.Timestamptz(6)
-  sealedAt        DateTime?  @map("sealed_at") @db.Timestamptz(6)
-  idempotencyKey  String     @unique @map("idempotency_key") @db.VarChar(64)
-  room            HyperRoom  @relation(fields: [roomId], references: [id], onDelete: Cascade)
-  evals           AgentEval[]
+  lines          Json        @default("[]")
+  costTokens     Int         @default(0) @map("cost_tokens")
+  startedAt      DateTime    @default(now()) @map("started_at") @db.Timestamptz(6)
+  sealedAt       DateTime?   @map("sealed_at") @db.Timestamptz(6)
+  idempotencyKey String      @unique @map("idempotency_key") @db.VarChar(64)
+  room           HyperRoom   @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  evals          AgentEval[]
 
   @@unique([roomId, seq])
   @@index([roomId])
@@ -1403,14 +1435,14 @@ model HyperTurn {
 /// total is the weighted sum. usedForTuningAt is set when consumed by
 /// a tuner run so each tune cycle waits for 20 fresh evals.
 model AgentEval {
-  id                String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  agentId           String     @map("agent_id") @db.Uuid
-  turnId            String     @map("turn_id") @db.Uuid
-  scores            Json
-  total             Float
-  createdAt         DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
-  usedForTuningAt   DateTime?  @map("used_for_tuning_at") @db.Timestamptz(6)
-  turn              HyperTurn  @relation(fields: [turnId], references: [id], onDelete: Cascade)
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  agentId         String    @map("agent_id") @db.Uuid
+  turnId          String    @map("turn_id") @db.Uuid
+  scores          Json
+  total           Float
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  usedForTuningAt DateTime? @map("used_for_tuning_at") @db.Timestamptz(6)
+  turn            HyperTurn @relation(fields: [turnId], references: [id], onDelete: Cascade)
 
   @@index([agentId, usedForTuningAt])
   @@index([turnId])
@@ -1632,22 +1664,22 @@ model ExternalRef {
 // Canonical entities are the master IDs for real-world things. Multiple
 // memories + cross-system refs collapse to one canonical entity.
 model CanonicalEntity {
-  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  organizationId  String   @map("organization_id") @db.Uuid
-  canonicalName   String   @map("canonical_name")
-  entityKind      String   @map("entity_kind") @db.VarChar(40)
-  aliases         String[] @default([])
-  primaryEmail    String?  @map("primary_email") @db.VarChar(255)
-  emailDomains    String[] @default([]) @map("email_domains")
-  verticalTags    String[] @default([]) @map("vertical_tags")
-  externalRefs    Json     @default("{}") @map("external_refs")
-  metadata        Json     @default("{}")
-  mergedFrom      String[] @default([]) @map("merged_from") @db.Uuid
-  confidence      Decimal  @default(1.00) @db.Decimal(3, 2)
-  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  canonicalName  String   @map("canonical_name")
+  entityKind     String   @map("entity_kind") @db.VarChar(40)
+  aliases        String[] @default([])
+  primaryEmail   String?  @map("primary_email") @db.VarChar(255)
+  emailDomains   String[] @default([]) @map("email_domains")
+  verticalTags   String[] @default([]) @map("vertical_tags")
+  externalRefs   Json     @default("{}") @map("external_refs")
+  metadata       Json     @default("{}")
+  mergedFrom     String[] @default([]) @map("merged_from") @db.Uuid
+  confidence     Decimal  @default(1.00) @db.Decimal(3, 2)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  memoryLinks     MemoryEntityLink[]
+  memoryLinks MemoryEntityLink[]
 
   @@index([organizationId, entityKind])
   @@index([aliases], type: Gin)
@@ -1663,7 +1695,7 @@ model MemoryEntityLink {
   confidence Decimal  @default(1.00) @db.Decimal(3, 2)
   createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  entity     CanonicalEntity @relation(fields: [entityId], references: [id], onDelete: Cascade)
+  entity CanonicalEntity @relation(fields: [entityId], references: [id], onDelete: Cascade)
 
   @@id([memoryId, entityId, role])
   @@index([entityId])
@@ -1672,17 +1704,17 @@ model MemoryEntityLink {
 
 // Entity review queue — fuzzy match candidates 0.70-0.95 surface here.
 model EntityReviewCandidate {
-  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  organizationId  String   @map("organization_id") @db.Uuid
-  proposedEntityId String? @map("proposed_entity_id") @db.Uuid
-  memoryId        String?  @map("memory_id") @db.Uuid
-  candidateName   String   @map("candidate_name")
-  candidateKind   String   @map("candidate_kind") @db.VarChar(40)
-  confidence      Decimal  @db.Decimal(3, 2)
-  reason          String?
-  status          String   @default("pending") @db.VarChar(20)
-  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  resolvedAt      DateTime? @map("resolved_at") @db.Timestamptz(6)
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId   String    @map("organization_id") @db.Uuid
+  proposedEntityId String?   @map("proposed_entity_id") @db.Uuid
+  memoryId         String?   @map("memory_id") @db.Uuid
+  candidateName    String    @map("candidate_name")
+  candidateKind    String    @map("candidate_kind") @db.VarChar(40)
+  confidence       Decimal   @db.Decimal(3, 2)
+  reason           String?
+  status           String    @default("pending") @db.VarChar(20)
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  resolvedAt       DateTime? @map("resolved_at") @db.Timestamptz(6)
 
   @@index([organizationId, status])
   @@map("entity_review_candidates")
@@ -1690,24 +1722,24 @@ model EntityReviewCandidate {
 
 // Decisions — Layer 4. Captures what was decided + why + alternatives.
 model Decision {
-  id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  organizationId      String   @map("organization_id") @db.Uuid
-  decisionMakerUserId String?  @map("decision_maker_user_id") @db.Uuid
-  decisionMakerName   String?  @map("decision_maker_name")
-  decisionType        String   @map("decision_type") @db.VarChar(80)
-  decidedAt           DateTime @map("decided_at") @db.Timestamptz(6)
-  whatDecided         String   @map("what_decided")
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId      String    @map("organization_id") @db.Uuid
+  decisionMakerUserId String?   @map("decision_maker_user_id") @db.Uuid
+  decisionMakerName   String?   @map("decision_maker_name")
+  decisionType        String    @map("decision_type") @db.VarChar(80)
+  decidedAt           DateTime  @map("decided_at") @db.Timestamptz(6)
+  whatDecided         String    @map("what_decided")
   reasoning           String?
-  alternatives        Json     @default("[]")
-  contextSnapshot     Json     @default("{}") @map("context_snapshot")
-  similarPastIds      String[] @default([]) @map("similar_past_ids") @db.Uuid
-  entityRefs          String[] @default([]) @map("entity_refs") @db.Uuid
-  outcomeTracked      Boolean  @default(false) @map("outcome_tracked")
+  alternatives        Json      @default("[]")
+  contextSnapshot     Json      @default("{}") @map("context_snapshot")
+  similarPastIds      String[]  @default([]) @map("similar_past_ids") @db.Uuid
+  entityRefs          String[]  @default([]) @map("entity_refs") @db.Uuid
+  outcomeTracked      Boolean   @default(false) @map("outcome_tracked")
   outcomeResolvesAt   DateTime? @map("outcome_resolves_at") @db.Timestamptz(6)
-  outcomeStatus       String?  @map("outcome_status") @db.VarChar(40)
-  outcomeDetails      Json?    @map("outcome_details")
-  sourceMemoryId      String?  @map("source_memory_id") @db.Uuid
-  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  outcomeStatus       String?   @map("outcome_status") @db.VarChar(40)
+  outcomeDetails      Json?     @map("outcome_details")
+  sourceMemoryId      String?   @map("source_memory_id") @db.Uuid
+  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
 
   @@index([organizationId, decidedAt(sort: Desc)])
   @@index([outcomeTracked, outcomeResolvesAt])
@@ -1770,20 +1802,85 @@ model ClusterIndex {
 /// on every restart, making operators blind to tick coverage across orgs.
 /// One row per org_id. Updated on every runOnce + auto-tick completion.
 model CognitionStatus {
-  orgId             String    @id @map("org_id") @db.Uuid
-  lastTickAt        DateTime? @map("last_tick_at") @db.Timestamptz(6)
-  lastRunMs         Int?      @map("last_run_ms")
-  lastSynthCount    Int       @default(0) @map("last_synth_count")
-  lastCompactCount  Int       @default(0) @map("last_compact_count")
-  nextTickAt        DateTime? @map("next_tick_at") @db.Timestamptz(6)
-  totalTicks        Int       @default(0) @map("total_ticks")
-  totalSynth        Int       @default(0) @map("total_synth")
-  totalCompact      Int       @default(0) @map("total_compact")
-  lastError         String?   @map("last_error")
-  lastErrorAt       DateTime? @map("last_error_at") @db.Timestamptz(6)
-  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  orgId            String    @id @map("org_id") @db.Uuid
+  lastTickAt       DateTime? @map("last_tick_at") @db.Timestamptz(6)
+  lastRunMs        Int?      @map("last_run_ms")
+  lastSynthCount   Int       @default(0) @map("last_synth_count")
+  lastCompactCount Int       @default(0) @map("last_compact_count")
+  nextTickAt       DateTime? @map("next_tick_at") @db.Timestamptz(6)
+  totalTicks       Int       @default(0) @map("total_ticks")
+  totalSynth       Int       @default(0) @map("total_synth")
+  totalCompact     Int       @default(0) @map("total_compact")
+  lastError        String?   @map("last_error")
+  lastErrorAt      DateTime? @map("last_error_at") @db.Timestamptz(6)
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@index([lastTickAt(sort: Desc)])
   @@map("cognition_status")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Phase 1 Governance: append-only mutation audit
+// ─────────────────────────────────────────────────────────────
+model GovernanceActionLog {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  batchId         String    @map("batch_id") @db.Uuid
+  agentName       String    @map("agent_name")
+  userId          String?   @map("user_id") @db.Uuid
+  orgId           String    @map("org_id") @db.Uuid
+  targetMemoryId  String?   @map("target_memory_id") @db.Uuid
+  actionType      String    @map("action_type")
+  reasoning       String?
+  evidenceIds     String[]  @map("evidence_ids") @db.Uuid
+  confidence      Float?
+  status          String    @default("proposed")
+  reversible      Boolean   @default(true)
+  retryCount      Int       @default(0) @map("retry_count")
+  beforeSnapshot  Json?     @map("before_snapshot")
+  afterSnapshot   Json?     @map("after_snapshot")
+  appliedAt       DateTime? @map("applied_at") @db.Timestamptz(6)
+  revertedAt      DateTime? @map("reverted_at") @db.Timestamptz(6)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([targetMemoryId, actionType, batchId], map: "governance_action_log_idempotent_idx")
+  @@index([orgId, status, createdAt(sort: Desc)], map: "governance_action_log_org_status_idx")
+  @@index([batchId], map: "governance_action_log_batch_idx")
+  @@index([agentName, createdAt(sort: Desc)], map: "governance_action_log_agent_idx")
+  @@map("governance_action_log")
+}
+
+model GovernanceAgentState {
+  agentName            String    @id @map("agent_name")
+  lastRunAt            DateTime? @map("last_run_at") @db.Timestamptz(6)
+  lastCompletedAt      DateTime? @map("last_completed_at") @db.Timestamptz(6)
+  cursorMemoryId       String?   @map("cursor_memory_id") @db.Uuid
+  config               Json      @default("{}")
+  metrics              Json      @default("{}")
+  dailyTokenBudget     Int       @default(1000000) @map("daily_token_budget")
+  tokensSpentToday     Int       @default(0) @map("tokens_spent_today")
+  tokenBudgetResetAt   DateTime  @default(dbgenerated("CURRENT_DATE")) @map("token_budget_reset_at") @db.Date
+  circuitBreakerUntil  DateTime? @map("circuit_breaker_until") @db.Timestamptz(6)
+  updatedAt            DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("governance_agent_state")
+}
+
+model GovernanceMetric {
+  agentName        String   @map("agent_name")
+  orgId            String   @map("org_id") @db.Uuid
+  day              DateTime @db.Date
+  actionsProposed  Int      @default(0) @map("actions_proposed")
+  actionsApproved  Int      @default(0) @map("actions_approved")
+  actionsApplied   Int      @default(0) @map("actions_applied")
+  actionsReverted  Int      @default(0) @map("actions_reverted")
+  actionsRejected  Int      @default(0) @map("actions_rejected")
+  actionsFailed    Int      @default(0) @map("actions_failed")
+  tokensSpent      BigInt   @default(0) @map("tokens_spent")
+  latencyMsP95     Int?     @map("latency_ms_p95")
+  updatedAt        DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@id([agentName, orgId, day])
+  @@index([day(sort: Desc), agentName], map: "governance_metric_day_idx")
+  @@map("governance_metric")
 }

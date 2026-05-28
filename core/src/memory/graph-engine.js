@@ -2701,6 +2701,7 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
       updated_at: timestamp,
       document_date: documentDate,
       event_dates: input.event_dates || [],
+      cognitive_layer_role: input.cognitive_layer_role || null,
       metadata: input.metadata || {},
       contentFingerprint: null,
       source_metadata: input.source_metadata || {

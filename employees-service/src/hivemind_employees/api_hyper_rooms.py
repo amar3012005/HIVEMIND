@@ -44,7 +44,13 @@ from pydantic import BaseModel, Field
 from .agents.agentscope_factory import build_react_agent
 from .bootstrap_client import fetch_bootstrap
 from .config import get_settings
-from .db import list_running_employees
+from .db import (
+    get_room_template,
+    get_trust_scores,
+    list_employees_by_ids,
+    list_running_employees,
+    update_trust,
+)
 from .hivemind_client import HivemindClient
 
 log = logging.getLogger(__name__)
@@ -58,7 +64,7 @@ router = APIRouter(prefix="/internal/hyper", tags=["hyper-rooms"])
 # ~200k). No per-line or per-turn truncation here.
 
 MAX_REACTORS = 2
-ROUND_2_CHALLENGE_THRESHOLD = 0.55
+ROUND_2_CHALLENGE_THRESHOLD = 0.45
 
 # Full toolkit for hyper-room agents — all HIVEMIND read paths + save
 # + time travel; web is gated by prompt ("only when info isn't here").
@@ -97,6 +103,150 @@ ADVERSARIAL_PAIRS = (
 # ─── Conversation-agent cache — shared with api_employee_chat ──
 
 _ROOM_AGENTS: Dict[str, ReActAgent] = {}
+
+# ─── B3 repeat-guard: rolling per-room normalized line history ───
+# Bounded in-memory dedup. Keys: room_id. Values: list of normalised
+# tokens-fingerprints from prior reactor lines. Prevents 'we re-litigate
+# the same risk every turn' anti-pattern.
+_ROOM_PRIOR_LINES: Dict[str, List[str]] = {}
+_REPEAT_GUARD_MAX = 80  # rolling window per room
+
+# ─── A1 decision sink — explicit save-intent regex ───
+_SAVE_INTENT_RE = re.compile(
+    r"\b(save (this|that|it)|remember (this|that)|log (this|that)|"
+    r"write (this|that) (down|to memory)|capture this)\b",
+    re.IGNORECASE,
+)
+
+# Decision-template flag — set via room metadata later. For now: any
+# turn that closes with verdict=resolved OR explicit save-intent.
+
+
+def _normalize_for_dedup(text: str) -> str:
+    """Strip punctuation/case for shingle dedup. 4-gram key."""
+    t = re.sub(r"[^\w\s]", " ", (text or "").lower())
+    toks = [w for w in t.split() if len(w) > 3]
+    return " ".join(toks[:12])  # first 12 substantive tokens = fingerprint
+
+
+def _line_already_raised(room_id: str, line: str) -> bool:
+    """B3: cheap repeat-detection. True if this reactor line restates a
+    prior one in the same room."""
+    fp = _normalize_for_dedup(line)
+    if not fp or len(fp) < 12:  # too-short fingerprints unreliable
+        return False
+    prior = _ROOM_PRIOR_LINES.get(room_id, [])
+    # Substantial overlap: shared 4+ consecutive tokens
+    fp_words = fp.split()
+    for p in prior:
+        p_words = p.split()
+        # Sliding 4-gram intersect
+        if len(p_words) < 4 or len(fp_words) < 4:
+            continue
+        fp_grams = {" ".join(fp_words[i:i+4]) for i in range(len(fp_words) - 3)}
+        p_grams = {" ".join(p_words[i:i+4]) for i in range(len(p_words) - 3)}
+        if fp_grams & p_grams:
+            return True
+    return False
+
+
+def _remember_line(room_id: str, line: str) -> None:
+    if not line:
+        return
+    fp = _normalize_for_dedup(line)
+    if not fp:
+        return
+    buf = _ROOM_PRIOR_LINES.setdefault(room_id, [])
+    buf.append(fp)
+    # Trim
+    if len(buf) > _REPEAT_GUARD_MAX:
+        del buf[: len(buf) - _REPEAT_GUARD_MAX]
+
+
+# ─── A2 completion verifier ───
+def _is_substantive_lead(text: str, had_memory_context: bool) -> bool:
+    """True if lead/synth text passes the no-empty-seal gate.
+
+    Rules:
+    - non-trivial length (>=120 chars)
+    - AND (cites a memory title via "<...>" OR contains "from \"" pattern
+      OR explicit 'nothing on file' acknowledgement when no memory context)
+    """
+    if not text or len(text.strip()) < 120:
+        return False
+    cite_patterns = (
+        re.search(r'from\s+["“][^"”]{6,}["”]', text),
+        re.search(r'["“][^"”]{6,}["”]\s*(?:memo|brief|doc|note)', text, re.IGNORECASE),
+        re.search(r'(?:per|see)\s+["“][^"”]{6,}["”]', text, re.IGNORECASE),
+    )
+    if any(cite_patterns):
+        return True
+    if not had_memory_context and re.search(r'nothing on file', text, re.IGNORECASE):
+        return True
+    return False
+
+
+# ─── A1 decision sink — POST to /api/memories with master key + emulation ─
+async def _save_room_decision(
+    *,
+    user_id: str,
+    org_id: str,
+    room_id: str,
+    turn_id: str,
+    user_message: str,
+    decision_text: str,
+    trigger: str,
+) -> Optional[str]:
+    """Persist a room decision as a HIVEMIND memory. Returns memory id
+    or None on failure. Uses master key + X-HM-User-Id/Org-Id emulation
+    so we don't require per-employee scoped keys."""
+    settings = get_settings()
+    master = settings.hivemind_master_api_key
+    if not master:
+        log.warning("decision-sink: no master key; skipping save room=%s", room_id)
+        return None
+    title = f"Room decision · {user_message[:80]}"
+    body = (
+        f"Trigger: {trigger}\n"
+        f"User asked: {user_message}\n\n"
+        f"Decision / closing line:\n{decision_text.strip()}\n"
+    )
+    tags = [
+        "room-decision",
+        f"room:{room_id}",
+        f"turn:{turn_id}",
+        "hyper-rooms",
+    ]
+    try:
+        async with httpx.AsyncClient(
+            base_url=settings.hivemind_core_url,
+            timeout=httpx.Timeout(15.0, connect=5.0),
+            headers={
+                "Authorization": f"Bearer {master}",
+                "X-API-Key": master,
+                "X-HM-User-Id": user_id,
+                "X-HM-Org-Id": org_id,
+                "Content-Type": "application/json",
+            },
+        ) as c:
+            r = await c.post(
+                "/api/memories",
+                json={
+                    "title": title,
+                    "content": body,
+                    "tags": tags,
+                    "memory_type": "decision",
+                    "sync": True,
+                },
+            )
+            r.raise_for_status()
+            data = r.json()
+            mid = data.get("id") or (data.get("memory") or {}).get("id")
+            log.info("decision-sink: saved room=%s memory=%s trigger=%s", room_id, mid, trigger)
+            return mid
+    except Exception as exc:  # noqa: BLE001
+        log.warning("decision-sink: save failed room=%s err=%s", room_id, exc)
+        return None
 
 
 def _require_master_key(token: Optional[str]) -> None:
@@ -233,7 +383,12 @@ async def _emit_event(callback_url: str, turn_id: str, event: Dict[str, Any]) ->
 # ─── Agent build / reuse ──────────────────────────────────────────────
 
 
-async def _build_agent_for_room(room_id: str, emp: Dict[str, Any]) -> ReActAgent:
+async def _build_agent_for_room(
+    room_id: str,
+    emp: Dict[str, Any],
+    user_id: Optional[str] = None,
+    org_id: Optional[str] = None,
+) -> ReActAgent:
     """Cache one agent per (room, employee) so memory carries across turns.
 
     Overrides the employee's `tools` list with the full HIVEMIND toolset
@@ -256,13 +411,16 @@ async def _build_agent_for_room(room_id: str, emp: Dict[str, Any]) -> ReActAgent
             "employee %s missing scoped api_key — building tool-less agent",
             emp.get("slug"),
         )
+        # Use master key + emulation headers (X-HM-User-Id/X-HM-Org-Id)
+        # so tools still execute as the room owner instead of bailing
+        # tool-less. Without this, agents fall back to "nothing on file".
         merged = {
             **emp,
-            "tools": [],
+            "tools": DEFAULT_HYPER_TOOLS,
             "hyper": boot_emp.get("hyper"),
             "active_prompt_version": boot_emp.get("active_prompt_version"),
         }
-        agent = build_react_agent(merged, "")
+        agent = build_react_agent(merged, "", user_id=user_id, org_id=org_id)
         _ROOM_AGENTS[key] = agent
         return agent
     merged = {
@@ -273,7 +431,7 @@ async def _build_agent_for_room(room_id: str, emp: Dict[str, Any]) -> ReActAgent
         "hyper": boot_emp.get("hyper"),
         "active_prompt_version": boot_emp.get("active_prompt_version"),
     }
-    agent = build_react_agent(merged, api_key)
+    agent = build_react_agent(merged, api_key, user_id=user_id, org_id=org_id)
     _ROOM_AGENTS[key] = agent
     return agent
 
@@ -306,8 +464,11 @@ def _msg_to_text(reply: Optional[Msg]) -> str:
 
 REACTOR_INSTRUCTIONS = """\
 You are an EMPLOYEE at HIVEMIND — a teammate, not an outside expert.
-The Lead colleague just spoke. Decide if YOU would chime in.
-Default to silence unless you add real value.
+The Lead colleague just spoke. ENGAGE when the topic touches your lane —
+silence only when the topic is clearly outside your expertise AND you have
+no memory evidence to add. The room expects active multi-voice debate, not
+a monologue. Use your hivemind tools (recall / traverse / web) if you need
+to ground a counter-point.
 
 Reply in STRICT JSON ONLY (no preamble, no code fence):
 {
@@ -318,11 +479,18 @@ Reply in STRICT JSON ONLY (no preamble, no code fence):
 }
 
 Hard rules:
-- ONE sentence. Conversational, 'we / our' voice, no headers, no bullets.
+- ONE sentence, ~25 words max. Conversational, 'we / our' voice, no headers, no bullets.
+- The line must be a CONCRETE point, fact, risk, or counter — NOT a suggestion to do
+  something later. BANNED: "let's recall", "we should consider", "let's clarify",
+  "let's also look at", "we need to check". If all you have is a process suggestion,
+  stay silent: {"react": false}.
 - Cite concrete evidence when challenging — name the memory or person.
+- STICK TO THE USER'S TOPIC. Do not pivot to project management — no inventing
+  owners, dates, deadlines, or sub-task assignments. If the memory doesn't name
+  a person responsible, you don't either.
 - DO NOT invent facts. If you're not sure, stay silent: {"react": false}.
-- "challenge" only with a substantive counter-point.
-- "extend" only if you add something concrete.
+- "challenge" only with a substantive counter-point (state the actual risk/flaw).
+- "extend" only if you add a NEW concrete fact or angle the Lead missed.
 - "agree" only if you add a real +1 (skip if you'd just say 'I agree').
 - Role voices:
     Skeptic       — surface risk, demand evidence
@@ -408,11 +576,13 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     cost_tokens = 0
     status = "complete"
 
-    # Look up participating employees (running set)
-    running = {r["id"]: r for r in await list_running_employees()}
+    # Look up participating employees — explicit user selection, so we
+    # ignore the running/deploying Slack-gateway filter and include any
+    # non-paused, non-archived employee by id.
+    by_id = {r["id"]: r for r in await list_employees_by_ids(req.participant_ids)}
     participants: List[Dict[str, Any]] = []
     for pid in req.participant_ids:
-        emp = running.get(pid)
+        emp = by_id.get(pid)
         if not emp:
             continue
         emp["_lane"] = derive_lane(emp)
@@ -421,7 +591,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     if not participants:
         await _emit_event(
             req.callback_url, req.turn_id,
-            {"t": "error", "message": "No running employees in room"},
+            {"t": "error", "message": "Room has no eligible employees (paused or archived)"},
         )
         await _emit_event(
             req.callback_url, req.turn_id,
@@ -441,11 +611,19 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     lead = forced or _pick_lead(participants, req.user_message)
     reactors = _pick_reactors(participants, lead)
 
+    # B1: per-room template (debate | decision). Falls back to 'debate'.
+    room_template = await get_room_template(req.room_id)
+    # A4: pull trust scores for display only (no routing weight yet).
+    trust_map = await get_trust_scores(req.org_id, [p["id"] for p in participants])
+    trust_by_slug = {p.get("slug"): trust_map.get(p["id"], 0.5) for p in participants}
+
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "router",
         "lead": lead.get("slug"),
         "reactors": [r.get("slug") for r in reactors],
         "lanes": {p.get("slug"): p["_lane"] for p in participants},
+        "template": room_template,
+        "trust": trust_by_slug,
     })
 
     # ── Pre-fetch HIVEMIND context (grounded RAG) ───────────────────
@@ -492,31 +670,64 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     lead_agent = None
     lead_prompt = ""
     try:
-        lead_agent = await _build_agent_for_room(req.room_id, lead)
+        lead_agent = await _build_agent_for_room(req.room_id, lead, user_id=req.user_id, org_id=req.org_id)
         # Provide CSI persona framing in the user-prompt wrapper so we
         # don't have to mutate the agent's underlying system prompt.
         # Chat-tone constraints — this is a Slack-style room, NOT a memo.
+        if memory_context:
+            grounding = (
+                "GROUNDING — you ALREADY have the relevant memories above.\n"
+                "- Answer NOW directly from them. Do NOT announce, narrate, or plan tool calls.\n"
+                "- BANNED phrases: 'we need to recall', 'let's recall', 'we should traverse', "
+                "'let me check', 'we'll review'. You already have the context — use it.\n"
+                "- When you state a fact, name its memory title inline: '<claim> — from \"<title>\"'.\n"
+                "- If the memories above don't actually cover the question, say so in one sentence, "
+                "then give your best direct take.\n"
+            )
+        else:
+            grounding = (
+                "GROUNDING — pre-fetch found no obvious match. DO NOT bail with 'nothing on file' yet.\n"
+                "- FIRST, silently call hivemind_recall 2-3 times with DIFFERENT queries before answering:\n"
+                "    • the user's exact phrasing\n"
+                "    • each proper noun in the question (people, projects, places, companies, products)\n"
+                "    • a broader related topic the question implies\n"
+                "- If ANY recall hits, answer from those memories and quote titles inline: '<claim> — from \"<title>\"'.\n"
+                "- If you find a related entity memory, call hivemind_traverse_graph on its id to pull neighbours.\n"
+                "- For time-anchored questions, try hivemind_at.\n"
+                "- ONLY if every silent tool call returns empty: say 'nothing on file about X yet' in ONE sentence, "
+                "then give a concrete take in 2-3 more sentences. Never invent facts.\n"
+                "- NEVER narrate the search ('let me check', 'we should recall', 'I'll look') — just call the tools.\n"
+            )
+        template_hint = (
+            "[TEMPLATE: decision — DACI flow. Lead delivers the final committed "
+            "answer with memory citations. Synthesis will be saved as a "
+            "decision memory.]\n\n"
+            if room_template == "decision"
+            else ""
+        )
         lead_prompt = (
             f"[CSI swarm — you are an EMPLOYEE at the HIVEMIND organisation. "
             f"You're the LEAD speaking up this turn. Your lane: {lead['_lane']}.]\n\n"
+            + template_hint
             + (memory_context + "\n" if memory_context else "")
             + f"WHO YOU ARE:\n"
-            f"- You work AT HIVEMIND. The 'HIVEMIND' in this room = our org / our product. "
-            f"It is NOT 'Hivemind Capital', NOT any NFT fund, NOT any other unrelated company with the same name.\n"
+            f"- You work AT HIVEMIND. The 'HIVEMIND' in this room = our org / our product.\n"
             f"- Speak from inside the company. Use 'we' / 'our' / 'the team'.\n"
-            f"- Reference colleagues + projects by name when they appear in the memory context above.\n\n"
-            f"HARD ANTI-HALLUCINATION RULES:\n"
-            f"1. Call hivemind_recall (or hivemind_query_with_ai for multi-hop) BEFORE you make any claim of fact about us, our people, our projects, decisions, or history. If recall returns nothing relevant, SAY SO — do not invent.\n"
-            f"2. Walk connections with hivemind_traverse_graph or hivemind_list_memories to find linked people, decisions, prior projects when the topic touches an entity already in memory.\n"
-            f"3. Quote evidence inline. When you state a fact, name the memory title or the person mentioned in it. Pattern: '<claim> — from memory \"<title>\"' or 'as <name> noted in <topic>'.\n"
-            f"4. Use hivemind_web_search / hivemind_web_research ONLY for external facts that genuinely don't live in HIVEMIND (live market prices, today's news, public-company filings we haven't tracked). Never for facts about ourselves.\n"
-            f"5. If you must speculate, prefix the sentence with 'Speculation:' so it's marked.\n"
-            f"6. Save durable conclusions with hivemind_save_memory at the end when the turn produced something worth keeping.\n\n"
+            f"- Reference colleagues + projects by name ONLY when they appear in the memory above.\n\n"
+            + grounding
+            + f"\nSTAY ON THE TOPIC:\n"
+            f"- ANSWER THE USER'S QUESTION DIRECTLY. Do not pivot to a project plan unless they "
+            f"explicitly asked for owners/dates.\n"
+            f"- Pull facts from the memories above; persona-flavour them in YOUR voice "
+            f"({lead['_lane']}).\n"
+            f"- NEVER invent owners, dates, deadlines, or assignments. If memory does not name a "
+            f"person responsible, don't assign one.\n"
+            f"- If the user adds a constraint mid-thread ('this is only about X'), narrow your "
+            f"answer accordingly — do not repeat the previous turn.\n\n"
             f"WRITE LIKE A CHAT MESSAGE:\n"
-            f"- 3-4 short sentences, or a brief list if the user asked for one (max 5 items).\n"
-            f"- First person plural ('we / our'), conversational, no formal opener.\n"
-            f"- No 'Next steps:' boilerplate, no 'How would you like to proceed?' closer.\n"
-            f"- Substance in sentence one.\n\n"
+            f"- 3-4 short sentences. Substance in sentence one.\n"
+            f"- Human Slack tone — tight, no filler, no 'Next steps:' boilerplate.\n"
+            f"- Quote memory titles inline when stating a fact: '<claim> — from \"<title>\"'.\n\n"
             f"User said:\n{req.user_message}"
         )
         reply = await lead_agent(Msg(name="user", content=lead_prompt, role="user"))
@@ -527,7 +738,15 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         # the LLM emits `"limit": "10"`. Retry once telling it to stop
         # quoting numbers; on second failure, fall back to a no-tool pass
         # so the turn at least delivers a lead bubble.
-        is_tool_schema = "tool_use_failed" in msg or "did not match schema" in msg
+        # gpt-oss-20b occasionally emits empty output → output_parse_failed.
+        # Treat it the same as a tool-schema error so we retry with a hint
+        # and then fall through to the no-tools plain pass.
+        is_tool_schema = (
+            "tool_use_failed" in msg
+            or "did not match schema" in msg
+            or "output_parse_failed" in msg
+            or "Parsing failed" in msg
+        )
         retried = False
         if is_tool_schema and lead_agent:
             try:
@@ -545,6 +764,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 try:
                     plain_agent = await _build_agent_for_room(
                         req.room_id + ":notools", {**lead, "tools": []},
+                        user_id=req.user_id, org_id=req.org_id,
                     )
                     reply3 = await plain_agent(Msg(name="user", content=req.user_message, role="user"))
                     lead_text = _msg_to_text(reply3) or "(no response)"
@@ -594,7 +814,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         await _emit_event(req.callback_url, req.turn_id, {
             "t": "typing", "agent": r.get("slug"), "kind": "react",
         })
-        agent = await _build_agent_for_room(req.room_id, r)
+        agent = await _build_agent_for_room(req.room_id, r, user_id=req.user_id, org_id=req.org_id)
         is_opp = r["_lane"] in opposing_lanes(lead["_lane"])
         reaction_tasks.append(asyncio.create_task(_run_reactor(
             agent=agent,
@@ -622,6 +842,19 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 })
                 continue
             line = result["line"]
+            # B3: suppress lines that restate prior reactor points in this room.
+            if _line_already_raised(req.room_id, line):
+                log.info("repeat-guard: suppressed reactor=%s line=%s", r_emp.get("slug"), line[:60])
+                await _emit_event(req.callback_url, req.turn_id, {
+                    "t": "react",
+                    "agent": r_emp.get("slug"),
+                    "round": 1,
+                    "agreement": "abstain",
+                    "content": "",
+                    "reason": "duplicate",
+                })
+                continue
+            _remember_line(req.room_id, line)
             r_tokens = max(80, len(line) // 4)
             cost_tokens += r_tokens
             event = {
@@ -643,6 +876,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     # user sees prompts to do work, not the work itself. Synthesis lets the
     # lead absorb the reactor lines + actually exercise tools (recall /
     # traverse) and produce one final actionable bubble.
+    synth_text = ""
     if reactions:
         await _emit_event(req.callback_url, req.turn_id, {
             "t": "typing", "agent": lead.get("slug"), "kind": "synthesis",
@@ -655,15 +889,18 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             synth_prompt = (
                 f"[CSI synthesis pass — you're still the HIVEMIND employee. Lane: {lead['_lane']}.]\n\n"
                 + (memory_context + "\n" if memory_context else "")
-                + f"YOUR EARLIER LEAD LINE:\n\"{lead_text}\"\n\n"
-                f"REACTOR SUGGESTIONS (what your teammates want you to do next):\n{reactor_summary}\n\n"
-                f"NOW EXECUTE THE WORK. Don't just acknowledge the suggestions — DO them.\n"
-                f"  • If a reactor said 'we should recall X' → call hivemind_recall right now and quote the hits.\n"
-                f"  • If 'we should traverse the graph' → call hivemind_traverse_graph on the right seed memory.\n"
-                f"  • If 'what's the next step' → propose 2-3 concrete next steps with names + dates from memory.\n"
-                f"  • If a reactor disagreed → defend with evidence or concede explicitly.\n\n"
-                f"OUTPUT: 3-6 short sentences, chat tone, 'we / our'. Lead with the new fact / action / answer\n"
-                f"the reactors were asking for. Quote memory titles inline. No 'happy to help' fluff."
+                + f"USER'S ORIGINAL QUESTION:\n\"{req.user_message}\"\n\n"
+                f"YOUR EARLIER LEAD LINE:\n\"{lead_text}\"\n\n"
+                f"REACTOR LINES:\n{reactor_summary}\n\n"
+                f"INTEGRATE the reactor signal into your answer to the user — do NOT pivot to a "
+                f"project plan with owners/dates unless the user asked for one.\n"
+                f"  • If a reactor surfaced a NEW fact from memory → fold it in and cite the title.\n"
+                f"  • If a reactor challenged a claim → defend with a memory hit, or concede.\n"
+                f"  • If a reactor's point is outside scope of the user's question → ignore it.\n"
+                f"  • Need more grounding? Call hivemind_recall / traverse_graph silently first.\n\n"
+                f"OUTPUT: 3-5 short sentences. Stay on the user's question. Chat tone, 'we / our'.\n"
+                f"Quote memory titles inline. NEVER invent owners, dates, or deadlines. No 'happy to "
+                f"help' fluff."
             )
             synth_reply = await lead_agent(Msg(name="user", content=synth_prompt, role="user"))
             synth_text = _msg_to_text(synth_reply) or ""
@@ -681,49 +918,109 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         except Exception as exc:  # noqa: BLE001
             log.warning("synthesis failed: %s", exc)
 
+        # ── Post-synthesis reactor pass (MiroFish-style forward motion) ──
+        # After the lead synthesises, reactors get one more turn to push back
+        # against the synthesis. This is what makes the room MOVE FORWARD
+        # instead of capping after a single lead bubble + one extend. Mirrors
+        # MiroFish CSI loop: propose -> review -> revise.
+        post_synth_tasks = []
+        for r in reactors:
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "typing", "agent": r.get("slug"), "kind": "react",
+            })
+            agent2 = await _build_agent_for_room(req.room_id, r, user_id=req.user_id, org_id=req.org_id)
+            is_opp2 = r["_lane"] in opposing_lanes(lead["_lane"])
+            post_synth_tasks.append(asyncio.create_task(_run_reactor(
+                agent=agent2,
+                user_message=req.user_message,
+                lead_line=synth_text or lead_text,
+                lead_name=lead.get("name", lead.get("slug", "lead")),
+                reactor_lane=r["_lane"],
+                is_opposing=is_opp2,
+            )))
+        post_synth_results = await asyncio.gather(*post_synth_tasks, return_exceptions=True)
+        for r_emp, result in zip(reactors, post_synth_results):
+            if isinstance(result, Exception) or not result.get("react"):
+                continue
+            line = result["line"]
+            if _line_already_raised(req.room_id, line):
+                log.info("repeat-guard r2: suppressed reactor=%s", r_emp.get("slug"))
+                continue
+            _remember_line(req.room_id, line)
+            r_tokens = max(80, len(line) // 4)
+            cost_tokens += r_tokens
+            event = {
+                "t": "react",
+                "agent": r_emp.get("slug"),
+                "round": 2,
+                "agreement": result.get("agreement", "extend"),
+                "confidence": float(result.get("confidence", 0.5)),
+                "content": line,
+                "tokens": r_tokens,
+            }
+            reactions.append({**event, "emp": r_emp})
+            await _emit_event(req.callback_url, req.turn_id, event)
+
     # ── Round 2 challenger debate (only if reactor explicitly challenged) ──
     challenger_reaction = next(
         (r for r in reactions if r["agreement"] == "challenge" and r.get("confidence", 0) >= ROUND_2_CHALLENGE_THRESHOLD),
         None,
     )
 
-    if challenger_reaction:
-        # Lead revises
+    # B1 decision template: skip debate loop. The synth bubble is the
+    # commitment; we save it and seal. Debate template (default) keeps
+    # the revise/validate flow below.
+    if room_template == "decision":
+        challenger_reaction = None
+    # Loop revise+validate while challenger keeps escalating. Caps at
+    # MAX_DEBATE_ROUNDS so cost stays bounded. MiroFish pattern: do not
+    # seal on unresolved 'escalate' — keep the debate moving until the
+    # challenger accepts or the cap hits.
+    MAX_DEBATE_ROUNDS = 3
+    debate_round = 2
+    current_challenge_text = challenger_reaction["content"] if challenger_reaction else ""
+    final_verdict: Optional[str] = None
+    open_question: str = ""
+    last_revise_text: str = ""
+    while challenger_reaction and debate_round <= MAX_DEBATE_ROUNDS:
         await _emit_event(req.callback_url, req.turn_id, {
             "t": "typing", "agent": lead.get("slug"), "kind": "revise",
         })
         try:
             revise_prompt = (
-                f"[CSI revision pass — you're still the HIVEMIND employee speaking. Lane: {lead['_lane']}.]\n"
+                f"[CSI revision pass round {debate_round} — HIVEMIND employee. Lane: {lead['_lane']}.]\n"
+                f"USER'S ORIGINAL QUESTION: \"{req.user_message}\"\n"
                 f"{challenger_reaction['emp'].get('name')} ({challenger_reaction['emp']['_lane']}) pushed back:\n"
-                f"\"{challenger_reaction['content']}\"\n\n"
-                f"Reconsider. If they're right, say so concretely and revise. If you stand by it, "
-                f"defend with HIVEMIND evidence — recall a memory, name a teammate, cite a prior decision. "
-                f"No invented facts; if you can't ground it, concede. 2-4 sentences, chat tone, 'we / our'."
+                f"\"{current_challenge_text}\"\n\n"
+                f"Reconsider. If right, concede + revise. If standing by, defend with a memory "
+                f"hit — quote the title. No invented owners / dates. Stay on the user's question. "
+                f"2-4 sentences, chat tone, 'we / our'."
             )
             reply2 = await lead_agent(Msg(name="user", content=revise_prompt, role="user"))
             revise_text = _msg_to_text(reply2) or "(no revision)"
+            last_revise_text = revise_text
             revise_tokens = max(150, len(revise_text) // 4)
             cost_tokens += revise_tokens
             await _emit_event(req.callback_url, req.turn_id, {
                 "t": "revise",
                 "agent": lead.get("slug"),
-                "round": 2,
+                "round": debate_round,
                 "content": revise_text,
                 "tokens": revise_tokens,
             })
 
-            # Challenger validates or escalates once
             await _emit_event(req.callback_url, req.turn_id, {
                 "t": "typing", "agent": challenger_reaction["emp"].get("slug"), "kind": "validate",
             })
-            ch_agent = await _build_agent_for_room(req.room_id, challenger_reaction["emp"])
+            ch_agent = await _build_agent_for_room(req.room_id, challenger_reaction["emp"], user_id=req.user_id, org_id=req.org_id)
             validate_prompt = (
-                f"[CSI validation pass — your lane: {challenger_reaction['emp']['_lane']}.]\n"
+                f"[CSI validation pass round {debate_round} — lane: {challenger_reaction['emp']['_lane']}.]\n"
                 f"{lead.get('name')} responded to your challenge:\n"
                 f"\"{revise_text}\"\n\n"
+                f"Did the lead resolve your concern with concrete memory evidence, or is the gap "
+                f"still real?\n"
                 f"Reply in STRICT JSON:\n"
-                f'{{"verdict": "resolved" | "escalate", "line": "1-2 sentences"}}'
+                f'{{"verdict": "resolved" | "escalate", "line": "1-2 sentences (cite a memory if escalating)"}}'
             )
             r3 = await ch_agent(Msg(name="user", content=validate_prompt, role="user"))
             validate_raw = _msg_to_text(r3)
@@ -744,25 +1041,138 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             await _emit_event(req.callback_url, req.turn_id, {
                 "t": "validate",
                 "agent": challenger_reaction["emp"].get("slug"),
-                "round": 2,
+                "round": debate_round,
                 "verdict": verdict_obj["verdict"],
                 "content": verdict_obj["line"],
                 "tokens": v_tokens,
             })
+
+            final_verdict = verdict_obj["verdict"]
+            open_question = verdict_obj["line"] or current_challenge_text
+            if verdict_obj["verdict"] != "escalate":
+                break
+            # Escalating — feed challenger's new line as next round's
+            # challenge text and loop. Cost cap still in play.
+            current_challenge_text = verdict_obj["line"] or current_challenge_text
+            debate_round += 1
         except Exception as exc:  # noqa: BLE001
-            log.warning("round-2 failed: %s", exc)
+            log.warning("round-%s debate failed: %s", debate_round, exc)
+            break
+
+    # ── A2 completion verifier ───────────────────────────────────────
+    # Pick the most recent substantive lead-side output for grounding +
+    # save eligibility. Order: revise > synth > lead.
+    final_text = last_revise_text or synth_text or lead_text or ""
+    quality_low = not _is_substantive_lead(final_text, bool(memory_context))
+
+    if quality_low and final_text and lead_agent:
+        # One-shot rescue retry. Don't loop — bounded cost.
+        try:
+            rescue_prompt = (
+                "You produced no concrete grounded substance in the prior turn.\n"
+                f"USER QUESTION: {req.user_message}\n"
+                f"Available memories above. Answer DIRECTLY in 3-4 sentences. "
+                f"Quote at least one memory title inline. If memory truly silent, "
+                f"say 'nothing on file about X yet' in one sentence then give a "
+                f"concrete take. NEVER invent owners/dates."
+            )
+            rescue_reply = await lead_agent(Msg(name="user", content=rescue_prompt, role="user"))
+            rescue_text = _msg_to_text(rescue_reply) or ""
+            if rescue_text and len(rescue_text) > 80:
+                final_text = rescue_text
+                quality_low = not _is_substantive_lead(rescue_text, bool(memory_context))
+                rescue_tokens = max(120, len(rescue_text) // 4)
+                cost_tokens += rescue_tokens
+                await _emit_event(req.callback_url, req.turn_id, {
+                    "t": "line",
+                    "agent": lead.get("slug"),
+                    "round": debate_round,
+                    "kind": "rescue",
+                    "content": rescue_text,
+                    "tokens": rescue_tokens,
+                })
+        except Exception as exc:  # noqa: BLE001
+            log.warning("rescue retry failed: %s", exc)
+
+    # ── A3 tool-exec proof (measure only, don't block) ───────────────
+    if memory_context and final_text and not re.search(r'["“][^"”]{6,}["”]', final_text):
+        log.info("low-grounding flag turn=%s — memory_context present but lead cited no title", req.turn_id)
+
+    # ── B2 conclusion gate ──────────────────────────────────────────
+    if final_verdict == "escalate":
+        # Debate hit MAX_DEBATE_ROUNDS without consensus. Don't fake
+        # 'complete' — surface the open question as an action item.
+        status = "escalated"
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "decision_required",
+            "open_question": open_question or req.user_message,
+            "raised_by": (challenger_reaction or {}).get("emp", {}).get("slug") if challenger_reaction else None,
+            "rounds_run": debate_round,
+        })
+
+    # ── A1 decision sink — save iff verdict=resolved OR save-intent
+    #     OR template == 'decision' (DACI flow always commits) ─
+    save_intent = bool(_SAVE_INTENT_RE.search(req.user_message))
+    is_decision_template = room_template == "decision"
+    should_save = (
+        (final_verdict == "resolved" and not quality_low)
+        or save_intent
+        or (is_decision_template and not quality_low)
+    )
+    saved_memory_id: Optional[str] = None
+    if should_save and final_text:
+        trigger = "save-intent" if save_intent else "verdict-resolved"
+        saved_memory_id = await _save_room_decision(
+            user_id=req.user_id,
+            org_id=req.org_id,
+            room_id=req.room_id,
+            turn_id=req.turn_id,
+            user_message=req.user_message,
+            decision_text=final_text,
+            trigger=trigger,
+        )
+        if saved_memory_id:
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "decision_saved",
+                "memory_id": saved_memory_id,
+                "trigger": trigger,
+            })
+
+    # ── A4 trust scoring (display-only, no routing impact yet) ──────
+    # Lead: +0.05 on substantive seal; -0.05 on unresolved escalate.
+    # Challenger: +0.05 if revise conceded (verdict=resolved came AFTER a
+    # real challenge); -0.05 if their challenge was over-stated and lead
+    # held ground (we approximate: resolved with no concession keyword =
+    # challenge over-stated → mild loss).
+    trust_deltas: Dict[str, float] = {}
+    try:
+        lead_won = (not quality_low) and (
+            final_verdict == "resolved" or final_verdict is None or is_decision_template
+        )
+        lead_delta = 0.05 if lead_won else -0.05
+        new_lead = await update_trust(req.org_id, lead["id"], lead_delta, lead_won)
+        if new_lead is not None:
+            trust_deltas[lead.get("slug")] = new_lead
+        if challenger_reaction:
+            ch_emp = challenger_reaction["emp"]
+            challenger_correct = final_verdict == "escalate"  # lead couldn't refute
+            ch_delta = 0.05 if challenger_correct else -0.02
+            new_ch = await update_trust(req.org_id, ch_emp["id"], ch_delta, challenger_correct)
+            if new_ch is not None:
+                trust_deltas[ch_emp.get("slug")] = new_ch
+    except Exception as exc:  # noqa: BLE001
+        log.warning("trust update failed: %s", exc)
 
     # ── Seal ─────────────────────────────────────────────────────────
-    # Earlier patch removed the cost-cap branches and accidentally also
-    # ate this final emit + return — orchestrator was falling off the
-    # end and returning None, which (a) crashed FastAPI's
-    # ResponseValidationError on RoomTurnResponse and (b) never sent
-    # the SSE seal event, leaving the UI stuck on "typing…".
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "seal",
         "cost_tokens": cost_tokens,
         "status": status,
         "duration_ms": int((time.time() - started) * 1000),
+        "quality_low": quality_low,
+        "saved_memory_id": saved_memory_id,
+        "trust": trust_deltas,
+        "template": room_template,
     })
     return RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status=status)
 

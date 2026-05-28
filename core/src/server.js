@@ -11,6 +11,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
+import { allowOrgRequest as rateLimitAllowOrgRequest, getRateLimitStats as getRateLimitStatsImpl } from './middleware/rate-limit.js';
 import { createRequire } from 'module';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1072,12 +1073,32 @@ const residentRunManager = new ResidentRunManager({
   graphStore: persistentMemoryStore,
   reputationEngine: trailExecutor?._reputationEngine || null,
   chainMiner: trailExecutor?._chainMiner || null,
+  prisma,
   logger: console,
 });
 residentRunManager.seedAgents().catch((error) => {
   console.warn('[Resident] Failed to seed resident agents:', error.message);
 });
 const residentRoutes = createResidentRoutes(residentRunManager);
+
+const { createGovernanceRoutes } = await import('./resident/governance-routes.js');
+const governanceRoutes = createGovernanceRoutes({
+  prisma,
+  memoryStore: persistentMemoryStore,
+  logger: console,
+});
+
+// Phase 1: governance scheduler. ENV-GATED OFF by default — see scheduler.js.
+{
+  const { ResidentAgentScheduler } = await import('./resident/scheduler.js');
+  const governanceScheduler = new ResidentAgentScheduler({
+    runManager: residentRunManager,
+    prisma,
+    intervalMs: Number(process.env.GOVERNANCE_INTERVAL_MS || process.env.GOVERNANCE_SCHEDULER_INTERVAL_MS || 30 * 60 * 1000),
+    logger: console,
+  });
+  governanceScheduler.start();
+}
 const enterpriseChatService = persistentMemoryStore ? new EnterpriseChatService({
   memoryStore: persistentMemoryStore,
 }) : null;
@@ -1499,7 +1520,54 @@ const retrievalEvaluator = new RetrievalEvaluator({
 // Default user/org for local mode
 const DEFAULT_USER = process.env.HIVEMIND_DEFAULT_USER_ID || '00000000-0000-4000-8000-000000000001';
 const DEFAULT_ORG = process.env.HIVEMIND_DEFAULT_ORG_ID || '00000000-0000-4000-8000-000000000002';
-const ADMIN_SECRET = process.env.HIVEMIND_ADMIN_SECRET || 'local-admin-secret-change-me';
+// SECURITY: HIVEMIND_ADMIN_SECRET MUST be set in production. We refuse to boot
+// with the legacy fallback so an unset env cannot leave admin endpoints open.
+// Local/dev still allowed: set HIVEMIND_ADMIN_SECRET=local-… explicitly.
+const ADMIN_SECRET = (() => {
+  const v = process.env.HIVEMIND_ADMIN_SECRET;
+  if (v && v !== 'local-admin-secret-change-me') return v;
+  if (process.env.NODE_ENV === 'production') {
+    console.error('[FATAL] HIVEMIND_ADMIN_SECRET must be set in production (and not the legacy default). Refusing to boot.');
+    process.exit(1);
+  }
+  return v || 'local-admin-secret-change-me';
+})();
+
+// SECURITY: HMAC-signed state for OAuth callbacks. Without this the state
+// blob (which carries userId/orgId) is trivially mintable, letting an attacker
+// bind their Google account to a victim user. Signed with OAUTH_STATE_SECRET
+// (separate key recommended; falls back to ADMIN_SECRET when unset).
+const OAUTH_STATE_SECRET = process.env.OAUTH_STATE_SECRET || ADMIN_SECRET;
+function signOAuthState(payloadObj) {
+  const json = Buffer.from(JSON.stringify(payloadObj || {})).toString('base64url');
+  const sig = crypto
+    .createHmac('sha256', OAUTH_STATE_SECRET)
+    .update(json)
+    .digest('base64url');
+  return `${json}.${sig}`;
+}
+function verifyOAuthState(stateStr, { maxAgeMs = 30 * 60 * 1000 } = {}) {
+  if (!stateStr || typeof stateStr !== 'string') return null;
+  const dot = stateStr.indexOf('.');
+  if (dot < 0) return null;
+  const json = stateStr.slice(0, dot);
+  const sig = stateStr.slice(dot + 1);
+  const expected = crypto
+    .createHmac('sha256', OAUTH_STATE_SECRET)
+    .update(json)
+    .digest('base64url');
+  // timingSafeEqual on equal-length buffers
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(json, 'base64url').toString());
+    if (maxAgeMs && payload._ts && Date.now() - Number(payload._ts) > maxAgeMs) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
 const CONTROL_PLANE_ADMIN_BASE_URL = process.env.HIVEMIND_CONTROL_PLANE_BASE_URL || 'https://api.hivemind.davinciai.eu:8040';
 const API_KEY_REQUIRED = process.env.HIVEMIND_API_KEY_REQUIRED !== 'false';
 const MASTER_API_KEY = process.env.HIVEMIND_MASTER_API_KEY || '';
@@ -3390,10 +3458,43 @@ const server = http.createServer(async (req, res) => {
         doclingOk = r.ok;
       } catch { doclingOk = false; }
     }
+    // Phase 4 — strict health: probe DB + Qdrant + Docling. Coolify health
+    // check uses HTTP 200 vs 503 to decide replica restart. Returns 503 if
+    // any critical dep is down so orchestrator can route around the pod.
+    let dbOk = null;
+    if (prisma) {
+      try {
+        const r = await prisma.$queryRawUnsafe('SELECT 1 AS ok');
+        dbOk = Array.isArray(r) && r[0]?.ok === 1;
+      } catch { dbOk = false; }
+    }
+    let qdrantOk = null;
+    if (process.env.QDRANT_URL) {
+      try {
+        const ctrl2 = new AbortController();
+        const t2 = setTimeout(() => ctrl2.abort(), 1500);
+        const headers = process.env.QDRANT_API_KEY ? { 'api-key': process.env.QDRANT_API_KEY } : {};
+        const qr = await fetch(`${process.env.QDRANT_URL}/healthz`, { signal: ctrl2.signal, headers });
+        clearTimeout(t2);
+        qdrantOk = qr.ok;
+      } catch { qdrantOk = false; }
+    }
+    const criticalOk = dbOk !== false && qdrantOk !== false;
+    const memUsage = process.memoryUsage();
     return jsonResponse(res, {
-      ok: true,
+      ok: criticalOk,
       service: 'hivemind-api',
       port: process.env.PORT || 3000,
+      uptime_seconds: Math.round(process.uptime()),
+      memory: {
+        rss_mb: Math.round(memUsage.rss / 1024 / 1024),
+        heap_used_mb: Math.round(memUsage.heapUsed / 1024 / 1024),
+      },
+      dependencies: {
+        db: dbOk,
+        qdrant: qdrantOk,
+        docling: doclingOk,
+      },
       phase1: {
         document_first_ingestion: !!documentFirstIngestion,
         evidence_retrieval: !!evidenceRetrieval,
@@ -3409,6 +3510,7 @@ const server = http.createServer(async (req, res) => {
         memory_promotion_jobs: process.env.ENABLE_MEMORY_PROMOTION_JOBS === 'true',
         contradiction_scan: process.env.ENABLE_CONTRADICTION_SCAN === 'true',
         memory_synthesis: process.env.ENABLE_MEMORY_SYNTHESIS === 'true',
+        governance_scheduler: process.env.ENABLE_GOVERNANCE_SCHEDULER === 'true',
       },
       features: {
         evidence_recall: process.env.ENABLE_EVIDENCE_RECALL === 'true',
@@ -3416,7 +3518,7 @@ const server = http.createServer(async (req, res) => {
         entity_extraction: process.env.ENABLE_ENTITY_EXTRACTION === 'true',
         topic_state: process.env.ENABLE_TOPIC_STATE === 'true',
       },
-    });
+    }, criticalOk ? 200 : 503);
   }
 
   // ── DR Server auth relay: verify an API key and return userId/orgId ──
@@ -4824,7 +4926,15 @@ exit \$RC
     try {
       // Skip JSON body parsing for multipart upload endpoints
       const isMultipart = (req.headers['content-type'] || '').includes('multipart/form-data');
-      const body = (req.method !== 'GET' && !isMultipart) ? await parseBody(req) : {};
+      let body;
+      try {
+        body = (req.method !== 'GET' && !isMultipart) ? await parseBody(req) : {};
+      } catch (parseErr) {
+        if (parseErr?.code === 'PAYLOAD_TOO_LARGE') {
+          return jsonResponse(res, { error: 'payload_too_large', max_bytes: JSON_BODY_MAX_BYTES }, 413);
+        }
+        return jsonResponse(res, { error: 'invalid_json_body', message: parseErr?.message || String(parseErr) }, 400);
+      }
 
       const hostedDescriptorMatch = pathname.match(/^\/api\/mcp\/servers\/([^\/]+)$/);
       if (hostedDescriptorMatch && req.method === 'GET' && url.searchParams.get('token')) {
@@ -5028,33 +5138,85 @@ exit \$RC
         return jsonResponse(res, { keys });
       }
 
-      // Gmail OAuth callback — browser redirect from Google, no API key possible
+      // Connector health — surfaces last-refresh + stale flag per provider.
+      // Lets ops + FE detect Nango token expiry before downstream sync fails.
+      if (pathname === '/api/connectors/health' && req.method === 'GET') {
+        if (!prisma) return jsonResponse(res, { error: 'prisma_unavailable' }, 503);
+        // Route fires before the outer auth's orgId is declared (TDZ). Pull
+        // org from headers directly. Caller still needs API key to reach here.
+        const hcOrgId = req.headers['x-hm-org-id'] || null;
+        if (!hcOrgId) return jsonResponse(res, { error: 'orgId_required' }, 400);
+        try {
+          const rows = await prisma.nangoConnection.findMany({
+            where: { orgId: hcOrgId },
+            select: {
+              providerKey: true, connectionId: true, status: true,
+              connectedAt: true, updatedAt: true, metadata: true,
+            },
+          });
+          const STALE_MS = Number(process.env.CONNECTOR_STALE_MS || 24 * 60 * 60 * 1000);
+          const now = Date.now();
+          const connectors = rows.map((r) => {
+            const lastTs = new Date(r.updatedAt || r.connectedAt).getTime();
+            const ageMs = now - lastTs;
+            return {
+              provider: r.providerKey,
+              connection_id: r.connectionId,
+              status: r.status,
+              connected_at: r.connectedAt,
+              last_refresh_at: r.updatedAt || r.connectedAt,
+              age_ms: ageMs,
+              stale: r.status !== 'active' || ageMs > STALE_MS,
+              error: r.metadata?.refresh_error || null,
+            };
+          });
+          const unhealthy = connectors.filter((c) => c.stale).length;
+          return jsonResponse(res, {
+            org_id: hcOrgId,
+            connector_count: connectors.length,
+            unhealthy_count: unhealthy,
+            overall_status: unhealthy === 0 ? 'healthy' : (unhealthy < connectors.length ? 'degraded' : 'down'),
+            stale_threshold_ms: STALE_MS,
+            connectors,
+          });
+        } catch (err) {
+          return jsonResponse(res, { error: err.message }, 500);
+        }
+      }
+
+      // Gmail/Google Workspace OAuth callback — browser redirect, no API key.
+      // SECURITY: state is HMAC-signed via signOAuthState in /connect endpoint.
+      // verifyOAuthState rejects forged/expired state → falls back to DEFAULT_USER
+      // so an attacker can't bind to a victim. Multi-service grant logic merged
+      // here (was previously duplicated + dead in main switch).
       if (pathname === '/api/connectors/gmail/callback' && req.method === 'GET') {
         const callbackCode = url.searchParams.get('code');
         const callbackState = url.searchParams.get('state');
         const callbackError = url.searchParams.get('error');
+        const frontendUrl = process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu';
 
         if (callbackError) {
-          const frontendUrl = process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu';
           res.writeHead(302, { Location: `${frontendUrl}/hivemind/app/connectors?error=${encodeURIComponent(callbackError)}` });
           res.end();
           return;
         }
-
         if (!callbackCode) {
           return jsonResponse(res, { error: 'Missing authorization code' }, 400);
         }
 
-        try {
-          let stateUserId = DEFAULT_USER, stateOrgId = DEFAULT_ORG;
-          if (callbackState) {
-            try {
-              const parsed = JSON.parse(Buffer.from(callbackState, 'base64url').toString());
-              stateUserId = parsed.userId || stateUserId;
-              stateOrgId = parsed.orgId || stateOrgId;
-            } catch {}
-          }
+        const verified = verifyOAuthState(callbackState);
+        if (!verified) {
+          console.warn('[gmail-oauth] state verification failed — refusing to bind');
+          res.writeHead(302, { Location: `${frontendUrl}/hivemind/app/connectors?error=invalid_state` });
+          res.end();
+          return;
+        }
+        const stateUserId = verified.userId || DEFAULT_USER;
+        const stateOrgId = verified.orgId || DEFAULT_ORG;
+        const stateTargetScope = verified.targetScope === 'organization' ? 'organization' : 'personal';
+        const requestedShort = Array.isArray(verified.services) ? verified.services : ['gmail'];
 
+        try {
           const { exchangeCode } = await import('./connectors/providers/gmail/oauth.js');
           const gmailCallbackUri = `${process.env.HIVEMIND_BASE_URL || getHostedApiBaseUrl(req)}/api/connectors/gmail/callback`;
           const tokens = await exchangeCode({ code: callbackCode, redirectUri: gmailCallbackUri });
@@ -5063,37 +5225,98 @@ exit \$RC
           const connStore = new ConnectorStore(prisma);
           const tokenExpiresAt = tokens.expires_in ? new Date(Date.now() + tokens.expires_in * 1000) : null;
 
-          // Plan enforcement: check connector limit before creating
           if (planEnforcer && stateOrgId) {
             const connectorCheck = await planEnforcer.checkLimit(stateOrgId, 'connectors', 1);
             if (!connectorCheck.allowed) {
-              const frontendUrl = process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu';
               res.writeHead(302, { Location: `${frontendUrl}/hivemind/app/connectors?error=${encodeURIComponent(connectorCheck.reason)}` });
               res.end();
               return;
             }
           }
 
-          await connStore.upsertConnector({
-            userId: stateUserId,
-            provider: 'gmail',
-            accountRef: tokens.email || null,
-            accessToken: tokens.access_token,
-            refreshToken: tokens.refresh_token,
-            tokenExpiresAt,
-            scopes: tokens.scope?.split(' ') || ['https://www.googleapis.com/auth/gmail.readonly'],
-            metadata: { email: tokens.email },
-          });
+          // Map granted scopes → canonical (hyphen) provider IDs.
+          const SCOPE_TO_SERVICE = {
+            'https://www.googleapis.com/auth/gmail.readonly':         'gmail',
+            'https://www.googleapis.com/auth/gmail.modify':           'gmail',
+            'https://www.googleapis.com/auth/drive.readonly':         'google-drive',
+            'https://www.googleapis.com/auth/drive':                  'google-drive',
+            'https://www.googleapis.com/auth/calendar.readonly':      'google-calendar',
+            'https://www.googleapis.com/auth/calendar':               'google-calendar',
+            'https://www.googleapis.com/auth/documents.readonly':     'google-docs',
+            'https://www.googleapis.com/auth/documents':              'google-docs',
+            'https://www.googleapis.com/auth/spreadsheets.readonly':  'google-sheets',
+            'https://www.googleapis.com/auth/spreadsheets':           'google-sheets',
+            'https://www.googleapis.com/auth/presentations.readonly': 'google-slides',
+            'https://www.googleapis.com/auth/presentations':          'google-slides',
+            'https://www.googleapis.com/auth/contacts.readonly':      'google-contacts',
+            'https://www.googleapis.com/auth/contacts':               'google-contacts',
+            'https://www.googleapis.com/auth/chat.messages.readonly': 'google-chat',
+            'https://www.googleapis.com/auth/tasks.readonly':         'google-tasks',
+            'https://www.googleapis.com/auth/tasks':                  'google-tasks',
+            'https://www.googleapis.com/auth/forms.body.readonly':    'google-forms',
+          };
+          // SHORT short-form (state) → canonical (hyphen, matching SCOPE_TO_SERVICE)
+          const SHORT_TO_CANON = {
+            gmail: 'gmail',
+            drive: 'google-drive',
+            calendar: 'google-calendar',
+            docs: 'google-docs',
+            sheets: 'google-sheets',
+            slides: 'google-slides',
+            contacts: 'google-contacts',
+            chat: 'google-chat',
+            tasks: 'google-tasks',
+            forms: 'google-forms',
+          };
 
-          console.log(`[gmail-oauth] Connected for user=${stateUserId} email=${tokens.email}. Awaiting sync configuration.`);
+          const grantedScopes = (tokens.scope || '').split(' ').filter(Boolean);
+          const grantedServices = [...new Set(grantedScopes.map(s => SCOPE_TO_SERVICE[s]).filter(Boolean))];
+          const requestedSet = new Set(
+            requestedShort.map(s => SHORT_TO_CANON[String(s).toLowerCase()]).filter(Boolean)
+          );
+          let filtered = requestedSet.size > 0
+            ? grantedServices.filter(s => requestedSet.has(s))
+            : grantedServices;
+          if (filtered.length === 0) filtered = ['gmail'];
 
-          const frontendUrl = process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu';
-          res.writeHead(302, { Location: `${frontendUrl}/hivemind/app/connectors?connected=gmail&needs_config=true&email=${encodeURIComponent(tokens.email || '')}` });
+          for (const service of filtered) {
+            await connStore.upsertConnector({
+              userId: stateUserId,
+              provider: service,
+              targetScope: stateTargetScope,
+              accountRef: tokens.email || null,
+              accessToken: tokens.access_token,
+              refreshToken: tokens.refresh_token,
+              tokenExpiresAt,
+              scopes: grantedScopes,
+              metadata: {
+                email: tokens.email,
+                google_account: tokens.email,
+                primary_provider: 'gmail',
+                granted_services: filtered,
+              },
+            });
+          }
+
+          console.log(`[google-oauth] Connected user=${stateUserId} email=${tokens.email} services=[${filtered.join(', ')}]`);
+
+          // Auto-register Pub/Sub watch (Gmail-only, non-fatal).
+          if (process.env.GCP_PUBSUB_TOPIC && grantedScopes.includes('https://www.googleapis.com/auth/gmail.modify')) {
+            try {
+              const { registerWatch } = await import('./connectors/providers/gmail/gmail-watch.js');
+              const watch = await registerWatch({ accessToken: tokens.access_token, topicName: process.env.GCP_PUBSUB_TOPIC });
+              await connStore.updateMetadata(stateUserId, 'gmail', { watch });
+              console.log(`[gmail-oauth] Watch registered for ${tokens.email}`);
+            } catch (watchErr) {
+              console.warn(`[gmail-oauth] Watch registration failed (non-fatal): ${watchErr.message}`);
+            }
+          }
+
+          res.writeHead(302, { Location: `${frontendUrl}/hivemind/app/connectors?connected=gmail&needs_config=true&email=${encodeURIComponent(tokens.email || '')}&target_scope=${encodeURIComponent(stateTargetScope)}` });
           res.end();
           return;
         } catch (err) {
           console.error('[gmail-oauth] Callback failed:', err.message);
-          const frontendUrl = process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu';
           res.writeHead(302, { Location: `${frontendUrl}/hivemind/app/connectors?error=${encodeURIComponent(err.message)}` });
           res.end();
           return;
@@ -5105,10 +5328,12 @@ exit \$RC
       // a service principal so downstream code (which references userId/
       // orgId from `principal`) still has a context — the actual user is
       // resolved per-event by the webhook handler.
+      // SECURITY: slack/event-ingest was previously public; removed because
+      // the handler trusts body.user_id. Caller (control plane) must now
+      // supply master API key so principal.userId/orgId is authoritative.
       const PUBLIC_WEBHOOK_PATHS = new Set([
         '/api/connectors/nango/webhook',
         '/api/connectors/gmail/pubsub-webhook',
-        '/api/connectors/slack/event-ingest',
       ]);
       const isPublicWebhook = PUBLIC_WEBHOOK_PATHS.has(pathname) && req.method === 'POST';
 
@@ -5867,7 +6092,13 @@ exit \$RC
             if (!memory || memory.deleted_at) {
               return jsonResponse(res, { error: 'Not found' }, 404);
             }
-            if (memory.user_id !== userId && !principal.scopes?.includes('admin')) {
+            // SECURITY: must match BOTH user AND org. Without orgId check a
+            // multi-org user using an API key scoped to org A could read a
+            // memory belonging to org B.
+            const isAdmin = principal.scopes?.includes('admin') || principal.master;
+            const memOrg = memory.org_id || memory.orgId || null;
+            const sameOrg = !memOrg || memOrg === orgId;
+            if ((memory.user_id !== userId || !sameOrg) && !isAdmin) {
               return jsonResponse(res, { error: 'Not found' }, 404);
             }
             return jsonResponse(res, memory);
@@ -5883,6 +6114,17 @@ exit \$RC
           const memoryId = pathname.split('/api/memories/')[1];
           try {
             const existing = await persistentMemoryStore.getMemory(memoryId);
+            // SECURITY: ownership check before destructive op. Without this,
+            // any authenticated user could delete arbitrary memories by ID.
+            if (!existing || existing.deleted_at) {
+              return jsonResponse(res, { error: 'Not found' }, 404);
+            }
+            const isAdmin = principal.scopes?.includes('admin') || principal.master;
+            const memOrg = existing.org_id || existing.orgId || null;
+            const sameOrg = !memOrg || memOrg === orgId;
+            if ((existing.user_id !== userId || !sameOrg) && !isAdmin) {
+              return jsonResponse(res, { error: 'Not found' }, 404);
+            }
             await persistentMemoryStore.deleteMemory(memoryId);
             if (existing) {
               invalidateAggregateCache({ userId, orgId, project: existing.project || null });
@@ -5929,7 +6171,10 @@ exit \$RC
             if (!existing || existing.deleted_at) {
               return jsonResponse(res, { error: 'Not found' }, 404);
             }
-            if (existing.user_id !== userId && !principal.scopes?.includes('admin')) {
+            const isAdmin = principal.scopes?.includes('admin') || principal.master;
+            const memOrg = existing.org_id || existing.orgId || null;
+            const sameOrg = !memOrg || memOrg === orgId;
+            if ((existing.user_id !== userId || !sameOrg) && !isAdmin) {
               return jsonResponse(res, { error: 'Not found' }, 404);
             }
             const updated = await persistentMemoryStore.updateMemory(memoryId, {
@@ -6097,8 +6342,20 @@ exit \$RC
         }
         try {
           const provider = body.provider;
-          const syncUserId = body.user_id || userId;
-          const syncOrgId = body.org_id || orgId;
+          // SECURITY: caller may NOT override target user/org unless admin.
+          // Previously body.user_id/org_id silently bypassed auth scope —
+          // any authenticated key could sync data into another tenant.
+          const isAdmin = principal.scopes?.includes('admin') || principal.master;
+          if (!isAdmin) {
+            if (body.user_id && body.user_id !== userId) {
+              return jsonResponse(res, { error: 'user_id override requires admin' }, 403);
+            }
+            if (body.org_id && body.org_id !== orgId) {
+              return jsonResponse(res, { error: 'org_id override requires admin' }, 403);
+            }
+          }
+          const syncUserId = isAdmin ? (body.user_id || userId) : userId;
+          const syncOrgId = isAdmin ? (body.org_id || orgId) : orgId;
           const allowedScopes = ['personal', 'organization', 'team'];
           const targetScope = allowedScopes.includes(body.target_scope) ? body.target_scope : null;
           const syncTeamId = body.team_id || null;
@@ -6581,6 +6838,22 @@ exit \$RC
         });
         if (residentResult) {
           return jsonResponse(res, residentResult.body, residentResult.statusCode);
+        }
+      }
+
+      if (governanceRoutes && pathname.startsWith('/api/governance/')) {
+        const url = new URL(req.url, 'http://x');
+        const query = Object.fromEntries(url.searchParams.entries());
+        const governanceResult = await governanceRoutes.dispatch({
+          pathname,
+          method: req.method,
+          body,
+          query,
+          userId,
+          orgId,
+        });
+        if (governanceResult) {
+          return jsonResponse(res, governanceResult.body, governanceResult.statusCode);
         }
       }
 
@@ -7164,11 +7437,15 @@ exit \$RC
               if (!boundaryMatch) {
                 return jsonResponse(res, { error: 'Missing boundary' }, 400);
               }
-              const rawBody = await new Promise((resolve) => {
-                const chunks = [];
-                req.on('data', (c) => chunks.push(c));
-                req.on('end', () => resolve(Buffer.concat(chunks)));
-              });
+              let rawBody;
+              try {
+                rawBody = await readBoundedBuffer(req);
+              } catch (sizeErr) {
+                if (sizeErr?.code === 'PAYLOAD_TOO_LARGE') {
+                  return jsonResponse(res, { error: 'payload_too_large', max_bytes: MULTIPART_MAX_BYTES }, 413);
+                }
+                return jsonResponse(res, { error: 'read_failed', message: sizeErr?.message || String(sizeErr) }, 400);
+              }
               const parts = parseMultipart(rawBody, boundaryMatch[1].trim());
               const filePart = parts.find((p) => p.filename);
               if (!filePart) {
@@ -7679,6 +7956,37 @@ exit \$RC
             return jsonResponse(res, { error: 'Failed to load recent cognition output' }, 500);
           }
 
+        case '/api/cognition/stop':
+          // Phase 4 — runtime cognition-loop kill switch. Governance owns
+          // the cognitive layer post-Turing-emit; this endpoint lets ops
+          // stop the loop without a redeploy. Admin/master only.
+          if (req.method !== 'POST') break;
+          {
+            const m = await prisma.userOrganization.findUnique({
+              where: { userId_orgId: { userId, orgId } },
+              select: { role: true, roles: true },
+            }).catch(() => null);
+            const rs = new Set([
+              ...(m?.role ? [m.role] : []),
+              ...(Array.isArray(m?.roles) ? m.roles : []),
+            ]);
+            const adminOk = ['admin','owner','org_admin','org_owner'].some((r) => rs.has(r));
+            if (!adminOk && !principal.master) {
+              return jsonResponse(res, { error: 'admin/owner role required' }, 403);
+            }
+            if (!cognitionLoop) {
+              return jsonResponse(res, { stopped: true, was_running: false });
+            }
+            try {
+              cognitionLoop.stop();
+              const wasRunning = !!cognitionLoop.timer;
+              cognitionLoop = null;
+              return jsonResponse(res, { stopped: true, was_running: wasRunning, note: 'restart will re-arm if ENABLE_COGNITION_LOOP still true in env' });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+
         case '/api/cognition/synthesize-now':
           // Admin-gated manual trigger — runs one tick immediately.
           if (req.method !== 'POST') break;
@@ -8094,7 +8402,10 @@ exit \$RC
               .filter(s => AVAILABLE_SERVICES.includes(s));
             const services = requestedServices.length > 0 ? requestedServices : ['gmail'];
 
-            const gmailState = Buffer.from(JSON.stringify({ userId, orgId, targetScope, services })).toString('base64url');
+            // SECURITY: state is HMAC-signed so the callback can trust the
+            // userId/orgId we encode here. _ts caps lifetime to 30 min in
+            // verifyOAuthState.
+            const gmailState = signOAuthState({ userId, orgId, targetScope, services, _ts: Date.now() });
             const authorizationUrl = buildAuthUrl({ redirectUri: gmailRedirectUri, state: gmailState, services });
             return jsonResponse(res, {
               url: authorizationUrl,
@@ -8105,176 +8416,6 @@ exit \$RC
           }
           break;
 
-        case '/api/connectors/gmail/callback':
-          if (req.method === 'GET') {
-            const callbackCode = url.searchParams.get('code');
-            const callbackState = url.searchParams.get('state');
-            const callbackError = url.searchParams.get('error');
-
-            if (callbackError) {
-              res.writeHead(302, { Location: `${process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu'}/hivemind/app/connectors?error=${encodeURIComponent(callbackError)}` });
-              res.end();
-              return;
-            }
-
-            if (!callbackCode) {
-              return jsonResponse(res, { error: 'Missing authorization code' }, 400);
-            }
-
-            try {
-              // Parse state to get userId/orgId
-              let stateUserId = userId, stateOrgId = orgId, stateTargetScope = 'personal';
-              if (callbackState) {
-                try {
-                  const parsed = JSON.parse(Buffer.from(callbackState, 'base64url').toString());
-                  stateUserId = parsed.userId || stateUserId;
-                  stateOrgId = parsed.orgId || stateOrgId;
-                  stateTargetScope = parsed.targetScope === 'organization' ? 'organization' : 'personal';
-                } catch {}
-              }
-
-              const { exchangeCode } = await import('./connectors/providers/gmail/oauth.js');
-              const gmailCallbackUri = `${process.env.HIVEMIND_BASE_URL || getHostedApiBaseUrl(req)}/api/connectors/gmail/callback`;
-              const tokens = await exchangeCode({ code: callbackCode, redirectUri: gmailCallbackUri });
-
-              // Store connection via ConnectorStore — ONE ROW PER GRANTED SERVICE
-              // so user can disconnect any service independently (Drive without
-              // losing Gmail, etc.). All rows share the same Google token because
-              // the OAuth grant is single — but stored under per-service provider.
-              const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
-              const connStore = new ConnectorStore(prisma);
-
-              const tokenExpiresAt = tokens.expires_in
-                ? new Date(Date.now() + tokens.expires_in * 1000)
-                : null;
-
-              const grantedScopes = (tokens.scope || '').split(' ').filter(Boolean);
-
-              // Map each granted scope to the service it represents
-              // CANONICAL provider key form is hyphen (`google-drive`) to match
-              // the connector catalog + /api/connectors/status lookups.
-              // Underscore form (`google_drive`) was an older variant that
-              // caused split-brain rows. Don't reintroduce it.
-              const SCOPE_TO_SERVICE = {
-                'https://www.googleapis.com/auth/gmail.readonly':         'gmail',
-                'https://www.googleapis.com/auth/gmail.modify':           'gmail',
-                'https://www.googleapis.com/auth/drive.readonly':         'google-drive',
-                'https://www.googleapis.com/auth/drive':                  'google-drive',
-                'https://www.googleapis.com/auth/calendar.readonly':      'google-calendar',
-                'https://www.googleapis.com/auth/calendar':               'google-calendar',
-                'https://www.googleapis.com/auth/documents.readonly':     'google-docs',
-                'https://www.googleapis.com/auth/documents':              'google-docs',
-                'https://www.googleapis.com/auth/spreadsheets.readonly':  'google-sheets',
-                'https://www.googleapis.com/auth/spreadsheets':           'google-sheets',
-                'https://www.googleapis.com/auth/presentations.readonly': 'google-slides',
-                'https://www.googleapis.com/auth/presentations':          'google-slides',
-                'https://www.googleapis.com/auth/contacts.readonly':      'google-contacts',
-                'https://www.googleapis.com/auth/contacts':               'google-contacts',
-                'https://www.googleapis.com/auth/chat.messages.readonly': 'google-chat',
-                'https://www.googleapis.com/auth/tasks.readonly':         'google-tasks',
-                'https://www.googleapis.com/auth/tasks':                  'google-tasks',
-                'https://www.googleapis.com/auth/forms.body.readonly':    'google-forms',
-              };
-
-              const grantedServices = [...new Set(
-                grantedScopes.map(s => SCOPE_TO_SERVICE[s]).filter(Boolean)
-              )];
-
-              // Intersect with services the user actually REQUESTED in this
-              // OAuth round (parsed from state.services). Defends against
-              // Google echoing previously-authorized scopes — without this,
-              // clicking "Connect Gmail" after a prior Drive/Calendar grant
-              // would create rows for everything.
-              let requestedServices = null;
-              if (callbackState) {
-                try {
-                  const parsedState = JSON.parse(Buffer.from(callbackState, 'base64url').toString());
-                  if (Array.isArray(parsedState.services) && parsedState.services.length > 0) {
-                    // state uses short names ('gmail','drive','calendar') —
-                    // SCOPE_TO_SERVICE produces canonical ('google_drive', …).
-                    const SHORT_TO_CANON = {
-                      gmail: 'gmail',
-                      drive: 'google_drive',
-                      calendar: 'google_calendar',
-                      docs: 'google_docs',
-                      sheets: 'google_sheets',
-                      slides: 'google_slides',
-                      contacts: 'google_contacts',
-                      chat: 'google_chat',
-                      tasks: 'google_tasks',
-                      forms: 'google_forms',
-                    };
-                    requestedServices = new Set(parsedState.services
-                      .map(s => SHORT_TO_CANON[String(s).toLowerCase()])
-                      .filter(Boolean));
-                  }
-                } catch { /* state parse already happened above */ }
-              }
-              const filteredServices = requestedServices
-                ? grantedServices.filter(s => requestedServices.has(s))
-                : grantedServices;
-              if (filteredServices.length === 0) filteredServices.push('gmail');
-              // Replace grantedServices with filtered set for downstream upsert
-              grantedServices.length = 0;
-              grantedServices.push(...filteredServices);
-
-              // Per-service upsert — same token shared across all rows
-              for (const service of grantedServices) {
-                await connStore.upsertConnector({
-                  userId: stateUserId,
-                  provider: service,
-                  targetScope: stateTargetScope,
-                  accountRef: tokens.email || null,
-                  accessToken: tokens.access_token,
-                  refreshToken: tokens.refresh_token,
-                  tokenExpiresAt,
-                  scopes: grantedScopes,
-                  metadata: {
-                    email: tokens.email,
-                    google_account: tokens.email,
-                    primary_provider: 'gmail',
-                    granted_services: grantedServices,
-                  },
-                });
-              }
-
-              console.log(`[google-oauth] Connected user=${stateUserId} email=${tokens.email} services=[${grantedServices.join(', ')}]`);
-
-              // Auto-register Pub/Sub watch if topic configured. Non-fatal on failure —
-              // user can still use polling-based sync. Skipped if scopes don't include
-              // gmail.modify (watch requires write tier).
-              if (process.env.GCP_PUBSUB_TOPIC) {
-                const grantedScopes = (tokens.scope || '').split(' ');
-                if (grantedScopes.includes('https://www.googleapis.com/auth/gmail.modify')) {
-                  try {
-                    const { registerWatch } = await import('./connectors/providers/gmail/gmail-watch.js');
-                    const watch = await registerWatch({
-                      accessToken: tokens.access_token,
-                      topicName: process.env.GCP_PUBSUB_TOPIC,
-                    });
-                    await connStore.updateMetadata(stateUserId, 'gmail', { watch });
-                    console.log(`[gmail-oauth] Watch registered for ${tokens.email} expires=${new Date(watch.expirationMs).toISOString()}`);
-                  } catch (watchErr) {
-                    console.warn(`[gmail-oauth] Watch registration failed (non-fatal): ${watchErr.message}`);
-                  }
-                } else {
-                  console.log(`[gmail-oauth] Skipping watch — gmail.modify scope not granted (only got: ${tokens.scope})`);
-                }
-              }
-
-              const frontendUrl = process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu';
-              res.writeHead(302, { Location: `${frontendUrl}/hivemind/app/connectors?connected=gmail&needs_config=true&email=${encodeURIComponent(tokens.email || '')}&target_scope=${encodeURIComponent(stateTargetScope)}` });
-              res.end();
-              return;
-            } catch (err) {
-              console.error('[gmail-oauth] Callback failed:', err.message);
-              const frontendUrl = process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu';
-              res.writeHead(302, { Location: `${frontendUrl}/hivemind/app/connectors?error=${encodeURIComponent(err.message)}` });
-              res.end();
-              return;
-            }
-          }
-          break;
 
         // ==========================================
         // NANGO CONNECT SESSION (OAuth popup trigger)
@@ -9771,10 +9912,22 @@ exit \$RC
               const hardDelete = body.hard === true;
               const allUsers = body.all_users === true; // admin-only flag
 
-              // Build scope filter
+              // SECURITY: all_users=true is destructive cross-user. Require
+              // admin/master credential AND constrain to current org so a
+              // master-key request can't blast every tenant.
+              const isMaster = !!(principal && principal.master);
+              const isAdmin = isAdminRequest(req) || isMaster;
+              if (allUsers && !isAdmin) {
+                return jsonResponse(res, {
+                  error: 'all_users=true requires admin (X-Admin-Secret header or master key)',
+                }, 403);
+              }
+
+              // Build scope filter. orgId always present so tenant middleware
+              // doesn't reject. allUsers crosses users WITHIN the current org.
               const scopeWhere = allUsers
-                ? {} // requires admin (TODO: gate with admin check)
-                : { userId };
+                ? (orgId ? { orgId } : { userId })
+                : { userId, ...(orgId ? { orgId } : {}) };
 
               // Patterns that identify legacy Gmail fact-extraction garbage
               const patterns = [
@@ -10039,16 +10192,31 @@ exit \$RC
         case '/api/connectors/slack/sync':
           if (req.method === 'POST') {
             try {
+              // Build SyncEngine locally — was previously referencing an
+              // out-of-scope `syncEngine` and silently failing in the
+              // background, while still returning 202 to the caller.
+              if (!persistentMemoryEngine || !persistentMemoryStore) {
+                return jsonResponse(res, { error: 'Persistent memory unavailable' }, 503);
+              }
               const { SlackAdapter } = await import('./connectors/providers/slack/adapter.js');
-              const adapter = new SlackAdapter();
               const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
+              const { SyncEngine } = await import('./connectors/framework/sync-engine.js');
               const slackStore = new ConnectorStore(prisma);
-
-              // Run sync in background
+              const adapter = new SlackAdapter();
+              const slackSyncEngine = new SyncEngine({
+                connectorStore: slackStore,
+                memoryEngine: persistentMemoryEngine,
+                memoryStore: persistentMemoryStore,
+                prisma,
+                smartIngestRouter,
+                externalRefStore,
+                entityResolver,
+                qdrantClient,
+              });
               const syncId = crypto.randomUUID();
               setImmediate(async () => {
                 try {
-                  await syncEngine.runSync({
+                  await slackSyncEngine.runSync({
                     adapter,
                     userId,
                     orgId,
@@ -10494,11 +10662,15 @@ exit \$RC
               if (!boundaryMatch) {
                 return jsonResponse(res, { error: 'Missing boundary' }, 400);
               }
-              const rawBody = await new Promise((resolve) => {
-                const chunks = [];
-                req.on('data', (c) => chunks.push(c));
-                req.on('end', () => resolve(Buffer.concat(chunks)));
-              });
+              let rawBody;
+              try {
+                rawBody = await readBoundedBuffer(req);
+              } catch (sizeErr) {
+                if (sizeErr?.code === 'PAYLOAD_TOO_LARGE') {
+                  return jsonResponse(res, { error: 'payload_too_large', max_bytes: MULTIPART_MAX_BYTES }, 413);
+                }
+                return jsonResponse(res, { error: 'read_failed', message: sizeErr?.message || String(sizeErr) }, 400);
+              }
               const boundary = boundaryMatch[1].trim();
               const parts = parseMultipart(rawBody, boundary);
               const filePart = parts.find(p => p.filename);
@@ -10933,9 +11105,15 @@ exit \$RC
             }
             const bm = ct.match(/boundary=(.+)/);
             if (!bm) return jsonResponse(res, { error: 'Missing boundary' }, 400);
-            const raw = await new Promise((resolve) => {
-              const c = []; req.on('data', x => c.push(x)); req.on('end', () => resolve(Buffer.concat(c)));
-            });
+            let raw;
+            try {
+              raw = await readBoundedBuffer(req);
+            } catch (sizeErr) {
+              if (sizeErr?.code === 'PAYLOAD_TOO_LARGE') {
+                return jsonResponse(res, { error: 'payload_too_large', max_bytes: MULTIPART_MAX_BYTES }, 413);
+              }
+              return jsonResponse(res, { error: 'read_failed', message: sizeErr?.message || String(sizeErr) }, 400);
+            }
             const parts = parseMultipart(raw, bm[1].trim());
             const fileParts = parts.filter(p => p.filename);
             if (fileParts.length === 0) {
@@ -11026,11 +11204,15 @@ exit \$RC
                 return jsonResponse(res, { error: 'Missing boundary in Content-Type' }, 400);
               }
 
-              const rawBody = await new Promise((resolve) => {
-                const chunks = [];
-                req.on('data', (c) => chunks.push(c));
-                req.on('end', () => resolve(Buffer.concat(chunks)));
-              });
+              let rawBody;
+              try {
+                rawBody = await readBoundedBuffer(req);
+              } catch (sizeErr) {
+                if (sizeErr?.code === 'PAYLOAD_TOO_LARGE') {
+                  return jsonResponse(res, { error: 'payload_too_large', max_bytes: MULTIPART_MAX_BYTES }, 413);
+                }
+                return jsonResponse(res, { error: 'read_failed', message: sizeErr?.message || String(sizeErr) }, 400);
+              }
 
               // Simple multipart parser
               const boundary = boundaryMatch[1].trim();
@@ -11369,73 +11551,6 @@ exit \$RC
           }
           break;
 
-        // ==========================================
-        // CONNECTOR FRAMEWORK SYNC (Provider-agnostic)
-        // ==========================================
-        case '/api/connectors/sync':
-          if (req.method === 'POST') {
-            if (!persistentMemoryEngine || !persistentMemoryStore) {
-              return jsonResponse(res, { error: 'Persistent memory unavailable' }, 503);
-            }
-            try {
-              const provider = body.provider;
-              const syncUserId = body.user_id || userId;
-              const syncOrgId = body.org_id || orgId;
-
-              // Dynamically load provider adapter
-              const adapterModules = {
-                gmail: './connectors/providers/gmail/adapter.js',
-              };
-              const adapterPath = adapterModules[provider];
-              if (!adapterPath) {
-                return jsonResponse(res, { error: `Unknown provider: ${provider}` }, 400);
-              }
-
-              const mod = await import(adapterPath);
-              const AdapterClass = mod.GmailAdapter || mod.default;
-              const adapter = new AdapterClass();
-
-              // Build sync engine
-              const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
-              const { SyncEngine } = await import('./connectors/framework/sync-engine.js');
-              const cStore = new ConnectorStore(prisma);
-              const syncEngine = new SyncEngine({
-                connectorStore: cStore,
-                memoryEngine: persistentMemoryEngine,
-                memoryStore: persistentMemoryStore,
-                prisma,
-                smartIngestRouter,
-                externalRefStore,
-                entityResolver,
-                qdrantClient,
-              });
-
-              // Run sync in background
-              const incremental = body.incremental !== false;
-              const cursor = body.cursor || null;
-
-              setImmediate(async () => {
-                try {
-                  const result = await syncEngine.runSync({
-                    adapter,
-                    userId: syncUserId,
-                    orgId: syncOrgId,
-                    provider,
-                    cursor,
-                    incremental,
-                  });
-                  console.log(`[connector-sync] ${provider}:${syncUserId} → ${result.status} (imported: ${result.imported}, skipped: ${result.skipped})`);
-                } catch (syncErr) {
-                  console.error(`[connector-sync] ${provider}:${syncUserId} failed:`, syncErr.message);
-                }
-              });
-
-              return jsonResponse(res, { success: true, message: 'Sync enqueued', provider }, 202);
-            } catch (error) {
-              return jsonResponse(res, { error: error.message }, 500);
-            }
-          }
-          break;
 
         // ==========================================
         // CONNECTOR SYNC SCHEDULE STATUS
@@ -12672,7 +12787,9 @@ exit \$RC
             if (!ensurePersistedMemoryOrFail(res, '/api/memories/delete-all')) return;
             try {
               const project = url.searchParams.get('project') || body.project || null;
-              const memoryWhere = { userId, ...(project ? { project } : {}) };
+              // SECURITY: include orgId so a user in multiple orgs cannot
+              // wipe memories from another org with a key scoped to org A.
+              const memoryWhere = { userId, ...(orgId ? { orgId } : {}), ...(project ? { project } : {}) };
 
               // Get all IDs first
               const allMemories = await prisma.memory.findMany({ where: memoryWhere, select: { id: true } });
@@ -12700,6 +12817,7 @@ exit \$RC
                   const qdrantKey = process.env.QDRANT_API_KEY || '';
                   if (qdrantUrl) {
                     const filter = { must: [{ key: 'user_id', match: { value: userId } }] };
+                    if (orgId) filter.must.push({ key: 'org_id', match: { value: orgId } });
                     if (project) filter.must.push({ key: 'project', match: { value: project } });
                     await fetch(`${qdrantUrl}/collections/${qdrantCollection}/points/delete`, {
                       method: 'POST',
@@ -12989,7 +13107,7 @@ exit \$RC
               user_id: userId,
               org_id: orgId
             };
-            for (const key of ['project', 'memory_type', 'tags', 'is_latest', 'limit', 'offset', 'include_children']) {
+            for (const key of ['project', 'project_id', 'memory_type', 'tags', 'is_latest', 'limit', 'offset', 'include_children']) {
               const value = url.searchParams.get(key);
               if (value !== null) {
                 queryParams[key] = value;
@@ -13016,7 +13134,7 @@ exit \$RC
               }, 400);
             }
             
-            const { user_id, org_id, project, ...filters } = validation.data;
+            const { user_id, org_id, project, project_id, ...filters } = validation.data;
             
             const offset = filters.offset || 0;
             const limit = filters.limit || 50;
@@ -13031,6 +13149,7 @@ exit \$RC
               user_id: userId,
               org_id: orgId,
               project,
+              project_id: project_id || undefined,
               memory_type: filters.memory_type,
               tags: parsedTags,
               is_latest: filters.is_latest,
@@ -14422,6 +14541,10 @@ exit \$RC
             if (!ensurePersistedMemoryOrFail(res, '/api/recall')) {
               return;
             }
+            // Per-org rate limit. Default 120 rpm with 2× burst.
+            if (orgId && !rateLimitAllowOrgRequest(orgId)) {
+              return jsonResponse(res, { error: 'rate_limited', retry_after_seconds: 1 }, 429);
+            }
             try {
               // Apply dynamic weights from Operator Layer if available
               let recallWeights = body.weights;
@@ -14685,7 +14808,7 @@ exit \$RC
               // Slim response — default ON for mode=auto/memory/hybrid/evidence
               // Caller can opt back into full payload via body.verbose=true
               if (!body.verbose) {
-                const SLIM_MEM_KEYS = ['id','title','content','memory_type','tags','score','created_at','document_date','project','source','evidence','_synthesis_boosted','_cross_cluster_boost','_cross_cluster_overlap','synthesis_cluster_hash','synthesis_revision','synthesis_confidence','synthesis_evidence_ids','source_metadata','tier','last_accessed_at','promoted_at','_ws_match','_entity_match'];
+                const SLIM_MEM_KEYS = ['id','title','content','memory_type','tags','score','created_at','document_date','project','project_id','source','evidence','_synthesis_boosted','_cross_cluster_boost','_cross_cluster_overlap','synthesis_cluster_hash','synthesis_revision','synthesis_confidence','synthesis_evidence_ids','source_metadata','tier','last_accessed_at','promoted_at','_ws_match','_entity_match','cognitive_layer_role','_cognitive_role'];
                 const slimMem = (m) => {
                   const out = {};
                   for (const k of SLIM_MEM_KEYS) if (m[k] !== undefined) out[k] = m[k];
@@ -15650,8 +15773,9 @@ exit \$RC
                 deletedAt: null,
                 isLatest: true,
                 ...(backfillProject ? { project: backfillProject } : {}),
-                outgoingRelationships: { none: {} },
-                incomingRelationships: { none: {} },
+                // schema relations are relationshipsFrom/relationshipsTo
+                relationshipsFrom: { none: {} },
+                relationshipsTo: { none: {} },
               };
 
               const [totalOrphans, orphans] = await Promise.all([
@@ -15768,13 +15892,14 @@ exit \$RC
                 ...(qualityProject ? { project: qualityProject } : {}),
               };
 
-              const [nodes, orphanIds, relTypeCounts, duplicateGroups] = await Promise.all([
+              const [nodes, orphanIds, relTypeCounts, duplicateGroupsRows] = await Promise.all([
                 prisma.memory.count({ where: memoryWhere }),
                 prisma.memory.findMany({
                   where: {
                     ...memoryWhere,
-                    outgoingRelationships: { none: {} },
-                    incomingRelationships: { none: {} },
+                    // schema relation names — was outgoing/incomingRelationships (P2009).
+                    relationshipsFrom: { none: {} },
+                    relationshipsTo: { none: {} },
                   },
                   select: { id: true },
                 }),
@@ -15786,22 +15911,27 @@ exit \$RC
                   },
                   _count: { type: true },
                 }),
-                prisma.$queryRaw`
-                  SELECT COUNT(*)::int AS cnt FROM (
-                    SELECT r.from_id, r.to_id, r.type, COUNT(*)
-                    FROM relationships r
-                    JOIN memories mf ON mf.id = r.from_id
-                    JOIN memories mt ON mt.id = r.to_id
-                    WHERE mf.user_id = ${userId}::uuid
-                      AND mf.org_id = ${orgId}::uuid
-                      AND mf.deleted_at IS NULL
-                      AND mt.deleted_at IS NULL
-                      ${qualityProject ? Prisma.sql`AND mf.project = ${qualityProject} AND mt.project = ${qualityProject}` : Prisma.sql``}
-                    GROUP BY r.from_id, r.to_id, r.type
-                    HAVING COUNT(*) > 1
-                  ) dupes
-                `,
+                // $queryRawUnsafe + ternary string so we don't depend on the
+                // unimported `Prisma` namespace (was a ReferenceError that
+                // 500'd this endpoint).
+                prisma.$queryRawUnsafe(
+                  `SELECT COUNT(*)::int AS cnt FROM (
+                     SELECT r.from_id, r.to_id, r.type, COUNT(*)
+                     FROM hivemind.relationships r
+                     JOIN hivemind.memories mf ON mf.id = r.from_id
+                     JOIN hivemind.memories mt ON mt.id = r.to_id
+                     WHERE mf.user_id = $1::uuid
+                       AND mf.org_id = $2::uuid
+                       AND mf.deleted_at IS NULL
+                       AND mt.deleted_at IS NULL
+                       ${qualityProject ? `AND mf.project = $3 AND mt.project = $3` : ''}
+                     GROUP BY r.from_id, r.to_id, r.type
+                     HAVING COUNT(*) > 1
+                   ) dupes`,
+                  ...(qualityProject ? [userId, orgId, qualityProject] : [userId, orgId])
+                ),
               ]);
+              const duplicateGroups = duplicateGroupsRows;
 
               const edges = relTypeCounts.reduce((sum, row) => sum + (row._count?.type || 0), 0);
               const isolatedNodes = orphanIds.length;
@@ -15823,11 +15953,6 @@ exit \$RC
               return jsonResponse(res, { error: 'Graph quality probe failed', message: error.message }, 500);
             }
           }
-          break;
-
-        case '/api/stats':
-          const stats = engine.getStats(userId, orgId);
-          jsonResponse(res, stats);
           break;
 
         // ==========================================
@@ -16947,6 +17072,11 @@ exit \$RC
         // ==========================================
         case '/api/chat':
           if (req.method === 'POST') {
+            // Per-org rate limit. Chat is more expensive than recall so we
+            // share the same bucket — protects token spend at the door.
+            if (orgId && !rateLimitAllowOrgRequest(orgId)) {
+              return jsonResponse(res, { error: 'rate_limited', retry_after_seconds: 1 }, 429);
+            }
             const { message, model = 'openai/gpt-oss-120b', history = [], stream: wantStream = false, language = null } = body;
             // Project scope from caller — when set, all recall/save tool
             // calls dispatched by the ReAct agent are auto-bound to this
@@ -18299,17 +18429,61 @@ function inferChatToneGuidance(text = '') {
   return 'Match the user tone: direct, natural, and concise.';
 }
 
+// SECURITY: cap JSON body size to bound memory. Default 5 MB — large enough
+// for code-ingestion payloads but rejects unbounded attackers. Override via
+// HIVEMIND_JSON_BODY_MAX_BYTES.
+const JSON_BODY_MAX_BYTES = Number(process.env.HIVEMIND_JSON_BODY_MAX_BYTES || 5 * 1024 * 1024);
+const MULTIPART_MAX_BYTES = Number(process.env.HIVEMIND_MULTIPART_MAX_BYTES || 50 * 1024 * 1024);
+/** Buffered request reader with hard byte cap. Throws PAYLOAD_TOO_LARGE on overflow. */
+function readBoundedBuffer(req, max = MULTIPART_MAX_BYTES) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let bytes = 0;
+    let aborted = false;
+    req.on('data', (c) => {
+      if (aborted) return;
+      bytes += c.length;
+      if (bytes > max) {
+        aborted = true;
+        const e = new Error(`payload too large: > ${max} bytes`);
+        e.code = 'PAYLOAD_TOO_LARGE';
+        e.statusCode = 413;
+        // Reject + drain (don't destroy — caller needs to write 413).
+        reject(e);
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => { if (!aborted) resolve(Buffer.concat(chunks)); });
+    req.on('error', (e) => { if (!aborted) reject(e); });
+  });
+}
 function parseBody(req) {
   return new Promise((resolve, reject) => {
     let body = '';
-    req.on('data', chunk => body += chunk);
-    req.on('end', () => {
-      try {
-        resolve(JSON.parse(body || '{}'));
-      } catch (e) {
-        reject(e);
+    let bytes = 0;
+    let aborted = false;
+    req.on('data', chunk => {
+      if (aborted) return;
+      bytes += chunk.length;
+      if (bytes > JSON_BODY_MAX_BYTES) {
+        aborted = true;
+        const err = new Error(`payload too large: > ${JSON_BODY_MAX_BYTES} bytes`);
+        err.code = 'PAYLOAD_TOO_LARGE';
+        err.statusCode = 413;
+        // Reject + drain. Don't destroy() — caller must still be able to
+        // write a 413 response before socket closes.
+        reject(err);
+        return;
       }
+      body += chunk;
     });
+    req.on('end', () => {
+      if (aborted) return;
+      try { resolve(JSON.parse(body || '{}')); }
+      catch (e) { reject(e); }
+    });
+    req.on('error', (e) => { if (!aborted) reject(e); });
   });
 }
 

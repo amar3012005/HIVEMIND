@@ -59,6 +59,9 @@ export class BridgeSynthesisTool extends CognitiveTool {
     if (await this.isOnCooldown(orgId, hash, { hours: COOLDOWN_HOURS })) {
       return { applicable: false, reason: 'cooldown', cluster_hash: hash };
     }
+    if (await this.hasOpenProposal(orgId, hash, this.name, { hours: COOLDOWN_HOURS })) {
+      return { applicable: false, reason: 'open_proposal_exists', cluster_hash: hash };
+    }
 
     return {
       applicable: true,
@@ -126,10 +129,14 @@ export class BridgeSynthesisTool extends CognitiveTool {
     if (written?.error) return { status: 'failed', error: written.error };
 
     if (written?.id) {
-      await this.prisma.memory.update({
-        where: { id: written.id },
-        data: { cognitiveLayerRole: 'bridge' },
-      }).catch(() => null);
+      try {
+        await this.prisma.memory.update({
+          where: { id: written.id },
+          data: { cognitiveLayerRole: 'bridge' },
+        });
+      } catch (updErr) {
+        this.logger?.warn?.(`[bridge-tool] role update failed: ${updErr.message}`);
+      }
       try { await loop._linkDerivesEdges(written.id, allMembers, 'synthesis-bridge', bridge_tag); } catch {}
     }
 

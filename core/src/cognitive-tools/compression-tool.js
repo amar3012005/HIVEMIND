@@ -46,6 +46,9 @@ export class CompressionTool extends CognitiveTool {
     if (await this.isOnCooldown(orgId, hash, { hours: COOLDOWN_HOURS })) {
       return { applicable: false, reason: 'cooldown', cluster_hash: hash };
     }
+    if (await this.hasOpenProposal(orgId, hash, this.name, { hours: COOLDOWN_HOURS })) {
+      return { applicable: false, reason: 'open_proposal_exists', cluster_hash: hash };
+    }
     return {
       applicable: true,
       topic: best.topic,
@@ -101,14 +104,18 @@ export class CompressionTool extends CognitiveTool {
     if (written?.error) return { status: 'failed', error: written.error };
 
     if (written?.id) {
-      await this.prisma.memory.update({
-        where: { id: written.id },
-        data: {
-          cognitiveLayerRole: 'compression',
-          synthesisClusterHash: cluster_hash,
-          synthesisEvidenceIds: evidence_ids,
-        },
-      }).catch(() => null);
+      try {
+        await this.prisma.memory.update({
+          where: { id: written.id },
+          data: {
+            cognitiveLayerRole: 'compression',
+            synthesisClusterHash: cluster_hash,
+            synthesisEvidenceIds: evidence_ids,
+          },
+        });
+      } catch (updErr) {
+        this.logger?.warn?.(`[compression-tool] post-write update failed: ${updErr.message}`);
+      }
       try { await loop._linkDerivesEdges(written.id, members, 'compression', topic); } catch {}
     }
 

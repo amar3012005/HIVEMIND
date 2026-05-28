@@ -605,6 +605,9 @@ export class TuringAgent {
         target_memory_ids: item.content.target_memory_ids || [],
         rationale: item.content.rationale || '',
         expected_impact: item.content.expected_impact || '',
+        // Forward full content so run-manager queueProposal can carry
+        // cluster_hash, topic, bridge_tag, evidence_ids_a/b into persistence.
+        content: item.content,
       })),
       summary: {
         scope,

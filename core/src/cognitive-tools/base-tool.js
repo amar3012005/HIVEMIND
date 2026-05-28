@@ -140,6 +140,41 @@ export class CognitiveTool {
     }
   }
 
+  /**
+   * Assess-side dedup: don't re-emit a proposal for a cluster that already
+   * has an OPEN (proposed/approved) action_log row within the recent window.
+   * Prevents same proposal flooding consecutive cycles before user reviews.
+   * cluster_hash is matched against governance_action_log.reasoning JSON.
+   * Window default 6h (matches canonical cooldown).
+   */
+  async hasOpenProposal(orgId, hash, actionType, { hours = 6 } = {}) {
+    if (!this.prisma || !orgId || !hash) return false;
+    try {
+      const since = new Date(Date.now() - hours * 60 * 60 * 1000);
+      // We embed cluster_hash in action_log.reasoning OR we match via batch.
+      // Cheap approach: fetch recent proposed/approved rows of this type for
+      // org, scan for cluster_hash match in beforeSnapshot / afterSnapshot.
+      const rows = await this.prisma.governanceActionLog.findMany({
+        where: {
+          orgId,
+          actionType,
+          status: { in: ['proposed', 'approved'] },
+          createdAt: { gte: since },
+        },
+        select: { id: true, beforeSnapshot: true, afterSnapshot: true, reasoning: true },
+        take: 50,
+      });
+      return rows.some((r) => {
+        if (r.beforeSnapshot?.cluster_hash === hash) return true;
+        if (r.afterSnapshot?.cluster_hash === hash) return true;
+        if (typeof r.reasoning === 'string' && r.reasoning.includes(hash)) return true;
+        return false;
+      });
+    } catch {
+      return false;
+    }
+  }
+
   /** Subclass overrides. */
   async assess(/* context */) {
     return { applicable: false, reason: 'not_implemented' };

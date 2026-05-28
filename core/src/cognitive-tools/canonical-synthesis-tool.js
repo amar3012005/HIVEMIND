@@ -51,6 +51,9 @@ export class CanonicalSynthesisTool extends CognitiveTool {
     if (await this.isOnCooldown(orgId, hash, { hours: COOLDOWN_HOURS })) {
       return { applicable: false, reason: 'cooldown', cluster_hash: hash };
     }
+    if (await this.hasOpenProposal(orgId, hash, this.name, { hours: COOLDOWN_HOURS })) {
+      return { applicable: false, reason: 'open_proposal_exists', cluster_hash: hash };
+    }
 
     return {
       applicable: true,
@@ -137,10 +140,14 @@ export class CanonicalSynthesisTool extends CognitiveTool {
 
     // Cognitive role tagging — graph-engine should propagate but bake-in for safety.
     if (written?.id) {
-      await this.prisma.memory.update({
-        where: { id: written.id },
-        data: { cognitiveLayerRole: 'canonical' },
-      }).catch(() => null);
+      try {
+        await this.prisma.memory.update({
+          where: { id: written.id },
+          data: { cognitiveLayerRole: 'canonical' },
+        });
+      } catch (updErr) {
+        this.logger?.warn?.(`[canonical-tool] role update failed: ${updErr.message}`);
+      }
       // Link Derives edges from canonical → each evidence.
       try { await loop._linkDerivesEdges(written.id, members, 'canonical-fact', topic); } catch {}
     }

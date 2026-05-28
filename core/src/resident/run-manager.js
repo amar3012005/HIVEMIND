@@ -531,6 +531,7 @@ export class ResidentRunManager {
         reason: action.reason || null,
         status: 'pending',                   // pending | approved | rejected
         created_at: new Date().toISOString(),
+        content: action.content || null,    // carries cluster_hash, topic, etc
       });
     };
 
@@ -825,31 +826,28 @@ export class ResidentRunManager {
       }
     }
 
-    // Row-level cycle lock on governance_agent_state. Pool-safe (no session affinity).
-    // Atomic UPDATE returns 1 row if no other cycle is holding it.
+    // Row-level cycle lock. Single atomic INSERT ... ON CONFLICT DO UPDATE
+    // so we acquire on first-ever cycle AND steal an expired lock — without
+    // ever raising a UNIQUE constraint error. Returns rows-affected (1 = got
+    // the lock, 0 = another holder still active).
     if (this.prisma) {
       try {
-        const until = new Date(Date.now() + LOCK_HOLD_MS);
-        const updated = await this.prisma.$executeRawUnsafe(
-          `UPDATE hivemind.governance_agent_state
-             SET circuit_breaker_until = $1::timestamptz
-           WHERE agent_name = 'governance-cycle'
-             AND (circuit_breaker_until IS NULL OR circuit_breaker_until < now())`,
-          until.toISOString()
+        const until = new Date(Date.now() + LOCK_HOLD_MS).toISOString();
+        const affected = await this.prisma.$executeRawUnsafe(
+          `INSERT INTO hivemind.governance_agent_state
+             (agent_name, circuit_breaker_until, updated_at)
+           VALUES ('governance-cycle', $1::timestamptz, now())
+           ON CONFLICT (agent_name) DO UPDATE
+             SET circuit_breaker_until = EXCLUDED.circuit_breaker_until,
+                 updated_at = now()
+             WHERE governance_agent_state.circuit_breaker_until IS NULL
+                OR governance_agent_state.circuit_breaker_until < now()`,
+          until
         );
-        if (updated === 0) {
-          // Row may not exist yet — try to insert. If conflict + still locked, busy.
-          try {
-            await this.prisma.governanceAgentState.create({
-              data: { agentName: 'governance-cycle', circuitBreakerUntil: until },
-            });
-            lockAcquired = true;
-          } catch {
-            return { batch_id: batchId, status: 'skipped_lock_busy', reason: 'busy' };
-          }
-        } else {
-          lockAcquired = true;
+        if (affected === 0) {
+          return { batch_id: batchId, status: 'skipped_lock_busy', reason: 'busy' };
         }
+        lockAcquired = true;
       } catch (err) {
         this.logger?.warn?.(`[gov-cycle] row-lock acquire failed: ${err.message}`);
       }
@@ -1029,6 +1027,14 @@ export class ResidentRunManager {
           const targetMemoryId = Array.isArray(p.target_memory_ids) && p.target_memory_ids[0]
             ? p.target_memory_ids[0]
             : null;
+          // Carry cluster_hash + topic + bridge_tag into beforeSnapshot so
+          // assess-side dedup (hasOpenProposal) can match on subsequent ticks.
+          const snapshot = {};
+          if (p.content?.cluster_hash) snapshot.cluster_hash = p.content.cluster_hash;
+          if (p.content?.topic) snapshot.topic = p.content.topic;
+          if (p.content?.bridge_tag) snapshot.bridge_tag = p.content.bridge_tag;
+          if (Array.isArray(p.content?.evidence_ids_a)) snapshot.evidence_ids_a = p.content.evidence_ids_a;
+          if (Array.isArray(p.content?.evidence_ids_b)) snapshot.evidence_ids_b = p.content.evidence_ids_b;
           await this.prisma.governanceActionLog.create({
             data: {
               batchId,
@@ -1042,6 +1048,7 @@ export class ResidentRunManager {
               confidence: typeof p.confidence === 'number' ? p.confidence : null,
               status: 'proposed',
               reversible: true,
+              beforeSnapshot: Object.keys(snapshot).length ? snapshot : null,
             },
           });
           count += 1;

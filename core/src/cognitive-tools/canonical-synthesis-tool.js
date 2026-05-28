@@ -4,7 +4,9 @@ const CONFIDENCE_FLOOR = Number(process.env.CANONICAL_CONFIDENCE_FLOOR || 0.7);
 const COOLDOWN_HOURS   = Number(process.env.CANONICAL_COOLDOWN_HOURS   || 1);
 // Tier window: only assess verifications from the last N hours so 1h ticks
 // don't reprocess the same backlog every cycle.
-const WINDOW_HOURS     = Number(process.env.CANONICAL_WINDOW_HOURS     || 1);
+// Bootstrap-friendly default: 24h catches accumulated verifications when
+// per-cycle yield is low. Tighten via env once backlog stable.
+const WINDOW_HOURS     = Number(process.env.CANONICAL_WINDOW_HOURS     || 24);
 
 /**
  * Canonical fact synthesizer.

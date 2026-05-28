@@ -2,7 +2,9 @@ import { CognitiveTool, clusterHash, jaccard } from './base-tool.js';
 
 const MIN_MEMBERS    = Number(process.env.COMPRESSION_MIN_MEMBERS || 3);
 const COOLDOWN_HOURS = Number(process.env.COMPRESSION_COOLDOWN_HOURS || 12);
-const WINDOW_HOURS   = Number(process.env.COMPRESSION_WINDOW_HOURS || 12);
+// Bootstrap window: 168h (1 week) catches backlog. Lower via env when
+// per-day yield is high enough to form clusters within 12h.
+const WINDOW_HOURS   = Number(process.env.COMPRESSION_WINDOW_HOURS || 168);
 const MIN_ENTITIES   = Number(process.env.COMPRESSION_MIN_ENTITIES || 2);
 const MIN_PURITY     = Number(process.env.COMPRESSION_MIN_PURITY || 0.5);
 const DRIFT_SPLIT    = Number(process.env.COMPRESSION_DRIFT_SPLIT || 0.5);

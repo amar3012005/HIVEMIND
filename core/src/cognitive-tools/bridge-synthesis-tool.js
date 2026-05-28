@@ -2,7 +2,9 @@ import { CognitiveTool, clusterHash, isRestatement, capConfidence } from './base
 
 const CONFIDENCE_FLOOR = Number(process.env.BRIDGE_CONFIDENCE_FLOOR || 0.7);
 const COOLDOWN_HOURS   = Number(process.env.BRIDGE_COOLDOWN_HOURS   || 4);
-const WINDOW_HOURS     = Number(process.env.BRIDGE_WINDOW_HOURS     || 4);
+// Bootstrap-friendly default: 48h. Bridge needs cross-cluster signal which
+// rarely forms in 4h on a young memory store.
+const WINDOW_HOURS     = Number(process.env.BRIDGE_WINDOW_HOURS     || 48);
 
 /**
  * Cross-cluster bridge synthesizer.

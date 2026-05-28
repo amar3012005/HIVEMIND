@@ -79,12 +79,23 @@ export class ResidentAgentScheduler {
   async _listActiveOrgs() {
     if (!this.prisma) return [];
     try {
-      // Active = at least one active membership. Cheap and tenant-correct.
+      // Active = at least one active membership AND at least 1 non-deleted
+      // memory AND not an auto-test org (slug LIKE 'local-org-%' is the
+      // sentinel ensureTenantContext uses for test-scaffold orgs). This
+      // skips empty test artifacts that would burn token budget for nothing.
+      const minMemories = Number(process.env.GOV_MIN_ORG_MEMORIES || 5);
       const rows = await this.prisma.$queryRawUnsafe(
         `SELECT DISTINCT o.id
            FROM hivemind.organizations o
            JOIN hivemind.user_organizations uo ON uo.org_id = o.id
           WHERE uo.is_active = true
+            AND (o.slug IS NULL OR o.slug NOT LIKE 'local-org-%')
+            AND EXISTS (
+              SELECT 1 FROM hivemind.memories m
+               WHERE m.org_id = o.id
+                 AND m.deleted_at IS NULL
+              OFFSET ${minMemories - 1} LIMIT 1
+            )
           LIMIT 1000`
       );
       return Array.isArray(rows) ? rows : [];

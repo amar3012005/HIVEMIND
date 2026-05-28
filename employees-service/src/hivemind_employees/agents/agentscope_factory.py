@@ -56,7 +56,11 @@ def _resolve_openai_compatible_target(
     groq_key = llm_api_key or os.environ.get("GROQ_API_KEY") or os.environ.get("LLM_API_KEY", "")
     groq_model = model
     if provider != "groq" or "/" in model:
-        groq_model = os.environ.get("GROQ_INFERENCE_MODEL") or "llama-3.3-70b-versatile"
+        # llama-3.3-70b-versatile emits Llama-tag <function=NAME{...}> format
+        # instead of OpenAI JSON tool_calls under strict-mode tool validation,
+        # producing tool_use_failed (400) on Groq. openai/gpt-oss-120b on Groq
+        # honours the OpenAI tool_calls contract cleanly.
+        groq_model = os.environ.get("GROQ_INFERENCE_MODEL") or "openai/gpt-oss-120b"
     base_url = os.environ.get("GROQ_BASE_URL", GROQ_BASE)
     return groq_model, groq_key, base_url
 

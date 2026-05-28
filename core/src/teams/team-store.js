@@ -61,6 +61,99 @@ export class TeamStore {
     });
   }
 
+  /**
+   * Ensure an org has a default team and the given user is a member.
+   * - Finds existing { orgId, isDefault: true } team, OR creates one.
+   * - On create, auto-adds every active org_member as a team member
+   *   (lead = first member if no creator), matching the user's expectation
+   *   that "if there's no team, all org members are the default team."
+   * - Idempotent: safe to call repeatedly. If the team exists, just adds
+   *   the caller (if missing) and any newly-joined org members.
+   * Returns the team row with _count + members.
+   */
+  async ensureDefaultTeam({ orgId, userId }) {
+    if (!orgId) throw new Error('orgId required');
+    let team = await this.prisma.team.findFirst({
+      where: { orgId, isDefault: true, archivedAt: null },
+    });
+    if (!team) {
+      // Fetch active org members to seed the default team.
+      const orgMembers = await this.prisma.userOrganization.findMany({
+        where: { orgId, isActive: true },
+        select: { userId: true, role: true },
+      });
+      const seedMembers = orgMembers.length
+        ? orgMembers
+        : (userId ? [{ userId, role: 'member' }] : []);
+      const creator = userId || seedMembers[0]?.userId;
+      if (!creator) throw new Error('Cannot create default team — no org members');
+      // Unique slug
+      let slug = 'default-team';
+      let n = 1;
+      while (await this.prisma.team.findUnique({ where: { orgId_slug: { orgId, slug } } })) {
+        n += 1;
+        slug = `default-team-${n}`;
+      }
+      team = await this.prisma.team.create({
+        data: {
+          orgId,
+          name: 'Default Team',
+          slug,
+          description: 'Auto-created. Includes all organization members.',
+          isDefault: true,
+          createdBy: creator,
+          members: {
+            create: seedMembers.map((m, i) => ({
+              userId: m.userId,
+              role: m.userId === creator ? 'lead' : 'member',
+              addedById: creator,
+            })),
+          },
+        },
+        include: { _count: { select: { members: true, projects: true } } },
+      });
+      return team;
+    }
+    // Existing default team — ensure caller is a member.
+    if (userId) {
+      await this.prisma.teamMember.upsert({
+        where: { teamId_userId: { teamId: team.id, userId } },
+        create: { teamId: team.id, userId, role: 'member', addedById: userId },
+        update: {},
+      });
+    }
+    // Backfill: add any active org member that isn't already on the team.
+    try {
+      const orgMembers = await this.prisma.userOrganization.findMany({
+        where: { orgId, isActive: true },
+        select: { userId: true },
+      });
+      const existing = await this.prisma.teamMember.findMany({
+        where: { teamId: team.id },
+        select: { userId: true },
+      });
+      const existingIds = new Set(existing.map((m) => m.userId));
+      const toAdd = orgMembers.filter((m) => !existingIds.has(m.userId));
+      if (toAdd.length) {
+        await this.prisma.teamMember.createMany({
+          data: toAdd.map((m) => ({
+            teamId: team.id,
+            userId: m.userId,
+            role: 'member',
+            addedById: userId || m.userId,
+          })),
+          skipDuplicates: true,
+        });
+      }
+    } catch (err) {
+      // best-effort backfill — never block the call
+    }
+    return this.prisma.team.findUnique({
+      where: { id: team.id },
+      include: { _count: { select: { members: true, projects: true } } },
+    });
+  }
+
   async listAllTeamsInOrg({ orgId }) {
     return this.prisma.team.findMany({
       where: { orgId, archivedAt: null },

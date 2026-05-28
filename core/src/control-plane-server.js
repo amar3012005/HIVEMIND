@@ -3547,10 +3547,29 @@ const server = http.createServer(async (req, res) => {
     const ts = await _getTeamStore();
     if (!ts) return jsonResponse(res, { error: 'Database unavailable' }, 503);
     try {
-      const teams = await ts.store.listTeamsForUser({
+      let teams = await ts.store.listTeamsForUser({
         userId: current.session.userId,
         orgId: current.session.orgId,
       });
+      // Bug fix: if user is an org member but has no team yet, lazy-create
+      // (or join) the org's Default Team so they can immediately create
+      // projects. Treats all org members as the implicit default team.
+      if (!teams.length) {
+        const orgMem = await getOrgMembership(current.session.userId, current.session.orgId);
+        if (orgMem?.isActive !== false && orgMem) {
+          try {
+            const def = await ts.store.ensureDefaultTeam({
+              orgId: current.session.orgId,
+              userId: current.session.userId,
+            });
+            if (def) teams = [def];
+          } catch (defErr) {
+            // Log but don't fail the call — user still sees empty list,
+            // can still trigger /v1/teams POST manually.
+            console.warn('[teams] ensureDefaultTeam failed:', defErr.message);
+          }
+        }
+      }
       return jsonResponse(res, { teams });
     } catch (err) {
       return jsonResponse(res, { error: err.message }, 500);

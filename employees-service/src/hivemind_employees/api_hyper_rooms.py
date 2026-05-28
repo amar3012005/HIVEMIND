@@ -335,6 +335,9 @@ Hard rules:
   "let's also look at", "we need to check". If all you have is a process suggestion,
   stay silent: {"react": false}.
 - Cite concrete evidence when challenging — name the memory or person.
+- STICK TO THE USER'S TOPIC. Do not pivot to project management — no inventing
+  owners, dates, deadlines, or sub-task assignments. If the memory doesn't name
+  a person responsible, you don't either.
 - DO NOT invent facts. If you're not sure, stay silent: {"react": false}.
 - "challenge" only with a substantive counter-point (state the actual risk/flaw).
 - "extend" only if you add a NEW concrete fact or angle the Lead missed.
@@ -542,17 +545,23 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             f"You're the LEAD speaking up this turn. Your lane: {lead['_lane']}.]\n\n"
             + (memory_context + "\n" if memory_context else "")
             + f"WHO YOU ARE:\n"
-            f"- You work AT HIVEMIND. The 'HIVEMIND' in this room = our org / our product. "
-            f"It is NOT 'Hivemind Capital', NOT any NFT fund, NOT any other unrelated company with the same name.\n"
+            f"- You work AT HIVEMIND. The 'HIVEMIND' in this room = our org / our product.\n"
             f"- Speak from inside the company. Use 'we' / 'our' / 'the team'.\n"
-            f"- Reference colleagues + projects by name when they appear in the memory context above.\n\n"
+            f"- Reference colleagues + projects by name ONLY when they appear in the memory above.\n\n"
             + grounding
-            + f"\nWRITE LIKE A CHAT MESSAGE:\n"
-            f"- 3-4 short sentences, or a brief numbered list (max 5 items) if reasoning has steps.\n"
-            f"- Human Slack tone — tight, no filler, no formal opener.\n"
-            f"- First person plural ('we / our'), conversational, no formal opener.\n"
-            f"- Substance + a real answer in sentence one. No 'Next steps:' boilerplate, "
-            f"no 'How would you like to proceed?' closer.\n\n"
+            + f"\nSTAY ON THE TOPIC:\n"
+            f"- ANSWER THE USER'S QUESTION DIRECTLY. Do not pivot to a project plan unless they "
+            f"explicitly asked for owners/dates.\n"
+            f"- Pull facts from the memories above; persona-flavour them in YOUR voice "
+            f"({lead['_lane']}).\n"
+            f"- NEVER invent owners, dates, deadlines, or assignments. If memory does not name a "
+            f"person responsible, don't assign one.\n"
+            f"- If the user adds a constraint mid-thread ('this is only about X'), narrow your "
+            f"answer accordingly — do not repeat the previous turn.\n\n"
+            f"WRITE LIKE A CHAT MESSAGE:\n"
+            f"- 3-4 short sentences. Substance in sentence one.\n"
+            f"- Human Slack tone — tight, no filler, no 'Next steps:' boilerplate.\n"
+            f"- Quote memory titles inline when stating a fact: '<claim> — from \"<title>\"'.\n\n"
             f"User said:\n{req.user_message}"
         )
         reply = await lead_agent(Msg(name="user", content=lead_prompt, role="user"))
@@ -693,16 +702,18 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             synth_prompt = (
                 f"[CSI synthesis pass — you're still the HIVEMIND employee. Lane: {lead['_lane']}.]\n\n"
                 + (memory_context + "\n" if memory_context else "")
-                + f"YOUR EARLIER LEAD LINE:\n\"{lead_text}\"\n\n"
-                f"REACTOR SUGGESTIONS (what your teammates want you to do next):\n{reactor_summary}\n\n"
-                f"NOW EXECUTE THE WORK. Don't just acknowledge the suggestions — DO them.\n"
-                f"  • If a reactor said 'we should recall X' → call hivemind_recall right now and quote the hits.\n"
-                f"  • If 'we should traverse the graph' → call hivemind_traverse_graph on the right seed memory.\n"
-                f"  • If 'what's the next step' → propose 2-3 concrete next steps with names + dates from memory.\n"
-                f"  • If a reactor disagreed → defend with evidence or concede explicitly.\n\n"
-                f"OUTPUT: 3-6 short sentences total. Chat tone, 'we / our'.\n"
-                f"Lead with the new fact / action / answer the reactors were asking for. Use a numbered list\n"
-                f"when proposing multiple steps. Quote memory titles inline. No 'happy to help' fluff."
+                + f"USER'S ORIGINAL QUESTION:\n\"{req.user_message}\"\n\n"
+                f"YOUR EARLIER LEAD LINE:\n\"{lead_text}\"\n\n"
+                f"REACTOR LINES:\n{reactor_summary}\n\n"
+                f"INTEGRATE the reactor signal into your answer to the user — do NOT pivot to a "
+                f"project plan with owners/dates unless the user asked for one.\n"
+                f"  • If a reactor surfaced a NEW fact from memory → fold it in and cite the title.\n"
+                f"  • If a reactor challenged a claim → defend with a memory hit, or concede.\n"
+                f"  • If a reactor's point is outside scope of the user's question → ignore it.\n"
+                f"  • Need more grounding? Call hivemind_recall / traverse_graph silently first.\n\n"
+                f"OUTPUT: 3-5 short sentences. Stay on the user's question. Chat tone, 'we / our'.\n"
+                f"Quote memory titles inline. NEVER invent owners, dates, or deadlines. No 'happy to "
+                f"help' fluff."
             )
             synth_reply = await lead_agent(Msg(name="user", content=synth_prompt, role="user"))
             synth_text = _msg_to_text(synth_reply) or ""
@@ -773,11 +784,12 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         try:
             revise_prompt = (
                 f"[CSI revision pass — you're still the HIVEMIND employee speaking. Lane: {lead['_lane']}.]\n"
+                f"USER'S ORIGINAL QUESTION: \"{req.user_message}\"\n"
                 f"{challenger_reaction['emp'].get('name')} ({challenger_reaction['emp']['_lane']}) pushed back:\n"
                 f"\"{challenger_reaction['content']}\"\n\n"
-                f"Reconsider. If they're right, say so concretely and revise. If you stand by it, "
-                f"defend with HIVEMIND evidence — recall a memory, name a teammate, cite a prior decision. "
-                f"No invented facts; if you can't ground it, concede. As long as needed, chat tone, 'we / our'."
+                f"Reconsider. If right, concede and revise. If standing by, defend with a memory "
+                f"hit — quote the title. No invented owners / dates / assignments. Stay on the "
+                f"user's question. 2-4 sentences, chat tone, 'we / our'."
             )
             reply2 = await lead_agent(Msg(name="user", content=revise_prompt, role="user"))
             revise_text = _msg_to_text(reply2) or "(no revision)"

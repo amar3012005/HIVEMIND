@@ -365,9 +365,18 @@ export async function handleScimRequest({ prisma, req, res, pathname, url }) {
   if (groupsCollection && req.method === 'POST') {
     let body; try { body = await readScimBody(req); } catch (e) { return scimError(res, 400, `Invalid JSON: ${e.message}`); }
     if (!body.displayName) return scimError(res, 400, 'displayName required', 'invalidValue');
+    // Team.createdBy is NOT NULL. SCIM has no user context (bearer scoped to
+    // org) — use first active admin of the org as the synthetic creator, or
+    // fall back to first active member.
+    const creator = await prisma.userOrganization.findFirst({
+      where: { orgId, isActive: true },
+      orderBy: { joinedAt: 'asc' },
+      select: { userId: true },
+    });
+    if (!creator) return scimError(res, 400, 'org has no active members to attribute as creator', 'invalidValue');
     const slug = body.displayName.trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').slice(0, 80);
     const team = await prisma.team.create({
-      data: { orgId, name: body.displayName, slug: `${slug}-${crypto.randomBytes(3).toString('hex')}` },
+      data: { orgId, name: body.displayName, slug: `${slug}-${crypto.randomBytes(3).toString('hex')}`, createdBy: creator.userId },
     });
     if (Array.isArray(body.members)) {
       for (const m of body.members) {
@@ -514,9 +523,15 @@ async function dispatchBulkSubOp({ prisma, orgId, method, path, data }) {
 
   if (method === 'POST' && path === '/Groups') {
     if (!data.displayName) return { status: 400 };
+    const creator = await prisma.userOrganization.findFirst({
+      where: { orgId, isActive: true },
+      orderBy: { joinedAt: 'asc' },
+      select: { userId: true },
+    });
+    if (!creator) return { status: 400 };
     const slug = data.displayName.trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').slice(0, 80);
     const team = await prisma.team.create({
-      data: { orgId, name: data.displayName, slug: `${slug}-${crypto.randomBytes(3).toString('hex')}` },
+      data: { orgId, name: data.displayName, slug: `${slug}-${crypto.randomBytes(3).toString('hex')}`, createdBy: creator.userId },
     });
     if (Array.isArray(data.members)) {
       for (const m of data.members) {

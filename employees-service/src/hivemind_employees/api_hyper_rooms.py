@@ -233,7 +233,12 @@ async def _emit_event(callback_url: str, turn_id: str, event: Dict[str, Any]) ->
 # ─── Agent build / reuse ──────────────────────────────────────────────
 
 
-async def _build_agent_for_room(room_id: str, emp: Dict[str, Any]) -> ReActAgent:
+async def _build_agent_for_room(
+    room_id: str,
+    emp: Dict[str, Any],
+    user_id: Optional[str] = None,
+    org_id: Optional[str] = None,
+) -> ReActAgent:
     """Cache one agent per (room, employee) so memory carries across turns.
 
     Overrides the employee's `tools` list with the full HIVEMIND toolset
@@ -256,13 +261,16 @@ async def _build_agent_for_room(room_id: str, emp: Dict[str, Any]) -> ReActAgent
             "employee %s missing scoped api_key — building tool-less agent",
             emp.get("slug"),
         )
+        # Use master key + emulation headers (X-HM-User-Id/X-HM-Org-Id)
+        # so tools still execute as the room owner instead of bailing
+        # tool-less. Without this, agents fall back to "nothing on file".
         merged = {
             **emp,
-            "tools": [],
+            "tools": DEFAULT_HYPER_TOOLS,
             "hyper": boot_emp.get("hyper"),
             "active_prompt_version": boot_emp.get("active_prompt_version"),
         }
-        agent = build_react_agent(merged, "")
+        agent = build_react_agent(merged, "", user_id=user_id, org_id=org_id)
         _ROOM_AGENTS[key] = agent
         return agent
     merged = {
@@ -273,7 +281,7 @@ async def _build_agent_for_room(room_id: str, emp: Dict[str, Any]) -> ReActAgent
         "hyper": boot_emp.get("hyper"),
         "active_prompt_version": boot_emp.get("active_prompt_version"),
     }
-    agent = build_react_agent(merged, api_key)
+    agent = build_react_agent(merged, api_key, user_id=user_id, org_id=org_id)
     _ROOM_AGENTS[key] = agent
     return agent
 
@@ -498,7 +506,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     lead_agent = None
     lead_prompt = ""
     try:
-        lead_agent = await _build_agent_for_room(req.room_id, lead)
+        lead_agent = await _build_agent_for_room(req.room_id, lead, user_id=req.user_id, org_id=req.org_id)
         # Provide CSI persona framing in the user-prompt wrapper so we
         # don't have to mutate the agent's underlying system prompt.
         # Chat-tone constraints — this is a Slack-style room, NOT a memo.
@@ -570,6 +578,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 try:
                     plain_agent = await _build_agent_for_room(
                         req.room_id + ":notools", {**lead, "tools": []},
+                        user_id=req.user_id, org_id=req.org_id,
                     )
                     reply3 = await plain_agent(Msg(name="user", content=req.user_message, role="user"))
                     lead_text = _msg_to_text(reply3) or "(no response)"
@@ -619,7 +628,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         await _emit_event(req.callback_url, req.turn_id, {
             "t": "typing", "agent": r.get("slug"), "kind": "react",
         })
-        agent = await _build_agent_for_room(req.room_id, r)
+        agent = await _build_agent_for_room(req.room_id, r, user_id=req.user_id, org_id=req.org_id)
         is_opp = r["_lane"] in opposing_lanes(lead["_lane"])
         reaction_tasks.append(asyncio.create_task(_run_reactor(
             agent=agent,
@@ -743,7 +752,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             await _emit_event(req.callback_url, req.turn_id, {
                 "t": "typing", "agent": challenger_reaction["emp"].get("slug"), "kind": "validate",
             })
-            ch_agent = await _build_agent_for_room(req.room_id, challenger_reaction["emp"])
+            ch_agent = await _build_agent_for_room(req.room_id, challenger_reaction["emp"], user_id=req.user_id, org_id=req.org_id)
             validate_prompt = (
                 f"[CSI validation pass — your lane: {challenger_reaction['emp']['_lane']}.]\n"
                 f"{lead.get('name')} responded to your challenge:\n"

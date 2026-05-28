@@ -43,9 +43,11 @@ async function scim(path, init = {}) {
   const headers = {
     'Content-Type': 'application/scim+json',
     Accept: 'application/scim+json',
-    ...(init.headers || {}),
   };
   if (!init.noAuth) headers.Authorization = `Bearer ${TOKEN}`;
+  // init.headers last so caller can override Authorization (used in
+  // bogus-bearer test) without us silently re-applying the env token.
+  Object.assign(headers, init.headers || {});
   const r = await fetch(`${BASE}${path}`, { ...init, headers });
   let body = null;
   const text = await r.text();

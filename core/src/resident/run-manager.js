@@ -332,6 +332,8 @@ export class ResidentRunManager {
 
     const result = await this.turing.run({
       agentId: run.agent_id,
+      orgId: context.orgId,
+      userId: context.userId,
       scope: run.scope,
       project: run.project,
       region: run.region,

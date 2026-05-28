@@ -1491,6 +1491,9 @@ export async function recallPersistedMemories(store, {
 
   // Caller-opts-in audit pass-through (e.g. /v1/governance UI). Else drop.
   const callerWantsAudit = Array.isArray(tags) && tags.some((t) => t === 'internal-audit');
+  // Caller-opts-in hyper-room pass-through (e.g. /hivemind/app/swarm-rooms).
+  const callerWantsRoomDecisions = Array.isArray(tags)
+    && tags.some((t) => t === 'room-decision' || t === 'hyper-rooms');
 
   let top = finalItems
     .filter(item => {
@@ -1500,6 +1503,9 @@ export async function recallPersistedMemories(store, {
       // Drop internal-audit (governance reflection rows etc.) unless
       // caller explicitly asked for them.
       if (!callerWantsAudit && tags.includes('internal-audit')) return false;
+      // Drop hyper-room decisions from default recall — caller opts in.
+      if (!callerWantsRoomDecisions
+          && (tags.includes('room-decision') || tags.includes('hyper-rooms'))) return false;
       return true;
     })
     .sort((a, b) => {

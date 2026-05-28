@@ -356,7 +356,16 @@ export class PrismaGraphStore {
     // operational noise — drop from default listing. Caller opts in by
     // passing tags=['internal-audit'].
     const callerWantsAudit = Array.isArray(tags) && tags.includes('internal-audit');
-    const auditExclusion = callerWantsAudit ? {} : { NOT: { tags: { has: 'internal-audit' } } };
+    const callerWantsRoomDecisions = Array.isArray(tags) && (tags.includes('room-decision') || tags.includes('hyper-rooms'));
+    // Build exclusion clause: drop internal-audit AND hyper-room decisions
+    // by default. Caller opts in via tags=['internal-audit'] or
+    // tags=['room-decision']/['hyper-rooms'].
+    const hiddenTags = [];
+    if (!callerWantsAudit) hiddenTags.push('internal-audit');
+    if (!callerWantsRoomDecisions) hiddenTags.push('room-decision', 'hyper-rooms');
+    const auditExclusion = hiddenTags.length
+      ? { NOT: { tags: { hasSome: hiddenTags } } }
+      : {};
     const records = await this.client.memory.findMany({
       where: {
         ...baseWhere,

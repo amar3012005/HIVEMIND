@@ -1374,6 +1374,7 @@ model HyperRoom {
   orgId           String       @map("org_id") @db.Uuid
   name            String       @db.VarChar(120)
   participantIds  String[]     @default([]) @map("participant_ids") @db.Uuid
+  template        String       @default("debate") @db.VarChar(40)
   createdAt       DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt       DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   archivedAt      DateTime?    @map("archived_at") @db.Timestamptz(6)
@@ -1385,6 +1386,23 @@ model HyperRoom {
   @@index([userId, orgId])
   @@index([archivedAt])
   @@map("hyper_rooms")
+}
+
+/// AgentTrust — per-org meritocracy ledger. score in [0,1], starts 0.5.
+/// Updated post-seal: lead-success +0.05, challenger-correct +0.05,
+/// unresolved-escalate -0.05. Display-only in v1; routing weight wiring
+/// in _pick_lead is phase-2 (observe 50-100 turns first).
+model AgentTrust {
+  orgId       String   @map("org_id") @db.Uuid
+  employeeId  String   @map("employee_id") @db.Uuid
+  trustScore  Float    @default(0.5) @map("trust_score")
+  wins        Int      @default(0)
+  losses      Int      @default(0)
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@id([orgId, employeeId])
+  @@index([orgId, trustScore])
+  @@map("agent_trust")
 }
 
 /// HyperTurn — one user message + lead + reactors + (optional) round-2

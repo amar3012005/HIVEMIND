@@ -131,6 +131,70 @@ async def get_api_key_for_employee(employee_id: str) -> Optional[Dict[str, Any]]
     return dict(row) if row else None
 
 
+async def get_room_template(room_id: str) -> str:
+    """B1: return the room's template ('debate' or 'decision').
+    Defaults to 'debate' if row missing or column absent (graceful pre-migration)."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(
+                "SELECT template FROM hivemind.hyper_rooms WHERE id = $1",
+                room_id,
+            )
+            if row and row["template"]:
+                return str(row["template"])
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_room_template fallback: %s", exc)
+    return "debate"
+
+
+async def get_trust_scores(org_id: str, employee_ids: List[str]) -> Dict[str, float]:
+    """A4: return {employee_id: trust_score} for given ids. Missing rows = 0.5."""
+    if not employee_ids:
+        return {}
+    pool = await init_pool()
+    out: Dict[str, float] = {eid: 0.5 for eid in employee_ids}
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT employee_id::text, trust_score
+                FROM hivemind.agent_trust
+                WHERE org_id = $1 AND employee_id = ANY($2::uuid[])
+                """,
+                org_id, employee_ids,
+            )
+            for r in rows:
+                out[r["employee_id"]] = float(r["trust_score"])
+    except Exception as exc:  # noqa: BLE001
+        log.warning("get_trust_scores fallback: %s", exc)
+    return out
+
+
+async def update_trust(org_id: str, employee_id: str, delta: float, won: bool) -> Optional[float]:
+    """A4: upsert + clamp [0,1]. Returns new score."""
+    pool = await init_pool()
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO hivemind.agent_trust (org_id, employee_id, trust_score, wins, losses, updated_at)
+                VALUES ($1, $2, GREATEST(0.0, LEAST(1.0, 0.5 + $3)), $4, $5, now())
+                ON CONFLICT (org_id, employee_id) DO UPDATE
+                SET trust_score = GREATEST(0.0, LEAST(1.0, hivemind.agent_trust.trust_score + $3)),
+                    wins = hivemind.agent_trust.wins + $4,
+                    losses = hivemind.agent_trust.losses + $5,
+                    updated_at = now()
+                RETURNING trust_score
+                """,
+                org_id, employee_id, delta, 1 if won else 0, 0 if won else 1,
+            )
+            return float(row["trust_score"]) if row else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("update_trust failed org=%s emp=%s: %s", org_id, employee_id, exc)
+        return None
+
+
 async def get_slack_token(installer_user_id: str) -> Optional[str]:
     """Resolve the bot token for the employee owner's slack integration.
     Returns the encrypted_text — caller must decrypt via core helper OR

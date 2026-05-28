@@ -44,7 +44,13 @@ from pydantic import BaseModel, Field
 from .agents.agentscope_factory import build_react_agent
 from .bootstrap_client import fetch_bootstrap
 from .config import get_settings
-from .db import list_employees_by_ids, list_running_employees
+from .db import (
+    get_room_template,
+    get_trust_scores,
+    list_employees_by_ids,
+    list_running_employees,
+    update_trust,
+)
 from .hivemind_client import HivemindClient
 
 log = logging.getLogger(__name__)
@@ -605,11 +611,19 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     lead = forced or _pick_lead(participants, req.user_message)
     reactors = _pick_reactors(participants, lead)
 
+    # B1: per-room template (debate | decision). Falls back to 'debate'.
+    room_template = await get_room_template(req.room_id)
+    # A4: pull trust scores for display only (no routing weight yet).
+    trust_map = await get_trust_scores(req.org_id, [p["id"] for p in participants])
+    trust_by_slug = {p.get("slug"): trust_map.get(p["id"], 0.5) for p in participants}
+
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "router",
         "lead": lead.get("slug"),
         "reactors": [r.get("slug") for r in reactors],
         "lanes": {p.get("slug"): p["_lane"] for p in participants},
+        "template": room_template,
+        "trust": trust_by_slug,
     })
 
     # ── Pre-fetch HIVEMIND context (grounded RAG) ───────────────────
@@ -684,9 +698,17 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 "then give a concrete take in 2-3 more sentences. Never invent facts.\n"
                 "- NEVER narrate the search ('let me check', 'we should recall', 'I'll look') — just call the tools.\n"
             )
+        template_hint = (
+            "[TEMPLATE: decision — DACI flow. Lead delivers the final committed "
+            "answer with memory citations. Synthesis will be saved as a "
+            "decision memory.]\n\n"
+            if room_template == "decision"
+            else ""
+        )
         lead_prompt = (
             f"[CSI swarm — you are an EMPLOYEE at the HIVEMIND organisation. "
             f"You're the LEAD speaking up this turn. Your lane: {lead['_lane']}.]\n\n"
+            + template_hint
             + (memory_context + "\n" if memory_context else "")
             + f"WHO YOU ARE:\n"
             f"- You work AT HIVEMIND. The 'HIVEMIND' in this room = our org / our product.\n"
@@ -945,6 +967,11 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         None,
     )
 
+    # B1 decision template: skip debate loop. The synth bubble is the
+    # commitment; we save it and seal. Debate template (default) keeps
+    # the revise/validate flow below.
+    if room_template == "decision":
+        challenger_reaction = None
     # Loop revise+validate while challenger keeps escalating. Caps at
     # MAX_DEBATE_ROUNDS so cost stays bounded. MiroFish pattern: do not
     # seal on unresolved 'escalate' — keep the debate moving until the
@@ -1083,11 +1110,14 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             "rounds_run": debate_round,
         })
 
-    # ── A1 decision sink — save iff verdict=resolved OR save-intent ─
+    # ── A1 decision sink — save iff verdict=resolved OR save-intent
+    #     OR template == 'decision' (DACI flow always commits) ─
     save_intent = bool(_SAVE_INTENT_RE.search(req.user_message))
+    is_decision_template = room_template == "decision"
     should_save = (
         (final_verdict == "resolved" and not quality_low)
         or save_intent
+        or (is_decision_template and not quality_low)
     )
     saved_memory_id: Optional[str] = None
     if should_save and final_text:
@@ -1108,6 +1138,31 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 "trigger": trigger,
             })
 
+    # ── A4 trust scoring (display-only, no routing impact yet) ──────
+    # Lead: +0.05 on substantive seal; -0.05 on unresolved escalate.
+    # Challenger: +0.05 if revise conceded (verdict=resolved came AFTER a
+    # real challenge); -0.05 if their challenge was over-stated and lead
+    # held ground (we approximate: resolved with no concession keyword =
+    # challenge over-stated → mild loss).
+    trust_deltas: Dict[str, float] = {}
+    try:
+        lead_won = (not quality_low) and (
+            final_verdict == "resolved" or final_verdict is None or is_decision_template
+        )
+        lead_delta = 0.05 if lead_won else -0.05
+        new_lead = await update_trust(req.org_id, lead["id"], lead_delta, lead_won)
+        if new_lead is not None:
+            trust_deltas[lead.get("slug")] = new_lead
+        if challenger_reaction:
+            ch_emp = challenger_reaction["emp"]
+            challenger_correct = final_verdict == "escalate"  # lead couldn't refute
+            ch_delta = 0.05 if challenger_correct else -0.02
+            new_ch = await update_trust(req.org_id, ch_emp["id"], ch_delta, challenger_correct)
+            if new_ch is not None:
+                trust_deltas[ch_emp.get("slug")] = new_ch
+    except Exception as exc:  # noqa: BLE001
+        log.warning("trust update failed: %s", exc)
+
     # ── Seal ─────────────────────────────────────────────────────────
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "seal",
@@ -1116,6 +1171,8 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         "duration_ms": int((time.time() - started) * 1000),
         "quality_low": quality_low,
         "saved_memory_id": saved_memory_id,
+        "trust": trust_deltas,
+        "template": room_template,
     })
     return RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status=status)
 

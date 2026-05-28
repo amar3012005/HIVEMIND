@@ -13107,7 +13107,7 @@ exit \$RC
               user_id: userId,
               org_id: orgId
             };
-            for (const key of ['project', 'memory_type', 'tags', 'is_latest', 'limit', 'offset', 'include_children']) {
+            for (const key of ['project', 'project_id', 'memory_type', 'tags', 'is_latest', 'limit', 'offset', 'include_children']) {
               const value = url.searchParams.get(key);
               if (value !== null) {
                 queryParams[key] = value;
@@ -13134,7 +13134,7 @@ exit \$RC
               }, 400);
             }
             
-            const { user_id, org_id, project, ...filters } = validation.data;
+            const { user_id, org_id, project, project_id, ...filters } = validation.data;
             
             const offset = filters.offset || 0;
             const limit = filters.limit || 50;
@@ -13149,6 +13149,7 @@ exit \$RC
               user_id: userId,
               org_id: orgId,
               project,
+              project_id: project_id || undefined,
               memory_type: filters.memory_type,
               tags: parsedTags,
               is_latest: filters.is_latest,
@@ -14807,7 +14808,7 @@ exit \$RC
               // Slim response — default ON for mode=auto/memory/hybrid/evidence
               // Caller can opt back into full payload via body.verbose=true
               if (!body.verbose) {
-                const SLIM_MEM_KEYS = ['id','title','content','memory_type','tags','score','created_at','document_date','project','source','evidence','_synthesis_boosted','_cross_cluster_boost','_cross_cluster_overlap','synthesis_cluster_hash','synthesis_revision','synthesis_confidence','synthesis_evidence_ids','source_metadata','tier','last_accessed_at','promoted_at','_ws_match','_entity_match','cognitive_layer_role','_cognitive_role'];
+                const SLIM_MEM_KEYS = ['id','title','content','memory_type','tags','score','created_at','document_date','project','project_id','source','evidence','_synthesis_boosted','_cross_cluster_boost','_cross_cluster_overlap','synthesis_cluster_hash','synthesis_revision','synthesis_confidence','synthesis_evidence_ids','source_metadata','tier','last_accessed_at','promoted_at','_ws_match','_entity_match','cognitive_layer_role','_cognitive_role'];
                 const slimMem = (m) => {
                   const out = {};
                   for (const k of SLIM_MEM_KEYS) if (m[k] !== undefined) out[k] = m[k];

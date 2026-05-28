@@ -41,6 +41,9 @@ function mapMemoryRecord(record) {
     user_id: record.userId,
     org_id: record.orgId,
     project: record.project,
+    // Phase P.2: surface formal Project FK when populated. project (string)
+    // stays for legacy free-text label compatibility.
+    project_id: record.projectId || null,
     visibility: record.visibility,
     scope: record.scope || 'personal',
     primary_team_id: record.primaryTeamId || null,
@@ -343,10 +346,15 @@ export class PrismaGraphStore {
     return records.map(mapMemoryRecord);
   }
 
-  async listMemories({ user_id, org_id, project, memory_type, tags, is_latest, limit = 50, offset = 0, scope = 'personal' }) {
+  async listMemories({ user_id, org_id, project, project_id, memory_type, tags, is_latest, limit = 50, offset = 0, scope = 'personal' }) {
+    // Phase P.3: prefer formal projectId FK when caller passes it; falls back
+    // to legacy free-text `project` string. Both forms allowed simultaneously
+    // (logical AND) to support FE clients sending both during transition.
+    const baseWhere = scopedMemoryWhere({ user_id, org_id, project, scope });
+    if (project_id) baseWhere.projectId = project_id;
     const records = await this.client.memory.findMany({
       where: {
-        ...scopedMemoryWhere({ user_id, org_id, project, scope }),
+        ...baseWhere,
         memoryType: memory_type || undefined,
         isLatest: typeof is_latest === 'boolean' ? is_latest : undefined,
         tags: tags?.length ? { hasEvery: tags } : undefined,
@@ -364,9 +372,11 @@ export class PrismaGraphStore {
       take: limit
     });
 
+    const countWhere = scopedMemoryWhere({ user_id, org_id, project });
+    if (project_id) countWhere.projectId = project_id;
     const total = await this.client.memory.count({
       where: {
-        ...scopedMemoryWhere({ user_id, org_id, project }),
+        ...countWhere,
         memoryType: memory_type || undefined,
         isLatest: typeof is_latest === 'boolean' ? is_latest : undefined,
         tags: tags?.length ? { hasSome: tags } : undefined

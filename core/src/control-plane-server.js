@@ -3501,6 +3501,35 @@ const server = http.createServer(async (req, res) => {
     };
   }
 
+  // SCIM 2.0 stub. Real impl deferred — see docs/architecture/SCIM_ROADMAP.md.
+  // Returning a documented stub on ServiceProviderConfig prevents IdP
+  // discovery 404s while keeping the surface explicit.
+  if (pathname === '/scim/v2/ServiceProviderConfig' && req.method === 'GET') {
+    return jsonResponse(res, {
+      schemas: ['urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig'],
+      implementation_status: 'stub',
+      implementation_eta_days: 5,
+      documentationUri: 'https://github.com/amar3012005/HIVEMIND/blob/main/docs/architecture/SCIM_ROADMAP.md',
+      patch: { supported: false },
+      bulk:  { supported: false, maxOperations: 0, maxPayloadSize: 0 },
+      filter:{ supported: false, maxResults: 0 },
+      changePassword: { supported: false },
+      sort:  { supported: false },
+      etag:  { supported: false },
+      authenticationSchemes: [{
+        type: 'oauthbearertoken', name: 'Bearer Token', description: 'Per-org SCIM token generated via AdminSso UI', primary: true,
+      }],
+    });
+  }
+  // Any other /scim/v2/* — explicit 501 with hint.
+  if (pathname.startsWith('/scim/v2/') && pathname !== '/scim/v2/ServiceProviderConfig') {
+    return jsonResponse(res, {
+      error: 'scim_not_implemented',
+      message: 'SCIM provisioning endpoints are not yet implemented. Use AdminSso UI for SSO config; bulk provisioning roadmap in docs/architecture/SCIM_ROADMAP.md.',
+      stub: true,
+    }, 501);
+  }
+
   // GET /v1/teams — list teams current user belongs to in current org
   if (pathname === '/v1/teams' && req.method === 'GET') {
     const current = await requireSession(req, res);
@@ -3797,18 +3826,53 @@ const server = http.createServer(async (req, res) => {
       }
     }
     // POST /v1/projects/:id/members
+    const PROJECT_ROLES = ['owner', 'contributor', 'viewer'];
     if (sub === 'members' && req.method === 'POST') {
       try {
         await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'owner' });
         const body = await parseBody(req);
         if (!body.user_id) return jsonResponse(res, { error: 'user_id required' }, 400);
+        const role = body.role || 'contributor';
+        if (!PROJECT_ROLES.includes(role)) {
+          return jsonResponse(res, { error: `role must be one of ${PROJECT_ROLES.join('|')}` }, 400);
+        }
         const m = await ts.store.addProjectMember({
           projectId,
           userId: body.user_id,
-          role: body.role || 'contributor',
+          role,
           addedById: userId,
         });
         return jsonResponse(res, { member: m }, 201);
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, err.status || 500);
+      }
+    }
+    // PATCH /v1/projects/:id/members/:userId — change project-member role.
+    const projMemberPatch = sub && sub.match(/^members\/([0-9a-f-]{36})$/);
+    if (projMemberPatch && req.method === 'PATCH') {
+      try {
+        await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'owner' });
+        const targetUserId = projMemberPatch[1];
+        const body = await parseBody(req);
+        if (!body.role || !PROJECT_ROLES.includes(body.role)) {
+          return jsonResponse(res, { error: `role must be one of ${PROJECT_ROLES.join('|')}` }, 400);
+        }
+        const updated = await prisma.projectMember.update({
+          where: { projectId_userId: { projectId, userId: targetUserId } },
+          data: { role: body.role },
+        });
+        audit({
+          organizationId: orgId,
+          userId,
+          eventType: 'project.member_role_changed',
+          eventCategory: 'auth',
+          action: 'update',
+          resourceType: 'project_member',
+          resourceId: `${projectId}:${targetUserId}`,
+          newValue: { role: body.role },
+          ..._reqMeta(req),
+        });
+        return jsonResponse(res, { member: updated });
       } catch (err) {
         return jsonResponse(res, { error: err.message }, err.status || 500);
       }

@@ -386,6 +386,9 @@ model Memory {
   updatedAt                                                   DateTime?            @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   deletedAt                                                   DateTime?            @map("deleted_at") @db.Timestamptz(6)
   project                                                     String?              @map("project")
+  // Phase P.3: formal Project FK. Backfilled from `project` string by name/slug
+  // match. Recall filters by projectId (preferred) OR free-text `project` (legacy).
+  projectId                                                   String?              @map("project_id") @db.Uuid
   version                                                     Int                  @default(1)
   auditLogs                                                   AuditLog[]           @relation("MemoryAuditLogs")
   codeMetadata                                                CodeMemoryMetadata?
@@ -437,6 +440,7 @@ model Memory {
   @@index([userId])
   @@index([orgId])
   @@index([project])
+  @@index([projectId], map: "memories_project_id_idx")
   @@index([scope])
   @@index([primaryTeamId])
   @@index([memoryType])

@@ -131,6 +131,38 @@ async def get_api_key_for_employee(employee_id: str) -> Optional[Dict[str, Any]]
     return dict(row) if row else None
 
 
+async def get_permanent_skeptic_id(room_id: str) -> Optional[str]:
+    """Returns the permanent_skeptic_id for the room, or None.
+    Gracefully tolerates pre-migration rooms (column absent)."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(
+                "SELECT permanent_skeptic_id::text FROM hivemind.hyper_rooms WHERE id = $1",
+                room_id,
+            )
+            if row and row["permanent_skeptic_id"]:
+                return str(row["permanent_skeptic_id"])
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_permanent_skeptic_id fallback: %s", exc)
+    return None
+
+
+async def set_permanent_skeptic_id(room_id: str, employee_id: Optional[str]) -> bool:
+    """PATCH the permanent Skeptic for a room."""
+    pool = await init_pool()
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE hivemind.hyper_rooms SET permanent_skeptic_id = $1::uuid WHERE id = $2",
+                employee_id, room_id,
+            )
+            return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("set_permanent_skeptic_id failed: %s", exc)
+        return False
+
+
 async def get_room_template(room_id: str) -> str:
     """B1: return the room's template ('debate' or 'decision').
     Defaults to 'debate' if row missing or column absent (graceful pre-migration)."""

@@ -1375,6 +1375,7 @@ model HyperRoom {
   name            String       @db.VarChar(120)
   participantIds  String[]     @default([]) @map("participant_ids") @db.Uuid
   template        String       @default("debate") @db.VarChar(40)
+  permanentSkepticId String?   @map("permanent_skeptic_id") @db.Uuid
   createdAt       DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt       DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   archivedAt      DateTime?    @map("archived_at") @db.Timestamptz(6)

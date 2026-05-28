@@ -1093,7 +1093,8 @@ const governanceRoutes = createGovernanceRoutes({
   const { ResidentAgentScheduler } = await import('./resident/scheduler.js');
   const governanceScheduler = new ResidentAgentScheduler({
     runManager: residentRunManager,
-    intervalMs: Number(process.env.GOVERNANCE_SCHEDULER_INTERVAL_MS || 30 * 60 * 1000),
+    prisma,
+    intervalMs: Number(process.env.GOVERNANCE_INTERVAL_MS || process.env.GOVERNANCE_SCHEDULER_INTERVAL_MS || 30 * 60 * 1000),
     logger: console,
   });
   governanceScheduler.start();

@@ -1,18 +1,18 @@
 /**
  * Resident-agent scheduler.
  *
- * Phase 1: env-gated and OFF by default. When ENABLE_GOVERNANCE_SCHEDULER=true
- * AND a positive intervalMs is configured, fires Faraday → Feynman → Turing
- * on each tick. Until the env flag is set, .start() is a no-op so production
- * behavior is unchanged from V1.
+ * Phase 4: env-gated. When ENABLE_GOVERNANCE_SCHEDULER=true fires
+ * Faraday → Feynman → Turing on each tick FOR EVERY ACTIVE ORG. Pulls
+ * org list from prisma at tick time so newly onboarded tenants pick up
+ * the cadence automatically.
  *
- * Concurrency is guarded by a Postgres advisory lock inside run-manager so
- * multiple hm-core instances can boot the scheduler without colliding.
+ * Concurrency is guarded by a row-level cycle lock inside run-manager.
  */
 
 export class ResidentAgentScheduler {
-  constructor({ runManager, intervalMs = 30 * 60 * 1000, logger = console } = {}) {
+  constructor({ runManager, prisma = null, intervalMs = 30 * 60 * 1000, logger = console } = {}) {
     this.runManager = runManager;
+    this.prisma = prisma;
     this.intervalMs = intervalMs;
     this.logger = logger;
     this.timer = null;
@@ -45,15 +45,52 @@ export class ResidentAgentScheduler {
     }
     this.tickInFlight = true;
     try {
-      if (typeof this.runManager?.runFullCycle === 'function') {
-        await this.runManager.runFullCycle({ trigger: 'scheduler' });
-      } else {
+      if (typeof this.runManager?.runFullCycle !== 'function') {
         this.logger?.warn?.('[gov-scheduler] run-manager has no runFullCycle, skipping tick');
+        return;
+      }
+      const orgs = await this._listActiveOrgs();
+      if (orgs.length === 0) {
+        this.logger?.log?.('[gov-scheduler] no active orgs — tick noop');
+        return;
+      }
+      this.logger?.log?.(`[gov-scheduler] tick: ${orgs.length} org(s)`);
+      for (const o of orgs) {
+        try {
+          const res = await this.runManager.runFullCycle({
+            orgId: o.id,
+            scope: 'organization',
+            trigger: 'scheduler',
+          });
+          if (res?.status === 'skipped_lock_busy') {
+            this.logger?.log?.(`[gov-scheduler] org=${o.id.slice(0,8)} busy — skipped`);
+          }
+        } catch (err) {
+          this.logger?.warn?.(`[gov-scheduler] org=${o.id.slice(0,8)} failed: ${err?.message || err}`);
+        }
       }
     } catch (err) {
       this.logger?.warn?.(`[gov-scheduler] tick failed: ${err?.message || err}`);
     } finally {
       this.tickInFlight = false;
+    }
+  }
+
+  async _listActiveOrgs() {
+    if (!this.prisma) return [];
+    try {
+      // Active = at least one active membership. Cheap and tenant-correct.
+      const rows = await this.prisma.$queryRawUnsafe(
+        `SELECT DISTINCT o.id
+           FROM hivemind.organizations o
+           JOIN hivemind.user_organizations uo ON uo.org_id = o.id
+          WHERE uo.is_active = true
+          LIMIT 1000`
+      );
+      return Array.isArray(rows) ? rows : [];
+    } catch (err) {
+      this.logger?.warn?.(`[gov-scheduler] org list failed: ${err.message}`);
+      return [];
     }
   }
 }

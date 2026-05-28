@@ -352,9 +352,15 @@ export class PrismaGraphStore {
     // (logical AND) to support FE clients sending both during transition.
     const baseWhere = scopedMemoryWhere({ user_id, org_id, project, scope });
     if (project_id) baseWhere.projectId = project_id;
+    // Internal-audit suppression: governance reflection rows etc. are
+    // operational noise — drop from default listing. Caller opts in by
+    // passing tags=['internal-audit'].
+    const callerWantsAudit = Array.isArray(tags) && tags.includes('internal-audit');
+    const auditExclusion = callerWantsAudit ? {} : { NOT: { tags: { has: 'internal-audit' } } };
     const records = await this.client.memory.findMany({
       where: {
         ...baseWhere,
+        ...auditExclusion,
         memoryType: memory_type || undefined,
         isLatest: typeof is_latest === 'boolean' ? is_latest : undefined,
         tags: tags?.length ? { hasEvery: tags } : undefined,
@@ -377,6 +383,7 @@ export class PrismaGraphStore {
     const total = await this.client.memory.count({
       where: {
         ...countWhere,
+        ...auditExclusion,
         memoryType: memory_type || undefined,
         isLatest: typeof is_latest === 'boolean' ? is_latest : undefined,
         tags: tags?.length ? { hasSome: tags } : undefined

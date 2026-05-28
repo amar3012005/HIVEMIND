@@ -9912,21 +9912,22 @@ exit \$RC
               const hardDelete = body.hard === true;
               const allUsers = body.all_users === true; // admin-only flag
 
-              // SECURITY: all_users=true is destructive cross-tenant. Require
-              // admin/master credential. Without this any authenticated user
-              // could (especially with hard:true) erase memories org-wide.
-              if (allUsers) {
-                const isMaster = !!(principal && principal.master);
-                const isAdmin = isAdminRequest(req);
-                if (!isMaster && !isAdmin) {
-                  return jsonResponse(res, {
-                    error: 'all_users=true requires admin (X-Admin-Secret header or master key)',
-                  }, 403);
-                }
+              // SECURITY: all_users=true is destructive cross-user. Require
+              // admin/master credential AND constrain to current org so a
+              // master-key request can't blast every tenant.
+              const isMaster = !!(principal && principal.master);
+              const isAdmin = isAdminRequest(req) || isMaster;
+              if (allUsers && !isAdmin) {
+                return jsonResponse(res, {
+                  error: 'all_users=true requires admin (X-Admin-Secret header or master key)',
+                }, 403);
               }
 
-              // Build scope filter
-              const scopeWhere = allUsers ? {} : { userId };
+              // Build scope filter. orgId always present so tenant middleware
+              // doesn't reject. allUsers crosses users WITHIN the current org.
+              const scopeWhere = allUsers
+                ? (orgId ? { orgId } : { userId })
+                : { userId, ...(orgId ? { orgId } : {}) };
 
               // Patterns that identify legacy Gmail fact-extraction garbage
               const patterns = [
@@ -18446,7 +18447,7 @@ function readBoundedBuffer(req, max = MULTIPART_MAX_BYTES) {
         const e = new Error(`payload too large: > ${max} bytes`);
         e.code = 'PAYLOAD_TOO_LARGE';
         e.statusCode = 413;
-        req.destroy();
+        // Reject + drain (don't destroy — caller needs to write 413).
         reject(e);
         return;
       }
@@ -18469,7 +18470,8 @@ function parseBody(req) {
         const err = new Error(`payload too large: > ${JSON_BODY_MAX_BYTES} bytes`);
         err.code = 'PAYLOAD_TOO_LARGE';
         err.statusCode = 413;
-        req.destroy();
+        // Reject + drain. Don't destroy() — caller must still be able to
+        // write a 413 response before socket closes.
         reject(err);
         return;
       }

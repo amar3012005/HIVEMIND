@@ -425,7 +425,13 @@ async function fetchMemoriesByIds(memoryStore, ids = [], scopeFilter = {}) {
     await yieldEvery(index, 40);
     try {
       const memory = await memoryStore.getMemory(id, scopeFilter);
-      if (memory) loaded.push(memory);
+      if (!memory) continue;
+      // Drop reflection / canonical / bridge / compression memories that
+      // leaked in via graph traversal — Faraday must not scan its own
+      // outputs (feedback loop).
+      if (memory.cognitive_layer_role || memory.cognitiveLayerRole) continue;
+      if (Array.isArray(memory.tags) && memory.tags.includes('internal-audit')) continue;
+      loaded.push(memory);
     } catch {
       /* best effort */
     }

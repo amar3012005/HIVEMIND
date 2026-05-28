@@ -572,7 +572,15 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         # the LLM emits `"limit": "10"`. Retry once telling it to stop
         # quoting numbers; on second failure, fall back to a no-tool pass
         # so the turn at least delivers a lead bubble.
-        is_tool_schema = "tool_use_failed" in msg or "did not match schema" in msg
+        # gpt-oss-20b occasionally emits empty output → output_parse_failed.
+        # Treat it the same as a tool-schema error so we retry with a hint
+        # and then fall through to the no-tools plain pass.
+        is_tool_schema = (
+            "tool_use_failed" in msg
+            or "did not match schema" in msg
+            or "output_parse_failed" in msg
+            or "Parsing failed" in msg
+        )
         retried = False
         if is_tool_schema and lead_agent:
             try:

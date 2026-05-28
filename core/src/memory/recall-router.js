@@ -670,6 +670,16 @@ export class RecallRouter {
     // Cheap moves that cut answer-step bloat without a reranker. Drops
     // near-duplicates, kills low-score noise, and collapses redundant
     // synthesis-cluster siblings down to the canonical synth + 1 source.
+    // Internal-audit suppression: 'internal-audit' tagged memories
+    // (governance reflection rows etc.) are operational noise — they
+    // should never crowd user queries. Drop them unless the caller
+    // explicitly asked for them via options.tags = ['internal-audit'].
+    const callerWantsAudit = Array.isArray(options.tags)
+      && options.tags.some((t) => t === 'internal-audit');
+    if (!callerWantsAudit) {
+      rankedMemories = rankedMemories.filter((m) => !(m.tags || []).includes('internal-audit'));
+    }
+
     rankedMemories = applyScoreFloor(rankedMemories, 0.40);
     rankedMemories = applyMMRDiversity(rankedMemories, 0.70);
     rankedMemories = collapseClusterDuplicates(rankedMemories);

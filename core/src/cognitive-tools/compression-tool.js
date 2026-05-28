@@ -90,11 +90,28 @@ export class CompressionTool extends CognitiveTool {
       return { status: 'skipped', reason: 'duplicate', existing_id: existing.id };
     }
 
+    // Pick a non-null tag for the title. Falls back to the most common
+    // entity:* tag across members, then to 'cluster'.
+    let effectiveTag = topic && topic !== 'null' ? topic : null;
+    if (!effectiveTag) {
+      const entityCounts = new Map();
+      for (const m of members) {
+        for (const t of (m.tags || [])) {
+          if (typeof t === 'string' && t.startsWith('entity:')) {
+            const name = t.slice(7).replace(/_/g, ' ');
+            entityCounts.set(name, (entityCounts.get(name) || 0) + 1);
+          }
+        }
+      }
+      const best = [...entityCounts.entries()].sort((a, b) => b[1] - a[1])[0];
+      effectiveTag = best?.[0] || 'cluster';
+    }
+
     // Write via cognition-loop helper for engine routing.
     const written = await loop._writeSummaryMemory({
       orgId, userId,
       project: members[0].project || null,
-      tag: topic,
+      tag: effectiveTag,
       members,
       content,
       partIndex: 0,

@@ -895,6 +895,14 @@ export class ResidentRunManager {
         run_id: fFinal?.run_id,
         status: fFinal?.status,
         observations_count: fFinal?.observations_count || 0,
+        // Sample observations for richer reflection content. summary/title
+        // first, then fall back to kind+memory_id.
+        observations: (fFinal?.result?.observations || []).slice(0, 5).map((o) => {
+          return o?.content?.summary
+            || o?.content?.title
+            || o?.content?.cluster_label
+            || `${o?.kind}: ${o?.content?.memory_id || o?.id || ''}`.slice(0, 100);
+        }).filter(Boolean),
       };
 
       // Update Faraday cursor to oldest memory it scanned (for next-run resume).
@@ -919,6 +927,12 @@ export class ResidentRunManager {
         run_id: feFinal?.run_id,
         status: feFinal?.status,
         observations_count: feFinal?.observations_count || 0,
+        hypotheses: (feFinal?.result?.observations || []).slice(0, 5).map((o) => {
+          return o?.content?.hypothesis
+            || o?.content?.summary
+            || o?.content?.title
+            || `${o?.kind}`.slice(0, 100);
+        }).filter(Boolean),
       };
 
       // ── 3. Turing (chained off Feynman) ────────────────────────────
@@ -928,6 +942,15 @@ export class ResidentRunManager {
         run_id: tFinal?.run_id,
         status: tFinal?.status,
         observations_count: tFinal?.observations_count || 0,
+        verifications: (tFinal?.result?.observations || [])
+          .filter((o) => o?.kind === 'verification')
+          .slice(0, 5)
+          .map((o) => {
+            return o?.content?.summary
+              || o?.content?.verified_hypothesis
+              || o?.content?.title
+              || 'verification';
+          }).filter(Boolean),
       };
 
       // ── 4. Persist all queued proposals from each run ──────────────

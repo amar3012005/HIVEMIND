@@ -314,11 +314,11 @@ Reply in STRICT JSON ONLY (no preamble, no code fence):
   "react": true | false,
   "agreement": "agree" | "extend" | "challenge",
   "confidence": 0.0 - 1.0,
-  "line": "..."   // ONE sentence, max ~25 words, Slack tone
+  "line": "..."   // 1-3 sentences with substance, Slack tone
 }
 
 Hard rules:
-- ONE sentence. Conversational, 'we / our' voice, no headers, no bullets.
+- 1-3 sentences max. Conversational, 'we / our' voice, no headers, no bullets.
 - The line must be a CONCRETE point, fact, risk, or counter — NOT a suggestion to do
   something later. BANNED: "let's recall", "we should consider", "let's clarify",
   "let's also look at", "we need to check". If all you have is a process suggestion,
@@ -532,7 +532,8 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             f"- Reference colleagues + projects by name when they appear in the memory context above.\n\n"
             + grounding
             + f"\nWRITE LIKE A CHAT MESSAGE:\n"
-            f"- 3-4 short sentences, or a brief list if the user asked for one (max 5 items).\n"
+            f"- As long as needed to cover the question completely — no artificial brevity.\n"
+            f"- Use a numbered list or sub-bullets when reasoning has steps; otherwise prose.\n"
             f"- First person plural ('we / our'), conversational, no formal opener.\n"
             f"- Substance + a real answer in sentence one. No 'Next steps:' boilerplate, "
             f"no 'How would you like to proceed?' closer.\n\n"
@@ -681,8 +682,9 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 f"  • If 'we should traverse the graph' → call hivemind_traverse_graph on the right seed memory.\n"
                 f"  • If 'what's the next step' → propose 2-3 concrete next steps with names + dates from memory.\n"
                 f"  • If a reactor disagreed → defend with evidence or concede explicitly.\n\n"
-                f"OUTPUT: 3-6 short sentences, chat tone, 'we / our'. Lead with the new fact / action / answer\n"
-                f"the reactors were asking for. Quote memory titles inline. No 'happy to help' fluff."
+                f"OUTPUT: as long as needed for completeness — no artificial brevity. Chat tone, 'we / our'.\n"
+                f"Lead with the new fact / action / answer the reactors were asking for. Use a numbered list\n"
+                f"when proposing multiple steps. Quote memory titles inline. No 'happy to help' fluff."
             )
             synth_reply = await lead_agent(Msg(name="user", content=synth_prompt, role="user"))
             synth_text = _msg_to_text(synth_reply) or ""
@@ -718,7 +720,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 f"\"{challenger_reaction['content']}\"\n\n"
                 f"Reconsider. If they're right, say so concretely and revise. If you stand by it, "
                 f"defend with HIVEMIND evidence — recall a memory, name a teammate, cite a prior decision. "
-                f"No invented facts; if you can't ground it, concede. 2-4 sentences, chat tone, 'we / our'."
+                f"No invented facts; if you can't ground it, concede. As long as needed, chat tone, 'we / our'."
             )
             reply2 = await lead_agent(Msg(name="user", content=revise_prompt, role="user"))
             revise_text = _msg_to_text(reply2) or "(no revision)"

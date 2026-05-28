@@ -86,6 +86,16 @@ services:
             ENABLE_COGNITION_LOOP: 'false'
             ENABLE_GOVERNANCE_SCHEDULER: 'true'
             GOVERNANCE_INTERVAL_MS: '${GOVERNANCE_INTERVAL_MS:-14400000}'
+            # Cognitive-tool LLM models (used by canonical + bridge tools).
+            SYNTHESIS_MODEL: '${SYNTHESIS_MODEL:-openai/gpt-oss-120b}'
+            SYNTHESIS_FALLBACK_MODEL: '${SYNTHESIS_FALLBACK_MODEL:-openai/gpt-oss-20b}'
+            # Per-tool tuning.
+            CANONICAL_CONFIDENCE_FLOOR: '${CANONICAL_CONFIDENCE_FLOOR:-0.7}'
+            CANONICAL_COOLDOWN_HOURS: '${CANONICAL_COOLDOWN_HOURS:-6}'
+            BRIDGE_CONFIDENCE_FLOOR: '${BRIDGE_CONFIDENCE_FLOOR:-0.7}'
+            BRIDGE_COOLDOWN_HOURS: '${BRIDGE_COOLDOWN_HOURS:-12}'
+            COMPRESSION_MIN_MEMBERS: '${COMPRESSION_MIN_MEMBERS:-3}'
+            COMPRESSION_COOLDOWN_HOURS: '${COMPRESSION_COOLDOWN_HOURS:-12}'
             # Phase 4 — Tenant guard STRICT. Relational FK keys now recognised
             # so existing recall paths pass without code change.
             MEMORY_TENANT_STRICT: 'true'

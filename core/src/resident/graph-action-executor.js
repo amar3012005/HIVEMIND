@@ -84,14 +84,13 @@ export class GraphActionExecutor {
         return this._promoteRisk(targetIds, content, confidence, dryRun);
       case 'relationship_candidate':
         return this._createRelationship(targetIds, confidence, dryRun, content);
-      // Phase 4 — synthesis ownership. Governance can now write cognitive
-      // layer memories directly, removing cognition-loop's exclusive ownership.
+      // Phase 4 — synthesis ownership. Delegates to cognitive-tool registry
+      // so cluster_hash + cooldown + LLM rewrite + dedup + derives edges
+      // all live in one place.
       case 'canonical_synthesis':
-        return this._synthesizeCanonical(targetIds, content, confidence, dryRun);
       case 'bridge_synthesis':
-        return this._synthesizeBridge(targetIds, content, confidence, dryRun);
       case 'compression':
-        return this._compressCluster(targetIds, content, confidence, dryRun);
+        return this._runCognitiveTool(recommendation, targetIds, content, confidence, dryRun);
       default:
         return { status: 'skipped', reason: `unknown_action: ${recommendation}` };
     }
@@ -123,83 +122,62 @@ export class GraphActionExecutor {
     return this._cognitionLoop;
   }
 
-  async _synthesizeCanonical(memoryIds, content, confidence, dryRun) {
-    if (!Array.isArray(memoryIds) || memoryIds.length < 2) {
-      return { status: 'skipped', reason: 'need_at_least_2_evidence_ids' };
+  /**
+   * Delegates to cognitive-tool registry. Tool owns cluster_hash + cooldown
+   * + LLM rewrite + dedup + derives edges + cognitive_layer_role stamping.
+   */
+  async _runCognitiveTool(toolName, memoryIds, content, confidence, dryRun) {
+    let prisma = this.memoryStore?.client
+      || this.memoryStore?.prisma
+      || this.memoryStore?._client
+      || null;
+    if (!prisma) {
+      try {
+        const { getPrismaClient } = await import('../db/prisma.js');
+        prisma = getPrismaClient();
+      } catch { /* ignore */ }
     }
-    if (dryRun) return { status: 'dry_run', would_synthesize: memoryIds.length };
-    const loop = await this._getCognitionLoop();
-    const members = await this._fetchMemories(memoryIds);
-    if (members.length < 2) return { status: 'skipped', reason: 'evidence_not_found' };
-    const tag = content?.topic || content?.tag || members[0]?.tags?.find?.((t) => /^topic:/.test(t))?.slice(6) || 'canonical';
-    const written = await loop._writeSynthMemory({
-      orgId: members[0].org_id,
-      userId: members[0].user_id,
-      project: members[0].project,
-      sourceType: 'canonical-fact',
-      tag,
-      members,
-      content: content?.text || content?.summary || `Canonical fact derived from ${members.length} sources.`,
-      confidence,
-      evidenceIds: memoryIds,
-      clusterHash: content?.cluster_hash || null,
-      extraMeta: { generator: 'governance.turing', actor: 'GraphActionExecutor' },
-    }).catch((err) => ({ error: err.message }));
-    return written?.error
-      ? { status: 'failed', error: written.error }
-      : { status: 'executed', memory_id: written?.id || null, evidence_count: members.length };
-  }
+    if (!prisma) return { status: 'failed', error: 'prisma_unavailable' };
 
-  async _synthesizeBridge(memoryIds, content, confidence, dryRun) {
-    if (!Array.isArray(memoryIds) || memoryIds.length < 2) {
-      return { status: 'skipped', reason: 'need_at_least_2_evidence_ids' };
-    }
-    if (dryRun) return { status: 'dry_run', would_bridge: memoryIds.length };
-    const loop = await this._getCognitionLoop();
-    const members = await this._fetchMemories(memoryIds);
-    if (members.length < 2) return { status: 'skipped', reason: 'evidence_not_found' };
-    const tag = content?.bridge_tag || content?.topic || 'cross-cluster';
-    const written = await loop._writeSynthMemory({
-      orgId: members[0].org_id,
-      userId: members[0].user_id,
-      project: members[0].project,
-      sourceType: 'synthesis-bridge',
-      tag,
-      members,
-      content: content?.text || content?.summary || `Bridge linking ${members.length} memories across clusters.`,
-      confidence,
-      evidenceIds: memoryIds,
-      clusterHash: content?.cluster_hash || null,
-      extraMeta: { generator: 'governance.turing', actor: 'GraphActionExecutor' },
-    }).catch((err) => ({ error: err.message }));
-    return written?.error
-      ? { status: 'failed', error: written.error }
-      : { status: 'executed', memory_id: written?.id || null, evidence_count: members.length };
-  }
+    const { getCognitiveToolRegistry } = await import('../cognitive-tools/registry.js');
+    const registry = getCognitiveToolRegistry({ prisma, memoryStore: this.memoryStore, logger: this.logger });
+    const tool = registry.get(toolName);
+    if (!tool) return { status: 'failed', error: `unknown_tool: ${toolName}` };
 
-  async _compressCluster(memoryIds, content, confidence, dryRun) {
-    if (!Array.isArray(memoryIds) || memoryIds.length < 3) {
-      return { status: 'skipped', reason: 'need_at_least_3_memories_to_compress' };
+    // Resolve a representative member for orgId/userId fallback.
+    const sample = memoryIds?.length
+      ? await prisma.memory.findFirst({ where: { id: { in: memoryIds.slice(0, 1) } }, select: { orgId: true, userId: true } })
+      : null;
+    const orgId = content?.org_id || sample?.orgId;
+    const userId = content?.user_id || sample?.userId;
+    if (!orgId) return { status: 'failed', error: 'org_id_unresolvable' };
+
+    const args = {
+      orgId,
+      userId,
+      cluster_hash: content?.cluster_hash || null,
+      confidence: content?.confidence ?? confidence,
+      dryRun,
+    };
+    if (toolName === 'canonical_synthesis' || toolName === 'compression') {
+      args.topic = content?.topic || content?.bridge_tag || null;
+      args.evidence_ids = content?.evidence_ids?.length ? content.evidence_ids : memoryIds;
+    } else if (toolName === 'bridge_synthesis') {
+      args.bridge_tag = content?.bridge_tag || content?.topic;
+      // Bridge expects A+B sets — derive heuristically if not given.
+      if (content?.evidence_ids_a?.length && content?.evidence_ids_b?.length) {
+        args.evidence_ids_a = content.evidence_ids_a;
+        args.evidence_ids_b = content.evidence_ids_b;
+      } else if (Array.isArray(memoryIds) && memoryIds.length >= 2) {
+        const half = Math.ceil(memoryIds.length / 2);
+        args.evidence_ids_a = memoryIds.slice(0, half);
+        args.evidence_ids_b = memoryIds.slice(half);
+      } else {
+        return { status: 'failed', error: 'bridge_needs_two_clusters' };
+      }
     }
-    if (dryRun) return { status: 'dry_run', would_compress: memoryIds.length };
-    const loop = await this._getCognitionLoop();
-    const members = await this._fetchMemories(memoryIds);
-    if (members.length < 3) return { status: 'skipped', reason: 'evidence_not_found' };
-    const tag = content?.topic || content?.tag || 'compressed';
-    const summaryText = content?.text || content?.summary || `Compression of ${members.length} memories.`;
-    const written = await loop._writeSummaryMemory({
-      orgId: members[0].org_id,
-      userId: members[0].user_id,
-      project: members[0].project,
-      tag,
-      members,
-      content: summaryText,
-      partIndex: 0,
-      partCount: 1,
-    }).catch((err) => ({ error: err.message }));
-    return written?.error
-      ? { status: 'failed', error: written.error }
-      : { status: 'executed', memory_id: written?.id || null, evidence_count: members.length };
+
+    return tool.execute(args);
   }
 
   // ── action handlers ──────────────────────────────────────────────

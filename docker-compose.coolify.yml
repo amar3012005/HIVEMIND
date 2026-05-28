@@ -63,7 +63,7 @@ services:
             REDIS_HOST_FALLBACKS: '${REDIS_HOST_FALLBACKS:-redis-s0k0s0k40wo44w4w8gcs8ow0-223235365936,hivemind-redis}'
             REDIS_PASSWORD: '${REDIS_PASSWORD}'
             GROQ_API_KEY: '${GROQ_API_KEY}'
-            GROQ_INFERENCE_MODEL: '${GROQ_INFERENCE_MODEL:-openai/gpt-oss-120b}'
+            GROQ_INFERENCE_MODEL: '${GROQ_INFERENCE_MODEL:-openai/gpt-oss-20b}'
             MISTRAL_API_KEY: '${MISTRAL_API_KEY}'
             MISTRAL_EMBEDDING_MODEL: '${MISTRAL_EMBEDDING_MODEL:-mistral-embed}'
             API_MASTER_KEY: '${API_MASTER_KEY}'
@@ -87,7 +87,7 @@ services:
             ENABLE_GOVERNANCE_SCHEDULER: 'true'
             GOVERNANCE_INTERVAL_MS: '${GOVERNANCE_INTERVAL_MS:-14400000}'
             # Cognitive-tool LLM models (used by canonical + bridge tools).
-            SYNTHESIS_MODEL: '${SYNTHESIS_MODEL:-openai/gpt-oss-120b}'
+            SYNTHESIS_MODEL: '${SYNTHESIS_MODEL:-openai/gpt-oss-20b}'
             SYNTHESIS_FALLBACK_MODEL: '${SYNTHESIS_FALLBACK_MODEL:-openai/gpt-oss-20b}'
             # Per-tool tuning.
             CANONICAL_CONFIDENCE_FLOOR: '${CANONICAL_CONFIDENCE_FLOOR:-0.7}'
@@ -243,7 +243,7 @@ services:
             REDIS_PORT: '6379'
             REDIS_PASSWORD: '${REDIS_PASSWORD}'
             GROQ_API_KEY: '${GROQ_API_KEY}'
-            GROQ_INFERENCE_MODEL: '${GROQ_INFERENCE_MODEL:-openai/gpt-oss-120b}'
+            GROQ_INFERENCE_MODEL: '${GROQ_INFERENCE_MODEL:-openai/gpt-oss-20b}'
             MISTRAL_API_KEY: '${MISTRAL_API_KEY}'
             MISTRAL_EMBEDDING_MODEL: '${MISTRAL_EMBEDDING_MODEL:-mistral-embed}'
             API_MASTER_KEY: '${API_MASTER_KEY}'

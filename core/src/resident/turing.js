@@ -526,7 +526,45 @@ export class TuringAgent {
         memoryStore: this.memoryStore || null,
         logger: this.logger,
       });
-      const proposals = await registry.assessAll({ verifications, orgId });
+      // Widen assess window: per-cycle verifications average 2-3 — far
+      // below compression/bridge/synthesis MIN_MEMBERS thresholds. Pull
+      // the last ASSESS_WINDOW_HOURS of verifications from observation
+      // store so clusters accumulate across cycles.
+      const ASSESS_WINDOW_HOURS = Number(process.env.COG_ASSESS_WINDOW_HOURS || 48);
+      let aggregatedVerifications = verifications;
+      try {
+        if (this.observationStore?.listRecentByKind) {
+          const recent = await this.observationStore.listRecentByKind({
+            kind: 'verification',
+            sinceHours: ASSESS_WINDOW_HOURS,
+            limit: 200,
+          });
+          if (Array.isArray(recent) && recent.length > 0) {
+            // Dedup by id — current cycle's verifications may already be in DB.
+            const seen = new Set(verifications.map((v) => v.id));
+            const extra = recent.filter((r) => !seen.has(r.id));
+            aggregatedVerifications = [...verifications, ...extra];
+          }
+        } else if (prisma?.opObservation?.findMany) {
+          const since = new Date(Date.now() - ASSESS_WINDOW_HOURS * 3600 * 1000);
+          const rows = await prisma.opObservation.findMany({
+            where: { kind: 'verification', timestamp: { gte: since } },
+            orderBy: { timestamp: 'desc' },
+            take: 200,
+          });
+          const seen = new Set(verifications.map((v) => v.id));
+          const extra = rows
+            .filter((r) => !seen.has(r.id))
+            .map((r) => ({ id: r.id, kind: 'verification', content: r.content, certainty: r.certainty }));
+          aggregatedVerifications = [...verifications, ...extra];
+        }
+      } catch (winErr) {
+        this.logger?.warn?.(`[turing] assess window pull failed: ${winErr?.message || winErr}`);
+      }
+      const proposals = await registry.assessAll({
+        verifications: aggregatedVerifications,
+        orgId,
+      });
       for (const p of proposals) {
         actionCandidates.push({
           id: randomUUID(),

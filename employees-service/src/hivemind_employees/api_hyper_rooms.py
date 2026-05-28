@@ -639,21 +639,28 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         if lead_api_key:
             hm_client = HivemindClient(api_key=lead_api_key)
             try:
-                recall_resp = await hm_client.recall(req.user_message, max_memories=8)
+                recall_resp = await hm_client.recall(req.user_message, max_memories=6)
                 rows = recall_resp.get("memories") or recall_resp.get("combined") or []
+                # Drop low-relevance hits so a single dominant memory (long
+                # AUDIT memo etc.) doesn't crowd out diverse signal.
+                MIN_SCORE = 0.45
+                rows = [r for r in rows if float(r.get("score", 0)) >= MIN_SCORE]
                 if rows:
                     lines_out = []
-                    for r in rows[:8]:
+                    for r in rows[:5]:
                         title = (r.get("title") or "").strip()
                         content = (r.get("content") or "").replace("\n", " ").strip()
                         if not content:
                             continue
-                        snippet = content[:1200] + ("…" if len(content) > 1200 else "")
+                        # Shorter snippet — was 1200, now 300. Lead can ask
+                        # for full memory via recall tool if needed.
+                        snippet = content[:300] + ("…" if len(content) > 300 else "")
                         prefix = f'"{title}" — ' if title else ""
                         lines_out.append(f"- {prefix}{snippet}")
                     if lines_out:
                         memory_context = (
-                            "RELEVANT HIVEMIND MEMORIES (already pulled for you — quote these when relevant):\n"
+                            "CANDIDATE MEMORIES (only use if they DIRECTLY answer the user's question — "
+                            "otherwise ignore; do NOT anchor on the heaviest memory):\n"
                             + "\n".join(lines_out)
                             + "\n"
                         )

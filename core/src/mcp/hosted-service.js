@@ -2289,23 +2289,57 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
           throw new Error('hivemind_save_memory requires non-empty content');
         }
 
-        // Org-policy hint: if the org's default_project_policy says "ask"
-        // and caller didn't specify a project, return a soft warning so
-        // Claude can ask the user which project to scope to next time.
+        // Project-membership routing: if the user belongs to >=2 projects
+        // and didn't specify one, return a structured clarification (does
+        // NOT save) so the agent surfaces a picker to the user. Single
+        // project → auto-attach. Zero → fall through to org-wide policy.
         let projectPolicyHint = null;
-        if (!resolvedProjectId && userId && orgId) {
+        let autoAttachedProjectId = null;
+        if (!resolvedProjectId && userId) {
           try {
             const { getPrismaClient } = await import('../db/prisma.js');
             const prisma = getPrismaClient();
-            const org = await prisma.organization.findUnique({
-              where: { id: orgId },
-              select: { memorySavePolicy: true },
+            const memberships = await prisma.projectMember.findMany({
+              where: { userId },
+              select: {
+                projectId: true,
+                project: { select: { id: true, name: true, slug: true, description: true, orgId: true } },
+              },
             });
-            const policy = org?.memorySavePolicy || 'private';
-            if (policy === 'ask') {
-              projectPolicyHint = 'Org policy requires explicit project scope. Please call hivemind_list_projects then re-call this with project="<name>".';
+            const orgScoped = orgId
+              ? memberships.filter(m => m.project && m.project.orgId === orgId)
+              : memberships;
+            if (orgScoped.length === 1) {
+              autoAttachedProjectId = orgScoped[0].project.id;
+            } else if (orgScoped.length >= 2) {
+              return formatToolContent({
+                needs_project_choice: true,
+                message: `You belong to ${orgScoped.length} projects. Ask the user which one to save this memory to, then re-call hivemind_save_memory with project_id="<chosen id>".`,
+                projects: orgScoped.map(m => ({
+                  id: m.project.id,
+                  name: m.project.name,
+                  slug: m.project.slug,
+                  description: m.project.description,
+                })),
+                saved: false,
+              });
             }
-          } catch { /* policy lookup best-effort */ }
+          } catch { /* membership lookup best-effort */ }
+
+          // No membership match — fall back to existing org-policy hint.
+          if (!autoAttachedProjectId && orgId) {
+            try {
+              const { getPrismaClient } = await import('../db/prisma.js');
+              const prisma = getPrismaClient();
+              const org = await prisma.organization.findUnique({
+                where: { id: orgId },
+                select: { memorySavePolicy: true },
+              });
+              if ((org?.memorySavePolicy || 'private') === 'ask') {
+                projectPolicyHint = 'Org policy requires explicit project scope. Please call hivemind_list_projects then re-call this with project="<name>".';
+              }
+            } catch { /* best-effort */ }
+          }
         }
 
         // Smart save (sync): the MCP caller expects an actual memory id +
@@ -2330,6 +2364,7 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
           smartIngest: true,
           sync: true,
           ...SCOPE_FIELDS,
+          ...(autoAttachedProjectId && !resolvedProjectId ? { project_id: autoAttachedProjectId } : {}),
           __bypass_membership: isMaster && resolvedProjectId ? true : undefined,
         });
         return formatToolContent({

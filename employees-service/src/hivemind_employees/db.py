@@ -77,6 +77,40 @@ async def list_running_employees() -> List[Dict[str, Any]]:
     return out
 
 
+async def list_employees_by_ids(ids: List[str]) -> List[Dict[str, Any]]:
+    """Fetch employees by id, ignoring status. Used by hyper-rooms where
+    the user explicitly selected participants — Slack-gateway's
+    running/deploying filter would wrongly exclude draft employees that
+    have never been resumed."""
+    if not ids:
+        return []
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+              id, org_id, team_id, name, slug, persona, model, llm_provider,
+              scope, slack_team_id, slack_channels_allowed, tools, policy_rules,
+              status, replicas, max_replicas, hivemind_api_key_id, created_by,
+              avatar_url, slack_display_name, slack_avatar_emoji,
+              role_archetype, peer_review_targets
+            FROM hivemind.digital_employees
+            WHERE archived_at IS NULL
+              AND status <> 'paused'
+              AND id = ANY($1::uuid[])
+            """,
+            ids,
+        )
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        for key in ("id", "org_id", "team_id", "hivemind_api_key_id", "created_by"):
+            if item.get(key) is not None:
+                item[key] = str(item[key])
+        out.append(item)
+    return out
+
+
 async def get_api_key_for_employee(employee_id: str) -> Optional[Dict[str, Any]]:
     """Resolve the scoped HIVEMIND API key bound to an employee.
     Returns the row; raw key NEVER reads back (only hash stored), so this

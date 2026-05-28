@@ -2102,6 +2102,82 @@ const server = http.createServer(async (req, res) => {
   }
 
   const joinMatch = pathname.match(/^\/v1\/join\/([^/]+)$/);
+
+  // GET /v1/join/:token — preview invite (does NOT accept). Used by the
+  // consent screen so the recipient sees org + project metadata before
+  // clicking Accept.
+  if (joinMatch && req.method === 'GET') {
+    const token = joinMatch[1];
+    const invite = await prisma.orgInvite.findUnique({
+      where: { token },
+      include: { org: true },
+    });
+    if (!invite) return jsonResponse(res, { error: 'Invite not found' }, 404);
+
+    const now = new Date();
+    let status = 'pending';
+    if (invite.usedAt) status = 'accepted';
+    else if (invite.revokedAt) status = 'revoked';
+    else if (invite.expiresAt < now) status = 'expired';
+
+    const projectIds = Array.isArray(invite.projectIds) ? invite.projectIds : [];
+    const teamIds    = Array.isArray(invite.teamIds)    ? invite.teamIds    : [];
+
+    const [projects, teams, inviter] = await Promise.all([
+      projectIds.length
+        ? prisma.project.findMany({
+            where: { id: { in: projectIds }, orgId: invite.orgId },
+            select: { id: true, name: true, slug: true, description: true },
+          }).catch(() => [])
+        : Promise.resolve([]),
+      teamIds.length
+        ? prisma.team.findMany({
+            where: { id: { in: teamIds }, orgId: invite.orgId },
+            select: { id: true, name: true },
+          }).catch(() => [])
+        : Promise.resolve([]),
+      invite.createdBy
+        ? prisma.user.findUnique({
+            where: { id: invite.createdBy },
+            select: { email: true, displayName: true },
+          }).catch(() => null)
+        : Promise.resolve(null),
+    ]);
+
+    return jsonResponse(res, {
+      token,
+      status,
+      email: invite.email,
+      role: invite.role,
+      roles: invite.roles,
+      expires_at: invite.expiresAt,
+      organization: invite.org ? {
+        id: invite.org.id,
+        name: invite.org.name,
+        slug: invite.org.slug,
+      } : null,
+      projects,
+      teams,
+      inviter,
+    });
+  }
+
+  // POST /v1/join/:token/decline — recipient declines an invite (soft-revoke).
+  const declineMatch = pathname.match(/^\/v1\/join\/([^/]+)\/decline$/);
+  if (declineMatch && req.method === 'POST') {
+    const token = declineMatch[1];
+    const invite = await prisma.orgInvite.findUnique({ where: { token } });
+    if (!invite)          return jsonResponse(res, { error: 'Invite not found' }, 404);
+    if (invite.usedAt)    return jsonResponse(res, { error: 'Invite already accepted' }, 409);
+    if (invite.revokedAt) return jsonResponse(res, { success: true, already_declined: true });
+
+    await prisma.orgInvite.update({
+      where: { id: invite.id },
+      data: { revokedAt: new Date() },
+    });
+    return jsonResponse(res, { success: true });
+  }
+
   if (joinMatch && req.method === 'POST') {
     const current = await requireSession(req, res);
     if (!current) return;

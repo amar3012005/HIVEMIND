@@ -44,7 +44,7 @@ from pydantic import BaseModel, Field
 from .agents.agentscope_factory import build_react_agent
 from .bootstrap_client import fetch_bootstrap
 from .config import get_settings
-from .db import list_running_employees
+from .db import list_employees_by_ids, list_running_employees
 from .hivemind_client import HivemindClient
 
 log = logging.getLogger(__name__)
@@ -408,11 +408,13 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     cost_tokens = 0
     status = "complete"
 
-    # Look up participating employees (running set)
-    running = {r["id"]: r for r in await list_running_employees()}
+    # Look up participating employees — explicit user selection, so we
+    # ignore the running/deploying Slack-gateway filter and include any
+    # non-paused, non-archived employee by id.
+    by_id = {r["id"]: r for r in await list_employees_by_ids(req.participant_ids)}
     participants: List[Dict[str, Any]] = []
     for pid in req.participant_ids:
-        emp = running.get(pid)
+        emp = by_id.get(pid)
         if not emp:
             continue
         emp["_lane"] = derive_lane(emp)
@@ -421,7 +423,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     if not participants:
         await _emit_event(
             req.callback_url, req.turn_id,
-            {"t": "error", "message": "No running employees in room"},
+            {"t": "error", "message": "Room has no eligible employees (paused or archived)"},
         )
         await _emit_event(
             req.callback_url, req.turn_id,

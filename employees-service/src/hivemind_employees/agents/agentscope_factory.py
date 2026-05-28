@@ -60,7 +60,13 @@ def _resolve_openai_compatible_target(
     # tool-call-reliable model (openai/gpt-oss-120b by default, overridable
     # via GROQ_INFERENCE_MODEL). Applies whenever we fall back to Groq AND
     # the requested model is a known-broken Llama family.
-    fallback_default = os.environ.get("GROQ_INFERENCE_MODEL") or "openai/gpt-oss-120b"
+    env_default = os.environ.get("GROQ_INFERENCE_MODEL", "")
+    # If the env-provided default is itself a Llama-3 (known broken for
+    # OpenAI tool_calls under Groq strict validation), drop it.
+    if not env_default or "llama-3" in env_default.lower() or "llama3" in env_default.lower():
+        fallback_default = "openai/gpt-oss-120b"
+    else:
+        fallback_default = env_default
     if provider != "groq" or "/" in model:
         groq_model = fallback_default
     elif "llama-3" in model.lower() or "llama3" in model.lower():

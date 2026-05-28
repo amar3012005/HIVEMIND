@@ -319,10 +319,14 @@ Reply in STRICT JSON ONLY (no preamble, no code fence):
 
 Hard rules:
 - ONE sentence. Conversational, 'we / our' voice, no headers, no bullets.
+- The line must be a CONCRETE point, fact, risk, or counter — NOT a suggestion to do
+  something later. BANNED: "let's recall", "we should consider", "let's clarify",
+  "let's also look at", "we need to check". If all you have is a process suggestion,
+  stay silent: {"react": false}.
 - Cite concrete evidence when challenging — name the memory or person.
 - DO NOT invent facts. If you're not sure, stay silent: {"react": false}.
-- "challenge" only with a substantive counter-point.
-- "extend" only if you add something concrete.
+- "challenge" only with a substantive counter-point (state the actual risk/flaw).
+- "extend" only if you add a NEW concrete fact or angle the Lead missed.
 - "agree" only if you add a real +1 (skip if you'd just say 'I agree').
 - Role voices:
     Skeptic       — surface risk, demand evidence
@@ -498,6 +502,25 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         # Provide CSI persona framing in the user-prompt wrapper so we
         # don't have to mutate the agent's underlying system prompt.
         # Chat-tone constraints — this is a Slack-style room, NOT a memo.
+        if memory_context:
+            grounding = (
+                "GROUNDING — you ALREADY have the relevant memories above.\n"
+                "- Answer NOW directly from them. Do NOT announce, narrate, or plan tool calls.\n"
+                "- BANNED phrases: 'we need to recall', 'let's recall', 'we should traverse', "
+                "'let me check', 'we'll review'. You already have the context — use it.\n"
+                "- When you state a fact, name its memory title inline: '<claim> — from \"<title>\"'.\n"
+                "- If the memories above don't actually cover the question, say so in one sentence, "
+                "then give your best direct take.\n"
+            )
+        else:
+            grounding = (
+                "GROUNDING — recall found nothing on file for this topic.\n"
+                "- Say that plainly in ONE sentence ('We have nothing on file about X yet'), "
+                "then give your best direct, concrete take.\n"
+                "- Do NOT narrate what you 'would' recall or traverse. No future-tense planning.\n"
+                "- You MAY call hivemind_recall ONCE silently if you believe context exists under "
+                "different words — but if it returns nothing, answer directly. Never invent facts.\n"
+            )
         lead_prompt = (
             f"[CSI swarm — you are an EMPLOYEE at the HIVEMIND organisation. "
             f"You're the LEAD speaking up this turn. Your lane: {lead['_lane']}.]\n\n"
@@ -507,18 +530,12 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             f"It is NOT 'Hivemind Capital', NOT any NFT fund, NOT any other unrelated company with the same name.\n"
             f"- Speak from inside the company. Use 'we' / 'our' / 'the team'.\n"
             f"- Reference colleagues + projects by name when they appear in the memory context above.\n\n"
-            f"HARD ANTI-HALLUCINATION RULES:\n"
-            f"1. Call hivemind_recall (or hivemind_query_with_ai for multi-hop) BEFORE you make any claim of fact about us, our people, our projects, decisions, or history. If recall returns nothing relevant, SAY SO — do not invent.\n"
-            f"2. Walk connections with hivemind_traverse_graph or hivemind_list_memories to find linked people, decisions, prior projects when the topic touches an entity already in memory.\n"
-            f"3. Quote evidence inline. When you state a fact, name the memory title or the person mentioned in it. Pattern: '<claim> — from memory \"<title>\"' or 'as <name> noted in <topic>'.\n"
-            f"4. Use hivemind_web_search / hivemind_web_research ONLY for external facts that genuinely don't live in HIVEMIND (live market prices, today's news, public-company filings we haven't tracked). Never for facts about ourselves.\n"
-            f"5. If you must speculate, prefix the sentence with 'Speculation:' so it's marked.\n"
-            f"6. Save durable conclusions with hivemind_save_memory at the end when the turn produced something worth keeping.\n\n"
-            f"WRITE LIKE A CHAT MESSAGE:\n"
+            + grounding
+            + f"\nWRITE LIKE A CHAT MESSAGE:\n"
             f"- 3-4 short sentences, or a brief list if the user asked for one (max 5 items).\n"
             f"- First person plural ('we / our'), conversational, no formal opener.\n"
-            f"- No 'Next steps:' boilerplate, no 'How would you like to proceed?' closer.\n"
-            f"- Substance in sentence one.\n\n"
+            f"- Substance + a real answer in sentence one. No 'Next steps:' boilerplate, "
+            f"no 'How would you like to proceed?' closer.\n\n"
             f"User said:\n{req.user_message}"
         )
         reply = await lead_agent(Msg(name="user", content=lead_prompt, role="user"))

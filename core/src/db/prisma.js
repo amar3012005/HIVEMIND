@@ -90,13 +90,19 @@ function installTenantIsolationMiddleware(client) {
   // Relationship.fromId/toId → Memory.orgId). Accepts unique-id lookups
   // (id, where.id) since those are tenant-irrelevant by definition.
   const TENANT_FK_KEYS = ['orgId', 'userId', 'memoryId', 'fromId', 'toId', 'id'];
+  // Prisma relational filter keys — when present, scope is enforced
+  // transitively (e.g. fromMemory.user_id or memory.orgId).
+  const RELATIONAL_SCOPE_KEYS = ['user', 'memory', 'fromMemory', 'toMemory', 'organization', 'org'];
   const hasOrgScope = (where) => {
     if (!where || typeof where !== 'object') return false;
     for (const k of TENANT_FK_KEYS) if (where[k] !== undefined) return true;
+    for (const k of RELATIONAL_SCOPE_KEYS) if (where[k] !== undefined) return true;
     if (where.user?.orgId !== undefined) return true;
     if (where.memory?.orgId !== undefined) return true;
-    if (where.AND?.some?.((c) => TENANT_FK_KEYS.some((k) => c?.[k] !== undefined))) return true;
-    if (where.OR?.some?.((c) => TENANT_FK_KEYS.some((k) => c?.[k] !== undefined))) return true;
+    if (where.AND?.some?.((c) => TENANT_FK_KEYS.some((k) => c?.[k] !== undefined)
+        || RELATIONAL_SCOPE_KEYS.some((k) => c?.[k] !== undefined))) return true;
+    if (where.OR?.some?.((c) => TENANT_FK_KEYS.some((k) => c?.[k] !== undefined)
+        || RELATIONAL_SCOPE_KEYS.some((k) => c?.[k] !== undefined))) return true;
     return false;
   };
 

@@ -10382,6 +10382,102 @@ exit \$RC
                 }
               };
 
+              // Each cascade step is wrapped so a partial failure names WHICH
+              // step broke instead of a generic 500.
+              const cascade = async (label, fn) => {
+                try { await fn(); } catch (cErr) {
+                  const detail = cErr.code
+                    ? `${cErr.code} ${cErr.message || ''} ${cErr.meta ? JSON.stringify(cErr.meta) : ''}`
+                    : (cErr.message || cErr.toString() || 'unknown');
+                  console.error(`[knowledge-delete] cascade "${label}" failed:`, detail);
+                  throw new Error(`cascade ${label} failed: ${detail}`);
+                }
+              };
+
+              // Hard-purge memories + every FK ref + their Qdrant vectors.
+              const purgeMemories = async (ids) => {
+                ids = Array.from(new Set((ids || []).filter(Boolean)));
+                if (ids.length === 0) return;
+                await cascade('source_metadata', () =>
+                  prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: ids } } }));
+                await cascade('memory_versions_related_refs', () =>
+                  prisma.memoryVersion.updateMany({ where: { relatedMemoryId: { in: ids } }, data: { relatedMemoryId: null } }));
+                await cascade('memory_versions', () =>
+                  prisma.memoryVersion.deleteMany({ where: { memoryId: { in: ids } } }));
+                await cascade('relationships', () =>
+                  prisma.relationship.deleteMany({ where: { OR: [{ fromId: { in: ids } }, { toId: { in: ids } }] } }));
+                await cascade('audit_log_refs', () =>
+                  prisma.auditLog.updateMany({ where: { resourceId: { in: ids } }, data: { resourceId: null } }));
+                await cascade('memories', () =>
+                  prisma.memory.deleteMany({ where: { id: { in: ids } } }));
+                // memory_evidence_links cascade-delete with the memory (FK onDelete Cascade).
+                try {
+                  const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
+                  const qdrantCollection = process.env.QDRANT_COLLECTION || 'hivemind_memories';
+                  const qdrantKey = process.env.QDRANT_API_KEY || '';
+                  if (qdrantUrl) {
+                    await fetch(`${qdrantUrl}/collections/${encodeURIComponent(qdrantCollection)}/points/delete?wait=true`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json', ...(qdrantKey ? { 'api-key': qdrantKey } : {}) },
+                      body: JSON.stringify({ points: ids }),
+                    }).catch(() => {});
+                  }
+                } catch (qErr) { console.warn('[knowledge-delete] Qdrant memory delete failed:', qErr.message); }
+              };
+
+              // Hard-purge knowledge_document rows + segments + source_artifact +
+              // evidence vectors. knowledge_segments + memory_evidence_links
+              // cascade-delete from the document FK.
+              const purgeKnowledgeDocs = async (docIds) => {
+                const uniq = Array.from(new Set((docIds || []).filter(Boolean)));
+                for (const docId of uniq) {
+                  try {
+                    const docRow = await prisma.knowledgeDocument.findFirst({
+                      where: { id: docId, orgId }, select: { id: true, sourceArtifactId: true },
+                    });
+                    if (!docRow) continue;
+                    try {
+                      const segs = await prisma.knowledgeSegment.findMany({ where: { documentId: docRow.id }, select: { id: true } });
+                      if (segs.length) {
+                        const qUrl = process.env.QDRANT_URL || 'http://qdrant:6333';
+                        const qKey = process.env.QDRANT_API_KEY || '';
+                        const coll = process.env.EVIDENCE_QDRANT_COLLECTION || 'hivemind_evidence';
+                        await fetch(`${qUrl}/collections/${encodeURIComponent(coll)}/points/delete?wait=true`, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json', ...(qKey ? { 'api-key': qKey } : {}) },
+                          body: JSON.stringify({ points: segs.map(s => s.id) }),
+                        }).catch(() => {});
+                      }
+                    } catch { /* evidence qdrant best-effort */ }
+                    await prisma.knowledgeDocument.delete({ where: { id: docRow.id } });
+                    if (docRow.sourceArtifactId) {
+                      await prisma.sourceArtifact.delete({ where: { id: docRow.sourceArtifactId } }).catch(() => {});
+                    }
+                  } catch (dErr) {
+                    console.warn(`[knowledge-delete] purgeKnowledgeDocs ${docId} failed:`, dErr.message);
+                  }
+                }
+              };
+
+              // Resolve doc↔memory both ways via memory_evidence_links.
+              const docsForMemories = async (ids) => {
+                if (!ids?.length) return [];
+                try {
+                  const links = await prisma.memoryEvidenceLink.findMany({
+                    where: { memoryId: { in: ids }, documentId: { not: null } }, select: { documentId: true },
+                  });
+                  return Array.from(new Set(links.map(l => l.documentId).filter(Boolean)));
+                } catch { return []; }
+              };
+              const memoriesForDoc = async (docId) => {
+                try {
+                  const links = await prisma.memoryEvidenceLink.findMany({
+                    where: { documentId: docId }, select: { memoryId: true },
+                  });
+                  return Array.from(new Set(links.map(l => l.memoryId).filter(Boolean)));
+                } catch { return []; }
+              };
+
               if (deleteUploadId && !deleteMemoryId) {
                 // Direct upload_id path: find all memories tagged with upload:{id}
                 memoryIds = await safeFind('upload-tag-direct', () =>
@@ -10511,34 +10607,20 @@ exit \$RC
                       select: { id: true, sourceArtifactId: true },
                     });
                     if (doc) {
-                      // Best-effort: remove Qdrant evidence points first
-                      try {
-                        const segs = await prisma.knowledgeSegment.findMany({
-                          where: { documentId: doc.id },
-                          select: { id: true },
-                        });
-                        if (segs.length) {
-                          const qUrl = process.env.QDRANT_URL || 'http://qdrant:6333';
-                          const qKey = process.env.QDRANT_API_KEY || '';
-                          const hdrs = { 'Content-Type': 'application/json' };
-                          if (qKey) hdrs['api-key'] = qKey;
-                          const coll = process.env.EVIDENCE_QDRANT_COLLECTION || 'hivemind_evidence';
-                          await fetch(`${qUrl}/collections/${coll}/points/delete?wait=true`, {
-                            method: 'POST', headers: hdrs,
-                            body: JSON.stringify({ points: segs.map(s => s.id) }),
-                          }).catch(() => {});
-                        }
-                      } catch { /* noop */ }
-                      // Delete document — cascades segments + memory_evidence_links via FK
-                      await prisma.knowledgeDocument.delete({ where: { id: doc.id } });
-                      // Try also delete source_artifact (orphaned if no other docs reference it)
-                      if (doc.sourceArtifactId) {
-                        await prisma.sourceArtifact.delete({ where: { id: doc.sourceArtifactId } }).catch(() => {});
-                      }
+                      // Purge derived memories FIRST. Deleting the document only
+                      // cascades the evidence LINK rows, not the memories they
+                      // point to — so without this the memories survive on the
+                      // memories page (the remnant bug). Then purge the doc +
+                      // segments + artifact + evidence vectors.
+                      const linkedMems = await memoriesForDoc(doc.id);
+                      await purgeMemories(linkedMems);
+                      await purgeKnowledgeDocs([doc.id]);
+                      invalidateAggregateCache({ userId, orgId, project: null });
                       return jsonResponse(res, {
                         success: true,
                         mode: 'phase1_document_delete',
                         documentId: doc.id,
+                        deleted_memories: linkedMems.length,
                       });
                     }
                   } catch (phase1Err) {
@@ -10549,89 +10631,25 @@ exit \$RC
               }
               // De-dup
               memoryIds = Array.from(new Set(memoryIds));
-              console.log(`[knowledge-delete] resolution=${resolutionStrategy} target=${deleteMemoryId || deleteUploadId} count=${memoryIds.length}`);
+              // Resolve any knowledge_document rows linked to these memories
+              // BEFORE deleting (the link rows cascade away with the memory).
+              const linkedDocIds = await docsForMemories(memoryIds);
+              console.log(`[knowledge-delete] resolution=${resolutionStrategy} target=${deleteMemoryId || deleteUploadId} memories=${memoryIds.length} docs=${linkedDocIds.length}`);
 
-              // Cascade hard delete (same pattern as delete-all). Each step is
-              // wrapped so a partial failure (e.g. orphan relationship row)
-              // still lets the rest progress and the user gets a useful error
-              // mentioning WHICH step failed, not a generic 500.
-              const cascade = async (label, fn) => {
-                try { await fn(); } catch (cErr) {
-                  const detail = cErr.code
-                    ? `${cErr.code} ${cErr.message || ''} ${cErr.meta ? JSON.stringify(cErr.meta) : ''}`
-                    : (cErr.message || cErr.toString() || 'unknown');
-                  console.error(`[knowledge-delete] cascade "${label}" failed:`, detail, cErr);
-                  throw new Error(`cascade ${label} failed: ${detail}`);
-                }
-              };
-              await cascade('audit_logs', () =>
-                prisma.auditLog.updateMany({
-                  where: { resourceId: { in: memoryIds } },
-                  data: { resourceId: null },
-                })
-              );
-              await cascade('source_metadata', () =>
-                prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: memoryIds } } })
-              );
-              await cascade('related_memory_versions', () =>
-                prisma.memoryVersion.updateMany({
-                  where: { relatedMemoryId: { in: memoryIds } },
-                  data: { relatedMemoryId: null },
-                })
-              );
-              await cascade('memory_versions', () =>
-                prisma.memoryVersion.deleteMany({ where: { memoryId: { in: memoryIds } } })
-              );
-              await cascade('relationships', () =>
-                prisma.relationship.deleteMany({
-                  where: { OR: [{ fromId: { in: memoryIds } }, { toId: { in: memoryIds } }] },
-                })
-              );
-              // FK to Memory.id from OTHER memories' versions via related_memory_id.
-              // Has no onDelete cascade in schema → restrict → memories.deleteMany fails.
-              // Nullify these refs first (audit-safe — they were "see also" pointers).
-              await cascade('memory_versions_related_refs', () =>
-                prisma.memoryVersion.updateMany({
-                  where: { relatedMemoryId: { in: memoryIds } },
-                  data: { relatedMemoryId: null },
-                })
-              );
-              // AuditLog.resourceId → Memory.id has no onDelete cascade either.
-              // Audit records must outlive deletions (compliance) so we nullify the FK
-              // rather than delete the log entries.
-              await cascade('audit_log_refs', () =>
-                prisma.auditLog.updateMany({
-                  where: { resourceId: { in: memoryIds } },
-                  data: { resourceId: null },
-                })
-              );
-              await cascade('memories', () =>
-                prisma.memory.deleteMany({ where: { id: { in: memoryIds } } })
-              );
-
-              // Delete from Qdrant
-              try {
-                const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
-                const qdrantCollection = process.env.QDRANT_COLLECTION || 'hivemind_memories';
-                const qdrantKey = process.env.QDRANT_API_KEY || '';
-                if (qdrantUrl && memoryIds.length > 0) {
-                  await fetch(`${qdrantUrl}/collections/${qdrantCollection}/points/delete`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', ...(qdrantKey ? { 'api-key': qdrantKey } : {}) },
-                    body: JSON.stringify({ points: memoryIds, wait: true }),
-                  });
-                }
-              } catch (qdrantErr) {
-                console.warn('[knowledge-delete] Qdrant delete failed:', qdrantErr.message);
-              }
+              // Hard-delete memories (+ all FK refs + Qdrant), then the linked
+              // knowledge_document rows (+ segments + artifact + evidence) so
+              // nothing remains on either the memories or knowledge page.
+              await purgeMemories(memoryIds);
+              await purgeKnowledgeDocs(linkedDocIds);
 
               invalidateAggregateCache({ userId, orgId, project: null });
 
-              console.log(`[knowledge-delete] Deleted ${memoryIds.length} memories for document ${deleteMemoryId || deleteUploadId}`);
+              console.log(`[knowledge-delete] Deleted ${memoryIds.length} memories + ${linkedDocIds.length} docs for ${deleteMemoryId || deleteUploadId}`);
 
               return jsonResponse(res, {
                 success: true,
                 deleted: memoryIds.length,
+                deleted_docs: linkedDocIds.length,
                 memory_ids: memoryIds,
               });
             } catch (err) {

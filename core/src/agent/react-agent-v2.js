@@ -1270,6 +1270,7 @@ async function runActionSubLoop({ toolkit, message, history, model, apiKey, ctx,
   const schemas = toolkit.getJsonSchemas();
   const steps = [];
   const draftIds = [];
+  let projectChoice = null; // set when a save deferred for project selection
   const toolNames = schemas.map(s => s.function.name);
 
   // Provider context hint: for Slack, pre-fetch channel directory so the
@@ -1370,6 +1371,16 @@ RULES:
         const text = toolResp.content?.[0]?.text || '';
         onEvent?.({ type: 'tool_result', name: toolName, summary: text.slice(0, 140) });
         steps.push({ tool: toolName, args: toolArgs, result_summary: text.slice(0, 200) });
+        // Capture a deferred-save project choice so the chat UI can render
+        // project buttons (Org + each) instead of free-text asking.
+        if (toolName === 'hivemind_save_memory') {
+          try {
+            const parsed = JSON.parse(text);
+            if (parsed && parsed.needs_project_choice) {
+              projectChoice = { projects: parsed.projects || [], draft: parsed.draft || null };
+            }
+          } catch { /* result not JSON — ignore */ }
+        }
         if (toolResp.status === 'draft_created' && toolResp.meta?.draft_id) {
           draftIds.push(toolResp.meta.draft_id);
         }
@@ -1379,10 +1390,10 @@ RULES:
     }
 
     const final = (msg.content || '').trim();
-    return { response: final, steps, draftIds };
+    return { response: final, steps, draftIds, project_choice: projectChoice };
   }
 
-  return { response: 'Action chain exceeded iteration budget.', steps, draftIds };
+  return { response: 'Action chain exceeded iteration budget.', steps, draftIds, project_choice: projectChoice };
 }
 
 async function maybeSaveOrUpdate({ plan, ctx, onEvent, message, history }) {
@@ -1669,6 +1680,7 @@ export async function runReactAgentV2({
         trace: finalizeTrace(trace, usages),
             assistant_name: assistantName || null,
             draft_ids: sub.draftIds,
+            project_choice: sub.project_choice || null,
           };
         }
       } catch (err) {

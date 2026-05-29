@@ -483,6 +483,29 @@ const TOOL_HANDLERS = {
       ? explicitScope
       : (hasProject ? 'project' : 'personal');
 
+    // Project-choice gate: when the user can access >=1 project but neither a
+    // project nor an explicit org/personal scope was chosen, DEFER the save and
+    // return the choice + a draft so the chat UI renders project buttons
+    // (Org + each project). The FE completes the save silently on click.
+    if (!hasProject && !explicitScope && ctx.persistentMemoryStore?.client?.project) {
+      const accessProjectIds = (ctx.accessContext?.projectIds) || [];
+      if (accessProjectIds.length > 0) {
+        const projs = await ctx.persistentMemoryStore.client.project.findMany({
+          where: { id: { in: accessProjectIds }, orgId: ctx.orgId, status: 'active' },
+          select: { id: true, name: true, slug: true },
+        }).catch(() => []);
+        if (projs.length > 0) {
+          return {
+            saved: false,
+            needs_project_choice: true,
+            message: 'Ask the user which project to save this to (buttons are shown). Do not retry the save yourself.',
+            projects: projs.map(p => ({ id: p.id, name: p.name, slug: p.slug })),
+            draft: { title: args.title, content: args.content, tags: args.tags || [], memory_type: memType },
+          };
+        }
+      }
+    }
+
     const payload = {
       title: args.title,
       content: args.content,

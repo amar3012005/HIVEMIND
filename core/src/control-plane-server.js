@@ -5982,13 +5982,22 @@ Write the persona now.`;
         try {
           if (!connectorStore || !prisma) return;
           // Resolve connector by team_id (multi-tenant fanout)
-          const conn = await prisma.platformIntegration.findFirst({
+          let conn = await prisma.platformIntegration.findFirst({
             where: {
               platformType: 'slack',
               isActive: true,
               connectorMetadata: { path: ['provider_metadata', 'team_id'], equals: teamId },
             },
           });
+          if (!conn) {
+            // Fallback: team_id not captured on the connection (older OAuth /
+            // Nango). Use the single active Slack connector — correct for a
+            // single workspace. Multi-workspace requires team_id capture at
+            // OAuth time.
+            conn = await prisma.platformIntegration.findFirst({
+              where: { platformType: 'slack', isActive: true },
+            });
+          }
           if (!conn) {
             console.warn(`[slack-events] no connector for team_id=${teamId}`);
             return;

@@ -22,8 +22,13 @@ import {
 import { ROLES, effectiveRoles, hasPermission, assertPermission } from './auth/permissions.js';
 import { attachSsoContext, resolveSsoConfig } from './auth/sso-resolver.js';
 import { handleScimRequest } from './scim/scim-router.js';
+import { sendSystemEmail } from './email/email-service.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Welcome-email idempotency: send at most once per login session (not per page
+// render). Keyed by sessionId; cleared naturally on process restart.
+const _welcomedSessions = new Set();
 const PROJECT_ROOT = path.join(__dirname, '..');
 
 function loadLocalEnv(envPath) {
@@ -1773,6 +1778,31 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { error: 'User not found' }, 404);
     }
     return jsonResponse(res, await buildBootstrapPayload(user));
+  }
+
+  // Welcome email — fired by the frontend once the user lands on Overview after
+  // a successful login. Recipient is ALWAYS the session user (never client-
+  // supplied), so this can't be abused to send mail to arbitrary addresses.
+  // Idempotent per login session; fire-and-forget — never blocks or fails login.
+  if (pathname === '/v1/notifications/welcome' && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    if (_welcomedSessions.has(current.sessionId)) {
+      return jsonResponse(res, { ok: true, deduped: true });
+    }
+    _welcomedSessions.add(current.sessionId);
+    const user = await prisma?.user.findUnique({ where: { id: current.session.userId } });
+    if (!user?.email) {
+      return jsonResponse(res, { ok: false, error: 'no_user_email' });
+    }
+    const firstName = (user.displayName || user.email.split('@')[0] || 'there').split(' ')[0];
+    // Don't await the send — return immediately so login UX is never delayed.
+    sendSystemEmail({
+      templateId: 'welcome_login',
+      to: user.email,
+      vars: { name: firstName, email: user.email },
+    }).catch((err) => console.error(JSON.stringify({ svc: 'email', level: 'error', event: 'welcome_dispatch_failed', error: err.message })));
+    return jsonResponse(res, { ok: true });
   }
 
   if (pathname === '/v1/orgs' && req.method === 'POST') {

@@ -6781,22 +6781,11 @@ exit \$RC
                 },
               });
               const answer = String(result?.response || '').trim() || 'I could not find an answer.';
-              // Reply in a DIRECT MESSAGE to the asker (private 1:1 chat feel),
-              // not as a channel thread reply. Open/resolve the DM channel, then
-              // post there. Falls back to the originating channel if the DM
-              // can't be opened (e.g. im:write not granted yet).
-              let replyChannel = qChannel;
-              if (askerSlackId) {
-                try {
-                  const botToken = await bridge.connectorStore.getAccessToken(evUserId, 'slack');
-                  const dm = await bridge._call('conversations.open', { users: askerSlackId }, botToken, 'POST');
-                  if (dm?.channel?.id) replyChannel = dm.channel.id;
-                } catch (e) {
-                  console.warn('[slack-query] DM open failed, replying in channel:', e.message);
-                }
-              }
-              const useThread = replyChannel === qChannel && !isDM;
-              await bridge.postMessage(evUserId, replyChannel, answer, useThread ? { threadTs: qThreadTs } : {});
+              // Reply in the SAME conversation it was asked — the originating
+              // channel or DM. If the mention was inside a thread, stay in that
+              // thread; otherwise post top-level. Never redirect to the app DM.
+              const threadTs = ev.thread_ts || undefined;
+              await bridge.postMessage(evUserId, qChannel, answer, threadTs ? { threadTs } : {});
             } catch (err) {
               console.error('[slack-query] handle failed:', err.message);
             }

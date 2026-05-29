@@ -1453,6 +1453,11 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
 
     # ─── Seal ──────────────────────────────────────────────────────────
     status = "complete" if consensus["verdict"] in ("AGREED", "CONDITIONAL") else "escalated"
+    log.info(
+        "[swarm] seal turn=%s verdict=%s tool_call_total=%d counts=%s evidence_pool=%d",
+        req.turn_id, consensus["verdict"], sum(tool_call_counts.values()),
+        tool_call_counts, len(evidence_pool),
+    )
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "seal",
         "cost_tokens": cost_tokens,

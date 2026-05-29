@@ -1796,13 +1796,20 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { ok: false, error: 'no_user_email' });
     }
     const firstName = (user.displayName || user.email.split('@')[0] || 'there').split(' ')[0];
+    // First-ever login (brand-new account) gets the signup welcome; returning
+    // users get the login welcome. Heuristic: account created in the last 15
+    // minutes ⇒ this is their signup session. Avoids a DB migration; per-session
+    // dedup above already prevents repeats.
+    const ageMs = user.createdAt ? Date.now() - new Date(user.createdAt).getTime() : Infinity;
+    const isNewAccount = ageMs < 15 * 60 * 1000;
+    const templateId = isNewAccount ? 'welcome_signup' : 'welcome_login';
     // Don't await the send — return immediately so login UX is never delayed.
     sendSystemEmail({
-      templateId: 'welcome_login',
+      templateId,
       to: user.email,
       vars: { name: firstName, email: user.email },
     }).catch((err) => console.error(JSON.stringify({ svc: 'email', level: 'error', event: 'welcome_dispatch_failed', error: err.message })));
-    return jsonResponse(res, { ok: true });
+    return jsonResponse(res, { ok: true, template: templateId });
   }
 
   // Admin broadcast — send a templated notification to ALL platform users

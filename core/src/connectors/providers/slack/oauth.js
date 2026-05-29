@@ -17,6 +17,7 @@ const BOT_SCOPES = [
   'reactions:write',
   'reactions:read',
   'pins:read',
+  'app_mentions:read',
 ];
 
 const USER_SCOPES = [

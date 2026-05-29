@@ -6692,6 +6692,61 @@ exit \$RC
           return jsonResponse(res, { ok: true, skipped: 'noise_subtype' });
         }
 
+        // ── @DAVINCIAI mention → Talk-to-HIVE in Slack ──────────────────────
+        // Run the SAME agent path as /api/chat (full recall/save/all-tools
+        // parity) and reply in-thread. Identity v1: run as the connecting user
+        // (the one who OAuth'd Slack). Ack the control-plane immediately, then
+        // run the multi-second agent + post in the background.
+        if (evType === 'app_mention') {
+          const mentionChannel = ev.channel || null;
+          const mentionThreadTs = ev.thread_ts || ev.ts || null;
+          // Strip the leading bot mention token(s): "<@U123> hello" -> "hello"
+          const question = String(ev.text || '').replace(/<@[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+          if (!question || !mentionChannel) {
+            return jsonResponse(res, { ok: true, skipped: 'empty_or_no_channel' });
+          }
+          jsonResponse(res, { ok: true, handling: 'app_mention' });
+          setImmediate(async () => {
+            try {
+              const groqKey = process.env.GROQ_API_KEY;
+              const useV2 = process.env.HIVEMIND_AGENT_V1 !== 'true';
+              const { runReactAgent } = useV2
+                ? await import('./agent/react-agent-v2.js').then(m => ({ runReactAgent: m.runReactAgentV2 }))
+                : await import('./agent/react-agent.js');
+              const accessCtx = await buildAccessContext(evUserId, evOrgId);
+              const result = await runReactAgent({
+                message: question,
+                history: [],
+                model: 'openai/gpt-oss-120b',
+                apiKey: groqKey,
+                language: 'en',
+                ctx: {
+                  userId: evUserId,
+                  orgId: evOrgId,
+                  projectId: null,
+                  prisma,
+                  persistentMemoryStore,
+                  persistentMemoryEngine,
+                  evidenceRetrieval,
+                  smartIngestRouter,
+                  buildRoutedIngestPayloads,
+                  ingestRoutedPayload,
+                  accessContext: accessCtx,
+                  webIntelligence: globalThis.webIntelligence || null,
+                },
+              });
+              const answer = String(result?.response || '').trim() || 'I could not find an answer.';
+              const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
+              const { SlackBridge } = await import('./connectors/providers/slack/bridge.js');
+              const bridge = new SlackBridge({ connectorStore: new ConnectorStore(prisma) });
+              await bridge.postMessage(evUserId, mentionChannel, answer, { threadTs: mentionThreadTs });
+            } catch (err) {
+              console.error('[slack-mention] handle failed:', err.message);
+            }
+          });
+          return;
+        }
+
         // Only ingest message-class events for now
         if (!evType.startsWith('message') && evType !== 'pin_added' && evType !== 'reaction_added') {
           return jsonResponse(res, { ok: true, skipped: `unhandled_type:${evType}` });

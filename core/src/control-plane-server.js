@@ -5897,6 +5897,40 @@ Write the persona now.`;
 
   // ─── End Connector Routes ──────────────────────────────────────
 
+  // POST /v1/tara/cartesia-token — mint a short-lived Cartesia agent access
+  // token for the browser voice widget. The secret CARTESIA_API_KEY stays
+  // server-side; the browser only ever sees a ~60s token + the agent id.
+  if (pathname === '/v1/tara/cartesia-token' && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const apiKey = process.env.CARTESIA_API_KEY || '';
+    const agentId = process.env.CARTESIA_AGENT_ID || '';
+    if (!apiKey || !agentId) {
+      return jsonResponse(res, { error: 'Cartesia not configured (CARTESIA_API_KEY / CARTESIA_AGENT_ID)' }, 503);
+    }
+    try {
+      const r = await fetch('https://api.cartesia.ai/access-token', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Cartesia-Version': '2025-04-16',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ grants: { agent: true }, expires_in: 60 }),
+      });
+      if (!r.ok) {
+        const detail = await r.text().catch(() => '');
+        console.warn('[tara] cartesia token mint failed:', r.status, detail.slice(0, 200));
+        return jsonResponse(res, { error: 'Token mint failed' }, 502);
+      }
+      const data = await r.json();
+      return jsonResponse(res, { token: data.token, agent_id: agentId, version: '2025-04-16' });
+    } catch (err) {
+      console.warn('[tara] cartesia token mint error:', err.message);
+      return jsonResponse(res, { error: 'Token mint error' }, 502);
+    }
+  }
+
   // ─── Proxy Routes (session-cookie → core API with master key) ─────
   if (pathname.startsWith('/v1/proxy/')) {
     const current = await requireSession(req, res);

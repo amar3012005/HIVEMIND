@@ -14923,10 +14923,30 @@ exit \$RC
 
               // 1. Memories scoped to user/org
               const includeChildren = url.searchParams.get('include_children') === 'true';
+              // Project scope — parity with normal /api/graph + Memories page:
+              // filter to memories whose projectId matches OR whose legacy
+              // `project` string matches the selected project's slug/name.
+              const projectParam = url.searchParams.get('project') || null;
+              let projScope = null;
+              if (projectParam) {
+                const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(projectParam);
+                projScope = await prisma.project.findFirst({
+                  where: {
+                    orgId,
+                    OR: [
+                      ...(isUuid ? [{ id: projectParam }] : []),
+                      { slug: projectParam.toLowerCase() },
+                      { name: { equals: projectParam, mode: 'insensitive' } },
+                    ],
+                  },
+                  select: { id: true, slug: true, name: true },
+                }).catch(() => null);
+              }
               const memWhere = {
                 userId, orgId, deletedAt: null, isLatest: true,
                 ...(memTypeFilter ? { memoryType: memTypeFilter } : {}),
                 ...(includeChildren ? {} : { NOT: { tags: { has: 'extracted-fact' } } }),
+                ...(projScope ? { OR: [{ projectId: projScope.id }, { project: { in: [projScope.slug, projScope.name].filter(Boolean) } }] } : {}),
               };
               const memories = await prisma.memory.findMany({
                 where: memWhere,

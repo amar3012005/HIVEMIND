@@ -5,18 +5,15 @@
 // user-only scope), so we request it via user_scope and use authed_user.access_token
 // for live search calls.
 
+// Must EXACTLY match the Slack app's configured Bot Token Scopes — requesting
+// any bot scope the app doesn't have => Slack OAuth "invalid_scope_requested".
 const BOT_SCOPES = [
   'channels:history', 'channels:read',
-  'groups:history', 'groups:read',
+  'groups:history',
   'im:history', 'mpim:history',
-  'users:read', 'users:read.email',
+  'users:read',
   'team:read',
   'chat:write',
-  'chat:write.public',
-  'files:read',
-  'reactions:write',
-  'reactions:read',
-  'pins:read',
   'app_mentions:read',
 ];
 

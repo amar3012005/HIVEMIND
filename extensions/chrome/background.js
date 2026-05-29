@@ -418,16 +418,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async () => {
       try {
         const config = await getConfig();
-        const payload = await withScope({
+        const base = {
           content: message.content,
           title: message.title || 'Browser chat',
           tags: message.tags || ['browser-chat', 'browser-extension'],
-          memory_type: 'note',
+          memory_type: message.memory_type || 'note',
           source_metadata: {
             source_platform: 'browser-extension',
             url: message.url || '',
           },
-        });
+        };
+        // Explicit project choice (from the chat project-buttons) overrides the
+        // scope pill; otherwise apply the pill's scope.
+        const payload = (message.project_id || message.scope)
+          ? {
+              ...base,
+              ...(message.project_id ? { project_id: message.project_id, project_ids: [message.project_id] } : {}),
+              ...(message.scope ? { scope: message.scope } : {}),
+            }
+          : await withScope(base);
         const r = await fetch(`${config.apiBase}/api/memories`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-API-Key': config.apiKey },
@@ -1911,6 +1920,7 @@ async function handleChatMessage(message, tabId) {
       reply: data.response,
       sources: data.sources || [],
       actions: actions,
+      project_choice: data.project_choice || null,
     };
   } catch (err) {
     throw new Error(`Chat failed: ${err.message}`);

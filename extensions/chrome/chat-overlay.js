@@ -276,6 +276,7 @@
         addMessage('assistant', response.reply, {
           sources: response.sources,
           actions: response.actions,
+          projectChoice: response.project_choice,
         });
         if (response.actions && response.actions.length > 0) {
           await executeActions(response.actions);
@@ -321,6 +322,46 @@
     contentEl.className = 'hivemind-message-content';
     contentEl.textContent = content;
     messageEl.appendChild(contentEl);
+
+    // ── Project picker — Org-wide + each project; click → silent scoped save ──
+    if (role === 'assistant' && options.projectChoice && options.projectChoice.draft) {
+      const pc = options.projectChoice;
+      const wrap = document.createElement('div');
+      wrap.style.cssText = 'margin-top:8px;display:flex;flex-direction:column;gap:6px;';
+      const label = document.createElement('div');
+      label.textContent = 'Save this to:';
+      label.style.cssText = 'font-size:11px;opacity:0.7;';
+      wrap.appendChild(label);
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;';
+      const mkBtn = (text, extra) => {
+        const b = document.createElement('button');
+        b.textContent = text;
+        b.style.cssText = 'padding:4px 10px;font-size:11px;border-radius:999px;border:1px solid #d4d0ca;background:#fff;cursor:pointer;';
+        b.onclick = async () => {
+          row.querySelectorAll('button').forEach((x) => { x.disabled = true; });
+          try {
+            const r = await chrome.runtime.sendMessage({
+              action: 'saveToMemory',
+              title: pc.draft.title,
+              content: pc.draft.content,
+              tags: pc.draft.tags || [],
+              memory_type: pc.draft.memory_type || 'fact',
+              ...extra,
+            });
+            label.textContent = (r && r.error) ? `Save failed: ${r.error}` : `✓ Saved to ${text}`;
+            row.remove();
+          } catch (e) {
+            label.textContent = 'Save failed.';
+          }
+        };
+        return b;
+      };
+      row.appendChild(mkBtn('🌐 Org-wide', { scope: 'organization' }));
+      (pc.projects || []).forEach((p) => row.appendChild(mkBtn(p.name, { project_id: p.id })));
+      wrap.appendChild(row);
+      messageEl.appendChild(wrap);
+    }
 
     // ── Metadata footer for assistant ────────────────────
     if (role === 'assistant' && (options.sources || options.tokenInfo)) {

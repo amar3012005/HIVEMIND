@@ -5993,11 +5993,13 @@ Write the persona now.`;
           });
           if (!conn) {
             // Fallback: team_id not captured on the connection (older OAuth /
-            // Nango). Use the single active Slack connector — correct for a
-            // single workspace. Multi-workspace requires team_id capture at
-            // OAuth time.
+            // Nango). Use the MOST-RECENTLY-connected active Slack connector —
+            // a fresh reconnect supersedes a stale one (whose token may be
+            // dead). Correct for a single workspace; multi-workspace needs
+            // team_id capture at OAuth time.
             conn = await prisma.platformIntegration.findFirst({
               where: { platformType: 'slack', isActive: true },
+              orderBy: { updatedAt: 'desc' },
             });
           }
           if (!conn) {

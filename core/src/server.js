@@ -11256,6 +11256,27 @@ exit \$RC
                 ...projectIdsRaw.split(',').map(value => value.trim()).filter(Boolean),
               ]);
 
+              // The upload-scope modal sends the project SLUG via containerTag
+              // (not a UUID). Without an explicit projectId, resolve the
+              // container slug/name/id → a real project id so derived memories
+              // get scoped (projectId). Otherwise they land org-wide and vanish
+              // from project-filtered Memories / Graph views.
+              const containerTagVal = parts.find(p => p.name === 'containerTag')?.value || null;
+              if (projectIds.length === 0 && containerTagVal) {
+                try {
+                  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(containerTagVal);
+                  const proj = await prisma.project.findFirst({
+                    where: { orgId, OR: [
+                      ...(isUuid ? [{ id: containerTagVal }] : []),
+                      { slug: containerTagVal.toLowerCase() },
+                      { name: { equals: containerTagVal, mode: 'insensitive' } },
+                    ] },
+                    select: { id: true },
+                  });
+                  if (proj) projectIds.push(proj.id);
+                } catch (e) { console.warn('[knowledge] containerTag project resolve failed:', e.message); }
+              }
+
               // Validate file size (max 100MB)
               if (filePart.data.length > 100 * 1024 * 1024) {
                 return jsonResponse(res, { error: 'File too large. Maximum 100MB.' }, 413);

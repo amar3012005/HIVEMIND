@@ -1461,6 +1461,10 @@ async function maybeSaveOrUpdate({ plan, ctx, onEvent, message, history }) {
     };
     try {
       const r = await dispatchTool('hivemind_save_memory', args, ctx);
+      if (r?.needs_project_choice) {
+        return { tool: 'hivemind_save_memory', args, result_summary: 'needs project choice',
+          project_choice: { projects: r.projects || [], draft: r.draft || null } };
+      }
       onEvent?.({ type: 'tool_call', name: 'hivemind_save_memory', arguments: JSON.stringify(args) });
       onEvent?.({ type: 'tool_result', name: 'hivemind_save_memory', summary: r?.id ? `saved ${(r.id || '').slice(0, 8)}` : 'saved' });
       return { tool: 'hivemind_save_memory', args, result_summary: r?.id ? `saved ${(r.id || '').slice(0, 8)}` : 'saved' };
@@ -1489,6 +1493,10 @@ async function maybeSaveOrUpdate({ plan, ctx, onEvent, message, history }) {
     };
     try {
       const r = await dispatchTool('hivemind_save_memory', args, ctx);
+      if (r?.needs_project_choice) {
+        return { tool: 'hivemind_save_memory', args, result_summary: 'needs project choice',
+          project_choice: { projects: r.projects || [], draft: r.draft || null } };
+      }
       const summary = r?.id ? `auto-saved ${(r.id || '').slice(0, 8)} (conf=${as.confidence.toFixed(2)})` : 'auto-saved';
       onEvent?.({ type: 'tool_call', name: 'hivemind_save_memory', arguments: JSON.stringify({ ...args, __auto: true }) });
       onEvent?.({ type: 'tool_result', name: 'hivemind_save_memory', summary });
@@ -1814,6 +1822,23 @@ export async function runReactAgentV2({
       const saveStep = await maybeSaveOrUpdate({ plan, ctx, onEvent, message, history });
       if (saveStep) steps.push(saveStep);
       const lang = languageName(language);
+      // Deferred for project choice — ask (the FE renders project buttons),
+      // do NOT claim it was saved.
+      if (saveStep?.project_choice) {
+        const askText = lang === 'German'  ? 'In welches Projekt soll ich das speichern?' :
+                        lang === 'Spanish' ? '¿En qué proyecto lo guardo?' :
+                        lang === 'French'  ? 'Dans quel projet dois-je l’enregistrer ?' :
+                        'Which project should I save this to?';
+        onEvent?.({ type: 'finish', text: askText });
+        return {
+          response: askText, sources: [], steps,
+          evidence_used: [], confidence: 1.0, gaps: [],
+          usage: sumUsage(usages),
+          trace: finalizeTrace(trace, usages),
+          assistant_name: assistantName || null,
+          project_choice: saveStep.project_choice,
+        };
+      }
       const scopeNote = saveStep?.args?.project_id || saveStep?.args?.project
         ? ` (project: ${saveStep.args.project || saveStep.args.project_id.slice(0, 8)})`
         : '';
@@ -1952,14 +1977,17 @@ export async function runReactAgentV2({
     //   (b) proactive auto-save: planner detected durable fact with
     //       confidence >= 0.75 in any intent_kind. The function checks
     //       both intents and prefers explicit save when both present.
+    let recallProjectChoice = null;
     if ((plan.intent_kind === 'save' && plan.save_intent) || plan.auto_save_intent) {
       const saveStep = await maybeSaveOrUpdate({ plan, ctx, onEvent, message, history });
       if (saveStep) steps.push(saveStep);
+      if (saveStep?.project_choice) recallProjectChoice = saveStep.project_choice;
     }
 
     onEvent?.({ type: 'finish', text: answer.response });
 
     return {
+      project_choice: recallProjectChoice,
       response:      answer.response,
       // Sources include recall-trace metadata so the FE can render WHY a
       // memory ranked (synth boost, x-cluster overlap, raw score). Helps

@@ -6125,7 +6125,21 @@ exit \$RC
             if ((existing.user_id !== userId || !sameOrg) && !isAdmin) {
               return jsonResponse(res, { error: 'Not found' }, 404);
             }
-            await persistentMemoryStore.deleteMemory(memoryId);
+            const hardDelete = url.searchParams.get('hard') === 'true';
+            if (hardDelete && typeof persistentMemoryStore.hardDeleteMemories === 'function') {
+              await persistentMemoryStore.hardDeleteMemories([memoryId]);
+              try {
+                const qUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
+                const qColl = process.env.QDRANT_COLLECTION || 'hivemind_memories';
+                const qKey = process.env.QDRANT_API_KEY || '';
+                if (qUrl) await fetch(`${qUrl}/collections/${encodeURIComponent(qColl)}/points/delete?wait=true`, {
+                  method: 'POST', headers: { 'Content-Type': 'application/json', ...(qKey ? { 'api-key': qKey } : {}) },
+                  body: JSON.stringify({ points: [memoryId] }),
+                }).catch(() => {});
+              } catch { /* qdrant best-effort */ }
+            } else {
+              await persistentMemoryStore.deleteMemory(memoryId);
+            }
             if (existing) {
               invalidateAggregateCache({ userId, orgId, project: existing.project || null });
               invalidateAggregateCache({ userId, orgId, project: null });
@@ -10588,6 +10602,36 @@ exit \$RC
                     );
                     memoryIds = [deleteMemoryId, ...children];
                     resolutionStrategy = resolutionStrategy || 'self-plus-children';
+                  }
+
+                  // Strategy 5: document-first parent. Its promoted children
+                  // carry NO parent_schema_id and link only to the
+                  // knowledge_document (not the parent memory) — so they
+                  // survive deletion. Resolve them via document_id → evidence
+                  // links + doc-anchor tags (filename/doc-hash/doc-id) so the
+                  // WHOLE document purges, not just the summary node.
+                  {
+                    const docIdMeta = docMeta?.document_id
+                      || docMemory?.sourceMetadata?.metadata?.document_id || null;
+                    const extra = [];
+                    if (docIdMeta) extra.push(...await memoriesForDoc(docIdMeta));
+                    const anchorTags = (docMemory.tags || []).filter(t =>
+                      t.startsWith('filename:') || t.startsWith('doc-hash:') || t.startsWith('doc-id:'));
+                    if (docIdMeta) anchorTags.push(`doc-id:${docIdMeta}`);
+                    const fnameMeta = docMeta?.filename || docMeta?.document_title;
+                    if (fnameMeta) anchorTags.push(`filename:${fnameMeta}`);
+                    if (anchorTags.length) {
+                      const tagged = await safeFind('doc-anchor-tags', () =>
+                        prisma.memory.findMany({
+                          where: { userId, deletedAt: null, tags: { hasSome: anchorTags } },
+                          select: { id: true },
+                        }));
+                      extra.push(...tagged);
+                    }
+                    if (extra.length) {
+                      memoryIds = Array.from(new Set([...memoryIds, ...extra]));
+                      resolutionStrategy = resolutionStrategy ? `${resolutionStrategy}+doc-anchor` : 'doc-anchor';
+                    }
                   }
 
                   // Always include the clicked document

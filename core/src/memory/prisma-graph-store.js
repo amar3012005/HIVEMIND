@@ -334,6 +334,20 @@ export class PrismaGraphStore {
     return mapMemoryRecord(deleted);
   }
 
+  /** Hard-delete memories + all FK refs (irreversible). Returns count. Caller
+   *  handles Qdrant point removal. Mirrors the knowledge-delete cascade. */
+  async hardDeleteMemories(ids) {
+    ids = Array.from(new Set((ids || []).filter(Boolean)));
+    if (ids.length === 0) return 0;
+    await this.client.sourceMetadata.deleteMany({ where: { memoryId: { in: ids } } });
+    await this.client.memoryVersion.updateMany({ where: { relatedMemoryId: { in: ids } }, data: { relatedMemoryId: null } });
+    await this.client.memoryVersion.deleteMany({ where: { memoryId: { in: ids } } });
+    await this.client.relationship.deleteMany({ where: { OR: [{ fromId: { in: ids } }, { toId: { in: ids } }] } });
+    await this.client.auditLog.updateMany({ where: { resourceId: { in: ids } }, data: { resourceId: null } }).catch(() => {});
+    const res = await this.client.memory.deleteMany({ where: { id: { in: ids } } });
+    return res.count;
+  }
+
   async listLatestMemories({ user_id, org_id, project, scope = 'personal', access_context = null }) {
     const records = await this.client.memory.findMany({
       where: { ...scopedMemoryWhere({ user_id, org_id, project, scope, access_context }), isLatest: true },

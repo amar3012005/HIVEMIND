@@ -5966,6 +5966,7 @@ Write the persona now.`;
 
     // 1. URL verification handshake (Slack one-time when subscribing)
     if (payload.type === 'url_verification') {
+      console.log('[slack-events] url_verification challenge received — responding');
       return jsonResponse(res, { challenge: payload.challenge });
     }
 

@@ -5973,6 +5973,7 @@ Write the persona now.`;
     if (payload.type === 'event_callback') {
       const teamId = payload.team_id;
       const event = payload.event || {};
+      console.log(`[slack-events] inbound event_callback type=${event.type} subtype=${event.subtype || '-'} team=${teamId} channel=${event.channel || '-'}`);
 
       // Respond 200 within 3s (Slack retry policy)
       jsonResponse(res, { ok: true });

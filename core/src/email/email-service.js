@@ -212,4 +212,50 @@ export async function sendSystemEmail({ templateId, to, vars = {}, from, connect
   return { ok: false, error: 'send_failed' };
 }
 
-export default { sendSystemEmail, renderTemplate };
+/**
+ * Send the same template to many recipients, throttled to respect Gmail's
+ * send quota. Sequential with a per-message delay (not parallel) — keeps us
+ * well under rate limits and avoids burst spam-flagging. Never throws.
+ *
+ * Stops early if the sender connection is unconfigured (no point looping).
+ *
+ * @param {Array<{email:string}|string>} recipients
+ * @param {object} opts
+ * @param {string} opts.templateId
+ * @param {(r:any)=>Record<string,any>} [opts.varsFor]  per-recipient template vars
+ * @param {number} [opts.perMessageDelayMs=700]
+ * @param {string} [opts.from]
+ * @param {string} [opts.connectionId]
+ * @returns {Promise<{total:number,sent:number,failed:number,skipped:number,errors:string[]}>}
+ */
+export async function sendSystemEmailBatch(recipients = [], opts = {}) {
+  const { templateId, varsFor, perMessageDelayMs = 700, from, connectionId } = opts;
+  const result = { total: recipients.length, sent: 0, failed: 0, skipped: 0, errors: [] };
+  for (let i = 0; i < recipients.length; i++) {
+    const r = recipients[i];
+    const to = typeof r === 'string' ? r : r?.email;
+    if (!to) { result.skipped += 1; continue; }
+    const vars = varsFor ? varsFor(r) : {};
+    // eslint-disable-next-line no-await-in-loop
+    const res = await sendSystemEmail({ templateId, to, vars, from, connectionId });
+    if (res.ok) {
+      result.sent += 1;
+    } else if (res.skipped) {
+      result.skipped += 1;
+      if (res.error === 'no_sender_connection') {
+        result.errors.push('no_sender_connection — aborting batch');
+        break;
+      }
+    } else {
+      result.failed += 1;
+      if (result.errors.length < 10) result.errors.push(`${to}: ${res.error}`);
+    }
+    if (perMessageDelayMs && i < recipients.length - 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((resolve) => setTimeout(resolve, perMessageDelayMs));
+    }
+  }
+  return result;
+}
+
+export default { sendSystemEmail, sendSystemEmailBatch, renderTemplate };

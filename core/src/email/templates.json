@@ -17,5 +17,12 @@
     "preheader": "A brain that never forgets, now yours.",
     "text": "Hi {{name}},\n\nWelcome to HIVEMIND! You now have a sovereign, GDPR-compliant memory engine for you and your AI agents.\n\nStart by capturing a memory or connecting a tool:\n\n{{appUrl}}\n\nWe're glad you're here.\nThe HIVEMIND team\n\n© {{year}} Da'vinci Solutions",
     "html": "<h1 style=\"margin:0 0 12px;font-family:'Space Grotesk',Inter,sans-serif;font-size:24px;color:#0a0a0a\">Welcome to HIVEMIND, {{name}}</h1><p style=\"margin:0 0 16px;font-size:15px;line-height:1.6;color:#525252\">You now have a sovereign, GDPR-compliant memory engine for you and your AI agents — a brain that never forgets.</p><p style=\"margin:0 0 28px\"><a href=\"{{appUrl}}\" style=\"display:inline-block;background:#117dff;color:#fff;text-decoration:none;font-family:'Space Grotesk',Inter,sans-serif;font-weight:600;font-size:15px;padding:12px 22px;border-radius:999px\">Get started</a></p><p style=\"margin:0;font-size:13px;color:#a3a3a3\">We're glad you're here — the HIVEMIND team</p>"
+  },
+
+  "announcement": {
+    "subject": "{{subject}}",
+    "preheader": "{{preheader}}",
+    "text": "Hi {{name}},\n\n{{body}}\n\n{{appUrl}}\n\n— The HIVEMIND team\n© {{year}} Da'vinci Solutions",
+    "html": "<h1 style=\"margin:0 0 14px;font-family:'Space Grotesk',Inter,sans-serif;font-size:22px;color:#0a0a0a\">{{heading}}</h1><div style=\"margin:0 0 24px;font-size:15px;line-height:1.65;color:#525252;white-space:pre-line\">{{body}}</div><p style=\"margin:0 0 28px\"><a href=\"{{appUrl}}\" style=\"display:inline-block;background:#117dff;color:#fff;text-decoration:none;font-family:'Space Grotesk',Inter,sans-serif;font-weight:600;font-size:15px;padding:12px 22px;border-radius:999px\">Open HIVEMIND</a></p><p style=\"margin:0;font-size:13px;color:#a3a3a3\">— the HIVEMIND team</p>"
   }
 }

@@ -22,7 +22,7 @@ import {
 import { ROLES, effectiveRoles, hasPermission, assertPermission } from './auth/permissions.js';
 import { attachSsoContext, resolveSsoConfig } from './auth/sso-resolver.js';
 import { handleScimRequest } from './scim/scim-router.js';
-import { sendSystemEmail } from './email/email-service.js';
+import { sendSystemEmail, sendSystemEmailBatch } from './email/email-service.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -1803,6 +1803,66 @@ const server = http.createServer(async (req, res) => {
       vars: { name: firstName, email: user.email },
     }).catch((err) => console.error(JSON.stringify({ svc: 'email', level: 'error', event: 'welcome_dispatch_failed', error: err.message })));
     return jsonResponse(res, { ok: true });
+  }
+
+  // Admin broadcast — send a templated notification to ALL platform users
+  // (real emails only; placeholder @local.hivemind.dev accounts excluded).
+  // Admin/owner-gated. dryRun is the DEFAULT — a live send requires explicit
+  // { dryRun: false }. Sender is the single SYSTEM_EMAIL connection; recipients
+  // are resolved server-side. Throttled to respect Gmail quota.
+  if (pathname === '/v1/notifications/broadcast' && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const admin = await requireOrgAdmin(req, res, current.session.userId, current.session.orgId);
+    if (!admin) return;
+    const body = (await parseBody(req)) || {};
+    const { subject, heading, body: msgBody, templateId, dryRun = true } = body;
+    if (!templateId && (!subject || !msgBody)) {
+      return jsonResponse(res, { error: 'subject_and_body_required' }, 400);
+    }
+    const users = await prisma.user.findMany({
+      where: { email: { not: null }, NOT: { email: { endsWith: '@local.hivemind.dev' } } },
+      select: { email: true, displayName: true },
+    });
+    const seen = new Set();
+    const recipients = [];
+    for (const u of users) {
+      const e = (u.email || '').trim().toLowerCase();
+      if (!e || seen.has(e)) continue;
+      seen.add(e);
+      recipients.push({
+        email: u.email,
+        name: (u.displayName || u.email.split('@')[0] || 'there').split(' ')[0],
+      });
+    }
+    if (dryRun) {
+      return jsonResponse(res, {
+        ok: true,
+        dryRun: true,
+        recipientCount: recipients.length,
+        sample: recipients.slice(0, 8).map((r) => r.email),
+        note: 'No emails sent. Re-POST with { "dryRun": false } to send for real.',
+      });
+    }
+    const tpl = templateId || 'announcement';
+    const result = await sendSystemEmailBatch(recipients, {
+      templateId: tpl,
+      perMessageDelayMs: 700,
+      varsFor: (r) => ({
+        name: r.name,
+        email: r.email,
+        subject,
+        heading: heading || subject,
+        body: msgBody,
+        preheader: String(msgBody || '').replace(/\s+/g, ' ').slice(0, 90),
+      }),
+    });
+    console.log(JSON.stringify({
+      svc: 'email', level: 'info', event: 'broadcast_done',
+      actor: current.session.userId, template: tpl,
+      total: result.total, sent: result.sent, failed: result.failed, skipped: result.skipped,
+    }));
+    return jsonResponse(res, { ok: true, dryRun: false, ...result });
   }
 
   if (pathname === '/v1/orgs' && req.method === 'POST') {

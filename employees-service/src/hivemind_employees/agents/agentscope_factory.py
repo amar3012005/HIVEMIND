@@ -92,14 +92,26 @@ def _resolve_model(employee_row: dict, llm_api_key: Optional[str] = None) -> Cha
 
     if provider == "openai":
         api_key = llm_api_key or os.environ.get("OPENAI_API_KEY", "")
-        return OpenAIChatModel(model_name=model, api_key=api_key, stream=False)
+        # max_retries enables the SDK's built-in exponential backoff w/ jitter
+        # on 429/5xx; timeout bounds each call so a hang can't wedge a turn.
+        return OpenAIChatModel(
+            model_name=model,
+            api_key=api_key,
+            stream=False,
+            client_kwargs={"max_retries": 3, "timeout": 60.0},
+        )
 
     if provider == "anthropic_direct":
         # Native Anthropic SDK path (skips OpenRouter). Only used when an
         # employee explicitly opts in — the default 'anthropic' path stays
         # on OpenRouter for billing parity with the rest of HIVEMIND.
         api_key = llm_api_key or os.environ.get("ANTHROPIC_API_KEY", "")
-        return AnthropicChatModel(model_name=model, api_key=api_key, stream=False)
+        return AnthropicChatModel(
+            model_name=model,
+            api_key=api_key,
+            stream=False,
+            client_kwargs={"max_retries": 3, "timeout": 60.0},
+        )
 
     # OpenAI-compatible providers can route through OpenRouter when present,
     # otherwise fall back to the same Groq endpoint used by Talk to HIVE.
@@ -108,11 +120,14 @@ def _resolve_model(employee_row: dict, llm_api_key: Optional[str] = None) -> Cha
         model,
         llm_api_key=llm_api_key,
     )
+    # max_retries gives the OpenAI SDK its built-in exponential backoff with
+    # jitter on 429 (Groq rate limits) and 5xx — without it a single 429
+    # silently drops a swarm speaker. timeout bounds each call.
     return OpenAIChatModel(
         model_name=routed_model,
         api_key=api_key,
         stream=False,
-        client_kwargs={"base_url": base_url},
+        client_kwargs={"base_url": base_url, "max_retries": 3, "timeout": 60.0},
     )
 
 
@@ -194,8 +209,8 @@ def build_react_agent(
             try:
                 setattr(target_agent, "tool_call_count",
                         int(getattr(target_agent, "tool_call_count", 0)) + 1)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                log.debug("tool_call_count hook tick failed: %s", exc)
         return _hook
 
     agent = ReActAgent(

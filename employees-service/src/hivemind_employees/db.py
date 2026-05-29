@@ -77,30 +77,52 @@ async def list_running_employees() -> List[Dict[str, Any]]:
     return out
 
 
-async def list_employees_by_ids(ids: List[str]) -> List[Dict[str, Any]]:
+async def list_employees_by_ids(ids: List[str], org_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """Fetch employees by id, ignoring status. Used by hyper-rooms where
     the user explicitly selected participants — Slack-gateway's
     running/deploying filter would wrongly exclude draft employees that
-    have never been resumed."""
+    have never been resumed.
+
+    org_id MUST be passed by callers acting on behalf of a tenant: it
+    enforces that loaded employees belong to that org, preventing
+    cross-org invocation when a request body mixes foreign employee ids."""
     if not ids:
         return []
     pool = await init_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT
-              id, org_id, team_id, name, slug, persona, model, llm_provider,
-              scope, slack_team_id, slack_channels_allowed, tools, policy_rules,
-              status, replicas, max_replicas, hivemind_api_key_id, created_by,
-              avatar_url, slack_display_name, slack_avatar_emoji,
-              role_archetype, peer_review_targets
-            FROM hivemind.digital_employees
-            WHERE archived_at IS NULL
-              AND status <> 'paused'
-              AND id = ANY($1::uuid[])
-            """,
-            ids,
-        )
+        if org_id is not None:
+            rows = await conn.fetch(
+                """
+                SELECT
+                  id, org_id, team_id, name, slug, persona, model, llm_provider,
+                  scope, slack_team_id, slack_channels_allowed, tools, policy_rules,
+                  status, replicas, max_replicas, hivemind_api_key_id, created_by,
+                  avatar_url, slack_display_name, slack_avatar_emoji,
+                  role_archetype, peer_review_targets
+                FROM hivemind.digital_employees
+                WHERE archived_at IS NULL
+                  AND status <> 'paused'
+                  AND id = ANY($1::uuid[])
+                  AND org_id = $2::uuid
+                """,
+                ids, org_id,
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT
+                  id, org_id, team_id, name, slug, persona, model, llm_provider,
+                  scope, slack_team_id, slack_channels_allowed, tools, policy_rules,
+                  status, replicas, max_replicas, hivemind_api_key_id, created_by,
+                  avatar_url, slack_display_name, slack_avatar_emoji,
+                  role_archetype, peer_review_targets
+                FROM hivemind.digital_employees
+                WHERE archived_at IS NULL
+                  AND status <> 'paused'
+                  AND id = ANY($1::uuid[])
+                """,
+                ids,
+            )
     out: List[Dict[str, Any]] = []
     for row in rows:
         item = dict(row)
@@ -131,16 +153,26 @@ async def get_api_key_for_employee(employee_id: str) -> Optional[Dict[str, Any]]
     return dict(row) if row else None
 
 
-async def get_permanent_skeptic_id(room_id: str) -> Optional[str]:
+async def get_permanent_skeptic_id(room_id: str, org_id: Optional[str] = None) -> Optional[str]:
     """Returns the permanent_skeptic_id for the room, or None.
-    Gracefully tolerates pre-migration rooms (column absent)."""
+    Gracefully tolerates pre-migration rooms (column absent).
+
+    org_id, when passed, scopes the read so a foreign room_id cannot leak
+    a skeptic id from another tenant."""
     pool = await init_pool()
     async with pool.acquire() as conn:
         try:
-            row = await conn.fetchrow(
-                "SELECT permanent_skeptic_id::text FROM hivemind.hyper_rooms WHERE id = $1",
-                room_id,
-            )
+            if org_id is not None:
+                row = await conn.fetchrow(
+                    "SELECT permanent_skeptic_id::text FROM hivemind.hyper_rooms "
+                    "WHERE id = $1 AND org_id = $2::uuid",
+                    room_id, org_id,
+                )
+            else:
+                row = await conn.fetchrow(
+                    "SELECT permanent_skeptic_id::text FROM hivemind.hyper_rooms WHERE id = $1",
+                    room_id,
+                )
             if row and row["permanent_skeptic_id"]:
                 return str(row["permanent_skeptic_id"])
         except Exception as exc:  # noqa: BLE001
@@ -163,16 +195,57 @@ async def set_permanent_skeptic_id(room_id: str, employee_id: Optional[str]) -> 
         return False
 
 
-async def get_room_template(room_id: str) -> str:
-    """B1: return the room's template ('debate' or 'decision').
-    Defaults to 'debate' if row missing or column absent (graceful pre-migration)."""
+async def get_turn_seq(turn_id: str, org_id: Optional[str] = None) -> Optional[int]:
+    """Return the monotonic per-room seq for a turn (rotation ordinal).
+
+    Returns None (NOT 0) when the row/column is unreadable — missing row,
+    NULL seq, absent column (pre-migration), or DB error. Callers MUST
+    distinguish None ('no seq available') from a real 0 and fall back to a
+    deterministic-but-varying ordinal, otherwise every fallback turn would
+    elect the same alphabetically-first lead/skeptic forever.
+
+    org_id, when passed, scopes the read via hyper_turns -> hyper_rooms so
+    a foreign turn_id cannot leak a seq from another tenant."""
     pool = await init_pool()
     async with pool.acquire() as conn:
         try:
-            row = await conn.fetchrow(
-                "SELECT template FROM hivemind.hyper_rooms WHERE id = $1",
-                room_id,
-            )
+            if org_id is not None:
+                row = await conn.fetchrow(
+                    "SELECT t.seq FROM hivemind.hyper_turns t "
+                    "JOIN hivemind.hyper_rooms r ON r.id = t.room_id "
+                    "WHERE t.id = $1 AND r.org_id = $2::uuid",
+                    turn_id, org_id,
+                )
+            else:
+                row = await conn.fetchrow(
+                    "SELECT seq FROM hivemind.hyper_turns WHERE id = $1", turn_id
+                )
+            if row and row["seq"] is not None:
+                return int(row["seq"])
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_turn_seq fallback (returning None): %s", exc)
+    return None
+
+
+async def get_room_template(room_id: str, org_id: Optional[str] = None) -> str:
+    """B1: return the room's template ('debate' or 'decision').
+    Defaults to 'debate' if row missing or column absent (graceful pre-migration).
+
+    org_id, when passed, scopes the read so a foreign room_id cannot leak
+    another tenant's template."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        try:
+            if org_id is not None:
+                row = await conn.fetchrow(
+                    "SELECT template FROM hivemind.hyper_rooms WHERE id = $1 AND org_id = $2::uuid",
+                    room_id, org_id,
+                )
+            else:
+                row = await conn.fetchrow(
+                    "SELECT template FROM hivemind.hyper_rooms WHERE id = $1",
+                    room_id,
+                )
             if row and row["template"]:
                 return str(row["template"])
         except Exception as exc:  # noqa: BLE001

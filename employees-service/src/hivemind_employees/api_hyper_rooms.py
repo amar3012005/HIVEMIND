@@ -29,6 +29,7 @@ Reuses, does NOT duplicate:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -49,6 +50,7 @@ from .db import (
     get_permanent_skeptic_id,
     get_room_template,
     get_trust_scores,
+    get_turn_seq,
     list_employees_by_ids,
     list_running_employees,
     update_trust,
@@ -315,24 +317,6 @@ def opposing_lanes(lane: str) -> Set[str]:
     return out
 
 
-def _score_lane_against_message(lane: str, message: str) -> int:
-    """Crude scorer — how well a lane matches the user message keywords."""
-    lo = message.lower()
-    return sum(1 for h in ROLE_LANE_HINTS.get(lane, []) if h in lo)
-
-
-def _pick_lead(participants: List[Dict[str, Any]], user_message: str) -> Dict[str, Any]:
-    """Pick the highest-scoring participant; deterministic tie-break by slug."""
-    if not participants:
-        raise ValueError("no participants")
-    scored = [
-        (p, _score_lane_against_message(p["_lane"], user_message), p.get("slug", ""))
-        for p in participants
-    ]
-    scored.sort(key=lambda t: (-t[1], t[2]))
-    return scored[0][0]
-
-
 def _pick_reactors(
     participants: List[Dict[str, Any]], lead: Dict[str, Any], max_reactors: int = MAX_REACTORS
 ) -> List[Dict[str, Any]]:
@@ -346,6 +330,65 @@ def _pick_reactors(
         )
     )
     return others[:max_reactors]
+
+
+def _pick_lead_rotating(
+    participants: List[Dict[str, Any]],
+    _user_message: str,
+    seq: int,
+    skeptic_id: Optional[str],
+) -> Dict[str, Any]:
+    """Stateless lead rotation across consecutive turns.
+
+    Eligible = all participants except the locked skeptic. Ordered
+    deterministically by slug so the modulo is stable across processes.
+    seq is 1-based, so use (seq - 1). Consecutive seq values advance the
+    index by 1, cycling the lead role across turns.
+
+    _user_message is reserved (rotation is purely seq-based); the @mention
+    lead override is applied at the call site before this is reached.
+    """
+    if not participants:
+        raise ValueError("no participants")
+    eligible = [p for p in participants if p["id"] != skeptic_id] or participants
+    eligible = sorted(eligible, key=lambda p: p.get("slug", ""))
+    idx = (max(seq, 1) - 1) % len(eligible)
+    return eligible[idx]
+
+
+def _pick_skeptic_rotating(
+    participants: List[Dict[str, Any]],
+    permanent_skeptic_id: Optional[str],
+    seq: int,
+    lead_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Resolve the Skeptic for this turn.
+
+    If permanent_skeptic_id is set AND that employee is present -> always
+    that employee (NO rotation). If the configured permanent skeptic is NOT
+    among participants (left the room, archived, paused, stale config), do
+    NOT silently return None — that would skip the entire adversarial round.
+    Instead fall through to lane rotation so the room still gets a Skeptic;
+    the call site surfaces a 'configured_skeptic_absent' warning event.
+    Else rotate the Skeptic over Skeptic-lane participants (or any non-lead
+    participant when no Skeptic lane exists), deterministic by slug + seq.
+    """
+    if permanent_skeptic_id:
+        locked = next((p for p in participants if p["id"] == permanent_skeptic_id), None)
+        if locked is not None:
+            return locked
+        log.warning(
+            "[hyper] permanent_skeptic_id %s not among participants — falling "
+            "through to Skeptic rotation so the round is not skipped",
+            permanent_skeptic_id,
+        )
+    pool = [p for p in participants if p.get("_lane") == "Skeptic" and p["id"] != lead_id] \
+        or [p for p in participants if p["id"] != lead_id]
+    if not pool:
+        return None
+    pool = sorted(pool, key=lambda p: p.get("slug", ""))
+    # Offset by 1 so lead and skeptic don't rotate in lockstep onto the same edge.
+    return pool[(max(seq, 1) - 1 + 1) % len(pool)]
 
 
 # ─── Callback to control-plane ────────────────────────────────────────
@@ -764,6 +807,13 @@ SKEPTIC_PERSONA_PRELUDE = (
 
 HYPER_ROOM_MAX_TOOL_CALLS = int(os.environ.get("HYPER_ROOM_MAX_TOOL_CALLS", "80"))
 
+# Wall-clock budget for a whole swarm turn. The 1.5s/agent stagger repeats
+# per round (R1/R2/R3/R5-vote); under a 429 storm the per-call retries stack
+# on top, so a turn can run for minutes and blow past the control-plane's SSE
+# turn timeout — the user sees a half-streamed turn that never seals. Keep
+# this a few seconds under the control-plane timeout so the seal wins the race.
+HYPER_ROOM_MAX_WALL_SECONDS = float(os.environ.get("HYPER_ROOM_MAX_WALL_SECONDS", "150"))
+
 
 # Round prompt templates. Filled with persona + lane + context per agent.
 
@@ -810,13 +860,17 @@ Reply STRICT JSON only (array of reviews):
   "reviews": [
     {{
       "target_hypothesis_id": "<id>",
-      "agreement": "support | challenge | extend",
+      "agreement": "agree | challenge | extend",
       "evidence_memory_ids": ["<uuid>"],
       "reason": "<1-2 sentences citing the evidence>"
     }}
   ]
 }}
 Min 1 evidence_memory_id per review.
+PEER ACCOUNTABILITY: begin each "reason" with the target author's NAME
+(from the hypotheses table above) and your stance verb — agree, contradict,
+or extend — then justify with the evidence. Example: "Contradict Dana: her
+claim ignores ... (see <uuid>)."
 """
 
 
@@ -908,6 +962,10 @@ Reply STRICT JSON only:
   "conditions": ["<required condition for approval>"],
   "reason": "<1 sentence>"
 }}
+PEER ACCOUNTABILITY: your "reason" MUST name at least one OTHER participant
+(from the refined hypotheses table above) and state whether you agree with,
+contradict, or extend their point. Example: "Agree with Dana — extends Sam's
+edge case."
 """
 
 
@@ -958,8 +1016,12 @@ def _consensus_verdict(votes: List[Dict[str, Any]], trust_map: Dict[str, float])
         for c in (v.get("conditions") or []):
             if c and c not in tally[hid]["conditions"]:
                 tally[hid]["conditions"].append(c)
-    # Pick winner
-    winner = max(tally.items(), key=lambda kv: kv[1]["weighted_sum"]) if tally else (None, None)
+    # Pick winner. The 'none'/abstain bucket is never a valid winner — a turn
+    # where most voters abstained is inconclusive (DISSENT), not a positive
+    # consensus on a non-answer. Excluding it also prevents saving a decision
+    # memory whose winning_id resolves to nothing downstream.
+    real_tally = {hid: agg for hid, agg in tally.items() if hid != "none"}
+    winner = max(real_tally.items(), key=lambda kv: kv[1]["weighted_sum"]) if real_tally else (None, None)
     if winner[0] is None or winner[1] is None:
         return {"verdict": "DISSENT", "winning_id": None, "weighted_score": 0.0, "action_items": []}
     weighted_score = winner[1]["weighted_sum"] / max(winner[1]["weight_total"], 0.0001)
@@ -989,6 +1051,39 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
     cost_tokens = cost_tokens_initial
     tool_call_counts: Dict[str, int] = {}
     evidence_pool: Set[str] = set()
+
+    def _turn_tool_total() -> int:
+        """Running sum of tool calls across all cached agents this turn.
+        Used to enforce the per-turn HYPER_ROOM_MAX_TOOL_CALLS cost cap."""
+        total = 0
+        for p in participants:
+            cached = _ROOM_AGENTS.get(f"{req.room_id}:{p['id']}")
+            total += int(getattr(cached, "tool_call_count", 0) or 0)
+        return total
+
+    cost_cap_hit = False
+    _deadline_emitted = {"v": False}
+
+    async def _deadline_hit(next_round: int) -> bool:
+        """True once the turn has exceeded HYPER_ROOM_MAX_WALL_SECONDS.
+        Emits a one-shot 'deadline_hit' event so the UI can show the turn
+        short-circuited to seal. Treated like a cost-cap short-circuit:
+        remaining rounds are skipped and we go straight to synthesis/seal
+        with whatever completed, guaranteeing the seal beats the
+        control-plane turn timeout."""
+        if time.time() - started <= HYPER_ROOM_MAX_WALL_SECONDS:
+            return False
+        if not _deadline_emitted["v"]:
+            _deadline_emitted["v"] = True
+            log.warning("[swarm] wall-clock deadline hit turn=%s elapsed=%.1fs cap=%.1fs skip_from_round=%d",
+                        req.turn_id, time.time() - started, HYPER_ROOM_MAX_WALL_SECONDS, next_round)
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "deadline_hit",
+                "elapsed_s": round(time.time() - started, 1),
+                "cap_s": HYPER_ROOM_MAX_WALL_SECONDS,
+                "skipped_from_round": next_round,
+            })
+        return True
 
     # Pull trust scores once for vote weighting.
     trust_map = await get_trust_scores(req.org_id, [p["id"] for p in participants])
@@ -1023,6 +1118,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
             m = re.search(r"\{[\s\S]+\}", text)
             parsed = json.loads(m.group(0)) if m else None
             if not isinstance(parsed, dict) or not parsed.get("hypothesis"):
+                log.info("[swarm] R1 %s: non-JSON/empty reply, dropping", emp.get("slug"))
                 return None
             ev_ids = [str(x) for x in (parsed.get("evidence_memory_ids") or []) if x]
             for e in ev_ids:
@@ -1064,6 +1160,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
         })
 
     if not hypotheses:
+        log.warning("[swarm] no R1 hypotheses turn=%s speakers=%d", req.turn_id, len(speakers))
         await _emit_event(req.callback_url, req.turn_id, {
             "t": "seal", "cost_tokens": cost_tokens, "status": "failed",
             "duration_ms": int((time.time() - started) * 1000),
@@ -1071,16 +1168,36 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
         })
         return RoomTurnResponse(ok=False, cost_tokens=cost_tokens, status="failed")
 
+    log.info("[swarm] R1 done turn=%s hypotheses=%d", req.turn_id, len(hypotheses))
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "round_end", "round": 1, "hypotheses_count": len(hypotheses),
     })
+
+    # Cost cap: if the per-turn tool ceiling is already exhausted, skip the
+    # remaining LLM rounds and go straight to synthesis with R1 hypotheses.
+    if _turn_tool_total() >= HYPER_ROOM_MAX_TOOL_CALLS:
+        cost_cap_hit = True
+        log.warning("[swarm] cost cap hit before R2 turn=%s total=%d cap=%d",
+                    req.turn_id, _turn_tool_total(), HYPER_ROOM_MAX_TOOL_CALLS)
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "cost_cap_hit", "total": _turn_tool_total(),
+            "cap": HYPER_ROOM_MAX_TOOL_CALLS, "skipped_from_round": 2,
+        })
+    elif await _deadline_hit(2):
+        cost_cap_hit = True
+
+    hyp_by_id = {h["id"]: h for h in hypotheses}
+    # Pre-declared so cost-cap skips of R2/R3 leave well-typed empties for
+    # the downstream vote + synthesis to consume gracefully.
+    peer_reviews: List[Dict[str, Any]] = []
+    refined: List[Dict[str, Any]] = []
+    refined_by_id: Dict[str, Any] = {}
 
     # ─── R2 — Peer Cross-Exam ──────────────────────────────────────────
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "round_start", "round": 2, "label": "Peer Cross-Exam",
         "task": "Each agent reviews 2 OTHER hypotheses with corroborating or contradicting evidence.",
     })
-    hyp_by_id = {h["id"]: h for h in hypotheses}
     hyp_table = "\n".join(
         f"  [{h['id']}] {h['agent_name']} ({h['lane']}, conf {h['confidence']:.2f}): {h['hypothesis']}"
         for h in hypotheses
@@ -1115,11 +1232,20 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
                 ev_ids = [str(x) for x in (r.get("evidence_memory_ids") or []) if x]
                 for e in ev_ids:
                     evidence_pool.add(e)
+                # Normalise to the canonical stance set (agree|challenge|extend).
+                # Older prompts emitted "support"; map it to "agree" so the
+                # debate/R3 accountability and downstream "== challenge" checks
+                # see a consistent vocabulary.
+                stance = str(r.get("agreement", "extend"))[:20].strip().lower()
+                if stance == "support":
+                    stance = "agree"
+                if stance not in ("agree", "challenge", "extend"):
+                    stance = "extend"
                 out.append({
                     "reviewer_slug": emp["slug"],
                     "reviewer_name": emp.get("name", emp["slug"]),
                     "target_hypothesis_id": str(r.get("target_hypothesis_id", ""))[:100],
-                    "agreement": str(r.get("agreement", "extend"))[:20],
+                    "agreement": stance,
                     "evidence_memory_ids": ev_ids,
                     "reason": str(r.get("reason", ""))[:500],
                 })
@@ -1131,21 +1257,26 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
     async def _staggered_r2(emp, idx):
         await asyncio.sleep(1.5 * idx)
         return await _run_r2(emp)
-    r2_lists = await asyncio.gather(*[_staggered_r2(emp, i) for i, emp in enumerate(speakers)], return_exceptions=False)
-    peer_reviews = [r for lst in r2_lists for r in lst]
+    if not cost_cap_hit:
+        r2_lists = await asyncio.gather(*[_staggered_r2(emp, i) for i, emp in enumerate(speakers)], return_exceptions=False)
+        peer_reviews = [r for lst in r2_lists for r in lst]
     for r in peer_reviews:
         tokens = max(60, len(r["reason"]) // 4)
         cost_tokens += tokens
+        target_author = (hyp_by_id.get(r["target_hypothesis_id"]) or {}).get("agent_name")
         await _emit_event(req.callback_url, req.turn_id, {
             "t": "peer_review",
             "reviewer": r["reviewer_slug"],
+            "reviewer_name": r["reviewer_name"],
             "target_hypothesis_id": r["target_hypothesis_id"],
+            "target_author": target_author,
             "agreement": r["agreement"],
             "evidence_memory_ids": r["evidence_memory_ids"],
             "content": r["reason"],
             "tokens": tokens,
             "round": 2,
         })
+    log.info("[swarm] R2 done turn=%s reviews=%d capped=%s", req.turn_id, len(peer_reviews), cost_cap_hit)
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "round_end", "round": 2, "reviews_count": len(peer_reviews),
     })
@@ -1207,9 +1338,20 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
     async def _staggered_r3(emp, idx):
         await asyncio.sleep(1.5 * idx)
         return await _run_r3(emp)
-    r3_results = await asyncio.gather(*[_staggered_r3(emp, i) for i, emp in enumerate(speakers)], return_exceptions=False)
-    refined = [r for r in r3_results if r]
-    refined_by_id = {r["id"]: r for r in refined}
+    if not cost_cap_hit and _turn_tool_total() >= HYPER_ROOM_MAX_TOOL_CALLS:
+        cost_cap_hit = True
+        log.warning("[swarm] cost cap hit before R3 turn=%s total=%d cap=%d",
+                    req.turn_id, _turn_tool_total(), HYPER_ROOM_MAX_TOOL_CALLS)
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "cost_cap_hit", "total": _turn_tool_total(),
+            "cap": HYPER_ROOM_MAX_TOOL_CALLS, "skipped_from_round": 3,
+        })
+    elif not cost_cap_hit and await _deadline_hit(3):
+        cost_cap_hit = True
+    if not cost_cap_hit:
+        r3_results = await asyncio.gather(*[_staggered_r3(emp, i) for i, emp in enumerate(speakers)], return_exceptions=False)
+        refined = [r for r in r3_results if r]
+        refined_by_id = {r["id"]: r for r in refined}
     for r in refined:
         tokens = max(150, (len(r["refined_hypothesis"]) + sum(len(s) for s in r["chain_of_thought"])) // 4)
         cost_tokens += tokens
@@ -1226,6 +1368,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
             "tokens": tokens,
             "round": 3,
         })
+    log.info("[swarm] R3 done turn=%s refined=%d capped=%s", req.turn_id, len(refined), cost_cap_hit)
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "round_end", "round": 3, "refined_count": len(refined),
     })
@@ -1236,7 +1379,17 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
         "task": "Permanent Skeptic surfaces hidden assumptions + unorthodox alternatives.",
     })
     skeptic_output: Dict[str, Any] = {"challenges": [], "unorthodox_alternatives": [], "hidden_assumptions": []}
-    if skeptic and refined:
+    if not cost_cap_hit and _turn_tool_total() >= HYPER_ROOM_MAX_TOOL_CALLS:
+        cost_cap_hit = True
+        log.warning("[swarm] cost cap hit before R4 turn=%s total=%d cap=%d",
+                    req.turn_id, _turn_tool_total(), HYPER_ROOM_MAX_TOOL_CALLS)
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "cost_cap_hit", "total": _turn_tool_total(),
+            "cap": HYPER_ROOM_MAX_TOOL_CALLS, "skipped_from_round": 4,
+        })
+    elif not cost_cap_hit and await _deadline_hit(4):
+        cost_cap_hit = True
+    if skeptic and refined and not cost_cap_hit:
         try:
             agent = await _build_agent_for_room(req.room_id, skeptic, user_id=req.user_id, org_id=req.org_id)
             refined_table = "\n".join(
@@ -1276,6 +1429,9 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
             "tokens": tokens,
             "round": 4,
         })
+    log.info("[swarm] R4 done turn=%s challenges=%d unorthodox=%d capped=%s",
+             req.turn_id, len(skeptic_output["challenges"]),
+             len(skeptic_output["unorthodox_alternatives"]), cost_cap_hit)
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "round_end", "round": 4,
         "challenges_count": len(skeptic_output["challenges"]),
@@ -1287,10 +1443,21 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
         "t": "round_start", "round": 5, "label": "Convergence Vote + Synthesis",
         "task": "Everyone votes on refined hypotheses or unorthodox alternatives. Lead synthesises.",
     })
-    refined_table_str = "\n".join(
-        f"  [{r['id']}] {r['agent_name']} ({r['lane']}, conf {r['confidence']:.2f}): {r['refined_hypothesis']}"
-        for r in refined
-    ) or "(no refined hypotheses)"
+    # If R3 was skipped (cost-capped before refinement) `refined` is empty.
+    # Voting on "(no refined hypotheses)" makes every agent emit "none" /
+    # hallucinated ids and the winning synthesis references hypotheses that
+    # were never surfaced. Fall back to the R1 hypotheses so there is always
+    # a real, voteable table with valid ids.
+    if refined:
+        refined_table_str = "\n".join(
+            f"  [{r['id']}] {r['agent_name']} ({r['lane']}, conf {r['confidence']:.2f}): {r['refined_hypothesis']}"
+            for r in refined
+        )
+    else:
+        refined_table_str = "\n".join(
+            f"  [{h['id']}] {h['agent_name']} ({h['lane']}, conf {h['confidence']:.2f}): {h['hypothesis']}"
+            for h in hypotheses
+        ) or "(no hypotheses)"
     skeptic_output_str = json.dumps(skeptic_output, indent=2)[:3000]
     voters = list(participants)  # everyone votes
 
@@ -1308,6 +1475,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
             m = re.search(r"\{[\s\S]+\}", text)
             parsed = json.loads(m.group(0)) if m else None
             if not isinstance(parsed, dict):
+                log.info("[swarm] R5 vote %s: non-JSON reply, dropping (abstain)", emp.get("slug"))
                 return None
             return {
                 "voter": emp["slug"],
@@ -1324,8 +1492,20 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
     async def _staggered_vote(emp, idx):
         await asyncio.sleep(1.5 * idx)
         return await _run_vote(emp)
-    vote_results = await asyncio.gather(*[_staggered_vote(emp, i) for i, emp in enumerate(voters)], return_exceptions=False)
-    votes = [v for v in vote_results if v]
+    if not cost_cap_hit and _turn_tool_total() >= HYPER_ROOM_MAX_TOOL_CALLS:
+        cost_cap_hit = True
+        log.warning("[swarm] cost cap hit before R5 vote turn=%s total=%d cap=%d",
+                    req.turn_id, _turn_tool_total(), HYPER_ROOM_MAX_TOOL_CALLS)
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "cost_cap_hit", "total": _turn_tool_total(),
+            "cap": HYPER_ROOM_MAX_TOOL_CALLS, "skipped_from_round": 5,
+        })
+    elif not cost_cap_hit and await _deadline_hit(5):
+        cost_cap_hit = True
+    votes: List[Dict[str, Any]] = []
+    if not cost_cap_hit:
+        vote_results = await asyncio.gather(*[_staggered_vote(emp, i) for i, emp in enumerate(voters)], return_exceptions=False)
+        votes = [v for v in vote_results if v]
     for v in votes:
         tokens = max(60, len(v.get("reason", "")) // 4)
         cost_tokens += tokens
@@ -1343,28 +1523,42 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
     consensus = _consensus_verdict(votes, trust_by_slug)
 
     # ─── R5 Step B — Lead Synthesis ────────────────────────────────────
+    # When the cost cap fired before the vote, `votes` is empty and the
+    # verdict is DISSENT/none. Invoking the synthesis agent here would burn
+    # real tokens to write a "final answer" over an empty table and an empty
+    # tally — almost certainly empty or hallucinated. Skip the LLM call and
+    # emit a canned marker so the seal reflects reality.
     final_text = ""
-    try:
-        lead_agent = await _build_agent_for_room(req.room_id, lead, user_id=req.user_id, org_id=req.org_id)
-        vote_summary_lines = []
-        for v in votes:
-            vote_summary_lines.append(
-                f"  - {v['voter']} (trust {trust_by_slug.get(v['voter'], 0.5):.2f}): "
-                f"vote={v['vote_for_hypothesis_id']} score={v['score']} conditions={v['conditions']}"
+    if cost_cap_hit:
+        final_text = "[cost cap reached — synthesis skipped]"
+        synth_tokens = 0
+        log.warning("[swarm] synthesis skipped (cost cap) turn=%s verdict=%s",
+                    req.turn_id, consensus["verdict"])
+    else:
+        try:
+            lead_agent = await _build_agent_for_room(req.room_id, lead, user_id=req.user_id, org_id=req.org_id)
+            vote_summary_lines = []
+            for v in votes:
+                vote_summary_lines.append(
+                    f"  - {v['voter']} (trust {trust_by_slug.get(v['voter'], 0.5):.2f}): "
+                    f"vote={v['vote_for_hypothesis_id']} score={v['score']} conditions={v['conditions']}"
+                )
+            synth_prompt = R5_SYNTHESIS_PROMPT.format(
+                lead_name=lead.get("name", lead.get("slug")),
+                refined_hypotheses_table=refined_table_str,
+                skeptic_output=skeptic_output_str,
+                vote_summary="\n".join(vote_summary_lines) or "(no votes)",
+                verdict=consensus["verdict"],
+                winning_id=consensus["winning_id"] or "none",
             )
-        synth_prompt = R5_SYNTHESIS_PROMPT.format(
-            lead_name=lead.get("name", lead.get("slug")),
-            refined_hypotheses_table=refined_table_str,
-            skeptic_output=skeptic_output_str,
-            vote_summary="\n".join(vote_summary_lines) or "(no votes)",
-            verdict=consensus["verdict"],
-            winning_id=consensus["winning_id"] or "none",
-        )
-        synth_reply = await lead_agent(Msg(name="user", content=synth_prompt, role="user"))
-        final_text = _msg_to_text(synth_reply) or ""
-    except Exception as exc:
-        log.warning("[swarm] R5 synthesis failed: %s", exc)
-    synth_tokens = max(200, len(final_text) // 4)
+            synth_reply = await lead_agent(Msg(name="user", content=synth_prompt, role="user"))
+            final_text = _msg_to_text(synth_reply) or ""
+        except Exception as exc:
+            log.warning("[swarm] R5 synthesis failed: %s", exc)
+        if not final_text:
+            log.warning("[swarm] empty synthesis turn=%s verdict=%s cost_cap_hit=%s",
+                        req.turn_id, consensus["verdict"], cost_cap_hit)
+        synth_tokens = max(200, len(final_text) // 4)
     cost_tokens += synth_tokens
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "line",
@@ -1374,6 +1568,8 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
         "kind": "synthesis",
         "tokens": synth_tokens,
     })
+    log.info("[swarm] R5 done turn=%s verdict=%s votes=%d capped=%s",
+             req.turn_id, consensus["verdict"], len(votes), cost_cap_hit)
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "round_end", "round": 5, "verdict": consensus["verdict"],
     })
@@ -1446,8 +1642,8 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
                 # Reset post-turn so next turn starts fresh.
                 try:
                     setattr(cached_agent, "tool_call_count", 0)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("tool_call_count reset failed slug=%s: %s", p.get("slug"), exc)
     except Exception as exc:  # noqa: BLE001
         log.warning("[swarm] tool_call_count collection failed: %s", exc)
 
@@ -1471,6 +1667,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
         "tool_call_total": sum(tool_call_counts.values()),
         "saved_memory_id": saved_memory_id,
         "vote_count": len(votes),
+        "cost_cap_hit": cost_cap_hit,
     })
     return RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status=status)
 
@@ -1489,11 +1686,21 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     # Look up participating employees — explicit user selection, so we
     # ignore the running/deploying Slack-gateway filter and include any
     # non-paused, non-archived employee by id.
-    by_id = {r["id"]: r for r in await list_employees_by_ids(req.participant_ids)}
+    by_id = {r["id"]: r for r in await list_employees_by_ids(req.participant_ids, org_id=req.org_id)}
     participants: List[Dict[str, Any]] = []
     for pid in req.participant_ids:
         emp = by_id.get(pid)
         if not emp:
+            # Either paused/archived OR belongs to a different org (the
+            # query is now org-scoped). Drop it — never run a foreign-org
+            # agent under this request's emulation headers.
+            log.warning("[hyper] participant %s not found for org %s — dropping", pid, req.org_id)
+            continue
+        # Defence-in-depth: even if the query somehow returned a foreign
+        # row, refuse to invoke an employee outside the request's tenant.
+        if emp.get("org_id") and emp["org_id"] != req.org_id:
+            log.warning("[hyper] participant %s org %s != req org %s — dropping",
+                        pid, emp.get("org_id"), req.org_id)
             continue
         emp["_lane"] = derive_lane(emp)
         participants.append(emp)
@@ -1518,13 +1725,37 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             if p.get("slug") == mention.group(1):
                 forced = p
                 break
-    lead = forced or _pick_lead(participants, req.user_message)
+    # Role rotation: stateless, keyed on the monotonic per-room turn seq
+    # (seq lives on hyper_turns, written by the control-plane). Resolve a
+    # locked permanent skeptic first so lead rotation can exclude it.
+    # All reads are org-scoped so a foreign room/turn id can't leak config.
+    raw_seq = await get_turn_seq(req.turn_id, org_id=req.org_id)
+    if raw_seq is None:
+        # No seq available (missing row / NULL / pre-migration column / DB
+        # error). Falling back to a fixed 0 would freeze rotation onto the
+        # alphabetically-first lead forever. Derive a deterministic-but-
+        # varying ordinal from the turn id so rotation still cycles, and
+        # surface the degraded path so it's observable.
+        seq = (int(hashlib.sha1(req.turn_id.encode("utf-8")).hexdigest(), 16) % 997) + 1
+        log.warning("[hyper] get_turn_seq returned None for turn=%s — using hashed ordinal %d",
+                    req.turn_id, seq)
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "warning", "code": "turn_seq_unavailable", "fallback_seq": seq,
+        })
+    else:
+        seq = raw_seq
+    permanent_skeptic_id = await get_permanent_skeptic_id(req.room_id, org_id=req.org_id)
+    # Lead: @mention override wins; otherwise rotate by seq, excluding a
+    # locked permanent skeptic so the skeptic is never auto-elected lead.
+    lead = forced or _pick_lead_rotating(
+        participants, req.user_message, seq, permanent_skeptic_id,
+    )
     reactors = _pick_reactors(participants, lead)
 
     # B1: per-room template (debate | decision | swarm | brainstorm | council
     # | lean_coffee | retrospective | review | standup | auto). Falls back to
     # 'debate'. 'auto' OR ROOM_TEMPLATE_AUTO_PICK=true triggers keyword scorer.
-    room_template = await get_room_template(req.room_id)
+    room_template = await get_room_template(req.room_id, org_id=req.org_id)
     if room_template == "auto" or os.environ.get("ROOM_TEMPLATE_AUTO_PICK", "").lower() == "true":
         picked = recommend_template(req.user_message, default=room_template if room_template != "auto" else "debate")
         if picked and picked != room_template:
@@ -1534,12 +1765,36 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     trust_map = await get_trust_scores(req.org_id, [p["id"] for p in participants])
     trust_by_slug = {p.get("slug"): trust_map.get(p["id"], 0.5) for p in participants}
 
-    # Permanent Skeptic (swarm template). Falls back to any Skeptic-lane
-    # participant if the field isn't set yet.
-    skeptic_id = await get_permanent_skeptic_id(req.room_id)
-    skeptic = next((p for p in participants if p["id"] == skeptic_id), None) if skeptic_id else None
-    if not skeptic:
-        skeptic = next((p for p in participants if p.get("_lane") == "Skeptic"), None)
+    # Permanent Skeptic (swarm template). If permanent_skeptic_id is set the
+    # skeptic is locked (no rotation); otherwise rotate over Skeptic-lane
+    # participants by seq, falling back to any non-lead participant.
+    skeptic = _pick_skeptic_rotating(
+        participants, permanent_skeptic_id, seq, lead["id"],
+    )
+    # Collision guard: an @mention `forced` lead bypasses the skeptic
+    # exclusion, and a locked permanent skeptic ignores lead_id — either can
+    # make lead.id == skeptic.id. The lead is silent R1-R4 and the skeptic
+    # only speaks R4, so the same employee in both roles would never produce
+    # a hypothesis or a coherent synthesis. Drop the skeptic for this turn.
+    if skeptic and skeptic["id"] == lead["id"]:
+        log.warning("[hyper] lead==skeptic (slug=%s) turn=%s — dropping skeptic this turn",
+                    lead.get("slug"), req.turn_id)
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "warning",
+            "code": "lead_skeptic_collision",
+            "slug": lead.get("slug"),
+        })
+        skeptic = None
+    # Surface the case where a room has a locked permanent skeptic that is
+    # not present this turn — the UI should show the configured challenger
+    # was absent and a rotation stand-in (if any) was used instead.
+    if permanent_skeptic_id and not any(p["id"] == permanent_skeptic_id for p in participants):
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "warning",
+            "code": "configured_skeptic_absent",
+            "permanent_skeptic_id": permanent_skeptic_id,
+            "stand_in_skeptic": skeptic.get("slug") if skeptic else None,
+        })
 
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "router",
@@ -1549,6 +1804,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         "template": room_template,
         "trust": trust_by_slug,
         "skeptic": skeptic.get("slug") if skeptic else None,
+        "turn_seq": seq,
     })
 
     # ── Swarm template — branch into R1-R5 phase machine ──────────────
@@ -2008,8 +2264,9 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                             "verdict": parsed.get("verdict") or "resolved",
                             "line": (parsed.get("line") or "").strip()[:2000],
                         }
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                log.warning("validate JSON parse failed turn=%s: %s — defaulting to resolved",
+                            req.turn_id, exc)
             v_tokens = max(80, len(verdict_obj.get("line", "")) // 4)
             cost_tokens += v_tokens
             await _emit_event(req.callback_url, req.turn_id, {
@@ -2077,6 +2334,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         # Debate hit MAX_DEBATE_ROUNDS without consensus. Don't fake
         # 'complete' — surface the open question as an action item.
         status = "escalated"
+        log.info("[room] debate exhausted %d rounds unresolved turn=%s", debate_round, req.turn_id)
         await _emit_event(req.callback_url, req.turn_id, {
             "t": "decision_required",
             "open_question": open_question or req.user_message,
@@ -2138,6 +2396,10 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         log.warning("trust update failed: %s", exc)
 
     # ── Seal ─────────────────────────────────────────────────────────
+    log.info(
+        "[room] seal turn=%s status=%s template=%s cost=%d quality_low=%s",
+        req.turn_id, status, room_template, cost_tokens, quality_low,
+    )
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "seal",
         "cost_tokens": cost_tokens,

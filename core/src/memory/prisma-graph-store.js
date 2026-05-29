@@ -201,6 +201,11 @@ export class PrismaGraphStore {
         scope: memory.scope || 'personal',
         primaryTeamId: memory.primary_team_id || null,
         project: memory.project,
+        // Formal project FK — persist from the resolved project_id / first
+        // project_ids entry so project-scoped queries that filter by projectId
+        // (not just the legacy `project` string) see the memory.
+        projectId: memory.project_id
+          || (Array.isArray(memory.project_ids) && memory.project_ids.length > 0 ? memory.project_ids[0] : null),
         content,
         tags: memory.tags,
         isLatest: memory.is_latest,

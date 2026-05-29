@@ -7789,7 +7789,7 @@ exit \$RC
             try {
               const limit = Math.min(Number(url.searchParams.get('limit') || 50), 200);
               const rows = await prisma.relationship.findMany({
-                where: { type: 'Contradicts' },
+                where: { type: 'Contradicts', fromMemory: { orgId } },
                 orderBy: { createdAt: 'desc' },
                 take: limit,
                 select: {

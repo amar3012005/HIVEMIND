@@ -3854,6 +3854,38 @@ const server = http.createServer(async (req, res) => {
         return jsonResponse(res, { error: err.message }, err.status || 500);
       }
     }
+    // GET /v1/projects/:id/activity — recent memories + per-contributor
+    // activity + project audit events. Member-gated (any project member sees
+    // their project's activity; no org-admin requirement).
+    if (sub === 'activity' && req.method === 'GET') {
+      try {
+        await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'member' });
+        const memWhere = {
+          orgId, deletedAt: null,
+          OR: [{ projectId }, { memoryProjects: { some: { projectId } } }],
+        };
+        const [recent, byUser, audits, totalMem] = await Promise.all([
+          prisma.memory.findMany({ where: memWhere, select: { id: true, title: true, userId: true, createdAt: true, memoryType: true }, orderBy: { createdAt: 'desc' }, take: 15 }),
+          prisma.memory.groupBy({ by: ['userId'], where: memWhere, _count: { _all: true }, _max: { createdAt: true } }),
+          prisma.auditLog.findMany({ where: { organizationId: orgId, OR: [{ resourceType: 'project', resourceId: projectId }, { resourceType: 'project_member', resourceId: { startsWith: projectId } }] }, select: { eventType: true, action: true, userId: true, createdAt: true }, orderBy: { createdAt: 'desc' }, take: 15 }).catch(() => []),
+          prisma.memory.count({ where: memWhere }),
+        ]);
+        const uids = Array.from(new Set([...recent.map(m => m.userId), ...byUser.map(u => u.userId), ...audits.map(a => a.userId)].filter(Boolean)));
+        const users = uids.length ? await prisma.user.findMany({ where: { id: { in: uids } }, select: { id: true, email: true, displayName: true } }) : [];
+        const uMap = Object.fromEntries(users.map(u => [u.id, u]));
+        const nameOf = (id) => uMap[id]?.displayName || uMap[id]?.email || (id ? `${id.slice(0, 8)}…` : 'system');
+        return jsonResponse(res, {
+          total_memories: totalMem,
+          contributors: byUser
+            .map(u => ({ user_id: u.userId, name: nameOf(u.userId), memory_count: u._count._all, last_activity: u._max.createdAt }))
+            .sort((a, b) => new Date(b.last_activity) - new Date(a.last_activity)),
+          recent_memories: recent.map(m => ({ id: m.id, title: m.title, by: nameOf(m.userId), type: m.memoryType, at: m.createdAt })),
+          audit: audits.map(a => ({ event: a.eventType || a.action, by: nameOf(a.userId), at: a.createdAt })),
+        });
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, err.status || 500);
+      }
+    }
     // POST /v1/projects/:id/members
     const PROJECT_ROLES = ['owner', 'contributor', 'viewer'];
     if (sub === 'members' && req.method === 'POST') {

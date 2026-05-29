@@ -13184,6 +13184,10 @@ exit \$RC
               parsedTags = parsedTags.split(',').map(t => t.trim()).filter(Boolean);
             }
 
+            // Membership-based visibility: pass the caller's accessible
+            // project/team IDs so project memories authored by OTHER members
+            // surface (not just the caller's own rows).
+            const listAccessCtx = await buildAccessContext(userId, orgId).catch(() => null);
             const { memories, total } = await persistentMemoryStore.listMemories({
               user_id: userId,
               org_id: orgId,
@@ -13194,7 +13198,8 @@ exit \$RC
               is_latest: filters.is_latest,
               offset,
               limit,
-              include_children: includeChildren
+              include_children: includeChildren,
+              access_context: listAccessCtx,
             });
 
             return jsonResponse(res, {

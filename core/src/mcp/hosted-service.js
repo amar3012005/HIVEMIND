@@ -491,13 +491,11 @@ SELF-EVOLVING GRAPH:
 On every save the server runs semantic recall against past memories + a triple-operator detector. If the new content updates / extends / contradicts a prior memory the right edge type (Updates / Extends / Derives / Contradicts) is auto-added. No manual relationship needed for most cases.
 
 PROJECT SCOPING (IMPORTANT):
-The org has ONE shared HIVEMIND by default. Admins can create sub-HIVEMINDs called projects (e.g. "SOLVIS", "Q2-Planning"). Choose the right scope:
-  • If the user mentions a project ("save this to SOLVIS", "in my Q2 project"), pass project="<name>" or project_id="<uuid>".
-  • If the content is clearly about a known project (e.g. references that project's docs, code, or team), pick that project automatically.
-  • If the org policy is "ask" OR the project is ambiguous, ASK the user which project before saving.
-  • If genuinely org-wide (general fact, personal preference), omit project — saves org-wide.
-
-Call hivemind_list_projects first if you don't yet know which projects exist.`,
+The org has ONE shared HIVEMIND by default. Admins can create sub-HIVEMINDs called projects (e.g. "SOLVIS", "Q2-Planning"). Rule:
+  • If the user names a project ("save this to SOLVIS"), pass project="<name>" or project_id="<uuid>".
+  • Otherwise: if the user has access to one or more projects, the server returns needs_project_choice with the list — ASK the user which project to save to (or org-wide), then re-call with the chosen project_id (omit project entirely for org-wide).
+  • If the user has NO accessible projects, the save goes org-wide automatically — no need to ask.
+  • Genuinely org-wide facts/preferences: omit project.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -2295,51 +2293,44 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
         // project → auto-attach. Zero → fall through to org-wide policy.
         let projectPolicyHint = null;
         let autoAttachedProjectId = null;
-        if (!resolvedProjectId && userId) {
+        if (!resolvedProjectId && userId && orgId) {
           try {
             const { getPrismaClient } = await import('../db/prisma.js');
             const prisma = getPrismaClient();
-            const memberships = await prisma.projectMember.findMany({
-              where: { userId },
-              select: {
-                projectId: true,
-                project: { select: { id: true, name: true, slug: true, description: true, orgId: true } },
-              },
-            });
-            const orgScoped = orgId
-              ? memberships.filter(m => m.project && m.project.orgId === orgId)
-              : memberships;
-            if (orgScoped.length === 1) {
-              autoAttachedProjectId = orgScoped[0].project.id;
-            } else if (orgScoped.length >= 2) {
+            // Projects the user can save to = explicit ProjectMember rows
+            // UNION all projects of the user's teams (implicit access).
+            const [explicit, teamRows] = await Promise.all([
+              prisma.projectMember.findMany({
+                where: { userId, project: { orgId, status: 'active' } },
+                select: { project: { select: { id: true, name: true, slug: true, description: true } } },
+              }),
+              prisma.teamMember.findMany({ where: { userId }, select: { teamId: true } }),
+            ]);
+            const teamIds = teamRows.map(t => t.teamId);
+            const viaTeam = teamIds.length
+              ? await prisma.project.findMany({
+                  where: { orgId, status: 'active', teamId: { in: teamIds } },
+                  select: { id: true, name: true, slug: true, description: true },
+                })
+              : [];
+            const byId = new Map();
+            for (const e of explicit) if (e.project) byId.set(e.project.id, e.project);
+            for (const p of viaTeam) byId.set(p.id, p);
+            const accessible = [...byId.values()];
+
+            // Rule: if the user can access >=1 project and didn't name one,
+            // ASK which project (or org-wide). Zero projects → save org-wide.
+            if (accessible.length >= 1) {
               return formatToolContent({
                 needs_project_choice: true,
-                message: `You belong to ${orgScoped.length} projects. Ask the user which one to save this memory to, then re-call hivemind_save_memory with project_id="<chosen id>".`,
-                projects: orgScoped.map(m => ({
-                  id: m.project.id,
-                  name: m.project.name,
-                  slug: m.project.slug,
-                  description: m.project.description,
-                })),
+                message: `This memory can be scoped to a project. Ask the user which of these ${accessible.length} project(s) to save it to — or org-wide. Then re-call hivemind_save_memory with project_id="<chosen id>" (omit project entirely for org-wide).`,
+                projects: accessible.map(p => ({ id: p.id, name: p.name, slug: p.slug, description: p.description })),
+                org_wide_option: true,
                 saved: false,
               });
             }
-          } catch { /* membership lookup best-effort */ }
-
-          // No membership match — fall back to existing org-policy hint.
-          if (!autoAttachedProjectId && orgId) {
-            try {
-              const { getPrismaClient } = await import('../db/prisma.js');
-              const prisma = getPrismaClient();
-              const org = await prisma.organization.findUnique({
-                where: { id: orgId },
-                select: { memorySavePolicy: true },
-              });
-              if ((org?.memorySavePolicy || 'private') === 'ask') {
-                projectPolicyHint = 'Org policy requires explicit project scope. Please call hivemind_list_projects then re-call this with project="<name>".';
-              }
-            } catch { /* best-effort */ }
-          }
+            // accessible.length === 0 → fall through: save org-wide (default).
+          } catch { /* best-effort: fall through to org-wide save */ }
         }
 
         // Smart save (sync): the MCP caller expects an actual memory id +

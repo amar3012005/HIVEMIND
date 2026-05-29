@@ -334,9 +334,9 @@ export class PrismaGraphStore {
     return mapMemoryRecord(deleted);
   }
 
-  async listLatestMemories({ user_id, org_id, project, scope = 'personal' }) {
+  async listLatestMemories({ user_id, org_id, project, scope = 'personal', access_context = null }) {
     const records = await this.client.memory.findMany({
-      where: { ...scopedMemoryWhere({ user_id, org_id, project, scope }), isLatest: true },
+      where: { ...scopedMemoryWhere({ user_id, org_id, project, scope, access_context }), isLatest: true },
       include: {
         sourceMetadata: true,
         codeMetadata: true,
@@ -351,12 +351,25 @@ export class PrismaGraphStore {
     return records.map(mapMemoryRecord);
   }
 
-  async listMemories({ user_id, org_id, project, project_id, memory_type, tags, is_latest, limit = 50, offset = 0, scope = 'personal' }) {
+  async listMemories({ user_id, org_id, project, project_id, memory_type, tags, is_latest, limit = 50, offset = 0, scope = 'personal', access_context = null }) {
     // Phase P.3: prefer formal projectId FK when caller passes it; falls back
-    // to legacy free-text `project` string. Both forms allowed simultaneously
-    // (logical AND) to support FE clients sending both during transition.
-    const baseWhere = scopedMemoryWhere({ user_id, org_id, project, scope });
-    if (project_id) baseWhere.projectId = project_id;
+    // to legacy free-text `project` string.
+    const baseWhere = scopedMemoryWhere({ user_id, org_id, project, scope, access_context });
+    if (project_id) {
+      // Narrow to a single project the caller can access. Use the M:N
+      // memory_projects join so memories authored by OTHER project members
+      // surface — not just the caller's own (Memory.projectId) rows.
+      const accessible = !access_context
+        || (Array.isArray(access_context.projectIds) && access_context.projectIds.includes(project_id));
+      if (accessible) {
+        delete baseWhere.OR;
+        delete baseWhere.userId;
+        baseWhere.memoryProjects = { some: { projectId: project_id } };
+      } else {
+        // Not a member of this project → restrict to the caller's own rows.
+        baseWhere.projectId = project_id;
+      }
+    }
     // Internal-audit suppression: governance reflection rows etc. are
     // operational noise — drop from default listing. Caller opts in by
     // passing tags=['internal-audit'].

@@ -5033,12 +5033,24 @@ Write the persona now.`;
             })
           : [];
         const validIds = valid.map(v => v.id);
+        const ALLOWED_TEMPLATES = new Set([
+          'auto', 'debate', 'decision', 'swarm', 'brainstorm', 'council',
+          'lean_coffee', 'retrospective', 'review', 'standup',
+        ]);
+        const template = (typeof body.template === 'string' && ALLOWED_TEMPLATES.has(body.template))
+          ? body.template : 'debate';
+        let permanentSkepticId = null;
+        if (typeof body.permanent_skeptic_id === 'string' && validIds.includes(body.permanent_skeptic_id)) {
+          permanentSkepticId = body.permanent_skeptic_id;
+        }
         const room = await prisma.hyperRoom.create({
           data: {
             userId: current.session.userId,
             orgId: current.session.orgId,
             name,
             participantIds: validIds,
+            template,
+            permanentSkepticId,
           },
         });
         return jsonResponse(res, { room }, 201);
@@ -5101,6 +5113,24 @@ Write the persona now.`;
             })
           : [];
         data.participantIds = valid.map(v => v.id);
+      }
+      const ALLOWED_TEMPLATES = new Set([
+        'auto', 'debate', 'decision', 'swarm', 'brainstorm', 'council',
+        'lean_coffee', 'retrospective', 'review', 'standup',
+      ]);
+      if (typeof body.template === 'string' && ALLOWED_TEMPLATES.has(body.template)) {
+        data.template = body.template;
+      }
+      if (typeof body.permanent_skeptic_id === 'string' || body.permanent_skeptic_id === null) {
+        if (body.permanent_skeptic_id) {
+          // Must be a valid employee in this org
+          const emp = await prisma.digitalEmployee.findFirst({
+            where: { id: body.permanent_skeptic_id, orgId: current.session.orgId },
+            select: { id: true },
+          });
+          if (!emp) return jsonResponse(res, { error: 'Skeptic employee not in org' }, 400);
+        }
+        data.permanentSkepticId = body.permanent_skeptic_id || null;
       }
       const updated = await prisma.hyperRoom.update({ where: { id: roomId }, data });
       return jsonResponse(res, { room: updated });

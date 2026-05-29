@@ -15221,11 +15221,34 @@ exit \$RC
                 url.searchParams.get('include_children') === 'true';
               // Mirrors HIDDEN_CHILD_TAGS in prisma-graph-store.listMemories.
               const HIDDEN_CHILD_TAGS_GRAPH = ['extracted-fact', 'tara-turn', 'tara-insight'];
+              // Resolve the project filter to match the formal projectId FK +
+              // memory_projects join, NOT just the legacy `project` string —
+              // uploads set projectId (string stays null), so a string-only
+              // match returned an EMPTY graph for project-scoped docs.
+              let graphProjScope = null;
+              if (graphProject) {
+                const isUuidGP = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(graphProject);
+                const projRow = await prisma.project.findFirst({
+                  where: { orgId, OR: [
+                    ...(isUuidGP ? [{ id: graphProject }] : []),
+                    { slug: graphProject.toLowerCase() },
+                    { name: { equals: graphProject, mode: 'insensitive' } },
+                  ] },
+                  select: { id: true, slug: true, name: true },
+                }).catch(() => null);
+                graphProjScope = projRow
+                  ? { OR: [
+                      { projectId: projRow.id },
+                      { project: { in: [projRow.slug, projRow.name].filter(Boolean) } },
+                      { memoryProjects: { some: { projectId: projRow.id } } },
+                    ] }
+                  : { project: graphProject };
+              }
               const baseWhere = {
                 orgId: orgId,
                 deletedAt: null,
                 ...(includeSuperseded ? {} : { isLatest: true }),
-                ...(graphProject ? { project: graphProject } : {}),
+                ...(graphProjScope || {}),
                 ...(includeChildren ? {} : { AND: HIDDEN_CHILD_TAGS_GRAPH.map((t) => ({ NOT: { tags: { has: t } } })) }),
               };
               const scopeWhere = graphScope === 'team'

@@ -995,6 +995,85 @@ Output: 4-6 short sentences + action_items at end.
 """
 
 
+# Broad-recall probes for the standing company brief. The query-specific
+# recall alone (semantic match on the user's question) misses foundational
+# facts — what the business IS, who's involved, what's shipped — so the room
+# debates a topic without the company in front of it. MiroFish establishes
+# the world (full graph paging) before agents reason; this is the bounded
+# HIVEMIND analogue: a handful of orthogonal recalls, deduped + compressed
+# once, injected into every agent for the whole turn.
+_COMPANY_BRIEF_PROBES: List[str] = [
+    "company business model products services what we do",
+    "team people founders employees roles who is involved",
+    "customers clients partners pipeline revenue",
+    "goals roadmap strategy priorities current focus",
+]
+
+
+async def _build_company_brief(hm_client: "HivemindClient", query: str,
+                               max_memories: int = 25) -> str:
+    """Fan out orthogonal recalls (query + company/people/customers/goals),
+    dedup by memory id/title, compress to ~25 snippets, return a standing
+    COMPANY CONTEXT block. Best-effort: returns '' on any failure so the
+    turn still runs on the per-query recall."""
+    seen_ids: Set[str] = set()
+    seen_titles: Set[str] = set()
+    collected: List[Dict[str, Any]] = []
+    probes = [query] + _COMPANY_BRIEF_PROBES
+
+    async def _probe(p: str) -> List[Dict[str, Any]]:
+        try:
+            resp = await hm_client.recall(p, max_memories=8)
+            return resp.get("memories") or resp.get("combined") or []
+        except Exception as exc:  # noqa: BLE001 — one probe failing must not sink the brief
+            log.warning("[brief] recall probe failed (%s): %s", p[:40], exc)
+            return []
+
+    # Probes are orthogonal — fan out concurrently so the brief adds one
+    # recall-latency to the pre-round phase, not five.
+    probe_results = await asyncio.gather(*[_probe(p) for p in probes])
+    # Preserve probe order (query first) when deduping so the query-specific
+    # hits win ties over the generic company probes.
+    for rows in probe_results:
+        for r in rows:
+            if float(r.get("score", 0)) < 0.40:
+                continue
+            mid = str(r.get("id") or r.get("memory_id") or "")
+            title = (r.get("title") or "").strip()
+            key_title = title.lower()
+            if (mid and mid in seen_ids) or (key_title and key_title in seen_titles):
+                continue
+            if mid:
+                seen_ids.add(mid)
+            if key_title:
+                seen_titles.add(key_title)
+            collected.append(r)
+    if not collected:
+        return ""
+    # Highest-scored first so the budget keeps the strongest signal.
+    collected.sort(key=lambda r: float(r.get("score", 0)), reverse=True)
+    lines_out: List[str] = []
+    for r in collected[:max_memories]:
+        title = (r.get("title") or "").strip()
+        content = (r.get("content") or "").replace("\n", " ").strip()
+        if not content:
+            continue
+        snippet = content[:220] + ("…" if len(content) > 220 else "")
+        prefix = f'"{title}" — ' if title else ""
+        lines_out.append(f"- {prefix}{snippet}")
+    if not lines_out:
+        return ""
+    log.info("[brief] built company context: %d memories from %d probes",
+             len(lines_out), len(probes))
+    return (
+        "COMPANY CONTEXT — standing facts about this business, its people, "
+        "products, customers and goals. Ground every claim in these; this is "
+        "WHO and WHAT you are reasoning about:\n"
+        + "\n".join(lines_out)
+        + "\n"
+    )
+
+
 def _consensus_verdict(votes: List[Dict[str, Any]], trust_map: Dict[str, float]) -> Dict[str, Any]:
     """Compute swarm verdict from votes + per-voter trust.
     Returns { verdict, winning_id, weighted_score, action_items[] }.
@@ -1818,9 +1897,13 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             if lead_api_key:
                 hm_client = HivemindClient(api_key=lead_api_key)
                 try:
+                    # Broad standing brief first (who/what/why), then the
+                    # query-specific candidate memories on top.
+                    company_brief = await _build_company_brief(hm_client, req.user_message)
                     recall_resp = await hm_client.recall(req.user_message, max_memories=6)
                     rows = recall_resp.get("memories") or recall_resp.get("combined") or []
                     rows = [r for r in rows if float(r.get("score", 0)) >= 0.45]
+                    candidate_block = ""
                     if rows:
                         lines_out = []
                         for r in rows[:5]:
@@ -1832,10 +1915,13 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                             prefix = f'"{title}" — ' if title else ""
                             lines_out.append(f"- {prefix}{snippet}")
                         if lines_out:
-                            memory_context_swarm = (
-                                "CANDIDATE MEMORIES (only use if they DIRECTLY answer the user's question):\n"
+                            candidate_block = (
+                                "CANDIDATE MEMORIES (most relevant to the user's question):\n"
                                 + "\n".join(lines_out) + "\n"
                             )
+                    memory_context_swarm = (company_brief + candidate_block).strip()
+                    if memory_context_swarm:
+                        memory_context_swarm += "\n"
                 finally:
                     await hm_client.aclose()
         except Exception as exc:  # noqa: BLE001
@@ -1859,12 +1945,16 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         if lead_api_key:
             hm_client = HivemindClient(api_key=lead_api_key)
             try:
+                # Broad standing brief first (who/what/why), then the
+                # query-specific candidate memories on top.
+                company_brief = await _build_company_brief(hm_client, req.user_message)
                 recall_resp = await hm_client.recall(req.user_message, max_memories=6)
                 rows = recall_resp.get("memories") or recall_resp.get("combined") or []
                 # Drop low-relevance hits so a single dominant memory (long
                 # AUDIT memo etc.) doesn't crowd out diverse signal.
                 MIN_SCORE = 0.45
                 rows = [r for r in rows if float(r.get("score", 0)) >= MIN_SCORE]
+                candidate_block = ""
                 if rows:
                     lines_out = []
                     for r in rows[:5]:
@@ -1878,12 +1968,14 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                         prefix = f'"{title}" — ' if title else ""
                         lines_out.append(f"- {prefix}{snippet}")
                     if lines_out:
-                        memory_context = (
-                            "CANDIDATE MEMORIES (only use if they DIRECTLY answer the user's question — "
-                            "otherwise ignore; do NOT anchor on the heaviest memory):\n"
+                        candidate_block = (
+                            "CANDIDATE MEMORIES (most relevant to the user's question):\n"
                             + "\n".join(lines_out)
                             + "\n"
                         )
+                memory_context = (company_brief + candidate_block).strip()
+                if memory_context:
+                    memory_context += "\n"
             finally:
                 await hm_client.aclose()
     except Exception as exc:  # noqa: BLE001
@@ -2206,12 +2298,34 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     # MAX_DEBATE_ROUNDS so cost stays bounded. MiroFish pattern: do not
     # seal on unresolved 'escalate' — keep the debate moving until the
     # challenger accepts or the cap hits.
-    MAX_DEBATE_ROUNDS = 3
+    # MiroFish-style gate: run up to MAX_DEBATE_ROUNDS, but terminate early on
+    # convergence (challenger resolves) OR when the debate stops making
+    # progress — the challenger repeating the same point with no new evidence
+    # for MAX_NO_PROGRESS consecutive rounds. This lets a well-grounded debate
+    # run deep (now that agents have the full company brief) instead of dying
+    # at a flat cap, while still cutting off a genuine deadlock fast.
+    MAX_DEBATE_ROUNDS = int(os.environ.get("HYPER_ROOM_MAX_DEBATE_ROUNDS", "8"))
+    MAX_NO_PROGRESS = int(os.environ.get("HYPER_ROOM_MAX_NO_PROGRESS", "2"))
     debate_round = 2
+    no_progress = 0
     current_challenge_text = challenger_reaction["content"] if challenger_reaction else ""
     final_verdict: Optional[str] = None
     open_question: str = ""
     last_revise_text: str = ""
+
+    def _challenge_repeats(prev: str, nxt: str) -> bool:
+        """True when the new challenge is essentially the prior one — same
+        point, no new angle. 4-gram Jaccard over normalized text."""
+        a, b = _normalize_for_dedup(prev), _normalize_for_dedup(nxt)
+        if not a or not b:
+            return False
+        aw, bw = a.split(), b.split()
+        ag = {" ".join(aw[i:i + 4]) for i in range(max(len(aw) - 3, 0))} or {a}
+        bg = {" ".join(bw[i:i + 4]) for i in range(max(len(bw) - 3, 0))} or {b}
+        inter = len(ag & bg)
+        union = len(ag | bg) or 1
+        return (inter / union) >= 0.6
+
     while challenger_reaction and debate_round <= MAX_DEBATE_ROUNDS:
         await _emit_event(req.callback_url, req.turn_id, {
             "t": "typing", "agent": lead.get("slug"), "kind": "revise",
@@ -2282,9 +2396,20 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             open_question = verdict_obj["line"] or current_challenge_text
             if verdict_obj["verdict"] != "escalate":
                 break
-            # Escalating — feed challenger's new line as next round's
-            # challenge text and loop. Cost cap still in play.
-            current_challenge_text = verdict_obj["line"] or current_challenge_text
+            # Escalating — feed challenger's new line as next round's challenge
+            # and loop. Progress gate: if the challenger just repeats the same
+            # point with no new angle, count it; after MAX_NO_PROGRESS such
+            # rounds the debate is deadlocked — stop and escalate to a human.
+            next_challenge = verdict_obj["line"] or current_challenge_text
+            if _challenge_repeats(current_challenge_text, next_challenge):
+                no_progress += 1
+            else:
+                no_progress = 0
+            current_challenge_text = next_challenge
+            if no_progress >= MAX_NO_PROGRESS:
+                log.info("[room] debate deadlocked (no progress x%d) at round %d turn=%s",
+                         no_progress, debate_round, req.turn_id)
+                break
             debate_round += 1
         except Exception as exc:  # noqa: BLE001
             log.warning("round-%s debate failed: %s", debate_round, exc)

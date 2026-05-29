@@ -6,6 +6,7 @@ saves — via the existing REST endpoints (and the policy-gated
 """
 from __future__ import annotations
 
+import os
 import httpx
 import logging
 from typing import Any, Dict, Optional
@@ -13,6 +14,49 @@ from typing import Any, Dict, Optional
 from .config import get_settings
 
 log = logging.getLogger(__name__)
+
+
+def _emulated_headers(api_key: str, user_id: Optional[str], org_id: Optional[str]) -> Dict[str, str]:
+    """Auth headers for HIVEMIND core. Preferred: the employee's scoped key.
+    Fallback when no minted key exists: master key + X-HM-User-Id/X-HM-Org-Id
+    emulation so recall executes as the room owner. Mirrors the agent toolkit
+    (agentscope_tools._client) so server-side prefetch reaches the SAME org
+    brain the agents' tool calls do — not whatever key bootstrap happens to
+    hand back (often none)."""
+    effective = api_key or ""
+    extra: Dict[str, str] = {}
+    if not effective:
+        master = os.environ.get("HIVEMIND_MASTER_API_KEY") or os.environ.get("API_MASTER_KEY") or ""
+        if master:
+            effective = master
+            if user_id:
+                extra["X-HM-User-Id"] = user_id
+            if org_id:
+                extra["X-HM-Org-Id"] = org_id
+    headers = {
+        "Authorization": f"Bearer {effective}" if effective else "",
+        "X-API-Key": effective,
+        "Content-Type": "application/json",
+    }
+    headers = {k: v for k, v in headers.items() if v}
+    headers.update(extra)
+    return headers
+
+
+async def recall_emulated(query: str, *, user_id: Optional[str], org_id: Optional[str],
+                          api_key: str = "", max_memories: int = 8) -> Dict[str, Any]:
+    """Async recall that works even when the employee has no minted key, via
+    master + emulation headers. Returns the raw /api/recall JSON."""
+    settings = get_settings()
+    headers = _emulated_headers(api_key, user_id, org_id)
+    async with httpx.AsyncClient(
+        base_url=settings.hivemind_core_url,
+        timeout=httpx.Timeout(30.0, connect=5.0),
+        headers=headers,
+    ) as c:
+        r = await c.post("/api/recall", json={"query_context": query, "max_memories": max_memories})
+        r.raise_for_status()
+        return r.json()
 
 
 class HivemindClient:

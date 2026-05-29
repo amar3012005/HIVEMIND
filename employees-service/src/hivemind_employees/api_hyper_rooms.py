@@ -55,7 +55,7 @@ from .db import (
     list_running_employees,
     update_trust,
 )
-from .hivemind_client import HivemindClient
+from .hivemind_client import recall_emulated
 
 log = logging.getLogger(__name__)
 
@@ -1010,12 +1010,13 @@ _COMPANY_BRIEF_PROBES: List[str] = [
 ]
 
 
-async def _build_company_brief(hm_client: "HivemindClient", query: str,
-                               max_memories: int = 25) -> str:
+async def _build_company_brief(query: str, user_id: str, org_id: str,
+                               api_key: str = "", max_memories: int = 25) -> str:
     """Fan out orthogonal recalls (query + company/people/customers/goals),
     dedup by memory id/title, compress to ~25 snippets, return a standing
-    COMPANY CONTEXT block. Best-effort: returns '' on any failure so the
-    turn still runs on the per-query recall."""
+    COMPANY CONTEXT block. Recalls via master+emulation (recall_emulated) so
+    it reaches the org brain even when the rotated lead has no minted key.
+    Best-effort: returns '' on any failure so the turn still runs."""
     seen_ids: Set[str] = set()
     seen_titles: Set[str] = set()
     collected: List[Dict[str, Any]] = []
@@ -1023,7 +1024,8 @@ async def _build_company_brief(hm_client: "HivemindClient", query: str,
 
     async def _probe(p: str) -> List[Dict[str, Any]]:
         try:
-            resp = await hm_client.recall(p, max_memories=8)
+            resp = await recall_emulated(p, user_id=user_id, org_id=org_id,
+                                         api_key=api_key, max_memories=8)
             return resp.get("memories") or resp.get("combined") or []
         except Exception as exc:  # noqa: BLE001 — one probe failing must not sink the brief
             log.warning("[brief] recall probe failed (%s): %s", p[:40], exc)
@@ -1889,41 +1891,38 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     # ── Swarm template — branch into R1-R5 phase machine ──────────────
     if room_template == "swarm":
         # Best-effort pre-fetch memory context for R1 (shared across all agents).
+        # Recall via master+emulation (req.user_id/org_id) so it reaches the
+        # org brain regardless of whether bootstrap minted a lead key.
         memory_context_swarm = ""
         try:
             boot_map = {b["id"]: b for b in await fetch_bootstrap()}
-            lead_boot = boot_map.get(lead["id"], {}) or {}
-            lead_api_key = lead_boot.get("api_key")
-            if lead_api_key:
-                hm_client = HivemindClient(api_key=lead_api_key)
-                try:
-                    # Broad standing brief first (who/what/why), then the
-                    # query-specific candidate memories on top.
-                    company_brief = await _build_company_brief(hm_client, req.user_message)
-                    recall_resp = await hm_client.recall(req.user_message, max_memories=6)
-                    rows = recall_resp.get("memories") or recall_resp.get("combined") or []
-                    rows = [r for r in rows if float(r.get("score", 0)) >= 0.45]
-                    candidate_block = ""
-                    if rows:
-                        lines_out = []
-                        for r in rows[:5]:
-                            title = (r.get("title") or "").strip()
-                            content = (r.get("content") or "").replace("\n", " ").strip()
-                            if not content:
-                                continue
-                            snippet = content[:300] + ("…" if len(content) > 300 else "")
-                            prefix = f'"{title}" — ' if title else ""
-                            lines_out.append(f"- {prefix}{snippet}")
-                        if lines_out:
-                            candidate_block = (
-                                "CANDIDATE MEMORIES (most relevant to the user's question):\n"
-                                + "\n".join(lines_out) + "\n"
-                            )
-                    memory_context_swarm = (company_brief + candidate_block).strip()
-                    if memory_context_swarm:
-                        memory_context_swarm += "\n"
-                finally:
-                    await hm_client.aclose()
+            lead_api_key = (boot_map.get(lead["id"], {}) or {}).get("api_key", "") or ""
+            company_brief = await _build_company_brief(
+                req.user_message, req.user_id, req.org_id, lead_api_key)
+            recall_resp = await recall_emulated(
+                req.user_message, user_id=req.user_id, org_id=req.org_id,
+                api_key=lead_api_key, max_memories=6)
+            rows = recall_resp.get("memories") or recall_resp.get("combined") or []
+            rows = [r for r in rows if float(r.get("score", 0)) >= 0.45]
+            candidate_block = ""
+            if rows:
+                lines_out = []
+                for r in rows[:5]:
+                    title = (r.get("title") or "").strip()
+                    content = (r.get("content") or "").replace("\n", " ").strip()
+                    if not content:
+                        continue
+                    snippet = content[:300] + ("…" if len(content) > 300 else "")
+                    prefix = f'"{title}" — ' if title else ""
+                    lines_out.append(f"- {prefix}{snippet}")
+                if lines_out:
+                    candidate_block = (
+                        "CANDIDATE MEMORIES (most relevant to the user's question):\n"
+                        + "\n".join(lines_out) + "\n"
+                    )
+            memory_context_swarm = (company_brief + candidate_block).strip()
+            if memory_context_swarm:
+                memory_context_swarm += "\n"
         except Exception as exc:  # noqa: BLE001
             log.warning("[swarm] pre-fetch failed: %s", exc)
         return await _orchestrate_swarm(
@@ -1940,44 +1939,42 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     memory_context = ""
     try:
         boot_map = {b["id"]: b for b in await fetch_bootstrap()}
-        lead_boot = boot_map.get(lead["id"], {}) or {}
-        lead_api_key = lead_boot.get("api_key")
-        if lead_api_key:
-            hm_client = HivemindClient(api_key=lead_api_key)
-            try:
-                # Broad standing brief first (who/what/why), then the
-                # query-specific candidate memories on top.
-                company_brief = await _build_company_brief(hm_client, req.user_message)
-                recall_resp = await hm_client.recall(req.user_message, max_memories=6)
-                rows = recall_resp.get("memories") or recall_resp.get("combined") or []
-                # Drop low-relevance hits so a single dominant memory (long
-                # AUDIT memo etc.) doesn't crowd out diverse signal.
-                MIN_SCORE = 0.45
-                rows = [r for r in rows if float(r.get("score", 0)) >= MIN_SCORE]
-                candidate_block = ""
-                if rows:
-                    lines_out = []
-                    for r in rows[:5]:
-                        title = (r.get("title") or "").strip()
-                        content = (r.get("content") or "").replace("\n", " ").strip()
-                        if not content:
-                            continue
-                        # Shorter snippet — was 1200, now 300. Lead can ask
-                        # for full memory via recall tool if needed.
-                        snippet = content[:300] + ("…" if len(content) > 300 else "")
-                        prefix = f'"{title}" — ' if title else ""
-                        lines_out.append(f"- {prefix}{snippet}")
-                    if lines_out:
-                        candidate_block = (
-                            "CANDIDATE MEMORIES (most relevant to the user's question):\n"
-                            + "\n".join(lines_out)
-                            + "\n"
-                        )
-                memory_context = (company_brief + candidate_block).strip()
-                if memory_context:
-                    memory_context += "\n"
-            finally:
-                await hm_client.aclose()
+        lead_api_key = (boot_map.get(lead["id"], {}) or {}).get("api_key", "") or ""
+        # Broad standing brief first (who/what/why), then the query-specific
+        # candidate memories on top. Recall via master+emulation so it reaches
+        # the org brain regardless of whether bootstrap minted a lead key.
+        company_brief = await _build_company_brief(
+            req.user_message, req.user_id, req.org_id, lead_api_key)
+        recall_resp = await recall_emulated(
+            req.user_message, user_id=req.user_id, org_id=req.org_id,
+            api_key=lead_api_key, max_memories=6)
+        rows = recall_resp.get("memories") or recall_resp.get("combined") or []
+        # Drop low-relevance hits so a single dominant memory (long
+        # AUDIT memo etc.) doesn't crowd out diverse signal.
+        MIN_SCORE = 0.45
+        rows = [r for r in rows if float(r.get("score", 0)) >= MIN_SCORE]
+        candidate_block = ""
+        if rows:
+            lines_out = []
+            for r in rows[:5]:
+                title = (r.get("title") or "").strip()
+                content = (r.get("content") or "").replace("\n", " ").strip()
+                if not content:
+                    continue
+                # Shorter snippet — was 1200, now 300. Lead can ask
+                # for full memory via recall tool if needed.
+                snippet = content[:300] + ("…" if len(content) > 300 else "")
+                prefix = f'"{title}" — ' if title else ""
+                lines_out.append(f"- {prefix}{snippet}")
+            if lines_out:
+                candidate_block = (
+                    "CANDIDATE MEMORIES (most relevant to the user's question):\n"
+                    + "\n".join(lines_out)
+                    + "\n"
+                )
+        memory_context = (company_brief + candidate_block).strip()
+        if memory_context:
+            memory_context += "\n"
     except Exception as exc:  # noqa: BLE001
         log.warning("hyper-rooms pre-fetch recall failed: %s", exc)
 

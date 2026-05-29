@@ -6758,10 +6758,28 @@ exit \$RC
               const { runReactAgent } = useV2
                 ? await import('./agent/react-agent-v2.js').then(m => ({ runReactAgent: m.runReactAgentV2 }))
                 : await import('./agent/react-agent.js');
+              // Thinking indicator — Slack has no bot typing API, so post a
+              // placeholder now and update it with the answer when ready.
+              const botToken = await bridge.connectorStore.getAccessToken(evUserId, 'slack');
+              let placeholderTs = null;
+              try {
+                const ph = await bridge._call('chat.postMessage',
+                  { channel: qChannel, text: '🧠 _Thinking…_', ...(ev.thread_ts ? { thread_ts: ev.thread_ts } : {}) },
+                  botToken, 'POST');
+                placeholderTs = ph?.ts || null;
+              } catch (e) { /* non-fatal: fall back to a fresh post below */ }
+
+              // Per-conversation history so multi-turn flows work — e.g.
+              // "save this" → "which project?" → reply names a project → saves —
+              // and the chosen project persists across the session.
+              const convKey = `${qChannel}:${askerSlackId || ''}`;
+              globalThis._slackHistory = globalThis._slackHistory || new Map();
+              const priorHistory = globalThis._slackHistory.get(convKey) || [];
+
               const accessCtx = await buildAccessContext(runUserId, runOrgId);
               const result = await runReactAgent({
                 message: question,
-                history: [],
+                history: priorHistory.map((h) => ({ role: h.role, content: h.content })),
                 model: 'openai/gpt-oss-120b',
                 apiKey: groqKey,
                 language: 'en',
@@ -6780,12 +6798,36 @@ exit \$RC
                   webIntelligence: globalThis.webIntelligence || null,
                 },
               });
-              const answer = String(result?.response || '').trim() || 'I could not find an answer.';
-              // Reply in the SAME conversation it was asked — the originating
-              // channel or DM. If the mention was inside a thread, stay in that
-              // thread; otherwise post top-level. Never redirect to the app DM.
-              const threadTs = ev.thread_ts || undefined;
-              await bridge.postMessage(evUserId, qChannel, answer, threadTs ? { threadTs } : {});
+              let answer = String(result?.response || '').trim() || 'I could not find an answer.';
+              // When a save is deferred for project selection, name the projects
+              // so the user can just reply with one (the agent's continuation
+              // logic + the history below turn that reply into the save).
+              const pcProjects = result?.project_choice?.projects;
+              if (Array.isArray(pcProjects) && pcProjects.length) {
+                const names = pcProjects.map((p) => p.name || p.slug || p.id).filter(Boolean);
+                if (names.length) answer += `\n\n*Projects:* ${names.join(' · ')} — reply with one (or "personal") to save.`;
+              }
+
+              // Persist the turn into per-conversation history (cap 12).
+              const updated = [...priorHistory,
+                { role: 'user', content: question },
+                { role: 'assistant', content: answer },
+              ].slice(-12);
+              globalThis._slackHistory.set(convKey, updated);
+              if (globalThis._slackHistory.size > 2000) {
+                globalThis._slackHistory = new Map([...globalThis._slackHistory].slice(-1000));
+              }
+
+              // Reply in the SAME conversation — update the placeholder if we
+              // posted one, else post fresh (stay in-thread only if originally
+              // threaded). Never redirect to the app DM.
+              if (placeholderTs) {
+                await bridge._call('chat.update',
+                  { channel: qChannel, ts: placeholderTs, text: answer }, botToken, 'POST');
+              } else {
+                const threadTs = ev.thread_ts || undefined;
+                await bridge.postMessage(evUserId, qChannel, answer, threadTs ? { threadTs } : {});
+              }
             } catch (err) {
               console.error('[slack-query] handle failed:', err.message);
             }

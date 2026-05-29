@@ -6692,28 +6692,73 @@ exit \$RC
           return jsonResponse(res, { ok: true, skipped: 'noise_subtype' });
         }
 
-        // ── @DAVINCIAI mention → Talk-to-HIVE in Slack ──────────────────────
-        // Run the SAME agent path as /api/chat (full recall/save/all-tools
-        // parity) and reply in-thread. Identity v1: run as the connecting user
-        // (the one who OAuth'd Slack). Ack the control-plane immediately, then
-        // run the multi-second agent + post in the background.
-        if (evType === 'app_mention') {
-          const mentionChannel = ev.channel || null;
-          const mentionThreadTs = ev.thread_ts || ev.ts || null;
-          // Strip the leading bot mention token(s): "<@U123> hello" -> "hello"
+        // ── Talk-to-HIVE in Slack — @mention OR direct message ──────────────
+        // Runs the SAME agent path as /api/chat (full recall/save/all-tools
+        // parity) and replies. Acks the control-plane immediately, runs the
+        // multi-second agent + post in the background.
+        //
+        //  • Identity: resolve the ASKING Slack user -> their HIVEMIND user/org
+        //    (via email) so recall hits THEIR memories. Falls back to the
+        //    connecting (OAuth) user when the email can't be resolved.
+        //  • Dedup: Slack retries on slow/non-200 — skip already-handled events.
+        //  • Reply is posted with the connecting user's bot token (the only one
+        //    that can chat.postMessage as the app).
+        const isDM = (ev.channel_type === 'im') || (typeof ev.channel === 'string' && ev.channel.startsWith('D'));
+        const isBotEcho = !!(ev.bot_id || subtype === 'bot_message' || ev.app_id);
+        const isQuery = evType === 'app_mention' || (evType === 'message' && isDM && !isBotEcho);
+
+        if (isQuery) {
+          const qChannel = ev.channel || null;
+          const qThreadTs = ev.thread_ts || ev.ts || null;
+          const askerSlackId = ev.user || null;
           const question = String(ev.text || '').replace(/<@[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-          if (!question || !mentionChannel) {
+          if (!question || !qChannel) {
             return jsonResponse(res, { ok: true, skipped: 'empty_or_no_channel' });
           }
-          jsonResponse(res, { ok: true, handling: 'app_mention' });
+          // Dedup on team:event_ts (bounded set).
+          const dedupKey = `${teamId || ''}:${ev.event_ts || ev.ts || ''}`;
+          globalThis._slackSeenEvents = globalThis._slackSeenEvents || new Set();
+          if (globalThis._slackSeenEvents.has(dedupKey)) {
+            return jsonResponse(res, { ok: true, deduped: true });
+          }
+          globalThis._slackSeenEvents.add(dedupKey);
+          if (globalThis._slackSeenEvents.size > 5000) {
+            globalThis._slackSeenEvents = new Set([...globalThis._slackSeenEvents].slice(-2000));
+          }
+
+          jsonResponse(res, { ok: true, handling: isDM ? 'slack_dm' : 'app_mention' });
           setImmediate(async () => {
             try {
+              const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
+              const { SlackBridge } = await import('./connectors/providers/slack/bridge.js');
+              const bridge = new SlackBridge({ connectorStore: new ConnectorStore(prisma) });
+
+              // Resolve the asking Slack user -> HIVEMIND user/org via email.
+              let runUserId = evUserId;
+              let runOrgId = evOrgId;
+              if (askerSlackId) {
+                try {
+                  const info = await bridge.getUser(evUserId, askerSlackId);
+                  const email = info?.profile?.email || info?.user?.profile?.email || null;
+                  if (email) {
+                    const hu = await prisma.user.findFirst({ where: { email } });
+                    if (hu?.id) {
+                      runUserId = hu.id;
+                      const membership = await prisma.userOrganization.findFirst({ where: { userId: hu.id } });
+                      runOrgId = membership?.orgId || evOrgId;
+                    }
+                  }
+                } catch (e) {
+                  console.warn('[slack-query] identity resolve failed, using connecting user:', e.message);
+                }
+              }
+
               const groqKey = process.env.GROQ_API_KEY;
               const useV2 = process.env.HIVEMIND_AGENT_V1 !== 'true';
               const { runReactAgent } = useV2
                 ? await import('./agent/react-agent-v2.js').then(m => ({ runReactAgent: m.runReactAgentV2 }))
                 : await import('./agent/react-agent.js');
-              const accessCtx = await buildAccessContext(evUserId, evOrgId);
+              const accessCtx = await buildAccessContext(runUserId, runOrgId);
               const result = await runReactAgent({
                 message: question,
                 history: [],
@@ -6721,8 +6766,8 @@ exit \$RC
                 apiKey: groqKey,
                 language: 'en',
                 ctx: {
-                  userId: evUserId,
-                  orgId: evOrgId,
+                  userId: runUserId,
+                  orgId: runOrgId,
                   projectId: null,
                   prisma,
                   persistentMemoryStore,
@@ -6736,12 +6781,9 @@ exit \$RC
                 },
               });
               const answer = String(result?.response || '').trim() || 'I could not find an answer.';
-              const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
-              const { SlackBridge } = await import('./connectors/providers/slack/bridge.js');
-              const bridge = new SlackBridge({ connectorStore: new ConnectorStore(prisma) });
-              await bridge.postMessage(evUserId, mentionChannel, answer, { threadTs: mentionThreadTs });
+              await bridge.postMessage(evUserId, qChannel, answer, { threadTs: isDM ? undefined : qThreadTs });
             } catch (err) {
-              console.error('[slack-mention] handle failed:', err.message);
+              console.error('[slack-query] handle failed:', err.message);
             }
           });
           return;

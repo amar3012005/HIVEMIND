@@ -12,6 +12,7 @@ const BOT_SCOPES = [
   'groups:history',
   'im:history', 'mpim:history',
   'users:read',
+  'users:read.email',
   'team:read',
   'chat:write',
   'app_mentions:read',

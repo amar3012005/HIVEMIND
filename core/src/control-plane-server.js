@@ -5064,6 +5064,57 @@ Write the persona now.`;
     const roomTurnMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/turns(?:\/([0-9a-f-]{36})(\/stream)?)?$/);
     const roomMetaMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})$/);
 
+    // DELETE /v1/hyper-rooms/:id — permanent delete (?hard=true) or archive.
+    // Archive (default) sets archived_at so the room drops to the rail's
+    // Archived section; hard delete removes the row and cascades its turns +
+    // agent_evals (schema onDelete: Cascade). Both tenant-scoped.
+    if (roomMetaMatch && req.method === 'DELETE') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const roomId = roomMetaMatch[1];
+      const room = await prisma.hyperRoom.findFirst({
+        where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId },
+        select: { id: true },
+      });
+      if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
+      const hard = url.searchParams.get('hard') === 'true';
+      try {
+        if (hard) {
+          await prisma.hyperRoom.delete({ where: { id: roomId } });
+          return jsonResponse(res, { ok: true, deleted: true, mode: 'hard' });
+        }
+        await prisma.hyperRoom.update({
+          where: { id: roomId },
+          data: { archivedAt: new Date() },
+        });
+        return jsonResponse(res, { ok: true, archived: true, mode: 'archive' });
+      } catch (err) {
+        console.warn('[hyper-rooms] delete failed:', err.message);
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+
+    // DELETE /v1/hyper-rooms/:id/turns — clear the whole discussion (every
+    // turn + its agent activity). Keeps the room. Saved decision memories are
+    // separate and untouched. Tenant-scoped.
+    if (roomTurnMatch && roomTurnMatch[2] == null && req.method === 'DELETE') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const roomId = roomTurnMatch[1];
+      const room = await prisma.hyperRoom.findFirst({
+        where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId },
+        select: { id: true },
+      });
+      if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
+      try {
+        const result = await prisma.hyperTurn.deleteMany({ where: { roomId } });
+        return jsonResponse(res, { ok: true, cleared: result.count });
+      } catch (err) {
+        console.warn('[hyper-rooms] clear discussion failed:', err.message);
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+
     // GET /v1/hyper-rooms/:id — metadata + recent turns
     if (roomMetaMatch && req.method === 'GET') {
       const current = await requireSession(req, res);

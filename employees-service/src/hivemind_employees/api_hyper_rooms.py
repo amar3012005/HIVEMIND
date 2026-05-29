@@ -1044,7 +1044,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
 
     # Stagger starts so 9-concurrent Groq calls don't 429.
     async def _staggered_r1(emp, idx):
-        await asyncio.sleep(0.25 * idx)
+        await asyncio.sleep(1.5 * idx)
         return await _run_r1(emp)
     r1_results = await asyncio.gather(*[_staggered_r1(emp, i) for i, emp in enumerate(speakers)], return_exceptions=False)
     hypotheses = [h for h in r1_results if h]
@@ -1129,7 +1129,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
             return []
 
     async def _staggered_r2(emp, idx):
-        await asyncio.sleep(0.25 * idx)
+        await asyncio.sleep(1.5 * idx)
         return await _run_r2(emp)
     r2_lists = await asyncio.gather(*[_staggered_r2(emp, i) for i, emp in enumerate(speakers)], return_exceptions=False)
     peer_reviews = [r for lst in r2_lists for r in lst]
@@ -1205,7 +1205,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
             return None
 
     async def _staggered_r3(emp, idx):
-        await asyncio.sleep(0.25 * idx)
+        await asyncio.sleep(1.5 * idx)
         return await _run_r3(emp)
     r3_results = await asyncio.gather(*[_staggered_r3(emp, i) for i, emp in enumerate(speakers)], return_exceptions=False)
     refined = [r for r in r3_results if r]
@@ -1322,7 +1322,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
             return None
 
     async def _staggered_vote(emp, idx):
-        await asyncio.sleep(0.25 * idx)
+        await asyncio.sleep(1.5 * idx)
         return await _run_vote(emp)
     vote_results = await asyncio.gather(*[_staggered_vote(emp, i) for i, emp in enumerate(voters)], return_exceptions=False)
     votes = [v for v in vote_results if v]

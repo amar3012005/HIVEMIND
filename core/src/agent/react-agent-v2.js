@@ -1988,7 +1988,11 @@ export async function runReactAgentV2({
 
     return {
       project_choice: recallProjectChoice,
-      response:      answer.response,
+      // When a save was deferred for project choice, don't claim it was saved —
+      // prompt the user to pick (the FE renders project buttons below).
+      response:      recallProjectChoice
+        ? 'Which project should I save this to? (pick below)'
+        : answer.response,
       // Sources include recall-trace metadata so the FE can render WHY a
       // memory ranked (synth boost, x-cluster overlap, raw score). Helps
       // users trust the answer + spot mis-ranking.

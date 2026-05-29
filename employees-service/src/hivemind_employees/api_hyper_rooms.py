@@ -567,6 +567,135 @@ class RoomTurnResponse(BaseModel):
     status: str
 
 
+# ─── Meeting-template overlays (Phase 4 PR-3) ──────────────────────────
+# Eight AI-Company-inspired templates. Each one injects a prompt prelude
+# into the lead/synth pipeline so the same orchestrator flow yields
+# topic-appropriate behaviour (e.g. retrospective wants "what worked / what
+# didn't / actions", standup wants status report, etc.). Phase-machine
+# stays the SAME — only the framing differs. Avoids 8 forked orchestrators.
+TEMPLATE_OVERLAYS: Dict[str, Dict[str, str]] = {
+    "debate": {
+        "label": "Debate",
+        "lead_hint": "",
+        "synth_hint": "",
+    },
+    "decision": {
+        "label": "Decision (DACI)",
+        "lead_hint": (
+            "MEETING MODE: DACI Decision. Lead is Driver. Bias toward committing "
+            "to one path with explicit Approver / Consulted / Informed if memory "
+            "names them. Output must end with a clear COMMITMENT line."
+        ),
+        "synth_hint": "End with: 'DECISION: ...' on its own line.",
+    },
+    "swarm": {
+        "label": "Swarm (R1-R5)",
+        "lead_hint": "",
+        "synth_hint": "",
+    },
+    "brainstorm": {
+        "label": "Brainstorm",
+        "lead_hint": (
+            "MEETING MODE: Brainstorm. Generative-only. Suspend criticism. "
+            "Encourage volume + variety. Skeptic challenges still allowed but "
+            "should propose NEW options rather than kill existing ones."
+        ),
+        "synth_hint": (
+            "Output: top 5-8 ideas as a bulleted list, sorted by novelty + "
+            "feasibility. No premature pick. No 'best option'."
+        ),
+    },
+    "council": {
+        "label": "Council (majority vote)",
+        "lead_hint": (
+            "MEETING MODE: Council. Each participant is an expert peer. Lead is "
+            "facilitator, not decision-maker. Final outcome requires majority "
+            "APPROVE (3/5 or higher)."
+        ),
+        "synth_hint": (
+            "Output: APPROVED / CONDITIONAL / REJECTED based on vote count. "
+            "List the conditions explicitly when CONDITIONAL."
+        ),
+    },
+    "lean_coffee": {
+        "label": "Lean Coffee",
+        "lead_hint": (
+            "MEETING MODE: Lean Coffee. Rotate through 2-3 sub-topics in the "
+            "user's question. Time-box each. Light, exploratory. No deep dive."
+        ),
+        "synth_hint": "Output: per-topic 2-3 sentences. End with 'Carry forward: …'.",
+    },
+    "retrospective": {
+        "label": "Retrospective",
+        "lead_hint": (
+            "MEETING MODE: Retrospective. Frame answer as: WHAT WORKED / WHAT "
+            "DIDN'T / WHAT TO CHANGE. Pull memory evidence for each bucket. "
+            "Skeptic emphasises what didn't work."
+        ),
+        "synth_hint": (
+            "Output STRICT structure:\n"
+            "WHAT WORKED:\n- ...\nWHAT DIDN'T:\n- ...\nWHAT TO CHANGE:\n- ..."
+        ),
+    },
+    "review": {
+        "label": "Review (checklist)",
+        "lead_hint": (
+            "MEETING MODE: Review. Treat the user's question as something to "
+            "evaluate against a checklist. Each reactor scores one dimension. "
+            "Skeptic surfaces missed criteria."
+        ),
+        "synth_hint": (
+            "Output: dimension-by-dimension verdict + overall PASS / NEEDS_WORK / FAIL."
+        ),
+    },
+    "standup": {
+        "label": "Standup",
+        "lead_hint": (
+            "MEETING MODE: Standup. Status report. Brief. Each participant: "
+            "YESTERDAY / TODAY / BLOCKERS based on memory. No deep deliberation."
+        ),
+        "synth_hint": (
+            "Output STRICT structure per participant if relevant, or merged:\n"
+            "YESTERDAY: ...\nTODAY: ...\nBLOCKERS: ..."
+        ),
+    },
+}
+
+
+# Auto-pick template from user message via keyword scoring (no LLM, cheap).
+# Returns template key or None when caller already specified one.
+_TEMPLATE_KEYWORDS: Dict[str, List[str]] = {
+    "decision": ["should we", "decide", "go/no-go", "commit", "approve", "pick one"],
+    "brainstorm": ["brainstorm", "ideas", "what could", "options for", "how might we"],
+    "council": ["vote", "council", "team think", "majority", "everyone's take"],
+    "lean_coffee": ["talk through", "discuss multiple", "couple topics", "quick chat"],
+    "retrospective": ["retro", "retrospective", "what went wrong", "what worked", "post-mortem", "postmortem"],
+    "review": ["review", "evaluate", "score", "rate", "audit this", "check this"],
+    "standup": ["status", "where are we", "what's the state", "standup", "stand-up"],
+    "swarm": ["why", "what do you all think", "from every angle", "perspectives", "team analysis"],
+}
+
+
+def recommend_template(user_message: str, default: str = "debate") -> str:
+    """Score templates by keyword presence in user message. Returns best
+    match or default. No LLM call — cheap heuristic. Set
+    ROOM_TEMPLATE_AUTO_PICK=true env to enable in orchestrator."""
+    if not user_message:
+        return default
+    msg = user_message.lower()
+    best, best_score = default, 0
+    for tpl, keys in _TEMPLATE_KEYWORDS.items():
+        score = sum(1 for k in keys if k in msg)
+        if score > best_score:
+            best_score = score
+            best = tpl
+    return best
+
+
+def get_template_overlay(template: str) -> Dict[str, str]:
+    return TEMPLATE_OVERLAYS.get(template, TEMPLATE_OVERLAYS.get("debate", {}))
+
+
 # ─── Swarm orchestrator (Phase 4) ──────────────────────────────────────
 #
 # Fixed R1-R5 phase machine for `template == 'swarm'` rooms.
@@ -1293,6 +1422,22 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
                 "trigger": f"swarm-{consensus['verdict'].lower()}",
             })
 
+    # ─── Collect tool_call_counts from cached agents ───────────────────
+    try:
+        for p in participants:
+            cache_key = f"{req.room_id}:{p['id']}"
+            cached_agent = _ROOM_AGENTS.get(cache_key)
+            if cached_agent is not None:
+                count = int(getattr(cached_agent, "tool_call_count", 0) or 0)
+                tool_call_counts[p.get("slug")] = count
+                # Reset post-turn so next turn starts fresh.
+                try:
+                    setattr(cached_agent, "tool_call_count", 0)
+                except Exception:  # noqa: BLE001
+                    pass
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[swarm] tool_call_count collection failed: %s", exc)
+
     # ─── Seal ──────────────────────────────────────────────────────────
     status = "complete" if consensus["verdict"] in ("AGREED", "CONDITIONAL") else "escalated"
     await _emit_event(req.callback_url, req.turn_id, {
@@ -1305,6 +1450,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
         "winning_id": consensus["winning_id"],
         "evidence_pool_size": len(evidence_pool),
         "tool_call_counts": tool_call_counts,
+        "tool_call_total": sum(tool_call_counts.values()),
         "saved_memory_id": saved_memory_id,
         "vote_count": len(votes),
     })
@@ -1357,8 +1503,15 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     lead = forced or _pick_lead(participants, req.user_message)
     reactors = _pick_reactors(participants, lead)
 
-    # B1: per-room template (debate | decision | swarm). Falls back to 'debate'.
+    # B1: per-room template (debate | decision | swarm | brainstorm | council
+    # | lean_coffee | retrospective | review | standup | auto). Falls back to
+    # 'debate'. 'auto' OR ROOM_TEMPLATE_AUTO_PICK=true triggers keyword scorer.
     room_template = await get_room_template(req.room_id)
+    if room_template == "auto" or os.environ.get("ROOM_TEMPLATE_AUTO_PICK", "").lower() == "true":
+        picked = recommend_template(req.user_message, default=room_template if room_template != "auto" else "debate")
+        if picked and picked != room_template:
+            log.info("[template] auto-picked %s for room %s (was %s)", picked, req.room_id, room_template)
+        room_template = picked
     # A4: pull trust scores for display only (no routing weight yet).
     trust_map = await get_trust_scores(req.org_id, [p["id"] for p in participants])
     trust_by_slug = {p.get("slug"): trust_map.get(p["id"], 0.5) for p in participants}
@@ -1498,11 +1651,11 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 "then give a concrete take in 2-3 more sentences. Never invent facts.\n"
                 "- NEVER narrate the search ('let me check', 'we should recall', 'I'll look') — just call the tools.\n"
             )
+        overlay = get_template_overlay(room_template)
+        overlay_lead = overlay.get("lead_hint", "")
         template_hint = (
-            "[TEMPLATE: decision — DACI flow. Lead delivers the final committed "
-            "answer with memory citations. Synthesis will be saved as a "
-            "decision memory.]\n\n"
-            if room_template == "decision"
+            f"[TEMPLATE: {overlay.get('label', room_template)}]\n{overlay_lead}\n\n"
+            if overlay_lead
             else ""
         )
         lead_prompt = (
@@ -1700,7 +1853,10 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 f"  • Need more grounding? Call hivemind_recall / traverse_graph silently first.\n\n"
                 f"OUTPUT: 3-5 short sentences. Stay on the user's question. Chat tone, 'we / our'.\n"
                 f"Quote memory titles inline. NEVER invent owners, dates, or deadlines. No 'happy to "
-                f"help' fluff."
+                f"help' fluff.\n"
+                + (f"\nTEMPLATE-SPECIFIC OUTPUT REQUIREMENT ({room_template}):\n"
+                   f"{get_template_overlay(room_template).get('synth_hint', '')}\n"
+                   if get_template_overlay(room_template).get('synth_hint') else "")
             )
             synth_reply = await lead_agent(Msg(name="user", content=synth_prompt, role="user"))
             synth_text = _msg_to_text(synth_reply) or ""

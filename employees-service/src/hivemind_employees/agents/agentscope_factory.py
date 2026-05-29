@@ -187,6 +187,17 @@ def build_react_agent(
     model = _resolve_model(employee_row)
     formatter = _resolve_formatter(provider)
 
+    # Per-agent tool-call counter. post_acting fires once per tool call.
+    # Stored on agent instance so the orchestrator can read it after a turn.
+    def _make_count_hook(target_agent):
+        async def _hook(*args, **kwargs):
+            try:
+                setattr(target_agent, "tool_call_count",
+                        int(getattr(target_agent, "tool_call_count", 0)) + 1)
+            except Exception:  # noqa: BLE001
+                pass
+        return _hook
+
     agent = ReActAgent(
         name=name,
         sys_prompt=persona,
@@ -206,6 +217,13 @@ def build_react_agent(
     )
     setattr(agent, "hivemind_enabled_tools", list(requested_tools))
     setattr(agent, "hivemind_use_simulation_actions", _uses_groq_fallback(provider))
+    setattr(agent, "tool_call_count", 0)
+    # Attach post_acting hook so every tool call ticks the counter.
+    try:
+        agent.register_instance_hook("post_acting", "tool_call_counter",
+                                      _make_count_hook(agent))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Failed to attach tool_call_counter hook: %s", exc)
     log.info(
         "Built ReActAgent for employee=%s model=%s tools=%d",
         name, employee_row.get("model"), len(enabled_tools),

@@ -90,6 +90,7 @@ export class SlackAdapter extends BaseProviderAdapter {
    * Full backfill: list conversations, pull history, group into units.
    */
   async fetchInitial({ accessToken, cursor, context }) {
+    if (process.env.SLACK_SYNC_ENABLED !== 'true') return { records: [], nextCursor: cursor || null, hasMore: false };
     return this._fetchMessages({ accessToken, cursor, context });
   }
 
@@ -97,6 +98,10 @@ export class SlackAdapter extends BaseProviderAdapter {
    * Incremental delta sync using `oldest` timestamp cursor.
    */
   async fetchIncremental({ accessToken, cursor, context }) {
+    // Slack channel→memory auto-sync is OFF by default — it produced noise
+    // (every "hello"/test became a memory). Memories are created only on an
+    // explicit "@DAVINCIAI save this…". Set SLACK_SYNC_ENABLED=true to re-enable.
+    if (process.env.SLACK_SYNC_ENABLED !== 'true') return { records: [], nextCursor: cursor || null, hasMore: false };
     return this._fetchMessages({ accessToken, cursor, context });
   }
 

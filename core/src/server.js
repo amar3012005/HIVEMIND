@@ -6799,15 +6799,85 @@ exit \$RC
                 return;
               }
 
-              // "save this" → read the LAST ~10 messages of this Slack
-              // conversation (thread if threaded, else channel) and pass them
-              // to the save flow to summarize into ONE memory — NOT the raw
-              // "save this" command. If nothing substantive exists, tell the
-              // user instead of saving the command verbatim.
-              let effectiveQuestion = question;
+              // ── SAVE flow — fully bypasses the agent ─────────────────────
+              // The agent's save path saved the prompt/command verbatim. So we
+              // own the save: read last ~10 messages → summarize via the LLM →
+              // canonical ingest (smart-router + entity edges + relationships).
+              // Project choice is a 2-turn flow via an in-memory pending map.
               const SAVE_RE = /\bsave\b[^.]{0,40}\b(this|chat|conversation|convo|thread|session|here|it)\b/i;
-              const saveIntent = SAVE_RE.test(question);
-              if (saveIntent) {
+              const saveConvKey = `${qChannel}:${askerSlackId || ''}`;
+              globalThis._slackPendingSave = globalThis._slackPendingSave || new Map();
+
+              const postSlack = async (text) => {
+                try {
+                  const bt = await bridge.connectorStore.getAccessToken(evUserId, 'slack');
+                  await bridge._call('chat.postMessage',
+                    { channel: qChannel, text, ...(ev.thread_ts ? { thread_ts: ev.thread_ts } : {}) }, bt, 'POST');
+                } catch (e) { /* noop */ }
+              };
+              const resolveProject = async (raw) => {
+                const pick = String(raw || '').replace(/<@[^>]+>/g, '').trim();
+                if (!pick || /^(personal|org|organization|none|me)$/i.test(pick)) return { projectId: null, label: 'personal' };
+                try {
+                  const proj = await persistentMemoryStore.client.project.findFirst({
+                    where: { orgId: runOrgId, status: 'active', OR: [{ name: { equals: pick, mode: 'insensitive' } }, { slug: pick.toLowerCase() }] },
+                    select: { id: true, name: true },
+                  });
+                  if (proj) return { projectId: proj.id, label: proj.name };
+                } catch (e) { /* fall through */ }
+                return { projectId: null, label: 'personal' };
+              };
+              const canonicalSave = async ({ title, content, projectId }) => {
+                const payload = {
+                  title: title || 'Slack conversation',
+                  content,
+                  tags: ['slack', 'conversation-summary'],
+                  memory_type: 'note',
+                  user_id: runUserId,
+                  org_id: runOrgId,
+                  scope: projectId ? 'project' : 'personal',
+                  project_ids: projectId ? [projectId] : [],
+                  source_metadata: { source_platform: 'slack', via: 'slack-save' },
+                };
+                const [routed] = await buildRoutedIngestPayloads(payload, { smartIngestRouter });
+                return ingestRoutedPayload
+                  ? ingestRoutedPayload(routed, persistentMemoryEngine)
+                  : persistentMemoryEngine.ingestMemory(routed);
+              };
+              const summarize = async (transcript) => {
+                const resp = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
+                  method: 'POST',
+                  headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    model: 'openai/gpt-oss-120b', temperature: 0.2, response_format: { type: 'json_object' },
+                    messages: [
+                      { role: 'system', content: 'Summarize the Slack conversation into ONE durable memory. Return JSON {"title": string, "summary": string}. Capture only durable facts, decisions, names, action items. Drop greetings, tests, and any "save" command. summary = 1-4 sentences, third person.' },
+                      { role: 'user', content: transcript },
+                    ],
+                  }),
+                });
+                const j = await resp.json();
+                const parsed = JSON.parse(j.choices[0].message.content);
+                return { title: parsed.title || 'Slack conversation', summary: parsed.summary || transcript.slice(0, 500) };
+              };
+
+              // (A) A pending save is awaiting a project pick → this reply picks it.
+              const pendingSave = globalThis._slackPendingSave.get(saveConvKey);
+              if (pendingSave && !SAVE_RE.test(question)) {
+                globalThis._slackPendingSave.delete(saveConvKey);
+                try {
+                  const { projectId, label } = await resolveProject(question);
+                  await canonicalSave({ title: pendingSave.title, content: pendingSave.summary, projectId });
+                  await postSlack(`Saved to *${label}* ✓\n${pendingSave.summary}`);
+                } catch (e) {
+                  console.warn('[slack-save] save failed:', e.message);
+                  await postSlack('Could not save — try again.');
+                }
+                return;
+              }
+
+              // (B) Save intent → fetch last ~10, summarize, then ask project.
+              if (SAVE_RE.test(question)) {
                 let transcript = '';
                 try {
                   const msgs = ev.thread_ts
@@ -6816,28 +6886,49 @@ exit \$RC
                   transcript = (msgs || [])
                     .filter((m) => String(m.text || '').trim() && !m.bot_id && !m.app_id)
                     .map((m) => String(m.text || '').replace(/<@[^>]+>/g, '').trim())
-                    // drop the "save" command(s) + bare project-pick replies
                     .filter((tx) => tx && !SAVE_RE.test(tx))
                     .slice(-10)
                     .join('\n');
                 } catch (e) {
                   console.warn('[slack-save] history fetch failed:', e.message);
                 }
-                if (transcript.trim().length >= 15) {
-                  effectiveQuestion =
-                    'Summarize the following Slack conversation (the last ~10 messages) into ONE concise memory — capture only durable facts, decisions, names, and action items; drop greetings, tests, and the "save" command itself. Then save it with hivemind_save_memory (tags: slack, conversation-summary). Do NOT save the raw messages or the command verbatim.\n\nConversation:\n' + transcript;
-                } else {
-                  // Nothing substantive to summarize — don't save the command.
-                  try {
-                    const bt = await bridge.connectorStore.getAccessToken(evUserId, 'slack');
-                    await bridge._call('chat.postMessage',
-                      { channel: qChannel, text: "Nothing to summarize here yet — have a conversation in this chat first, then say \"save this\".", ...(ev.thread_ts ? { thread_ts: ev.thread_ts } : {}) },
-                      bt, 'POST');
-                  } catch (e) { /* noop */ }
+                if (transcript.trim().length < 15) {
+                  await postSlack('Nothing to summarize here yet — have a conversation in this chat first, then say "save this".');
                   return;
                 }
+                await postSlack('🧠 _Summarizing the last ~10 messages…_');
+                let title, summary;
+                try {
+                  ({ title, summary } = await summarize(transcript));
+                } catch (e) {
+                  console.warn('[slack-save] summarize failed:', e.message);
+                  await postSlack('Could not summarize — try again.');
+                  return;
+                }
+                // "save this to <project>" inline → save immediately.
+                const inlineProj = question.match(/\bto\s+([\w' .&-]{2,40})$/i);
+                if (inlineProj) {
+                  const { projectId, label } = await resolveProject(inlineProj[1]);
+                  try {
+                    await canonicalSave({ title, content: summary, projectId });
+                    await postSlack(`Saved to *${label}* ✓\n${summary}`);
+                  } catch (e) { await postSlack('Could not save — try again.'); }
+                  return;
+                }
+                // Otherwise ask which project.
+                let names = [];
+                try {
+                  const projs = await persistentMemoryStore.client.project.findMany({
+                    where: { orgId: runOrgId, status: 'active' }, select: { name: true }, take: 25,
+                  });
+                  names = projs.map((p) => p.name).filter(Boolean);
+                } catch (e) { /* none */ }
+                globalThis._slackPendingSave.set(saveConvKey, { title, summary });
+                await postSlack(`Summary ready:\n> ${summary}\n\nSave to which project? ${names.length ? names.join(' · ') + ' · ' : ''}or reply "personal".`);
+                return;
               }
 
+              const effectiveQuestion = question;
               const groqKey = process.env.GROQ_API_KEY;
               const useV2 = process.env.HIVEMIND_AGENT_V1 !== 'true';
               const { runReactAgent } = useV2

@@ -6903,9 +6903,12 @@ exit \$RC
                 if (names.length) answer += `\n\n*Projects:* ${names.join(' · ')} — reply with one (or "personal") to save.`;
               }
 
-              // Persist the turn into per-conversation history (cap 12).
+              // Persist the turn into per-conversation history (cap 12). Use
+              // effectiveQuestion so a deferred save (project-choice) carries
+              // the SUMMARY task into the follow-up turn's continuation — not
+              // the raw "save this" command.
               const updated = [...priorHistory,
-                { role: 'user', content: question },
+                { role: 'user', content: effectiveQuestion },
                 { role: 'assistant', content: answer },
               ].slice(-12);
               globalThis._slackHistory.set(convKey, updated);

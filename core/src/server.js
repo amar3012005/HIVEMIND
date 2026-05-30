@@ -6799,6 +6799,34 @@ exit \$RC
                 return;
               }
 
+              // "save this" → summarize the RECENT thread/channel into ONE
+              // memory instead of saving raw chatter. Fetch the last ~10
+              // messages and reframe the agent task as a summarize-and-save.
+              let effectiveQuestion = question;
+              const saveIntent = /\bsave\b[^.]{0,40}\b(this|chat|conversation|convo|thread|here|it)\b/i.test(question);
+              if (saveIntent) {
+                try {
+                  let msgs = [];
+                  if (ev.thread_ts) {
+                    msgs = await bridge.getThread(evUserId, qChannel, ev.thread_ts, { limit: 30 });
+                  } else {
+                    msgs = await bridge.getChannelHistory(evUserId, qChannel, { limit: 12 });
+                    msgs = msgs.slice().reverse(); // history is newest-first
+                  }
+                  const transcript = (msgs || [])
+                    .filter((m) => String(m.text || '').trim() && !m.bot_id)
+                    .slice(-10)
+                    .map((m) => `${m.user || 'user'}: ${String(m.text || '').replace(/<@[^>]+>/g, '').trim()}`)
+                    .join('\n');
+                  if (transcript) {
+                    effectiveQuestion =
+                      'Summarize the following Slack conversation into ONE concise memory — capture only durable facts, decisions, names, and action items; drop greetings, tests, and noise. Then save it with hivemind_save_memory (tags: slack, conversation-summary). Do NOT save the raw messages individually.\n\nConversation:\n' + transcript;
+                  }
+                } catch (e) {
+                  console.warn('[slack-save] history fetch failed:', e.message);
+                }
+              }
+
               const groqKey = process.env.GROQ_API_KEY;
               const useV2 = process.env.HIVEMIND_AGENT_V1 !== 'true';
               const { runReactAgent } = useV2
@@ -6824,7 +6852,7 @@ exit \$RC
 
               const accessCtx = await buildAccessContext(runUserId, runOrgId);
               const result = await runReactAgent({
-                message: question,
+                message: effectiveQuestion,
                 history: priorHistory.map((h) => ({ role: h.role, content: h.content })),
                 model: 'openai/gpt-oss-120b',
                 apiKey: groqKey,
@@ -6881,52 +6909,11 @@ exit \$RC
           return;
         }
 
-        // Only ingest message-class events for now
-        if (!evType.startsWith('message') && evType !== 'pin_added' && evType !== 'reaction_added') {
-          return jsonResponse(res, { ok: true, skipped: `unhandled_type:${evType}` });
-        }
-
-        const text = (ev.text || '').trim();
-        if (evType === 'message' || evType.startsWith('message')) {
-          if (!text || text.length < 15) {
-            return jsonResponse(res, { ok: true, skipped: 'too_short' });
-          }
-        }
-
-        const channelId = ev.channel || ev.item?.channel || null;
-        const channelName = ev.channel_name || null;
-        const where = channelName ? `#${channelName}` : (channelId || 'unknown');
-        const who = ev.user || ev.user_id || 'unknown';
-        const ts = ev.ts || ev.event_ts || body.event_ts || null;
-
-        const titleBase = text || `Slack ${evType}`;
-        const title = `Slack ${where} · ${who}: ${titleBase.slice(0, 60)}`;
-
-        // Fire-and-forget ingest, ack 200 immediately
-        const slackEventPayload = {
-          content: text || `[${evType}${subtype ? `:${subtype}` : ''}] in ${where}`,
-          title,
-          tags: ['slack', 'live-slack', 'webhook', `slack:${where}`, `slack-team:${teamId || 'unknown'}`],
-          memory_type: 'note',
-          user_id: evUserId,
-          org_id: evOrgId,
-          source_metadata: {
-            source_platform: 'slack',
-            event_type: evType,
-            event_subtype: subtype,
-            channel_id: channelId,
-            channel_name: channelName,
-            ts,
-            user: who,
-            team_id: teamId,
-          },
-          skip_fact_extraction: true,
-        };
-        buildRoutedIngestPayloads(slackEventPayload, { smartIngestRouter }).then(([routed]) =>
-          persistentMemoryEngine.ingestMemory(routed)
-        ).catch(err => console.warn('[slack-events] ingest failed:', err.message));
-
-        return jsonResponse(res, { ok: true, ingested: true, event_type: evType });
+        // Do NOT auto-ingest live Slack messages as memories — that produced
+        // pure noise (every "hello"/test message became a memory). Memories are
+        // now created ONLY on an explicit ask ("@DAVINCIAI save this…"), which
+        // the isQuery branch above handles by summarizing the recent thread.
+        return jsonResponse(res, { ok: true, skipped: 'live_ingest_disabled', event_type: evType });
       }
 
       // ── Usage tracking + plan enforcement (PlanEnforcer) ──

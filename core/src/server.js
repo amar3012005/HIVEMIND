@@ -6799,49 +6799,39 @@ exit \$RC
                 return;
               }
 
-              // "save this" → summarize the SESSION (the user's Q&A WITH the
-              // bot, from per-conversation history) into ONE memory — NOT the
-              // raw "save this" command. Falls back to recent channel messages
-              // if there's no bot history. If nothing substantive exists, tell
-              // the user instead of saving the command verbatim.
+              // "save this" → read the LAST ~10 messages of this Slack
+              // conversation (thread if threaded, else channel) and pass them
+              // to the save flow to summarize into ONE memory — NOT the raw
+              // "save this" command. If nothing substantive exists, tell the
+              // user instead of saving the command verbatim.
               let effectiveQuestion = question;
-              const saveIntent = /\bsave\b[^.]{0,40}\b(this|chat|conversation|convo|thread|session|here|it)\b/i.test(question);
+              const SAVE_RE = /\bsave\b[^.]{0,40}\b(this|chat|conversation|convo|thread|session|here|it)\b/i;
+              const saveIntent = SAVE_RE.test(question);
               if (saveIntent) {
-                const sConvKey = `${qChannel}:${askerSlackId || ''}`;
-                const sHist = (globalThis._slackHistory && globalThis._slackHistory.get(sConvKey)) || [];
                 let transcript = '';
-                // Prefer the bot conversation history (the actual "session").
-                const meaningful = sHist.filter((h) =>
-                  h.content && !/\bsave\b[^.]{0,40}\b(this|chat|session|conversation|convo|thread|here|it)\b/i.test(h.content));
-                if (meaningful.length) {
-                  transcript = meaningful
-                    .map((h) => `${h.role === 'user' ? 'User' : 'Assistant'}: ${String(h.content).slice(0, 1500)}`)
+                try {
+                  const msgs = ev.thread_ts
+                    ? await bridge.getThread(evUserId, qChannel, ev.thread_ts, { limit: 50 })
+                    : (await bridge.getChannelHistory(evUserId, qChannel, { limit: 30 })).slice().reverse();
+                  transcript = (msgs || [])
+                    .filter((m) => String(m.text || '').trim() && !m.bot_id && !m.app_id)
+                    .map((m) => String(m.text || '').replace(/<@[^>]+>/g, '').trim())
+                    // drop the "save" command(s) + bare project-pick replies
+                    .filter((tx) => tx && !SAVE_RE.test(tx))
+                    .slice(-10)
                     .join('\n');
-                } else {
-                  // Fallback: recent channel/thread messages, minus bot + save commands.
-                  try {
-                    let msgs = ev.thread_ts
-                      ? await bridge.getThread(evUserId, qChannel, ev.thread_ts, { limit: 30 })
-                      : (await bridge.getChannelHistory(evUserId, qChannel, { limit: 20 })).slice().reverse();
-                    transcript = (msgs || [])
-                      .filter((m) => String(m.text || '').trim() && !m.bot_id)
-                      .map((m) => String(m.text || '').replace(/<@[^>]+>/g, '').trim())
-                      .filter((tx) => tx && !/\bsave\b[^.]{0,40}\b(this|chat|session|conversation|convo|thread|here|it)\b/i.test(tx))
-                      .slice(-12)
-                      .join('\n');
-                  } catch (e) {
-                    console.warn('[slack-save] history fetch failed:', e.message);
-                  }
+                } catch (e) {
+                  console.warn('[slack-save] history fetch failed:', e.message);
                 }
                 if (transcript.trim().length >= 15) {
                   effectiveQuestion =
-                    'Summarize the following conversation into ONE concise memory — capture only durable facts, decisions, names, and action items; drop greetings, tests, and the "save" command itself. Then save it with hivemind_save_memory (tags: slack, conversation-summary). Do NOT save the raw messages or the command verbatim.\n\nConversation:\n' + transcript;
+                    'Summarize the following Slack conversation (the last ~10 messages) into ONE concise memory — capture only durable facts, decisions, names, and action items; drop greetings, tests, and the "save" command itself. Then save it with hivemind_save_memory (tags: slack, conversation-summary). Do NOT save the raw messages or the command verbatim.\n\nConversation:\n' + transcript;
                 } else {
                   // Nothing substantive to summarize — don't save the command.
                   try {
                     const bt = await bridge.connectorStore.getAccessToken(evUserId, 'slack');
                     await bridge._call('chat.postMessage',
-                      { channel: qChannel, text: "Nothing to summarize here yet — ask me some questions in this chat first, then say \"save this\".", ...(ev.thread_ts ? { thread_ts: ev.thread_ts } : {}) },
+                      { channel: qChannel, text: "Nothing to summarize here yet — have a conversation in this chat first, then say \"save this\".", ...(ev.thread_ts ? { thread_ts: ev.thread_ts } : {}) },
                       bt, 'POST');
                   } catch (e) { /* noop */ }
                   return;

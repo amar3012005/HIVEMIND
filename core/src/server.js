@@ -6712,7 +6712,8 @@ exit \$RC
           const qThreadTs = ev.thread_ts || ev.ts || null;
           const askerSlackId = ev.user || null;
           const question = String(ev.text || '').replace(/<@[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-          if (!question || !qChannel) {
+          const slackFiles = Array.isArray(ev.files) ? ev.files : [];
+          if ((!question && !slackFiles.length) || !qChannel) {
             return jsonResponse(res, { ok: true, skipped: 'empty_or_no_channel' });
           }
           // Dedup on team:event_ts (bounded set).
@@ -6751,6 +6752,51 @@ exit \$RC
                 } catch (e) {
                   console.warn('[slack-query] identity resolve failed, using connecting user:', e.message);
                 }
+              }
+
+              // ── File upload → Knowledge Base ────────────────────────────────
+              // If the message carried files, download each via Slack's
+              // url_private (bot token, needs files:read) and POST to the same
+              // /api/knowledge/upload pipeline (Docling parse → memories),
+              // scoped to the asking user/org. Skip the agent for file turns.
+              if (slackFiles.length) {
+                const botTokenF = await bridge.connectorStore.getAccessToken(evUserId, 'slack');
+                const ingested = [];
+                const failed = [];
+                for (const f of slackFiles) {
+                  const url = f.url_private_download || f.url_private;
+                  const fname = f.name || f.title || `slack-file-${f.id || ''}`;
+                  if (!url) { failed.push(fname); continue; }
+                  try {
+                    const dl = await fetch(url, { headers: { Authorization: `Bearer ${botTokenF}` } });
+                    if (!dl.ok) { failed.push(fname); continue; }
+                    const buf = Buffer.from(await dl.arrayBuffer());
+                    const form = new FormData();
+                    form.append('file', new Blob([buf], { type: f.mimetype || 'application/octet-stream' }), fname);
+                    form.append('tags', 'slack-upload');
+                    const up = await fetch('http://localhost:3000/api/knowledge/upload', {
+                      method: 'POST',
+                      headers: {
+                        'X-API-Key': MASTER_API_KEY,
+                        'X-HM-User-Id': runUserId,
+                        'X-HM-Org-Id': runOrgId || '',
+                      },
+                      body: form,
+                    });
+                    if (up.ok) ingested.push(fname); else failed.push(fname);
+                  } catch (e) {
+                    console.warn('[slack-file] ingest failed:', fname, e.message);
+                    failed.push(fname);
+                  }
+                }
+                const lines = [];
+                if (ingested.length) lines.push(`📎 Added to knowledge base: ${ingested.join(', ')}`);
+                if (failed.length) lines.push(`⚠️ Could not ingest: ${failed.join(', ')}`);
+                const fileMsg = lines.join('\n') || 'No files processed.';
+                try {
+                  await bridge.postMessage(evUserId, qChannel, fileMsg, ev.thread_ts ? { threadTs: ev.thread_ts } : {});
+                } catch (e) { console.warn('[slack-file] reply failed:', e.message); }
+                return;
               }
 
               const groqKey = process.env.GROQ_API_KEY;

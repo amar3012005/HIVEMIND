@@ -17,6 +17,7 @@ const BOT_SCOPES = [
   'team:read',
   'chat:write',
   'app_mentions:read',
+  'files:read',
 ];
 
 const USER_SCOPES = [

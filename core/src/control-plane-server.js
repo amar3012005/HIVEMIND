@@ -4766,11 +4766,36 @@ Write the persona now.`;
     try {
       const r = await store.findBySlugForChat(slug, { orgId });
       if (!r) return jsonResponse(res, { error: 'employee not found' }, 404);
-      const { decryptToken } = await import('./connectors/framework/connector-store.js');
+      const { decryptToken, encryptToken } = await import('./connectors/framework/connector-store.js');
       const { enrichEmployeeWithHyperState } = await import('./employees/hyper-state.js');
       let apiKey = null;
       if (r.scopedApiKeyEncrypted) {
         try { apiKey = decryptToken(r.scopedApiKeyEncrypted); } catch {}
+      }
+      // Draft employees are created without a scoped key (minted at deploy).
+      // 1-on-1 chat needs one to bootstrap tools/memory — mint on demand so a
+      // never-deployed employee is still chattable. Idempotent per employee.
+      if (!apiKey) {
+        try {
+          const crypto = await import('node:crypto');
+          const raw = 'hmk_emp_' + crypto.randomBytes(24).toString('hex');
+          const keyHash = crypto.createHash('sha256').update(raw).digest('hex');
+          const minted = await prisma.apiKey.create({
+            data: {
+              userId: r.createdBy,
+              orgId: r.orgId,
+              name: `${r.name} (employee, chat)`,
+              keyHash,
+              keyPrefix: raw.slice(0, 12),
+              scopes: ['memory:read', 'memory:write', 'mcp', 'slack:act'],
+              isActive: true,
+            },
+          });
+          await store.setScopedApiKey({ id: r.id, apiKeyId: minted.id, encryptedKey: encryptToken(raw) });
+          apiKey = raw;
+        } catch (mintErr) {
+          console.warn('[employees.chat-profile] key mint failed:', mintErr.message);
+        }
       }
       const baseEmployee = {
         id: r.id,

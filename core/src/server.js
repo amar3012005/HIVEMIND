@@ -4394,80 +4394,101 @@ exit \$RC
       });
 
       const scopeListHtml = requestedScopes.map(s => `
-      <div style="display:flex; align-items:center; gap:0.5rem; margin:0.5rem 0; padding:0.5rem; background:#f8fafc; border-radius:8px; border:1px solid #e2e8f0;">
-        <input type="checkbox" checked disabled id="s-${s}" style="accent-color:#0ea5e9;">
-        <label for="s-${s}" style="font-size:0.9rem; color:#475569; cursor:default;">${sanitizeHtml(s)}</label>
+      <div class="scope-chip">
+        <svg viewBox="0 0 20 20" fill="none" width="15" height="15" aria-hidden="true"><path d="M16.5 5.5 8 14l-4.5-4.5" stroke="#117dff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>${sanitizeHtml(s)}</span>
       </div>
     `).join('');
 
     const consentHtml = `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>HiveMind Partner Connection</title>
+<title>Connect ${sanitizeHtml(client.client_name)} · HIVEMIND</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
 <style>
-  body{font-family:'Space Grotesk',system-ui,-apple-system,sans-serif;background:#fafaf6;color:#0a0a0a;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}
-  .card{background:#fff;border:1px solid #e3e0db;border-radius:18px;padding:2.2rem;max-width:480px;width:92%;box-shadow:0 20px 60px rgba(10,10,10,.08)}
-  .brand{display:flex;flex-direction:column;align-items:center;text-align:center;margin-bottom:1.4rem;padding-bottom:1.2rem;border-bottom:1px solid #f3f1ec}
-  .brand img,.brand svg{width:72px;height:72px;margin-bottom:.6rem}
-  .brand-title{font-size:.78rem;font-weight:700;letter-spacing:.18em;color:#737373;text-transform:uppercase}
-  .header{display:flex;align-items:center;justify-content:center;gap:.9rem;margin-bottom:1.2rem}
-  .app-icon{width:44px;height:44px;background:#f3f1ec;border-radius:10px;display:flex;align-items:center;justify-content:center;font-weight:700;color:#737373;font-size:1.1rem}
-  .sync-icon{color:#a3a3a3;font-size:1.2rem}
-  .hm-icon{width:44px;height:44px;border-radius:10px;background:#fafaf6;border:1px solid #e3e0db;display:flex;align-items:center;justify-content:center;overflow:hidden}
-  .hm-icon img,.hm-icon svg{width:38px;height:38px}
-  h1{font-size:1.3rem;margin:0 0 .3rem;color:#0f172a}
-  p{font-size:0.95rem;color:#64748b;line-height:1.5;margin:0 0 1.2rem}
-  .permissions-box{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:1rem;margin-bottom:1.5rem}
-  .perm-header{font-size:0.85rem;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#94a3b8;margin-bottom:0.8rem}
-  .access-level{margin-bottom:1.5rem}
-  .radio-group{display:flex;flex-direction:column;gap:0.8rem}
-  .radio-item{display:flex;align-items:flex-start;gap:0.8rem;padding:1rem;border:1px solid #e2e8f0;border-radius:10px;cursor:pointer;transition:all 0.2s}
-  .radio-item:hover{background:#f8fafc;border-color:#0ea5e9}
-  .radio-item input:checked + .radio-content{color:#0ea5e9}
-  .radio-content strong{display:block;margin-bottom:0.2rem}
-  .radio-content span{font-size:0.85rem;color:#64748b}
-  .actions{display:flex;gap:.7rem;margin-top:1.5rem}
-  button{flex:1;padding:.85rem;border:none;border-radius:10px;font-size:.95rem;cursor:pointer;font-weight:600;transition:opacity 0.2s}
-  button:hover{opacity:0.9}
-  .approve{background:#0ea5e9;color:#fff}
-  .deny{background:#f1f5f9;color:#475569}
+  *{box-sizing:border-box}
+  :root{--blue:#117dff;--blue-press:#0066e0;--ink:#0a0a0a;--muted:#6b7280;--line:#e9e6e0;--bg:#f6f5f1}
+  html,body{margin:0}
+  body{font-family:'Inter',system-ui,-apple-system,sans-serif;color:var(--ink);min-height:100vh;display:flex;justify-content:center;align-items:center;padding:24px;
+    background:radial-gradient(1200px 600px at 50% -10%,#eef4ff 0%,rgba(238,244,255,0) 55%),linear-gradient(180deg,#faf9f5 0%,#f2f0ea 100%)}
+  .card{position:relative;background:rgba(255,255,255,.86);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
+    border:1px solid rgba(255,255,255,.7);border-radius:24px;padding:34px 32px 28px;max-width:440px;width:100%;
+    box-shadow:0 1px 0 rgba(255,255,255,.6) inset,0 30px 80px -20px rgba(17,38,80,.22),0 10px 30px -15px rgba(17,38,80,.18);
+    animation:rise .45s cubic-bezier(.2,.7,.2,1) both}
+  @keyframes rise{from{opacity:0;transform:translateY(14px) scale(.985)}to{opacity:1;transform:none}}
+  .brand{display:flex;flex-direction:column;align-items:center;text-align:center;gap:.5rem;padding-bottom:1.1rem;margin-bottom:1.3rem;border-bottom:1px solid var(--line)}
+  .brand img{width:64px;height:64px;border-radius:16px;object-fit:cover;box-shadow:0 8px 20px -8px rgba(17,38,80,.35)}
+  .brand-title{font-family:'Space Grotesk';font-size:.72rem;font-weight:700;letter-spacing:.26em;color:#8a8578;text-transform:uppercase}
+  .header{display:flex;align-items:center;justify-content:center;gap:1rem;margin-bottom:1.3rem}
+  .app-icon,.hm-icon{width:52px;height:52px;border-radius:14px;display:flex;align-items:center;justify-content:center;overflow:hidden}
+  .app-icon{background:#f0eee8;border:1px solid var(--line);font-family:'Space Grotesk';font-weight:700;color:#5b5650;font-size:1.25rem}
+  .hm-icon{background:#fff;border:1px solid var(--line)}
+  .hm-icon img{width:46px;height:46px;border-radius:11px;object-fit:cover}
+  .sync{display:flex;flex-direction:column;align-items:center;color:var(--blue);font-size:1.05rem;line-height:1}
+  .sync .pulse{width:6px;height:6px;border-radius:50%;background:var(--blue);margin-top:5px;animation:blink 1.6s ease-in-out infinite}
+  @keyframes blink{0%,100%{opacity:.25}50%{opacity:1}}
+  h1{font-family:'Space Grotesk';font-size:1.45rem;font-weight:700;margin:0 0 .35rem;letter-spacing:-.01em}
+  .sub{font-size:.92rem;color:var(--muted);line-height:1.55;margin:0 0 1.5rem}
+  .label{font-size:.7rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:#9aa1ad;margin-bottom:.7rem}
+  .tiers{display:flex;flex-direction:column;gap:.6rem;margin-bottom:1.5rem}
+  .tier{position:relative;display:flex;align-items:flex-start;gap:.8rem;padding:.95rem 1rem;border:1.5px solid var(--line);border-radius:14px;cursor:pointer;transition:border-color .18s,background .18s,box-shadow .18s;background:#fff}
+  .tier:hover{border-color:#cfe0ff}
+  .tier input{position:absolute;opacity:0;pointer-events:none}
+  .dot{flex:0 0 auto;width:18px;height:18px;margin-top:1px;border-radius:50%;border:2px solid #cbd2dc;display:flex;align-items:center;justify-content:center;transition:border-color .18s}
+  .dot::after{content:"";width:8px;height:8px;border-radius:50%;background:var(--blue);transform:scale(0);transition:transform .18s}
+  .tier .t-title{font-weight:600;font-size:.95rem;margin-bottom:.12rem}
+  .tier .t-desc{font-size:.82rem;color:var(--muted);line-height:1.45}
+  .tier:has(input:checked){border-color:var(--blue);background:linear-gradient(180deg,#f5f9ff,#fff);box-shadow:0 0 0 4px rgba(17,125,255,.08)}
+  .tier:has(input:checked) .dot{border-color:var(--blue)}
+  .tier:has(input:checked) .dot::after{transform:scale(1)}
+  .tier:has(input:checked) .t-title{color:var(--blue)}
+  .scopes{border:1px solid var(--line);border-radius:16px;padding:1rem;background:linear-gradient(180deg,#fcfbf9,#fff);margin-bottom:1.6rem}
+  .scope-grid{display:grid;grid-template-columns:1fr 1fr;gap:.5rem}
+  .scope-chip{display:flex;align-items:center;gap:.5rem;padding:.5rem .65rem;background:#fff;border:1px solid var(--line);border-radius:10px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:.78rem;color:#3f4654}
+  .scope-chip svg{flex:0 0 auto}
+  .actions{display:flex;gap:.7rem}
+  button{flex:1;padding:.9rem 1rem;border:none;border-radius:13px;font-family:inherit;font-size:.95rem;font-weight:600;cursor:pointer;transition:transform .12s,box-shadow .18s,background .18s}
+  button:active{transform:translateY(1px)}
+  .approve{color:#fff;background:linear-gradient(180deg,#2b8bff,var(--blue));box-shadow:0 10px 20px -8px rgba(17,125,255,.6)}
+  .approve:hover{background:linear-gradient(180deg,#1f82ff,var(--blue-press))}
+  .deny{background:#f0efea;color:#52514c}
+  .deny:hover{background:#e7e5de}
+  .foot{display:flex;align-items:center;justify-content:center;gap:.4rem;margin-top:1.1rem;font-size:.72rem;color:#a3a3a3}
+  @media(max-width:420px){.scope-grid{grid-template-columns:1fr}.card{padding:26px 20px 22px}}
 </style></head><body>
 <div class="card">
   <div class="brand">
-    <img src="/oauth/logo.png" alt="HIVEMIND" width="72" height="72" style="border-radius:14px;object-fit:cover">
+    <img src="/oauth/logo.png" alt="HIVEMIND">
     <div class="brand-title">HIVEMIND</div>
   </div>
   <div class="header">
     <div class="app-icon">${sanitizeHtml(client.client_name[0])}</div>
-    <div class="sync-icon">⇌</div>
-    <div class="hm-icon"><img src="/oauth/logo.png" alt="HIVEMIND" width="38" height="38" style="border-radius:8px;object-fit:cover"></div>
+    <div class="sync">⇌<span class="pulse"></span></div>
+    <div class="hm-icon"><img src="/oauth/logo.png" alt="HIVEMIND"></div>
   </div>
   <h1>Connect ${sanitizeHtml(client.client_name)}</h1>
-  <p>Authorize <strong>${sanitizeHtml(client.client_name)}</strong> to securely access your HiveMind account details and tools.</p>
-  
+  <p class="sub">Authorize <strong>${sanitizeHtml(client.client_name)}</strong> to securely access your HIVEMIND account details and tools.</p>
+
   <form method="POST" action="/oauth/authorize">
-    <div class="access-level">
-      <div class="perm-header">Select Access Level</div>
-      <div class="radio-group">
-        <label class="radio-item">
-          <input type="radio" name="access_tier" value="full" checked style="margin-top:0.3rem">
-          <div class="radio-content">
-            <strong>Full Access</strong>
-            <span>Ability to read, write and execute memory operations. recommended for full integration.</span>
-          </div>
-        </label>
-        <label class="radio-item">
-          <input type="radio" name="access_tier" value="default" style="margin-top:0.3rem">
-          <div class="radio-content">
-            <strong>Default Access</strong>
-            <span>Read-only access to specific memory segments and limited tool execution.</span>
-          </div>
-        </label>
-      </div>
+    <div class="label">Select access level</div>
+    <div class="tiers">
+      <label class="tier">
+        <input type="radio" name="access_tier" value="full" checked>
+        <span class="dot"></span>
+        <span><span class="t-title">Full Access</span><span class="t-desc">Read, write, and execute memory operations. Recommended for full integration.</span></span>
+      </label>
+      <label class="tier">
+        <input type="radio" name="access_tier" value="default">
+        <span class="dot"></span>
+        <span><span class="t-title">Default Access</span><span class="t-desc">Read-only access to specific memory segments and limited tool execution.</span></span>
+      </label>
     </div>
 
-    <div class="permissions-box">
-      <div class="perm-header">Requested Scopes</div>
-      ${scopeListHtml}
+    <div class="scopes">
+      <div class="label" style="margin-bottom:.8rem">Requested scopes</div>
+      <div class="scope-grid">
+        ${scopeListHtml}
+      </div>
     </div>
 
     <input type="hidden" name="oauth_state_id" value="${sanitizeHtml(consentStateId)}">
@@ -4478,10 +4499,14 @@ exit \$RC
     <input type="hidden" name="code_challenge" value="${sanitizeHtml(codeChallenge)}">
     <input type="hidden" name="code_challenge_method" value="${sanitizeHtml(codeChallengeMethod)}">
     <input type="hidden" name="resource" value="${sanitizeHtml(resource)}">
-    
+
     <div class="actions">
-      <button type="submit" name="action" value="approve" class="approve">Proceed Further</button>
+      <button type="submit" name="action" value="approve" class="approve">Authorize &amp; Continue</button>
       <button type="submit" name="action" value="deny" class="deny">Cancel</button>
+    </div>
+    <div class="foot">
+      <svg width="11" height="11" viewBox="0 0 20 20" fill="none"><path d="M10 1.5 3 4.5v5c0 4 3 7 7 9 4-2 7-5 7-9v-5L10 1.5Z" stroke="#b9b9b9" stroke-width="1.6" stroke-linejoin="round"/></svg>
+      Secured by HIVEMIND · GDPR-compliant
     </div>
   </form>
 </div></body></html>`;

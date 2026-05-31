@@ -1369,20 +1369,20 @@ model DigitalEmployee {
 /// Per-user (not per-org) for v1. summaryMemoryId is set on archive
 /// when the transcript is distilled into a canonical Memory.
 model HyperRoom {
-  id              String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId          String       @map("user_id") @db.Uuid
-  orgId           String       @map("org_id") @db.Uuid
-  name            String       @db.VarChar(120)
-  participantIds  String[]     @default([]) @map("participant_ids") @db.Uuid
-  template        String       @default("debate") @db.VarChar(40)
-  permanentSkepticId String?   @map("permanent_skeptic_id") @db.Uuid
-  createdAt       DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt       DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  archivedAt      DateTime?    @map("archived_at") @db.Timestamptz(6)
-  summaryMemoryId String?      @map("summary_memory_id") @db.Uuid
-  user            User         @relation("UserHyperRooms", fields: [userId], references: [id], onDelete: Cascade)
-  org             Organization @relation("OrgHyperRooms", fields: [orgId], references: [id], onDelete: Cascade)
-  turns           HyperTurn[]
+  id                 String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId             String       @map("user_id") @db.Uuid
+  orgId              String       @map("org_id") @db.Uuid
+  name               String       @db.VarChar(120)
+  participantIds     String[]     @default([]) @map("participant_ids") @db.Uuid
+  template           String       @default("debate") @db.VarChar(40)
+  permanentSkepticId String?      @map("permanent_skeptic_id") @db.Uuid
+  createdAt          DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  archivedAt         DateTime?    @map("archived_at") @db.Timestamptz(6)
+  summaryMemoryId    String?      @map("summary_memory_id") @db.Uuid
+  user               User         @relation("UserHyperRooms", fields: [userId], references: [id], onDelete: Cascade)
+  org                Organization @relation("OrgHyperRooms", fields: [orgId], references: [id], onDelete: Cascade)
+  turns              HyperTurn[]
 
   @@index([userId, orgId])
   @@index([archivedAt])
@@ -1394,12 +1394,12 @@ model HyperRoom {
 /// unresolved-escalate -0.05. Display-only in v1; routing weight wiring
 /// in _pick_lead is phase-2 (observe 50-100 turns first).
 model AgentTrust {
-  orgId       String   @map("org_id") @db.Uuid
-  employeeId  String   @map("employee_id") @db.Uuid
-  trustScore  Float    @default(0.5) @map("trust_score")
-  wins        Int      @default(0)
-  losses      Int      @default(0)
-  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  orgId      String   @map("org_id") @db.Uuid
+  employeeId String   @map("employee_id") @db.Uuid
+  trustScore Float    @default(0.5) @map("trust_score")
+  wins       Int      @default(0)
+  losses     Int      @default(0)
+  updatedAt  DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@id([orgId, employeeId])
   @@index([orgId, trustScore])
@@ -1429,6 +1429,78 @@ model HyperTurn {
   @@index([roomId])
   @@index([status])
   @@map("hyper_turns")
+}
+
+/// HyperClaim — a durable, queryable claim/hypothesis/synthesis artifact emitted
+/// during a turn. Persisted from turn events (hypothesis | line:lead/synthesis |
+/// chain_of_thought) so the reasoning graph survives beyond the lines[] transcript.
+/// refId is the event's in-turn id (e.g. "h-{slug}"); relations reference it.
+/// No @relation back-refs (matches AgentTrust) — kept additive; FK + cascade in SQL.
+model HyperClaim {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  turnId            String   @map("turn_id") @db.Uuid
+  roomId            String   @map("room_id") @db.Uuid
+  orgId             String   @map("org_id") @db.Uuid
+  refId             String   @map("ref_id") @db.VarChar(120)
+  agentSlug         String?  @map("agent_slug") @db.VarChar(120)
+  agentName         String?  @map("agent_name") @db.VarChar(120)
+  lane              String?  @db.VarChar(40)
+  kind              String   @default("hypothesis") @db.VarChar(40)
+  // hypothesis | lead | synthesis | refined
+  text              String
+  confidence        Float?
+  round             Int      @default(0)
+  evidenceMemoryIds String[] @default([]) @map("evidence_memory_ids") @db.Uuid
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([roomId])
+  @@index([turnId])
+  @@index([orgId])
+  @@map("hyper_claims")
+}
+
+/// HyperTrial — a review/reaction/vote/validation verdict against a claim.
+/// Verdict strings are HyperAgents-native (agree|extend|challenge|abstain for
+/// reactions; resolved|escalate for validation; the consensus verdict for votes).
+model HyperTrial {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  turnId       String   @map("turn_id") @db.Uuid
+  roomId       String   @map("room_id") @db.Uuid
+  orgId        String   @map("org_id") @db.Uuid
+  trialKind    String   @map("trial_kind") @db.VarChar(40)
+  // peer_review | react | vote | validate | skeptic
+  reviewerSlug String?  @map("reviewer_slug") @db.VarChar(120)
+  reviewerName String?  @map("reviewer_name") @db.VarChar(120)
+  targetRef    String?  @map("target_ref") @db.VarChar(120)
+  verdict      String?  @db.VarChar(40)
+  confidence   Float?
+  content      String?
+  round        Int      @default(0)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([roomId])
+  @@index([turnId])
+  @@index([orgId])
+  @@map("hyper_trials")
+}
+
+/// HyperRelation — a provenance edge between artifacts (claim->memory derived_from,
+/// trial->claim supports/contradicts, revised->original updates). fromRef/toRef are
+/// in-turn refIds, not uuids.
+model HyperRelation {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  turnId       String   @map("turn_id") @db.Uuid
+  roomId       String   @map("room_id") @db.Uuid
+  orgId        String   @map("org_id") @db.Uuid
+  relationType String   @map("relation_type") @db.VarChar(40)
+  fromRef      String   @map("from_ref") @db.VarChar(120)
+  toRef        String   @map("to_ref") @db.VarChar(120)
+  metadata     Json     @default("{}")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([roomId])
+  @@index([turnId])
+  @@map("hyper_relations")
 }
 
 /// AgentEval — one row per (agent, turn-line) scored by the CSI judge.
@@ -1825,24 +1897,24 @@ model CognitionStatus {
 // Phase 1 Governance: append-only mutation audit
 // ─────────────────────────────────────────────────────────────
 model GovernanceActionLog {
-  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  batchId         String    @map("batch_id") @db.Uuid
-  agentName       String    @map("agent_name")
-  userId          String?   @map("user_id") @db.Uuid
-  orgId           String    @map("org_id") @db.Uuid
-  targetMemoryId  String?   @map("target_memory_id") @db.Uuid
-  actionType      String    @map("action_type")
-  reasoning       String?
-  evidenceIds     String[]  @map("evidence_ids") @db.Uuid
-  confidence      Float?
-  status          String    @default("proposed")
-  reversible      Boolean   @default(true)
-  retryCount      Int       @default(0) @map("retry_count")
-  beforeSnapshot  Json?     @map("before_snapshot")
-  afterSnapshot   Json?     @map("after_snapshot")
-  appliedAt       DateTime? @map("applied_at") @db.Timestamptz(6)
-  revertedAt      DateTime? @map("reverted_at") @db.Timestamptz(6)
-  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  batchId        String    @map("batch_id") @db.Uuid
+  agentName      String    @map("agent_name")
+  userId         String?   @map("user_id") @db.Uuid
+  orgId          String    @map("org_id") @db.Uuid
+  targetMemoryId String?   @map("target_memory_id") @db.Uuid
+  actionType     String    @map("action_type")
+  reasoning      String?
+  evidenceIds    String[]  @map("evidence_ids") @db.Uuid
+  confidence     Float?
+  status         String    @default("proposed")
+  reversible     Boolean   @default(true)
+  retryCount     Int       @default(0) @map("retry_count")
+  beforeSnapshot Json?     @map("before_snapshot")
+  afterSnapshot  Json?     @map("after_snapshot")
+  appliedAt      DateTime? @map("applied_at") @db.Timestamptz(6)
+  revertedAt     DateTime? @map("reverted_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
 
   @@unique([targetMemoryId, actionType, batchId], map: "governance_action_log_idempotent_idx")
   @@index([orgId, status, createdAt(sort: Desc)], map: "governance_action_log_org_status_idx")
@@ -1852,34 +1924,34 @@ model GovernanceActionLog {
 }
 
 model GovernanceAgentState {
-  agentName            String    @id @map("agent_name")
-  lastRunAt            DateTime? @map("last_run_at") @db.Timestamptz(6)
-  lastCompletedAt      DateTime? @map("last_completed_at") @db.Timestamptz(6)
-  cursorMemoryId       String?   @map("cursor_memory_id") @db.Uuid
-  config               Json      @default("{}")
-  metrics              Json      @default("{}")
-  dailyTokenBudget     Int       @default(1000000) @map("daily_token_budget")
-  tokensSpentToday     Int       @default(0) @map("tokens_spent_today")
-  tokenBudgetResetAt   DateTime  @default(dbgenerated("CURRENT_DATE")) @map("token_budget_reset_at") @db.Date
-  circuitBreakerUntil  DateTime? @map("circuit_breaker_until") @db.Timestamptz(6)
-  updatedAt            DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  agentName           String    @id @map("agent_name")
+  lastRunAt           DateTime? @map("last_run_at") @db.Timestamptz(6)
+  lastCompletedAt     DateTime? @map("last_completed_at") @db.Timestamptz(6)
+  cursorMemoryId      String?   @map("cursor_memory_id") @db.Uuid
+  config              Json      @default("{}")
+  metrics             Json      @default("{}")
+  dailyTokenBudget    Int       @default(1000000) @map("daily_token_budget")
+  tokensSpentToday    Int       @default(0) @map("tokens_spent_today")
+  tokenBudgetResetAt  DateTime  @default(dbgenerated("CURRENT_DATE")) @map("token_budget_reset_at") @db.Date
+  circuitBreakerUntil DateTime? @map("circuit_breaker_until") @db.Timestamptz(6)
+  updatedAt           DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@map("governance_agent_state")
 }
 
 model GovernanceMetric {
-  agentName        String   @map("agent_name")
-  orgId            String   @map("org_id") @db.Uuid
-  day              DateTime @db.Date
-  actionsProposed  Int      @default(0) @map("actions_proposed")
-  actionsApproved  Int      @default(0) @map("actions_approved")
-  actionsApplied   Int      @default(0) @map("actions_applied")
-  actionsReverted  Int      @default(0) @map("actions_reverted")
-  actionsRejected  Int      @default(0) @map("actions_rejected")
-  actionsFailed    Int      @default(0) @map("actions_failed")
-  tokensSpent      BigInt   @default(0) @map("tokens_spent")
-  latencyMsP95     Int?     @map("latency_ms_p95")
-  updatedAt        DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  agentName       String   @map("agent_name")
+  orgId           String   @map("org_id") @db.Uuid
+  day             DateTime @db.Date
+  actionsProposed Int      @default(0) @map("actions_proposed")
+  actionsApproved Int      @default(0) @map("actions_approved")
+  actionsApplied  Int      @default(0) @map("actions_applied")
+  actionsReverted Int      @default(0) @map("actions_reverted")
+  actionsRejected Int      @default(0) @map("actions_rejected")
+  actionsFailed   Int      @default(0) @map("actions_failed")
+  tokensSpent     BigInt   @default(0) @map("tokens_spent")
+  latencyMsP95    Int?     @map("latency_ms_p95")
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@id([agentName, orgId, day])
   @@index([day(sort: Desc), agentName], map: "governance_metric_day_idx")

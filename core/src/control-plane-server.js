@@ -5583,11 +5583,111 @@ Write the persona now.`;
         } else {
           await appendTurnEvent(prisma, body.turn_id, body.event);
         }
+
+        // ── CSI artifact persistence (best-effort, must never delay/break the append path) ──
+        try {
+          const _isUuid = (s) => typeof s === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
+          const ev = body.event;
+          const turn_id = body.turn_id;
+
+          // Resolve roomId + orgId from the turn row
+          const _turn = await prisma.hyperTurn.findUnique({ where: { id: turn_id }, select: { roomId: true } });
+          if (_turn && prisma) {
+            const _room = await prisma.hyperRoom.findUnique({ where: { id: _turn.roomId }, select: { orgId: true } });
+            if (_room) {
+              const roomId = _turn.roomId;
+              const orgId = _room.orgId;
+              const round = ev.round || 0;
+
+              // Stable refId for events that lack an id field
+              const _stableRef = `${turn_id}:${ev.t}:${ev.agent || ev.reviewer || ev.voter || 'x'}:${round}`;
+
+              if (ev.t === 'hypothesis' && ev.content) {
+                const refId = ev.id || _stableRef;
+                await prisma.hyperClaim.create({
+                  data: { refId, turnId: turn_id, roomId, orgId, agentSlug: ev.agent, lane: ev.lane, kind: 'hypothesis', text: ev.content, confidence: ev.confidence ?? null, round, evidenceMemoryIds: (ev.evidence_memory_ids || []).filter(_isUuid) },
+                });
+                for (const memId of (ev.evidence_memory_ids || []).filter(_isUuid)) {
+                  await prisma.hyperRelation.create({ data: { turnId: turn_id, roomId, orgId, relationType: 'derived_from', fromRef: refId, toRef: memId } }).catch(() => {});
+                }
+              } else if (ev.t === 'chain_of_thought' && (ev.refined_hypothesis || '')) {
+                const refId = ev.id || _stableRef;
+                await prisma.hyperClaim.create({
+                  data: { refId, turnId: turn_id, roomId, orgId, agentSlug: ev.agent, lane: ev.lane, kind: 'refined', text: ev.refined_hypothesis || '', confidence: ev.confidence ?? null, round, evidenceMemoryIds: (ev.evidence_memory_ids || []).filter(_isUuid) },
+                });
+                for (const memId of (ev.evidence_memory_ids || []).filter(_isUuid)) {
+                  await prisma.hyperRelation.create({ data: { turnId: turn_id, roomId, orgId, relationType: 'derived_from', fromRef: refId, toRef: memId } }).catch(() => {});
+                }
+              } else if (ev.t === 'line' && (ev.kind === 'lead' || ev.kind === 'synthesis') && ev.content) {
+                await prisma.hyperClaim.create({
+                  data: { refId: _stableRef, turnId: turn_id, roomId, orgId, agentSlug: ev.agent, kind: ev.kind, text: ev.content || '', round },
+                });
+              } else if (ev.t === 'peer_review') {
+                await prisma.hyperTrial.create({
+                  data: { turnId: turn_id, roomId, orgId, trialKind: 'peer_review', reviewerSlug: ev.reviewer ?? null, targetRef: ev.target_hypothesis_id ?? null, verdict: ev.agreement ?? null, content: ev.content ?? null, round },
+                });
+                if (ev.reviewer && ev.target_hypothesis_id) {
+                  await prisma.hyperRelation.create({ data: { turnId: turn_id, roomId, orgId, relationType: ev.agreement || 'review', fromRef: ev.reviewer, toRef: ev.target_hypothesis_id } }).catch(() => {});
+                }
+              } else if (ev.t === 'react') {
+                await prisma.hyperTrial.create({
+                  data: { turnId: turn_id, roomId, orgId, trialKind: 'react', reviewerSlug: ev.agent ?? null, verdict: ev.agreement ?? null, confidence: ev.confidence ?? null, content: ev.content ?? null, round },
+                });
+              } else if (ev.t === 'vote') {
+                await prisma.hyperTrial.create({
+                  data: { turnId: turn_id, roomId, orgId, trialKind: 'vote', reviewerSlug: ev.voter ?? null, targetRef: ev.vote_for_hypothesis_id ?? null, verdict: ev.score != null ? `score:${ev.score}` : null, content: ev.content ?? null, round },
+                });
+                if (ev.voter && ev.vote_for_hypothesis_id && ev.vote_for_hypothesis_id !== 'none') {
+                  await prisma.hyperRelation.create({ data: { turnId: turn_id, roomId, orgId, relationType: 'votes_for', fromRef: ev.voter, toRef: ev.vote_for_hypothesis_id } }).catch(() => {});
+                }
+              } else if (ev.t === 'validate') {
+                await prisma.hyperTrial.create({
+                  data: { turnId: turn_id, roomId, orgId, trialKind: 'validate', reviewerSlug: ev.agent ?? null, verdict: ev.verdict ?? null, content: ev.content ?? null, round },
+                });
+              } else if (ev.t === 'skeptic_challenge') {
+                await prisma.hyperTrial.create({
+                  data: { turnId: turn_id, roomId, orgId, trialKind: 'skeptic', reviewerSlug: ev.agent ?? null, content: JSON.stringify({ challenges: ev.challenges, alternatives: ev.unorthodox_alternatives, assumptions: ev.hidden_assumptions }).slice(0, 4000), round },
+                });
+              }
+            }
+          }
+        } catch (_artifactErr) {
+          logger.warn({ err: _artifactErr.message, turn_id: body.turn_id }, '[hyper-rooms] artifact persist failed (best-effort)');
+        }
+
         return jsonResponse(res, { ok: true });
       } catch (err) {
         console.warn('[hyper-rooms] turn-event append failed:', err.message);
         return jsonResponse(res, { error: err.message }, 500);
       }
+    }
+
+    // GET /v1/hyper-rooms/:roomId/artifacts — CSI artifact read
+    const artifactsMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/artifacts$/);
+    if (artifactsMatch && req.method === 'GET') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const roomId = artifactsMatch[1];
+      const room = await prisma.hyperRoom.findFirst({
+        where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId },
+      });
+      if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
+      const qp = new URL(req.url, 'http://x').searchParams;
+      const type = qp.get('type') || 'all';
+      const limitRaw = parseInt(qp.get('limit') || '200', 10);
+      const limit = Math.min(isNaN(limitRaw) ? 200 : limitRaw, 500);
+      const orderAsc = { orderBy: { createdAt: 'asc' } };
+      const result = { claims: [], trials: [], relations: [] };
+      if (type === 'all' || type === 'claim') {
+        result.claims = await prisma.hyperClaim.findMany({ where: { roomId }, take: limit, ...orderAsc });
+      }
+      if (type === 'all' || type === 'trial') {
+        result.trials = await prisma.hyperTrial.findMany({ where: { roomId }, take: limit, ...orderAsc });
+      }
+      if (type === 'all' || type === 'relation') {
+        result.relations = await prisma.hyperRelation.findMany({ where: { roomId }, take: limit, ...orderAsc });
+      }
+      return jsonResponse(res, result);
     }
   }
   // ─── End Hyper Agents Rooms ───────────────────────────────

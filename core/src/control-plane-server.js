@@ -4973,7 +4973,7 @@ Write the persona now.`;
           try {
             await prisma.apiKey.update({
               where: { id: emp.hivemindApiKeyId },
-              data: { isActive: false },
+              data: { revokedAt: new Date(), revokedReason: 'employee key reminted' },
             });
           } catch (_) { /* ignore — key might have been hard-deleted */ }
         }
@@ -4987,7 +4987,6 @@ Write the persona now.`;
             keyHash,
             keyPrefix: raw.slice(0, 12),
             scopes: ['memory:read', 'memory:write', 'mcp', 'slack:act'],
-            isActive: true,
           },
         });
         await store.setScopedApiKey({ id: emp.id, apiKeyId: apiKey.id, encryptedKey: encryptToken(raw) });
@@ -5041,7 +5040,6 @@ Write the persona now.`;
               keyHash,
               keyPrefix: raw.slice(0, 12),
               scopes: ['memory:read', 'memory:write', 'mcp', 'slack:act'],
-              isActive: true,
             },
           });
           await store.setScopedApiKey({ id: r.id, apiKeyId: apiKey.id, encryptedKey: encryptToken(raw) });

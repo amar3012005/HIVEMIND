@@ -6037,6 +6037,54 @@ Write the persona now.`;
     return jsonResponse(res, { ok: true });
   }
 
+  // POST /v1/connectors/slack/interactivity — Slack interactive components
+  // (button clicks). Body is application/x-www-form-urlencoded: payload=<json>.
+  // HMAC-verified, then forwarded to core (master-key) to perform the save.
+  if (pathname === '/v1/connectors/slack/interactivity' && req.method === 'POST') {
+    const signingSecret = process.env.SLACK_SIGNING_SECRET;
+    if (!signingSecret) return jsonResponse(res, { error: 'webhook not configured' }, 503);
+    const chunks = [];
+    let total = 0;
+    for await (const chunk of req) {
+      total += chunk.length;
+      if (total > 1_000_000) return jsonResponse(res, { error: 'body too large' }, 413);
+      chunks.push(chunk);
+    }
+    const rawBody = Buffer.concat(chunks).toString('utf8');
+    const ts = req.headers['x-slack-request-timestamp'];
+    const sig = req.headers['x-slack-signature'];
+    if (!ts || !sig) return jsonResponse(res, { error: 'missing signature headers' }, 400);
+    if (Math.abs(Math.floor(Date.now() / 1000) - parseInt(ts, 10)) > 300) {
+      return jsonResponse(res, { error: 'stale timestamp' }, 400);
+    }
+    const crypto = await import('node:crypto');
+    const expected = `v0=${crypto.createHmac('sha256', signingSecret).update(`v0:${ts}:${rawBody}`).digest('hex')}`;
+    let sigOk = false;
+    try { sigOk = crypto.timingSafeEqual(Buffer.from(expected, 'utf8'), Buffer.from(String(sig), 'utf8')); } catch { sigOk = false; }
+    if (!sigOk) return jsonResponse(res, { error: 'bad signature' }, 401);
+
+    let payload;
+    try { payload = JSON.parse(new URLSearchParams(rawBody).get('payload') || '{}'); } catch { return jsonResponse(res, { error: 'invalid payload' }, 400); }
+
+    jsonResponse(res, { ok: true });
+    setImmediate(async () => {
+      try {
+        const action = (payload.actions && payload.actions[0]) || null;
+        if (!action || !String(action.action_id || '').startsWith('hm_save_pick')) return;
+        const apiKey = process.env.HIVEMIND_MASTER_API_KEY;
+        if (!apiKey) { console.error('[slack-interactivity] HIVEMIND_MASTER_API_KEY missing'); return; }
+        await fetch(`${CONFIG.coreApiBaseUrl}/api/connectors/slack/interactivity`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
+          body: JSON.stringify({ value: action.value, response_url: payload.response_url || null }),
+        });
+      } catch (err) {
+        console.error('[slack-interactivity] dispatch failed:', err.message);
+      }
+    });
+    return;
+  }
+
   // ─── End Connector Routes ──────────────────────────────────────
 
   // POST /v1/tara/cartesia-token — mint a short-lived Cartesia agent access

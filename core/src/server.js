@@ -6673,6 +6673,56 @@ exit \$RC
       // POST /api/connectors/slack/event-ingest — webhook ingest path
       // Called by control-plane after Slack signature verification. Master-key auth.
       // Ingests one Slack event (message/reaction/pin) as a HIVEMIND memory.
+      // Slack interactivity (button click) → save the pending summary to the
+      // chosen project. Forwarded by the control-plane (master-key authed).
+      // The button value carries the whole pending save, so this is
+      // self-contained (no cross-instance state needed).
+      if (pathname === '/api/connectors/slack/interactivity' && req.method === 'POST') {
+        const rawVal = body.value;
+        const responseUrl = body.response_url || null;
+        if (!rawVal) return jsonResponse(res, { ok: true, skipped: 'no_value' });
+        jsonResponse(res, { ok: true });
+        setImmediate(async () => {
+          try {
+            let d;
+            try { d = JSON.parse(rawVal); } catch { return; }
+            const { t, s, p, u, o } = d || {};
+            if (!s || !u) return;
+            const payload = {
+              title: t || 'Slack conversation',
+              content: s,
+              tags: ['slack', 'conversation-summary'],
+              memory_type: 'conversation',
+              user_id: u,
+              org_id: o || null,
+              scope: p ? 'project' : 'personal',
+              project_ids: p ? [p] : [],
+              source_metadata: { source_platform: 'slack', via: 'slack-save-button' },
+            };
+            const [routed] = await buildRoutedIngestPayloads(payload, { smartIngestRouter });
+            if (ingestRoutedPayload) await ingestRoutedPayload(routed, persistentMemoryEngine);
+            else await persistentMemoryEngine.ingestMemory(routed);
+            let label = 'personal';
+            if (p) {
+              try {
+                const pr = await persistentMemoryStore.client.project.findUnique({ where: { id: p }, select: { name: true } });
+                label = pr?.name || 'project';
+              } catch (e) { /* keep default */ }
+            }
+            if (responseUrl) {
+              await fetch(responseUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ replace_original: true, text: `Saved to *${label}* ✓\n${s}` }),
+              }).catch(() => {});
+            }
+          } catch (e) {
+            console.error('[slack-interactivity] save failed:', e && (e.stack || e.message));
+          }
+        });
+        return;
+      }
+
       if (pathname === '/api/connectors/slack/event-ingest' && req.method === 'POST') {
         if (!persistentMemoryEngine) {
           return jsonResponse(res, { error: 'memory engine unavailable' }, 503);
@@ -6905,17 +6955,48 @@ exit \$RC
                   await postSlack('Could not summarize — try again.');
                   return;
                 }
-                // Ask which project (no fragile inline parsing — "save this to
-                // hivemind" must NOT be read as a project named "hivemind").
-                let names = [];
+                // Ask which project — clickable Block Kit buttons. Each button
+                // carries the whole pending save in its value (title, summary,
+                // project, user, org) so the interactivity click is
+                // self-contained (works regardless of which core instance
+                // handles it). Also keep the in-memory pending + accept a typed
+                // reply as a fallback.
+                let projs = [];
                 try {
-                  const projs = await persistentMemoryStore.client.project.findMany({
-                    where: { orgId: runOrgId, status: 'active' }, select: { name: true }, take: 25,
+                  projs = await persistentMemoryStore.client.project.findMany({
+                    where: { orgId: runOrgId, status: 'active' }, select: { id: true, name: true }, take: 20,
                   });
-                  names = projs.map((p) => p.name).filter(Boolean);
                 } catch (e) { /* none */ }
                 globalThis._slackPendingSave.set(saveConvKey, { title, summary });
-                await postSlack(`Summary ready:\n> ${summary}\n\nSave to which project? ${names.length ? names.join(' · ') + ' · ' : ''}or reply "personal".`);
+                const mkVal = (pid) => JSON.stringify({
+                  t: String(title).slice(0, 120),
+                  s: String(summary).slice(0, 1500),
+                  p: pid || null,
+                  u: runUserId,
+                  o: runOrgId || null,
+                }).slice(0, 1999);
+                const buttons = [
+                  ...projs.map((p) => ({
+                    type: 'button',
+                    text: { type: 'plain_text', text: String(p.name).slice(0, 75) },
+                    value: mkVal(p.id),
+                    action_id: `hm_save_pick:${p.id}`,
+                  })),
+                  { type: 'button', text: { type: 'plain_text', text: 'Personal' }, value: mkVal(null), action_id: 'hm_save_pick:personal' },
+                ].slice(0, 25);
+                const blocks = [
+                  { type: 'section', text: { type: 'mrkdwn', text: `*Summary ready:*\n> ${String(summary).slice(0, 2800)}` } },
+                  { type: 'section', text: { type: 'mrkdwn', text: 'Save to which project?' } },
+                  { type: 'actions', block_id: 'hm_save_actions', elements: buttons },
+                ];
+                try {
+                  const bt = await bridge.connectorStore.getAccessToken(evUserId, 'slack');
+                  await bridge._call('chat.postMessage',
+                    { channel: qChannel, text: 'Save to which project?', blocks, ...(ev.thread_ts ? { thread_ts: ev.thread_ts } : {}) }, bt, 'POST');
+                } catch (e) {
+                  // Fallback to plain text if blocks fail.
+                  await postSlack(`Summary ready:\n> ${summary}\n\nSave to which project? ${projs.map((p) => p.name).join(' · ')} · or reply "personal".`);
+                }
                 return;
               }
 

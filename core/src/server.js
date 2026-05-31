@@ -6991,8 +6991,9 @@ exit \$RC
                 ];
                 try {
                   const bt = await bridge.connectorStore.getAccessToken(evUserId, 'slack');
+                  // _call form-encodes — blocks must be a JSON STRING, not an array.
                   await bridge._call('chat.postMessage',
-                    { channel: qChannel, text: 'Save to which project?', blocks, ...(ev.thread_ts ? { thread_ts: ev.thread_ts } : {}) }, bt, 'POST');
+                    { channel: qChannel, text: 'Save to which project?', blocks: JSON.stringify(blocks), ...(ev.thread_ts ? { thread_ts: ev.thread_ts } : {}) }, bt, 'POST');
                 } catch (e) {
                   // Fallback to plain text if blocks fail.
                   await postSlack(`Summary ready:\n> ${summary}\n\nSave to which project? ${projs.map((p) => p.name).join(' · ')} · or reply "personal".`);

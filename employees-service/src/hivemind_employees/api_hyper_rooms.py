@@ -805,14 +805,41 @@ SKEPTIC_PERSONA_PRELUDE = (
 )
 
 
-HYPER_ROOM_MAX_TOOL_CALLS = int(os.environ.get("HYPER_ROOM_MAX_TOOL_CALLS", "80"))
+HYPER_ROOM_MAX_TOOL_CALLS = int(os.environ.get("HYPER_ROOM_MAX_TOOL_CALLS", "400"))
 
 # Wall-clock budget for a whole swarm turn. The 1.5s/agent stagger repeats
 # per round (R1/R2/R3/R5-vote); under a 429 storm the per-call retries stack
-# on top, so a turn can run for minutes and blow past the control-plane's SSE
-# turn timeout — the user sees a half-streamed turn that never seals. Keep
-# this a few seconds under the control-plane timeout so the seal wins the race.
-HYPER_ROOM_MAX_WALL_SECONDS = float(os.environ.get("HYPER_ROOM_MAX_WALL_SECONDS", "150"))
+# on top. The control-plane SSE stream has NO hard turn timeout — it polls the
+# turn row until sealedAt is set (heartbeat keeps the connection alive) — so the
+# only ceiling is this self-imposed budget. Recursive CSI convergence runs
+# multiple cycles (each ~4 LLM rounds x N agents), so the budget is generous;
+# deadline_hit still short-circuits to synthesis/seal if it is ever exceeded.
+HYPER_ROOM_MAX_WALL_SECONDS = float(os.environ.get("HYPER_ROOM_MAX_WALL_SECONDS", "600"))
+
+# ─── Recursive CSI convergence ──────────────────────────────────────────
+# A swarm turn is no longer a single R1->R5 pass. After the R5 vote, if the
+# verdict is not a strong consensus, the swarm RE-SEEDS (carries the refined
+# hypotheses forward + injects the prior dissent reasons and the Skeptic's
+# unorthodox alternatives) and runs another R2->R5 cycle — mirroring the
+# MiroFish / CSI propose -> review -> revise -> vote loop. It stops when the
+# verdict converges, the cycle cap is hit, or the cost/deadline cap fires.
+HYPER_ROOM_MAX_CYCLES = int(os.environ.get("HYPER_ROOM_MAX_CYCLES", "6"))
+
+# Seal (stop looping) when verdict is AGREED, or CONDITIONAL with a weighted
+# score at/above this floor. Below it (weak CONDITIONAL) or DISSENT -> re-run.
+HYPER_ROOM_CONVERGE_SCORE = float(os.environ.get("HYPER_ROOM_CONVERGE_SCORE", "3.2"))
+
+
+def _has_converged(consensus: Dict[str, Any]) -> bool:
+    """True when the swarm should stop iterating and seal.
+    AGREED always converges; CONDITIONAL converges only when the weighted
+    score clears HYPER_ROOM_CONVERGE_SCORE; DISSENT never converges."""
+    verdict = consensus.get("verdict")
+    if verdict == "AGREED":
+        return True
+    if verdict == "CONDITIONAL":
+        return float(consensus.get("weighted_score") or 0) >= HYPER_ROOM_CONVERGE_SCORE
+    return False
 
 
 # Round prompt templates. Filled with persona + lane + context per agent.
@@ -1275,333 +1302,433 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
     refined_by_id: Dict[str, Any] = {}
 
     # ─── R2 — Peer Cross-Exam ──────────────────────────────────────────
-    await _emit_event(req.callback_url, req.turn_id, {
-        "t": "round_start", "round": 2, "label": "Peer Cross-Exam",
-        "task": "Each agent reviews 2 OTHER hypotheses with corroborating or contradicting evidence.",
-    })
-    hyp_table = "\n".join(
-        f"  [{h['id']}] {h['agent_name']} ({h['lane']}, conf {h['confidence']:.2f}): {h['hypothesis']}"
-        for h in hypotheses
-    )
-
-    async def _run_r2(emp: Dict[str, Any]) -> List[Dict[str, Any]]:
-        # Assign 2 targets that are NOT this agent's own.
-        own_id = f"h-{emp['slug']}"
-        candidate_ids = [h["id"] for h in hypotheses if h["id"] != own_id]
-        target_ids = candidate_ids[:2]
-        if not target_ids:
-            return []
-        try:
-            agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id)
-            prompt = R2_PEER_REVIEW_PROMPT.format(
-                persona_name=emp.get("name", emp.get("slug")),
-                lane=emp["_lane"],
-                hypotheses_table=hyp_table,
-                target_ids=", ".join(target_ids),
-            )
-            reply = await agent(Msg(name="user", content=prompt, role="user"))
-            text = _msg_to_text(reply)
-            m = re.search(r"\{[\s\S]+\}", text)
-            parsed = json.loads(m.group(0)) if m else None
-            reviews = parsed.get("reviews") if isinstance(parsed, dict) else None
-            if not isinstance(reviews, list):
-                return []
-            out = []
-            for r in reviews:
-                if not isinstance(r, dict):
-                    continue
-                ev_ids = [str(x) for x in (r.get("evidence_memory_ids") or []) if x]
-                for e in ev_ids:
-                    evidence_pool.add(e)
-                # Normalise to the canonical stance set (agree|challenge|extend).
-                # Older prompts emitted "support"; map it to "agree" so the
-                # debate/R3 accountability and downstream "== challenge" checks
-                # see a consistent vocabulary.
-                stance = str(r.get("agreement", "extend"))[:20].strip().lower()
-                if stance == "support":
-                    stance = "agree"
-                if stance not in ("agree", "challenge", "extend"):
-                    stance = "extend"
-                out.append({
-                    "reviewer_slug": emp["slug"],
-                    "reviewer_name": emp.get("name", emp["slug"]),
-                    "target_hypothesis_id": str(r.get("target_hypothesis_id", ""))[:100],
-                    "agreement": stance,
-                    "evidence_memory_ids": ev_ids,
-                    "reason": str(r.get("reason", ""))[:500],
-                })
-            return out
-        except Exception as exc:
-            log.warning("[swarm] R2 %s failed: %s", emp.get("slug"), exc)
-            return []
-
-    async def _staggered_r2(emp, idx):
-        await asyncio.sleep(1.5 * idx)
-        return await _run_r2(emp)
-    if not cost_cap_hit:
-        r2_lists = await asyncio.gather(*[_staggered_r2(emp, i) for i, emp in enumerate(speakers)], return_exceptions=False)
-        peer_reviews = [r for lst in r2_lists for r in lst]
-    for r in peer_reviews:
-        tokens = max(60, len(r["reason"]) // 4)
-        cost_tokens += tokens
-        target_author = (hyp_by_id.get(r["target_hypothesis_id"]) or {}).get("agent_name")
-        await _emit_event(req.callback_url, req.turn_id, {
-            "t": "peer_review",
-            "reviewer": r["reviewer_slug"],
-            "reviewer_name": r["reviewer_name"],
-            "target_hypothesis_id": r["target_hypothesis_id"],
-            "target_author": target_author,
-            "agreement": r["agreement"],
-            "evidence_memory_ids": r["evidence_memory_ids"],
-            "content": r["reason"],
-            "tokens": tokens,
-            "round": 2,
-        })
-    log.info("[swarm] R2 done turn=%s reviews=%d capped=%s", req.turn_id, len(peer_reviews), cost_cap_hit)
-    await _emit_event(req.callback_url, req.turn_id, {
-        "t": "round_end", "round": 2, "reviews_count": len(peer_reviews),
-    })
-
-    # ─── R3 — Deep Chain-of-Thought ────────────────────────────────────
-    await _emit_event(req.callback_url, req.turn_id, {
-        "t": "round_start", "round": 3, "label": "Deep Chain-of-Thought",
-        "task": "Each agent refines hypothesis via full lane playbook; emits explicit steps.",
-    })
-    reviews_by_target: Dict[str, List[Dict[str, Any]]] = {}
-    for r in peer_reviews:
-        reviews_by_target.setdefault(r["target_hypothesis_id"], []).append(r)
-
-    async def _run_r3(emp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        own_id = f"h-{emp['slug']}"
-        own = hyp_by_id.get(own_id)
-        if not own:
-            return None
-        own_reviews = reviews_by_target.get(own_id, [])
-        reviews_text = "\n".join(
-            f"  - {rv['reviewer_name']} ({rv['agreement']}): {rv['reason']}"
-            for rv in own_reviews
-        ) or "  (no peer reviews of your hypothesis)"
-        try:
-            agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id)
-            prompt = R3_DEEP_DIVE_PROMPT.format(
-                persona_name=emp.get("name", emp.get("slug")),
-                lane=emp["_lane"],
-                your_hypothesis=own["hypothesis"],
-                your_reviews=reviews_text,
-                lane_playbook=LANE_PLAYBOOKS.get(emp["_lane"], ""),
-            )
-            reply = await agent(Msg(name="user", content=prompt, role="user"))
-            text = _msg_to_text(reply)
-            m = re.search(r"\{[\s\S]+\}", text)
-            parsed = json.loads(m.group(0)) if m else None
-            if not isinstance(parsed, dict) or not parsed.get("refined_hypothesis"):
-                return None
-            ev_ids = [str(x) for x in (parsed.get("evidence_memory_ids") or []) if x]
-            for e in ev_ids:
-                evidence_pool.add(e)
-            steps = [str(s)[:300] for s in (parsed.get("chain_of_thought") or [])][:8]
-            refined = {
-                "id": own_id,  # Same id — same hypothesis, refined
-                "agent_slug": emp["slug"],
-                "agent_name": emp.get("name", emp["slug"]),
-                "lane": emp["_lane"],
-                "refined_hypothesis": str(parsed.get("refined_hypothesis", ""))[:2000],
-                "chain_of_thought": steps,
-                "evidence_memory_ids": ev_ids,
-                "lane_specific_finding": str(parsed.get("lane_specific_finding", ""))[:500],
-                "confidence": float(parsed.get("confidence") or 0.6),
-            }
-            return refined
-        except Exception as exc:
-            log.warning("[swarm] R3 %s failed: %s", emp.get("slug"), exc)
-            return None
-
-    async def _staggered_r3(emp, idx):
-        await asyncio.sleep(1.5 * idx)
-        return await _run_r3(emp)
-    if not cost_cap_hit and _turn_tool_total() >= HYPER_ROOM_MAX_TOOL_CALLS:
-        cost_cap_hit = True
-        log.warning("[swarm] cost cap hit before R3 turn=%s total=%d cap=%d",
-                    req.turn_id, _turn_tool_total(), HYPER_ROOM_MAX_TOOL_CALLS)
-        await _emit_event(req.callback_url, req.turn_id, {
-            "t": "cost_cap_hit", "total": _turn_tool_total(),
-            "cap": HYPER_ROOM_MAX_TOOL_CALLS, "skipped_from_round": 3,
-        })
-    elif not cost_cap_hit and await _deadline_hit(3):
-        cost_cap_hit = True
-    if not cost_cap_hit:
-        r3_results = await asyncio.gather(*[_staggered_r3(emp, i) for i, emp in enumerate(speakers)], return_exceptions=False)
-        refined = [r for r in r3_results if r]
-        refined_by_id = {r["id"]: r for r in refined}
-    for r in refined:
-        tokens = max(150, (len(r["refined_hypothesis"]) + sum(len(s) for s in r["chain_of_thought"])) // 4)
-        cost_tokens += tokens
-        await _emit_event(req.callback_url, req.turn_id, {
-            "t": "chain_of_thought",
-            "id": r["id"],
-            "agent": r["agent_slug"],
-            "lane": r["lane"],
-            "steps": r["chain_of_thought"],
-            "refined_hypothesis": r["refined_hypothesis"],
-            "lane_specific_finding": r["lane_specific_finding"],
-            "evidence_memory_ids": r["evidence_memory_ids"],
-            "confidence": r["confidence"],
-            "tokens": tokens,
-            "round": 3,
-        })
-    log.info("[swarm] R3 done turn=%s refined=%d capped=%s", req.turn_id, len(refined), cost_cap_hit)
-    await _emit_event(req.callback_url, req.turn_id, {
-        "t": "round_end", "round": 3, "refined_count": len(refined),
-    })
-
-    # ─── R4 — Skeptic Unorthodox Challenge ─────────────────────────────
-    await _emit_event(req.callback_url, req.turn_id, {
-        "t": "round_start", "round": 4, "label": "Skeptic Unorthodox Challenge",
-        "task": "Permanent Skeptic surfaces hidden assumptions + unorthodox alternatives.",
-    })
+    # ═══ Recursive CSI convergence loop ════════════════════════════════
+    # Each cycle is one R2(peer-exam) -> R3(refine) -> R4(skeptic) ->
+    # R5(vote) pass. Cycle 1 reviews the R1 hypotheses; cycle 2+ carries the
+    # refined hypotheses forward and injects the prior dissent + Skeptic
+    # alternatives, then re-runs until the verdict converges (AGREED, or
+    # CONDITIONAL >= floor), the cycle cap is hit, or cost/deadline fires.
+    # `round` is monotonic across cycles ((cycle-1)*5 + phase) so artifact
+    # rows stay unique; events also carry explicit `cycle` + `phase`.
+    consensus: Dict[str, Any] = {"verdict": "DISSENT", "winning_id": None, "weighted_score": 0.0, "action_items": []}
+    refined_table_str = "(no hypotheses)"
     skeptic_output: Dict[str, Any] = {"challenges": [], "unorthodox_alternatives": [], "hidden_assumptions": []}
-    if not cost_cap_hit and _turn_tool_total() >= HYPER_ROOM_MAX_TOOL_CALLS:
-        cost_cap_hit = True
-        log.warning("[swarm] cost cap hit before R4 turn=%s total=%d cap=%d",
-                    req.turn_id, _turn_tool_total(), HYPER_ROOM_MAX_TOOL_CALLS)
-        await _emit_event(req.callback_url, req.turn_id, {
-            "t": "cost_cap_hit", "total": _turn_tool_total(),
-            "cap": HYPER_ROOM_MAX_TOOL_CALLS, "skipped_from_round": 4,
-        })
-    elif not cost_cap_hit and await _deadline_hit(4):
-        cost_cap_hit = True
-    if skeptic and refined and not cost_cap_hit:
-        try:
-            agent = await _build_agent_for_room(req.room_id, skeptic, user_id=req.user_id, org_id=req.org_id)
-            refined_table = "\n".join(
-                f"  [{r['id']}] {r['agent_name']} ({r['lane']}): {r['refined_hypothesis']}"
-                for r in refined
-            )
-            prompt = R4_SKEPTIC_PROMPT.format(
-                skeptic_prelude=SKEPTIC_PERSONA_PRELUDE,
-                refined_hypotheses_table=refined_table,
-            )
-            reply = await agent(Msg(name="user", content=prompt, role="user"))
-            text = _msg_to_text(reply)
-            m = re.search(r"\{[\s\S]+\}", text)
-            parsed = json.loads(m.group(0)) if m else None
-            if isinstance(parsed, dict):
-                skeptic_output = {
-                    "challenges": (parsed.get("challenges") or [])[:6],
-                    "unorthodox_alternatives": (parsed.get("unorthodox_alternatives") or [])[:4],
-                    "hidden_assumptions": (parsed.get("hidden_assumptions") or [])[:5],
-                }
-                for c in skeptic_output["challenges"]:
-                    for e in (c.get("evidence_memory_ids") or []):
-                        if e: evidence_pool.add(str(e))
-                for u in skeptic_output["unorthodox_alternatives"]:
-                    for e in (u.get("evidence_memory_ids") or []):
-                        if e: evidence_pool.add(str(e))
-        except Exception as exc:
-            log.warning("[swarm] R4 skeptic failed: %s", exc)
-        tokens = 200
-        cost_tokens += tokens
-        await _emit_event(req.callback_url, req.turn_id, {
-            "t": "skeptic_challenge",
-            "agent": skeptic["slug"],
-            "challenges": skeptic_output["challenges"],
-            "unorthodox_alternatives": skeptic_output["unorthodox_alternatives"],
-            "hidden_assumptions": skeptic_output["hidden_assumptions"],
-            "tokens": tokens,
-            "round": 4,
-        })
-    log.info("[swarm] R4 done turn=%s challenges=%d unorthodox=%d capped=%s",
-             req.turn_id, len(skeptic_output["challenges"]),
-             len(skeptic_output["unorthodox_alternatives"]), cost_cap_hit)
-    await _emit_event(req.callback_url, req.turn_id, {
-        "t": "round_end", "round": 4,
-        "challenges_count": len(skeptic_output["challenges"]),
-        "unorthodox_count": len(skeptic_output["unorthodox_alternatives"]),
-    })
+    skeptic_output_str = "{}"
+    votes: List[Dict[str, Any]] = []
+    cycle_verdicts: List[Dict[str, Any]] = []
+    prior_ctx = ""  # injected into the hypotheses tables on cycle >= 2
 
-    # ─── R5 Step A — Convergence Vote (parallel) ───────────────────────
-    await _emit_event(req.callback_url, req.turn_id, {
-        "t": "round_start", "round": 5, "label": "Convergence Vote + Synthesis",
-        "task": "Everyone votes on refined hypotheses or unorthodox alternatives. Lead synthesises.",
-    })
-    # If R3 was skipped (cost-capped before refinement) `refined` is empty.
-    # Voting on "(no refined hypotheses)" makes every agent emit "none" /
-    # hallucinated ids and the winning synthesis references hypotheses that
-    # were never surfaced. Fall back to the R1 hypotheses so there is always
-    # a real, voteable table with valid ids.
-    if refined:
-        refined_table_str = "\n".join(
-            f"  [{r['id']}] {r['agent_name']} ({r['lane']}, conf {r['confidence']:.2f}): {r['refined_hypothesis']}"
-            for r in refined
-        )
-    else:
-        refined_table_str = "\n".join(
+    for cycle in range(1, HYPER_ROOM_MAX_CYCLES + 1):
+        def _pr(phase: int) -> int:
+            return (cycle - 1) * 5 + phase
+
+        if cycle > 1:
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "cycle_start", "cycle": cycle, "max_cycles": HYPER_ROOM_MAX_CYCLES,
+                "prior_verdict": consensus.get("verdict"),
+                "prior_score": consensus.get("weighted_score"),
+                "reason": "re-seeding refined hypotheses + skeptic alternatives to drive convergence",
+            })
+
+        # Reset per-cycle phase outputs.
+        peer_reviews = []
+        refined = []
+        refined_by_id = {}
+        skeptic_output = {"challenges": [], "unorthodox_alternatives": [], "hidden_assumptions": []}
+        votes = []
+
+        # ─── R2 — Peer Cross-Exam ──────────────────────────────────────
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "round_start", "round": _pr(2), "cycle": cycle, "phase": 2, "label": "Peer Cross-Exam",
+            "task": "Each agent reviews 2 OTHER hypotheses with corroborating or contradicting evidence.",
+        })
+        hyp_table = (prior_ctx + "\n" if prior_ctx else "") + "\n".join(
             f"  [{h['id']}] {h['agent_name']} ({h['lane']}, conf {h['confidence']:.2f}): {h['hypothesis']}"
             for h in hypotheses
-        ) or "(no hypotheses)"
-    skeptic_output_str = json.dumps(skeptic_output, indent=2)[:3000]
-    voters = list(participants)  # everyone votes
+        )
 
-    async def _run_vote(emp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        try:
-            agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id)
-            prompt = R5_VOTE_PROMPT.format(
-                persona_name=emp.get("name", emp.get("slug")),
-                lane=emp["_lane"],
-                refined_hypotheses_table=refined_table_str,
-                skeptic_output=skeptic_output_str,
-            )
-            reply = await agent(Msg(name="user", content=prompt, role="user"))
-            text = _msg_to_text(reply)
-            m = re.search(r"\{[\s\S]+\}", text)
-            parsed = json.loads(m.group(0)) if m else None
-            if not isinstance(parsed, dict):
-                log.info("[swarm] R5 vote %s: non-JSON reply, dropping (abstain)", emp.get("slug"))
+        async def _run_r2(emp: Dict[str, Any]) -> List[Dict[str, Any]]:
+            # Assign 2 targets that are NOT this agent's own.
+            own_id = f"h-{emp['slug']}"
+            candidate_ids = [h["id"] for h in hypotheses if h["id"] != own_id]
+            target_ids = candidate_ids[:2]
+            if not target_ids:
+                return []
+            try:
+                agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id)
+                prompt = R2_PEER_REVIEW_PROMPT.format(
+                    persona_name=emp.get("name", emp.get("slug")),
+                    lane=emp["_lane"],
+                    hypotheses_table=hyp_table,
+                    target_ids=", ".join(target_ids),
+                )
+                reply = await agent(Msg(name="user", content=prompt, role="user"))
+                text = _msg_to_text(reply)
+                m = re.search(r"\{[\s\S]+\}", text)
+                parsed = json.loads(m.group(0)) if m else None
+                reviews = parsed.get("reviews") if isinstance(parsed, dict) else None
+                if not isinstance(reviews, list):
+                    return []
+                out = []
+                for r in reviews:
+                    if not isinstance(r, dict):
+                        continue
+                    ev_ids = [str(x) for x in (r.get("evidence_memory_ids") or []) if x]
+                    for e in ev_ids:
+                        evidence_pool.add(e)
+                    # Normalise to the canonical stance set (agree|challenge|extend).
+                    stance = str(r.get("agreement", "extend"))[:20].strip().lower()
+                    if stance == "support":
+                        stance = "agree"
+                    if stance not in ("agree", "challenge", "extend"):
+                        stance = "extend"
+                    out.append({
+                        "reviewer_slug": emp["slug"],
+                        "reviewer_name": emp.get("name", emp["slug"]),
+                        "target_hypothesis_id": str(r.get("target_hypothesis_id", ""))[:100],
+                        "agreement": stance,
+                        "evidence_memory_ids": ev_ids,
+                        "reason": str(r.get("reason", ""))[:500],
+                    })
+                return out
+            except Exception as exc:
+                log.warning("[swarm] R2 %s failed: %s", emp.get("slug"), exc)
+                return []
+
+        async def _staggered_r2(emp, idx):
+            await asyncio.sleep(1.5 * idx)
+            return await _run_r2(emp)
+        if not cost_cap_hit:
+            r2_lists = await asyncio.gather(*[_staggered_r2(emp, i) for i, emp in enumerate(speakers)], return_exceptions=False)
+            peer_reviews = [r for lst in r2_lists for r in lst]
+        for r in peer_reviews:
+            tokens = max(60, len(r["reason"]) // 4)
+            cost_tokens += tokens
+            target_author = (hyp_by_id.get(r["target_hypothesis_id"]) or {}).get("agent_name")
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "peer_review",
+                "reviewer": r["reviewer_slug"],
+                "reviewer_name": r["reviewer_name"],
+                "target_hypothesis_id": r["target_hypothesis_id"],
+                "target_author": target_author,
+                "agreement": r["agreement"],
+                "evidence_memory_ids": r["evidence_memory_ids"],
+                "content": r["reason"],
+                "tokens": tokens,
+                "round": _pr(2), "cycle": cycle, "phase": 2,
+            })
+        log.info("[swarm] R2 done turn=%s cycle=%d reviews=%d capped=%s", req.turn_id, cycle, len(peer_reviews), cost_cap_hit)
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "round_end", "round": _pr(2), "cycle": cycle, "phase": 2, "reviews_count": len(peer_reviews),
+        })
+
+        # ─── R3 — Deep Chain-of-Thought ────────────────────────────────
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "round_start", "round": _pr(3), "cycle": cycle, "phase": 3, "label": "Deep Chain-of-Thought",
+            "task": "Each agent refines hypothesis via full lane playbook; emits explicit steps.",
+        })
+        reviews_by_target: Dict[str, List[Dict[str, Any]]] = {}
+        for r in peer_reviews:
+            reviews_by_target.setdefault(r["target_hypothesis_id"], []).append(r)
+
+        async def _run_r3(emp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            own_id = f"h-{emp['slug']}"
+            own = hyp_by_id.get(own_id)
+            if not own:
                 return None
-            return {
-                "voter": emp["slug"],
-                "voter_id": emp["id"],
-                "vote_for_hypothesis_id": str(parsed.get("vote_for_hypothesis_id", "none"))[:100],
-                "score": max(1, min(5, int(parsed.get("score") or 3))),
-                "conditions": [str(c)[:200] for c in (parsed.get("conditions") or [])][:5],
-                "reason": str(parsed.get("reason", ""))[:300],
-            }
-        except Exception as exc:
-            log.warning("[swarm] R5 vote %s failed: %s", emp.get("slug"), exc)
-            return None
+            own_reviews = reviews_by_target.get(own_id, [])
+            reviews_text = "\n".join(
+                f"  - {rv['reviewer_name']} ({rv['agreement']}): {rv['reason']}"
+                for rv in own_reviews
+            ) or "  (no peer reviews of your hypothesis)"
+            try:
+                agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id)
+                prompt = R3_DEEP_DIVE_PROMPT.format(
+                    persona_name=emp.get("name", emp.get("slug")),
+                    lane=emp["_lane"],
+                    your_hypothesis=own["hypothesis"],
+                    your_reviews=reviews_text,
+                    lane_playbook=LANE_PLAYBOOKS.get(emp["_lane"], ""),
+                )
+                reply = await agent(Msg(name="user", content=prompt, role="user"))
+                text = _msg_to_text(reply)
+                m = re.search(r"\{[\s\S]+\}", text)
+                parsed = json.loads(m.group(0)) if m else None
+                if not isinstance(parsed, dict) or not parsed.get("refined_hypothesis"):
+                    return None
+                ev_ids = [str(x) for x in (parsed.get("evidence_memory_ids") or []) if x]
+                for e in ev_ids:
+                    evidence_pool.add(e)
+                steps = [str(s)[:300] for s in (parsed.get("chain_of_thought") or [])][:8]
+                refined_one = {
+                    "id": own_id,  # Same id — same hypothesis, refined
+                    "agent_slug": emp["slug"],
+                    "agent_name": emp.get("name", emp["slug"]),
+                    "lane": emp["_lane"],
+                    "refined_hypothesis": str(parsed.get("refined_hypothesis", ""))[:2000],
+                    "chain_of_thought": steps,
+                    "evidence_memory_ids": ev_ids,
+                    "lane_specific_finding": str(parsed.get("lane_specific_finding", ""))[:500],
+                    "confidence": float(parsed.get("confidence") or 0.6),
+                }
+                return refined_one
+            except Exception as exc:
+                log.warning("[swarm] R3 %s failed: %s", emp.get("slug"), exc)
+                return None
 
-    async def _staggered_vote(emp, idx):
-        await asyncio.sleep(1.5 * idx)
-        return await _run_vote(emp)
-    if not cost_cap_hit and _turn_tool_total() >= HYPER_ROOM_MAX_TOOL_CALLS:
-        cost_cap_hit = True
-        log.warning("[swarm] cost cap hit before R5 vote turn=%s total=%d cap=%d",
-                    req.turn_id, _turn_tool_total(), HYPER_ROOM_MAX_TOOL_CALLS)
+        async def _staggered_r3(emp, idx):
+            await asyncio.sleep(1.5 * idx)
+            return await _run_r3(emp)
+        if not cost_cap_hit and _turn_tool_total() >= HYPER_ROOM_MAX_TOOL_CALLS:
+            cost_cap_hit = True
+            log.warning("[swarm] cost cap hit before R3 turn=%s total=%d cap=%d",
+                        req.turn_id, _turn_tool_total(), HYPER_ROOM_MAX_TOOL_CALLS)
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "cost_cap_hit", "total": _turn_tool_total(),
+                "cap": HYPER_ROOM_MAX_TOOL_CALLS, "skipped_from_round": _pr(3), "cycle": cycle,
+            })
+        elif not cost_cap_hit and await _deadline_hit(_pr(3)):
+            cost_cap_hit = True
+        if not cost_cap_hit:
+            r3_results = await asyncio.gather(*[_staggered_r3(emp, i) for i, emp in enumerate(speakers)], return_exceptions=False)
+            refined = [r for r in r3_results if r]
+            refined_by_id = {r["id"]: r for r in refined}
+        for r in refined:
+            tokens = max(150, (len(r["refined_hypothesis"]) + sum(len(s) for s in r["chain_of_thought"])) // 4)
+            cost_tokens += tokens
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "chain_of_thought",
+                "id": r["id"],
+                "agent": r["agent_slug"],
+                "lane": r["lane"],
+                "steps": r["chain_of_thought"],
+                "refined_hypothesis": r["refined_hypothesis"],
+                "lane_specific_finding": r["lane_specific_finding"],
+                "evidence_memory_ids": r["evidence_memory_ids"],
+                "confidence": r["confidence"],
+                "tokens": tokens,
+                "round": _pr(3), "cycle": cycle, "phase": 3,
+            })
+        log.info("[swarm] R3 done turn=%s cycle=%d refined=%d capped=%s", req.turn_id, cycle, len(refined), cost_cap_hit)
         await _emit_event(req.callback_url, req.turn_id, {
-            "t": "cost_cap_hit", "total": _turn_tool_total(),
-            "cap": HYPER_ROOM_MAX_TOOL_CALLS, "skipped_from_round": 5,
-        })
-    elif not cost_cap_hit and await _deadline_hit(5):
-        cost_cap_hit = True
-    votes: List[Dict[str, Any]] = []
-    if not cost_cap_hit:
-        vote_results = await asyncio.gather(*[_staggered_vote(emp, i) for i, emp in enumerate(voters)], return_exceptions=False)
-        votes = [v for v in vote_results if v]
-    for v in votes:
-        tokens = max(60, len(v.get("reason", "")) // 4)
-        cost_tokens += tokens
-        await _emit_event(req.callback_url, req.turn_id, {
-            "t": "vote",
-            "voter": v["voter"],
-            "vote_for_hypothesis_id": v["vote_for_hypothesis_id"],
-            "score": v["score"],
-            "conditions": v["conditions"],
-            "content": v["reason"],
-            "tokens": tokens,
-            "round": 5,
+            "t": "round_end", "round": _pr(3), "cycle": cycle, "phase": 3, "refined_count": len(refined),
         })
 
-    consensus = _consensus_verdict(votes, trust_by_slug)
+        # ─── R4 — Skeptic Unorthodox Challenge ─────────────────────────
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "round_start", "round": _pr(4), "cycle": cycle, "phase": 4, "label": "Skeptic Unorthodox Challenge",
+            "task": "Permanent Skeptic surfaces hidden assumptions + unorthodox alternatives.",
+        })
+        if not cost_cap_hit and _turn_tool_total() >= HYPER_ROOM_MAX_TOOL_CALLS:
+            cost_cap_hit = True
+            log.warning("[swarm] cost cap hit before R4 turn=%s total=%d cap=%d",
+                        req.turn_id, _turn_tool_total(), HYPER_ROOM_MAX_TOOL_CALLS)
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "cost_cap_hit", "total": _turn_tool_total(),
+                "cap": HYPER_ROOM_MAX_TOOL_CALLS, "skipped_from_round": _pr(4), "cycle": cycle,
+            })
+        elif not cost_cap_hit and await _deadline_hit(_pr(4)):
+            cost_cap_hit = True
+        if skeptic and refined and not cost_cap_hit:
+            try:
+                agent = await _build_agent_for_room(req.room_id, skeptic, user_id=req.user_id, org_id=req.org_id)
+                refined_table = "\n".join(
+                    f"  [{r['id']}] {r['agent_name']} ({r['lane']}): {r['refined_hypothesis']}"
+                    for r in refined
+                )
+                prompt = R4_SKEPTIC_PROMPT.format(
+                    skeptic_prelude=SKEPTIC_PERSONA_PRELUDE,
+                    refined_hypotheses_table=refined_table,
+                )
+                reply = await agent(Msg(name="user", content=prompt, role="user"))
+                text = _msg_to_text(reply)
+                m = re.search(r"\{[\s\S]+\}", text)
+                parsed = json.loads(m.group(0)) if m else None
+                if isinstance(parsed, dict):
+                    skeptic_output = {
+                        "challenges": (parsed.get("challenges") or [])[:6],
+                        "unorthodox_alternatives": (parsed.get("unorthodox_alternatives") or [])[:4],
+                        "hidden_assumptions": (parsed.get("hidden_assumptions") or [])[:5],
+                    }
+                    for c in skeptic_output["challenges"]:
+                        for e in (c.get("evidence_memory_ids") or []):
+                            if e: evidence_pool.add(str(e))
+                    for u in skeptic_output["unorthodox_alternatives"]:
+                        for e in (u.get("evidence_memory_ids") or []):
+                            if e: evidence_pool.add(str(e))
+            except Exception as exc:
+                log.warning("[swarm] R4 skeptic failed: %s", exc)
+            tokens = 200
+            cost_tokens += tokens
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "skeptic_challenge",
+                "agent": skeptic["slug"],
+                "challenges": skeptic_output["challenges"],
+                "unorthodox_alternatives": skeptic_output["unorthodox_alternatives"],
+                "hidden_assumptions": skeptic_output["hidden_assumptions"],
+                "tokens": tokens,
+                "round": _pr(4), "cycle": cycle, "phase": 4,
+            })
+        log.info("[swarm] R4 done turn=%s cycle=%d challenges=%d unorthodox=%d capped=%s",
+                 req.turn_id, cycle, len(skeptic_output["challenges"]),
+                 len(skeptic_output["unorthodox_alternatives"]), cost_cap_hit)
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "round_end", "round": _pr(4), "cycle": cycle, "phase": 4,
+            "challenges_count": len(skeptic_output["challenges"]),
+            "unorthodox_count": len(skeptic_output["unorthodox_alternatives"]),
+        })
+
+        # ─── R5 Step A — Convergence Vote (parallel) ───────────────────
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "round_start", "round": _pr(5), "cycle": cycle, "phase": 5, "label": "Convergence Vote + Synthesis",
+            "task": "Everyone votes on refined hypotheses or unorthodox alternatives. Lead synthesises.",
+        })
+        # If R3 was skipped (cost-capped) fall back to current hypotheses so
+        # there is always a real, voteable table with valid ids.
+        if refined:
+            refined_table_str = "\n".join(
+                f"  [{r['id']}] {r['agent_name']} ({r['lane']}, conf {r['confidence']:.2f}): {r['refined_hypothesis']}"
+                for r in refined
+            )
+        else:
+            refined_table_str = "\n".join(
+                f"  [{h['id']}] {h['agent_name']} ({h['lane']}, conf {h['confidence']:.2f}): {h['hypothesis']}"
+                for h in hypotheses
+            ) or "(no hypotheses)"
+        vote_table_str = (prior_ctx + "\n" if prior_ctx else "") + refined_table_str
+        skeptic_output_str = json.dumps(skeptic_output, indent=2)[:3000]
+        voters = list(participants)  # everyone votes
+
+        async def _run_vote(emp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            try:
+                agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id)
+                prompt = R5_VOTE_PROMPT.format(
+                    persona_name=emp.get("name", emp.get("slug")),
+                    lane=emp["_lane"],
+                    refined_hypotheses_table=vote_table_str,
+                    skeptic_output=skeptic_output_str,
+                )
+                reply = await agent(Msg(name="user", content=prompt, role="user"))
+                text = _msg_to_text(reply)
+                m = re.search(r"\{[\s\S]+\}", text)
+                parsed = json.loads(m.group(0)) if m else None
+                if not isinstance(parsed, dict):
+                    log.info("[swarm] R5 vote %s: non-JSON reply, dropping (abstain)", emp.get("slug"))
+                    return None
+                return {
+                    "voter": emp["slug"],
+                    "voter_id": emp["id"],
+                    "vote_for_hypothesis_id": str(parsed.get("vote_for_hypothesis_id", "none"))[:100],
+                    "score": max(1, min(5, int(parsed.get("score") or 3))),
+                    "conditions": [str(c)[:200] for c in (parsed.get("conditions") or [])][:5],
+                    "reason": str(parsed.get("reason", ""))[:300],
+                }
+            except Exception as exc:
+                log.warning("[swarm] R5 vote %s failed: %s", emp.get("slug"), exc)
+                return None
+
+        async def _staggered_vote(emp, idx):
+            await asyncio.sleep(1.5 * idx)
+            return await _run_vote(emp)
+        if not cost_cap_hit and _turn_tool_total() >= HYPER_ROOM_MAX_TOOL_CALLS:
+            cost_cap_hit = True
+            log.warning("[swarm] cost cap hit before R5 vote turn=%s total=%d cap=%d",
+                        req.turn_id, _turn_tool_total(), HYPER_ROOM_MAX_TOOL_CALLS)
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "cost_cap_hit", "total": _turn_tool_total(),
+                "cap": HYPER_ROOM_MAX_TOOL_CALLS, "skipped_from_round": _pr(5), "cycle": cycle,
+            })
+        elif not cost_cap_hit and await _deadline_hit(_pr(5)):
+            cost_cap_hit = True
+        if not cost_cap_hit:
+            vote_results = await asyncio.gather(*[_staggered_vote(emp, i) for i, emp in enumerate(voters)], return_exceptions=False)
+            votes = [v for v in vote_results if v]
+        for v in votes:
+            tokens = max(60, len(v.get("reason", "")) // 4)
+            cost_tokens += tokens
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "vote",
+                "voter": v["voter"],
+                "vote_for_hypothesis_id": v["vote_for_hypothesis_id"],
+                "score": v["score"],
+                "conditions": v["conditions"],
+                "content": v["reason"],
+                "tokens": tokens,
+                "round": _pr(5), "cycle": cycle, "phase": 5,
+            })
+
+        consensus = _consensus_verdict(votes, trust_by_slug)
+        converged = _has_converged(consensus)
+        cycle_verdicts.append({
+            "cycle": cycle, "verdict": consensus["verdict"],
+            "weighted_score": consensus["weighted_score"], "converged": converged,
+        })
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "cycle_end", "cycle": cycle, "max_cycles": HYPER_ROOM_MAX_CYCLES,
+            "verdict": consensus["verdict"], "weighted_score": consensus["weighted_score"],
+            "winning_hypothesis_id": consensus["winning_id"], "converged": converged,
+        })
+        log.info("[swarm] cycle %d/%d done turn=%s verdict=%s score=%.2f converged=%s capped=%s",
+                 cycle, HYPER_ROOM_MAX_CYCLES, req.turn_id, consensus["verdict"],
+                 consensus["weighted_score"], converged, cost_cap_hit)
+
+        # ── Stop or iterate ────────────────────────────────────────────
+        if converged or cost_cap_hit:
+            break
+        if cycle >= HYPER_ROOM_MAX_CYCLES:
+            break
+        if await _deadline_hit(_pr(5) + 1):
+            cost_cap_hit = True
+            break
+        if not refined:
+            # Nothing to carry forward — re-running with no hypotheses would
+            # just regenerate the same dissent. Stop and seal what we have.
+            break
+
+        # ── Re-seed for the next cycle ─────────────────────────────────
+        # Carry the refined hypotheses forward as the new candidate set
+        # (ids stay stable: h-{slug}), and build a context preamble of the
+        # unresolved dissent + the Skeptic's unorthodox alternatives so the
+        # next cycle's reviewers/voters actually try to reconcile, not repeat.
+        hypotheses = [{
+            "id": r["id"],
+            "agent_id": refined_by_id.get(r["id"], {}).get("agent_id"),
+            "agent_slug": r["agent_slug"],
+            "agent_name": r["agent_name"],
+            "lane": r["lane"],
+            "hypothesis": r["refined_hypothesis"],
+            "confidence": r["confidence"],
+            "evidence_memory_ids": r.get("evidence_memory_ids", []),
+            "reasoning_brief": r.get("lane_specific_finding", ""),
+        } for r in refined]
+        hyp_by_id = {h["id"]: h for h in hypotheses}
+        dissent_lines = [
+            f"  - {v['voter']} scored {v['score']}/5 for {v['vote_for_hypothesis_id']}: {v['reason']}"
+            for v in votes if int(v.get("score") or 0) <= 3
+        ][:6]
+        alt_lines = [
+            f"  - {a.get('alternative') or a.get('title') or a.get('idea') or a}"
+            for a in (skeptic_output.get("unorthodox_alternatives") or [])
+        ][:4]
+        prior_ctx = (
+            f"[PRIOR CYCLE {cycle} VERDICT: {consensus['verdict']} "
+            f"(weighted {consensus['weighted_score']}). The room did NOT reach strong consensus. "
+            f"This is convergence cycle {cycle + 1} — RECONCILE the disagreement and converge on one "
+            f"defensible answer; do not merely restate your prior position.]\n"
+            + ("Unresolved dissent:\n" + "\n".join(dissent_lines) + "\n" if dissent_lines else "")
+            + ("Skeptic's unorthodox alternatives to weigh:\n" + "\n".join(alt_lines) if alt_lines else "")
+        ).strip()
+
+    # ─── Convergence summary (drives the FE cycle trail) ───────────────
+    await _emit_event(req.callback_url, req.turn_id, {
+        "t": "convergence",
+        "cycles_run": len(cycle_verdicts),
+        "max_cycles": HYPER_ROOM_MAX_CYCLES,
+        "trail": cycle_verdicts,
+        "final_verdict": consensus["verdict"],
+        "final_score": consensus["weighted_score"],
+        "converged": _has_converged(consensus),
+    })
 
     # ─── R5 Step B — Lead Synthesis ────────────────────────────────────
     # When the cost cap fired before the vote, `votes` is empty and the

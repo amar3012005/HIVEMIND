@@ -4761,9 +4761,10 @@ Write the persona now.`;
     }
     if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
     const slug = chatProfileMatch[1];
+    const orgId = new URL(req.url, 'http://x').searchParams.get('org_id') || null;
     const store = await _getEmployeeStore();
     try {
-      const r = await store.findBySlugForChat(slug);
+      const r = await store.findBySlugForChat(slug, { orgId });
       if (!r) return jsonResponse(res, { error: 'employee not found' }, 404);
       const { decryptToken } = await import('./connectors/framework/connector-store.js');
       const { enrichEmployeeWithHyperState } = await import('./employees/hyper-state.js');

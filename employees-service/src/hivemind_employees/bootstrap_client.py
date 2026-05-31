@@ -49,7 +49,7 @@ async def fetch_bootstrap() -> List[Dict]:
             return []
 
 
-async def fetch_employee_profile(slug: str) -> Optional[Dict]:
+async def fetch_employee_profile(slug: str, org_id: Optional[str] = None) -> Optional[Dict]:
     """Pull ONE employee profile (any non-archived status, incl. draft) +
     decrypted api_key from control-plane. Powers 1-on-1 chat with employees
     that are not deployed/running. Returns None if not found/unreachable."""
@@ -58,10 +58,12 @@ async def fetch_employee_profile(slug: str) -> Optional[Dict]:
     if not master_key:
         log.warning("chat-profile: HIVEMIND_MASTER_API_KEY not set")
         return None
+    params = {"org_id": org_id} if org_id else None
     async with httpx.AsyncClient(base_url=cp_url, timeout=httpx.Timeout(15.0, connect=5.0)) as c:
         try:
             r = await c.get(
                 f"/v1/employees/{slug}/chat-profile",
+                params=params,
                 headers={"Authorization": f"Bearer {master_key}"},
             )
             if r.status_code == 404:

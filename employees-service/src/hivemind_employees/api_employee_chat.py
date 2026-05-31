@@ -57,16 +57,17 @@ def _require_master_key(token: Optional[str]) -> None:
         raise HTTPException(401, "Invalid admin token")
 
 
-async def _resolve_employee(slug: str) -> Dict:
+async def _resolve_employee(slug: str, org_id: Optional[str] = None) -> Dict:
     # Fast path: a deployed/running employee (already in the sidecar's DB view).
     rows = await list_running_employees()
     for r in rows:
-        if r.get("slug") == slug:
+        if r.get("slug") == slug and (not org_id or str(r.get("org_id")) == str(org_id)):
             return r
     # Fallback: 1-on-1 chat does NOT need a running container — it builds an
     # ephemeral in-process agent. Pull the profile (any non-archived status,
     # incl. draft) + api_key from control-plane so draft employees are chattable.
-    profile = await fetch_employee_profile(slug)
+    # Org-scoped so a same-slug employee in another org is never picked.
+    profile = await fetch_employee_profile(slug, org_id)
     if profile and profile.get("id"):
         return profile
     raise HTTPException(404, f"employee slug={slug} not found")
@@ -104,10 +105,11 @@ async def chat_with_employee(
     slug: str,
     req: ChatRequest,
     x_admin_token: Optional[str] = Header(None, alias="X-Admin-Token"),
+    x_org_id: Optional[str] = Header(None, alias="X-Org-Id"),
 ) -> ChatResponse:
     _require_master_key(x_admin_token)
 
-    emp = await _resolve_employee(slug)
+    emp = await _resolve_employee(slug, x_org_id)
     conversation_id = req.conversation_id or f"adhoc-{emp['id']}"
     key = _conv_key(emp["id"], conversation_id)
     agent = await _get_or_build_agent(emp, key)

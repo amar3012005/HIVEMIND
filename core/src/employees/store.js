@@ -265,6 +265,22 @@ export class EmployeeStore {
     });
   }
 
+  // Single employee by slug at ANY non-archived status (incl. draft/paused).
+  // Powers 1-on-1 chat, which builds an ephemeral in-process agent and does
+  // NOT require a deployed container — so it must not be gated on 'running'.
+  async findBySlugForChat(slug, { orgId = null } = {}) {
+    const where = { archivedAt: null, slug };
+    if (orgId) where.orgId = orgId;
+    return this.prisma.digitalEmployee.findFirst({
+      where,
+      select: {
+        ...PUBLIC_FIELDS,
+        scopedApiKeyEncrypted: true,
+      },
+      orderBy: { updatedAt: 'desc' },
+    });
+  }
+
   // Bump metrics — called by Python sidecar after each LLM call
   async incrementMetrics({ id, tokens = 0, messages = 0, errors = 0 }) {
     const emp = await this.prisma.digitalEmployee.findUnique({

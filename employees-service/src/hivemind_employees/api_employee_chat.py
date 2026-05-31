@@ -21,7 +21,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from .agents.agentscope_factory import build_react_agent
-from .bootstrap_client import fetch_bootstrap
+from .bootstrap_client import fetch_bootstrap, fetch_employee_profile
 from .config import get_settings
 from .db import list_running_employees
 
@@ -58,11 +58,18 @@ def _require_master_key(token: Optional[str]) -> None:
 
 
 async def _resolve_employee(slug: str) -> Dict:
+    # Fast path: a deployed/running employee (already in the sidecar's DB view).
     rows = await list_running_employees()
     for r in rows:
         if r.get("slug") == slug:
             return r
-    raise HTTPException(404, f"employee slug={slug} not running")
+    # Fallback: 1-on-1 chat does NOT need a running container — it builds an
+    # ephemeral in-process agent. Pull the profile (any non-archived status,
+    # incl. draft) + api_key from control-plane so draft employees are chattable.
+    profile = await fetch_employee_profile(slug)
+    if profile and profile.get("id"):
+        return profile
+    raise HTTPException(404, f"employee slug={slug} not found")
 
 
 def _conv_key(employee_id: str, conversation_id: str) -> str:
@@ -72,16 +79,21 @@ def _conv_key(employee_id: str, conversation_id: str) -> str:
 async def _get_or_build_agent(emp: Dict, conv_key: str) -> ReActAgent:
     if conv_key in _CHAT_AGENTS:
         return _CHAT_AGENTS[conv_key]
-    boot = {b["id"]: b for b in await fetch_bootstrap()}
-    boot_emp = boot.get(emp["id"], {})
-    api_key = boot_emp.get("api_key")
+    # If emp already carries api_key (chat-profile fallback for draft/paused),
+    # use it directly. Otherwise resolve via the running-employee bootstrap.
+    api_key = emp.get("api_key")
+    merged_emp = emp
+    if not api_key:
+        boot = {b["id"]: b for b in await fetch_bootstrap()}
+        boot_emp = boot.get(emp["id"], {})
+        api_key = boot_emp.get("api_key")
+        merged_emp = {
+            **emp,
+            "hyper": boot_emp.get("hyper"),
+            "active_prompt_version": boot_emp.get("active_prompt_version"),
+        }
     if not api_key:
         raise HTTPException(412, "employee has no bootstrap api_key")
-    merged_emp = {
-        **emp,
-        "hyper": boot_emp.get("hyper"),
-        "active_prompt_version": boot_emp.get("active_prompt_version"),
-    }
     agent = build_react_agent(merged_emp, api_key)
     _CHAT_AGENTS[conv_key] = agent
     return agent

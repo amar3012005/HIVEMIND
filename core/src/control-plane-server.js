@@ -4746,6 +4746,56 @@ Write the persona now.`;
     }
   }
 
+  // GET /v1/employees/:slug/chat-profile — internal-only; master-key authed.
+  // Returns ONE employee (any non-archived status, incl. draft) + decrypted
+  // api_key + hyper state, so the sidecar can build an ephemeral 1-on-1 chat
+  // agent without the employee being deployed/running. Distinct from the
+  // bootstrap snapshot (which only lists running employees for reconcile).
+  const chatProfileMatch = pathname.match(/^\/v1\/employees\/([a-z0-9-]{1,120})\/chat-profile$/);
+  if (chatProfileMatch && req.method === 'GET') {
+    const callerKey = (req.headers['authorization'] || '').replace('Bearer ', '').trim()
+      || (req.headers['x-hivemind-master-key'] || '').trim();
+    const expected = process.env.HIVEMIND_MASTER_API_KEY;
+    if (!expected || callerKey !== expected) {
+      return jsonResponse(res, { error: 'master key required' }, 403);
+    }
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const slug = chatProfileMatch[1];
+    const store = await _getEmployeeStore();
+    try {
+      const r = await store.findBySlugForChat(slug);
+      if (!r) return jsonResponse(res, { error: 'employee not found' }, 404);
+      const { decryptToken } = await import('./connectors/framework/connector-store.js');
+      const { enrichEmployeeWithHyperState } = await import('./employees/hyper-state.js');
+      let apiKey = null;
+      if (r.scopedApiKeyEncrypted) {
+        try { apiKey = decryptToken(r.scopedApiKeyEncrypted); } catch {}
+      }
+      const baseEmployee = {
+        id: r.id,
+        slug: r.slug,
+        name: r.name,
+        org_id: r.orgId,
+        team_id: r.teamId,
+        persona: r.persona,
+        model: r.model,
+        llm_provider: r.llmProvider,
+        tools: r.tools,
+        policy_rules: r.policyRules,
+        scope: r.scope,
+        role_archetype: r.roleArchetype,
+        peer_review_targets: r.peerReviewTargets || [],
+        status: r.status,
+        api_key: apiKey,
+        created_by: r.createdBy,
+      };
+      return jsonResponse(res, await enrichEmployeeWithHyperState(baseEmployee));
+    } catch (err) {
+      console.warn('[employees.chat-profile] failed:', err.message);
+      return jsonResponse(res, { error: err.message }, 500);
+    }
+  }
+
   // PUT /v1/employees/:id/sidecar-status — master-key authed.
   // Python sidecar POSTs after building (or failing to build) the
   // Assistant for an employee so the UI badge flips draft → running

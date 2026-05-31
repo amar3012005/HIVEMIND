@@ -49,6 +49,30 @@ async def fetch_bootstrap() -> List[Dict]:
             return []
 
 
+async def fetch_employee_profile(slug: str) -> Optional[Dict]:
+    """Pull ONE employee profile (any non-archived status, incl. draft) +
+    decrypted api_key from control-plane. Powers 1-on-1 chat with employees
+    that are not deployed/running. Returns None if not found/unreachable."""
+    cp_url = os.environ.get("HIVEMIND_CP_URL", "http://hm-control:3000")
+    master_key = os.environ.get("HIVEMIND_MASTER_API_KEY", "")
+    if not master_key:
+        log.warning("chat-profile: HIVEMIND_MASTER_API_KEY not set")
+        return None
+    async with httpx.AsyncClient(base_url=cp_url, timeout=httpx.Timeout(15.0, connect=5.0)) as c:
+        try:
+            r = await c.get(
+                f"/v1/employees/{slug}/chat-profile",
+                headers={"Authorization": f"Bearer {master_key}"},
+            )
+            if r.status_code == 404:
+                return None
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            log.warning("chat-profile fetch failed (slug=%s): %s", slug, e)
+            return None
+
+
 async def report_sidecar_status(employee_id: str, status: str, error_message: Optional[str] = None) -> None:
     """Best-effort PUT to /v1/employees/:id/sidecar-status so the UI
     badge flips automatically. Never raises."""

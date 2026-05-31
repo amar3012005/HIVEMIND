@@ -20,8 +20,10 @@ from agentscope.message import Msg
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
+import asyncio
+
 from .agents.agentscope_factory import build_react_agent
-from .bootstrap_client import fetch_bootstrap, fetch_employee_profile
+from .bootstrap_client import fetch_bootstrap, fetch_employee_profile, report_metrics
 from .config import get_settings
 from .db import list_running_employees
 
@@ -118,7 +120,21 @@ async def chat_with_employee(
         reply: Msg = await agent(Msg(name="user", content=req.text, role="user"))
     except Exception as exc:
         log.exception("chat_with_employee failed (slug=%s): %s", slug, exc)
+        asyncio.create_task(report_metrics(emp["id"], errors=1))  # best-effort
         raise HTTPException(502, f"agent failure: {exc}") from exc
+
+    # Best-effort per-turn metrics so the UI msgs/tok counters reflect real
+    # usage. messages always counts; tokens extracted if AgentScope exposes it.
+    _tok = 0
+    try:
+        _u = getattr(reply, "usage", None) or (getattr(reply, "metadata", None) or {}).get("usage")
+        if isinstance(_u, dict):
+            _tok = int(_u.get("total_tokens")
+                       or (int(_u.get("input_tokens", 0)) + int(_u.get("output_tokens", 0)))
+                       or 0)
+    except Exception:  # noqa: BLE001 — metrics are non-critical
+        _tok = 0
+    asyncio.create_task(report_metrics(emp["id"], tokens=_tok, messages=1))
 
     content = reply.content if reply is not None else ""
     if isinstance(content, list):

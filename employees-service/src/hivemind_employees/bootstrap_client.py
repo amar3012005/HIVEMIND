@@ -94,3 +94,21 @@ async def report_sidecar_status(employee_id: str, status: str, error_message: Op
             )
         except Exception as e:
             log.debug("status report failed for %s: %s", employee_id, e)
+
+
+async def report_metrics(employee_id: str, *, tokens: int = 0, messages: int = 0, errors: int = 0) -> None:
+    """Best-effort PUT to /v1/employees/:id/metrics so the UI msgs/tok
+    counters reflect real per-turn usage. Never raises."""
+    cp_url = os.environ.get("HIVEMIND_CP_URL", "http://hm-control:3000")
+    master_key = os.environ.get("HIVEMIND_MASTER_API_KEY", "")
+    if not master_key:
+        return
+    async with httpx.AsyncClient(base_url=cp_url, timeout=5.0) as c:
+        try:
+            await c.put(
+                f"/v1/employees/{employee_id}/metrics",
+                headers={"Authorization": f"Bearer {master_key}"},
+                json={"tokens": int(tokens or 0), "messages": int(messages or 0), "errors": int(errors or 0)},
+            )
+        except Exception as e:
+            log.debug("metrics report failed for %s: %s", employee_id, e)

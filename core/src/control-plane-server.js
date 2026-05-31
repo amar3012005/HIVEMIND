@@ -4851,6 +4851,35 @@ Write the persona now.`;
     }
   }
 
+  // PUT /v1/employees/:id/metrics — master-key authed. Sidecar reports
+  // per-turn token/message/error counts after each LLM turn (1-1 chat,
+  // team-tasks, hyper-rooms) so the UI msgs/tok counters reflect real usage.
+  // Must sit BEFORE the session-gated employeeIdMatch block (sidecar has no
+  // session cookie — it authenticates with the master key like sidecar-status).
+  const empMetricsMatch = pathname.match(/^\/v1\/employees\/([0-9a-f-]{36})\/metrics$/);
+  if (empMetricsMatch && req.method === 'PUT') {
+    const callerKey = (req.headers['authorization'] || '').replace('Bearer ', '').trim()
+      || (req.headers['x-hivemind-master-key'] || '').trim();
+    const expected = process.env.HIVEMIND_MASTER_API_KEY;
+    if (!expected || callerKey !== expected) {
+      return jsonResponse(res, { error: 'master key required' }, 403);
+    }
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const store = await _getEmployeeStore();
+    const empId = empMetricsMatch[1];
+    const body = await parseBody(req).catch(() => ({}));
+    const clamp = (v) => Math.max(0, Math.floor(Number(v) || 0));
+    const tokens = clamp(body?.tokens);
+    const messages = clamp(body?.messages);
+    const errors = clamp(body?.errors);
+    try {
+      const updated = await store.incrementMetrics({ id: empId, tokens, messages, errors });
+      return jsonResponse(res, { status: 'success', employee_id: empId, metrics: updated?.metricsLast24h || null });
+    } catch (err) {
+      return jsonResponse(res, { error: err.message }, 500);
+    }
+  }
+
   // Routes scoped to a single employee
   const employeeIdMatch = pathname.match(/^\/v1\/employees\/([0-9a-f-]{36})(?:\/(.+))?$/);
   if (employeeIdMatch) {
@@ -4945,6 +4974,60 @@ Write the persona now.`;
         });
         const { enrichEmployeeWithHyperState } = await import('./employees/hyper-state.js');
         return jsonResponse(res, { employee: await enrichEmployeeWithHyperState(updated) });
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+
+    // POST /v1/employees/:id/deploy — take a draft (or errored) employee LIVE.
+    // Distinct from resume (paused→running): deploy is the draft/error→deploying
+    // entrypoint, guarantees a scoped HIVEMIND key exists (mints on demand),
+    // and sets status 'deploying' so the sidecar reconcile builds the agent and
+    // flips it to running/error via /sidecar-status. No container provisioning —
+    // the sidecar is a long-lived process; deploy just makes the row reconcilable.
+    if (sub === 'deploy' && req.method === 'POST') {
+      if (!isOrgAdmin) return jsonResponse(res, { error: 'Forbidden' }, 403);
+      try {
+        const { enrichEmployeeWithHyperState } = await import('./employees/hyper-state.js');
+        // Idempotent: already live or mid-deploy → no-op success.
+        if (emp.status === 'running' || emp.status === 'deploying') {
+          return jsonResponse(res, { employee: await enrichEmployeeWithHyperState(emp), status: emp.status, already: true });
+        }
+        // Ensure a scoped key (created employees have one; legacy/error rows may not).
+        const keyRow = await prisma.digitalEmployee.findUnique({
+          where: { id: empId },
+          select: { scopedApiKeyEncrypted: true, createdBy: true, name: true },
+        });
+        if (keyRow && !keyRow.scopedApiKeyEncrypted) {
+          try {
+            const crypto = await import('node:crypto');
+            const { encryptToken } = await import('./connectors/framework/connector-store.js');
+            const raw = 'hmk_emp_' + crypto.randomBytes(24).toString('hex');
+            const keyHash = crypto.createHash('sha256').update(raw).digest('hex');
+            const minted = await prisma.apiKey.create({
+              data: {
+                userId: keyRow.createdBy || userId,
+                orgId,
+                name: `${keyRow.name} (employee, deploy)`,
+                keyHash,
+                keyPrefix: raw.slice(0, 12),
+                scopes: ['memory:read', 'memory:write', 'mcp', 'slack:act'],
+              },
+            });
+            await store.setScopedApiKey({ id: empId, apiKeyId: minted.id, encryptedKey: encryptToken(raw) });
+          } catch (mintErr) {
+            return jsonResponse(res, { error: `could not provision employee key: ${mintErr.message}` }, 500);
+          }
+        }
+        const updated = await store.setStatus({ id: empId, status: 'deploying' });
+        _notifyEmployeesReload();
+        audit({
+          organizationId: orgId, userId,
+          eventType: 'employee.deployed', eventCategory: 'employee', action: 'update',
+          resourceType: 'digital_employee', resourceId: empId,
+          ..._reqMeta(req),
+        });
+        return jsonResponse(res, { employee: await enrichEmployeeWithHyperState(updated), status: 'deploying' }, 202);
       } catch (err) {
         return jsonResponse(res, { error: err.message }, 500);
       }

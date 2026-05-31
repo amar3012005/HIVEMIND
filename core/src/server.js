@@ -6870,7 +6870,7 @@ exit \$RC
                   await canonicalSave({ title: pendingSave.title, content: pendingSave.summary, projectId });
                   await postSlack(`Saved to *${label}* ✓\n${pendingSave.summary}`);
                 } catch (e) {
-                  console.warn('[slack-save] save failed:', e.message);
+                  console.error('[slack-save] save failed:', e && (e.stack || e.message || JSON.stringify(e)));
                   await postSlack('Could not save — try again.');
                 }
                 return;

@@ -6905,17 +6905,8 @@ exit \$RC
                   await postSlack('Could not summarize — try again.');
                   return;
                 }
-                // "save this to <project>" inline → save immediately.
-                const inlineProj = question.match(/\bto\s+([\w' .&-]{2,40})$/i);
-                if (inlineProj) {
-                  const { projectId, label } = await resolveProject(inlineProj[1]);
-                  try {
-                    await canonicalSave({ title, content: summary, projectId });
-                    await postSlack(`Saved to *${label}* ✓\n${summary}`);
-                  } catch (e) { await postSlack('Could not save — try again.'); }
-                  return;
-                }
-                // Otherwise ask which project.
+                // Ask which project (no fragile inline parsing — "save this to
+                // hivemind" must NOT be read as a project named "hivemind").
                 let names = [];
                 try {
                   const projs = await persistentMemoryStore.client.project.findMany({

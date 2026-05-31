@@ -4788,7 +4788,6 @@ Write the persona now.`;
               keyHash,
               keyPrefix: raw.slice(0, 12),
               scopes: ['memory:read', 'memory:write', 'mcp', 'slack:act'],
-              isActive: true,
             },
           });
           await store.setScopedApiKey({ id: r.id, apiKeyId: minted.id, encryptedKey: encryptToken(raw) });

@@ -6832,7 +6832,7 @@ exit \$RC
                   title: title || 'Slack conversation',
                   content,
                   tags: ['slack', 'conversation-summary'],
-                  memory_type: 'note',
+                  memory_type: 'conversation',
                   user_id: runUserId,
                   org_id: runOrgId,
                   scope: projectId ? 'project' : 'personal',

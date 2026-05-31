@@ -11,7 +11,6 @@ const BOT_SCOPES = [
   'channels:history', 'channels:read',
   'groups:history',
   'im:history', 'mpim:history',
-  'im:write',
   'users:read',
   'users:read.email',
   'team:read',

@@ -2537,7 +2537,7 @@ function buildOAuthWwwAuthenticate({ error = 'invalid_token', description = 'Bea
     `error_description="${description.replace(/"/g, "'")}"`,
     `authorization_uri="${base}/oauth/authorize"`,
     `token_uri="${base}/oauth/token"`,
-    `resource_metadata_uri="${base}/.well-known/oauth-protected-resource"`
+    `resource_metadata_uri="${base}/.well-known/oauth-protected-resource/api/mcp"`
   ];
   if (requiredScope) {
     pairs.push(`scope="${requiredScope}"`);
@@ -4173,16 +4173,24 @@ exit \$RC
     }
   }
 
-  if (pathname === '/.well-known/oauth-protected-resource' && req.method === 'GET') {
+  // RFC 9728 Protected Resource Metadata. Claude.ai (current MCP spec) probes
+  // the PATH-SUFFIXED URL derived from the MCP resource — i.e.
+  // /.well-known/oauth-protected-resource/api/mcp — not just the bare path.
+  // Match both. `resource` MUST be the canonical MCP endpoint URL (…/api/mcp),
+  // otherwise Claude rejects the handshake ("Authorization with the MCP server
+  // failed"). authorization_servers stays the issuer origin.
+  if ((pathname === '/.well-known/oauth-protected-resource'
+       || pathname.startsWith('/.well-known/oauth-protected-resource/')) && req.method === 'GET') {
     return jsonResponse(res, {
-      resource: _discoveryBase,
+      resource: `${_discoveryBase}/api/mcp`,
       authorization_servers: [_discoveryBase],
       scopes_supported: OAUTH_SCOPES_SUPPORTED,
       bearer_methods_supported: ['header']
     });
   }
 
-  if (pathname === '/.well-known/oauth-authorization-server' && req.method === 'GET') {
+  if ((pathname === '/.well-known/oauth-authorization-server'
+       || pathname.startsWith('/.well-known/oauth-authorization-server/')) && req.method === 'GET') {
     return jsonResponse(res, {
       issuer: _discoveryBase,
       authorization_endpoint: `${_discoveryBase}/oauth/authorize`,

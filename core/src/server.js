@@ -15335,9 +15335,20 @@ exit \$RC
                 if (hits.length > 0 && prisma) {
                   const ids = hits.map((m) => m.id).filter(Boolean);
                   if (ids.length > 0) {
+                    // P2 salience feedback: every recall hit reinforces the
+                    // memory — bump lastAccessedAt (tier heuristics), increment
+                    // recall_count (consumed by synthesis-boost + future
+                    // ranking), and nudge strength (consumed by
+                    // applyClusterBoost). strength is read-clamped to [0.1,1.0]
+                    // and decayed by strength-updater.js, so an uncapped small
+                    // increment here is safe.
                     prisma.memory.updateMany({
                       where: { id: { in: ids } },
-                      data: { lastAccessedAt: new Date() },
+                      data: {
+                        lastAccessedAt: new Date(),
+                        recallCount: { increment: 1 },
+                        strength: { increment: 0.05 },
+                      },
                     }).catch(() => {});
                   }
                   const HYDRATE_THRESHOLD = 0.6;

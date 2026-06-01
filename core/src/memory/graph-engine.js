@@ -18,6 +18,33 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+// ── P2 salience: content-derived importance_score (0.1–1.0). ───────────
+// Until now importance_score defaulted to 0.5 for ~99% of rows and was
+// never computed, so recall ranking could not separate a board-level
+// decision from a throwaway observation. We derive it from two signals
+// the engine already has: memory_type (structural importance) and the
+// LLM/user priority (low/medium/high). Consumed by applyClusterBoost in
+// persisted-retrieval.js (centered on 0.5 → legacy rows stay neutral).
+const IMPORTANCE_TYPE_WEIGHT = {
+  decision: 0.85,
+  canonical_summary: 0.85,
+  lesson: 0.80,
+  goal: 0.75,
+  summary: 0.72,
+  preference: 0.70,
+  relationship: 0.70,
+  event: 0.60,
+  fact: 0.55,
+  observation: 0.45,
+  conversation: 0.30,
+};
+const IMPORTANCE_PRIORITY_DELTA = { high: 0.15, medium: 0, low: -0.15 };
+function computeImportanceScore({ memory_type, priority } = {}) {
+  const base = IMPORTANCE_TYPE_WEIGHT[String(memory_type || 'fact').toLowerCase()] ?? 0.5;
+  const delta = IMPORTANCE_PRIORITY_DELTA[String(priority || 'medium').toLowerCase()] ?? 0;
+  return Math.max(0.1, Math.min(1.0, Number((base + delta).toFixed(3))));
+}
+
 // ── Memory-ingest LLM model (overrides per-stage env vars). ────────────
 // gpt-oss-20b chosen for JSON field extraction over llama-3.3-70b:
 //   • ~5× cheaper ($0.0003 vs $0.0015 / call)
@@ -734,6 +761,8 @@ export class MemoryGraphEngine {
               fact_augment_only: true,
               processed_at: nowIso()
             };
+            // P2: upgrade importance now the processor has extracted priority.
+            baseMemory.importance_score = computeImportanceScore({ memory_type: baseMemory.memory_type, priority: result.priority });
             // Store parsed event dates on the memory for Qdrant filtering
             if (eventDates.length > 0) {
               baseMemory.event_dates = eventDates;
@@ -860,6 +889,8 @@ export class MemoryGraphEngine {
               memory_priority: result.priority || 'medium',
               processed_at: nowIso()
             };
+            // P2: upgrade importance now the processor has extracted priority.
+            baseMemory.importance_score = computeImportanceScore({ memory_type: baseMemory.memory_type, priority: result.priority });
             if (eventDatesStd.length > 0) {
               baseMemory.event_dates = eventDatesStd;
             }
@@ -2695,6 +2726,13 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
       memory_type: input.memory_type || 'fact',
       title: input.title || null,
       tags: input.tags || [],
+      // P2 salience: explicit caller value wins; else derive from memory_type
+      // (priority is unknown pre-processor and is upgraded below once the
+      // processor extracts it). Legacy callers that pass nothing still get a
+      // meaningful type-based score instead of the flat 0.5 default.
+      importance_score: Number.isFinite(input.importance_score)
+        ? input.importance_score
+        : computeImportanceScore({ memory_type: input.memory_type, priority: input.priority }),
       is_latest: true,
       version: 1,
       created_at: timestamp,

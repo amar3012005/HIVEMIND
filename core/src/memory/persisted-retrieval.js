@@ -1234,6 +1234,14 @@ export async function recallPersistedMemories(store, {
     else if (role === 'bridge') mult *= 1.05;
     if (hubScore > 0) mult *= (1 + 0.10 * Math.min(1, hubScore));
     mult *= (0.85 + 0.15 * Math.max(0.1, Math.min(1.0, strength)));
+    // P2 salience: importance_score is the content-derived priority signal set
+    // at ingest (decision/lesson > fact > observation, ± user/LLM priority).
+    // Centered on 0.5 so legacy rows (default 0.5) stay neutral (×1.0); a 0.85
+    // decision lifts ×1.14, a 0.1 throwaway drops ×0.84. Until now this column
+    // was written but never consumed in ranking — this is the wire-up.
+    const importance = Number.isFinite(mem.importance_score) ? mem.importance_score
+      : (Number.isFinite(mem.importanceScore) ? mem.importanceScore : 0.5);
+    mult *= (0.80 + 0.40 * Math.max(0.1, Math.min(1.0, importance)));
     return { ...item, score: (item.score || 0) * mult };
   };
 

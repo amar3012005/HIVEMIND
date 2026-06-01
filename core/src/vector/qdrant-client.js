@@ -26,6 +26,12 @@ const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:9200';
 const API_KEY = process.env.QDRANT_API_KEY || 'dev_api_key_hivemind_2026';
 const COLLECTION_NAME = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
 const DEFAULT_SCORE_THRESHOLD = parseFloat(process.env.HIVEMIND_VECTOR_SCORE_THRESHOLD || '0.15');
+// P4: search-time HNSW ef — THE recall/latency dial at scale (OpenSearch
+// benchmark: recall@1 0.56→0.97 across ef 10→640). Without an explicit
+// params.hnsw_ef, Qdrant uses an untuned internal default with no control.
+// 128 is a balanced default; callers can pass a higher value for accurate
+// tiers. Tune via QDRANT_HNSW_EF without a redeploy.
+const EF_SEARCH_DEFAULT = Number(process.env.QDRANT_HNSW_EF || 128);
 
 const headers = {
   'Content-Type': 'application/json',
@@ -239,7 +245,7 @@ export class QdrantClient {
    * @param {number} options.score_threshold - Minimum similarity score
    * @returns {Promise<Array>} Search results
    */
-  async searchMemories({ query, vector, filter, limit = 10, score_threshold = DEFAULT_SCORE_THRESHOLD, collectionName }) {
+  async searchMemories({ query, vector, filter, limit = 10, score_threshold = DEFAULT_SCORE_THRESHOLD, collectionName, hnsw_ef }) {
     // Check connection first
     const connected = await this.isConnected();
     if (!connected) {
@@ -276,6 +282,13 @@ export class QdrantClient {
       with_payload: true,
       with_vector: false
     };
+
+    // P4: explicit search-time HNSW ef (recall/latency dial). Per-call
+    // override wins; else the QDRANT_HNSW_EF default. Skip when ≤0.
+    const effEf = Number.isFinite(hnsw_ef) ? hnsw_ef : EF_SEARCH_DEFAULT;
+    if (effEf > 0) {
+      searchRequest.params = { hnsw_ef: effEf };
+    }
 
     // Add user/org filter for multi-tenancy
     if (filter) {

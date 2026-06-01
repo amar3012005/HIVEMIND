@@ -83,6 +83,38 @@ const DRIFT_COMPACT_THRESHOLD     = Number(process.env.DRIFT_COMPACT_THRESHOLD  
 const MAX_MEMBERS_PER_CANONICAL   = Number(process.env.DRIFT_MAX_MEMBERS_PER_CANONICAL || 10);
 const MAX_ORGS_PER_TICK           = Number(process.env.COGNITION_MAX_ORGS_PER_TICK  || 25);
 
+// ─── P3 selective vector forgetting ──────────────────────────────────────────
+// Drift compaction builds a LOSSLESS summary (every source embedded verbatim),
+// so once a source is folded in, its standalone vector is pure redundancy that
+// keeps polluting ANN recall (the Memora failure mode: stale fragments retrieved
+// alongside the canonical). We delete the source POINTS from Qdrant (the DB rows
+// survive as isLatest=false for time-travel/evolution). Mirrors the canonical
+// purge in server.js: filter by payload memory_id, chunked POST, fire-and-forget.
+async function purgeVectorsByMemoryIds(memoryIds, logger = console) {
+  const ids = (memoryIds || []).filter(Boolean);
+  if (ids.length === 0) return 0;
+  const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
+  if (!qdrantUrl) return 0;
+  const qdrantCollection = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
+  const qdrantKey = process.env.QDRANT_API_KEY || '';
+  let purged = 0;
+  try {
+    const chunkSize = 500;
+    for (let i = 0; i < ids.length; i += chunkSize) {
+      const slice = ids.slice(i, i + chunkSize);
+      await fetch(`${qdrantUrl}/collections/${encodeURIComponent(qdrantCollection)}/points/delete?wait=true`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(qdrantKey ? { 'api-key': qdrantKey } : {}) },
+        body: JSON.stringify({ filter: { must: [{ key: 'memory_id', match: { any: slice } }] } }),
+      });
+      purged += slice.length;
+    }
+  } catch (err) {
+    logger.warn(`[cognition] vector purge failed (non-fatal): ${err.message}`);
+  }
+  return purged;
+}
+
 // ─── Tag filters ───────────────────────────────────────────────────────────────
 // Tags that don't form meaningful topic clusters for synthesis purposes
 const SYS_TAG_RE = /^(file:|fn:|page:|heading:|upload:|doc-hash:|promoted-from|synthesized|topic:|cognition-loop|synthesis:|knowledge-base$|document$|document-summary$|entity:|time:|ts:|section:|chat$|talk-to-hive$)/i;
@@ -1569,6 +1601,25 @@ Output JSON only:
                 },
               });
             } catch { /* race — skip */ }
+          }
+
+          // P3: demote folded sources + purge their vectors. The summary is
+          // lossless (every source embedded verbatim) so this is zero info
+          // loss — it just stops the same fragments requalifying into the
+          // 500-row pool forever (compaction starvation, failure-mode #1) and
+          // stops them polluting ANN recall. DB rows survive (isLatest=false)
+          // for time-travel; only the Qdrant points and the default-view flag
+          // are removed. supersedesId points at the canonical for lineage.
+          const foldedIds = chunk.map(s => s.id);
+          try {
+            await this.prisma.memory.updateMany({
+              where: { id: { in: foldedIds } },
+              data:  { isLatest: false, supersedesId: created.id },
+            });
+            const purged = await purgeVectorsByMemoryIds(foldedIds, this.logger);
+            this.logger.log(`[cognition-loop] drift-compact tag=${tag} part=${ci + 1}/${chunks.length}: folded ${foldedIds.length} → ${created.id.slice(0, 8)}, demoted+purged ${purged} vectors`);
+          } catch (demoteErr) {
+            this.logger.warn(`[cognition] drift-compact demote/purge failed tag=${tag}: ${demoteErr.message}`);
           }
           compactions++;
         } catch (err) {

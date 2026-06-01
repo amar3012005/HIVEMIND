@@ -295,7 +295,15 @@ CREATE INDEX IF NOT EXISTS idx_memories_strength ON memories(strength DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_deleted ON memories(deleted_at) WHERE deleted_at IS NOT NULL;
 
 -- Full-text search index (for hybrid search fallback)
+-- NOTE: the content-only index below does NOT match the actual recall query,
+-- which tsvectors content || title (prisma-graph-store.js recallPersistedMemories).
+-- The matching expression index is required or that query seq-scans (P5).
 CREATE INDEX IF NOT EXISTS idx_memories_content_fts ON memories USING GIN (to_tsvector('english', content));
+-- P5: matches the primary FTS recall expression exactly (content || title).
+-- Without it the canonical recall path seq-scans memories at every query —
+-- a latency cliff that lands well before 10M rows. Applied live 2026-06-02.
+CREATE INDEX IF NOT EXISTS idx_memories_fts_content_title ON memories
+  USING GIN (to_tsvector('english', COALESCE(content, '') || ' ' || COALESCE(title, '')));
 
 -- Tags GIN index for array containment queries
 CREATE INDEX IF NOT EXISTS idx_memories_tags ON memories USING GIN (tags);

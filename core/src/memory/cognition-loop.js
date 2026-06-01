@@ -88,8 +88,13 @@ const MAX_ORGS_PER_TICK           = Number(process.env.COGNITION_MAX_ORGS_PER_TI
 // so once a source is folded in, its standalone vector is pure redundancy that
 // keeps polluting ANN recall (the Memora failure mode: stale fragments retrieved
 // alongside the canonical). We delete the source POINTS from Qdrant (the DB rows
-// survive as isLatest=false for time-travel/evolution). Mirrors the canonical
-// purge in server.js: filter by payload memory_id, chunked POST, fire-and-forget.
+// survive as isLatest=false for time-travel/evolution).
+//
+// IMPORTANT: in this collection the Qdrant POINT ID *is* the memory UUID — there
+// is NO `memory_id` payload field (verified by scroll). So deletion MUST target
+// `{ points: [...] }` by id, NOT a payload filter. (The filter-by-memory_id
+// pattern elsewhere in server.js is a silent no-op for the same reason — see
+// the follow-up note.) Deleting by point id also needs no payload index.
 async function purgeVectorsByMemoryIds(memoryIds, logger = console) {
   const ids = (memoryIds || []).filter(Boolean);
   if (ids.length === 0) return 0;
@@ -102,12 +107,13 @@ async function purgeVectorsByMemoryIds(memoryIds, logger = console) {
     const chunkSize = 500;
     for (let i = 0; i < ids.length; i += chunkSize) {
       const slice = ids.slice(i, i + chunkSize);
-      await fetch(`${qdrantUrl}/collections/${encodeURIComponent(qdrantCollection)}/points/delete?wait=true`, {
+      const resp = await fetch(`${qdrantUrl}/collections/${encodeURIComponent(qdrantCollection)}/points/delete?wait=true`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...(qdrantKey ? { 'api-key': qdrantKey } : {}) },
-        body: JSON.stringify({ filter: { must: [{ key: 'memory_id', match: { any: slice } }] } }),
+        body: JSON.stringify({ points: slice }),
       });
-      purged += slice.length;
+      if (resp.ok) purged += slice.length;
+      else logger.warn(`[cognition] vector purge HTTP ${resp.status}: ${(await resp.text()).slice(0, 160)}`);
     }
   } catch (err) {
     logger.warn(`[cognition] vector purge failed (non-fatal): ${err.message}`);

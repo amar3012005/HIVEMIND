@@ -364,6 +364,24 @@ const TOOL_HANDLERS = {
       accessContext: ctx.accessContext,
     });
 
+    // P2 salience feedback: reinforce every recalled memory (agent + MCP
+    // surface). Mirrors the /api/recall tap — bump recall_count + nudge
+    // strength + stamp lastAccessedAt. Fire-and-forget, never blocks the
+    // tool response. strength is read-clamped to [0.1,1.0] downstream.
+    if (ctx.prisma && Array.isArray(result.memories) && result.memories.length > 0) {
+      const recalledIds = result.memories.map((m) => m.id).filter(Boolean);
+      if (recalledIds.length > 0) {
+        ctx.prisma.memory.updateMany({
+          where: { id: { in: recalledIds } },
+          data: {
+            lastAccessedAt: new Date(),
+            recallCount: { increment: 1 },
+            strength: { increment: 0.05 },
+          },
+        }).catch(() => {});
+      }
+    }
+
     // mode='insight' expansion: pull every synthesis row's evidence chain so
     // the agent sees both the curated claim AND its source memories. Quick
     // mode already returns the top synthesis + 2 evidence ids; insight mode

@@ -32,7 +32,8 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from agentscope.message import Msg
 from agentscope.pipeline import MsgHub
 
-from .worker import EmployeeWorker, WorkerMessage
+from ..bootstrap_client import report_eval, report_metrics
+from .worker import EmployeeWorker, WorkerMessage, WorkerTurn
 
 log = logging.getLogger(__name__)
 
@@ -227,6 +228,7 @@ class TeamRoom:
             lambda w: w.respond(_PROMPT_INVESTIGATE, round_num=round_num, phase="investigate"),
         )
         replies = [(w, turn) for w, turn in results if turn]
+        self._report_turns(replies, _PROMPT_INVESTIGATE)
         await self._broadcast_batch(hub, replies, round_num, kind="chat", phase="investigate")
 
     # ── Phase 2: propose (parallel, then broadcast) ──────────
@@ -235,6 +237,7 @@ class TeamRoom:
             self.roster,
             lambda w: w.respond(_PROMPT_PROPOSE, round_num=round_num, phase="propose"),
         )
+        self._report_turns([(w, turn) for w, turn in results if turn], _PROMPT_PROPOSE)
         kept: List[Tuple[EmployeeWorker, WorkerTurn]] = [
             (w, turn) for w, turn in results if turn and turn.text and _is_valid_claim(turn.text)
         ]
@@ -277,6 +280,7 @@ class TeamRoom:
             reviewer, reply, claim_msg = out
             if not reply or not reply.text:
                 continue
+            self._report_turns([(reviewer, reply)], _PROMPT_REVIEW)
             verdict = _parse_verdict(reply.text)
             replies_to_broadcast.append((
                 reviewer,
@@ -324,6 +328,7 @@ class TeamRoom:
                 continue
             proposer, reply, meta = out
             if proposer and reply and reply.text:
+                self._report_turns([(proposer, reply)], _PROMPT_REVISE)
                 replies_to_broadcast.append((proposer, reply, meta))
         await self._broadcast_with_metadata(hub, replies_to_broadcast, round_num, kind="revision")
 
@@ -334,6 +339,7 @@ class TeamRoom:
             return "(no synthesizer available; review transcript directly)"
         reply = await synth.respond(_PROMPT_SYNTHESIZE, round_num=round_num, phase="synthesize")
         if reply and reply.text:
+            self._report_turns([(synth, reply)], _PROMPT_SYNTHESIZE)
             await self._broadcast_with_metadata(
                 hub,
                 [(synth, reply, {"phase": "synthesize"})],
@@ -388,6 +394,26 @@ class TeamRoom:
             return self.roster[0]
         best_id = max(claim_count.items(), key=lambda kv: kv[1])[0]
         return self._find_worker(best_id) or self.roster[0]
+
+    # ── Telemetry ────────────────────────────────────────────
+    def _report_turns(
+        self,
+        replies: List[Tuple[EmployeeWorker, WorkerTurn]],
+        phase_prompt: str,
+    ) -> None:
+        """Fire-and-forget per-turn metrics + eval reports for each
+        (worker, turn). Best-effort: report_metrics/report_eval never raise,
+        and we don't await — orchestration logic stays unchanged."""
+        for worker, turn in replies:
+            if turn is None:
+                continue
+            tokens = turn.tokens or (len(turn.text) // 4)
+            asyncio.create_task(
+                report_metrics(worker.employee_id, tokens=tokens, messages=1)
+            )
+            asyncio.create_task(
+                report_eval(worker.employee_id, phase_prompt, turn.text)
+            )
 
     # ── Helpers ──────────────────────────────────────────────
     async def _gather(

@@ -4,7 +4,7 @@ import path from 'node:path';
 const TUNING_THRESHOLD = 20;
 const CORE_PERSONAS = ['maya', 'jonah', 'lina', 'eli'];
 
-function employeeLearningKey(employee = {}) {
+export function employeeLearningKey(employee = {}) {
   const slug = String(employee.slug || '').toLowerCase();
   const name = String(employee.name || '').toLowerCase();
   const firstToken = name.split(/\s+/).filter(Boolean)[0] || '';
@@ -19,8 +19,7 @@ function employeeLearningKey(employee = {}) {
 }
 
 function archiveRoot() {
-  const cwd = process.cwd();
-  return path.resolve(cwd, '..', 'archive');
+  return process.env.HIVEMIND_ARCHIVE_DIR || path.resolve(process.cwd(), 'archive');
 }
 
 async function safeReaddir(dir) {

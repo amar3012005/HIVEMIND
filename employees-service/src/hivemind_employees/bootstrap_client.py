@@ -112,3 +112,21 @@ async def report_metrics(employee_id: str, *, tokens: int = 0, messages: int = 0
             )
         except Exception as e:
             log.debug("metrics report failed for %s: %s", employee_id, e)
+
+
+async def report_eval(employee_id: str, query: str, response: str) -> None:
+    """Best-effort PUT to /v1/employees/:id/eval so the control-plane can
+    score/archive per-turn responses. Never raises."""
+    cp_url = os.environ.get("HIVEMIND_CP_URL", "http://hm-control:3000")
+    master_key = os.environ.get("HIVEMIND_MASTER_API_KEY", "")
+    if not master_key:
+        return
+    async with httpx.AsyncClient(base_url=cp_url, timeout=5.0) as c:
+        try:
+            await c.put(
+                f"/v1/employees/{employee_id}/eval",
+                headers={"Authorization": f"Bearer {master_key}"},
+                json={"query": (query or "")[:4000], "response": (response or "")[:8000]},
+            )
+        except Exception as e:
+            log.debug("eval report failed for %s: %s", employee_id, e)

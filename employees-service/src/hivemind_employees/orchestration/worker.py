@@ -57,6 +57,7 @@ class WorkerMessage:
 class WorkerTurn:
     text: str
     actions: List[Dict[str, Any]] = field(default_factory=list)
+    tokens: int = 0
 
 
 class EmployeeWorker:
@@ -138,6 +139,10 @@ class EmployeeWorker:
             log.exception("worker %s reply failed: %s", self.slug, exc)
             return WorkerTurn(text=f"(internal error from {self.employee_name}: {exc})", actions=actions)
 
+        # Extract token usage from the reply Msg BEFORE text conversion;
+        # usage may live on reply.usage or reply.metadata.usage.
+        tokens = self._extract_tokens(reply)
+
         # Msg.content can be a string or a list of content blocks; reduce
         # to plain text so downstream parsers (claim/verdict regex) work.
         content = reply.content if reply is not None else ""
@@ -151,7 +156,45 @@ class EmployeeWorker:
             content = "\n".join(p for p in text_parts if p)
         text = (content or "").strip()
         actions.extend(await self._postprocess_simulation_actions(phase=phase, reply_text=text, target_message=target_message))
-        return WorkerTurn(text=text, actions=actions)
+        return WorkerTurn(text=text, actions=actions, tokens=tokens)
+
+    @staticmethod
+    def _extract_tokens(reply: Optional[Msg]) -> int:
+        """Pull total token count off a reply Msg's usage block, if present.
+        Checks reply.usage then reply.metadata.usage; tolerates dicts/objects."""
+        if reply is None:
+            return 0
+        usage = getattr(reply, "usage", None)
+        if usage is None:
+            meta = getattr(reply, "metadata", None)
+            if isinstance(meta, dict):
+                usage = meta.get("usage")
+            elif meta is not None:
+                usage = getattr(meta, "usage", None)
+        if usage is None:
+            return 0
+
+        def _get(obj: Any, key: str) -> Any:
+            if isinstance(obj, dict):
+                return obj.get(key)
+            return getattr(obj, key, None)
+
+        for key in ("total_tokens", "total"):
+            val = _get(usage, key)
+            if val:
+                try:
+                    return int(val)
+                except (TypeError, ValueError):
+                    pass
+        total = 0
+        for key in ("input_tokens", "prompt_tokens", "output_tokens", "completion_tokens"):
+            val = _get(usage, key)
+            if val:
+                try:
+                    total += int(val)
+                except (TypeError, ValueError):
+                    pass
+        return total
 
     async def _prepare_simulation_actions(
         self,

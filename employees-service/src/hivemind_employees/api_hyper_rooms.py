@@ -44,7 +44,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from .agents.agentscope_factory import build_react_agent
-from .bootstrap_client import fetch_bootstrap
+from .bootstrap_client import fetch_bootstrap, report_eval, report_metrics
 from .config import get_settings
 from .db import (
     get_permanent_skeptic_id,
@@ -503,6 +503,25 @@ def _msg_to_text(reply: Optional[Msg]) -> str:
         # Also nuke residual single-line variants
         text = re.sub(r"<function=[^\n>]+>", "", text).strip()
     return text
+
+
+def _report_turn(emp_id: str, query: str, reply: Optional[Msg]) -> None:
+    """Best-effort fire-and-forget per-turn metrics + eval for one agent
+    bubble. Mirrors the token-extract block in api_employee_chat.py:
+    reply.usage || reply.metadata.usage -> total_tokens or input+output.
+    Schedules report_metrics + report_eval as background tasks; never
+    raises (metrics/eval are non-critical to the turn)."""
+    _tok = 0
+    try:
+        _u = getattr(reply, "usage", None) or (getattr(reply, "metadata", None) or {}).get("usage")
+        if isinstance(_u, dict):
+            _tok = int(_u.get("total_tokens")
+                       or (int(_u.get("input_tokens", 0)) + int(_u.get("output_tokens", 0)))
+                       or 0)
+    except Exception:  # noqa: BLE001 — metrics are non-critical
+        _tok = 0
+    asyncio.create_task(report_metrics(emp_id, tokens=_tok, messages=1))
+    asyncio.create_task(report_eval(emp_id, query, _msg_to_text(reply)))
 
 
 # ─── Reactor "quiet-check" — cheap JSON pass ───────────────────────────
@@ -1222,6 +1241,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
                 user_message=req.user_message,
             )
             reply = await agent(Msg(name="user", content=prompt, role="user"))
+            _report_turn(emp["id"], req.user_message, reply)
             text = _msg_to_text(reply)
             m = re.search(r"\{[\s\S]+\}", text)
             parsed = json.loads(m.group(0)) if m else None
@@ -1363,6 +1383,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
                     target_ids=", ".join(target_ids),
                 )
                 reply = await agent(Msg(name="user", content=prompt, role="user"))
+                _report_turn(emp["id"], req.user_message, reply)
                 text = _msg_to_text(reply)
                 m = re.search(r"\{[\s\S]+\}", text)
                 parsed = json.loads(m.group(0)) if m else None
@@ -1451,6 +1472,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
                     lane_playbook=LANE_PLAYBOOKS.get(emp["_lane"], ""),
                 )
                 reply = await agent(Msg(name="user", content=prompt, role="user"))
+                _report_turn(emp["id"], req.user_message, reply)
                 text = _msg_to_text(reply)
                 m = re.search(r"\{[\s\S]+\}", text)
                 parsed = json.loads(m.group(0)) if m else None
@@ -1541,6 +1563,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
                     refined_hypotheses_table=refined_table,
                 )
                 reply = await agent(Msg(name="user", content=prompt, role="user"))
+                _report_turn(skeptic["id"], req.user_message, reply)
                 text = _msg_to_text(reply)
                 m = re.search(r"\{[\s\S]+\}", text)
                 parsed = json.loads(m.group(0)) if m else None
@@ -1609,6 +1632,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
                     skeptic_output=skeptic_output_str,
                 )
                 reply = await agent(Msg(name="user", content=prompt, role="user"))
+                _report_turn(emp["id"], req.user_message, reply)
                 text = _msg_to_text(reply)
                 m = re.search(r"\{[\s\S]+\}", text)
                 parsed = json.loads(m.group(0)) if m else None
@@ -1760,6 +1784,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
                 winning_id=consensus["winning_id"] or "none",
             )
             synth_reply = await lead_agent(Msg(name="user", content=synth_prompt, role="user"))
+            _report_turn(lead["id"], req.user_message, synth_reply)
             final_text = _msg_to_text(synth_reply) or ""
         except Exception as exc:
             log.warning("[swarm] R5 synthesis failed: %s", exc)
@@ -2174,6 +2199,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             f"User said:\n{req.user_message}"
         )
         reply = await lead_agent(Msg(name="user", content=lead_prompt, role="user"))
+        _report_turn(lead["id"], req.user_message, reply)
         lead_text = _msg_to_text(reply) or "(no response)"
     except Exception as exc:  # noqa: BLE001
         msg = str(exc)
@@ -2349,6 +2375,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                    if get_template_overlay(room_template).get('synth_hint') else "")
             )
             synth_reply = await lead_agent(Msg(name="user", content=synth_prompt, role="user"))
+            _report_turn(lead["id"], req.user_message, synth_reply)
             synth_text = _msg_to_text(synth_reply) or ""
             if synth_text.strip():
                 synth_tokens = max(200, len(synth_text) // 4)

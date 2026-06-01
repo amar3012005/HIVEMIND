@@ -4880,6 +4880,47 @@ Write the persona now.`;
     }
   }
 
+  // POST /v1/employees/:id/eval — master-key authed (beside /metrics).
+  // Scores one agent response against its persona role and appends a JSONL
+  // row to <archiveRoot>/evaluations/<key>_evals.jsonl. The autonomous tuning
+  // loop reads that file (count >= TUNING_THRESHOLD triggers a variant).
+  const empEvalMatch = pathname.match(/^\/v1\/employees\/([0-9a-f-]{36})\/eval$/);
+  if (empEvalMatch && req.method === 'POST') {
+    const callerKey = (req.headers['authorization'] || '').replace('Bearer ', '').trim()
+      || (req.headers['x-hivemind-master-key'] || '').trim();
+    const expected = process.env.HIVEMIND_MASTER_API_KEY;
+    if (!expected || callerKey !== expected) {
+      return jsonResponse(res, { error: 'master key required' }, 403);
+    }
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const store = await _getEmployeeStore();
+    const empId = empEvalMatch[1];
+    const body = await parseBody(req).catch(() => ({}));
+    const query = String(body?.query || '');
+    const response = String(body?.response || '');
+    if (!query || !response) return jsonResponse(res, { error: 'query and response required' }, 400);
+    try {
+      const emp = await store.getById({ id: empId });
+      if (!emp) return jsonResponse(res, { error: 'Employee not found' }, 404);
+      const { employeeLearningKey, scoreResponse } = await import('./employees/autonomous-scorer.js');
+      const key = employeeLearningKey(emp);
+      const { score, breakdown } = scoreResponse({ key, query, response });
+      // archiveRoot resolution mirrors hyper-state.js (not exported there).
+      const archiveRoot = process.env.HIVEMIND_ARCHIVE_DIR || path.resolve(process.cwd(), 'archive');
+      const evalDir = path.join(archiveRoot, 'evaluations');
+      await fs.promises.mkdir(evalDir, { recursive: true });
+      const row = { ts: new Date().toISOString(), query, response, score, breakdown };
+      await fs.promises.appendFile(path.join(evalDir, `${key}_evals.jsonl`), JSON.stringify(row) + '\n');
+      const { enrichEmployeeWithHyperState } = await import('./employees/hyper-state.js');
+      const enriched = await enrichEmployeeWithHyperState(emp);
+      const state = enriched?.hyper || null;
+      const evaluation_count = state?.evaluation_count ?? null;
+      return jsonResponse(res, { status: 'success', evaluation_count, state });
+    } catch (err) {
+      return jsonResponse(res, { error: err.message }, 500);
+    }
+  }
+
   // Routes scoped to a single employee
   const employeeIdMatch = pathname.match(/^\/v1\/employees\/([0-9a-f-]{36})(?:\/(.+))?$/);
   if (employeeIdMatch) {
@@ -5028,6 +5069,32 @@ Write the persona now.`;
           ..._reqMeta(req),
         });
         return jsonResponse(res, { employee: await enrichEmployeeWithHyperState(updated), status: 'deploying' }, 202);
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+
+    // POST /v1/employees/:id/tune — org-admin (like deploy). Kicks off the
+    // autonomous prompt-tuning loop for this employee as a detached background
+    // process so the request returns immediately (the loop reads the evals
+    // JSONL, calls the Groq teacher, and writes a prompt variant). Non-blocking.
+    if (sub === 'tune' && req.method === 'POST') {
+      if (!isOrgAdmin) return jsonResponse(res, { error: 'Forbidden' }, 403);
+      try {
+        const { spawn } = await import('node:child_process');
+        const script = path.join(PROJECT_ROOT, 'scripts', 'prompt-tune.mjs');
+        const child = spawn(process.execPath, [script, '--employee', empId], {
+          detached: true,
+          stdio: 'ignore',
+        });
+        child.unref();
+        audit({
+          organizationId: orgId, userId,
+          eventType: 'employee.tuned', eventCategory: 'employee', action: 'update',
+          resourceType: 'digital_employee', resourceId: empId,
+          ..._reqMeta(req),
+        });
+        return jsonResponse(res, { status: 'running' }, 202);
       } catch (err) {
         return jsonResponse(res, { error: err.message }, 500);
       }

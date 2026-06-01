@@ -17748,48 +17748,14 @@ exit \$RC
                   },
                 });
 
-                // Auto-save the turn so the conversation lands in HIVEMIND
-                // even when the LLM forgot to call hivemind_save_memory.
-                // Skip when the agent ALREADY saved an explicit memory —
-                // duplicating would create a noisy turn-log alongside the
-                // curated fact. Also skip operator inference + contradiction
-                // detection on the conversation log itself: it's an audit
-                // record, not a fact-claim, and treating it as one was
-                // producing the 100+ false-positive contradiction edges.
-                try {
-                  // Skip auto-save when agent already saved/logged an explicit
-                  // memory this turn. Match on tool name + "saved"/"logged"
-                  // prefix in summary — covers both hivemind_save_memory and
-                  // hivemind_log_decision. Permissive on the id suffix because
-                  // older summaries occasionally omitted it.
-                  const SAVE_TOOLS = new Set(['hivemind_save_memory', 'hivemind_log_decision']);
-                  const alreadySaved = Array.isArray(result.steps)
-                    && result.steps.some(s =>
-                      SAVE_TOOLS.has(s?.tool) && /^(saved|logged)\b/i.test(String(s?.result_summary || '').trim())
-                    );
-                  if (persistentMemoryEngine?.ingestMemory && result.response && !alreadySaved) {
-                    const convoPayload = {
-                      title: `Chat turn — ${new Date().toISOString().slice(0, 10)}`,
-                      content: `User: ${message}\n\nAssistant: ${result.response}`,
-                      tags: ['chat', 'talk-to-hive', 'react-agent', 'conversation-log'],
-                      memory_type: 'conversation',
-                      user_id: userId,
-                      org_id: orgId,
-                      ...(requestProjectId ? { project_id: requestProjectId, project_ids: [requestProjectId] } : {}),
-                      source_metadata: { source_platform: 'talk-to-hive', via: 'react-agent' },
-                      // Conversation logs bypass operator inference and
-                      // contradiction detection. They still get timestamp
-                      // tags + indexed for retrieval, but don't fan out
-                      // into Updates/Contradicts edges against every prior
-                      // chat turn.
-                      skipSmartRouting: true,
-                      skip_contradiction_detection: true,
-                      skip_relationship_classification: true,
-                    };
-                    persistentMemoryEngine.ingestMemory(convoPayload)
-                      .catch((e) => console.warn('[chat:react-agent] auto-save failed:', e.message));
-                  }
-                } catch {}
+                // Saving is LLM-decided in the FIRST loop (the planner), not
+                // here. planStep emits `save_intent` (user explicitly said
+                // "save/remember…") and `auto_save_intent` (proactive durable
+                // fact, confidence ≥ 0.70 fires) — both execute
+                // hivemind_save_memory inside the agent. There is intentionally
+                // NO blanket every-turn conversation-log auto-save: it flooded
+                // the graph with noisy "Chat turn — <date>" records. Event-
+                // driven save only. (Removed 2026-06-01.)
 
                 return jsonResponse(res, result);
               } catch (agentErr) {

@@ -24,11 +24,17 @@ const DOCLING_URL = process.env.DOCLING_URL || 'http://docling:5001';
  */
 export function collapseLetterSpacing(s) {
   if (!s || typeof s !== 'string') return s;
-  // Match runs of >=5 single LETTERS (no digits/underscore) each separated by
-  // whitespace, bounded by line-start/space. Letter-only + min-5 protects
-  // numeric/tabular data (ledger cells like "3 1 4 1 5", short lists "a b c d")
-  // from being merged, while still collapsing real letter-spaced words.
-  return s.replace(/(?<=^|\s)[^\W\d_](?:\s+[^\W\d_]){4,}(?=\s|$)/gu, (run) => run.replace(/\s+/g, ''));
+  // 1. Strip bytes Postgres cannot store: NUL (0x00) breaks text/jsonb
+  //    inserts, and lone control chars from PDF text layers surface as
+  //    "unexpected end of hex escape" on sourceMetadata.upsert() — aborting
+  //    promotion (17/167). Keep \n \r \t; drop the rest of C0 + DEL + C1.
+  let out = s.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, '');
+  // 2. Collapse runs of >=5 single LETTERS (no digits/underscore) each
+  //    separated by whitespace. Letter-only + min-5 protects numeric/tabular
+  //    data (ledger cells "3 1 4 1 5", short lists "a b c d") while still
+  //    collapsing real letter-spaced words ("G E M E I N" → "GEMEIN").
+  out = out.replace(/(?<=^|\s)[^\W\d_](?:\s+[^\W\d_]){4,}(?=\s|$)/gu, (run) => run.replace(/\s+/g, ''));
+  return out;
 }
 
 /**

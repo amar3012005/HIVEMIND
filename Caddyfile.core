@@ -4,5 +4,8 @@
 
 https://core.hivemind.davinciai.eu:443 {
     reverse_proxy hivemind-api:3000
-    tls /etc/letsencrypt/live/core.hivemind.davinciai.eu/fullchain.pem /etc/letsencrypt/live/core.hivemind.davinciai.eu/privkey.pem
+    tls /etc/letsencrypt/live/core.hivemind.davinciai.eu/fullchain.pem /etc/letsencrypt/live/core.hivemind.davinciai.eu/privkey.pem {
+        # Hybrid post-quantum key exchange (NIST FIPS 203 ML-KEM-768 + X25519).
+        curves x25519mlkem768 x25519
+    }
 }

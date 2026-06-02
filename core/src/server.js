@@ -7961,6 +7961,44 @@ exit \$RC
           }
           break;
 
+        // ── Async knowledge-upload status (job tracker + durable DB fallback) ──
+        case '/api/knowledge/status':
+          if (req.method === 'GET') {
+            const jobId = url.searchParams.get('job_id');
+            const docId = url.searchParams.get('document_id');
+            if (!jobId && !docId) {
+              return jsonResponse(res, { error: 'job_id or document_id is required' }, 400);
+            }
+            // Live in-memory progress (per-stage counts) while the job runs.
+            if (jobId) {
+              const job = ingestTracker.getJob(jobId);
+              if (job) return jsonResponse(res, { source: 'tracker', ...job });
+            }
+            // Durable fallback: the DB doc row survives restart + job expiry.
+            if (docId && prisma?.knowledgeDocument) {
+              try {
+                const doc = await prisma.knowledgeDocument.findFirst({
+                  where: { id: docId, userId },
+                  select: { id: true, parseStatus: true, parseEngine: true, wordCount: true, updatedAt: true },
+                });
+                if (doc) {
+                  return jsonResponse(res, {
+                    source: 'db',
+                    document_id: doc.id,
+                    status: doc.parseStatus === 'parsed' ? 'indexed' : (doc.parseStatus || 'unknown'),
+                    parse_engine: doc.parseEngine,
+                    word_count: doc.wordCount,
+                    updated_at: doc.updatedAt,
+                  });
+                }
+              } catch (e) {
+                console.warn('[knowledge/status] db fallback failed:', e.message);
+              }
+            }
+            return jsonResponse(res, { error: 'Job or document not found' }, 404);
+          }
+          break;
+
         // ── Static catalog: what connectors exist + their modes ─────────
         case '/api/connectors/catalog':
           if (req.method === 'GET') {
@@ -11838,9 +11876,65 @@ exit \$RC
                 }
               }
 
+              // Async opt-in: return a job id immediately + process in the
+              // background, so large multi-MB PDFs (150s+ sync pipeline) never
+              // hit the proxy timeout / 502. Default stays sync for FE compat.
+              const asyncMode = (parts.find(p => p.name === 'async')?.value || '').toLowerCase() === 'true'
+                || url.searchParams.get('async') === 'true';
+
               // ─── Phase 1: Document-First Ingestion Path (feature-flagged) ───
               if (documentFirstIngestion) {
-                console.log(`[knowledge] Using Phase 1 document-first ingestion for ${filePart.filename}${smartFlag ? ' (smart=true)' : ''}`);
+                console.log(`[knowledge] Using Phase 1 document-first ingestion for ${filePart.filename}${smartFlag ? ' (smart=true)' : ''}${asyncMode ? ' (async)' : ''}`);
+
+                const phase1Metadata = {
+                  tags: userTags,
+                  project: containerTag,
+                  project_id: projectIds[0] || null,
+                  project_ids: projectIds,
+                  primary_team_id: primaryTeamId,
+                  visibility: targetScope === 'organization' ? 'organization' : 'private',
+                  smart: smartFlag,
+                  picture_descriptions: pictureDescFlag,
+                };
+
+                if (asyncMode) {
+                  const jobId = crypto.randomUUID();
+                  ingestTracker.createJob(jobId, { userId, orgId, filename: filePart.filename, kind: 'knowledge_upload' });
+                  res.setHeader('X-Job-Id', jobId);
+                  jsonResponse(res, { success: true, job_id: jobId, status: 'queued', filename: filePart.filename }, 202);
+                  // Background ingest — per-stage progress streamed into the tracker.
+                  (async () => {
+                    const tBg = Date.now();
+                    try {
+                      const result = await documentFirstIngestion.ingestKnowledgeDocument({
+                        userId, orgId,
+                        filename: filePart.filename,
+                        fileBuffer: filePart.data,
+                        contentType: filePart.contentType || `text/${ext}`,
+                        metadata: phase1Metadata,
+                        onProgress: (p) => {
+                          const prev = ingestTracker.getJob(jobId)?.metadata || {};
+                          ingestTracker.updateJob(jobId, { status: p.stage || 'processing', progress: p.progress ?? 0, metadata: { ...prev, ...p } });
+                        },
+                      });
+                      const prev = ingestTracker.getJob(jobId)?.metadata || {};
+                      ingestTracker.updateJob(jobId, {
+                        status: 'indexed', progress: 100, memoryId: result.documentId,
+                        metadata: { ...prev, document_id: result.documentId, segmentCount: result.segmentCount, candidateCount: result.candidateCount, promotedCount: result.promotedCount },
+                      });
+                      if (planEnforcer && orgId) {
+                        planEnforcer.recordUsage(orgId, 'kbPages', result.pages || result.segmentCount || 1);
+                        planEnforcer.recordUsage(orgId, 'uploads', 1);
+                      }
+                      console.log(`[knowledge:async] ✓ ${filePart.filename} doc=${result.documentId} segs=${result.segmentCount} promoted=${result.promotedCount} ms=${Date.now() - tBg}`);
+                    } catch (bgErr) {
+                      console.error(`[knowledge:async] ✗ ${filePart.filename}:`, bgErr.message);
+                      ingestTracker.updateJob(jobId, { status: 'failed', error: bgErr.message });
+                    }
+                  })();
+                  return;
+                }
+
                 const tPhase1 = Date.now();
                 try {
                   const result = await documentFirstIngestion.ingestKnowledgeDocument({

@@ -64,7 +64,8 @@ export class DocumentFirstIngestionService {
    * @param {Object} params.metadata
    * @returns {Promise<{documentId, segmentCount, candidateCount, promotedCount}>}
    */
-  async ingestKnowledgeDocument({ userId, orgId, filename, fileBuffer, contentType, metadata = {} }) {
+  async ingestKnowledgeDocument({ userId, orgId, filename, fileBuffer, contentType, metadata = {}, onProgress = null }) {
+    const emit = (stage, progress, extra = {}) => { try { onProgress?.({ stage, progress, ...extra }); } catch { /* never let telemetry break ingest */ } };
     const checksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
 
     // Step 1: Store raw source artifact
@@ -95,11 +96,13 @@ export class DocumentFirstIngestionService {
 
     // Step 2: Parse document with Docling
     const _tParse = Date.now();
+    emit('parsing', 10);
     const parseResult = await this._parseDocument(fileBuffer, contentType, filename, {
       smart: metadata?.smart === true,
       picture_descriptions: metadata?.picture_descriptions === true,
     });
     const _msParse = Date.now() - _tParse;
+    emit('parsed', 35, { parse_ms: _msParse, pages: parseResult.pages, word_count: parseResult.wordCount });
 
     // Step 3: Create knowledge document
     // sourceId scoped per checksum so identical re-uploads dedupe via source_artifact
@@ -154,9 +157,11 @@ export class DocumentFirstIngestionService {
       _msEmbed = Date.now() - _tEmbed;
     }
     const _msSeg = Date.now() - _tSeg;
+    emit('embedded', 70, { segments: segments.length, embed_ms: _msEmbed });
 
     this._extractEntitiesAsync({ segments, userId, orgId, documentId: knowledgeDoc.id });
     // Step 6: Promote candidate memories
+    emit('promoting', 80, { segments: segments.length });
     const _tPromote = Date.now();
     const promoted = await this._promoteMemories({
       documentId: knowledgeDoc.id,
@@ -173,6 +178,14 @@ export class DocumentFirstIngestionService {
     });
     const _msPromote = Date.now() - _tPromote;
     console.log(`[phase1-timing] parse=${_msParse}ms seg=${_msSeg}ms embed=${_msEmbed}ms promote=${_msPromote}ms segs=${segments.length} memories=${promoted.memories.length}`);
+    // Per-stage drop counter (#3 observability): how many segments survived to
+    // candidates → promoted memories. Surfaces silent loss ("167 segs → 13").
+    emit('promoted', 95, {
+      segments: segments.length,
+      candidates: promoted.candidates.length,
+      promoted: promoted.memories.filter(m => m?.id).length,
+      timings_ms: { parse: _msParse, segment: _msSeg, embed: _msEmbed, promote: _msPromote },
+    });
 
     return {
       documentId: knowledgeDoc.id,

@@ -28,6 +28,7 @@
   "dependencies": {
     "@lightpanda/browser": "^1.2.0",
     "@modelcontextprotocol/sdk": "^1.27.1",
+    "@noble/post-quantum": "0.6.1",
     "@prisma/client": "^5.22.0",
     "@qdrant/js-client-rest": "^1.11.0",
     "@tavily/core": "^0.7.2",

@@ -5180,6 +5180,63 @@ exit \$RC
         }
       }
 
+      // ── Post-quantum security: status + public keys + verification ────────
+      if (pathname === '/api/security/pqc' && req.method === 'GET') {
+        try {
+          const pqc = await import('./security/pqc-signer.js');
+          return jsonResponse(res, { ...pqc.pqcStatus(), public_keys: pqc.publicKeys() });
+        } catch (e) { return jsonResponse(res, { error: 'pqc_unavailable', message: e.message }, 500); }
+      }
+
+      // Verify a memory's ML-DSA integrity signature.
+      if (pathname === '/api/security/verify-memory' && req.method === 'GET') {
+        if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+        const id = url.searchParams.get('id');
+        if (!id) return jsonResponse(res, { error: 'id_required' }, 400);
+        try {
+          const pqc = await import('./security/pqc-signer.js');
+          const rows = await prisma.$queryRawUnsafe(
+            `SELECT m.id, m.user_id, m.org_id, m.content, s.signature, s.alg
+             FROM memories m LEFT JOIN memory_signatures s ON s.memory_id = m.id
+             WHERE m.id = $1::uuid LIMIT 1`, id);
+          const r = rows?.[0];
+          if (!r) return jsonResponse(res, { error: 'not_found' }, 404);
+          if (!r.signature) return jsonResponse(res, { id, signed: false, verified: false, reason: 'no_signature' });
+          const payload = pqc.canonical({ id: r.id, user_id: r.user_id, org_id: r.org_id || null, content: r.content });
+          const verified = await pqc.verifyMemory(payload, r.signature);
+          return jsonResponse(res, { id, signed: true, verified, alg: r.alg });
+        } catch (e) { return jsonResponse(res, { error: 'verify_error', message: e.message }, 500); }
+      }
+
+      // Walk + verify the SLH-DSA audit chain for the caller's org.
+      if (pathname === '/api/security/audit-verify' && req.method === 'GET') {
+        if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+        const vOrg = req.headers['x-hm-org-id'] || DEFAULT_ORG;
+        try {
+          const pqc = await import('./security/pqc-signer.js');
+          const limit = Math.min(500, Math.max(1, parseInt(url.searchParams.get('limit') || '200', 10)));
+          const rows = await prisma.$queryRawUnsafe(
+            `SELECT a.id, a.organization_id, a.event_type, a.action, a.user_id, a.resource_id,
+                    s.prev_hash, s.entry_hash, s.signature, s.seq
+             FROM audit_signatures s JOIN audit_logs a ON a.id = s.audit_id
+             WHERE s.org_id IS NOT DISTINCT FROM $1::uuid
+             ORDER BY s.seq ASC LIMIT $2`, vOrg, limit);
+          let checked = 0, sigOk = 0, chainOk = 0, bindOk = 0; let firstBroken = null; let prev = null;
+          for (const r of rows) {
+            checked++;
+            const payload = pqc.canonical({ id: r.id, org: r.organization_id || null, type: r.event_type, action: r.action, user: r.user_id || null, resource: r.resource_id || null });
+            const recomputed = pqc.sha256Hex((r.prev_hash || '') + payload);
+            const bind = recomputed === r.entry_hash;            // payload not tampered
+            const chain = prev === null ? true : (r.prev_hash === prev); // append-only linkage
+            const sig = await pqc.verifyAudit(r.entry_hash, r.signature); // signed by key
+            if (bind) bindOk++; if (chain) chainOk++; if (sig) sigOk++;
+            if (!firstBroken && (!bind || !chain || !sig)) firstBroken = { audit_id: r.id, bind, chain, sig };
+            prev = r.entry_hash;
+          }
+          return jsonResponse(res, { org_id: vOrg, checked, signature_valid: sigOk, chain_intact: chainOk, payload_bound: bindOk, tamper_evident: checked > 0 && sigOk === checked && chainOk === checked && bindOk === checked, first_broken: firstBroken });
+        } catch (e) { return jsonResponse(res, { error: 'audit_verify_error', message: e.message }, 500); }
+      }
+
       const hostedDescriptorMatch = pathname.match(/^\/api\/mcp\/servers\/([^\/]+)$/);
       if (hostedDescriptorMatch && req.method === 'GET' && url.searchParams.get('token')) {
         const pathUserId = hostedDescriptorMatch[1];

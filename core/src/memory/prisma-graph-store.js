@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { computeTokenSimilarity } from './conflict-detector.js';
 import { normalizeRelationshipType } from './relationship-semantics.js';
+import { signMemory, sha256Hex, canonical as pqcCanonical } from '../security/pqc-signer.js';
 
 /**
  * Strip null bytes (\u0000) from strings — Postgres text columns reject them (code 22P05).
@@ -292,6 +293,26 @@ export class PrismaGraphStore {
         metadata: metadata || {}
       });
     }
+
+    // PQC integrity (FIPS 204 ML-DSA-65): sign the immutable core fields so any
+    // post-write tampering is cryptographically detectable. Stored in the
+    // memory_signatures side-table (raw SQL → no ORM column / client regen).
+    // ML-DSA signing is sub-millisecond; skips silently if keys/lib absent so
+    // the write never breaks.
+    try {
+      const sigPayload = pqcCanonical({
+        id: memory.id, user_id: memory.user_id, org_id: memory.org_id || null, content,
+      });
+      const sig = await signMemory(sigPayload);
+      if (sig) {
+        await this.client.$executeRawUnsafe(
+          `INSERT INTO memory_signatures (memory_id, org_id, alg, payload_hash, signature)
+           VALUES ($1::uuid, $2::uuid, 'ML-DSA-65', $3, $4)
+           ON CONFLICT (memory_id) DO NOTHING`,
+          memory.id, memory.org_id || null, sha256Hex(sigPayload), sig,
+        );
+      }
+    } catch { /* integrity signing is best-effort — never block the write */ }
 
     return this.getMemory(memory.id);
   }

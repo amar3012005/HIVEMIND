@@ -34,7 +34,8 @@ export class AuditLogger {
     if (!this._enabled || !this.prisma) return;
     try {
       const retentionDays = parseInt(process.env.AUDIT_RETENTION_DAYS || '2555', 10);
-      await this.prisma.auditLog.create({
+      const created = await this.prisma.auditLog.create({
+        select: { id: true, createdAt: true },
         data: {
           userId: event.userId || null,
           organizationId: event.organizationId || null,
@@ -57,10 +58,39 @@ export class AuditLogger {
           retentionUntil: new Date(Date.now() + retentionDays * 24 * 60 * 60 * 1000),
         },
       });
+      // PQC tamper-evidence (FIPS 205 SLH-DSA), hash-chained. Fire-and-forget:
+      // SLH-DSA signing is slow, so it must not add latency to the audited
+      // request. Chain = sha256(prev_hash + payload), signed.
+      this._signAudit(created, event);
     } catch (err) {
       // Never let audit logging break the main flow
       console.warn('[audit] Log failed:', err.message);
     }
+  }
+
+  async _signAudit(row, event) {
+    try {
+      const { signAudit, sha256Hex, canonical } = await import('../security/pqc-signer.js');
+      const orgId = event.organizationId || null;
+      const prev = await this.prisma.$queryRawUnsafe(
+        `SELECT entry_hash FROM audit_signatures WHERE org_id IS NOT DISTINCT FROM $1::uuid ORDER BY seq DESC LIMIT 1`,
+        orgId,
+      );
+      const prevHash = prev?.[0]?.entry_hash || '';
+      const payload = canonical({
+        id: row.id, org: orgId, type: event.eventType, action: event.action || 'read',
+        user: event.userId || null, resource: event.resourceId || null,
+      });
+      const entryHash = sha256Hex(prevHash + payload);
+      const sig = await signAudit(entryHash);
+      if (!sig) return;
+      await this.prisma.$executeRawUnsafe(
+        `INSERT INTO audit_signatures (audit_id, org_id, alg, prev_hash, entry_hash, signature)
+         VALUES ($1::uuid, $2::uuid, 'SLH-DSA-SHA2-128s', $3, $4, $5)
+         ON CONFLICT (audit_id) DO NOTHING`,
+        row.id, orgId, prevHash, entryHash, sig,
+      );
+    } catch { /* tamper-evidence is best-effort — never affect the request */ }
   }
 
   /**

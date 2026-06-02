@@ -9,8 +9,7 @@ import { normalizeRelationshipType } from './relationship-semantics.js';
 function stripNullBytes(val) {
   if (typeof val === 'string') {
     // Strip null bytes AND other invalid UTF-8 sequences (cause 22021 Postgres errors + garbled streaming)
-    return val.replace(/\u0000/g, '').replace(/[\uFFFD]/g, '');
-  }
+    return val.replace(/\u0000/g, '').replace(/\uFFFD/g, '').replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, '').replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '');  }
   if (Array.isArray(val)) return val.map(stripNullBytes);
   if (val instanceof Date) return val;
   if (val && typeof val === 'object') {

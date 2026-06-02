@@ -787,8 +787,14 @@ export class DocumentFirstIngestionService {
       }
     };
 
-    // Parallel promotion with concurrency cap (default 6) — ~3-5x speedup.
-    const PROMOTE_CONCURRENCY = Number(process.env.PHASE1_PROMOTE_CONCURRENCY || 6);
+    // Promotion concurrency. NOTE: every ingestMemory acquires a PER-USER
+    // advisory lock (graph-engine advisoryLock) that serializes all of a user's
+    // writes — so concurrency >1 for the same user gains NO parallelism (the
+    // lock queues them) and actively HARMS: waiting workers sit inside an open
+    // Prisma transaction whose timeout ticks during the wait, blowing it →
+    // P2010 aborts under bulk ingest. Default 2 keeps a shallow pipeline (next
+    // worker preps while one holds the lock) without a deep timeout-prone queue.
+    const PROMOTE_CONCURRENCY = Number(process.env.PHASE1_PROMOTE_CONCURRENCY || 2);
     let nextIdx = 0;
     const workers = Array.from({ length: Math.min(PROMOTE_CONCURRENCY, promotableSegments.length) }, async () => {
       while (true) {

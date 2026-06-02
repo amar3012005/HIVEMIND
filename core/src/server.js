@@ -5058,8 +5058,14 @@ exit \$RC
           const ext = ((_ct.split('/')[1] || 'webm').split(';')[0]) || 'webm';
           const fd = new FormData();
           fd.append('file', new Blob([audio], { type: _ct || 'audio/webm' }), `meeting.${ext}`);
+          // Accuracy config (Groq Whisper): whisper-large-v3 is the lowest-WER
+          // model (10.3% vs turbo 12%); verbose_json yields segment timestamps
+          // (needed for diarization alignment); temperature 0 = deterministic,
+          // most-accurate decoding. LANGUAGE is intentionally OMITTED → Whisper
+          // auto-detects the spoken language (surfaced back as wJson.language).
           fd.append('model', process.env.GROQ_WHISPER_MODEL || 'whisper-large-v3');
           fd.append('response_format', 'verbose_json');
+          fd.append('temperature', '0');
           const wRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
             method: 'POST',
             headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },

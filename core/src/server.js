@@ -4957,16 +4957,162 @@ exit \$RC
   // API Routes
   if (pathname.startsWith('/api/')) {
     try {
-      // Skip JSON body parsing for multipart upload endpoints
-      const isMultipart = (req.headers['content-type'] || '').includes('multipart/form-data');
+      // Skip JSON body parsing for multipart + raw audio upload endpoints
+      const _ct = req.headers['content-type'] || '';
+      const isMultipart = _ct.includes('multipart/form-data');
+      const isRawAudio = _ct.includes('audio/') || _ct.includes('application/octet-stream');
       let body;
       try {
-        body = (req.method !== 'GET' && !isMultipart) ? await parseBody(req) : {};
+        body = (req.method !== 'GET' && !isMultipart && !isRawAudio) ? await parseBody(req) : {};
       } catch (parseErr) {
         if (parseErr?.code === 'PAYLOAD_TOO_LARGE') {
           return jsonResponse(res, { error: 'payload_too_large', max_bytes: JSON_BODY_MAX_BYTES }, 413);
         }
         return jsonResponse(res, { error: 'invalid_json_body', message: parseErr?.message || String(parseErr) }, 400);
+      }
+
+      // ── pyannoteAI cloud diarization (toggle-only "Multi-speaker recognition") ──
+      // media:// upload → submit diarize job → poll → turns. Returns null on ANY
+      // failure so the caller always falls back to the plain transcript path.
+      // Endpoints verified against docs.pyannote.ai (2026-06-02).
+      const pyannoteDiarize = async (audio, contentType) => {
+        const token = process.env.PYANNOTE_API_TOKEN;
+        if (!token) return null;
+        const PB = 'https://api.pyannote.ai';
+        const H = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+        try {
+          // 1. claim a media:// object → presigned PUT url
+          const objectKey = `media://hm-meeting-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          const inRes = await fetch(`${PB}/v1/media/input`, {
+            method: 'POST', headers: H, body: JSON.stringify({ url: objectKey }),
+            signal: AbortSignal.timeout(30_000),
+          });
+          if (!inRes.ok) return null;
+          const presigned = (await inRes.json())?.url;
+          if (!presigned) return null;
+          // 2. PUT raw audio to the presigned url (no auth header)
+          const putRes = await fetch(presigned, {
+            method: 'PUT', headers: { 'Content-Type': contentType || 'audio/webm' },
+            body: audio, signal: AbortSignal.timeout(120_000),
+          });
+          if (!putRes.ok) return null;
+          // 3. submit diarize job referencing the media:// key
+          const subRes = await fetch(`${PB}/v1/diarize`, {
+            method: 'POST', headers: H,
+            body: JSON.stringify({ url: objectKey, model: process.env.PYANNOTE_MODEL || 'precision-2' }),
+            signal: AbortSignal.timeout(30_000),
+          });
+          if (!subRes.ok) return null;
+          const jobId = (await subRes.json())?.jobId;
+          if (!jobId) return null;
+          // 4. poll GET /v1/jobs/{jobId} until terminal (cap 4 min, under the 5-min client timeout)
+          const deadline = Date.now() + 240_000;
+          while (Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, 4000));
+            const jr = await fetch(`${PB}/v1/jobs/${jobId}`, {
+              headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30_000),
+            });
+            if (!jr.ok) continue;
+            const jj = await jr.json();
+            if (jj.status === 'succeeded') return jj.output?.diarization || null;
+            if (jj.status === 'failed' || jj.status === 'canceled') return null;
+          }
+          return null;
+        } catch { return null; }
+      };
+
+      // Assign each Whisper segment the diarization turn with max temporal
+      // overlap, then merge consecutive same-speaker segments.
+      const alignSegmentsToSpeakers = (segments, turns) => {
+        if (!Array.isArray(segments) || !Array.isArray(turns) || !turns.length) return null;
+        const labeled = segments.map((seg) => {
+          const s = Number(seg.start) || 0, e = Number(seg.end) || 0;
+          let best = null, bestOv = 0;
+          for (const tn of turns) {
+            const ov = Math.min(e, Number(tn.end)) - Math.max(s, Number(tn.start));
+            if (ov > bestOv) { bestOv = ov; best = tn.speaker; }
+          }
+          return { start: s, end: e, speaker: best || 'SPEAKER_00', text: (seg.text || '').trim() };
+        });
+        const merged = [];
+        for (const seg of labeled) {
+          const last = merged[merged.length - 1];
+          if (last && last.speaker === seg.speaker) {
+            last.end = seg.end;
+            last.text = `${last.text} ${seg.text}`.trim();
+          } else merged.push({ ...seg });
+        }
+        return merged;
+      };
+
+      // ── AI Meeting Notes ──────────────────────────────────────────────
+      // POST /api/meetings/transcribe — raw audio body → Groq Whisper → transcript.
+      // Optional ?diarize=true → pyannote multi-speaker labels (graceful fallback).
+      if (pathname === '/api/meetings/transcribe' && req.method === 'POST') {
+        if (!process.env.GROQ_API_KEY) return jsonResponse(res, { error: 'stt_unavailable' }, 503);
+        try {
+          const chunks = [];
+          for await (const c of req) chunks.push(c);
+          const audio = Buffer.concat(chunks);
+          if (!audio.length) return jsonResponse(res, { error: 'empty_audio' }, 400);
+          const ext = ((_ct.split('/')[1] || 'webm').split(';')[0]) || 'webm';
+          const fd = new FormData();
+          fd.append('file', new Blob([audio], { type: _ct || 'audio/webm' }), `meeting.${ext}`);
+          fd.append('model', process.env.GROQ_WHISPER_MODEL || 'whisper-large-v3');
+          fd.append('response_format', 'verbose_json');
+          const wRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+            body: fd,
+            signal: AbortSignal.timeout(300_000),
+          });
+          if (!wRes.ok) return jsonResponse(res, { error: 'whisper_failed', detail: (await wRes.text()).slice(0, 200) }, 502);
+          const wJson = await wRes.json();
+          const baseOut = { transcript: wJson.text || '', language: wJson.language || null, segments: wJson.segments || [], bytes: audio.length };
+          // Opt-in multi-speaker diarization. Requires ?diarize=true AND the
+          // PYANNOTE_API_TOKEN env; any failure falls through to plain transcript.
+          if (url.searchParams.get('diarize') === 'true' && process.env.PYANNOTE_API_TOKEN) {
+            const turns = await pyannoteDiarize(audio, _ct);
+            const speakerSegments = alignSegmentsToSpeakers(wJson.segments || [], turns);
+            if (speakerSegments) {
+              return jsonResponse(res, { ...baseOut, diarized: true, speakerSegments });
+            }
+          }
+          return jsonResponse(res, baseOut);
+        } catch (e) {
+          return jsonResponse(res, { error: 'transcribe_error', message: e.message }, 500);
+        }
+      }
+
+      // POST /api/meetings/insights — { transcript, notes? } → LLM → structured insights.
+      if (pathname === '/api/meetings/insights' && req.method === 'POST') {
+        if (!process.env.GROQ_API_KEY) return jsonResponse(res, { error: 'llm_unavailable' }, 503);
+        const transcript = (body.transcript || '').toString().trim();
+        if (!transcript) return jsonResponse(res, { error: 'no_transcript' }, 400);
+        const notes = (body.notes || '').toString().slice(0, 4000);
+        try {
+          const sys = 'You are an expert meeting analyst. From the transcript (and optional user notes) produce STRICT JSON: {"title": string, "summary": string (3-6 sentences), "key_points": string[], "action_items": [{"task": string, "owner": string|null, "due": string|null}], "decisions": string[], "questions": string[], "topics": string[], "sentiment": string}. Be faithful — never invent facts. Use empty arrays when none.';
+          const usr = (notes ? `USER NOTES:\n${notes}\n\n` : '') + `TRANSCRIPT:\n${transcript.slice(0, 60000)}`;
+          const resp = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              model: process.env.MEETING_INSIGHTS_MODEL || 'openai/gpt-oss-120b',
+              temperature: 0.2,
+              response_format: { type: 'json_object' },
+              messages: [{ role: 'system', content: sys }, { role: 'user', content: usr }],
+            }),
+            signal: AbortSignal.timeout(120_000),
+          });
+          if (!resp.ok) return jsonResponse(res, { error: 'insights_failed', detail: (await resp.text()).slice(0, 200) }, 502);
+          const j = await resp.json();
+          let insights;
+          try { insights = JSON.parse(j.choices[0].message.content); }
+          catch { insights = { summary: '', raw: j.choices?.[0]?.message?.content || '' }; }
+          return jsonResponse(res, { insights });
+        } catch (e) {
+          return jsonResponse(res, { error: 'insights_error', message: e.message }, 500);
+        }
       }
 
       const hostedDescriptorMatch = pathname.match(/^\/api\/mcp\/servers\/([^\/]+)$/);

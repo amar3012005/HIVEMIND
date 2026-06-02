@@ -20,6 +20,45 @@ function stripNullBytes(val) {
   return val;
 }
 
+// Bulletproof string→Postgres-safe: a UTF-8 Buffer round-trip replaces ANY
+// invalid byte sequence (lone surrogates, malformed UTF-8, stray escapes) with
+// U+FFFD, then stripNullBytes removes FFFD/NUL/surrogates. Catches cases the
+// targeted regexes miss. Used as the self-heal retry sanitizer.
+function pgSafeDeep(val) {
+  if (typeof val === 'string') {
+    return stripNullBytes(Buffer.from(val, 'utf8').toString('utf8'));
+  }
+  if (Array.isArray(val)) return val.map(pgSafeDeep);
+  if (val instanceof Date) return val;
+  if (val && typeof val === 'object') {
+    const out = {};
+    for (const k of Object.keys(val)) out[k] = pgSafeDeep(val[k]);
+    return out;
+  }
+  return val;
+}
+
+// Instrumentation: find which field of an object carries JSONB-illegal content
+// (NUL or unpaired UTF-16 surrogate). Returns { field, snippet } or null.
+function findJsonbCulprit(obj) {
+  const bad = /\u0000|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+  const walk = (v, path) => {
+    if (typeof v === 'string') {
+      const m = bad.exec(v);
+      if (m) return { field: path, snippet: v.slice(Math.max(0, m.index - 20), m.index + 20), code: v.charCodeAt(m.index).toString(16) };
+      return null;
+    }
+    if (v && typeof v === 'object' && !(v instanceof Date)) {
+      for (const k of Object.keys(v)) {
+        const hit = walk(v[k], path ? `${path}.${k}` : k);
+        if (hit) return hit;
+      }
+    }
+    return null;
+  };
+  try { return walk(obj, ''); } catch { return null; }
+}
+
 function mapMemoryRecord(record) {
   if (!record) return null;
 
@@ -697,8 +736,7 @@ export class PrismaGraphStore {
   }
 
   async createSourceMetadata(source) {
-    const s = stripNullBytes(source);
-    return this.client.sourceMetadata.upsert({
+    const buildArgs = (s) => ({
       where: { memoryId: s.memory_id },
       update: {
         sourceType: s.source_type,
@@ -722,6 +760,26 @@ export class PrismaGraphStore {
         ingestedAt: s.ingested_at ? (() => { const d = new Date(s.ingested_at); return isNaN(d.getTime()) ? new Date() : d; })() : new Date()
       }
     });
+    const s = stripNullBytes(source);
+    try {
+      return await this.client.sourceMetadata.upsert(buildArgs(s));
+    } catch (err) {
+      // JSONB / encoding failure ("unexpected end of hex escape", 22P02, lone
+      // surrogate). INSTRUMENT: name the exact field + char so we stop guessing.
+      // Then SELF-HEAL: re-encode every string via a UTF-8 round-trip (pgSafeDeep)
+      // which neutralizes any invalid byte sequence, and retry once. A write is
+      // never silently dropped again.
+      const msg = err?.message || '';
+      if (/hex escape|surrogate|22P02|invalid input syntax for type json|unsupported Unicode/i.test(msg)) {
+        const culprit = findJsonbCulprit({
+          source_id: s.source_id, source_url: s.source_url, thread_id: s.thread_id,
+          parent_message_id: s.parent_message_id, metadata: s.metadata,
+        });
+        console.error(`[sourceMetadata] JSONB-illegal content memory=${s.memory_id} field=${culprit?.field || '?'} charHex=${culprit?.code || '?'} snippet=${JSON.stringify(culprit?.snippet || '').slice(0, 80)} — self-healing via UTF-8 round-trip`);
+        return await this.client.sourceMetadata.upsert(buildArgs(pgSafeDeep(s)));
+      }
+      throw err;
+    }
   }
 
   async createCodeMetadata(metadata) {

@@ -8272,6 +8272,64 @@ exit \$RC
           }
           break;
 
+        case '/api/admin/memory-metrics':
+          // P6 minimal telemetry — read-only memory-engine health for the
+          // CALLER'S org (scoped; never global). Surfaces the signals the 10M
+          // roadmap fixes touch: salience coverage (P2), supersession/forgetting
+          // (P3), and DB↔Qdrant vector drift. Cheap counts only, no scan.
+          try {
+            if (!prisma?.memory) return jsonResponse(res, { error: 'memory store unavailable' }, 503);
+            const baseWhere = { orgId, deletedAt: null };
+            const [total, latest, superseded, deletedCnt, salienceScored, reinforced, agg] = await Promise.all([
+              prisma.memory.count({ where: { orgId } }),
+              prisma.memory.count({ where: { ...baseWhere, isLatest: true } }),
+              prisma.memory.count({ where: { ...baseWhere, isLatest: false } }),
+              prisma.memory.count({ where: { orgId, deletedAt: { not: null } } }),
+              // P2 coverage: rows whose importance_score moved off the 0.5 default
+              prisma.memory.count({ where: { ...baseWhere, NOT: { importanceScore: 0.5 } } }),
+              prisma.memory.count({ where: { ...baseWhere, recallCount: { gt: 0 } } }),
+              prisma.memory.aggregate({
+                where: { ...baseWhere, isLatest: true },
+                _avg: { importanceScore: true, strength: true },
+                _max: { recallCount: true },
+              }),
+            ]);
+            // DB↔Qdrant drift: latest DB rows vs live points for this org.
+            let qdrantPoints = null;
+            try {
+              const qUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
+              const qColl = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
+              const qKey = process.env.QDRANT_API_KEY || '';
+              if (qUrl && orgId) {
+                const qr = await fetch(`${qUrl}/collections/${encodeURIComponent(qColl)}/points/count`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json', ...(qKey ? { 'api-key': qKey } : {}) },
+                  body: JSON.stringify({ filter: { must: [{ key: 'org_id', match: { value: orgId } }] }, exact: true }),
+                });
+                if (qr.ok) qdrantPoints = (await qr.json())?.result?.count ?? null;
+              }
+            } catch { /* qdrant optional */ }
+            return jsonResponse(res, {
+              org_id: orgId,
+              counts: { total, latest, superseded, deleted: deletedCnt },
+              salience: {
+                scored_off_default: salienceScored,
+                coverage_pct: latest > 0 ? Math.round((salienceScored / latest) * 1000) / 10 : 0,
+                avg_importance_latest: agg._avg.importanceScore,
+                avg_strength_latest: agg._avg.strength,
+              },
+              reinforcement: { recalled_at_least_once: reinforced, max_recall_count: agg._max.recallCount },
+              vector_drift: qdrantPoints == null ? null : {
+                qdrant_points_org: qdrantPoints,
+                db_latest: latest,
+                delta: qdrantPoints - latest,
+              },
+              generated_at: new Date().toISOString(),
+            });
+          } catch (err) {
+            return jsonResponse(res, { error: err.message }, 500);
+          }
+
         case '/api/cognition/status':
           // Read-only — any authenticated caller can see loop health.
           // In-memory _status carries current-process state; cognition_status

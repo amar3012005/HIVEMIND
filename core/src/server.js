@@ -5127,7 +5127,9 @@ exit \$RC
       // POST /api/meetings        → persist a meeting + its insights
       if (pathname === '/api/meetings' && req.method === 'GET') {
         if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
-        const mOrg = principal.orgId || DEFAULT_ORG;
+        // userId/orgId from the control-plane-injected headers (principal is
+        // initialized later in this handler — avoid the TDZ).
+        const mOrg = req.headers['x-hm-org-id'] || DEFAULT_ORG;
         try {
           const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') || '40', 10)));
           const rows = await prisma.$queryRawUnsafe(
@@ -5147,8 +5149,8 @@ exit \$RC
 
       if (pathname === '/api/meetings' && req.method === 'POST') {
         if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
-        const mUser = principal.userId || DEFAULT_USER;
-        const mOrg = principal.orgId || DEFAULT_ORG;
+        const mUser = req.headers['x-hm-user-id'] || DEFAULT_USER;
+        const mOrg = req.headers['x-hm-org-id'] || DEFAULT_ORG;
         const ins = body.insights || {};
         const title = (body.title || ins.title || `Meeting ${new Date().toISOString().slice(0, 16)}`).toString().slice(0, 300);
         const transcript = (body.transcript || '').toString();

@@ -9850,30 +9850,31 @@ exit \$RC
               }
               const deletedRows = await prisma.memory.deleteMany({ where: { id: { in: ids } } });
 
-              // 3. Qdrant vector purge — delete points whose payload memory_id ∈ ids.
-              //    One filter-batched POST so we do not N+1 the vector store.
+              // 3. Qdrant vector purge — delete points BY POINT ID.
+              //    The Qdrant point id IS the memory UUID; there is no
+              //    `memory_id` payload field, so the old filter-by-memory_id
+              //    was a silent no-op (matched nothing / 400s without an index)
+              //    and left deleted memories' vectors live in ANN. Delete by id.
               let qdrantDeleted = 0;
               try {
                 const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
                 const qdrantCollection = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
                 const qdrantKey = process.env.QDRANT_API_KEY || '';
                 if (qdrantUrl) {
-                  // Chunk ids to keep the filter payload small on big batches
+                  // Chunk ids to keep the request payload small on big batches
                   const chunkSize = 500;
                   for (let i = 0; i < ids.length; i += chunkSize) {
                     const slice = ids.slice(i, i + chunkSize);
-                    await fetch(`${qdrantUrl}/collections/${qdrantCollection}/points/delete`, {
+                    const qresp = await fetch(`${qdrantUrl}/collections/${encodeURIComponent(qdrantCollection)}/points/delete?wait=true`, {
                       method: 'POST',
                       headers: {
                         'Content-Type': 'application/json',
                         ...(qdrantKey ? { 'api-key': qdrantKey } : {}),
                       },
-                      body: JSON.stringify({
-                        filter: { must: [{ key: 'memory_id', match: { any: slice } }] },
-                        wait: true,
-                      }),
+                      body: JSON.stringify({ points: slice }),
                     });
-                    qdrantDeleted += slice.length;
+                    if (qresp.ok) qdrantDeleted += slice.length;
+                    else console.warn(`[gmail-flush:hard] Qdrant purge HTTP ${qresp.status}: ${(await qresp.text()).slice(0, 160)}`);
                   }
                 }
               } catch (qErr) {

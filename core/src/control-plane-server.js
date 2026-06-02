@@ -1155,8 +1155,15 @@ async function proxyToCore(req, res, { session, method, path, body, query, rawBo
       }
     }
 
-    // 90s timeout for slow Phase1 ingest (Docling parse + chunk + embed + promote)
-    fetchOpts.signal = AbortSignal.timeout(90_000);
+    // Timeout: knowledge upload/ingest runs the full synchronous Phase1
+    // pipeline (Docling parse + chunk + per-segment embed + promote), which on
+    // large multi-MB PDFs takes 150s+ — the 90s default was aborting those and
+    // surfacing as a 502 while core kept processing. Give ingest routes 300s;
+    // everything else keeps the snappy 90s. (Proper fix is async upload + poll;
+    // tracked separately.) Upload is POST so it is never retried below, and the
+    // pipeline is checksum-idempotent regardless.
+    const isSlowIngest = /\/knowledge\/(upload|document|ingest)/i.test(path) || /\/ingest(\/|$)/i.test(path);
+    fetchOpts.signal = AbortSignal.timeout(isSlowIngest ? 300_000 : 90_000);
 
     // Retry once on transient network failure (ECONNREFUSED / aborted) —
     // most common cause of 502 during hm-core restart windows.

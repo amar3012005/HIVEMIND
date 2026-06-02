@@ -116,12 +116,18 @@ export class TaraStreamHandler {
 
       // ── STEP 2: Build prompt (< 5ms) ──
       const model = config.model || this.defaultModel;
-      const hasClinical = !!config.clinical_prompt;
+      // mode='internal' → direct humanized recall, NO clinical reasoning layer.
+      // mode='external' (default) → full current behavior (clinical if configured).
+      const internalMode = (params.mode || 'external') === 'internal';
+      const hasClinical = !internalMode && !!config.clinical_prompt;
 
       // Store clinical config in session state for post-turn use
       if (hasClinical) {
         sessionState._clinical_prompt = config.clinical_prompt;
         sessionState._clinical_model = config.clinical_model || null;
+      } else if (internalMode) {
+        // ensure no stale clinical layer leaks into internal-mode turns
+        sessionState._clinical_prompt = null;
       }
 
       const { messages, tokenEstimate } = buildPrompt({
@@ -134,7 +140,7 @@ export class TaraStreamHandler {
         interruptedText,
         interruptionType,
         // Pass the latest clinical insight (single directive, not the full history)
-        clinicalInsight: sessionState.clinical_insights || null,
+        clinicalInsight: hasClinical ? (sessionState.clinical_insights || null) : null,
       });
 
       this._writeLine(res, {

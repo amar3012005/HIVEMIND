@@ -61,6 +61,13 @@ export function buildPrompt({
   const langName = getLanguageName(effectiveLang) || 'English';
   system += `\n\nIMPORTANT: The user is speaking ${langName}. You MUST respond in ${langName}. Do not switch languages unless the user switches first.`;
 
+  // Grounding — answer strictly from HIVEMIND recall + conversation; never invent.
+  system += `\n\n## Grounding (critical — do not violate)
+- Answer ONLY from "What you know about this user (from memory)" below and what the user said in this conversation.
+- These memories are your source of truth. Quote/paraphrase them faithfully.
+- If the answer is NOT in your memory or the conversation, say so briefly (e.g. "I don't have that in my memory yet") — do NOT guess.
+- NEVER invent names, dates, numbers, facts, events, or details that are not grounded in the memories or the user's words.`;
+
   // 2. Context sections — kept minimal for TTFB
   const contextParts = [];
 

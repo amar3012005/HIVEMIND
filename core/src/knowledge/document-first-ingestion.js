@@ -663,9 +663,13 @@ export class DocumentFirstIngestionService {
           primary_team_id: metadata.primary_team_id || null,
           project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
           content: segment.content,
+          // Title: prefer the chunk heading; else first sentence/line of the
+          // segment (meaningful + searchable) instead of the opaque
+          // "Extracted from <hash>" fallback that produced unusable titles.
           title: segment.metadata?.heading
             ? String(segment.metadata.heading).slice(0, 200)
-            : `Extracted from ${documentId.slice(0, 8)}`,
+            : ((segment.content || '').trim().split(/(?<=[.!?])\s|\n/)[0] || '').trim().slice(0, 80)
+              || `Segment ${documentId.slice(0, 8)}`,
           source_type: 'knowledge_segment',
           source_metadata: {
             segment_id: segment.id,

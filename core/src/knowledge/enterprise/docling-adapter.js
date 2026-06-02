@@ -13,6 +13,25 @@ import path from 'path';
 const DOCLING_URL = process.env.DOCLING_URL || 'http://docling:5001';
 
 /**
+ * Collapse letter-spacing artifacts from designed/branded PDFs.
+ *
+ * Some PDFs carry a text layer with per-character tracking, so a title like
+ * "GEMEINWOHL-BILANZ" extracts as "G E M E I N W O H L - B I L A N Z". Docling
+ * preserves it faithfully — which then poisons embeddings, titles, and recall.
+ * We collapse any run of >=4 single word-characters each separated by whitespace
+ * back into a word. The single-char constraint means normal prose ("I am a x")
+ * is never touched — only true letter-spacing runs match.
+ */
+export function collapseLetterSpacing(s) {
+  if (!s || typeof s !== 'string') return s;
+  // Match runs of >=5 single LETTERS (no digits/underscore) each separated by
+  // whitespace, bounded by line-start/space. Letter-only + min-5 protects
+  // numeric/tabular data (ledger cells like "3 1 4 1 5", short lists "a b c d")
+  // from being merged, while still collapsing real letter-spaced words.
+  return s.replace(/(?<=^|\s)[^\W\d_](?:\s+[^\W\d_]){4,}(?=\s|$)/gu, (run) => run.replace(/\s+/g, ''));
+}
+
+/**
  * Parse a file with the Docling sidecar.
  *
  * @param {string} filePath — absolute temp path
@@ -117,8 +136,8 @@ export async function parseWithDocling(filePath, filename, opts = {}) {
       const data = await resultRes.json();
       const doc = data.document || data;
       return {
-        markdown: data.markdown || doc.markdown || '',
-        text: data.text || doc.text || '',
+        markdown: collapseLetterSpacing(data.markdown || doc.markdown || ''),
+        text: collapseLetterSpacing(data.text || doc.text || ''),
         json: doc,
         tables: extractTablesFromDocling(doc),
         pages: Array.isArray(data.pages) ? data.pages.length : (doc.num_pages || 1),
@@ -142,12 +161,12 @@ export async function parseWithDocling(filePath, filename, opts = {}) {
     const doc = data.document || data;
 
     return {
-      markdown: typeof doc.export_to_markdown === 'function'
+      markdown: collapseLetterSpacing(typeof doc.export_to_markdown === 'function'
         ? doc.export_to_markdown() || ''
-        : data.markdown || '',
-      text: typeof doc.export_to_text === 'function'
+        : data.markdown || ''),
+      text: collapseLetterSpacing(typeof doc.export_to_text === 'function'
         ? doc.export_to_text() || ''
-        : data.text || '',
+        : data.text || ''),
       json: doc,
       tables: extractTablesFromDocling(doc),
       pages: Array.isArray(data.pages) ? data.pages.length : (doc.num_pages || 1),
@@ -191,7 +210,7 @@ export async function chunkWithDocling(filePath, filename) {
       : Array.isArray(data?.document?.chunks) ? data.document.chunks
       : Array.isArray(data) ? data : [];
     const chunks = rawChunks.map(c => {
-      const text = c.text || c.content || c.body || (typeof c === 'string' ? c : '');
+      const text = collapseLetterSpacing(c.text || c.content || c.body || (typeof c === 'string' ? c : ''));
       const meta = c.meta || c.metadata || {};
       const headings = Array.isArray(c.headings) ? c.headings
         : Array.isArray(meta.headings) ? meta.headings

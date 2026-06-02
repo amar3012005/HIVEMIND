@@ -8285,7 +8285,7 @@ exit \$RC
             // vector-drift gauge so it measures REAL embedding loss, not
             // intentionally-unembedded chat/observation rows. (summary IS now
             // embedded — see cognition-loop._writeSummaryMemory.)
-            const NON_EMBEDDED_TYPES = ['conversation', 'observation'];
+            const NON_EMBEDDED_TYPES = ['conversation'];
             const [total, latest, superseded, deletedCnt, salienceScored, reinforced, agg, latestEmbeddable] = await Promise.all([
               prisma.memory.count({ where: { orgId } }),
               prisma.memory.count({ where: { ...baseWhere, isLatest: true } }),

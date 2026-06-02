@@ -5121,6 +5121,63 @@ exit \$RC
         }
       }
 
+      // ── Persistent org-level meetings (Postgres `meetings` table) ──────────
+      // Raw SQL so it works without a Prisma client regen on the running image.
+      // GET  /api/meetings        → list org's meetings (newest first)
+      // POST /api/meetings        → persist a meeting + its insights
+      if (pathname === '/api/meetings' && req.method === 'GET') {
+        if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+        const mOrg = principal.orgId || DEFAULT_ORG;
+        try {
+          const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') || '40', 10)));
+          const rows = await prisma.$queryRawUnsafe(
+            `SELECT id, user_id, org_id, project_id, title, summary, language, duration_sec,
+                    multi_speaker, speaker_count, action_items, decisions, key_points, questions,
+                    segments, topics, sentiment, source_memory_id, created_at
+             FROM meetings
+             WHERE org_id = $1::uuid AND deleted_at IS NULL
+             ORDER BY created_at DESC LIMIT $2`,
+            mOrg, limit,
+          );
+          return jsonResponse(res, { meetings: rows });
+        } catch (e) {
+          return jsonResponse(res, { error: 'meetings_list_error', message: e.message }, 500);
+        }
+      }
+
+      if (pathname === '/api/meetings' && req.method === 'POST') {
+        if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+        const mUser = principal.userId || DEFAULT_USER;
+        const mOrg = principal.orgId || DEFAULT_ORG;
+        const ins = body.insights || {};
+        const title = (body.title || ins.title || `Meeting ${new Date().toISOString().slice(0, 16)}`).toString().slice(0, 300);
+        const transcript = (body.transcript || '').toString();
+        if (!transcript.trim() && !ins.summary) return jsonResponse(res, { error: 'empty_meeting' }, 400);
+        const J = (v) => JSON.stringify(Array.isArray(v) ? v : (v || []));
+        try {
+          const rows = await prisma.$queryRawUnsafe(
+            `INSERT INTO meetings
+               (user_id, org_id, project_id, title, summary, transcript, language, duration_sec,
+                audio_bytes, multi_speaker, speaker_count, action_items, decisions, key_points,
+                questions, segments, topics, sentiment, source_memory_id)
+             VALUES ($1::uuid,$2::uuid,$3::uuid,$4,$5,$6,$7,$8,$9,$10,$11,
+                     $12::jsonb,$13::jsonb,$14::jsonb,$15::jsonb,$16::jsonb,$17::text[],$18,$19::uuid)
+             RETURNING id, created_at`,
+            mUser, mOrg, body.project_id || null, title, ins.summary || null, transcript,
+            body.language || null, Number.isFinite(body.duration_sec) ? body.duration_sec : null,
+            Number.isFinite(body.audio_bytes) ? body.audio_bytes : null,
+            !!body.multi_speaker, Number.isFinite(body.speaker_count) ? body.speaker_count : null,
+            J(ins.action_items), J(ins.decisions), J(ins.key_points), J(ins.questions),
+            body.segments ? JSON.stringify(body.segments) : null,
+            Array.isArray(ins.topics) ? ins.topics.slice(0, 20) : [],
+            ins.sentiment || null, body.source_memory_id || null,
+          );
+          return jsonResponse(res, { ok: true, id: rows?.[0]?.id, created_at: rows?.[0]?.created_at }, 201);
+        } catch (e) {
+          return jsonResponse(res, { error: 'meetings_save_error', message: e.message }, 500);
+        }
+      }
+
       const hostedDescriptorMatch = pathname.match(/^\/api\/mcp\/servers\/([^\/]+)$/);
       if (hostedDescriptorMatch && req.method === 'GET' && url.searchParams.get('token')) {
         const pathUserId = hostedDescriptorMatch[1];

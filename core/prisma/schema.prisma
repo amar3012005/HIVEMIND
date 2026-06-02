@@ -1957,3 +1957,36 @@ model GovernanceMetric {
   @@index([day(sort: Desc), agentName], map: "governance_metric_day_idx")
   @@map("governance_metric")
 }
+
+// AI Meeting Notes — org-level persistent record of every recorded meeting
+// and its extracted insights. Distinct from the generic `memories` row (kept
+// for graph/recall); this is the structured, queryable system of record.
+model Meeting {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
+  userId         String    @map("user_id") @db.Uuid
+  orgId          String    @map("org_id") @db.Uuid
+  projectId      String?   @map("project_id") @db.Uuid
+  title          String    @map("title")
+  summary        String?   @map("summary")
+  transcript     String?   @map("transcript")
+  language       String?   @map("language") @db.VarChar(16)
+  durationSec    Int?      @map("duration_sec")
+  audioBytes     Int?      @map("audio_bytes")
+  multiSpeaker   Boolean   @default(false) @map("multi_speaker")
+  speakerCount   Int?      @map("speaker_count")
+  actionItems    Json      @default("[]") @map("action_items")
+  decisions      Json      @default("[]") @map("decisions")
+  keyPoints      Json      @default("[]") @map("key_points")
+  questions      Json      @default("[]") @map("questions")
+  segments       Json?     @map("segments")
+  topics         String[]  @default([]) @map("topics")
+  sentiment      String?   @map("sentiment") @db.VarChar(32)
+  sourceMemoryId String?   @map("source_memory_id") @db.Uuid
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt      DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  @@index([orgId, createdAt(sort: Desc)], map: "meetings_org_created_idx")
+  @@index([userId], map: "meetings_user_idx")
+  @@map("meetings")
+}

@@ -1691,14 +1691,15 @@ Output JSON only:
     const summaryTags = Array.from(unionedTags);
 
     const partSuffix = partCount > 1 ? ` part ${partIndex + 1}/${partCount}` : '';
-    return this.prisma.memory.create({
+    const title = `Canonical: ${tag} (${members.length} memories${partSuffix})`;
+    const created = await this.prisma.memory.create({
       data: {
         id:             crypto.randomUUID(),
         userId,
         orgId,
         project:        project || null,
         memoryType:     'summary',
-        title:          `Canonical: ${tag} (${members.length} memories${partSuffix})`,
+        title,
         content,
         tags:           summaryTags,
         isLatest:       true,
@@ -1727,6 +1728,29 @@ Output JSON only:
       this.logger.warn(`[cognition] write summary failed: ${err.message}`);
       return null;
     });
+
+    // Stage-2 fix: canonical summaries are born here via prisma.create — a
+    // direct-save path that never reached the embedder, so summaries had ZERO
+    // vectors system-wide (tag/FTS-only recall of compacted knowledge). Embed +
+    // upsert now so the highest-value memory type is semantically recallable.
+    // Fire-and-forget; point id = memory id (matches storeMemory contract).
+    if (created?.id && this.engine?.vectorStore?.storeMemory) {
+      this.engine.vectorStore.storeMemory({
+        id:               created.id,
+        user_id:          userId,
+        org_id:           orgId,
+        project:          project || null,
+        memory_type:      'summary',
+        title,
+        content,
+        tags:             summaryTags,
+        is_latest:        true,
+        importance_score: 0.85,
+        created_at:       new Date().toISOString(),
+        source:           'cognition-loop',
+      }).catch(err => this.logger.warn(`[cognition] summary embed failed: ${err.message}`));
+    }
+    return created;
   }
 
   // Legacy lossy summary — kept for reference, no longer called.

@@ -8280,7 +8280,13 @@ exit \$RC
           try {
             if (!prisma?.memory) return jsonResponse(res, { error: 'memory store unavailable' }, 503);
             const baseWhere = { orgId, deletedAt: null };
-            const [total, latest, superseded, deletedCnt, salienceScored, reinforced, agg] = await Promise.all([
+            // Types NOT vectorized by design (born via direct-save paths,
+            // recalled by tag/FTS/structure not semantics). Excluded from the
+            // vector-drift gauge so it measures REAL embedding loss, not
+            // intentionally-unembedded chat/observation rows. (summary IS now
+            // embedded — see cognition-loop._writeSummaryMemory.)
+            const NON_EMBEDDED_TYPES = ['conversation', 'observation'];
+            const [total, latest, superseded, deletedCnt, salienceScored, reinforced, agg, latestEmbeddable] = await Promise.all([
               prisma.memory.count({ where: { orgId } }),
               prisma.memory.count({ where: { ...baseWhere, isLatest: true } }),
               prisma.memory.count({ where: { ...baseWhere, isLatest: false } }),
@@ -8293,6 +8299,7 @@ exit \$RC
                 _avg: { importanceScore: true, strength: true },
                 _max: { recallCount: true },
               }),
+              prisma.memory.count({ where: { ...baseWhere, isLatest: true, memoryType: { notIn: NON_EMBEDDED_TYPES } } }),
             ]);
             // DB↔Qdrant drift: latest DB rows vs live points for this org.
             let qdrantPoints = null;
@@ -8321,8 +8328,13 @@ exit \$RC
               reinforcement: { recalled_at_least_once: reinforced, max_recall_count: agg._max.recallCount },
               vector_drift: qdrantPoints == null ? null : {
                 qdrant_points_org: qdrantPoints,
-                db_latest: latest,
-                delta: qdrantPoints - latest,
+                db_latest_all: latest,
+                db_latest_embeddable: latestEmbeddable,
+                non_embedded_excluded: latest - latestEmbeddable,
+                // Drift vs EMBEDDABLE rows only — the honest gauge. Negative =
+                // embeddable memories missing a vector. (qdrant count includes
+                // superseded points, so a small positive delta is normal.)
+                delta_embeddable: qdrantPoints - latestEmbeddable,
               },
               generated_at: new Date().toISOString(),
             });

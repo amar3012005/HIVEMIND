@@ -88,7 +88,15 @@ export class QdrantClient {
         return false;
       }
 
-      await collections.createMemoriesCollection();
+      // Lazy-create backstop. The default collection uses createMemoriesCollection
+      // (legacy config); any other name (org_<id>, HIVEMIND_PERSONAL) is an org
+      // container and must be created under its own name with the 1024 contract —
+      // createMemoriesCollection would otherwise create the WRONG (default) name.
+      if (resolvedCollectionName === COLLECTION_NAME) {
+        await collections.createMemoriesCollection();
+      } else {
+        await collections.createOrgContainer(resolvedCollectionName);
+      }
       await collections.ensureMemoriesCollectionIndexes(resolvedCollectionName);
       this.collectionReady = collectionName;
       return true;

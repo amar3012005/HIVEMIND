@@ -13,6 +13,7 @@ import { buildAllClientDescriptors, buildClientDescriptor } from './control-plan
 import { ControlPlaneSessionStore, buildSessionCookie, verifySessionCookie } from './control-plane/session-store.js';
 import { ZitadelOidcClient } from './control-plane/zitadel.js';
 import { ConnectorStore } from './connectors/framework/connector-store.js';
+import { orgContainerName, provisionOrgContainer } from './vector/container-router.js';
 import { PLANS } from './billing/plans.js';
 import {
   installConsoleCapture,
@@ -1901,6 +1902,24 @@ const server = http.createServer(async (req, res) => {
         slug,
         plan: requestedPlan
       }
+    });
+
+    // Auto-provision the org's Qdrant container. Name is deterministic from the
+    // org id (org_<id>) so it can be persisted synchronously; the actual Qdrant
+    // collection is created fire-and-forget (provisionOrgContainer never throws,
+    // and QdrantClient.ensureCollection lazily creates on first write as backstop)
+    // — org signup must never block on or fail because of the vector box.
+    const vectorContainer = orgContainerName(org.id);
+    try {
+      await prisma.organization.update({
+        where: { id: org.id },
+        data: { vectorContainer }
+      });
+    } catch (err) {
+      console.error('[org-create] failed to persist vectorContainer', { orgId: org.id, error: err.message });
+    }
+    provisionOrgContainer(org.id).catch((err) => {
+      console.error('[org-create] container provisioning rejected', { orgId: org.id, error: err?.message });
     });
 
     await prisma.userOrganization.create({

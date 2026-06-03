@@ -68,6 +68,10 @@ model Organization {
   billingEmail         String?            @map("billing_email") @db.VarChar(255)
   defaultProjectPolicy String             @default("private") @map("default_project_policy") @db.VarChar(50)
   memorySavePolicy     String             @default("private") @map("memory_save_policy") @db.VarChar(50)
+  // Qdrant container ("collection") that holds ALL memory+evidence for this org.
+  // Set on org creation (org_<id>); members + projects share it (filtered by
+  // user_id/project_id/layer). Null until provisioned.
+  vectorContainer      String?            @map("vector_container") @db.VarChar(255)
   apiKeys              ApiKey[]           @relation("OrgApiKeys")
   auditLogs            AuditLog[]         @relation("OrgAuditLogs")
   memories             Memory[]           @relation("OrgMemories")

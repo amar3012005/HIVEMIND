@@ -140,8 +140,30 @@ const MEMORIES_PAYLOAD_INDEXES = [
     field_name: 'embedding_version',
     field_schema: 'integer',
     description: 'Version for re-embedding when model changes'
+  },
+  {
+    field_name: 'layer',
+    field_schema: 'keyword',
+    description: 'Layer discriminator within an org container: memory | evidence'
+  },
+  {
+    field_name: 'project_id',
+    field_schema: 'keyword',
+    description: 'Project-level filtering — projects are shared inside an org container'
   }
 ];
+
+// Org-container HNSW/quant contract — MUST match the bge-m3 1024 migration
+// (UWE_BERGER, CEYDA_SARIOGLU, AMAR_SAI, SEBASTIAN_GARN, HIVEMIND_PERSONAL).
+// m=32/ef_construct=256, int8 always-RAM quant, on_disk vectors + payload.
+// Single shard/replica — the prometheus box is single-node; shard_number>1 or
+// replication_factor>1 only adds fd pressure with no failover benefit.
+const ORG_CONTAINER_CONFIG = {
+  hnsw: { m: 32, ef_construct: 256, full_scan_threshold: 10000, max_indexing_threads: 2 },
+  shard_number: 1,
+  replication_factor: 1,
+  write_consistency_factor: 1
+};
 
 const SESSIONS_PAYLOAD_INDEXES = [
   {
@@ -288,6 +310,56 @@ export class QdrantCollections {
       logger.error(`Failed to create collection ${collectionName}`, { error });
       throw error;
     }
+  }
+
+  /**
+   * Create an org container (per-organization memory+evidence collection).
+   * Idempotent — no-op if the collection already exists. Uses the 1024-dim
+   * bge-m3 migration contract (m=32/ef=256, int8 quant, on_disk).
+   * @param {string} collectionName e.g. `org_<orgId>`
+   * @returns {Promise<boolean>} true if created or already present
+   */
+  async createOrgContainer(collectionName) {
+    if (!collectionName) throw new Error('createOrgContainer: collectionName required');
+
+    if (await this.collectionExists(collectionName)) {
+      logger.info(`Org container ${collectionName} already exists`);
+      await this.createPayloadIndexes(collectionName, MEMORIES_PAYLOAD_INDEXES);
+      return true;
+    }
+
+    logger.info(`Creating org container: ${collectionName}`);
+    await this.#client.createCollection(collectionName, {
+      vectors: {
+        size: CONFIG.vectors.dimension,
+        distance: CONFIG.vectors.distance,
+        on_disk: true
+      },
+      hnsw_config: {
+        m: ORG_CONTAINER_CONFIG.hnsw.m,
+        ef_construct: ORG_CONTAINER_CONFIG.hnsw.ef_construct,
+        full_scan_threshold: ORG_CONTAINER_CONFIG.hnsw.full_scan_threshold,
+        max_indexing_threads: ORG_CONTAINER_CONFIG.hnsw.max_indexing_threads,
+        on_disk: true
+      },
+      optimizers_config: {
+        deleted_threshold: CONFIG.optimizers.deleted_threshold,
+        vacuum_min_vector_number: CONFIG.optimizers.vacuum_min_vector_number,
+        default_segment_number: CONFIG.optimizers.default_segment_number,
+        memmap_threshold: CONFIG.optimizers.memmap_threshold,
+        indexing_threshold: CONFIG.optimizers.indexing_threshold
+      },
+      quantization_config: CONFIG.quantization,
+      on_disk_payload: true,
+      shard_number: ORG_CONTAINER_CONFIG.shard_number,
+      replication_factor: ORG_CONTAINER_CONFIG.replication_factor,
+      write_consistency_factor: ORG_CONTAINER_CONFIG.write_consistency_factor
+    });
+
+    logger.info(`Org container ${collectionName} created — installing payload indexes`);
+    await this.createPayloadIndexes(collectionName, MEMORIES_PAYLOAD_INDEXES);
+    logger.info(`Org container ${collectionName} ready`);
+    return true;
   }
 
   /**

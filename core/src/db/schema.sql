@@ -139,6 +139,10 @@ CREATE TABLE IF NOT EXISTS organizations (
     hsm_provider VARCHAR(50) DEFAULT 'ovhcloud',  -- ovhcloud, thales, utimaco
     hsm_key_arn VARCHAR(255),
 
+    -- Qdrant container holding ALL memory+evidence for this org (org_<id>).
+    -- Members + projects share it, filtered by user_id/project_id/layer.
+    vector_container VARCHAR(255),
+
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );

@@ -8,19 +8,8 @@
  */
 
 import fetch from 'node-fetch';
-import { getMistralEmbedService } from '../embeddings/mistral.js';
+import { getEmbedService } from '../embeddings/factory.js';
 import { getQdrantCollections } from './collections.js';
-
-// Dynamic embedding service: EMBEDDING_PROVIDER=litellm switches to bge-m3 via LiteLLM
-let _litellmService = null;
-async function getLiteLLMEmbed() {
-  if (!_litellmService) {
-    const { getLiteLLMEmbedService } = await import('../embeddings/litellm.js');
-    _litellmService = getLiteLLMEmbedService();
-  }
-  return _litellmService;
-}
-const USE_LITELLM = process.env.EMBEDDING_PROVIDER === 'litellm';
 
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:9200';
 const API_KEY = process.env.QDRANT_API_KEY || 'dev_api_key_hivemind_2026';
@@ -58,11 +47,13 @@ function applyFactMemoryBoost(results) {
 export class QdrantClient {
   constructor() {
     this.collectionName = COLLECTION_NAME;
-    this.embedService = USE_LITELLM ? null : getMistralEmbedService(); // null = async init
+    // Factory: primary by EMBEDDING_PROVIDER, optionally wrapped with a fallback
+    // (EMBEDDING_FALLBACK_PROVIDER) — e.g. prometheus bge-m3 primary → blaiq fallback.
+    this.embedService = getEmbedService();
     this.dimension = parseInt(process.env.EMBEDDING_DIMENSION || '1024', 10);
     this.connected = null;
     this.collectionReady = null;
-    this._litellmReady = USE_LITELLM ? getLiteLLMEmbed().then(svc => { this.embedService = svc; }) : null;
+    this._litellmReady = null;
   }
 
   async ensureCollection(collectionName = this.collectionName) {

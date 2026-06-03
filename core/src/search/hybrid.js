@@ -7,7 +7,7 @@
  * @module search/hybrid
  */
 
-import { getMistralEmbedService } from '../embeddings/mistral.js';
+import { getEmbedService } from '../embeddings/factory.js';
 import { getQdrantClient } from '../vector/qdrant-client.js';
 import ranker from '../recall/ranker.js';
 const { rank, rankHybrid } = ranker;
@@ -289,7 +289,7 @@ async function resolveQueryVector(query, existingVector) {
   }
 
   try {
-    embedService ||= getMistralEmbedService();
+    embedService ||= getEmbedService();
     if (!embedService) {
       logger.warn('Embedding service unavailable for semantic search');
       return null;

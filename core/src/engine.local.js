@@ -6,7 +6,7 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import { getSituationalizer, ContextualPipeline } from './situationalizer.js';
-import { getMistralEmbedService } from './embeddings/mistral.js';
+import { getEmbedService } from './embeddings/factory.js';
 import { getQdrantClient } from './vector/qdrant-client.js';
 import { getSyntaxChunker } from './chunker.ast.js';
 import { getNWSCalculator } from './ast/density.js';
@@ -31,7 +31,7 @@ export class MemoryEngine {
 
     // Initialize contextual pipeline components
     this.situationalizer = situationalizer || getSituationalizer();
-    this.embedService = embedService || getMistralEmbedService();
+    this.embedService = embedService || getEmbedService();
     this.contextualPipeline = new ContextualPipeline(this.situationalizer);
     
     // Initialize Qdrant client for vector storage

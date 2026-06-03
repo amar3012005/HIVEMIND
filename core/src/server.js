@@ -5291,6 +5291,90 @@ exit \$RC
         } catch (e) { return jsonResponse(res, { error: 'audit_verify_error', message: e.message }, 500); }
       }
 
+      // ── TARA call history / turns / insights / usage (org-scoped, real-time) ──
+      if (pathname.startsWith('/api/tara/calls')) {
+        const tOrg = req.headers['x-hm-org-id'] || DEFAULT_ORG;
+        const tUser = req.headers['x-hm-user-id'] || DEFAULT_USER;
+
+        if (pathname === '/api/tara/calls/start' && req.method === 'POST') {
+          if (!body.session_id) return jsonResponse(res, { error: 'session_id required' }, 400);
+          try {
+            const call = await prisma.taraCall.upsert({
+              where: { sessionId: String(body.session_id) },
+              update: { mode: body.mode || 'external', voiceId: body.voice_id || null, language: body.language || 'en', status: 'active' },
+              create: { orgId: tOrg, userId: tUser, sessionId: String(body.session_id), mode: body.mode || 'external', voiceId: body.voice_id || null, language: body.language || 'en' },
+            });
+            return jsonResponse(res, { call_id: call.id });
+          } catch (e) { return jsonResponse(res, { error: 'start_failed', message: e.message }, 500); }
+        }
+
+        if (pathname === '/api/tara/calls/turn' && req.method === 'POST') {
+          if (!body.session_id) return jsonResponse(res, { error: 'session_id required' }, 400);
+          try {
+            const call = await prisma.taraCall.findUnique({ where: { sessionId: String(body.session_id) } });
+            if (!call || call.orgId !== tOrg) return jsonResponse(res, { error: 'call_not_found' }, 404);
+            const pt = Number(body.prompt_tokens) || 0, ct = Number(body.completion_tokens) || 0;
+            await prisma.taraTurn.create({ data: {
+              callId: call.id, orgId: tOrg, userId: tUser, seq: Number(body.seq) || (call.turnCount + 1),
+              userText: body.user_text || null, agentText: body.agent_text || null,
+              sttEngine: body.stt_engine || null, sttMs: body.stt_ms ?? null,
+              llmTtfbMs: body.llm_ttfb_ms ?? null, ttsTtfbMs: body.tts_ttfb_ms ?? null,
+              recallCount: body.recall_count ?? null, promptTokens: pt || null, completionTokens: ct || null,
+            }});
+            await prisma.taraCall.update({ where: { id: call.id }, data: { turnCount: { increment: 1 }, promptTokens: { increment: pt }, completionTokens: { increment: ct } } });
+            return jsonResponse(res, { ok: true });
+          } catch (e) { return jsonResponse(res, { error: 'turn_failed', message: e.message }, 500); }
+        }
+
+        if (pathname === '/api/tara/calls/end' && req.method === 'POST') {
+          if (!body.session_id) return jsonResponse(res, { error: 'session_id required' }, 400);
+          try {
+            const call = await prisma.taraCall.findUnique({ where: { sessionId: String(body.session_id) } });
+            if (!call || call.orgId !== tOrg) return jsonResponse(res, { error: 'call_not_found' }, 404);
+            const durationMs = Math.max(0, Date.now() - new Date(call.startedAt).getTime());
+            await prisma.taraCall.update({ where: { id: call.id }, data: { status: 'completed', endedAt: new Date(), durationMs } });
+            const turns = await prisma.taraTurn.findMany({ where: { callId: call.id }, orderBy: { seq: 'asc' } });
+            const transcript = turns.map(t => `User: ${t.userText || ''}\nTARA: ${t.agentText || ''}`).join('\n');
+            if (transcript.trim() && process.env.GROQ_API_KEY) {
+              try {
+                const r = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
+                  method: 'POST', headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ model: 'openai/gpt-oss-120b', temperature: 0.2, response_format: { type: 'json_object' },
+                    messages: [
+                      { role: 'system', content: 'Summarize this voice conversation. STRICT JSON: {"summary": string (2-4 sentences), "key_points": string[], "action_items": [{"task": string, "owner": string|null}], "topics": string[], "questions": string[], "sentiment": string}. Empty arrays if none. Faithful — no invention.' },
+                      { role: 'user', content: transcript.slice(0, 40000) },
+                    ] }),
+                  signal: AbortSignal.timeout(60_000),
+                });
+                if (r.ok) {
+                  const j = await r.json();
+                  let parsed; try { parsed = JSON.parse(j.choices[0].message.content); } catch { parsed = {}; }
+                  await prisma.taraInsight.upsert({ where: { callId: call.id }, update: { summary: parsed.summary || null, data: parsed }, create: { callId: call.id, orgId: tOrg, userId: tUser, summary: parsed.summary || null, data: parsed } });
+                }
+              } catch (e2) { console.warn('[tara/insights]', e2.message); }
+            }
+            return jsonResponse(res, { ok: true, duration_ms: durationMs, turns: turns.length });
+          } catch (e) { return jsonResponse(res, { error: 'end_failed', message: e.message }, 500); }
+        }
+
+        if (pathname === '/api/tara/calls' && req.method === 'GET') {
+          const limit = Math.min(100, Number(url.searchParams.get('limit')) || 30);
+          const calls = await prisma.taraCall.findMany({ where: { orgId: tOrg }, orderBy: { startedAt: 'desc' }, take: limit });
+          return jsonResponse(res, { calls });
+        }
+
+        const cm = pathname.match(/^\/api\/tara\/calls\/([0-9a-f-]{36})$/i);
+        if (cm && req.method === 'GET') {
+          const call = await prisma.taraCall.findUnique({ where: { id: cm[1] } });
+          if (!call || call.orgId !== tOrg) return jsonResponse(res, { error: 'not_found' }, 404);
+          const [turns, insight] = await Promise.all([
+            prisma.taraTurn.findMany({ where: { callId: call.id }, orderBy: { seq: 'asc' } }),
+            prisma.taraInsight.findUnique({ where: { callId: call.id } }),
+          ]);
+          return jsonResponse(res, { call, turns, insight });
+        }
+      }
+
       const hostedDescriptorMatch = pathname.match(/^\/api\/mcp\/servers\/([^\/]+)$/);
       if (hostedDescriptorMatch && req.method === 'GET' && url.searchParams.get('token')) {
         const pathUserId = hostedDescriptorMatch[1];

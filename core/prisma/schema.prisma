@@ -1507,6 +1507,69 @@ model HyperRelation {
   @@map("hyper_relations")
 }
 
+/// TaraCall — one row per TARA voice call (self-hosted AaaS). Org-scoped.
+/// Created on WS connect, finalized on disconnect. Aggregates usage.
+model TaraCall {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId            String    @map("org_id") @db.Uuid
+  userId           String    @map("user_id") @db.Uuid
+  sessionId        String    @unique @map("session_id") @db.VarChar(120)
+  mode             String    @default("external") @db.VarChar(20) // internal | external
+  voiceId          String?   @map("voice_id") @db.VarChar(120)
+  language         String    @default("en") @db.VarChar(10)
+  status           String    @default("active") @db.VarChar(20) // active | completed | failed
+  turnCount        Int       @default(0) @map("turn_count")
+  durationMs       Int       @default(0) @map("duration_ms")
+  promptTokens     Int       @default(0) @map("prompt_tokens")
+  completionTokens Int       @default(0) @map("completion_tokens")
+  startedAt        DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
+  endedAt          DateTime? @map("ended_at") @db.Timestamptz(6)
+
+  @@index([orgId])
+  @@index([userId])
+  @@index([orgId, startedAt])
+  @@map("tara_calls")
+}
+
+/// TaraTurn — one row per conversation turn (real-time append). Holds per-turn
+/// transcript + agent reply + latency breakdown + token usage.
+model TaraTurn {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  callId           String   @map("call_id") @db.Uuid
+  orgId            String   @map("org_id") @db.Uuid
+  userId           String   @map("user_id") @db.Uuid
+  seq              Int
+  userText         String?  @map("user_text")
+  agentText        String?  @map("agent_text")
+  sttEngine        String?  @map("stt_engine") @db.VarChar(40) // parakeet | groq-whisper
+  sttMs            Int?     @map("stt_ms")
+  llmTtfbMs        Int?     @map("llm_ttfb_ms")
+  ttsTtfbMs        Int?     @map("tts_ttfb_ms")
+  recallCount      Int?     @map("recall_count")
+  promptTokens     Int?     @map("prompt_tokens")
+  completionTokens Int?     @map("completion_tokens")
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([callId])
+  @@index([orgId])
+  @@map("tara_turns")
+}
+
+/// TaraInsight — one row per call, generated at call end (LLM over the transcript).
+/// data = { key_points[], action_items[], topics[], questions[], sentiment }.
+model TaraInsight {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  callId    String   @unique @map("call_id") @db.Uuid
+  orgId     String   @map("org_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  summary   String?
+  data      Json     @default("{}")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([orgId])
+  @@map("tara_insights")
+}
+
 /// AgentEval — one row per (agent, turn-line) scored by the CSI judge.
 /// scores is { helpful, role_fit, evidence, opposition } in [0,1].
 /// total is the weighted sum. usedForTuningAt is set when consumed by

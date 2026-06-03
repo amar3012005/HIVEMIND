@@ -107,6 +107,51 @@ export class AuditLogger {
   }
 
   /**
+   * Write a signed tail checkpoint for one org's audit chain (H5 defense).
+   * Anchors (max_seq, head_entry_hash, row_count) under an SLH-DSA signature so
+   * audit-verify can detect truncation of the newest entries — which the chain
+   * walk alone cannot. Per-org advisory lock keeps it consistent with appends.
+   * Returns the checkpoint summary, or null if there is nothing to checkpoint.
+   */
+  async _writeCheckpoint(orgId) {
+    const { signAudit, sha256Hex, canonical } = await import('../security/pqc-signer.js');
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(`SELECT pg_advisory_xact_lock(hashtext($1))`, `audit_chain:${orgId || 'null'}`);
+      const agg = await tx.$queryRawUnsafe(
+        `SELECT COALESCE(MAX(seq),0) AS max_seq, COUNT(*) AS cnt
+         FROM audit_signatures WHERE org_id IS NOT DISTINCT FROM $1::uuid`, orgId);
+      const maxSeq = Number(agg?.[0]?.max_seq || 0);
+      const cnt = Number(agg?.[0]?.cnt || 0);
+      if (maxSeq === 0) return null; // empty chain — nothing to anchor
+      const head = await tx.$queryRawUnsafe(
+        `SELECT entry_hash FROM audit_signatures
+         WHERE org_id IS NOT DISTINCT FROM $1::uuid AND seq = $2::bigint LIMIT 1`, orgId, maxSeq);
+      const headHash = head?.[0]?.entry_hash || '';
+      const payload = canonical({ org: orgId, max_seq: maxSeq, head: headHash, count: cnt });
+      const sig = await signAudit(sha256Hex(payload));
+      if (!sig) return null; // signing disabled (no key) — skip
+      await tx.$executeRawUnsafe(
+        `INSERT INTO audit_checkpoints (org_id, max_seq, head_entry_hash, row_count, signature)
+         VALUES ($1::uuid, $2::bigint, $3, $4::bigint, $5)`,
+        orgId, maxSeq, headHash, cnt, sig);
+      return { org_id: orgId, max_seq: maxSeq, count: cnt };
+    }, { timeout: 30000 });
+  }
+
+  /** Checkpoint every org that has audit signatures. Best-effort, never throws. */
+  async checkpointAllOrgs() {
+    if (!this.prisma) return;
+    try {
+      const orgs = await this.prisma.$queryRawUnsafe(`SELECT DISTINCT org_id FROM audit_signatures`);
+      let n = 0;
+      for (const o of orgs || []) {
+        try { if (await this._writeCheckpoint(o.org_id)) n++; } catch { /* per-org best-effort */ }
+      }
+      if (n) console.log(`[audit-checkpoint] wrote ${n} checkpoint(s)`);
+    } catch (e) { console.warn('[audit-checkpoint] sweep failed:', e.message); }
+  }
+
+  /**
    * Query audit logs with filtering and pagination.
    */
   async query({ organizationId, userId, eventCategory, action, resourceType, from, to, limit = 50, offset = 0 }) {

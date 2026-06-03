@@ -266,6 +266,13 @@ const usageTracker = prisma ? new UsageTracker(prisma) : null;
 const planStore = prisma ? new PlanStore(prisma) : null;
 const planEnforcer = (prisma && planStore && usageTracker) ? new PlanEnforcer(prisma, planStore, usageTracker) : null;
 const auditLogger = prisma ? new AuditLogger(prisma) : null;
+// Periodic signed audit checkpoints (H5 tail-truncation defense). First run
+// after 10min warm-up, then hourly. Best-effort; no-ops when PQC keys absent.
+if (auditLogger) {
+  const AUDIT_CHECKPOINT_INTERVAL_MS = parseInt(process.env.AUDIT_CHECKPOINT_INTERVAL_MS || String(60 * 60 * 1000), 10);
+  setTimeout(() => { auditLogger.checkpointAllOrgs().catch(() => {}); }, 10 * 60 * 1000);
+  setInterval(() => { auditLogger.checkpointAllOrgs().catch(() => {}); }, AUDIT_CHECKPOINT_INTERVAL_MS);
+}
 const webhookManager = prisma ? new WebhookManager(prisma) : null;
 const ingestTracker = new IngestTracker();
 const persistentMemoryStore = prisma ? new PrismaGraphStore(prisma) : null;
@@ -5253,7 +5260,34 @@ exit \$RC
             if (!firstBroken && (!bind || !chain || !sig)) firstBroken = { audit_id: r.id, bind, chain, sig };
             prev = r.entry_hash;
           }
-          return jsonResponse(res, { org_id: vOrg, checked, signature_valid: sigOk, chain_intact: chainOk, payload_bound: bindOk, tamper_evident: checked > 0 && sigOk === checked && chainOk === checked && bindOk === checked, first_broken: firstBroken });
+          // Tail-truncation defense (H5): compare against the latest signed
+          // checkpoint. The chain walk + genesis anchor catch mutation/reorder/
+          // head-deletion but NOT deletion of the newest entries; the checkpoint
+          // anchors (max_seq, head_entry_hash) so truncation below it is caught.
+          let checkpoint = null; let checkpointOk = null;
+          const cps = await prisma.$queryRawUnsafe(
+            `SELECT max_seq, head_entry_hash, row_count, signature FROM audit_checkpoints
+             WHERE org_id IS NOT DISTINCT FROM $1::uuid ORDER BY id DESC LIMIT 1`, vOrg);
+          if (cps?.[0]) {
+            const cp = cps[0];
+            const cpMaxSeq = Number(cp.max_seq);
+            const cpPayload = pqc.canonical({ org: vOrg, max_seq: cpMaxSeq, head: cp.head_entry_hash, count: Number(cp.row_count) });
+            const cpSig = await pqc.verifyAudit(pqc.sha256Hex(cpPayload), cp.signature);
+            // The anchored row must still exist with the same hash …
+            const anchor = await prisma.$queryRawUnsafe(
+              `SELECT entry_hash FROM audit_signatures
+               WHERE org_id IS NOT DISTINCT FROM $1::uuid AND seq = $2::bigint LIMIT 1`, vOrg, cpMaxSeq);
+            const anchorOk = anchor?.[0]?.entry_hash === cp.head_entry_hash;
+            // … and the current tail must not have regressed below the checkpoint.
+            const cur = await prisma.$queryRawUnsafe(
+              `SELECT COALESCE(MAX(seq),0) AS m FROM audit_signatures WHERE org_id IS NOT DISTINCT FROM $1::uuid`, vOrg);
+            const noTailLoss = Number(cur?.[0]?.m || 0) >= cpMaxSeq;
+            checkpointOk = cpSig && anchorOk && noTailLoss;
+            checkpoint = { max_seq: cpMaxSeq, signature_valid: cpSig, anchor_intact: anchorOk, no_tail_loss: noTailLoss };
+          }
+          const tamperEvident = checked > 0 && sigOk === checked && chainOk === checked && bindOk === checked
+            && (checkpointOk === null ? true : checkpointOk);
+          return jsonResponse(res, { org_id: vOrg, checked, signature_valid: sigOk, chain_intact: chainOk, payload_bound: bindOk, tamper_evident: tamperEvident, checkpoint, first_broken: firstBroken });
         } catch (e) { return jsonResponse(res, { error: 'audit_verify_error', message: e.message }, 500); }
       }
 

@@ -5181,24 +5181,36 @@ exit \$RC
       }
 
       // ── Post-quantum security: status + public keys + verification ────────
+      // All three routes require authentication and are scoped to the caller's
+      // key-bound org. authenticateApiKey only folds x-hm-org-id into
+      // principal.orgId when the master / control-plane key is presented, so a
+      // normal caller cannot select another tenant via a spoofable header.
+      // Without this gate the audit chain + arbitrary memory signatures would be
+      // readable cross-tenant by anyone who can reach the process.
       if (pathname === '/api/security/pqc' && req.method === 'GET') {
+        const auth = await authenticateApiKey(req);
+        if (!auth.ok) return jsonResponse(res, { error: auth.error || 'unauthorized' }, auth.status || 401);
         try {
           const pqc = await import('./security/pqc-signer.js');
           return jsonResponse(res, { ...pqc.pqcStatus(), public_keys: pqc.publicKeys() });
         } catch (e) { return jsonResponse(res, { error: 'pqc_unavailable', message: e.message }, 500); }
       }
 
-      // Verify a memory's ML-DSA integrity signature.
+      // Verify a memory's ML-DSA integrity signature (tenant-scoped).
       if (pathname === '/api/security/verify-memory' && req.method === 'GET') {
+        const auth = await authenticateApiKey(req);
+        if (!auth.ok) return jsonResponse(res, { error: auth.error || 'unauthorized' }, auth.status || 401);
         if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
         const id = url.searchParams.get('id');
         if (!id) return jsonResponse(res, { error: 'id_required' }, 400);
+        const scopeOrg = auth.principal?.orgId || DEFAULT_ORG;
         try {
           const pqc = await import('./security/pqc-signer.js');
+          // Scoped to the caller's org — out-of-tenant ids return 404 (no existence leak).
           const rows = await prisma.$queryRawUnsafe(
             `SELECT m.id, m.user_id, m.org_id, m.content, s.signature, s.alg
              FROM memories m LEFT JOIN memory_signatures s ON s.memory_id = m.id
-             WHERE m.id = $1::uuid LIMIT 1`, id);
+             WHERE m.id = $1::uuid AND m.org_id IS NOT DISTINCT FROM $2::uuid LIMIT 1`, id, scopeOrg);
           const r = rows?.[0];
           if (!r) return jsonResponse(res, { error: 'not_found' }, 404);
           if (!r.signature) return jsonResponse(res, { id, signed: false, verified: false, reason: 'no_signature' });
@@ -5210,8 +5222,11 @@ exit \$RC
 
       // Walk + verify the SLH-DSA audit chain for the caller's org.
       if (pathname === '/api/security/audit-verify' && req.method === 'GET') {
+        const auth = await authenticateApiKey(req);
+        if (!auth.ok) return jsonResponse(res, { error: auth.error || 'unauthorized' }, auth.status || 401);
         if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
-        const vOrg = req.headers['x-hm-org-id'] || DEFAULT_ORG;
+        // Org is key-bound, never the raw header (see note above).
+        const vOrg = auth.principal?.orgId || DEFAULT_ORG;
         try {
           const pqc = await import('./security/pqc-signer.js');
           const limit = Math.min(500, Math.max(1, parseInt(url.searchParams.get('limit') || '200', 10)));
@@ -5227,7 +5242,12 @@ exit \$RC
             const payload = pqc.canonical({ id: r.id, org: r.organization_id || null, type: r.event_type, action: r.action, user: r.user_id || null, resource: r.resource_id || null });
             const recomputed = pqc.sha256Hex((r.prev_hash || '') + payload);
             const bind = recomputed === r.entry_hash;            // payload not tampered
-            const chain = prev === null ? true : (r.prev_hash === prev); // append-only linkage
+            // Genesis anchor: the first row walked (lowest seq, no offset) MUST be
+            // the true genesis (prev_hash === ''). Accepting any non-empty prev on
+            // the first row would let an attacker delete the chain head and have the
+            // surviving suffix re-baseline as a valid "genesis" — head truncation
+            // would go undetected. (Tail truncation still needs a signed checkpoint.)
+            const chain = prev === null ? (r.prev_hash === '') : (r.prev_hash === prev);
             const sig = await pqc.verifyAudit(r.entry_hash, r.signature); // signed by key
             if (bind) bindOk++; if (chain) chainOk++; if (sig) sigOk++;
             if (!firstBroken && (!bind || !chain || !sig)) firstBroken = { audit_id: r.id, bind, chain, sig };

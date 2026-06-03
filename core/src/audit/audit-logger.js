@@ -72,24 +72,37 @@ export class AuditLogger {
     try {
       const { signAudit, sha256Hex, canonical } = await import('../security/pqc-signer.js');
       const orgId = event.organizationId || null;
-      const prev = await this.prisma.$queryRawUnsafe(
-        `SELECT entry_hash FROM audit_signatures WHERE org_id IS NOT DISTINCT FROM $1::uuid ORDER BY seq DESC LIMIT 1`,
-        orgId,
-      );
-      const prevHash = prev?.[0]?.entry_hash || '';
       const payload = canonical({
         id: row.id, org: orgId, type: event.eventType, action: event.action || 'read',
         user: event.userId || null, resource: event.resourceId || null,
       });
-      const entryHash = sha256Hex(prevHash + payload);
-      const sig = await signAudit(entryHash);
-      if (!sig) return;
-      await this.prisma.$executeRawUnsafe(
-        `INSERT INTO audit_signatures (audit_id, org_id, alg, prev_hash, entry_hash, signature)
-         VALUES ($1::uuid, $2::uuid, 'SLH-DSA-SHA2-128s', $3, $4, $5)
-         ON CONFLICT (audit_id) DO NOTHING`,
-        row.id, orgId, prevHash, entryHash, sig,
-      );
+      // Serialize chain extension per org. read-prev → sign → insert is a
+      // read-modify-write: without a lock, two concurrent same-org audits (incl.
+      // across the hm-core + hm-core-2 processes, where no in-process mutex helps)
+      // read the same tail prev_hash and insert two rows sharing it, forking the
+      // chain and causing audit-verify to report a false tamper break. A per-org
+      // Postgres advisory lock held for the txn serializes appends; different orgs
+      // use different lock keys so they never block each other.
+      await this.prisma.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe(
+          `SELECT pg_advisory_xact_lock(hashtext($1))`,
+          `audit_chain:${orgId || 'null'}`,
+        );
+        const prev = await tx.$queryRawUnsafe(
+          `SELECT entry_hash FROM audit_signatures WHERE org_id IS NOT DISTINCT FROM $1::uuid ORDER BY seq DESC LIMIT 1`,
+          orgId,
+        );
+        const prevHash = prev?.[0]?.entry_hash || '';
+        const entryHash = sha256Hex(prevHash + payload);
+        const sig = await signAudit(entryHash);
+        if (!sig) return;
+        await tx.$executeRawUnsafe(
+          `INSERT INTO audit_signatures (audit_id, org_id, alg, prev_hash, entry_hash, signature)
+           VALUES ($1::uuid, $2::uuid, 'SLH-DSA-SHA2-128s', $3, $4, $5)
+           ON CONFLICT (audit_id) DO NOTHING`,
+          row.id, orgId, prevHash, entryHash, sig,
+        );
+      }, { timeout: 30000 });
     } catch { /* tamper-evidence is best-effort — never affect the request */ }
   }
 

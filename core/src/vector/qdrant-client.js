@@ -10,6 +10,7 @@
 import fetch from 'node-fetch';
 import { getEmbedService } from '../embeddings/factory.js';
 import { getQdrantCollections } from './collections.js';
+import { resolveCollection, PER_TENANT } from './container-router.js';
 
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:9200';
 const API_KEY = process.env.QDRANT_API_KEY || 'dev_api_key_hivemind_2026';
@@ -29,6 +30,25 @@ const headers = {
 
 function resolveCollectionName(collectionName) {
   return collectionName || COLLECTION_NAME;
+}
+
+// Pull a payload value out of a Qdrant filter's `must` clause (used to derive
+// the org for routing when the caller didn't pass an explicit collectionName).
+function filterMatchValue(filter, key) {
+  const must = filter?.must;
+  if (!Array.isArray(must)) return null;
+  const clause = must.find((c) => c?.key === key);
+  return clause?.match?.value ?? null;
+}
+
+// Central tenant routing. When QDRANT_PER_TENANT is off this returns the legacy
+// collection (unchanged behavior). When on, org context → org_<id> container,
+// no org → HIVEMIND_PERSONAL. Derives org from the data the client already
+// receives (memory.org_id / filter org_id) so no call site needs changing.
+function routeCollection({ explicit, orgId } = {}) {
+  if (explicit) return explicit;
+  if (!PER_TENANT) return COLLECTION_NAME;
+  return resolveCollection({ orgId });
 }
 
 // Boost extracted-fact memories — they have precise, focused embeddings
@@ -144,7 +164,7 @@ export class QdrantClient {
       return memory.id;
     }
 
-    const collectionName = resolveCollectionName(options.collectionName);
+    const collectionName = routeCollection({ explicit: options.collectionName, orgId: memory.org_id });
     const collectionReady = await this.ensureCollection(collectionName);
     if (!collectionReady) {
       console.warn('⚠️  Qdrant collection unavailable, storing in-memory only');
@@ -204,6 +224,9 @@ export class QdrantClient {
         embedding_version: memory.embedding_version,
         temporal_status: memory.temporal_status,
         decay_factor: memory.decay_factor,
+        // Layer discriminator — org containers hold memory + evidence in one
+        // collection. Default 'memory'; evidence ingest passes options.layer.
+        layer: options.layer || memory.layer || 'memory',
         metadata: memory.metadata || {}
       }
     };
@@ -244,7 +267,7 @@ export class QdrantClient {
    * @param {number} options.score_threshold - Minimum similarity score
    * @returns {Promise<Array>} Search results
    */
-  async searchMemories({ query, vector, filter, limit = 10, score_threshold = DEFAULT_SCORE_THRESHOLD, collectionName, hnsw_ef }) {
+  async searchMemories({ query, vector, filter, limit = 10, score_threshold = DEFAULT_SCORE_THRESHOLD, collectionName, hnsw_ef, layer }) {
     // Check connection first
     const connected = await this.isConnected();
     if (!connected) {
@@ -252,7 +275,22 @@ export class QdrantClient {
       return [];
     }
 
-    const resolvedCollection = resolveCollectionName(collectionName);
+    // Route to the org container (org_<id>) / HIVEMIND_PERSONAL when per-tenant
+    // is on and no explicit collection was given — derive org from the filter.
+    const autoResolved = !collectionName && PER_TENANT;
+    const resolvedCollection = routeCollection({
+      explicit: collectionName,
+      orgId: filterMatchValue(filter, 'org_id')
+    });
+
+    // When we auto-routed into a shared org container, constrain to the memory
+    // layer so evidence segments in the same collection don't leak into memory
+    // recall. Explicit-collection callers (e.g. evidence-retrieval) own their
+    // own layer filter and are left untouched.
+    const effectiveLayer = layer ?? (autoResolved ? 'memory' : null);
+    if (effectiveLayer && filter && Array.isArray(filter.must) && !filter.must.some((c) => c?.key === 'layer')) {
+      filter = { ...filter, must: [...filter.must, { key: 'layer', match: { value: effectiveLayer } }] };
+    }
     const collectionReady = await this.ensureCollection(resolvedCollection);
     if (!collectionReady) {
       console.warn('⚠️  Qdrant collection unavailable, search returning empty results');

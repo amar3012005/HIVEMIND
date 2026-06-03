@@ -11,6 +11,7 @@
  */
 
 import crypto from 'crypto';
+import { resolveCollection, PER_TENANT } from '../vector/container-router.js';
 
 export class DocumentFirstIngestionService {
   constructor({ db, smartIngestRouter, memoryGraphEngine, doclingAdapter, embeddingService, entityExtractor = null, topicStateWriter = null, logger = console }) {
@@ -567,13 +568,20 @@ export class DocumentFirstIngestionService {
   async _embedSegments(segments) {
     if (!this.embeddingService) return;
 
-    const collectionName = process.env.EVIDENCE_QDRANT_COLLECTION || 'hivemind_evidence';
+    // Legacy: a dedicated hivemind_evidence collection. Per-tenant: evidence
+    // lives in the org container alongside memory, separated by layer=evidence.
+    const legacyEvidence = process.env.EVIDENCE_QDRANT_COLLECTION || 'hivemind_evidence';
 
     for (const segment of segments) {
       try {
         const embedding = await this.embeddingService.embed(segment.content);
 
-        // Store in Qdrant evidence collection (separate from memory collection)
+        const collectionName = PER_TENANT
+          ? resolveCollection({ orgId: segment.orgId })
+          : legacyEvidence;
+
+        // Store evidence vector. In per-tenant mode the org container holds both
+        // memory + evidence — layer=evidence keeps it out of memory recall.
         await this.embeddingService.storeVector({
           collectionName,
           id: segment.id,
@@ -584,6 +592,7 @@ export class DocumentFirstIngestionService {
             user_id: segment.userId,
             org_id: segment.orgId,
             segment_type: segment.segmentType,
+            layer: 'evidence',
             content_preview: segment.content.slice(0, 200)
           }
         });

@@ -8,6 +8,8 @@
  * - Hybrid mode: blends both with ranked results
  */
 
+import { resolveCollection, PER_TENANT } from '../vector/container-router.js';
+
 export class EvidenceRetrievalService {
   constructor({ db, qdrantClient }) {
     this.db = db;
@@ -30,7 +32,11 @@ export class EvidenceRetrievalService {
     documentIds = null,       // NEW: multi-doc filter — used by RecallRouter for tag-anchored evidence
     scoreThreshold = null,    // override default 0.5; lower for doc-filtered search where we want most chunks
   }) {
-    const collectionName = process.env.EVIDENCE_QDRANT_COLLECTION || 'hivemind_evidence';
+    // Per-tenant: evidence lives in the org container (layer=evidence). Legacy:
+    // a dedicated hivemind_evidence collection. Must mirror _embedSegments.
+    const collectionName = PER_TENANT
+      ? resolveCollection({ orgId })
+      : (process.env.EVIDENCE_QDRANT_COLLECTION || 'hivemind_evidence');
     const docIdSet = Array.isArray(documentIds) && documentIds.length
       ? [...new Set(documentIds.filter(Boolean))]
       : (documentId ? [documentId] : null);
@@ -62,7 +68,11 @@ export class EvidenceRetrievalService {
           ]
         },
         limit: limit * 2, // Over-fetch for reranking
-        scoreThreshold: effectiveThreshold,
+        // searchMemories destructures `score_threshold` (snake) — passing
+        // camelCase silently dropped the computed threshold (fell back to 0.15).
+        score_threshold: effectiveThreshold,
+        // Per-tenant: constrain to evidence layer within the shared org container.
+        layer: PER_TENANT ? 'evidence' : undefined,
       });
 
       // Step 2: Hydrate segments from DB

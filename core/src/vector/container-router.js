@@ -37,23 +37,22 @@ export function orgContainerName(orgId) {
 
 /**
  * Resolve the Qdrant collection a read/write should target.
+ *
+ * Routing is by org-presence, NOT memory.scope: an org account ALWAYS has an
+ * orgId, a personal account never does. A personal-SCOPE memory belonging to an
+ * org member still lives in the org container (separated by user_id filter) —
+ * "all employees under the org inside this container". Only true personal
+ * accounts (no org) land in the shared HIVEMIND_PERSONAL pool.
+ *
  * @param {object} ctx
- * @param {string} [ctx.scope]            personal | organization | project | team
  * @param {string} [ctx.orgId]
- * @param {string} [ctx.userId]
  * @param {string} [ctx.vectorContainer]  org.vectorContainer if already loaded (skips name build)
  * @returns {string} collection name
  */
-export function resolveCollection({ scope, orgId, vectorContainer } = {}) {
+export function resolveCollection({ orgId, vectorContainer } = {}) {
   if (!PER_TENANT) return LEGACY_COLLECTION;
-
-  if (scope === 'personal') return PERSONAL_COLLECTION;
-
-  // org / project / team scope → the org's own container
   if (vectorContainer) return vectorContainer;
   if (orgId) return orgContainerName(orgId);
-
-  // No org context → personal pool (personal accounts have no org row)
   return PERSONAL_COLLECTION;
 }
 

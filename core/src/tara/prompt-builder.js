@@ -56,6 +56,7 @@ export function buildPrompt({
   language = 'en',
   voiceOptimized = true,
   internalMode = false,
+  greeting = false,
   interruptedText = null,
   interruptionType = null,
   clinicalInsight = null,
@@ -90,6 +91,17 @@ export function buildPrompt({
 - These memories are your source of truth. Quote/paraphrase them faithfully.
 - If the answer is NOT in your memory or the conversation, say so briefly (e.g. "I don't have that in my memory yet") — do NOT guess.
 - NEVER invent names, dates, numbers, facts, events, or details that are not grounded in the memories or the user's words.`;
+  }
+
+  // Greeting turn — open the call in-character, in the selected language. No
+  // memories/session needed; short-circuit with a single opening instruction.
+  if (greeting) {
+    const userContent = `## Opening — the call just started; the user has NOT spoken yet.\nGreet them now as your persona: 1–2 short, natural spoken sentences. Briefly introduce who you are and invite them to start. Stay fully in character. Write ONLY the greeting (no stage directions). Respond in ${langName}.`;
+    const messages = [
+      { role: 'system', content: system },
+      { role: 'user', content: userContent },
+    ];
+    return { messages, tokenEstimate: Math.ceil((system.length + userContent.length) / 4) };
   }
 
   // 2. Context sections — kept minimal for TTFB

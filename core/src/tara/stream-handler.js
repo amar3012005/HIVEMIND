@@ -48,7 +48,6 @@ export class TaraStreamHandler {
 
   async handleStream(params, { userId, orgId, res }) {
     const {
-      query,
       session_id: sessionId,
       tenant_id: tenantId,
       agent_name: agentName,
@@ -57,6 +56,11 @@ export class TaraStreamHandler {
       interrupted_text: interruptedText,
       interruption_type: interruptionType,
     } = params;
+
+    // Greeting turn: the call just opened, no user utterance yet. The LLM opens
+    // in-character (active skill) + in the selected language. No recall/turn save.
+    const greetingMode = params.greeting === true || params.greeting === 'true';
+    const query = greetingMode ? (params.query || '__open__') : params.query;
 
     if (!query) {
       this._writeLine(res, { type: 'error', message: 'query is required' });
@@ -83,8 +87,9 @@ export class TaraStreamHandler {
 
       // Fast KB-only recall — skip tsvector/vector/scoring pipeline entirely
       // Voice needs speed (<100ms), not exhaustive search
-      const recallPromise = this._fastKBRecall(query, { userId, orgId })
-        .catch(() => []);
+      const recallPromise = greetingMode
+        ? Promise.resolve([])
+        : this._fastKBRecall(query, { userId, orgId }).catch(() => []);
 
       const sessionPromise = this.sessionManager.load(sessionId, { tenantId, userId, orgId, language });
 
@@ -141,6 +146,7 @@ export class TaraStreamHandler {
         query,
         systemPrompt: effectiveSystemPrompt,
         internalMode,
+        greeting: greetingMode,
         sessionState,
         memories,
         language: language || sessionState.language,
@@ -290,10 +296,13 @@ export class TaraStreamHandler {
       res.end();
 
       // ── STEP 5: Async post-turn update (NEVER blocks the stream) ──
-      this._postTurnUpdate(sessionId, {
-        userId, orgId, tenantId, mainUsage,
-        sessionState, query, response: fullResponse,
-      }).catch(err => console.warn('[tara/stream] Post-turn update failed:', err.message));
+      // Skip for greeting turns — no user utterance to record/analyze.
+      if (!greetingMode) {
+        this._postTurnUpdate(sessionId, {
+          userId, orgId, tenantId, mainUsage,
+          sessionState, query, response: fullResponse,
+        }).catch(err => console.warn('[tara/stream] Post-turn update failed:', err.message));
+      }
 
     } catch (err) {
       console.error('[tara/stream] Pipeline error:', err);

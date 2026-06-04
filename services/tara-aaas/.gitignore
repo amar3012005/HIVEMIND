@@ -1,0 +1,8 @@
+# Secrets — live only on the box (/opt/tara-aaas/.env.deploy) + in env-file
+.env*
+# Python / OS junk
+__pycache__/
+*.pyc
+.DS_Store
+._*
+uv.lock

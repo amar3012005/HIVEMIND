@@ -187,6 +187,7 @@ const { createEnterpriseChatRoutes } = await import('./enterprise/chat/routes.js
 // TARA Voice Agent imports
 const { TaraStreamHandler } = await import('./tara/stream-handler.js');
 const { TaraConfigStore } = await import('./tara/config-store.js');
+const { TaraSkillsStore } = await import('./tara/skills-store.js');
 const { SessionManager } = await import('./tara/session-manager.js');
 const { SessionAnalytics } = await import('./tara/session-analytics.js');
 const { isTaraRoute } = await import('./tara/routes.js');
@@ -1118,6 +1119,13 @@ const taraHandler = persistentMemoryStore ? new TaraStreamHandler({
   llmApiKey: process.env.GROQ_API_KEY || '',
   defaultModel: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
 }) : null;
+// TARA Skills store — named prompt presets; select copies prompts into config.
+if (taraHandler) {
+  taraHandler.skillsStore = new TaraSkillsStore({
+    memoryStore: persistentMemoryStore,
+    configStore: taraHandler.configStore,
+  });
+}
 const contextAutopilot = persistentMemoryStore ? new ContextAutopilot({
   store: persistentMemoryStore,
   maxContextTokens: 128_000,
@@ -5372,6 +5380,46 @@ exit \$RC
             prisma.taraInsight.findUnique({ where: { callId: call.id } }),
           ]);
           return jsonResponse(res, { call, turns, insight });
+        }
+      }
+
+      // ── TARA Skills — named prompt presets (org-scoped). Select copies the
+      // skill's prompts into the live config; runtime is unchanged. ──
+      if (pathname.startsWith('/api/tara/skills')) {
+        if (!taraHandler?.skillsStore) return jsonResponse(res, { error: 'TARA not available' }, 503);
+        const sOrg = req.headers['x-hm-org-id'] || DEFAULT_ORG;
+        const sUser = req.headers['x-hm-user-id'] || DEFAULT_USER;
+        const ss = taraHandler.skillsStore;
+        const ctx = { userId: sUser, orgId: sOrg };
+        try {
+          if (pathname === '/api/tara/skills' && req.method === 'GET') {
+            return jsonResponse(res, await ss.list(ctx));
+          }
+          if (pathname === '/api/tara/skills' && req.method === 'POST') {
+            const skill = await ss.create({
+              kind: body.kind, name: body.name,
+              primary_prompt: body.primary_prompt, secondary_prompt: body.secondary_prompt,
+            }, ctx);
+            return jsonResponse(res, { skill });
+          }
+          if (pathname === '/api/tara/skills/select' && req.method === 'POST') {
+            if (!body.skill_id) return jsonResponse(res, { error: 'skill_id required' }, 400);
+            const out = await ss.select(String(body.skill_id), ctx);
+            taraHandler.invalidateConfigCache('default', 'default');
+            return jsonResponse(res, out);
+          }
+          const sm = pathname.match(/^\/api\/tara\/skills\/([0-9a-f-]{36})$/i);
+          if (sm && req.method === 'PUT') {
+            const skill = await ss.update(sm[1], {
+              name: body.name, primary_prompt: body.primary_prompt, secondary_prompt: body.secondary_prompt,
+            }, ctx);
+            return jsonResponse(res, { skill });
+          }
+          if (sm && req.method === 'DELETE') {
+            return jsonResponse(res, await ss.remove(sm[1], ctx));
+          }
+        } catch (e) {
+          return jsonResponse(res, { error: 'skill_error', message: e.message }, 400);
         }
       }
 

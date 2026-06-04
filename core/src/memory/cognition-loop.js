@@ -95,12 +95,23 @@ const MAX_ORGS_PER_TICK           = Number(process.env.COGNITION_MAX_ORGS_PER_TI
 // `{ points: [...] }` by id, NOT a payload filter. (The filter-by-memory_id
 // pattern elsewhere in server.js is a silent no-op for the same reason — see
 // the follow-up note.) Deleting by point id also needs no payload index.
-async function purgeVectorsByMemoryIds(memoryIds, logger = console) {
+async function purgeVectorsByMemoryIds(memoryIds, orgId = null, logger = console) {
   const ids = (memoryIds || []).filter(Boolean);
   if (ids.length === 0) return 0;
   const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
   if (!qdrantUrl) return 0;
-  const qdrantCollection = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
+  // Per-tenant routing: the memory's vector lives in its org container
+  // (org_<id>) or HIVEMIND_PERSONAL, NOT the legacy 'BUNDB AGENT' singleton.
+  // Without this, drift-compaction supersession purges the wrong (empty)
+  // collection → stale vectors re-accumulate in the live collection (ANN
+  // re-pollution). Resolver is plan-aware + cached.
+  let qdrantCollection = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
+  try {
+    const { resolveCollectionForOrg, PER_TENANT } = await import('../vector/container-router.js');
+    if (PER_TENANT) qdrantCollection = await resolveCollectionForOrg(orgId);
+  } catch (e) {
+    logger.warn(`[cognition] collection resolve failed, using ${qdrantCollection}: ${e.message}`);
+  }
   const qdrantKey = process.env.QDRANT_API_KEY || '';
   let purged = 0;
   try {
@@ -1622,7 +1633,7 @@ Output JSON only:
               where: { id: { in: foldedIds } },
               data:  { isLatest: false, supersedesId: created.id },
             });
-            const purged = await purgeVectorsByMemoryIds(foldedIds, this.logger);
+            const purged = await purgeVectorsByMemoryIds(foldedIds, orgId, this.logger);
             this.logger.log(`[cognition-loop] drift-compact tag=${tag} part=${ci + 1}/${chunks.length}: folded ${foldedIds.length} → ${created.id.slice(0, 8)}, demoted+purged ${purged} vectors`);
           } catch (demoteErr) {
             this.logger.warn(`[cognition] drift-compact demote/purge failed tag=${tag}: ${demoteErr.message}`);

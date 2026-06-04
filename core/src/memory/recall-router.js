@@ -23,6 +23,7 @@
 
 import { recallPersistedMemories, crossClusterEntityBoost } from './persisted-retrieval.js';
 import { ClusterIndex } from './cluster-index.js';
+import { rerank } from './reranker.js';
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -717,8 +718,12 @@ export class RecallRouter {
     if (hop2.items.length > 0) tiersFired.push(`evidence-${hop2.reason}`);
     if (hop3.items.length > 0) tiersFired.push('live');
 
+    // Stage 4 / P1: optional cross-encoder rerank of the wide ranked pool →
+    // deliver top-N. No-op (returns first N) unless RERANK_ENABLED + endpoint.
+    const deliverMemories = await rerank(query, rankedMemories, { topN: RECALL_DELIVER_LIMIT });
+
     return {
-      memories: rankedMemories.slice(0, RECALL_DELIVER_LIMIT).map((m) => ({
+      memories: deliverMemories.map((m) => ({
         id: m.id,
         title: m.title,
         content: typeof m.content === 'string' ? m.content.slice(0, 400) : '',

@@ -8,7 +8,7 @@
  * - Hybrid mode: blends both with ranked results
  */
 
-import { resolveCollection, PER_TENANT } from '../vector/container-router.js';
+import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
 
 export class EvidenceRetrievalService {
   constructor({ db, qdrantClient }) {
@@ -35,7 +35,7 @@ export class EvidenceRetrievalService {
     // Per-tenant: evidence lives in the org container (layer=evidence). Legacy:
     // a dedicated hivemind_evidence collection. Must mirror _embedSegments.
     const collectionName = PER_TENANT
-      ? resolveCollection({ orgId })
+      ? await resolveCollectionForOrg(orgId)
       : (process.env.EVIDENCE_QDRANT_COLLECTION || 'hivemind_evidence');
     const docIdSet = Array.isArray(documentIds) && documentIds.length
       ? [...new Set(documentIds.filter(Boolean))]

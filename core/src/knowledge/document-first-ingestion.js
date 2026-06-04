@@ -11,7 +11,7 @@
  */
 
 import crypto from 'crypto';
-import { resolveCollection, PER_TENANT } from '../vector/container-router.js';
+import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
 
 export class DocumentFirstIngestionService {
   constructor({ db, smartIngestRouter, memoryGraphEngine, doclingAdapter, embeddingService, entityExtractor = null, topicStateWriter = null, logger = console }) {
@@ -577,7 +577,7 @@ export class DocumentFirstIngestionService {
         const embedding = await this.embeddingService.embed(segment.content);
 
         const collectionName = PER_TENANT
-          ? resolveCollection({ orgId: segment.orgId })
+          ? await resolveCollectionForOrg(segment.orgId)
           : legacyEvidence;
 
         // Store evidence vector. In per-tenant mode the org container holds both

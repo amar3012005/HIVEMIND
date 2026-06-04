@@ -10,7 +10,7 @@
 import fetch from 'node-fetch';
 import { getEmbedService } from '../embeddings/factory.js';
 import { getQdrantCollections } from './collections.js';
-import { resolveCollection, PER_TENANT } from './container-router.js';
+import { resolveCollectionForOrg, PER_TENANT } from './container-router.js';
 
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:9200';
 const API_KEY = process.env.QDRANT_API_KEY || 'dev_api_key_hivemind_2026';
@@ -42,13 +42,14 @@ function filterMatchValue(filter, key) {
 }
 
 // Central tenant routing. When QDRANT_PER_TENANT is off this returns the legacy
-// collection (unchanged behavior). When on, org context → org_<id> container,
-// no org → HIVEMIND_PERSONAL. Derives org from the data the client already
-// receives (memory.org_id / filter org_id) so no call site needs changing.
-function routeCollection({ explicit, orgId } = {}) {
+// collection (unchanged behavior). When on, routes by org PLAN (looked up +
+// cached): enterprise org → org_<id>, free/personal/no-org → HIVEMIND_PERSONAL.
+// Derives org from the data the client already receives (memory.org_id /
+// filter org_id) so no call site needs changing.
+async function routeCollection({ explicit, orgId } = {}) {
   if (explicit) return explicit;
   if (!PER_TENANT) return COLLECTION_NAME;
-  return resolveCollection({ orgId });
+  return resolveCollectionForOrg(orgId);
 }
 
 // Boost extracted-fact memories — they have precise, focused embeddings
@@ -164,7 +165,7 @@ export class QdrantClient {
       return memory.id;
     }
 
-    const collectionName = routeCollection({ explicit: options.collectionName, orgId: memory.org_id });
+    const collectionName = await routeCollection({ explicit: options.collectionName, orgId: memory.org_id });
     const collectionReady = await this.ensureCollection(collectionName);
     if (!collectionReady) {
       console.warn('⚠️  Qdrant collection unavailable, storing in-memory only');
@@ -278,7 +279,7 @@ export class QdrantClient {
     // Route to the org container (org_<id>) / HIVEMIND_PERSONAL when per-tenant
     // is on and no explicit collection was given — derive org from the filter.
     const autoResolved = !collectionName && PER_TENANT;
-    const resolvedCollection = routeCollection({
+    const resolvedCollection = await routeCollection({
       explicit: collectionName,
       orgId: filterMatchValue(filter, 'org_id')
     });

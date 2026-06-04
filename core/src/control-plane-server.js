@@ -13,7 +13,7 @@ import { buildAllClientDescriptors, buildClientDescriptor } from './control-plan
 import { ControlPlaneSessionStore, buildSessionCookie, verifySessionCookie } from './control-plane/session-store.js';
 import { ZitadelOidcClient } from './control-plane/zitadel.js';
 import { ConnectorStore } from './connectors/framework/connector-store.js';
-import { orgContainerName, provisionOrgContainer } from './vector/container-router.js';
+import { provisionForPlan } from './vector/container-router.js';
 import { PLANS } from './billing/plans.js';
 import {
   installConsoleCapture,
@@ -751,34 +751,49 @@ async function buildBootstrapPayload(user) {
   };
 }
 
-async function purgeUserVectors(userId) {
+/**
+ * Per-tenant Qdrant cleanup on account deletion.
+ *  - Fully-deleted ENTERPRISE org (sole owner gone) → DROP its org_<id> collection.
+ *  - Surviving enterprise org the user was a member of → delete the user's points
+ *    by user_id (org keeps its data).
+ *  - Personal/free data → delete the user's points from the shared HIVEMIND_PERSONAL.
+ * @param {string} userId
+ * @param {Array<{orgId:string, plan:string}>} userOrgs  memberships captured BEFORE deletion
+ * @param {string[]} orgIdsToDelete  orgs being fully removed (sole owner)
+ */
+async function purgeUserVectors(userId, userOrgs = [], orgIdsToDelete = []) {
   try {
     const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
-    const qdrantCollection = process.env.QDRANT_COLLECTION || 'hivemind_memories';
     const qdrantKey = process.env.QDRANT_API_KEY || '';
     if (!qdrantUrl || !userId) {
       console.warn('[account-delete] ⚠ Qdrant purge skipped — no URL or userId:', { qdrantUrl: !!qdrantUrl, userId: !!userId });
       return;
     }
+    const { PERSONAL_COLLECTION, orgContainerName, isEnterprisePlan } = await import('./vector/container-router.js');
+    const qhdr = { 'Content-Type': 'application/json', ...(qdrantKey ? { 'api-key': qdrantKey } : {}) };
+    const delSet = new Set(orgIdsToDelete || []);
 
-    console.log('[account-delete] Purging Qdrant vectors for userId:', userId, 'collection:', qdrantCollection);
-    const resp = await fetch(`${qdrantUrl}/collections/${qdrantCollection}/points/delete`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(qdrantKey ? { 'api-key': qdrantKey } : {}),
-      },
-      body: JSON.stringify({
-        filter: {
-          must: [{ key: 'user_id', match: { value: userId } }],
-        },
-        wait: true,
-      }),
-    });
-    const respBody = await resp.text();
-    console.log('[account-delete] Qdrant response:', resp.status, respBody.slice(0, 200));
+    const toDrop = new Set();              // whole collections to remove
+    const toScrub = new Set([PERSONAL_COLLECTION]); // delete this user's points only
+    for (const { orgId, plan } of userOrgs) {
+      if (!isEnterprisePlan(plan)) continue;            // free → data lives in personal pool
+      if (delSet.has(orgId)) toDrop.add(orgContainerName(orgId));
+      else toScrub.add(orgContainerName(orgId));        // org survives → scrub user
+    }
+
+    for (const coll of toDrop) {
+      const r = await fetch(`${qdrantUrl}/collections/${coll}`, { method: 'DELETE', headers: qhdr });
+      console.log('[account-delete] dropped collection', coll, r.status);
+    }
+    for (const coll of toScrub) {
+      const r = await fetch(`${qdrantUrl}/collections/${coll}/points/delete`, {
+        method: 'POST', headers: qhdr,
+        body: JSON.stringify({ filter: { must: [{ key: 'user_id', match: { value: userId } }] }, wait: true }),
+      });
+      console.log('[account-delete] scrubbed user from', coll, r.status);
+    }
   } catch (error) {
-    console.warn('[account-delete] ⚠ Qdrant delete failed:', error.message);
+    console.warn('[account-delete] ⚠ Qdrant purge failed:', error.message);
   }
 }
 
@@ -806,6 +821,13 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [], onProgress 
 
   emit(0, 'Starting deletion...');
   try {
+    // Capture org memberships (with plan) BEFORE we delete userOrganization rows —
+    // needed by purgeUserVectors to know which Qdrant containers to drop/scrub.
+    const userOrgs = (await prisma.userOrganization.findMany({
+      where: { userId },
+      select: { orgId: true, org: { select: { plan: true } } },
+    })).map((m) => ({ orgId: m.orgId, plan: m.org?.plan }));
+
     const memoryIds = (
       await prisma.memory.findMany({
         where: { userId },
@@ -918,7 +940,7 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [], onProgress 
     await prisma.user.delete({ where: { id: userId } });
     emit(90, 'Deleted user record');
 
-    await purgeUserVectors(userId);
+    await purgeUserVectors(userId, userOrgs, orgIdsToDelete);
     emit(95, 'Purged vector embeddings');
 
     if (Array.isArray(orgIdsToDelete) && orgIdsToDelete.length) {
@@ -1904,23 +1926,18 @@ const server = http.createServer(async (req, res) => {
       }
     });
 
-    // Auto-provision the org's Qdrant container. Name is deterministic from the
-    // org id (org_<id>) so it can be persisted synchronously; the actual Qdrant
-    // collection is created fire-and-forget (provisionOrgContainer never throws,
-    // and QdrantClient.ensureCollection lazily creates on first write as backstop)
-    // — org signup must never block on or fail because of the vector box.
-    const vectorContainer = orgContainerName(org.id);
-    try {
-      await prisma.organization.update({
-        where: { id: org.id },
-        data: { vectorContainer }
-      });
-    } catch (err) {
-      console.error('[org-create] failed to persist vectorContainer', { orgId: org.id, error: err.message });
-    }
-    provisionOrgContainer(org.id).catch((err) => {
-      console.error('[org-create] container provisioning rejected', { orgId: org.id, error: err?.message });
-    });
+    // Route the org to its Qdrant home by PLAN:
+    //   enterprise (paid) → own container org_<id> (provisioned now, fire-and-forget)
+    //   free (personal)   → shared HIVEMIND_PERSONAL pool (no container created)
+    // Persist the decision on the org row so the hot path resolves without a plan
+    // lookup. Signup must never block/fail on the vector store.
+    provisionForPlan(org.id, requestedPlan)
+      .then((vectorContainer) =>
+        prisma.organization.update({ where: { id: org.id }, data: { vectorContainer } })
+      )
+      .catch((err) =>
+        console.error('[org-create] vector container provisioning failed', { orgId: org.id, plan: requestedPlan, error: err?.message })
+      );
 
     await prisma.userOrganization.create({
       data: {

@@ -23,6 +23,16 @@ VOICE RULES (critical):
 - Ask ONE focused question per turn, not multiple
 - When clinical guidance says "close" or "pivot" — follow it, don't keep probing`;
 
+// Internal mode voice rules — HIVEMIND speaking to an insider. Spoken cadence,
+// but NO sales probing: answer completely, don't force a question every turn.
+const INTERNAL_VOICE_SUFFIX = `
+
+VOICE (spoken, internal):
+- Speak naturally — no markdown, bullets, or numbered lists.
+- Be complete: give the full answer the user asked for. Don't truncate real substance, but don't ramble either — match depth to the question.
+- You do NOT need to end with a question. Only ask one if you genuinely need a detail to continue.
+- Vary your phrasing; don't reuse the same opener twice.`;
+
 /**
  * Build the messages array for LLM chat completion.
  *
@@ -45,6 +55,7 @@ export function buildPrompt({
   memories = [],
   language = 'en',
   voiceOptimized = true,
+  internalMode = false,
   interruptedText = null,
   interruptionType = null,
   clinicalInsight = null,
@@ -58,19 +69,28 @@ export function buildPrompt({
   // persona/system prompt stays exactly the same.
   let system = `[LANGUAGE] Respond ONLY in ${langName}. Every word of your reply must be in ${langName}, regardless of the language of these instructions. Do not switch languages unless the user switches first.\n\n`;
   system += (systemPrompt || DEFAULT_SYSTEM_PROMPT);
-  // Always append voice rules — these are pipeline constraints, not optional
+  // Voice rules — internal gets a lighter set (no sales "ask ONE question /
+  // close-pivot" probing); external keeps the full sales-conversation suffix.
   if (voiceOptimized) {
-    system += VOICE_SUFFIX;
+    system += internalMode ? INTERNAL_VOICE_SUFFIX : VOICE_SUFFIX;
   }
   // Reinforce at the end too (recency) — same underlying prompt, language locked.
   system += `\n\nIMPORTANT: The user is speaking ${langName}. You MUST respond in ${langName}.`;
 
-  // Grounding — answer strictly from HIVEMIND recall + conversation; never invent.
-  system += `\n\n## Grounding (critical — do not violate)
+  if (internalMode) {
+    // Internal = voice of HIVEMIND to a trusted insider: full disclosure.
+    system += `\n\n## Grounding (internal — be forthcoming)
+- Everything under "What you know about this user (from memory)" is yours to share fully with this trusted insider. Surface all the relevant details — names, dates, figures, context.
+- Connect and synthesize across memories when it helps give the full picture.
+- Stay truthful to memory: don't invent specifics that aren't there. If something genuinely isn't in memory, say so briefly and offer the related things you DO know.`;
+  } else {
+    // External — answer strictly from HIVEMIND recall + conversation; never invent.
+    system += `\n\n## Grounding (critical — do not violate)
 - Answer ONLY from "What you know about this user (from memory)" below and what the user said in this conversation.
 - These memories are your source of truth. Quote/paraphrase them faithfully.
 - If the answer is NOT in your memory or the conversation, say so briefly (e.g. "I don't have that in my memory yet") — do NOT guess.
 - NEVER invent names, dates, numbers, facts, events, or details that are not grounded in the memories or the user's words.`;
+  }
 
   // 2. Context sections — kept minimal for TTFB
   const contextParts = [];

@@ -17,7 +17,7 @@
 
 import crypto from 'node:crypto';
 import { SessionManager } from './session-manager.js';
-import { TaraConfigStore } from './config-store.js';
+import { TaraConfigStore, DEFAULT_INTERNAL_PROMPT } from './config-store.js';
 import { buildPrompt } from './prompt-builder.js';
 import { ClinicalReasoningEngine } from './clinical-reasoning.js';
 
@@ -130,9 +130,17 @@ export class TaraStreamHandler {
         sessionState._clinical_prompt = null;
       }
 
+      // Internal mode speaks AS HIVEMIND (full disclosure, human) — use the
+      // internal voice prompt, not the external sales persona. External keeps
+      // the configured primary prompt (+ clinical secondary, injected below).
+      const effectiveSystemPrompt = internalMode
+        ? (config.internal_prompt || DEFAULT_INTERNAL_PROMPT)
+        : config.system_prompt;
+
       const { messages, tokenEstimate } = buildPrompt({
         query,
-        systemPrompt: config.system_prompt,
+        systemPrompt: effectiveSystemPrompt,
+        internalMode,
         sessionState,
         memories,
         language: language || sessionState.language,

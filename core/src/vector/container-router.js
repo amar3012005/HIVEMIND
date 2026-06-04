@@ -84,13 +84,14 @@ export async function resolveCollectionForOrg(orgId) {
   try {
     const { getPrismaClient } = await import('../db/prisma.js');
     const prisma = getPrismaClient();
+    // Select ONLY plan — container is fully derivable from it (enterprise →
+    // org_<id>, free → personal pool). Avoids depending on the vector_container
+    // column being present in the generated Prisma client (it can lag the DB).
     const org = await prisma.organization.findUnique({
       where: { id: orgId },
-      select: { plan: true, vectorContainer: true },
+      select: { plan: true },
     });
-    if (org?.vectorContainer) container = org.vectorContainer;
-    else if (org && isEnterprisePlan(org.plan)) container = orgContainerName(orgId);
-    else container = PERSONAL_COLLECTION;
+    container = (org && isEnterprisePlan(org.plan)) ? orgContainerName(orgId) : PERSONAL_COLLECTION;
   } catch (err) {
     logger.warn('resolveCollectionForOrg lookup failed; defaulting to personal pool', { orgId, error: err.message });
   }

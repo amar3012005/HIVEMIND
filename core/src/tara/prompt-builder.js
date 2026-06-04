@@ -49,17 +49,21 @@ export function buildPrompt({
   interruptionType = null,
   clinicalInsight = null,
 }) {
-  // 1. System prompt — always comes from config-store (Davinci AI prompt by default)
-  let system = systemPrompt || DEFAULT_SYSTEM_PROMPT;
+  // Language resolution (from selected language → STT code → session default).
+  const effectiveLang = sessionState?.language_code || language || sessionState?.language || 'en';
+  const langName = getLanguageName(effectiveLang) || 'English';
+
+  // 1. System prompt — config-store prompt (or default), with a TOP-LEVEL language
+  // directive prepended so output language is the dominant rule while the underlying
+  // persona/system prompt stays exactly the same.
+  let system = `[LANGUAGE] Respond ONLY in ${langName}. Every word of your reply must be in ${langName}, regardless of the language of these instructions. Do not switch languages unless the user switches first.\n\n`;
+  system += (systemPrompt || DEFAULT_SYSTEM_PROMPT);
   // Always append voice rules — these are pipeline constraints, not optional
   if (voiceOptimized) {
     system += VOICE_SUFFIX;
   }
-
-  // Language: always inject detected language — overrides any "default: German" in system prompt
-  const effectiveLang = sessionState?.language_code || language || sessionState?.language || 'en';
-  const langName = getLanguageName(effectiveLang) || 'English';
-  system += `\n\nIMPORTANT: The user is speaking ${langName}. You MUST respond in ${langName}. Do not switch languages unless the user switches first.`;
+  // Reinforce at the end too (recency) — same underlying prompt, language locked.
+  system += `\n\nIMPORTANT: The user is speaking ${langName}. You MUST respond in ${langName}.`;
 
   // Grounding — answer strictly from HIVEMIND recall + conversation; never invent.
   system += `\n\n## Grounding (critical — do not violate)

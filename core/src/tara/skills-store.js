@@ -118,7 +118,7 @@ export class TaraSkillsStore {
       content: JSON.stringify(record),
       title: `TARA Skill — ${record.name} (${record.kind})`,
       tags: ['tara-skill', `kind:${record.kind}`, `skill:${id}`, ...(record.builtin ? ['skill-builtin'] : [])],
-      memory_type: 'tara_skill',
+      memory_type: 'fact',  // MemoryType enum — skills are distinguished by the 'tara-skill' tag, not memory_type
       document_date: now,
       metadata: { skill_id: id, kind: record.kind, builtin: record.builtin },
     });

@@ -2,6 +2,15 @@ import { computeTokenSimilarity } from './conflict-detector.js';
 import { getQdrantClient } from '../vector/qdrant-client.js';
 import { expandTemporalQuery } from '../search/time-aware-expander.js';
 
+// TARA voice activity (turn/insight/call-log/session) is isolated from recall.
+// Matches by project prefix `tara/` or any `tara-*` tag.
+function isTaraActivity(memory) {
+  if (!memory) return false;
+  if ((memory.project || '').startsWith('tara/')) return true;
+  const t = memory.tags || [];
+  return t.some((x) => typeof x === 'string' && (x === 'tara-turn' || x === 'tara-insight' || x === 'tara-call-log' || x === 'tara-session'));
+}
+
 function scopeChain(ast = {}) {
   if (Array.isArray(ast.scopeChain)) return ast.scopeChain;
   if (typeof ast.scopeChain === 'string' && ast.scopeChain.trim()) return [ast.scopeChain];
@@ -967,6 +976,9 @@ export async function recallPersistedMemories(store, {
 
   const filteredLexical = lexicalCandidates.filter(memory => {
     const memTags = memory.tags || [];
+    // Exclude TARA voice activity (turns/insights/call-logs/session state) from
+    // recall — isolated noise, surfaced only via the /tara Call History tab.
+    if (isTaraActivity(memory)) return false;
     // Exclude benchmark data from production recall when no specific project is set
     if (!project && memTags.includes('longmemeval')) return false;
     if (!isMemoryInDateRange(memory, effectiveDateRange)) return false;
@@ -1012,7 +1024,9 @@ export async function recallPersistedMemories(store, {
     is_latest: effectiveIsLatest,
     access_context,
     scope_filter,
-  });
+  })
+    // Drop old TARA turn/insight vectors still living in Qdrant from past calls.
+    .then((cands) => cands.filter((c) => !isTaraActivity(c?.memory)));
   const relationships = await store.listRelationships({ user_id, org_id, project, limit: 1000 });
   const relationshipCounts = buildRelationshipIndex(relationships);
   const contradictedIds    = buildContradictedIndex(relationships);

@@ -454,6 +454,11 @@ export class PrismaGraphStore {
     const hiddenTags = [];
     if (!callerWantsAudit) hiddenTags.push('internal-audit');
     if (!callerWantsRoomDecisions) hiddenTags.push('room-decision', 'hyper-rooms');
+    // TARA voice activity: hide per-turn/insight/session rows from the Memories
+    // list. The single per-call `tara-call-log` summary stays visible. Caller
+    // opts in by passing any tara-* tag.
+    const callerWantsTara = Array.isArray(tags) && tags.some((t) => typeof t === 'string' && t.startsWith('tara-'));
+    if (!callerWantsTara) hiddenTags.push('tara-turn', 'tara-insight', 'tara-session');
     const auditExclusion = hiddenTags.length
       ? { NOT: { tags: { hasSome: hiddenTags } } }
       : {};

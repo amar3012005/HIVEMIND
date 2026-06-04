@@ -499,66 +499,17 @@ export class TaraStreamHandler {
       console.log(`[tara/session] Clinical reasoning pending for session ${sessionId.slice(0, 12)}`);
     }
 
-    // 2. Save this turn as a graph memory (visible in MemoryGraph as purple node)
-    try {
-      const turnId = crypto.randomUUID();
-      const turnContent = `User: ${userSummary}\nAssistant: ${assistantSummary}`;
+    // NOTE: Per-turn + per-insight graph memories are intentionally NOT written.
+    // The full conversation + insights live in the dedicated Postgres tables
+    // (tara_calls / tara_turns / tara_insights, written by the AaaS orchestrator)
+    // and surface in the /tara Call History tab + a single per-call "call log"
+    // summary memory (created at /api/tara/calls/end). Writing one memory per
+    // turn + insight polluted recall, Qdrant, and the memory graph with noise.
+    this._trackMemoryOperation(sessionId, 'saved');
 
-      await this.memoryStore.createMemory({
-        id: turnId,
-        user_id: userId,
-        org_id: orgId,
-        project: `tara/${tenantId || 'default'}`,
-        content: turnContent,
-        title: `TARA Turn ${turnNumber} — ${sessionId.slice(0, 12)}`,
-        tags: [
-          'tara-turn', `sid:${sessionId}`, `turn:${turnNumber}`,
-          `lang:${sessionState.language_code || 'en'}`,
-          `in:${mainUsage?.prompt_tokens || 0}`,
-          `out:${mainUsage?.completion_tokens || 0}`,
-          `tokens:${mainUsage?.total_tokens || 0}`,
-        ],
-        memory_type: 'event',
-        document_date: new Date().toISOString(),
-        metadata: {
-          session_id: sessionId,
-          turn_number: turnNumber,
-          tenant_id: tenantId,
-          node_color: 'purple',
-          usage: mainUsage || null,
-        },
-      });
-
-      // Track successful save
-      this._trackMemoryOperation(sessionId, 'saved');
-
-      // 3. Chain turns: link this turn to the previous TURN (not insight)
-      if (turnNumber > 1) {
-        const { memories: prevTurns } = await this.memoryStore.listMemories({
-          user_id: userId,
-          org_id: orgId,
-          tags: ['tara-turn', `sid:${sessionId}`, `turn:${turnNumber - 1}`],
-          limit: 1,
-        });
-
-        if (prevTurns?.length > 0) {
-          await this.memoryStore.createRelationship({
-            id: crypto.randomUUID(),
-            from_id: turnId,
-            to_id: prevTurns[0].id,
-            type: 'Extends',
-            confidence: 1.0,
-            metadata: { source: 'tara_conversation_chain', session_id: sessionId },
-            created_by: 'tara',
-          }).catch(() => {});
-        }
-      }
-    } catch (err) {
-      console.warn('[tara/stream] Turn memory save failed:', err.message);
-      // Never fail the turn because of graph persistence
-    }
-
-    // 3. Run clinical reasoning (async background — never blocks)
+    // 2. Run clinical reasoning (async background — never blocks). Result is
+    // kept ONLY in session state (clinical_insights) to steer the NEXT turn —
+    // it is NOT persisted as a graph memory.
     //    Passes FULL turn history + ALL past insights for accumulation
     if (sessionState._clinical_prompt) {
       try {
@@ -606,90 +557,10 @@ export class TaraStreamHandler {
           // Update cache so next turn sees these insights immediately
           this.sessionManager._cache.set(sessionId, { state: { ...sessionState }, updatedAt: Date.now() });
           const duration = Date.now() - (sessionState._clinical_started_at || 0);
-          console.log(`[tara/clinical] Insights ready in ${duration}ms for session ${sessionId.slice(0, 12)}`);
-
-          // 4. Save insight as a visible memory (orange diamond in MemoryGraph)
-          try {
-            const insightId = crypto.randomUUID();
-            const insightLines = [];
-            if (insights.directive) insightLines.push(`Directive: ${insights.directive}`);
-            if (insights.hypotheses?.length) {
-              const hyps = insights.hypotheses.map(h => typeof h === 'string' ? h : `${h.text} (${Math.round((h.probability||0)*100)}%, ${h.status || 'active'})`);
-              insightLines.push(`Hypotheses: ${hyps.join('; ')}`);
-            }
-            if (insights.user_type) insightLines.push(`User type: ${insights.user_type}`);
-            if (insights.strategy) insightLines.push(`Strategy: ${insights.strategy}`);
-            if (insights.reasoning_summary) insightLines.push(`Reasoning: ${insights.reasoning_summary}`);
-            if (insights.psychological_notes) insightLines.push(`Notes: ${insights.psychological_notes}`);
-            if (insights.red_flags?.length) insightLines.push(`Red flags: ${insights.red_flags.join('; ')}`);
-
-            await this.memoryStore.createMemory({
-              id: insightId,
-              user_id: userId,
-              org_id: orgId,
-              project: `tara/${tenantId || 'default'}`,
-              content: insightLines.join('\n'),
-              title: `Clinical Insight — Turn ${turnNumber} — ${sessionId.slice(0, 12)}`,
-              tags: [
-                'tara-insight', `sid:${sessionId}`, `turn:${turnNumber}`,
-                `clinical-in:${insights._usage?.prompt_tokens || 0}`,
-                `clinical-out:${insights._usage?.completion_tokens || 0}`,
-                `clinical-tokens:${insights._usage?.total_tokens || 0}`,
-                `clinical-model:${insights._model || 'unknown'}`,
-              ],
-              memory_type: 'fact',
-              document_date: new Date().toISOString(),
-              metadata: {
-                session_id: sessionId,
-                turn_number: turnNumber,
-                confidence: insights.confidence,
-                strategy: insights.strategy,
-                node_color: 'orange',
-                clinical_usage: insights._usage || null,
-                clinical_model: insights._model || null,
-              },
-            });
-
-            // Link insight to the turn memory it analyzed
-            const { memories: turnMems } = await this.memoryStore.listMemories({
-              user_id: userId, org_id: orgId,
-              tags: ['tara-turn', `sid:${sessionId}`, `turn:${turnNumber}`],
-              limit: 1,
-            });
-            if (turnMems?.length > 0) {
-              await this.memoryStore.createRelationship({
-                id: crypto.randomUUID(),
-                from_id: insightId,
-                to_id: turnMems[0].id,
-                type: 'Derives',
-                confidence: insights.confidence || 0.7,
-                metadata: { source: 'tara_clinical_reasoning', session_id: sessionId },
-                created_by: 'tara-clinical',
-              }).catch(() => {});
-            }
-
-            // Chain insight to previous insight (insight → insight chain in graph)
-            if (turnNumber > 1) {
-              const { memories: prevInsights } = await this.memoryStore.listMemories({
-                user_id: userId, org_id: orgId,
-                tags: ['tara-insight', `sid:${sessionId}`, `turn:${turnNumber - 1}`],
-                limit: 1,
-              });
-              if (prevInsights?.length > 0) {
-                await this.memoryStore.createRelationship({
-                  id: crypto.randomUUID(),
-                  from_id: insightId,
-                  to_id: prevInsights[0].id,
-                  type: 'Extends',
-                  confidence: 1.0,
-                  metadata: { source: 'tara_clinical_chain', session_id: sessionId },
-                  created_by: 'tara-clinical',
-                }).catch(() => {});
-              }
-            }
-          } catch (err) {
-            console.warn('[tara/clinical] Insight memory save failed:', err.message);
-          }
+          console.log(`[tara/clinical] Insights ready in ${duration}ms for session ${sessionId.slice(0, 12)} — strategy=${insights.strategy || '?'} user_type=${insights.user_type || '?'}`);
+          // Insight is NOT persisted as a graph memory (noise). It lives in
+          // session state to steer the next turn; the per-turn psychology +
+          // strategy are captured in the call-log summary at call end.
         }
       } catch (err) {
         console.warn('[tara/clinical] Background analysis failed:', err.message);

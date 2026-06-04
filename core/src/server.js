@@ -2120,7 +2120,7 @@ async function buildProfileSummary({ userId, orgId, project = null }) {
     // Match /api/memories default — exclude all hidden-child tag families so
     // Overview counts reconcile with the list view (was 1012 vs visible 346).
     // Mirrors HIDDEN_CHILD_TAGS in prisma-graph-store.listMemories.
-    const HIDDEN_CHILD_TAGS = ['extracted-fact', 'tara-turn', 'tara-insight'];
+    const HIDDEN_CHILD_TAGS = ['extracted-fact', 'tara-turn', 'tara-insight', 'tara-session'];
     const where = {
       userId,
       orgId,
@@ -5358,6 +5358,32 @@ exit \$RC
                   const j = await r.json();
                   let parsed; try { parsed = JSON.parse(j.choices[0].message.content); } catch { parsed = {}; }
                   await prisma.taraInsight.upsert({ where: { callId: call.id }, update: { summary: parsed.summary || null, data: parsed }, create: { callId: call.id, orgId: tOrg, userId: tUser, summary: parsed.summary || null, data: parsed } });
+
+                  // ONE call-log summary memory per call (replaces the old per-turn
+                  // + per-insight memory spam). Postgres-only via store.createMemory
+                  // (NO Qdrant embed, NO operator routing). Tagged tara-call-log +
+                  // project tara/* → excluded from recall + memory graph; shows in
+                  // the Memories list as a single collapsed entry per call.
+                  if (persistentMemoryStore && parsed.summary) {
+                    try {
+                      const kp = Array.isArray(parsed.key_points) && parsed.key_points.length
+                        ? `\n\nKey points:\n- ${parsed.key_points.slice(0, 8).join('\n- ')}` : '';
+                      const tp = Array.isArray(parsed.topics) && parsed.topics.length
+                        ? `\n\nTopics: ${parsed.topics.slice(0, 12).join(', ')}` : '';
+                      await persistentMemoryStore.createMemory({
+                        id: crypto.randomUUID(),
+                        user_id: tUser,
+                        org_id: tOrg,
+                        project: `tara/${call.tenantId || 'default'}`,
+                        content: `TARA call (${call.mode || 'external'}, ${turns.length} turns): ${parsed.summary}${kp}${tp}`,
+                        title: `TARA Call Log — ${new Date(call.startedAt).toISOString().slice(0, 10)} — ${String(body.session_id).slice(0, 16)}`,
+                        tags: ['tara-call-log', `sid:${body.session_id}`, `mode:${call.mode || 'external'}`],
+                        memory_type: 'event',
+                        document_date: new Date().toISOString(),
+                        metadata: { session_id: body.session_id, call_id: call.id, turns: turns.length, sentiment: parsed.sentiment || null, node_color: 'teal' },
+                      });
+                    } catch (e3) { console.warn('[tara/call-log] memory save failed:', e3.message); }
+                  }
                 }
               } catch (e2) { console.warn('[tara/insights]', e2.message); }
             }
@@ -16237,7 +16263,8 @@ exit \$RC
               const includeChildren =
                 url.searchParams.get('include_children') === 'true';
               // Mirrors HIDDEN_CHILD_TAGS in prisma-graph-store.listMemories.
-              const HIDDEN_CHILD_TAGS_GRAPH = ['extracted-fact', 'tara-turn', 'tara-insight'];
+              // TARA voice activity is fully skipped in the graph for now.
+              const HIDDEN_CHILD_TAGS_GRAPH = ['extracted-fact', 'tara-turn', 'tara-insight', 'tara-call-log', 'tara-session'];
               // Resolve the project filter to match the formal projectId FK +
               // memory_projects join, NOT just the legacy `project` string —
               // uploads set projectId (string stays null), so a string-only

@@ -30,6 +30,11 @@ const HOP1_DEFAULT_LIMIT       = 12;
 const HOP2_DOC_LIMIT           = 8;
 const HOP2_UNFILTERED_LIMIT    = 6;
 const HOP3_LIVE_LIMIT          = 5;
+// Deliver-narrow: retrieve stays wide (HOP1 fetches up to 50, RRF/MMR-ranked),
+// but only the top-N ranked memories go to the answer model. 1024 bge-m3 +
+// algorithmic rerank shows a clean relevance cliff after ~5 (junk/redundancy
+// beyond), so default 5. Env-tunable (no redeploy to widen for summarize).
+const RECALL_DELIVER_LIMIT     = Number(process.env.RECALL_DELIVER_LIMIT || 5);
 
 const HOP1_TIMEOUT_MS          = 4000;
 const HOP2_TIMEOUT_MS          = 1500;
@@ -713,7 +718,7 @@ export class RecallRouter {
     if (hop3.items.length > 0) tiersFired.push('live');
 
     return {
-      memories: rankedMemories.slice(0, 15).map((m) => ({
+      memories: rankedMemories.slice(0, RECALL_DELIVER_LIMIT).map((m) => ({
         id: m.id,
         title: m.title,
         content: typeof m.content === 'string' ? m.content.slice(0, 400) : '',

@@ -80,6 +80,11 @@ const BRIDGE_TOP_K                = Number(process.env.BRIDGE_TOP_K             
 // Cosine range for bridge eligibility: clusters must be related but not identical
 const BRIDGE_SIM_LOW              = Number(process.env.BRIDGE_SIM_LOW              || 0.55);
 const BRIDGE_SIM_HIGH             = Number(process.env.BRIDGE_SIM_HIGH             || 0.85);
+// A2 anti-hallucination grounding: a bridge must reflect a REAL connection — the
+// two clusters must share ≥ this many actual entities (entity:/person: tags),
+// not just centroid cosine (which yields tautological/coincidental bridges like
+// "US contacts share country:usa with US accounts"). 0 disables the gate.
+const BRIDGE_GROUND_MIN          = Number(process.env.BRIDGE_GROUND_MIN          || 1);
 // Drop synthesis output if cosine(output, any source) > this (restatement guard)
 const RESTATEMENT_THRESHOLD       = Number(process.env.RESTATEMENT_THRESHOLD       || 0.92);
 const COOLDOWN_HOURS              = Number(process.env.SYNTHESIS_COOLDOWN_HOURS    || 6);
@@ -208,6 +213,27 @@ function tokenCosine(textA = '', textB = '') {
 // ─── Centroid text (bag of all content in a cluster) ─────────────────────────
 function clusterCentroidText(members) {
   return members.map(m => `${m.title || ''} ${m.content || ''}`).join(' ').slice(0, 8000);
+}
+
+// ─── A2 bridge grounding: real shared entities between two clusters ───────────
+// Extract entity:/person: tags from a cluster's members.
+function entityTagsOf(members) {
+  const s = new Set();
+  for (const m of members || []) {
+    for (const t of (m.tags || [])) {
+      const tl = String(t).toLowerCase();
+      if (tl.startsWith('entity:') || tl.startsWith('person:')) s.add(tl);
+    }
+  }
+  return s;
+}
+// Count entities present in BOTH clusters — the real connective tissue of a bridge.
+function sharedEntityKeys(aMembers, bMembers) {
+  const A = entityTagsOf(aMembers);
+  const B = entityTagsOf(bMembers);
+  const shared = [];
+  for (const e of A) if (B.has(e)) shared.push(e);
+  return shared;
 }
 
 // ─── Cluster hash ─────────────────────────────────────────────────────────────
@@ -627,7 +653,14 @@ export class CognitionLoop {
         const sim = tokenCosine(a.centroid, b.centroid);
         if (sim < BRIDGE_SIM_LOW || sim > BRIDGE_SIM_HIGH) continue;
 
-        bridgeCandidates.push({ a, b, sim });
+        // A2 grounding gate: cosine alone produces coincidental/tautological
+        // bridges. Require the two clusters to share ≥ BRIDGE_GROUND_MIN real
+        // entities (entity:/person:) — that shared entity IS the actual
+        // enterprise connection. No shared entity → not a real bridge → skip.
+        const shared = sharedEntityKeys(a.members, b.members);
+        if (BRIDGE_GROUND_MIN > 0 && shared.length < BRIDGE_GROUND_MIN) continue;
+
+        bridgeCandidates.push({ a, b, sim, sharedEntities: shared });
       }
     }
 
@@ -639,7 +672,7 @@ export class CognitionLoop {
 
     const topBridges = bridgeCandidates.slice(0, BRIDGE_TOP_K);
 
-    for (const { a, b } of topBridges) {
+    for (const { a, b, sharedEntities } of topBridges) {
       const pairKey = [a.tag, b.tag].sort().join('||');
       const hash    = clusterHash(`bridge:${pairKey}`);
 
@@ -770,6 +803,8 @@ export class CognitionLoop {
             tag_b: b.tag,
             evidence_a: result.evidence_a || [],
             evidence_b: result.evidence_b || [],
+            // A2 provenance: the real entities this bridge is grounded on
+            grounded_on_entities: sharedEntities || [],
           },
         });
         if (created) {

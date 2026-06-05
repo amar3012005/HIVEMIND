@@ -921,38 +921,52 @@ export class ResidentRunManager {
         } catch {}
       }
 
-      // ── 2. Feynman (chained off Faraday) ───────────────────────────
-      const feRun = await this.runAgent('feynman', { scope, project, region, dry_run: true, run_id: fFinal?.run_id }, ctx);
-      const feFinal = await this._waitForCompletion(feRun.run_id, 120_000);
-      summary.feynman = {
-        run_id: feFinal?.run_id,
-        status: feFinal?.status,
-        observations_count: feFinal?.observations_count || 0,
-        hypotheses: (feFinal?.result?.observations || []).slice(0, 5).map((o) => {
-          return o?.content?.hypothesis
-            || o?.content?.summary
-            || o?.content?.title
-            || `${o?.kind}`.slice(0, 100);
-        }).filter(Boolean),
-      };
+      // ── SIGNAL GATE (Phase 0): Feynman + Turing are the LLM-heavy agents.
+      // Running them when Faraday surfaced nothing burns the daily token budget
+      // on empty work → exhaustion → every later cycle skips. Only fire the
+      // downstream reasoning chain when Faraday emitted real observations.
+      const faradayObs = summary.faraday?.observations_count || 0;
+      const minSignal = Number(process.env.GOV_MIN_FARADAY_SIGNAL || 1);
+      let feFinal = null;
+      let tFinal = null;
 
-      // ── 3. Turing (chained off Feynman) ────────────────────────────
-      const tRun = await this.runAgent('turing', { scope, project, region, dry_run: true, run_id: feFinal?.run_id, enabled_cognitive_tools: enabledCognitiveTools }, ctx);
-      const tFinal = await this._waitForCompletion(tRun.run_id, 120_000);
-      summary.turing = {
-        run_id: tFinal?.run_id,
-        status: tFinal?.status,
-        observations_count: tFinal?.observations_count || 0,
-        verifications: (tFinal?.result?.observations || [])
-          .filter((o) => o?.kind === 'verification')
-          .slice(0, 5)
-          .map((o) => {
-            return o?.content?.summary
-              || o?.content?.verified_hypothesis
+      if (faradayObs >= minSignal) {
+        // ── 2. Feynman (chained off Faraday) ───────────────────────────
+        const feRun = await this.runAgent('feynman', { scope, project, region, dry_run: true, run_id: fFinal?.run_id }, ctx);
+        feFinal = await this._waitForCompletion(feRun.run_id, 120_000);
+        summary.feynman = {
+          run_id: feFinal?.run_id,
+          status: feFinal?.status,
+          observations_count: feFinal?.observations_count || 0,
+          hypotheses: (feFinal?.result?.observations || []).slice(0, 5).map((o) => {
+            return o?.content?.hypothesis
+              || o?.content?.summary
               || o?.content?.title
-              || 'verification';
+              || `${o?.kind}`.slice(0, 100);
           }).filter(Boolean),
-      };
+        };
+
+        // ── 3. Turing (chained off Feynman) ────────────────────────────
+        const tRun = await this.runAgent('turing', { scope, project, region, dry_run: true, run_id: feFinal?.run_id, enabled_cognitive_tools: enabledCognitiveTools }, ctx);
+        tFinal = await this._waitForCompletion(tRun.run_id, 120_000);
+        summary.turing = {
+          run_id: tFinal?.run_id,
+          status: tFinal?.status,
+          observations_count: tFinal?.observations_count || 0,
+          verifications: (tFinal?.result?.observations || [])
+            .filter((o) => o?.kind === 'verification')
+            .slice(0, 5)
+            .map((o) => {
+              return o?.content?.summary
+                || o?.content?.verified_hypothesis
+                || o?.content?.title
+                || 'verification';
+            }).filter(Boolean),
+        };
+      } else {
+        summary.skipped_downstream = 'no_faraday_signal';
+        this.logger?.log?.(`[gov-cycle] org=${orgId?.slice(0, 8)} Faraday signal=${faradayObs} < ${minSignal} — skipping Feynman/Turing (saves budget)`);
+      }
 
       // ── 4. Persist all queued proposals from each run ──────────────
       if (this.prisma) {

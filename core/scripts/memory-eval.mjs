@@ -176,4 +176,8 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error(e); process.exit(1); });
+// CLI guard: only run main() when invoked directly, NOT when imported for evalOrg().
+const _invokedDirectly = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
+if (_invokedDirectly) {
+  main().catch((e) => { console.error(e); process.exit(1); });
+}

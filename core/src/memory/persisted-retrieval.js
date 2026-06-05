@@ -1,5 +1,6 @@
 import { computeTokenSimilarity } from './conflict-detector.js';
 import { getQdrantClient } from '../vector/qdrant-client.js';
+import { getRetrievalConfig } from './retrieval-config.js';
 import { expandTemporalQuery } from '../search/time-aware-expander.js';
 
 // TARA voice activity (turn/insight/call-log/session) is isolated from recall.
@@ -938,7 +939,12 @@ export async function recallPersistedMemories(store, {
   const candidatePoolSize = temporalComparison
     ? Math.max(max_memories * 8, 40)
     : Math.max(max_memories * 4, 20);
-  const vectorScoreThreshold = temporalComparison ? 0.15 : 0.20; // Lowered from 0.18/0.25 for better recall
+  // Phase 2 (B2): non-temporal score threshold comes from the per-org
+  // RetrievalConfig (the self-evolution loop's primary Recall@K knob), falling
+  // back to 0.20. Temporal queries keep the looser 0.15 floor for recall.
+  let _cfgThreshold = 0.20;
+  try { _cfgThreshold = (await getRetrievalConfig(org_id))?.score_threshold ?? 0.20; } catch { /* default */ }
+  const vectorScoreThreshold = temporalComparison ? 0.15 : _cfgThreshold;
 
   // is_latest: undefined = default true, false = include superseded versions
   const effectiveIsLatest = is_latest !== undefined ? is_latest : true;

@@ -115,6 +115,12 @@ ${pastInsights.length > 0
   : 'This is your first analysis of this conversation. Establish initial hypotheses and user profile.'}
 
 What is the ONE thing TARA should do next? Be specific and natural.
+
+ALWAYS include these JSON fields (in addition to any others):
+- "user_type": the caller's behavioral profile — one of Director | Socializer | Thinker | Relater
+- "directive": the single concrete next move TARA should make, imperative (e.g. "Acknowledge the budget worry, then propose a phased pilot")
+- "strategy": probe_deeper | pivot | empathize | close | educate | reframe
+
 Respond with valid JSON only.`;
 
     try {

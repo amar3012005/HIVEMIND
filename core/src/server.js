@@ -16058,7 +16058,10 @@ exit \$RC
               const memWhere = {
                 userId, orgId, deletedAt: null, isLatest: true,
                 ...(memTypeFilter ? { memoryType: memTypeFilter } : {}),
-                ...(includeChildren ? {} : { NOT: { tags: { hasSome: ['extracted-fact', 'tara-turn', 'tara-insight', 'tara-call-log', 'tara-session'] } } }),
+                ...(includeChildren ? {} : { AND: [
+                  { NOT: { tags: { hasSome: ['extracted-fact', 'tara-turn', 'tara-insight', 'tara-call-log', 'tara-session'] } } },
+                  { NOT: { project: { startsWith: 'tara/' } } },  // skip ALL TARA activity (turns/config/skills/call-logs)
+                ] }),
                 ...(projScope ? { OR: [{ projectId: projScope.id }, { project: { in: [projScope.slug, projScope.name].filter(Boolean) } }] } : {}),
               };
               const memories = await prisma.memory.findMany({

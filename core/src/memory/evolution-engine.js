@@ -17,14 +17,12 @@
  */
 
 import crypto from 'crypto';
-import { chatCompletion } from '../knowledge/enterprise/litellm-client.js';
 import { getPrismaClient } from '../db/prisma.js';
 import {
-  getRetrievalConfig, applyRetrievalConfigDelta, clampTunable, TUNABLE_BOUNDS,
+  getRetrievalConfig, applyRetrievalConfigDelta, clampTunable,
 } from './retrieval-config.js';
 
 const ENABLED       = process.env.EVOLUTION_ENABLED === 'true';
-const WRITER_MODEL  = process.env.COGNITION_WRITER_MODEL || 'llama-3.1-8b-instant';
 const MIN_OUTCOMES  = Number(process.env.EVOLUTION_MIN_OUTCOMES || 20);   // need signal
 const P95_TOLERANCE = Number(process.env.EVOLUTION_P95_TOLERANCE || 1.5); // allow ≤1.5× p95
 const EVAL_N        = Number(process.env.EVOLUTION_EVAL_N || 15);
@@ -59,45 +57,37 @@ async function diagnose(prisma, orgId) {
   return { signal: false, reason: 'healthy', emptyRate, lowRate, stats: s };
 }
 
-// ── Feynman role: propose ONE config delta (1 cheap LLM call) ───────────────
-async function propose(diagnosis, currentCfg) {
-  const sys = 'You tune a vector-retrieval config to fix a diagnosed recall problem. '
-    + 'Output STRICT JSON: one small delta object with 1-2 keys from the allowed set. No prose.';
-  const user = JSON.stringify({
-    diagnosis: { root: diagnosis.root, empty_rate: diagnosis.emptyRate, low_relevance_rate: diagnosis.lowRate },
-    current: currentCfg,
-    allowed_keys_and_bounds: TUNABLE_BOUNDS,
-    guidance: {
-      empty_recalls: 'too strict — consider LOWER score_threshold or HIGHER hnsw_ef',
-      low_relevance: 'noisy — consider HIGHER score_threshold or HIGHER importance_weight',
-    },
-    output_format: '{"score_threshold": 0.12}  // 1-2 keys only',
-  });
-  let raw;
-  try {
-    raw = await chatCompletion({
-      model: WRITER_MODEL,
-      messages: [{ role: 'system', content: sys }, { role: 'user', content: user }],
-      max_tokens: 200, temperature: 0.1, timeout: 20000,
-    });
-  } catch (e) {
-    return { delta: null, reason: `propose llm failed: ${e.message}` };
-  }
-  const text = typeof raw === 'string' ? raw : (raw?.content || raw?.choices?.[0]?.message?.content || '');
-  let parsed;
-  try {
-    const m = text.match(/\{[\s\S]*\}/);
-    parsed = m ? JSON.parse(m[0]) : null;
-  } catch { parsed = null; }
-  if (!parsed || typeof parsed !== 'object') return { delta: null, reason: 'unparseable proposal' };
-  // Keep only tunable keys, clamped.
+// ── Feynman role: propose ONE config delta ─────────────────────────────────
+// Rule-based + deterministic (0 tokens): a diagnosed root has an obvious knob
+// step. The empirical replay-gate (Turing) validates it — so the proposal only
+// needs to be a sensible bounded step, not a reasoned essay. This is cheaper
+// AND more reliable than depending on a small model to emit strict JSON.
+// EVOLUTION_STEP controls step size.
+const STEP_THRESH = Number(process.env.EVOLUTION_STEP_THRESHOLD || 0.03);
+const STEP_EF     = Number(process.env.EVOLUTION_STEP_EF || 64);
+const STEP_WEIGHT = Number(process.env.EVOLUTION_STEP_WEIGHT || 0.03);
+
+function tryDelta(delta, key, value, currentCfg) {
+  const c = clampTunable(key, value);
+  if (c != null && c !== currentCfg[key]) { delta[key] = c; return true; }
+  return false;
+}
+
+function propose(diagnosis, currentCfg) {
   const delta = {};
-  for (const [k, v] of Object.entries(parsed)) {
-    const c = clampTunable(k, v);
-    if (c != null && c !== currentCfg[k]) delta[k] = c;
+  if (diagnosis.root === 'empty_recalls') {
+    // Too strict / too narrow → loosen threshold, else widen ANN search.
+    if (!tryDelta(delta, 'score_threshold', currentCfg.score_threshold - STEP_THRESH, currentCfg)) {
+      tryDelta(delta, 'hnsw_ef', currentCfg.hnsw_ef + STEP_EF, currentCfg);
+    }
+  } else if (diagnosis.root === 'low_relevance') {
+    // Noisy top hits → tighten threshold, else lean on salience.
+    if (!tryDelta(delta, 'score_threshold', currentCfg.score_threshold + STEP_THRESH, currentCfg)) {
+      tryDelta(delta, 'importance_weight', currentCfg.importance_weight + STEP_WEIGHT, currentCfg);
+    }
   }
-  if (!Object.keys(delta).length) return { delta: null, reason: 'no actionable delta' };
-  return { delta, reason: 'ok' };
+  if (!Object.keys(delta).length) return { delta: null, reason: 'no actionable delta (knob at bound)' };
+  return { delta, reason: 'rule' };
 }
 
 /**

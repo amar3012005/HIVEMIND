@@ -85,7 +85,9 @@ Output VALID JSON ONLY:
   "confidence": 0.0,
   "missing_info": ["..."],
   "suggested_question": "Natural question in user's language",
+  "user_type": "Director|Socializer|Thinker|Relater",
   "psychological_notes": "style + emotion + tension",
+  "directive": "the single next move TARA should make, imperative (e.g. 'Acknowledge the budget worry, then propose a phased pilot')",
   "red_flags": [],
   "strategy": "probe_deeper|pivot|empathize|close|educate|reframe",
   "reasoning": "brief chain-of-thought"

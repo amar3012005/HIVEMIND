@@ -100,15 +100,18 @@ export class TaraStreamHandler {
 
       const memories = recallResult;
 
-      // Language priority: current text > session history > orchestrator hint
+      // Language: the language selected in the voice config (params.language —
+      // sent on every turn by the orchestrator) is AUTHORITATIVE and sticky for
+      // the whole call. Honor an explicit mid-call switch ONLY when detection
+      // confidently finds a DIFFERENT language; ambiguous/short turns ("ok",
+      // "ja") keep the selected language so the conversation never drifts.
+      if (language) sessionState.selected_language = language;
       const detectedLang = this._detectLanguage(query);
-      if (detectedLang) {
-        sessionState.language_code = detectedLang;
-      } else if (sessionState.language_code) {
-        // Ambiguous text ("ja", "ok") — keep previous session language
-      } else if (sttLanguageCode) {
-        // Last resort: orchestrator hint (often wrong)
-        sessionState.language_code = sttLanguageCode;
+      if (detectedLang && detectedLang !== sessionState.selected_language) {
+        sessionState.language_code = detectedLang;            // user switched languages mid-call
+      } else {
+        sessionState.language_code =
+          sessionState.selected_language || detectedLang || sessionState.language_code || sttLanguageCode || 'en';
       }
 
       const fetchMs = Date.now() - startMs;

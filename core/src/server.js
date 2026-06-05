@@ -16058,7 +16058,7 @@ exit \$RC
               const memWhere = {
                 userId, orgId, deletedAt: null, isLatest: true,
                 ...(memTypeFilter ? { memoryType: memTypeFilter } : {}),
-                ...(includeChildren ? {} : { NOT: { tags: { has: 'extracted-fact' } } }),
+                ...(includeChildren ? {} : { NOT: { tags: { hasSome: ['extracted-fact', 'tara-turn', 'tara-insight', 'tara-call-log', 'tara-session'] } } }),
                 ...(projScope ? { OR: [{ projectId: projScope.id }, { project: { in: [projScope.slug, projScope.name].filter(Boolean) } }] } : {}),
               };
               const memories = await prisma.memory.findMany({

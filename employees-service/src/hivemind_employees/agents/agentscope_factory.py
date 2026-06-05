@@ -123,10 +123,15 @@ def _resolve_model(employee_row: dict, llm_api_key: Optional[str] = None) -> Cha
     # max_retries gives the OpenAI SDK its built-in exponential backoff with
     # jitter on 429 (Groq rate limits) and 5xx — without it a single 429
     # silently drops a swarm speaker. timeout bounds each call.
+    # reasoning_effort="low": gpt-oss on Groq otherwise burns large reasoning
+    # token budgets ("medium" default) → each swarm speaker takes seconds and a
+    # full R1-R5 turn stacks ~15 calls → very slow first chat. Low effort keeps
+    # the grounded answer quality while cutting per-call latency sharply.
     return OpenAIChatModel(
         model_name=routed_model,
         api_key=api_key,
         stream=False,
+        reasoning_effort="low",
         client_kwargs={"base_url": base_url, "max_retries": 3, "timeout": 60.0},
     )
 

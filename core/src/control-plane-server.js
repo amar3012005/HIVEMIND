@@ -112,6 +112,61 @@ const CONFIG = {
 };
 
 const prisma = getPrismaClient();
+
+// ── Hyper-room stuck-turn sweeper ─────────────────────────────────────────
+// The room-turn kick to the employees sidecar is fire-and-forget and can be
+// dropped (the sidecar holds the connection open for the whole synchronous
+// turn). This sweeper re-kicks any turn still 'live' with 0 lines for ~2 ticks
+// (~30s), at most ONCE, so a dropped kick self-heals instead of leaving the FE
+// spinning forever. Real in-flight turns emit a line within seconds, so they
+// drop out of the watch set before the re-kick threshold.
+if (prisma) {
+  const _sweepSeen = new Map();   // turnId -> consecutive empty-tick count
+  const _sweepKicked = new Set(); // turnId -> already re-kicked once
+  const SWEEP_MS = 15_000;
+  const _hyperSidecar = () => process.env.EMPLOYEES_SIDECAR_URL || process.env.HIVEMIND_EMPLOYEES_URL || 'http://hm-employees:8060';
+  setInterval(async () => {
+    try {
+      const live = await prisma.hyperTurn.findMany({
+        where: { status: 'live' },
+        select: { id: true, roomId: true, userMessage: true, lines: true },
+        take: 50,
+      });
+      const liveIds = new Set(live.map((t) => t.id));
+      for (const k of [..._sweepSeen.keys()]) if (!liveIds.has(k)) { _sweepSeen.delete(k); _sweepKicked.delete(k); }
+      for (const t of live) {
+        const empty = !Array.isArray(t.lines) || t.lines.length === 0;
+        if (!empty) { _sweepSeen.delete(t.id); continue; }
+        const ticks = (_sweepSeen.get(t.id) || 0) + 1;
+        _sweepSeen.set(t.id, ticks);
+        if (ticks < 2 || _sweepKicked.has(t.id)) continue;
+        const room = await prisma.hyperRoom.findUnique({
+          where: { id: t.roomId },
+          select: { userId: true, orgId: true, participantIds: true },
+        });
+        if (!room) continue;
+        _sweepKicked.add(t.id);
+        console.warn('[hyper-sweeper] re-kicking stuck turn', t.id);
+        fetch(`${_hyperSidecar()}/internal/hyper/room-turn`, {
+          method: 'POST',
+          headers: {
+            'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            room_id: t.roomId, turn_id: t.id, user_id: room.userId, org_id: room.orgId,
+            user_message: t.userMessage || '(continue)', participant_ids: room.participantIds || [],
+            callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
+          }),
+        }).catch((err) => console.warn('[hyper-sweeper] re-kick failed:', err.message));
+      }
+    } catch (err) {
+      console.warn('[hyper-sweeper] tick failed:', err.message);
+    }
+  }, SWEEP_MS);
+  console.log('[hyper-sweeper] stuck-turn re-kick sweeper active (15s)');
+}
+
 const sessionStore = new ControlPlaneSessionStore(CONFIG);
 const connectorStore = prisma ? new ConnectorStore(prisma) : null;
 const ADMIN_SECRET = process.env.HIVEMIND_ADMIN_SECRET || 'local-admin-secret-change-me';

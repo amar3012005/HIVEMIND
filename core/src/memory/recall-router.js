@@ -24,6 +24,7 @@
 import { recallPersistedMemories, crossClusterEntityBoost } from './persisted-retrieval.js';
 import { ClusterIndex } from './cluster-index.js';
 import { rerank } from './reranker.js';
+import { getRetrievalConfig, logTaskOutcome } from './retrieval-config.js';
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -718,9 +719,24 @@ export class RecallRouter {
     if (hop2.items.length > 0) tiersFired.push(`evidence-${hop2.reason}`);
     if (hop3.items.length > 0) tiersFired.push('live');
 
+    // Phase 2 (B2): deliver-N comes from the per-org RetrievalConfig (the
+    // self-evolution action space), falling back to RECALL_DELIVER_LIMIT.
+    let deliverN = RECALL_DELIVER_LIMIT;
+    try {
+      const cfg = await getRetrievalConfig(ctx.orgId);
+      if (cfg?.deliver_limit) deliverN = cfg.deliver_limit;
+    } catch { /* default */ }
+
     // Stage 4 / P1: optional cross-encoder rerank of the wide ranked pool →
     // deliver top-N. No-op (returns first N) unless RERANK_ENABLED + endpoint.
-    const deliverMemories = await rerank(query, rankedMemories, { topN: RECALL_DELIVER_LIMIT });
+    const deliverMemories = await rerank(query, rankedMemories, { topN: deliverN });
+
+    // Phase 2 (B3): fire-and-forget TaskOutcome signal for the evolution loop.
+    logTaskOutcome({
+      orgId: ctx.orgId, userId: ctx.userId, query,
+      returnedN: deliverMemories.length,
+      topScore: deliverMemories[0]?.score,
+    });
 
     return {
       memories: deliverMemories.map((m) => ({

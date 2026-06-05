@@ -7,7 +7,13 @@
  * the cadence automatically.
  *
  * Concurrency is guarded by a row-level cycle lock inside run-manager.
+ *
+ * Phase 3: when EVOLUTION_ENABLED=true, a once-daily self-evolution pass runs
+ * after the synthesis cycle — diagnoses retrieval from TaskOutcome stats,
+ * proposes a RetrievalConfig delta, and commits only if Recall@K doesn't regress.
  */
+
+import { isEvolutionEnabled, runEvolution } from '../memory/evolution-engine.js';
 
 export class ResidentAgentScheduler {
   constructor({ runManager, prisma = null, intervalMs = 60 * 60 * 1000, logger = console } = {}) {
@@ -84,10 +90,39 @@ export class ResidentAgentScheduler {
           this.logger?.warn?.(`[gov-scheduler] org=${o.id.slice(0,8)} failed: ${err?.message || err}`);
         }
       }
+      await this._maybeEvolve(orgs);
     } catch (err) {
       this.logger?.warn?.(`[gov-scheduler] tick failed: ${err?.message || err}`);
     } finally {
       this.tickInFlight = false;
+    }
+  }
+
+  // Phase 3: once-daily self-evolution pass (gated). Diagnose→propose→replay-gate
+  // →commit/revert per org. No-op unless EVOLUTION_ENABLED.
+  async _maybeEvolve(orgs) {
+    if (!isEvolutionEnabled() || !this.prisma) return;
+    const today = new Date().toISOString().slice(0, 10);
+    if (this._lastEvolveDate === today) return; // once/day
+    this._lastEvolveDate = today;
+    const apiKey = process.env.MASTER_API_KEY || process.env.HM_API_KEY;
+    if (!apiKey) { this.logger?.warn?.('[evolution] no MASTER_API_KEY — skipping'); return; }
+    this.logger?.log?.(`[evolution] daily pass over ${orgs.length} org(s)`);
+    for (const o of orgs) {
+      try {
+        const m = await this.prisma.$queryRawUnsafe(
+          `SELECT user_id FROM hivemind.user_organizations WHERE org_id=$1::uuid AND is_active=true LIMIT 1`,
+          o.id,
+        );
+        const userId = m?.[0]?.user_id;
+        if (!userId) continue;
+        const res = await runEvolution({ orgId: o.id, userId, apiKey, logger: this.logger });
+        if (res?.decision && res.decision !== 'no_signal') {
+          this.logger?.log?.(`[evolution] org=${o.id.slice(0,8)} → ${res.decision}`);
+        }
+      } catch (err) {
+        this.logger?.warn?.(`[evolution] org=${o.id.slice(0,8)} failed: ${err?.message || err}`);
+      }
     }
   }
 

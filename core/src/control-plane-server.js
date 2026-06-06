@@ -11,6 +11,7 @@ import {
 } from './auth/api-keys.js';
 import { buildAllClientDescriptors, buildClientDescriptor } from './control-plane/descriptors.js';
 import { ControlPlaneSessionStore, buildSessionCookie, verifySessionCookie } from './control-plane/session-store.js';
+import { handleHermesRoutes } from './hermes/control-routes.js';
 import { ZitadelOidcClient } from './control-plane/zitadel.js';
 import { ConnectorStore } from './connectors/framework/connector-store.js';
 import { provisionForPlan } from './vector/container-router.js';
@@ -6784,6 +6785,13 @@ Write the persona now.`;
   // This is integrated inline in the Zitadel callback handler above.
   // The _jitProvision helper is called at the bottom of /auth/callback.
   // Defined here as a module-level helper for reuse.
+
+  // ─── Hermes agents control plane (Phase 6e) ──────────────────
+  // Default OFF (HERMES_MANAGER_ENABLED!=='true' → 404). Flag-gated, session-auth'd,
+  // org-scoped inside the handler. See core/src/hermes/control-routes.js.
+  if (await handleHermesRoutes(req, res, { pathname, method: req.method, prisma, jsonResponse, parseBody, requireSession })) {
+    return;
+  }
 
   return jsonResponse(res, { error: 'Not found' }, 404);
 });

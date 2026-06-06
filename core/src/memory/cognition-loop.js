@@ -161,8 +161,13 @@ async function purgeVectorsByMemoryIds(memoryIds, orgId = null, logger = console
 }
 
 // ─── Tag filters ───────────────────────────────────────────────────────────────
-// Tags that don't form meaningful topic clusters for synthesis purposes
-const SYS_TAG_RE = /^(file:|fn:|page:|heading:|upload:|doc-hash:|promoted-from|synthesized|topic:|cognition-loop|synthesis:|knowledge-base$|document$|document-summary$|entity:|time:|ts:|section:|chat$|talk-to-hive$)/i;
+// Tags that don't form meaningful topic clusters for synthesis purposes.
+// Includes provenance / ingest-source tags (source:, url:, kind:, skill:,
+// type:, from-<platform>, *-ingest): these describe WHERE a memory came from,
+// not WHAT it is about, so bucketing on them produces redundant near-duplicate
+// syntheses (e.g. every chat-ingested memory clustering under from-claude /
+// url:claude.ai / ai-chat-ingest). Topic + entity tags remain the only anchors.
+const SYS_TAG_RE = /^(file:|fn:|page:|heading:|upload:|doc-hash:|promoted-from|synthesized|topic:|cognition-loop|synthesis:|knowledge-base$|document$|document-summary$|entity:|time:|ts:|section:|chat$|talk-to-hive$|source:|url:|kind:|skill:|provider:|model:|type:|from-[a-z]+$|[a-z][a-z-]*-ingest$)/i;
 
 // ─── Entity-key derivation (cluster_index.entity_keys) ───────────────────────
 // Inherited tag prefixes that carry entity identity. Strip prefix to produce

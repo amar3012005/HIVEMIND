@@ -526,6 +526,37 @@ export class CognitionLoop {
       }
     }
 
+    // Hybrid cluster enrichment (gated, default OFF). Tag buckets above are a
+    // purely lexical grouping; recall is hybrid (lexical FTS + vector HNSW), so
+    // make clustering hybrid too — pull vector-similar memories from the SAME
+    // window into each bucket even when they don't share the tag. Bounded: one
+    // hybridSearch per bucket, ≤5 added, window-only (no extra DB fetch).
+    if (process.env.COGNITION_HYBRID_CLUSTER === 'true' && this.engine?.vectorStore?.hybridSearch) {
+      const recentById = new Map(recent.map((m) => [m.id, m]));
+      for (const [tag, members] of buckets.entries()) {
+        if (members.length < 2) continue;
+        const have = new Set(members.map((m) => m.id));
+        const seed = `${members[0].title || ''} ${(members[0].content || '').slice(0, 200)} ${tag}`.trim();
+        let hits = [];
+        try {
+          hits = await this.engine.vectorStore.hybridSearch(seed, {
+            org_id: orgId, is_latest: true, limit: 12,
+          }) || [];
+        } catch { hits = []; }
+        let added = 0;
+        for (const h of hits) {
+          if (added >= 5) break;
+          const id = h.payload?.memory_id || h.id;
+          if (!id || have.has(id)) continue;
+          const m = recentById.get(id); // enrich only from the window pool
+          if (!m) continue;
+          members.push(m);
+          have.add(id);
+          added += 1;
+        }
+      }
+    }
+
     let writes = 0;
 
     // ── Sub-pass A: canonical-fact per qualifying cluster ─────────────────────

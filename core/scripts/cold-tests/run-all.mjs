@@ -39,13 +39,20 @@ function runChild(file) {
 }
 
 async function recallSmoke() {
+  // Closed-loop: ingest a unique fact, then recall it. Avoids false-negatives on
+  // sparse test accounts (a generic corpus query can legitimately return 0).
   const r = makeReport('T2-recall-smoke');
+  const tok = `recallsmoke-${process.pid}`;
+  const fact = `Caldera Systems uses the Helios billing engine. ${tok}`;
+  await api('POST', '/api/memories', { content: fact, memory_type: 'fact', tags: ['coldtest'], project: 'coldtest' });
+  await new Promise((s) => setTimeout(s, 6000)); // let the queue land it
   const t0 = Date.now();
-  const rec = await api('POST', '/api/recall', { query_context: 'what do you know about HIVEMIND', max_memories: 5 });
+  const rec = await api('POST', '/api/recall', { query_context: 'Caldera Systems Helios billing', max_memories: 5 });
   r.check('POST /api/recall 2xx', rec.ok, `status=${rec.status}`);
   const mems = rec.json?.memories || rec.json?.results || [];
-  r.check('recall returns results', Array.isArray(mems) && mems.length > 0, `n=${mems.length}`);
   r.check('recall p95 < 8s', (Date.now() - t0) < 8000, `${Date.now() - t0}ms`);
+  r.check('closed-loop recall returns the ingested fact',
+    mems.some((m) => (m.content || '').includes('Caldera Systems')), `n=${mems.length}`);
   return r.finish();
 }
 

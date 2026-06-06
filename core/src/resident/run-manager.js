@@ -600,7 +600,11 @@ export class ResidentRunManager {
           const { GraphActionExecutor } = await import('./graph-action-executor.js');
           const executor = new GraphActionExecutor({ memoryStore: this.memoryStore });
           const actionResult = await executor.executeActions(filtered, {
-            minConfidence: 0.95,    // raised from 0.65 — only high-conf
+            // Turing proposals are the ADDITIVE cognitive tools (canonical/bridge
+            // synthesis — no member supersession), so the floor is env-tunable
+            // (GOV_MIN_PROPOSAL_CONFIDENCE) for pilot calibration. Default stays
+            // 0.95. Faraday's superseding merge/link path above is left at 0.95.
+            minConfidence: Number(process.env.GOV_MIN_PROPOSAL_CONFIDENCE || 0.95),
             project: run.project,
             duplicateMode: 'flag',  // never merge by default
           });

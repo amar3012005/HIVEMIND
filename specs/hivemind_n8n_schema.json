@@ -1,0 +1,321 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "HiveMind n8n Ingestion Payload",
+  "description": "Canonical schema for n8n workflow data ingestion into HiveMind with bi-temporal tracking, PII governance, and idempotency",
+  "type": "object",
+  "required": [
+    "source",
+    "entity",
+    "event",
+    "provenance",
+    "idempotencyKey"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "source": {
+      "type": "object",
+      "description": "Source system metadata",
+      "required": [
+        "system",
+        "recordId",
+        "pulledAt"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "system": {
+          "type": "string",
+          "description": "Source system identifier (e.g., 'salesforce', 'hubspot', 'stripe', 'postgres')",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-z0-9_-]+$"
+        },
+        "object": {
+          "type": "string",
+          "description": "Object type in source system (e.g., 'Contact', 'Deal', 'Customer', 'Transaction')",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "recordId": {
+          "type": "string",
+          "description": "Primary ID in source system — must be stable and unique within system",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "externalUrl": {
+          "type": "string",
+          "format": "uri",
+          "description": "Deep link to view record in source system UI"
+        },
+        "pulledAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp when data was extracted from source"
+        }
+      }
+    },
+    "entity": {
+      "type": "object",
+      "description": "Canonical entity representation",
+      "required": [
+        "type",
+        "canonicalId"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "canonicalId": {
+          "type": "string",
+          "description": "Stable UUID v5 (namespace-based) or deterministic hash: SHA256(system:recordId) truncated to 64 hex chars. Used for deduplication across systems.",
+          "minLength": 32,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9-]+$"
+        },
+        "type": {
+          "type": "string",
+          "description": "Entity type in canonical model (e.g., 'Person', 'Company', 'Transaction', 'Interaction')",
+          "minLength": 1,
+          "maxLength": 64,
+          "enum": [
+            "Person",
+            "Company",
+            "Transaction",
+            "Interaction",
+            "Document",
+            "Account",
+            "Order",
+            "Opportunity",
+            "Custom"
+          ]
+        },
+        "name": {
+          "type": "string",
+          "description": "Primary display name or identifier",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "crossSystemIds": {
+          "type": "object",
+          "description": "Mapping of canonicalId to IDs in other integrated systems for record linkage",
+          "minProperties": 0,
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "examples": {
+            "hubspot": "contact-123-abc",
+            "salesforce": "0015g00000XYZ123",
+            "slack": "U012ABC345"
+          }
+        },
+        "attributes": {
+          "type": "object",
+          "description": "Optional structured attributes (flattened, no nesting). Keys use snake_case.",
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "type": "string",
+                "maxLength": 4096
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "event": {
+      "type": "object",
+      "description": "Event or state change within the entity lifecycle",
+      "required": [
+        "kind",
+        "validAt"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "description": "Event type: mutation, state_change, metric, score, or status_update",
+          "enum": [
+            "created",
+            "updated",
+            "deleted",
+            "merged",
+            "status_changed",
+            "property_changed",
+            "score_calculated",
+            "metric_recorded",
+            "interaction_logged",
+            "engagement_event",
+            "custom"
+          ]
+        },
+        "validAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp when this event became valid in the real world (bi-temporal: the moment it occurred, not when we recorded it)"
+        },
+        "amount": {
+          "type": "number",
+          "description": "Optional numeric value (e.g., revenue, quantity, score, percentage)",
+          "multipleOf": 0.001,
+          "examples": [
+            1500.50,
+            95.2,
+            -50
+          ]
+        },
+        "narrative": {
+          "type": "string",
+          "description": "THE differentiator: free-form text explaining reason, context, or details. E.g., 'Lead status changed because demo scheduled for 2026-06-15', 'Payment failed: card expired', 'Churn risk flagged: 30d inactivity'",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "reason": {
+          "type": "string",
+          "description": "Structured reason code for programmatic filtering (e.g., 'INACTIVITY', 'CHURN_SIGNAL', 'SALES_QUALIFIED')",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Z0-9_]+$"
+        },
+        "tags": {
+          "type": "array",
+          "description": "Optional categorical tags for filtering and clustering",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[a-z0-9_-]+$"
+          },
+          "maxItems": 20
+        },
+        "metadata": {
+          "type": "object",
+          "description": "Optional unstructured metadata (flattened). Do NOT use for critical queryable fields.",
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "type": "string",
+                "maxLength": 1024
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "description": "Data provenance, governance, and audit trail",
+      "required": [
+        "touchedAt"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "preparer": {
+          "type": "string",
+          "description": "System or user that prepared/transformed the payload. For n8n: workflow ID or execution ID.",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "channel": {
+          "type": "string",
+          "description": "Delivery channel (e.g., 'n8n_webhook', 'n8n_schedule', 'api_direct', 'batch_import')",
+          "enum": [
+            "n8n_webhook",
+            "n8n_schedule",
+            "n8n_trigger",
+            "api_direct",
+            "batch_import",
+            "sync_service",
+            "manual_upload",
+            "custom"
+          ]
+        },
+        "touchedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp when this record was last modified in HiveMind (transaction_at, distinct from event.validAt)"
+        },
+        "piiFlags": {
+          "type": "object",
+          "description": "GDPR/privacy field classification. Set to true for any field containing PII.",
+          "additionalProperties": {
+            "type": "boolean"
+          },
+          "examples": {
+            "entity.name": true,
+            "entity.attributes.email": true,
+            "entity.attributes.phone": true,
+            "entity.attributes.address": true,
+            "event.narrative": false
+          }
+        },
+        "dataClassification": {
+          "type": "string",
+          "description": "Sensitivity level for access control: public, internal, confidential, restricted",
+          "enum": [
+            "public",
+            "internal",
+            "confidential",
+            "restricted"
+          ],
+          "default": "confidential"
+        },
+        "consentGiven": {
+          "type": "boolean",
+          "description": "Has explicit GDPR consent been obtained for processing this record?"
+        },
+        "retentionDays": {
+          "type": "integer",
+          "description": "Days to retain this record before deletion (null = indefinite). If not set, use system default (e.g., 2555 for 7 years).",
+          "minimum": 1,
+          "maximum": 3650
+        },
+        "version": {
+          "type": "integer",
+          "description": "Schema version for breaking changes. Current: 1",
+          "minimum": 1,
+          "default": 1
+        }
+      }
+    },
+    "idempotencyKey": {
+      "type": "object",
+      "description": "Ensures idempotent upserts: canonical_id + lastModified. If key already exists in HiveMind, update; else create.",
+      "required": [
+        "canonicalId",
+        "lastModifiedAt"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "canonicalId": {
+          "type": "string",
+          "description": "Must match entity.canonicalId exactly",
+          "minLength": 32,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9-]+$"
+        },
+        "lastModifiedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp from source system. If incoming lastModifiedAt <= stored lastModifiedAt, skip update (prevent stale replays). Usually source.pulledAt or a source-side 'updated_at' field."
+        }
+      }
+    }
+  }
+}

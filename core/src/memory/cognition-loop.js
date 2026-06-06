@@ -36,8 +36,6 @@ import { ClusterIndex } from './cluster-index.js';
 const PRIMARY_SYNTHESIS_MODEL   = process.env.COGNITION_WRITER_MODEL || process.env.SYNTHESIS_MODEL || 'llama-3.1-8b-instant';
 // Fallback fires on primary EXCEPTION (gateway down), so escalate to a sturdier model.
 const FALLBACK_SYNTHESIS_MODEL  = process.env.SYNTHESIS_FALLBACK_MODEL || 'openai/gpt-oss-20b';
-// Legacy constant kept for drift-compaction header prompt (non-critical path)
-const SYNTHESIS_MODEL           = PRIMARY_SYNTHESIS_MODEL;
 
 // ─── Clustering / quality thresholds ──────────────────────────────────────────
 const DEFAULT_LOOKBACK_HOURS      = Number(process.env.SYNTHESIS_LOOKBACK_HOURS    || 24);
@@ -53,7 +51,6 @@ const CANONICAL_CLUSTER_MIN_ENV   = process.env.CANONICAL_CLUSTER_MIN != null
   ? Number(process.env.CANONICAL_CLUSTER_MIN)
   : null;
 const CANONICAL_CLUSTER_MIN       = CANONICAL_CLUSTER_MIN_ENV ?? CANONICAL_CLUSTER_MIN_HARD;
-const DEFAULT_CLUSTER_MIN         = CANONICAL_CLUSTER_MIN; // alias kept for compaction path
 
 async function deriveClusterMin(prisma, orgId) {
   // Env override pins value across all orgs — operators may force a
@@ -92,6 +89,27 @@ const DRIFT_COMPACT_THRESHOLD     = Number(process.env.DRIFT_COMPACT_THRESHOLD  
 // Hard cap on members folded into one canonical (stops 394-member pathology)
 const MAX_MEMBERS_PER_CANONICAL   = Number(process.env.DRIFT_MAX_MEMBERS_PER_CANONICAL || 10);
 const MAX_ORGS_PER_TICK           = Number(process.env.COGNITION_MAX_ORGS_PER_TICK  || 25);
+
+// ─── Phase A: L2 principle tier (flag-gated, default OFF) ─────────────────────
+// Principles are the transferable rule layer above canonical-facts. Reuses the
+// synthesis storage table (memory_type='synthesis', tag 'synthesis:principle',
+// cognitive_layer_role='principle'). Default OFF → distillPrinciplesForOrg is a
+// no-op and behaviour is byte-identical to pre-Phase-A.
+const PRINCIPLES_ENABLED          = process.env.PRINCIPLES_ENABLED === 'true';
+const PRINCIPLE_CLUSTER_MIN       = Number(process.env.PRINCIPLE_CLUSTER_MIN       || 8);
+const PRINCIPLE_TOP_K             = Number(process.env.PRINCIPLE_TOP_K             || 5);
+const PRINCIPLE_CONFIDENCE_FLOOR  = Number(process.env.PRINCIPLE_CONFIDENCE_FLOOR  || 0.72);
+// Principles change slowly — cool down twice as long as canonical synthesis.
+const PRINCIPLE_COOLDOWN_HOURS    = Number(process.env.PRINCIPLE_COOLDOWN_HOURS    || COOLDOWN_HOURS * 2);
+
+/** @returns {boolean} whether the L2 principle tier is enabled */
+export function isPrinciplesEnabled() { return PRINCIPLES_ENABLED; }
+
+// Slugify a topic tag into a stable principle:<slug> tag fragment.
+/** @param {string} s @returns {string} */
+function slugify(s) {
+  return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+}
 
 // ─── P3 selective vector forgetting ──────────────────────────────────────────
 // Drift compaction builds a LOSSLESS summary (every source embedded verbatim),
@@ -282,6 +300,17 @@ export class CognitionLoop {
   }
 
   start() {
+    // PHASE D — the standalone cognition timer is retired. Cadence is now owned
+    // by ResidentAgentScheduler (governance cycle). This start() is an inert
+    // no-op unless explicitly re-armed via ENABLE_COGNITION_LOOP_TIMER=true.
+    // (server.js:485 cognitionLoop.start() therefore becomes inert without
+    // touching the forbidden server.js file.)
+    // PHASE-D NOTE: server.js:8971 reads cognitionLoop.timer (vs this._timer) —
+    // a pre-existing field-name mismatch bug. DO NOT fix here (forbidden file).
+    if (process.env.ENABLE_COGNITION_LOOP_TIMER !== 'true') {
+      this.logger.log('[cognition] standalone timer retired (Phase D) — cadence owned by ResidentAgentScheduler; set ENABLE_COGNITION_LOOP_TIMER=true to re-arm');
+      return;
+    }
     if (this._timer) return;
     this.logger.log(`[cognition] starting loop — interval=${Math.round(this._intervalMs / 1000)}s`);
     // First tick: small delay so startup load doesn't pile up
@@ -306,14 +335,18 @@ export class CognitionLoop {
     try {
       const synth   = await this.synthesizeForOrg(orgId);
       const compact = await this.compactDriftForOrg(orgId);
+      // Pass 3 — L2 principle distillation (no-op unless PRINCIPLES_ENABLED)
+      const principles = await this.distillPrinciplesForOrg(orgId);
       _status.last_run_at           = new Date().toISOString();
       _status.last_run_ms           = Date.now() - tStart;
       _status.last_synthesis_count  = synth;
       _status.last_compaction_count = compact;
       _status.next_run_at           = new Date(Date.now() + this._intervalMs).toISOString();
-      this.logger.log(`[cognition] manual run org=${orgId} synth=${synth} compact=${compact} ms=${_status.last_run_ms}`);
+      this.logger.log(`[cognition] manual run org=${orgId} synth=${synth} compact=${compact} principles=${principles} ms=${_status.last_run_ms}`);
+      // PHASE-A TODO: surface principle count via a cognition_status counter
+      // column (do NOT add the schema column in this stage).
       await this._persistOrgStatus(orgId, { synth, compact, runMs: Date.now() - tStart, error: null });
-      return { synth, compact, ms: _status.last_run_ms };
+      return { synth, compact, principles, ms: _status.last_run_ms };
     } catch (err) {
       _status.errors = [..._status.errors.slice(-9), { org_id: orgId, error: err.message, at: new Date().toISOString() }];
       await this._persistOrgStatus(orgId, { synth: 0, compact: 0, runMs: Date.now() - tStart, error: err.message });
@@ -378,13 +411,17 @@ export class CognitionLoop {
       });
       let totalSynth = 0;
       let totalCompact = 0;
+      let totalPrinciples = 0;
       for (const org of orgs) {
         const orgStart = Date.now();
         try {
           const synthN   = await this.synthesizeForOrg(org.id);
           const compactN = await this.compactDriftForOrg(org.id);
-          totalSynth   += synthN;
-          totalCompact += compactN;
+          // Pass 3 — L2 principle distillation (no-op unless PRINCIPLES_ENABLED)
+          const principleN = await this.distillPrinciplesForOrg(org.id);
+          totalSynth      += synthN;
+          totalCompact    += compactN;
+          totalPrinciples += principleN;
           await this._persistOrgStatus(org.id, { synth: synthN, compact: compactN, runMs: Date.now() - orgStart, error: null });
         } catch (perOrgErr) {
           this.logger.warn(`[cognition] org=${org.id} failed: ${perOrgErr.message}`);
@@ -397,13 +434,18 @@ export class CognitionLoop {
       _status.last_synthesis_count  = totalSynth;
       _status.last_compaction_count = totalCompact;
       _status.next_run_at           = new Date(Date.now() + this._intervalMs).toISOString();
-      this.logger.log(`[cognition] tick complete orgs=${orgs.length} synth=${totalSynth} compact=${totalCompact} ms=${_status.last_run_ms}`);
+      // PHASE-A TODO: add a cognition_status principle counter column (schema
+      // change deferred — log-only for now).
+      this.logger.log(`[cognition] tick complete orgs=${orgs.length} synth=${totalSynth} compact=${totalCompact} principles=${totalPrinciples} ms=${_status.last_run_ms}`);
     } catch (err) {
       _status.errors = [..._status.errors.slice(-9), { error: err.message, at: new Date().toISOString() }];
       this.logger.error('[cognition] tick failed:', err.message);
     } finally {
       _status.running = false;
-      this._timer = setTimeout(() => this._tick(), this._intervalMs);
+      // PHASE D — only self-reschedule when the timer is explicitly re-armed.
+      if (process.env.ENABLE_COGNITION_LOOP_TIMER === 'true') {
+        this._timer = setTimeout(() => this._tick(), this._intervalMs);
+      }
     }
   }
 
@@ -836,8 +878,10 @@ export class CognitionLoop {
   // Phase 2: we no longer skip if new evidence exists — delta-update path takes
   // over instead. Cooldown only skips if updatedAt is within the window AND
   // no source memories are newer than the existing synthesis.
-  async _onCooldown(orgId, hash) {
-    const cutoff = new Date(Date.now() - COOLDOWN_HOURS * 3600 * 1000);
+  // cooldownHours defaults to COOLDOWN_HOURS so existing 1-arg callers are
+  // unaffected; principle distillation passes PRINCIPLE_COOLDOWN_HOURS.
+  async _onCooldown(orgId, hash, cooldownHours = COOLDOWN_HOURS) {
+    const cutoff = new Date(Date.now() - cooldownHours * 3600 * 1000);
     const existing = await this.prisma.memory.findFirst({
       where: {
         orgId,
@@ -1394,7 +1438,13 @@ Output JSON only:
     orgId, userId, project, sourceType, tag, members, content,
     confidence, evidenceIds = [], clusterHash: hash, extraMeta = {},
   }) {
-    const synthTag = sourceType === 'canonical-fact' ? 'synthesis:canonical' : 'synthesis:bridge';
+    // Phase A: explicit 3-way (principle | canonical-fact | bridge). Additive —
+    // canonical/bridge output is byte-identical to prior behaviour.
+    const synthTag = sourceType === 'principle'
+      ? 'synthesis:principle'
+      : sourceType === 'canonical-fact'
+        ? 'synthesis:canonical'
+        : 'synthesis:bridge';
 
     // Collect UNION of topic tags from all source members (inherits routing oracles)
     const unionedTags = new Set();
@@ -1408,10 +1458,15 @@ Output JSON only:
     unionedTags.add('cognition-loop');
     unionedTags.add(synthTag);
     unionedTags.add(`topic:${tag.slice(0, 80)}`);
+    if (sourceType === 'principle') {
+      unionedTags.add(`principle:${slugify(tag)}`);
+    }
 
-    const title = sourceType === 'canonical-fact'
-      ? `Canonical fact: ${tag.slice(0, 60)} (${members.length} sources)`
-      : `Bridge: ${tag.slice(0, 80)} [conf=${confidence?.toFixed(2)}]`;
+    const title = sourceType === 'principle'
+      ? `Principle: ${tag.slice(0, 60)} [conf=${confidence?.toFixed(2)}]`
+      : sourceType === 'canonical-fact'
+        ? `Canonical fact: ${tag.slice(0, 60)} (${members.length} sources)`
+        : `Bridge: ${tag.slice(0, 80)} [conf=${confidence?.toFixed(2)}]`;
 
     // Use engine.ingestMemory so smart-routing fires (operator, entity-co-mention, conflict-detector)
     if (!this.engine) {
@@ -1425,7 +1480,16 @@ Output JSON only:
       // silently result in undefined fields and a Prisma rejection.
       // source_metadata must be an object matching { source_type, source_id, ... }.
       let finalTags = Array.from(unionedTags);
-      const cognitiveLayerRole = sourceType === 'canonical-fact' ? 'canonical' : 'bridge';
+      const cognitiveLayerRole = sourceType === 'principle'
+        ? 'principle'
+        : sourceType === 'canonical-fact'
+          ? 'canonical'
+          : 'bridge';
+      const importanceScore = sourceType === 'principle'
+        ? 0.92
+        : sourceType === 'canonical-fact'
+          ? 0.85
+          : 0.90;
       const result = await this.engine.ingestMemory({
         user_id:         userId,
         org_id:          orgId,
@@ -1434,7 +1498,7 @@ Output JSON only:
         memory_type:     'synthesis',
         tags:            Array.from(unionedTags),
         project:         project || null,
-        importance_score: sourceType === 'canonical-fact' ? 0.85 : 0.90,
+        importance_score: importanceScore,
         cognitive_layer_role: cognitiveLayerRole,
         source_metadata: {
           source_type: sourceType,
@@ -1538,7 +1602,10 @@ Output JSON only:
         content,
         tags:                Array.from(unionedTags),
         isLatest:            true,
-        importanceScore:     sourceType === 'canonical-fact' ? 0.85 : 0.90,
+        importanceScore:     sourceType === 'principle' ? 0.92 : sourceType === 'canonical-fact' ? 0.85 : 0.90,
+        // Additive: only principle sets the role here (canonical/bridge unchanged
+        // from prior behaviour — they relied on the column default).
+        ...(sourceType === 'principle' ? { cognitiveLayerRole: 'principle' } : {}),
         synthesisConfidence: confidence,
         synthesisEvidenceIds: evidenceIds,
         synthesisClusterHash: hash,
@@ -1613,12 +1680,11 @@ Output JSON only:
     });
     if (recent.length < DRIFT_COMPACT_THRESHOLD) return 0;
 
-    // SYS_TAG_RE for compaction excludes synthesis outputs from re-compaction
-    const COMPACT_SYS_TAG_RE = /^(file:|fn:|page:|heading:|upload:|doc-hash:|promoted-from|synthesized|topic:|cognition-loop|synthesis:|knowledge-base$|document$|document-summary$|entity:|section:|chat$|talk-to-hive$)/i;
-
     const buckets = new Map();
     for (const m of recent) {
-      const primaryTag = (m.tags || []).find(t => !COMPACT_SYS_TAG_RE.test(t));
+      // Use module-level SYS_TAG_RE (superset incl. time:/ts:) so compaction
+      // buckets match synthesis bucketing exactly — one source of truth.
+      const primaryTag = (m.tags || []).find(t => !SYS_TAG_RE.test(t));
       if (!primaryTag) continue;
       if (!buckets.has(primaryTag)) buckets.set(primaryTag, []);
       buckets.get(primaryTag).push(m);
@@ -1685,6 +1751,151 @@ Output JSON only:
       }
     }
     return compactions;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Pass 3 — L2 principle distillation (Phase A, flag-gated PRINCIPLES_ENABLED)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Distill transferable PRINCIPLES (the L2 tier) from clusters of durable
+   * memories. A principle is a domain-general "if/then" or normative rule that
+   * generalises beyond any single fact — distinct from canonical-fact (one
+   * concrete durable fact) and bridge (a latent cross-cluster connection).
+   *
+   * Reuses the synthesis storage table via _writeSynthMemory(sourceType:
+   * 'principle'). Additive: returns 0 immediately when the flag is OFF, so the
+   * default-OFF deployment is byte-identical to prior behaviour.
+   *
+   * @param {string} orgId
+   * @returns {Promise<number>} number of principle memories written this tick
+   */
+  async distillPrinciplesForOrg(orgId) {
+    if (!PRINCIPLES_ENABLED) return 0;
+
+    try {
+    const candidates = await this.prisma.memory.findMany({
+      where: {
+        orgId,
+        isLatest: true,
+        deletedAt: null,
+        memoryType: { in: ['fact', 'decision', 'lesson', 'summary'] },
+        NOT: { tags: { hasSome: ['synthesis:principle'] } },
+      },
+      take: 500,
+      orderBy: { updatedAt: 'desc' },
+      select: {
+        id: true, userId: true, title: true, content: true, tags: true,
+        project: true, createdAt: true, updatedAt: true, cognitiveLayerRole: true,
+      },
+    });
+    if (candidates.length < PRINCIPLE_CLUSTER_MIN) return 0;
+
+    // Bucket by topic tag (tag-intersection), excluding system tags.
+    const buckets = new Map(); // tag → Memory[]
+    for (const m of candidates) {
+      const topicTags = (m.tags || []).filter(t => !SYS_TAG_RE.test(t));
+      for (const tag of topicTags) {
+        if (!buckets.has(tag)) buckets.set(tag, []);
+        buckets.get(tag).push(m);
+      }
+    }
+
+    let writes = 0;
+    for (const [tag, members] of buckets.entries()) {
+      if (writes >= PRINCIPLE_TOP_K) break;                 // cap writes per tick
+      if (members.length < PRINCIPLE_CLUSTER_MIN) continue;
+
+      const hash = clusterHash(`principle:${tag}`);
+
+      // Existing-principle guard (mirror canonical sub-pass): if a principle
+      // synthesis already exists on this hash, only proceed when NEW evidence
+      // arrived after it; otherwise respect the (longer) principle cooldown.
+      const existingPrinciple = await this.prisma.memory.findFirst({
+        where: { orgId, synthesisClusterHash: hash, isLatest: true, deletedAt: null },
+        select: { id: true, updatedAt: true },
+      });
+      if (existingPrinciple) {
+        const hasNewEvidence = members.some(
+          m => m.createdAt && new Date(m.createdAt) > new Date(existingPrinciple.updatedAt)
+        );
+        if (!hasNewEvidence) continue; // nothing new — leave the existing principle
+      } else if (await this._onCooldown(orgId, hash, PRINCIPLE_COOLDOWN_HOURS)) {
+        continue;
+      }
+
+      members.sort((a, b) => new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0));
+      const promptMembers = members.slice(0, DEFAULT_CLUSTER_MAX);
+
+      try {
+        const facts = promptMembers.map((m) => {
+          const c  = (m.content || '').replace(/\s+/g, ' ').slice(0, 500);
+          const ts = m.createdAt ? new Date(m.createdAt).toISOString().slice(0, 10) : 'unknown-date';
+          return `[${m.id}] (${ts}) ${m.title ? m.title + ' — ' : ''}${c}`;
+        }).join('\n');
+
+        const prompt = `Below are ${promptMembers.length} memories sharing tag "${tag}". Extract ONE transferable PRINCIPLE:
+- A domain-general rule, heuristic, or normative pattern (if/then or "always/never")
+- Generalises BEYOND any single memory — would help decide a NEW situation
+- NOT a restatement of one concrete fact (that is a canonical-fact, not a principle)
+- Concrete enough to be falsifiable, abstract enough to transfer
+
+REJECT: single-fact restatements, vague platitudes, enumerations.
+
+Memories:
+${facts}
+
+Output JSON only:
+{ "principle": "<one sentence>", "confidence": 0.0-1.0 }`;
+
+        const raw = await llmWithFallback({
+          messages:    [{ role: 'user', content: prompt }],
+          temperature: 0.1,
+          max_tokens:  220,
+        }, this.logger);
+        if (!raw) continue;
+
+        // Reuse the SAME tolerant JSON helper the canonical sub-pass uses.
+        const parsed = safeParseJSON(raw);
+        const principleText = parsed?.principle;
+        const confidence = Number(parsed?.confidence || 0);
+        if (!principleText || principleText.length < 20) continue;
+        if (confidence < PRINCIPLE_CONFIDENCE_FLOOR) {
+          this.logger.log(`[cognition] principle tag=${tag} confidence=${confidence} < floor — dropped`);
+          continue;
+        }
+        // Restatement guard: drop if near-verbatim of any single source member.
+        if (this._isRestatement(principleText, promptMembers)) {
+          this.logger.log(`[cognition] principle tag=${tag} restatement detected — dropped`);
+          continue;
+        }
+
+        const evidenceIds = promptMembers.map(m => m.id).filter(Boolean);
+        const created = await this._writeSynthMemory({
+          orgId,
+          userId:     members[0].userId,
+          project:    members[0].project,
+          sourceType: 'principle',
+          tag,
+          members:    promptMembers,
+          content:    principleText,
+          confidence,
+          evidenceIds,
+          clusterHash: hash,
+        });
+        if (created) {
+          writes++;
+          this.logger.log(`[cognition] principle tag=${tag} conf=${confidence.toFixed(2)} → ${String(created.id).slice(0, 8)}`);
+        }
+      } catch (err) {
+        this.logger.warn(`[cognition] principle tag=${tag} failed: ${err.message}`);
+      }
+    }
+    return writes;
+    } catch (err) {
+      this.logger.warn(`[cognition] distillPrinciplesForOrg org=${orgId} failed: ${err.message}`);
+      return 0;
+    }
   }
 
   /**
@@ -1767,7 +1978,7 @@ Output JSON only:
               source_ids:    sourceIds,
               part_index:    partIndex,
               part_count:    partCount,
-              model:         SYNTHESIS_MODEL,
+              model:         PRIMARY_SYNTHESIS_MODEL,
               generator:     'cognition-loop.drift-compact',
               lossless:      true,
             },
@@ -1802,12 +2013,5 @@ Output JSON only:
       }).catch(err => this.logger.warn(`[cognition] summary embed failed: ${err.message}`));
     }
     return created;
-  }
-
-  // Legacy lossy summary — kept for reference, no longer called.
-  // eslint-disable-next-line no-unused-vars
-  async _llmDriftSummary(tag, members) {
-    // Replaced by _buildLosslessSummary. Kept so git blame shows history.
-    return null;
   }
 }

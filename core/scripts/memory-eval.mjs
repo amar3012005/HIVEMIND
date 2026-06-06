@@ -48,7 +48,15 @@ export async function evalOrg({ orgId, userId, apiKey, baseUrl = BASE, n = N, k 
   const p = prisma || new PrismaClient();
   try {
     const pool = await p.memory.findMany({
-      where: { orgId, isLatest: true, deletedAt: null, title: { not: null } },
+      // Probe pool MUST mirror what recall can actually return. Internal-audit
+      // (governance reflection) + tara activity rows are excluded from recall by
+      // design (persisted-retrieval), so sampling them as probes guarantees a
+      // self-retrieval MISS and reports a false-low Recall@K. Exclude them so the
+      // metric measures real recallable knowledge (the evolution gate's contract).
+      where: {
+        orgId, isLatest: true, deletedAt: null, title: { not: null },
+        NOT: { tags: { hasSome: ['internal-audit', 'tara-turn', 'tara-insight', 'tara-call-log', 'tara-session'] } },
+      },
       select: { id: true, title: true, content: true },
       orderBy: { updatedAt: 'desc' },
       take: Math.max(n * 5, 50),
@@ -73,7 +81,10 @@ export async function evalOrg({ orgId, userId, apiKey, baseUrl = BASE, n = N, k 
       const t0 = Date.now();
       try {
         const resp = await fetch(`${baseUrl}/api/recall`, {
-          method: 'POST', headers, body: JSON.stringify({ query: q, limit: k }),
+          // /api/recall reads body.query_context (NOT body.query) and body.max_memories
+          // (NOT body.limit). Sending the wrong field names yields an empty query and
+          // a false 0% recall.
+          method: 'POST', headers, body: JSON.stringify({ query_context: q, max_memories: k }),
         });
         latencies.push(Date.now() - t0);
         if (resp.ok) {
@@ -105,7 +116,12 @@ async function main() {
   try {
     // Random-ish sample of latest, non-deleted memories with a usable title.
     const pool = await prisma.memory.findMany({
-      where: { orgId: ORG, isLatest: true, deletedAt: null, title: { not: null } },
+      // Mirror recall's exclusions (see evalOrg) so the metric isn't tanked by
+      // sampling non-recallable governance/tara rows.
+      where: {
+        orgId: ORG, isLatest: true, deletedAt: null, title: { not: null },
+        NOT: { tags: { hasSome: ['internal-audit', 'tara-turn', 'tara-insight', 'tara-call-log', 'tara-session'] } },
+      },
       select: { id: true, title: true, content: true },
       orderBy: { updatedAt: 'desc' },
       take: Math.max(N * 5, 50),
@@ -138,7 +154,10 @@ async function main() {
       let found = false;
       try {
         const resp = await fetch(`${BASE}/api/recall`, {
-          method: 'POST', headers, body: JSON.stringify({ query: q, limit: K }),
+          // /api/recall reads body.query_context (NOT body.query) and body.max_memories
+          // (NOT body.limit). Sending the wrong field names yields an empty query and
+          // a false 0% recall.
+          method: 'POST', headers, body: JSON.stringify({ query_context: q, max_memories: K }),
         });
         const ms = Date.now() - t0;
         latencies.push(ms);

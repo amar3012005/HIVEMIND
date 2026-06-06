@@ -9,30 +9,41 @@
 # broken overnight — it self-reverts to the last green code pointer.
 #
 # Usage (run from a machine with SSH alias `myserver`):
-#   bash deploy-verified.sh                 # deploy current origin/main + verify
-#   DRY_RUN=1 bash deploy-verified.sh        # verify-only, no pull/restart
+#   FILES="core/src/a.js core/src/b.js" bash deploy-verified.sh   # scp these files + verify
+#   DRY_RUN=1 bash deploy-verified.sh                              # verify-only, no copy/restart
 #
-# SAFETY: rollback moves the CODE pointer only (git reset --hard + restart).
-# It never down-migrates the DB or deletes data. If a migration shipped with the
-# bad deploy, this script FLAGS it and refuses silent schema rollback.
+# DEPLOY MODE = scp individual FILES (NOT git pull). Prod runs working-tree DRIFT,
+# so `git pull` would clobber uncommitted prod edits → outage. We only ever push
+# the explicit files named in $FILES, each backed up on the box first so rollback
+# restores the EXACT prior bytes (not a git pointer move).
+#
+# SAFETY: rollback restores the per-file backups + restart. Never down-migrates,
+# never deletes data, never touches files outside $FILES.
 set -uo pipefail
 
 SSH="${SSH_ALIAS:-myserver}"
 REPO="/opt/HIVEMIND"
 DRY_RUN="${DRY_RUN:-0}"
+FILES="${FILES:-}"
 
 say() { printf '\n>>> %s\n' "$*"; }
 
-LKG=$(ssh "$SSH" "cd $REPO && git rev-parse HEAD")
-say "last-known-good SHA: $LKG"
+DEPLOYED=$(ssh "$SSH" "cd $REPO && git rev-parse --short HEAD")
+say "prod HEAD (unchanged — drift preserved): $DEPLOYED"
 
-if [ "$DRY_RUN" != "1" ]; then
-  say "deploying: git pull + docker restart hm-core"
-  ssh "$SSH" "cd $REPO && git pull origin main && docker restart hm-core" || { echo "DEPLOY STEP FAILED"; exit 3; }
+BK="/tmp/deploy-backup-$DEPLOYED"
+if [ "$DRY_RUN" != "1" ] && [ -n "$FILES" ]; then
+  say "backing up + scp-deploying files: $FILES"
+  ssh "$SSH" "mkdir -p $BK"
+  for f in $FILES; do
+    ssh "$SSH" "cp $REPO/$f $BK/$(echo $f | tr / _) 2>/dev/null || true"   # backup exact prior bytes
+    scp "$f" "$SSH:$REPO/$f" || { echo "SCP FAILED for $f"; exit 3; }
+  done
+  ssh "$SSH" "docker restart hm-core" || { echo "RESTART FAILED"; exit 3; }
+elif [ "$DRY_RUN" != "1" ]; then
+  say "no FILES given — verify-only (nothing copied)"
 fi
-
-DEPLOYED=$(ssh "$SSH" "cd $REPO && git rev-parse HEAD")
-say "deployed SHA: $DEPLOYED"
+say "last-known-good backups at: $SSH:$BK"
 
 say "waiting for hm-core ready..."
 for i in $(seq 1 60); do
@@ -46,19 +57,16 @@ echo "$OUT" | tail -50
 VERDICT=$(echo "$OUT" | grep -o 'COLD_TEST_REPORT_JSON .*' | sed 's/COLD_TEST_REPORT_JSON //')
 
 if echo "$VERDICT" | grep -q '"green":true'; then
-  say "PROD VERIFIED ✅  deployed=$DEPLOYED  lkg=$LKG"
+  say "PROD VERIFIED ✅  files=[$FILES]  backups=$BK"
   exit 0
 fi
 
-say "COLD TESTS RED ❌ — rolling back to last-known-good $LKG"
-# Refuse silent schema rollback if a migration shipped in this range.
-MIGR=$(ssh "$SSH" "cd $REPO && git diff --name-only $LKG..$DEPLOYED -- 'core/prisma/migrations' '**/migrations' 2>/dev/null")
-if [ -n "$MIGR" ]; then
-  say "⚠️  MIGRATION shipped in bad deploy — NOT auto-down-migrating (human decision):"
-  echo "$MIGR"
-  say "rolling back CODE only; DB schema left as-is. FLAG for review."
-fi
-ssh "$SSH" "cd $REPO && git reset --hard $LKG && docker restart hm-core"
+say "COLD TESTS RED ❌ — restoring per-file backups from $BK"
+if [ -z "$FILES" ]; then say "nothing deployed (verify-only) — no rollback needed"; exit 1; fi
+for f in $FILES; do
+  ssh "$SSH" "cp $BK/$(echo $f | tr / _) $REPO/$f 2>/dev/null && echo restored $f || echo 'NO BACKUP for $f (was new file? removing)'; "
+done
+ssh "$SSH" "docker restart hm-core"
 
 say "verifying rollback health..."
 for i in $(seq 1 60); do

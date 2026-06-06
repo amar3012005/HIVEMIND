@@ -2,6 +2,21 @@ import { computeTokenSimilarity } from './conflict-detector.js';
 import { getQdrantClient } from '../vector/qdrant-client.js';
 import { getRetrievalConfig } from './retrieval-config.js';
 import { expandTemporalQuery } from '../search/time-aware-expander.js';
+import { ResultReranker } from '../search/result-reranker.js';
+
+// PHASE-B: single canonical ALGORITHMIC reranker, shared with three-tier-retrieval.js.
+// Lazily constructed inside the RECALL_TIERED_VIEW=true branch so the dark-by-default
+// contract holds even if ResultReranker's constructor ever gains side effects.
+let _algorithmicReranker = null;
+
+// PHASE-B: tiered "recall spine" view (l2_principles / l1_summaries / supporting_facts /
+// evidence / bridges) is additive and dark by default. When OFF the result object is
+// byte-identical to the legacy shape (no `spine` key, no algorithmic rerank of `top`).
+const TIERED_VIEW_ENABLED = process.env.RECALL_TIERED_VIEW === 'true';
+
+// PHASE-A: principle-layer recall boost. OFF by default — when unset the `principle`
+// role/tag branches below are never taken, so output is byte-identical to legacy.
+const PRINCIPLES_RECALL_ENABLED = process.env.PRINCIPLES_ENABLED === 'true';
 
 // TARA voice activity (turn/insight/call-log/session) is isolated from recall.
 // Matches by project prefix `tara/` or any `tara-*` tag.
@@ -277,54 +292,6 @@ function applyRecallRelevanceFloor(scored, options = {}) {
 }
 
 /**
- * Reciprocal Rank Fusion (RRF) — merges multiple ranked lists by rank position,
- * not raw scores. This handles the problem of different score scales across
- * vector, lexical, and graph results. Borrowed from code-review-graph's approach.
- *
- * RRF score = sum(1 / (k + rank + 1)) across all lists an item appears in.
- */
-function rrfMerge(lists, k = 60) {
-  const scores = new Map();
-  const items = new Map();
-
-  for (const list of lists) {
-    if (!list) continue;
-    for (let rank = 0; rank < list.length; rank++) {
-      const item = list[rank];
-      if (!item?.memory?.id) continue;
-      const id = item.memory.id;
-      scores.set(id, (scores.get(id) || 0) + 1.0 / (k + rank + 1));
-      if (!items.has(id)) {
-        items.set(id, { ...item });
-      } else {
-        // Merge metadata: keep the richer version
-        const existing = items.get(id);
-        items.set(id, {
-          ...existing,
-          memory: existing.memory || item.memory,
-          vectorScore: Math.max(existing.vectorScore || 0, item.vectorScore || 0),
-          keywordScore: Math.max(existing.keywordScore || 0, item.keywordScore || 0),
-          graphScore: Math.max(existing.graphScore || 0, item.graphScore || 0),
-          similarityScore: Math.max(existing.similarityScore || 0, item.similarityScore || 0),
-          recencyScore: Math.max(existing.recencyScore || 0, item.recencyScore || 0),
-        });
-      }
-    }
-  }
-
-  // Apply RRF scores
-  const merged = [];
-  for (const [id, rrfScore] of scores) {
-    const item = items.get(id);
-    if (item) {
-      merged.push({ ...item, score: rrfScore, _rrfScore: rrfScore });
-    }
-  }
-
-  return merged.sort((a, b) => b.score - a.score);
-}
-
-/**
  * Memory type boosting based on query intent.
  * Inspired by code-review-graph's kind boosting (PascalCase → Class, snake_case → Function).
  * "what did I decide" → boost decision memories. "my preference" → boost preference memories.
@@ -458,6 +425,7 @@ async function vectorCandidatesForRecall(store, {
   max_memories,
   dateRange = null,
   scoreThreshold = 0.25,
+  hnswEf = undefined, // PHASE-F: per-org HNSW ef_search; undefined → searchMemories falls back to EF_SEARCH_DEFAULT
   candidatePoolSize = Math.max(max_memories * 4, 20),
   is_latest = true,
   access_context = null,
@@ -469,6 +437,14 @@ async function vectorCandidatesForRecall(store, {
     return [];
   }
 
+  // PHASE-F NOTE: the LIVE /api/recall tuned-param path is
+  //   recallPersistedMemories → vectorCandidatesForRecall → qdrantClient.hybridSearch
+  //   (src/vector/qdrant-client.js) → searchMemories.
+  // It bypasses BOTH src/search/hybrid.js AND src/external/search/hybrid.js entirely.
+  // PHASE-X TODO: the genuine hybrid.js dedup (search/ vs external/search/, currently
+  // diverged supersets — NOT identical) is DEFERRED. Any future unification MUST preserve
+  // the LIVE matchesHardScope scope-filtering in src/search/hybrid.js and the
+  // ThreeTierRetrieval path (server.js → three-tier-retrieval.js → ResultReranker).
   const results = await qdrantClient.hybridSearch(query_context, {
     user_id,
     org_id,
@@ -477,6 +453,7 @@ async function vectorCandidatesForRecall(store, {
     is_latest,
     limit: candidatePoolSize,
     score_threshold: scoreThreshold,
+    hnsw_ef: hnswEf, // PHASE-F: inert when undefined (searchMemories → EF_SEARCH_DEFAULT)
     collectionName: buildCollectionName(user_id)
   });
 
@@ -728,35 +705,6 @@ export async function queryPersistedMemories(store, { pattern, user_id, org_id, 
  * @param {number} params.depth - Graph traversal depth (default: 2)
  * @returns {Array} Expanded candidate memories with graph_expanded flag
  */
-// Boost fact-memories (extracted-fact tags) — they have focused, precise embeddings
-function boostFactMemories(memories) {
-  return memories.map(mem => {
-    const tags = mem.tags || mem.payload?.tags || [];
-    const isFactMemory = Array.isArray(tags) && tags.includes('extracted-fact');
-    if (isFactMemory) {
-      return { ...mem, score: (mem.score || 0) * 1.15 };
-    }
-    return mem;
-  }).sort((a, b) => (b.score || 0) - (a.score || 0));
-}
-
-function boostPreferenceMemories(memories, options = {}) {
-  if (!options.preference_boost) return memories;
-
-  return memories.map(mem => {
-    const type = mem.memory_type || mem.payload?.memory_type || '';
-    const tags = mem.tags || mem.payload?.tags || [];
-
-    const isPreference = type === 'preference'
-      || (Array.isArray(tags) && tags.some(t => ['preference', 'personal', 'opinion'].includes(t)));
-    const isObservation = type === 'observation';
-
-    if (isPreference) return { ...mem, score: (mem.score || 0) * 1.6 };
-    if (isObservation) return { ...mem, score: (mem.score || 0) * 1.25 };
-    return mem;
-  }).sort((a, b) => (b.score || 0) - (a.score || 0));
-}
-
 async function traverseUpdateChain(memories, store, { maxDepth = 3 } = {}) {
   if (!store || !memories?.length) return memories;
 
@@ -910,6 +858,97 @@ async function expandCandidatesViaGraph(store, {
   return expandedCandidates;
 }
 
+/**
+ * PHASE-B — Build the tiered "recall spine" view from already-scored/sliced
+ * memories. Pure: no IO, no DB, no Qdrant. Never throws — on any error returns
+ * empty tiers. Reuses the same synthesis predicates the main path uses.
+ *
+ * Tiers:
+ *   l2_principles   — most distilled knowledge:
+ *                       cognitive_layer_role ∈ {canonical, bridge}
+ *                       OR source_metadata.source_type ∈ {canonical-fact, synthesis-bridge}
+ *                       OR tags include synthesis:canonical / synthesis:bridge
+ *   l1_summaries    — role ∈ {compression, reflection}
+ *                       OR canonical-summary carrying a topic anchor
+ *   supporting_facts— everything else
+ *   bridges         — sub-list of l2 that are specifically synthesis-bridge
+ *   evidence        — synthesized[].evidence flattened + deduped by id
+ *
+ * @param {Array}  flatMemories  Final sliced memories[] (each a flat memory object).
+ * @param {Array}  synthesized   The synthesized[] rich array (carries .evidence[]).
+ * @returns {{l2_principles:Array,l1_summaries:Array,supporting_facts:Array,evidence:Array,bridges:Array}}
+ */
+export function buildRecallSpine(flatMemories, synthesized) {
+  const empty = { l2_principles: [], l1_summaries: [], supporting_facts: [], evidence: [], bridges: [] };
+  try {
+    const mems = Array.isArray(flatMemories) ? flatMemories : [];
+    const synth = Array.isArray(synthesized) ? synthesized : [];
+
+    const roleOf = (m) => m?.cognitive_layer_role || m?.cognitiveLayerRole || null;
+    const srcTypeOf = (m) =>
+      m?.source_metadata?.source_type || m?.sourceMetadata?.sourceType || m?.source_type || null;
+    const tagsOf = (m) => (Array.isArray(m?.tags) ? m.tags : []);
+    const hasTopicAnchor = (tags) =>
+      tags.some((t) => typeof t === 'string' && (
+        t === 'topic:knowledge-base' || t === 'topic:document' ||
+        t.startsWith('topic:') || t.startsWith('entity:') || t.startsWith('person:')
+      ));
+
+    const isL2 = (m) => {
+      const role = roleOf(m);
+      if (role === 'canonical' || role === 'bridge') return true;
+      const st = srcTypeOf(m);
+      if (st === 'canonical-fact' || st === 'synthesis-bridge') return true;
+      const tags = tagsOf(m);
+      return tags.includes('synthesis:canonical') || tags.includes('synthesis:bridge');
+    };
+    const isBridge = (m) => {
+      if (roleOf(m) === 'bridge') return true;
+      if (srcTypeOf(m) === 'synthesis-bridge') return true;
+      return tagsOf(m).includes('synthesis:bridge');
+    };
+    const isL1 = (m) => {
+      const role = roleOf(m);
+      if (role === 'compression' || role === 'reflection') return true;
+      const tags = tagsOf(m);
+      return tags.includes('canonical-summary') && hasTopicAnchor(tags);
+    };
+
+    const l2_principles = [];
+    const l1_summaries = [];
+    const supporting_facts = [];
+    const bridges = [];
+
+    for (const m of mems) {
+      if (isL2(m)) {
+        l2_principles.push(m);
+        if (isBridge(m)) bridges.push(m);
+      } else if (isL1(m)) {
+        l1_summaries.push(m);
+      } else {
+        supporting_facts.push(m);
+      }
+    }
+
+    const evidence = [];
+    const seenEvidence = new Set();
+    for (const s of synth) {
+      const ev = Array.isArray(s?.evidence) ? s.evidence : [];
+      for (const e of ev) {
+        const id = e?.id;
+        if (id == null) { evidence.push(e); continue; }
+        if (seenEvidence.has(id)) continue;
+        seenEvidence.add(id);
+        evidence.push(e);
+      }
+    }
+
+    return { l2_principles, l1_summaries, supporting_facts, evidence, bridges };
+  } catch {
+    return { ...empty };
+  }
+}
+
 export async function recallPersistedMemories(store, {
   query_context,
   user_id,
@@ -942,9 +981,28 @@ export async function recallPersistedMemories(store, {
   // Phase 2 (B2): non-temporal score threshold comes from the per-org
   // RetrievalConfig (the self-evolution loop's primary Recall@K knob), falling
   // back to 0.20. Temporal queries keep the looser 0.15 floor for recall.
+  // PHASE-F: optional per-org RetrievalConfig wiring (hnsw_ef + ranking weights).
+  // Default OFF — when unset, behaviour is byte-identical: only score_threshold is
+  // read (legacy semantics), weights stay at caller/default, hnswEf stays undefined.
+  const _wireCfg = process.env.RETRIEVAL_CONFIG_WIRING === 'true';
+  let _cfg = null;
   let _cfgThreshold = 0.20;
-  try { _cfgThreshold = (await getRetrievalConfig(org_id))?.score_threshold ?? 0.20; } catch { /* default */ }
+  // Single DB fetch reused for threshold + (when wired) hnsw_ef + weights. No extra call.
+  try { _cfg = await getRetrievalConfig(org_id); _cfgThreshold = _cfg?.score_threshold ?? 0.20; } catch { /* default */ }
   const vectorScoreThreshold = temporalComparison ? 0.15 : _cfgThreshold;
+
+  // PHASE-F: derive effective ranking weights. policy has NO RetrievalConfig column —
+  // keep the caller/default value. All else from the same single _cfg fetch.
+  const _effectiveWeights = (_wireCfg && _cfg)
+    ? {
+        similarity: _cfg.similarity_weight,
+        recency:    _cfg.recency_weight,
+        importance: _cfg.importance_weight,
+        vector:     _cfg.vector_weight,
+        graph:      _cfg.graph_weight,
+        policy:     weights.policy ?? 0.05,
+      }
+    : weights;
 
   // is_latest: undefined = default true, false = include superseded versions
   const effectiveIsLatest = is_latest !== undefined ? is_latest : true;
@@ -1026,6 +1084,7 @@ export async function recallPersistedMemories(store, {
     max_memories,
     dateRange: effectiveDateRange,
     scoreThreshold: vectorScoreThreshold,
+    hnswEf: _wireCfg ? _cfg?.hnsw_ef : undefined, // PHASE-F: per-org ef_search when wired; undefined otherwise (dark-safe)
     candidatePoolSize,
     is_latest: effectiveIsLatest,
     access_context,
@@ -1043,7 +1102,7 @@ export async function recallPersistedMemories(store, {
     relationships,
     relationshipCounts,
     query_context,
-    weights,
+    weights: _effectiveWeights, // PHASE-F: per-org ranking weights when wired, else caller/default
     preferred_project,
     preferred_source_platforms,
     preferred_tags,
@@ -1080,12 +1139,13 @@ export async function recallPersistedMemories(store, {
       preferred_tags
     });
     const temporalBoost = temporalSignalBoost(memory, query_context, temporalComparison);
-    let score = (weights.similarity ?? 0.45) * similarityScore +
-        (weights.recency ?? 0.15) * recencyScore +
-        (weights.importance ?? 0.1) * importanceScore +
-        (weights.vector ?? 0.2) * vectorScore +
-        (weights.graph ?? 0.05) * graphScore +
-        (weights.policy ?? 0.05) * policyScore +
+    // PHASE-F: _effectiveWeights === weights when wiring OFF (byte-identical scoring).
+    let score = (_effectiveWeights.similarity ?? 0.45) * similarityScore +
+        (_effectiveWeights.recency ?? 0.15) * recencyScore +
+        (_effectiveWeights.importance ?? 0.1) * importanceScore +
+        (_effectiveWeights.vector ?? 0.2) * vectorScore +
+        (_effectiveWeights.graph ?? 0.05) * graphScore +
+        (_effectiveWeights.policy ?? 0.05) * policyScore +
         temporalBoost;
     // Superseded memory penalty
     if (memory.is_latest === false) score *= 0.55;
@@ -1140,12 +1200,13 @@ export async function recallPersistedMemories(store, {
     });
     const temporalBoost = temporalSignalBoost(candidate.memory, query_context, temporalComparison);
 
-    let score = (weights.similarity ?? 0.45) * (candidate.similarityScore || 0) +
-        (weights.recency ?? 0.15) * recencyScore +
-        (weights.importance ?? 0.1) * importanceScore +
-        (weights.vector ?? 0.2) * (candidate.vectorScore || 0) +
-        (weights.graph ?? 0.05) * graphScore +
-        (weights.policy ?? 0.05) * policyScore +
+    // PHASE-F: _effectiveWeights === weights when wiring OFF (byte-identical scoring).
+    let score = (_effectiveWeights.similarity ?? 0.45) * (candidate.similarityScore || 0) +
+        (_effectiveWeights.recency ?? 0.15) * recencyScore +
+        (_effectiveWeights.importance ?? 0.1) * importanceScore +
+        (_effectiveWeights.vector ?? 0.2) * (candidate.vectorScore || 0) +
+        (_effectiveWeights.graph ?? 0.05) * graphScore +
+        (_effectiveWeights.policy ?? 0.05) * policyScore +
         temporalBoost;
     // Superseded memory penalty
     if (candidate.memory?.is_latest === false) score *= 0.55;
@@ -1356,7 +1417,11 @@ export async function recallPersistedMemories(store, {
     // memories so they surface FIRST. canonical/bridge are Turing-verified
     // facts/edges — they encode the most distilled knowledge.
     const role = mem.cognitive_layer_role || mem.cognitiveLayerRole;
-    if (role === 'canonical')   mult *= 1.6;
+    // PHASE-A: principle layer is the most distilled tier — intentionally boosted
+    // ABOVE canonical (1.7 > 1.6). Dark by default; a 'principle' role string matches
+    // no existing branch when PRINCIPLES_RECALL_ENABLED is off, so OFF is byte-identical.
+    if (role === 'principle' && PRINCIPLES_RECALL_ENABLED) mult *= 1.7;
+    else if (role === 'canonical')   mult *= 1.6;
     else if (role === 'bridge') mult *= 1.4;
     else if (role === 'compression') mult *= 1.3;
     else if (role === 'reflection')  mult *= 1.1;
@@ -1436,13 +1501,16 @@ export async function recallPersistedMemories(store, {
         const tags = mem.tags || [];
         if (tags.includes('synthesis:canonical')) srcType = 'canonical-fact';
         else if (tags.includes('synthesis:bridge')) srcType = 'synthesis-bridge';
+        // PHASE-A: principle layer (dark by default). Treated like canonical-fact below.
+        else if (tags.includes('synthesis:principle') && PRINCIPLES_RECALL_ENABLED) srcType = 'principle';
       }
       const conf = typeof mem.synthesis_confidence === 'number'
         ? mem.synthesis_confidence
         : (typeof mem.synthesisConfidence === 'number' ? mem.synthesisConfidence : null);
 
       if (!srcType || conf === null) return item;
-      if (srcType !== 'canonical-fact' && srcType !== 'synthesis-bridge') return item;
+      // PHASE-A: 'principle' joins the eligible set (gated — OFF never produces it).
+      if (srcType !== 'canonical-fact' && srcType !== 'synthesis-bridge' && srcType !== 'principle') return item;
       if (conf < SYNTHESIS_CONF_BOOST_FLOOR) return item;
 
       // Query-relevance gate. Synthesis boost only fires when query overlaps
@@ -1465,8 +1533,8 @@ export async function recallPersistedMemories(store, {
         if (STOP_PHRASES.some((p) => content.includes(p))) return item;
       }
 
-      // Source-type multiplier
-      let mult = srcType === 'canonical-fact' ? 1.35 : 1.50;
+      // Source-type multiplier. PHASE-A: 'principle' treated like canonical-fact (1.35).
+      let mult = (srcType === 'canonical-fact' || srcType === 'principle') ? 1.35 : 1.50;
 
       // Phase 2 — revision boost: each confirmed revision adds ×1.05 (capped at rev 6+)
       // rev1→×1.00, rev2→×1.05, rev3→×1.10, rev4→×1.15, rev5→×1.20, rev6+→×1.25
@@ -1552,6 +1620,33 @@ export async function recallPersistedMemories(store, {
     })
     .slice(0, max_memories);
 
+  // PHASE-B: tiered-view delivery reranking via the canonical algorithmic
+  // ResultReranker (shared with three-tier-retrieval.js). Dark by default —
+  // when RECALL_TIERED_VIEW is unset the inline score-sort above is the final
+  // ordering and `top` is untouched. Re-ordering only; head-slot splice below
+  // still runs afterwards so the canonical/bridge guarantee is preserved.
+  if (TIERED_VIEW_ENABLED && top.length > 1) {
+    // Normalize query_context to a string: the JSDoc types it as {string} but
+    // callers can pass an object. ResultReranker._tokenize would coerce an
+    // object to '[object Object]', nulling the BM25-like term-overlap signal.
+    const rerankQuery = typeof query_context === 'string'
+      ? query_context
+      : (query_context?.text ?? query_context?.query ?? String(query_context));
+    // PHASE-B: `top[]` items are wrapped as { memory, score, vectorScore, ... };
+    // ResultReranker reads the flat fields `content`/`created_at`, which are
+    // absent on the wrapper. Surface them from `item.memory` so the termOverlap
+    // and recency signals are computed instead of silently degrading to 0.
+    if (!_algorithmicReranker) _algorithmicReranker = new ResultReranker();
+    top = _algorithmicReranker.rerank(
+      rerankQuery,
+      top.map((item) => ({
+        ...item,
+        content: item.memory?.content ?? item.content,
+        created_at: item.memory?.created_at ?? item.created_at,
+      }))
+    );
+  }
+
   // ── Head-slot: guarantee top synthesis candidate is first ─────────────────
   // When mode !== 'date_asc/date_desc' and the top synthesis candidate has a
   // boosted final score > 0.6 AND confidence ≥ 0.70, splice it to slot[0].
@@ -1570,10 +1665,12 @@ export async function recallPersistedMemories(store, {
         const tags = mem.tags || [];
         if (tags.includes('synthesis:canonical')) srcType = 'canonical-fact';
         else if (tags.includes('synthesis:bridge')) srcType = 'synthesis-bridge';
+        // PHASE-A: principle is head-slot eligible like canonical-fact (gated — OFF never produces it).
+        else if (tags.includes('synthesis:principle') && PRINCIPLES_RECALL_ENABLED) srcType = 'principle';
       }
       const conf = typeof mem.synthesis_confidence === 'number' ? mem.synthesis_confidence
         : (typeof mem.synthesisConfidence === 'number' ? mem.synthesisConfidence : null);
-      return (srcType === 'canonical-fact' || srcType === 'synthesis-bridge')
+      return (srcType === 'canonical-fact' || srcType === 'synthesis-bridge' || srcType === 'principle')
         && conf !== null && conf >= 0.70
         && (item.score || 0) > 0.6;
     });
@@ -1730,6 +1827,10 @@ export async function recallPersistedMemories(store, {
       included_count:   top.filter(item => item.graph_expanded).length,
       synthesis_count:  synthesized.length,
     },
+    // PHASE-B: tiered "recall spine" view. Additive + dark by default — the key is
+    // absent entirely unless RECALL_TIERED_VIEW=true, so legacy clients see the
+    // byte-identical shape. memories/synthesized/raw kept for backcompat.
+    ...(TIERED_VIEW_ENABLED ? { spine: buildRecallSpine(flatMemories, synthesized) } : {}),
   };
 }
 

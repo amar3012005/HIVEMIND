@@ -458,6 +458,10 @@ model Memory {
   @@index([tier], map: "memories_tier_idx")
   @@index([userId, tier, lastAccessedAt(sort: Desc)], map: "memories_user_tier_lastaccess_idx")
   @@index([cognitiveLayerRole], map: "memories_cognitive_layer_role_idx")
+  // PHASE-A: a partial index `memories_principle_role_idx` on (org_id, updated_at DESC)
+  // WHERE cognitive_layer_role = 'principle' exists in the DB (migration
+  // 20260606000000_l2_principles_tier). The WHERE filter is not expressible in
+  // the Prisma DSL, so it is migration-only and intentionally absent here.
   @@map("memories")
 }
 

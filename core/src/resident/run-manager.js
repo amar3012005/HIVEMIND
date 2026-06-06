@@ -9,6 +9,7 @@ import {
 import { FaradayAgent } from './faraday.js';
 import { FeynmanAgent } from './feynman.js';
 import { TuringAgent } from './turing.js';
+import { isPoolEnabled, ensurePoolRow, resetAndReadPool, spendPool } from './budget-pool.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -784,7 +785,7 @@ export class ResidentRunManager {
    *
    * Returns { batch_id, status, faraday, feynman, turing, proposals_persisted }.
    */
-  async runFullCycle({ orgId, userId, scope = 'project', project = null, region = null, trigger = 'manual', enabledCognitiveTools = null } = {}) {
+  async runFullCycle({ orgId, userId, scope = 'project', project = null, region = null, trigger = 'manual', enabledCognitiveTools = null, tierName = 'synthesis', tierTokenEstimate = null } = {}) {
     if (!orgId) {
       const err = new Error('runFullCycle requires orgId');
       err.code = 'MISSING_ORG_ID';
@@ -800,7 +801,25 @@ export class ResidentRunManager {
     const LOCK_HOLD_MS = 10 * 60 * 1000; // 10 min cycle ceiling
 
     // Token-budget circuit breaker: reset day, check spend, refuse if exhausted.
-    if (this.prisma) {
+    // PHASE E: when the shared pool is enabled, the pool is the authoritative
+    // cap and the per-agent breaker becomes advisory. Otherwise the original
+    // per-agent block runs byte-identically.
+    if (this.prisma && isPoolEnabled()) {
+      try {
+        await ensurePoolRow(this.prisma);
+        const { spent, budget, exhausted } = await resetAndReadPool(this.prisma);
+        if (exhausted) {
+          this.logger?.warn?.(`[gov-cycle] shared token pool exhausted (spent=${spent}/${budget})`);
+          return {
+            batch_id: batchId,
+            status: 'skipped_budget_exhausted',
+            pool: { spent, budget },
+          };
+        }
+      } catch (err) {
+        this.logger?.warn?.(`[gov-cycle] pool-budget check failed: ${err.message}`);
+      }
+    } else if (this.prisma) {
       try {
         await this.prisma.$executeRawUnsafe(
           `UPDATE hivemind.governance_agent_state
@@ -1016,6 +1035,8 @@ export class ResidentRunManager {
             proposalsPersisted: summary.proposals_persisted,
             latencyMs: Date.now() - cycleStartedAt,
             tokenUsageByAgent: { faraday: faradayTokens },
+            tierName,
+            tierTokenEstimate,
           });
         } catch (err) {
           this.logger?.warn?.(`[gov-cycle] state update failed: ${err.message}`);
@@ -1205,14 +1226,16 @@ export class ResidentRunManager {
     });
   }
 
-  async _updateAgentStateAfterCycle({ orgId, status, proposalsPersisted, latencyMs, tokenUsageByAgent = {} }) {
+  async _updateAgentStateAfterCycle({ orgId, status, proposalsPersisted, latencyMs, tokenUsageByAgent = {}, tierName = 'synthesis', tierTokenEstimate = null }) {
     const now = new Date();
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     // Heuristic token cost when LLM doesn't surface usage. Conservative
     // overestimate so circuit-breaker fires before real overrun.
     const FALLBACK_TOKENS_PER_RUN = Number(process.env.GOV_FALLBACK_TOKENS_PER_RUN || 5000);
+    let totalCycleTokens = 0;
     for (const agentName of ['faraday', 'feynman', 'turing']) {
       const tokensSpent = Number(tokenUsageByAgent[agentName] ?? FALLBACK_TOKENS_PER_RUN) | 0;
+      totalCycleTokens += tokensSpent;
       await this.prisma.governanceAgentState.update({
         where: { agentName },
         data: {
@@ -1244,6 +1267,16 @@ export class ResidentRunManager {
           tokensSpent: { increment: BigInt(tokensSpent) },
         },
       }).catch(() => null);
+    }
+
+    // PHASE E: debit the shared pool for this whole cycle. Per-agent updates
+    // above are retained (advisory when the pool is enabled). Prefer the
+    // caller's tier estimate when provided so the pool reflects the tier mix.
+    if (isPoolEnabled()) {
+      const poolTokens = Number.isFinite(tierTokenEstimate) && tierTokenEstimate != null
+        ? Number(tierTokenEstimate)
+        : totalCycleTokens;
+      await spendPool(this.prisma, poolTokens, tierName, this.logger);
     }
   }
 

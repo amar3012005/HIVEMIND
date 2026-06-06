@@ -1850,24 +1850,30 @@ Output JSON only:
           return `[${m.id}] (${ts}) ${m.title ? m.title + ' — ' : ''}${c}`;
         }).join('\n');
 
-        const prompt = `You are distilling a transferable PRINCIPLE (a reusable rule the org can apply to future decisions) from memory. Below are ${promptMembers.length} memories sharing the tag "${tag}".
+        const prompt = `You are surfacing a NEW INSIGHT from organizational memory — a specific, non-obvious fact that emerges ONLY by combining these memories and is NOT stated in any single one. This is what a sharp analyst notices after reading everything, that no individual memory says on its own. It must be impossible to find by reading just one memory at ingestion time.
 
-GROUNDING — strict:
-- Derive the principle ONLY from what these memories actually show. Do NOT invent supporting detail, outcomes, or context.
-- Name the concrete context it was learned from — the specific people, organizations, products, or projects involved (proper nouns, exactly as written). A principle with NO named grounding is a vague platitude and must be rejected.
+Below are ${promptMembers.length} memories sharing the tag "${tag}".
 
-TASK:
-- State a domain-general rule/heuristic (if/then or always/never) that generalises BEYOND any single memory and would help decide a NEW situation.
-- 2–3 sentences: first the rule, then the named context/evidence it was learned from — e.g. "Derived from how <Name>/<Org> handled <X>: …".
-- Concrete enough to be falsifiable; abstract enough to transfer. Not a restatement of one fact (that is a canonical-fact).
+PRODUCE the single strongest insight (choose the type that fits, ground it in the evidence):
+- emergent_connection: memory A + memory B together imply a concrete fact Z that neither states alone.
+- pattern: a recurring specific pattern across ≥3 memories (name the instances).
+- implication: a concrete consequence that follows from the facts but is never written down.
+- tension: a specific contradiction or unresolved conflict between memories.
+- gap: a specific missing piece the evidence reveals is absent or blocking.
 
-REJECT: single-fact restatements, vague platitudes with no named grounding, enumerations.
+HARD RULES (violations are rejected):
+- SPECIFIC to THIS organization. Name the real entities exactly — people, orgs, products, projects, dates — as written. Reference the concrete facts, not abstractions.
+- NEW: must NOT be a restatement of any single memory, and must NOT be derivable from one memory alone — it has to require combining at least two.
+- GROUNDED: cite the memory [ids] it emerges from; never invent facts, numbers, or names.
+- 2–4 sentences.
+
+REJECT (these are failures, output nothing rather than these): generic advice / best-practices ("always prioritize clarity", "complementary skills help co-founders", "start simple then iterate"), motivational platitudes, anything that would be true for ANY company, single-memory restatements, vague summaries.
 
 Memories:
 ${facts}
 
 Output JSON only:
-{ "principle": "<2-3 sentences: the rule + the named context/evidence it was derived from>", "entities": ["<proper nouns referenced, verbatim>"], "supporting_memory_ids":[...], "confidence": 0.0-1.0 }`;
+{ "insight": "<2-4 specific, grounded sentences naming real entities — the emergent fact>", "insight_type": "emergent_connection|pattern|implication|tension|gap", "entities": ["<proper nouns referenced, verbatim>"], "supporting_memory_ids":[...], "confidence": 0.0-1.0 }`;
 
         const raw = await llmWithFallback({
           messages:    [{ role: 'user', content: prompt }],
@@ -1878,7 +1884,9 @@ Output JSON only:
 
         // Reuse the SAME tolerant JSON helper the canonical sub-pass uses.
         const parsed = safeParseJSON(raw);
-        const principleText = parsed?.principle;
+        // L2 now produces emergent INSIGHT (key 'insight'); fall back to the
+        // legacy 'principle' key for any in-flight prompt variant.
+        const principleText = parsed?.insight || parsed?.principle;
         const confidence = Number(parsed?.confidence || 0);
         if (!principleText || principleText.length < 20) continue;
         if (confidence < PRINCIPLE_CONFIDENCE_FLOOR) {

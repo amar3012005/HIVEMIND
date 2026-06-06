@@ -3,16 +3,17 @@
 > The cron reads this FIRST every run. Keep it accurate or work repeats.
 
 status: IN_PROGRESS
-current_phase: 11       # reconcile of in-scope recall/memory files DONE; cognitive trio SKIPPED; now AI Meeting Notes
+current_phase: 13       # reconcile done(in-scope); P11 audit done; P12 dial preview-deployed (awaiting visual review); P13-14 bge-m3 next
 total_phases: 14
-branch: reconcile/merge
-last_verdict: GREEN
+branch: preview/meeting-notes-dial (P12) / reconcile/merge (reconcile)
+last_verdict: GREEN (P12 JSX parse + preview pushed)
 last_run: 2026-06-06 continuous
 
 ## Next concrete action
-P11: audit frontend/Da-vinci/src/components/hivemind/app/pages/MeetingNotes.jsx —
-  write concrete gap list vs desired (past meetings, recording animation, insights,
-  dial hover, dates/days). No code yet. Then P12 = finish/redesign the existing component.
+P13: finish/document bge-m3 dark wiring + design SANDBOX rehearsal (org_<sandbox>
+  collection, 1024-dim). HIGH RISK — sandbox only. Live EMBEDDING_DIMENSION flip is
+  FORBIDDEN without explicit human go. Best done as a dedicated focused run.
+AWAITING: P12 visual review of Vercel preview (preview/meeting-notes-dial) before merge to main.
 
 ## Phase checklist
 - [x] P1  reconcile graph-action-executor.js  (adopt prod, dark-safe)
@@ -25,10 +26,10 @@ P11: audit frontend/Da-vinci/src/components/hivemind/app/pages/MeetingNotes.jsx 
 - [~] P6  run-manager.js    — SKIPPED: cognitive layer + diverged-both (out of scope)
 - [~] P8  cognition-loop.js — SKIPPED: cognitive layer (out of scope)
 - [ ] P10 ff reconcile/merge → main — DEFERRED (supervised branch merge; main+reconcile diverged)
-- [ ] P11 audit MeetingNotes.jsx (gap list, no code)  ← CURRENT
-- [ ] P12 implement Meeting Notes redesign + deploy Vercel
-- [ ] P13 finish bge-m3 dark wiring + design sandbox rehearsal
-- [ ] P14 run bge-m3 sandbox rehearsal (NO live flip)
+- [x] P11 audit MeetingNotes.jsx (gap list → meeting-notes-gaps.md)
+- [x] P12 record dial added (hover + pulse rings, logic preserved) → preview/meeting-notes-dial (Vercel preview). AWAITING visual review before merge to main.
+- [ ] P13 finish bge-m3 dark wiring + design sandbox rehearsal  ← NEXT (dedicated run; high risk)
+- [ ] P14 run bge-m3 sandbox rehearsal (NO live flip — needs human go)
 
 ## Already done (do not redo)
 - reconcile/merge holds prod versions of: qdrant-client, graph-action-executor, faraday,

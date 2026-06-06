@@ -82,6 +82,8 @@ export class ClusterIndex {
   }
 
   // ─── Bump dirty count (atomic) ─────────────────────────────────────────────
+  // PHASE-X TODO: dirty counter is now write-only (getDirtyClusters/resetDirty removed);
+  // revisit whether bumpDirty bookkeeping is still needed.
   /**
    * Increment dirty_count for a cluster. Called when cognition-loop discovers
    * new source memories that have arrived since the last synthesis for this
@@ -126,74 +128,6 @@ export class ClusterIndex {
     }
   }
 
-  // ─── Reset dirty count after tick ─────────────────────────────────────────
-  async resetDirty({ id }) {
-    try {
-      await this.prisma.clusterIndex.update({
-        where:  { id },
-        data:   { dirtyCount: 0, lastTickAt: new Date() },
-      });
-    } catch (err) {
-      console.warn(`[cluster-index] resetDirty id=${id} failed: ${err.message}`);
-    }
-  }
-
-  // ─── Get dirty clusters (scheduler) ────────────────────────────────────────
-  /**
-   * Returns clusters ordered by dirty_count desc. cognition-loop uses this
-   * to prioritise which clusters to synthesise next.
-   *
-   * @param {{ organizationId: string, minDirty?: number, limit?: number }} opts
-   */
-  async getDirtyClusters({ organizationId, minDirty = 3, limit = 50 }) {
-    try {
-      return await this.prisma.clusterIndex.findMany({
-        where: {
-          organizationId,
-          dirtyCount: { gte: minDirty },
-        },
-        orderBy: { dirtyCount: 'desc' },
-        take:    limit,
-      });
-    } catch (err) {
-      console.warn(`[cluster-index] getDirtyClusters failed: ${err.message}`);
-      return [];
-    }
-  }
-
-  // ─── Cross-cluster entity overlap lookup ────────────────────────────────────
-  /**
-   * Returns clusters sharing at least one entity with the given set.
-   * Used by crossClusterEntityBoost in persisted-retrieval.js.
-   *
-   * @param {{ organizationId: string, entityKeys: string[], excludeHashes?: string[], limit?: number }} opts
-   */
-  async getClustersByEntityOverlap({ organizationId, entityKeys, excludeHashes = [], limit = 50 }) {
-    if (!entityKeys || !entityKeys.length) return [];
-    try {
-      return await this.prisma.clusterIndex.findMany({
-        where: {
-          organizationId,
-          ...(excludeHashes.length > 0
-            ? { clusterHash: { notIn: excludeHashes } }
-            : {}),
-          entityKeys: { hasSome: entityKeys },
-        },
-        select: {
-          clusterHash:       true,
-          entityKeys:        true,
-          latestConfidence:  true,
-          latestSynthesisId: true,
-          latestRevision:    true,
-        },
-        take: limit,
-      });
-    } catch (err) {
-      console.warn(`[cluster-index] getClustersByEntityOverlap failed: ${err.message}`);
-      return [];
-    }
-  }
-
   // ─── Record recall hit (async fire-and-forget) ─────────────────────────────
   /**
    * Bump recall_count_30d + last_recall_at for all cluster hashes returned
@@ -215,15 +149,5 @@ export class ClusterIndex {
       // Non-fatal metric write — warn only
       console.warn(`[cluster-index] recordRecall failed: ${err.message}`);
     }
-  }
-
-  // ─── 30-day recall decay (nightly job, stub) ────────────────────────────────
-  /**
-   * Decay recall_count_30d by removing counts older than 30 days.
-   * TODO: wire as a nightly cron (Day 3).
-   */
-  async decayRecallCounts() {
-    /* TODO Day 3 — implement rolling 30-day decay with a separate
-       recall_events table or a periodic reset approach */
   }
 }

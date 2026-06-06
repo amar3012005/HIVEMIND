@@ -1268,7 +1268,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
 
     # Stagger starts so 9-concurrent Groq calls don't 429.
     async def _staggered_r1(emp, idx):
-        await asyncio.sleep(1.5 * idx)
+        await asyncio.sleep(0.25 * idx)
         return await _run_r1(emp)
     r1_results = await asyncio.gather(*[_staggered_r1(emp, i) for i, emp in enumerate(speakers)], return_exceptions=False)
     hypotheses = [h for h in r1_results if h]
@@ -1417,7 +1417,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
                 return []
 
         async def _staggered_r2(emp, idx):
-            await asyncio.sleep(1.5 * idx)
+            await asyncio.sleep(0.25 * idx)
             return await _run_r2(emp)
         if not cost_cap_hit:
             r2_lists = await asyncio.gather(*[_staggered_r2(emp, i) for i, emp in enumerate(speakers)], return_exceptions=False)
@@ -1499,7 +1499,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
                 return None
 
         async def _staggered_r3(emp, idx):
-            await asyncio.sleep(1.5 * idx)
+            await asyncio.sleep(0.25 * idx)
             return await _run_r3(emp)
         if not cost_cap_hit and _turn_tool_total() >= HYPER_ROOM_MAX_TOOL_CALLS:
             cost_cap_hit = True
@@ -1652,7 +1652,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
                 return None
 
         async def _staggered_vote(emp, idx):
-            await asyncio.sleep(1.5 * idx)
+            await asyncio.sleep(0.25 * idx)
             return await _run_vote(emp)
         if not cost_cap_hit and _turn_tool_total() >= HYPER_ROOM_MAX_TOOL_CALLS:
             cost_cap_hit = True

@@ -1,9 +1,10 @@
 # STATE — hermes-runtime
 
-- **Current phase:** 2 (hm-hermes image + compose) — NOT STARTED
-- **Next concrete action:** Add `hm-hermes` Dockerfile from `nousresearch/hermes-agent:latest` (+ `--shm-size`, resource limits) + a shim that reads a task spec from hm-control and invokes Hermes; add `hm-hermes` service to `docker-compose.coolify.yml` (volume `/opt/data`, ports 8642/9119, `API_SERVER_ENABLED=true`, generated `API_SERVER_KEY`, dashboard auth). VERIFY: container boots, gateway `:8642` health + dashboard reachable, state persists across restart. Deploy via verify+rollback on Hetzner. This phase needs server access — if blocked, mark BLOCKED + log.
-- **Branch:** Phase 1 = `claude/hermes-phase-1` (committed). Phase 2 → `claude/hermes-phase-2`.
-- **Last verdict:** Phase 1 GREEN — `core/src/hermes/agent-config.schema.json` + `agent-config.js` (ajv validator + SAMPLE_COMPETITOR_WATCHER). Tests: sample valid; missing-required / bad memory_mode / cron-without-expr / bad status all rejected. Prod deploy DEFERRED (dormant module, unused until Phase 4 wires it into hm-control — deploy then).
-- **Phases:** 1 ✅ Config contract · 2 hm-hermes image+compose · 3 HiveMind MCP wiring · 4 hm-control client · 5 Competitor Watcher e2e · 6 GATE pods-per-client
-- **Done:** Phase 1 (config contract)
-- **Do NOT:** edit `core/src/server.js` blindly · `git pull` on prod · start Phase 6 before Phase 5 is solid · commit secrets.
+- **Current phase:** 2 (hm-hermes image + compose) — ⛔ BLOCKED (artifacts done + locally verified; prod boot/deploy needs human go)
+- **Why blocked:** booting requires (a) pulling new third-party image `nousresearch/hermes-agent` onto Hetzner, (b) mutating the LIVE Coolify stack (new service hm-hermes, ports 8642/9119, volume), (c) secrets `HERMES_API_SERVER_KEY` + `HERMES_DASHBOARD_PASSWORD`. Safety rails: prod infra of this kind is human-gated, not autonomous.
+- **Unblock (operator):** follow `services/hm-hermes/README.md` runbook — set the two secrets in Coolify env, run the ISOLATED smoke test (`docker run … -p 18642:8642 … gateway run` then curl `:18642`), then apply the compose change via Coolify redeploy. Verify gates: `:8642` answers · dashboard `:9119` loads · restart → `/opt/data` persists. Then mark Phase 2 DONE, advance to Phase 3.
+- **Branch:** Phase 2 = `claude/hermes-phase-2` (committed). Phase 1 = `claude/hermes-phase-1`.
+- **Last verdict:** Phase 2 artifacts GREEN locally — `services/hm-hermes/{Dockerfile,shim.mjs,.env.example,README.md}` + `hm-hermes` service & `hermes-data` volume in `docker-compose.coolify.yml`. `docker compose config` valid; shim `node --check` clean. NOT deployed (human gate).
+- **Phases:** 1 ✅ Config contract · 2 ⛔ hm-hermes image+compose (artifacts done, deploy gated) · 3 HiveMind MCP wiring · 4 hm-control client · 5 Competitor Watcher e2e · 6 GATE pods-per-client
+- **Done:** Phase 1 (config contract). Phase 2 artifacts (deploy pending human).
+- **Do NOT:** edit `core/src/server.js` blindly · `git pull` on prod · pull/run new images or edit live Coolify stack without human go · start Phase 6 before Phase 5 · commit secrets.

@@ -949,7 +949,66 @@ services:
         env_file:
             - .env
 
+    hm-hermes:
+        build:
+            context: ./services/hm-hermes
+            dockerfile: Dockerfile
+        image: 'hivemind/hm-hermes:${VERSION:-latest}'
+        container_name: hm-hermes
+        hostname: hm-hermes
+        restart: unless-stopped
+        command: ['gateway', 'run']
+        # Browser (Playwright) tools need shared memory.
+        shm_size: '1gb'
+        deploy:
+            resources:
+                limits:
+                    cpus: '2'
+                    memory: 4G
+                reservations:
+                    cpus: '0.5'
+                    memory: 1G
+            restart_policy:
+                condition: on-failure
+                delay: 5s
+                max_attempts: 3
+                window: 120s
+        environment:
+            # Gateway = OpenAI-compatible API used by hm-control (Phase 4)
+            API_SERVER_ENABLED: 'true'
+            API_SERVER_HOST: 0.0.0.0
+            API_SERVER_KEY: '${HERMES_API_SERVER_KEY}'
+            # Admin dashboard
+            HERMES_DASHBOARD: '1'
+            HERMES_DASHBOARD_HOST: 0.0.0.0
+            HERMES_DASHBOARD_PORT: '9119'
+            HERMES_DASHBOARD_BASIC_AUTH_USERNAME: '${HERMES_DASHBOARD_USER:-admin}'
+            HERMES_DASHBOARD_BASIC_AUTH_PASSWORD: '${HERMES_DASHBOARD_PASSWORD}'
+            PUID: '1000'
+            PGID: '1000'
+            # HiveMind MCP = memory system of record (wired in Phase 3 via mcp.json)
+            HIVEMIND_API_URL: '${HIVEMIND_API_URL:-https://core.hivemind.davinciai.eu:8050}'
+        volumes:
+            - 'hermes-data:/opt/data'
+        ports:
+            - '8642:8642'
+            - '9119:9119'
+        networks:
+            hivemind-network: null
+            s0k0s0k40wo44w4w8gcs8ow0: null
+        healthcheck:
+            test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:8642/').then(()=>process.exit(0)).catch(()=>process.exit(1))"]
+            interval: 30s
+            timeout: 5s
+            retries: 3
+            start_period: 40s
+
 volumes:
+    hermes-data:
+        driver: local
+        labels:
+            - hivemind.component=hermes-runtime
+            - hivemind.backup=true
     hivemind-logs:
         driver: local
         labels:

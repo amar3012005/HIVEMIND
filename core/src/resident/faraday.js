@@ -190,17 +190,19 @@ function mapRawMemoryRecord(record = {}) {
   };
 }
 
-async function loadOrgScopedMemories(memoryStore, { userId, orgId, project, limit = 100, cursorAfter = null } = {}) {
+async function loadOrgScopedMemories(memoryStore, { userId, orgId, project, limit = 100, cursorAfter = null, includePersonal = false } = {}) {
   const client = getRawPrismaClient(memoryStore);
   if (!client?.memory?.findMany) return [];
 
   // Phase 3 sliding window: cap absolute scan size + optional cursor for
   // resume-from-where-you-left-off. Prevents unbounded scan on large orgs.
   const cappedLimit = Math.min(limit, 500);
+  // Pilot orgs may opt in to scanning personal memories too (cognition-pilot.js);
+  // default stays organization-only so the cron is a no-op on personal data.
   const where = {
     orgId,
     deletedAt: null,
-    visibility: 'organization',
+    visibility: includePersonal ? { in: ['organization', 'personal'] } : 'organization',
     // Skip Faraday's own outputs + cognitive-layer memories — scanning them
     // creates a feedback loop where reflections get hypothesised about and
     // Turing relates governance memories to other governance memories.
@@ -229,7 +231,7 @@ async function loadOrgScopedMemories(memoryStore, { userId, orgId, project, limi
   return records.map(mapRawMemoryRecord).filter(Boolean);
 }
 
-async function searchOrgScopedMemories(memoryStore, { query = '', orgId, project, n_results = 12, memory_type, tags, source_platform, created_after, created_before, is_latest } = {}) {
+async function searchOrgScopedMemories(memoryStore, { query = '', orgId, project, n_results = 12, memory_type, tags, source_platform, created_after, created_before, is_latest, includePersonal = false } = {}) {
   const client = getRawPrismaClient(memoryStore);
   if (!client?.memory?.findMany) return [];
 
@@ -239,7 +241,7 @@ async function searchOrgScopedMemories(memoryStore, { query = '', orgId, project
       NOT: { tags: { has: 'internal-audit' } },
       orgId,
       deletedAt: null,
-      visibility: 'organization',
+      visibility: includePersonal ? { in: ['organization', 'personal'] } : 'organization',
       ...(project ? { project } : {}),
       memoryType: memory_type || undefined,
       sourcePlatform: source_platform || undefined,
@@ -705,6 +707,7 @@ CRITICAL: Use the COMPLETE memory IDs exactly as shown in brackets. They are ful
     dryRun = false,
     runId,
     cursorAfter = null,
+    includePersonal = false,
     onProgress = async () => {},
     isCancelled = () => false,
   } = {}) {
@@ -750,6 +753,7 @@ CRITICAL: Use the COMPLETE memory IDs exactly as shown in brackets. They are ful
         project,
         limit: Math.min(Math.max(scanBudget * 2, 600), 2000),
         cursorAfter,
+        includePersonal,
       });
       if (memories.length === 0) {
         memories = await searchOrgScopedMemories(this.memoryStore, {
@@ -757,6 +761,7 @@ CRITICAL: Use the COMPLETE memory IDs exactly as shown in brackets. They are ful
           orgId,
           project,
           n_results: 150,
+          includePersonal,
         });
       }
     } else if (this.memoryStore?.listLatestMemories) {
@@ -815,6 +820,7 @@ CRITICAL: Use the COMPLETE memory IDs exactly as shown in brackets. They are ful
           project,
           is_latest: true,
           n_results: 12,
+          includePersonal,
         });
 
         for (const result of probeResults || []) {

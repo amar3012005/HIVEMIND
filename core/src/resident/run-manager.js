@@ -7,6 +7,7 @@ import {
   TURING_OBSERVATION_FIELDS,
 } from './contract.js';
 import { FaradayAgent } from './faraday.js';
+import { includePersonalForOrg } from './cognition-pilot.js';
 import { FeynmanAgent } from './feynman.js';
 import { TuringAgent } from './turing.js';
 import { isPoolEnabled, ensurePoolRow, resetAndReadPool, spendPool } from './budget-pool.js';
@@ -195,6 +196,8 @@ export class ResidentRunManager {
       dryRun: run.dry_run,
       runId: run.run_id,
       cursorAfter: run.cursor_after || null,
+      // Pilot-gated: scan personal memories only for allowlisted orgs (cognition-pilot.js).
+      includePersonal: includePersonalForOrg(context.orgId),
       onProgress: async (progress) => {
         run.current_step = progress.current_step;
         run.progress = progress;

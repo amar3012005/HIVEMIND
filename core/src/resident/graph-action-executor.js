@@ -35,7 +35,10 @@ export class GraphActionExecutor {
    * @returns {Promise<{ executed: number, skipped: number, failed: number, results: Array }>}
    */
   async executeActions(actions, options = {}) {
-    const { dryRun = false, minConfidence = 0.6, duplicateMode = 'merge' } = options;
+    // Default confidence floor is env-tunable (GOV_MIN_PROPOSAL_CONFIDENCE) so a
+    // pilot org can calibrate it while agent confidence scoring is being tuned,
+    // without a code change. Falls back to the original 0.6.
+    const { dryRun = false, minConfidence = Number(process.env.GOV_MIN_PROPOSAL_CONFIDENCE || 0.6), duplicateMode = 'merge' } = options;
     const results = [];
 
     for (const action of actions) {

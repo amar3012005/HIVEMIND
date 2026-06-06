@@ -1,3 +1,4 @@
 # JOURNAL — hermes-runtime (append-only)
 
 - 2026-06-06 · PLAN · Fetched all 4 Hermes docs (profiles, profile-distributions, multi-profile-gateways, docker) via web; recon = greenfield (no existing Hermes code; hm-control = control-plane-server.js ~6793 lines; no hm-hermes compose service). Authored README (vision, acceptance criteria, Hermes reference, JSON config contract, 6-phase plan, safety) + STATE + this JOURNAL. Registered durable cron. Verdict: GREEN — ready for Phase 1.
+- 2026-06-06 · UPGRADE · task-cron skill bumped to v2 (CONTINUOUS, no fixed interval). Retired 30-min cron f82b0b00; switched runner to continuous self-paced (ScheduleWakeup 60s resume, finish+verify→next immediately). Task NOT restarted — README/phases/recon/STATE phase-index preserved. Verdict: GREEN — Phase 1 unchanged, pending continuous fire.

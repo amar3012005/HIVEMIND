@@ -916,24 +916,31 @@ export class CognitionLoop {
       return `[${m.id}] (${ts}) ${m.title ? m.title + ' — ' : ''}${c}`;
     }).join('\n');
 
-    const prompt = `Below are ${members.length} memories sharing tag "${tag}". Extract ONE canonical fact:
-- Persists across ≥3 of these memories (cite IDs)
-- Concrete: names roles, relationships, intentions — NOT "is involved with"
-- Survives 6 months without trivial staleness
-- NEVER stated verbatim by a single source
+    const prompt = `You are distilling durable organizational knowledge into a CANONICAL FACT that the system will trust and recall later. Below are ${members.length} memories sharing the tag "${tag}".
 
-REJECT: enumerations ("X and Y and Z"), vague qualifiers, "X is connected to Y through Z".
+GROUNDING — strict (this becomes a trusted memory; hallucination poisons recall):
+- Use ONLY information stated in the memories below. Do NOT invent names, numbers, dates, roles, products, or events that are not present in the evidence.
+- Preserve every proper noun EXACTLY as written — people, organizations, products, projects, places, dates. Name the specific entity; NEVER replace a name with "the team", "a person", "the product", "the company".
+- If a detail is not supported by the evidence, omit it rather than guess. Every claim must trace to at least one cited [id].
+
+TASK — write the canonical fact this cluster establishes:
+- 2–4 sentences. State precisely WHAT is true, WHO is involved (by name), and HOW they relate — roles, decisions, relationships, intentions.
+- It must hold across ≥3 of these memories (cite their ids in supporting_memory_ids).
+- Durable: the stable truth, not a one-off event detail; should survive ~6 months.
+- Richer than any single source — synthesize the relationships, do not copy one memory.
+
+REJECT: vague qualifiers ("is involved with", "is connected to … through …"), unsupported specifics, generic platitudes, bare enumerations ("X and Y and Z").
 
 Memories:
 ${facts}
 
 Output JSON only:
-{ "canonical_fact": "<one sentence>", "supporting_memory_ids":[...], "valid_from":"YYYY-MM-DD", "expected_decay":"<falsifier>", "confidence": 0.0-1.0 }`;
+{ "canonical_fact": "<2-4 grounded sentences naming the real entities>", "entities": ["<every proper noun referenced, verbatim>"], "supporting_memory_ids":[...], "valid_from":"YYYY-MM-DD", "expected_decay":"<what observation would falsify this>", "confidence": 0.0-1.0 }`;
 
     const raw = await llmWithFallback({
       messages:    [{ role: 'user', content: prompt }],
-      temperature: 0.15,
-      max_tokens:  400,
+      temperature: 0.1,
+      max_tokens:  650,
     }, this.logger);
 
     if (!raw) return null;
@@ -959,15 +966,19 @@ ${formatCluster(tagB, membersB)}
 
 These clusters never co-occur. Find the LATENT BRIDGE — causal | temporal_arc | contradiction | enabling_gap.
 
-REJECT: restatement, "X and Y are connected through Z", generic summary.
+GROUNDING — strict:
+- The bridge must be supported by the actual content of BOTH clusters. Do NOT invent a connection that the evidence does not show. If there is no real bridge, set confidence low.
+- Name the specific entities and dates on both sides EXACTLY as written (people, organizations, products, projects). Never use "the team" / "the project" when a name is available.
+
+REJECT: restatement, "X and Y are connected through Z", generic summary, speculative links with no evidence.
 
 Output JSON only:
-{ "bridge_type":"causal|temporal_arc|contradiction|enabling_gap", "bridge_claim":"<one sentence, names entities + dates>", "evidence_a":[{"id":"<uuid>","why":"<short reason>"}], "evidence_b":[{"id":"<uuid>","why":"<short reason>"}], "confidence": 0.0-1.0, "actionable_next_step":"<one sentence>" }`;
+{ "bridge_type":"causal|temporal_arc|contradiction|enabling_gap", "bridge_claim":"<2-3 sentences naming the entities + dates on both sides, with the grounded mechanism of the link>", "entities":["<proper nouns from both clusters>"], "evidence_a":[{"id":"<uuid>","why":"<short reason grounded in that memory>"}], "evidence_b":[{"id":"<uuid>","why":"<short reason>"}], "confidence": 0.0-1.0, "actionable_next_step":"<one concrete sentence>" }`;
 
     const raw = await llmWithFallback({
       messages:    [{ role: 'user', content: prompt }],
-      temperature: 0.20,
-      max_tokens:  600,
+      temperature: 0.15,
+      max_tokens:  700,
     }, this.logger);
 
     if (!raw) return null;
@@ -1834,24 +1845,29 @@ Output JSON only:
           return `[${m.id}] (${ts}) ${m.title ? m.title + ' — ' : ''}${c}`;
         }).join('\n');
 
-        const prompt = `Below are ${promptMembers.length} memories sharing tag "${tag}". Extract ONE transferable PRINCIPLE:
-- A domain-general rule, heuristic, or normative pattern (if/then or "always/never")
-- Generalises BEYOND any single memory — would help decide a NEW situation
-- NOT a restatement of one concrete fact (that is a canonical-fact, not a principle)
-- Concrete enough to be falsifiable, abstract enough to transfer
+        const prompt = `You are distilling a transferable PRINCIPLE (a reusable rule the org can apply to future decisions) from memory. Below are ${promptMembers.length} memories sharing the tag "${tag}".
 
-REJECT: single-fact restatements, vague platitudes, enumerations.
+GROUNDING — strict:
+- Derive the principle ONLY from what these memories actually show. Do NOT invent supporting detail, outcomes, or context.
+- Name the concrete context it was learned from — the specific people, organizations, products, or projects involved (proper nouns, exactly as written). A principle with NO named grounding is a vague platitude and must be rejected.
+
+TASK:
+- State a domain-general rule/heuristic (if/then or always/never) that generalises BEYOND any single memory and would help decide a NEW situation.
+- 2–3 sentences: first the rule, then the named context/evidence it was learned from — e.g. "Derived from how <Name>/<Org> handled <X>: …".
+- Concrete enough to be falsifiable; abstract enough to transfer. Not a restatement of one fact (that is a canonical-fact).
+
+REJECT: single-fact restatements, vague platitudes with no named grounding, enumerations.
 
 Memories:
 ${facts}
 
 Output JSON only:
-{ "principle": "<one sentence>", "confidence": 0.0-1.0 }`;
+{ "principle": "<2-3 sentences: the rule + the named context/evidence it was derived from>", "entities": ["<proper nouns referenced, verbatim>"], "supporting_memory_ids":[...], "confidence": 0.0-1.0 }`;
 
         const raw = await llmWithFallback({
           messages:    [{ role: 'user', content: prompt }],
           temperature: 0.1,
-          max_tokens:  220,
+          max_tokens:  450,
         }, this.logger);
         if (!raw) continue;
 

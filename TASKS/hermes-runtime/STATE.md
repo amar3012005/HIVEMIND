@@ -1,6 +1,6 @@
 # STATE — hermes-runtime
 
-- **Current phase:** 6a (pods-per-client: placement + runtime-spec contract) — NOT STARTED
+- **Current phase:** 6b (hermes_runtimes registry migration) — NOT STARTED
 - **Next concrete action:** 6a — decide manager placement (Node module inside hm-control [preferred, single deploy boundary, reuses hm-control-client.js {baseUrl,apiKey}] vs Python FastAPI sidecar mirroring employees-service). Write `core/src/hermes/runtime-spec.schema.json` (tenant_id, container_name, volume_name, gateway_port, networks, resource_limits, mcp_url, api_key_ref) reusing Phase-1 HermesAgentConfig vocab + an ajv validator (mirror agent-config test). NO Docker calls, NO prod. VERIFY: ajv validates sample / rejects malformed; node --check; doc records chosen language + the existing networks (hivemind-network/hmtest/s0k0_hivemind) + secret path (/opt/HIVEMIND/.hm-hermes.env).
 - **Sub-phases (ordered; see README "Phase 6 (detailed)"):** 6a contract · 6b hermes_runtimes registry migration · 6c Docker orchestrator module (local socket) · 6d per-tenant resolver + reconcile (reuse runOnce) · 6e hm-control /v1/hermes/* routes (flag-gated HERMES_MANAGER_ENABLED=off) · 6f ⛔HUMAN-GATE first prod tenant + routing flip · 6g ⛔HUMAN-GATE per-tenant scoped MCP tokens + multi-tenant hardening.
 - **Branch:** P1-5 done. P6 → claude/hermes-phase-6a (then -6b ...).

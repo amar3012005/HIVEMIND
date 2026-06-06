@@ -73,7 +73,10 @@ export async function evalOrg({ orgId, userId, apiKey, baseUrl = BASE, n = N, k 
       const t0 = Date.now();
       try {
         const resp = await fetch(`${baseUrl}/api/recall`, {
-          method: 'POST', headers, body: JSON.stringify({ query: q, limit: k }),
+          // /api/recall reads body.query_context (NOT body.query) and body.max_memories
+          // (NOT body.limit). Sending the wrong field names yields an empty query and
+          // a false 0% recall.
+          method: 'POST', headers, body: JSON.stringify({ query_context: q, max_memories: k }),
         });
         latencies.push(Date.now() - t0);
         if (resp.ok) {
@@ -138,7 +141,10 @@ async function main() {
       let found = false;
       try {
         const resp = await fetch(`${BASE}/api/recall`, {
-          method: 'POST', headers, body: JSON.stringify({ query: q, limit: K }),
+          // /api/recall reads body.query_context (NOT body.query) and body.max_memories
+          // (NOT body.limit). Sending the wrong field names yields an empty query and
+          // a false 0% recall.
+          method: 'POST', headers, body: JSON.stringify({ query_context: q, max_memories: K }),
         });
         const ms = Date.now() - t0;
         latencies.push(ms);

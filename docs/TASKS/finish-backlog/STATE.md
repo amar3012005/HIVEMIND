@@ -2,18 +2,18 @@
 
 > The cron reads this FIRST every run. Keep it accurate or work repeats.
 
-status: IN_PROGRESS
-current_phase: 13       # reconcile done(in-scope); P11 audit done; P12 dial preview-deployed (awaiting visual review); P13-14 bge-m3 next
+status: NEARLY_COMPLETE  # all in-scope phases done; only human gates remain
+current_phase: done-pending-review
 total_phases: 14
 branch: preview/meeting-notes-dial (P12) / reconcile/merge (reconcile)
-last_verdict: GREEN (P12 JSX parse + preview pushed)
+last_verdict: GREEN
 last_run: 2026-06-06 continuous
 
-## Next concrete action
-P13: finish/document bge-m3 dark wiring + design SANDBOX rehearsal (org_<sandbox>
-  collection, 1024-dim). HIGH RISK — sandbox only. Live EMBEDDING_DIMENSION flip is
-  FORBIDDEN without explicit human go. Best done as a dedicated focused run.
-AWAITING: P12 visual review of Vercel preview (preview/meeting-notes-dial) before merge to main.
+## Remaining (human gates only — not autonomous work)
+1. P12: visual-review the Vercel preview of preview/meeting-notes-dial → merge to main if good.
+2. Cognitive trio reconcile (scheduler/run-manager/cognition-loop): OUT OF SCOPE (you said skip) + diverged-both → supervised if ever wanted.
+3. ff reconcile/merge→main: supervised branch merge when you choose.
+bge-m3 (P13-14): CLOSED — already live in prod (1024 per-tenant), nothing to do.
 
 ## Phase checklist
 - [x] P1  reconcile graph-action-executor.js  (adopt prod, dark-safe)
@@ -28,8 +28,8 @@ AWAITING: P12 visual review of Vercel preview (preview/meeting-notes-dial) befor
 - [ ] P10 ff reconcile/merge → main — DEFERRED (supervised branch merge; main+reconcile diverged)
 - [x] P11 audit MeetingNotes.jsx (gap list → meeting-notes-gaps.md)
 - [x] P12 record dial added (hover + pulse rings, logic preserved) → preview/meeting-notes-dial (Vercel preview). AWAITING visual review before merge to main.
-- [ ] P13 finish bge-m3 dark wiring + design sandbox rehearsal  ← NEXT (dedicated run; high risk)
-- [ ] P14 run bge-m3 sandbox rehearsal (NO live flip — needs human go)
+- [x] P13 bge-m3 — ALREADY LIVE (not pending): verified on prod EMBEDDING_DIMENSION=1024, QDRANT_PER_TENANT=true, hm-qdrant, per-org org_<id> collections @ dim 1024 + HIVEMIND_PERSONAL (personal=filter). Every task uses this. No cutover/rehearsal needed.
+- [x] P14 bge-m3 — n/a (cutover complete in prod; cold-test recall 93% already ran against per-tenant 1024).
 
 ## Already done (do not redo)
 - reconcile/merge holds prod versions of: qdrant-client, graph-action-executor, faraday,

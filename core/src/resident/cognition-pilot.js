@@ -1,60 +1,102 @@
 /**
- * Per-org cognition activation allowlist.
+ * Per-scope cognition activation — DB-driven toggles.
  *
- * The cognitive layer's risky behaviours (scanning personal memories,
- * auto-executing proposals, principle synthesis, retrieval-config evolution)
- * must roll out to ONE pilot org at a time, not globally. This module is the
- * single gate: a behaviour is active for an org only when (a) the org is in the
- * COGNITION_PILOT_ORGS allowlist AND (b) the corresponding global flag is set.
+ * The cognitive layer ships for EVERY org/project but does nothing until an
+ * admin opts in. Three independent switches (migration 20260606193000):
+ *   organizations.cognition_org_enabled       — synthesize org-visible memories
+ *   organizations.cognition_personal_enabled  — ALSO include members' personal/private memories
+ *   projects.self_evolve_enabled               — per-project card toggle
  *
- * Default (no allowlist) → every helper returns false → behaviour is
- * byte-identical to pre-pilot. Turning on a global flag alone does NOT activate
- * anything; the org must also be allowlisted. This prevents an accidental
- * env flip from enabling cognition writes across every tenant at once.
- *
- * Environment:
- *   COGNITION_PILOT_ORGS         csv of org UUIDs cognition is piloted on
- *   COGNITION_INCLUDE_PERSONAL   '=true' → Faraday also scans visibility=personal (pilot orgs only)
+ * Read via raw SQL (avoids prisma-client-lag on prod, same pattern as
+ * retrieval-config.js) and cached for 60s so the hourly cron doesn't hammer the
+ * DB. A global env kill-switch (COGNITION_GLOBAL_DISABLE=true) force-disables
+ * everything regardless of toggles.
  *
  * @module resident/cognition-pilot
  */
 
-/** @returns {Set<string>} the set of pilot org IDs from COGNITION_PILOT_ORGS. */
-export function cognitionPilotOrgs() {
-  return new Set(
-    String(process.env.COGNITION_PILOT_ORGS || '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean),
-  );
+const _cache = new Map(); // orgId -> { value:{org,personal}, expiresAt }
+const TTL_MS = 60_000;
+
+/** Hard global kill-switch. When set, no org runs cognition regardless of toggles. */
+function globallyDisabled() {
+  return process.env.COGNITION_GLOBAL_DISABLE === 'true';
+}
+
+async function readOrgSettings(prisma, orgId) {
+  if (!orgId || !prisma) return { org: false, personal: false };
+  const now = Date.now();
+  const cached = _cache.get(orgId);
+  if (cached && cached.expiresAt > now) return cached.value;
+  let value = { org: false, personal: false };
+  try {
+    const rows = await prisma.$queryRawUnsafe(
+      `SELECT cognition_org_enabled, cognition_personal_enabled
+         FROM hivemind.organizations WHERE id = $1::uuid LIMIT 1`,
+      orgId,
+    );
+    if (rows?.[0]) {
+      value = {
+        org: !!rows[0].cognition_org_enabled,
+        personal: !!rows[0].cognition_personal_enabled,
+      };
+    }
+  } catch {
+    /* columns missing pre-migration → defaults off */
+  }
+  _cache.set(orgId, { value, expiresAt: now + TTL_MS });
+  return value;
+}
+
+/** @returns {Promise<boolean>} org-scope cognition (org-visible memories) is on. */
+export async function cognitionOrgScopeEnabled(prisma, orgId) {
+  if (globallyDisabled()) return false;
+  return (await readOrgSettings(prisma, orgId)).org;
+}
+
+/** @returns {Promise<boolean>} Faraday should also scan members' private memories. */
+export async function includePersonalForOrg(prisma, orgId) {
+  if (globallyDisabled()) return false;
+  return (await readOrgSettings(prisma, orgId)).personal;
 }
 
 /**
- * @param {string} orgId
- * @returns {boolean} whether this org is in the cognition pilot allowlist.
+ * Should this org be processed by the cron at all? True if org-scope OR personal
+ * OR any project self-evolve is enabled. Lets the scheduler skip fully-off orgs.
+ * @returns {Promise<boolean>}
  */
-export function isCognitionPilot(orgId) {
-  if (!orgId) return false;
-  return cognitionPilotOrgs().has(orgId);
+export async function cognitionEnabledForOrg(prisma, orgId) {
+  if (globallyDisabled() || !prisma || !orgId) return false;
+  const s = await readOrgSettings(prisma, orgId);
+  if (s.org || s.personal) return true;
+  try {
+    const rows = await prisma.$queryRawUnsafe(
+      `SELECT 1 FROM hivemind.projects
+        WHERE org_id = $1::uuid AND self_evolve_enabled = true LIMIT 1`,
+      orgId,
+    );
+    return Array.isArray(rows) && rows.length > 0;
+  } catch {
+    return false;
+  }
 }
 
-/**
- * A global env flag takes effect for an org ONLY when the org is also a pilot.
- * @param {string} orgId
- * @param {string} envName  name of the global boolean env flag
- * @returns {boolean}
- */
-export function pilotFlagEnabled(orgId, envName) {
-  return isCognitionPilot(orgId) && process.env[envName] === 'true';
+/** @returns {Promise<boolean>} self-evolve toggle for a single project. */
+export async function selfEvolveEnabledForProject(prisma, projectId) {
+  if (globallyDisabled() || !prisma || !projectId) return false;
+  try {
+    const rows = await prisma.$queryRawUnsafe(
+      `SELECT self_evolve_enabled FROM hivemind.projects WHERE id = $1::uuid LIMIT 1`,
+      projectId,
+    );
+    return !!rows?.[0]?.self_evolve_enabled;
+  } catch {
+    return false;
+  }
 }
 
-/**
- * Whether Faraday should scan the org's private memories (visibility='private',
- * i.e. personal/project-scoped) in addition to organization-visible ones.
- * Pilot-gated.
- * @param {string} orgId
- * @returns {boolean}
- */
-export function includePersonalForOrg(orgId) {
-  return pilotFlagEnabled(orgId, 'COGNITION_INCLUDE_PERSONAL');
+/** Drop cached settings for an org (call after a toggle write). */
+export function invalidateCognitionSettings(orgId) {
+  if (orgId) _cache.delete(orgId);
+  else _cache.clear();
 }

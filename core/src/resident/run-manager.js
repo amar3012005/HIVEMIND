@@ -7,7 +7,7 @@ import {
   TURING_OBSERVATION_FIELDS,
 } from './contract.js';
 import { FaradayAgent } from './faraday.js';
-import { includePersonalForOrg } from './cognition-pilot.js';
+import { includePersonalForOrg, cognitionEnabledForOrg } from './cognition-pilot.js';
 import { FeynmanAgent } from './feynman.js';
 import { TuringAgent } from './turing.js';
 import { isPoolEnabled, ensurePoolRow, resetAndReadPool, spendPool } from './budget-pool.js';
@@ -196,8 +196,9 @@ export class ResidentRunManager {
       dryRun: run.dry_run,
       runId: run.run_id,
       cursorAfter: run.cursor_after || null,
-      // Pilot-gated: scan personal memories only for allowlisted orgs (cognition-pilot.js).
-      includePersonal: includePersonalForOrg(context.orgId),
+      // Toggle-gated: scan members' personal/private memories only when the org's
+      // cognition_personal_enabled switch is on (cognition-pilot.js, DB-driven).
+      includePersonal: await includePersonalForOrg(this.prisma, context.orgId),
       // Windowed sense: only memories from the last tick window (hourly cron),
       // not the whole corpus. 0 = legacy whole-corpus scan.
       lookbackHours: Number(process.env.GOV_SCAN_LOOKBACK_HOURS || 0),
@@ -803,6 +804,19 @@ export class ResidentRunManager {
     }
     if (!this.prisma) {
       this.logger?.warn?.('[gov-cycle] no prisma client — skipping persistence');
+    }
+
+    // Toggle gate: the cognitive layer ships dormant for every org. Skip the
+    // whole cycle unless an admin enabled org-scope, personal-scope, or a
+    // project self-evolve toggle (cognition-pilot.js). 'manual' triggers from
+    // admin tools bypass so they can force a run for testing.
+    if (this.prisma && trigger === 'scheduler') {
+      try {
+        const enabled = await cognitionEnabledForOrg(this.prisma, orgId);
+        if (!enabled) {
+          return { batch_id: randomUUID(), status: 'skipped_cognition_disabled', org_id: orgId };
+        }
+      } catch { /* fail-open to existing behaviour on settings read error */ }
     }
 
     const batchId = randomUUID();

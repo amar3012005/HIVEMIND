@@ -68,6 +68,11 @@ model Organization {
   billingEmail         String?            @map("billing_email") @db.VarChar(255)
   defaultProjectPolicy String             @default("private") @map("default_project_policy") @db.VarChar(50)
   memorySavePolicy     String             @default("private") @map("memory_save_policy") @db.VarChar(50)
+  // Cognition scope toggles (workspace-admin choices). Default OFF — the
+  // cognitive layer does nothing for an org until an admin opts in. Read via
+  // raw SQL in cognition-pilot.js. See migration 20260606193000.
+  cognitionOrgEnabled      Boolean        @default(false) @map("cognition_org_enabled")
+  cognitionPersonalEnabled Boolean        @default(false) @map("cognition_personal_enabled")
   // Qdrant container ("collection") that holds ALL memory+evidence for this org.
   // Set on org creation (org_<id>); members + projects share it (filtered by
   // user_id/project_id/layer). Null until provisioned.
@@ -188,6 +193,9 @@ model Project {
   slug        String          @db.VarChar(120)
   description String?
   status      String          @default("active") @db.VarChar(20) // 'active' | 'archived'
+  // Per-project self-evolve toggle (card switch). Default OFF. When true the
+  // cognitive layer synthesizes/evolves this project's memories. Migration 20260606193000.
+  selfEvolveEnabled Boolean    @default(false) @map("self_evolve_enabled")
   createdBy   String          @map("created_by") @db.Uuid
   createdAt   DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt   DateTime        @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)

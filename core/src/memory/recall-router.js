@@ -23,6 +23,9 @@
 
 import { recallPersistedMemories, crossClusterEntityBoost } from './persisted-retrieval.js';
 import { ClusterIndex } from './cluster-index.js';
+// Two-reranker contract: this `rerank` is the OPT-IN CROSS-ENCODER pass (external model,
+// gated RERANK_ENABLED) on the agent path. The ALGORITHMIC ResultReranker (search/result-reranker.js)
+// is the always-on, no-network ordering reranker used on delivery (and behind RECALL_TIERED_VIEW).
 import { rerank } from './reranker.js';
 import { getRetrievalConfig, logTaskOutcome } from './retrieval-config.js';
 
@@ -152,6 +155,7 @@ async function hop1Memory({ store, query, options, ctx }) {
       ? { date_range: explicitDateRange }
       : validAtDate ? { date_range: { end: validAtDate.toISOString() } } : {}),
   };
+  // PHASE-B TODO: surface spine from recallPersistedMemories result when TIERED_VIEW lands on router path
   const result = willOverride
     ? { memories: [] }
     : await recallPersistedMemories(store, recallArgs);
@@ -727,8 +731,10 @@ export class RecallRouter {
       if (cfg?.deliver_limit) deliverN = cfg.deliver_limit;
     } catch { /* default */ }
 
-    // Stage 4 / P1: optional cross-encoder rerank of the wide ranked pool →
-    // deliver top-N. No-op (returns first N) unless RERANK_ENABLED + endpoint.
+    // Two-reranker contract: this is the OPT-IN CROSS-ENCODER precision pass (external
+    // model, gated RERANK_ENABLED) — no-op (returns first N) when disabled. The ALGORITHMIC
+    // ResultReranker (always-on, no network) handles ordering upstream / behind RECALL_TIERED_VIEW.
+    // Stage 4 / P1: optional cross-encoder rerank of the wide ranked pool → deliver top-N.
     const deliverMemories = await rerank(query, rankedMemories, { topN: deliverN });
 
     // Phase 2 (B3): fire-and-forget TaskOutcome signal for the evolution loop.

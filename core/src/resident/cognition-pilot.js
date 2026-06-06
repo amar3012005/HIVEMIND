@@ -49,8 +49,9 @@ export function pilotFlagEnabled(orgId, envName) {
 }
 
 /**
- * Whether Faraday should scan visibility=personal memories (in addition to
- * organization) for this org. Pilot-gated.
+ * Whether Faraday should scan the org's private memories (visibility='private',
+ * i.e. personal/project-scoped) in addition to organization-visible ones.
+ * Pilot-gated.
  * @param {string} orgId
  * @returns {boolean}
  */

@@ -202,7 +202,7 @@ async function loadOrgScopedMemories(memoryStore, { userId, orgId, project, limi
   const where = {
     orgId,
     deletedAt: null,
-    visibility: includePersonal ? { in: ['organization', 'personal'] } : 'organization',
+    visibility: includePersonal ? { in: ['organization', 'private'] } : 'organization',
     // Skip Faraday's own outputs + cognitive-layer memories — scanning them
     // creates a feedback loop where reflections get hypothesised about and
     // Turing relates governance memories to other governance memories.
@@ -241,7 +241,7 @@ async function searchOrgScopedMemories(memoryStore, { query = '', orgId, project
       NOT: { tags: { has: 'internal-audit' } },
       orgId,
       deletedAt: null,
-      visibility: includePersonal ? { in: ['organization', 'personal'] } : 'organization',
+      visibility: includePersonal ? { in: ['organization', 'private'] } : 'organization',
       ...(project ? { project } : {}),
       memoryType: memory_type || undefined,
       sourcePlatform: source_platform || undefined,

@@ -19,7 +19,8 @@
  * @module hermes/control-routes
  */
 import crypto from 'node:crypto';
-import { runTask, ensureProfile, destroyProfile } from './profile-manager.js';
+// profile-manager (→ runtime-spec → ajv) is lazy-imported only on dispatch so the
+// default-OFF path (and server boot) never loads it. See run branch below.
 
 const ROUTE_PREFIX = '/hermes/';
 
@@ -168,6 +169,7 @@ export async function handleHermesRoutes(req, res, ctx) {
       if (!payload.task) { jsonResponse(res, { error: 'task required' }, 400); return true; }
       const jobId = await auditJob(prisma, { orgId, tenantId, agentId, action: 'run', status: 'running', payload, createdBy: userId });
       const agentConfig = { ...(row.config || {}), tenant_id: tenantId };
+      const { runTask } = await import('./profile-manager.js'); // lazy: pulls ajv only on dispatch
       const out = await runTask(prisma, tenantId, agentConfig, payload);
       const status = out && out.ok ? 'succeeded' : 'failed';
       await prisma.$executeRawUnsafe(

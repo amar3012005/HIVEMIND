@@ -67,6 +67,11 @@ export async function createProfile(tenantId, { apiKey, port, soul = null, extra
   return { ok: true, profile, port, issues: [] };
 }
 
+/** Write a file under a tenant's profile dir (e.g. 'config.yaml', 'mcp.json'). */
+export async function writeProfileFile(tenantId, relpath, content) {
+  return writeInContainer(`/opt/data/profiles/${profileName(tenantId)}/${relpath}`, content);
+}
+
 export async function startGateway(tenantId) { const r = await dx(['hermes', '-p', profileName(tenantId), 'gateway', 'start']); return { ok: r.ok, issues: r.ok ? [] : [r.stderr] }; }
 export async function stopGateway(tenantId) { const r = await dx(['hermes', '-p', profileName(tenantId), 'gateway', 'stop']); return { ok: r.ok, issues: r.ok ? [] : [r.stderr] }; }
 export async function restartGateway(tenantId) { const r = await dx(['hermes', '-p', profileName(tenantId), 'gateway', 'restart']); return { ok: r.ok, issues: r.ok ? [] : [r.stderr] }; }

@@ -432,6 +432,7 @@ export class QdrantClient {
       filter,
       limit: filters.limit || 10,
       score_threshold: filters.score_threshold || 0.5,
+      hnsw_ef: filters.hnsw_ef, // PHASE-F: thread per-org ef_search; inert when undefined (searchMemories → EF_SEARCH_DEFAULT). Dark-safe for all other hybridSearch callers.
       collectionName: filters.collectionName
     });
   }

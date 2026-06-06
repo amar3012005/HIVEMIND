@@ -190,13 +190,20 @@ function mapRawMemoryRecord(record = {}) {
   };
 }
 
-async function loadOrgScopedMemories(memoryStore, { userId, orgId, project, limit = 100, cursorAfter = null, includePersonal = false } = {}) {
+async function loadOrgScopedMemories(memoryStore, { userId, orgId, project, limit = 100, cursorAfter = null, includePersonal = false, lookbackHours = 0 } = {}) {
   const client = getRawPrismaClient(memoryStore);
   if (!client?.memory?.findMany) return [];
 
   // Phase 3 sliding window: cap absolute scan size + optional cursor for
   // resume-from-where-you-left-off. Prevents unbounded scan on large orgs.
   const cappedLimit = Math.min(limit, 500);
+  // Time window: an hourly cron should only sense the memories that landed in
+  // the last tick, not re-scan the whole corpus every run. lookbackHours>0
+  // restricts the scan to recently-created memories (GOV_SCAN_LOOKBACK_HOURS).
+  // 0 = whole corpus (legacy behaviour).
+  const sinceFilter = lookbackHours > 0
+    ? { createdAt: { gte: new Date(Date.now() - lookbackHours * 3600 * 1000) } }
+    : {};
   // Pilot orgs may opt in to scanning personal memories too (cognition-pilot.js);
   // default stays organization-only so the cron is a no-op on personal data.
   const where = {
@@ -208,6 +215,7 @@ async function loadOrgScopedMemories(memoryStore, { userId, orgId, project, limi
     // Turing relates governance memories to other governance memories.
     cognitiveLayerRole: null,
     NOT: { tags: { has: 'internal-audit' } },
+    ...sinceFilter,
     ...(project ? { project } : {}),
   };
   if (cursorAfter) {
@@ -708,9 +716,13 @@ CRITICAL: Use the COMPLETE memory IDs exactly as shown in brackets. They are ful
     runId,
     cursorAfter = null,
     includePersonal = false,
+    lookbackHours = 0,
     onProgress = async () => {},
     isCancelled = () => false,
   } = {}) {
+    const sinceIso = lookbackHours > 0
+      ? new Date(Date.now() - lookbackHours * 3600 * 1000).toISOString()
+      : undefined;
     const observations = [];
     const scanBudget = scanBudgetForScope({ scope, project, region });
     const orgWideScope = isOrgWideScope(scope);
@@ -754,6 +766,7 @@ CRITICAL: Use the COMPLETE memory IDs exactly as shown in brackets. They are ful
         limit: Math.min(Math.max(scanBudget * 2, 600), 2000),
         cursorAfter,
         includePersonal,
+        lookbackHours,
       });
       if (memories.length === 0) {
         memories = await searchOrgScopedMemories(this.memoryStore, {
@@ -762,6 +775,7 @@ CRITICAL: Use the COMPLETE memory IDs exactly as shown in brackets. They are ful
           project,
           n_results: 150,
           includePersonal,
+          created_after: sinceIso,
         });
       }
     } else if (this.memoryStore?.listLatestMemories) {
@@ -821,6 +835,7 @@ CRITICAL: Use the COMPLETE memory IDs exactly as shown in brackets. They are ful
           is_latest: true,
           n_results: 12,
           includePersonal,
+          created_after: sinceIso,
         });
 
         for (const result of probeResults || []) {

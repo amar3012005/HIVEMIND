@@ -198,6 +198,9 @@ export class ResidentRunManager {
       cursorAfter: run.cursor_after || null,
       // Pilot-gated: scan personal memories only for allowlisted orgs (cognition-pilot.js).
       includePersonal: includePersonalForOrg(context.orgId),
+      // Windowed sense: only memories from the last tick window (hourly cron),
+      // not the whole corpus. 0 = legacy whole-corpus scan.
+      lookbackHours: Number(process.env.GOV_SCAN_LOOKBACK_HOURS || 0),
       onProgress: async (progress) => {
         run.current_step = progress.current_step;
         run.progress = progress;

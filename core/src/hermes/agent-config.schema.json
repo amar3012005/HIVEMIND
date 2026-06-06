@@ -1,0 +1,82 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://hivemind/schemas/hermes-agent-config.json",
+  "title": "HermesAgentConfig",
+  "description": "Config object for one Hermes 'external agent brain'. 1 runtime = 1 tenant; HiveMind MCP is the memory system of record. Owned by hm-control; FE never talks to Hermes directly.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["agent_id", "name", "tenant_id", "hermes_profile", "memory_mode", "capabilities", "schedule", "output_routes", "safety_policy", "status"],
+  "properties": {
+    "agent_id": { "type": "string", "format": "uuid", "description": "hm-core primary key." },
+    "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+    "tenant_id": { "type": "string", "minLength": 1, "description": "org id; the isolation unit (1 runtime = 1 tenant brain)." },
+    "hermes_profile": { "type": "string", "minLength": 1, "description": "Hermes profile name (~/.hermes/profiles/<name>) — the isolated agent home." },
+    "distribution": { "type": ["string", "null"], "description": "Optional git profile-distribution source (e.g. github.com/davinci/hermes-competitor-watcher)." },
+    "memory_mode": { "type": "string", "enum": ["hivemind_mcp"], "description": "Always HiveMind MCP as system of record. Hermes local memories/ is never the source of truth." },
+    "capabilities": {
+      "type": "array",
+      "items": { "type": "string", "enum": ["browser", "web_search", "forms", "inbox", "code", "files"] },
+      "uniqueItems": true,
+      "description": "Hermes toolsets enabled for this agent."
+    },
+    "schedule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "type": "string", "enum": ["manual", "cron"] },
+        "expr": { "type": "string", "description": "5-field cron when type=cron." }
+      },
+      "allOf": [
+        { "if": { "properties": { "type": { "const": "cron" } } }, "then": { "required": ["expr"] } }
+      ]
+    },
+    "output_routes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type"],
+        "properties": {
+          "type": { "type": "string", "enum": ["hivemind_memory", "webhook"] },
+          "tenant_id": { "type": "string" },
+          "tags": { "type": "array", "items": { "type": "string" } },
+          "url": { "type": "string", "format": "uri" }
+        },
+        "allOf": [
+          { "if": { "properties": { "type": { "const": "webhook" } } }, "then": { "required": ["url"] } },
+          { "if": { "properties": { "type": { "const": "hivemind_memory" } } }, "then": { "required": ["tenant_id"] } }
+        ]
+      }
+    },
+    "safety_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_tokens_per_run", "max_runtime_seconds"],
+      "properties": {
+        "max_tokens_per_run": { "type": "integer", "minimum": 1, "maximum": 5000000 },
+        "max_runtime_seconds": { "type": "integer", "minimum": 1, "maximum": 86400 },
+        "allowed_domains": { "type": "array", "items": { "type": "string" } },
+        "require_approval": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["send", "purchase", "form_submit", "delete", "post"] },
+          "uniqueItems": true,
+          "description": "Side-effectful actions that must be human-approved before Hermes performs them."
+        }
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provider": { "type": "string" },
+        "model": { "type": "string" },
+        "base_url": { "type": "string" },
+        "api_key": { "type": "string", "description": "env:<VAR> reference only — never a literal secret." }
+      }
+    },
+    "soul_ref": { "type": "string", "enum": ["distribution", "inline"], "description": "Where SOUL.md comes from." },
+    "status": { "type": "string", "enum": ["active", "paused"] }
+  }
+}

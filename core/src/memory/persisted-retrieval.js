@@ -73,10 +73,6 @@ function sortByRelevance(memories, query) {
     });
 }
 
-function buildCollectionName(userId) {
-  return process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
-}
-
 function normalizeForDedup(content = '') {
   return content
     .toLowerCase()
@@ -454,7 +450,12 @@ async function vectorCandidatesForRecall(store, {
     limit: candidatePoolSize,
     score_threshold: scoreThreshold,
     hnsw_ef: hnswEf, // PHASE-F: inert when undefined (searchMemories → EF_SEARCH_DEFAULT)
-    collectionName: buildCollectionName(user_id)
+    // Per-tenant routing fix: omit explicit collectionName so qdrant-client resolves
+    // the org_<id> / HIVEMIND_PERSONAL container from filter.org_id (writes already
+    // route this way via createMemory). Previously this forced the legacy
+    // 'BUNDB AGENT' collection, which bypassed EVERY per-tenant collection where the
+    // real bge-m3 vectors live — recall reads were searching the wrong store.
+    collectionName: undefined
   });
 
   const hydrated = await Promise.all((results || []).map(async result => {

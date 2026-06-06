@@ -32,7 +32,9 @@ export const POOL_AGENT_NAME = '__pool__';
 
 /** @returns {boolean} whether the Phase E shared budget pool is enabled */
 export function isPoolEnabled() {
-  return process.env.PHASE_E_BUDGET_POOL === 'true';
+  // Default ON: the shared 1M/day pool is the safe budgeting substrate. Opt OUT
+  // with PHASE_E_BUDGET_POOL=false. (Per-org cognition toggle is the real gate.)
+  return process.env.PHASE_E_BUDGET_POOL !== 'false';
 }
 
 /** Daily token budget for the shared pool. */

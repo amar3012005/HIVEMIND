@@ -201,7 +201,7 @@ export class ResidentRunManager {
       includePersonal: await includePersonalForOrg(this.prisma, context.orgId),
       // Windowed sense: only memories from the last tick window (hourly cron),
       // not the whole corpus. 0 = legacy whole-corpus scan.
-      lookbackHours: Number(process.env.GOV_SCAN_LOOKBACK_HOURS || 0),
+      lookbackHours: Number(process.env.GOV_SCAN_LOOKBACK_HOURS || 24),
       onProgress: async (progress) => {
         run.current_step = progress.current_step;
         run.progress = progress;
@@ -523,7 +523,11 @@ export class ResidentRunManager {
     // ops are gated separately by SWARM_ALLOW_MERGE (default FALSE
     // per the no-merge policy).
     // ─────────────────────────────────────────────────────────────────
-    const AUTO_EXECUTE = process.env.SWARM_AUTO_EXECUTE === 'true';
+    // Default ON: only orgs with a cognition toggle reach a scheduler cycle
+    // (runFullCycle gate), and Faraday's superseding merge/link path stays
+    // locked at 0.95 below — so auto-exec only writes the additive Turing tools.
+    // Opt OUT globally with SWARM_AUTO_EXECUTE=false.
+    const AUTO_EXECUTE = process.env.SWARM_AUTO_EXECUTE !== 'false';
     const ALLOW_MERGE = process.env.SWARM_ALLOW_MERGE === 'true';
 
     // Helper — turn a Turing/Faraday action candidate into a queueable
@@ -608,7 +612,7 @@ export class ResidentRunManager {
             // synthesis — no member supersession), so the floor is env-tunable
             // (GOV_MIN_PROPOSAL_CONFIDENCE) for pilot calibration. Default stays
             // 0.95. Faraday's superseding merge/link path above is left at 0.95.
-            minConfidence: Number(process.env.GOV_MIN_PROPOSAL_CONFIDENCE || 0.95),
+            minConfidence: Number(process.env.GOV_MIN_PROPOSAL_CONFIDENCE || 0.45),
             project: run.project,
             duplicateMode: 'flag',  // never merge by default
           });

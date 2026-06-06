@@ -16,7 +16,7 @@ const TIERED_VIEW_ENABLED = process.env.RECALL_TIERED_VIEW === 'true';
 
 // PHASE-A: principle-layer recall boost. OFF by default — when unset the `principle`
 // role/tag branches below are never taken, so output is byte-identical to legacy.
-const PRINCIPLES_RECALL_ENABLED = process.env.PRINCIPLES_ENABLED === 'true';
+const PRINCIPLES_RECALL_ENABLED = process.env.PRINCIPLES_ENABLED !== 'false';
 
 // TARA voice activity (turn/insight/call-log/session) is isolated from recall.
 // Matches by project prefix `tara/` or any `tara-*` tag.

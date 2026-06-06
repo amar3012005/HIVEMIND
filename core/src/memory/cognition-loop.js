@@ -95,7 +95,7 @@ const MAX_ORGS_PER_TICK           = Number(process.env.COGNITION_MAX_ORGS_PER_TI
 // synthesis storage table (memory_type='synthesis', tag 'synthesis:principle',
 // cognitive_layer_role='principle'). Default OFF → distillPrinciplesForOrg is a
 // no-op and behaviour is byte-identical to pre-Phase-A.
-const PRINCIPLES_ENABLED          = process.env.PRINCIPLES_ENABLED === 'true';
+const PRINCIPLES_ENABLED          = process.env.PRINCIPLES_ENABLED !== 'false';
 const PRINCIPLE_CLUSTER_MIN       = Number(process.env.PRINCIPLE_CLUSTER_MIN       || 8);
 const PRINCIPLE_TOP_K             = Number(process.env.PRINCIPLE_TOP_K             || 5);
 const PRINCIPLE_CONFIDENCE_FLOOR  = Number(process.env.PRINCIPLE_CONFIDENCE_FLOOR  || 0.72);
@@ -531,7 +531,7 @@ export class CognitionLoop {
     // make clustering hybrid too — pull vector-similar memories from the SAME
     // window into each bucket even when they don't share the tag. Bounded: one
     // hybridSearch per bucket, ≤5 added, window-only (no extra DB fetch).
-    if (process.env.COGNITION_HYBRID_CLUSTER === 'true' && this.engine?.vectorStore?.hybridSearch) {
+    if (process.env.COGNITION_HYBRID_CLUSTER !== 'false' && this.engine?.vectorStore?.hybridSearch) {
       const recentById = new Map(recent.map((m) => [m.id, m]));
       for (const [tag, members] of buckets.entries()) {
         if (members.length < 2) continue;

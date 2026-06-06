@@ -109,3 +109,44 @@ hm-control surface: `createRuntime/updateRuntime/destroyRuntime` (lifecycle), `r
 - Secrets (`API_SERVER_KEY`, HiveMind key, model keys) via env only — never committed; never in a distribution repo.
 - Side-effectful Hermes actions (send/submit/purchase) gated by `safety_policy.require_approval`.
 - One phase per run. Stop + log in JOURNAL if ambiguous or work-loss risk.
+
+
+---
+
+# Phase 6 (detailed) — pods-per-client architecture
+*Designed 2026-06-06 via parallel workflow wd4qoyvvi (5 design agents). Supersedes the Phase 6 stub above.*
+
+## Phase 6 — GATE: pods-per-client (hm-hermes-manager)
+
+> **Precondition (hard gate):** Do NOT start before the Phase 5 single-container loop is solid and *observed* in prod. This phase adds per-tenant Hermes runtimes; the shared `hm-hermes` container remains the fallback until 6f flips routing.
+
+**What this owns:** per-tenant Hermes runtime lifecycle on the **single Hetzner host** via the **Docker API** (dockerode / docker CLI) — `createRuntime(tenant_id)`, `start/stop/restartRuntime`, `runTask(tenant_id, agent_id, task_spec)`. One tenant → one container `hm-hermes-<tenant>` (image `hm-hermes`, volume `hermes-state-<tenant>`), reusing the **existing** Docker networks (compose `hivemind-network`; the live container is also on `hmtest` + `s0k0_hivemind`) — **no new per-tenant bridge networks in MVP**. All FE→Hermes traffic is mediated by `hm-control` (`control-plane-server.js`, never `server.js`).
+
+**Docker now, Kubernetes later (explicit decision):** this stack is **Docker + Coolify on one host — there is NO Kubernetes**. The implementable path is the Docker API managing per-tenant containers on the single host. K8s (Deployment/StatefulSet replica=1 per tenant, PVC `hermes-state-<tenant>`, ClusterIP Service, optional CronJob, Secret-per-tenant) is the **documented long-term migration target, not built now**. The registry schema is designed forward-compatible (e.g. allow a future `container_host` field) so the same APIs survive a multi-host/K8s move.
+
+**Placement decision (resolve in 6a):** implement the manager as a **Node module inside `hm-control`** (single deploy boundary; reuses the existing `hm-control-client.js` which already accepts `{baseUrl, apiKey}`, plus existing auth/org-scoping) — **or** a Python FastAPI sidecar mirroring `employees-service` if a separate boundary is required. Pick one in 6a before writing lifecycle code.
+
+### Ordered sub-phases (one per cron run; each small, verifiable)
+| ID | Goal | Deployable | Human-gated |
+|----|------|------------|-------------|
+| 6a | Pick placement/language; freeze `runtime-spec.schema.json`; resolve network/secret reality on paper | yes | no |
+| 6b | Additive `hermes_runtimes` registry migration (no behavior) | yes | no |
+| 6c | Docker orchestrator module (create/start/stop/restart/status/logs/delete) — local/staging socket only | no | no |
+| 6d | Per-tenant resolver wired to existing `runOnce`/`checkHealth` + startup reconciliation (drift = alert, no auto-recreate) | no | no |
+| 6e | Mediated `hm-control` `/v1/hermes/*` routes + `hermes_jobs` audit; default-off via `HERMES_MANAGER_ENABLED` | yes | no |
+| 6f | **GATE:** first real tenant in prod — ops review of docker.sock/secrets/resource-cap/rollback, then create container + flip routing | yes | **yes** |
+| 6g | **GATE:** per-tenant scoped MCP tokens + rotation, admission control, isolation test, onboard 2-3 tenants | yes | **yes** |
+
+### Reuse / finish-first (no net-new where it exists)
+- `hm-control-client.js` `runOnce/checkHealth/getStatus` — **already** take `{baseUrl, apiKey}`; add only a per-tenant resolver, no client edit.
+- `agent-config.js` validator + schema (Phase 1) — reuse for task payloads and mirror its ajv test for the new runtime spec.
+- Same `hm-hermes` image for all tenants (no per-tenant rebuild); reuse existing networks + `/opt/HIVEMIND/.hm-hermes.env`.
+- `employees-service` per-tenant orchestration — **pattern reference only** (copy structure, not code), and only if 6a chooses the sidecar option.
+
+### Safety (inherited every run)
+- Prod is DRIFT: never `git pull` on server; deploy = surgical `git checkout origin/<branch> -- <file>` (or scp) + restart + rollback; verify with `cold-tests/run-all.mjs` via `deploy-verified.sh`.
+- **Never** edit `core/src/server.js`; extend `control-plane-server.js` only.
+- Migrations additive + backward-compatible; **no** DROP/down-migrate/volume purge without an explicit approval token.
+- Secrets via env-file only — never in args/inspect, never committed, never in a distribution repo.
+- `docker.sock` access is root-equivalent → infra-reviewed (human-gated) before any prod container creation.
+- Per-tenant prod container creation **and** the `HERMES_MANAGER_ENABLED` routing flip are **human-gated** (6f/6g). One phase per run; stop + log in JOURNAL on ambiguity or work-loss risk.

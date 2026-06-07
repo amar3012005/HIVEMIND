@@ -18,6 +18,9 @@
 import { createProfile, startGateway, deleteProfile, getProfileStatus, writeProfileFile, profileName } from './profile-orchestrator.js';
 import { deriveGatewayPort } from './runtime-spec.js';
 import { runOnce, checkHealth } from './hm-control-client.js';
+import { createPersistedApiKey } from '../auth/api-keys.js';
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const HERMES_HOST = process.env.HERMES_HOST || 'hm-hermes';
 
@@ -80,23 +83,52 @@ function buildProfileConfigYaml(mcpUrl, groqKey) {
   ].join('\n');
 }
 
-async function upsertRegistry(prisma, { tenantId, profile, port, orgId, mcpUrl, status }) {
+async function upsertRegistry(prisma, { tenantId, profile, port, orgId, mcpUrl, status, mcpKeyId = null, mcpKeyPrefix = null }) {
   if (!prisma) return;
   await prisma.$executeRawUnsafe(
     `INSERT INTO hivemind.hermes_runtimes
-       (tenant_id, container_name, volume_name, gateway_port, networks, mcp_url, org_id, status, updated_at)
-     VALUES ($1,$2,$3,$4,'{}',$5,$6,$7, now())
+       (tenant_id, container_name, volume_name, gateway_port, networks, mcp_url, org_id, status, mcp_key_id, mcp_key_prefix, updated_at)
+     VALUES ($1,$2,$3,$4,'{}',$5,$6,$7,$8,$9, now())
      ON CONFLICT (tenant_id) DO UPDATE SET
-       container_name=$2, gateway_port=$4, mcp_url=$5, org_id=$6, status=$7, updated_at=now()`,
-    tenantId, profile, profile, port, mcpUrl, orgId || tenantId, status,
+       container_name=$2, gateway_port=$4, mcp_url=$5, org_id=$6, status=$7,
+       mcp_key_id=COALESCE($8, hivemind.hermes_runtimes.mcp_key_id),
+       mcp_key_prefix=COALESCE($9, hivemind.hermes_runtimes.mcp_key_prefix),
+       updated_at=now()`,
+    tenantId, profile, profile, port, mcpUrl, orgId || tenantId, status, mcpKeyId, mcpKeyPrefix,
   );
+}
+
+/**
+ * Mint a HiveMind API key scoped to ONE org for that tenant's profile MCP, so a
+ * compromised profile can't reach other orgs' memory. Returns the existing key's
+ * id if already minted (raw is not re-derivable — caller falls back to master on
+ * first-create only). On any failure (no prisma, non-uuid tenant, mint error)
+ * returns null and the caller uses the shared master key (back-compat).
+ * @returns {Promise<{ rawKey:string, keyId:string, keyPrefix:string }|null>}
+ */
+async function mintScopedMcpKey(prisma, { tenantId, orgId, userId }) {
+  if (!prisma || !userId) return null;
+  const org = orgId || tenantId;
+  if (!UUID_RE.test(String(org))) return null; // apiKey.orgId is a uuid column
+  try {
+    const { rawKey, record } = await createPersistedApiKey(prisma, {
+      userId,
+      orgId: org,
+      name: `Hermes profile ${profileName(tenantId)}`,
+      description: 'Per-tenant scoped MCP key for the Hermes agent runtime (auto-minted).',
+      scopes: ['memory:read', 'memory:write', 'mcp'],
+    });
+    return { rawKey, keyId: record.id, keyPrefix: record.keyPrefix };
+  } catch {
+    return null;
+  }
 }
 
 /**
  * Ensure a tenant's profile exists + its gateway is running. Idempotent.
  * @param {object} prisma  prisma client (registry)
  * @param {string} tenantId
- * @param {{ soul?: string, orgId?: string, mcpUrl?: string, mcpKey?: string }} [cfg]
+ * @param {{ soul?: string, orgId?: string, mcpUrl?: string, mcpKey?: string, mcpUserId?: string }} [cfg]
  * @returns {Promise<{ ok:boolean, profile:string, port:number, url:string, issues:string[] }>}
  */
 export async function ensureProfile(prisma, tenantId, cfg = {}) {
@@ -113,8 +145,11 @@ export async function ensureProfile(prisma, tenantId, cfg = {}) {
     return { ok: true, profile, port, url, issues: ['already running'] };
   }
 
-  // MCP key for this profile (MVP: shared master key; per-tenant token = 6g)
-  const mcpKey = cfg.mcpKey || process.env.MCP_HIVEMIND_API_KEY || apiKey;
+  // Per-tenant scoped MCP key (preferred): isolates this profile to one org's
+  // memory. Falls back to the shared master key when minting isn't possible
+  // (no prisma/userId, or a non-uuid throwaway tenant) — back-compatible.
+  const scoped = cfg.mcpKey ? null : await mintScopedMcpKey(prisma, { tenantId, orgId: cfg.orgId, userId: cfg.mcpUserId });
+  const mcpKey = cfg.mcpKey || scoped?.rawKey || process.env.MCP_HIVEMIND_API_KEY || apiKey;
   const create = await createProfile(tenantId, {
     apiKey, port,
     soul: cfg.soul || `You are the HiveMind agent runtime for tenant ${tenantId}. Use the hivemind MCP tools for all memory recall/search/save (system of record).`,
@@ -125,7 +160,10 @@ export async function ensureProfile(prisma, tenantId, cfg = {}) {
   const s = await startGateway(tenantId);
   if (!s.ok) return { ok: false, profile, port, url, issues: ['startGateway: ' + s.issues.join(';')] };
   const ready = await waitForGateway(url);
-  await upsertRegistry(prisma, { tenantId, profile, port, orgId: cfg.orgId, mcpUrl, status: ready ? 'running' : 'starting' });
+  await upsertRegistry(prisma, {
+    tenantId, profile, port, orgId: cfg.orgId, mcpUrl, status: ready ? 'running' : 'starting',
+    mcpKeyId: scoped?.keyId || null, mcpKeyPrefix: scoped?.keyPrefix || null,
+  });
   if (!ready) return { ok: false, profile, port, url, issues: ['gateway did not become reachable within timeout'] };
   return { ok: true, profile, port, url, issues: [] };
 }
@@ -138,8 +176,8 @@ export async function ensureProfile(prisma, tenantId, cfg = {}) {
  * @param {{ task: string, context?: string }} payload
  * @returns {Promise<object>} runOnce result
  */
-export async function runTask(prisma, tenantId, agentConfig, payload) {
-  const ens = await ensureProfile(prisma, tenantId, { orgId: agentConfig?.tenant_id });
+export async function runTask(prisma, tenantId, agentConfig, payload, opts = {}) {
+  const ens = await ensureProfile(prisma, tenantId, { orgId: agentConfig?.tenant_id || tenantId, mcpUserId: opts.createdBy });
   if (!ens.ok) return { ok: false, status: 'failed', result: null, issues: ['ensureProfile: ' + ens.issues.join(';')] };
   return runOnce(agentConfig, payload, { baseUrl: ens.url, apiKey: getApiKey() });
 }

@@ -18,6 +18,9 @@ COOLIFY_REDIS="redis-s0k0s0k40wo44w4w8gcs8ow0-223235365936"
 COOLIFY_QDRANT="qdrant-s0k0s0k40wo44w4w8gcs8ow0-223235347017"
 COOLIFY_EMBED="embeddings-eu-f8osow0so0w0c0w8gow8ok8s-235454534875"
 COOLIFY_CONTROL="control-plane-s0k0s0k40wo44w4w8gcs8ow0"
+COOLIFY_HIVEMIND_NET="s0k0s0k40wo44w4w8gcs8ow0_hivemind-network"
+HERMES_IMAGE="${HERMES_IMAGE:-hm-hermes:6h}"
+HERMES_ENV="${HERMES_ENV:-/opt/HIVEMIND/.hm-hermes.env}"
 
 GREEN='\033[0;32m'; RED='\033[0;31m'; CYAN='\033[0;36m'; NC='\033[0m'
 log()  { echo -e "${GREEN}[deploy]${NC} $1"; }
@@ -413,10 +416,46 @@ start_core_benchmark() {
   return 1
 }
 
+# hm-hermes — Hermes runtime (Phase 6h). Builds the image (in-container secure
+# mgmt server baked in) then runs with resource caps. Mgmt port 8650 is NEVER
+# published (internal hmtest only); only the gateway 8642 + dashboard 9119 are.
+start_hermes() {
+  log "Building $HERMES_IMAGE (in-container mgmt server)..."
+  docker build -t "$HERMES_IMAGE" /opt/HIVEMIND/services/hm-hermes 2>&1 | tail -3
+  log "Starting hm-hermes (caps 4cpu/6g; mgmt 8650 internal-only)..."
+  docker stop hm-hermes 2>/dev/null || true
+  docker rm hm-hermes 2>/dev/null || true
+  ensure_networks
+  docker run -d \
+    --name hm-hermes \
+    --network "$NETWORK" \
+    --restart unless-stopped \
+    --cpus 4 --memory 6g --memory-swap 6g \
+    -p 8642:8642 -p 9119:9119 \
+    -v hermes-data:/opt/data \
+    -v /etc/localtime:/etc/localtime:ro \
+    --env-file "$HERMES_ENV" \
+    "$HERMES_IMAGE"
+  docker network connect "$COOLIFY_HIVEMIND_NET" hm-hermes 2>/dev/null || true
+  log "Waiting for hm-hermes mgmt health..."
+  for i in $(seq 1 20); do
+    sleep 2
+    if docker exec hm-hermes curl -sf http://127.0.0.1:8650/mgmt/health >/dev/null 2>&1; then
+      log "hm-hermes is ${GREEN}healthy${NC} (mgmt 8650 internal, gateway 8642)"
+      return 0
+    fi
+    echo -n "."
+  done
+  err "hm-hermes mgmt not healthy after 40s"
+  docker logs hm-hermes --tail 20
+  return 1
+}
+
 case "${1:-all}" in
   core)              start_core && verify ;;
   benchmark)         start_core_benchmark && verify ;;
   control)           start_control ;;
+  hermes|hm-hermes)  start_hermes ;;
   mirofish)          start_mirofish ;;
   employees|digital-employees|slack-agents)
                      start_employees ;;
@@ -426,5 +465,5 @@ case "${1:-all}" in
   logs)              logs "${2:-hm-core}" ;;
   verify)            verify ;;
   all)               start_workspace_mcp && start_core && start_control && start_mirofish && start_employees && verify ;;
-  *)                 echo "Usage: $0 {all|core|benchmark|control|mirofish|employees|workspace-mcp|restart|status|logs [name]|verify}"; exit 1 ;;
+  *)                 echo "Usage: $0 {all|core|benchmark|control|hermes|mirofish|employees|workspace-mcp|restart|status|logs [name]|verify}"; exit 1 ;;
 esac

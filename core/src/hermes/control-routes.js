@@ -170,7 +170,7 @@ export async function handleHermesRoutes(req, res, ctx) {
       const jobId = await auditJob(prisma, { orgId, tenantId, agentId, action: 'run', status: 'running', payload, createdBy: userId });
       const agentConfig = { ...(row.config || {}), tenant_id: tenantId };
       const { runTask } = await import('./profile-manager.js'); // lazy: pulls ajv only on dispatch
-      const out = await runTask(prisma, tenantId, agentConfig, payload);
+      const out = await runTask(prisma, tenantId, agentConfig, payload, { createdBy: userId });
       const status = out && out.ok ? 'succeeded' : 'failed';
       await prisma.$executeRawUnsafe(
         `UPDATE hivemind.hermes_jobs SET status=$2, result=$3::jsonb, updated_at=now() WHERE id=$1`,

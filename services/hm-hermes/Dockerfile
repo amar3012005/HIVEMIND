@@ -24,10 +24,10 @@ RUN touch /etc/s6-overlay/s6-rc.d/user/contents.d/hm-mgmt
 # 8650 = internal management server (documentation only — never published to host).
 EXPOSE 8642 9119 8650
 
-# Liveness: gateway API must answer. (Path tolerant — 200/401/404 all prove the
-# server is up; only connection failure is unhealthy.)
+# Liveness: the management server must answer (it owns the profiles-per-tenant
+# flow). The default 8642 gateway is NOT used in this deployment, so probe 8650.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:8642/').then(r=>process.exit(0)).catch(()=>process.exit(1))" || exit 1
+  CMD node -e "fetch('http://127.0.0.1:8650/mgmt/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" || exit 1
 
 # Default command = run the gateway (state in /opt/data). Overridable for setup.
 CMD ["gateway", "run"]

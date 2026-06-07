@@ -27,6 +27,36 @@ export function profileName(tenantId) {
   return `org-${s}`;
 }
 
+/** Provider base URLs for the OpenAI-compatible `custom` provider. */
+export const PROVIDER_BASE_URLS = {
+  groq: 'https://api.groq.com/openai/v1',
+  openrouter: 'https://openrouter.ai/api/v1',
+};
+
+/**
+ * Build a profile config.yaml (model + HiveMind MCP). model.api_key MUST be a
+ * literal (Hermes does NOT resolve env-refs for model.api_key; it DOES for MCP
+ * headers). Used by fresh-create (profile-manager) and the model-switch route.
+ * @param {{ provider?: 'groq'|'openrouter', model: string, apiKeyLiteral: string, mcpUrl: string }} o
+ */
+export function buildConfigYaml({ provider = 'groq', model, apiKeyLiteral, mcpUrl }) {
+  const baseUrl = PROVIDER_BASE_URLS[provider] || PROVIDER_BASE_URLS.groq;
+  return [
+    'model:',
+    `  default: ${model}`,
+    '  provider: custom',
+    `  base_url: ${baseUrl}`,
+    `  api_key: ${apiKeyLiteral}`,
+    'mcp:',
+    '  hivemind:',
+    `    url: ${mcpUrl}`,
+    '    headers:',
+    '      Authorization: Bearer ${MCP_HIVEMIND_API_KEY}',
+    '    enabled: true',
+    '',
+  ].join('\n');
+}
+
 /** Authenticated JSON call to the in-container management server. */
 async function mgr(method, path, body) {
   if (!MGMT_KEY) return { ok: false, error: 'HERMES_MGMT_KEY missing (fail-closed)' };

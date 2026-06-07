@@ -15,7 +15,7 @@
  *
  * @module hermes/profile-manager
  */
-import { createProfile, startGateway, deleteProfile, getProfileStatus, writeProfileFile, profileName } from './profile-orchestrator.js';
+import { createProfile, startGateway, deleteProfile, getProfileStatus, writeProfileFile, profileName, buildConfigYaml } from './profile-orchestrator.js';
 import { deriveGatewayPort } from './runtime-spec.js';
 import { runOnce, checkHealth } from './hm-control-client.js';
 import { createPersistedApiKey } from '../auth/api-keys.js';
@@ -61,30 +61,17 @@ async function waitForGateway(url, { timeoutMs = 20000, intervalMs = 1000 } = {}
   return false;
 }
 
-/** Build the per-profile config.yaml (Groq model + HiveMind MCP).
- * NOTE: model.api_key MUST be the literal key — Hermes does NOT resolve env-refs
- * (${VAR}) for model.api_key (it does for MCP headers). The literal lands in the
- * profile's config.yaml on the root-only /opt/data volume (never git). */
+/** Build the per-profile config.yaml. Default = Groq llama-3.3-70b-versatile
+ * (non-reasoning, tool-capable — gpt-oss-20b's reasoning_content breaks multi-turn
+ * tool calls on Groq). Per-profile model is overridable via PUT /hermes/agent/model.
+ * Delegates to the shared buildConfigYaml in profile-orchestrator. */
 function buildProfileConfigYaml(mcpUrl, groqKey) {
-  return [
-    'model:',
-    // Non-reasoning, tool-capable model. gpt-oss-20b is a REASONING model: Hermes
-    // stores assistant reasoning_content and replays it on multi-turn tool calls,
-    // which Groq rejects with HTTP 400 ("property 'reasoning_content' is
-    // unsupported"). llama-3.3-70b-versatile has no reasoning_content → multi-turn
-    // tool use (web_search, library agents) works. Matches the Digital Employees default.
-    `  default: ${process.env.HERMES_MODEL || 'llama-3.3-70b-versatile'}`,
-    '  provider: custom',
-    '  base_url: https://api.groq.com/openai/v1',
-    `  api_key: ${groqKey}`,
-    'mcp:',
-    '  hivemind:',
-    `    url: ${mcpUrl}`,
-    '    headers:',
-    '      Authorization: Bearer ${MCP_HIVEMIND_API_KEY}',
-    '    enabled: true',
-    '',
-  ].join('\n');
+  return buildConfigYaml({
+    provider: 'groq',
+    model: process.env.HERMES_MODEL || 'llama-3.3-70b-versatile',
+    apiKeyLiteral: groqKey,
+    mcpUrl,
+  });
 }
 
 async function upsertRegistry(prisma, { tenantId, profile, port, orgId, mcpUrl, status, mcpKeyId = null, mcpKeyPrefix = null }) {

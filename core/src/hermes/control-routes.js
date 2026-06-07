@@ -24,7 +24,36 @@ import crypto from 'node:crypto';
 // library is a static module with no heavy deps — imported at top level.
 import { LIBRARY, findTemplate } from './library.js';
 // profile-orchestrator: writeProfileFile + restartGateway + cron + env-merge ops (Phase 6h transport).
-import { writeProfileFile, restartGateway, listCron, addCron, deleteCron, mergeProfileEnv } from './profile-orchestrator.js';
+import { writeProfileFile, restartGateway, listCron, addCron, deleteCron, mergeProfileEnv, buildConfigYaml, PROVIDER_BASE_URLS } from './profile-orchestrator.js';
+
+const DEFAULT_MODEL = { provider: 'groq', model: process.env.HERMES_MODEL || 'llama-3.3-70b-versatile' };
+const ALLOWED_PROVIDERS = ['groq', 'openrouter'];
+
+/** Fetch the model list from a provider (server-side). Groq needs the platform
+ * key; OpenRouter's catalog is public. Returns [{id,name}]. */
+async function fetchProviderModels(provider) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 12000);
+  try {
+    if (provider === 'groq') {
+      const r = await fetch('https://api.groq.com/openai/v1/models', {
+        headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY || ''}` }, signal: ctrl.signal,
+      });
+      const d = await r.json().catch(() => ({}));
+      return (d.data || []).map((m) => ({ id: m.id, name: m.id }));
+    }
+    if (provider === 'openrouter') {
+      const r = await fetch('https://openrouter.ai/api/v1/models', { signal: ctrl.signal });
+      const d = await r.json().catch(() => ({}));
+      return (d.data || []).map((m) => ({ id: m.id, name: m.name || m.id }));
+    }
+    return [];
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 const ROUTE_PREFIX = '/hermes/';
 
@@ -747,6 +776,63 @@ export async function handleHermesRoutes(req, res, ctx) {
         created_at: r.created_at,
       }));
       jsonResponse(res, { memories });
+      return true;
+    }
+
+    // ── GET /hermes/agent/model — current provider + model ──────────────────
+    if (pathname === '/hermes/agent/model' && method === 'GET') {
+      const rows = await prisma.$queryRawUnsafe(
+        `SELECT config FROM hivemind.hermes_agents WHERE org_id = $1 AND deleted_at IS NULL ORDER BY created_at ASC LIMIT 1`,
+        orgId,
+      ).catch(() => []);
+      const saved = rows && rows[0] && rows[0].config && rows[0].config.model;
+      jsonResponse(res, { model: (saved && saved.provider && saved.model) ? saved : DEFAULT_MODEL });
+      return true;
+    }
+
+    // ── GET /hermes/providers/:provider/models — selectable model list ──────
+    const provModels = pathname.match(/^\/hermes\/providers\/([^/]+)\/models$/);
+    if (provModels && method === 'GET') {
+      const provider = provModels[1];
+      if (!ALLOWED_PROVIDERS.includes(provider)) { jsonResponse(res, { error: 'unsupported provider' }, 400); return true; }
+      const models = await fetchProviderModels(provider);
+      jsonResponse(res, { provider, models });
+      return true;
+    }
+
+    // ── PUT /hermes/agent/model { provider, model, apiKey? } ─────────────────
+    // Switches the tenant agent's model. OpenRouter requires the tenant's own key
+    // (written as the literal model.api_key on the root-only profile volume; never
+    // returned/logged). Rewrites config.yaml + restarts the gateway.
+    if (pathname === '/hermes/agent/model' && method === 'PUT') {
+      const body = (await parseBody(req)) || {};
+      const provider = String(body.provider || '').trim();
+      const model = String(body.model || '').trim();
+      if (!ALLOWED_PROVIDERS.includes(provider)) { jsonResponse(res, { error: 'provider must be groq or openrouter' }, 400); return true; }
+      if (!model) { jsonResponse(res, { error: 'model required' }, 400); return true; }
+      const apiKeyLiteral = provider === 'openrouter' ? String(body.apiKey || '').trim() : (process.env.GROQ_API_KEY || '');
+      if (provider === 'openrouter' && !apiKeyLiteral) { jsonResponse(res, { error: 'OpenRouter API key required' }, 400); return true; }
+      if (!apiKeyLiteral) { jsonResponse(res, { error: 'provider key unavailable' }, 503); return true; }
+
+      const { ensureProfile } = await import('./profile-manager.js');
+      const ens = await ensureProfile(prisma, tenantId, { orgId, mcpUserId: userId });
+      if (!ens.ok) { jsonResponse(res, { error: 'profile unavailable: ' + (ens.issues || []).join(';') }, 502); return true; }
+      const mcpUrl = process.env.HIVEMIND_API_URL ? `${process.env.HIVEMIND_API_URL}/api/mcp` : 'https://core.hivemind.davinciai.eu:8050/api/mcp';
+      const wrote = await writeProfileFile(tenantId, 'config.yaml', buildConfigYaml({ provider, model, apiKeyLiteral, mcpUrl }));
+      if (!wrote) { jsonResponse(res, { error: 'failed to write model config' }, 502); return true; }
+      await restartGateway(tenantId);
+      // Persist {provider,model} (NOT the key) to the agent config.
+      const rows = await prisma.$queryRawUnsafe(
+        `SELECT id, config FROM hivemind.hermes_agents WHERE org_id = $1 AND deleted_at IS NULL ORDER BY created_at ASC LIMIT 1`, orgId,
+      ).catch(() => []);
+      if (rows && rows[0]) {
+        const cfg = { ...(rows[0].config || {}), model: { provider, model } };
+        await prisma.$executeRawUnsafe(
+          `UPDATE hivemind.hermes_agents SET config=$2::jsonb, updated_at=now() WHERE id=$1`,
+          rows[0].id, JSON.stringify(cfg),
+        ).catch(() => {});
+      }
+      jsonResponse(res, { model: { provider, model } });
       return true;
     }
 

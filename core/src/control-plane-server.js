@@ -5565,6 +5565,30 @@ Write the persona now.`;
       }
     }
 
+    // DELETE /v1/hyper-rooms/:id/turns/:turnId — remove ONE turn (e.g. a turn
+    // whose answer was wrong/time-stale). Lets the user clear a single bubble
+    // instead of nuking the whole discussion. Tenant-scoped; the turn must
+    // belong to a room owned by the caller.
+    if (roomTurnMatch && roomTurnMatch[2] != null && roomTurnMatch[3] == null && req.method === 'DELETE') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const roomId = roomTurnMatch[1];
+      const turnId = roomTurnMatch[2];
+      const room = await prisma.hyperRoom.findFirst({
+        where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId },
+        select: { id: true },
+      });
+      if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
+      try {
+        const result = await prisma.hyperTurn.deleteMany({ where: { id: turnId, roomId } });
+        if (result.count === 0) return jsonResponse(res, { error: 'Turn not found' }, 404);
+        return jsonResponse(res, { ok: true, deleted: result.count });
+      } catch (err) {
+        console.warn('[hyper-rooms] delete turn failed:', err.message);
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+
     // GET /v1/hyper-rooms/:id — metadata + recent turns
     if (roomMetaMatch && req.method === 'GET') {
       const current = await requireSession(req, res);

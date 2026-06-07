@@ -61,15 +61,21 @@ async function waitForGateway(url, { timeoutMs = 20000, intervalMs = 1000 } = {}
   return false;
 }
 
-/** Build the per-profile config.yaml. Default = Groq llama-3.3-70b-versatile
- * (non-reasoning, tool-capable — gpt-oss-20b's reasoning_content breaks multi-turn
- * tool calls on Groq). Per-profile model is overridable via PUT /hermes/agent/model.
- * Delegates to the shared buildConfigYaml in profile-orchestrator. */
-function buildProfileConfigYaml(mcpUrl, groqKey) {
+/**
+ * Build the per-profile config.yaml for a FRESH profile creation.
+ *
+ * Defaults to provider=openrouter, model=google/gemini-2.5-flash (tool-capable).
+ * OPENROUTER_API_KEY is supplied via the profile .env (extraEnv) — never inline.
+ * Per-profile model is overridable via PUT /hermes/agent/model (which rewrites
+ * config.yaml on the existing profile without touching ensureProfile).
+ *
+ * @param {string} mcpUrl  HiveMind MCP endpoint for this environment
+ * @returns {string}
+ */
+function buildProfileConfigYaml(mcpUrl) {
   return buildConfigYaml({
-    provider: 'groq',
-    model: process.env.HERMES_MODEL || 'llama-3.3-70b-versatile',
-    apiKeyLiteral: groqKey,
+    provider: 'openrouter',
+    model: process.env.HERMES_MODEL || 'google/gemini-2.5-flash',
     mcpUrl,
     browserMcpUrl: process.env.HERMES_BROWSER_MCP_URL || 'http://hivemind-control-plane:3000/hermes/mcp/browser',
     webMcpUrl: process.env.HERMES_PLAYWRIGHT_MCP_URL || 'http://hm-playwright:8931/mcp',
@@ -143,13 +149,29 @@ export async function ensureProfile(prisma, tenantId, cfg = {}) {
   // (no prisma/userId, or a non-uuid throwaway tenant) — back-compatible.
   const scoped = cfg.mcpKey ? null : await mintScopedMcpKey(prisma, { tenantId, orgId: cfg.orgId, userId: cfg.mcpUserId });
   const mcpKey = cfg.mcpKey || scoped?.rawKey || process.env.MCP_HIVEMIND_API_KEY || apiKey;
-  const create = await createProfile(tenantId, {
-    apiKey, port,
-    soul: cfg.soul || `You are the HiveMind agent runtime for tenant ${tenantId}. Use the hivemind MCP tools for all memory recall/search/save (system of record). For web tasks you have TWO browser tool sets: prefer the Playwright "browser_*" tools (a server-side headless browser) for public web — research, reading pages, extracting data, filling public forms; use the WebBridge tools only when the task needs the user's own logged-in browser sessions (their email, internal apps). Only call a tool that is actually listed in your available tools.`,
-    extraEnv: { GROQ_API_KEY: process.env.GROQ_API_KEY || '', MCP_HIVEMIND_API_KEY: mcpKey },
-  });
-  if (!create.ok) return { ok: false, profile, port, url, issues: create.issues };
-  await writeProfileFile(tenantId, 'config.yaml', buildProfileConfigYaml(mcpUrl, process.env.GROQ_API_KEY || ''));
+
+  // Only create the profile (and write config.yaml) when it does not yet exist.
+  // If the profile exists but the gateway is merely stopped (e.g. after a process
+  // restart) we skip create+config-write and go straight to startGateway — this
+  // preserves whatever model the tenant previously configured via PUT /hermes/agent/model.
+  const isNewProfile = !st.exists;
+
+  if (isNewProfile) {
+    const create = await createProfile(tenantId, {
+      apiKey, port,
+      soul: cfg.soul || `You are the HiveMind agent runtime for tenant ${tenantId}. Use the available web and browser tools for web tasks — prefer the server-side headless browser tools for public web research, reading pages, extracting data, and filling public forms; use the user browser tools only when the task needs the user's own logged-in sessions. Use the hivemind tools for all memory recall, search, and save operations (system of record). Only call a tool that is actually listed in your available tools.`,
+      extraEnv: {
+        OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY || '',
+        GROQ_API_KEY: process.env.GROQ_API_KEY || '',
+        MCP_HIVEMIND_API_KEY: mcpKey,
+      },
+    });
+    if (!create.ok) return { ok: false, profile, port, url, issues: create.issues };
+    // Write config.yaml only on fresh create — never clobber an existing profile's
+    // chosen model. Subsequent model changes go through PUT /hermes/agent/model.
+    await writeProfileFile(tenantId, 'config.yaml', buildProfileConfigYaml(mcpUrl));
+  }
+
   const s = await startGateway(tenantId);
   if (!s.ok) return { ok: false, profile, port, url, issues: ['startGateway: ' + s.issues.join(';')] };
   const ready = await waitForGateway(url);

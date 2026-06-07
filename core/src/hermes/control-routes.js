@@ -24,7 +24,7 @@ import crypto from 'node:crypto';
 // library is a static module with no heavy deps — imported at top level.
 import { LIBRARY, findTemplate } from './library.js';
 // profile-orchestrator: writeProfileFile + restartGateway + cron + env-merge ops (Phase 6h transport).
-import { writeProfileFile, restartGateway, listCron, addCron, deleteCron, mergeProfileEnv, buildConfigYaml, PROVIDER_BASE_URLS } from './profile-orchestrator.js';
+import { writeProfileFile, restartGateway, stopGateway, startGateway, listCron, addCron, deleteCron, mergeProfileEnv, buildConfigYaml, PROVIDER_BASE_URLS } from './profile-orchestrator.js';
 
 /**
  * Whitelabelled browser connector (served at GET /hermes/wb/connector.mjs).
@@ -64,11 +64,20 @@ async function loop() {
 loop();
 `;
 
-const DEFAULT_MODEL = { provider: 'groq', model: process.env.HERMES_MODEL || 'llama-3.3-70b-versatile' };
+const DEFAULT_MODEL = { provider: 'openrouter', model: process.env.HERMES_MODEL || 'google/gemini-2.5-flash' };
 const ALLOWED_PROVIDERS = ['groq', 'openrouter'];
 
-/** Fetch the model list from a provider (server-side). Groq needs the platform
- * key; OpenRouter's catalog is public. Returns [{id,name}]. */
+/**
+ * Fetch the selectable model list from a provider (server-side).
+ *
+ * - groq: uses the Groq platform key; returns all available models.
+ * - openrouter: filters to TOOL-CAPABLE models only — entries whose
+ *   `supported_parameters` array includes 'tools'. This excludes base models
+ *   that would 404 at the /v1/chat/completions?route=tool-call endpoint and
+ *   NousResearch/hermes models that have no tool endpoint on OpenRouter.
+ *
+ * Returns [{id, name}].
+ */
 async function fetchProviderModels(provider) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 12000);
@@ -83,7 +92,12 @@ async function fetchProviderModels(provider) {
     if (provider === 'openrouter') {
       const r = await fetch('https://openrouter.ai/api/v1/models', { signal: ctrl.signal });
       const d = await r.json().catch(() => ({}));
-      return (d.data || []).map((m) => ({ id: m.id, name: m.name || m.id }));
+      // Filter to models that explicitly declare 'tools' support so the gateway
+      // can use tool-calling. Models without this parameter silently drop tool
+      // schemas or 404 at the tool-call endpoint.
+      return (d.data || [])
+        .filter((m) => Array.isArray(m.supported_parameters) && m.supported_parameters.includes('tools'))
+        .map((m) => ({ id: m.id, name: m.name || m.id }));
     }
     return [];
   } catch {
@@ -938,30 +952,40 @@ export async function handleHermesRoutes(req, res, ctx) {
       return true;
     }
 
-    // ── PUT /hermes/agent/model { provider, model, apiKey? } ─────────────────
-    // Switches the tenant agent's model. OpenRouter requires the tenant's own key
-    // (written as the literal model.api_key on the root-only profile volume; never
-    // returned/logged). Rewrites config.yaml + restarts the gateway.
+    // ── PUT /hermes/agent/model { provider, model } ──────────────────────────
+    // Switches the tenant agent's model. Keys are server-side env vars — the
+    // caller NEVER sends an API key. Rewrites config.yaml and does a full gateway
+    // STOP then START (restart alone does not reload the provider on some Hermes
+    // versions). provider 'groq' is normalised to 'custom:groq' in buildConfigYaml.
     if (pathname === '/hermes/agent/model' && method === 'PUT') {
       const body = (await parseBody(req)) || {};
-      const provider = String(body.provider || '').trim();
+      const rawProvider = String(body.provider || '').trim();
       const model = String(body.model || '').trim();
-      if (!ALLOWED_PROVIDERS.includes(provider)) { jsonResponse(res, { error: 'provider must be groq or openrouter' }, 400); return true; }
+      if (!ALLOWED_PROVIDERS.includes(rawProvider)) {
+        jsonResponse(res, { error: 'provider must be groq or openrouter' }, 400); return true;
+      }
       if (!model) { jsonResponse(res, { error: 'model required' }, 400); return true; }
-      const apiKeyLiteral = provider === 'openrouter' ? String(body.apiKey || '').trim() : (process.env.GROQ_API_KEY || '');
-      if (provider === 'openrouter' && !apiKeyLiteral) { jsonResponse(res, { error: 'OpenRouter API key required' }, 400); return true; }
-      if (!apiKeyLiteral) { jsonResponse(res, { error: 'provider key unavailable' }, 503); return true; }
+
+      // Map 'groq' → 'custom:groq' for buildConfigYaml; store the canonical name.
+      const provider = rawProvider === 'groq' ? 'custom:groq' : rawProvider;
 
       const { ensureProfile } = await import('./profile-manager.js');
       const ens = await ensureProfile(prisma, tenantId, { orgId, mcpUserId: userId });
       if (!ens.ok) { jsonResponse(res, { error: 'profile unavailable: ' + (ens.issues || []).join(';') }, 502); return true; }
+
       const mcpUrl = process.env.HIVEMIND_API_URL ? `${process.env.HIVEMIND_API_URL}/api/mcp` : 'https://core.hivemind.davinciai.eu:8050/api/mcp';
       const browserMcpUrl = process.env.HERMES_BROWSER_MCP_URL || 'http://hivemind-control-plane:3000/hermes/mcp/browser';
       const webMcpUrl = process.env.HERMES_PLAYWRIGHT_MCP_URL || 'http://hm-playwright:8931/mcp';
-      const wrote = await writeProfileFile(tenantId, 'config.yaml', buildConfigYaml({ provider, model, apiKeyLiteral, mcpUrl, browserMcpUrl, webMcpUrl }));
+
+      const wrote = await writeProfileFile(tenantId, 'config.yaml', buildConfigYaml({ provider, model, mcpUrl, browserMcpUrl, webMcpUrl }));
       if (!wrote) { jsonResponse(res, { error: 'failed to write model config' }, 502); return true; }
-      await restartGateway(tenantId);
-      // Persist {provider,model} (NOT the key) to the agent config.
+
+      // Full stop → start (NOT restartGateway) so Hermes reinitialises the
+      // provider from scratch; restart keeps the old provider in-process.
+      await stopGateway(tenantId);
+      await startGateway(tenantId);
+
+      // Persist {provider, model} (NOT any key) to the agent config.
       const rows = await prisma.$queryRawUnsafe(
         `SELECT id, config FROM hivemind.hermes_agents WHERE org_id = $1 AND deleted_at IS NULL ORDER BY created_at ASC LIMIT 1`, orgId,
       ).catch(() => []);

@@ -27,37 +27,77 @@ export function profileName(tenantId) {
   return `org-${s}`;
 }
 
-/** Provider base URLs for the OpenAI-compatible `custom` provider. */
+/**
+ * Provider base URLs — kept for callers that need the raw URL (e.g. diagnostics).
+ * Note: for the official Hermes `openrouter` provider these are NOT written into
+ * config.yaml (Hermes resolves them natively via `provider: openrouter`).
+ * Only `groq` uses the `custom_providers` list with an explicit base_url.
+ */
 export const PROVIDER_BASE_URLS = {
   groq: 'https://api.groq.com/openai/v1',
   openrouter: 'https://openrouter.ai/api/v1',
 };
 
 /**
- * Build a profile config.yaml (model + HiveMind MCP). model.api_key MUST be a
- * literal (Hermes does NOT resolve env-refs for model.api_key; it DOES for MCP
- * headers). Used by fresh-create (profile-manager) and the model-switch route.
- * @param {{ provider?: 'groq'|'openrouter', model: string, apiKeyLiteral: string, mcpUrl: string, browserMcpUrl?: string, webMcpUrl?: string }} o
+ * Build an OFFICIAL Hermes profile config.yaml.
+ *
+ * Key differences from the old (broken) format:
+ *  - `mcp_servers:` (NOT `mcp:`) — the old key silently prevented MCP from loading.
+ *  - `provider: openrouter` is a NATIVE Hermes provider — no base_url, no api_key
+ *    in the YAML (OPENROUTER_API_KEY is read from the profile .env at runtime).
+ *  - `provider: custom:groq` uses a top-level `custom_providers:` list with
+ *    base_url + key_env; GROQ_API_KEY must be present in the profile .env.
+ *  - No API key literals ever appear in the YAML — keys are server-side env vars.
+ *  - MCP header tokens use env-ref syntax (${VAR}) resolved by Hermes at runtime.
+ *
+ * @param {{
+ *   provider?: 'openrouter'|'custom:groq'|'groq',
+ *   model?: string,
+ *   mcpUrl: string,
+ *   browserMcpUrl?: string|null,
+ *   webMcpUrl?: string|null,
+ * }} o
+ * @returns {string} YAML content for config.yaml
  */
-export function buildConfigYaml({ provider = 'groq', model, apiKeyLiteral, mcpUrl, browserMcpUrl = null, webMcpUrl = null }) {
-  const baseUrl = PROVIDER_BASE_URLS[provider] || PROVIDER_BASE_URLS.groq;
-  const lines = [
+export function buildConfigYaml({
+  provider = 'openrouter',
+  model = 'google/gemini-2.5-flash',
+  mcpUrl,
+  browserMcpUrl = null,
+  webMcpUrl = null,
+}) {
+  // Normalise 'groq' shorthand → 'custom:groq'.
+  const resolvedProvider = provider === 'groq' ? 'custom:groq' : provider;
+
+  const lines = [];
+
+  // For the groq custom provider we need a top-level custom_providers block.
+  if (resolvedProvider === 'custom:groq') {
+    lines.push(
+      'custom_providers:',
+      '  - name: groq',
+      `    base_url: ${PROVIDER_BASE_URLS.groq}`,
+      '    key_env: GROQ_API_KEY',
+    );
+  }
+
+  lines.push(
     'model:',
+    `  provider: ${resolvedProvider}`,
     `  default: ${model}`,
-    '  provider: custom',
-    `  base_url: ${baseUrl}`,
-    `  api_key: ${apiKeyLiteral}`,
-    'mcp:',
+    // OFFICIAL key — 'mcp_servers:', NOT 'mcp:' (the old key never loaded tools).
+    'mcp_servers:',
     '  hivemind:',
     `    url: ${mcpUrl}`,
     '    headers:',
     '      Authorization: Bearer ${MCP_HIVEMIND_API_KEY}',
     '    enabled: true',
-  ];
-  // Web-bridge automation MCP (P2). Header token via env-ref (resolves for MCP
-  // headers); when the tenant hasn't paired a browser, WB_MCP_TOKEN is unset →
-  // the relay 401s and the browser tools are simply unavailable (gateway keeps
-  // running). When paired, WB_MCP_TOKEN is set in the profile .env.
+  );
+
+  // Web-bridge automation MCP. When the tenant hasn't paired a browser,
+  // WB_MCP_TOKEN is unset → the relay 401s and the browser tools are simply
+  // unavailable (gateway keeps running). When paired, WB_MCP_TOKEN is set via
+  // mergeProfileEnv into the profile .env.
   if (browserMcpUrl) {
     lines.push(
       '  browser:',
@@ -67,9 +107,10 @@ export function buildConfigYaml({ provider = 'groq', model, apiKeyLiteral, mcpUr
       '    enabled: true',
     );
   }
-  // Server-side headless browser (Playwright MCP) — always available, no user
-  // install. Agents use the `browser_*` tools for public web / research; reserve
-  // the WebBridge tools above for tasks needing the user's logged-in sessions.
+
+  // Server-side headless Playwright MCP — always available, no user install.
+  // Agents use the web tools for public web / research; reserve the WebBridge
+  // browser tools for tasks that need the user's own logged-in sessions.
   if (webMcpUrl) {
     lines.push(
       '  web:',
@@ -77,6 +118,7 @@ export function buildConfigYaml({ provider = 'groq', model, apiKeyLiteral, mcpUr
       '    enabled: true',
     );
   }
+
   lines.push('');
   return lines.join('\n');
 }

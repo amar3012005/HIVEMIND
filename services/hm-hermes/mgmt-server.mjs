@@ -68,7 +68,10 @@ async function createProfile({ tenantId, apiKey, port, soul, extraEnv = {} }) {
   const profile = profileName(tenantId);
   if (!apiKey || !port) return { ok: false, profile, issues: ['apiKey + port required'] };
   const create = await hermes(['profile', 'create', profile]);
-  if (!create.ok && !/exist/i.test(create.stderr)) return { ok: false, profile, issues: [`create: ${create.stderr}`] };
+  // "already exists" is idempotent-OK. Hermes prints it to stdout (not stderr),
+  // and execFile's err.message is just "Command failed" — so check BOTH streams.
+  const existsAlready = /exist/i.test(create.stderr) || /exist/i.test(create.stdout);
+  if (!create.ok && !existsAlready) return { ok: false, profile, issues: [`create: ${create.stderr || create.stdout}`] };
   const envLines = {
     API_SERVER_ENABLED: 'true', API_SERVER_HOST: '0.0.0.0', API_SERVER_PORT: String(port), API_SERVER_KEY: apiKey, ...extraEnv,
   };

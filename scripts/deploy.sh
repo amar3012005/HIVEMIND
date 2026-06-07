@@ -437,6 +437,9 @@ start_hermes() {
     --env-file "$HERMES_ENV" \
     "$HERMES_IMAGE"
   docker network connect "$COOLIFY_HIVEMIND_NET" hm-hermes 2>/dev/null || true
+  # `coolify` net: the PUBLIC control-plane (hivemind-control-plane alias) lives here;
+  # it must reach hm-hermes:8650 (mgmt) + the per-profile gateway ports.
+  docker network connect coolify hm-hermes 2>/dev/null || true
   log "Waiting for hm-hermes mgmt health..."
   for i in $(seq 1 20); do
     sleep 2

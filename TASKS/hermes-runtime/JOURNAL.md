@@ -62,3 +62,11 @@
 - Cleaned a leftover org-723f0f5b profile dir (cleanup gap from earlier e2e).
 - VERIFIED: public /hermes/agents → 401 (was 404); full e2e FROM control-plane-s0k0 (ensureProfile→runTask→Groq+MCP="PONG", scoped key hmk_live_2c9, cleaned).
 - NOTE: there are TWO control-plane containers sharing the code (hm-control:3002 deploy.sh + control-plane-s0k0 Coolify/public). Public = control-plane-s0k0. Future code deploys to the bind path reach both; flag/env must be set where each reads it (Coolify CP reads /app/.env via dotenv + its Coolify env).
+
+## Hermes v2 P1 — SHIPPED LIVE — 2026-06-07 (workflow w0lwl04wl)
+- 502 ROOT CAUSE: agents created with empty config → run branch built agentConfig={tenant_id} → strict ajv validateHermesAgentConfig failed → runOnce failed → HTTP 502. NOT Groq/gateway (gateway never contacted). FIX: control-routes.js run branch normalizes a full HermesAgentConfig (fresh uuid agent_id — hagent_ id is not uuid; hermes_profile=org-<tenant>; memory_mode; safe defaults for required fields; stored config spread last; tenant_id+memory_mode re-asserted). Verified LIVE: empty-config→valid=true→dispatch ok=true completed (was 502).
+- NEW backend (control-routes.js + library.js): GET /hermes/agent (singleton resolve-or-create org's 1 canonical agent); GET /hermes/library (5 templates: research-brief, summarize-doc, competitor-watch, draft-reply, data-qa); POST /hermes/library/:id/run (ephemeral dispatch, re-asserts output_routes after spread → valid; audit agent_id 'lib:<id>' since col NOT NULL). Deployed to /opt/HIVEMIND/core bind path; BOTH control-planes restarted.
+- NEW FE (Da-vinci main dfd7d35 → Vercel): HermesAgents.jsx = two-pane shell (left rail single agent + nav; Home/Tasks/Library active, P2/P3 as 'soon' stubs); pages/hermes/{Home,Tasks,Library}.jsx; api-client getHermesAgent/getHermesLibrary/runHermesLibrary. Fixed FE/BE drift (FE read {items}; backend returns {templates} → FE now reads templates).
+- VERIFY: node --check all; 17/17 route harness; eslint 0 on 5 FE files; live dispatch completed.
+- Cron 402 OpenRouter = separate user experiment in Hermes' own dashboard (not our flow). Schedules tab (P2) keeps users out of raw Hermes cron.
+- NEXT: P2 (Persona, Schedules, Skills) then P3 (Channels, Approvals, Memory).

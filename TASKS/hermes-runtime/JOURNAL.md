@@ -70,3 +70,10 @@
 - VERIFY: node --check all; 17/17 route harness; eslint 0 on 5 FE files; live dispatch completed.
 - Cron 402 OpenRouter = separate user experiment in Hermes' own dashboard (not our flow). Schedules tab (P2) keeps users out of raw Hermes cron.
 - NEXT: P2 (Persona, Schedules, Skills) then P3 (Channels, Approvals, Memory).
+
+## Hermes v2 P2 — SHIPPED LIVE — 2026-06-07 (workflow w2q7b0k74)
+- Persona: PUT /hermes/agent/persona {name,role,behavior} → SOUL.md write + restartGateway + persist to config. GET/PUT skills (6-cap catalog, state→config, best-effort skills.yaml; full Hermes denylist enforcement = follow-up). Schedules: GET/POST/DELETE → Hermes cron via NEW mgmt routes /mgmt/cron/{list,add,delete} + orchestrator listCron/addCron/deleteCron. Cron CLI: `hermes -p <profile> cron list/create/remove`; jobs hot-read by running gateway (no restart).
+- VERIFY (live, public CP): cron add→jobId 6d5b6e95→list reflects→delete ok; persona SOUL write+restart ok. node --check all; 17/17 harness.
+- Deployed: hm-hermes rebuilt (mgmt cron), both CPs restarted.
+- FE GOTCHA: P2 workflow ran with working tree on branch preview/meeting-notes-dial (6f base, NO P1), so its shell rewrite omitted Home/Tasks/Library. RECONCILED: reset to origin/main (P1), grafted the 3 P2 tab files + wired imports/render/nav + added 6 P2 api-client methods by hand. main now has P1+P2 coexisting. Pushed main 9ce592a. LESSON: ensure FE working tree is on main before FE workflows.
+- P3 (Channels/Approvals/Memory) launched wcpt76huv. Approvals endpoints already exist (6e) → FE-only.

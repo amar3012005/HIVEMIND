@@ -5484,7 +5484,7 @@ Write the persona now.`;
           : [];
         const validIds = valid.map(v => v.id);
         const ALLOWED_TEMPLATES = new Set([
-          'auto', 'debate', 'decision', 'swarm', 'brainstorm', 'council',
+          'auto', 'debate', 'decision', 'swarm', 'deep_sim', 'brainstorm', 'council',
           'lean_coffee', 'retrospective', 'review', 'standup',
         ]);
         const template = (typeof body.template === 'string' && ALLOWED_TEMPLATES.has(body.template))
@@ -5519,6 +5519,7 @@ Write the persona now.`;
 
     // /v1/hyper-rooms/:id/turns(/:turnId)(/stream)
     const roomTurnMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/turns(?:\/([0-9a-f-]{36})(\/stream)?)?$/);
+    const flybyDecisionMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/turns\/([0-9a-f-]{36})\/flyby-decision$/);
     const roomMetaMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})$/);
 
     // DELETE /v1/hyper-rooms/:id — permanent delete (?hard=true) or archive.
@@ -5623,7 +5624,7 @@ Write the persona now.`;
         data.participantIds = valid.map(v => v.id);
       }
       const ALLOWED_TEMPLATES = new Set([
-        'auto', 'debate', 'decision', 'swarm', 'brainstorm', 'council',
+        'auto', 'debate', 'decision', 'swarm', 'deep_sim', 'brainstorm', 'council',
         'lean_coffee', 'retrospective', 'review', 'standup',
       ]);
       if (typeof body.template === 'string' && ALLOWED_TEMPLATES.has(body.template)) {
@@ -5722,6 +5723,68 @@ Write the persona now.`;
         data: { archivedAt: new Date(), summaryMemoryId },
       });
       return jsonResponse(res, { room: updated, summary_memory_id: summaryMemoryId });
+    }
+
+    // POST /v1/hyper-rooms/:id/turns/:turnId/flyby-decision — continue a
+    // deep simulation after the user approves/rejects the temporary specialist.
+    if (flybyDecisionMatch && req.method === 'POST') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const body = await parseBody(req);
+      const roomId = flybyDecisionMatch[1];
+      const turnId = flybyDecisionMatch[2];
+      const decision = String(body.decision || '').trim().toLowerCase();
+      if (!['agree', 'disagree'].includes(decision)) {
+        return jsonResponse(res, { error: 'decision must be agree or disagree' }, 400);
+      }
+      try {
+        const room = await prisma.hyperRoom.findFirst({
+          where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId },
+        });
+        if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
+        const turn = await prisma.hyperTurn.findFirst({
+          where: { id: turnId, roomId },
+          select: { id: true, userMessage: true, lines: true, status: true, sealedAt: true },
+        });
+        if (!turn) return jsonResponse(res, { error: 'Turn not found' }, 404);
+        if (turn.sealedAt || turn.status !== 'live') {
+          return jsonResponse(res, { error: 'Turn is no longer live' }, 409);
+        }
+        const proposal = (turn.lines || []).find(ev => ev && ev.t === 'flyby_proposal');
+        const flybySpec = body.flyby_spec || proposal?.spec || null;
+        const { appendTurnEvent } = await import('./employees/hyper-rooms.js');
+        await appendTurnEvent(prisma, turnId, {
+          t: 'flyby_decision',
+          decision,
+          spec: flybySpec,
+          ts: Date.now(),
+        });
+
+        const sidecarBase = process.env.EMPLOYEES_SIDECAR_URL || 'http://hm-employees:8060';
+        fetch(`${sidecarBase}/internal/hyper/room-turn`, {
+          method: 'POST',
+          headers: {
+            'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            room_id: roomId,
+            turn_id: turnId,
+            user_id: current.session.userId,
+            org_id: current.session.orgId,
+            user_message: turn.userMessage,
+            participant_ids: room.participantIds || [],
+            flyby_decision: decision,
+            flyby_spec: flybySpec,
+            callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
+          }),
+        }).catch(err => console.warn('[hyper-rooms] flyby continuation failed:', err.message));
+
+        return jsonResponse(res, { ok: true, status: 'continuing' }, 202);
+      } catch (err) {
+        console.warn('[hyper-rooms] flyby decision failed:', err.message);
+        return jsonResponse(res, { error: err.message }, 500);
+      }
     }
 
     // POST /v1/hyper-rooms/:id/turns — submit user message, kick a turn

@@ -794,6 +794,8 @@ class RoomTurnRequest(BaseModel):
     user_message: str = Field(min_length=1, max_length=8000)
     participant_ids: List[str] = Field(default_factory=list)
     callback_url: Optional[str] = None
+    flyby_decision: Optional[str] = None
+    flyby_spec: Optional[Dict[str, Any]] = None
 
 
 class RoomTurnResponse(BaseModel):
@@ -894,6 +896,15 @@ TEMPLATE_OVERLAYS: Dict[str, Dict[str, str]] = {
             "YESTERDAY: ...\nTODAY: ...\nBLOCKERS: ..."
         ),
     },
+    "deep_sim": {
+        "label": "Deep Simulation",
+        "lead_hint": (
+            "MEETING MODE: Deep Simulation. Build a live Slack-style simulation: "
+            "ontology/capability check, specialist flyby if needed, then propose, "
+            "peer-review, revise, vote, and conclude."
+        ),
+        "synth_hint": "Output a decisive conclusion with assumptions, risks, and next decisions.",
+    },
 }
 
 
@@ -908,6 +919,7 @@ _TEMPLATE_KEYWORDS: Dict[str, List[str]] = {
     "review": ["review", "evaluate", "score", "rate", "audit this", "check this"],
     "standup": ["status", "where are we", "what's the state", "standup", "stand-up"],
     "swarm": ["why", "what do you all think", "from every angle", "perspectives", "team analysis"],
+    "deep_sim": ["simulate", "simulation", "real life", "real-life", "2-5 years", "long term", "future scenario", "all perspectives"],
 }
 
 
@@ -929,6 +941,349 @@ def recommend_template(user_message: str, default: str = "debate") -> str:
 
 def get_template_overlay(template: str) -> Dict[str, str]:
     return TEMPLATE_OVERLAYS.get(template, TEMPLATE_OVERLAYS.get("debate", {}))
+
+
+# ─── Deep simulation (MiroFish-style live room) ────────────────────────
+
+DEEP_SIM_ROLES: Dict[str, List[str]] = {
+    "strategist": ["strategy", "growth", "roadmap", "pricing", "gtm", "market", "profit", "moat"],
+    "finance": ["finance", "revenue", "arr", "margin", "profit", "cash", "runway", "unit economics", "pricing"],
+    "builder": ["build", "product", "engineering", "infra", "code", "platform", "scale", "technical"],
+    "skeptic": ["risk", "legal", "compliance", "security", "failure", "downside", "assumption", "audit"],
+    "researcher": ["research", "evidence", "data", "customer", "market", "competitive", "benchmark"],
+    "communicator": ["sales", "partner", "message", "brand", "customer", "story", "positioning"],
+}
+
+
+def _employee_role_text(emp: Dict[str, Any]) -> str:
+    return " ".join(
+        str(emp.get(k, "") or "")
+        for k in ("name", "slug", "persona", "roleArchetype", "_lane")
+    ).lower()
+
+
+def _build_task_ontology(user_message: str) -> Dict[str, Any]:
+    msg = (user_message or "").lower()
+    required = {"strategist", "skeptic", "researcher", "communicator"}
+    if any(k in msg for k in DEEP_SIM_ROLES["finance"]):
+        required.add("finance")
+    if any(k in msg for k in DEEP_SIM_ROLES["builder"]):
+        required.add("builder")
+    if len(user_message.split()) > 18 or any(k in msg for k in ("long term", "2-5", "future", "scenario", "simulate")):
+        required.update({"finance", "builder"})
+    entity_types = ["Question", "Organization", "Person", "Product", "Market", "Customer", "Risk", "Constraint", "Opportunity", "Decision"]
+    edge_types = ["supports", "contradicts", "depends_on", "owned_by", "impacts", "requires_review"]
+    return {
+        "mode": "deepresearch",
+        "entity_types": entity_types,
+        "edge_types": edge_types,
+        "required_roles": sorted(required),
+        "rounds": ["collect", "debate", "revise", "vote", "conclude"],
+        "gate_policy": {
+            "min_roles_covered": min(4, len(required)),
+            "reviewed_ratio": 0.75,
+            "requires_provenance": True,
+        },
+    }
+
+
+def _assess_workforce_coverage(participants: List[Dict[str, Any]], ontology: Dict[str, Any]) -> Dict[str, Any]:
+    coverage: Dict[str, List[str]] = {}
+    for role in ontology.get("required_roles", []):
+        hints = DEEP_SIM_ROLES.get(role, [])
+        matched: List[str] = []
+        for emp in participants:
+            text = _employee_role_text(emp)
+            lane = (emp.get("_lane") or "").lower()
+            if role == "strategist" and lane == "strategist":
+                matched.append(emp["slug"])
+            elif role == "builder" and lane == "builder":
+                matched.append(emp["slug"])
+            elif role == "skeptic" and lane == "skeptic":
+                matched.append(emp["slug"])
+            elif role == "researcher" and lane == "researcher":
+                matched.append(emp["slug"])
+            elif role == "communicator" and lane == "communicator":
+                matched.append(emp["slug"])
+            elif any(h in text for h in hints):
+                matched.append(emp["slug"])
+        coverage[role] = sorted(set(matched))
+    missing = [role for role, slugs in coverage.items() if not slugs]
+    critical_missing = [role for role in missing if role in ("finance", "builder", "skeptic", "researcher")]
+    return {
+        "coverage": coverage,
+        "missing_roles": missing,
+        "needs_flyby": bool(critical_missing),
+        "critical_missing": critical_missing,
+    }
+
+
+def _build_flyby_spec(req: "RoomTurnRequest", assessment: Dict[str, Any]) -> Dict[str, Any]:
+    candidates = assessment.get("critical_missing") or assessment.get("missing_roles") or ["finance"]
+    msg = (req.user_message or "").lower()
+    if "finance" in candidates and any(k in msg for k in DEEP_SIM_ROLES["finance"]):
+        role = "finance"
+    else:
+        priority = ["skeptic", "finance", "builder", "researcher", "strategist", "communicator"]
+        role = next((p for p in priority if p in candidates), candidates[0])
+    title = {
+        "finance": "Unit Economics CFO",
+        "builder": "Systems Builder",
+        "skeptic": "Red-Team Operator",
+        "researcher": "Market Evidence Analyst",
+    }.get(role, f"{role.title()} Specialist")
+    slug = f"flyby-{role}"
+    return {
+        "id": f"flyby:{req.turn_id}:{role}",
+        "name": title,
+        "slug": slug,
+        "role": role,
+        "roleArchetype": "Skeptic" if role == "skeptic" else ("Builder" if role == "builder" else "Researcher"),
+        "llm_provider": "groq",
+        "model": os.environ.get("GROQ_INFERENCE_MODEL", "openai/gpt-oss-20b"),
+        "persona": (
+            f"Temporary flyby employee for this room only. You are a high-conviction {title}. "
+            "Speak like an internal operator with a strong point of view. Challenge weak assumptions, "
+            "use company memory when available, and make enterprise-grade tradeoffs explicit."
+        ),
+        "reason": f"The current room does not visibly cover the {role} lens needed for this question.",
+    }
+
+
+def _participant_brief(participants: List[Dict[str, Any]]) -> str:
+    return "\n".join(
+        f"- {p.get('name', p.get('slug'))} ({p.get('slug')}, lane={p.get('_lane')}): {str(p.get('persona') or '')[:240]}"
+        for p in participants
+    )
+
+
+async def _sim_agent_json(
+    *,
+    req: "RoomTurnRequest",
+    emp: Dict[str, Any],
+    prompt: str,
+    fallback: Dict[str, Any],
+) -> Dict[str, Any]:
+    try:
+        agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id)
+        reply = await agent(Msg(name="user", content=prompt, role="user"))
+        _report_turn(emp["id"], req.user_message, reply)
+        text = _msg_to_text(reply)
+        m = re.search(r"\{[\s\S]+\}", text)
+        parsed = json.loads(m.group(0)) if m else None
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[deep-sim] %s failed: %s", emp.get("slug"), exc)
+    return fallback
+
+
+async def _orchestrate_deep_sim(
+    req: "RoomTurnRequest",
+    participants: List[Dict[str, Any]],
+    lead: Dict[str, Any],
+    room_template: str,
+    started: float,
+) -> "RoomTurnResponse":
+    cost_tokens = 0
+    ontology = _build_task_ontology(req.user_message)
+    await _emit_event(req.callback_url, req.turn_id, {"t": "ontology", **ontology})
+    assessment = _assess_workforce_coverage(participants, ontology)
+    await _emit_event(req.callback_url, req.turn_id, {"t": "workforce_assessment", **assessment})
+
+    flyby_spec = req.flyby_spec or (_build_flyby_spec(req, assessment) if assessment.get("needs_flyby") else None)
+    decision = (req.flyby_decision or "").strip().lower()
+    if flyby_spec and assessment.get("needs_flyby") and decision not in ("agree", "disagree"):
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "flyby_proposal",
+            "spec": flyby_spec,
+            "missing_roles": assessment.get("missing_roles", []),
+            "reason": flyby_spec.get("reason"),
+        })
+        return RoomTurnResponse(ok=True, cost_tokens=0, status="awaiting_flyby")
+    if flyby_spec and decision == "agree":
+        flyby = {
+            **flyby_spec,
+            "org_id": req.org_id,
+            "_lane": derive_lane(flyby_spec),
+            "tools": DEFAULT_HYPER_TOOLS,
+        }
+        participants = participants + [flyby]
+        await _emit_event(req.callback_url, req.turn_id, {"t": "flyby_joined", "spec": flyby_spec})
+    elif flyby_spec and decision == "disagree":
+        await _emit_event(req.callback_url, req.turn_id, {"t": "flyby_skipped", "spec": flyby_spec})
+
+    await _emit_event(req.callback_url, req.turn_id, {"t": "typing", "agent": lead.get("slug"), "kind": "grounding"})
+    blackboard = await _build_turn_blackboard(query=req.user_message, user_id=req.user_id, org_id=req.org_id, api_key="")
+    memory_context = blackboard.get("context_text") or ""
+    await _emit_event(req.callback_url, req.turn_id, {
+        "t": "simulation_phase",
+        "phase": "collect",
+        "label": "Private investigation",
+        "agents": [p.get("slug") for p in participants],
+        "blackboard": {"hit_count": blackboard.get("hit_count", 0), "confidence": blackboard.get("confidence", 0)},
+    })
+
+    roster = _participant_brief(participants)
+    claims: List[Dict[str, Any]] = []
+
+    async def _collect(emp: Dict[str, Any]) -> Dict[str, Any]:
+        prompt = (
+            "[DEEP SIM COLLECT]\n"
+            "You are an employee in a live HIVEMIND simulation. Use your persona at full strength.\n"
+            f"Question: {req.user_message}\n\n"
+            f"Ontology: {json.dumps(ontology)[:2000]}\n\n"
+            f"Room roster:\n{roster}\n\n"
+            f"Shared blackboard:\n{memory_context or '(no recalled context)'}\n"
+            "Return STRICT JSON: {\"stance\":\"...\",\"claim\":\"...\",\"evidence\":[\"memory title or id\"],\"risk\":\"...\",\"confidence\":0.0-1.0}."
+        )
+        return await _sim_agent_json(
+            req=req,
+            emp=emp,
+            prompt=prompt,
+            fallback={"stance": "conditional", "claim": "No clear claim returned.", "evidence": [], "risk": "low signal", "confidence": 0.3},
+        )
+
+    async def _collect_with_emp(emp: Dict[str, Any]) -> Dict[str, Any]:
+        return {"emp": emp, "result": await _collect(emp)}
+
+    tasks = [asyncio.create_task(_collect_with_emp(emp)) for emp in participants]
+    for task in asyncio.as_completed(tasks):
+        packed = await task
+        emp = packed["emp"]
+        c = packed["result"]
+        claim = {
+            "id": f"sim-{emp['slug']}",
+            "agent": emp["slug"],
+            "lane": emp.get("_lane"),
+            "stance": str(c.get("stance", "conditional"))[:80],
+            "claim": str(c.get("claim", ""))[:1800],
+            "evidence": [str(x)[:160] for x in (c.get("evidence") or [])][:6],
+            "risk": str(c.get("risk", ""))[:500],
+            "confidence": float(c.get("confidence") or 0.5),
+        }
+        claims.append(claim)
+        cost_tokens += max(120, len(claim["claim"]) // 4)
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "simulation_claim",
+            **claim,
+            "content": claim["claim"],
+            "round": 1,
+        })
+
+    await _emit_event(req.callback_url, req.turn_id, {"t": "simulation_phase", "phase": "debate", "label": "Peer review"})
+    reviews: List[Dict[str, Any]] = []
+
+    async def _review(emp: Dict[str, Any], target: Dict[str, Any]) -> Dict[str, Any]:
+        prompt = (
+            "[DEEP SIM PEER REVIEW]\n"
+            f"You are {emp.get('name', emp.get('slug'))}. Review this teammate claim hard but fairly.\n"
+            f"User question: {req.user_message}\n"
+            f"Target claim by {target['agent']}: {target['claim']}\n"
+            f"Shared blackboard:\n{memory_context or '(no recalled context)'}\n"
+            "Return STRICT JSON: {\"agreement\":\"agree|extend|challenge\",\"review\":\"...\",\"condition\":\"...\",\"confidence\":0.0-1.0}."
+        )
+        return await _sim_agent_json(
+            req=req,
+            emp=emp,
+            prompt=prompt,
+            fallback={"agreement": "extend", "review": "No review returned.", "condition": "", "confidence": 0.4},
+        )
+
+    async def _review_with_emp_target(emp: Dict[str, Any], target: Dict[str, Any]) -> Dict[str, Any]:
+        return {"emp": emp, "target": target, "result": await _review(emp, target)}
+
+    review_tasks = []
+    for i, emp in enumerate(participants):
+        if not claims:
+            continue
+        target = claims[(i + 1) % len(claims)]
+        review_tasks.append(asyncio.create_task(_review_with_emp_target(emp, target)))
+    for task in asyncio.as_completed(review_tasks):
+        packed = await task
+        emp = packed["emp"]
+        target = packed["target"]
+        r = packed["result"]
+        agreement = str(r.get("agreement", "extend")).lower()
+        if agreement not in ("agree", "extend", "challenge"):
+            agreement = "extend"
+        review = {
+            "reviewer": emp["slug"],
+            "target_hypothesis_id": target["id"],
+            "target_author": target["agent"],
+            "agreement": agreement,
+            "content": str(r.get("review", ""))[:1200],
+            "condition": str(r.get("condition", ""))[:400],
+            "confidence": float(r.get("confidence") or 0.5),
+            "round": 2,
+        }
+        reviews.append(review)
+        cost_tokens += max(80, len(review["content"]) // 4)
+        await _emit_event(req.callback_url, req.turn_id, {"t": "peer_review", **review})
+
+    await _emit_event(req.callback_url, req.turn_id, {"t": "simulation_phase", "phase": "revise", "label": "Revision"})
+    lead_agent = await _build_agent_for_room(req.room_id, lead, user_id=req.user_id, org_id=req.org_id)
+    conclusion_prompt = (
+        "[DEEP SIM CONCLUSION]\n"
+        "You are the lead. Synthesize the simulated Slack session into a strong enterprise decision.\n"
+        f"Question: {req.user_message}\n\n"
+        f"Claims: {json.dumps(claims)[:6000]}\n\n"
+        f"Peer reviews: {json.dumps(reviews)[:6000]}\n\n"
+        f"Blackboard: {memory_context[:6000]}\n"
+        "Write 5-8 concise bullets: decision, why, objections addressed, what to watch, next irreversible choice. "
+        "Do not soften strong POVs; preserve dissent where unresolved."
+    )
+    final_reply = await lead_agent(Msg(name="user", content=conclusion_prompt, role="user"))
+    _report_turn(lead["id"], req.user_message, final_reply)
+    final_text = _msg_to_text(final_reply) or "(lead synthesis failed)"
+    cost_tokens += max(250, len(final_text) // 4)
+    await _emit_event(req.callback_url, req.turn_id, {
+        "t": "line",
+        "agent": lead.get("slug"),
+        "round": 3,
+        "kind": "synthesis",
+        "content": final_text,
+        "tokens": max(250, len(final_text) // 4),
+    })
+
+    await _emit_event(req.callback_url, req.turn_id, {"t": "simulation_phase", "phase": "vote", "label": "Decision votes"})
+    vote_summary: List[Dict[str, Any]] = []
+    for claim in claims:
+        support = sum(1 for r in reviews if r["target_hypothesis_id"] == claim["id"] and r["agreement"] in ("agree", "extend"))
+        challenge = sum(1 for r in reviews if r["target_hypothesis_id"] == claim["id"] and r["agreement"] == "challenge")
+        score = max(1, min(5, 3 + support - challenge))
+        vote = {
+            "voter": claim["agent"],
+            "vote_for_hypothesis_id": claim["id"],
+            "score": score,
+            "conditions": [r["condition"] for r in reviews if r["target_hypothesis_id"] == claim["id"] and r.get("condition")][:3],
+            "content": f"{claim['agent']} backs its {claim['stance']} stance with score {score}/5.",
+            "round": 4,
+        }
+        vote_summary.append(vote)
+        await _emit_event(req.callback_url, req.turn_id, {"t": "vote", **vote})
+
+    verdict = "AGREED" if vote_summary and sum(v["score"] for v in vote_summary) / len(vote_summary) >= 3.5 else "CONDITIONAL"
+    await _emit_event(req.callback_url, req.turn_id, {
+        "t": "swarm_verdict",
+        "verdict": verdict,
+        "weighted_score": round(sum(v["score"] for v in vote_summary) / max(len(vote_summary), 1), 2),
+        "winning_hypothesis_id": max(vote_summary, key=lambda v: v["score"])["vote_for_hypothesis_id"] if vote_summary else None,
+        "action_items": [v["conditions"][0] for v in vote_summary if v.get("conditions")][:6],
+        "vote_count": len(vote_summary),
+    })
+    await _emit_event(req.callback_url, req.turn_id, {
+        "t": "seal",
+        "cost_tokens": cost_tokens,
+        "status": "complete",
+        "duration_ms": int((time.time() - started) * 1000),
+        "template": room_template,
+        "blackboard": {"hit_count": blackboard.get("hit_count", 0), "confidence": blackboard.get("confidence", 0)},
+        "flyby": bool(flyby_spec and decision == "agree"),
+        "simulation_claims": len(claims),
+        "simulation_reviews": len(reviews),
+    })
+    return RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status="complete")
 
 
 # ─── Swarm orchestrator (Phase 4) ──────────────────────────────────────
@@ -2215,6 +2570,12 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         "turn_seq": seq,
     })
     _mark("router_ms")
+
+    # ── Deep simulation template — MiroFish-style live room ───────────
+    if room_template == "deep_sim":
+        return await _orchestrate_deep_sim(
+            req, participants, lead, room_template, started,
+        )
 
     # ── Swarm template — branch into R1-R5 phase machine ──────────────
     if room_template == "swarm":

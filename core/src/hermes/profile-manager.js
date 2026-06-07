@@ -68,11 +68,15 @@ async function waitForGateway(url, { timeoutMs = 20000, intervalMs = 1000 } = {}
 function buildProfileConfigYaml(mcpUrl, groqKey) {
   return [
     'model:',
-    '  default: openai/gpt-oss-20b',
+    // Non-reasoning, tool-capable model. gpt-oss-20b is a REASONING model: Hermes
+    // stores assistant reasoning_content and replays it on multi-turn tool calls,
+    // which Groq rejects with HTTP 400 ("property 'reasoning_content' is
+    // unsupported"). llama-3.3-70b-versatile has no reasoning_content → multi-turn
+    // tool use (web_search, library agents) works. Matches the Digital Employees default.
+    `  default: ${process.env.HERMES_MODEL || 'llama-3.3-70b-versatile'}`,
     '  provider: custom',
     '  base_url: https://api.groq.com/openai/v1',
     `  api_key: ${groqKey}`,
-    '  reasoning_effort: low',
     'mcp:',
     '  hivemind:',
     `    url: ${mcpUrl}`,

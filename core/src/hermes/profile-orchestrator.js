@@ -65,6 +65,7 @@ export function buildConfigYaml({
   mcpUrl,
   browserMcpUrl = null,
   webMcpUrl = null,
+  webSearchBackend = null,
 }) {
   // Normalise 'groq' shorthand → 'custom:groq'.
   const resolvedProvider = provider === 'groq' ? 'custom:groq' : provider;
@@ -116,6 +117,19 @@ export function buildConfigYaml({
       '  web:',
       `    url: ${webMcpUrl}`,
       '    enabled: true',
+    );
+  }
+
+  // Native Hermes web search + extract tools (top-level `web:` block — distinct
+  // from the Playwright mcp_servers.web above). Gives the agent real search +
+  // page-extract/crawl (not just one-page browse). Backend key (e.g.
+  // TAVILY_API_KEY / EXA_API_KEY / FIRECRAWL_API_KEY) must be in the profile .env.
+  if (webSearchBackend) {
+    lines.push(
+      'web:',
+      `  backend: ${webSearchBackend}`,
+      `  search_backend: ${webSearchBackend}`,
+      `  extract_backend: ${webSearchBackend}`,
     );
   }
 

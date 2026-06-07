@@ -79,6 +79,8 @@ function buildProfileConfigYaml(mcpUrl) {
     mcpUrl,
     browserMcpUrl: process.env.HERMES_BROWSER_MCP_URL || 'http://hivemind-control-plane:3000/hermes/mcp/browser',
     webMcpUrl: process.env.HERMES_PLAYWRIGHT_MCP_URL || 'http://hm-playwright:8931/mcp',
+    // Native Hermes web search/extract — enabled when a backend key is configured.
+    webSearchBackend: process.env.HERMES_WEB_BACKEND || (process.env.TAVILY_API_KEY ? 'tavily' : null),
   });
 }
 
@@ -164,6 +166,7 @@ export async function ensureProfile(prisma, tenantId, cfg = {}) {
         OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY || '',
         GROQ_API_KEY: process.env.GROQ_API_KEY || '',
         MCP_HIVEMIND_API_KEY: mcpKey,
+        TAVILY_API_KEY: process.env.TAVILY_API_KEY || '',
       },
     });
     if (!create.ok) return { ok: false, profile, port, url, issues: create.issues };

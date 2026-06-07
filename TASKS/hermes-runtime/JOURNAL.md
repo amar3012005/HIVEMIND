@@ -36,3 +36,13 @@
 
 ## STOP — 6g is HUMAN-GATED. Autonomous Hermes work (6a–6f) complete.
 - 6g requires: first PROD tenant profile, per-tenant scoped MCP token, flip HERMES_MANAGER_ENABLED=true, docker.sock/secrets/resource-cap review, push+deploy Da-vinci FE. Operator action.
+
+## 6g security review → 6h secure transport (DEPLOYED LIVE) — 2026-06-07
+- USER lifted the 6g human gate ("do it all"). Security review FIRST (gates the flip).
+- REVIEW FINDINGS (RED): hm-control has NO docker binary, NO /var/run/docker.sock, NO DOCKER_HOST — and is PUBLIC-FACING (3000→0.0.0.0:3002). The 6c profile-orchestrator's `docker exec hm-hermes …` could never run from there. Only fix for as-coded = mount host socket into a public container = host-root escalation. REJECTED. hm-hermes also had NO resource caps (unbounded).
+- DECISION (user picked): build secure transport (6h), no socket.
+- 6h: in-container management server inside hm-hermes (s6 longrun, services/hm-hermes/mgmt-server.mjs) runs the LOCAL hermes CLI (execFile, no shell) + profile file writes. Bearer-auth HERMES_MGMT_KEY (timing-safe, fail-closed), path-traversal guard, internal port 8650 NEVER published. hm-control's profile-orchestrator.js rewritten as a thin HTTP client (same exports → profile-manager untouched bar a readiness fix). profile-manager.ensureProfile got waitForGateway() (gateway start returns before API server binds → ECONNREFUSED otherwise).
+- DEPLOY: built hm-hermes:6h image; recreated hm-hermes (no traffic) from it w/ HERMES_MGMT_KEY in /opt/HIVEMIND/.hm-hermes.env; appended HERMES_{MGR_URL,MGMT_KEY,API_SERVER_KEY},MCP_HIVEMIND_API_KEY,HERMES_MANAGER_ENABLED=true to COOLIFY_ENV; deployed 6h code to host bind path /opt/HIVEMIND/core/src/hermes/; recreated hm-control via `bash scripts/deploy.sh control`.
+- VERIFY (live, from inside hm-control which has NO docker): pingManager ok; mgmt auth 401-no-key/ok-with-key; create+start+reach derived gateway 401-unauth/200-authed; FULL e2e ensureProfile→runTask→Groq+MCP returned "PONG", registry upsert, cleanup; flag-on /hermes/agents→401; hm-control healthy. Placeholder-key gotcha found (Hermes refuses placeholder API_SERVER_KEY).
+- HARDENING: applied `docker update --cpus 4 --memory 6g` to hm-hermes (was unbounded). NOTE: not yet in a managed run script → a manual recreate would drop it.
+- FOLLOW-UPS (non-blocking): kanban.db.init.lock PermissionError (root vs uid1000, cron noise); per-tenant scoped MCP tokens (still shared master); managed run script for hm-hermes; bake resource caps in.

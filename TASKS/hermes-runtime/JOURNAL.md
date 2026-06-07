@@ -110,3 +110,11 @@
 - TOP HYPOTHESIS (unconfirmed): `hermes config show` shows a SECOND "Model: (auto)" — Hermes' AGENT loop may use a separate "auto" model resolution for tool orchestration, distinct from the chat model, defaulting to a tool-weak path. Next: pin the agent/tool model; inspect Hermes agent-loop tool-call formatting (native function-calling vs prompted parse) in /opt/hermes for the api_server path.
 - STATE: browser wiring COMPLETE + reachable (Playwright initialize 200; WebBridge relay ok). Blocker is Hermes tool execution = platform-level, affects ALL tools. Needs dedicated Hermes-internals work (bounded-risk unknown) — deliberately NOT iterated further to avoid runaway.
 - NO REGRESSION: plain tasks complete; services healthy; default-OFF respected.
+
+## TOOL-CALLING FIXED — official provider/MCP config (workflow ws51awnfa) — 2026-06-07
+- ROOT CAUSE (2): (1) config key `mcp:` should be `mcp_servers:` (official) → MCP servers never loaded → no tools. (2) Groq `custom` provider mangles tool calls.
+- FIX (curl + live-e2e proven): buildConfigYaml → official structure: `mcp_servers:` + native `provider: openrouter` default `google/gemini-2.5-flash` (tool-capable) / `custom_providers`+`custom:groq` for groq; keys via profile .env (OPENROUTER_API_KEY), never inline. ensureProfile writes config ONLY on fresh create (no clobber on restart) + OPENROUTER_API_KEY in extraEnv. PUT /model = official config + stop+start. fetchProviderModels(openrouter) filters supported_parameters includes 'tools'. DEFAULT_MODEL openrouter/gemini-2.5-flash.
+- OPENROUTER_API_KEY added to control-plane env (COOLIFY_ENV + /opt/HIVEMIND/core/.env) → profiles inherit. FE ModelCard = key-less provider+model picker (main 4500d3e).
+- VERIFIED LIVE (product path): fresh profile → runTask "open example.com via web browser tools" → agent drove Playwright → "Example Domain". tool browser_navigate completed 0.73s.
+- TOOL-CAPABLE OR models: google/gemini-2.5-flash, gemini-2.5-pro, anthropic/claude-sonnet-4/4.5/4.6, openai/gpt-4o-*, meta-llama/llama-3.3-70b-instruct(:free). NousResearch hermes-4 on OR = NO tool endpoint.
+- CAVEAT: pre-existing profiles created with the old (mcp:/groq) config keep it until recreated (ensureProfile no longer rewrites existing configs). New profiles = official config. No persistent prod profiles existed (test profiles cleaned).

@@ -35,6 +35,7 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 
 import httpx
@@ -58,6 +59,30 @@ from .db import (
 from .hivemind_client import recall_emulated
 
 log = logging.getLogger(__name__)
+
+
+def _now_block() -> str:
+    """Inject the present moment into every agent prompt so the swarm
+    classifies dates correctly. Without this, agents treat dates found
+    inside memories (e.g. a "July 1 deadline", a "June 4-5 summit") as
+    upcoming/future and hallucinate plans around events that already
+    happened. The directive forces explicit past/future classification
+    relative to the real current date."""
+    now = datetime.now(timezone.utc)
+    today = now.strftime("%A, %d %B %Y")
+    iso = now.strftime("%Y-%m-%d")
+    return (
+        "[TIME CONTEXT — read before reasoning or planning]\n"
+        f"TODAY IS {today} ({iso}), {now.strftime('%H:%M')} UTC. This is the present.\n"
+        "- Any date BEFORE today already happened (PAST). Any date ON/AFTER today is upcoming (FUTURE).\n"
+        "- Dates, deadlines, summits, and events mentioned INSIDE memories are NOT automatically "
+        "upcoming. Compare each one to TODAY before reasoning about it.\n"
+        f"- If a memory references a deadline or event whose date is before {iso}, it is OVER. "
+        "Say so plainly ('that deadline/summit already passed on <date>') — do NOT build a plan "
+        "around it as if it were still ahead.\n"
+        "- Never call a past event 'upcoming', 'coming up', or something to 'hit by'. Anchor all "
+        "timelines and plans to today's real date.\n\n"
+    )
 
 router = APIRouter(prefix="/internal/hyper", tags=["hyper-rooms"])
 
@@ -579,7 +604,8 @@ async def _run_reactor(
     """
     bias = " (Your lane is opposing the Lead's — speak up if you have a real challenge.)" if is_opposing else ""
     prompt = (
-        f"{REACTOR_INSTRUCTIONS}\n"
+        _now_block()
+        + f"{REACTOR_INSTRUCTIONS}\n"
         f"User asked: {user_message}\n\n"
         f"Lead ({lead_name}, lane {reactor_lane}'s opposite={is_opposing}) said:\n"
         f"{lead_line}\n\n"
@@ -1239,7 +1265,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
     async def _run_r1(emp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         try:
             agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id)
-            prompt = R1_HYPOTHESIS_PROMPT.format(
+            prompt = _now_block() + R1_HYPOTHESIS_PROMPT.format(
                 persona_name=emp.get("name", emp.get("slug")),
                 lane=emp["_lane"],
                 lane_playbook=LANE_PLAYBOOKS.get(emp["_lane"], ""),
@@ -1382,7 +1408,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
                 return []
             try:
                 agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id)
-                prompt = R2_PEER_REVIEW_PROMPT.format(
+                prompt = _now_block() + R2_PEER_REVIEW_PROMPT.format(
                     persona_name=emp.get("name", emp.get("slug")),
                     lane=emp["_lane"],
                     hypotheses_table=hyp_table,
@@ -1470,7 +1496,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
             ) or "  (no peer reviews of your hypothesis)"
             try:
                 agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id)
-                prompt = R3_DEEP_DIVE_PROMPT.format(
+                prompt = _now_block() + R3_DEEP_DIVE_PROMPT.format(
                     persona_name=emp.get("name", emp.get("slug")),
                     lane=emp["_lane"],
                     your_hypothesis=own["hypothesis"],
@@ -1564,7 +1590,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
                     f"  [{r['id']}] {r['agent_name']} ({r['lane']}): {r['refined_hypothesis']}"
                     for r in refined
                 )
-                prompt = R4_SKEPTIC_PROMPT.format(
+                prompt = _now_block() + R4_SKEPTIC_PROMPT.format(
                     skeptic_prelude=SKEPTIC_PERSONA_PRELUDE,
                     refined_hypotheses_table=refined_table,
                 )
@@ -1631,7 +1657,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
         async def _run_vote(emp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             try:
                 agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id)
-                prompt = R5_VOTE_PROMPT.format(
+                prompt = _now_block() + R5_VOTE_PROMPT.format(
                     persona_name=emp.get("name", emp.get("slug")),
                     lane=emp["_lane"],
                     refined_hypotheses_table=vote_table_str,
@@ -1781,7 +1807,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
                     f"  - {v['voter']} (trust {trust_by_slug.get(v['voter'], 0.5):.2f}): "
                     f"vote={v['vote_for_hypothesis_id']} score={v['score']} conditions={v['conditions']}"
                 )
-            synth_prompt = R5_SYNTHESIS_PROMPT.format(
+            synth_prompt = _now_block() + R5_SYNTHESIS_PROMPT.format(
                 lead_name=lead.get("name", lead.get("slug")),
                 refined_hypotheses_table=refined_table_str,
                 skeptic_output=skeptic_output_str,
@@ -2199,7 +2225,8 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             else ""
         )
         lead_prompt = (
-            f"[CSI swarm — you are an EMPLOYEE at the HIVEMIND organisation. "
+            _now_block()
+            + f"[CSI swarm — you are an EMPLOYEE at the HIVEMIND organisation. "
             f"You're the LEAD speaking up this turn. Your lane: {lead['_lane']}.]\n\n"
             + template_hint
             + (memory_context + "\n" if memory_context else "")
@@ -2381,7 +2408,8 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 for r in reactions
             )
             synth_prompt = (
-                f"[CSI synthesis pass — you're still the HIVEMIND employee. Lane: {lead['_lane']}.]\n\n"
+                _now_block()
+                + f"[CSI synthesis pass — you're still the HIVEMIND employee. Lane: {lead['_lane']}.]\n\n"
                 + (memory_context + "\n" if memory_context else "")
                 + f"USER'S ORIGINAL QUESTION:\n\"{req.user_message}\"\n\n"
                 f"YOUR EARLIER LEAD LINE:\n\"{lead_text}\"\n\n"
@@ -2508,7 +2536,8 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         })
         try:
             revise_prompt = (
-                f"[CSI revision pass round {debate_round} — HIVEMIND employee. Lane: {lead['_lane']}.]\n"
+                _now_block()
+                + f"[CSI revision pass round {debate_round} — HIVEMIND employee. Lane: {lead['_lane']}.]\n"
                 f"USER'S ORIGINAL QUESTION: \"{req.user_message}\"\n"
                 f"{challenger_reaction['emp'].get('name')} ({challenger_reaction['emp']['_lane']}) pushed back:\n"
                 f"\"{current_challenge_text}\"\n\n"
@@ -2534,7 +2563,8 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             })
             ch_agent = await _build_agent_for_room(req.room_id, challenger_reaction["emp"], user_id=req.user_id, org_id=req.org_id)
             validate_prompt = (
-                f"[CSI validation pass round {debate_round} — lane: {challenger_reaction['emp']['_lane']}.]\n"
+                _now_block()
+                + f"[CSI validation pass round {debate_round} — lane: {challenger_reaction['emp']['_lane']}.]\n"
                 f"{lead.get('name')} responded to your challenge:\n"
                 f"\"{revise_text}\"\n\n"
                 f"Did the lead resolve your concern with concrete memory evidence, or is the gap "
@@ -2601,7 +2631,8 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         # One-shot rescue retry. Don't loop — bounded cost.
         try:
             rescue_prompt = (
-                "You produced no concrete grounded substance in the prior turn.\n"
+                _now_block()
+                + "You produced no concrete grounded substance in the prior turn.\n"
                 f"USER QUESTION: {req.user_message}\n"
                 f"Available memories above. Answer DIRECTLY in 3-4 sentences. "
                 f"Quote at least one memory title inline. If memory truly silent, "

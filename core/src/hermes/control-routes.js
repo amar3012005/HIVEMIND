@@ -26,6 +26,44 @@ import { LIBRARY, findTemplate } from './library.js';
 // profile-orchestrator: writeProfileFile + restartGateway + cron + env-merge ops (Phase 6h transport).
 import { writeProfileFile, restartGateway, listCron, addCron, deleteCron, mergeProfileEnv, buildConfigYaml, PROVIDER_BASE_URLS } from './profile-orchestrator.js';
 
+/**
+ * Whitelabelled browser connector (served at GET /hermes/wb/connector.mjs).
+ * Runs on the USER's machine: long-polls the relay for commands and proxies them
+ * to the local Kimi WebBridge daemon (127.0.0.1:10086), returning results. Dials
+ * OUT only (no inbound ports). Usage: RELAY=<url> WB_TOKEN=<token> node connector.mjs
+ */
+const WEBBRIDGE_CONNECTOR_JS = `#!/usr/bin/env node
+// HiveMind Web-bridge automation connector. Proxies relay <-> local Kimi daemon.
+const RELAY = (process.env.RELAY || '').replace(/\\/+$/, '');
+const TOKEN = process.env.WB_TOKEN || '';
+const DAEMON = process.env.WB_DAEMON || 'http://127.0.0.1:10086';
+if (!RELAY || !TOKEN) { console.error('Set RELAY and WB_TOKEN'); process.exit(1); }
+const H = { 'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json' };
+async function runOne(cmd) {
+  try {
+    const r = await fetch(DAEMON + '/command', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: cmd.action, args: cmd.args || {}, session: (cmd.args && cmd.args.session) || 'hivemind' }) });
+    const data = await r.json().catch(() => ({ ok: false, error: 'daemon non-json' }));
+    return data;
+  } catch (e) { return { ok: false, error: 'daemon unreachable: ' + e.message }; }
+}
+async function loop() {
+  console.log('[webbridge-connector] connected to', RELAY, '— browser tasks enabled. Ctrl+C to stop.');
+  for (;;) {
+    try {
+      const r = await fetch(RELAY + '/hermes/wb/poll', { headers: H });
+      if (r.status === 401) { console.error('pairing token rejected — re-pair from the app'); process.exit(1); }
+      const { commands = [] } = await r.json().catch(() => ({ commands: [] }));
+      for (const cmd of commands) {
+        const result = await runOne(cmd);
+        await fetch(RELAY + '/hermes/wb/result', { method: 'POST', headers: H, body: JSON.stringify({ commandId: cmd.id, result }) }).catch(() => {});
+      }
+    } catch (e) { await new Promise((s) => setTimeout(s, 2000)); }
+  }
+}
+loop();
+`;
+
 const DEFAULT_MODEL = { provider: 'groq', model: process.env.HERMES_MODEL || 'llama-3.3-70b-versatile' };
 const ALLOWED_PROVIDERS = ['groq', 'openrouter'];
 
@@ -179,6 +217,44 @@ export async function handleHermesRoutes(req, res, ctx) {
   }
   if (!prisma) {
     jsonResponse(res, { error: 'Database unavailable' }, 503);
+    return true;
+  }
+
+  // (1a) Public connector bootstrap script (no auth) — the whitelabelled installer.
+  if (pathname === '/hermes/wb/connector.mjs' && method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'text/javascript' });
+    res.end(WEBBRIDGE_CONNECTOR_JS);
+    return true;
+  }
+
+  // (1b) Web-bridge CONNECTOR routes — authenticated by PAIRING TOKEN (not a
+  // session): the connector runs on the user's machine, no cookie. Handle these
+  // before session auth. Token → tenant via hermes_browser_pairings(token_hash).
+  if (pathname === '/hermes/wb/poll' || pathname === '/hermes/wb/result') {
+    const auth = req.headers['authorization'] || '';
+    const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+    if (!token) { jsonResponse(res, { error: 'pairing token required' }, 401); return true; }
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const rows = await prisma.$queryRawUnsafe(
+      `SELECT tenant_id FROM hivemind.hermes_browser_pairings WHERE token_hash=$1 AND revoked_at IS NULL LIMIT 1`,
+      tokenHash,
+    ).catch(() => []);
+    const wbTenant = rows && rows[0] && rows[0].tenant_id;
+    if (!wbTenant) { jsonResponse(res, { error: 'invalid pairing token' }, 401); return true; }
+    const relay = await import('./webbridge-relay.js');
+    if (pathname === '/hermes/wb/poll' && method === 'GET') {
+      const cmds = await relay.poll(wbTenant);
+      await prisma.$executeRawUnsafe(`UPDATE hivemind.hermes_browser_pairings SET last_seen_at=now() WHERE tenant_id=$1`, wbTenant).catch(() => {});
+      jsonResponse(res, { commands: cmds });
+      return true;
+    }
+    if (pathname === '/hermes/wb/result' && method === 'POST') {
+      const body = (await parseBody(req)) || {};
+      const ok = relay.submitResult(wbTenant, body.commandId, body.result);
+      jsonResponse(res, { ok });
+      return true;
+    }
+    jsonResponse(res, { error: 'method not allowed' }, 405);
     return true;
   }
 
@@ -833,6 +909,55 @@ export async function handleHermesRoutes(req, res, ctx) {
         ).catch(() => {});
       }
       jsonResponse(res, { model: { provider, model } });
+      return true;
+    }
+
+    // ── GET /hermes/agent/browser — pairing + connector status ──────────────
+    if (pathname === '/hermes/agent/browser' && method === 'GET') {
+      const rows = await prisma.$queryRawUnsafe(
+        `SELECT created_at, last_seen_at FROM hivemind.hermes_browser_pairings WHERE tenant_id=$1 AND revoked_at IS NULL LIMIT 1`,
+        tenantId,
+      ).catch(() => []);
+      const paired = !!(rows && rows[0]);
+      const { isOnline } = await import('./webbridge-relay.js');
+      jsonResponse(res, { paired, online: paired ? isOnline(tenantId) : false, paired_at: paired ? rows[0].created_at : null });
+      return true;
+    }
+
+    // ── POST /hermes/agent/browser/pair — mint a connector pairing token ────
+    if (pathname === '/hermes/agent/browser/pair' && method === 'POST') {
+      const token = `wbk_${crypto.randomBytes(24).toString('hex')}`;
+      const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO hivemind.hermes_browser_pairings (tenant_id, org_id, token_hash, created_by)
+         VALUES ($1,$2,$3,$4)
+         ON CONFLICT (tenant_id) DO UPDATE SET token_hash=$3, created_by=$4, created_at=now(), revoked_at=NULL, last_seen_at=NULL`,
+        tenantId, orgId, tokenHash, userId,
+      );
+      const base = process.env.HIVEMIND_CONTROL_PLANE_PUBLIC_URL || 'https://api.hivemind.davinciai.eu:8040';
+      // One-liner the user runs AFTER installing Kimi WebBridge (cdn.kimi.com).
+      const connectCommand = `curl -fsSL ${base}/hermes/wb/connector.mjs -o /tmp/hm-webbridge.mjs && RELAY=${base} WB_TOKEN=${token} node /tmp/hm-webbridge.mjs`;
+      jsonResponse(res, { token, connect_command: connectCommand, relay: base }, 201);
+      return true;
+    }
+
+    // ── DELETE /hermes/agent/browser — unpair (revoke) ──────────────────────
+    if (pathname === '/hermes/agent/browser' && method === 'DELETE') {
+      await prisma.$executeRawUnsafe(
+        `UPDATE hivemind.hermes_browser_pairings SET revoked_at=now() WHERE tenant_id=$1 AND revoked_at IS NULL`, tenantId,
+      ).catch(() => {});
+      jsonResponse(res, { ok: true });
+      return true;
+    }
+
+    // ── POST /hermes/agent/browser/dispatch — run one browser action (test/MCP) ──
+    if (pathname === '/hermes/agent/browser/dispatch' && method === 'POST') {
+      const body = (await parseBody(req)) || {};
+      const action = String(body.action || '').trim();
+      if (!action) { jsonResponse(res, { error: 'action required' }, 400); return true; }
+      const { dispatch } = await import('./webbridge-relay.js');
+      const result = await dispatch(tenantId, action, body.args || {});
+      jsonResponse(res, { result });
       return true;
     }
 

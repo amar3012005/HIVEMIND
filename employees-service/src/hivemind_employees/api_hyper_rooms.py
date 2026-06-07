@@ -835,6 +835,12 @@ HYPER_ROOM_MAX_TOOL_CALLS = int(os.environ.get("HYPER_ROOM_MAX_TOOL_CALLS", "400
 # deadline_hit still short-circuits to synthesis/seal if it is ever exceeded.
 HYPER_ROOM_MAX_WALL_SECONDS = float(os.environ.get("HYPER_ROOM_MAX_WALL_SECONDS", "600"))
 
+# Pre-round memory prefetch (company brief + query recall) is the only thing
+# between a user message and the first agent bubble. Run those recalls
+# CONCURRENTLY and hard-cap them so a slow/empty org brain never stalls the
+# start of the turn — agents begin ASAP with whatever context arrived in time.
+HYPER_PREFETCH_TIMEOUT_S = float(os.environ.get("HYPER_PREFETCH_TIMEOUT_S", "3.0"))
+
 # ─── Recursive CSI convergence ──────────────────────────────────────────
 # A swarm turn is no longer a single R1->R5 pass. After the R5 vote, if the
 # verdict is not a strong consensus, the swarm RE-SEEDS (carries the refined
@@ -2049,11 +2055,22 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         try:
             boot_map = {b["id"]: b for b in await fetch_bootstrap()}
             lead_api_key = (boot_map.get(lead["id"], {}) or {}).get("api_key", "") or ""
-            company_brief = await _build_company_brief(
-                req.user_message, req.user_id, req.org_id, lead_api_key)
-            recall_resp = await recall_emulated(
-                req.user_message, user_id=req.user_id, org_id=req.org_id,
-                api_key=lead_api_key, max_memories=6)
+            # Run the standing brief + query recall CONCURRENTLY (independent
+            # calls) and hard-cap the wait so a slow brain never stalls R1 —
+            # the agents start ASAP with whatever context arrived in time.
+            try:
+                company_brief, recall_resp = await asyncio.wait_for(
+                    asyncio.gather(
+                        _build_company_brief(req.user_message, req.user_id, req.org_id, lead_api_key),
+                        recall_emulated(req.user_message, user_id=req.user_id, org_id=req.org_id,
+                                        api_key=lead_api_key, max_memories=6),
+                    ),
+                    timeout=HYPER_PREFETCH_TIMEOUT_S,
+                )
+            except asyncio.TimeoutError:
+                log.warning("[swarm] pre-round prefetch >%.1fs — starting agents with partial context",
+                            HYPER_PREFETCH_TIMEOUT_S)
+                company_brief, recall_resp = "", {}
             rows = recall_resp.get("memories") or recall_resp.get("combined") or []
             rows = [r for r in rows if float(r.get("score", 0)) >= 0.45]
             candidate_block = ""
@@ -2092,14 +2109,22 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     try:
         boot_map = {b["id"]: b for b in await fetch_bootstrap()}
         lead_api_key = (boot_map.get(lead["id"], {}) or {}).get("api_key", "") or ""
-        # Broad standing brief first (who/what/why), then the query-specific
-        # candidate memories on top. Recall via master+emulation so it reaches
-        # the org brain regardless of whether bootstrap minted a lead key.
-        company_brief = await _build_company_brief(
-            req.user_message, req.user_id, req.org_id, lead_api_key)
-        recall_resp = await recall_emulated(
-            req.user_message, user_id=req.user_id, org_id=req.org_id,
-            api_key=lead_api_key, max_memories=6)
+        # Broad standing brief (who/what/why) + the query-specific candidate
+        # memories, run CONCURRENTLY and time-capped so the lead starts ASAP.
+        # Recall via master+emulation so it reaches the org brain regardless of
+        # whether bootstrap minted a lead key.
+        try:
+            company_brief, recall_resp = await asyncio.wait_for(
+                asyncio.gather(
+                    _build_company_brief(req.user_message, req.user_id, req.org_id, lead_api_key),
+                    recall_emulated(req.user_message, user_id=req.user_id, org_id=req.org_id,
+                                    api_key=lead_api_key, max_memories=6),
+                ),
+                timeout=HYPER_PREFETCH_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            log.warning("[lead] pre-fetch >%.1fs — starting with partial context", HYPER_PREFETCH_TIMEOUT_S)
+            company_brief, recall_resp = "", {}
         rows = recall_resp.get("memories") or recall_resp.get("combined") or []
         # Drop low-relevance hits so a single dominant memory (long
         # AUDIT memo etc.) doesn't crowd out diverse signal.

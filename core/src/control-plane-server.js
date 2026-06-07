@@ -5826,7 +5826,9 @@ Write the persona now.`;
 
       let cursor = 0;
       let alive = true;
-      const POLL_MS = 700;
+      // Tighter poll = agent bubbles surface to the UI faster (cheap indexed
+      // findFirst). 300ms keeps streaming snappy without hammering PG.
+      const POLL_MS = Number(process.env.HYPER_SSE_POLL_MS || 300);
       const HEARTBEAT_MS = 15_000;
 
       const flush = (lines) => {

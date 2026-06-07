@@ -102,3 +102,11 @@
 - VERIFIED: hm-playwright MCP initialize 200; profiles boot with hivemind+browser+web MCP blocks; gateway reaches it.
 - OPEN ISSUE (NOT browser-specific): Hermes gateway tool-call formatting is flaky — Groq llama-3.3-70b FUSES name+args ('browser_navigate{"url":..}' → 'not in request.tools'); OpenRouter claude-3.5-sonnet → 'Failed to call a function / failed_generation'. Affects ALL MCP tool invocation (memory/browser/web), not just browser. No Hermes tool-format flag exists. NEXT: tune the gateway tool-calling (Hermes version/model combo that does native function-calling cleanly) — separate task from the (now-complete) browser wiring.
 - Backend commits on claude/hermes-phase-6h.
+
+## Tool-calling investigation (BLOCKER, not yet fixed) — 2026-06-07
+- SYMPTOM: agent can't reliably invoke ANY MCP tool (memory/browser/web). Groq llama → tool name+args FUSION ('browser_navigate{"url":..}' not in request.tools). OpenRouter Claude (native provider) → Groq-style "Failed to call a function … failed_generation". Fails on plain (no-tool) tasks? NO — plain PONG works; ONLY tool-invocation fails.
+- TESTED (all fail identically): groq llama-3.3-70b, llama-4-scout, qwen3-32b; provider custom vs native openrouter; claude-3.5-sonnet; ONLY-Playwright-MCP minimal; explicit "call browser_navigate with {url}" prompts. → NOT model-, provider-, tool-count-, or wiring-specific.
+- CONFIRMED: profile config.yaml DOES apply (hermes config show resolves provider/model correctly). Hermes v0.16.0. The error string is the provider's (Groq's failed_generation) — model generates tool-call args the provider rejects.
+- TOP HYPOTHESIS (unconfirmed): `hermes config show` shows a SECOND "Model: (auto)" — Hermes' AGENT loop may use a separate "auto" model resolution for tool orchestration, distinct from the chat model, defaulting to a tool-weak path. Next: pin the agent/tool model; inspect Hermes agent-loop tool-call formatting (native function-calling vs prompted parse) in /opt/hermes for the api_server path.
+- STATE: browser wiring COMPLETE + reachable (Playwright initialize 200; WebBridge relay ok). Blocker is Hermes tool execution = platform-level, affects ALL tools. Needs dedicated Hermes-internals work (bounded-risk unknown) — deliberately NOT iterated further to avoid runaway.
+- NO REGRESSION: plain tasks complete; services healthy; default-OFF respected.

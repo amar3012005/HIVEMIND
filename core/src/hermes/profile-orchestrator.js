@@ -37,11 +37,11 @@ export const PROVIDER_BASE_URLS = {
  * Build a profile config.yaml (model + HiveMind MCP). model.api_key MUST be a
  * literal (Hermes does NOT resolve env-refs for model.api_key; it DOES for MCP
  * headers). Used by fresh-create (profile-manager) and the model-switch route.
- * @param {{ provider?: 'groq'|'openrouter', model: string, apiKeyLiteral: string, mcpUrl: string }} o
+ * @param {{ provider?: 'groq'|'openrouter', model: string, apiKeyLiteral: string, mcpUrl: string, browserMcpUrl?: string }} o
  */
-export function buildConfigYaml({ provider = 'groq', model, apiKeyLiteral, mcpUrl }) {
+export function buildConfigYaml({ provider = 'groq', model, apiKeyLiteral, mcpUrl, browserMcpUrl = null }) {
   const baseUrl = PROVIDER_BASE_URLS[provider] || PROVIDER_BASE_URLS.groq;
-  return [
+  const lines = [
     'model:',
     `  default: ${model}`,
     '  provider: custom',
@@ -53,8 +53,22 @@ export function buildConfigYaml({ provider = 'groq', model, apiKeyLiteral, mcpUr
     '    headers:',
     '      Authorization: Bearer ${MCP_HIVEMIND_API_KEY}',
     '    enabled: true',
-    '',
-  ].join('\n');
+  ];
+  // Web-bridge automation MCP (P2). Header token via env-ref (resolves for MCP
+  // headers); when the tenant hasn't paired a browser, WB_MCP_TOKEN is unset →
+  // the relay 401s and the browser tools are simply unavailable (gateway keeps
+  // running). When paired, WB_MCP_TOKEN is set in the profile .env.
+  if (browserMcpUrl) {
+    lines.push(
+      '  browser:',
+      `    url: ${browserMcpUrl}`,
+      '    headers:',
+      '      Authorization: Bearer ${WB_MCP_TOKEN}',
+      '    enabled: true',
+    );
+  }
+  lines.push('');
+  return lines.join('\n');
 }
 
 /** Authenticated JSON call to the in-container management server. */

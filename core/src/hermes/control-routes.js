@@ -96,6 +96,31 @@ async function fetchProviderModels(provider) {
 const ROUTE_PREFIX = '/hermes/';
 
 /**
+ * Browser-automation MCP tools (P2). Exposed to the Hermes gateway as a JSON-RPC
+ * MCP server at POST /hermes/mcp/browser (same hand-rolled transport as the
+ * hivemind MCP). Each tool name maps 1:1 to a Kimi WebBridge action; tools/call
+ * forwards to webbridge-relay.dispatch(tenant,…) → the user's connector → browser.
+ */
+const BROWSER_TOOLS = [
+  { name: 'navigate', description: 'Open a URL in the user’s browser (use newTab:true on first call).',
+    inputSchema: { type: 'object', properties: { url: { type: 'string' }, newTab: { type: 'boolean' }, group_title: { type: 'string' } }, required: ['url'] } },
+  { name: 'find_tab', description: 'Reuse an already-open tab by URL/domain (active:true = the tab the user is viewing).',
+    inputSchema: { type: 'object', properties: { url: { type: 'string' }, active: { type: 'boolean' } }, required: ['url'] } },
+  { name: 'snapshot', description: 'Read the current page as an accessibility tree (text) with @e element refs.',
+    inputSchema: { type: 'object', properties: {} } },
+  { name: 'click', description: 'Click an element by @e ref or CSS selector.',
+    inputSchema: { type: 'object', properties: { selector: { type: 'string' } }, required: ['selector'] } },
+  { name: 'fill', description: 'Fill an input/textarea/contenteditable (clear-and-insert).',
+    inputSchema: { type: 'object', properties: { selector: { type: 'string' }, value: { type: 'string' } }, required: ['selector', 'value'] } },
+  { name: 'evaluate', description: 'Run JS in the page (supports async). Return compact JSON.',
+    inputSchema: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] } },
+  { name: 'list_tabs', description: 'List open tabs in the session.', inputSchema: { type: 'object', properties: {} } },
+  { name: 'save_as_pdf', description: 'Render the current page to PDF (saved on the user machine).',
+    inputSchema: { type: 'object', properties: { paper_format: { type: 'string' }, landscape: { type: 'boolean' }, file_name: { type: 'string' } } } },
+  { name: 'close_session', description: 'Close all tabs in the session (call at task end).', inputSchema: { type: 'object', properties: {} } },
+];
+
+/**
  * Supported messaging channel types and the env var(s) each requires.
  * Telegram is the simplest (one token). Slack requires two tokens (xoxb- + xapp-).
  * Discord: no dedicated platform adapter file was confirmed during recon — we gate
@@ -230,7 +255,7 @@ export async function handleHermesRoutes(req, res, ctx) {
   // (1b) Web-bridge CONNECTOR routes — authenticated by PAIRING TOKEN (not a
   // session): the connector runs on the user's machine, no cookie. Handle these
   // before session auth. Token → tenant via hermes_browser_pairings(token_hash).
-  if (pathname === '/hermes/wb/poll' || pathname === '/hermes/wb/result') {
+  if (pathname === '/hermes/wb/poll' || pathname === '/hermes/wb/result' || pathname === '/hermes/wb/dispatch' || pathname === '/hermes/mcp/browser') {
     const auth = req.headers['authorization'] || '';
     const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
     if (!token) { jsonResponse(res, { error: 'pairing token required' }, 401); return true; }
@@ -242,6 +267,43 @@ export async function handleHermesRoutes(req, res, ctx) {
     const wbTenant = rows && rows[0] && rows[0].tenant_id;
     if (!wbTenant) { jsonResponse(res, { error: 'invalid pairing token' }, 401); return true; }
     const relay = await import('./webbridge-relay.js');
+
+    // Browser MCP server (JSON-RPC over POST) — the Hermes gateway connects here
+    // as an MCP server (same hand-rolled transport as hivemind MCP). tools/call
+    // forwards to the relay → this tenant's connector → the user's browser.
+    if (pathname === '/hermes/mcp/browser' && method === 'POST') {
+      const rpc = (await parseBody(req)) || {};
+      const reply = (result) => jsonResponse(res, { jsonrpc: '2.0', id: rpc.id ?? null, result });
+      if (rpc.method === 'initialize') {
+        return reply({ protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'hivemind-web-automation', version: '1.0.0' } }), true;
+      }
+      if (rpc.method === 'notifications/initialized' || rpc.method === 'ping') { jsonResponse(res, { jsonrpc: '2.0', id: rpc.id ?? null, result: {} }); return true; }
+      if (rpc.method === 'tools/list') { return reply({ tools: BROWSER_TOOLS }), true; }
+      if (rpc.method === 'tools/call') {
+        const name = rpc.params && rpc.params.name;
+        const args = (rpc.params && rpc.params.arguments) || {};
+        if (!BROWSER_TOOLS.some((t) => t.name === name)) {
+          jsonResponse(res, { jsonrpc: '2.0', id: rpc.id ?? null, error: { code: -32601, message: `unknown tool ${name}` } });
+          return true;
+        }
+        const out = await relay.dispatch(wbTenant, name, args);
+        const isErr = out && out.ok === false;
+        return reply({ content: [{ type: 'text', text: typeof out === 'string' ? out : JSON.stringify(out) }], isError: !!isErr }), true;
+      }
+      jsonResponse(res, { jsonrpc: '2.0', id: rpc.id ?? null, error: { code: -32601, message: `method ${rpc.method} not found` } });
+      return true;
+    }
+
+    // Agent/MCP side: dispatch a browser action to this tenant's connector. The
+    // browser-MCP forwards the gateway's per-tenant token here (same token the
+    // connector uses), so token → tenant resolution is identical.
+    if (pathname === '/hermes/wb/dispatch' && method === 'POST') {
+      const body = (await parseBody(req)) || {};
+      if (!body.action) { jsonResponse(res, { error: 'action required' }, 400); return true; }
+      const result = await relay.dispatch(wbTenant, String(body.action), body.args || {});
+      jsonResponse(res, { result });
+      return true;
+    }
     if (pathname === '/hermes/wb/poll' && method === 'GET') {
       const cmds = await relay.poll(wbTenant);
       await prisma.$executeRawUnsafe(`UPDATE hivemind.hermes_browser_pairings SET last_seen_at=now() WHERE tenant_id=$1`, wbTenant).catch(() => {});
@@ -894,7 +956,8 @@ export async function handleHermesRoutes(req, res, ctx) {
       const ens = await ensureProfile(prisma, tenantId, { orgId, mcpUserId: userId });
       if (!ens.ok) { jsonResponse(res, { error: 'profile unavailable: ' + (ens.issues || []).join(';') }, 502); return true; }
       const mcpUrl = process.env.HIVEMIND_API_URL ? `${process.env.HIVEMIND_API_URL}/api/mcp` : 'https://core.hivemind.davinciai.eu:8050/api/mcp';
-      const wrote = await writeProfileFile(tenantId, 'config.yaml', buildConfigYaml({ provider, model, apiKeyLiteral, mcpUrl }));
+      const browserMcpUrl = process.env.HERMES_BROWSER_MCP_URL || 'http://hivemind-control-plane:3000/hermes/mcp/browser';
+      const wrote = await writeProfileFile(tenantId, 'config.yaml', buildConfigYaml({ provider, model, apiKeyLiteral, mcpUrl, browserMcpUrl }));
       if (!wrote) { jsonResponse(res, { error: 'failed to write model config' }, 502); return true; }
       await restartGateway(tenantId);
       // Persist {provider,model} (NOT the key) to the agent config.
@@ -934,6 +997,15 @@ export async function handleHermesRoutes(req, res, ctx) {
          ON CONFLICT (tenant_id) DO UPDATE SET token_hash=$3, created_by=$4, created_at=now(), revoked_at=NULL, last_seen_at=NULL`,
         tenantId, orgId, tokenHash, userId,
       );
+      // Activate the browser MCP on this tenant's profile: ensure it exists, put
+      // the pairing token in the profile .env (the browser MCP header resolves
+      // Bearer ${WB_MCP_TOKEN}), and restart so the gateway loads the tools.
+      try {
+        const { ensureProfile } = await import('./profile-manager.js');
+        await ensureProfile(prisma, tenantId, { orgId, mcpUserId: userId });
+        await mergeProfileEnv(tenantId, { WB_MCP_TOKEN: token });
+        await restartGateway(tenantId);
+      } catch { /* best-effort; tools activate on next profile (re)start */ }
       const base = process.env.HIVEMIND_CONTROL_PLANE_PUBLIC_URL || 'https://api.hivemind.davinciai.eu:8040';
       // One-liner the user runs AFTER installing Kimi WebBridge (cdn.kimi.com).
       const connectCommand = `curl -fsSL ${base}/hermes/wb/connector.mjs -o /tmp/hm-webbridge.mjs && RELAY=${base} WB_TOKEN=${token} node /tmp/hm-webbridge.mjs`;

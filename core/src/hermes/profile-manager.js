@@ -71,6 +71,7 @@ function buildProfileConfigYaml(mcpUrl, groqKey) {
     model: process.env.HERMES_MODEL || 'llama-3.3-70b-versatile',
     apiKeyLiteral: groqKey,
     mcpUrl,
+    browserMcpUrl: process.env.HERMES_BROWSER_MCP_URL || 'http://hivemind-control-plane:3000/hermes/mcp/browser',
   });
 }
 

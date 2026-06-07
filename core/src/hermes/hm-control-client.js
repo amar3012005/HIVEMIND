@@ -76,8 +76,12 @@ export async function runOnce(agentConfig, payload, { baseUrl = DEFAULT_GATEWAY,
 
   const timeoutMs = Math.min(Number(agentConfig.safety_policy?.max_runtime_seconds || 600), 86400) * 1000;
   const maxTokens = Math.min(Number(agentConfig.safety_policy?.max_tokens_per_run || 100000), 5000000);
+  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
   const sys = `You are the "${agentConfig.name}" agent for tenant ${agentConfig.tenant_id}. `
-    + 'Use the hivemind MCP tools for all memory recall/search/save (it is the system of record). '
+    + `Today's date is ${today} (UTC). `
+    + 'Use the hivemind MCP tools (recall / search / list / save) for all memory operations — they are the system of record. '
+    + 'For time-relative requests (e.g. "last 7 days"), work out the date range yourself from today\'s date — do NOT run code or Python just to compute dates. '
+    + 'Prefer the available MCP, web, and browser tools over code execution. Do NOT ask the user to approve running code; if a step would need approval you cannot get, accomplish the task another way with the tools you already have, and answer directly. '
     + (payload.context ? `Context: ${payload.context}` : '');
 
   try {

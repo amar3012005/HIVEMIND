@@ -21,6 +21,8 @@
 import crypto from 'node:crypto';
 // profile-manager (→ runtime-spec → ajv) is lazy-imported only on dispatch so the
 // default-OFF path (and server boot) never loads it. See run branch below.
+// library is a static module with no heavy deps — imported at top level.
+import { LIBRARY, findTemplate } from './library.js';
 
 const ROUTE_PREFIX = '/hermes/';
 
@@ -168,7 +170,35 @@ export async function handleHermesRoutes(req, res, ctx) {
       const payload = { task: String(body.task || ''), context: body.context || '' };
       if (!payload.task) { jsonResponse(res, { error: 'task required' }, 400); return true; }
       const jobId = await auditJob(prisma, { orgId, tenantId, agentId, action: 'run', status: 'running', payload, createdBy: userId });
-      const agentConfig = { ...(row.config || {}), tenant_id: tenantId };
+      // Build a normalized HermesAgentConfig so the strict AJV validator passes even
+      // when the stored row.config is empty (agents created with minimal config).
+      // agent_id MUST be a real UUID (the hagent_ row.id is NOT a UUID format).
+      // hermes_profile convention: "org-<tenantId>" (matches profile-orchestrator.profileName).
+      const storedCfg = (row.config && typeof row.config === 'object') ? row.config : {};
+      const agentConfig = {
+        // Defaults first — stored fields override below via spread.
+        agent_id: crypto.randomUUID(),
+        name: row.name,
+        tenant_id: tenantId,
+        hermes_profile: `org-${tenantId}`,
+        memory_mode: 'hivemind_mcp',
+        capabilities: Array.isArray(storedCfg.capabilities) ? storedCfg.capabilities : [],
+        schedule: storedCfg.schedule && typeof storedCfg.schedule === 'object'
+          ? storedCfg.schedule
+          : { type: 'manual' },
+        output_routes: Array.isArray(storedCfg.output_routes) && storedCfg.output_routes.length > 0
+          ? storedCfg.output_routes
+          : [{ type: 'hivemind_memory', tenant_id: tenantId }],
+        safety_policy: storedCfg.safety_policy && typeof storedCfg.safety_policy === 'object'
+          ? storedCfg.safety_policy
+          : { max_tokens_per_run: 100000, max_runtime_seconds: 600 },
+        status: row.status || 'active',
+        // Spread stored config last so any explicitly-set fields override the defaults.
+        ...storedCfg,
+        // Re-assert non-negotiables that must not be overridden by empty stored values.
+        tenant_id: tenantId,
+        memory_mode: 'hivemind_mcp',
+      };
       const { runTask } = await import('./profile-manager.js'); // lazy: pulls ajv only on dispatch
       const out = await runTask(prisma, tenantId, agentConfig, payload, { createdBy: userId });
       const status = out && out.ok ? 'succeeded' : 'failed';
@@ -236,6 +266,96 @@ export async function handleHermesRoutes(req, res, ctx) {
       ).catch(() => 0);
       if (!n) { jsonResponse(res, { error: 'Approval not found' }, 404); return true; }
       jsonResponse(res, { id: approvalId, status: decision });
+      return true;
+    }
+
+    // ── GET /hermes/agent — singleton canonical agent for the org ───────
+    // Resolve-or-create: if an active hermes_agents row exists for this org,
+    // return it; otherwise create one (name 'Hermes Agent') and return it.
+    if (pathname === '/hermes/agent' && method === 'GET') {
+      const existing = await prisma.$queryRawUnsafe(
+        `SELECT id, org_id, tenant_id, name, config, status, created_at, updated_at
+           FROM hivemind.hermes_agents
+          WHERE org_id = $1 AND deleted_at IS NULL AND status != 'deleted'
+          ORDER BY created_at ASC
+          LIMIT 1`,
+        orgId,
+      );
+      if (existing && existing.length > 0) {
+        jsonResponse(res, { agent: existing[0] });
+        return true;
+      }
+      // No active agent — create the canonical singleton.
+      const id = newId('hagent');
+      const name = 'Hermes Agent';
+      const config = {};
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO hivemind.hermes_agents (id, org_id, tenant_id, name, config, status, created_by)
+         VALUES ($1,$2,$3,$4,$5::jsonb,'active',$6)`,
+        id, orgId, tenantId, name, JSON.stringify(config), userId,
+      );
+      jsonResponse(res, { agent: { id, org_id: orgId, tenant_id: tenantId, name, config, status: 'active' } }, 201);
+      return true;
+    }
+
+    // ── GET /hermes/library — curated dispatch templates ────────────────
+    if (pathname === '/hermes/library' && method === 'GET') {
+      const items = LIBRARY.map(({ id, name, blurb, persona, suggestedTask, skills }) => ({
+        id, name, blurb, persona, suggestedTask, skills,
+      }));
+      jsonResponse(res, { templates: items });
+      return true;
+    }
+
+    // ── POST /hermes/library/:id/run — ephemeral template dispatch ───────
+    const libraryRun = pathname.match(/^\/hermes\/library\/([^/]+)\/run$/);
+    if (libraryRun && method === 'POST') {
+      const templateId = libraryRun[1];
+      const template = findTemplate(templateId);
+      if (!template) { jsonResponse(res, { error: 'Template not found' }, 404); return true; }
+
+      const body = (await parseBody(req)) || {};
+      const task = String(body.task || template.suggestedTask || '').trim();
+      const context = body.context || '';
+
+      // Build a full, schema-valid HermesAgentConfig for this ephemeral run.
+      const templateCfg = template.agentConfig;
+      const ephemeralConfig = {
+        agent_id: crypto.randomUUID(),
+        name: template.name,
+        tenant_id: tenantId,
+        hermes_profile: `org-${tenantId}`,
+        memory_mode: 'hivemind_mcp',
+        capabilities: Array.isArray(templateCfg.capabilities) ? templateCfg.capabilities : [],
+        schedule: templateCfg.schedule || { type: 'manual' },
+        output_routes: Array.isArray(templateCfg.output_routes) && templateCfg.output_routes.length > 0
+          ? templateCfg.output_routes
+          : [{ type: 'hivemind_memory', tenant_id: tenantId }],
+        safety_policy: templateCfg.safety_policy || { max_tokens_per_run: 100000, max_runtime_seconds: 600 },
+        status: 'active',
+        ...templateCfg,
+        // Re-assert non-negotiables.
+        agent_id: crypto.randomUUID(),
+        tenant_id: tenantId,
+        memory_mode: 'hivemind_mcp',
+        // Ensure output_routes always has the tenant-scoped hivemind_memory route.
+        output_routes: Array.isArray(templateCfg.output_routes) && templateCfg.output_routes.length > 0
+          ? templateCfg.output_routes
+          : [{ type: 'hivemind_memory', tenant_id: tenantId }],
+      };
+
+      const jobId = await auditJob(prisma, {
+        orgId, tenantId, agentId: `lib:${templateId}`, action: 'library_run',
+        status: 'running', payload: { templateId, task, context }, createdBy: userId,
+      });
+      const { runTask } = await import('./profile-manager.js');
+      const out = await runTask(prisma, tenantId, ephemeralConfig, { task, context }, { createdBy: userId });
+      const status = out && out.ok ? 'succeeded' : 'failed';
+      await prisma.$executeRawUnsafe(
+        `UPDATE hivemind.hermes_jobs SET status=$2, result=$3::jsonb, updated_at=now() WHERE id=$1`,
+        jobId, status, JSON.stringify(out || null),
+      ).catch(() => {});
+      jsonResponse(res, { job_id: jobId, status, result: out }, status === 'succeeded' ? 200 : 502);
       return true;
     }
 

@@ -5826,7 +5826,9 @@ Write the persona now.`;
 
       let cursor = 0;
       let alive = true;
-      const POLL_MS = 700;
+      // Poll frequently so the first router/typing event reaches the FE
+      // quickly even though the stream is DB-backed, not a raw push pipe.
+      const POLL_MS = 250;
       const HEARTBEAT_MS = 15_000;
 
       const flush = (lines) => {

@@ -80,7 +80,8 @@ export async function runOnce(agentConfig, payload, { baseUrl = DEFAULT_GATEWAY,
   const sys = `You are the "${agentConfig.name}" agent for tenant ${agentConfig.tenant_id}. `
     + `Today's date is ${today} (UTC). `
     + 'Use the hivemind MCP tools (recall / search / list / save) for all memory operations — they are the system of record. '
-    + 'For time-relative requests (e.g. "last 7 days"), work out the date range yourself from today\'s date — do NOT run code or Python just to compute dates. '
+    + 'For time-relative requests (e.g. "last 7 days", "recent"), LIST the most recent memories newest-first (use the list-memories tool with a generous limit) rather than semantic recall — semantic recall ranks by relevance, not date, and will miss recent items. Then keep only those within the requested window. '
+    + 'For time-relative requests, work out the date range yourself from today\'s date — do NOT run code or Python just to compute dates. '
     + 'Prefer the available MCP, web, and browser tools over code execution. Do NOT ask the user to approve running code; if a step would need approval you cannot get, accomplish the task another way with the tools you already have, and answer directly. '
     + (payload.context ? `Context: ${payload.context}` : '');
 

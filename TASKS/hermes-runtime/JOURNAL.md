@@ -53,3 +53,12 @@
 - C: s6/hm-mgmt/run → `exec s6-setuidgid hermes node …` so mgmt runs as the hermes user (same as gateways). Fixes root-owned profile files → 0 PermissionError (was kanban lock). Verified: fresh profile files hermes:hermes, gateway log clean, derived gateway 200.
 - FE: cherry-picked b87358b onto Da-vinci main (commit 827ec80), ESLint clean, pushed → Vercel davinciai-eu prod deploy. "Hermes Agents" tab now live for users.
 - FINAL LIVE STATE: hm-control healthy + flag-on (401 unauth); hm-hermes healthy, caps 4cpu/6g; mgmt as hermes uid; scoped tokens default. Commits on claude/hermes-phase-6h.
+
+## Enabled on the PUBLIC control-plane — 2026-06-07
+- FE showed "not enabled" (404). ROOT CAUSE: public traffic api.hivemind.davinciai.eu:8040 → hivemind-caddy-api → `hivemind-control-plane` alias = the COOLIFY container control-plane-s0k0s0k40wo44w4w8gcs8ow0, NOT the deploy.sh hm-control. I'd flipped the flag + restarted the wrong container. Both share /opt/HIVEMIND/core bind mount (code present on both).
+- FIX 1 (flag): app dotenv-loads /app/.env with `if(!(key in process.env))`. Added HERMES_MGR_URL/MGMT_KEY/API_SERVER_KEY/MCP_HIVEMIND_API_KEY/MANAGER_ENABLED=true to /opt/HIVEMIND/core/.env + restarted control-plane-s0k0 → flag picked up WITHOUT clobbering its baked DATABASE_URL.
+- FIX 2 (network): public CP is on `coolify` net; hm-hermes wasn't. `docker network connect coolify hm-hermes` + baked into deploy.sh start_hermes (persists recreate). hm-hermes now on coolify+hmtest+s0k0_hivemind.
+- FIX 3 (idempotent create): hermes prints "already exists" to STDOUT; mgmt createProfile only checked stderr → broke reuse. Now checks both streams.
+- Cleaned a leftover org-723f0f5b profile dir (cleanup gap from earlier e2e).
+- VERIFIED: public /hermes/agents → 401 (was 404); full e2e FROM control-plane-s0k0 (ensureProfile→runTask→Groq+MCP="PONG", scoped key hmk_live_2c9, cleaned).
+- NOTE: there are TWO control-plane containers sharing the code (hm-control:3002 deploy.sh + control-plane-s0k0 Coolify/public). Public = control-plane-s0k0. Future code deploys to the bind path reach both; flag/env must be set where each reads it (Coolify CP reads /app/.env via dotenv + its Coolify env).

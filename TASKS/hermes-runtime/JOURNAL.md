@@ -24,3 +24,15 @@
 - DEPLOY: docker cp whole src/hermes (8 files) + edited control-plane-server.js into hm-control:/app; backed up server as .bak-6e; restart → "[control-plane] listening on 3000" clean. Cold-tests: /hermes/agents & /hermes/agents/x/run → 404 (flag OFF, prod unchanged); /v1/bootstrap → 200 (regression alive); HERMES_MANAGER_ENABLED unset. In-container import chain resolves (control-routes.handleHermesRoutes + profile-manager.runTask both function) → 6g flip is safe.
 - Rollback: `docker exec hm-control cp /app/src/control-plane-server.js.bak-6e /app/src/control-plane-server.js && docker restart hm-control`.
 - 6g (HUMAN-GATE) unchanged: first prod tenant profile + per-tenant scoped MCP token + flip HERMES_MANAGER_ENABLED.
+
+## 6f — FE Hermes Agents page (COMMITTED, not deployed) — 2026-06-07
+- FE repo: /Users/amar/HIVE-MIND/frontend/Da-vinci (separate git, branch preview/meeting-notes-dial). Commit b87358b.
+- NEW src/components/hivemind/app/pages/HermesAgents.jsx — per-tenant agent roster (cards w/ Cpu icon, StatusBadge active/paused/archived), inline Run dialog (task+context → runHermesAgent, RunResult render), Pause/Resume (optimistic status), expandable Runs (listHermesRuns) + pending approvals (listHermesApprovals). CreateDialog (name + optional JSON config). Loading/error/empty + DEFAULT-OFF: listHermesAgents 404 → calm "not enabled" state (errStatus check), never error toast.
+- api-client.js: +10 Hermes methods on the control-plane axios client (list/create/update/run/pause/resume/listRuns/listApprovals/decideApproval) — mirror existing /v1 method style ({data}=await this.controlPlane.<verb>).
+- HiveMindApp.jsx: React.lazy(./pages/HermesAgents) + <Route path="hermes">. Sidebar.jsx + TopBar.jsx entries (Hermes Agents, /hivemind/app/hermes).
+- Built via Workflow wom8844eg (READ×4 → BUILD → VERIFY). Workflow FAILED on the build agent's StructuredOutput call, but it HAD written api-client + router/sidebar/topbar edits; the page file itself was missing → I wrote HermesAgents.jsx by hand matching DigitalEmployees theme + the 6e API surface.
+- VERIFY: ESLint (react-app config) clean on all 5 files (exit 0); Cpu import + PageSuspense + route placement confirmed. Skipped full CRA prod build (heavy); lint+import check sufficient.
+- NOT pushed/deployed — FE deploy + backend flag flip = 6g human gate.
+
+## STOP — 6g is HUMAN-GATED. Autonomous Hermes work (6a–6f) complete.
+- 6g requires: first PROD tenant profile, per-tenant scoped MCP token, flip HERMES_MANAGER_ENABLED=true, docker.sock/secrets/resource-cap review, push+deploy Da-vinci FE. Operator action.

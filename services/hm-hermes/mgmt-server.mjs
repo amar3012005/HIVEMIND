@@ -105,6 +105,62 @@ async function deleteProfile(tenantId) {
   return { ok: r.ok, issues: r.ok ? [] : [r.stderr] };
 }
 
+// ── Cron ops (local hermes CLI) ─────────────────────────────────────
+
+/**
+ * List cron jobs for a tenant's profile.
+ * @returns {{ ok:boolean, jobs:object[], raw:string, issues:string[] }}
+ */
+async function cronList(tenantId) {
+  const r = await hermes(['-p', profileName(tenantId), 'cron', 'list', '--all']);
+  if (!r.ok) return { ok: false, jobs: [], raw: r.stderr, issues: [r.stderr || 'cron list failed'] };
+  // Parse the tab/space-aligned table output. Each line that contains a hex id
+  // (12 hex chars) represents one job. Fall back to returning raw text if
+  // parsing yields nothing — the caller can use raw to build its own view.
+  const lines = r.stdout.split('\n').filter(Boolean);
+  const jobs = [];
+  for (const line of lines) {
+    // Format from recon: "  <id>  <name>  <schedule>  <status>  <next_run_at>"
+    // The id is always 12 lowercase hex chars.
+    const m = line.match(/^\s*([0-9a-f]{12})\s+(.+)$/i);
+    if (m) jobs.push({ id: m[1], raw: line.trim() });
+  }
+  return { ok: true, jobs, raw: r.stdout, issues: [] };
+}
+
+/**
+ * Add a cron job to a tenant's profile.
+ * @param {string} tenantId
+ * @param {{ cron:string, prompt?:string, name?:string, deliver?:string }} opts
+ * @returns {{ ok:boolean, jobId:string|null, issues:string[] }}
+ */
+async function cronAdd(tenantId, { cron: schedule, prompt = '', name = '', deliver = 'origin' } = {}) {
+  if (!schedule) return { ok: false, jobId: null, issues: ['schedule (cron expr or interval) required'] };
+  const args = ['-p', profileName(tenantId), 'cron', 'create', schedule];
+  if (prompt) args.push(prompt);
+  if (name) { args.push('--name'); args.push(name); }
+  if (deliver) { args.push('--deliver'); args.push(deliver); }
+  const r = await hermes(args);
+  if (!r.ok) return { ok: false, jobId: null, issues: [r.stderr || r.stdout || 'cron create failed'] };
+  // Parse: "Created job: <12-hex-id>"
+  const m = r.stdout.match(/Created job:\s*([0-9a-f]{12})/i);
+  const jobId = m ? m[1] : null;
+  return { ok: true, jobId, raw: r.stdout, issues: [] };
+}
+
+/**
+ * Remove a cron job from a tenant's profile.
+ * @param {string} tenantId
+ * @param {string} jobId  12-hex cron job id
+ * @returns {{ ok:boolean, issues:string[] }}
+ */
+async function cronDelete(tenantId, jobId) {
+  if (!jobId) return { ok: false, issues: ['jobId required'] };
+  const r = await hermes(['-p', profileName(tenantId), 'cron', 'remove', jobId]);
+  if (!r.ok) return { ok: false, issues: [r.stderr || r.stdout || 'cron remove failed'] };
+  return { ok: true, issues: [] };
+}
+
 // ── HTTP plumbing ───────────────────────────────────────────────────
 
 function send(res, status, body) {
@@ -169,6 +225,15 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, await gatewayAction(tenantId, 'restart'));
       case '/mgmt/profile/delete':
         return send(res, 200, await deleteProfile(tenantId));
+      case '/mgmt/cron/list':
+        return send(res, 200, await cronList(tenantId));
+      case '/mgmt/cron/add':
+        return send(res, 200, await cronAdd(tenantId, body));
+      case '/mgmt/cron/delete': {
+        const jobId = body.jobId;
+        if (!jobId) return send(res, 400, { ok: false, error: 'jobId required' });
+        return send(res, 200, await cronDelete(tenantId, jobId));
+      }
       default:
         return send(res, 404, { ok: false, error: 'not found' });
     }

@@ -102,3 +102,38 @@ export async function pingManager() {
   const r = await mgr('POST', '/mgmt/ping', {});
   return { ok: !!r.ok, error: r.error };
 }
+
+/**
+ * List cron jobs for a tenant's profile via the mgmt-server.
+ * @param {string} tenantId
+ * @returns {Promise<{ ok:boolean, jobs:object[], raw:string, issues:string[] }>}
+ */
+export async function listCron(tenantId) {
+  const r = await mgr('POST', '/mgmt/cron/list', { tenantId });
+  if (!r.ok) return { ok: false, jobs: [], raw: '', issues: r.issues || [r.error || 'listCron failed'] };
+  return { ok: true, jobs: r.jobs || [], raw: r.raw || '', issues: [] };
+}
+
+/**
+ * Add a cron job to a tenant's profile via the mgmt-server.
+ * @param {string} tenantId
+ * @param {{ cron:string, prompt?:string, name?:string, deliver?:string }} opts
+ * @returns {Promise<{ ok:boolean, jobId:string|null, issues:string[] }>}
+ */
+export async function addCron(tenantId, { cron, prompt = '', name = '', deliver = 'origin' } = {}) {
+  const r = await mgr('POST', '/mgmt/cron/add', { tenantId, cron, prompt, name, deliver });
+  if (!r.ok) return { ok: false, jobId: null, issues: r.issues || [r.error || 'addCron failed'] };
+  return { ok: true, jobId: r.jobId || null, issues: [] };
+}
+
+/**
+ * Delete a cron job from a tenant's profile via the mgmt-server.
+ * @param {string} tenantId
+ * @param {string} jobId  12-hex cron job id
+ * @returns {Promise<{ ok:boolean, issues:string[] }>}
+ */
+export async function deleteCron(tenantId, jobId) {
+  const r = await mgr('POST', '/mgmt/cron/delete', { tenantId, jobId });
+  if (!r.ok) return { ok: false, issues: r.issues || [r.error || 'deleteCron failed'] };
+  return { ok: true, issues: [] };
+}

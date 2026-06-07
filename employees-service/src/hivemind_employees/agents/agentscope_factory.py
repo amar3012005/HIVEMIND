@@ -218,6 +218,11 @@ def build_react_agent(
                 log.debug("tool_call_count hook tick failed: %s", exc)
         return _hook
 
+    try:
+        max_iters = int(employee_row.get("max_iters") or os.environ.get("AGENTSCOPE_MAX_ITERS") or 25)
+    except Exception:
+        max_iters = 25
+
     agent = ReActAgent(
         name=name,
         sys_prompt=persona,
@@ -225,10 +230,7 @@ def build_react_agent(
         formatter=formatter,
         toolkit=toolkit,
         memory=InMemoryMemory(),
-        # Bumped from 10 -> 25. Hyper-room agents chain hivemind_recall +
-        # graph traversal + occasional web search, plus the final
-        # synthesis turn. Each tool round eats one iter.
-        max_iters=25,
+        max_iters=max_iters,
         # Sequential tool calls keep transcripts deterministic for
         # multi-agent reasoning. Parallel tool calls can be re-enabled
         # per-employee later if we want speedups for trusted roles.

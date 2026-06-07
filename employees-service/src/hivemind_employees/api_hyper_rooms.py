@@ -88,6 +88,9 @@ DEFAULT_HYPER_TOOLS = [
     "hivemind_web_research",
 ]
 
+HYPER_ROOM_AGENT_MAX_ITERS = int(os.environ.get("HYPER_ROOM_AGENT_MAX_ITERS", "3"))
+BLACKBOARD_MIN_SCORE = float(os.environ.get("HYPER_ROOM_BLACKBOARD_MIN_SCORE", "0.45"))
+
 ROLE_LANES = ("Strategist", "Builder", "Skeptic", "Researcher", "Communicator")
 
 ROLE_LANE_HINTS: Dict[str, List[str]] = {
@@ -252,6 +255,146 @@ async def _save_room_decision(
     except Exception as exc:  # noqa: BLE001
         log.warning("decision-sink: save failed room=%s err=%s", room_id, exc)
         return None
+
+
+def _extract_memory_rows(resp: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows = resp.get("memories") or resp.get("combined") or []
+    return rows if isinstance(rows, list) else []
+
+
+def _score_memory_row(row: Dict[str, Any]) -> float:
+    try:
+        return float(row.get("score", 0) or 0)
+    except Exception:
+        return 0.0
+
+
+def _format_memory_rows(rows: List[Dict[str, Any]], *, limit: int = 6, snippet_chars: int = 300) -> str:
+    lines_out: List[str] = []
+    for r in rows[:limit]:
+        title = (r.get("title") or "").strip()
+        content = (r.get("content") or "").replace("\n", " ").strip()
+        if not content:
+            continue
+        snippet = content[:snippet_chars] + ("..." if len(content) > snippet_chars else "")
+        prefix = f'"{title}" - ' if title else ""
+        mid = str(r.get("id") or r.get("memory_id") or "").strip()
+        suffix = f" [memory_id={mid}]" if mid else ""
+        lines_out.append(f"- {prefix}{snippet}{suffix}")
+    return "\n".join(lines_out)
+
+
+async def _build_turn_blackboard(
+    *,
+    query: str,
+    user_id: str,
+    org_id: str,
+    api_key: str = "",
+) -> Dict[str, Any]:
+    """Build one shared turn context that every room agent reads.
+
+    This is the HyperAgents version of MiroFish's blackboard: one bounded
+    memory fan-out before the debate, not one broad ReAct recall loop per
+    agent. Agents can still use tools for targeted gaps.
+    """
+    company_brief, recall_resp = await asyncio.gather(
+        _build_company_brief(query, user_id, org_id, api_key),
+        recall_emulated(query, user_id=user_id, org_id=org_id, api_key=api_key, max_memories=8),
+        return_exceptions=True,
+    )
+    if isinstance(company_brief, Exception):
+        log.warning("[blackboard] company brief failed: %s", company_brief)
+        company_brief = ""
+    if isinstance(recall_resp, Exception):
+        log.warning("[blackboard] query recall failed: %s", recall_resp)
+        recall_resp = {}
+    rows = [
+        r for r in _extract_memory_rows(recall_resp)
+        if _score_memory_row(r) >= BLACKBOARD_MIN_SCORE
+    ]
+    rows.sort(key=_score_memory_row, reverse=True)
+    candidate_block = ""
+    formatted = _format_memory_rows(rows, limit=6, snippet_chars=300)
+    if formatted:
+        candidate_block = (
+            "CANDIDATE MEMORIES (most relevant to the user's question):\n"
+            + formatted
+            + "\n"
+        )
+    context_text = (str(company_brief or "") + candidate_block).strip()
+    if context_text:
+        context_text += "\n"
+    hit_count = len(rows)
+    confidence = min(1.0, hit_count / 3.0)
+    return {
+        "context_text": context_text,
+        "memory_hits": rows,
+        "hit_count": hit_count,
+        "confidence": confidence,
+        "memory_ids": [
+            str(r.get("id") or r.get("memory_id"))
+            for r in rows
+            if r.get("id") or r.get("memory_id")
+        ][:20],
+    }
+
+
+def _is_fast_decision_candidate(user_message: str, room_template: str) -> bool:
+    if room_template != "decision":
+        return False
+    msg = (user_message or "").strip().lower()
+    if len(msg) > 1200 or len(msg.split()) > 180:
+        return False
+    heavy_terms = (
+        "debate", "from every angle", "full analysis", "audit", "review all",
+        "brainstorm", "compare", "pros and cons", "risk register", "deep dive",
+    )
+    return not any(term in msg for term in heavy_terms)
+
+
+def _has_strong_challenge(reactions: List[Dict[str, Any]]) -> bool:
+    return any(
+        r.get("agreement") == "challenge"
+        and float(r.get("confidence", 0) or 0) >= ROUND_2_CHALLENGE_THRESHOLD
+        for r in reactions
+    )
+
+
+def _schedule_decision_save(
+    *,
+    callback_url: Optional[str],
+    user_id: str,
+    org_id: str,
+    room_id: str,
+    turn_id: str,
+    user_message: str,
+    decision_text: str,
+    trigger: str,
+) -> None:
+    async def _runner() -> None:
+        mid = await _save_room_decision(
+            user_id=user_id,
+            org_id=org_id,
+            room_id=room_id,
+            turn_id=turn_id,
+            user_message=user_message,
+            decision_text=decision_text,
+            trigger=trigger,
+        )
+        if mid:
+            await _emit_event(callback_url or "", turn_id, {
+                "t": "decision_saved",
+                "memory_id": mid,
+                "trigger": trigger,
+            })
+        else:
+            await _emit_event(callback_url or "", turn_id, {
+                "t": "warning",
+                "code": "decision_save_failed",
+                "trigger": trigger,
+            })
+
+    asyncio.create_task(_runner())
 
 
 def _require_master_key(token: Optional[str]) -> None:
@@ -483,6 +626,7 @@ async def _build_agent_for_room(
         merged = {
             **emp,
             "tools": DEFAULT_HYPER_TOOLS,
+            "max_iters": HYPER_ROOM_AGENT_MAX_ITERS,
             "hyper": boot_emp.get("hyper"),
             "active_prompt_version": boot_emp.get("active_prompt_version"),
         }
@@ -494,6 +638,7 @@ async def _build_agent_for_room(
         # Force the full hyper toolkit regardless of what's stored on the
         # employee row — gives every swarm participant equal reach.
         "tools": DEFAULT_HYPER_TOOLS,
+        "max_iters": HYPER_ROOM_AGENT_MAX_ITERS,
         "hyper": boot_emp.get("hyper"),
         "active_prompt_version": boot_emp.get("active_prompt_version"),
     }
@@ -594,6 +739,7 @@ async def _run_reactor(
     lead_name: str,
     reactor_lane: str,
     is_opposing: bool,
+    blackboard_context: str = "",
 ) -> Dict[str, Any]:
     """Returns a dict like
         {"react": bool, "agreement": str|None, "confidence": float, "line": str}
@@ -601,11 +747,17 @@ async def _run_reactor(
     bias = " (Your lane is opposing the Lead's — speak up if you have a real challenge.)" if is_opposing else ""
     prompt = (
         f"{REACTOR_INSTRUCTIONS}\n"
-        f"User asked: {user_message}\n\n"
-        f"Lead ({lead_name}, lane {reactor_lane}'s opposite={is_opposing}) said:\n"
-        f"{lead_line}\n\n"
-        f"Your lane: {reactor_lane}.{bias}\n"
-        f"Reply with the JSON now."
+        + (
+            "SHARED BLACKBOARD — already recalled for this turn. Use this before tools; "
+            "only call tools for one targeted missing fact.\n"
+            f"{blackboard_context}\n"
+            if blackboard_context else ""
+        )
+        + f"User asked: {user_message}\n\n"
+        + f"Lead ({lead_name}, lane {reactor_lane}'s opposite={is_opposing}) said:\n"
+        + f"{lead_line}\n\n"
+        + f"Your lane: {reactor_lane}.{bias}\n"
+        + f"Reply with the JSON now."
     )
     try:
         reply = await agent(Msg(name="user", content=prompt, role="user"))
@@ -1934,6 +2086,12 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     the way, returns the final cost + status.
     """
     started = time.time()
+    perf_started = time.perf_counter()
+    timing: Dict[str, int] = {}
+
+    def _mark(label: str) -> None:
+        timing[label] = int((time.perf_counter() - perf_started) * 1000)
+
     cost_tokens = 0
     status = "complete"
 
@@ -2056,6 +2214,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         "skeptic": skeptic.get("slug") if skeptic else None,
         "turn_seq": seq,
     })
+    _mark("router_ms")
 
     # ── Swarm template — branch into R1-R5 phase machine ──────────────
     if room_template == "swarm":
@@ -2100,57 +2259,41 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             cost_tokens, started,
         )
 
-    # ── Pre-fetch HIVEMIND context (grounded RAG) ───────────────────
-    # Don't rely on the agent's tool calls — Groq/llama function-call
-    # reliability varies. Pull recall results server-side and inject
-    # them into the lead prompt so the agent ALWAYS sees relevant
-    # memories without needing to emit a tool call first.
+    # ── Shared blackboard (grounded RAG) ─────────────────────────────
+    # Build one evidence board for the turn, then inject it into every
+    # participant prompt. This avoids N broad ReAct recall loops while still
+    # letting agents run targeted tools if the board has a real gap.
+    await _emit_event(req.callback_url, req.turn_id, {
+        "t": "typing", "agent": lead.get("slug"), "kind": "grounding",
+    })
     memory_context = ""
+    blackboard: Dict[str, Any] = {
+        "context_text": "",
+        "memory_hits": [],
+        "hit_count": 0,
+        "confidence": 0.0,
+        "memory_ids": [],
+    }
     try:
         boot_map = {b["id"]: b for b in await fetch_bootstrap()}
         lead_api_key = (boot_map.get(lead["id"], {}) or {}).get("api_key", "") or ""
-        # Broad standing brief first (who/what/why), then the query-specific
-        # candidate memories on top. Recall via master+emulation so it reaches
-        # the org brain regardless of whether bootstrap minted a lead key.
-        company_brief = await _build_company_brief(
-            req.user_message, req.user_id, req.org_id, lead_api_key)
-        recall_resp = await recall_emulated(
-            req.user_message, user_id=req.user_id, org_id=req.org_id,
-            api_key=lead_api_key, max_memories=6)
-        rows = recall_resp.get("memories") or recall_resp.get("combined") or []
-        # Drop low-relevance hits so a single dominant memory (long
-        # AUDIT memo etc.) doesn't crowd out diverse signal.
-        MIN_SCORE = 0.45
-        rows = [r for r in rows if float(r.get("score", 0)) >= MIN_SCORE]
-        candidate_block = ""
-        if rows:
-            lines_out = []
-            for r in rows[:5]:
-                title = (r.get("title") or "").strip()
-                content = (r.get("content") or "").replace("\n", " ").strip()
-                if not content:
-                    continue
-                # Shorter snippet — was 1200, now 300. Lead can ask
-                # for full memory via recall tool if needed.
-                snippet = content[:300] + ("…" if len(content) > 300 else "")
-                prefix = f'"{title}" — ' if title else ""
-                lines_out.append(f"- {prefix}{snippet}")
-            if lines_out:
-                candidate_block = (
-                    "CANDIDATE MEMORIES (most relevant to the user's question):\n"
-                    + "\n".join(lines_out)
-                    + "\n"
-                )
-        memory_context = (company_brief + candidate_block).strip()
-        if memory_context:
-            memory_context += "\n"
+        blackboard = await _build_turn_blackboard(
+            query=req.user_message,
+            user_id=req.user_id,
+            org_id=req.org_id,
+            api_key=lead_api_key,
+        )
+        memory_context = blackboard.get("context_text") or ""
     except Exception as exc:  # noqa: BLE001
-        log.warning("hyper-rooms pre-fetch recall failed: %s", exc)
+        log.warning("hyper-rooms blackboard build failed: %s", exc)
+    _mark("blackboard_ms")
 
     # ── Lead generates full response ─────────────────────────────────
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "typing", "agent": lead.get("slug"), "kind": "lead",
     })
+    _mark("lead_start_ms")
+    fast_decision_candidate = _is_fast_decision_candidate(req.user_message, room_template)
     lead_text = ""
     lead_agent = None
     lead_prompt = ""
@@ -2163,6 +2306,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             grounding = (
                 "GROUNDING — you ALREADY have the relevant memories above.\n"
                 "- Answer NOW directly from them. Do NOT announce, narrate, or plan tool calls.\n"
+                "- Do NOT run broad recall again. Use tools only for one precise missing fact.\n"
                 "- BANNED phrases: 'we need to recall', 'let's recall', 'we should traverse', "
                 "'let me check', 'we'll review'. You already have the context — use it.\n"
                 "- When you state a fact, name its memory title inline: '<claim> — from \"<title>\"'.\n"
@@ -2292,6 +2436,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         "content": lead_text,
         "tokens": lead_tokens,
     })
+    _mark("lead_line_ms")
 
 
     # ── Reactors (parallel) ──────────────────────────────────────────
@@ -2309,6 +2454,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             lead_name=lead.get("name", lead.get("slug", "lead")),
             reactor_lane=r["_lane"],
             is_opposing=is_opp,
+            blackboard_context=memory_context,
         )))
 
     reactions: List[Dict[str, Any]] = []
@@ -2355,15 +2501,23 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             reactions.append({**event, "emp": r_emp})
             await _emit_event(req.callback_url, req.turn_id, event)
 
+    _mark("reactor_round1_ms")
 
-    # ── Synthesis round (always when reactors spoke) ────────────────
+    fast_decision_exit = (
+        fast_decision_candidate
+        and not _has_strong_challenge(reactions)
+        and _is_substantive_lead(lead_text, bool(memory_context))
+        and float(blackboard.get("confidence", 0) or 0) >= 0.34
+    )
+
+    # ── Synthesis round (always when reactors spoke, unless fast gate passed) ─
     # Reactors emit suggestion lines ("we should recall X", "what's the next
     # step"). Without a closer, the turn ends on those suggestions — the
     # user sees prompts to do work, not the work itself. Synthesis lets the
     # lead absorb the reactor lines + actually exercise tools (recall /
     # traverse) and produce one final actionable bubble.
     synth_text = ""
-    if reactions:
+    if reactions and not fast_decision_exit:
         await _emit_event(req.callback_url, req.turn_id, {
             "t": "typing", "agent": lead.get("slug"), "kind": "synthesis",
         })
@@ -2383,7 +2537,8 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 f"  • If a reactor surfaced a NEW fact from memory → fold it in and cite the title.\n"
                 f"  • If a reactor challenged a claim → defend with a memory hit, or concede.\n"
                 f"  • If a reactor's point is outside scope of the user's question → ignore it.\n"
-                f"  • Need more grounding? Call hivemind_recall / traverse_graph silently first.\n\n"
+                f"  • The shared blackboard is already above. Only call hivemind_recall / traverse_graph "
+                f"for one precise missing fact.\n\n"
                 f"OUTPUT: 3-5 short sentences. Stay on the user's question. Chat tone, 'we / our'.\n"
                 f"Quote memory titles inline. NEVER invent owners, dates, or deadlines. No 'happy to "
                 f"help' fluff.\n"
@@ -2407,6 +2562,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 })
         except Exception as exc:  # noqa: BLE001
             log.warning("synthesis failed: %s", exc)
+        _mark("synthesis_ms")
 
         # ── Post-synthesis reactor pass (MiroFish-style forward motion) ──
         # After the lead synthesises, reactors get one more turn to push back
@@ -2427,6 +2583,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 lead_name=lead.get("name", lead.get("slug", "lead")),
                 reactor_lane=r["_lane"],
                 is_opposing=is_opp2,
+                blackboard_context=memory_context,
             )))
         post_synth_results = await asyncio.gather(*post_synth_tasks, return_exceptions=True)
         for r_emp, result in zip(reactors, post_synth_results):
@@ -2450,6 +2607,9 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             }
             reactions.append({**event, "emp": r_emp})
             await _emit_event(req.callback_url, req.turn_id, event)
+        _mark("post_synthesis_ms")
+    elif fast_decision_exit:
+        _mark("fast_decision_exit_ms")
 
     # ── Round 2 challenger debate (only if reactor explicitly challenged) ──
     challenger_reaction = next(
@@ -2501,12 +2661,13 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         try:
             revise_prompt = (
                 f"[CSI revision pass round {debate_round} — HIVEMIND employee. Lane: {lead['_lane']}.]\n"
-                f"USER'S ORIGINAL QUESTION: \"{req.user_message}\"\n"
-                f"{challenger_reaction['emp'].get('name')} ({challenger_reaction['emp']['_lane']}) pushed back:\n"
-                f"\"{current_challenge_text}\"\n\n"
-                f"Reconsider. If right, concede + revise. If standing by, defend with a memory "
-                f"hit — quote the title. No invented owners / dates. Stay on the user's question. "
-                f"2-4 sentences, chat tone, 'we / our'."
+                + (memory_context + "\n" if memory_context else "")
+                + f"USER'S ORIGINAL QUESTION: \"{req.user_message}\"\n"
+                + f"{challenger_reaction['emp'].get('name')} ({challenger_reaction['emp']['_lane']}) pushed back:\n"
+                + f"\"{current_challenge_text}\"\n\n"
+                + f"Reconsider. If right, concede + revise. If standing by, defend with a memory "
+                + f"hit — quote the title. No invented owners / dates. Stay on the user's question. "
+                + f"2-4 sentences, chat tone, 'we / our'."
             )
             reply2 = await lead_agent(Msg(name="user", content=revise_prompt, role="user"))
             revise_text = _msg_to_text(reply2) or "(no revision)"
@@ -2587,6 +2748,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     # Pick the most recent substantive lead-side output for grounding +
     # save eligibility. Order: revise > synth > lead.
     final_text = last_revise_text or synth_text or lead_text or ""
+    exit_reason = "fast_decision_consensus" if fast_decision_exit else "full_flow"
     quality_low = not _is_substantive_lead(final_text, bool(memory_context))
 
     if quality_low and final_text and lead_agent:
@@ -2645,9 +2807,12 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         or (is_decision_template and not quality_low)
     )
     saved_memory_id: Optional[str] = None
+    save_pending = False
     if should_save and final_text:
         trigger = "save-intent" if save_intent else "verdict-resolved"
-        saved_memory_id = await _save_room_decision(
+        save_pending = True
+        _schedule_decision_save(
+            callback_url=req.callback_url,
             user_id=req.user_id,
             org_id=req.org_id,
             room_id=req.room_id,
@@ -2656,12 +2821,6 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             decision_text=final_text,
             trigger=trigger,
         )
-        if saved_memory_id:
-            await _emit_event(req.callback_url, req.turn_id, {
-                "t": "decision_saved",
-                "memory_id": saved_memory_id,
-                "trigger": trigger,
-            })
 
     # ── A4 trust scoring (display-only, no routing impact yet) ──────
     # Lead: +0.05 on substantive seal; -0.05 on unresolved escalate.
@@ -2688,10 +2847,27 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     except Exception as exc:  # noqa: BLE001
         log.warning("trust update failed: %s", exc)
 
+    tool_call_counts: Dict[str, int] = {}
+    try:
+        for p in participants:
+            cache_key = f"{req.room_id}:{p['id']}"
+            cached_agent = _ROOM_AGENTS.get(cache_key)
+            if cached_agent is not None:
+                count = int(getattr(cached_agent, "tool_call_count", 0) or 0)
+                tool_call_counts[p.get("slug")] = count
+                try:
+                    setattr(cached_agent, "tool_call_count", 0)
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("tool_call_count reset failed slug=%s: %s", p.get("slug"), exc)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[room] tool_call_count collection failed: %s", exc)
+
     # ── Seal ─────────────────────────────────────────────────────────
+    _mark("seal_ms")
     log.info(
-        "[room] seal turn=%s status=%s template=%s cost=%d quality_low=%s",
+        "[room] seal turn=%s status=%s template=%s cost=%d quality_low=%s exit=%s tools=%d",
         req.turn_id, status, room_template, cost_tokens, quality_low,
+        exit_reason, sum(tool_call_counts.values()),
     )
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "seal",
@@ -2700,8 +2876,18 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         "duration_ms": int((time.time() - started) * 1000),
         "quality_low": quality_low,
         "saved_memory_id": saved_memory_id,
+        "save_pending": save_pending,
         "trust": trust_deltas,
         "template": room_template,
+        "exit_reason": exit_reason,
+        "blackboard": {
+            "hit_count": int(blackboard.get("hit_count", 0) or 0),
+            "confidence": float(blackboard.get("confidence", 0) or 0),
+            "memory_ids": blackboard.get("memory_ids", [])[:10],
+        },
+        "timing": timing,
+        "tool_call_counts": tool_call_counts,
+        "tool_call_total": sum(tool_call_counts.values()),
     })
     return RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status=status)
 

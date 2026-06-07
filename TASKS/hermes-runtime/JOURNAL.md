@@ -94,3 +94,11 @@
 - VERIFIED LIVE (server-side): relay roundtrip; connector.mjs served+valid; poll 401 w/o token; tools/list→9; tools/call→graceful no-connector; unpaired profile boots+PONG. REAL browser leg needs the user: install Kimi + run connector.
 - ARCH NOTE: relay + MCP both in the PUBLIC control-plane process (control-plane-s0k0); gateway reaches MCP at internal http://hivemind-control-plane:3000/hermes/mcp/browser (hm-hermes on coolify net). Token in MCP header via env-ref ${WB_MCP_TOKEN} (resolves for MCP headers).
 - CAVEAT: Kimi daemon/extension = 3rd-party (cdn.kimi.com); isTrusted-strict sites reject synthetic events. Whitelabel = our connector + UI; engine is Kimi's.
+
+## Second browser backend — server-side Playwright MCP — 2026-06-07
+- GOAL (user): two built-in browser tools in default; agent picks per task. WebBridge (user's real browser) + Playwright (server-side headless, no install).
+- BUILT: services/hm-playwright (FROM mcr playwright image + @playwright/mcp@latest, headless --isolated --allowed-hosts '*'). MCP at hm-playwright:8931/mcp. deploy.sh start_playwright (build+run+health, internal-only, coolify+hmtest+s0k0 nets). buildConfigYaml gains mcp.web block (always-on, no auth, internal). Default SOUL guides: Playwright browser_* for public web; WebBridge for user's logged-in sessions.
+- GOTCHA: @playwright/mcp host guard → 403 "Access only allowed at localhost" for cross-container Host. FIX: --allowed-hosts '*' (internal-only container). After: initialize → 200 from gateway net.
+- VERIFIED: hm-playwright MCP initialize 200; profiles boot with hivemind+browser+web MCP blocks; gateway reaches it.
+- OPEN ISSUE (NOT browser-specific): Hermes gateway tool-call formatting is flaky — Groq llama-3.3-70b FUSES name+args ('browser_navigate{"url":..}' → 'not in request.tools'); OpenRouter claude-3.5-sonnet → 'Failed to call a function / failed_generation'. Affects ALL MCP tool invocation (memory/browser/web), not just browser. No Hermes tool-format flag exists. NEXT: tune the gateway tool-calling (Hermes version/model combo that does native function-calling cleanly) — separate task from the (now-complete) browser wiring.
+- Backend commits on claude/hermes-phase-6h.

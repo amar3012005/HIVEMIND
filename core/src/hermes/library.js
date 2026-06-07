@@ -15,101 +15,96 @@
  *
  * memory_mode is always 'hivemind_mcp' — non-negotiable.
  *
+ * TOOL-HONESTY (important): the only tools actually wired into a tenant profile
+ * are the HiveMind MCP memory tools. There is NO web_search / browser / file /
+ * code tool in the runtime. If a persona instructs the model to "search the web"
+ * or "read a file", the model emits a tool call for a tool that is NOT in
+ * request.tools and Hermes rejects it ("tool call validation failed: … not in
+ * request.tools"). So every template below works from the model's own knowledge
+ * + whatever the user pastes into the task/context, and persists via HiveMind
+ * memory. capabilities is [] for all. (When a real web/browser tool is wired,
+ * re-introduce those capabilities + personas.)
+ *
  * @module hermes/library
  */
+
+const BASE_SAFETY = { max_tokens_per_run: 80000, max_runtime_seconds: 300 };
 
 /** @type {Array<{id:string,name:string,blurb:string,persona:string,suggestedTask:string,skills:string[],agentConfig:object}>} */
 export const LIBRARY = [
   {
     id: 'research-brief',
     name: 'Research Brief',
-    blurb: 'Gathers structured research on any topic and stores a concise brief in HiveMind memory.',
-    persona: 'You are a meticulous research analyst. Given a topic or question, produce a concise, well-sourced brief. Save the final output to HiveMind memory with clear headings.',
-    suggestedTask: 'Research the latest developments in large language model alignment and produce a 3-section brief.',
-    skills: ['web_search'],
-    agentConfig: {
-      memory_mode: 'hivemind_mcp',
-      capabilities: ['web_search'],
-      schedule: { type: 'manual' },
-      output_routes: [], // filled by route with tenant-scoped route
-      safety_policy: {
-        max_tokens_per_run: 100000,
-        max_runtime_seconds: 600,
-      },
-    },
-  },
-  {
-    id: 'summarize-doc',
-    name: 'Summarize Document',
-    blurb: 'Reads a document or URL and saves a structured summary to HiveMind memory.',
-    persona: 'You are an expert document analyst. Summarize the provided document or URL into key takeaways, action items, and open questions. Save to HiveMind memory.',
-    suggestedTask: 'Summarize the document at the URL provided in the context field.',
-    skills: ['browser', 'files'],
-    agentConfig: {
-      memory_mode: 'hivemind_mcp',
-      capabilities: ['browser', 'files'],
-      schedule: { type: 'manual' },
-      output_routes: [],
-      safety_policy: {
-        max_tokens_per_run: 80000,
-        max_runtime_seconds: 300,
-      },
-    },
-  },
-  {
-    id: 'competitor-watch',
-    name: 'Competitor Watch',
-    blurb: 'Scans competitor websites and news, then saves a digest of changes to HiveMind memory.',
-    persona: 'You are a competitive intelligence analyst. Find recent product updates, pricing changes, and blog posts from the named competitor. Produce a digest and save it to HiveMind memory tagged with "competitor".',
-    suggestedTask: 'Search for the latest product and pricing news from the competitor named in the context field.',
-    skills: ['web_search', 'browser'],
-    agentConfig: {
-      memory_mode: 'hivemind_mcp',
-      capabilities: ['web_search', 'browser'],
-      schedule: { type: 'manual' },
-      output_routes: [],
-      safety_policy: {
-        max_tokens_per_run: 100000,
-        max_runtime_seconds: 600,
-        allowed_domains: ['*'],
-      },
-    },
-  },
-  {
-    id: 'draft-reply',
-    name: 'Draft Reply',
-    blurb: 'Drafts a professional email or message reply based on context you provide.',
-    persona: 'You are a senior communications specialist. Given a thread or context, draft a clear, professional reply. Do NOT send anything — only output the draft text and save it to HiveMind memory.',
-    suggestedTask: 'Draft a polite follow-up reply to the email thread described in the context field.',
-    skills: [],
+    blurb: 'Writes a structured brief on any topic from the model’s knowledge and saves it to memory.',
+    persona: 'You are a meticulous research analyst. Using your own knowledge (you do NOT have web access), write a concise, well-structured brief on the given topic with clear section headings and a short "what to watch / open questions" section. Note where your knowledge may be dated. When finished, save the brief to HiveMind memory using the available memory tool.',
+    suggestedTask: 'Write a 3-section brief on the current state of large language model alignment (key approaches, open problems, what to watch).',
+    skills: ['memory'],
     agentConfig: {
       memory_mode: 'hivemind_mcp',
       capabilities: [],
       schedule: { type: 'manual' },
       output_routes: [],
-      safety_policy: {
-        max_tokens_per_run: 40000,
-        max_runtime_seconds: 180,
-        require_approval: ['send'],
-      },
+      safety_policy: { max_tokens_per_run: 100000, max_runtime_seconds: 600 },
+    },
+  },
+  {
+    id: 'summarize-doc',
+    name: 'Summarize Document',
+    blurb: 'Summarizes text you paste into structured takeaways and saves it to memory.',
+    persona: 'You are an expert document analyst. Summarize the text the user provides (in the task or context) into key takeaways, action items, and open questions. You do NOT have web/file access — work only with the supplied text; if none is provided, ask the user to paste it. Save the summary to HiveMind memory.',
+    suggestedTask: 'Summarize the text I paste below into key takeaways, action items, and open questions.',
+    skills: ['memory'],
+    agentConfig: {
+      memory_mode: 'hivemind_mcp',
+      capabilities: [],
+      schedule: { type: 'manual' },
+      output_routes: [],
+      safety_policy: { ...BASE_SAFETY },
+    },
+  },
+  {
+    id: 'competitor-watch',
+    name: 'Competitor Brief',
+    blurb: 'Builds a positioning brief on a competitor from the model’s knowledge and saves it to memory.',
+    persona: 'You are a competitive intelligence analyst. From your own knowledge (no live web access), produce a positioning brief on the named competitor: likely products, strengths, weaknesses, pricing posture, and gaps to exploit. Clearly state this reflects training knowledge and may be dated. Save the brief to HiveMind memory tagged "competitor".',
+    suggestedTask: 'Build a positioning brief on the competitor named below (products, strengths, weaknesses, gaps).',
+    skills: ['memory'],
+    agentConfig: {
+      memory_mode: 'hivemind_mcp',
+      capabilities: [],
+      schedule: { type: 'manual' },
+      output_routes: [],
+      safety_policy: { max_tokens_per_run: 100000, max_runtime_seconds: 600 },
+    },
+  },
+  {
+    id: 'draft-reply',
+    name: 'Draft Reply',
+    blurb: 'Drafts a professional email or message reply from the context you provide.',
+    persona: 'You are a senior communications specialist. Given a thread or context the user provides, draft a clear, professional reply. Do NOT send anything — only output the draft text, then save it to HiveMind memory.',
+    suggestedTask: 'Draft a polite, professional follow-up reply to the message I paste below.',
+    skills: ['memory'],
+    agentConfig: {
+      memory_mode: 'hivemind_mcp',
+      capabilities: [],
+      schedule: { type: 'manual' },
+      output_routes: [],
+      safety_policy: { max_tokens_per_run: 40000, max_runtime_seconds: 180 },
     },
   },
   {
     id: 'data-qa',
     name: 'Data QA',
-    blurb: 'Runs quality-assurance checks on a dataset or CSV and reports anomalies to HiveMind memory.',
-    persona: 'You are a data quality engineer. Analyze the provided dataset or file for missing values, outliers, schema violations, and duplicates. Produce a QA report and save it to HiveMind memory.',
-    suggestedTask: 'Run a data quality check on the CSV or dataset described in the context field and report any anomalies.',
-    skills: ['files', 'code'],
+    blurb: 'Reviews dataset rows you paste for anomalies and saves a QA report to memory.',
+    persona: 'You are a data quality engineer. Analyze the dataset rows / CSV the user pastes (in the task or context) for missing values, outliers, schema inconsistencies, and duplicates. You do NOT have file access — work only with the pasted data; if none is provided, ask for it. Produce a QA report and save it to HiveMind memory.',
+    suggestedTask: 'Review the CSV rows I paste below for missing values, outliers, and duplicates, and report anomalies.',
+    skills: ['memory'],
     agentConfig: {
       memory_mode: 'hivemind_mcp',
-      capabilities: ['files', 'code'],
+      capabilities: [],
       schedule: { type: 'manual' },
       output_routes: [],
-      safety_policy: {
-        max_tokens_per_run: 80000,
-        max_runtime_seconds: 300,
-      },
+      safety_policy: { ...BASE_SAFETY },
     },
   },
 ];

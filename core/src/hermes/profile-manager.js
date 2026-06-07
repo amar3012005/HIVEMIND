@@ -72,6 +72,7 @@ function buildProfileConfigYaml(mcpUrl, groqKey) {
     apiKeyLiteral: groqKey,
     mcpUrl,
     browserMcpUrl: process.env.HERMES_BROWSER_MCP_URL || 'http://hivemind-control-plane:3000/hermes/mcp/browser',
+    webMcpUrl: process.env.HERMES_PLAYWRIGHT_MCP_URL || 'http://hm-playwright:8931/mcp',
   });
 }
 
@@ -144,7 +145,7 @@ export async function ensureProfile(prisma, tenantId, cfg = {}) {
   const mcpKey = cfg.mcpKey || scoped?.rawKey || process.env.MCP_HIVEMIND_API_KEY || apiKey;
   const create = await createProfile(tenantId, {
     apiKey, port,
-    soul: cfg.soul || `You are the HiveMind agent runtime for tenant ${tenantId}. Use the hivemind MCP tools for all memory recall/search/save (system of record).`,
+    soul: cfg.soul || `You are the HiveMind agent runtime for tenant ${tenantId}. Use the hivemind MCP tools for all memory recall/search/save (system of record). For web tasks you have TWO browser tool sets: prefer the Playwright "browser_*" tools (a server-side headless browser) for public web — research, reading pages, extracting data, filling public forms; use the WebBridge tools only when the task needs the user's own logged-in browser sessions (their email, internal apps). Only call a tool that is actually listed in your available tools.`,
     extraEnv: { GROQ_API_KEY: process.env.GROQ_API_KEY || '', MCP_HIVEMIND_API_KEY: mcpKey },
   });
   if (!create.ok) return { ok: false, profile, port, url, issues: create.issues };

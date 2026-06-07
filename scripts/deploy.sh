@@ -416,6 +416,30 @@ start_core_benchmark() {
   return 1
 }
 
+# hm-playwright — server-side headless browser as an MCP server (@playwright/mcp).
+# The "web automation" default tool that needs no user install. Internal-only
+# (no published port); reached by the Hermes gateway on the docker networks.
+start_playwright() {
+  log "Building hm-playwright (@playwright/mcp headless)..."
+  docker build -t hm-playwright:latest /opt/HIVEMIND/services/hm-playwright 2>&1 | tail -3
+  docker rm -f hm-playwright 2>/dev/null || true
+  ensure_networks
+  docker run -d \
+    --name hm-playwright \
+    --network "$NETWORK" \
+    --restart unless-stopped \
+    --cpus 2 --memory 2g \
+    hm-playwright:latest
+  docker network connect "$COOLIFY_HIVEMIND_NET" hm-playwright 2>/dev/null || true
+  docker network connect coolify hm-playwright 2>/dev/null || true
+  sleep 6
+  if docker exec hm-playwright sh -c "curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8931/mcp -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"p\",\"version\":\"1\"}}}'" 2>/dev/null | grep -q 200; then
+    log "hm-playwright is ${GREEN}healthy${NC} (MCP on 8931, internal)"
+  else
+    err "hm-playwright MCP not answering"; docker logs hm-playwright --tail 10
+  fi
+}
+
 # hm-hermes — Hermes runtime (Phase 6h). Builds the image (in-container secure
 # mgmt server baked in) then runs with resource caps. Mgmt port 8650 is NEVER
 # published (internal hmtest only); only the gateway 8642 + dashboard 9119 are.
@@ -459,6 +483,7 @@ case "${1:-all}" in
   benchmark)         start_core_benchmark && verify ;;
   control)           start_control ;;
   hermes|hm-hermes)  start_hermes ;;
+  playwright|hm-playwright) start_playwright ;;
   mirofish)          start_mirofish ;;
   employees|digital-employees|slack-agents)
                      start_employees ;;

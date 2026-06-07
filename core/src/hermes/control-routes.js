@@ -957,7 +957,8 @@ export async function handleHermesRoutes(req, res, ctx) {
       if (!ens.ok) { jsonResponse(res, { error: 'profile unavailable: ' + (ens.issues || []).join(';') }, 502); return true; }
       const mcpUrl = process.env.HIVEMIND_API_URL ? `${process.env.HIVEMIND_API_URL}/api/mcp` : 'https://core.hivemind.davinciai.eu:8050/api/mcp';
       const browserMcpUrl = process.env.HERMES_BROWSER_MCP_URL || 'http://hivemind-control-plane:3000/hermes/mcp/browser';
-      const wrote = await writeProfileFile(tenantId, 'config.yaml', buildConfigYaml({ provider, model, apiKeyLiteral, mcpUrl, browserMcpUrl }));
+      const webMcpUrl = process.env.HERMES_PLAYWRIGHT_MCP_URL || 'http://hm-playwright:8931/mcp';
+      const wrote = await writeProfileFile(tenantId, 'config.yaml', buildConfigYaml({ provider, model, apiKeyLiteral, mcpUrl, browserMcpUrl, webMcpUrl }));
       if (!wrote) { jsonResponse(res, { error: 'failed to write model config' }, 502); return true; }
       await restartGateway(tenantId);
       // Persist {provider,model} (NOT the key) to the agent config.

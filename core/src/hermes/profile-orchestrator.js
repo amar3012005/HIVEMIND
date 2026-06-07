@@ -37,9 +37,9 @@ export const PROVIDER_BASE_URLS = {
  * Build a profile config.yaml (model + HiveMind MCP). model.api_key MUST be a
  * literal (Hermes does NOT resolve env-refs for model.api_key; it DOES for MCP
  * headers). Used by fresh-create (profile-manager) and the model-switch route.
- * @param {{ provider?: 'groq'|'openrouter', model: string, apiKeyLiteral: string, mcpUrl: string, browserMcpUrl?: string }} o
+ * @param {{ provider?: 'groq'|'openrouter', model: string, apiKeyLiteral: string, mcpUrl: string, browserMcpUrl?: string, webMcpUrl?: string }} o
  */
-export function buildConfigYaml({ provider = 'groq', model, apiKeyLiteral, mcpUrl, browserMcpUrl = null }) {
+export function buildConfigYaml({ provider = 'groq', model, apiKeyLiteral, mcpUrl, browserMcpUrl = null, webMcpUrl = null }) {
   const baseUrl = PROVIDER_BASE_URLS[provider] || PROVIDER_BASE_URLS.groq;
   const lines = [
     'model:',
@@ -64,6 +64,16 @@ export function buildConfigYaml({ provider = 'groq', model, apiKeyLiteral, mcpUr
       `    url: ${browserMcpUrl}`,
       '    headers:',
       '      Authorization: Bearer ${WB_MCP_TOKEN}',
+      '    enabled: true',
+    );
+  }
+  // Server-side headless browser (Playwright MCP) — always available, no user
+  // install. Agents use the `browser_*` tools for public web / research; reserve
+  // the WebBridge tools above for tasks needing the user's logged-in sessions.
+  if (webMcpUrl) {
+    lines.push(
+      '  web:',
+      `    url: ${webMcpUrl}`,
       '    enabled: true',
     );
   }

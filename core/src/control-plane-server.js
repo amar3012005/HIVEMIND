@@ -5919,6 +5919,7 @@ Write the persona now.`;
           await sealTurn(prisma, body.turn_id, {
             status: body.event.status || 'complete',
             costTokens: body.event.cost_tokens || 0,
+            event: body.event,
           });
         } else {
           await appendTurnEvent(prisma, body.turn_id, body.event);

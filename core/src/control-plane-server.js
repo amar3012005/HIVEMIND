@@ -5799,6 +5799,59 @@ Write the persona now.`;
       const room = await prisma.hyperRoom.findFirst({
         where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId },
       });
+      if (body.action === 'flyby-decision') {
+        const turnId = typeof body.turn_id === 'string' ? body.turn_id : '';
+        const decision = String(body.decision || '').trim().toLowerCase();
+        if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
+        if (!turnId) return jsonResponse(res, { error: 'turn_id is required' }, 400);
+        if (!['agree', 'disagree'].includes(decision)) {
+          return jsonResponse(res, { error: 'decision must be agree or disagree' }, 400);
+        }
+        try {
+          const turn = await prisma.hyperTurn.findFirst({
+            where: { id: turnId, roomId },
+            select: { id: true, userMessage: true, lines: true, status: true, sealedAt: true },
+          });
+          if (!turn) return jsonResponse(res, { error: 'Turn not found' }, 404);
+          if (turn.sealedAt || turn.status !== 'live') {
+            return jsonResponse(res, { error: 'Turn is no longer live' }, 409);
+          }
+          const proposal = (turn.lines || []).find(ev => ev && ev.t === 'flyby_proposal');
+          const flybySpec = body.flyby_spec || proposal?.spec || null;
+          const { appendTurnEvent } = await import('./employees/hyper-rooms.js');
+          await appendTurnEvent(prisma, turnId, {
+            t: 'flyby_decision',
+            decision,
+            spec: flybySpec,
+            ts: Date.now(),
+          });
+
+          const sidecarBase = process.env.EMPLOYEES_SIDECAR_URL || 'http://hm-employees:8060';
+          fetch(`${sidecarBase}/internal/hyper/room-turn`, {
+            method: 'POST',
+            headers: {
+              'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              room_id: roomId,
+              turn_id: turnId,
+              user_id: current.session.userId,
+              org_id: current.session.orgId,
+              user_message: turn.userMessage,
+              participant_ids: room.participantIds || [],
+              flyby_decision: decision,
+              flyby_spec: flybySpec,
+              callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
+            }),
+          }).catch(err => console.warn('[hyper-rooms] flyby continuation failed:', err.message));
+
+          return jsonResponse(res, { ok: true, status: 'continuing' }, 202);
+        } catch (err) {
+          console.warn('[hyper-rooms] flyby decision failed:', err.message);
+          return jsonResponse(res, { error: err.message }, 500);
+        }
+      }
       const pre = preflightTurn({ room, userMessage });
       if (pre) return jsonResponse(res, pre, 400);
 

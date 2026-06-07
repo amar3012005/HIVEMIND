@@ -77,3 +77,11 @@
 - Deployed: hm-hermes rebuilt (mgmt cron), both CPs restarted.
 - FE GOTCHA: P2 workflow ran with working tree on branch preview/meeting-notes-dial (6f base, NO P1), so its shell rewrite omitted Home/Tasks/Library. RECONCILED: reset to origin/main (P1), grafted the 3 P2 tab files + wired imports/render/nav + added 6 P2 api-client methods by hand. main now has P1+P2 coexisting. Pushed main 9ce592a. LESSON: ensure FE working tree is on main before FE workflows.
 - P3 (Channels/Approvals/Memory) launched wcpt76huv. Approvals endpoints already exist (6e) → FE-only.
+
+## Hermes v2 P3 — SHIPPED LIVE — 2026-06-07 (workflow wcpt76huv)
+- Channels: GET /hermes/agent/channels + POST /:type/connect (telegram TELEGRAM_BOT_TOKEN; slack BOT+APP; discord 400). Token → NEW mgmt /mgmt/profile/env-merge (orchestrator mergeProfileEnv, upserts .env keys in place, preserves API_SERVER_KEY) → restartGateway. Tokens never logged/returned. Verified live: mergeProfileEnv ok.
+- Memory: GET /hermes/agent/memory → read-only recent memories, raw SQL hivemind.memories WHERE org_id=$1::uuid (memories.org_id is UUID — needed cast; bare "memories" also fixed to hivemind.memories) is_latest limit 20, content truncated. Verified live: 5 rows.
+- Approvals: existing 6e endpoints, FE-only.
+- Deployed: hm-hermes rebuilt (env-merge), both CPs restarted.
+- FE GOTCHA (again): external process thrashed branches (main→_ts_fix→preview/meeting-notes-dial) mid-session. The P3 FE commit landed as b280670 on _ts_fix (parent = origin/main tip 7c4760b, full P3: 9 imports + Channels/Approvals/Memory + api methods). Recovered: checkout main, reset origin/main, merge --ff-only b280670, push (atomic single command). main = b280670.
+- ** Hermes v2 COMPLETE: all 9 sections live (Home/Tasks/Library/Persona/Schedules/Skills/Channels/Approvals/Memory) + quick-run Library. Backend on both control-planes; FE on Da-vinci main. **

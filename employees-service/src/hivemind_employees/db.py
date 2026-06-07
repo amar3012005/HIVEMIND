@@ -180,6 +180,30 @@ async def get_permanent_skeptic_id(room_id: str, org_id: Optional[str] = None) -
     return None
 
 
+async def get_permanent_lead_id(room_id: str, org_id: Optional[str] = None) -> Optional[str]:
+    """Returns the permanent_lead_id for the room, or None.
+    Gracefully tolerates pre-migration rooms (column absent)."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        try:
+            if org_id is not None:
+                row = await conn.fetchrow(
+                    "SELECT permanent_lead_id::text FROM hivemind.hyper_rooms "
+                    "WHERE id = $1 AND org_id = $2::uuid",
+                    room_id, org_id,
+                )
+            else:
+                row = await conn.fetchrow(
+                    "SELECT permanent_lead_id::text FROM hivemind.hyper_rooms WHERE id = $1",
+                    room_id,
+                )
+            if row and row["permanent_lead_id"]:
+                return str(row["permanent_lead_id"])
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_permanent_lead_id fallback: %s", exc)
+    return None
+
+
 async def set_permanent_skeptic_id(room_id: str, employee_id: Optional[str]) -> bool:
     """PATCH the permanent Skeptic for a room."""
     pool = await init_pool()
@@ -192,6 +216,21 @@ async def set_permanent_skeptic_id(room_id: str, employee_id: Optional[str]) -> 
             return True
     except Exception as exc:  # noqa: BLE001
         log.warning("set_permanent_skeptic_id failed: %s", exc)
+        return False
+
+
+async def set_permanent_lead_id(room_id: str, employee_id: Optional[str]) -> bool:
+    """PATCH the permanent lead for a room."""
+    pool = await init_pool()
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE hivemind.hyper_rooms SET permanent_lead_id = $1::uuid WHERE id = $2",
+                employee_id, room_id,
+            )
+            return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("set_permanent_lead_id failed: %s", exc)
         return False
 
 

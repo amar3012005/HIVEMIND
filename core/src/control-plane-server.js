@@ -5489,6 +5489,12 @@ Write the persona now.`;
         ]);
         const template = (typeof body.template === 'string' && ALLOWED_TEMPLATES.has(body.template))
           ? body.template : 'debate';
+        let permanentLeadId = null;
+        if (typeof body.permanent_lead_id === 'string' && validIds.includes(body.permanent_lead_id)) {
+          permanentLeadId = body.permanent_lead_id;
+        } else if (validIds.length > 0) {
+          permanentLeadId = validIds.slice().sort()[0];
+        }
         let permanentSkepticId = null;
         if (typeof body.permanent_skeptic_id === 'string' && validIds.includes(body.permanent_skeptic_id)) {
           permanentSkepticId = body.permanent_skeptic_id;
@@ -5500,6 +5506,7 @@ Write the persona now.`;
             name,
             participantIds: validIds,
             template,
+            permanentLeadId,
             permanentSkepticId,
           },
         });
@@ -5621,6 +5628,16 @@ Write the persona now.`;
       ]);
       if (typeof body.template === 'string' && ALLOWED_TEMPLATES.has(body.template)) {
         data.template = body.template;
+      }
+      if (typeof body.permanent_lead_id === 'string' || body.permanent_lead_id === null) {
+        if (body.permanent_lead_id) {
+          const emp = await prisma.digitalEmployee.findFirst({
+            where: { id: body.permanent_lead_id, orgId: current.session.orgId },
+            select: { id: true },
+          });
+          if (!emp) return jsonResponse(res, { error: 'Lead employee not in org' }, 400);
+        }
+        data.permanentLeadId = body.permanent_lead_id || null;
       }
       if (typeof body.permanent_skeptic_id === 'string' || body.permanent_skeptic_id === null) {
         if (body.permanent_skeptic_id) {

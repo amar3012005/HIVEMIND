@@ -47,6 +47,7 @@ from .agents.agentscope_factory import build_react_agent
 from .bootstrap_client import fetch_bootstrap, report_eval, report_metrics
 from .config import get_settings
 from .db import (
+    get_permanent_lead_id,
     get_permanent_skeptic_id,
     get_room_template,
     get_trust_scores,
@@ -354,6 +355,26 @@ def _pick_lead_rotating(
     eligible = sorted(eligible, key=lambda p: p.get("slug", ""))
     idx = (max(seq, 1) - 1) % len(eligible)
     return eligible[idx]
+
+
+def _pick_lead_fixed(
+    participants: List[Dict[str, Any]],
+    permanent_lead_id: Optional[str],
+    skeptic_id: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    """Resolve a fixed per-room lead, or fall back to the first eligible agent."""
+    if permanent_lead_id:
+        locked = next((p for p in participants if p["id"] == permanent_lead_id), None)
+        if locked is not None and locked["id"] != skeptic_id:
+            return locked
+        log.warning(
+            "[hyper] permanent_lead_id %s not among participants or collides with skeptic — falling back",
+            permanent_lead_id,
+        )
+    eligible = [p for p in participants if p["id"] != skeptic_id] or participants
+    if not eligible:
+        return None
+    return sorted(eligible, key=lambda p: p.get("slug", ""))[0]
 
 
 def _pick_skeptic_rotating(
@@ -1962,13 +1983,10 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     # (seq lives on hyper_turns, written by the control-plane). Resolve a
     # locked permanent skeptic first so lead rotation can exclude it.
     # All reads are org-scoped so a foreign room/turn id can't leak config.
+    permanent_skeptic_id = await get_permanent_skeptic_id(req.room_id, org_id=req.org_id)
+    permanent_lead_id = await get_permanent_lead_id(req.room_id, org_id=req.org_id)
     raw_seq = await get_turn_seq(req.turn_id, org_id=req.org_id)
     if raw_seq is None:
-        # No seq available (missing row / NULL / pre-migration column / DB
-        # error). Falling back to a fixed 0 would freeze rotation onto the
-        # alphabetically-first lead forever. Derive a deterministic-but-
-        # varying ordinal from the turn id so rotation still cycles, and
-        # surface the degraded path so it's observable.
         seq = (int(hashlib.sha1(req.turn_id.encode("utf-8")).hexdigest(), 16) % 997) + 1
         log.warning("[hyper] get_turn_seq returned None for turn=%s — using hashed ordinal %d",
                     req.turn_id, seq)
@@ -1977,12 +1995,11 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         })
     else:
         seq = raw_seq
-    permanent_skeptic_id = await get_permanent_skeptic_id(req.room_id, org_id=req.org_id)
-    # Lead: @mention override wins; otherwise rotate by seq, excluding a
-    # locked permanent skeptic so the skeptic is never auto-elected lead.
-    lead = forced or _pick_lead_rotating(
-        participants, req.user_message, seq, permanent_skeptic_id,
-    )
+    # Lead: @mention override wins; otherwise use the room's pinned lead.
+    # This avoids recomputing router selection on every turn.
+    lead = forced or _pick_lead_fixed(participants, permanent_lead_id, permanent_skeptic_id)
+    if lead is None:
+        raise RuntimeError("no eligible lead")
     reactors = _pick_reactors(participants, lead)
 
     # B1: per-room template (debate | decision | swarm | brainstorm | council

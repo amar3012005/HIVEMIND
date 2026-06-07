@@ -20,7 +20,7 @@
 import http from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
 
@@ -60,6 +60,63 @@ async function writeProfileFile(tenantId, relpath, content) {
   } catch (err) {
     return { ok: false, error: err.message };
   }
+}
+
+/**
+ * Merge key/value pairs into a tenant's profile .env without clobbering existing
+ * keys that are NOT in the provided env object. Keys present in the env object
+ * are upserted (added if absent, replaced if already there).
+ *
+ * Constraint: both key and value are ASCII-safe env var text; values may NOT
+ * contain newlines (reject if they do — prevents injection into the .env file).
+ *
+ * @param {string} tenantId
+ * @param {Record<string,string>} env
+ * @returns {Promise<{ ok:boolean, error?:string }>}
+ */
+async function mergeProfileEnv(tenantId, env) {
+  if (!env || typeof env !== 'object' || Array.isArray(env)) {
+    return { ok: false, error: 'env must be a non-array object' };
+  }
+  const entries = Object.entries(env);
+  if (!entries.length) return { ok: true }; // nothing to do
+  // Validate keys (must be valid env var names) and values (no newlines).
+  for (const [k, v] of entries) {
+    if (!/^[A-Z_][A-Z0-9_]*$/i.test(k)) return { ok: false, error: `invalid env key: ${k}` };
+    if (String(v).includes('\n') || String(v).includes('\r')) {
+      return { ok: false, error: `value for ${k} contains a newline — rejected` };
+    }
+  }
+  const full = `${PROFILES_DIR}/${profileName(tenantId)}/.env`;
+  let existing = '';
+  try {
+    existing = await readFile(full, 'utf8');
+  } catch {
+    // File may not exist yet — treat as empty (createProfile will have written it
+    // on first create; mergeProfileEnv is always called after that).
+    existing = '';
+  }
+  // Parse current lines into a map (preserve comments/blanks as-is).
+  const lines = existing.split('\n');
+  /** @type {Map<string, number>} key → line index for existing KEY=… lines */
+  const keyLineMap = new Map();
+  const parsedLines = lines.map((line, i) => {
+    const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/i);
+    if (m) { keyLineMap.set(m[1], i); }
+    return line;
+  });
+  // Upsert each incoming key.
+  for (const [k, v] of entries) {
+    const newLine = `${k}=${v}`;
+    if (keyLineMap.has(k)) {
+      parsedLines[keyLineMap.get(k)] = newLine;
+    } else {
+      parsedLines.push(newLine);
+    }
+  }
+  // Ensure trailing newline, remove excess blank lines at the end.
+  const merged = parsedLines.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';
+  return writeProfileFile(tenantId, '.env', merged);
 }
 
 // ── Lifecycle ops (local hermes CLI) ────────────────────────────────
@@ -216,6 +273,11 @@ const server = http.createServer(async (req, res) => {
       case '/mgmt/profile/file': {
         const content = body.contentB64 ? Buffer.from(body.contentB64, 'base64').toString('utf8') : (body.content || '');
         return send(res, 200, await writeProfileFile(tenantId, body.relpath, content));
+      }
+      case '/mgmt/profile/env-merge': {
+        const envMap = body.env && typeof body.env === 'object' ? body.env : null;
+        if (!envMap) return send(res, 400, { ok: false, error: 'env object required' });
+        return send(res, 200, await mergeProfileEnv(tenantId, envMap));
       }
       case '/mgmt/gateway/start':
         return send(res, 200, await gatewayAction(tenantId, 'start'));

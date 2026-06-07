@@ -137,3 +137,19 @@ export async function deleteCron(tenantId, jobId) {
   if (!r.ok) return { ok: false, issues: r.issues || [r.error || 'deleteCron failed'] };
   return { ok: true, issues: [] };
 }
+
+/**
+ * Merge env key/value pairs into a tenant profile's .env without clobbering
+ * unrelated keys. Uses the mgmt-server /mgmt/profile/env-merge route.
+ *
+ * Callers MUST NOT log `env` values — they will contain secrets (bot tokens).
+ *
+ * @param {string} tenantId
+ * @param {Record<string,string>} env  Keys → values to upsert into the profile .env
+ * @returns {Promise<{ ok:boolean, issues:string[] }>}
+ */
+export async function mergeProfileEnv(tenantId, env) {
+  const r = await mgr('POST', '/mgmt/profile/env-merge', { tenantId, env });
+  if (!r.ok) return { ok: false, issues: r.issues || [r.error || 'mergeProfileEnv failed'] };
+  return { ok: true, issues: [] };
+}

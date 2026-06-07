@@ -23,10 +23,52 @@ import crypto from 'node:crypto';
 // default-OFF path (and server boot) never loads it. See run branch below.
 // library is a static module with no heavy deps — imported at top level.
 import { LIBRARY, findTemplate } from './library.js';
-// profile-orchestrator: writeProfileFile + restartGateway + cron ops (Phase 6h transport).
-import { writeProfileFile, restartGateway, listCron, addCron, deleteCron } from './profile-orchestrator.js';
+// profile-orchestrator: writeProfileFile + restartGateway + cron + env-merge ops (Phase 6h transport).
+import { writeProfileFile, restartGateway, listCron, addCron, deleteCron, mergeProfileEnv } from './profile-orchestrator.js';
 
 const ROUTE_PREFIX = '/hermes/';
+
+/**
+ * Supported messaging channel types and the env var(s) each requires.
+ * Telegram is the simplest (one token). Slack requires two tokens (xoxb- + xapp-).
+ * Discord: no dedicated platform adapter file was confirmed during recon — we gate
+ * it as 'unsupported' and return 400 so the FE can show a clear error rather than
+ * silently misconfiguring the profile env.
+ *
+ * Structure: { envVars: string[], label: string, supported: boolean }
+ */
+const CHANNEL_SPECS = {
+  telegram: {
+    label: 'Telegram',
+    supported: true,
+    envVars: ['TELEGRAM_BOT_TOKEN'],
+    tokenFields: ['token'], // body field names that map 1:1 to envVars
+  },
+  slack: {
+    label: 'Slack',
+    supported: true,
+    envVars: ['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN'],
+    tokenFields: ['bot_token', 'app_token'],
+  },
+  discord: {
+    label: 'Discord',
+    supported: false, // no dedicated platform adapter confirmed in recon
+    envVars: [],
+    tokenFields: [],
+  },
+};
+
+/** Extract channels status from hermes_agents.config.channels (defaults to all false). */
+function channelsFromConfig(storedCfg) {
+  const stored = (storedCfg && typeof storedCfg.channels === 'object' && storedCfg.channels !== null)
+    ? storedCfg.channels
+    : {};
+  return {
+    telegram: !!stored.telegram,
+    slack: !!stored.slack,
+    discord: !!stored.discord,
+  };
+}
 
 /**
  * Canonical skill catalog — 6 toggleable capabilities.
@@ -564,6 +606,147 @@ export async function handleHermesRoutes(req, res, ctx) {
         return true;
       }
       jsonResponse(res, { ok: true });
+      return true;
+    }
+
+    // ── GET /hermes/agent/channels ──────────────────────────────────────────
+    // Returns the connection status for each messaging channel (slack, telegram,
+    // discord) read from hermes_agents.config.channels (booleans). Does NOT
+    // reveal any tokens — purely a status endpoint.
+    if (pathname === '/hermes/agent/channels' && method === 'GET') {
+      const agentRows = await prisma.$queryRawUnsafe(
+        `SELECT id, config FROM hivemind.hermes_agents
+          WHERE org_id = $1 AND deleted_at IS NULL AND status != 'deleted'
+          ORDER BY created_at ASC LIMIT 1`,
+        orgId,
+      );
+      const agent = agentRows && agentRows[0];
+      const storedCfg = (agent && agent.config && typeof agent.config === 'object') ? agent.config : {};
+      const channels = channelsFromConfig(storedCfg);
+      jsonResponse(res, {
+        channels: [
+          { type: 'telegram', label: 'Telegram', connected: channels.telegram, supported: true },
+          { type: 'slack',    label: 'Slack',    connected: channels.slack,    supported: true },
+          { type: 'discord',  label: 'Discord',  connected: channels.discord,  supported: false },
+        ],
+      });
+      return true;
+    }
+
+    // ── POST /hermes/agent/channels/:type/connect ──────────────────────────
+    // Connect a messaging channel by writing its bot token(s) into the profile
+    // .env (via mergeProfileEnv → mgmt-server /mgmt/profile/env-merge) and
+    // restarting the gateway so the Hermes gateway picks them up.
+    //
+    // Body for telegram: { token: "..." }
+    // Body for slack:    { bot_token: "xoxb-...", app_token: "xapp-..." }
+    //
+    // SECURITY: tokens are NEVER logged or returned in the response.
+    const channelConnect = pathname.match(/^\/hermes\/agent\/channels\/([^/]+)\/connect$/);
+    if (channelConnect && method === 'POST') {
+      const channelType = channelConnect[1];
+      const spec = CHANNEL_SPECS[channelType];
+      if (!spec) {
+        jsonResponse(res, { error: `Unknown channel type: ${channelType}` }, 400);
+        return true;
+      }
+      if (!spec.supported) {
+        jsonResponse(res, {
+          error: `Channel type '${channelType}' is not supported in this release`,
+          supported_channels: ['telegram', 'slack'],
+        }, 400);
+        return true;
+      }
+
+      const body = (await parseBody(req)) || {};
+
+      // Build the env map from body fields → env var names.
+      /** @type {Record<string,string>} */
+      const envMap = {};
+      for (let i = 0; i < spec.tokenFields.length; i++) {
+        const fieldName = spec.tokenFields[i];
+        const envKey = spec.envVars[i];
+        const val = body[fieldName];
+        if (!val || typeof val !== 'string' || !val.trim()) {
+          jsonResponse(res, { error: `${fieldName} is required for ${channelType}` }, 400);
+          return true;
+        }
+        envMap[envKey] = val.trim();
+      }
+
+      // Resolve (or auto-create) the singleton agent so we can persist config.
+      const agentRows = await prisma.$queryRawUnsafe(
+        `SELECT id, org_id, tenant_id, name, config, status
+           FROM hivemind.hermes_agents
+          WHERE org_id = $1 AND deleted_at IS NULL AND status != 'deleted'
+          ORDER BY created_at ASC LIMIT 1`,
+        orgId,
+      );
+      let agent = agentRows && agentRows[0];
+      if (!agent) {
+        const id = newId('hagent');
+        await prisma.$executeRawUnsafe(
+          `INSERT INTO hivemind.hermes_agents (id, org_id, tenant_id, name, config, status, created_by)
+           VALUES ($1,$2,$3,'Hermes Agent','{}','active',$4)`,
+          id, orgId, tenantId, userId,
+        );
+        agent = { id, org_id: orgId, tenant_id: tenantId, name: 'Hermes Agent', config: {}, status: 'active' };
+      }
+
+      // Merge tokens into the profile .env (no-log, no-return of the values).
+      const mergeResult = await mergeProfileEnv(tenantId, envMap);
+      if (!mergeResult.ok) {
+        jsonResponse(res, { error: 'Failed to write channel credentials', issues: mergeResult.issues }, 502);
+        return true;
+      }
+
+      // Restart gateway to pick up the new env vars.
+      const restartResult = await restartGateway(tenantId);
+
+      // Persist channels[type]=true into config.channels (independent of restart outcome).
+      const storedCfg = (agent.config && typeof agent.config === 'object') ? agent.config : {};
+      const nextChannels = { ...channelsFromConfig(storedCfg), [channelType]: true };
+      const nextConfig = { ...storedCfg, channels: nextChannels };
+      await prisma.$executeRawUnsafe(
+        `UPDATE hivemind.hermes_agents SET config=$2::jsonb, updated_at=now() WHERE id=$1`,
+        agent.id, JSON.stringify(nextConfig),
+      );
+
+      jsonResponse(res, {
+        channel: channelType,
+        connected: true,
+        gateway_restarted: restartResult.ok,
+        issues: restartResult.issues || [],
+      });
+      return true;
+    }
+
+    // ── GET /hermes/agent/memory ────────────────────────────────────────────
+    // Returns the 20 most-recent memory records scoped to this org (read-only).
+    // Content is truncated to 300 chars to avoid bloating the API response.
+    // No writes — purely observational for the Hermes UI "memory" tab.
+    if (pathname === '/hermes/agent/memory' && method === 'GET') {
+      const SNIPPET_LEN = 300;
+      const rows = await prisma.$queryRawUnsafe(
+        `SELECT id, title, content, tags, created_at
+           FROM hivemind.memories
+          WHERE org_id = $1::uuid
+            AND deleted_at IS NULL
+            AND is_latest = true
+          ORDER BY created_at DESC
+          LIMIT 20`,
+        orgId,
+      ).catch(() => []);
+      const memories = (rows || []).map((r) => ({
+        id: r.id,
+        title: r.title || null,
+        content_snippet: typeof r.content === 'string' && r.content.length > SNIPPET_LEN
+          ? r.content.slice(0, SNIPPET_LEN) + '…'
+          : (r.content || ''),
+        tags: Array.isArray(r.tags) ? r.tags : [],
+        created_at: r.created_at,
+      }));
+      jsonResponse(res, { memories });
       return true;
     }
 

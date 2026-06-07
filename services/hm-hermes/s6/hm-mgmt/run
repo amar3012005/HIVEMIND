@@ -1,0 +1,3 @@
+#!/command/with-contenv sh
+# hm-hermes management server (Phase 6h). Internal-only; bearer-auth via HERMES_MGMT_KEY.
+exec node /opt/hm-hermes/mgmt-server.mjs

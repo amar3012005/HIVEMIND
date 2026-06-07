@@ -1,53 +1,57 @@
 /**
- * Hermes per-tenant PROFILE orchestrator (Phase 6c).
+ * Hermes per-tenant PROFILE orchestrator — HTTP CLIENT (Phase 6h transport).
  *
- * Profiles-per-tenant (NOT pods/K8s). One shared `hm-hermes` container hosts N
- * tenant profiles; each profile = its own SOUL/sessions/mcp + its own gateway on
- * a distinct API_SERVER_PORT, reachable cross-container at hm-hermes:<port>
- * (verified: no host port publish needed). This module wraps the Hermes CLI via
- * `docker exec <container> hermes [-p <profile>] …` (execFile — no shell).
+ * SECURITY CHANGE (6h): hm-control is public-facing and has NO docker / no
+ * docker.sock. The previous 6c implementation shelled out to `docker exec
+ * hm-hermes hermes …` from here — impossible in the deployed container, and the
+ * only way to make it work (mounting the host socket into a public container)
+ * is a host-root escalation we explicitly rejected.
  *
- * Lifecycle only (create/start/stop/restart/status/delete). The tenant→profile→
- * port registry + dispatch (runTask via hm-control-client) live in 6d. Dependency-
- * light on purpose (only node:child_process) so it runs wherever the Docker host
- * is. deleteProfile is data-preserving by intent (Hermes keeps the profile dir
- * until explicit delete; memory SoR is HiveMind anyway).
+ * Instead, lifecycle now runs INSIDE hm-hermes via its in-container management
+ * server (services/hm-hermes/mgmt-server.mjs, an s6 longrun). This module is a
+ * thin authenticated HTTP client to that server, reachable only on the internal
+ * `hmtest` network (the mgmt port is never published to the host). No docker,
+ * no socket, no shell — fixed hermes subcommands run locally on the hm-hermes
+ * side. Exported function signatures are unchanged so profile-manager (6d) and
+ * profile orchestration callers need no edits.
  *
  * @module hermes/profile-orchestrator
  */
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+const MGR_URL = (process.env.HERMES_MGR_URL || 'http://hm-hermes:8650').replace(/\/+$/, '');
+const MGMT_KEY = process.env.HERMES_MGMT_KEY || '';
+const TIMEOUT_MS = Number(process.env.HERMES_MGR_TIMEOUT_MS || 60000);
 
-const exec = promisify(execFile);
-const CONTAINER = process.env.HERMES_CONTAINER || 'hm-hermes';
-
-/** profile name for a tenant: org-<sanitized>. */
+/** profile name for a tenant: org-<sanitized>. (Must match the server side.) */
 export function profileName(tenantId) {
   const s = String(tenantId).toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
   return `org-${s}`;
 }
 
-async function dx(args, { timeoutMs = 60000, input = null } = {}) {
+/** Authenticated JSON call to the in-container management server. */
+async function mgr(method, path, body) {
+  if (!MGMT_KEY) return { ok: false, error: 'HERMES_MGMT_KEY missing (fail-closed)' };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
   try {
-    const opts = { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 };
-    const { stdout, stderr } = await exec('docker', ['exec', ...(input ? ['-i'] : []), CONTAINER, ...args], opts);
-    return { ok: true, stdout: (stdout || '').trim(), stderr: (stderr || '').trim() };
+    const res = await fetch(`${MGR_URL}${path}`, {
+      method,
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${MGMT_KEY}` },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: ctrl.signal,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return { ok: false, error: data.error || `mgmt ${res.status}`, ...data };
+    return data;
   } catch (err) {
-    return { ok: false, stdout: (err.stdout || '').trim(), stderr: (err.stderr || err.message || '').trim() };
+    return { ok: false, error: err.name === 'AbortError' ? 'mgmt timeout' : err.message };
+  } finally {
+    clearTimeout(timer);
   }
-}
-
-/** Write a file inside the container (used for .env / SOUL.md). */
-async function writeInContainer(path, content) {
-  // base64 round-trip avoids quoting/heredoc hazards
-  const b64 = Buffer.from(content, 'utf8').toString('base64');
-  const r = await dx(['sh', '-c', `echo ${b64} | base64 -d > ${path}`]);
-  return r.ok;
 }
 
 /**
  * Create a tenant profile + write its gateway .env (port/keys) and optional SOUL.
- * Does NOT start the gateway (call startGateway). mcp.json wiring = 6d.
+ * Does NOT start the gateway (call startGateway).
  * @param {string} tenantId
  * @param {{ apiKey: string, port: number, soul?: string, extraEnv?: Record<string,string> }} cfg
  * @returns {Promise<{ ok:boolean, profile:string, port:number, issues:string[] }>}
@@ -55,40 +59,46 @@ async function writeInContainer(path, content) {
 export async function createProfile(tenantId, { apiKey, port, soul = null, extraEnv = {} } = {}) {
   const profile = profileName(tenantId);
   if (!apiKey || !port) return { ok: false, profile, port, issues: ['apiKey + port required'] };
-  const create = await dx(['hermes', 'profile', 'create', profile]);
-  // "already exists" is fine (idempotent create)
-  if (!create.ok && !/exist/i.test(create.stderr)) return { ok: false, profile, port, issues: [`create: ${create.stderr}`] };
-  const envLines = {
-    API_SERVER_ENABLED: 'true', API_SERVER_HOST: '0.0.0.0', API_SERVER_PORT: String(port), API_SERVER_KEY: apiKey, ...extraEnv,
-  };
-  const envText = Object.entries(envLines).map(([k, v]) => `${k}=${v}`).join('\n') + '\n';
-  if (!await writeInContainer(`/opt/data/profiles/${profile}/.env`, envText)) return { ok: false, profile, port, issues: ['write .env failed'] };
-  if (soul && !await writeInContainer(`/opt/data/profiles/${profile}/SOUL.md`, soul)) return { ok: false, profile, port, issues: ['write SOUL failed'] };
+  const r = await mgr('POST', '/mgmt/profile/create', { tenantId, apiKey, port, soul, extraEnv });
+  if (!r.ok) return { ok: false, profile, port, issues: r.issues || [r.error || 'create failed'] };
   return { ok: true, profile, port, issues: [] };
 }
 
 /** Write a file under a tenant's profile dir (e.g. 'config.yaml', 'mcp.json'). */
 export async function writeProfileFile(tenantId, relpath, content) {
-  return writeInContainer(`/opt/data/profiles/${profileName(tenantId)}/${relpath}`, content);
+  const contentB64 = Buffer.from(String(content), 'utf8').toString('base64');
+  const r = await mgr('POST', '/mgmt/profile/file', { tenantId, relpath, contentB64 });
+  return !!r.ok;
 }
 
-export async function startGateway(tenantId) { const r = await dx(['hermes', '-p', profileName(tenantId), 'gateway', 'start']); return { ok: r.ok, issues: r.ok ? [] : [r.stderr] }; }
-export async function stopGateway(tenantId) { const r = await dx(['hermes', '-p', profileName(tenantId), 'gateway', 'stop']); return { ok: r.ok, issues: r.ok ? [] : [r.stderr] }; }
-export async function restartGateway(tenantId) { const r = await dx(['hermes', '-p', profileName(tenantId), 'gateway', 'restart']); return { ok: r.ok, issues: r.ok ? [] : [r.stderr] }; }
+export async function startGateway(tenantId) {
+  const r = await mgr('POST', '/mgmt/gateway/start', { tenantId });
+  return { ok: !!r.ok, issues: r.ok ? [] : (r.issues || [r.error]) };
+}
+export async function stopGateway(tenantId) {
+  const r = await mgr('POST', '/mgmt/gateway/stop', { tenantId });
+  return { ok: !!r.ok, issues: r.ok ? [] : (r.issues || [r.error]) };
+}
+export async function restartGateway(tenantId) {
+  const r = await mgr('POST', '/mgmt/gateway/restart', { tenantId });
+  return { ok: !!r.ok, issues: r.ok ? [] : (r.issues || [r.error]) };
+}
 
 /** @returns {Promise<{ exists:boolean, gatewayRunning:boolean }>} */
 export async function getProfileStatus(tenantId) {
-  const profile = profileName(tenantId);
-  const r = await dx(['hermes', 'profile', 'list']);
+  const r = await mgr('GET', `/mgmt/profile/status?tenantId=${encodeURIComponent(tenantId)}`);
   if (!r.ok) return { exists: false, gatewayRunning: false };
-  const line = r.stdout.split('\n').find((l) => l.includes(profile));
-  return { exists: !!line, gatewayRunning: !!line && /running/i.test(line) };
+  return { exists: !!r.exists, gatewayRunning: !!r.gatewayRunning };
 }
 
-/** Stop gateway + delete the profile. Hermes prompts — pass -y. */
+/** Stop gateway + delete the profile (data-preserving by intent on the server). */
 export async function deleteProfile(tenantId) {
-  const profile = profileName(tenantId);
-  await dx(['hermes', '-p', profile, 'gateway', 'stop']);
-  const r = await dx(['hermes', 'profile', 'delete', profile, '-y']);
-  return { ok: r.ok, issues: r.ok ? [] : [r.stderr] };
+  const r = await mgr('POST', '/mgmt/profile/delete', { tenantId });
+  return { ok: !!r.ok, issues: r.ok ? [] : (r.issues || [r.error]) };
+}
+
+/** Liveness/auth probe against the management server. */
+export async function pingManager() {
+  const r = await mgr('POST', '/mgmt/ping', {});
+  return { ok: !!r.ok, error: r.error };
 }

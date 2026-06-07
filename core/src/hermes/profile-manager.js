@@ -31,6 +31,33 @@ export function getApiKey() {
   return process.env.HERMES_API_SERVER_KEY || '';
 }
 
+/**
+ * Poll a freshly-started gateway until its HTTP port is bound. The Hermes gateway
+ * returns from `gateway start` immediately, but the Python API server takes a few
+ * seconds to bind — dispatching before that yields ECONNREFUSED ("fetch failed").
+ * ANY HTTP response (incl. 401/404) proves the port is live; only a connection
+ * error retries. Bounded so a wedged gateway can't hang the request.
+ * @returns {Promise<boolean>} true once reachable, false on timeout.
+ */
+async function waitForGateway(url, { timeoutMs = 20000, intervalMs = 1000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 2000);
+      try {
+        await fetch(url, { signal: ctrl.signal });
+        return true; // any status = port bound
+      } finally {
+        clearTimeout(t);
+      }
+    } catch {
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+  }
+  return false;
+}
+
 /** Build the per-profile config.yaml (Groq model + HiveMind MCP).
  * NOTE: model.api_key MUST be the literal key — Hermes does NOT resolve env-refs
  * (${VAR}) for model.api_key (it does for MCP headers). The literal lands in the
@@ -97,7 +124,9 @@ export async function ensureProfile(prisma, tenantId, cfg = {}) {
   await writeProfileFile(tenantId, 'config.yaml', buildProfileConfigYaml(mcpUrl, process.env.GROQ_API_KEY || ''));
   const s = await startGateway(tenantId);
   if (!s.ok) return { ok: false, profile, port, url, issues: ['startGateway: ' + s.issues.join(';')] };
-  await upsertRegistry(prisma, { tenantId, profile, port, orgId: cfg.orgId, mcpUrl, status: 'running' });
+  const ready = await waitForGateway(url);
+  await upsertRegistry(prisma, { tenantId, profile, port, orgId: cfg.orgId, mcpUrl, status: ready ? 'running' : 'starting' });
+  if (!ready) return { ok: false, profile, port, url, issues: ['gateway did not become reachable within timeout'] };
   return { ok: true, profile, port, url, issues: [] };
 }
 

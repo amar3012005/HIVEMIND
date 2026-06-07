@@ -5520,6 +5520,7 @@ Write the persona now.`;
     // /v1/hyper-rooms/:id/turns(/:turnId)(/stream)
     const roomTurnMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/turns(?:\/([0-9a-f-]{36})(\/stream)?)?$/);
     const flybyDecisionMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/turns\/([0-9a-f-]{36})\/flyby-decision$/);
+    const flybyDecisionCompat = roomTurnMatch && roomTurnMatch[2] && !roomTurnMatch[3] && url.searchParams.get('action') === 'flyby-decision';
     const roomMetaMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})$/);
 
     // DELETE /v1/hyper-rooms/:id — permanent delete (?hard=true) or archive.
@@ -5727,12 +5728,12 @@ Write the persona now.`;
 
     // POST /v1/hyper-rooms/:id/turns/:turnId/flyby-decision — continue a
     // deep simulation after the user approves/rejects the temporary specialist.
-    if (flybyDecisionMatch && req.method === 'POST') {
+    if ((flybyDecisionMatch || flybyDecisionCompat) && req.method === 'POST') {
       const current = await requireSession(req, res);
       if (!current) return;
       const body = await parseBody(req);
-      const roomId = flybyDecisionMatch[1];
-      const turnId = flybyDecisionMatch[2];
+      const roomId = flybyDecisionMatch ? flybyDecisionMatch[1] : roomTurnMatch[1];
+      const turnId = flybyDecisionMatch ? flybyDecisionMatch[2] : roomTurnMatch[2];
       const decision = String(body.decision || '').trim().toLowerCase();
       if (!['agree', 'disagree'].includes(decision)) {
         return jsonResponse(res, { error: 'decision must be agree or disagree' }, 400);

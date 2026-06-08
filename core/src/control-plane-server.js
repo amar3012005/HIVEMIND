@@ -5795,6 +5795,10 @@ Write the persona now.`;
       const body = await parseBody(req);
       const roomId = roomTurnMatch[1];
       const userMessage = typeof body.user_message === 'string' ? body.user_message : '';
+      const requestedTurnId = typeof body.turn_id === 'string'
+        && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(body.turn_id)
+          ? body.turn_id
+          : null;
 
       const room = await prisma.hyperRoom.findFirst({
         where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId },
@@ -5877,6 +5881,7 @@ Write the persona now.`;
 
           const created = await tx.hyperTurn.create({
             data: {
+              ...(requestedTurnId ? { id: requestedTurnId } : {}),
               roomId,
               seq: nextSeq,
               userMessage,
@@ -5964,10 +5969,12 @@ Write the persona now.`;
 
       let cursor = 0;
       let alive = true;
+      let missingTicks = 0;
       // Poll frequently so the first router/typing event reaches the FE
       // quickly even though the stream is DB-backed, not a raw push pipe.
       const POLL_MS = 250;
       const HEARTBEAT_MS = 15_000;
+      const MAX_MISSING_TICKS = 120;
 
       const flush = (lines) => {
         for (let i = cursor; i < lines.length; i++) {
@@ -5994,9 +6001,13 @@ Write the persona now.`;
             select: { lines: true, status: true, sealedAt: true },
           });
           if (!turn) {
-            res.write(`event: error\ndata: ${JSON.stringify({ message: 'Turn vanished' })}\n\n`);
-            alive = false;
+            missingTicks += 1;
+            if (missingTicks >= MAX_MISSING_TICKS) {
+              res.write(`event: error\ndata: ${JSON.stringify({ message: 'Turn vanished' })}\n\n`);
+              alive = false;
+            }
           } else {
+            missingTicks = 0;
             flush(Array.isArray(turn.lines) ? turn.lines : []);
             if (turn.sealedAt || ['complete', 'failed', 'cost_capped'].includes(turn.status)) {
               alive = false;

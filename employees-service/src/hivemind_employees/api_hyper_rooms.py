@@ -939,6 +939,16 @@ def recommend_template(user_message: str, default: str = "debate") -> str:
     return best
 
 
+def _is_deep_sim_prompt(user_message: str) -> bool:
+    msg = (user_message or "").lower()
+    triggers = (
+        "simulate", "simulation", "real life", "real-life", "long simulation",
+        "2-5 years", "2 to 5 years", "long term", "future scenario",
+        "all perspectives", "like mirofish", "mirofish",
+    )
+    return any(t in msg for t in triggers)
+
+
 def get_template_overlay(template: str) -> Dict[str, str]:
     return TEMPLATE_OVERLAYS.get(template, TEMPLATE_OVERLAYS.get("debate", {}))
 
@@ -1057,6 +1067,69 @@ def _participant_brief(participants: List[Dict[str, Any]]) -> str:
     )
 
 
+async def _build_deep_sim_role_context(
+    *,
+    query: str,
+    participants: List[Dict[str, Any]],
+    user_id: str,
+    org_id: str,
+    api_key: str = "",
+) -> Dict[str, str]:
+    """Persona-specific recall packs for deep simulations.
+
+    MiroFish gives each spawned persona a world/profile slice. This gives each
+    existing HyperAgent an equivalent lens-specific evidence pack while still
+    sharing one blackboard.
+    """
+    async def _recall_for(emp: Dict[str, Any]) -> str:
+        lane = emp.get("_lane") or derive_lane(emp)
+        slug = emp.get("slug", "agent")
+        role_terms = " ".join(DEEP_SIM_ROLES.get(lane.lower(), [])) or lane
+        probes = [
+            f"{query} {lane} perspective {role_terms}",
+            f"{query} risks evidence constraints for {slug}",
+            f"{query} decisions revenue customers product roadmap",
+        ]
+        rows: List[Dict[str, Any]] = []
+        seen: Set[str] = set()
+        for probe in probes:
+            try:
+                resp = await recall_emulated(
+                    probe,
+                    user_id=user_id,
+                    org_id=org_id,
+                    api_key=api_key,
+                    max_memories=10,
+                )
+                for r in _extract_memory_rows(resp):
+                    mid = str(r.get("id") or r.get("memory_id") or r.get("title") or "")
+                    if not mid or mid in seen or _score_memory_row(r) < 0.35:
+                        continue
+                    seen.add(mid)
+                    rows.append(r)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[deep-sim] role recall failed slug=%s probe=%s err=%s", slug, probe[:50], exc)
+        rows.sort(key=_score_memory_row, reverse=True)
+        formatted = _format_memory_rows(rows, limit=8, snippet_chars=420)
+        if not formatted:
+            return ""
+        return (
+            f"PERSONA EVIDENCE PACK for {emp.get('name', slug)} ({lane}). "
+            "Use these facts through your own role lens; do not just repeat the shared blackboard:\n"
+            + formatted
+            + "\n"
+        )
+
+    packed = await asyncio.gather(*[_recall_for(emp) for emp in participants], return_exceptions=True)
+    out: Dict[str, str] = {}
+    for emp, value in zip(participants, packed):
+        if isinstance(value, Exception):
+            out[emp.get("slug", "")] = ""
+        else:
+            out[emp.get("slug", "")] = value or ""
+    return out
+
+
 async def _sim_agent_json(
     *,
     req: "RoomTurnRequest",
@@ -1118,10 +1191,24 @@ async def _orchestrate_deep_sim(
     memory_context = blackboard.get("context_text") or ""
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "simulation_phase",
+        "phase": "role_grounding",
+        "label": "Role-specific recall",
+        "agents": [p.get("slug") for p in participants],
+    })
+    role_context = await _build_deep_sim_role_context(
+        query=req.user_message,
+        participants=participants,
+        user_id=req.user_id,
+        org_id=req.org_id,
+        api_key="",
+    )
+    await _emit_event(req.callback_url, req.turn_id, {
+        "t": "simulation_phase",
         "phase": "collect",
         "label": "Private investigation",
         "agents": [p.get("slug") for p in participants],
         "blackboard": {"hit_count": blackboard.get("hit_count", 0), "confidence": blackboard.get("confidence", 0)},
+        "role_context_agents": [slug for slug, ctx in role_context.items() if ctx],
     })
 
     roster = _participant_brief(participants)
@@ -1135,6 +1222,7 @@ async def _orchestrate_deep_sim(
             f"Ontology: {json.dumps(ontology)[:2000]}\n\n"
             f"Room roster:\n{roster}\n\n"
             f"Shared blackboard:\n{memory_context or '(no recalled context)'}\n"
+            f"{role_context.get(emp.get('slug'), '')}\n"
             "Return STRICT JSON: {\"stance\":\"...\",\"claim\":\"...\",\"evidence\":[\"memory title or id\"],\"risk\":\"...\",\"confidence\":0.0-1.0}."
         )
         return await _sim_agent_json(
@@ -1181,6 +1269,7 @@ async def _orchestrate_deep_sim(
             f"User question: {req.user_message}\n"
             f"Target claim by {target['agent']}: {target['claim']}\n"
             f"Shared blackboard:\n{memory_context or '(no recalled context)'}\n"
+            f"{role_context.get(emp.get('slug'), '')}\n"
             "Return STRICT JSON: {\"agreement\":\"agree|extend|challenge\",\"review\":\"...\",\"condition\":\"...\",\"confidence\":0.0-1.0}."
         )
         return await _sim_agent_json(
@@ -1230,6 +1319,7 @@ async def _orchestrate_deep_sim(
         f"Claims: {json.dumps(claims)[:6000]}\n\n"
         f"Peer reviews: {json.dumps(reviews)[:6000]}\n\n"
         f"Blackboard: {memory_context[:6000]}\n"
+        f"Lead evidence pack: {role_context.get(lead.get('slug'), '')[:4000]}\n"
         "Write 5-8 concise bullets: decision, why, objections addressed, what to watch, next irreversible choice. "
         "Do not soften strong POVs; preserve dissent where unresolved."
     )
@@ -2524,6 +2614,9 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         if picked and picked != room_template:
             log.info("[template] auto-picked %s for room %s (was %s)", picked, req.room_id, room_template)
         room_template = picked
+    elif _is_deep_sim_prompt(req.user_message):
+        log.info("[template] promoted explicit simulation prompt to deep_sim room=%s previous=%s", req.room_id, room_template)
+        room_template = "deep_sim"
     # A4: pull trust scores for display only (no routing weight yet).
     trust_map = await get_trust_scores(req.org_id, [p["id"] for p in participants])
     trust_by_slug = {p.get("slug"): trust_map.get(p["id"], 0.5) for p in participants}

@@ -5892,9 +5892,11 @@ Write the persona now.`;
           return created;
         });
 
-        // Kick the sidecar to execute the turn. Fire-and-forget; the
-        // sidecar will write events back via the callback hook.
-        try {
+        // Kick the sidecar only after the 202 response has been flushed. This
+        // lets the frontend open SSE/poll immediately instead of waiting behind
+        // any sidecar connection/setup latency.
+        const dispatchSidecar = () => {
+          try {
           const sidecarBase = process.env.EMPLOYEES_SIDECAR_URL || 'http://hm-employees:8060';
           fetch(`${sidecarBase}/internal/hyper/room-turn`, {
             method: 'POST',
@@ -5912,9 +5914,11 @@ Write the persona now.`;
               callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
             }),
           }).catch(err => console.warn('[hyper-rooms] sidecar kick failed:', err.message));
-        } catch (err) {
-          console.warn('[hyper-rooms] sidecar dispatch threw:', err.message);
-        }
+          } catch (err) {
+            console.warn('[hyper-rooms] sidecar dispatch threw:', err.message);
+          }
+        };
+        setImmediate(dispatchSidecar);
 
         return jsonResponse(res, { turn_id: turn.id, status: turn.status }, 202);
       } catch (err) {
@@ -6039,7 +6043,10 @@ Write the persona now.`;
             event: body.event,
           });
         } else {
-          await appendTurnEvent(prisma, body.turn_id, body.event);
+          await appendTurnEvent(prisma, body.turn_id, {
+            ...body.event,
+            received_ts: Date.now(),
+          });
         }
 
         // ── CSI artifact persistence (best-effort, must never delay/break the append path) ──

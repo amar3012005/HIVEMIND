@@ -1159,13 +1159,16 @@ async def _orchestrate_deep_sim(
     started: float,
 ) -> "RoomTurnResponse":
     cost_tokens = 0
+    decision = (req.flyby_decision or "").strip().lower()
+    is_flyby_continuation = decision in ("agree", "disagree")
     ontology = _build_task_ontology(req.user_message)
-    await _emit_event(req.callback_url, req.turn_id, {"t": "ontology", **ontology})
+    if not is_flyby_continuation:
+        await _emit_event(req.callback_url, req.turn_id, {"t": "ontology", **ontology})
     assessment = _assess_workforce_coverage(participants, ontology)
-    await _emit_event(req.callback_url, req.turn_id, {"t": "workforce_assessment", **assessment})
+    if not is_flyby_continuation:
+        await _emit_event(req.callback_url, req.turn_id, {"t": "workforce_assessment", **assessment})
 
     flyby_spec = req.flyby_spec or (_build_flyby_spec(req, assessment) if assessment.get("needs_flyby") else None)
-    decision = (req.flyby_decision or "").strip().lower()
     if flyby_spec and assessment.get("needs_flyby") and decision not in ("agree", "disagree"):
         await _emit_event(req.callback_url, req.turn_id, {
             "t": "flyby_proposal",
@@ -2652,16 +2655,17 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             "stand_in_skeptic": skeptic.get("slug") if skeptic else None,
         })
 
-    await _emit_event(req.callback_url, req.turn_id, {
-        "t": "router",
-        "lead": lead.get("slug"),
-        "reactors": [r.get("slug") for r in reactors],
-        "lanes": {p.get("slug"): p["_lane"] for p in participants},
-        "template": room_template,
-        "trust": trust_by_slug,
-        "skeptic": skeptic.get("slug") if skeptic else None,
-        "turn_seq": seq,
-    })
+    if (req.flyby_decision or "").strip().lower() not in ("agree", "disagree"):
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "router",
+            "lead": lead.get("slug"),
+            "reactors": [r.get("slug") for r in reactors],
+            "lanes": {p.get("slug"): p["_lane"] for p in participants},
+            "template": room_template,
+            "trust": trust_by_slug,
+            "skeptic": skeptic.get("slug") if skeptic else None,
+            "turn_seq": seq,
+        })
     _mark("router_ms")
 
     # ── Deep simulation template — MiroFish-style live room ───────────

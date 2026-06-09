@@ -1523,10 +1523,25 @@ Output JSON only:
         ? `Canonical fact: ${tag.slice(0, 60)} (${members.length} sources)`
         : `Bridge: ${tag.slice(0, 80)} [conf=${confidence?.toFixed(2)}]`;
 
+    // Inherit visibility conservatively: an org-wide canonical ONLY when EVERY
+    // source is org-visible — never fold a user's private memory into a memory
+    // the whole org can recall. Default private. Without this, all synthesis was
+    // born private-to-the-author and never surfaced for other org members.
+    let synthVisibility = 'private';
+    try {
+      const ids = members.map(m => m.id).filter(Boolean);
+      if (ids.length) {
+        const nonOrg = await this.prisma.memory.count({
+          where: { id: { in: ids }, NOT: { visibility: 'organization' } },
+        });
+        if (nonOrg === 0) synthVisibility = 'organization';
+      }
+    } catch { /* default private — fail safe */ }
+
     // Use engine.ingestMemory so smart-routing fires (operator, entity-co-mention, conflict-detector)
     if (!this.engine) {
       // Engine not wired → fall back to direct prisma insert (preserves synthesis columns)
-      return this._directInsert({ orgId, userId, project, sourceType, tag, members, content, confidence, evidenceIds, hash, title, unionedTags, extraMeta });
+      return this._directInsert({ orgId, userId, project, sourceType, tag, members, content, confidence, evidenceIds, hash, title, unionedTags, extraMeta, visibility: synthVisibility });
     }
 
     try {
@@ -1555,6 +1570,7 @@ Output JSON only:
         project:         project || null,
         importance_score: importanceScore,
         cognitive_layer_role: cognitiveLayerRole,
+        visibility:       synthVisibility,
         source_metadata: {
           source_type: sourceType,
           source_id:   `${sourceType}:${hash}:${Date.now()}`,
@@ -1637,16 +1653,16 @@ Output JSON only:
         await this._linkDerivesEdges(newId, members, sourceType, tag);
       }
 
-      if (newId) await this._embedSynthMemory({ id: newId, userId, orgId, project, title, content, tags: finalTags, sourceType });
+      if (newId) await this._embedSynthMemory({ id: newId, userId, orgId, project, title, content, tags: finalTags, sourceType, visibility: synthVisibility });
       return newId ? { id: newId, tags: finalTags } : null;
     } catch (err) {
       this.logger.warn(`[cognition] engine.ingestMemory failed (${err.message}), falling back to direct insert`);
-      return this._directInsert({ orgId, userId, project, sourceType, tag, members, content, confidence, evidenceIds, hash, title, unionedTags, extraMeta });
+      return this._directInsert({ orgId, userId, project, sourceType, tag, members, content, confidence, evidenceIds, hash, title, unionedTags, extraMeta, visibility: synthVisibility });
     }
   }
 
   // Direct Prisma insert fallback (used when engine not available or throws)
-  async _directInsert({ orgId, userId, project, sourceType, tag, members, content, confidence, evidenceIds, hash, title, unionedTags, extraMeta }) {
+  async _directInsert({ orgId, userId, project, sourceType, tag, members, content, confidence, evidenceIds, hash, title, unionedTags, extraMeta, visibility = 'private' }) {
     const created = await this.prisma.memory.create({
       data: {
         id:                  crypto.randomUUID(),
@@ -1658,6 +1674,7 @@ Output JSON only:
         content,
         tags:                Array.from(unionedTags),
         isLatest:            true,
+        visibility,
         importanceScore:     sourceType === 'principle' ? 0.92 : sourceType === 'canonical-fact' ? 0.85 : 0.90,
         // Set cognitive_layer_role on EVERY synthesis tier (mirrors the engine
         // path). Previously canonical/bridge were left null and "relied on the
@@ -1699,7 +1716,7 @@ Output JSON only:
 
     if (created) {
       await this._linkDerivesEdges(created.id, members, sourceType, tag);
-      await this._embedSynthMemory({ id: created.id, userId, orgId, project, title, content, tags: Array.from(unionedTags), sourceType });
+      await this._embedSynthMemory({ id: created.id, userId, orgId, project, title, content, tags: Array.from(unionedTags), sourceType, visibility });
     }
     return created;
   }
@@ -1711,7 +1728,7 @@ Output JSON only:
   // candidate pool — the whole synthesis tier was invisible to recall. Mirror
   // the Stage-2 fix already applied to compaction summaries. storeMemory embeds
   // the content when no vector is supplied and routes by org_id to org_<id>.
-  async _embedSynthMemory({ id, userId, orgId, project, title, content, tags, sourceType }) {
+  async _embedSynthMemory({ id, userId, orgId, project, title, content, tags, sourceType, visibility = 'private' }) {
     if (!id) return;
     // this.engine.vectorStore is null on the cron-constructed loop (qdrant is
     // injected onto the server's engine instance, not reliably visible here), so
@@ -1730,7 +1747,7 @@ Output JSON only:
         id, user_id: userId, org_id: orgId, project: project || null,
         memory_type: 'synthesis', title, content, tags: tags || [],
         is_latest: true, importance_score: importanceScore,
-        cognitive_layer_role: role,
+        cognitive_layer_role: role, visibility,
         created_at: new Date().toISOString(), source: 'cognition-loop',
       });
       this.logger.log?.(`[cognition] embedded ${sourceType} synth ${String(id).slice(0, 8)}`);

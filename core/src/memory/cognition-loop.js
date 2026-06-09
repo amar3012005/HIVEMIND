@@ -1731,6 +1731,13 @@ Output JSON only:
         isLatest:   true,
         deletedAt:  null,
         memoryType: { in: ['fact', 'decision'] },
+        // Exclude the governance swarm's own reflection/audit output (same gate as
+        // synthesizeForOrg). Without it, compaction folds 300 internal-audit/
+        // reflection rows into junk "Canonical: governance (N memories)" and
+        // supersedes them. cognitive_layer_role is non-null on every reflection +
+        // synthesis tier; real fact/decision memories have it null.
+        cognitiveLayerRole: null,
+        NOT: { tags: { hasSome: ['internal-audit', 'governance', 'synthesis:canonical', 'synthesis:bridge', 'canonical-summary', 'synthesized'] } },
       },
       take: 500,
       orderBy: { updatedAt: 'desc' },
@@ -1841,7 +1848,11 @@ Output JSON only:
         isLatest: true,
         deletedAt: null,
         memoryType: { in: ['fact', 'decision', 'lesson', 'summary'] },
-        NOT: { tags: { hasSome: ['synthesis:principle'] } },
+        // Exclude the governance swarm's own reflection/audit output (same gate as
+        // synthesizeForOrg). Without it, principle distillation emits junk
+        // "Principle: governance/internal-audit/reflection" units.
+        cognitiveLayerRole: null,
+        NOT: { tags: { hasSome: ['synthesis:principle', 'internal-audit', 'governance', 'synthesis:canonical', 'synthesis:bridge', 'canonical-summary', 'synthesized'] } },
       },
       take: 500,
       orderBy: { updatedAt: 'desc' },

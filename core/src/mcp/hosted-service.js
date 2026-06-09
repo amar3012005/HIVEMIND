@@ -550,7 +550,7 @@ The org has ONE shared HIVEMIND by default. Admins can create sub-HIVEMINDs call
     },
     {
       name: 'hivemind_recall',
-      description: 'Search and retrieve relevant memories from HIVE-MIND. Use this to find previously stored information, code patterns, or context from past conversations. PROJECT WORKFLOW: for best results call hivemind_list_projects first; if the query clearly belongs to one project, pass its `project_id` to scope recall to that project + org-wide facts (other projects excluded); if it does not clearly fit a project, omit project_id for a whole-org recall.',
+      description: 'Search and retrieve relevant memories from HIVE-MIND. Use this to find previously stored information, code patterns, or context from past conversations. PROJECT WORKFLOW: for best results call hivemind_list_projects first; if the query clearly belongs to one project, pass its `project_id` to scope recall to that project + org-wide facts (other projects excluded); if it does not clearly fit a project, omit project_id for a whole-org recall. PERSON/TIME: pass `author` (member name/email/id) to return only that member memories, and `date_range` to bound time — together they answer "what did <person> update today / this week", optionally scoped to a project.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -595,6 +595,15 @@ The org has ONE shared HIVEMIND by default. Admins can create sub-HIVEMINDs call
           transaction_at: {
             type: 'string',
             description: 'Bi-temporal filter: only return memories the system had learned by this ISO timestamp (excludes future writes that happened after the cutoff).'
+          },
+          author: {
+            type: 'string',
+            description: 'Person filter — a member name, email, or user id. Returns only memories owned by that person. Combine with date_range to answer "what did <person> update today" (e.g. author="Maya Ortiz", date_range={start:<today ISO>}). Omit for everyone.'
+          },
+          date_range: {
+            type: 'object',
+            description: 'Restrict to a time window: { start: ISO, end?: ISO }. Use with author for "what did X do today/this week".',
+            properties: { start: { type: 'string' }, end: { type: 'string' } }
           }
         },
         required: ['query']
@@ -2435,6 +2444,9 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
             ...(args.valid_at ? { valid_at: args.valid_at } : {}),
             ...(args.transaction_at ? { transaction_at: args.transaction_at } : {}),
             ...(resolvedProjectId ? { project_id: resolvedProjectId, project_ids: resolvedProjectIds } : {}),
+            // Person filter ("what did X update today"): server resolves name/email→userId.
+            ...(args.author ? { author: args.author } : {}),
+            ...(args.date_range ? { date_range: args.date_range } : {}),
           });
 
           // Polished memory shape only — drops semantic_*, vector_score, user_profile,

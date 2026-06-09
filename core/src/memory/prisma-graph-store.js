@@ -75,9 +75,17 @@ function mapMemoryRecord(record) {
     language: record.codeMetadata.language
   } : {};
 
+  // Owner attribution — surface a human name when the User relation was joined
+  // (listMemories/getMemory include it). Falls back to displayName → email → null.
+  const ownerName = record.user
+    ? (record.user.displayName || record.user.email || null)
+    : null;
+
   return {
     id: record.id,
     user_id: record.userId,
+    owner: record.userId ? { id: record.userId, name: ownerName } : null,
+    owner_name: ownerName,
     org_id: record.orgId,
     project: record.project,
     // Phase P.2: surface formal Project FK when populated. project (string)
@@ -473,6 +481,7 @@ export class PrismaGraphStore {
       include: {
         sourceMetadata: true,
         codeMetadata: true,
+        user: { select: { id: true, displayName: true, email: true } },
         versions: {
           orderBy: { createdAt: 'desc' },
           take: 1

@@ -15706,6 +15706,24 @@ exit \$RC
                 };
               }
 
+              // Person-filtered recall ("what did person X update today"): resolve an
+              // author by id, email, or display name (within this org) → userId, then
+              // post-filter results to that author. Combine with date_range for time.
+              let recallAuthorId = null;
+              if (body.author_id && typeof body.author_id === 'string') {
+                recallAuthorId = body.author_id;
+              } else if (body.author && typeof body.author === 'string' && prisma) {
+                const term = body.author.trim();
+                const a = await prisma.user.findFirst({
+                  where: {
+                    organizations: { some: { orgId } },
+                    OR: [{ email: term }, { displayName: { equals: term, mode: 'insensitive' } }],
+                  },
+                  select: { id: true },
+                }).catch(() => null);
+                recallAuthorId = a?.id || null;
+              }
+
               // Bi-temporal filter: when valid_at is set, return only memories
               // that were valid at that timestamp (valid_from <= valid_at AND
               // (valid_to IS NULL OR valid_to > valid_at)). Caller can also
@@ -15773,6 +15791,13 @@ exit \$RC
                   m => !m.project_id || m.project_id === body.project_id,
                 );
                 result.project_scope_applied = { project_id: body.project_id, kept: result.memories.length, dropped: before - result.memories.length };
+              }
+
+              // Author/person post-filter: keep only memories owned by the resolved person.
+              if (recallAuthorId && Array.isArray(result?.memories)) {
+                const before = result.memories.length;
+                result.memories = result.memories.filter(m => m.user_id === recallAuthorId);
+                result.author_filter_applied = { author_id: recallAuthorId, kept: result.memories.length, dropped: before - result.memories.length };
               }
 
               // Apply memory type boosts from Operator Layer

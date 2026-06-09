@@ -15685,11 +15685,16 @@ exit \$RC
 
               let recallAccessCtx = await buildAccessContext(userId, orgId);
               // Project-scoped recall: when a caller (e.g. a project-scoped HyperAgent
-              // room) passes project_id, narrow the access context to JUST that project.
-              // The recall filter then returns that project's memories + org-wide +
-              // personal (scope_filter stays null), but EXCLUDES other projects.
-              if (body.project_id && recallAccessCtx?.projectIds?.includes(body.project_id)) {
-                recallAccessCtx = { ...recallAccessCtx, projectIds: [body.project_id] };
+              // room) passes project_id, FORCE the access context to that project. The
+              // store's tier OR clause + the vector filter then return the project's
+              // memories + org-wide + the caller's personal, and EXCLUDE other projects
+              // — regardless of the caller's project membership (the room/caller
+              // explicitly chose this project). Without project_id, behavior is unchanged.
+              if (body.project_id) {
+                recallAccessCtx = {
+                  projectIds: [body.project_id],
+                  teamIds: (recallAccessCtx && recallAccessCtx.teamIds) || [],
+                };
               }
 
               // Bi-temporal filter: when valid_at is set, return only memories

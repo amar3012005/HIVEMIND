@@ -464,20 +464,22 @@ export function generateHostedServer(userId, orgId, apiKey) {
  */
 function generateToolsManifest(userId, orgId, options = {}) {
   const scopes = Array.isArray(options.scopes) ? options.scopes : [];
-  const hasAll = scopes.includes('*');
-  const hasWebSearch = hasAll || scopes.includes('web_search');
-  const hasWebCrawl = hasAll || scopes.includes('web_crawl');
+  const scopeSet = new Set(scopes);
+  // Full HIVEMIND-native toolset is exposed to every authenticated MCP client by
+  // default. The previous scope-gating silently hid 23 of 34 tools: the OAuth→
+  // internal scope map (server.js) emits names ('mcp', 'memory:read', 'web:search')
+  // that NEVER matched the gate's expected names ('coding', 'web_search',
+  // 'web_crawl', 'slack:act'), so every OAuth / Claude connection fell through to
+  // only the 10 always-on core tools — regardless of what the user consented to.
+  // These tools read/write HIVEMIND's OWN graph or server-side-keyed services
+  // (same trust level as the always-on memory tools), so they are on by default.
+  // Power users / restricted integrations can opt a group OUT with a negative
+  // scope: '!coding', '!web', '!slack'. '*' or an empty scope list = everything.
+  const hasAll = scopeSet.has('*') || scopes.length === 0;
+  const hasCoding = hasAll || !scopeSet.has('!coding');
+  const hasWebSearch = hasAll || !scopeSet.has('!web');
+  const hasWebCrawl = hasWebSearch;
   const hasAnyWeb = hasWebSearch || hasWebCrawl;
-
-  // Coding scope: explicit grant OR auto-grant via known coding-platform connectors.
-  // Power users can override by adding 'coding' to scopes (force on) or '!coding' (force off).
-  const CODING_PLATFORM_KEYWORDS = ['cursor', 'claude', 'vscode', 'copilot', 'continue', 'cody', 'zed', 'windsurf'];
-  const platform = (options.platform || '').toLowerCase();
-  const platformIsCoding = !!platform && CODING_PLATFORM_KEYWORDS.some(kw => platform.includes(kw));
-  const hasCoding =
-    hasAll ||
-    scopes.includes('coding') ||
-    (platformIsCoding && !scopes.includes('!coding'));
 
   const tools = [
     {
@@ -546,6 +548,40 @@ The org has ONE shared HIVEMIND by default. Admins can create sub-HIVEMINDs call
       inputSchema: {
         type: 'object',
         properties: {},
+      },
+    },
+    {
+      name: 'hivemind_create_project',
+      description: `Create a new project (a sub-HIVEMIND) inside the current org. A project is a focused, named knowledge bucket (e.g. "SOLVIS", "Q3-Launch", "ACME-Account") that scopes memories so recall stays on-topic. The calling user becomes the project owner.
+
+WHEN TO USE:
+  • The user explicitly asks to create/start a project ("make a project for the SOLVIS account", "spin up a workspace for Q3 planning").
+  • You are about to save a cluster of related memories that clearly belong to a NEW initiative that does not yet exist in hivemind_list_projects.
+
+WORKFLOW (avoid duplicates):
+  1. Call hivemind_list_projects FIRST and check whether a project with the same name/topic already exists — if so, reuse its project_id instead of creating a duplicate.
+  2. Only call this when no fitting project exists.
+  3. A 'description' is REQUIRED and should be a 1–2 sentence summary of the project's purpose — it powers project matching in later hivemind_list_projects / save / recall calls, so make it specific.
+  4. After creation, use the returned project_id with hivemind_save_memory and hivemind_recall to file and retrieve that project's memories.
+
+Returns the created project: { id, name, slug, description, status, created_at }. The slug is auto-derived from the name and de-duplicated.`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: {
+            type: 'string',
+            description: 'Project name (human-readable, e.g. "SOLVIS Account"). The slug is auto-generated from this.',
+          },
+          description: {
+            type: 'string',
+            description: 'REQUIRED. 1–2 sentence summary of what this project is for. Drives project matching in list/save/recall, so be specific about scope and topic.',
+          },
+          team_id: {
+            type: 'string',
+            description: 'Optional team UUID to attach the project to a team workspace. Omit for an org-level project.',
+          },
+        },
+        required: ['name', 'description'],
       },
     },
     {
@@ -1262,7 +1298,7 @@ ENTERPRISE EXAMPLES:
   }
 
   // ── Slack action tools (Digital Employee scope: slack:act) ──
-  const hasSlackAct = hasAll || scopes.includes('slack:act');
+  const hasSlackAct = hasAll || !scopeSet.has('!slack');
   if (hasSlackAct) {
     tools.push({
       name: 'hivemind_slack_post',
@@ -2422,6 +2458,68 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
           });
         } catch (err) {
           return formatToolContent({ error: err.message, projects: [] });
+        }
+      }
+
+      case 'hivemind_create_project': {
+        try {
+          const name = (args.name || '').trim();
+          const description = (args.description || '').trim();
+          if (!name) {
+            return formatToolContent({ error: 'name is required to create a project.' });
+          }
+          if (!description) {
+            return formatToolContent({
+              error: 'description is required — provide a 1–2 sentence summary of the project purpose so it can be matched in future recall/save calls.',
+            });
+          }
+          const { getPrismaClient } = await import('../db/prisma.js');
+          const prisma = getPrismaClient();
+          const { TeamStore } = await import('../teams/team-store.js');
+          const store = new TeamStore(prisma);
+
+          // Guard against duplicate-by-name within the org (case-insensitive).
+          const existing = await prisma.project.findFirst({
+            where: { orgId, name: { equals: name, mode: 'insensitive' } },
+            select: { id: true, name: true, slug: true, description: true, status: true, createdAt: true },
+          });
+          if (existing) {
+            return formatToolContent({
+              created: false,
+              reason: 'project_already_exists',
+              project: {
+                id: existing.id,
+                name: existing.name,
+                slug: existing.slug,
+                description: existing.description || null,
+                status: existing.status,
+                created_at: existing.createdAt,
+              },
+              hint: 'A project with this name already exists — reuse its project_id with hivemind_save_memory / hivemind_recall instead of creating a duplicate.',
+            });
+          }
+
+          const project = await store.createProject({
+            orgId,
+            teamId: args.team_id || null,
+            name,
+            description,
+            createdBy: userId,
+          });
+          return formatToolContent({
+            created: true,
+            project: {
+              id: project.id,
+              name: project.name,
+              slug: project.slug,
+              description: project.description || null,
+              status: project.status,
+              created_at: project.createdAt,
+            },
+            hint: 'Project created. Use its `id` as project_id in hivemind_save_memory to file memories here, and in hivemind_recall to scope retrieval to this project + org-wide facts.',
+          });
+        } catch (err) {
+          return formatToolContent({ created: false, error: err.message });
         }
       }
 

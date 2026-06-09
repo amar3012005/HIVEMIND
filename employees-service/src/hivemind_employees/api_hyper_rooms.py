@@ -290,6 +290,7 @@ async def _build_turn_blackboard(
     user_id: str,
     org_id: str,
     api_key: str = "",
+    project_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build one shared turn context that every room agent reads.
 
@@ -298,8 +299,15 @@ async def _build_turn_blackboard(
     agent. Agents can still use tools for targeted gaps.
     """
     company_brief, recall_resp = await asyncio.gather(
-        _build_company_brief(query, user_id, org_id, api_key),
-        recall_emulated(query, user_id=user_id, org_id=org_id, api_key=api_key, max_memories=8),
+        _build_company_brief(query, user_id, org_id, api_key, project_id=project_id),
+        recall_emulated(
+            query,
+            user_id=user_id,
+            org_id=org_id,
+            api_key=api_key,
+            max_memories=8,
+            project_id=project_id,
+        ),
         return_exceptions=True,
     )
     if isinstance(company_brief, Exception):
@@ -1078,6 +1086,7 @@ async def _build_deep_sim_role_context(
     user_id: str,
     org_id: str,
     api_key: str = "",
+    project_id: Optional[str] = None,
 ) -> Dict[str, str]:
     """Persona-specific recall packs for deep simulations.
 
@@ -1104,6 +1113,7 @@ async def _build_deep_sim_role_context(
                     org_id=org_id,
                     api_key=api_key,
                     max_memories=10,
+                    project_id=project_id,
                 )
                 for r in _extract_memory_rows(resp):
                     mid = str(r.get("id") or r.get("memory_id") or r.get("title") or "")
@@ -1194,7 +1204,13 @@ async def _orchestrate_deep_sim(
         await _emit_event(req.callback_url, req.turn_id, {"t": "flyby_skipped", "spec": flyby_spec})
 
     await _emit_event(req.callback_url, req.turn_id, {"t": "typing", "agent": lead.get("slug"), "kind": "grounding"})
-    blackboard = await _build_turn_blackboard(query=req.user_message, user_id=req.user_id, org_id=req.org_id, api_key="")
+    blackboard = await _build_turn_blackboard(
+        query=req.user_message,
+        user_id=req.user_id,
+        org_id=req.org_id,
+        api_key="",
+        project_id=req.project_id,
+    )
     memory_context = blackboard.get("context_text") or ""
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "simulation_phase",
@@ -1208,6 +1224,7 @@ async def _orchestrate_deep_sim(
         user_id=req.user_id,
         org_id=req.org_id,
         api_key="",
+        project_id=req.project_id,
     )
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "simulation_phase",
@@ -1682,7 +1699,8 @@ _COMPANY_BRIEF_PROBES: List[str] = [
 
 
 async def _build_company_brief(query: str, user_id: str, org_id: str,
-                               api_key: str = "", max_memories: int = 25) -> str:
+                               api_key: str = "", max_memories: int = 25,
+                               project_id: Optional[str] = None) -> str:
     """Fan out orthogonal recalls (query + company/people/customers/goals),
     dedup by memory id/title, compress to ~25 snippets, return a standing
     COMPANY CONTEXT block. Recalls via master+emulation (recall_emulated) so
@@ -1696,7 +1714,8 @@ async def _build_company_brief(query: str, user_id: str, org_id: str,
     async def _probe(p: str) -> List[Dict[str, Any]]:
         try:
             resp = await recall_emulated(p, user_id=user_id, org_id=org_id,
-                                         api_key=api_key, max_memories=8)
+                                         api_key=api_key, max_memories=8,
+                                         project_id=project_id)
             return resp.get("memories") or resp.get("combined") or []
         except Exception as exc:  # noqa: BLE001 — one probe failing must not sink the brief
             log.warning("[brief] recall probe failed (%s): %s", p[:40], exc)
@@ -2688,10 +2707,11 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             boot_map = {b["id"]: b for b in await fetch_bootstrap()}
             lead_api_key = (boot_map.get(lead["id"], {}) or {}).get("api_key", "") or ""
             company_brief = await _build_company_brief(
-                req.user_message, req.user_id, req.org_id, lead_api_key)
+                req.user_message, req.user_id, req.org_id, lead_api_key,
+                project_id=req.project_id)
             recall_resp = await recall_emulated(
                 req.user_message, user_id=req.user_id, org_id=req.org_id,
-                api_key=lead_api_key, max_memories=6)
+                api_key=lead_api_key, max_memories=6, project_id=req.project_id)
             rows = recall_resp.get("memories") or recall_resp.get("combined") or []
             rows = [r for r in rows if float(r.get("score", 0)) >= 0.45]
             candidate_block = ""
@@ -2744,6 +2764,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             user_id=req.user_id,
             org_id=req.org_id,
             api_key=lead_api_key,
+            project_id=req.project_id,
         )
         memory_context = blackboard.get("context_text") or ""
     except Exception as exc:  # noqa: BLE001

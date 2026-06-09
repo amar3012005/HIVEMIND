@@ -1155,11 +1155,17 @@ export class MemoryGraphEngine {
         // 1 extra query per save. We accept that cost in exchange for
         // ALL ingest paths (chat, MCP, KB, connectors) producing
         // entity-rich graphs without per-callsite wiring.
-        try {
-          await this._attachEntityCoMentionEdges(baseMemory, store, recallSimilar);
-        } catch (entityErr) {
-          // Non-fatal — entity linking is best-effort enrichment.
-          console.warn('[entity-co-mention] failed:', entityErr.message);
+        // defer_entity_linking: bulk callers (KB promotion) skip the in-lock
+        // entity-link LLM (~2s) so the per-user advisory lock + transaction stay
+        // short (just the DB write). They run linkEntitiesForMemories() concurrently
+        // AFTER commit instead — turning a serial 2s/memory tax into a parallel pass.
+        if (!input.defer_entity_linking) {
+          try {
+            await this._attachEntityCoMentionEdges(baseMemory, store, recallSimilar);
+          } catch (entityErr) {
+            // Non-fatal — entity linking is best-effort enrichment.
+            console.warn('[entity-co-mention] failed:', entityErr.message);
+          }
         }
 
         const result = {
@@ -1848,6 +1854,35 @@ OUTPUT JSON only.`;
       await recordError('persist_error', null, persistErr.message);
       return parsed;
     }
+  }
+
+  /**
+   * Concurrent, lock-free entity-co-mention linking for a batch of ALREADY-persisted
+   * memories. Used after deferred bulk ingest (KB promotion) — runs the per-memory
+   * entity-link LLM in parallel WITHOUT the per-user advisory lock (entity:* tags +
+   * co-mention edges are additive; edge dedup + EDGE_CAP in _attachEntityCoMentionEdges
+   * make concurrent runs safe). Best-effort: failures are logged, never thrown.
+   *
+   * @param {Array<object>} memories - persisted memory objects (need id, user_id, org_id, content, tags, memory_type)
+   * @param {{concurrency?: number}} opts
+   */
+  async linkEntitiesForMemories(memories, { concurrency = 6 } = {}) {
+    if (!Array.isArray(memories) || memories.length === 0) return;
+    if ((process.env.MEMORY_ENTITY_LINKING || 'true').toLowerCase() === 'false') return;
+    const queue = memories.filter(m => m && m.id);
+    let idx = 0;
+    const worker = async () => {
+      while (idx < queue.length) {
+        const m = queue[idx++];
+        try {
+          await this._attachEntityCoMentionEdges(m, this.store, []);
+        } catch (err) {
+          console.warn(`[entity-co-mention:deferred] ${String(m.id).slice(0, 8)} failed: ${err.message}`);
+        }
+      }
+    };
+    const n = Math.max(1, Math.min(concurrency, queue.length));
+    await Promise.all(Array.from({ length: n }, worker));
   }
 
   async _attachEntityCoMentionEdges(baseMemory, store, similar = []) {

@@ -615,6 +615,7 @@ export class DocumentFirstIngestionService {
   async _promoteMemories({ documentId, segments, userId, orgId, metadata, promotionStrategy = 'kb_default' }) {
     const candidates = [];
     const memories = [];
+    const entityLinkTargets = []; // collected during promote, entity-linked concurrently after commit
 
     // Strategy: diversity-sampled promotion
     // 1. Always include first + last (document boundaries)
@@ -740,7 +741,10 @@ export class DocumentFirstIngestionService {
         const routedPayloads = await this.smartIngestRouter.route(payload);
 
         for (const routed of routedPayloads) {
-          const result = await this.memoryGraphEngine.ingestMemory(routed);
+          // Defer entity-co-mention linking: keeps the per-user advisory lock +
+          // transaction short (DB write only) so promotion parallelizes. Linking
+          // runs concurrently AFTER all segments commit (see entityLinkTargets).
+          const result = await this.memoryGraphEngine.ingestMemory({ ...routed, defer_entity_linking: true });
           // graph-engine returns { memoryId, operation, ... }
           // operation = 'skipped_*' means memory NOT persisted to DB -> FK would fail
           const memoryId = result?.memoryId || result?.id || null;
@@ -756,6 +760,16 @@ export class DocumentFirstIngestionService {
             continue;
           }
           memories.push({ ...result, id: memoryId });
+          // Capture for the concurrent post-commit entity-co-mention pass.
+          entityLinkTargets.push({
+            id: memoryId,
+            user_id: routed.user_id,
+            org_id: routed.org_id,
+            project: routed.project || null,
+            content: routed.content,
+            tags: routed.tags || [],
+            memory_type: routed.memory_type,
+          });
 
           // Link memory to evidence
           await this.db.memoryEvidenceLink.create({
@@ -796,14 +810,13 @@ export class DocumentFirstIngestionService {
       }
     };
 
-    // Promotion concurrency. NOTE: every ingestMemory acquires a PER-USER
-    // advisory lock (graph-engine advisoryLock) that serializes all of a user's
-    // writes — so concurrency >1 for the same user gains NO parallelism (the
-    // lock queues them) and actively HARMS: waiting workers sit inside an open
-    // Prisma transaction whose timeout ticks during the wait, blowing it →
-    // P2010 aborts under bulk ingest. Default 2 keeps a shallow pipeline (next
-    // worker preps while one holds the lock) without a deep timeout-prone queue.
-    const PROMOTE_CONCURRENCY = Number(process.env.PHASE1_PROMOTE_CONCURRENCY || 2);
+    // Promotion concurrency. Each ingestMemory still acquires the PER-USER
+    // advisory lock, BUT with defer_entity_linking=true the locked critical section
+    // is now just the DB write + conflict check (~100ms) instead of the ~2s
+    // entity-link LLM — so the lock queue drains fast and a higher fan-out gives
+    // real throughput without the old P2010 transaction-timeout risk. Entity
+    // linking runs concurrently AFTER commit (linkEntitiesForMemories).
+    const PROMOTE_CONCURRENCY = Number(process.env.PHASE1_PROMOTE_CONCURRENCY || 4);
     let nextIdx = 0;
     const workers = Array.from({ length: Math.min(PROMOTE_CONCURRENCY, promotableSegments.length) }, async () => {
       while (true) {
@@ -813,6 +826,18 @@ export class DocumentFirstIngestionService {
       }
     });
     await Promise.all(workers);
+
+    // Deferred entity-co-mention linking — run the per-memory entity-link LLM for
+    // all promoted memories CONCURRENTLY (no per-user lock), now that the rows are
+    // committed. Fire-and-forget: the upload reports done immediately; entity:* tags
+    // + co-mention edges land shortly after (same eventual-enrichment posture as
+    // _extractEntitiesAsync). This is what removes the serial 2s/segment promote tax.
+    if (entityLinkTargets.length && typeof this.memoryGraphEngine.linkEntitiesForMemories === 'function') {
+      const linkConcurrency = Number(process.env.PHASE1_ENTITY_LINK_CONCURRENCY || 6);
+      this.memoryGraphEngine.linkEntitiesForMemories(entityLinkTargets, { concurrency: linkConcurrency })
+        .then(() => this.logger.info?.(`[entity-link:deferred] linked ${entityLinkTargets.length} promoted memories`))
+        .catch((err) => this.logger.warn?.(`[entity-link:deferred] batch failed: ${err.message}`));
+    }
 
     // ── Canonical Document parent + PartOf edges (Supermemory-shape graph) ──
     // Per-segment promotion above wrote N standalone Memory rows but no

@@ -480,6 +480,12 @@ function generateToolsManifest(userId, orgId, options = {}) {
   const hasWebSearch = hasAll || !scopeSet.has('!web');
   const hasWebCrawl = hasWebSearch;
   const hasAnyWeb = hasWebSearch || hasWebCrawl;
+  // Write gate for the "Default Access" (read-only) OAuth tier. The token's
+  // stored scopes are the INTERNAL scopes (server.js createOAuthAccessToken
+  // persists internalScopes): Full Access carries 'memory:write', the read-only
+  // tier does not. When write is not granted, mutating tools are filtered out of
+  // the manifest so a read-only consent is actually enforced, not just cosmetic.
+  const canWrite = hasAll || scopeSet.has('memory:write') || scopeSet.has('memory.write');
 
   const tools = [
     {
@@ -1351,6 +1357,20 @@ ENTERPRISE EXAMPLES:
         required: ['channel']
       }
     });
+  }
+
+  if (!canWrite) {
+    // Read-only ("Default Access") OAuth tier — drop every mutating tool so the
+    // consent is enforced, not decorative. Read / recall / time-travel / project
+    // listing / web-read tools remain available.
+    const WRITE_TOOLS = new Set([
+      'hivemind_save_memory', 'hivemind_update_memory', 'hivemind_delete_memory',
+      'hivemind_save_conversation', 'hivemind_create_project', 'hivemind_ingest_code',
+      'hivemind_log_decision', 'hivemind_track_refactor', 'hivemind_test_coverage',
+      'hivemind_set_assistant_name', 'hivemind_set_voice',
+      'hivemind_slack_post', 'hivemind_slack_react',
+    ]);
+    return tools.filter(t => !WRITE_TOOLS.has(t.name));
   }
 
   return tools;

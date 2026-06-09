@@ -2419,9 +2419,9 @@ function normalizeOAuthClientRecord(rawClient = {}) {
   };
 }
 
-async function loadOAuthClientRegistry() {
+async function loadOAuthClientRegistry({ force = false } = {}) {
   const now = Date.now();
-  if (oauthClientRegistryCache.expiresAt > now) {
+  if (!force && oauthClientRegistryCache.expiresAt > now) {
     return oauthClientRegistryCache.clients;
   }
 
@@ -2457,8 +2457,19 @@ async function loadOAuthClientRegistry() {
 }
 
 async function getOAuthClientById(clientId) {
-  const clients = await loadOAuthClientRegistry();
-  return clients.find(c => c.client_id === clientId && c.status === 'active') || null;
+  let clients = await loadOAuthClientRegistry();
+  let found = clients.find(c => c.client_id === clientId && c.status === 'active');
+  if (!found) {
+    // Cross-node staleness guard: a client just registered on a PEER node lands
+    // in the DB, but this node's 60s registry cache predates it. Force one fresh
+    // DB read before declaring the client unknown. Fixes the register→authorize
+    // race that surfaced as 'unauthorized_client' on multi-node deploys
+    // (hm-core + hm-core-2 are load-balanced; register and authorize can land on
+    // different nodes within the cache TTL).
+    clients = await loadOAuthClientRegistry({ force: true });
+    found = clients.find(c => c.client_id === clientId && c.status === 'active');
+  }
+  return found || null;
 }
 
 function normalizeRequestedScopes(scopeInput, fallbackScopes = ['memory.read']) {
@@ -4418,7 +4429,7 @@ exit \$RC
       });
 
       const scopeListHtml = requestedScopes.map(s => `
-      <div class="scope-chip">
+      <div class="scope-chip${s === 'memory.write' ? ' write' : ''}">
         <svg viewBox="0 0 20 20" fill="none" width="15" height="15" aria-hidden="true"><path d="M16.5 5.5 8 14l-4.5-4.5" stroke="#117dff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <span>${sanitizeHtml(s)}</span>
       </div>
@@ -4460,16 +4471,21 @@ exit \$RC
   .tier input{position:absolute;opacity:0;pointer-events:none}
   .dot{flex:0 0 auto;width:18px;height:18px;margin-top:1px;border-radius:50%;border:2px solid #cbd2dc;display:flex;align-items:center;justify-content:center;transition:border-color .18s}
   .dot::after{content:"";width:8px;height:8px;border-radius:50%;background:var(--blue);transform:scale(0);transition:transform .18s}
-  .tier .t-title{font-weight:600;font-size:.95rem;margin-bottom:.12rem}
-  .tier .t-desc{font-size:.82rem;color:var(--muted);line-height:1.45}
+  .tier .t-copy{display:flex;flex-direction:column;gap:.18rem}
+  .tier .t-title{display:block;font-weight:600;font-size:.95rem}
+  .tier .t-desc{display:block;font-size:.82rem;color:var(--muted);line-height:1.45}
   .tier:has(input:checked){border-color:var(--blue);background:linear-gradient(180deg,#f5f9ff,#fff);box-shadow:0 0 0 4px rgba(17,125,255,.08)}
   .tier:has(input:checked) .dot{border-color:var(--blue)}
   .tier:has(input:checked) .dot::after{transform:scale(1)}
   .tier:has(input:checked) .t-title{color:var(--blue)}
   .scopes{border:1px solid var(--line);border-radius:16px;padding:1rem;background:linear-gradient(180deg,#fcfbf9,#fff);margin-bottom:1.6rem}
   .scope-grid{display:grid;grid-template-columns:1fr 1fr;gap:.5rem}
-  .scope-chip{display:flex;align-items:center;gap:.5rem;padding:.5rem .65rem;background:#fff;border:1px solid var(--line);border-radius:10px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:.78rem;color:#3f4654}
+  .scope-chip{display:flex;align-items:center;gap:.5rem;padding:.5rem .65rem;background:#fff;border:1px solid var(--line);border-radius:10px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:.78rem;color:#3f4654;transition:opacity .18s}
   .scope-chip svg{flex:0 0 auto}
+  /* Read-only tier preview: dim + strike the write scope when Default selected */
+  form:has(.tier input[value="default"]:checked) .scope-chip.write{opacity:.45;text-decoration:line-through;text-decoration-color:#c0392b}
+  .scope-note{display:none;margin-top:.75rem;font-size:.75rem;color:#8a8578;line-height:1.45}
+  form:has(.tier input[value="default"]:checked) .scope-note{display:block}
   .actions{display:flex;gap:.7rem}
   button{flex:1;padding:.9rem 1rem;border:none;border-radius:13px;font-family:inherit;font-size:.95rem;font-weight:600;cursor:pointer;transition:transform .12s,box-shadow .18s,background .18s}
   button:active{transform:translateY(1px)}
@@ -4499,12 +4515,12 @@ exit \$RC
       <label class="tier">
         <input type="radio" name="access_tier" value="full" checked>
         <span class="dot"></span>
-        <span><span class="t-title">Full Access</span><span class="t-desc">Read, write, and execute memory operations. Recommended for full integration.</span></span>
+        <span class="t-copy"><span class="t-title">Full Access</span><span class="t-desc">Read, write, and execute memory operations. Recommended for full integration.</span></span>
       </label>
       <label class="tier">
         <input type="radio" name="access_tier" value="default">
         <span class="dot"></span>
-        <span><span class="t-title">Default Access</span><span class="t-desc">Read-only access to specific memory segments and limited tool execution.</span></span>
+        <span class="t-copy"><span class="t-title">Default Access</span><span class="t-desc">Read-only — recall, search, and time-travel. Write operations (saving &amp; editing memories) are disabled.</span></span>
       </label>
     </div>
 
@@ -4513,6 +4529,7 @@ exit \$RC
       <div class="scope-grid">
         ${scopeListHtml}
       </div>
+      <div class="scope-note">Default Access is read-only: <strong>memory.write</strong> is not granted, so ${sanitizeHtml(client.client_name)} cannot create or modify memories.</div>
     </div>
 
     <input type="hidden" name="oauth_state_id" value="${sanitizeHtml(consentStateId)}">
@@ -4702,11 +4719,20 @@ exit \$RC
       return;
     }
 
+    // Access-tier enforcement: "Default Access" (read-only) drops memory.write
+    // from the granted scopes so the token carries no write capability. The
+    // tools manifest gates mutating tools on memory:write, so this is enforced,
+    // not cosmetic. "Full Access" grants exactly what the client requested.
+    const accessTier = params.get('access_tier') === 'default' ? 'default' : 'full';
+    const grantedScopes = accessTier === 'default'
+      ? requestedScopes.filter(s => s !== 'memory.write')
+      : requestedScopes;
+
     const code = crypto.randomBytes(32).toString('hex');
     oauthCodeStore.set(code, {
       clientId,
       redirectUri,
-      scopes: requestedScopes,
+      scopes: grantedScopes,
       codeChallenge,
       codeChallengeMethod,
       userId: session.userId || DEFAULT_USER,

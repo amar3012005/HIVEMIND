@@ -27,6 +27,7 @@
 import crypto from 'crypto';
 import { chatCompletion } from '../knowledge/enterprise/litellm-client.js';
 import { ClusterIndex } from './cluster-index.js';
+import { getQdrantClient } from '../vector/qdrant-client.js';
 
 // ─── Model config ──────────────────────────────────────────────────────────────
 // Phase 0 cost cut: routine synthesis/compaction is high-volume, low-reasoning
@@ -1711,18 +1712,31 @@ Output JSON only:
   // the Stage-2 fix already applied to compaction summaries. storeMemory embeds
   // the content when no vector is supplied and routes by org_id to org_<id>.
   async _embedSynthMemory({ id, userId, orgId, project, title, content, tags, sourceType }) {
-    if (!id || !this.engine?.vectorStore?.storeMemory) return;
+    if (!id) return;
+    // this.engine.vectorStore is null on the cron-constructed loop (qdrant is
+    // injected onto the server's engine instance, not reliably visible here), so
+    // fall back to the qdrant singleton the server itself uses (same instance).
+    const vs = this.engine?.vectorStore || getQdrantClient();
+    if (!vs?.storeMemory) {
+      this.logger.warn?.(`[cognition] synth embed skipped — no qdrant client for ${id}`);
+      return;
+    }
     const role = sourceType === 'principle' ? 'principle'
       : sourceType === 'canonical-fact' ? 'canonical' : 'bridge';
     const importanceScore = sourceType === 'principle' ? 0.92
       : sourceType === 'canonical-fact' ? 0.85 : 0.90;
-    await this.engine.vectorStore.storeMemory({
-      id, user_id: userId, org_id: orgId, project: project || null,
-      memory_type: 'synthesis', title, content, tags: tags || [],
-      is_latest: true, importance_score: importanceScore,
-      cognitive_layer_role: role,
-      created_at: new Date().toISOString(), source: 'cognition-loop',
-    }).catch(err => this.logger.warn(`[cognition] synth embed failed: ${err.message}`));
+    try {
+      await vs.storeMemory({
+        id, user_id: userId, org_id: orgId, project: project || null,
+        memory_type: 'synthesis', title, content, tags: tags || [],
+        is_latest: true, importance_score: importanceScore,
+        cognitive_layer_role: role,
+        created_at: new Date().toISOString(), source: 'cognition-loop',
+      });
+      this.logger.log?.(`[cognition] embedded ${sourceType} synth ${String(id).slice(0, 8)}`);
+    } catch (err) {
+      this.logger.warn(`[cognition] synth embed failed: ${err.message}`);
+    }
   }
 
   // Derives edges to all source members

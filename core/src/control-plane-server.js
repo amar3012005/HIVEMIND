@@ -5519,9 +5519,19 @@ Write the persona now.`;
             template,
             permanentLeadId,
             permanentSkepticId,
-            projectId,
           },
         });
+        // Persist scope via raw SQL — avoids requiring a regenerated Prisma client
+        // for the new project_id column (safe on bind-mount prod without `prisma generate`).
+        if (projectId) {
+          try {
+            await prisma.$executeRawUnsafe(
+              'UPDATE "hivemind"."hyper_rooms" SET "project_id" = $1::uuid WHERE "id" = $2::uuid',
+              projectId, room.id,
+            );
+            room.projectId = projectId;
+          } catch (e) { console.warn('[hyper-rooms] project scope set failed:', e.message); }
+        }
         return jsonResponse(res, { room }, 201);
       } catch (err) {
         console.warn('[hyper-rooms] create failed:', err.message);

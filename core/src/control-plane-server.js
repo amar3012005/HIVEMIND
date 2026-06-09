@@ -5437,6 +5437,19 @@ Write the persona now.`;
           orderBy: [{ archivedAt: 'asc' }, { updatedAt: 'desc' }],
           take: 200,
         });
+        // Stamp project_id via raw SQL — the deployed Prisma client predates the
+        // column, so findMany() omits it. Without this every room reads as org-wide.
+        try {
+          const rids = rooms.map(r => r.id);
+          if (rids.length) {
+            const ph = rids.map((_, i) => `$${i + 1}::uuid`).join(',');
+            const prows = await prisma.$queryRawUnsafe(
+              `SELECT id, project_id FROM "hivemind"."hyper_rooms" WHERE id IN (${ph})`, ...rids,
+            );
+            const pmap = Object.fromEntries((prows || []).map(x => [x.id, x.project_id]));
+            for (const r of rooms) r.projectId = pmap[r.id] || null;
+          }
+        } catch { /* leave projectId undefined */ }
         // Hydrate participants + project scope for the rail
         const allIds = Array.from(new Set(rooms.flatMap(r => r.participantIds || [])));
         const projectIds = Array.from(new Set(rooms.map(r => r.projectId).filter(Boolean)));
@@ -5626,6 +5639,14 @@ Write the persona now.`;
         where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId },
       });
       if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
+      // project_id is read via raw SQL — the deployed Prisma client predates the
+      // column, so prisma.hyperRoom.findFirst() omits it from the result object.
+      try {
+        const pr = await prisma.$queryRawUnsafe(
+          'SELECT project_id FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid', roomId,
+        );
+        room.projectId = pr?.[0]?.project_id || null;
+      } catch { /* leave undefined */ }
       const turns = await prisma.hyperTurn.findMany({
         where: { roomId },
         orderBy: { seq: 'asc' },

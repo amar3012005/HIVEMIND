@@ -5499,6 +5499,17 @@ Write the persona now.`;
         if (typeof body.permanent_skeptic_id === 'string' && validIds.includes(body.permanent_skeptic_id)) {
           permanentSkepticId = body.permanent_skeptic_id;
         }
+        // Scope: optional project_id nests the room inside a project HIVEMIND.
+        // Validate it belongs to this org; ignore otherwise (falls back to org-wide).
+        let projectId = null;
+        if (typeof body.project_id === 'string' && body.project_id) {
+          const proj = await prisma.project.findFirst({
+            where: { id: body.project_id, orgId: current.session.orgId },
+            select: { id: true },
+          }).catch(() => null);
+          if (!proj) return jsonResponse(res, { error: 'project not found in this org' }, 400);
+          projectId = proj.id;
+        }
         const room = await prisma.hyperRoom.create({
           data: {
             userId: current.session.userId,
@@ -5508,6 +5519,7 @@ Write the persona now.`;
             template,
             permanentLeadId,
             permanentSkepticId,
+            projectId,
           },
         });
         return jsonResponse(res, { room }, 201);

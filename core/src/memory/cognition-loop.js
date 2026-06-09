@@ -332,6 +332,57 @@ export class CognitionLoop {
    * Same status-counter update as the auto tick — call from
    * /api/cognition/synthesize-now so the UI sees fresh last_run / counts.
    */
+  /**
+   * Activity gate (per org). Two reasons to skip a cognition run entirely — no
+   * model spend, no churn:
+   *   A) zero NEW real memories since the last run → re-synthesizing identical
+   *      data produces nothing new and just burns tokens. ("don't do it again
+   *      and again.")
+   *   B) fewer than COGNITION_MIN_WINDOW_MEMORIES real memories in the lookback
+   *      window → nothing can cluster, so there is nothing to synthesize.
+   * "Real" = fact/decision that is NOT a synthesis/reflection output
+   * (cognitive_layer_role IS NULL) and NOT the governance swarm's own audit rows.
+   * The window/last-run counts exclude cognition's own output so a run never
+   * re-triggers itself. Fail-open on DB error (a transient hiccup must not stall
+   * cognition silently).
+   * @returns {Promise<{run: boolean, reason: string|null}>}
+   */
+  async _shouldRunForOrg(orgId) {
+    const MIN = Number(process.env.COGNITION_MIN_WINDOW_MEMORIES || 3);
+    const since = new Date(Date.now() - DEFAULT_LOOKBACK_HOURS * 3600 * 1000);
+    const baseWhere = {
+      orgId,
+      deletedAt: null,
+      memoryType: { in: ['fact', 'decision'] },
+      cognitiveLayerRole: null,
+      NOT: { tags: { hasSome: ['internal-audit', 'governance', 'synthesis:canonical', 'synthesis:bridge', 'canonical-summary', 'synthesized'] } },
+    };
+    try {
+      const windowCount = await this.prisma.memory.count({
+        where: { ...baseWhere, createdAt: { gte: since } },
+      });
+      if (windowCount < MIN) {
+        return { run: false, reason: `below_min_window_memories(${windowCount}<${MIN})` };
+      }
+      const status = this.prisma?.cognitionStatus
+        ? await this.prisma.cognitionStatus.findUnique({ where: { orgId }, select: { lastTickAt: true } }).catch(() => null)
+        : null;
+      const lastTickAt = status?.lastTickAt || null;
+      if (lastTickAt) {
+        const newSinceLastRun = await this.prisma.memory.count({
+          where: { ...baseWhere, createdAt: { gt: lastTickAt } },
+        });
+        if (newSinceLastRun === 0) {
+          return { run: false, reason: 'no_new_activity_since_last_run' };
+        }
+      }
+      return { run: true, reason: null };
+    } catch (err) {
+      this.logger.warn?.(`[cognition] activity-gate check failed (${err.message}) — running anyway`);
+      return { run: true, reason: null };
+    }
+  }
+
   async runOnce(orgId) {
     if (_status.running) {
       return { skipped: true, reason: 'tick already in progress' };
@@ -339,6 +390,14 @@ export class CognitionLoop {
     _status.running = true;
     const tStart = Date.now();
     try {
+      const gate = await this._shouldRunForOrg(orgId);
+      if (!gate.run) {
+        this.logger.log(`[cognition] org=${orgId} skipped — ${gate.reason}`);
+        // Do NOT persist status on skip: lastTickAt must stay anchored to the
+        // last run that actually processed data, so gate A keeps comparing
+        // against it until new memories arrive.
+        return { synth: 0, compact: 0, principles: 0, ms: Date.now() - tStart, skipped: true, reason: gate.reason };
+      }
       const synth   = await this.synthesizeForOrg(orgId);
       const compact = await this.compactDriftForOrg(orgId);
       // Pass 3 — L2 principle distillation (no-op unless PRINCIPLES_ENABLED)
@@ -421,6 +480,11 @@ export class CognitionLoop {
       for (const org of orgs) {
         const orgStart = Date.now();
         try {
+          const gate = await this._shouldRunForOrg(org.id);
+          if (!gate.run) {
+            this.logger.log(`[cognition] org=${org.id} skipped — ${gate.reason}`);
+            continue; // no spend, no status update — stay anchored to last real run
+          }
           const synthN   = await this.synthesizeForOrg(org.id);
           const compactN = await this.compactDriftForOrg(org.id);
           // Pass 3 — L2 principle distillation (no-op unless PRINCIPLES_ENABLED)

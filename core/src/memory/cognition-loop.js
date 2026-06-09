@@ -1636,6 +1636,7 @@ Output JSON only:
         await this._linkDerivesEdges(newId, members, sourceType, tag);
       }
 
+      if (newId) await this._embedSynthMemory({ id: newId, userId, orgId, project, title, content, tags: finalTags, sourceType });
       return newId ? { id: newId, tags: finalTags } : null;
     } catch (err) {
       this.logger.warn(`[cognition] engine.ingestMemory failed (${err.message}), falling back to direct insert`);
@@ -1697,8 +1698,31 @@ Output JSON only:
 
     if (created) {
       await this._linkDerivesEdges(created.id, members, sourceType, tag);
+      await this._embedSynthMemory({ id: created.id, userId, orgId, project, title, content, tags: Array.from(unionedTags), sourceType });
     }
     return created;
+  }
+
+  // Embed + upsert a synthesis memory into the per-tenant Qdrant collection.
+  // _writeSynthMemory persists to Postgres only (engine.ingestMemory does not
+  // embed the new row; _directInsert is a raw prisma.create), so canonical /
+  // bridge / principle were born with ZERO vectors and never entered the vector
+  // candidate pool — the whole synthesis tier was invisible to recall. Mirror
+  // the Stage-2 fix already applied to compaction summaries. storeMemory embeds
+  // the content when no vector is supplied and routes by org_id to org_<id>.
+  async _embedSynthMemory({ id, userId, orgId, project, title, content, tags, sourceType }) {
+    if (!id || !this.engine?.vectorStore?.storeMemory) return;
+    const role = sourceType === 'principle' ? 'principle'
+      : sourceType === 'canonical-fact' ? 'canonical' : 'bridge';
+    const importanceScore = sourceType === 'principle' ? 0.92
+      : sourceType === 'canonical-fact' ? 0.85 : 0.90;
+    await this.engine.vectorStore.storeMemory({
+      id, user_id: userId, org_id: orgId, project: project || null,
+      memory_type: 'synthesis', title, content, tags: tags || [],
+      is_latest: true, importance_score: importanceScore,
+      cognitive_layer_role: role,
+      created_at: new Date().toISOString(), source: 'cognition-loop',
+    }).catch(err => this.logger.warn(`[cognition] synth embed failed: ${err.message}`));
   }
 
   // Derives edges to all source members

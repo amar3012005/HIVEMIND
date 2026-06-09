@@ -7,8 +7,10 @@ import {
   TURING_OBSERVATION_FIELDS,
 } from './contract.js';
 import { FaradayAgent } from './faraday.js';
+import { includePersonalForOrg, cognitionEnabledForOrg } from './cognition-pilot.js';
 import { FeynmanAgent } from './feynman.js';
 import { TuringAgent } from './turing.js';
+import { isPoolEnabled, ensurePoolRow, resetAndReadPool, spendPool } from './budget-pool.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -194,6 +196,12 @@ export class ResidentRunManager {
       dryRun: run.dry_run,
       runId: run.run_id,
       cursorAfter: run.cursor_after || null,
+      // Toggle-gated: scan members' personal/private memories only when the org's
+      // cognition_personal_enabled switch is on (cognition-pilot.js, DB-driven).
+      includePersonal: await includePersonalForOrg(this.prisma, context.orgId),
+      // Windowed sense: only memories from the last tick window (hourly cron),
+      // not the whole corpus. 0 = legacy whole-corpus scan.
+      lookbackHours: Number(process.env.GOV_SCAN_LOOKBACK_HOURS || 24),
       onProgress: async (progress) => {
         run.current_step = progress.current_step;
         run.progress = progress;
@@ -515,7 +523,11 @@ export class ResidentRunManager {
     // ops are gated separately by SWARM_ALLOW_MERGE (default FALSE
     // per the no-merge policy).
     // ─────────────────────────────────────────────────────────────────
-    const AUTO_EXECUTE = process.env.SWARM_AUTO_EXECUTE === 'true';
+    // Default ON: only orgs with a cognition toggle reach a scheduler cycle
+    // (runFullCycle gate), and Faraday's superseding merge/link path stays
+    // locked at 0.95 below — so auto-exec only writes the additive Turing tools.
+    // Opt OUT globally with SWARM_AUTO_EXECUTE=false.
+    const AUTO_EXECUTE = process.env.SWARM_AUTO_EXECUTE !== 'false';
     const ALLOW_MERGE = process.env.SWARM_ALLOW_MERGE === 'true';
 
     // Helper — turn a Turing/Faraday action candidate into a queueable
@@ -596,7 +608,11 @@ export class ResidentRunManager {
           const { GraphActionExecutor } = await import('./graph-action-executor.js');
           const executor = new GraphActionExecutor({ memoryStore: this.memoryStore });
           const actionResult = await executor.executeActions(filtered, {
-            minConfidence: 0.95,    // raised from 0.65 — only high-conf
+            // Turing proposals are the ADDITIVE cognitive tools (canonical/bridge
+            // synthesis — no member supersession), so the floor is env-tunable
+            // (GOV_MIN_PROPOSAL_CONFIDENCE) for pilot calibration. Default stays
+            // 0.95. Faraday's superseding merge/link path above is left at 0.95.
+            minConfidence: Number(process.env.GOV_MIN_PROPOSAL_CONFIDENCE || 0.45),
             project: run.project,
             duplicateMode: 'flag',  // never merge by default
           });
@@ -784,7 +800,7 @@ export class ResidentRunManager {
    *
    * Returns { batch_id, status, faraday, feynman, turing, proposals_persisted }.
    */
-  async runFullCycle({ orgId, userId, scope = 'project', project = null, region = null, trigger = 'manual', enabledCognitiveTools = null } = {}) {
+  async runFullCycle({ orgId, userId, scope = 'project', project = null, region = null, trigger = 'manual', enabledCognitiveTools = null, tierName = 'synthesis', tierTokenEstimate = null } = {}) {
     if (!orgId) {
       const err = new Error('runFullCycle requires orgId');
       err.code = 'MISSING_ORG_ID';
@@ -794,13 +810,44 @@ export class ResidentRunManager {
       this.logger?.warn?.('[gov-cycle] no prisma client — skipping persistence');
     }
 
+    // Toggle gate: the cognitive layer ships dormant for every org. Skip the
+    // whole cycle unless an admin enabled org-scope, personal-scope, or a
+    // project self-evolve toggle (cognition-pilot.js). 'manual' triggers from
+    // admin tools bypass so they can force a run for testing.
+    if (this.prisma && trigger === 'scheduler') {
+      try {
+        const enabled = await cognitionEnabledForOrg(this.prisma, orgId);
+        if (!enabled) {
+          return { batch_id: randomUUID(), status: 'skipped_cognition_disabled', org_id: orgId };
+        }
+      } catch { /* fail-open to existing behaviour on settings read error */ }
+    }
+
     const batchId = randomUUID();
     const cycleStartedAt = Date.now();
     let lockAcquired = false;
     const LOCK_HOLD_MS = 10 * 60 * 1000; // 10 min cycle ceiling
 
     // Token-budget circuit breaker: reset day, check spend, refuse if exhausted.
-    if (this.prisma) {
+    // PHASE E: when the shared pool is enabled, the pool is the authoritative
+    // cap and the per-agent breaker becomes advisory. Otherwise the original
+    // per-agent block runs byte-identically.
+    if (this.prisma && isPoolEnabled()) {
+      try {
+        await ensurePoolRow(this.prisma);
+        const { spent, budget, exhausted } = await resetAndReadPool(this.prisma);
+        if (exhausted) {
+          this.logger?.warn?.(`[gov-cycle] shared token pool exhausted (spent=${spent}/${budget})`);
+          return {
+            batch_id: batchId,
+            status: 'skipped_budget_exhausted',
+            pool: { spent, budget },
+          };
+        }
+      } catch (err) {
+        this.logger?.warn?.(`[gov-cycle] pool-budget check failed: ${err.message}`);
+      }
+    } else if (this.prisma) {
       try {
         await this.prisma.$executeRawUnsafe(
           `UPDATE hivemind.governance_agent_state
@@ -1016,6 +1063,8 @@ export class ResidentRunManager {
             proposalsPersisted: summary.proposals_persisted,
             latencyMs: Date.now() - cycleStartedAt,
             tokenUsageByAgent: { faraday: faradayTokens },
+            tierName,
+            tierTokenEstimate,
           });
         } catch (err) {
           this.logger?.warn?.(`[gov-cycle] state update failed: ${err.message}`);
@@ -1205,14 +1254,16 @@ export class ResidentRunManager {
     });
   }
 
-  async _updateAgentStateAfterCycle({ orgId, status, proposalsPersisted, latencyMs, tokenUsageByAgent = {} }) {
+  async _updateAgentStateAfterCycle({ orgId, status, proposalsPersisted, latencyMs, tokenUsageByAgent = {}, tierName = 'synthesis', tierTokenEstimate = null }) {
     const now = new Date();
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     // Heuristic token cost when LLM doesn't surface usage. Conservative
     // overestimate so circuit-breaker fires before real overrun.
     const FALLBACK_TOKENS_PER_RUN = Number(process.env.GOV_FALLBACK_TOKENS_PER_RUN || 5000);
+    let totalCycleTokens = 0;
     for (const agentName of ['faraday', 'feynman', 'turing']) {
       const tokensSpent = Number(tokenUsageByAgent[agentName] ?? FALLBACK_TOKENS_PER_RUN) | 0;
+      totalCycleTokens += tokensSpent;
       await this.prisma.governanceAgentState.update({
         where: { agentName },
         data: {
@@ -1244,6 +1295,16 @@ export class ResidentRunManager {
           tokensSpent: { increment: BigInt(tokensSpent) },
         },
       }).catch(() => null);
+    }
+
+    // PHASE E: debit the shared pool for this whole cycle. Per-agent updates
+    // above are retained (advisory when the pool is enabled). Prefer the
+    // caller's tier estimate when provided so the pool reflects the tier mix.
+    if (isPoolEnabled()) {
+      const poolTokens = Number.isFinite(tierTokenEstimate) && tierTokenEstimate != null
+        ? Number(tierTokenEstimate)
+        : totalCycleTokens;
+      await spendPool(this.prisma, poolTokens, tierName, this.logger);
     }
   }
 

@@ -1,7 +1,15 @@
 /**
  * ResultReranker
  *
- * Multi-signal reranking for post-retrieval precision boost.
+ * CANONICAL ALGORITHMIC multi-signal reranker for HIVEMIND recall. This is the
+ * single, always-available, no-external-model reranker shared by BOTH delivery paths:
+ *   • src/external/search/three-tier-retrieval.js (three-tier retrieval ordering)
+ *   • src/memory/persisted-retrieval.js (gated behind RECALL_TIERED_VIEW — PHASE-B)
+ *
+ * Distinct from the OPT-IN cross-encoder reranker in src/memory/reranker.js
+ * (gated behind RERANK_ENABLED, agent path). That one is a precision pass that
+ * calls an external model; this one is pure scoring and never makes network calls.
+ *
  * Combines: vector score, recency, confirmation count, relationship density,
  * query-term overlap (BM25-like), and source authority.
  *
@@ -23,11 +31,15 @@ export class ResultReranker {
    * Rerank results based on multiple signals.
    * @param {string} query - original search query
    * @param {Object[]} results - search results with score, content, metadata, etc.
-   * @param {Object} options - { boostRecent?: boolean, boostConfirmed?: boolean }
+   * @param {Object} options - { boostRecent?: boolean, boostConfirmed?: boolean, passthrough?: boolean }
+   *   passthrough (default false): when true, results are re-ORDERED by the combined
+   *   signal score but each result's own `score` field is left UNCHANGED (no override).
+   *   Behaviour is otherwise identical. Useful when a downstream stage owns the score.
    * @returns {Object[]} reranked results with _rerank metadata
    */
   rerank(query, results, options = {}) {
     if (!results || results.length <= 1) return results;
+    const passthrough = options.passthrough === true;
 
     const queryTerms = this._tokenize(query);
     const now = Date.now();
@@ -53,7 +65,8 @@ export class ResultReranker {
           signals,
           rank: 0, // set after sorting
         },
-        score: combinedScore, // override score with reranked score
+        // Default: override score with reranked score. passthrough: keep original.
+        ...(passthrough ? {} : { score: combinedScore }),
       };
     });
 

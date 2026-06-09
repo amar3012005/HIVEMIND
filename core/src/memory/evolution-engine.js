@@ -21,6 +21,7 @@ import { getPrismaClient } from '../db/prisma.js';
 import {
   getRetrievalConfig, applyRetrievalConfigDelta, clampTunable,
 } from './retrieval-config.js';
+import { isPoolEnabled, spendPool } from '../resident/budget-pool.js';
 
 const ENABLED       = process.env.EVOLUTION_ENABLED === 'true';
 const MIN_OUTCOMES  = Number(process.env.EVOLUTION_MIN_OUTCOMES || 20);   // need signal
@@ -150,6 +151,21 @@ export async function runEvolution({ orgId, userId, apiKey, logger = console } =
     recall_before: evBefore.recall_at_k, recall_after: evAfter.recall_at_k,
     p95_before: evBefore.latency_ms?.p95, p95_after: evAfter.latency_ms?.p95,
   });
+
+  // PHASE E: debit the shared pool a conservative flat estimate for this run.
+  // PHASE-E TODO: litellm-client.js:49 discards real token usage and the cheap
+  // propose() path is now rule-based (0 LLM tokens), so the only LLM spend here
+  // is inside evalOrg replay — not surfaced. Charge a flat estimate until usage
+  // is threaded through. Never blocks the decision.
+  if (isPoolEnabled()) {
+    try {
+      const estEvolution = Number(process.env.PHASE_E_EST_EVOLUTION || 4000);
+      await spendPool(prisma, estEvolution, 'evolution', logger);
+    } catch (err) {
+      logger?.warn?.(`[evolution] pool spend failed (non-fatal): ${err.message}`);
+    }
+  }
+
   return { decision, delta, recall_before: evBefore.recall_at_k, recall_after: evAfter.recall_at_k };
 }
 

@@ -46,15 +46,19 @@ async function main() {
     // Wire the real engine — import graph-engine and give it prisma + store
     try {
       const { MemoryGraphEngine } = await import('../src/memory/graph-engine.js');
-      const store = new PrismaGraphStore({ prisma });
-      engine = new MemoryGraphEngine({ prisma, store });
+      // PrismaGraphStore's constructor is POSITIONAL: constructor(client). Passing
+      // { prisma } sets this.client = { prisma } → this.client.$transaction is
+      // undefined → ingestMemory throws and silently falls back to direct insert
+      // (no embedding, no role). Match server.js: new PrismaGraphStore(prisma).
+      const store = new PrismaGraphStore(prisma);
+      engine = new MemoryGraphEngine({ store });
     } catch (err) {
       console.warn(`[backfill] could not load MemoryGraphEngine (${err.message}), falling back to direct insert`);
       engine = null; // CognitionLoop falls back to direct Prisma insert
     }
   }
 
-  const store = new PrismaGraphStore({ prisma });
+  const store = new PrismaGraphStore(prisma);
   const loop = new CognitionLoop({
     prisma,
     memoryGraphEngine: engine,

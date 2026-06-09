@@ -472,7 +472,7 @@ if (persistentMemoryEngine && persistentMemoryStore && prisma) {
 // (was opt-in; legacy ENABLE_COGNITION_LOOP=true still works).
 const COGNITION_LOOP_ENABLED = process.env.ENABLE_COGNITION_LOOP !== 'false';
 let cognitionLoop = null;
-if (COGNITION_LOOP_ENABLED && prisma) {
+if (prisma) {
   setImmediate(async () => {
     try {
       const { CognitionLoop } = await import('./memory/cognition-loop.js');
@@ -482,8 +482,17 @@ if (COGNITION_LOOP_ENABLED && prisma) {
         persistentMemoryStore,
         logger: console,
       });
-      cognitionLoop.start();
-      console.log('[cognition] loop started');
+      // Phase D: the standalone setInterval timer is the RETIRED cadence owner —
+      // the governance scheduler drives the hourly cycle now. Gate only the TIMER
+      // on ENABLE_COGNITION_LOOP, not the object: the manual trigger
+      // (/api/cognition/synthesize-now) needs a live loop regardless, otherwise it
+      // 503s ("cognition loop not running") on prod where the timer is disabled.
+      if (COGNITION_LOOP_ENABLED) {
+        cognitionLoop.start();
+        console.log('[cognition] loop started (standalone timer)');
+      } else {
+        console.log('[cognition] loop ready (manual trigger only; governance scheduler owns cadence)');
+      }
     } catch (err) {
       console.warn('[cognition] init failed:', err.message);
     }

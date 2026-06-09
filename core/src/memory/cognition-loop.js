@@ -486,8 +486,15 @@ export class CognitionLoop {
         createdAt:  { gte: since },
         deletedAt:  null,
         memoryType: { in: ['fact', 'decision'] },
-        // Exclude existing synthesis outputs from source pools
-        NOT: { tags: { hasSome: ['synthesis:canonical', 'synthesis:bridge', 'canonical-summary', 'synthesized'] } },
+        // Exclude the governance swarm's OWN output. Reflections + every synthesis
+        // tier carry a non-null cognitive_layer_role; without this filter the
+        // agents' internal-audit/reflection memories dominate clustering and the
+        // only canonical that ever reaches the floor is a tautological
+        // "governance (N sources)". This is the cognition layer eating its own
+        // exhaust — the single biggest reason synthesis produced no real knowledge.
+        cognitiveLayerRole: null,
+        // Exclude existing synthesis outputs + governance audit tags from the source pool
+        NOT: { tags: { hasSome: ['synthesis:canonical', 'synthesis:bridge', 'canonical-summary', 'synthesized', 'internal-audit', 'governance'] } },
       },
       take: 400,
       orderBy: { createdAt: 'desc' },
@@ -1650,9 +1657,16 @@ Output JSON only:
         tags:                Array.from(unionedTags),
         isLatest:            true,
         importanceScore:     sourceType === 'principle' ? 0.92 : sourceType === 'canonical-fact' ? 0.85 : 0.90,
-        // Additive: only principle sets the role here (canonical/bridge unchanged
-        // from prior behaviour — they relied on the column default).
-        ...(sourceType === 'principle' ? { cognitiveLayerRole: 'principle' } : {}),
+        // Set cognitive_layer_role on EVERY synthesis tier (mirrors the engine
+        // path). Previously canonical/bridge were left null and "relied on the
+        // column default" — but there is no default, so the role-keyed recall
+        // boost (principle ×1.7 > canonical ×1.6 > bridge ×1.4) and the
+        // memories_principle_role_idx partial index never fired for them.
+        cognitiveLayerRole: sourceType === 'principle'
+          ? 'principle'
+          : sourceType === 'canonical-fact'
+            ? 'canonical'
+            : 'bridge',
         synthesisConfidence: confidence,
         synthesisEvidenceIds: evidenceIds,
         synthesisClusterHash: hash,

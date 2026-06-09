@@ -142,7 +142,7 @@ if (prisma) {
         if (ticks < 2 || _sweepKicked.has(t.id)) continue;
         const room = await prisma.hyperRoom.findUnique({
           where: { id: t.roomId },
-          select: { userId: true, orgId: true, participantIds: true },
+          select: { userId: true, orgId: true, participantIds: true, projectId: true },
         });
         if (!room) continue;
         _sweepKicked.add(t.id);
@@ -155,7 +155,7 @@ if (prisma) {
           },
           body: JSON.stringify({
             room_id: t.roomId, turn_id: t.id, user_id: room.userId, org_id: room.orgId,
-            user_message: t.userMessage || '(continue)', participant_ids: room.participantIds || [],
+            user_message: t.userMessage || '(continue)', participant_ids: room.participantIds || [], project_id: room.projectId || null,
             callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
           }),
         }).catch((err) => console.warn('[hyper-sweeper] re-kick failed:', err.message));
@@ -5837,7 +5837,7 @@ Write the persona now.`;
             user_id: current.session.userId,
             org_id: current.session.orgId,
             user_message: turn.userMessage,
-            participant_ids: room.participantIds || [],
+            participant_ids: room.participantIds || [], project_id: room.projectId || null,
             flyby_decision: decision,
             flyby_spec: flybySpec,
             callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
@@ -5906,7 +5906,7 @@ Write the persona now.`;
               user_id: current.session.userId,
               org_id: current.session.orgId,
               user_message: turn.userMessage,
-              participant_ids: room.participantIds || [],
+              participant_ids: room.participantIds || [], project_id: room.projectId || null,
               flyby_decision: decision,
               flyby_spec: flybySpec,
               callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
@@ -5978,7 +5978,7 @@ Write the persona now.`;
               user_id: current.session.userId,
               org_id: current.session.orgId,
               user_message: userMessage,
-              participant_ids: room.participantIds || [],
+              participant_ids: room.participantIds || [], project_id: room.projectId || null,
               callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
             }),
           }).catch(err => console.warn('[hyper-rooms] sidecar kick failed:', err.message));

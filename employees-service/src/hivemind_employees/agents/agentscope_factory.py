@@ -157,6 +157,7 @@ def build_react_agent(
     hivemind_api_key: str,
     user_id: Optional[str] = None,
     org_id: Optional[str] = None,
+    project_id: Optional[str] = None,
 ) -> ReActAgent:
     """Construct an AgentScope ReActAgent for one DigitalEmployee.
 
@@ -202,6 +203,7 @@ def build_react_agent(
             enabled_tool_names=enabled_tools,
             user_id=user_id,
             org_id=org_id,
+            project_id=project_id,
         )
 
     model = _resolve_model(employee_row)

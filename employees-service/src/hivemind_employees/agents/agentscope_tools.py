@@ -96,6 +96,7 @@ def build_hivemind_toolkit(
     enabled_tool_names: List[str],
     user_id: Optional[str] = None,
     org_id: Optional[str] = None,
+    project_id: Optional[str] = None,
 ) -> Toolkit:
     """Return an AgentScope Toolkit populated with HIVEMIND tools.
 
@@ -181,9 +182,12 @@ def build_hivemind_toolkit(
                 max_memories: Max memories to return (default 5).
             """
             with _client(api_key, user_id, org_id) as c:
-                r = c.post("/api/recall", json={
-                    "query_context": query, "max_memories": max_memories,
-                })
+                body = {"query_context": query, "max_memories": max_memories}
+                # Room scope: when the room belongs to a project HIVEMIND, every
+                # agent recall is scoped to that project so the room stays on-topic.
+                if project_id:
+                    body["project_id"] = project_id
+                r = c.post("/api/recall", json=body)
                 r.raise_for_status()
                 return _tool_response(r.json())
         tk.register_tool_function(recall)
@@ -199,9 +203,11 @@ def build_hivemind_toolkit(
             """
             tag_list = [t.strip() for t in (tags or "").split(",") if t.strip()]
             with _client(api_key, user_id, org_id) as c:
-                r = c.post("/api/memories", json={
-                    "title": title, "content": content, "tags": tag_list, "sync": True,
-                })
+                body = {"title": title, "content": content, "tags": tag_list, "sync": True}
+                # Room scope: project-scoped rooms save into the project HIVEMIND.
+                if project_id:
+                    body["project_id"] = project_id
+                r = c.post("/api/memories", json=body)
                 r.raise_for_status()
                 return _tool_response(r.json())
         tk.register_tool_function(save_memory)

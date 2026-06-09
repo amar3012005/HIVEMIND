@@ -597,6 +597,7 @@ async def _build_agent_for_room(
     emp: Dict[str, Any],
     user_id: Optional[str] = None,
     org_id: Optional[str] = None,
+    project_id: Optional[str] = None,
 ) -> ReActAgent:
     """Cache one agent per (room, employee) so memory carries across turns.
 
@@ -630,7 +631,7 @@ async def _build_agent_for_room(
             "hyper": boot_emp.get("hyper"),
             "active_prompt_version": boot_emp.get("active_prompt_version"),
         }
-        agent = build_react_agent(merged, "", user_id=user_id, org_id=org_id)
+        agent = build_react_agent(merged, "", user_id=user_id, org_id=org_id, project_id=project_id)
         _ROOM_AGENTS[key] = agent
         return agent
     merged = {
@@ -642,7 +643,7 @@ async def _build_agent_for_room(
         "hyper": boot_emp.get("hyper"),
         "active_prompt_version": boot_emp.get("active_prompt_version"),
     }
-    agent = build_react_agent(merged, api_key, user_id=user_id, org_id=org_id)
+    agent = build_react_agent(merged, api_key, user_id=user_id, org_id=org_id, project_id=project_id)
     _ROOM_AGENTS[key] = agent
     return agent
 
@@ -796,6 +797,9 @@ class RoomTurnRequest(BaseModel):
     callback_url: Optional[str] = None
     flyby_decision: Optional[str] = None
     flyby_spec: Optional[Dict[str, Any]] = None
+    # Project scope: when set, every agent recall/save in this turn is scoped to
+    # the project HIVEMIND so the room stays about that project.
+    project_id: Optional[str] = None
 
 
 class RoomTurnResponse(BaseModel):
@@ -1138,7 +1142,7 @@ async def _sim_agent_json(
     fallback: Dict[str, Any],
 ) -> Dict[str, Any]:
     try:
-        agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id)
+        agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id, project_id=req.project_id)
         reply = await agent(Msg(name="user", content=prompt, role="user"))
         _report_turn(emp["id"], req.user_message, reply)
         text = _msg_to_text(reply)
@@ -1314,7 +1318,7 @@ async def _orchestrate_deep_sim(
         await _emit_event(req.callback_url, req.turn_id, {"t": "peer_review", **review})
 
     await _emit_event(req.callback_url, req.turn_id, {"t": "simulation_phase", "phase": "revise", "label": "Revision"})
-    lead_agent = await _build_agent_for_room(req.room_id, lead, user_id=req.user_id, org_id=req.org_id)
+    lead_agent = await _build_agent_for_room(req.room_id, lead, user_id=req.user_id, org_id=req.org_id, project_id=req.project_id)
     conclusion_prompt = (
         "[DEEP SIM CONCLUSION]\n"
         "You are the lead. Synthesize the simulated Slack session into a strong enterprise decision.\n"
@@ -1853,7 +1857,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
     # ─── R1 — Independent Hypothesis ───────────────────────────────────
     async def _run_r1(emp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         try:
-            agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id)
+            agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id, project_id=req.project_id)
             prompt = R1_HYPOTHESIS_PROMPT.format(
                 persona_name=emp.get("name", emp.get("slug")),
                 lane=emp["_lane"],
@@ -1996,7 +2000,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
             if not target_ids:
                 return []
             try:
-                agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id)
+                agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id, project_id=req.project_id)
                 prompt = R2_PEER_REVIEW_PROMPT.format(
                     persona_name=emp.get("name", emp.get("slug")),
                     lane=emp["_lane"],
@@ -2084,7 +2088,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
                 for rv in own_reviews
             ) or "  (no peer reviews of your hypothesis)"
             try:
-                agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id)
+                agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id, project_id=req.project_id)
                 prompt = R3_DEEP_DIVE_PROMPT.format(
                     persona_name=emp.get("name", emp.get("slug")),
                     lane=emp["_lane"],
@@ -2245,7 +2249,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
 
         async def _run_vote(emp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             try:
-                agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id)
+                agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id, project_id=req.project_id)
                 prompt = R5_VOTE_PROMPT.format(
                     persona_name=emp.get("name", emp.get("slug")),
                     lane=emp["_lane"],
@@ -2389,7 +2393,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
                     req.turn_id, consensus["verdict"])
     else:
         try:
-            lead_agent = await _build_agent_for_room(req.room_id, lead, user_id=req.user_id, org_id=req.org_id)
+            lead_agent = await _build_agent_for_room(req.room_id, lead, user_id=req.user_id, org_id=req.org_id, project_id=req.project_id)
             vote_summary_lines = []
             for v in votes:
                 vote_summary_lines.append(
@@ -2756,7 +2760,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     lead_agent = None
     lead_prompt = ""
     try:
-        lead_agent = await _build_agent_for_room(req.room_id, lead, user_id=req.user_id, org_id=req.org_id)
+        lead_agent = await _build_agent_for_room(req.room_id, lead, user_id=req.user_id, org_id=req.org_id, project_id=req.project_id)
         # Provide CSI persona framing in the user-prompt wrapper so we
         # don't have to mutate the agent's underlying system prompt.
         # Chat-tone constraints — this is a Slack-style room, NOT a memo.

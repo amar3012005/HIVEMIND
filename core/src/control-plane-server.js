@@ -5437,15 +5437,23 @@ Write the persona now.`;
           orderBy: [{ archivedAt: 'asc' }, { updatedAt: 'desc' }],
           take: 200,
         });
-        // Hydrate participants for the rail
+        // Hydrate participants + project scope for the rail
         const allIds = Array.from(new Set(rooms.flatMap(r => r.participantIds || [])));
+        const projectIds = Array.from(new Set(rooms.map(r => r.projectId).filter(Boolean)));
         const employees = allIds.length
           ? await prisma.digitalEmployee.findMany({
               where: { id: { in: allIds } },
               select: { id: true, slug: true, name: true, avatarUrl: true, roleArchetype: true, status: true },
             })
           : [];
+        const projects = projectIds.length
+          ? await prisma.project.findMany({
+              where: { id: { in: projectIds }, orgId: current.session.orgId },
+              select: { id: true, name: true, slug: true },
+            })
+          : [];
         const empById = Object.fromEntries(employees.map(e => [e.id, { ...e, lane: deriveCsiLane(e) }]));
+        const projectById = Object.fromEntries(projects.map(p => [p.id, p]));
         return jsonResponse(res, {
           rooms: rooms.map(r => ({
             id: r.id,
@@ -5456,6 +5464,14 @@ Write the persona now.`;
             updated_at: r.updatedAt,
             archived_at: r.archivedAt,
             summary_memory_id: r.summaryMemoryId,
+            project_id: r.projectId || null,
+            project: r.projectId && projectById[r.projectId]
+              ? {
+                  id: projectById[r.projectId].id,
+                  name: projectById[r.projectId].name,
+                  slug: projectById[r.projectId].slug,
+                }
+              : null,
           })),
         });
       } catch (err) {
@@ -5530,6 +5546,11 @@ Write the persona now.`;
               projectId, room.id,
             );
             room.projectId = projectId;
+            const scopedProject = await prisma.project.findFirst({
+              where: { id: projectId, orgId: current.session.orgId },
+              select: { id: true, name: true, slug: true },
+            }).catch(() => null);
+            if (scopedProject) room.project = scopedProject;
           } catch (e) { console.warn('[hyper-rooms] project scope set failed:', e.message); }
         }
         return jsonResponse(res, { room }, 201);
@@ -5675,6 +5696,26 @@ Write the persona now.`;
         data.permanentSkepticId = body.permanent_skeptic_id || null;
       }
       const updated = await prisma.hyperRoom.update({ where: { id: roomId }, data });
+      // Scope change (Org ↔ Project) — persisted via raw SQL so it works without a
+      // regenerated Prisma client for the project_id column. null clears to org-wide.
+      if (Object.prototype.hasOwnProperty.call(body, 'project_id')) {
+        let nextProjectId = null;
+        if (typeof body.project_id === 'string' && body.project_id) {
+          const proj = await prisma.project.findFirst({
+            where: { id: body.project_id, orgId: current.session.orgId },
+            select: { id: true },
+          }).catch(() => null);
+          if (!proj) return jsonResponse(res, { error: 'project not found in this org' }, 400);
+          nextProjectId = proj.id;
+        }
+        try {
+          await prisma.$executeRawUnsafe(
+            'UPDATE "hivemind"."hyper_rooms" SET "project_id" = $1::uuid WHERE "id" = $2::uuid',
+            nextProjectId, roomId,
+          );
+          updated.projectId = nextProjectId;
+        } catch (e) { console.warn('[hyper-rooms] scope update failed:', e.message); }
+      }
       return jsonResponse(res, { room: updated });
     }
 

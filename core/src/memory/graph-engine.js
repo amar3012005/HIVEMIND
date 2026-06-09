@@ -1740,6 +1740,9 @@ OUTPUT JSON only.`;
               temperature: 0.1,
               max_tokens: 1600,
             }),
+            // Bounded — a hung groq connection must not wedge ingestMemory (it holds a
+            // per-user advisory lock during promotion → would stall the whole KB upload).
+            signal: AbortSignal.timeout(Number(process.env.ENTITY_LINK_TIMEOUT_MS || 25000)),
           });
           if (!resp.ok) {
             const bodyText = await resp.text().catch(() => '');
@@ -2085,6 +2088,8 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
           temperature: 0.1,
           max_tokens: 700,
         }),
+        // Bounded — prevent a hung groq call from wedging ingestMemory's advisory lock.
+        signal: AbortSignal.timeout(Number(process.env.ENTITY_LINK_TIMEOUT_MS || 25000)),
       });
       if (!resp.ok) {
         const errBody = await resp.text();

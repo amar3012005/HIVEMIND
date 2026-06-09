@@ -15781,6 +15781,35 @@ exit \$RC
                 };
               }
 
+              // Hydrate owner/scope/project_id for the delivered memories (recall paths
+              // can strip these) so attribution display + project/author post-filters are
+              // reliable. One batch query for the ≤N delivered ids.
+              if (Array.isArray(result?.memories) && result.memories.length && prisma) {
+                try {
+                  const ids = result.memories.map(m => m.id).filter(Boolean);
+                  if (ids.length) {
+                    const ph = ids.map((_, i) => `$${i + 2}::uuid`).join(',');
+                    const rows = await prisma.$queryRawUnsafe(
+                      `SELECT m.id, m.user_id, m.scope, m.project_id, u.display_name AS dn, u.email AS em
+                       FROM hivemind.memories m LEFT JOIN hivemind.users u ON u.id = m.user_id
+                       WHERE m.org_id = $1::uuid AND m.id IN (${ph})`,
+                      orgId, ...ids,
+                    );
+                    const byId = Object.fromEntries((rows || []).map(r => [r.id, r]));
+                    for (const m of result.memories) {
+                      const r = byId[m.id];
+                      if (!r) continue;
+                      if (!m.user_id) m.user_id = r.user_id;
+                      if (!m.scope) m.scope = r.scope;
+                      if (m.project_id == null) m.project_id = r.project_id || null;
+                      const nm = r.dn || r.em || null;
+                      if (!m.owner_name) m.owner_name = nm;
+                      if (!m.owner && r.user_id) m.owner = { id: r.user_id, name: nm };
+                    }
+                  }
+                } catch (e) { /* attribution best-effort */ }
+              }
+
               // Project-scope post-filter (guarantee): when project_id is set, keep
               // memories that are org-wide/personal/legacy (no project_id) OR belong to
               // THIS project; drop memories that belong to a DIFFERENT project. Uses the

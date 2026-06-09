@@ -490,10 +490,11 @@ Every call writes a versioned snapshot. Past versions stay queryable via hivemin
 SELF-EVOLVING GRAPH:
 On every save the server runs semantic recall against past memories + a triple-operator detector. If the new content updates / extends / contradicts a prior memory the right edge type (Updates / Extends / Derives / Contradicts) is auto-added. No manual relationship needed for most cases.
 
-PROJECT SCOPING (IMPORTANT):
+PROJECT SCOPING (IMPORTANT — keeps the org knowledge structured):
 The org has ONE shared HIVEMIND by default. Admins can create sub-HIVEMINDs called projects (e.g. "SOLVIS", "Q2-Planning"). Rule:
+  • BEFORE saving, call hivemind_list_projects and match the content to the best-fitting project by name + description. If one clearly fits, save with its project_id so the memory lands in that project.
   • If the user names a project ("save this to SOLVIS"), pass project="<name>" or project_id="<uuid>".
-  • Otherwise: if the user has access to one or more projects, the server returns needs_project_choice with the list — ASK the user which project to save to (or org-wide), then re-call with the chosen project_id (omit project entirely for org-wide).
+  • If no project clearly fits and the user hasn't named one: if they have access to projects, the server returns needs_project_choice with the list — pick the obvious match or ASK which project (or org-wide), then re-call with project_id (omit for org-wide).
   • If the user has NO accessible projects, the save goes org-wide automatically — no need to ask.
   • Genuinely org-wide facts/preferences: omit project.`,
       inputSchema: {
@@ -541,7 +542,7 @@ The org has ONE shared HIVEMIND by default. Admins can create sub-HIVEMINDs call
     },
     {
       name: 'hivemind_list_projects',
-      description: 'List all projects (sub-HIVEMINDs) in the current org. Use this before saving a memory if you need to know which project to scope to.',
+      description: 'List the projects (sub-HIVEMINDs) in the current org with rich metadata per project: name, description, status, created_at, last_updated, member_count, memory_count, and people (member names + roles). CALL THIS FIRST when working with HIVEMIND memory: if the user task clearly belongs to one project (match by name/description), pass that project_id to hivemind_recall (scopes recall to that project + org-wide facts, excluding other projects) and to hivemind_save_memory (files the memory in that project). If no project clearly fits, omit project for an org-wide search/save. This keeps the org knowledge structured and on-topic.',
       inputSchema: {
         type: 'object',
         properties: {},
@@ -549,7 +550,7 @@ The org has ONE shared HIVEMIND by default. Admins can create sub-HIVEMINDs call
     },
     {
       name: 'hivemind_recall',
-      description: 'Search and retrieve relevant memories from HIVE-MIND. Use this to find previously stored information, code patterns, or context from past conversations.',
+      description: 'Search and retrieve relevant memories from HIVE-MIND. Use this to find previously stored information, code patterns, or context from past conversations. PROJECT WORKFLOW: for best results call hivemind_list_projects first; if the query clearly belongs to one project, pass its `project_id` to scope recall to that project + org-wide facts (other projects excluded); if it does not clearly fit a project, omit project_id for a whole-org recall.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -575,7 +576,7 @@ The org has ONE shared HIVEMIND by default. Admins can create sub-HIVEMINDs call
           },
           project_id: {
             type: 'string',
-            description: 'Optional HIVEMIND project ID for scoped recall. Omit for org-wide search.'
+            description: 'HIVEMIND project id (from hivemind_list_projects). When set, recall is scoped to that project PLUS org-wide/personal facts, and excludes other projects. Omit for a whole-org search.'
           },
           source_type: {
             type: 'string',
@@ -2379,6 +2380,12 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
               description: true,
               status: true,
               createdAt: true,
+              updatedAt: true,
+              _count: { select: { members: true, memories: true } },
+              members: {
+                take: 8,
+                select: { role: true, user: { select: { displayName: true, email: true } } },
+              },
             },
             take: 50,
           });
@@ -2389,12 +2396,20 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
               id: p.id,
               name: p.name,
               slug: p.slug,
-              description: p.description,
+              description: p.description || null,
               status: p.status,
+              created_at: p.createdAt,
+              last_updated: p.updatedAt,
+              member_count: p._count?.members ?? 0,
+              memory_count: p._count?.memories ?? 0,
+              people: (p.members || []).map(m => ({
+                name: m.user?.displayName || m.user?.email || 'member',
+                role: m.role,
+              })),
             })),
             hint: projects.length === 0
               ? 'No projects yet — memories save org-wide. Admin can create a project in the HIVEMIND web UI.'
-              : 'Pass the project name (case-insensitive) or id as the `project` / `project_id` arg on hivemind_save_memory.',
+              : 'Each project is a sub-HIVEMIND. If the user task clearly belongs to one (match by name/description), pass its `project_id` to hivemind_recall (scopes recall to that project + org-wide) and hivemind_save_memory. If unclear, omit project for org-wide.',
           });
         } catch (err) {
           return formatToolContent({ error: err.message, projects: [] });

@@ -15683,7 +15683,14 @@ exit \$RC
               // containerTag → project mapping for recall
               const recallProject = body.project || effectiveContainerTag || null;
 
-              const recallAccessCtx = await buildAccessContext(userId, orgId);
+              let recallAccessCtx = await buildAccessContext(userId, orgId);
+              // Project-scoped recall: when a caller (e.g. a project-scoped HyperAgent
+              // room) passes project_id, narrow the access context to JUST that project.
+              // The recall filter then returns that project's memories + org-wide +
+              // personal (scope_filter stays null), but EXCLUDES other projects.
+              if (body.project_id && recallAccessCtx?.projectIds?.includes(body.project_id)) {
+                recallAccessCtx = { ...recallAccessCtx, projectIds: [body.project_id] };
+              }
 
               // Bi-temporal filter: when valid_at is set, return only memories
               // that were valid at that timestamp (valid_from <= valid_at AND

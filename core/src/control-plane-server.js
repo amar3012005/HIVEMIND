@@ -2622,6 +2622,10 @@ const server = http.createServer(async (req, res) => {
     if (!name) {
       return jsonResponse(res, { error: 'name is required' }, 400);
     }
+    const description = typeof body.description === 'string' ? body.description.trim() : '';
+    if (!description) {
+      return jsonResponse(res, { error: 'description is required — every project needs a short description' }, 400);
+    }
     const slugBase = sanitizeSlug(body.slug || name);
     const existing = await prisma.project.findFirst({ where: { orgId, slug: slugBase } });
     const slug = existing ? `${slugBase}-${crypto.randomUUID().slice(0, 6)}` : slugBase;
@@ -2631,7 +2635,7 @@ const server = http.createServer(async (req, res) => {
         orgId,
         name,
         slug,
-        description: typeof body.description === 'string' && body.description.trim() ? body.description.trim() : null,
+        description,
         createdBy: current.session.userId,
       },
     });
@@ -3951,11 +3955,14 @@ const server = http.createServer(async (req, res) => {
         await ts.assertTeamPermission(prisma, { teamId, userId, orgRole, level: 'member' });
         const body = await parseBody(req);
         if (!body.name) return jsonResponse(res, { error: 'name required' }, 400);
+        if (!body.description || !String(body.description).trim()) {
+          return jsonResponse(res, { error: 'description is required — every project needs a short description' }, 400);
+        }
         const p = await ts.store.createProject({
           orgId,
           teamId,
           name: body.name.trim(),
-          description: body.description || null,
+          description: String(body.description).trim(),
           createdBy: userId,
         });
         audit({

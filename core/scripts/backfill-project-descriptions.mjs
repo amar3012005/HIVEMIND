@@ -23,17 +23,19 @@ const ORG_FILTER = orgArgIdx >= 0 ? process.argv[orgArgIdx + 1] : null;
 
 const isBlank = (s) => !s || !String(s).trim();
 
-async function sampleMemories(prisma, projectId) {
+async function sampleMemories(prisma, projectId, orgId) {
   // Memories linked via the M:N join OR the legacy projectId FK.
+  // orgId is required by the tenant-isolation guard on Memory queries.
   const rows = await prisma.memory.findMany({
     where: {
+      orgId,
       deletedAt: null,
       OR: [{ projectId }, { memoryProjects: { some: { projectId } } }],
     },
     orderBy: { createdAt: 'desc' },
     take: 25,
     select: { title: true, content: true, memoryType: true },
-  }).catch(() => []);
+  }).catch((e) => { console.warn(`[backfill] sample failed for ${projectId}: ${e.message}`); return []; });
   return rows;
 }
 
@@ -64,15 +66,18 @@ async function main() {
   let done = 0, skipped = 0, failed = 0;
   for (const p of needs) {
     try {
-      const mems = await sampleMemories(prisma, p.id);
+      const mems = await sampleMemories(prisma, p.id, p.orgId);
       let desc;
+      const fallback = `Project "${p.name}" — ${mems.length} memor${mems.length === 1 ? 'y' : 'ies'}; scope for ${p.name}-related knowledge.`;
       if (mems.length === 0) {
-        desc = `Project "${p.name}" — no memories yet; scope for ${p.name}-related knowledge.`;
+        desc = fallback;
       } else {
-        const raw = await chatCompletion({ messages: buildPrompt(p, mems), model: MODEL, temperature: 0.2, max_tokens: 160 });
-        desc = String(typeof raw === 'string' ? raw : (raw?.content || '')).trim().replace(/^["']|["']$/g, '').slice(0, 240);
+        try {
+          const raw = await chatCompletion({ messages: buildPrompt(p, mems), model: MODEL, temperature: 0.2, max_tokens: 160 });
+          desc = String(typeof raw === 'string' ? raw : (raw?.content || '')).trim().replace(/^["']|["']$/g, '').slice(0, 240);
+        } catch (e) { console.warn(`[backfill] LLM failed for ${p.name}: ${e.message}`); }
+        if (!desc) desc = fallback; // never leave a project description-less
       }
-      if (!desc) { failed++; console.warn(`[backfill] empty desc for ${p.name} (${p.id}) — skipped`); continue; }
       if (DRY_RUN) {
         console.log(`[dry] ${p.name} (${p.id}) → ${desc}`);
       } else {

@@ -1397,12 +1397,14 @@ model HyperRoom {
   updatedAt          DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   archivedAt         DateTime?    @map("archived_at") @db.Timestamptz(6)
   summaryMemoryId    String?      @map("summary_memory_id") @db.Uuid
+  projectId          String?      @map("project_id") @db.Uuid
   user               User         @relation("UserHyperRooms", fields: [userId], references: [id], onDelete: Cascade)
   org                Organization @relation("OrgHyperRooms", fields: [orgId], references: [id], onDelete: Cascade)
   turns              HyperTurn[]
 
   @@index([userId, orgId])
   @@index([archivedAt])
+  @@index([projectId])
   @@map("hyper_rooms")
 }
 

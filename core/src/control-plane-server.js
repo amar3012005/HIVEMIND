@@ -5499,6 +5499,17 @@ Write the persona now.`;
         if (typeof body.permanent_skeptic_id === 'string' && validIds.includes(body.permanent_skeptic_id)) {
           permanentSkepticId = body.permanent_skeptic_id;
         }
+        // Scope: optional project_id nests the room inside a project HIVEMIND.
+        // Validate it belongs to this org; ignore otherwise (falls back to org-wide).
+        let projectId = null;
+        if (typeof body.project_id === 'string' && body.project_id) {
+          const proj = await prisma.project.findFirst({
+            where: { id: body.project_id, orgId: current.session.orgId },
+            select: { id: true },
+          }).catch(() => null);
+          if (!proj) return jsonResponse(res, { error: 'project not found in this org' }, 400);
+          projectId = proj.id;
+        }
         const room = await prisma.hyperRoom.create({
           data: {
             userId: current.session.userId,
@@ -5510,6 +5521,17 @@ Write the persona now.`;
             permanentSkepticId,
           },
         });
+        // Persist scope via raw SQL — avoids requiring a regenerated Prisma client
+        // for the new project_id column (safe on bind-mount prod without `prisma generate`).
+        if (projectId) {
+          try {
+            await prisma.$executeRawUnsafe(
+              'UPDATE "hivemind"."hyper_rooms" SET "project_id" = $1::uuid WHERE "id" = $2::uuid',
+              projectId, room.id,
+            );
+            room.projectId = projectId;
+          } catch (e) { console.warn('[hyper-rooms] project scope set failed:', e.message); }
+        }
         return jsonResponse(res, { room }, 201);
       } catch (err) {
         console.warn('[hyper-rooms] create failed:', err.message);

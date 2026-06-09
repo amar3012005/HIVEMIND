@@ -15763,6 +15763,18 @@ exit \$RC
                 };
               }
 
+              // Project-scope post-filter (guarantee): when project_id is set, keep
+              // memories that are org-wide/personal/legacy (no project_id) OR belong to
+              // THIS project; drop memories that belong to a DIFFERENT project. Uses the
+              // reliably-present scalar project_id, independent of scope hydration.
+              if (body.project_id && Array.isArray(result?.memories)) {
+                const before = result.memories.length;
+                result.memories = result.memories.filter(
+                  m => !m.project_id || m.project_id === body.project_id,
+                );
+                result.project_scope_applied = { project_id: body.project_id, kept: result.memories.length, dropped: before - result.memories.length };
+              }
+
               // Apply memory type boosts from Operator Layer
               if (cognitiveOperator && result.memories) {
                 const intent = detectQueryIntent(body.query_context || body.context || '');

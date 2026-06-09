@@ -2317,6 +2317,7 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
   let resolvedProjectId = null;
   let resolvedProjectIds = [];
   let resolvedTeamId = null;
+  let projectAccessError = null;
   if (requestedProjectId && UUID_RE.test(requestedProjectId) && userId && orgId) {
     try {
       const { resolveScopedIngestPayload } = await import('../server.js');
@@ -2328,8 +2329,29 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
       resolvedProjectId = requestedProjectId;
       resolvedProjectIds = scoped.project_ids || [];
       resolvedTeamId = scoped.primary_team_id || null;
-    } catch (_ignored) {
-      // Membership validation failure — leave scope null, fall back to org-wide.
+    } catch (membershipErr) {
+      // Membership validation failed — most often a STALE access-context cache
+      // right after the project was just created (the owner ProjectMember row
+      // exists, but the cached context predates it). Do a direct DB check so an
+      // EXPLICIT project_id never silently degrades into the project-picker loop
+      // that blocked bootstrapping a freshly-created project.
+      try {
+        const { getPrismaClient } = await import('../db/prisma.js');
+        const prisma = getPrismaClient();
+        const proj = await prisma.project.findFirst({
+          where: { id: requestedProjectId, orgId, status: 'active' },
+          select: { id: true, teamId: true, members: { where: { userId }, select: { userId: true } } },
+        });
+        if (proj && (isMaster || proj.members.length > 0)) {
+          resolvedProjectId = requestedProjectId;
+          resolvedProjectIds = [requestedProjectId];
+          resolvedTeamId = proj.teamId || null;
+        } else if (proj) {
+          projectAccessError = `You are not a member of project ${requestedProjectId}. Ask an admin to add you, or omit project_id to save org-wide.`;
+        } else {
+          projectAccessError = `Project ${requestedProjectId} was not found (or is archived) in this org.`;
+        }
+      } catch { /* leave unresolved → falls through to org-wide save */ }
     }
   }
   const SCOPE_FIELDS = resolvedProjectId ? {
@@ -2353,13 +2375,22 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
           throw new Error('hivemind_save_memory requires non-empty content');
         }
 
+        // Explicit project_id that the caller cannot access → clear error, NOT
+        // a picker. Prevents the re-ask loop when an id was deliberately passed.
+        if (projectAccessError) {
+          return formatToolContent({ saved: false, error: projectAccessError });
+        }
+
         // Project-membership routing: if the user belongs to >=2 projects
         // and didn't specify one, return a structured clarification (does
         // NOT save) so the agent surfaces a picker to the user. Single
         // project → auto-attach. Zero → fall through to org-wide policy.
         let projectPolicyHint = null;
         let autoAttachedProjectId = null;
-        if (!resolvedProjectId && userId && orgId) {
+        // Only prompt for a project when the caller named NONE. An explicit
+        // project_id (resolved above, or rejected via projectAccessError) must
+        // never trigger the picker — that was the re-ask loop.
+        if (!requestedProjectId && !resolvedProjectId && userId && orgId) {
           try {
             const { getPrismaClient } = await import('../db/prisma.js');
             const prisma = getPrismaClient();

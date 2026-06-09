@@ -290,10 +290,21 @@ export class TeamStore {
       OR: [
         { members: { some: { userId } } },
         { teamId: { in: teamIds } },
-        { teamId: null }, // legacy org-level projects
+        { teamId: null }, // legacy / org-level projects (no team)
       ],
     };
-    if (teamId) where.teamId = teamId;
+    // When a specific team tab is active, scope to that team's projects BUT keep
+    // org-level (teamId=null) and explicitly-shared projects visible. An
+    // org-level project (e.g. one created via the MCP create_project tool with
+    // no team) must never vanish just because a team tab is selected — that made
+    // the project count (org-wide) disagree with the listed projects (team-only).
+    if (teamId) {
+      where.OR = [
+        { teamId },
+        { teamId: null },
+        { members: { some: { userId } } },
+      ];
+    }
     return this.prisma.project.findMany({
       where,
       include: { _count: { select: { members: true, memories: true } } },

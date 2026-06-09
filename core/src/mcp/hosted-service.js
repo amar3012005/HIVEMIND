@@ -2550,9 +2550,25 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
             });
           }
 
+          // Attach to a team so the project appears in the dashboard's
+          // team-scoped Projects tab (org-level teamId=null projects only show
+          // in the team view after the team-store visibility fix; defaulting to
+          // the org's Default Team keeps MCP-created projects alongside the rest).
+          let teamId = args.team_id || null;
+          if (!teamId) {
+            try {
+              const teams = await prisma.team.findMany({
+                where: { orgId },
+                select: { id: true, slug: true },
+                orderBy: { createdAt: 'asc' },
+              });
+              const def = teams.find(t => t.slug === 'default-team') || (teams.length === 1 ? teams[0] : null);
+              if (def) teamId = def.id;
+            } catch { /* leave org-level */ }
+          }
           const project = await store.createProject({
             orgId,
-            teamId: args.team_id || null,
+            teamId,
             name,
             description,
             createdBy: userId,

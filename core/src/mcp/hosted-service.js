@@ -2415,9 +2415,14 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
             for (const p of viaTeam) byId.set(p.id, p);
             const accessible = [...byId.values()];
 
-            // Rule: if the user can access >=1 project and didn't name one,
-            // ASK which project (or org-wide). Zero projects → save org-wide.
-            if (accessible.length >= 1) {
+            // Rule: exactly ONE accessible project → auto-attach (the tools
+            // "recognize the project" without asking — single-project members
+            // never see a picker). Two or more → ASK which project (or
+            // org-wide). Zero → fall through: save org-wide.
+            if (accessible.length === 1) {
+              autoAttachedProjectId = accessible[0].id;
+              projectPolicyHint = `Auto-scoped to your project "${accessible[0].name}" (your only project). Pass project_id explicitly to override, or project_id omitted with scope:"organization" for an org-wide save.`;
+            } else if (accessible.length >= 2) {
               return formatToolContent({
                 needs_project_choice: true,
                 message: `This memory can be scoped to a project. Ask the user which of these ${accessible.length} project(s) to save it to — or org-wide. Then re-call hivemind_save_memory with project_id="<chosen id>" (omit project entirely for org-wide).`,
@@ -2426,7 +2431,6 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
                 saved: false,
               });
             }
-            // accessible.length === 0 → fall through: save org-wide (default).
           } catch { /* best-effort: fall through to org-wide save */ }
         }
 

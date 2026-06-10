@@ -3990,6 +3990,111 @@ const server = http.createServer(async (req, res) => {
     return jsonResponse(res, { error: 'Not found' }, 404);
   }
 
+  // ─── SCIM 2.0 (minimal Users) — enterprise IdP provisioning ─────────────
+  // Okta/Entra/Zitadel point their SCIM connector here. Auth: static bearer
+  // HIVEMIND_SCIM_TOKEN bound to org HIVEMIND_SCIM_ORG_ID. Both unset → 503
+  // (feature off, route still answers so health checks see it's wired).
+  if (pathname.startsWith('/scim/v2/Users')) {
+    const scimToken = process.env.HIVEMIND_SCIM_TOKEN || '';
+    const scimOrgId = process.env.HIVEMIND_SCIM_ORG_ID || '';
+    if (!scimToken || !scimOrgId) {
+      return jsonResponse(res, { schemas: ['urn:ietf:params:scim:api:messages:2.0:Error'], detail: 'SCIM provisioning is not enabled on this deployment. Set HIVEMIND_SCIM_TOKEN + HIVEMIND_SCIM_ORG_ID.', status: '503' }, 503);
+    }
+    const authHeader = req.headers['authorization'] || '';
+    if (authHeader !== `Bearer ${scimToken}`) {
+      return jsonResponse(res, { schemas: ['urn:ietf:params:scim:api:messages:2.0:Error'], detail: 'Invalid SCIM bearer token.', status: '401' }, 401);
+    }
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const scimUser = (u, m) => ({
+      schemas: ['urn:ietf:params:scim:schemas:core:2.0:User'],
+      id: u.id,
+      userName: u.email,
+      displayName: u.displayName || u.email,
+      emails: [{ value: u.email, primary: true }],
+      active: m ? m.isActive !== false : true,
+      meta: { resourceType: 'User' },
+    });
+    const userIdMatch = pathname.match(/^\/scim\/v2\/Users\/([0-9a-f-]{36})$/);
+    try {
+      // GET /scim/v2/Users[?filter=userName eq "x@y"]
+      if (!userIdMatch && req.method === 'GET') {
+        const filter = url.searchParams.get('filter') || '';
+        const emailMatch = filter.match(/userName\s+eq\s+"([^"]+)"/i);
+        const rows = await prisma.userOrganization.findMany({
+          where: {
+            orgId: scimOrgId,
+            ...(emailMatch ? { user: { email: { equals: emailMatch[1], mode: 'insensitive' } } } : {}),
+          },
+          include: { user: { select: { id: true, email: true, displayName: true } } },
+          take: 200,
+        });
+        const resources = rows.map(r => scimUser(r.user, r));
+        return jsonResponse(res, {
+          schemas: ['urn:ietf:params:scim:api:messages:2.0:ListResponse'],
+          totalResults: resources.length, startIndex: 1, itemsPerPage: resources.length,
+          Resources: resources,
+        });
+      }
+      // GET /scim/v2/Users/:id
+      if (userIdMatch && req.method === 'GET') {
+        const m = await prisma.userOrganization.findUnique({
+          where: { userId_orgId: { userId: userIdMatch[1], orgId: scimOrgId } },
+          include: { user: { select: { id: true, email: true, displayName: true } } },
+        });
+        if (!m) return jsonResponse(res, { schemas: ['urn:ietf:params:scim:api:messages:2.0:Error'], detail: 'User not found', status: '404' }, 404);
+        return jsonResponse(res, scimUser(m.user, m));
+      }
+      // POST /scim/v2/Users — provision: create a pending org invite.
+      if (!userIdMatch && req.method === 'POST') {
+        const body = await parseBody(req);
+        const email = body.userName || body.emails?.[0]?.value;
+        if (!email) return jsonResponse(res, { schemas: ['urn:ietf:params:scim:api:messages:2.0:Error'], detail: 'userName (email) required', status: '400' }, 400);
+        const existing = await prisma.user.findFirst({ where: { email: { equals: email, mode: 'insensitive' } }, select: { id: true, email: true, displayName: true } });
+        if (existing) {
+          const m = await prisma.userOrganization.upsert({
+            where: { userId_orgId: { userId: existing.id, orgId: scimOrgId } },
+            update: { isActive: true, deactivatedAt: null },
+            create: { userId: existing.id, orgId: scimOrgId, role: 'member' },
+          });
+          audit({ organizationId: scimOrgId, userId: existing.id, eventType: 'scim.user_provisioned', eventCategory: 'auth', action: 'create', resourceType: 'org_member', resourceId: existing.id, ..._reqMeta(req) });
+          return jsonResponse(res, scimUser(existing, m), 201);
+        }
+        const token = crypto.randomBytes(24).toString('hex');
+        // createdBy is required — attribute SCIM-originated invites to the org owner.
+        const orgOwner = await prisma.userOrganization.findFirst({
+          where: { orgId: scimOrgId, role: 'owner' },
+          select: { userId: true },
+        });
+        await prisma.orgInvite.create({
+          data: {
+            orgId: scimOrgId, email, role: 'member', token,
+            expiresAt: new Date(Date.now() + 14 * 86400_000),
+            createdBy: orgOwner?.userId || '00000000-0000-0000-0000-000000000000',
+          },
+        }).catch(() => {});
+        audit({ organizationId: scimOrgId, userId: null, eventType: 'scim.user_invited', eventCategory: 'auth', action: 'create', resourceType: 'org_invite', resourceId: email, ..._reqMeta(req) });
+        return jsonResponse(res, {
+          schemas: ['urn:ietf:params:scim:schemas:core:2.0:User'],
+          id: `pending:${email}`, userName: email, emails: [{ value: email, primary: true }],
+          active: false, meta: { resourceType: 'User' },
+        }, 201);
+      }
+      // DELETE /scim/v2/Users/:id — deprovision: deactivate membership.
+      if (userIdMatch && req.method === 'DELETE') {
+        await prisma.userOrganization.update({
+          where: { userId_orgId: { userId: userIdMatch[1], orgId: scimOrgId } },
+          data: { isActive: false, deactivatedAt: new Date() },
+        }).catch(() => {});
+        audit({ organizationId: scimOrgId, userId: userIdMatch[1], eventType: 'scim.user_deprovisioned', eventCategory: 'auth', action: 'delete', resourceType: 'org_member', resourceId: userIdMatch[1], ..._reqMeta(req) });
+        res.writeHead(204); res.end();
+        return;
+      }
+      return jsonResponse(res, { schemas: ['urn:ietf:params:scim:api:messages:2.0:Error'], detail: 'Unsupported SCIM operation', status: '501' }, 501);
+    } catch (err) {
+      return jsonResponse(res, { schemas: ['urn:ietf:params:scim:api:messages:2.0:Error'], detail: err.message, status: '500' }, 500);
+    }
+  }
+
   // ─── Projects ─────────────────────────────────────────────
   // GET /v1/projects — list projects in current org for current user
   if (pathname === '/v1/projects' && req.method === 'GET') {
@@ -3998,9 +4103,12 @@ const server = http.createServer(async (req, res) => {
     const ts = await _getTeamStore();
     if (!ts) return jsonResponse(res, { error: 'Database unavailable' }, 503);
     try {
+      // Hierarchy visibility: pass org role so owners/admins list ALL projects.
+      const membership = await getOrgMembership(current.session.userId, current.session.orgId);
       const projects = await ts.store.listProjectsForUser({
         userId: current.session.userId,
         orgId: current.session.orgId,
+        orgRole: membership?.role || null,
       });
       return jsonResponse(res, { projects });
     } catch (err) {
@@ -4097,6 +4205,45 @@ const server = http.createServer(async (req, res) => {
         return jsonResponse(res, { error: err.message }, err.status || 500);
       }
     }
+    // GET /v1/projects/:id/export — full project memory export (data
+    // governance / enterprise offboarding). Project-owner or org-admin gated.
+    if (sub === 'export' && req.method === 'GET') {
+      try {
+        await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'owner' });
+        const memories = await prisma.memory.findMany({
+          where: {
+            orgId, deletedAt: null,
+            OR: [{ projectId }, { memoryProjects: { some: { projectId } } }],
+          },
+          select: {
+            id: true, title: true, content: true, memoryType: true, tags: true,
+            scope: true, userId: true, createdAt: true, updatedAt: true, isLatest: true,
+          },
+          orderBy: { createdAt: 'asc' },
+          take: 5000,
+        });
+        audit({
+          organizationId: orgId,
+          userId,
+          eventType: 'project.exported',
+          eventCategory: 'data',
+          action: 'read',
+          resourceType: 'project',
+          resourceId: projectId,
+          newValue: { memory_count: memories.length },
+          ..._reqMeta(req),
+        });
+        return jsonResponse(res, {
+          project_id: projectId,
+          project_name: project.name,
+          exported_at: new Date().toISOString(),
+          memory_count: memories.length,
+          memories,
+        });
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, err.status || 500);
+      }
+    }
     // POST /v1/projects/:id/members
     const PROJECT_ROLES = ['owner', 'contributor', 'viewer'];
     if (sub === 'members' && req.method === 'POST') {
@@ -4113,6 +4260,17 @@ const server = http.createServer(async (req, res) => {
           userId: body.user_id,
           role,
           addedById: userId,
+        });
+        audit({
+          organizationId: orgId,
+          userId,
+          eventType: 'project.member_added',
+          eventCategory: 'auth',
+          action: 'create',
+          resourceType: 'project_member',
+          resourceId: `${projectId}:${body.user_id}`,
+          newValue: { role },
+          ..._reqMeta(req),
         });
         return jsonResponse(res, { member: m }, 201);
       } catch (err) {
@@ -4155,6 +4313,16 @@ const server = http.createServer(async (req, res) => {
       try {
         await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'owner' });
         await ts.store.removeProjectMember({ projectId, userId: projMemberDel[1] });
+        audit({
+          organizationId: orgId,
+          userId,
+          eventType: 'project.member_removed',
+          eventCategory: 'auth',
+          action: 'delete',
+          resourceType: 'project_member',
+          resourceId: `${projectId}:${projMemberDel[1]}`,
+          ..._reqMeta(req),
+        });
         return jsonResponse(res, { success: true });
       } catch (err) {
         return jsonResponse(res, { error: err.message }, err.status || 500);

@@ -274,7 +274,19 @@ export class TeamStore {
 
   // ── Projects ─────────────────────────────────────────────
 
-  async listProjectsForUser({ userId, orgId, teamId = null }) {
+  async listProjectsForUser({ userId, orgId, teamId = null, orgRole = null }) {
+    // Hierarchy visibility: org owners/admins see EVERY active project in the
+    // org (with member rosters) — they sit above the project layer. Everyone
+    // else sees only projects they can access (member / team / org-level).
+    if (orgRole === 'owner' || orgRole === 'admin') {
+      const whereAll = { orgId, status: 'active' };
+      if (teamId) whereAll.OR = [{ teamId }, { teamId: null }, { members: { some: { userId } } }];
+      return this.prisma.project.findMany({
+        where: whereAll,
+        include: { _count: { select: { members: true, memories: true } } },
+        orderBy: [{ updatedAt: 'desc' }],
+      });
+    }
     // A user can see a project if:
     //   - They are an explicit ProjectMember, OR
     //   - They are a team member of the project's team, OR

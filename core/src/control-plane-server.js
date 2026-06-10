@@ -142,9 +142,18 @@ if (prisma) {
         if (ticks < 2 || _sweepKicked.has(t.id)) continue;
         const room = await prisma.hyperRoom.findUnique({
           where: { id: t.roomId },
-          select: { userId: true, orgId: true, participantIds: true, projectId: true },
+          select: { userId: true, orgId: true, participantIds: true },
         });
         if (!room) continue;
+        // projectId via raw SQL — the deployed Prisma client predates the column,
+        // so `select: { projectId: true }` throws "Unknown field projectId" and the
+        // catch below swallowed it, killing the re-kick. A turn whose kick dropped
+        // then stayed status=live with empty lines forever (FE spins, nothing renders).
+        let _sweepProjectId = null;
+        try {
+          const _pr = await prisma.$queryRawUnsafe('SELECT project_id FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid', t.roomId);
+          _sweepProjectId = _pr?.[0]?.project_id || null;
+        } catch { /* org-wide re-kick is acceptable for recovery */ }
         _sweepKicked.add(t.id);
         console.warn('[hyper-sweeper] re-kicking stuck turn', t.id);
         fetch(`${_hyperSidecar()}/internal/hyper/room-turn`, {
@@ -155,7 +164,7 @@ if (prisma) {
           },
           body: JSON.stringify({
             room_id: t.roomId, turn_id: t.id, user_id: room.userId, org_id: room.orgId,
-            user_message: t.userMessage || '(continue)', participant_ids: room.participantIds || [], project_id: room.projectId || null,
+            user_message: t.userMessage || '(continue)', participant_ids: room.participantIds || [], project_id: _sweepProjectId,
             callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
           }),
         }).catch((err) => console.warn('[hyper-sweeper] re-kick failed:', err.message));

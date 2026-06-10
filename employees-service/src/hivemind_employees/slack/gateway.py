@@ -31,24 +31,55 @@ log = logging.getLogger(__name__)
 class WorkspaceConnection:
     """Bolt app + socket handler for one Slack workspace."""
 
-    def __init__(self, slack_team_id: str, bot_token: str, app_token: str):
+    def __init__(self, slack_team_id: str, bot_token: str, app_token: str, token_provider=None):
         self.slack_team_id = slack_team_id
         self.bot_token = bot_token
         self.app_token = app_token
-        # Explicit authorize pinned to OUR bot token. Without it, the presence
-        # of SLACK_CLIENT_ID/SLACK_CLIENT_SECRET in the environment makes Bolt
+        # Live token source — Slack bot tokens ROTATE (xoxe, ~12h). A static
+        # env/startup token goes stale and then every inbound event fails
+        # authorize() silently. token_provider(team_id) fetches the current
+        # token from core (PlatformIntegration, refreshed there); we cache it
+        # for 10 minutes and force-refetch once on auth failure.
+        self._token_provider = token_provider
+        self._cached_token: Optional[str] = bot_token
+        self._cached_at: float = 0.0
+
+        # Explicit authorize pinned to OUR token. Without it, the presence of
+        # SLACK_CLIENT_ID/SLACK_CLIENT_SECRET in the environment makes Bolt
         # auto-enable its file-based OAuth InstallationStore and IGNORE the
-        # token= argument ("token will be ignored" warning) — inbound events
-        # then fail authorization and no handler ever fires. This silently
-        # killed every @mention received over Socket Mode.
+        # token= argument — inbound events then fail authorization and no
+        # handler ever fires.
         async def _authorize(client, enterprise_id=None, team_id=None, user_id=None, logger=None, **kwargs):
-            auth = await client.auth_test(token=bot_token)
+            tok = await self._current_token()
+            try:
+                auth = await client.auth_test(token=tok)
+            except Exception:
+                tok = await self._current_token(force=True)
+                auth = await client.auth_test(token=tok)
             return AuthorizeResult.from_auth_test_response(
-                auth_test_response=auth, bot_token=bot_token,
+                auth_test_response=auth, bot_token=tok,
             )
         self.app = AsyncApp(token=bot_token, authorize=_authorize)
         self.handler: Optional[AsyncSocketModeHandler] = None
         self.task: Optional[asyncio.Task] = None
+
+    async def _current_token(self, force: bool = False) -> Optional[str]:
+        import time
+        now = time.time()
+        if not force and self._cached_token and (now - self._cached_at) < 600:
+            return self._cached_token
+        if self._token_provider:
+            try:
+                fresh = await self._token_provider(self.slack_team_id)
+                if fresh:
+                    self._cached_token = fresh
+                    self._cached_at = now
+                    return fresh
+            except Exception as e:
+                log.warning("token provider failed for %s: %s", self.slack_team_id, e)
+        # Provider unavailable — keep whatever we have.
+        self._cached_at = now
+        return self._cached_token
 
     async def start(self):
         self.handler = AsyncSocketModeHandler(self.app, self.app_token)
@@ -179,10 +210,15 @@ class SlackGateway:
         # Ensure WorkspaceConnections exist for every seen workspace
         for wsid in seen_ws_ids:
             if wsid not in self.workspaces:
-                bot = self.workspace_bot_tokens.get(wsid) or self._resolve_bot_token_env(wsid)
+                # Prefer the LIVE token from core (PlatformIntegration row,
+                # auto-refreshed) — env/bootstrap copies of rotating xoxe bot
+                # tokens go stale and silently kill event authorization.
+                bot = await self._fetch_bot_token_from_core(wsid) \
+                    or self.workspace_bot_tokens.get(wsid) \
+                    or self._resolve_bot_token_env(wsid)
                 app_t = self._resolve_app_token_env(wsid)
                 if not bot:
-                    log.warning("workspace %s: no bot token (bootstrap empty, env SLACK_BOT_TOKEN_%s unset) — skip",
+                    log.warning("workspace %s: no bot token (core, bootstrap and env SLACK_BOT_TOKEN_%s all empty) — skip",
                                 wsid, wsid)
                     continue
                 if not app_t:
@@ -192,7 +228,7 @@ class SlackGateway:
                                 wsid, wsid)
                     continue
                 try:
-                    conn = WorkspaceConnection(wsid, bot, app_t)
+                    conn = WorkspaceConnection(wsid, bot, app_t, token_provider=self._fetch_bot_token_from_core)
                     self._wire_handlers(conn)
                     await conn.start()
                     self.workspaces[wsid] = conn
@@ -307,6 +343,30 @@ class SlackGateway:
             api_key, channel, reply_text, thread_ts,
             username=username, icon_url=icon_url, icon_emoji=icon_emoji,
         )
+
+    async def _fetch_bot_token_from_core(self, wsid: str) -> Optional[str]:
+        """Fetch the LIVE workspace bot token from core (master-key authed).
+        Core validates it with auth.test and refreshes via oauth.v2.access
+        when the rotating token went stale — so the gateway never holds a
+        dead token for more than one cache window."""
+        from ..config import get_settings
+        settings = get_settings()
+        master = settings.hivemind_master_api_key or os.environ.get("HIVEMIND_MASTER_API_KEY")
+        if not master:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(8.0, connect=4.0)) as c:
+                r = await c.get(
+                    f"{settings.hivemind_core_url}/api/connectors/slack/bot-token",
+                    params={"team_id": wsid},
+                    headers={"X-API-Key": master},
+                )
+                if r.status_code == 200:
+                    return (r.json() or {}).get("bot_token")
+                log.warning("bot-token fetch for %s → %s %s", wsid, r.status_code, r.text[:120])
+        except Exception as e:
+            log.warning("bot-token fetch for %s failed: %s", wsid, e)
+        return None
 
     async def _forward_to_core(self, wsid: str, event: Dict[str, Any]):
         """Bridge an unrouted @HIVEMIND mention / DM into core's slack

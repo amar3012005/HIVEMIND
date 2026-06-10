@@ -11264,6 +11264,81 @@ exit \$RC
         // SLACK CONNECTOR — Status & Sync
         // ==========================================
 
+        case '/api/connectors/slack/bot-token':
+          // INTERNAL (master-key only): the employees-service Socket-Mode
+          // gateway fetches the workspace bot token from here instead of a
+          // static SLACK_BOT_TOKEN_<TEAM> env var. Slack bot tokens ROTATE
+          // (~12h xoxe tokens) — env copies go stale and then every inbound
+          // socket event fails authorize() silently. The PlatformIntegration
+          // row is the live, refreshed source of truth. Validates with
+          // auth.test and refreshes via oauth.v2.access when stale.
+          if (req.method === 'GET') {
+            try {
+              const presented = req.headers['x-api-key']
+                || (req.headers['authorization'] || '').replace(/^Bearer\s+/i, '');
+              const masterKey = process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY;
+              if (!masterKey || presented !== masterKey) {
+                return jsonResponse(res, { error: 'master key required' }, 403);
+              }
+              const teamId = url.searchParams.get('team_id');
+              const { ConnectorStore, decryptToken, encryptToken } = await import('./connectors/framework/connector-store.js');
+              let conn = teamId ? await prisma.platformIntegration.findFirst({
+                where: {
+                  platformType: 'slack',
+                  isActive: true,
+                  connectorMetadata: { path: ['provider_metadata', 'team_id'], equals: teamId },
+                },
+              }) : null;
+              if (!conn) {
+                conn = await prisma.platformIntegration.findFirst({
+                  where: { platformType: 'slack', isActive: true },
+                  orderBy: { updatedAt: 'desc' },
+                });
+              }
+              if (!conn) return jsonResponse(res, { error: 'no active slack connector' }, 404);
+
+              let token = decryptToken(conn.accessTokenEncrypted);
+              // Validate; refresh on stale (Slack token rotation).
+              const test = await fetch('https://slack.com/api/auth.test', {
+                headers: { Authorization: `Bearer ${token}` },
+              }).then(r => r.json()).catch(() => ({ ok: false }));
+              if (!test.ok && conn.refreshTokenEncrypted) {
+                const refreshToken = decryptToken(conn.refreshTokenEncrypted);
+                const resp = await fetch('https://slack.com/api/oauth.v2.access', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                  body: new URLSearchParams({
+                    client_id: process.env.SLACK_CLIENT_ID,
+                    client_secret: process.env.SLACK_CLIENT_SECRET,
+                    grant_type: 'refresh_token',
+                    refresh_token: refreshToken,
+                  }),
+                }).then(r => r.json()).catch(() => null);
+                if (resp?.ok && resp.access_token) {
+                  token = resp.access_token;
+                  await prisma.platformIntegration.update({
+                    where: { id: conn.id },
+                    data: {
+                      accessTokenEncrypted: encryptToken(resp.access_token),
+                      ...(resp.refresh_token ? { refreshTokenEncrypted: encryptToken(resp.refresh_token) } : {}),
+                      ...(resp.expires_in ? { tokenExpiresAt: new Date(Date.now() + resp.expires_in * 1000) } : {}),
+                      oauthLastRefreshed: new Date(),
+                    },
+                  }).catch(() => {});
+                  console.log(`[slack] bot token refreshed for connector ${conn.id}`);
+                } else {
+                  return jsonResponse(res, { error: `slack token invalid and refresh failed: ${resp?.error || 'unknown'}` }, 502);
+                }
+              } else if (!test.ok) {
+                return jsonResponse(res, { error: 'slack token invalid, no refresh token stored' }, 502);
+              }
+              return jsonResponse(res, { bot_token: token, user_id: conn.userId, team_id: teamId || null });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
         case '/api/connectors/slack/status':
           if (req.method === 'GET') {
             try {

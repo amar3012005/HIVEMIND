@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Any
 import httpx
 from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
+from slack_bolt.authorization import AuthorizeResult
 
 from .. import db as db_module
 from ..redis_client import dedup_event
@@ -34,7 +35,18 @@ class WorkspaceConnection:
         self.slack_team_id = slack_team_id
         self.bot_token = bot_token
         self.app_token = app_token
-        self.app = AsyncApp(token=bot_token)
+        # Explicit authorize pinned to OUR bot token. Without it, the presence
+        # of SLACK_CLIENT_ID/SLACK_CLIENT_SECRET in the environment makes Bolt
+        # auto-enable its file-based OAuth InstallationStore and IGNORE the
+        # token= argument ("token will be ignored" warning) — inbound events
+        # then fail authorization and no handler ever fires. This silently
+        # killed every @mention received over Socket Mode.
+        async def _authorize(client, enterprise_id=None, team_id=None, user_id=None, logger=None, **kwargs):
+            auth = await client.auth_test(token=bot_token)
+            return AuthorizeResult.from_auth_test_response(
+                auth_test_response=auth, bot_token=bot_token,
+            )
+        self.app = AsyncApp(token=bot_token, authorize=_authorize)
         self.handler: Optional[AsyncSocketModeHandler] = None
         self.task: Optional[asyncio.Task] = None
 

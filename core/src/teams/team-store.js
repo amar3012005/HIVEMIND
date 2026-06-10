@@ -79,7 +79,9 @@ export class TeamStore {
     if (!team) {
       // Fetch active org members to seed the default team.
       const orgMembers = await this.prisma.userOrganization.findMany({
-        where: { orgId, isActive: true },
+        // Guests are project-scoped invitees — keep them OFF the default team
+        // (membership there exposes every team project).
+        where: { orgId, isActive: true, role: { not: 'guest' } },
         select: { userId: true, role: true },
       });
       const seedMembers = orgMembers.length
@@ -114,18 +116,25 @@ export class TeamStore {
       });
       return team;
     }
-    // Existing default team — ensure caller is a member.
+    // Existing default team — ensure caller is a member (guests excluded:
+    // default-team membership would expose every team project to them).
     if (userId) {
-      await this.prisma.teamMember.upsert({
-        where: { teamId_userId: { teamId: team.id, userId } },
-        create: { teamId: team.id, userId, role: 'member', addedById: userId },
-        update: {},
-      });
+      const callerMembership = await this.prisma.userOrganization.findUnique({
+        where: { userId_orgId: { userId, orgId } },
+        select: { role: true },
+      }).catch(() => null);
+      if (callerMembership?.role !== 'guest') {
+        await this.prisma.teamMember.upsert({
+          where: { teamId_userId: { teamId: team.id, userId } },
+          create: { teamId: team.id, userId, role: 'member', addedById: userId },
+          update: {},
+        });
+      }
     }
     // Backfill: add any active org member that isn't already on the team.
     try {
       const orgMembers = await this.prisma.userOrganization.findMany({
-        where: { orgId, isActive: true },
+        where: { orgId, isActive: true, role: { not: 'guest' } },
         select: { userId: true },
       });
       const existing = await this.prisma.teamMember.findMany({
@@ -283,6 +292,15 @@ export class TeamStore {
       if (teamId) whereAll.OR = [{ teamId }, { teamId: null }, { members: { some: { userId } } }];
       return this.prisma.project.findMany({
         where: whereAll,
+        include: { _count: { select: { members: true, memories: true } } },
+        orderBy: [{ updatedAt: 'desc' }],
+      });
+    }
+    // GUESTS (project-scoped invitees) see ONLY projects they're explicitly a
+    // member of — no team inheritance, no org-level (teamId:null) projects.
+    if (orgRole === 'guest') {
+      return this.prisma.project.findMany({
+        where: { orgId, status: 'active', members: { some: { userId } } },
         include: { _count: { select: { members: true, memories: true } } },
         orderBy: [{ updatedAt: 'desc' }],
       });

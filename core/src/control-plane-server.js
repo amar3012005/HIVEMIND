@@ -2440,14 +2440,23 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { error: 'Invite email does not match current account' }, 403);
     }
 
-    const inviteRoles = Array.isArray(invite.roles) && invite.roles.length > 0
-      ? invite.roles
-      : [invite.role || 'member'];
+    // Hierarchy semantics: an invite scoped to specific PROJECT(s) with the
+    // default 'member' role makes the invitee an org GUEST — they belong to
+    // those projects only, never the whole org (no org-wide memories, no other
+    // projects, no default-team flood). Explicit elevated roles (admin/owner)
+    // on the invite are honored as before.
+    const projectIds = Array.isArray(invite.projectIds) ? invite.projectIds : [];
+    const isProjectScopedInvite = projectIds.length > 0
+      && (!invite.role || invite.role === 'member' || invite.role === 'guest');
+    const effectiveRole = isProjectScopedInvite ? 'guest' : (invite.role || 'member');
+    const inviteRoles = isProjectScopedInvite
+      ? ['guest']
+      : (Array.isArray(invite.roles) && invite.roles.length > 0 ? invite.roles : [effectiveRole]);
 
     await prisma.userOrganization.upsert({
       where: { userId_orgId: { userId: current.session.userId, orgId: invite.orgId } },
       update: {
-        role: invite.role,
+        role: effectiveRole,
         roles: inviteRoles,
         joinedAt: new Date(),
         isActive: true,
@@ -2456,7 +2465,7 @@ const server = http.createServer(async (req, res) => {
       create: {
         userId: current.session.userId,
         orgId: invite.orgId,
-        role: invite.role,
+        role: effectiveRole,
         roles: inviteRoles,
         invitedAt: invite.createdAt,
         joinedAt: new Date(),
@@ -2464,8 +2473,9 @@ const server = http.createServer(async (req, res) => {
       },
     });
 
-    // Auto-add to invited teams
-    const teamIds = Array.isArray(invite.teamIds) ? invite.teamIds : [];
+    // Auto-add to invited teams — never for guests (team membership grants
+    // visibility of every team project, which defeats project scoping).
+    const teamIds = isProjectScopedInvite ? [] : (Array.isArray(invite.teamIds) ? invite.teamIds : []);
     if (teamIds.length > 0) {
       for (const teamId of teamIds) {
         await prisma.teamMember.upsert({
@@ -2477,17 +2487,18 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Auto-add to invited projects (project_ids was previously silently dropped here)
-    const projectIds = Array.isArray(invite.projectIds) ? invite.projectIds : [];
     if (projectIds.length > 0) {
       for (const projectId of projectIds) {
-        // ProjectMember has composite PK (projectId, userId) — no `id` column
+        // ProjectMember has composite PK (projectId, userId) — no `id` column.
+        // 'contributor' is the valid PROJECT_ROLES grant ('member' is not a
+        // project role and broke role-gated checks downstream).
         await prisma.projectMember.upsert({
           where: { projectId_userId: { projectId, userId: current.session.userId } },
           update: {},
           create: {
             projectId,
             userId: current.session.userId,
-            role: 'member',
+            role: 'contributor',
             addedById: invite.createdBy,
           },
         }).catch(() => null);

@@ -2475,8 +2475,31 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
         try {
           const { getPrismaClient } = await import('../db/prisma.js');
           const prisma = getPrismaClient();
+          // Role-aware: this previously listed EVERY org project to ANY caller,
+          // leaking project names/descriptions to guests. Guests see only their
+          // own projects; members see accessible (member/team/org-level);
+          // owners/admins see all.
+          const membership = await prisma.userOrganization.findUnique({
+            where: { userId_orgId: { userId, orgId } },
+            select: { role: true },
+          }).catch(() => null);
+          const callerRole = isMaster ? 'owner' : (membership?.role || 'member');
+          let projWhere = { orgId, status: 'active' };
+          if (callerRole === 'guest') {
+            projWhere = { ...projWhere, members: { some: { userId } } };
+          } else if (callerRole !== 'owner' && callerRole !== 'admin') {
+            const teamRows = await prisma.teamMember.findMany({ where: { userId }, select: { teamId: true } }).catch(() => []);
+            projWhere = {
+              ...projWhere,
+              OR: [
+                { members: { some: { userId } } },
+                { teamId: { in: teamRows.map(r => r.teamId) } },
+                { teamId: null },
+              ],
+            };
+          }
           const projects = await prisma.project.findMany({
-            where: { orgId },
+            where: projWhere,
             orderBy: { updatedAt: 'desc' },
             select: {
               id: true,
@@ -2494,8 +2517,20 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
             },
             take: 50,
           });
+          // Multi-org awareness: the MCP token is bound to ONE org. When the
+          // user belongs to several, say so — "0 projects" usually means the
+          // token is bound to the wrong org, not that projects were deleted.
+          const otherOrgs = await prisma.userOrganization.findMany({
+            where: { userId, isActive: true, NOT: { orgId } },
+            select: { role: true, org: { select: { id: true, name: true } } },
+            take: 10,
+          }).catch(() => []);
+          const orgsNote = otherOrgs.length
+            ? ` NOTE: this connection is bound to org ${orgId}. The user ALSO belongs to: ${otherOrgs.map(o => `"${o.org?.name}" (${o.org?.id}, role ${o.role})`).join(', ')} — projects there are not visible through this token. To work in another org, reconnect HIVEMIND while that org is active in the dashboard.`
+            : '';
           return formatToolContent({
             org_id: orgId,
+            caller_role: callerRole,
             count: projects.length,
             projects: projects.map(p => ({
               id: p.id,
@@ -2512,9 +2547,10 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
                 role: m.role,
               })),
             })),
-            hint: projects.length === 0
-              ? 'No projects yet — memories save org-wide. Admin can create a project in the HIVEMIND web UI.'
-              : 'Each project is a sub-HIVEMIND. If the user task clearly belongs to one (match by name/description), pass its `project_id` to hivemind_recall (scopes recall to that project + org-wide) and hivemind_save_memory. If unclear, omit project for org-wide.',
+            ...(otherOrgs.length ? { other_orgs: otherOrgs.map(o => ({ id: o.org?.id, name: o.org?.name, role: o.role })) } : {}),
+            hint: (projects.length === 0
+              ? 'No projects visible in this org for this user — memories save org-wide. Admin can create a project in the HIVEMIND web UI.'
+              : 'Each project is a sub-HIVEMIND. If the user task clearly belongs to one (match by name/description), pass its `project_id` to hivemind_recall (scopes recall to that project + org-wide) and hivemind_save_memory. If unclear, omit project for org-wide.') + orgsNote,
           });
         } catch (err) {
           return formatToolContent({ error: err.message, projects: [] });

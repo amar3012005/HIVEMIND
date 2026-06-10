@@ -170,8 +170,12 @@ function scopedMemoryWhere({ user_id, org_id, project, scope = 'personal', acces
     const teamIds = Array.isArray(access_context.teamIds) ? access_context.teamIds : [];
     const tiers = [
       { userId: user_id, scope: 'personal' },
-      { scope: 'organization', orgId: org_id },
     ];
+    // Hierarchy: org GUESTS (project-scoped invitees, often from another org)
+    // see their own memories + their projects' memories — never the org-wide tier.
+    if (access_context.orgRole !== 'guest') {
+      tiers.push({ scope: 'organization', orgId: org_id });
+    }
     if (projectIds.length > 0) {
       tiers.push({ scope: 'project', memoryProjects: { some: { projectId: { in: projectIds } } } });
     }

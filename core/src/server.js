@@ -5132,6 +5132,11 @@ exit \$RC
           fd.append('model', process.env.GROQ_WHISPER_MODEL || 'whisper-large-v3');
           fd.append('response_format', 'verbose_json');
           fd.append('temperature', '0');
+          // Optional meeting context (?prompt=) — biases Whisper toward the
+          // correct spelling of names/companies/jargon the user typed before
+          // the meeting (Whisper prompt cap ~224 tokens → hard-slice).
+          const ctxPrompt = (url.searchParams.get('prompt') || '').toString().slice(0, 800);
+          if (ctxPrompt) fd.append('prompt', ctxPrompt);
           const wRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
             method: 'POST',
             headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
@@ -5163,7 +5168,7 @@ exit \$RC
         if (!transcript) return jsonResponse(res, { error: 'no_transcript' }, 400);
         const notes = (body.notes || '').toString().slice(0, 4000);
         try {
-          const sys = 'You are an expert meeting analyst. From the transcript (and optional user notes) produce STRICT JSON: {"title": string, "summary": string (3-6 sentences), "key_points": string[], "action_items": [{"task": string, "owner": string|null, "due": string|null}], "decisions": string[], "questions": string[], "topics": string[], "sentiment": string, "quotes": [{"quote": string, "speaker": string|null}] (up to 5 short verbatim notable quotes, in the transcript original language), "risks": string[] (risks, blockers, warnings or red flags raised), "next_steps": string[] (concrete follow-ups beyond action items, e.g. upcoming events or dates mentioned), "entities": {"people": string[], "organizations": string[], "dates": string[]}}. Be faithful — never invent facts. Use empty arrays/objects when none.';
+          const sys = 'You are an expert meeting analyst. From the transcript (and optional user notes) produce STRICT JSON: {"title": string, "summary": string (3-6 sentences), "key_points": string[], "action_items": [{"task": string, "owner": string|null, "due": string|null}], "decisions": string[], "questions": string[], "topics": string[], "sentiment": string, "quotes": [{"quote": string, "speaker": string|null}] (up to 5 short verbatim notable quotes, in the transcript original language), "risks": string[] (risks, blockers, warnings or red flags raised), "next_steps": string[] (concrete follow-ups beyond action items, e.g. upcoming events or dates mentioned), "entities": {"people": string[], "organizations": string[], "dates": string[]}, "speaker_names": object}. speaker_names maps diarization labels to real participant names (e.g. {"SPEAKER_00": "Matthias"}) ONLY when the transcript contains SPEAKER_xx labels AND the user notes/context name the participants — infer who is who from how they speak; use {} when unsure. Be faithful — never invent facts. Use empty arrays/objects when none.';
           const usr = (notes ? `USER NOTES:\n${notes}\n\n` : '') + `TRANSCRIPT:\n${transcript.slice(0, 60000)}`;
           const resp = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
             method: 'POST',
@@ -15916,7 +15921,12 @@ exit \$RC
               // — regardless of the caller's project membership (the room/caller
               // explicitly chose this project). Without project_id, behavior is unchanged.
               if (body.project_id) {
+                // Spread-preserve the rest of the context (orgRole especially):
+                // rebuilding it bare dropped orgRole, which (a) re-granted the
+                // org-wide tier to guests on project recalls and (b) changed the
+                // keyword candidate pool composition.
                 recallAccessCtx = {
+                  ...(recallAccessCtx || {}),
                   projectIds: [body.project_id],
                   teamIds: (recallAccessCtx && recallAccessCtx.teamIds) || [],
                 };

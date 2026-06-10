@@ -535,8 +535,12 @@ export class PrismaGraphStore {
             const teamIds = Array.isArray(access_context.teamIds) ? access_context.teamIds : [];
             const tiers = [
               `(m.user_id = '${user_id}'::uuid AND m.scope = 'personal')`,
-              `(m.scope = 'organization' AND m.org_id = '${org_id}'::uuid)`,
             ];
+            // Guest gate mirrors scopedMemoryWhere: org guests (project-scoped
+            // invitees) never get the org-wide tier — keyword search included.
+            if (access_context.orgRole !== 'guest') {
+              tiers.push(`(m.scope = 'organization' AND m.org_id = '${org_id}'::uuid)`);
+            }
             if (projectIds.length > 0) {
               const idList = projectIds.map(id => `'${id}'::uuid`).join(',');
               tiers.push(`(m.scope = 'project' AND EXISTS (SELECT 1 FROM memory_projects mp WHERE mp.memory_id = m.id AND mp.project_id IN (${idList})))`);

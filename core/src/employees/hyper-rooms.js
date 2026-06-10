@@ -131,7 +131,8 @@ export async function appendTurnEvent(prisma, turnId, event) {
     });
     if (!row) throw new Error(`HyperTurn not found: ${turnId}`);
     const lines = Array.isArray(row.lines) ? row.lines : [];
-    const stamped = { ts: Date.now(), ...event };
+    const now = Date.now();
+    const stamped = { ts: now, received_ts: now, ...event };
     lines.push(stamped);
     await tx.hyperTurn.update({
       where: { id: turnId },

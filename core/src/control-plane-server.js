@@ -2651,9 +2651,15 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { error: 'Projects require an enterprise workspace' }, 403);
     }
 
-    const projects = await prisma.project.findMany({
-      where: { orgId },
-      orderBy: { updatedAt: 'desc' },
+    // Role + policy aware: was an unfiltered findMany that listed EVERY org
+    // project to ANY member — including guests and other members' private
+    // projects. Now routes through the same visibility engine as /v1/projects.
+    const ts2 = await _getTeamStore();
+    if (!ts2) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const projects = await ts2.store.listProjectsForUser({
+      userId: current.session.userId,
+      orgId,
+      orgRole: membership.role || null,
     });
 
     return jsonResponse(res, {
@@ -2663,6 +2669,9 @@ const server = http.createServer(async (req, res) => {
         name: project.name,
         slug: project.slug,
         description: project.description,
+        policy: project.policy,
+        member_count: project._count?.members ?? 0,
+        memory_count: project._count?.memories ?? 0,
         created_by: project.createdBy,
         created_at: project.createdAt,
         updated_at: project.updatedAt,
@@ -2702,6 +2711,18 @@ const server = http.createServer(async (req, res) => {
         createdBy: current.session.userId,
       },
     });
+    // Creator becomes a member; policy persisted via raw SQL (column postdates
+    // the deployed Prisma client). Default 'private' — creator decides access.
+    const projPolicy = ['private', 'team_inherited', 'org_visible'].includes(body.policy) ? body.policy : 'private';
+    await prisma.projectMember.upsert({
+      where: { projectId_userId: { projectId: project.id, userId: current.session.userId } },
+      update: {},
+      create: { projectId: project.id, userId: current.session.userId, role: 'owner', addedById: current.session.userId },
+    }).catch(() => {});
+    await prisma.$executeRawUnsafe(
+      `UPDATE hivemind.projects SET policy = $1 WHERE id = $2::uuid`,
+      projPolicy, project.id,
+    ).catch(() => {});
 
     return jsonResponse(res, {
       success: true,
@@ -2711,6 +2732,7 @@ const server = http.createServer(async (req, res) => {
         name: project.name,
         slug: project.slug,
         description: project.description,
+        policy: projPolicy,
         created_by: project.createdBy,
         created_at: project.createdAt,
         updated_at: project.updatedAt,
@@ -4030,6 +4052,7 @@ const server = http.createServer(async (req, res) => {
           teamId,
           name: body.name.trim(),
           description: String(body.description).trim(),
+          policy: typeof body.policy === 'string' ? body.policy : null,
           createdBy: userId,
         });
         audit({
@@ -4225,7 +4248,9 @@ const server = http.createServer(async (req, res) => {
     const PROJECT_ROLES = ['owner', 'contributor', 'viewer'];
     if (sub === 'members' && req.method === 'POST') {
       try {
-        await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'owner' });
+        // Any project member can bring in teammates (one-tap add / invite);
+        // role changes + removals stay owner/admin-gated below.
+        await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'member' });
         const body = await parseBody(req);
         if (!body.user_id) return jsonResponse(res, { error: 'user_id required' }, 400);
         const role = body.role || 'contributor';

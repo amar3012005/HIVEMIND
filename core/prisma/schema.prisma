@@ -193,6 +193,7 @@ model Project {
   slug        String          @db.VarChar(120)
   description String?
   status      String          @default("active") @db.VarChar(20) // 'active' | 'archived'
+  policy      String          @default("private") @db.VarChar(20) // 'private' | 'team_inherited' | 'org_visible'
   // Per-project self-evolve toggle (card switch). Default OFF. When true the
   // cognitive layer synthesizes/evolves this project's memories. Migration 20260606193000.
   selfEvolveEnabled Boolean    @default(false) @map("self_evolve_enabled")

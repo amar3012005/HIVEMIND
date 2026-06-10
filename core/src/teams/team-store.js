@@ -16,6 +16,7 @@
 const VALID_TEAM_ROLES = new Set(['lead', 'member']);
 const VALID_PROJECT_ROLES = new Set(['owner', 'contributor', 'viewer']);
 const VALID_PROJECT_STATUS = new Set(['active', 'archived']);
+const VALID_PROJECT_POLICIES = new Set(['private', 'team_inherited', 'org_visible']);
 
 function slugify(name) {
   return String(name || '')
@@ -283,32 +284,77 @@ export class TeamStore {
 
   // ── Projects ─────────────────────────────────────────────
 
+  /**
+   * Policy-aware project visibility. Raw SQL on purpose: the `policy` column
+   * postdates the deployed Prisma client (drift-proof — never reference new
+   * columns through Prisma selects).
+   *   admin/owner    → every active project
+   *   guest          → ONLY explicit ProjectMember rows (invited projects)
+   *   member         → explicit member, OR policy='org_visible', OR
+   *                    (policy='team_inherited' AND member of project's team).
+   *                    'private' projects are invisible to non-members — the
+   *                    creator (auto-member) decides who else gets in.
+   */
   async listProjectsForUser({ userId, orgId, teamId = null, orgRole = null }) {
-    // Hierarchy visibility: org owners/admins see EVERY active project in the
-    // org (with member rosters) — they sit above the project layer. Everyone
-    // else sees only projects they can access (member / team / org-level).
-    if (orgRole === 'owner' || orgRole === 'admin') {
-      const whereAll = { orgId, status: 'active' };
-      if (teamId) whereAll.OR = [{ teamId }, { teamId: null }, { members: { some: { userId } } }];
-      return this.prisma.project.findMany({
-        where: whereAll,
-        include: { _count: { select: { members: true, memories: true } } },
-        orderBy: [{ updatedAt: 'desc' }],
+    const isAdmin = orgRole === 'owner' || orgRole === 'admin';
+    const isGuest = orgRole === 'guest';
+
+    let visibility;
+    if (isAdmin) {
+      visibility = 'TRUE';
+    } else if (isGuest) {
+      visibility = `EXISTS (SELECT 1 FROM hivemind.project_members pm WHERE pm.project_id = p.id AND pm.user_id = $2::uuid)`;
+    } else {
+      const teamRows = await this.prisma.teamMember.findMany({
+        where: { userId },
+        select: { teamId: true },
       });
+      const teamIdList = teamRows.map(t => `'${t.teamId}'::uuid`).join(',');
+      const teamClause = teamIdList
+        ? `(p.policy = 'team_inherited' AND p.team_id IN (${teamIdList}))`
+        : 'FALSE';
+      visibility = `(
+        EXISTS (SELECT 1 FROM hivemind.project_members pm WHERE pm.project_id = p.id AND pm.user_id = $2::uuid)
+        OR p.policy = 'org_visible'
+        OR ${teamClause}
+      )`;
     }
-    // GUESTS (project-scoped invitees) see ONLY projects they're explicitly a
-    // member of — no team inheritance, no org-level (teamId:null) projects.
-    if (orgRole === 'guest') {
-      return this.prisma.project.findMany({
-        where: { orgId, status: 'active', members: { some: { userId } } },
-        include: { _count: { select: { members: true, memories: true } } },
-        orderBy: [{ updatedAt: 'desc' }],
-      });
-    }
-    // A user can see a project if:
-    //   - They are an explicit ProjectMember, OR
-    //   - They are a team member of the project's team, OR
-    //   - The project has no team (legacy org-level) and they are in the org
+
+    // Team-tab narrowing (non-guests): that team's projects + org-level rows +
+    // explicit memberships — composed with the role visibility above via AND.
+    const teamNarrow = teamId && !isGuest
+      ? `AND (p.team_id = '${teamId}'::uuid OR p.team_id IS NULL OR EXISTS (SELECT 1 FROM hivemind.project_members pm3 WHERE pm3.project_id = p.id AND pm3.user_id = $2::uuid))`
+      : '';
+
+    const rows = await this.prisma.$queryRawUnsafe(
+      `SELECT p.id, p.org_id, p.team_id, p.name, p.slug, p.description, p.status,
+              p.policy, p.created_by, p.created_at, p.updated_at,
+              (SELECT count(*)::int FROM hivemind.project_members pm2 WHERE pm2.project_id = p.id) AS member_count,
+              (SELECT count(*)::int FROM hivemind.memory_projects mp
+                 JOIN hivemind.memories m ON m.id = mp.memory_id AND m.deleted_at IS NULL
+                WHERE mp.project_id = p.id) AS memory_count
+         FROM hivemind.projects p
+        WHERE p.org_id = $1::uuid AND p.status = 'active' AND ${visibility} ${teamNarrow}
+        ORDER BY p.updated_at DESC`,
+      orgId, userId,
+    );
+    return rows.map((r) => ({
+      id: r.id,
+      orgId: r.org_id,
+      teamId: r.team_id,
+      name: r.name,
+      slug: r.slug,
+      description: r.description,
+      status: r.status,
+      policy: r.policy,
+      createdBy: r.created_by,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+      _count: { members: r.member_count, memories: r.memory_count },
+    }));
+  }
+
+  async _legacyListProjectsForUser({ userId, orgId, teamId = null }) {
     const teamIds = (await this.prisma.teamMember.findMany({
       where: { userId },
       select: { teamId: true },
@@ -323,11 +369,6 @@ export class TeamStore {
         { teamId: null }, // legacy / org-level projects (no team)
       ],
     };
-    // When a specific team tab is active, scope to that team's projects BUT keep
-    // org-level (teamId=null) and explicitly-shared projects visible. An
-    // org-level project (e.g. one created via the MCP create_project tool with
-    // no team) must never vanish just because a team tab is selected — that made
-    // the project count (org-wide) disagree with the listed projects (team-only).
     if (teamId) {
       where.OR = [
         { teamId },
@@ -352,7 +393,7 @@ export class TeamStore {
     });
   }
 
-  async createProject({ orgId, teamId = null, name, description = null, createdBy }) {
+  async createProject({ orgId, teamId = null, name, description = null, createdBy, policy = null }) {
     const baseSlug = slugify(name);
     let slug = baseSlug;
     let n = 1;
@@ -364,7 +405,7 @@ export class TeamStore {
     // but some prod DBs were created without that default. Generate
     // explicitly so insertion never fails on null id even on stale schemas.
     const { randomUUID } = await import('node:crypto');
-    return this.prisma.project.create({
+    const created = await this.prisma.project.create({
       data: {
         id: randomUUID(),
         orgId,
@@ -378,6 +419,14 @@ export class TeamStore {
       },
       include: { members: true },
     });
+    // policy column postdates the deployed Prisma client — set via raw SQL.
+    const effectivePolicy = VALID_PROJECT_POLICIES.has(policy) ? policy : 'private';
+    await this.prisma.$executeRawUnsafe(
+      `UPDATE hivemind.projects SET policy = $1 WHERE id = $2::uuid`,
+      effectivePolicy, created.id,
+    ).catch(() => {});
+    created.policy = effectivePolicy;
+    return created;
   }
 
   async updateProject({ projectId, data }) {
@@ -388,6 +437,16 @@ export class TeamStore {
     if (typeof data.status === 'string' && VALID_PROJECT_STATUS.has(data.status)) {
       allowed.status = data.status;
       if (data.status === 'archived') allowed.archivedAt = new Date();
+    }
+    if (typeof data.policy === 'string' && VALID_PROJECT_POLICIES.has(data.policy)) {
+      // Raw SQL — column postdates the deployed Prisma client.
+      await this.prisma.$executeRawUnsafe(
+        `UPDATE hivemind.projects SET policy = $1 WHERE id = $2::uuid`,
+        data.policy, projectId,
+      );
+      if (Object.keys(allowed).length === 0 && Object.keys(data).length === 1) {
+        return this.prisma.project.findUnique({ where: { id: projectId } });
+      }
     }
     if (Object.keys(allowed).length === 0) {
       throw new Error('No mutable fields supplied');

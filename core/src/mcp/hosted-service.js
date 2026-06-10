@@ -2539,39 +2539,36 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
           // Real membership wins — master-key service calls only default to
           // 'owner' when the emulated user has no membership row at all.
           const callerRole = membership?.role || (isMaster ? 'owner' : 'member');
-          let projWhere = { orgId, status: 'active' };
-          if (callerRole === 'guest') {
-            projWhere = { ...projWhere, members: { some: { userId } } };
-          } else if (callerRole !== 'owner' && callerRole !== 'admin') {
-            const teamRows = await prisma.teamMember.findMany({ where: { userId }, select: { teamId: true } }).catch(() => []);
-            projWhere = {
-              ...projWhere,
-              OR: [
-                { members: { some: { userId } } },
-                { teamId: { in: teamRows.map(r => r.teamId) } },
-                { teamId: null },
-              ],
-            };
+          // Same policy-aware visibility engine as the dashboard (raw SQL —
+          // the policy column postdates the deployed Prisma client):
+          // guests → explicit memberships only; members → member ∪ org_visible
+          // ∪ (team_inherited ∧ own team); admins → all.
+          const { TeamStore } = await import('../teams/team-store.js');
+          const tstore = new TeamStore(prisma);
+          const visible = await tstore.listProjectsForUser({ userId, orgId, orgRole: callerRole });
+          const visibleIds = visible.slice(0, 50).map(p => p.id);
+          const memberRows = visibleIds.length
+            ? await prisma.projectMember.findMany({
+                where: { projectId: { in: visibleIds } },
+                select: { projectId: true, role: true, user: { select: { displayName: true, email: true } } },
+              }).catch(() => [])
+            : [];
+          const peopleByProject = {};
+          for (const m of memberRows) {
+            (peopleByProject[m.projectId] = peopleByProject[m.projectId] || []).push(m);
           }
-          const projects = await prisma.project.findMany({
-            where: projWhere,
-            orderBy: { updatedAt: 'desc' },
-            select: {
-              id: true,
-              name: true,
-              slug: true,
-              description: true,
-              status: true,
-              createdAt: true,
-              updatedAt: true,
-              _count: { select: { members: true, memories: true } },
-              members: {
-                take: 8,
-                select: { role: true, user: { select: { displayName: true, email: true } } },
-              },
-            },
-            take: 50,
-          });
+          const projects = visible.slice(0, 50).map(p => ({
+            id: p.id,
+            name: p.name,
+            slug: p.slug,
+            description: p.description,
+            status: p.status,
+            policy: p.policy,
+            createdAt: p.createdAt,
+            updatedAt: p.updatedAt,
+            _count: p._count,
+            members: (peopleByProject[p.id] || []).slice(0, 8),
+          }));
           // Multi-org awareness: the MCP token is bound to ONE org. When the
           // user belongs to several, say so — "0 projects" usually means the
           // token is bound to the wrong org, not that projects were deleted.
@@ -2593,6 +2590,7 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
               slug: p.slug,
               description: p.description || null,
               status: p.status,
+              policy: p.policy || null,
               created_at: p.createdAt,
               last_updated: p.updatedAt,
               member_count: p._count?.members ?? 0,

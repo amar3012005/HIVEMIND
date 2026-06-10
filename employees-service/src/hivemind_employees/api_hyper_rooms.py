@@ -126,61 +126,122 @@ _SAVE_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 
-_PRICE_POINT_RE = re.compile(
-    r"(?:€|EUR\s*)\s?\d+(?:[.,]\d+)?\s*(?:/(?:mo|month|seat|user))?|"
-    r"\b\d+(?:[.,]\d+)?\s*(?:€|EUR)\s*(?:/(?:mo|month|seat|user))?",
+_VALUE_FACT_RE = re.compile(
+    r"(?:€|\$|£|EUR|USD|GBP)\s?\d+(?:[.,]\d+)?(?:\s?[kKmMbB])?(?:\s*/\s?(?:mo|month|seat|user|yr|year))?|"
+    r"\b\d+(?:[.,]\d+)?\s?(?:%|percent|users?|seats?|GB|MB|TB|minutes?|hours?|days?|weeks?|months?|years?|ARR|MRR|revenue|customers?|partners?|tasks?|tickets?)\b|"
+    r"\b\d{1,4}(?:[/-]\d{1,2}){1,2}\b|"
+    r"\b\d+(?:[.,]\d+)?\b",
     re.IGNORECASE,
 )
-_PRICING_TIER_TERMS = ("trial", "free", "pro", "plus", "scale", "enterprise", "starter", "team")
-_MISSING_PRICING_PATTERNS = (
-    re.compile(r"\b(?:no|without|lacks?|missing|did(?: not|n't)|does(?: not|n't))\b.{0,90}\b(?:price|pricing|figures?|amounts?|tiers?)\b", re.IGNORECASE),
-    re.compile(r"\b(?:price|pricing|figures?|amounts?|tiers?)\b.{0,90}\b(?:missing|needed|required|not supplied|not provided|unclear)\b", re.IGNORECASE),
-    re.compile(r"\bneed(?:s|ed)?\b.{0,50}\b(?:exact|specific|concrete)\b.{0,50}\b(?:price|pricing|figures?|amounts?)\b", re.IGNORECASE),
+_DATE_FACT_RE = re.compile(
+    r"\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|"
+    r"dec(?:ember)?)\s+\d{1,2}(?:,\s*\d{4})?|\b(?:q[1-4]|h[12])\s*\d{2,4}\b",
+    re.IGNORECASE,
+)
+_QUOTED_FACT_RE = re.compile(r"[\"“”']([^\"“”']{3,80})[\"“”']")
+_NAMED_FACT_RE = re.compile(r"\b[A-Z][A-Za-z0-9&.-]*(?:\s+[A-Z][A-Za-z0-9&.-]*){0,4}\b")
+_CONSTRAINT_RE = re.compile(
+    r"\b(?:must|should|need(?:s)?|only|do not|don't|cannot|can't|never|"
+    r"now|given|instead|because|so|therefore|make sure|fix|validate|compare)\b",
+    re.IGNORECASE,
+)
+_MISSING_CURRENT_FACT_PATTERNS = (
+    re.compile(r"\buser\b.{0,80}\b(?:did(?: not|n't)|has(?: not|n't)|does(?: not|n't)|never)\b.{0,80}\b(?:supply|provide|give|share|include)\b", re.IGNORECASE),
+    re.compile(r"\b(?:no|without|lacks?|missing)\b.{0,60}\b(?:concrete|exact|specific)?\s*(?:user\s+)?(?:details?|figures?|numbers?|values?|requirements?|constraints?|context|facts?)\b", re.IGNORECASE),
+    re.compile(r"\bneed(?:s|ed)?\b.{0,40}\b(?:exact|specific|concrete)\b.{0,50}\b(?:details?|figures?|numbers?|values?|requirements?|constraints?|facts?)\b", re.IGNORECASE),
+)
+_REAL_GAP_RE = re.compile(
+    r"\b(?:cost-to-serve|unit economics|margin|usage logs?|churn|elasticity|"
+    r"validation|evidence|memory evidence|pilot|survey|benchmark|customer data|"
+    r"legal|security|risk|implementation|owner|deadline)\b",
+    re.IGNORECASE,
 )
 
 # Decision-template flag — set via room metadata later. For now: any
 # turn that closes with verdict=resolved OR explicit save-intent.
 
 
-def _extract_pricing_facts(text: str) -> Dict[str, List[str]]:
-    """Pull explicit user-supplied pricing facts from chat text.
+def _uniq_keep_order(values: List[str], limit: int = 12) -> List[str]:
+    out: List[str] = []
+    seen: Set[str] = set()
+    for raw in values:
+        value = re.sub(r"\s+", " ", str(raw or "")).strip(" \t\n\r.,;:")
+        key = value.lower()
+        if not value or key in seen:
+            continue
+        seen.add(key)
+        out.append(value)
+        if len(out) >= limit:
+            break
+    return out
 
-    This is a deterministic guardrail for the debate loop: if the user
-    supplies concrete tier prices in a follow-up, validators must not keep
-    escalating on the stale first-round objection that prices are absent.
+
+def _extract_current_user_facts(text: str) -> Dict[str, List[str]]:
+    """Extract topic-agnostic current-turn facts supplied by the user.
+
+    Inspired by AgentScope memory marks: keep the user's latest facts as
+    explicit state separate from long-term memory so employee agents do not
+    re-litigate missing details the user just provided.
     """
     source = text or ""
-    prices: List[str] = []
-    for match in _PRICE_POINT_RE.finditer(source):
-        value = re.sub(r"\s+", " ", match.group(0)).strip()
-        if value and value not in prices:
-            prices.append(value)
-    lowered = source.lower()
-    tiers = [tier for tier in _PRICING_TIER_TERMS if re.search(rf"\b{re.escape(tier)}\b", lowered)]
-    return {"prices": prices[:12], "tiers": tiers[:12]}
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", source) if s.strip()]
+    constraints = [s[:220] for s in sentences if _CONSTRAINT_RE.search(s)]
+    named = [
+        v for v in _NAMED_FACT_RE.findall(source)
+        if len(v) > 2 and v.lower() not in {"i", "the", "and", "for", "now"}
+    ]
+    return {
+        "values": _uniq_keep_order(_VALUE_FACT_RE.findall(source), 16),
+        "dates": _uniq_keep_order(_DATE_FACT_RE.findall(source), 8),
+        "quoted": _uniq_keep_order(_QUOTED_FACT_RE.findall(source), 8),
+        "names": _uniq_keep_order(named, 16),
+        "constraints": _uniq_keep_order(constraints, 8),
+    }
 
 
-def _has_concrete_pricing_facts(text: str) -> bool:
-    facts = _extract_pricing_facts(text)
-    return len(facts["prices"]) >= 2 and len(facts["tiers"]) >= 2
+def _has_current_user_facts(facts: Dict[str, List[str]]) -> bool:
+    return sum(len(v) for v in facts.values()) >= 2
 
 
-def _format_pricing_facts(text: str) -> str:
-    facts = _extract_pricing_facts(text)
-    if not facts["prices"] and not facts["tiers"]:
+def _format_current_turn_state(user_message: str, blackboard: Optional[Dict[str, Any]] = None) -> str:
+    facts = _extract_current_user_facts(user_message)
+    memory_titles: List[str] = []
+    if blackboard:
+        for row in (blackboard.get("memory_hits") or [])[:8]:
+            title = str(row.get("title") or row.get("memory_title") or "").strip()
+            if title:
+                memory_titles.append(title)
+    if not _has_current_user_facts(facts) and not memory_titles:
         return ""
-    lines = ["USER-SUPPLIED PRICING FACTS (authoritative for this turn):"]
-    if facts["tiers"]:
-        lines.append(f"- tiers mentioned: {', '.join(facts['tiers'])}")
-    if facts["prices"]:
-        lines.append(f"- prices mentioned: {', '.join(facts['prices'])}")
-    lines.append("Use these numbers directly; do not ask for exact prices again.")
+    lines = [
+        "CURRENT TURN STATE (AgentScope-style marked memory; authoritative for this turn):",
+        f"[user_message] {user_message[:1200]}",
+    ]
+    for key, label in (
+        ("values", "user_fact:value"),
+        ("dates", "user_fact:date"),
+        ("quoted", "user_fact:quoted"),
+        ("names", "user_fact:name"),
+        ("constraints", "user_fact:constraint"),
+    ):
+        vals = facts.get(key) or []
+        if vals:
+            lines.append(f"[{label}] " + "; ".join(vals[:10]))
+    if memory_titles:
+        lines.append("[memory:title] " + "; ".join(_uniq_keep_order(memory_titles, 8)))
+    lines.append(
+        "Employee rule: use [user_fact] values as current truth; use [memory] for durable context; "
+        "escalate only for a real remaining [gap], not for facts already listed here."
+    )
     return "\n".join(lines)
 
 
-def _claims_missing_pricing(text: str) -> bool:
+def _claims_missing_current_user_facts(text: str) -> bool:
     candidate = text or ""
-    return any(pattern.search(candidate) for pattern in _MISSING_PRICING_PATTERNS)
+    if _REAL_GAP_RE.search(candidate) and not re.search(r"\buser\b", candidate, re.IGNORECASE):
+        return False
+    return any(pattern.search(candidate) for pattern in _MISSING_CURRENT_FACT_PATTERNS)
 
 
 def _normalize_for_dedup(text: str) -> str:
@@ -767,7 +828,9 @@ Reply in STRICT JSON ONLY (no preamble, no code fence):
   "react": true | false,
   "agreement": "agree" | "extend" | "challenge",
   "confidence": 0.0 - 1.0,
-  "line": "..."   // ONE sentence, max ~25 words, Slack tone
+  "line": "...",  // ONE sentence, max ~25 words, Slack tone
+  "evidence": ["[user_fact:value] 20 users", "memory title"],  // optional, max 3
+  "gap": "the still-open risk or missing proof"                 // required when challenging
 }
 
 Hard rules:
@@ -777,6 +840,8 @@ Hard rules:
   "let's also look at", "we need to check". If all you have is a process suggestion,
   stay silent: {"react": false}.
 - Cite concrete evidence when challenging — name the memory or person.
+- If challenging, compare the current [user_fact] state and [memory] state first.
+  Do not claim a detail is missing when the current user message already supplied it.
 - STICK TO THE USER'S TOPIC. Do not pivot to project management — no inventing
   owners, dates, deadlines, or sub-task assignments. If the memory doesn't name
   a person responsible, you don't either.
@@ -802,6 +867,7 @@ async def _run_reactor(
     reactor_lane: str,
     is_opposing: bool,
     blackboard_context: str = "",
+    current_turn_state: str = "",
 ) -> Dict[str, Any]:
     """Returns a dict like
         {"react": bool, "agreement": str|None, "confidence": float, "line": str}
@@ -815,6 +881,7 @@ async def _run_reactor(
             f"{blackboard_context}\n"
             if blackboard_context else ""
         )
+        + (current_turn_state + "\n" if current_turn_state else "")
         + f"User asked: {user_message}\n\n"
         + f"Lead ({lead_name}, lane {reactor_lane}'s opposite={is_opposing}) said:\n"
         + f"{lead_line}\n\n"
@@ -839,6 +906,8 @@ async def _run_reactor(
             "agreement": parsed.get("agreement") or "extend",
             "confidence": float(parsed.get("confidence") or 0.5),
             "line": line[:2000],
+            "gap": str(parsed.get("gap") or "")[:500],
+            "evidence": [str(x)[:160] for x in (parsed.get("evidence") or [])[:6]] if isinstance(parsed.get("evidence"), list) else [],
         }
     except Exception as exc:  # noqa: BLE001
         log.warning("reactor failed: %s", exc)
@@ -2829,6 +2898,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         memory_context = blackboard.get("context_text") or ""
     except Exception as exc:  # noqa: BLE001
         log.warning("hyper-rooms blackboard build failed: %s", exc)
+    current_turn_state = _format_current_turn_state(req.user_message, blackboard)
     _mark("blackboard_ms")
 
     # ── Lead generates full response ─────────────────────────────────
@@ -2881,6 +2951,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             f"[CSI swarm — you are an EMPLOYEE at the HIVEMIND organisation. "
             f"You're the LEAD speaking up this turn. Your lane: {lead['_lane']}.]\n\n"
             + template_hint
+            + (current_turn_state + "\n" if current_turn_state else "")
             + (memory_context + "\n" if memory_context else "")
             + f"WHO YOU ARE:\n"
             f"- You work AT HIVEMIND. The 'HIVEMIND' in this room = our org / our product.\n"
@@ -2892,6 +2963,8 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             f"explicitly asked for owners/dates.\n"
             f"- Pull facts from the memories above; persona-flavour them in YOUR voice "
             f"({lead['_lane']}).\n"
+            f"- Treat CURRENT TURN STATE as authoritative. If the user supplied a value, "
+            f"constraint, date, name, or requirement there, use it instead of asking for it again.\n"
             f"- NEVER invent owners, dates, deadlines, or assignments. If memory does not name a "
             f"person responsible, don't assign one.\n"
             f"- If the user adds a constraint mid-thread ('this is only about X'), narrow your "
@@ -2998,6 +3071,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             reactor_lane=r["_lane"],
             is_opposing=is_opp,
             blackboard_context=memory_context,
+            current_turn_state=current_turn_state,
         )))
 
     reactions: List[Dict[str, Any]] = []
@@ -3039,6 +3113,8 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 "agreement": result.get("agreement", "extend"),
                 "confidence": float(result.get("confidence", 0.5)),
                 "content": line,
+                "evidence": result.get("evidence", []),
+                "gap": result.get("gap", ""),
                 "tokens": r_tokens,
             }
             reactions.append({**event, "emp": r_emp})
@@ -3071,6 +3147,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             )
             synth_prompt = (
                 f"[CSI synthesis pass — you're still the HIVEMIND employee. Lane: {lead['_lane']}.]\n\n"
+                + (current_turn_state + "\n" if current_turn_state else "")
                 + (memory_context + "\n" if memory_context else "")
                 + f"USER'S ORIGINAL QUESTION:\n\"{req.user_message}\"\n\n"
                 f"YOUR EARLIER LEAD LINE:\n\"{lead_text}\"\n\n"
@@ -3079,6 +3156,8 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 f"project plan with owners/dates unless the user asked for one.\n"
                 f"  • If a reactor surfaced a NEW fact from memory → fold it in and cite the title.\n"
                 f"  • If a reactor challenged a claim → defend with a memory hit, or concede.\n"
+                f"  • If the user supplied a concrete fact in CURRENT TURN STATE → incorporate it; "
+                f"do not ask for it again.\n"
                 f"  • If a reactor's point is outside scope of the user's question → ignore it.\n"
                 f"  • The shared blackboard is already above. Only call hivemind_recall / traverse_graph "
                 f"for one precise missing fact.\n\n"
@@ -3127,6 +3206,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 reactor_lane=r["_lane"],
                 is_opposing=is_opp2,
                 blackboard_context=memory_context,
+                current_turn_state=current_turn_state,
             )))
         post_synth_results = await asyncio.gather(*post_synth_tasks, return_exceptions=True)
         for r_emp, result in zip(reactors, post_synth_results):
@@ -3146,6 +3226,8 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 "agreement": result.get("agreement", "extend"),
                 "confidence": float(result.get("confidence", 0.5)),
                 "content": line,
+                "evidence": result.get("evidence", []),
+                "gap": result.get("gap", ""),
                 "tokens": r_tokens,
             }
             reactions.append({**event, "emp": r_emp})
@@ -3183,7 +3265,6 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     final_verdict: Optional[str] = None
     open_question: str = ""
     last_revise_text: str = ""
-    user_pricing_facts = _format_pricing_facts(req.user_message)
 
     def _challenge_repeats(prev: str, nxt: str) -> bool:
         """True when the new challenge is essentially the prior one — same
@@ -3205,16 +3286,16 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         try:
             revise_prompt = (
                 f"[CSI revision pass round {debate_round} — HIVEMIND employee. Lane: {lead['_lane']}.]\n"
+                + (current_turn_state + "\n" if current_turn_state else "")
                 + (memory_context + "\n" if memory_context else "")
                 + f"USER'S ORIGINAL QUESTION: \"{req.user_message}\"\n"
-                + (user_pricing_facts + "\n" if user_pricing_facts else "")
                 + f"{challenger_reaction['emp'].get('name')} ({challenger_reaction['emp']['_lane']}) pushed back:\n"
                 + f"\"{current_challenge_text}\"\n\n"
-                + f"Reconsider. If right, concede + revise. If standing by, defend with a memory "
-                + f"hit — quote the title. No invented owners / dates. Stay on the user's question. "
-                + f"If the user supplied concrete numbers above, treat them as facts and move to "
-                + f"unit-economics / cost-to-serve implications instead of asking for the numbers again. "
-                + f"2-4 sentences, chat tone, 'we / our'."
+                + f"Reconsider like a real employee: compare [user_fact], [memory], your prior claim, "
+                + f"and the challenger's [gap]. If the challenger is right, concede + revise. If standing "
+                + f"by, defend with a memory title or a current user fact. Do NOT ask again for any value, "
+                + f"date, name, constraint, or requirement already listed in CURRENT TURN STATE. "
+                + f"No invented owners / dates. Stay on the user's question. 2-4 sentences, chat tone, 'we / our'."
             )
             reply2 = await lead_agent(Msg(name="user", content=revise_prompt, role="user"))
             revise_text = _msg_to_text(reply2) or "(no revision)"
@@ -3235,18 +3316,25 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             ch_agent = await _build_agent_for_room(req.room_id, challenger_reaction["emp"], user_id=req.user_id, org_id=req.org_id)
             validate_prompt = (
                 f"[CSI validation pass round {debate_round} — lane: {challenger_reaction['emp']['_lane']}.]\n"
-                f"Current user message:\n\"{req.user_message}\"\n"
-                + (user_pricing_facts + "\n" if user_pricing_facts else "")
+                + (current_turn_state + "\n" if current_turn_state else "")
+                + f"Current user message:\n\"{req.user_message}\"\n"
                 + f"Your original/current challenge was:\n\"{current_challenge_text}\"\n\n"
-                f"{lead.get('name')} responded to your challenge:\n"
-                f"\"{revise_text}\"\n\n"
-                f"Did the lead resolve your concern with concrete memory evidence or user-supplied "
-                f"facts from the current message, or is the gap still real?\n"
-                f"If the user supplied exact prices/tier facts, do NOT escalate by claiming exact "
-                f"pricing is missing; only escalate for a still-real gap such as cost-to-serve, "
-                f"margin, usage risk, or missing validation evidence.\n"
-                f"Reply in STRICT JSON:\n"
-                f'{{"verdict": "resolved" | "escalate", "line": "1-2 sentences (cite a memory if escalating)"}}'
+                + f"{lead.get('name')} responded to your challenge:\n"
+                + f"\"{revise_text}\"\n\n"
+                + f"Validate using this schematic:\n"
+                + f"1. [user_fact] = facts supplied in CURRENT TURN STATE.\n"
+                + f"2. [memory] = recalled durable evidence above.\n"
+                + f"3. [employee_claim] = lead's revised answer.\n"
+                + f"4. [gap] = what remains unresolved after comparing 1-3.\n\n"
+                + f"Resolve if the lead used the current user facts or memory evidence well enough. "
+                + f"Escalate only if a real gap remains, such as missing validation evidence, unresolved "
+                + f"risk, contradictory memory, implementation feasibility, cost/margin proof, legal/security "
+                + f"risk, or unclear decision ownership. Never escalate by saying a user-supplied detail is "
+                + f"missing when it appears in CURRENT TURN STATE.\n"
+                + f"Reply in STRICT JSON:\n"
+                + f'{{"verdict": "resolved" | "escalate", "line": "1-2 sentences", '
+                + f'"resolved_facts": ["facts now handled"], "remaining_gaps": ["real unresolved gaps"], '
+                + f'"next_action": "one concrete action if escalating, else empty string"}}'
             )
             r3 = await ch_agent(Msg(name="user", content=validate_prompt, role="user"))
             validate_raw = _msg_to_text(r3)
@@ -3259,31 +3347,37 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                         verdict_obj = {
                             "verdict": parsed.get("verdict") or "resolved",
                             "line": (parsed.get("line") or "").strip()[:2000],
+                            "resolved_facts": (parsed.get("resolved_facts") or [])[:8],
+                            "remaining_gaps": (parsed.get("remaining_gaps") or [])[:8],
+                            "next_action": (parsed.get("next_action") or "").strip()[:500],
                         }
             except Exception as exc:  # noqa: BLE001
                 log.warning("validate JSON parse failed turn=%s: %s — defaulting to resolved",
                             req.turn_id, exc)
-            pricing_evidence_corpus = "\n".join([req.user_message, revise_text, memory_context or ""])
-            stale_pricing_escalation = (
+            current_user_facts = _extract_current_user_facts(req.user_message)
+            stale_fact_escalation = (
                 verdict_obj.get("verdict") == "escalate"
-                and _has_concrete_pricing_facts(pricing_evidence_corpus)
+                and _has_current_user_facts(current_user_facts)
                 and (
-                    _claims_missing_pricing(verdict_obj.get("line", ""))
-                    or _claims_missing_pricing(current_challenge_text)
+                    _claims_missing_current_user_facts(verdict_obj.get("line", ""))
+                    or _claims_missing_current_user_facts(current_challenge_text)
                 )
             )
-            if stale_pricing_escalation:
+            if stale_fact_escalation:
                 log.info(
-                    "[room] resolved stale pricing escalation turn=%s round=%d",
+                    "[room] resolved stale current-fact escalation turn=%s round=%d",
                     req.turn_id,
                     debate_round,
                 )
                 verdict_obj = {
                     "verdict": "resolved",
                     "line": (
-                        "Pricing figures are now present from the user; remaining work is "
-                        "cost-to-serve and margin validation, not missing prices."
+                        "The requested details are present in the current user message; any follow-up "
+                        "should validate the remaining business or execution risk, not ask for them again."
                     ),
+                    "resolved_facts": ["current user facts acknowledged"],
+                    "remaining_gaps": [],
+                    "next_action": "",
                 }
             v_tokens = max(80, len(verdict_obj.get("line", "")) // 4)
             cost_tokens += v_tokens
@@ -3293,6 +3387,9 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 "round": debate_round,
                 "verdict": verdict_obj["verdict"],
                 "content": verdict_obj["line"],
+                "resolved_facts": verdict_obj.get("resolved_facts", []),
+                "remaining_gaps": verdict_obj.get("remaining_gaps", []),
+                "next_action": verdict_obj.get("next_action", ""),
                 "tokens": v_tokens,
             })
 

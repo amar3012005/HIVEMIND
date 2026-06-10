@@ -2063,6 +2063,8 @@ model Meeting {
   segments       Json?     @map("segments")
   topics         String[]  @default([]) @map("topics")
   sentiment      String?   @map("sentiment") @db.VarChar(32)
+  notes          String?   @map("notes")
+  insights       Json      @default("{}") @map("insights")
   sourceMemoryId String?   @map("source_memory_id") @db.Uuid
   createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)

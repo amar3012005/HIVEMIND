@@ -307,11 +307,27 @@ async function buildAccessContext(userId, orgId) {
   const ts = await getTeamStore();
   if (!ts) return null;
   try {
-    const [projectIds, teamIds] = await Promise.all([
+    const [projectIds, teamIds, membership] = await Promise.all([
       ts.accessibleProjectIds({ userId, orgId }),
       ts.accessibleTeamIds({ userId, orgId }),
+      prisma.userOrganization.findUnique({
+        where: { userId_orgId: { userId, orgId } },
+        select: { role: true },
+      }).catch(() => null),
     ]);
-    const value = { projectIds, teamIds };
+    // Hierarchy: org owners/admins sit above the project layer — their access
+    // context spans EVERY active project in the org, so admin MCP tokens and
+    // recall see cross-project without explicit membership rows.
+    const orgRole = membership?.role || null;
+    let effectiveProjectIds = projectIds;
+    if (orgRole === 'owner' || orgRole === 'admin') {
+      const all = await prisma.project.findMany({
+        where: { orgId, status: 'active' },
+        select: { id: true },
+      }).catch(() => []);
+      effectiveProjectIds = Array.from(new Set([...projectIds, ...all.map(p => p.id)]));
+    }
+    const value = { projectIds: effectiveProjectIds, teamIds, orgRole };
     _accessContextCache.set(key, { value, expiresAt: now + 60_000 });
     return value;
   } catch (err) {
@@ -5136,7 +5152,7 @@ exit \$RC
           }
           return jsonResponse(res, baseOut);
         } catch (e) {
-          return jsonResponse(res, { error: 'transcribe_error', message: e.message }, 500);
+          return jsonResponse(res, { error: 'transcribe_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
         }
       }
 
@@ -5147,7 +5163,7 @@ exit \$RC
         if (!transcript) return jsonResponse(res, { error: 'no_transcript' }, 400);
         const notes = (body.notes || '').toString().slice(0, 4000);
         try {
-          const sys = 'You are an expert meeting analyst. From the transcript (and optional user notes) produce STRICT JSON: {"title": string, "summary": string (3-6 sentences), "key_points": string[], "action_items": [{"task": string, "owner": string|null, "due": string|null}], "decisions": string[], "questions": string[], "topics": string[], "sentiment": string}. Be faithful — never invent facts. Use empty arrays when none.';
+          const sys = 'You are an expert meeting analyst. From the transcript (and optional user notes) produce STRICT JSON: {"title": string, "summary": string (3-6 sentences), "key_points": string[], "action_items": [{"task": string, "owner": string|null, "due": string|null}], "decisions": string[], "questions": string[], "topics": string[], "sentiment": string, "quotes": [{"quote": string, "speaker": string|null}] (up to 5 short verbatim notable quotes, in the transcript original language), "risks": string[] (risks, blockers, warnings or red flags raised), "next_steps": string[] (concrete follow-ups beyond action items, e.g. upcoming events or dates mentioned), "entities": {"people": string[], "organizations": string[], "dates": string[]}}. Be faithful — never invent facts. Use empty arrays/objects when none.';
           const usr = (notes ? `USER NOTES:\n${notes}\n\n` : '') + `TRANSCRIPT:\n${transcript.slice(0, 60000)}`;
           const resp = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
             method: 'POST',
@@ -5167,7 +5183,7 @@ exit \$RC
           catch { insights = { summary: '', raw: j.choices?.[0]?.message?.content || '' }; }
           return jsonResponse(res, { insights });
         } catch (e) {
-          return jsonResponse(res, { error: 'insights_error', message: e.message }, 500);
+          return jsonResponse(res, { error: 'insights_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
         }
       }
 
@@ -5193,7 +5209,7 @@ exit \$RC
           );
           return jsonResponse(res, { meetings: rows });
         } catch (e) {
-          return jsonResponse(res, { error: 'meetings_list_error', message: e.message }, 500);
+          return jsonResponse(res, { error: 'meetings_list_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
         }
       }
 
@@ -5211,9 +5227,9 @@ exit \$RC
             `INSERT INTO meetings
                (user_id, org_id, project_id, title, summary, transcript, language, duration_sec,
                 audio_bytes, multi_speaker, speaker_count, action_items, decisions, key_points,
-                questions, segments, topics, sentiment, source_memory_id)
+                questions, segments, topics, sentiment, source_memory_id, notes, insights)
              VALUES ($1::uuid,$2::uuid,$3::uuid,$4,$5,$6,$7,$8,$9,$10,$11,
-                     $12::jsonb,$13::jsonb,$14::jsonb,$15::jsonb,$16::jsonb,$17::text[],$18,$19::uuid)
+                     $12::jsonb,$13::jsonb,$14::jsonb,$15::jsonb,$16::jsonb,$17::text[],$18,$19::uuid,$20,$21::jsonb)
              RETURNING id, created_at`,
             mUser, mOrg, body.project_id || null, title, ins.summary || null, transcript,
             body.language || null, Number.isFinite(body.duration_sec) ? body.duration_sec : null,
@@ -5223,10 +5239,38 @@ exit \$RC
             body.segments ? JSON.stringify(body.segments) : null,
             Array.isArray(ins.topics) ? ins.topics.slice(0, 20) : [],
             ins.sentiment || null, body.source_memory_id || null,
+            (body.notes || '').toString().slice(0, 8000) || null,
+            JSON.stringify(ins != null && typeof ins === 'object' && !Array.isArray(ins) ? ins : {}),
           );
           return jsonResponse(res, { ok: true, id: rows?.[0]?.id, created_at: rows?.[0]?.created_at }, 201);
         } catch (e) {
-          return jsonResponse(res, { error: 'meetings_save_error', message: e.message }, 500);
+          return jsonResponse(res, { error: 'meetings_save_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
+        }
+      }
+
+      // GET /api/meetings/:id — full meeting detail (the list endpoint stays
+      // light and omits transcript/notes/insights; the Past-meetings detail
+      // view fetches this when a meeting is opened).
+      {
+        const mGet = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})$/);
+        if (mGet && req.method === 'GET') {
+          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+          const mOrg = req.headers['x-hm-org-id'] || DEFAULT_ORG;
+          try {
+            const rows = await prisma.$queryRawUnsafe(
+              `SELECT id, user_id, org_id, project_id, title, summary, transcript, language,
+                      duration_sec, multi_speaker, speaker_count, action_items, decisions,
+                      key_points, questions, segments, topics, sentiment, notes, insights,
+                      source_memory_id, created_at
+               FROM meetings
+               WHERE id = $1::uuid AND org_id = $2::uuid AND deleted_at IS NULL`,
+              mGet[1], mOrg,
+            );
+            if (!rows?.length) return jsonResponse(res, { error: 'not_found' }, 404);
+            return jsonResponse(res, { meeting: rows[0] });
+          } catch (e) {
+            return jsonResponse(res, { error: 'meeting_get_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
+          }
         }
       }
 
@@ -5258,7 +5302,7 @@ exit \$RC
             if (!rows?.length) return jsonResponse(res, { error: 'not_found' }, 404);
             return jsonResponse(res, { ok: true, id: rows[0].id });
           } catch (e) {
-            return jsonResponse(res, { error: 'meetings_update_error', message: e.message }, 500);
+            return jsonResponse(res, { error: 'meetings_update_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
           }
         }
       }

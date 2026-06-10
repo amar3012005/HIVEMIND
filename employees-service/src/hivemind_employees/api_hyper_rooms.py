@@ -3265,6 +3265,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     final_verdict: Optional[str] = None
     open_question: str = ""
     last_revise_text: str = ""
+    last_gap_signature: str = ""
 
     def _challenge_repeats(prev: str, nxt: str) -> bool:
         """True when the new challenge is essentially the prior one — same
@@ -3402,10 +3403,14 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             # point with no new angle, count it; after MAX_NO_PROGRESS such
             # rounds the debate is deadlocked — stop and escalate to a human.
             next_challenge = verdict_obj["line"] or current_challenge_text
-            if _challenge_repeats(current_challenge_text, next_challenge):
+            gap_signature = " ".join(str(g) for g in (verdict_obj.get("remaining_gaps") or []) if g)
+            if not gap_signature:
+                gap_signature = next_challenge
+            if _challenge_repeats(last_gap_signature or current_challenge_text, gap_signature):
                 no_progress += 1
             else:
                 no_progress = 0
+            last_gap_signature = gap_signature
             current_challenge_text = next_challenge
             if no_progress >= MAX_NO_PROGRESS:
                 log.info("[room] debate deadlocked (no progress x%d) at round %d turn=%s",

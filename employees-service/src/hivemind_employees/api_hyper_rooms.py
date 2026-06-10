@@ -3280,6 +3280,18 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         union = len(ag | bg) or 1
         return (inter / union) >= 0.6
 
+    def _gap_repeats(prev: str, nxt: str) -> bool:
+        """Structured remaining_gaps are short and often paraphrased. Token
+        overlap catches 'staffing/automation plan' repeats without requiring
+        identical 4-grams."""
+        a, b = _normalize_for_dedup(prev), _normalize_for_dedup(nxt)
+        if not a or not b:
+            return False
+        aw, bw = set(a.split()), set(b.split())
+        if not aw or not bw:
+            return False
+        return (len(aw & bw) / max(1, min(len(aw), len(bw)))) >= 0.6
+
     while challenger_reaction and debate_round <= MAX_DEBATE_ROUNDS:
         await _emit_event(req.callback_url, req.turn_id, {
             "t": "typing", "agent": lead.get("slug"), "kind": "revise",
@@ -3406,7 +3418,11 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             gap_signature = " ".join(str(g) for g in (verdict_obj.get("remaining_gaps") or []) if g)
             if not gap_signature:
                 gap_signature = next_challenge
-            if _challenge_repeats(last_gap_signature or current_challenge_text, gap_signature):
+            if last_gap_signature:
+                repeats = _gap_repeats(last_gap_signature, gap_signature)
+            else:
+                repeats = _challenge_repeats(current_challenge_text, gap_signature)
+            if repeats:
                 no_progress += 1
             else:
                 no_progress = 0

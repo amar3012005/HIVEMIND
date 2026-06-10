@@ -126,8 +126,61 @@ _SAVE_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_PRICE_POINT_RE = re.compile(
+    r"(?:€|EUR\s*)\s?\d+(?:[.,]\d+)?\s*(?:/(?:mo|month|seat|user))?|"
+    r"\b\d+(?:[.,]\d+)?\s*(?:€|EUR)\s*(?:/(?:mo|month|seat|user))?",
+    re.IGNORECASE,
+)
+_PRICING_TIER_TERMS = ("trial", "free", "pro", "plus", "scale", "enterprise", "starter", "team")
+_MISSING_PRICING_PATTERNS = (
+    re.compile(r"\b(?:no|without|lacks?|missing|did(?: not|n't)|does(?: not|n't))\b.{0,90}\b(?:price|pricing|figures?|amounts?|tiers?)\b", re.IGNORECASE),
+    re.compile(r"\b(?:price|pricing|figures?|amounts?|tiers?)\b.{0,90}\b(?:missing|needed|required|not supplied|not provided|unclear)\b", re.IGNORECASE),
+    re.compile(r"\bneed(?:s|ed)?\b.{0,50}\b(?:exact|specific|concrete)\b.{0,50}\b(?:price|pricing|figures?|amounts?)\b", re.IGNORECASE),
+)
+
 # Decision-template flag — set via room metadata later. For now: any
 # turn that closes with verdict=resolved OR explicit save-intent.
+
+
+def _extract_pricing_facts(text: str) -> Dict[str, List[str]]:
+    """Pull explicit user-supplied pricing facts from chat text.
+
+    This is a deterministic guardrail for the debate loop: if the user
+    supplies concrete tier prices in a follow-up, validators must not keep
+    escalating on the stale first-round objection that prices are absent.
+    """
+    source = text or ""
+    prices: List[str] = []
+    for match in _PRICE_POINT_RE.finditer(source):
+        value = re.sub(r"\s+", " ", match.group(0)).strip()
+        if value and value not in prices:
+            prices.append(value)
+    lowered = source.lower()
+    tiers = [tier for tier in _PRICING_TIER_TERMS if re.search(rf"\b{re.escape(tier)}\b", lowered)]
+    return {"prices": prices[:12], "tiers": tiers[:12]}
+
+
+def _has_concrete_pricing_facts(text: str) -> bool:
+    facts = _extract_pricing_facts(text)
+    return len(facts["prices"]) >= 2 and len(facts["tiers"]) >= 2
+
+
+def _format_pricing_facts(text: str) -> str:
+    facts = _extract_pricing_facts(text)
+    if not facts["prices"] and not facts["tiers"]:
+        return ""
+    lines = ["USER-SUPPLIED PRICING FACTS (authoritative for this turn):"]
+    if facts["tiers"]:
+        lines.append(f"- tiers mentioned: {', '.join(facts['tiers'])}")
+    if facts["prices"]:
+        lines.append(f"- prices mentioned: {', '.join(facts['prices'])}")
+    lines.append("Use these numbers directly; do not ask for exact prices again.")
+    return "\n".join(lines)
+
+
+def _claims_missing_pricing(text: str) -> bool:
+    candidate = text or ""
+    return any(pattern.search(candidate) for pattern in _MISSING_PRICING_PATTERNS)
 
 
 def _normalize_for_dedup(text: str) -> str:
@@ -3130,6 +3183,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     final_verdict: Optional[str] = None
     open_question: str = ""
     last_revise_text: str = ""
+    user_pricing_facts = _format_pricing_facts(req.user_message)
 
     def _challenge_repeats(prev: str, nxt: str) -> bool:
         """True when the new challenge is essentially the prior one — same
@@ -3153,10 +3207,13 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 f"[CSI revision pass round {debate_round} — HIVEMIND employee. Lane: {lead['_lane']}.]\n"
                 + (memory_context + "\n" if memory_context else "")
                 + f"USER'S ORIGINAL QUESTION: \"{req.user_message}\"\n"
+                + (user_pricing_facts + "\n" if user_pricing_facts else "")
                 + f"{challenger_reaction['emp'].get('name')} ({challenger_reaction['emp']['_lane']}) pushed back:\n"
                 + f"\"{current_challenge_text}\"\n\n"
                 + f"Reconsider. If right, concede + revise. If standing by, defend with a memory "
                 + f"hit — quote the title. No invented owners / dates. Stay on the user's question. "
+                + f"If the user supplied concrete numbers above, treat them as facts and move to "
+                + f"unit-economics / cost-to-serve implications instead of asking for the numbers again. "
                 + f"2-4 sentences, chat tone, 'we / our'."
             )
             reply2 = await lead_agent(Msg(name="user", content=revise_prompt, role="user"))
@@ -3178,10 +3235,16 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             ch_agent = await _build_agent_for_room(req.room_id, challenger_reaction["emp"], user_id=req.user_id, org_id=req.org_id)
             validate_prompt = (
                 f"[CSI validation pass round {debate_round} — lane: {challenger_reaction['emp']['_lane']}.]\n"
+                f"Current user message:\n\"{req.user_message}\"\n"
+                + (user_pricing_facts + "\n" if user_pricing_facts else "")
+                + f"Your original/current challenge was:\n\"{current_challenge_text}\"\n\n"
                 f"{lead.get('name')} responded to your challenge:\n"
                 f"\"{revise_text}\"\n\n"
-                f"Did the lead resolve your concern with concrete memory evidence, or is the gap "
-                f"still real?\n"
+                f"Did the lead resolve your concern with concrete memory evidence or user-supplied "
+                f"facts from the current message, or is the gap still real?\n"
+                f"If the user supplied exact prices/tier facts, do NOT escalate by claiming exact "
+                f"pricing is missing; only escalate for a still-real gap such as cost-to-serve, "
+                f"margin, usage risk, or missing validation evidence.\n"
                 f"Reply in STRICT JSON:\n"
                 f'{{"verdict": "resolved" | "escalate", "line": "1-2 sentences (cite a memory if escalating)"}}'
             )
@@ -3200,6 +3263,28 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             except Exception as exc:  # noqa: BLE001
                 log.warning("validate JSON parse failed turn=%s: %s — defaulting to resolved",
                             req.turn_id, exc)
+            pricing_evidence_corpus = "\n".join([req.user_message, revise_text, memory_context or ""])
+            stale_pricing_escalation = (
+                verdict_obj.get("verdict") == "escalate"
+                and _has_concrete_pricing_facts(pricing_evidence_corpus)
+                and (
+                    _claims_missing_pricing(verdict_obj.get("line", ""))
+                    or _claims_missing_pricing(current_challenge_text)
+                )
+            )
+            if stale_pricing_escalation:
+                log.info(
+                    "[room] resolved stale pricing escalation turn=%s round=%d",
+                    req.turn_id,
+                    debate_round,
+                )
+                verdict_obj = {
+                    "verdict": "resolved",
+                    "line": (
+                        "Pricing figures are now present from the user; remaining work is "
+                        "cost-to-serve and margin validation, not missing prices."
+                    ),
+                }
             v_tokens = max(80, len(verdict_obj.get("line", "")) // 4)
             cost_tokens += v_tokens
             await _emit_event(req.callback_url, req.turn_id, {

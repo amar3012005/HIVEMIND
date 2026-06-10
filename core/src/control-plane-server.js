@@ -4163,8 +4163,8 @@ const server = http.createServer(async (req, res) => {
           eventCategory: 'auth',
           action: 'create',
           resourceType: 'project_member',
-          resourceId: `${projectId}:${body.user_id}`,
-          newValue: { role },
+          resourceId: projectId,
+          newValue: { role, member_user_id: body.user_id },
           ..._reqMeta(req),
         });
         return jsonResponse(res, { member: m }, 201);
@@ -4193,8 +4193,8 @@ const server = http.createServer(async (req, res) => {
           eventCategory: 'auth',
           action: 'update',
           resourceType: 'project_member',
-          resourceId: `${projectId}:${targetUserId}`,
-          newValue: { role: body.role },
+          resourceId: projectId,
+          newValue: { role: body.role, member_user_id: targetUserId },
           ..._reqMeta(req),
         });
         return jsonResponse(res, { member: updated });
@@ -4215,7 +4215,8 @@ const server = http.createServer(async (req, res) => {
           eventCategory: 'auth',
           action: 'delete',
           resourceType: 'project_member',
-          resourceId: `${projectId}:${projMemberDel[1]}`,
+          resourceId: projectId,
+          newValue: { member_user_id: projMemberDel[1] },
           ..._reqMeta(req),
         });
         return jsonResponse(res, { success: true });

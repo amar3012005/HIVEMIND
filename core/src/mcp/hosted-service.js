@@ -2456,7 +2456,12 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
           smartIngest: true,
           sync: true,
           ...SCOPE_FIELDS,
-          ...(autoAttachedProjectId && !resolvedProjectId ? { project_id: autoAttachedProjectId } : {}),
+          // Auto-attach needs the same shape as explicit scoping: project_ids[]
+          // drives resolveScopedIngestPayload; bare project_id alone is ignored
+          // by the scope resolver and the save lands org-wide/personal.
+          ...(autoAttachedProjectId && !resolvedProjectId
+            ? { project_id: autoAttachedProjectId, project_ids: [autoAttachedProjectId], scope: 'project' }
+            : {}),
           __bypass_membership: isMaster && resolvedProjectId ? true : undefined,
         });
         return formatToolContent({

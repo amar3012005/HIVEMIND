@@ -3816,9 +3816,11 @@ const server = http.createServer(async (req, res) => {
       // Bug fix: if user is an org member but has no team yet, lazy-create
       // (or join) the org's Default Team so they can immediately create
       // projects. Treats all org members as the implicit default team.
+      // GUESTS excluded: handing them the default team exposed every team
+      // project of the org they were invited into (cross-org leak).
       if (!teams.length) {
         const orgMem = await getOrgMembership(current.session.userId, current.session.orgId);
-        if (orgMem?.isActive !== false && orgMem) {
+        if (orgMem?.isActive !== false && orgMem && orgMem.role !== 'guest') {
           try {
             const def = await ts.store.ensureDefaultTeam({
               orgId: current.session.orgId,
@@ -4006,7 +4008,9 @@ const server = http.createServer(async (req, res) => {
     if (sub === 'projects' && req.method === 'GET') {
       try {
         await ts.assertTeamPermission(prisma, { teamId, userId, orgRole, level: 'member' });
-        const projects = await ts.store.listProjectsForUser({ userId, orgId, teamId });
+        // orgRole flows through so guests (project-scoped invitees) only ever
+        // get their explicit projects — even via the team-scoped listing.
+        const projects = await ts.store.listProjectsForUser({ userId, orgId, teamId, orgRole });
         return jsonResponse(res, { projects });
       } catch (err) {
         return jsonResponse(res, { error: err.message }, err.status || 500);

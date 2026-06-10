@@ -1074,7 +1074,13 @@ def _build_flyby_spec(req: "RoomTurnRequest", assessment: Dict[str, Any]) -> Dic
 
 def _participant_brief(participants: List[Dict[str, Any]]) -> str:
     return "\n".join(
-        f"- {p.get('name', p.get('slug'))} ({p.get('slug')}, lane={p.get('_lane')}): {str(p.get('persona') or '')[:240]}"
+        f"- {p.get('name', p.get('slug'))} ({p.get('slug')}, lane={p.get('_lane')}): "
+        f"{str(p.get('persona') or '')[:180]}"
+        + (
+            f" | contract={((p.get('hyper') or {}).get('persona_contract') or p.get('persona_contract') or {}).get('stance', '')}"
+            if ((p.get('hyper') or {}).get('persona_contract') or p.get('persona_contract'))
+            else ""
+        )
         for p in participants
     )
 
@@ -2681,6 +2687,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     if (req.flyby_decision or "").strip().lower() not in ("agree", "disagree"):
         await _emit_event(req.callback_url, req.turn_id, {
             "t": "router",
+            "id": f"router:{req.turn_id}:authoritative",
             "lead": lead.get("slug"),
             "reactors": [r.get("slug") for r in reactors],
             "lanes": {p.get("slug"): p["_lane"] for p in participants},

@@ -5472,7 +5472,20 @@ Write the persona now.`;
         const employees = allIds.length
           ? await prisma.digitalEmployee.findMany({
               where: { id: { in: allIds } },
-              select: { id: true, slug: true, name: true, avatarUrl: true, roleArchetype: true, status: true },
+              select: {
+                id: true,
+                slug: true,
+                name: true,
+                avatarUrl: true,
+                roleArchetype: true,
+                peerReviewTargets: true,
+                policyRules: true,
+                scope: true,
+                persona: true,
+                model: true,
+                llmProvider: true,
+                status: true,
+              },
             })
           : [];
         const projects = projectIds.length
@@ -5481,7 +5494,9 @@ Write the persona now.`;
               select: { id: true, name: true, slug: true },
             })
           : [];
-        const empById = Object.fromEntries(employees.map(e => [e.id, { ...e, lane: deriveCsiLane(e) }]));
+        const { enrichEmployeesWithHyperState } = await import('./employees/hyper-state.js');
+        const enrichedEmployees = await enrichEmployeesWithHyperState(employees);
+        const empById = Object.fromEntries(enrichedEmployees.map(e => [e.id, { ...e, lane: deriveCsiLane(e) }]));
         const projectById = Object.fromEntries(projects.map(p => [p.id, p]));
         return jsonResponse(res, {
           rooms: rooms.map(r => ({
@@ -5671,13 +5686,28 @@ Write the persona now.`;
       const employees = (room.participantIds || []).length
         ? await prisma.digitalEmployee.findMany({
             where: { id: { in: room.participantIds } },
-            select: { id: true, slug: true, name: true, avatarUrl: true, roleArchetype: true, status: true },
+            select: {
+              id: true,
+              slug: true,
+              name: true,
+              avatarUrl: true,
+              roleArchetype: true,
+              peerReviewTargets: true,
+              policyRules: true,
+              scope: true,
+              persona: true,
+              model: true,
+              llmProvider: true,
+              status: true,
+            },
           })
         : [];
+      const { enrichEmployeesWithHyperState } = await import('./employees/hyper-state.js');
+      const enrichedParticipants = await enrichEmployeesWithHyperState(employees);
       return jsonResponse(res, {
         room: {
           ...room,
-          participants: employees.map(e => ({ ...e, lane: deriveCsiLane(e) })),
+          participants: enrichedParticipants.map(e => ({ ...e, lane: deriveCsiLane(e) })),
         },
         turns,
       });
@@ -5996,6 +6026,56 @@ Write the persona now.`;
           });
           return created;
         });
+
+        // Emit a bootstrap router event immediately so the UI can render the
+        // lead/reactor line before the sidecar finishes the heavier recall and
+        // simulation prep. The sidecar will emit the authoritative router event
+        // later; the frontend treats this as the same conversation state.
+        try {
+          const { appendTurnEvent } = await import('./employees/hyper-rooms.js');
+          const participantRows = room.participantIds?.length
+            ? await prisma.digitalEmployee.findMany({
+                where: { id: { in: room.participantIds } },
+                select: {
+                  id: true,
+                  slug: true,
+                  roleArchetype: true,
+                  persona: true,
+                },
+              })
+            : [];
+          const participantById = Object.fromEntries(participantRows.map(p => [p.id, p]));
+          const leadId = room.permanentLeadId && participantById[room.permanentLeadId]
+            ? room.permanentLeadId
+            : (room.participantIds || [])[0] || null;
+          const lead = leadId ? participantById[leadId] : null;
+          const reactors = (room.participantIds || [])
+            .filter(pid => pid !== leadId)
+            .map(pid => participantById[pid]?.slug)
+            .filter(Boolean);
+          if (lead?.slug) {
+            await appendTurnEvent(prisma, turn.id, {
+              t: 'router_bootstrap',
+              id: `router:${turn.id}:bootstrap`,
+              lead: lead.slug,
+              reactors,
+              lanes: Object.fromEntries(
+                participantRows.map(p => [p.slug, deriveCsiLane({
+                  roleArchetype: p.roleArchetype,
+                  persona: p.persona,
+                  slug: p.slug,
+                  name: p.slug,
+                })]),
+              ),
+              template: room.template || 'debate',
+              turn_seq: turn.seq,
+              bootstrap: true,
+              received_ts: Date.now(),
+            });
+          }
+        } catch (err) {
+          console.warn('[hyper-rooms] bootstrap router append failed:', err.message);
+        }
 
         // Kick the sidecar only after the 202 response has been flushed. This
         // lets the frontend open SSE/poll immediately instead of waiting behind

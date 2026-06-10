@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
+import json
+from typing import Any, Optional
 
 from agentscope.agent import ReActAgent
 from agentscope.formatter import (
@@ -36,6 +37,163 @@ log = logging.getLogger(__name__)
 
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 GROQ_BASE = "https://api.groq.com/openai/v1"
+
+ROLE_LANE_MAP = {
+    "coordinator": "Strategist",
+    "strategist": "Strategist",
+    "operator": "Strategist",
+    "synthesizer": "Strategist",
+    "investigator": "Researcher",
+    "researcher": "Researcher",
+    "analyst": "Researcher",
+    "skeptic": "Skeptic",
+    "critic": "Skeptic",
+    "challenger": "Skeptic",
+    "auditor": "Skeptic",
+    "builder": "Builder",
+    "engineer": "Builder",
+    "developer": "Builder",
+    "architect": "Builder",
+    "communicator": "Communicator",
+    "writer": "Communicator",
+    "marketer": "Communicator",
+    "advocate": "Communicator",
+    "fact_checker": "Researcher",
+}
+
+PERSONA_CONTRACTS = {
+    "Strategist": {
+        "decision_style": "Sequences choices, forces tradeoffs, and keeps the room pointed at a clear next move.",
+        "stance": "Keeps direction, sequencing, and execution pressure visible.",
+        "blind_spots": ["Can over-smooth dissent", "May privilege alignment over hard risk"],
+        "challenge_targets": ["Skeptic", "Builder"],
+        "future_skills": ["scenario planning", "portfolio prioritization", "facilitated decision making"],
+        "quality_gate": ["Requires a concrete goal, owner, and decision path before committing."],
+    },
+    "Builder": {
+        "decision_style": "Decomposes ideas into shippable steps, dependencies, and implementation risks.",
+        "stance": "Pushes the room toward a buildable answer.",
+        "blind_spots": ["Can underweight ambiguity", "May compress tradeoffs too early"],
+        "challenge_targets": ["Skeptic", "Strategist"],
+        "future_skills": ["system design", "delivery planning", "operational hardening"],
+        "quality_gate": ["Requires clear scope, interfaces, and the smallest useful next step."],
+    },
+    "Skeptic": {
+        "decision_style": "Red-teams assumptions, hunts for failure modes, and makes hidden risk explicit.",
+        "stance": "Challenges weak evidence and pushes back on wishful thinking.",
+        "blind_spots": ["Can over-index on failure", "May slow momentum if the room is already aligned"],
+        "challenge_targets": ["Strategist", "Builder", "Communicator"],
+        "future_skills": ["adversarial review", "risk modeling", "enterprise diligence"],
+        "quality_gate": ["Requires a concrete claim to challenge and evidence to support the pushback."],
+    },
+    "Researcher": {
+        "decision_style": "Pulls together context, memory, and evidence before the room commits.",
+        "stance": "Anchors discussion in what has already been learned.",
+        "blind_spots": ["Can over-collect evidence", "May stall on uncertainty"],
+        "challenge_targets": ["Strategist", "Communicator"],
+        "future_skills": ["source synthesis", "market analysis", "memory reasoning"],
+        "quality_gate": ["Requires a specific question and enough context to compare evidence."],
+    },
+    "Communicator": {
+        "decision_style": "Translates the room into clear language for customers, partners, and the broader org.",
+        "stance": "Keeps the answer legible and usable by real people.",
+        "blind_spots": ["Can soften hard calls", "May oversimplify the tradeoffs"],
+        "challenge_targets": ["Strategist", "Builder"],
+        "future_skills": ["executive framing", "customer storytelling", "stakeholder alignment"],
+        "quality_gate": ["Requires an audience and an outcome to frame the message correctly."],
+    },
+}
+
+
+def _as_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    if isinstance(value, tuple):
+        return [str(v).strip() for v in value if str(v).strip()]
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _derive_lane(employee_row: dict) -> str:
+    role = str(employee_row.get("role_archetype") or "").strip().lower()
+    if role in ROLE_LANE_MAP:
+        return ROLE_LANE_MAP[role]
+    haystack = " ".join(
+        str(employee_row.get(key, "") or "")
+        for key in ("name", "slug", "persona", "role_archetype")
+    ).lower()
+    if any(term in haystack for term in ("finance", "cfo", "margin", "pricing", "runway")):
+        return "Strategist"
+    if any(term in haystack for term in ("sales", "market", "customer", "support", "story", "copy", "brand")):
+        return "Communicator"
+    if any(term in haystack for term in ("risk", "security", "compliance", "audit", "challenge", "skeptic")):
+        return "Skeptic"
+    if any(term in haystack for term in ("research", "evidence", "insight", "study", "data", "market")):
+        return "Researcher"
+    if any(term in haystack for term in ("build", "ship", "engineer", "code", "infra", "platform", "product")):
+        return "Builder"
+    return "Strategist"
+
+
+def _build_persona_contract(employee_row: dict) -> dict[str, Any]:
+    lane = _derive_lane(employee_row)
+    preset = PERSONA_CONTRACTS.get(lane, PERSONA_CONTRACTS["Strategist"])
+    policy_rules = employee_row.get("policy_rules") or {}
+    if isinstance(policy_rules, str):
+        try:
+            policy_rules = json.loads(policy_rules)
+        except Exception:
+            policy_rules = {}
+    if not isinstance(policy_rules, dict):
+        policy_rules = {}
+    policy_contract = policy_rules.get("persona_contract") or {}
+    if not isinstance(policy_contract, dict):
+        policy_contract = {}
+
+    peer_review_targets = _as_list(
+        employee_row.get("peer_review_targets")
+        or policy_rules.get("peer_review_targets")
+        or policy_contract.get("challenge_targets"),
+    )
+    challenge_targets = _as_list(policy_contract.get("challenge_targets") or peer_review_targets)
+    allowed_scope = str(policy_contract.get("allowed_scope") or employee_row.get("scope") or "organization").lower()
+    context_home = str(policy_contract.get("context_home") or ("org" if allowed_scope == "organization" else allowed_scope)).lower()
+
+    return {
+        "persona_name": employee_row.get("name") or employee_row.get("slug") or "employee",
+        "role_archetype": employee_row.get("role_archetype") or None,
+        "lane": lane,
+        "decision_style": policy_contract.get("decision_style") or preset["decision_style"],
+        "stance": policy_contract.get("stance") or preset["stance"],
+        "blind_spots": _as_list(policy_contract.get("blind_spots") or preset["blind_spots"]),
+        "challenge_targets": challenge_targets or preset["challenge_targets"],
+        "context_home": context_home,
+        "allowed_scope": allowed_scope,
+        "future_skills": _as_list(policy_contract.get("future_skills") or preset["future_skills"]),
+        "quality_gate": _as_list(policy_contract.get("quality_gate") or preset["quality_gate"]),
+        "peer_review_targets": peer_review_targets,
+    }
+
+
+def _format_persona_contract(contract: dict[str, Any]) -> str:
+    lines = ["PERSONA CONTRACT"]
+    if contract.get("stance"):
+        lines.append(f"- Stance: {contract['stance']}")
+    if contract.get("decision_style"):
+        lines.append(f"- Decision style: {contract['decision_style']}")
+    if contract.get("blind_spots"):
+        lines.append(f"- Blind spots: {'; '.join(contract['blind_spots'])}")
+    if contract.get("challenge_targets"):
+        lines.append(f"- Challenge targets: {', '.join(contract['challenge_targets'])}")
+    if contract.get("context_home"):
+        lines.append(f"- Context home: {contract['context_home']}")
+    if contract.get("allowed_scope"):
+        lines.append(f"- Allowed scope: {contract['allowed_scope']}")
+    if contract.get("quality_gate"):
+        lines.append(f"- Quality gate: {' | '.join(contract['quality_gate'])}")
+    return "\n".join(lines)
 
 
 def _resolve_openai_compatible_target(
@@ -169,11 +327,23 @@ def build_react_agent(
     the slackagents path.
     """
     name = employee_row["slug"]  # unique per org
+    persona_contract = (
+        (employee_row.get("hyper") or {}).get("persona_contract")
+        or employee_row.get("persona_contract")
+        or _build_persona_contract(employee_row)
+    )
     persona = (
         (employee_row.get("active_prompt_version") or {}).get("system_prompt")
         or employee_row.get("persona")
         or ""
     )
+    persona = (
+        f"{_format_persona_contract(persona_contract)}\n"
+        "Use this contract as the binding operating model for the room. "
+        "Keep the base persona, but do not dilute stance, challenge behavior, "
+        "or scope discipline.\n\n"
+        f"BASE PERSONA\n{persona}"
+    ).strip()
     # Default fallback is wider than before — gives a fresh employee
     # the full HIVEMIND reach. Hyper-room agents override via merged_emp.
     requested_tools = employee_row.get("tools") or [
@@ -252,4 +422,8 @@ def build_react_agent(
         "Built ReActAgent for employee=%s model=%s tools=%d",
         name, employee_row.get("model"), len(enabled_tools),
     )
+    try:
+        setattr(agent, "hivemind_persona_contract", persona_contract)
+    except Exception:
+        pass
     return agent

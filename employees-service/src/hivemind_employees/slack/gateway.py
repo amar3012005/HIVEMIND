@@ -254,10 +254,13 @@ class SlackGateway:
 
         @app.event("app_mention")
         async def on_mention(event, body, say):
+            log.info("inbound app_mention ws=%s ch=%s user=%s", wsid, event.get("channel"), event.get("user"))
             await self._handle_inbound(wsid, event, body)
 
         @app.event("message")
         async def on_message(event, body, say):
+            log.info("inbound message ws=%s ch=%s user=%s bot=%s subtype=%s",
+                     wsid, event.get("channel"), event.get("user"), event.get("bot_id"), event.get("subtype"))
             # Skip bot echoes
             if event.get("bot_id") or event.get("subtype") == "bot_message":
                 return

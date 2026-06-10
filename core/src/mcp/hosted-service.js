@@ -2483,7 +2483,9 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
             where: { userId_orgId: { userId, orgId } },
             select: { role: true },
           }).catch(() => null);
-          const callerRole = isMaster ? 'owner' : (membership?.role || 'member');
+          // Real membership wins — master-key service calls only default to
+          // 'owner' when the emulated user has no membership row at all.
+          const callerRole = membership?.role || (isMaster ? 'owner' : 'member');
           let projWhere = { orgId, status: 'active' };
           if (callerRole === 'guest') {
             projWhere = { ...projWhere, members: { some: { userId } } };

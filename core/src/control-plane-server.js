@@ -2119,6 +2119,32 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    // Invitee status — tell the admin UP FRONT how this person will join:
+    //   already_member        → they're in this org already (invite is a no-op)
+    //   external_existing_user→ they belong to OTHER org(s); a project-scoped
+    //                           invite makes them a GUEST here (only those
+    //                           projects, no org-wide memories)
+    //   new_user              → fresh signup on accept
+    let inviteeStatus = 'new_user';
+    let inviteeJoinsAs = projectIds.length > 0 && legacyRoleReverse === 'member' ? 'guest' : legacyRoleReverse;
+    if (inviteEmail) {
+      try {
+        const existingUser = await prisma.user.findFirst({
+          where: { email: { equals: inviteEmail, mode: 'insensitive' } },
+          select: { id: true },
+        });
+        if (existingUser) {
+          const memberships = await prisma.userOrganization.findMany({
+            where: { userId: existingUser.id, isActive: true },
+            select: { orgId: true },
+          });
+          if (memberships.some((m) => m.orgId === orgId)) inviteeStatus = 'already_member';
+          else if (memberships.length > 0) inviteeStatus = 'external_existing_user';
+          else inviteeStatus = 'existing_user_no_org';
+        }
+      } catch { /* best-effort — default new_user */ }
+    }
+
     return jsonResponse(res, {
       success: true,
       invite: {
@@ -2133,6 +2159,8 @@ const server = http.createServer(async (req, res) => {
         created_at: invite.createdAt,
         join_url: joinUrl,
         email_dispatch: emailReport,
+        invitee_status: inviteeStatus,
+        joins_as: inviteeJoinsAs,
       },
     }, 201);
   }
@@ -2578,6 +2606,19 @@ const server = http.createServer(async (req, res) => {
       ],
     });
 
+    // Multi-org awareness: mark members who ALSO belong to other organizations
+    // (typical for project guests invited from a partner org). Boolean + count
+    // only — foreign org names are never leaked to this org's admins.
+    const memberIds = members.map((m) => m.userId);
+    const externalCounts = memberIds.length
+      ? await prisma.userOrganization.groupBy({
+          by: ['userId'],
+          where: { userId: { in: memberIds }, isActive: true, NOT: { orgId } },
+          _count: { _all: true },
+        }).catch(() => [])
+      : [];
+    const externalById = Object.fromEntries(externalCounts.map((r) => [r.userId, r._count._all]));
+
     return jsonResponse(res, {
       members: members.map((entry) => ({
         user_id: entry.userId,
@@ -2591,6 +2632,8 @@ const server = http.createServer(async (req, res) => {
         display_name: entry.user?.displayName || null,
         avatar_url: entry.user?.avatarUrl || null,
         last_active_at: entry.user?.lastActiveAt || null,
+        is_external: (externalById[entry.userId] || 0) > 0,
+        other_org_count: externalById[entry.userId] || 0,
       })),
     });
   }
@@ -4074,7 +4117,31 @@ const server = http.createServer(async (req, res) => {
       try {
         await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'member' });
         const proj = await ts.store.getProject({ projectId, orgId });
-        return jsonResponse(res, { members: proj?.members || [] });
+        const rows = proj?.members || [];
+        // Enrich with the member's ORG role + external flag so the UI can show
+        // "Guest · external" distinctly from full org members.
+        const ids = rows.map((m) => m.userId || m.user_id).filter(Boolean);
+        const orgRows = ids.length
+          ? await prisma.userOrganization.findMany({
+              where: { userId: { in: ids }, orgId },
+              select: { userId: true, role: true },
+            }).catch(() => [])
+          : [];
+        const extRows = ids.length
+          ? await prisma.userOrganization.groupBy({
+              by: ['userId'],
+              where: { userId: { in: ids }, isActive: true, NOT: { orgId } },
+              _count: { _all: true },
+            }).catch(() => [])
+          : [];
+        const orgRoleById = Object.fromEntries(orgRows.map((r) => [r.userId, r.role]));
+        const extById = Object.fromEntries(extRows.map((r) => [r.userId, r._count._all]));
+        return jsonResponse(res, {
+          members: rows.map((m) => {
+            const uid = m.userId || m.user_id;
+            return { ...m, org_role: orgRoleById[uid] || null, is_external: (extById[uid] || 0) > 0 };
+          }),
+        });
       } catch (err) {
         return jsonResponse(res, { error: err.message }, err.status || 500);
       }

@@ -297,7 +297,15 @@ export class MCPIngestionService {
       const accepted = [];
       for (const payload of jobs) {
         if (relationship && !payload.relationship) {
-          payload.relationship = relationship;
+          // Clone per-payload to prevent aliasing: a downstream mutation on one
+          // payload's relationship (e.g. pushing to sourceIds) must not bleed
+          // into sibling payloads that share the same object reference.
+          payload.relationship = {
+            ...relationship,
+            ...(Array.isArray(relationship.sourceIds)
+              ? { sourceIds: [...relationship.sourceIds] }
+              : {}),
+          };
         }
         const queued = await this.ingestionPipeline.ingest(payload);
         accepted.push({

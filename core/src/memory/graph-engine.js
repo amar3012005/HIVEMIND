@@ -1191,11 +1191,12 @@ export class MemoryGraphEngine {
           // as Updates because they share the verb "bought" plus
           // entity:Amar. Demand semantic kinship via actual entity
           // overlap, not LLM confidence alone.
+          const updatesTargetId = classification.relationship?.targetId ?? semanticRelationship?.targetId;
           const updateConf = classification.relationship?.confidence ?? semanticRelationship?.confidence ?? 0;
           let entityOverlapOk = false;
-          if (Number(updateConf) >= 0.85 && classification.relationship?.targetId) {
+          if (Number(updateConf) >= 0.85 && updatesTargetId) {
             try {
-              const targetMem = await store.getMemory(classification.relationship.targetId);
+              const targetMem = await store.getMemory(updatesTargetId);
               if (targetMem) {
                 const newEntsArr = (baseMemory.tags || [])
                   .filter(t => typeof t === 'string' && t.startsWith('entity:'))
@@ -1220,21 +1221,31 @@ export class MemoryGraphEngine {
                 const sharedNonCommon = targetEntsArr.filter(e => !isCommon(e) && newSet.has(e));
                 entityOverlapOk = sharedNonCommon.length >= 1;
                 if (!entityOverlapOk) {
-                  console.log(`[graph-engine] Updates DROPPED (no shared non-common entity): ${baseMemory.id.slice(0,8)} → ${classification.relationship.targetId.slice(0,8)} (conf=${updateConf})`);
+                  console.log(`[graph-engine] Updates DROPPED (no shared non-common entity): ${baseMemory.id.slice(0,8)} → ${updatesTargetId.slice(0,8)} (conf=${updateConf})`);
                 }
               }
             } catch (overlapErr) {
               console.warn('[graph-engine] entity-overlap check failed:', overlapErr.message);
             }
           }
-          if (Number(updateConf) >= 0.85 && entityOverlapOk) {
-            Object.assign(result, await this.applyUpdate(baseMemory.id, classification.relationship.targetId, {
+          if (Number(updateConf) >= 0.85 && entityOverlapOk && updatesTargetId) {
+            Object.assign(result, await this.applyUpdate(baseMemory.id, updatesTargetId, {
               store,
               user_id: baseMemory.user_id,
               org_id: baseMemory.org_id,
               confidence: updateConf,
               startedAt
             }));
+          } else if (!updatesTargetId) {
+            // targetId missing from both classification.relationship and semanticRelationship —
+            // skip the apply to avoid TypeError; record a plain version snapshot instead.
+            console.warn(`[graph-engine] Updates SKIPPED (no targetId): memory=${baseMemory.id} — falling back to 'created' snapshot`);
+            await this._recordVersionSnapshot(store, baseMemory, {
+              reason: 'created',
+              is_latest: true,
+              related_memory_id: null
+            });
+            result.processingMs = Date.now() - startedAt;
           } else {
             // Below threshold — drop entirely. Previously downgraded to a
             // Mentions edge, but that produced noise edges between
@@ -1242,16 +1253,29 @@ export class MemoryGraphEngine {
             // both authored by same user). Skip the edge. The dedicated
             // entity_co_mention_llm path will still create Mentions
             // edges for memories with REAL shared non-common entities.
-            console.log(`[graph-engine] Updates DROPPED (conf=${updateConf} < 0.85): ${baseMemory.id.slice(0,8)} → ${classification.relationship.targetId?.slice(0,8)}`);
+            console.log(`[graph-engine] Updates DROPPED (conf=${updateConf} < 0.85): ${baseMemory.id.slice(0,8)} → ${updatesTargetId?.slice(0,8)}`);
           }
         } else if (effectiveRelationshipType === 'Extends') {
-          Object.assign(result, await this.applyExtends(baseMemory.id, classification.relationship.targetId, {
-            store,
-            user_id: baseMemory.user_id,
-            org_id: baseMemory.org_id,
-            confidence: classification.relationship?.confidence ?? semanticRelationship?.confidence,
-            startedAt
-          }));
+          const extendsTargetId = classification.relationship?.targetId ?? semanticRelationship?.targetId;
+          if (extendsTargetId) {
+            Object.assign(result, await this.applyExtends(baseMemory.id, extendsTargetId, {
+              store,
+              user_id: baseMemory.user_id,
+              org_id: baseMemory.org_id,
+              confidence: classification.relationship?.confidence ?? semanticRelationship?.confidence,
+              startedAt
+            }));
+          } else {
+            // targetId missing from both classification.relationship and semanticRelationship —
+            // skip the apply to avoid TypeError; record a plain version snapshot instead.
+            console.warn(`[graph-engine] Extends SKIPPED (no targetId): memory=${baseMemory.id} — falling back to 'created' snapshot`);
+            await this._recordVersionSnapshot(store, baseMemory, {
+              reason: 'created',
+              is_latest: true,
+              related_memory_id: null
+            });
+            result.processingMs = Date.now() - startedAt;
+          }
         } else if (effectiveRelationshipType === 'Derives') {
           const sourceIds = semanticRelationship?.sourceIds?.length
             ? semanticRelationship.sourceIds
@@ -1266,8 +1290,11 @@ export class MemoryGraphEngine {
               startedAt,
             }));
           } else {
+            // sourceIds missing from both semanticRelationship and deriveSources —
+            // skip the apply to avoid a no-op call; record a plain version snapshot instead.
+            console.warn(`[graph-engine] Derives SKIPPED (no sourceIds): memory=${baseMemory.id} — falling back to 'created' snapshot`);
             await this._recordVersionSnapshot(store, baseMemory, {
-              reason: 'Derives',
+              reason: 'created',
               is_latest: true,
               related_memory_id: null
             });

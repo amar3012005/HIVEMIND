@@ -529,37 +529,82 @@ export class PrismaGraphStore {
           // Scope predicate: V2 multi-tier OR when access_context provided,
           // else legacy personal/org single-scope. Skips FTS only if neither
           // a usable access_context nor a single-scope param is available.
+          // Build parameterized WHERE fragments. $1=tsQuery, $2=limit are
+          // already fixed; additional bound values are appended here and
+          // referenced as $3, $4, … so NO user-supplied value is ever
+          // string-interpolated into the query.
+          const ftsParams = [tsQuery, n_results * 3];
+          // nextParam() is called AFTER pushing the value, so length already
+          // reflects the newly-added element — no +1 needed.
+          const nextParam = () => `$${ftsParams.length}`;
+
           let scopeWhere;
           if (access_context && (Array.isArray(access_context.projectIds) || Array.isArray(access_context.teamIds))) {
             const projectIds = Array.isArray(access_context.projectIds) ? access_context.projectIds : [];
             const teamIds = Array.isArray(access_context.teamIds) ? access_context.teamIds : [];
+
+            // personal tier — always present
+            ftsParams.push(user_id);
+            const userParam = `$${ftsParams.length}`;
             const tiers = [
-              `(m.user_id = '${user_id}'::uuid AND m.scope = 'personal')`,
+              `(m.user_id = ${userParam}::uuid AND m.scope = 'personal')`,
             ];
+
             // Guest gate mirrors scopedMemoryWhere: org guests (project-scoped
             // invitees) never get the org-wide tier — keyword search included.
             if (access_context.orgRole !== 'guest') {
-              tiers.push(`(m.scope = 'organization' AND m.org_id = '${org_id}'::uuid)`);
+              ftsParams.push(org_id);
+              const orgTierParam = `$${ftsParams.length}`;
+              tiers.push(`(m.scope = 'organization' AND m.org_id = ${orgTierParam}::uuid)`);
             }
+
             if (projectIds.length > 0) {
-              const idList = projectIds.map(id => `'${id}'::uuid`).join(',');
-              tiers.push(`(m.scope = 'project' AND EXISTS (SELECT 1 FROM memory_projects mp WHERE mp.memory_id = m.id AND mp.project_id IN (${idList})))`);
+              const placeholders = projectIds.map(id => {
+                ftsParams.push(id);
+                return `$${ftsParams.length}::uuid`;
+              }).join(',');
+              tiers.push(`(m.scope = 'project' AND EXISTS (SELECT 1 FROM memory_projects mp WHERE mp.memory_id = m.id AND mp.project_id IN (${placeholders})))`);
             }
+
             if (teamIds.length > 0) {
-              const idList = teamIds.map(id => `'${id}'::uuid`).join(',');
-              tiers.push(`(m.scope = 'team' AND m.primary_team_id IN (${idList}))`);
+              const placeholders = teamIds.map(id => {
+                ftsParams.push(id);
+                return `$${ftsParams.length}::uuid`;
+              }).join(',');
+              tiers.push(`(m.scope = 'team' AND m.primary_team_id IN (${placeholders}))`);
             }
+
             // Always require org scope match for safety
-            scopeWhere = `AND m.org_id = '${org_id}'::uuid AND (${tiers.join(' OR ')})`;
+            ftsParams.push(org_id);
+            const orgScopeParam = `$${ftsParams.length}`;
+            scopeWhere = `AND m.org_id = ${orgScopeParam}::uuid AND (${tiers.join(' OR ')})`;
           } else {
-            scopeWhere = scope === 'personal'
-              ? `AND m.user_id = '${user_id}'::uuid`
-              : `AND m.org_id = '${org_id}'::uuid`;
+            if (scope === 'personal') {
+              ftsParams.push(user_id);
+              const userParam = `$${ftsParams.length}`;
+              // LOW-1: also scope by org_id in personal branch (matches Prisma fallback)
+              ftsParams.push(org_id);
+              const orgParam = `$${ftsParams.length}`;
+              scopeWhere = `AND m.user_id = ${userParam}::uuid AND m.org_id = ${orgParam}::uuid`;
+            } else {
+              ftsParams.push(org_id);
+              const orgParam = `$${ftsParams.length}`;
+              scopeWhere = `AND m.org_id = ${orgParam}::uuid`;
+            }
           }
-          const projectWhere = project ? `AND m.project = '${project}'` : '';
-          const latestWhere = typeof is_latest === 'boolean' ? `AND m.is_latest = ${is_latest}` : '';
-          const dateAfterWhere = created_after ? `AND m.created_at >= '${new Date(created_after).toISOString()}'` : '';
-          const dateBeforeWhere = created_before ? `AND m.created_at <= '${new Date(created_before).toISOString()}'` : '';
+
+          const projectWhere = project
+            ? (ftsParams.push(project), `AND m.project = ${nextParam()}`)
+            : '';
+          const latestWhere = typeof is_latest === 'boolean'
+            ? (ftsParams.push(is_latest), `AND m.is_latest = ${nextParam()}`)
+            : '';
+          const dateAfterWhere = created_after
+            ? (ftsParams.push(new Date(created_after).toISOString()), `AND m.created_at >= ${nextParam()}`)
+            : '';
+          const dateBeforeWhere = created_before
+            ? (ftsParams.push(new Date(created_before).toISOString()), `AND m.created_at <= ${nextParam()}`)
+            : '';
 
           const ftsResults = await this.client.$queryRawUnsafe(`
             SELECT m.id, m.content, m.title, m.tags, m.memory_type, m.project,
@@ -576,7 +621,7 @@ export class PrismaGraphStore {
                   @@ to_tsquery('english', $1)
             ORDER BY fts_score DESC
             LIMIT $2
-          `, tsQuery, n_results * 3);
+          `, ...ftsParams);
 
           if (ftsResults.length > 0) {
             return ftsResults.map(r => ({

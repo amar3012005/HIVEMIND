@@ -7,6 +7,56 @@ const { embedChunks } = require('./embedder');
 const { indexEmbeddedChunks } = require('./indexer');
 const { IngestionAuditLogger } = require('./audit-logger');
 
+// Minimal bounded LRU+TTL cache for same-process idempotency dedup.
+// BullMQ jobId already handles cross-process dedup; this is only a
+// within-process retry guard, so a short TTL is intentionally safe.
+// Max 500 entries, 1-hour TTL. Oldest entry evicted on overflow.
+class BoundedTtlCache {
+  constructor({ max = 500, ttlMs = 60 * 60 * 1000 } = {}) {
+    this._max = max;
+    this._ttlMs = ttlMs;
+    // Insertion-order map: key → { value, expiresAt }
+    this._map = new Map();
+  }
+
+  _isExpired(entry) {
+    return Date.now() > entry.expiresAt;
+  }
+
+  has(key) {
+    const entry = this._map.get(key);
+    if (!entry) return false;
+    if (this._isExpired(entry)) {
+      this._map.delete(key);
+      return false;
+    }
+    return true;
+  }
+
+  get(key) {
+    const entry = this._map.get(key);
+    if (!entry) return undefined;
+    if (this._isExpired(entry)) {
+      this._map.delete(key);
+      return undefined;
+    }
+    return entry.value;
+  }
+
+  set(key, value) {
+    // Evict expired entries lazily, then evict oldest if still over cap.
+    if (this._map.has(key)) {
+      this._map.delete(key); // remove so re-insertion refreshes order
+    }
+    if (this._map.size >= this._max) {
+      // Map iterates insertion order — first key is oldest.
+      const oldestKey = this._map.keys().next().value;
+      this._map.delete(oldestKey);
+    }
+    this._map.set(key, { value, expiresAt: Date.now() + this._ttlMs });
+  }
+}
+
 function toChunkObjects(chunks, pageNumber = 1) {
   return chunks.map((chunk, index) => {
     if (typeof chunk === 'string') {
@@ -176,7 +226,7 @@ class IngestionPipelineOrchestrator {
     this.memoryWriter = deps.memoryWriter;
     this.relationshipClassifier = deps.relationshipClassifier;
     this.summaryModel = deps.summaryModel;
-    this.completedByIdempotency = new Map();
+    this.completedByIdempotency = new BoundedTtlCache({ max: 500, ttlMs: 60 * 60 * 1000 });
   }
 
   async transition(job, stage, context = {}) {
@@ -208,7 +258,7 @@ class IngestionPipelineOrchestrator {
     const startedAt = Date.now();
     const idempotencyKey = job.data.idempotency_key || job.data.request_id;
 
-    if (this.completedByIdempotency.has(idempotencyKey)) {
+    if (idempotencyKey && this.completedByIdempotency.has(idempotencyKey)) {
       return this.completedByIdempotency.get(idempotencyKey);
     }
 
@@ -301,7 +351,9 @@ class IngestionPipelineOrchestrator {
       event: 'memory.ingested',
     });
 
-    this.completedByIdempotency.set(idempotencyKey, result);
+    if (idempotencyKey) {
+      this.completedByIdempotency.set(idempotencyKey, result);
+    }
     job.result = result;
 
     return result;

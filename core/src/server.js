@@ -5230,6 +5230,39 @@ exit \$RC
         }
       }
 
+      // PATCH /api/meetings/:id — link a saved memory (Save to HIVEMIND) or amend
+      // title/summary on an EXISTING row. Lets the meeting be persisted to Past
+      // meetings the moment it finishes (POST, no memory) and later linked to a
+      // HIVEMIND memory without creating a duplicate row.
+      {
+        const mPatch = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})$/);
+        if (mPatch && req.method === 'PATCH') {
+          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+          const mOrg = req.headers['x-hm-org-id'] || DEFAULT_ORG;
+          const id = mPatch[1];
+          const sets = [];
+          const vals = [];
+          let i = 1;
+          if (typeof body.source_memory_id === 'string' && body.source_memory_id) { sets.push(`source_memory_id = $${i++}::uuid`); vals.push(body.source_memory_id); }
+          if (typeof body.title === 'string' && body.title.trim()) { sets.push(`title = $${i++}`); vals.push(body.title.slice(0, 300)); }
+          if (typeof body.summary === 'string') { sets.push(`summary = $${i++}`); vals.push(body.summary); }
+          if (!sets.length) return jsonResponse(res, { error: 'no_fields' }, 400);
+          vals.push(id, mOrg);
+          try {
+            const rows = await prisma.$queryRawUnsafe(
+              `UPDATE meetings SET ${sets.join(', ')}
+               WHERE id = $${i++}::uuid AND org_id = $${i}::uuid AND deleted_at IS NULL
+               RETURNING id`,
+              ...vals,
+            );
+            if (!rows?.length) return jsonResponse(res, { error: 'not_found' }, 404);
+            return jsonResponse(res, { ok: true, id: rows[0].id });
+          } catch (e) {
+            return jsonResponse(res, { error: 'meetings_update_error', message: e.message }, 500);
+          }
+        }
+      }
+
       // ── Post-quantum security: status + public keys + verification ────────
       // All three routes require authentication and are scoped to the caller's
       // key-bound org. authenticateApiKey only folds x-hm-org-id into

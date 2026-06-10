@@ -535,6 +535,10 @@ The org has ONE shared HIVEMIND by default. Admins can create sub-HIVEMINDs call
             type: 'string',
             description: 'Project UUID. Use this only when you already have the canonical id (e.g. from hivemind_list_projects). Otherwise use the project field with the name.'
           },
+          org_id: {
+            type: 'string',
+            description: 'Optional org UUID. The connection defaults to one org; pass another org id (from hivemind_list_projects other_orgs) to operate there instead — membership-validated, your role in that org applies.',
+          },
           relationship: {
             type: 'string',
             enum: ['update', 'extend', 'derive'],
@@ -553,7 +557,12 @@ The org has ONE shared HIVEMIND by default. Admins can create sub-HIVEMINDs call
       description: 'List the projects (sub-HIVEMINDs) in the current org with rich metadata per project: name, description, status, created_at, last_updated, member_count, memory_count, and people (member names + roles). CALL THIS FIRST when working with HIVEMIND memory: if the user task clearly belongs to one project (match by name/description), pass that project_id to hivemind_recall (scopes recall to that project + org-wide facts, excluding other projects) and to hivemind_save_memory (files the memory in that project). If no project clearly fits, omit project for an org-wide search/save. This keeps the org knowledge structured and on-topic.',
       inputSchema: {
         type: 'object',
-        properties: {},
+        properties: {
+          org_id: {
+            type: 'string',
+            description: 'Optional org UUID. The connection defaults to one org; pass another org id (from hivemind_list_projects other_orgs) to operate there instead — membership-validated, your role in that org applies.',
+          },
+        },
       },
     },
     {
@@ -596,6 +605,10 @@ Returns the created project: { id, name, slug, description, status, created_at }
       inputSchema: {
         type: 'object',
         properties: {
+          org_id: {
+            type: 'string',
+            description: 'Optional org UUID. The connection defaults to one org; pass another org id (from hivemind_list_projects other_orgs) to operate there instead — membership-validated, your role in that org applies.',
+          },
           query: {
             type: 'string',
             description: 'Search query - describe what you are looking for'
@@ -671,6 +684,10 @@ Returns the created project: { id, name, slug, description, status, created_at }
       inputSchema: {
         type: 'object',
         properties: {
+          org_id: {
+            type: 'string',
+            description: 'Optional org UUID. The connection defaults to one org; pass another org id (from hivemind_list_projects other_orgs) to operate there instead — membership-validated, your role in that org applies.',
+          },
           project: {
             type: 'string',
             description: 'Filter by project'
@@ -2143,6 +2160,9 @@ export function handleGetPrompt(params, userId, orgId) {
 
 export function createHostedApiClient({ baseUrl, apiKey, userId, orgId }) {
   const normalizedBaseUrl = baseUrl.replace(/\/+$/, '');
+  // Retained so handleToolCall can rebuild the client against a different org
+  // when a tool call passes a validated org_id override (multi-org users).
+  const __config = { baseUrl: normalizedBaseUrl, apiKey, userId, orgId };
 
   async function request(method, endpoint, { params, body } = {}) {
     const url = new URL(`${normalizedBaseUrl}${endpoint}`);
@@ -2198,6 +2218,7 @@ export function createHostedApiClient({ baseUrl, apiKey, userId, orgId }) {
   }
 
   return {
+    __config,
     get(endpoint, options = {}) {
       return request('GET', endpoint, options);
     },
@@ -2275,12 +2296,44 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
   const { name, arguments: args } = params;
   const isMaster = options.isMaster === true;
 
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  // Cross-org targeting: a tool call may pass `org_id` to operate on ANOTHER
+  // org the user actively belongs to — membership-validated here, and the
+  // user's role IN THAT ORG governs everything downstream (guests stay
+  // project-scoped via buildAccessContext / role-aware listings). This removes
+  // the "switch org in the dashboard + reconnect the MCP" dance for multi-org
+  // users: one token, every org they're a member of.
+  const requestedOrgId = typeof args?.org_id === 'string' && UUID_RE.test(args.org_id.trim())
+    ? args.org_id.trim()
+    : null;
+  if (requestedOrgId && requestedOrgId !== orgId && userId) {
+    try {
+      const { getPrismaClient } = await import('../db/prisma.js');
+      const prisma = getPrismaClient();
+      const m = await prisma.userOrganization.findUnique({
+        where: { userId_orgId: { userId, orgId: requestedOrgId } },
+        select: { isActive: true, role: true },
+      });
+      if (!m || m.isActive === false) {
+        return formatToolContent({
+          error: `You are not an active member of org ${requestedOrgId} — org_id override rejected. Call hivemind_list_projects to see which orgs this account belongs to.`,
+        });
+      }
+      orgId = requestedOrgId;
+      if (apiClient?.__config) {
+        apiClient = createHostedApiClient({ ...apiClient.__config, orgId });
+      }
+    } catch (orgErr) {
+      return formatToolContent({ error: `org_id validation failed: ${orgErr.message}` });
+    }
+  }
+
   // Resolve optional project scope. Two modes:
   //   1. project_id (UUID) → validate membership
   //   2. project (name/slug) → look up by name in org, then validate
   // Either path → server-side mapping to validated scope fields. Falls back
   // to org-wide when neither is set or both fail.
-  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   let requestedProjectId = typeof args.project_id === 'string' && args.project_id.trim()
     ? args.project_id.trim()
     : null;
@@ -2528,7 +2581,7 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
             take: 10,
           }).catch(() => []);
           const orgsNote = otherOrgs.length
-            ? ` NOTE: this connection is bound to org ${orgId}. The user ALSO belongs to: ${otherOrgs.map(o => `"${o.org?.name}" (${o.org?.id}, role ${o.role})`).join(', ')} — projects there are not visible through this token. To work in another org, reconnect HIVEMIND while that org is active in the dashboard.`
+            ? ` NOTE: this connection defaults to org ${orgId}. The user ALSO belongs to: ${otherOrgs.map(o => `"${o.org?.name}" (${o.org?.id}, role ${o.role})`).join(', ')}. To work in one of those orgs, pass org_id:"<that org's id>" on any HIVEMIND tool call (hivemind_list_projects, hivemind_recall, hivemind_save_memory, …) — same connection, membership-validated, the user's role in that org applies.`
             : '';
           return formatToolContent({
             org_id: orgId,

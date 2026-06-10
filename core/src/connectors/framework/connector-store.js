@@ -401,11 +401,28 @@ export class ConnectorStore {
       try {
         const nangoRow = await this.prisma.nangoConnection.findFirst({
           where: { userId, providerKey: nangoKey, status: 'active' },
-          select: { connectionId: true },
+          select: { id: true, connectionId: true },
         });
         if (nangoRow?.connectionId) {
           const { fetchBearerFromNango } = await import('../mcp/nango-service.js');
-          return await fetchBearerFromNango(nangoKey, nangoRow.connectionId);
+          try {
+            return await fetchBearerFromNango(nangoKey, nangoRow.connectionId);
+          } catch (bearerErr) {
+            // Self-heal: a connection whose credentials are permanently dead
+            // ("refresh limit has been reached", invalid_credentials) will
+            // never recover — flip it out of 'active' so every future lookup
+            // skips straight to the native platformIntegration token instead
+            // of hammering Nango (and spamming logs) on every call.
+            if (/refresh limit|invalid_credentials|424/i.test(bearerErr.message || '')) {
+              this.prisma.nangoConnection.update({
+                where: { id: nangoRow.id },
+                data: { status: 'error' },
+              }).then(() => {
+                console.warn(`[connector-store] marked dead Nango connection ${nangoRow.connectionId} (${provider}) status=error — falling back to native token`);
+              }).catch(() => {});
+            }
+            throw bearerErr;
+          }
         }
       } catch (err) {
         console.warn(`[connector-store] Nango token fetch failed for ${provider}: ${err.message}`);

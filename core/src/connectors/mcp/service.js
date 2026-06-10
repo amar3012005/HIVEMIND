@@ -101,8 +101,34 @@ export class MCPIngestionService {
     return endpoint;
   }
 
+  /**
+   * Health for transport:'internal' endpoints — tools are served in-process
+   * by the native toolkit group (e.g. slack via SlackBridge), so there is no
+   * external MCP server to inspect. Healthy ⇔ the user's native token
+   * resolves (PlatformIntegration / Nango via ConnectorStore).
+   */
+  async _inspectInternal(endpoint, { user_id } = {}) {
+    const tools = Array.isArray(endpoint.static_tools) ? endpoint.static_tools : [];
+    const provider = endpoint.native_provider || endpoint.adapter_type;
+    if (!this.db || !provider || !user_id) {
+      return { tools, resources: [], prompts: [] };
+    }
+    const { ConnectorStore } = await import('../framework/connector-store.js');
+    const token = await new ConnectorStore(this.db)
+      .getAccessToken(user_id, provider)
+      .catch(() => null);
+    if (!token) {
+      throw new Error(`${provider} not connected — connect it from the Connectors page`);
+    }
+    return { tools, resources: [], prompts: [] };
+  }
+
   async inspectEndpoint(name, scope) {
     const endpoint = this.getEndpoint(name, scope);
+    if (endpoint.transport === 'internal') {
+      const capabilities = await this._inspectInternal(endpoint, scope);
+      return { endpoint, ...capabilities };
+    }
     const authed = await this._resolveAuthenticatedEndpoint(endpoint, scope);
     const capabilities = await this.runner.inspect(authed);
     return {
@@ -117,10 +143,13 @@ export class MCPIngestionService {
     const statuses = await Promise.all(endpoints.map(async endpoint => {
       const endpointJobs = jobs.filter(job => job.endpoint_name === endpoint.name);
       const summary = buildJobSummary(endpointJobs);
-      const authed = await this._resolveAuthenticatedEndpoint(endpoint, scope);
+      const isInternal = endpoint.transport === 'internal';
+      const authed = isInternal ? endpoint : await this._resolveAuthenticatedEndpoint(endpoint, scope);
 
       try {
-        const inspection = await this.runner.inspect(authed);
+        const inspection = isInternal
+          ? await this._inspectInternal(endpoint, scope)
+          : await this.runner.inspect(authed);
         return {
           name: endpoint.name,
           transport: endpoint.transport,

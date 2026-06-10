@@ -7308,12 +7308,50 @@ exit \$RC
         if (!persistentMemoryEngine) {
           return jsonResponse(res, { error: 'memory engine unavailable' }, 503);
         }
-        const evUserId = body.user_id;
-        const evOrgId = body.org_id || orgId;
+        let evUserId = body.user_id;
+        let evOrgId = body.org_id || orgId;
         const teamId = body.team_id;
         const ev = body.event || {};
         const evType = body.event_type || ev.type || 'unknown';
         const subtype = body.event_subtype || ev.subtype || null;
+
+        // Socket-Mode bridge support: the employees-service Bolt gateway only
+        // knows the Slack team_id, not the HIVEMIND OAuth owner. Resolve the
+        // connector exactly like the control-plane events webhook does —
+        // team_id match first, most-recently-connected active Slack connector
+        // as fallback.
+        if (!evUserId && teamId && prisma?.platformIntegration) {
+          try {
+            let conn = await prisma.platformIntegration.findFirst({
+              where: {
+                platformType: 'slack',
+                isActive: true,
+                connectorMetadata: { path: ['provider_metadata', 'team_id'], equals: teamId },
+              },
+              select: { userId: true },
+            });
+            if (!conn) {
+              conn = await prisma.platformIntegration.findFirst({
+                where: { platformType: 'slack', isActive: true },
+                orderBy: { updatedAt: 'desc' },
+                select: { userId: true },
+              });
+            }
+            if (conn) {
+              evUserId = conn.userId;
+              if (!evOrgId) {
+                // PlatformIntegration has no org column — derive from membership.
+                const membership = await prisma.userOrganization?.findFirst({
+                  where: { userId: conn.userId },
+                  select: { orgId: true },
+                }).catch(() => null);
+                evOrgId = membership?.orgId || null;
+              }
+            }
+          } catch (resolveErr) {
+            console.warn('[slack-event-ingest] team_id user resolution failed:', resolveErr.message);
+          }
+        }
 
         if (!evUserId) return jsonResponse(res, { error: 'user_id required' }, 400);
 

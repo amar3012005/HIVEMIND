@@ -97,6 +97,18 @@ class SlackGateway:
         seen_emp_ids = set()
         seen_ws_ids = set()
 
+        # Env-declared workspaces: SLACK_APP_TOKEN_<TEAM_ID> + SLACK_BOT_TOKEN_
+        # <TEAM_ID> pairs keep a Socket Mode connection alive even when NO
+        # Digital Employee is bound to that workspace yet. Without this, a
+        # workspace with zero employees never connects, so "@HIVEMIND <question>"
+        # mentions (bridged to core event-ingest) are never received at all —
+        # prod sat at "5 employees, 0 workspaces" with tokens configured.
+        for key in os.environ:
+            if key.startswith("SLACK_APP_TOKEN_"):
+                wsid = key[len("SLACK_APP_TOKEN_"):]
+                if wsid and os.environ.get(f"SLACK_BOT_TOKEN_{wsid}"):
+                    seen_ws_ids.add(wsid)
+
         for emp in rows:
             seen_emp_ids.add(emp["id"])
             wsid = emp.get("slack_team_id")
@@ -217,7 +229,21 @@ class SlackGateway:
         ws_employees = [e for e in self.employees.values() if e.get("slack_team_id") == wsid]
         emp = route_event(event, ws_employees)
         if not emp:
-            log.debug("no route for event in %s channel=%s", wsid, event.get("channel"))
+            # No Digital Employee claims this event. If it is a question aimed
+            # at the app itself (@HIVEMIND mention or a DM), forward it to
+            # core's slack event-ingest — the SAME full react-agent path the
+            # public Events-API webhook drives (recall + save + uploads +
+            # draft-approval). This is what makes "@HIVEMIND <question>" work
+            # from inside Slack over Socket Mode, with no public webhook /
+            # signing-secret dependency. Core resolves the OAuth owner from
+            # team_id and replies with the connector's bot token.
+            ev_type = event.get("type") or ""
+            is_dm = event.get("channel_type") == "im" or str(event.get("channel", "")).startswith("D")
+            is_bot_echo = bool(event.get("bot_id") or event.get("subtype") == "bot_message" or event.get("app_id"))
+            if (ev_type == "app_mention" or (ev_type == "message" and is_dm)) and not is_bot_echo:
+                await self._forward_to_core(wsid, event)
+            else:
+                log.debug("no route for event in %s channel=%s", wsid, event.get("channel"))
             return
 
         assistant = self.assistants.get(emp["id"])
@@ -269,6 +295,36 @@ class SlackGateway:
             api_key, channel, reply_text, thread_ts,
             username=username, icon_url=icon_url, icon_emoji=icon_emoji,
         )
+
+    async def _forward_to_core(self, wsid: str, event: Dict[str, Any]):
+        """Bridge an unrouted @HIVEMIND mention / DM into core's slack
+        event-ingest (master-key authed). Core resolves the OAuth owner from
+        team_id, runs the full react agent (recall/save/upload/draft-approval)
+        and posts the reply itself with the connector's bot token — this
+        method is fire-and-forget."""
+        from ..config import get_settings
+        settings = get_settings()
+        master = settings.hivemind_master_api_key or os.environ.get("HIVEMIND_MASTER_API_KEY")
+        if not master:
+            log.warning("cannot forward @HIVEMIND mention — no master API key configured")
+            return
+        payload = {
+            "team_id": wsid,
+            "event": event,
+            "event_type": event.get("type"),
+            "event_subtype": event.get("subtype"),
+            "event_ts": event.get("event_ts") or event.get("ts"),
+        }
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as c:
+                r = await c.post(
+                    f"{settings.hivemind_core_url}/api/connectors/slack/event-ingest",
+                    json=payload,
+                    headers={"X-API-Key": master},
+                )
+                log.info("forwarded %s to core event-ingest → %s", event.get("type"), r.status_code)
+        except Exception as e:
+            log.warning("core event-ingest forward failed: %s", e)
 
     def _call_assistant(
         self,

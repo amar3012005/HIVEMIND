@@ -965,6 +965,16 @@ async function answerStep({ message, history, evidence, plan, language, assistan
         select: { providerKey: true },
       });
       const providers = conns.map(c => c.providerKey);
+      // Slack moved to native OAuth (PlatformIntegration) — Nango rows no
+      // longer represent it. Include it when the native connector is active
+      // so the agent knows the slack tool group exists.
+      if (!providers.includes('slack') && ctx.prisma.platformIntegration) {
+        const nativeSlack = await ctx.prisma.platformIntegration.findUnique({
+          where: { userId_platformType: { userId: ctx.userId, platformType: 'slack' } },
+          select: { isActive: true },
+        }).catch(() => null);
+        if (nativeSlack?.isActive) providers.push('slack');
+      }
       if (providers.length > 0) {
         capabilityHint += `\n\nCONNECTED PROVIDERS (write available via draft-approval): ${providers.join(', ')}`;
       }

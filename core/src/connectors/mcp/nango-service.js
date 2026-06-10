@@ -89,8 +89,15 @@ async function _nangoRequest(method, path, body, { retries = 2 } = {}) {
  * @param {{ db: any }} ctx — prisma client or compatible repository
  */
 export async function getConnectionId({ userId, orgId, providerKey }, { db }) {
+  // orgId is non-nullable in the NangoConnection schema, so passing
+  // `orgId: null` makes Prisma throw "Argument orgId must not be null" —
+  // which is exactly what the sync scheduler did on every tick (it has no
+  // org context) and what broke every scheduled Slack sync. Treat a falsy
+  // orgId as "any org for this user" instead of an invalid filter.
+  const where = { userId, providerKey, status: 'active' };
+  if (orgId) where.orgId = orgId;
   const row = await db.nangoConnection.findFirst({
-    where: { userId, orgId, providerKey, status: 'active' },
+    where,
     select: { connectionId: true },
   });
   return row?.connectionId ?? null;

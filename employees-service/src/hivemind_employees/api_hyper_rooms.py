@@ -244,6 +244,18 @@ def _claims_missing_current_user_facts(text: str) -> bool:
     return any(pattern.search(candidate) for pattern in _MISSING_CURRENT_FACT_PATTERNS)
 
 
+def _extract_jsonish_string(raw: str, field: str, limit: int = 2000) -> str:
+    m = re.search(rf'"{re.escape(field)}"\s*:\s*"([^"]*)"', raw or "")
+    return (m.group(1).strip()[:limit] if m else "")
+
+
+def _extract_jsonish_list(raw: str, field: str, limit: int = 8) -> List[str]:
+    m = re.search(rf'"{re.escape(field)}"\s*:\s*\[([^\]]*)\]', raw or "")
+    if not m:
+        return []
+    return [x.strip()[:300] for x in re.findall(r'"([^"]+)"', m.group(1))[:limit]]
+
+
 def _normalize_for_dedup(text: str) -> str:
     """Strip punctuation/case for shingle dedup. 4-gram key."""
     t = re.sub(r"[^\w\s]", " ", (text or "").lower())
@@ -3365,8 +3377,19 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                             "next_action": (parsed.get("next_action") or "").strip()[:500],
                         }
             except Exception as exc:  # noqa: BLE001
-                log.warning("validate JSON parse failed turn=%s: %s — defaulting to resolved",
-                            req.turn_id, exc)
+                raw_lower = (validate_raw or "").lower()
+                recovered_verdict = "escalate" if re.search(r'"?verdict"?\s*:\s*"?(?:escalate|escalated)', raw_lower) else "resolved"
+                verdict_obj = {
+                    "verdict": recovered_verdict,
+                    "line": _extract_jsonish_string(validate_raw, "line") or (validate_raw or "").strip()[:500],
+                    "resolved_facts": _extract_jsonish_list(validate_raw, "resolved_facts"),
+                    "remaining_gaps": _extract_jsonish_list(validate_raw, "remaining_gaps"),
+                    "next_action": _extract_jsonish_string(validate_raw, "next_action", 500),
+                }
+                log.warning(
+                    "validate JSON parse failed turn=%s: %s — recovered verdict=%s",
+                    req.turn_id, exc, recovered_verdict,
+                )
             current_user_facts = _extract_current_user_facts(req.user_message)
             stale_fact_escalation = (
                 verdict_obj.get("verdict") == "escalate"

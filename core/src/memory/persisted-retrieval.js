@@ -1026,12 +1026,24 @@ export async function recallPersistedMemories(store, {
   const _wsProjects = new Set(_workingSet.activeProjects || []);
   const _wsPinned = new Set((_workingSet.pinnedMemoryIds || []).map((id) => String(id)));
 
+  // ── Entity/tag-filter-first (gated: ENTITY_FILTER_MODE = off | should | must) ──
+  // off   → byte-identical to legacy (no entity tags computed).
+  // should→ additive precision pass below (floor preserved; never drops).
+  // must  → hard-require an entity-tag match on the primary passes (DROPS
+  //         untagged memories — only safe after the G1 symmetry test proves
+  //         ≥80% extraction recall; default off).
+  const ENTITY_FILTER_MODE = (process.env.ENTITY_FILTER_MODE || 'off').toLowerCase();
+  const _entityFilterTags = ENTITY_FILTER_MODE === 'off' ? [] : normalizeQueryEntityTokens(query_context);
+  const _effectiveTags = (ENTITY_FILTER_MODE === 'must' && _entityFilterTags.length)
+    ? [...tags, ..._entityFilterTags]
+    : tags;
+
   const lexicalCandidates = await store.searchMemories({
     query: query_context,
     user_id,
     org_id,
     project,
-    tags,
+    tags: _effectiveTags,
     is_latest: effectiveIsLatest,
     n_results: candidatePoolSize,
     created_after: effectiveDateRange?.start,
@@ -1081,7 +1093,7 @@ export async function recallPersistedMemories(store, {
     org_id,
     project,
     source_platforms,
-    tags,
+    tags: _effectiveTags,
     max_memories,
     dateRange: effectiveDateRange,
     scoreThreshold: vectorScoreThreshold,
@@ -1093,13 +1105,30 @@ export async function recallPersistedMemories(store, {
   })
     // Drop old TARA turn/insight vectors still living in Qdrant from past calls.
     .then((cands) => cands.filter((c) => !isTaraActivity(c?.memory)));
+
+  // SHOULD mode: ADDITIVE entity-filtered precision pass. The unfiltered passes
+  // above are the recall FLOOR (protects legacy/untagged memories); this only
+  // ADDS entity-tag matches, tagged _entity_filtered for the exact-match scoring
+  // term, and is folded into the same MAX-dedup merge downstream. Never removes.
+  let entityFilteredCandidates = [];
+  if (ENTITY_FILTER_MODE === 'should' && _entityFilterTags.length) {
+    entityFilteredCandidates = await vectorCandidatesForRecall(store, {
+      query_context, user_id, org_id, project, source_platforms,
+      tags: _entityFilterTags, max_memories,
+      dateRange: effectiveDateRange, scoreThreshold: vectorScoreThreshold,
+      hnswEf: _wireCfg ? _cfg?.hnsw_ef : undefined,
+      candidatePoolSize, is_latest: effectiveIsLatest, access_context, scope_filter,
+    })
+      .then((cands) => cands.filter((c) => !isTaraActivity(c?.memory)).map((c) => ({ ...c, _entity_filtered: true })))
+      .catch(() => []);
+  }
   const relationships = await store.listRelationships({ user_id, org_id, project, limit: 1000 });
   const relationshipCounts = buildRelationshipIndex(relationships);
   const contradictedIds    = buildContradictedIndex(relationships);
 
   // Graph Expansion: Discover related memories through graph traversal
   const expandedCandidates = await expandCandidatesViaGraph(store, {
-    initialCandidates: [...filteredLexical.map(m => ({ memory: m, score: 0 })), ...vectorCandidates],
+    initialCandidates: [...filteredLexical.map(m => ({ memory: m, score: 0 })), ...vectorCandidates, ...entityFilteredCandidates],
     relationships,
     relationshipCounts,
     query_context,
@@ -1909,6 +1938,35 @@ export async function crossClusterEntityBoost(memories, { clusterIndex, organiza
 //   • single capitalized 4+ char tokens → "Salesforce" → "salesforce"
 //   • bare lowercase 4+ char tokens when the query has no capitalization
 //     (covers all-lowercase user input like "vinil audit ai pilot")
+// Map query text → candidate `entity:<Token>` / `person:<Token>` tag forms that
+// mirror the INGEST-side normalization (graph-engine.js: `entity:` + name with
+// spaces→underscores, ORIGINAL case). The query extractor lowercases (loses
+// case), and ingest preserves case — so for an EXACT Qdrant keyword match we
+// must emit several case variants per token as OR (`should`) candidates:
+// original-extracted, lowercased, Title_Case. This is the G1 surface — its real
+// hit-rate is measured by the extraction-symmetry invariant test before any
+// flip to ENTITY_FILTER_MODE=must.
+function normalizeQueryEntityTokens(query) {
+  if (!query || typeof query !== 'string') return [];
+  const out = new Set();
+  // Case-PRESERVING extraction (the lowercase _extractQueryEntityTokens can't
+  // reconstruct 'Amar_Sai_Gadde' from 'amar sai gadde').
+  const capPhrases = query.match(/[A-Z][\w&]+(?:\s+[A-Z][\w&]+)+/g) || [];
+  const singletons = query.match(/\b[A-Z][\w&]{3,}\b/g) || [];
+  const raw = [...capPhrases, ...singletons];
+  const titleCase = (s) => s.split(/\s+/).map(w => w ? w[0].toUpperCase() + w.slice(1) : w).join('_');
+  for (const term of raw) {
+    const us = term.trim().replace(/\s+/g, '_');
+    if (!us) continue;
+    for (const prefix of ['entity:', 'person:']) {
+      out.add(prefix + us);                       // as-extracted
+      out.add(prefix + us.toLowerCase());          // lowercased
+      out.add(prefix + titleCase(term.trim()));    // Title_Case
+    }
+  }
+  return Array.from(out);
+}
+
 function _extractQueryEntityTokens(query) {
   if (!query || typeof query !== 'string') return [];
   const out = new Set();

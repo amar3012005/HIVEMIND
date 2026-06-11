@@ -1136,15 +1136,23 @@ export async function recallPersistedMemories(store, {
       .catch(() => []);
   }
 
-  // SHOULD mode (temporal): ADDITIVE date-filtered precision pass. Same shape as
-  // the entity pass — Qdrant any-matches the `ts:`/`time:` OR-set, results are
-  // marked _temporal_filtered and folded into the MAX-dedup merge. Never removes.
+  // SHOULD mode (temporal): ADDITIVE event-time tag pass. This is COMPLEMENTARY
+  // to (not a duplicate of) the existing `effectiveDateRange` filter:
+  //   • effectiveDateRange (expandTemporalQuery) filters on RECORD time
+  //     (created_at / document_date) — when the memory was written.
+  //   • This pass any-matches the ingest `ts:`/`time:` TAGS — which encode
+  //     EVENT time (e.g. a memory written today tagged `time:2026-07-01`
+  //     about a future deadline). created_at-range can never surface those.
+  // Hence we DELIBERATELY pass dateRange:null here — the tag match is the only
+  // temporal constraint, so event-dated memories aren't re-clipped by the
+  // record-time window. Marked _temporal_filtered, folded into MAX-dedup merge.
+  // Never removes (the unfiltered passes remain the recall floor).
   let temporalFilteredCandidates = [];
   if (TEMPORAL_FILTER_MODE === 'should' && _temporalFilterTags.length) {
     temporalFilteredCandidates = await vectorCandidatesForRecall(store, {
       query_context, user_id, org_id, project, source_platforms,
       tags: _temporalFilterTags, max_memories,
-      dateRange: effectiveDateRange, scoreThreshold: vectorScoreThreshold,
+      dateRange: null, scoreThreshold: vectorScoreThreshold,
       hnswEf: _wireCfg ? _cfg?.hnsw_ef : undefined,
       candidatePoolSize, is_latest: effectiveIsLatest, access_context, scope_filter,
     })
@@ -1296,7 +1304,31 @@ export async function recallPersistedMemories(store, {
     };
   }).filter(Boolean);
 
-  const ranked = mergeCandidateLists(scoredLexical, enrichedVector, expandedCandidates).sort((a, b) => b.score - a.score);
+  // Score the event-time temporal candidates and merge them DIRECTLY (not just
+  // as BFS seeds — expandCandidatesViaGraph only returns neighbours). These
+  // INTENTIONALLY skip the isMemoryInDateRange(effectiveDateRange) drop the
+  // vector/lexical paths apply: a memory tagged `time:2026-07-01` but created
+  // earlier is exactly what record-time filtering misses. Scored with the same
+  // weighted formula so they rank fairly against the other lists.
+  const scoredTemporal = temporalFilteredCandidates.map(candidate => {
+    const now = Date.now();
+    const created = new Date(candidate.memory?.created_at).getTime();
+    const daysAgo = Number.isFinite(created) ? (now - created) / (1000 * 60 * 60 * 24) : 365;
+    const recencyScore = Math.exp(-daysAgo / 30);
+    const graphScore = Math.min((relationshipCounts.get(candidate.memory?.id) || 0) * 0.03, 0.12);
+    const policyScore = policyBoost(candidate.memory, { preferred_project, preferred_source_platforms, preferred_tags });
+    let score = (_effectiveWeights.similarity ?? 0.45) * (candidate.similarityScore || 0) +
+        (_effectiveWeights.recency ?? 0.15) * recencyScore +
+        (_effectiveWeights.importance ?? 0.1) * 1 +
+        (_effectiveWeights.vector ?? 0.2) * (candidate.vectorScore || 0) +
+        (_effectiveWeights.graph ?? 0.05) * graphScore +
+        (_effectiveWeights.policy ?? 0.05) * policyScore;
+    if (candidate.memory?.is_latest === false) score *= 0.55;
+    if (candidate.memory?.id && contradictedIds.has(candidate.memory.id)) score *= 0.40;
+    return { ...candidate, keywordScore: candidate.similarityScore || 0, graphScore, policyScore, recencyScore, score };
+  }).filter(c => c.memory?.id);
+
+  const ranked = mergeCandidateLists(scoredLexical, enrichedVector, expandedCandidates, scoredTemporal).sort((a, b) => b.score - a.score);
 
   // Apply memory_type boosting based on query intent (from code-review-graph's kind boosting)
   const typeBoosts = detectMemoryTypeBoost(query_context);

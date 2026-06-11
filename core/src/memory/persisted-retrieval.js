@@ -1046,7 +1046,11 @@ export async function recallPersistedMemories(store, {
   // remain the recall floor). `must` is intentionally NOT supported: the FTS
   // path AND-matches tags (hasEvery), and a multi-day OR set would zero out;
   // the Qdrant additive pass (any-match) is the correct, safe mechanism.
-  const TEMPORAL_FILTER_MODE = (process.env.TEMPORAL_FILTER_MODE || 'off').toLowerCase();
+  // Default ON ('should') in production: the additive temporal pass is a no-op
+  // for non-date queries (normalizeQueryTemporalTokens returns [] → pass skipped)
+  // and only ADDS date-matched memories for date-anchored queries — verified
+  // byte-identical on non-temporal recall. Set TEMPORAL_FILTER_MODE=off to disable.
+  const TEMPORAL_FILTER_MODE = (process.env.TEMPORAL_FILTER_MODE || 'should').toLowerCase();
   const _temporalFilterTags = TEMPORAL_FILTER_MODE === 'should'
     ? normalizeQueryTemporalTokens(query_context, Date.now())
     : [];

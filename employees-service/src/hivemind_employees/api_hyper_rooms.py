@@ -6,8 +6,9 @@ POST /v1/hyper-rooms/:id/turns; this endpoint runs the actual debate:
 
     1. Router picks a Lead (closest CSI lane to the user_message)
     2. Lead generates full response (reuses build_react_agent, so the
-       MCP tools — hivemind_recall, hivemind_web_research, etc — are
-       all available).
+       HIVEMIND MCP tools are available. Public web access is routed
+       through one dedicated web-intel worker per room turn, not every
+       agent.
     3. Up to 2 Reactors run a "quiet-check" pass; reactors in opposing
        lanes (Strategist↔Skeptic, Builder↔Skeptic, Communicator↔Skeptic)
        are biased toward speaking up.
@@ -72,7 +73,8 @@ MAX_REACTORS = 2
 ROUND_2_CHALLENGE_THRESHOLD = 0.45
 
 # Full toolkit for hyper-room agents — all HIVEMIND read paths + save
-# + time travel; web is gated by prompt ("only when info isn't here").
+# + time travel. Web access is reserved for one dedicated web-intel worker
+# inside the room orchestrator, not every employee.
 DEFAULT_HYPER_TOOLS = [
     "hivemind_recall",
     "hivemind_list_memories",
@@ -84,9 +86,22 @@ DEFAULT_HYPER_TOOLS = [
     "hivemind_at",
     "hivemind_list_projects",
     "hivemind_save_memory",
+]
+
+WEB_INTEL_TOOLS = [
     "hivemind_web_search",
     "hivemind_web_research",
 ]
+
+WEB_INTEL_HINTS = (
+    "latest", "current", "recent", "today", "now", "web", "internet", "browse",
+    "public", "website", "docs", "documentation", "news", "market", "benchmark",
+    "competitor", "competitors", "compare", "comparison", "external", "publicly",
+    "search", "source", "sources", "pricing", "review", "report", "regulation",
+    "law", "policy", "release", "version", "product page", "homepage",
+)
+
+WEB_INTEL_GROQ_TOOLS = ("web_search", "visit_website")
 
 HYPER_ROOM_AGENT_MAX_ITERS = int(os.environ.get("HYPER_ROOM_AGENT_MAX_ITERS", "3"))
 BLACKBOARD_MIN_SCORE = float(os.environ.get("HYPER_ROOM_BLACKBOARD_MIN_SCORE", "0.45"))
@@ -732,11 +747,12 @@ async def _build_agent_for_room(
     user_id: Optional[str] = None,
     org_id: Optional[str] = None,
     project_id: Optional[str] = None,
+    allow_web_tools: bool = False,
 ) -> ReActAgent:
     """Cache one agent per (room, employee) so memory carries across turns.
 
     Overrides the employee's `tools` list with the full HIVEMIND toolset
-    (read paths + save + time-travel + web) so swarm agents have the
+    (read paths + save + time-travel; web only for the dedicated intel worker) so swarm agents have the
     same reach as the MCP-driven Talk-to-HIVE assistant.
     """
     key = f"{room_id}:{emp['id']}"
@@ -760,7 +776,7 @@ async def _build_agent_for_room(
         # tool-less. Without this, agents fall back to "nothing on file".
         merged = {
             **emp,
-            "tools": DEFAULT_HYPER_TOOLS,
+            "tools": DEFAULT_HYPER_TOOLS + (WEB_INTEL_TOOLS if allow_web_tools else []),
             "max_iters": HYPER_ROOM_AGENT_MAX_ITERS,
             "hyper": boot_emp.get("hyper"),
             "active_prompt_version": boot_emp.get("active_prompt_version"),
@@ -772,7 +788,7 @@ async def _build_agent_for_room(
         **emp,
         # Force the full hyper toolkit regardless of what's stored on the
         # employee row — gives every swarm participant equal reach.
-        "tools": DEFAULT_HYPER_TOOLS,
+        "tools": DEFAULT_HYPER_TOOLS + (WEB_INTEL_TOOLS if allow_web_tools else []),
         "max_iters": HYPER_ROOM_AGENT_MAX_ITERS,
         "hyper": boot_emp.get("hyper"),
         "active_prompt_version": boot_emp.get("active_prompt_version"),
@@ -804,6 +820,376 @@ def _msg_to_text(reply: Optional[Msg]) -> str:
         # Also nuke residual single-line variants
         text = re.sub(r"<function=[^\n>]+>", "", text).strip()
     return text
+
+
+def _web_intel_needed(user_message: str, blackboard: Dict[str, Any], room_template: str) -> bool:
+    """Decide whether the turn needs external/public evidence.
+
+    Prefer web whenever the room may benefit from current or public
+    evidence. This is intentionally broad: the dedicated web worker can
+    still return `needed=false` if it finds the turn is fully covered by
+    shared memory.
+    """
+    msg = (user_message or "").lower()
+    if not msg:
+        return False
+    external_signals = any(term in msg for term in WEB_INTEL_HINTS)
+    decision_signals = any(term in msg for term in (
+        "should", "best", "better", "compare", "comparison", "recommend",
+        "decide", "decision", "evaluate", "choose", "rename", "rebrand",
+        "brand", "legal", "law", "trademark", "domain", "pricing", "market",
+        "competitor", "current", "latest", "public", "evidence", "source",
+        "sources", "available", "availability", "release", "version", "docs",
+    ))
+    if room_template in ("deep_sim", "swarm", "decision"):
+        return True
+    if external_signals or decision_signals:
+        return True
+    if float(blackboard.get("confidence", 0) or 0) < 0.7:
+        return True
+    return int(blackboard.get("hit_count", 0) or 0) < 3
+
+
+async def _build_web_intel_agent_for_room(
+    room_id: str,
+    emp: Dict[str, Any],
+    user_id: str,
+    org_id: str,
+    project_id: Optional[str],
+) -> ReActAgent:
+    """Build the one web-enabled Hyper agent for this turn.
+
+    Fallback path when the direct Groq Compound web pass is unavailable.
+    This agent gets the Hivemind web MCP tools plus normal HIVEMIND read
+    tools, and it is the only agent allowed to browse on behalf of the room.
+    """
+    synthetic = {
+        **emp,
+        "id": f"{room_id}:web-intel",
+        "slug": emp.get("slug") or "web-intel",
+        "name": emp.get("name") or "Web Intel",
+        "role_archetype": "Researcher",
+        "persona": (
+            "You are the room's dedicated external-intelligence specialist. "
+            "Use web access only when the current room turn needs public or live "
+            "evidence. Prefer Hivemind memory first, browse only for gaps, and "
+            "return a concise evidence dossier with sources, caveats, and a clear POV."
+        ),
+        "llm_provider": os.environ.get("HYPER_WEB_INTEL_PROVIDER", "groq"),
+        "model": os.environ.get("HYPER_WEB_INTEL_MODEL", "gpt-oss-20b"),
+        "tools": DEFAULT_HYPER_TOOLS + WEB_INTEL_TOOLS,
+        "max_iters": int(os.environ.get("HYPER_WEB_INTEL_MAX_ITERS", "2")),
+    }
+    return await _build_agent_for_room(
+        room_id,
+        synthetic,
+        user_id=user_id,
+        org_id=org_id,
+        project_id=project_id,
+        allow_web_tools=True,
+    )
+
+
+def _format_web_intel_context(payload: Dict[str, Any]) -> str:
+    if not payload:
+        return ""
+    lines = ["WEB INTEL DOSSIER (dedicated HyperAgents web worker):"]
+    if payload.get("pov"):
+        lines.append(f"[pov] {payload['pov']}")
+    if payload.get("answer"):
+        lines.append(f"[answer] {payload['answer']}")
+    if payload.get("sources"):
+        src_lines = []
+        for src in payload["sources"][:6]:
+            if isinstance(src, dict):
+                title = (src.get("title") or src.get("url") or "source").strip()
+                url = (src.get("url") or "").strip()
+                snippet = (src.get("snippet") or "").strip()
+                src_lines.append(f"- {title}" + (f" ({url})" if url else "") + (f": {snippet}" if snippet else ""))
+            else:
+                src_lines.append(f"- {str(src)[:250]}")
+        if src_lines:
+            lines.append("[sources]")
+            lines.extend(src_lines)
+    if payload.get("gap"):
+        lines.append(f"[gap] {payload['gap']}")
+    if payload.get("confidence") is not None:
+        lines.append(f"[confidence] {payload['confidence']}")
+    lines.append(
+        "Use this dossier as the only external evidence in the room. Other agents should "
+        "consume it from shared context rather than browsing themselves."
+    )
+    return "\n".join(lines)
+
+
+def _join_context(*parts: str) -> str:
+    return "\n".join(part.strip() for part in parts if part and part.strip())
+
+
+def _compact_report_item(value: Any, limit: int = 260) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return ""
+    return text[:limit].rstrip() + ("..." if len(text) > limit else "")
+
+
+def _build_final_report(
+    *,
+    user_message: str,
+    final_text: str,
+    template: str,
+    status: str = "complete",
+    verdict: Optional[str] = None,
+    score: Optional[float] = None,
+    lead: Optional[Dict[str, Any]] = None,
+    action_items: Optional[List[Any]] = None,
+    evidence_ids: Optional[List[Any]] = None,
+    claims: Optional[List[Dict[str, Any]]] = None,
+    reviews: Optional[List[Dict[str, Any]]] = None,
+    votes: Optional[List[Dict[str, Any]]] = None,
+    objections: Optional[List[Any]] = None,
+    web_intel_used: bool = False,
+) -> Dict[str, Any]:
+    """Build a readable report event from already-computed room artifacts.
+
+    This intentionally avoids a post-turn LLM call: the report should make the
+    transcript consumable without adding latency after the simulation finishes.
+    """
+    title = "Final report"
+    verdict_text = verdict or status or "complete"
+    lead_name = (lead or {}).get("name") or (lead or {}).get("slug") or "lead"
+    lines: List[str] = [
+        f"## {title}",
+        "",
+        f"**Question:** {_compact_report_item(user_message, 500)}",
+        f"**Outcome:** {verdict_text}" + (f" · score {score}" if score is not None else ""),
+        f"**Lead:** {lead_name}",
+        "",
+        "### Conclusion",
+        _compact_report_item(final_text, 2400) or "No final synthesis was produced.",
+    ]
+
+    useful_actions = [_compact_report_item(a, 220) for a in (action_items or [])]
+    useful_actions = [a for a in useful_actions if a]
+    if useful_actions:
+        lines.extend(["", "### Next actions"])
+        lines.extend(f"- {a}" for a in useful_actions[:8])
+
+    if claims:
+        lines.extend(["", "### Strongest perspectives"])
+        for claim in claims[:6]:
+            who = claim.get("agent") or claim.get("agent_slug") or claim.get("agent_name") or "agent"
+            stance = claim.get("stance") or claim.get("lane") or "view"
+            body = claim.get("claim") or claim.get("hypothesis") or claim.get("refined_hypothesis") or ""
+            item = _compact_report_item(body, 260)
+            if item:
+                lines.append(f"- {who} ({stance}): {item}")
+
+    challenge_items: List[str] = []
+    for obj in objections or []:
+        if isinstance(obj, dict):
+            challenge_items.append(_compact_report_item(
+                obj.get("challenge") or obj.get("content") or obj.get("review") or obj.get("line") or obj,
+                260,
+            ))
+        else:
+            challenge_items.append(_compact_report_item(obj, 260))
+    if reviews:
+        for review in reviews:
+            if str(review.get("agreement", "")).lower() == "challenge":
+                challenge_items.append(_compact_report_item(review.get("content") or review.get("review"), 260))
+    challenge_items = [c for c in challenge_items if c]
+    if challenge_items:
+        lines.extend(["", "### Risks and dissent"])
+        lines.extend(f"- {c}" for c in challenge_items[:6])
+
+    if votes:
+        lines.extend(["", "### Vote snapshot"])
+        for vote in votes[:8]:
+            voter = vote.get("voter") or vote.get("agent") or "agent"
+            target = vote.get("vote_for_hypothesis_id") or vote.get("vote") or "none"
+            vote_score = vote.get("score")
+            reason = vote.get("reason") or vote.get("content") or ""
+            lines.append(f"- {voter}: {target}" + (f" · {vote_score}/5" if vote_score is not None else "") + (f" · {_compact_report_item(reason, 160)}" if reason else ""))
+
+    evidence = [str(e) for e in (evidence_ids or []) if e]
+    if evidence or web_intel_used:
+        lines.extend(["", "### Evidence"])
+        if evidence:
+            lines.append(f"- Memory evidence: {', '.join(evidence[:12])}")
+        if web_intel_used:
+            lines.append("- External web-intel dossier was consulted for public/current evidence.")
+
+    return {
+        "t": "final_report",
+        "title": title,
+        "template": template,
+        "status": status,
+        "verdict": verdict_text,
+        "weighted_score": score,
+        "content": "\n".join(lines).strip(),
+    }
+
+
+async def _run_groq_compound_web_intel(
+    req: "RoomTurnRequest",
+    lead: Dict[str, Any],
+    blackboard: Dict[str, Any],
+    memory_context: str,
+    room_template: str,
+) -> Dict[str, Any]:
+    api_key = (
+        os.environ.get("HYPER_WEB_INTEL_GROQ_API_KEY")
+        or os.environ.get("GROQ_API_KEY")
+        or os.environ.get("LLM_API_KEY")
+        or ""
+    )
+    if not api_key:
+        raise RuntimeError("GROQ_API_KEY not configured for web intel")
+    model = os.environ.get("HYPER_WEB_INTEL_GROQ_MODEL", "groq/compound")
+    groq_version = os.environ.get("HYPER_WEB_INTEL_GROQ_VERSION", "latest")
+    prompt = (
+        "You are the dedicated web-intelligence worker for one HyperAgents room turn.\n"
+        "Use Hivemind memory first. If the answer is already covered by the shared room context, "
+        "do not browse. If the turn needs live public evidence, use the built-in Compound web tools.\n"
+        "Return STRICT JSON only with this schema:\n"
+        "{\"needed\": true|false, \"pov\": \"one sentence on the angle you chose\", "
+        "\"answer\": \"concise external evidence summary\", "
+        "\"sources\": [{\"title\":\"...\", \"url\":\"...\", \"snippet\":\"...\"}], "
+        "\"gap\": \"what remains unverified, if anything\", "
+        "\"confidence\": 0.0-1.0}\n\n"
+        f"Lead lane: {lead['_lane']}\n"
+        f"Room template: {room_template}\n"
+        f"User message:\n{req.user_message}\n\n"
+        f"Shared memory context:\n{memory_context or '(none)'}\n\n"
+        f"Blackboard confidence: {blackboard.get('confidence', 0)}\n"
+        f"Blackboard hits: {blackboard.get('hit_count', 0)}\n"
+    )
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "You are a precise web-intelligence analyst. Stay factual and concise."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.2,
+        "compound_custom": {"tools": {"enabled_tools": list(WEB_INTEL_GROQ_TOOLS)}},
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Groq-Model-Version": groq_version,
+    }
+    async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
+        resp = await client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+    choice = (data.get("choices") or [{}])[0]
+    message = choice.get("message") or {}
+    text = (message.get("content") or "").strip()
+    payload_out: Dict[str, Any] = {}
+    if text:
+        try:
+            m = re.search(r"\{[\s\S]+\}", text)
+            if m:
+                parsed = json.loads(m.group(0))
+                if isinstance(parsed, dict):
+                    payload_out = parsed
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[web-intel] groq parse failed turn=%s: %s", req.turn_id, exc)
+    if not payload_out:
+        payload_out = {
+            "needed": True,
+            "pov": "external evidence specialist",
+            "answer": text[:3000] if text else "",
+            "sources": [],
+            "gap": "",
+            "confidence": 0.5,
+        }
+    if not isinstance(payload_out.get("sources"), list):
+        payload_out["sources"] = []
+    return payload_out
+
+
+async def _run_web_intel_turn(
+    req: "RoomTurnRequest",
+    lead: Dict[str, Any],
+    blackboard: Dict[str, Any],
+    memory_context: str,
+    room_template: str,
+) -> str:
+    if not _web_intel_needed(req.user_message, blackboard, room_template):
+        return ""
+    await _emit_event(req.callback_url, req.turn_id, {
+        "t": "typing", "agent": "web-intel", "kind": "web_intel",
+    })
+    try:
+        payload = await _run_groq_compound_web_intel(
+            req=req,
+            lead=lead,
+            blackboard=blackboard,
+            memory_context=memory_context,
+            room_template=room_template,
+        )
+    except Exception as groq_exc:  # noqa: BLE001
+        log.warning("[web-intel] groq compound failed turn=%s: %s — falling back to Hivemind web tools",
+                    req.turn_id, groq_exc)
+        web_agent = await _build_web_intel_agent_for_room(
+            req.room_id,
+            lead,
+            user_id=req.user_id,
+            org_id=req.org_id,
+            project_id=req.project_id,
+        )
+        prompt = (
+            "[WEB INTEL — dedicated external evidence worker for this HyperAgents turn.]\n"
+            "Use Hivemind recall first, then browse only if needed. Do not browse if the answer is already in memory.\n"
+            f"Lead lane: {lead['_lane']}\n"
+            f"User message:\n{req.user_message}\n\n"
+            f"Shared memory context:\n{memory_context or '(none)'}\n\n"
+            "Return STRICT JSON only:\n"
+            "{\"needed\": true|false, \"pov\": \"one sentence on the angle you chose\", "
+            "\"answer\": \"concise external evidence summary\", "
+            "\"sources\": [{\"title\":\"...\", \"url\":\"...\", \"snippet\":\"...\"}], "
+            "\"gap\": \"what remains unverified, if anything\", "
+            "\"confidence\": 0.0-1.0}"
+        )
+        try:
+            reply = await web_agent(Msg(name="user", content=prompt, role="user"))
+            text = _msg_to_text(reply)
+            payload = {}
+            try:
+                m = re.search(r"\{[\s\S]+\}", text)
+                if m:
+                    parsed = json.loads(m.group(0))
+                    if isinstance(parsed, dict):
+                        payload = parsed
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[web-intel] parse failed turn=%s: %s", req.turn_id, exc)
+            if not payload:
+                payload = {
+                    "needed": True,
+                    "pov": "external evidence specialist",
+                    "answer": text[:3000],
+                    "sources": [],
+                    "gap": "",
+                    "confidence": 0.5,
+                }
+            if not isinstance(payload.get("sources"), list):
+                payload["sources"] = []
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[web-intel] turn=%s failed: %s", req.turn_id, exc)
+            return ""
+    dossier = _format_web_intel_context(payload)
+    if dossier:
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "web_intel",
+            "agent": "web-intel",
+            "content": payload.get("answer") or "",
+            "sources": payload.get("sources") or [],
+            "gap": payload.get("gap") or "",
+            "confidence": float(payload.get("confidence") or 0.5),
+        })
+    return dossier
 
 
 def _report_turn(emp_id: str, query: str, reply: Optional[Msg]) -> None:
@@ -1366,6 +1752,23 @@ async def _orchestrate_deep_sim(
         api_key="",
         project_id=req.project_id,
     )
+    web_intel_context = ""
+    try:
+        web_intel_context = await _run_web_intel_turn(
+            req=req,
+            lead=lead,
+            blackboard=blackboard,
+            memory_context=memory_context,
+            room_template=room_template,
+        )
+        if web_intel_context:
+            memory_context = _join_context(memory_context, web_intel_context)
+            role_context = {
+                slug: _join_context(ctx, web_intel_context)
+                for slug, ctx in role_context.items()
+            }
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[deep-sim] web intel prefetch failed: %s", exc)
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "simulation_phase",
         "phase": "collect",
@@ -1526,6 +1929,21 @@ async def _orchestrate_deep_sim(
         "action_items": [v["conditions"][0] for v in vote_summary if v.get("conditions")][:6],
         "vote_count": len(vote_summary),
     })
+    await _emit_event(req.callback_url, req.turn_id, _build_final_report(
+        user_message=req.user_message,
+        final_text=final_text,
+        template=room_template,
+        status="complete",
+        verdict=verdict,
+        score=round(sum(v["score"] for v in vote_summary) / max(len(vote_summary), 1), 2),
+        lead=lead,
+        action_items=[v["conditions"][0] for v in vote_summary if v.get("conditions")][:6],
+        evidence_ids=blackboard.get("memory_ids", []),
+        claims=claims,
+        reviews=reviews,
+        votes=vote_summary,
+        web_intel_used=bool(web_intel_context),
+    ))
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "seal",
         "cost_tokens": cost_tokens,
@@ -1567,8 +1985,8 @@ LANE_PLAYBOOKS: Dict[str, str] = {
         "  1. silent: hivemind_recall(query)\n"
         "  2. silent: identify top entity:* tag from R1 hits, hivemind_recall(entity_name)\n"
         "  3. silent: hivemind_traverse_graph on top memory, depth=2\n"
-        "  4. silent: if memory thin, hivemind_web_research(focused query)\n"
-        "  5. write with at least 2 cited memory_ids + 1 fact from web if used\n"
+        "  4. consume the room's WEB INTEL DOSSIER if present; do not browse directly\n"
+        "  5. write with at least 2 cited memory_ids plus the dossier's source urls when available\n"
     ),
     "Builder": (
         "LANE PLAYBOOK (Builder — implementation + status reality):\n"
@@ -2671,6 +3089,38 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
         req.turn_id, consensus["verdict"], sum(tool_call_counts.values()),
         tool_call_counts, len(evidence_pool),
     )
+    report_claims: List[Dict[str, Any]] = []
+    for r in refined or []:
+        report_claims.append({
+            "agent_slug": r.get("agent_slug"),
+            "agent_name": r.get("agent_name"),
+            "lane": r.get("lane"),
+            "refined_hypothesis": r.get("refined_hypothesis"),
+        })
+    if not report_claims:
+        for h in hypotheses or []:
+            report_claims.append({
+                "agent_slug": h.get("agent_slug"),
+                "agent_name": h.get("agent_name"),
+                "lane": h.get("lane"),
+                "hypothesis": h.get("hypothesis"),
+            })
+    await _emit_event(req.callback_url, req.turn_id, _build_final_report(
+        user_message=req.user_message,
+        final_text=final_text,
+        template=room_template,
+        status=status,
+        verdict=consensus["verdict"],
+        score=consensus.get("weighted_score"),
+        lead=lead,
+        action_items=consensus.get("action_items") or [],
+        evidence_ids=sorted(evidence_pool)[:50],
+        claims=report_claims,
+        reviews=peer_reviews,
+        votes=votes,
+        objections=(skeptic_output.get("challenges") or []),
+        web_intel_used="WEB INTEL DOSSIER" in (memory_context or ""),
+    ))
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "seal",
         "cost_tokens": cost_tokens,
@@ -2844,6 +3294,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         # Recall via master+emulation (req.user_id/org_id) so it reaches the
         # org brain regardless of whether bootstrap minted a lead key.
         memory_context_swarm = ""
+        swarm_blackboard: Dict[str, Any] = {"confidence": 0.0, "hit_count": 0}
         try:
             boot_map = {b["id"]: b for b in await fetch_bootstrap()}
             lead_api_key = (boot_map.get(lead["id"], {}) or {}).get("api_key", "") or ""
@@ -2871,11 +3322,28 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                         "CANDIDATE MEMORIES (most relevant to the user's question):\n"
                         + "\n".join(lines_out) + "\n"
                     )
+            swarm_blackboard = {
+                "confidence": 0.55 if rows else 0.0,
+                "hit_count": len(rows),
+            }
             memory_context_swarm = (company_brief + candidate_block).strip()
             if memory_context_swarm:
                 memory_context_swarm += "\n"
         except Exception as exc:  # noqa: BLE001
             log.warning("[swarm] pre-fetch failed: %s", exc)
+        try:
+            web_intel_swarm = await _run_web_intel_turn(
+                req=req,
+                lead=lead,
+                blackboard=swarm_blackboard,
+                memory_context=memory_context_swarm,
+                room_template=room_template,
+            )
+            if web_intel_swarm:
+                memory_context_swarm = _join_context(memory_context_swarm, web_intel_swarm)
+                memory_context_swarm += "\n"
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[swarm] web intel prefetch failed: %s", exc)
         return await _orchestrate_swarm(
             req, participants, lead, skeptic,
             memory_context_swarm, room_template,
@@ -2911,6 +3379,19 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     except Exception as exc:  # noqa: BLE001
         log.warning("hyper-rooms blackboard build failed: %s", exc)
     current_turn_state = _format_current_turn_state(req.user_message, blackboard)
+    try:
+        web_intel_context = await _run_web_intel_turn(
+            req=req,
+            lead=lead,
+            blackboard=blackboard,
+            memory_context=memory_context,
+            room_template=room_template,
+        )
+        if web_intel_context:
+            memory_context = _join_context(memory_context, web_intel_context)
+            current_turn_state = _join_context(current_turn_state, web_intel_context)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("hyper-rooms web intel prefetch failed: %s", exc)
     _mark("blackboard_ms")
 
     # ── Lead generates full response ─────────────────────────────────
@@ -3585,6 +4066,30 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         req.turn_id, status, room_template, cost_tokens, quality_low,
         exit_reason, sum(tool_call_counts.values()),
     )
+    report_objections = [
+        {
+            "content": r.get("content"),
+            "agreement": r.get("agreement"),
+            "reviewer": (r.get("emp") or {}).get("slug") or r.get("agent"),
+        }
+        for r in reactions
+        if r.get("agreement") == "challenge" or r.get("gap")
+    ]
+    report_actions = []
+    if status == "escalated" and open_question:
+        report_actions.append(open_question)
+    await _emit_event(req.callback_url, req.turn_id, _build_final_report(
+        user_message=req.user_message,
+        final_text=final_text,
+        template=room_template,
+        status=status,
+        verdict=(final_verdict or ("resolved" if status == "complete" else status)),
+        lead=lead,
+        action_items=report_actions,
+        evidence_ids=blackboard.get("memory_ids", [])[:10],
+        reviews=report_objections,
+        web_intel_used="WEB INTEL DOSSIER" in (memory_context or ""),
+    ))
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "seal",
         "cost_tokens": cost_tokens,

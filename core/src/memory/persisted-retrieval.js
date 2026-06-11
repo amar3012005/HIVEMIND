@@ -1946,7 +1946,7 @@ export async function crossClusterEntityBoost(memories, { clusterIndex, organiza
 // original-extracted, lowercased, Title_Case. This is the G1 surface — its real
 // hit-rate is measured by the extraction-symmetry invariant test before any
 // flip to ENTITY_FILTER_MODE=must.
-function normalizeQueryEntityTokens(query) {
+export function normalizeQueryEntityTokens(query) {
   if (!query || typeof query !== 'string') return [];
   const out = new Set();
   // Case-PRESERVING extraction (the lowercase _extractQueryEntityTokens can't

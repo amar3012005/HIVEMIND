@@ -13,6 +13,60 @@
 import crypto from 'crypto';
 import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
 
+// ── KB content-quality gates (P3) ─────────────────────────────────────────
+// Magazines/brochures produce page furniture that Docling faithfully extracts:
+// imprints, mastheads, photo credits, page headers, tables of contents. None of
+// it is memory-worthy, and promoting it verbatim was the #1 source of "random
+// fragment" memories (hauspost case). Deterministic regex — no LLM cost.
+const BOILERPLATE_RES = [
+  /\bimpressum\b/i,
+  /\bherausgeber(?:in)?\b/i,
+  /\bv\.?\s?i\.?\s?s\.?\s?d\.?\s?p\.?\b/i,                  // V.i.S.d.P. (German press law)
+  /\b(?:redaktion|layout|gestaltung|satz|druck(?:erei)?|auflage|erscheinungsweise)\s*[:\n]/i,
+  /\bfotos?\s*\/?\s*grafiken\b/i,
+  /\b(?:bildnachweis|fotonachweis|titelbild|titelfoto)\b/i,
+  /\bmarkenagentur\b/i,
+  /\binhaltsverzeichnis\b|\btable of contents\b/i,
+  /(?:\.{3,}\s*\d{1,3}\s*){2,}/,                                   // dotted ToC leaders "..... 12"
+  /^\s*\d+\s+\d+\s+[A-ZÄÖÜ //]+\s*$/m,                           // page-header rows "4 5 FLURFUNK //"
+];
+
+function isBoilerplateSegment(content, heading) {
+  const text = `${heading || ''}\n${content || ''}`;
+  if (BOILERPLATE_RES.some((re) => re.test(text))) return true;
+  // Page-furniture heading like "4 5 FLURFUNK // hauspost 2/2022"
+  if (/hauspost\s+\d\s*\/\s*\d{2,4}/i.test(heading || '') && (content || '').length < 400) return true;
+  return false;
+}
+
+// A promotable segment must read like prose, not a fragment / credit line /
+// number run. Cheap deterministic checks only.
+function isQualityContent(content) {
+  const text = (content || '').trim();
+  if (!text) return false;
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length < 15) return false;                                // fragments
+  const letters = (text.match(/[\p{L}]/gu) || []).length;
+  if (letters / Math.max(1, text.length) < 0.55) return false;        // number/symbol runs
+  // Sentence-like: at least one terminator mid-text, or long-enough flowing prose
+  if (!/[.!?…](\s|$)/.test(text) && text.length < 160) return false;
+  // SHOUTING headers / collage of uppercase display text
+  const upperTokens = words.filter((w) => w.length > 2 && w === w.toUpperCase() && /[A-ZÄÖÜ]/.test(w)).length;
+  if (upperTokens / words.length > 0.5) return false;
+  return true;
+}
+
+// First-sentence title that NEVER cuts mid-word (the old slice(0,80) produced
+// titles like "Um weiterhin attraktiven Wohnraum z").
+function cleanTitleFrom(text, max = 80) {
+  const first = ((text || '').trim().split(/(?<=[.!?])\s|\n/)[0] || '').trim();
+  if (first.length <= max) return first;
+  const cut = first.slice(0, max);
+  const atWord = cut.slice(0, cut.lastIndexOf(' ') > 40 ? cut.lastIndexOf(' ') : max);
+  return `${atWord.trim()}…`;
+}
+
+
 export class DocumentFirstIngestionService {
   constructor({ db, smartIngestRouter, memoryGraphEngine, doclingAdapter, embeddingService, entityExtractor = null, topicStateWriter = null, logger = console }) {
     this.db = db;
@@ -52,6 +106,138 @@ export class DocumentFirstIngestionService {
       });
       await Promise.all(workers);
     })().catch(err => this.logger.warn(`[entity-extractor] batch failed: ${err.message}`));
+  }
+
+  /**
+   * Deferred KB fact-distillation (P6). Big documents (>=30 segments) used to
+   * SKIP fact extraction entirely for speed — so magazine/report uploads stored
+   * raw chunks labeled 'fact' and nothing distilled (the hauspost complaint).
+   * This runs the SAME MemoryProcessor LLM fact pass the inline path uses, but
+   * AFTER promotion commits: batched workers, off the critical path, graceful
+   * per-segment failure. Each distilled fact becomes its own memory with full
+   * provenance + a Derives edge back to its section memory.
+   *
+   * Returns the background promise (callers fire-and-forget; reprocess scripts
+   * can await it via service._distillPromise).
+   */
+  _distillFactsAsync({ targets, userId, orgId, metadata = {}, documentId }) {
+    if (!Array.isArray(targets) || targets.length === 0) return null;
+    if (process.env.KB_FACT_DISTILL === 'false') return null; // emergency off-switch
+    const CONCURRENCY = Number(process.env.KB_DISTILL_CONCURRENCY || 3);
+    const MAX_FACTS_PER_SEGMENT = Number(process.env.KB_DISTILL_MAX_FACTS || 5);
+    const MAX_FACTS_PER_DOC = Number(process.env.KB_DISTILL_DOC_CAP || 120);
+
+    const run = (async () => {
+      const { MemoryProcessor } = await import('../memory/memory-processor.js');
+      const processor = new MemoryProcessor();
+      let created = 0, failed = 0, idx = 0;
+
+      const distillOne = async (t) => {
+        if (created >= MAX_FACTS_PER_DOC) return;
+        const words = (t.content || '').split(/\s+/).filter(Boolean).length;
+        if (words < 25) return; // nothing to distill
+        let factSentences = [];
+        try {
+          const result = await processor.process(
+            { content: t.content, memory_type: 'fact', user_id: userId, org_id: orgId },
+            [], // no similar-memory comparison — facts only
+          );
+          factSentences = (result?.factSentences || [])
+            .filter((f) => typeof f === 'string' && f.trim().length >= 20)
+            .slice(0, MAX_FACTS_PER_SEGMENT);
+        } catch (err) {
+          failed++;
+          this.logger.warn?.(`[kb-distill] LLM failed for segment-memory ${t.memoryId}: ${err.message}`);
+          return;
+        }
+        for (const fact of factSentences) {
+          if (created >= MAX_FACTS_PER_DOC) break;
+          try {
+            const res = await this.memoryGraphEngine.ingestMemory({
+              user_id: userId,
+              org_id: orgId,
+              scope: t.scope,
+              visibility: t.visibility || 'private',
+              primary_team_id: t.primary_team_id || null,
+              project_ids: Array.isArray(t.project_ids) ? t.project_ids : [],
+              content: fact.trim(),
+              title: cleanTitleFrom(fact),
+              memory_type: 'fact',
+              source_type: 'knowledge_fact',
+              tags: [
+                ...(metadata.tags || []),
+                'extracted-fact',
+                'distilled-from-kb',
+                ...(metadata.filename ? [`filename:${metadata.filename}`] : []),
+                ...(documentId ? [`doc-id:${documentId}`] : []),
+                ...(t.heading ? [`heading:${String(t.heading).toLowerCase().replace(/\s+/g, '-').slice(0, 50)}`] : []),
+                ...(t.page ? [`page:${t.page}`] : []),
+              ],
+              source_metadata: {
+                source_platform: 'knowledge_base',
+                source_type: 'knowledge_fact',
+                document_id: documentId,
+              },
+              metadata: { document_id: documentId, segment_memory_id: t.memoryId, distill_agent: 'kb_distill_v1' },
+              skip_fact_extraction: true,
+              defer_entity_linking: true,
+              strict_contradictions: true,
+            });
+            const factId = res?.memoryId || res?.id || null;
+            if (factId && !(res?.operation || '').startsWith('skipped')) {
+              created++;
+              // Provenance edge: fact Derives-from its section memory.
+              try {
+                await this.memoryGraphEngine.store.createRelationship({
+                  id: crypto.randomUUID(),
+                  from_id: factId,
+                  to_id: t.memoryId,
+                  type: 'Derives',
+                  confidence: 0.9,
+                  metadata: { created_by: 'kb_distill_v1', document_id: documentId },
+                });
+              } catch { /* edge is best-effort */ }
+              // Vector index: route-level code indexes upload-path memories, but
+              // distilled facts are created inside dfi — index them here or they
+              // stay invisible to vector recall (lexical-only).
+              try {
+                await this.memoryGraphEngine.vectorStore?.storeMemory({
+                  id: factId, user_id: userId, org_id: orgId,
+                  content: fact.trim(),
+                  memory_type: 'fact', is_latest: true,
+                  tags: [], project_ids: Array.isArray(t.project_ids) ? t.project_ids : [],
+                  primary_team_id: t.primary_team_id || null,
+                  visibility: t.visibility || 'private',
+                  created_at: new Date().toISOString(),
+                });
+              } catch (vecErr) {
+                this.logger.warn?.(`[kb-distill] vector index failed for ${factId}: ${vecErr.message}`);
+              }
+            }
+          } catch (err) {
+            failed++;
+            this.logger.warn?.(`[kb-distill] fact ingest failed: ${err.message}`);
+          }
+        }
+      };
+
+      const workers = Array.from({ length: Math.min(CONCURRENCY, targets.length) }, async () => {
+        while (true) {
+          const i = idx++;
+          if (i >= targets.length) return;
+          await distillOne(targets[i]);
+        }
+      });
+      await Promise.all(workers);
+      this.logger.info?.(`[kb-distill] doc ${String(documentId).slice(0, 8)}: ${created} facts distilled from ${targets.length} sections (failed=${failed})`);
+      return { created, failed };
+    })().catch((err) => {
+      this.logger.warn?.(`[kb-distill] batch failed: ${err.message}`);
+      return null;
+    });
+
+    this._distillPromise = run; // reprocess scripts can await this
+    return run;
   }
 
   /**
@@ -616,6 +802,7 @@ export class DocumentFirstIngestionService {
     const candidates = [];
     const memories = [];
     const entityLinkTargets = []; // collected during promote, entity-linked concurrently after commit
+    const distillTargets = [];    // big-doc deferred fact distillation (P6) — fed after commit
 
     // Strategy: diversity-sampled promotion
     // 1. Always include first + last (document boundaries)
@@ -626,8 +813,19 @@ export class DocumentFirstIngestionService {
     const MIN_PROMOTE = Number(process.env.PHASE1_MIN_PROMOTE || 5);
     const promotableSegments = (() => {
       if (!Array.isArray(segments) || segments.length === 0) return [];
-      if (segments.length <= MIN_PROMOTE) return segments.slice();
+      // P3 quality gate FIRST: drop boilerplate (imprint/masthead/ToC/page
+      // furniture) and non-prose fragments BEFORE any selection, so boundary/
+      // heading/sampling picks come from the clean pool. Fallback to the raw
+      // list when the filter is too aggressive (tiny or unusual docs).
+      const cleanPool = segments.filter((s) =>
+        !isBoilerplateSegment(s.content, s.metadata?.heading) && isQualityContent(s.content));
+      const pool = cleanPool.length >= Math.min(MIN_PROMOTE, segments.length) ? cleanPool : segments;
+      if (pool.length !== segments.length) {
+        this.logger.info?.(`[kb-quality] ${documentId.slice(0, 8)}: ${segments.length - pool.length}/${segments.length} segments dropped as boilerplate/low-quality`);
+      }
+      if (pool.length <= MIN_PROMOTE) return pool.slice();
 
+      const segmentsForPick = pool;
       const picked = new Map(); // segmentId -> segment
       const dedupKeys = new Set();
       // Dedup by (heading + content-prefix) so single-H1 docs aren't squashed.
@@ -646,21 +844,21 @@ export class DocumentFirstIngestionService {
       };
 
       // Boundaries first
-      tryAdd(segments[0]);
-      tryAdd(segments[segments.length - 1]);
+      tryAdd(segmentsForPick[0]);
+      tryAdd(segmentsForPick[segmentsForPick.length - 1]);
 
       // All distinct-heading segments
-      for (const s of segments) {
+      for (const s of segmentsForPick) {
         if (picked.size >= MAX_PROMOTE) break;
         if (s.metadata?.heading) tryAdd(s);
       }
 
       // Even sampling to fill remaining
-      const target = Math.min(MAX_PROMOTE, Math.max(MIN_PROMOTE, Math.ceil(segments.length / 10)));
+      const target = Math.min(MAX_PROMOTE, Math.max(MIN_PROMOTE, Math.ceil(segmentsForPick.length / 10)));
       if (picked.size < target) {
-        const step = Math.max(1, Math.floor(segments.length / target));
-        for (let i = 0; i < segments.length && picked.size < target; i += step) {
-          tryAdd(segments[i]);
+        const step = Math.max(1, Math.floor(segmentsForPick.length / target));
+        for (let i = 0; i < segmentsForPick.length && picked.size < target; i += step) {
+          tryAdd(segmentsForPick[i]);
         }
       }
       return Array.from(picked.values());
@@ -695,8 +893,7 @@ export class DocumentFirstIngestionService {
           // "Extracted from <hash>" fallback that produced unusable titles.
           title: segment.metadata?.heading
             ? String(segment.metadata.heading).slice(0, 200)
-            : ((segment.content || '').trim().split(/(?<=[.!?])\s|\n/)[0] || '').trim().slice(0, 80)
-              || `Segment ${documentId.slice(0, 8)}`,
+            : cleanTitleFrom(segment.content) || `Segment ${documentId.slice(0, 8)}`,
           source_type: 'knowledge_segment',
           source_metadata: {
             segment_id: segment.id,
@@ -766,6 +963,16 @@ export class DocumentFirstIngestionService {
             project: routed.project || null, content: routed.content,
             tags: routed.tags || [], memory_type: routed.memory_type,
           });
+          distillTargets.push({
+            memoryId,
+            content: segment.content,
+            heading: segment.metadata?.heading || null,
+            page: segment.metadata?.page || null,
+            scope: routed.scope,
+            visibility: routed.visibility,
+            primary_team_id: routed.primary_team_id || null,
+            project_ids: Array.isArray(routed.project_ids) ? routed.project_ids : [],
+          });
 
           // Link memory to evidence
           await this.db.memoryEvidenceLink.create({
@@ -829,6 +1036,17 @@ export class DocumentFirstIngestionService {
       this.memoryGraphEngine.linkEntitiesForMemories(entityLinkTargets, { concurrency: linkConcurrency })
         .then(() => this.logger.info?.(`[entity-link:deferred] linked ${entityLinkTargets.length} promoted memories`))
         .catch((err) => this.logger.warn?.(`[entity-link:deferred] batch failed: ${err.message}`));
+    }
+
+    // P6 — deferred fact distillation for big docs. The per-segment payloads set
+    // skip_fact_extraction for >=30-segment documents (speed guard); instead of
+    // losing distillation entirely (old behavior: raw chunks stored as 'facts'),
+    // run it NOW in the background over the promoted sections.
+    const factsWereSkipped = metadata.force_fact_extraction === true
+      ? false
+      : (Array.isArray(segments) && segments.length >= 30);
+    if (factsWereSkipped && distillTargets.length) {
+      this._distillFactsAsync({ targets: distillTargets, userId, orgId, metadata, documentId });
     }
 
     // ── Canonical Document parent + PartOf edges (Supermemory-shape graph) ──

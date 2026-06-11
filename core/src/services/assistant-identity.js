@@ -184,6 +184,27 @@ export function extractNameFromReply(text) {
   return null;
 }
 
+// Naming INTENT detector — returns a name ONLY when the user explicitly asks to
+// (re)name the assistant. Unlike extractNameFromReply (which also grabs bare
+// capitalised / short replies as names — wrong when the reply is a real query),
+// this fires solely on explicit naming phrases. Use this on the live chat path
+// so a normal first question is never mistaken for a name. Works anytime → the
+// user can rename the assistant on any turn (dynamic intent, not a one-shot gate).
+const NAMING_INTENT_RE = /\b(?:call (?:you|yourself)|name (?:you|yourself)|your name (?:is|should be|will be)|rename (?:you|yourself)|i(?:'|’)?ll call you|let(?:'|’)?s call you|i want to call you|you(?:'|’)?(?:ll| will) be called|be called|go by)\b/i;
+export function hasNamingIntent(text) {
+  return typeof text === 'string' && NAMING_INTENT_RE.test(text);
+}
+export function extractNameIfIntent(text) {
+  if (!hasNamingIntent(text)) return null;
+  const t = text.trim();
+  // Prefer a quoted name when present (highest precision).
+  const quoted = t.match(/['"`“”‘’]([\w\s\-_.]{1,32})['"`“”‘’]/);
+  if (quoted) return sanitizeName(quoted[1]);
+  // Otherwise capture the token(s) right after the intent phrase.
+  const m = t.match(/(?:call (?:you|yourself)|name (?:you|yourself)|your name (?:is|should be|will be)|rename (?:you|yourself)|i(?:'|’)?ll call you|let(?:'|’)?s call you|i want to call you|you(?:'|’)?(?:ll| will) be called|be called|go by)\s+(?:to|as)?\s*([A-Za-z][\w\-_.]{0,31})/i);
+  return m ? sanitizeName(m[1]) : null;
+}
+
 function sanitizeName(raw) {
   if (!raw) return null;
   // Strip surrounding punctuation; keep letters / digits / dash / underscore / space.

@@ -18619,15 +18619,18 @@ exit \$RC
                 // LLM-picked because it needs to gate the very first turn
                 // before the LLM ever runs.
                 let agentAssistantName = null;
+                let agentOnboardingIntro = null; // one-time greeting, attached to the real answer
                 let agentOrgName = 'your organisation';
                 try {
                   const {
-                    getAssistantName, extractNameFromReply, buildAssistantNamePayload, ASSISTANT_IDENTITY,
+                    getAssistantName, extractNameIfIntent, buildAssistantNamePayload, ASSISTANT_IDENTITY,
                     hasShownOnboardingIntro, markOnboardingShown,
                   } = await import('./services/assistant-identity.js');
+                  let agentNameMemoryId = null;
                   if (persistentMemoryStore) {
                     const lookup = await getAssistantName(persistentMemoryStore, { userId, orgId });
                     agentAssistantName = lookup.name;
+                    agentNameMemoryId = lookup.memoryId;
                   }
                   if (orgId && prisma) {
                     try {
@@ -18638,31 +18641,35 @@ exit \$RC
                   const introShown = persistentMemoryStore
                     ? await hasShownOnboardingIntro(persistentMemoryStore, { userId, orgId })
                     : false;
-                  if (!agentAssistantName && !introShown) {
-                    if (persistentMemoryStore) await markOnboardingShown(persistentMemoryStore, { userId, orgId });
-                    return jsonResponse(res, {
-                      response: `Hi — I'm ${agentOrgName}'s second brain. I store, connect, and recall everything you and your team tell me.\n\nGot a name for me? Pick something short (max 32 chars). Say "skip" to use the default ("${ASSISTANT_IDENTITY.DEFAULT_NAME}").`,
-                      sources: [], usage: null, assistant_name: null,
-                      onboarding: { step: 'ask_name', org_name: agentOrgName },
-                    });
-                  }
-                  if (!agentAssistantName && introShown) {
-                    const extracted = extractNameFromReply(message);
-                    const finalName = extracted || ASSISTANT_IDENTITY.DEFAULT_NAME;
+
+                  // Dynamic naming intent (ANY turn) — only (re)name when the user
+                  // EXPLICITLY asks ("call yourself X", "your name is X", quoted).
+                  // A normal question is NEVER consumed as a name. Works after a
+                  // name is set too → user can rename anytime.
+                  const intentName = extractNameIfIntent(message);
+                  if (intentName) {
                     try {
-                      const payload = buildAssistantNamePayload({ name: finalName, userId, orgId });
+                      const payload = buildAssistantNamePayload({ name: intentName, userId, orgId, prevMemoryId: agentNameMemoryId });
                       if (persistentMemoryEngine?.ingestMemory) {
                         await persistentMemoryEngine.ingestMemory({ ...payload, skipProcessing: true, smartIngest: false });
                       }
+                      if (persistentMemoryStore && !introShown) await markOnboardingShown(persistentMemoryStore, { userId, orgId });
                     } catch {}
-                    agentAssistantName = finalName;
                     return jsonResponse(res, {
-                      response: extracted
-                        ? `Got it — I'll go by **${finalName}** from now on. What can I help you with?`
-                        : `Going with the default — call me **${finalName}**. What can I help you with?`,
-                      sources: [], usage: null, assistant_name: finalName,
-                      onboarding: { step: 'name_saved', name: finalName, org_name: agentOrgName },
+                      response: `Got it — I'll go by **${intentName}** from now on. What can I help you with?`,
+                      sources: [], usage: null, assistant_name: intentName,
+                      onboarding: { step: 'name_saved', name: intentName, org_name: agentOrgName },
                     });
+                  }
+
+                  // One-time greeting (NON-blocking) — surfaced as the agent's
+                  // first message via `onboarding.intro`; the user's real query is
+                  // still answered below. Shown once, then the sentinel is set.
+                  if (!agentAssistantName && !introShown) {
+                    agentOnboardingIntro =
+                      `Hi — I'm ${agentOrgName}'s second brain. I store, connect, and recall everything you and your team tell me. ` +
+                      `Want to name me? Just say e.g. "call yourself Sage" anytime — otherwise I go by "${ASSISTANT_IDENTITY.DEFAULT_NAME}".`;
+                    if (persistentMemoryStore) await markOnboardingShown(persistentMemoryStore, { userId, orgId });
                   }
                 } catch {}
 
@@ -18704,6 +18711,9 @@ exit \$RC
                       },
                       onEvent: emit,
                     });
+                    if (agentOnboardingIntro && result && typeof result === 'object' && !result.onboarding) {
+                      result.onboarding = { step: 'greeting', intro: agentOnboardingIntro, org_name: agentOrgName };
+                    }
                     emit({ type: 'done', ...result });
                   } catch (agentErr) {
                     emit({ type: 'error', error: agentErr.message });
@@ -18738,6 +18748,9 @@ exit \$RC
                 // the graph with noisy "Chat turn — <date>" records. Event-
                 // driven save only. (Removed 2026-06-01.)
 
+                if (agentOnboardingIntro && result && typeof result === 'object' && !result.onboarding) {
+                  result.onboarding = { step: 'greeting', intro: agentOnboardingIntro, org_name: agentOrgName };
+                }
                 return jsonResponse(res, result);
               } catch (agentErr) {
                 console.warn('[chat:react-agent] failed, falling back to legacy:', agentErr.message);
@@ -18754,9 +18767,10 @@ exit \$RC
             let assistantName = null;
             let assistantNameMemoryId = null;
             let orgName = 'your organisation';
+            let onboardingIntro = null; // one-time greeting attached to the first real answer
             try {
               const {
-                getAssistantName, extractNameFromReply, buildAssistantNamePayload, ASSISTANT_IDENTITY,
+                getAssistantName, extractNameIfIntent, buildAssistantNamePayload, ASSISTANT_IDENTITY,
                 hasShownOnboardingIntro, markOnboardingShown,
               } = await import('./services/assistant-identity.js');
               if (persistentMemoryStore) {
@@ -18775,71 +18789,54 @@ exit \$RC
                 } catch {}
               }
 
-              // Onboarding state via PERSISTENT sentinel (not history regex):
-              //   • introShown=false, name=null  → STATE 1: ask once, mark shown
-              //   • introShown=true,  name=null  → STATE 2: parse this turn as name reply
-              //   • name=*                       → skip onboarding entirely
-              // Survives empty-history sessions / new tabs / API reconnects.
-              const introShown = persistentMemoryStore
+              // Persistent sentinel — has the one-time greeting already been shown?
+              const introShownEarly = persistentMemoryStore
                 ? await hasShownOnboardingIntro(persistentMemoryStore, { userId, orgId })
                 : false;
 
-              // STATE 1: no name set, intro never shown → ask now + persist sentinel.
-              if (!assistantName && !introShown) {
-                const intro =
-                  `Hi — I'm ${orgName}'s second brain. I store, connect, and recall everything you and your team tell me.\n\n` +
-                  `Got a name for me? Pick something short (max 32 chars). Say "skip" to use the default ("${ASSISTANT_IDENTITY.DEFAULT_NAME}").`;
-                // Persist the "intro shown" sentinel BEFORE responding so a
-                // racing follow-up turn can't re-trigger State 1.
-                if (persistentMemoryStore) {
-                  await markOnboardingShown(persistentMemoryStore, { userId, orgId });
-                }
-                return jsonResponse(res, {
-                  response: intro,
-                  sources: [],
-                  usage: null,
-                  assistant_name: null,
-                  onboarding: { step: 'ask_name', org_name: orgName },
-                });
-              }
-
-              // STATE 2: no name set, intro was shown → this turn is the name reply.
-              if (!assistantName && introShown) {
-                const extracted = extractNameFromReply(message);
-                const finalName = extracted || ASSISTANT_IDENTITY.DEFAULT_NAME;
-                // Save it via the standard ingest pipeline. Skip processing so
-                // the LLM fact-extraction doesn't misinterpret "User chose to
-                // name their HIVEMIND assistant 'Sage'" as "User's name is
-                // Sage" — that pollution caused false claims in later
-                // "what's my name" queries.
+              // ── Dynamic naming intent (ANY turn) ──
+              // Only (re)name when the user EXPLICITLY asks — "call yourself X",
+              // "your name is X", "rename yourself to X", quoted name, etc.
+              // A normal question is NEVER consumed as a name (the old STATE-2
+              // regex-grab is gone). Works even after a name is set → rename.
+              const intentName = extractNameIfIntent(message);
+              if (intentName) {
                 try {
                   const payload = buildAssistantNamePayload({
-                    name: finalName,
-                    userId,
-                    orgId,
-                    prevMemoryId: assistantNameMemoryId,
+                    name: intentName, userId, orgId, prevMemoryId: assistantNameMemoryId,
                   });
                   if (persistentMemoryEngine?.ingestMemory) {
                     await persistentMemoryEngine.ingestMemory({
-                      ...payload,
-                      skipProcessing: true,
-                      smartIngest: false, // identity config, not knowledge
+                      ...payload, skipProcessing: true, smartIngest: false, // identity config, not knowledge
                     });
+                  }
+                  // Mark intro shown so the one-time greeting never fires later.
+                  if (persistentMemoryStore && !introShownEarly) {
+                    await markOnboardingShown(persistentMemoryStore, { userId, orgId });
                   }
                 } catch (saveErr) {
                   console.warn('[chat:onboarding] save name failed:', saveErr.message);
                 }
-                assistantName = finalName;
-                const ack = extracted
-                  ? `Got it — I'll go by **${finalName}** from now on. What can I help you with?`
-                  : `Going with the default — call me **${finalName}**. What can I help you with?`;
                 return jsonResponse(res, {
-                  response: ack,
-                  sources: [],
-                  usage: null,
-                  assistant_name: finalName,
-                  onboarding: { step: 'name_saved', name: finalName, org_name: orgName },
+                  response: `Got it — I'll go by **${intentName}** from now on. What can I help you with?`,
+                  sources: [], usage: null,
+                  assistant_name: intentName,
+                  onboarding: { step: 'name_saved', name: intentName, org_name: orgName },
                 });
+              }
+
+              // ── One-time greeting (NON-blocking) ──
+              // Surfaced as the AGENT's first message (FE renders the intro as the
+              // opening agent bubble). It does NOT replace the user's answer — the
+              // real query is processed below; the intro just rides along once via
+              // the `onboarding.intro` field. Shown a single time, then sentinel set.
+              if (!assistantName && !introShownEarly) {
+                onboardingIntro =
+                  `Hi — I'm ${orgName}'s second brain. I store, connect, and recall everything you and your team tell me. ` +
+                  `Want to name me? Just say e.g. "call yourself Sage" anytime — otherwise I go by "${ASSISTANT_IDENTITY.DEFAULT_NAME}".`;
+                if (persistentMemoryStore) {
+                  await markOnboardingShown(persistentMemoryStore, { userId, orgId });
+                }
               }
             } catch (idErr) {
               console.warn('[chat:onboarding] identity load failed:', idErr.message);
@@ -19566,6 +19563,9 @@ ${injectionText}`;
                 },
                 assistant_name: assistantName || null,
                 org_name: orgName,
+                // One-time greeting — FE renders this as the agent's opening
+                // bubble. Non-blocking: the real answer is in `response` above.
+                onboarding: onboardingIntro ? { step: 'greeting', intro: onboardingIntro, org_name: orgName } : undefined,
               });
             } catch (chatErr) {
               console.error('[chat] Failed:', chatErr.message);

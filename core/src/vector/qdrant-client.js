@@ -47,6 +47,18 @@ function filterMatchValue(filter, key) {
 // Derives org from the data the client already receives (memory.org_id /
 // filter org_id) so no call site needs changing.
 async function routeCollection({ explicit, orgId } = {}) {
+  // Per-tenant routing MUST win over a legacy default collection name. Many save
+  // sites pass collectionName = (QDRANT_COLLECTION || 'BUNDB AGENT') explicitly;
+  // under the old `if (explicit) return explicit` that silently wrote vectors to
+  // the legacy 'BUNDB AGENT' store while recall auto-routed reads to org_<id>.
+  // Net effect: every memory saved through those paths was invisible to vector
+  // recall → keyword-only fallback → "recall/KB not working". When per-tenant is
+  // on and the org is known, ignore a legacy/default explicit name and route to
+  // the org collection; honor only NON-legacy explicit names (e.g.
+  // evidence-retrieval's own collection, an explicit org_<id>/HIVEMIND_PERSONAL).
+  if (PER_TENANT && orgId && (!explicit || explicit === COLLECTION_NAME || explicit === 'BUNDB AGENT')) {
+    return resolveCollectionForOrg(orgId);
+  }
   if (explicit) return explicit;
   if (!PER_TENANT) return COLLECTION_NAME;
   return resolveCollectionForOrg(orgId);

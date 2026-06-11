@@ -12493,9 +12493,12 @@ exit \$RC
 
               // Extract optional form fields
               const containerTag = parts.find(p => p.name === 'containerTag')?.value || null;
-              const targetScope = parts.find(p => p.name === 'targetScope')?.value === 'organization'
-                ? 'organization'
-                : 'personal';
+              // KB uploads default to ORGANIZATION visibility (team knowledge is
+              // shared by default; users opt OUT to 'personal'). Was default
+              // 'personal', which siloed every upload to the uploader.
+              const targetScope = parts.find(p => p.name === 'targetScope')?.value === 'personal'
+                ? 'personal'
+                : 'organization';
               const customTags = parts.find(p => p.name === 'tags')?.value || '';
               const userTags = customTags ? customTags.split(',').map(t => t.trim()).filter(Boolean) : [];
               const projectId = parts.find(p => p.name === 'projectId')?.value || null;
@@ -12603,6 +12606,10 @@ exit \$RC
                   project_ids: projectIds,
                   primary_team_id: primaryTeamId,
                   visibility: targetScope === 'organization' ? 'organization' : 'private',
+                  // Explicit org scope when org-targeted with no project/team — so
+                  // recall's organization tier (visible to ALL org members) matches.
+                  // project/team scopes are derived downstream from the ids.
+                  scope: (targetScope === 'organization' && projectIds.length === 0 && !primaryTeamId) ? 'organization' : undefined,
                   smart: smartFlag,
                   picture_descriptions: pictureDescFlag,
                 };
@@ -12659,6 +12666,7 @@ exit \$RC
                       project_ids: projectIds,
                       primary_team_id: primaryTeamId,
                       visibility: targetScope === 'organization' ? 'organization' : 'private',
+                      scope: (targetScope === 'organization' && projectIds.length === 0 && !primaryTeamId) ? 'organization' : undefined,
                       smart: smartFlag,
                       picture_descriptions: pictureDescFlag,
                     }

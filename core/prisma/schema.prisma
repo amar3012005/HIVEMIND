@@ -1390,6 +1390,7 @@ model HyperRoom {
   userId             String       @map("user_id") @db.Uuid
   orgId              String       @map("org_id") @db.Uuid
   name               String       @db.VarChar(120)
+  goal               String?
   participantIds     String[]     @default([]) @map("participant_ids") @db.Uuid
   template           String       @default("debate") @db.VarChar(40)
   permanentLeadId    String?      @map("permanent_lead_id") @db.Uuid

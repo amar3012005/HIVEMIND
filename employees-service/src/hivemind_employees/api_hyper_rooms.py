@@ -926,6 +926,17 @@ def _join_context(*parts: str) -> str:
     return "\n".join(part.strip() for part in parts if part and part.strip())
 
 
+def _room_goal_context(goal: Optional[str]) -> str:
+    clean = re.sub(r"\s+", " ", str(goal or "")).strip()
+    if not clean:
+        return ""
+    return (
+        "ROOM GOAL — the standing objective for this room. Every agent should "
+        "optimize the discussion toward this outcome, not only answer the latest message:\n"
+        f"{clean}\n"
+    )
+
+
 def _compact_report_item(value: Any, limit: int = 260) -> str:
     text = re.sub(r"\s+", " ", str(value or "")).strip()
     if not text:
@@ -938,12 +949,15 @@ def _build_final_report(
     user_message: str,
     final_text: str,
     template: str,
+    room_goal: str = "",
     status: str = "complete",
     verdict: Optional[str] = None,
     score: Optional[float] = None,
     lead: Optional[Dict[str, Any]] = None,
     action_items: Optional[List[Any]] = None,
     evidence_ids: Optional[List[Any]] = None,
+    evidence: Optional[List[Dict[str, Any]]] = None,
+    sources: Optional[List[Dict[str, Any]]] = None,
     claims: Optional[List[Dict[str, Any]]] = None,
     reviews: Optional[List[Dict[str, Any]]] = None,
     votes: Optional[List[Dict[str, Any]]] = None,
@@ -962,6 +976,7 @@ def _build_final_report(
         f"## {title}",
         "",
         f"**Question:** {_compact_report_item(user_message, 500)}",
+        f"**Room goal:** {_compact_report_item(room_goal, 500)}" if room_goal else "",
         f"**Outcome:** {verdict_text}" + (f" · score {score}" if score is not None else ""),
         f"**Lead:** {lead_name}",
         "",
@@ -1012,11 +1027,41 @@ def _build_final_report(
             reason = vote.get("reason") or vote.get("content") or ""
             lines.append(f"- {voter}: {target}" + (f" · {vote_score}/5" if vote_score is not None else "") + (f" · {_compact_report_item(reason, 160)}" if reason else ""))
 
-    evidence = [str(e) for e in (evidence_ids or []) if e]
-    if evidence or web_intel_used:
+    evidence_rows = []
+    for row in evidence or []:
+        if not isinstance(row, dict):
+            continue
+        mid = str(row.get("id") or row.get("memory_id") or "").strip()
+        if not mid:
+            continue
+        evidence_rows.append({
+            "id": mid,
+            "title": _compact_report_item(row.get("title") or row.get("content") or "Memory", 90),
+            "snippet": _compact_report_item(row.get("content") or "", 220),
+        })
+    known_ids = {row["id"] for row in evidence_rows}
+    for mid in [str(e) for e in (evidence_ids or []) if e]:
+        if mid not in known_ids:
+            evidence_rows.append({"id": mid, "title": "Memory evidence", "snippet": ""})
+            known_ids.add(mid)
+    source_rows = []
+    for src in sources or []:
+        if not isinstance(src, dict):
+            continue
+        url = str(src.get("url") or "").strip()
+        title = _compact_report_item(src.get("title") or url or "Source", 120)
+        if url or title:
+            source_rows.append({
+                "title": title,
+                "url": url,
+                "snippet": _compact_report_item(src.get("snippet") or "", 220),
+            })
+    if evidence_rows or source_rows or web_intel_used:
         lines.extend(["", "### Evidence"])
-        if evidence:
-            lines.append(f"- Memory evidence: {', '.join(evidence[:12])}")
+        if evidence_rows:
+            lines.append(f"- {len(evidence_rows[:12])} relevant memories are linked below.")
+        if source_rows:
+            lines.append(f"- {len(source_rows[:8])} web sources are linked below.")
         if web_intel_used:
             lines.append("- External web-intel dossier was consulted for public/current evidence.")
 
@@ -1027,6 +1072,9 @@ def _build_final_report(
         "status": status,
         "verdict": verdict_text,
         "weighted_score": score,
+        "room_goal": room_goal or "",
+        "evidence": evidence_rows[:12],
+        "sources": source_rows[:8],
         "content": "\n".join(lines).strip(),
     }
 
@@ -1328,6 +1376,7 @@ class RoomTurnRequest(BaseModel):
     # Project scope: when set, every agent recall/save in this turn is scoped to
     # the project HIVEMIND so the room stays about that project.
     project_id: Optional[str] = None
+    room_goal: Optional[str] = None
 
 
 class RoomTurnResponse(BaseModel):
@@ -1738,6 +1787,9 @@ async def _orchestrate_deep_sim(
         project_id=req.project_id,
     )
     memory_context = blackboard.get("context_text") or ""
+    goal_context = _room_goal_context(req.room_goal)
+    if goal_context:
+        memory_context = _join_context(goal_context, memory_context)
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "simulation_phase",
         "phase": "role_grounding",
@@ -1933,12 +1985,14 @@ async def _orchestrate_deep_sim(
         user_message=req.user_message,
         final_text=final_text,
         template=room_template,
+        room_goal=req.room_goal or "",
         status="complete",
         verdict=verdict,
         score=round(sum(v["score"] for v in vote_summary) / max(len(vote_summary), 1), 2),
         lead=lead,
         action_items=[v["conditions"][0] for v in vote_summary if v.get("conditions")][:6],
         evidence_ids=blackboard.get("memory_ids", []),
+        evidence=blackboard.get("memory_hits", []),
         claims=claims,
         reviews=reviews,
         votes=vote_summary,
@@ -3109,6 +3163,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
         user_message=req.user_message,
         final_text=final_text,
         template=room_template,
+        room_goal=req.room_goal or "",
         status=status,
         verdict=consensus["verdict"],
         score=consensus.get("weighted_score"),
@@ -3293,7 +3348,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         # Best-effort pre-fetch memory context for R1 (shared across all agents).
         # Recall via master+emulation (req.user_id/org_id) so it reaches the
         # org brain regardless of whether bootstrap minted a lead key.
-        memory_context_swarm = ""
+        memory_context_swarm = _room_goal_context(req.room_goal)
         swarm_blackboard: Dict[str, Any] = {"confidence": 0.0, "hit_count": 0}
         try:
             boot_map = {b["id"]: b for b in await fetch_bootstrap()}
@@ -3326,7 +3381,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 "confidence": 0.55 if rows else 0.0,
                 "hit_count": len(rows),
             }
-            memory_context_swarm = (company_brief + candidate_block).strip()
+            memory_context_swarm = _join_context(memory_context_swarm, company_brief + candidate_block)
             if memory_context_swarm:
                 memory_context_swarm += "\n"
         except Exception as exc:  # noqa: BLE001
@@ -3379,6 +3434,10 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     except Exception as exc:  # noqa: BLE001
         log.warning("hyper-rooms blackboard build failed: %s", exc)
     current_turn_state = _format_current_turn_state(req.user_message, blackboard)
+    goal_context = _room_goal_context(req.room_goal)
+    if goal_context:
+        memory_context = _join_context(goal_context, memory_context)
+        current_turn_state = _join_context(goal_context, current_turn_state)
     try:
         web_intel_context = await _run_web_intel_turn(
             req=req,
@@ -4082,11 +4141,13 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         user_message=req.user_message,
         final_text=final_text,
         template=room_template,
+        room_goal=req.room_goal or "",
         status=status,
         verdict=(final_verdict or ("resolved" if status == "complete" else status)),
         lead=lead,
         action_items=report_actions,
         evidence_ids=blackboard.get("memory_ids", [])[:10],
+        evidence=blackboard.get("memory_hits", []),
         reviews=report_objections,
         web_intel_used="WEB INTEL DOSSIER" in (memory_context or ""),
     ))

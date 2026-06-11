@@ -1038,6 +1038,19 @@ export async function recallPersistedMemories(store, {
     ? [...tags, ..._entityFilterTags]
     : tags;
 
+  // ── Temporal tag-filter-first (gated: TEMPORAL_FILTER_MODE = off | should) ──
+  // Mirrors the entity SHOULD pass: when the query carries a date anchor
+  // ("yesterday", "last week", "on Monday", an explicit 2026-06-09), emit the
+  // matching `ts:`/`time:` OR-candidates and run ONE additive vector pass that
+  // can only ADD date-matched memories (never drops — the unfiltered passes
+  // remain the recall floor). `must` is intentionally NOT supported: the FTS
+  // path AND-matches tags (hasEvery), and a multi-day OR set would zero out;
+  // the Qdrant additive pass (any-match) is the correct, safe mechanism.
+  const TEMPORAL_FILTER_MODE = (process.env.TEMPORAL_FILTER_MODE || 'off').toLowerCase();
+  const _temporalFilterTags = TEMPORAL_FILTER_MODE === 'should'
+    ? normalizeQueryTemporalTokens(query_context, Date.now())
+    : [];
+
   const lexicalCandidates = await store.searchMemories({
     query: query_context,
     user_id,
@@ -1122,13 +1135,30 @@ export async function recallPersistedMemories(store, {
       .then((cands) => cands.filter((c) => !isTaraActivity(c?.memory)).map((c) => ({ ...c, _entity_filtered: true })))
       .catch(() => []);
   }
+
+  // SHOULD mode (temporal): ADDITIVE date-filtered precision pass. Same shape as
+  // the entity pass — Qdrant any-matches the `ts:`/`time:` OR-set, results are
+  // marked _temporal_filtered and folded into the MAX-dedup merge. Never removes.
+  let temporalFilteredCandidates = [];
+  if (TEMPORAL_FILTER_MODE === 'should' && _temporalFilterTags.length) {
+    temporalFilteredCandidates = await vectorCandidatesForRecall(store, {
+      query_context, user_id, org_id, project, source_platforms,
+      tags: _temporalFilterTags, max_memories,
+      dateRange: effectiveDateRange, scoreThreshold: vectorScoreThreshold,
+      hnswEf: _wireCfg ? _cfg?.hnsw_ef : undefined,
+      candidatePoolSize, is_latest: effectiveIsLatest, access_context, scope_filter,
+    })
+      .then((cands) => cands.filter((c) => !isTaraActivity(c?.memory)).map((c) => ({ ...c, _temporal_filtered: true })))
+      .catch(() => []);
+  }
+
   const relationships = await store.listRelationships({ user_id, org_id, project, limit: 1000 });
   const relationshipCounts = buildRelationshipIndex(relationships);
   const contradictedIds    = buildContradictedIndex(relationships);
 
   // Graph Expansion: Discover related memories through graph traversal
   const expandedCandidates = await expandCandidatesViaGraph(store, {
-    initialCandidates: [...filteredLexical.map(m => ({ memory: m, score: 0 })), ...vectorCandidates, ...entityFilteredCandidates],
+    initialCandidates: [...filteredLexical.map(m => ({ memory: m, score: 0 })), ...vectorCandidates, ...entityFilteredCandidates, ...temporalFilteredCandidates],
     relationships,
     relationshipCounts,
     query_context,
@@ -1964,6 +1994,66 @@ export function normalizeQueryEntityTokens(query) {
       out.add(prefix + titleCase(term.trim()));    // Title_Case
     }
   }
+  return Array.from(out);
+}
+
+// Map query text → candidate `ts:YYYY-MM-DD` / `time:YYYY-MM-DD` / `time:<dayname>`
+// tag forms that mirror the INGEST-side temporal stamps:
+//   - graph-engine deterministic stamp: `ts:YYYY-MM-DD` (every memory)
+//   - entity-co-mention LLM:            `time:YYYY-MM-DD` (date_iso) + `time:<dow>`
+// So for a date-anchored query ("yesterday", "last week", "on Monday",
+// explicit 2026-06-09) we emit BOTH `ts:` and `time:` forms as OR (`should`)
+// candidates. All date math is UTC to match the ingest stamp (which uses
+// `toISOString().slice(0,10)`). `nowMs` is injected so callers/tests are
+// deterministic. Returns [] when the query carries no temporal anchor — so the
+// additive pass is a no-op for non-temporal queries (zero cost).
+const _DOW = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+const _DAY_MS = 86400000;
+export function normalizeQueryTemporalTokens(query, nowMs) {
+  if (!query || typeof query !== 'string') return [];
+  const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const q = query.toLowerCase();
+  const out = new Set();
+  const fmtDay = (ms) => new Date(ms).toISOString().slice(0, 10);
+  const dowOf = (ms) => _DOW[new Date(ms).getUTCDay()];
+  const addDate = (ms) => { const d = fmtDay(ms); out.add(`ts:${d}`); out.add(`time:${d}`); };
+  const addDowDate = (ms) => { addDate(ms); out.add(`time:${dowOf(ms)}`); };
+
+  // ── Relative anchors ──
+  if (/\btoday(?:'?s)?\b|\bthis morning\b|\bthis afternoon\b|\btonight\b/.test(q)) addDowDate(now);
+  if (/\byesterday\b/.test(q)) addDowDate(now - _DAY_MS);
+  if (/\btomorrow\b/.test(q)) addDowDate(now + _DAY_MS);
+  // "last/past week" → trailing 7 days; "this week" → current day + 6 prior.
+  if (/\b(last|past|previous|prior)\s+week\b/.test(q)) {
+    for (let i = 1; i <= 7; i++) addDate(now - i * _DAY_MS);
+  }
+  if (/\bthis\s+week\b/.test(q)) {
+    for (let i = 0; i <= 6; i++) addDate(now - i * _DAY_MS);
+  }
+  // "last/past month" → trailing 31 days (no month-prefix tag exists to OR).
+  if (/\b(last|past|previous|prior)\s+month\b/.test(q)) {
+    for (let i = 1; i <= 31; i++) addDate(now - i * _DAY_MS);
+  }
+  if (/\brecently\b|\blately\b|\bpast few days\b|\blast few days\b/.test(q)) {
+    for (let i = 0; i <= 3; i++) addDate(now - i * _DAY_MS);
+  }
+
+  // ── Day-of-week mentions ("on monday", "monday", "fri") → the dow tag plus
+  //    the most-recent occurrence (today if it matches, else the prior one). ──
+  for (let d = 0; d < 7; d++) {
+    const name = _DOW[d];
+    const re = new RegExp(`\\b${name}\\b`);
+    if (re.test(q)) {
+      out.add(`time:${name}`);
+      const diff = (new Date(now).getUTCDay() - d + 7) % 7; // 0 = today
+      addDate(now - diff * _DAY_MS);
+    }
+  }
+
+  // ── Explicit ISO date(s) in the query (YYYY-MM-DD) ──
+  const isoDates = q.match(/\b\d{4}-\d{2}-\d{2}\b/g) || [];
+  for (const d of isoDates) { out.add(`ts:${d}`); out.add(`time:${d}`); }
+
   return Array.from(out);
 }
 

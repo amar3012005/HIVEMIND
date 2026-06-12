@@ -133,6 +133,7 @@ _ROOM_AGENTS: Dict[str, ReActAgent] = {}
 # the same risk every turn' anti-pattern.
 _ROOM_PRIOR_LINES: Dict[str, List[str]] = {}
 _REPEAT_GUARD_MAX = 80  # rolling window per room
+_WEB_INTEL_PAYLOADS: Dict[str, Dict[str, Any]] = {}
 
 # ─── A1 decision sink — explicit save-intent regex ───
 _SAVE_INTENT_RE = re.compile(
@@ -922,6 +923,12 @@ def _format_web_intel_context(payload: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _web_sources_for_turn(turn_id: str) -> List[Dict[str, Any]]:
+    payload = _WEB_INTEL_PAYLOADS.get(turn_id) or {}
+    sources = payload.get("sources")
+    return sources if isinstance(sources, list) else []
+
+
 def _join_context(*parts: str) -> str:
     return "\n".join(part.strip() for part in parts if part and part.strip())
 
@@ -942,6 +949,128 @@ def _compact_report_item(value: Any, limit: int = 260) -> str:
     if not text:
         return ""
     return text[:limit].rstrip() + ("..." if len(text) > limit else "")
+
+
+def _goal_terms(goal: str) -> List[str]:
+    stop = {
+        "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in",
+        "is", "it", "of", "on", "or", "our", "that", "the", "their", "this",
+        "to", "toward", "we", "with", "within",
+    }
+    terms: List[str] = []
+    for raw in re.findall(r"[a-z0-9][a-z0-9\-]{2,}", str(goal or "").lower()):
+        if raw not in stop and raw not in terms:
+            terms.append(raw)
+    return terms[:18]
+
+
+def _build_goal_progress(
+    *,
+    room_goal: str,
+    final_text: str,
+    action_items: Optional[List[Any]],
+    evidence_count: int,
+    source_count: int,
+    claims_count: int,
+    dissent_count: int,
+    status: str,
+) -> Dict[str, Any]:
+    goal = _compact_report_item(room_goal, 500)
+    if not goal:
+        return {
+            "status": "missing_goal",
+            "score": 0,
+            "label": "No room goal",
+            "summary": "This turn cannot be scored against a standing objective because the room has no goal.",
+            "signals": [],
+        }
+    terms = _goal_terms(goal)
+    body = f"{final_text or ''} {' '.join(_compact_report_item(a, 160) for a in (action_items or []))}".lower()
+    matched = [term for term in terms if term in body]
+    coverage = (len(matched) / max(len(terms), 1)) if terms else 0.35
+    score = 35
+    score += min(30, round(coverage * 30))
+    if final_text and len(final_text.strip()) >= 80:
+        score += 10
+    if action_items:
+        score += 10
+    if evidence_count:
+        score += 8
+    if source_count:
+        score += 4
+    if claims_count >= 2:
+        score += 5
+    if dissent_count:
+        score += 3
+    if status in ("failed", "escalated"):
+        score -= 15
+    score = max(0, min(100, int(score)))
+    if score >= 78:
+        label = "On track"
+        progress_status = "on_track"
+    elif score >= 55:
+        label = "Partially advanced"
+        progress_status = "partial"
+    else:
+        label = "Needs follow-up"
+        progress_status = "needs_followup"
+    signals = []
+    if matched:
+        signals.append(f"Goal terms reflected: {', '.join(matched[:6])}")
+    if action_items:
+        signals.append(f"{len(action_items[:8])} next action(s) captured")
+    if evidence_count:
+        signals.append(f"{evidence_count} memory evidence link(s)")
+    if source_count:
+        signals.append(f"{source_count} web source(s)")
+    if dissent_count:
+        signals.append(f"{dissent_count} dissent/risk signal(s) preserved")
+    if not signals:
+        signals.append("No strong progress signals detected")
+    summary = (
+        f"{label}: this turn moved the room goal forward with {evidence_count} memory link(s)"
+        f"{' and ' + str(source_count) + ' web source(s)' if source_count else ''}."
+    )
+    return {
+        "status": progress_status,
+        "score": score,
+        "label": label,
+        "summary": summary,
+        "matched_terms": matched[:8],
+        "signals": signals[:6],
+    }
+
+
+def _build_harness_quality_check(
+    *,
+    room_goal: str,
+    final_text: str,
+    evidence_count: int,
+    source_count: int,
+    claims_count: int = 0,
+    reviews_count: int = 0,
+    votes_count: int = 0,
+    web_intel_used: bool = False,
+) -> Dict[str, Any]:
+    checks = [
+        {"name": "room_goal", "ok": bool(_compact_report_item(room_goal, 20)), "detail": "standing objective present"},
+        {"name": "final_synthesis", "ok": bool(final_text and len(final_text.strip()) >= 60), "detail": "lead conclusion is substantive"},
+        {"name": "evidence_links", "ok": evidence_count > 0 or source_count > 0, "detail": f"{evidence_count} linked memories, {source_count} linked sources"},
+        {"name": "web_sources", "ok": (not web_intel_used) or source_count > 0, "detail": f"{source_count} linked sources"},
+        {"name": "perspective_trace", "ok": claims_count > 0 or reviews_count > 0 or votes_count > 0, "detail": f"{claims_count} claims, {reviews_count} reviews, {votes_count} votes"},
+    ]
+    failed = [c["name"] for c in checks if not c["ok"]]
+    return {
+        "t": "harness_check",
+        "status": "pass" if not failed else "warn",
+        "failed": failed,
+        "checks": checks,
+        "cleanup": {
+            "bounded_memory_links": min(evidence_count, 12),
+            "bounded_source_links": min(source_count, 8),
+            "report_sections": ["conclusion", "goal_progress", "actions", "perspectives", "risks", "evidence"],
+        },
+    }
 
 
 def _build_final_report(
@@ -1056,6 +1185,25 @@ def _build_final_report(
                 "url": url,
                 "snippet": _compact_report_item(src.get("snippet") or "", 220),
             })
+    dissent_count = len(challenge_items)
+    progress = _build_goal_progress(
+        room_goal=room_goal,
+        final_text=final_text,
+        action_items=action_items,
+        evidence_count=len(evidence_rows),
+        source_count=len(source_rows),
+        claims_count=len(claims or []),
+        dissent_count=dissent_count,
+        status=status,
+    )
+    lines.extend([
+        "",
+        "### Goal progress",
+        f"**{progress['label']} · {progress['score']}/100**",
+        progress["summary"],
+    ])
+    for signal in progress.get("signals", [])[:4]:
+        lines.append(f"- {signal}")
     if evidence_rows or source_rows or web_intel_used:
         lines.extend(["", "### Evidence"])
         if evidence_rows:
@@ -1073,6 +1221,7 @@ def _build_final_report(
         "verdict": verdict_text,
         "weighted_score": score,
         "room_goal": room_goal or "",
+        "goal_progress": progress,
         "evidence": evidence_rows[:12],
         "sources": source_rows[:8],
         "content": "\n".join(lines).strip(),
@@ -1229,6 +1378,7 @@ async def _run_web_intel_turn(
             return ""
     dossier = _format_web_intel_context(payload)
     if dossier:
+        _WEB_INTEL_PAYLOADS[req.turn_id] = payload
         await _emit_event(req.callback_url, req.turn_id, {
             "t": "web_intel",
             "agent": "web-intel",
@@ -1981,6 +2131,16 @@ async def _orchestrate_deep_sim(
         "action_items": [v["conditions"][0] for v in vote_summary if v.get("conditions")][:6],
         "vote_count": len(vote_summary),
     })
+    await _emit_event(req.callback_url, req.turn_id, _build_harness_quality_check(
+        room_goal=req.room_goal or "",
+        final_text=final_text,
+        evidence_count=len(blackboard.get("memory_hits", []) or blackboard.get("memory_ids", []) or []),
+        source_count=len(_web_sources_for_turn(req.turn_id)),
+        claims_count=len(claims),
+        reviews_count=len(reviews),
+        votes_count=len(vote_summary),
+        web_intel_used=bool(web_intel_context),
+    ))
     await _emit_event(req.callback_url, req.turn_id, _build_final_report(
         user_message=req.user_message,
         final_text=final_text,
@@ -1993,6 +2153,7 @@ async def _orchestrate_deep_sim(
         action_items=[v["conditions"][0] for v in vote_summary if v.get("conditions")][:6],
         evidence_ids=blackboard.get("memory_ids", []),
         evidence=blackboard.get("memory_hits", []),
+        sources=_web_sources_for_turn(req.turn_id),
         claims=claims,
         reviews=reviews,
         votes=vote_summary,
@@ -2009,6 +2170,7 @@ async def _orchestrate_deep_sim(
         "simulation_claims": len(claims),
         "simulation_reviews": len(reviews),
     })
+    _WEB_INTEL_PAYLOADS.pop(req.turn_id, None)
     return RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status="complete")
 
 
@@ -2284,8 +2446,10 @@ Vote tally (weighted by trust):
 
 Verdict computed by consensus formula: {verdict}
 Winning hypothesis id: {winning_id}
+Room goal: {room_goal}
 
 Your task: synthesise the final answer for the user.
+- Tie the answer back to the room goal; say whether the goal moved forward, stalled, or needs follow-up.
 - Quote the winning hypothesis (and the runner-up if CONDITIONAL).
 - Address the Skeptic's strongest challenge explicitly.
 - Cite memory_ids from the union of evidence used across all rounds.
@@ -3038,6 +3202,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
                 vote_summary="\n".join(vote_summary_lines) or "(no votes)",
                 verdict=consensus["verdict"],
                 winning_id=consensus["winning_id"] or "none",
+                room_goal=req.room_goal or "",
             )
             synth_reply = await lead_agent(Msg(name="user", content=synth_prompt, role="user"))
             _report_turn(lead["id"], req.user_message, synth_reply)
@@ -3159,6 +3324,16 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
                 "lane": h.get("lane"),
                 "hypothesis": h.get("hypothesis"),
             })
+    await _emit_event(req.callback_url, req.turn_id, _build_harness_quality_check(
+        room_goal=req.room_goal or "",
+        final_text=final_text,
+        evidence_count=len(evidence_pool),
+        source_count=len(_web_sources_for_turn(req.turn_id)),
+        claims_count=len(report_claims),
+        reviews_count=len(peer_reviews),
+        votes_count=len(votes),
+        web_intel_used="WEB INTEL DOSSIER" in (memory_context or ""),
+    ))
     await _emit_event(req.callback_url, req.turn_id, _build_final_report(
         user_message=req.user_message,
         final_text=final_text,
@@ -3170,6 +3345,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
         lead=lead,
         action_items=consensus.get("action_items") or [],
         evidence_ids=sorted(evidence_pool)[:50],
+        sources=_web_sources_for_turn(req.turn_id),
         claims=report_claims,
         reviews=peer_reviews,
         votes=votes,
@@ -3191,6 +3367,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
         "vote_count": len(votes),
         "cost_cap_hit": cost_cap_hit,
     })
+    _WEB_INTEL_PAYLOADS.pop(req.turn_id, None)
     return RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status=status)
 
 
@@ -4137,6 +4314,16 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     report_actions = []
     if status == "escalated" and open_question:
         report_actions.append(open_question)
+    await _emit_event(req.callback_url, req.turn_id, _build_harness_quality_check(
+        room_goal=req.room_goal or "",
+        final_text=final_text,
+        evidence_count=len(blackboard.get("memory_hits", []) or blackboard.get("memory_ids", []) or []),
+        source_count=len(_web_sources_for_turn(req.turn_id)),
+        claims_count=1 if lead_text else 0,
+        reviews_count=len(reactions),
+        votes_count=0,
+        web_intel_used="WEB INTEL DOSSIER" in (memory_context or ""),
+    ))
     await _emit_event(req.callback_url, req.turn_id, _build_final_report(
         user_message=req.user_message,
         final_text=final_text,
@@ -4148,6 +4335,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         action_items=report_actions,
         evidence_ids=blackboard.get("memory_ids", [])[:10],
         evidence=blackboard.get("memory_hits", []),
+        sources=_web_sources_for_turn(req.turn_id),
         reviews=report_objections,
         web_intel_used="WEB INTEL DOSSIER" in (memory_context or ""),
     ))
@@ -4171,6 +4359,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         "tool_call_counts": tool_call_counts,
         "tool_call_total": sum(tool_call_counts.values()),
     })
+    _WEB_INTEL_PAYLOADS.pop(req.turn_id, None)
     return RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status=status)
 
 

@@ -4209,7 +4209,11 @@ const server = http.createServer(async (req, res) => {
         const [recent, byUser, audits, totalMem] = await Promise.all([
           prisma.memory.findMany({ where: memWhere, select: { id: true, title: true, userId: true, createdAt: true, memoryType: true }, orderBy: { createdAt: 'desc' }, take: 15 }),
           prisma.memory.groupBy({ by: ['userId'], where: memWhere, _count: { _all: true }, _max: { createdAt: true } }),
-          prisma.auditLog.findMany({ where: { organizationId: orgId, OR: [{ resourceType: 'project', resourceId: projectId }, { resourceType: 'project_member', resourceId: { startsWith: projectId } }] }, select: { eventType: true, action: true, userId: true, createdAt: true }, orderBy: { createdAt: 'desc' }, take: 15 }).catch(() => []),
+          // resourceId is @db.Uuid — Prisma rejects string filters like
+          // startsWith on it ("Unknown argument"), which silently killed this
+          // whole activity feed. project_member rows store the plain project
+          // uuid anyway, so exact match covers both types.
+          prisma.auditLog.findMany({ where: { organizationId: orgId, resourceType: { in: ['project', 'project_member'] }, resourceId: projectId }, select: { eventType: true, action: true, userId: true, createdAt: true }, orderBy: { createdAt: 'desc' }, take: 15 }).catch(() => []),
           prisma.memory.count({ where: memWhere }),
         ]);
         const uids = Array.from(new Set([...recent.map(m => m.userId), ...byUser.map(u => u.userId), ...audits.map(a => a.userId)].filter(Boolean)));

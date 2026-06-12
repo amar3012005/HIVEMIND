@@ -27,6 +27,20 @@ function isTaraActivity(memory) {
   return t.some((x) => typeof x === 'string' && (x === 'tara-turn' || x === 'tara-insight' || x === 'tara-call-log' || x === 'tara-session'));
 }
 
+// Governance audit-reflection rows + HyperAgents room decisions are operational
+// noise, not user knowledge — keep them out of recall candidates. NOTE: the
+// 'cognition-loop' tag is deliberately NOT here — the GOOD cognitive-layer
+// synthesis/canonical outputs carry it; 'internal-audit'/'governance'/
+// 'reflection' are the clean discriminators (0 on synthesis outputs).
+function isRecallNoise(memory) {
+  if (!memory) return false;
+  const t = memory.tags || [];
+  return t.some((x) => typeof x === 'string' && (
+    x === 'internal-audit' || x === 'governance' || x === 'reflection' ||
+    x === 'hyper-rooms' || x === 'hyper-room' || x === 'room-decision'
+  ));
+}
+
 function scopeChain(ast = {}) {
   if (Array.isArray(ast.scopeChain)) return ast.scopeChain;
   if (typeof ast.scopeChain === 'string' && ast.scopeChain.trim()) return [ast.scopeChain];
@@ -1073,6 +1087,8 @@ export async function recallPersistedMemories(store, {
     // Exclude TARA voice activity (turns/insights/call-logs/session state) from
     // recall — isolated noise, surfaced only via the /tara Call History tab.
     if (isTaraActivity(memory)) return false;
+    // Governance audit-reflection + room-decision noise — never recall.
+    if (isRecallNoise(memory)) return false;
     // Exclude benchmark data from production recall when no specific project is set
     if (!project && memTags.includes('longmemeval')) return false;
     if (!isMemoryInDateRange(memory, effectiveDateRange)) return false;
@@ -1121,7 +1137,7 @@ export async function recallPersistedMemories(store, {
     scope_filter,
   })
     // Drop old TARA turn/insight vectors still living in Qdrant from past calls.
-    .then((cands) => cands.filter((c) => !isTaraActivity(c?.memory)));
+    .then((cands) => cands.filter((c) => !isTaraActivity(c?.memory) && !isRecallNoise(c?.memory)));
 
   // SHOULD mode: ADDITIVE entity-filtered precision pass. The unfiltered passes
   // above are the recall FLOOR (protects legacy/untagged memories); this only
@@ -1136,7 +1152,7 @@ export async function recallPersistedMemories(store, {
       hnswEf: _wireCfg ? _cfg?.hnsw_ef : undefined,
       candidatePoolSize, is_latest: effectiveIsLatest, access_context, scope_filter,
     })
-      .then((cands) => cands.filter((c) => !isTaraActivity(c?.memory)).map((c) => ({ ...c, _entity_filtered: true })))
+      .then((cands) => cands.filter((c) => !isTaraActivity(c?.memory) && !isRecallNoise(c?.memory)).map((c) => ({ ...c, _entity_filtered: true })))
       .catch(() => []);
   }
 
@@ -1160,7 +1176,7 @@ export async function recallPersistedMemories(store, {
       hnswEf: _wireCfg ? _cfg?.hnsw_ef : undefined,
       candidatePoolSize, is_latest: effectiveIsLatest, access_context, scope_filter,
     })
-      .then((cands) => cands.filter((c) => !isTaraActivity(c?.memory)).map((c) => ({ ...c, _temporal_filtered: true })))
+      .then((cands) => cands.filter((c) => !isTaraActivity(c?.memory) && !isRecallNoise(c?.memory)).map((c) => ({ ...c, _temporal_filtered: true })))
       .catch(() => []);
   }
 

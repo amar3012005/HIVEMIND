@@ -464,13 +464,17 @@ export class PrismaGraphStore {
     // by default. Caller opts in via tags=['internal-audit'] or
     // tags=['room-decision']/['hyper-rooms'].
     const hiddenTags = [];
-    if (!callerWantsAudit) hiddenTags.push('internal-audit');
-    if (!callerWantsRoomDecisions) hiddenTags.push('room-decision', 'hyper-rooms');
-    // TARA voice activity: hide per-turn/insight/session rows from the Memories
-    // list. The single per-call `tara-call-log` summary stays visible. Caller
-    // opts in by passing any tara-* tag.
+    // Governance audit-reflection noise — the cron's "Faraday scanned N memories"
+    // rows. All four tags co-occur; hide the whole class. Cognitive-layer OUTPUTS
+    // (canonical-summary / synthesis:* / principle / bridge) carry none of these,
+    // so they stay visible.
+    if (!callerWantsAudit) hiddenTags.push('internal-audit', 'governance', 'reflection');
+    if (!callerWantsRoomDecisions) hiddenTags.push('room-decision', 'hyper-rooms', 'hyper-room');
+    // TARA voice activity belongs in Call History, NOT the memory list — hide
+    // ALL of it including the per-call `tara-call-log` summary. Caller opts in
+    // by passing any tara-* tag.
     const callerWantsTara = Array.isArray(tags) && tags.some((t) => typeof t === 'string' && t.startsWith('tara-'));
-    if (!callerWantsTara) hiddenTags.push('tara-turn', 'tara-insight', 'tara-session');
+    if (!callerWantsTara) hiddenTags.push('tara-turn', 'tara-insight', 'tara-session', 'tara-call-log');
     const auditExclusion = hiddenTags.length
       ? { NOT: { tags: { hasSome: hiddenTags } } }
       : {};

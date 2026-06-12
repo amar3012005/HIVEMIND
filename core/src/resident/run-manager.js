@@ -1174,11 +1174,15 @@ export class ResidentRunManager {
       + (feynman?.observations_count || 0)
       + (turing?.observations_count || 0);
 
-    // Suppress empty cycles. If no observations were made AND no proposals
-    // persisted, the cycle was a no-op — writing a memory just for the
-    // metrics pollutes recall. Log to ops channel instead.
-    if (observationsTotal === 0 && (proposalsPersisted || 0) === 0) {
-      this.logger?.info?.(`[reflection] skip empty cycle batch=${batchId.slice(0, 8)} latency=${latencyMs}ms`);
+    // Only persist a reflection MEMORY when the cycle produced a real
+    // proposal. A cycle that merely "observed N memories, 0 proposals" is a
+    // no-op for the user — writing it floods the memory store + graph with
+    // audit noise (this was ~56% of some tenants' memories). The full audit
+    // trail still lives in governanceAgentState + the daily metrics tables
+    // (the dashboard reads those, not memory rows). Set
+    // GOV_PERSIST_EMPTY_REFLECTION=true to restore the old chatty behaviour.
+    if ((proposalsPersisted || 0) === 0 && process.env.GOV_PERSIST_EMPTY_REFLECTION !== 'true') {
+      this.logger?.info?.(`[reflection] skip no-proposal cycle batch=${batchId.slice(0, 8)} obs=${observationsTotal} latency=${latencyMs}ms`);
       return;
     }
 

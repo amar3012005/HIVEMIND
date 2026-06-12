@@ -16380,7 +16380,7 @@ exit \$RC
                 userId, orgId, deletedAt: null, isLatest: true,
                 ...(memTypeFilter ? { memoryType: memTypeFilter } : {}),
                 ...(includeChildren ? {} : { AND: [
-                  { NOT: { tags: { hasSome: ['extracted-fact', 'tara-turn', 'tara-insight', 'tara-call-log', 'tara-session'] } } },
+                  { NOT: { tags: { hasSome: ['extracted-fact', 'tara-turn', 'tara-insight', 'tara-call-log', 'tara-session', 'internal-audit', 'governance', 'reflection', 'hyper-rooms', 'hyper-room', 'room-decision'] } } },
                   { NOT: { project: { startsWith: 'tara/' } } },  // skip ALL TARA activity (turns/config/skills/call-logs)
                 ] }),
                 ...(projScope ? { OR: [{ projectId: projScope.id }, { project: { in: [projScope.slug, projScope.name].filter(Boolean) } }] } : {}),
@@ -16588,7 +16588,21 @@ exit \$RC
                 url.searchParams.get('include_children') === 'true';
               // Mirrors HIDDEN_CHILD_TAGS in prisma-graph-store.listMemories.
               // TARA voice activity is fully skipped in the graph for now.
-              const HIDDEN_CHILD_TAGS_GRAPH = ['extracted-fact', 'tara-turn', 'tara-insight', 'tara-call-log', 'tara-session'];
+              // Mirror listMemories suppression: extracted-fact + ALL TARA voice
+              // activity + governance audit-reflection noise + HyperAgents room
+              // decisions (those live in the room, not the memory graph). KEEP
+              // cognitive-layer outputs (canonical-summary / synthesis:* / principle
+              // / bridge) — those are real knowledge the user wants surfaced.
+              const HIDDEN_CHILD_TAGS_GRAPH = [
+                'extracted-fact',
+                'tara-turn', 'tara-insight', 'tara-call-log', 'tara-session',
+                // governance audit-reflection noise. NOTE: do NOT add
+                // 'cognition-loop' — the GOOD synthesis/canonical outputs carry
+                // it too; 'internal-audit'/'governance'/'reflection' are the
+                // clean discriminators (0 on synthesis outputs).
+                'internal-audit', 'governance', 'reflection',
+                'hyper-rooms', 'hyper-room', 'room-decision',
+              ];
               // Resolve the project filter to match the formal projectId FK +
               // memory_projects join, NOT just the legacy `project` string —
               // uploads set projectId (string stays null), so a string-only

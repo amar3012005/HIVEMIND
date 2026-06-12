@@ -1168,10 +1168,13 @@ Rules:
     // skip_fact_extraction for >=30-segment documents (speed guard); instead of
     // losing distillation entirely (old behavior: raw chunks stored as 'facts'),
     // run it NOW in the background over the promoted sections.
-    const factsWereSkipped = metadata.force_fact_extraction === true
-      ? false
-      : (Array.isArray(segments) && segments.length >= 30);
-    if (factsWereSkipped && distillTargets.length) {
+    // Deferred distillation is now the ONLY fact source for KB docs (sections
+    // ingest as pure inserts with smartIngest:false — no inline processor), so
+    // it must fire for EVERY doc, not just >=30-segment ones. The old >=30 gate
+    // was inherited from the inline-skip logic and silently left small docs
+    // (e.g. an 11-segment pitch deck) with zero facts. Async + batched — an
+    // 11-section doc costs 2 background LLM calls.
+    if (distillTargets.length) {
       this._distillFactsAsync({ targets: distillTargets, userId, orgId, metadata, documentId });
     }
 

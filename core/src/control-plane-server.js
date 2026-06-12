@@ -3322,6 +3322,26 @@ const server = http.createServer(async (req, res) => {
             promoted++;
           }
         }
+        // Providers with an active Nango connection but NO PROVIDER_REGISTRY
+        // entry (google-docs, google-gemini, …) used to vanish here — the row
+        // existed, the loop above had no entry to promote, and the FE card
+        // stayed on "Connect" forever even after a successful OAuth. Append
+        // synthetic connected entries so the FE (which matches on
+        // entry.provider === card.id|nangoProvider) always sees them.
+        const knownProviders = new Set(result.map((e) => e.provider));
+        for (const [regId, row] of Object.entries(overlayByProvider)) {
+          if (knownProviders.has(regId)) continue;
+          result.push({
+            provider: regId,
+            label: regId,
+            status: 'connected',
+            is_active: true,
+            account_ref: row.connectionId,
+            created_at: row.connectedAt,
+            source: 'nango',
+          });
+          promoted++;
+        }
         console.log(`[v1/connectors] overlay promoted=${promoted} providers=${Object.keys(overlayByProvider).join(',')}`);
       }
     } catch (nangoErr) {

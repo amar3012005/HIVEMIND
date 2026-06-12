@@ -40,8 +40,8 @@ const MODE_FILE = process.env.KB_QUEUE_MODE_FILE || '/app/data/kb-queue-mode';
 const QUEUE_NAME = 'kb-ingest';
 const ATTEMPTS = Number(process.env.KB_QUEUE_ATTEMPTS || 3);
 const JOB_TIMEOUT_MS = Number(process.env.KB_QUEUE_JOB_TIMEOUT_MS || 10 * 60 * 1000);
-const CONCURRENCY = Number(process.env.KB_QUEUE_CONCURRENCY || 4);
-const ORG_CONCURRENCY = Number(process.env.KB_QUEUE_ORG_CONCURRENCY || 2);
+const CONCURRENCY = Number(process.env.KB_QUEUE_CONCURRENCY || 6);
+const ORG_CONCURRENCY = Number(process.env.KB_QUEUE_ORG_CONCURRENCY || 4);
 const MAX_DEPTH = Number(process.env.KB_QUEUE_MAX_DEPTH || 2000);
 const ORG_PENDING_CAP = Number(process.env.KB_QUEUE_ORG_PENDING_CAP || 500);
 

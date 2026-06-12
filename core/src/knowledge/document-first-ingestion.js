@@ -1047,7 +1047,15 @@ Rules:
           }
         };
 
-        const routedPayloads = await this.smartIngestRouter.route(payload);
+        // FAST-PATH (no per-section LLM/recall). smartIngestRouter.route() runs
+        // _enrichWithTripleOperator → a searchMemories RECALL per section, purely
+        // to infer Updates/Extends operators. For document chunks that's wasted
+        // work (sections don't supersede each other) AND it's the dominant bulk
+        // latency: N sections = N serialized recalls. We skip route() entirely
+        // and pass the already-complete payload straight to ingestMemory with
+        // smartIngest:false (engine won't re-route). _smart_routed belt-and-braces.
+        // Content is clean Docling text; ts:* stamping still happens in the engine.
+        const routedPayloads = [{ ...payload, _smart_routed: true }];
 
         for (const routed of routedPayloads) {
           // #7 — KB section promotion fast-path. Sections are document chunks:

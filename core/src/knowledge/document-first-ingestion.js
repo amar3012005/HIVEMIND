@@ -775,17 +775,44 @@ Rules:
       if (segments.length) return segments;
     }
 
-    // Fallback: sliding window chunking
+    // Fallback chunking (only when Docling HybridChunker produced nothing — the
+    // primary path above is already structure-aware: respects headings/tables/
+    // lists, never splits mid-structure). Structural fallback: accumulate whole
+    // PARAGRAPHS up to a soft cap so we never cut mid-sentence/mid-structure;
+    // carry one trailing paragraph as overlap for context continuity.
     const segments = [];
     const text = parseResult.text;
-    const chunkSize = 1000;
-    const overlap = 200;
+    const SOFT_CAP = 1200;
+
+    const paragraphs = text.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean);
+    const chunks = [];
+    let buf = '';
+    for (const para of paragraphs) {
+      // A single oversized paragraph (e.g. a table block): flush buffer, emit it whole.
+      if (para.length >= SOFT_CAP) {
+        if (buf) { chunks.push(buf); buf = ''; }
+        chunks.push(para);
+        continue;
+      }
+      if (buf && (buf.length + para.length + 2) > SOFT_CAP) {
+        chunks.push(buf);
+        // overlap: keep the last paragraph of the flushed chunk for continuity
+        const prevParas = buf.split(/\n{2,}/);
+        buf = (prevParas[prevParas.length - 1] || '') + '\n\n' + para;
+      } else {
+        buf = buf ? `${buf}\n\n${para}` : para;
+      }
+    }
+    if (buf.trim()) chunks.push(buf);
+    // Last resort: if the text had no paragraph breaks at all, hard-split.
+    if (chunks.length === 0 && text.trim()) {
+      for (let i = 0; i < text.length; i += 1000) chunks.push(text.slice(i, i + 1000));
+    }
 
     let segmentIndex = 0;
     let previousSegmentId = null;
 
-    for (let i = 0; i < text.length; i += (chunkSize - overlap)) {
-      const chunk = text.slice(i, i + chunkSize);
+    for (const chunk of chunks) {
       if (chunk.trim().length === 0) continue;
 
       const contentHash = crypto.createHash('sha256').update(chunk).digest('hex');
@@ -801,10 +828,10 @@ Rules:
           segmentIndex,
           previousSegmentId,
           depth: 0,
-          startOffset: i,
-          endOffset: Math.min(i + chunkSize, text.length),
+          startOffset: null,
+          endOffset: null,
           wordCount: chunk.split(/\s+/).length,
-          metadata: {}
+          metadata: { source: 'paragraph_fallback' }
         }
       });
 
@@ -882,6 +909,8 @@ Rules:
     const memories = [];
     const entityLinkTargets = []; // collected during promote, entity-linked concurrently after commit
     const distillTargets = [];    // big-doc deferred fact distillation (P6) — fed after commit
+    const evidenceLinkRows = []; // #6 — batched provenance inserts (was per-section)
+    const derivationRows = [];
 
     // Strategy: diversity-sampled promotion
     // 1. Always include first + last (document boundaries)
@@ -1070,31 +1099,16 @@ Rules:
             project_ids: Array.isArray(routed.project_ids) ? routed.project_ids : [],
           });
 
-          // Link memory to evidence
-          await this.db.memoryEvidenceLink.create({
-            data: {
-              memoryId,
-              segmentId: segment.id,
-              documentId,
-              linkType: 'supports',
-              confidence: 0.9,
-              excerpt: segment.content.slice(0, 500)
-            }
+          // #6 — collect provenance rows; batch-insert after the loop (was 2
+          // synchronous round-trips per section).
+          evidenceLinkRows.push({
+            memoryId, segmentId: segment.id, documentId,
+            linkType: 'supports', confidence: 0.9, excerpt: segment.content.slice(0, 500),
           });
-
-          // Record derivation
-          await this.db.memoryDerivation.create({
-            data: {
-              memoryId,
-              derivationMethod: 'promoted_from_segment',
-              derivationAgent: 'document_first_ingestion_v1',
-              confidence: 0.8,
-              metadata: {
-                segment_id: segment.id,
-                document_id: documentId,
-                promotion_strategy: promotionStrategy
-              }
-            }
+          derivationRows.push({
+            memoryId, derivationMethod: 'promoted_from_segment',
+            derivationAgent: 'document_first_ingestion_v1', confidence: 0.8,
+            metadata: { segment_id: segment.id, document_id: documentId, promotion_strategy: promotionStrategy },
           });
 
           // P1 #12 — entity-aware memory linking
@@ -1126,6 +1140,17 @@ Rules:
       }
     });
     await Promise.all(workers);
+
+    // #6 — batched provenance inserts (2 round-trips total vs 2×N). Append-only
+    // link rows, no advisory-lock semantics — safe + contained to the KB path.
+    if (evidenceLinkRows.length) {
+      await this.db.memoryEvidenceLink.createMany({ data: evidenceLinkRows, skipDuplicates: true })
+        .catch((e) => this.logger.warn?.(`[kb] evidence-link batch failed: ${e.message}`));
+    }
+    if (derivationRows.length) {
+      await this.db.memoryDerivation.createMany({ data: derivationRows, skipDuplicates: true })
+        .catch((e) => this.logger.warn?.(`[kb] derivation batch failed: ${e.message}`));
+    }
 
     if (entityLinkTargets.length && typeof this.memoryGraphEngine.linkEntitiesForMemories === 'function') {
       const linkConcurrency = Number(process.env.PHASE1_ENTITY_LINK_CONCURRENCY || 6);

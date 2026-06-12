@@ -1,24 +1,33 @@
 {
   "_meta": {
     "description": "System email catalog. Add a new message type here — no code change needed. Placeholders use {{var}} and are filled from the `vars` passed to sendSystemEmail(). Values are HTML-escaped automatically in the html body. `text` is the plain-text fallback.",
-    "placeholders": ["name", "email", "orgName", "appUrl", "year"],
+    "placeholders": [
+      "name",
+      "email",
+      "orgName",
+      "appUrl",
+      "year"
+    ],
     "version": 1
   },
-
   "welcome_login": {
     "subject": "Welcome back to HIVEMIND, {{name}} 🐝",
     "preheader": "Your memory cortex is awake and ready.",
     "text": "Hi {{name}},\n\nWelcome back to HIVEMIND — your sovereign memory cortex is awake and ready.\n\nEverything you capture becomes durable, recallable memory your AI agents can use across every session. Jump back in:\n\n{{appUrl}}\n\nWarmly,\nThe HIVEMIND team\n\n© {{year}} Da'vinci Solutions",
     "html": "<h1 style=\"margin:0 0 12px;font-family:'Space Grotesk',Inter,sans-serif;font-size:24px;color:#0a0a0a\">Welcome back, {{name}} 🐝</h1><p style=\"margin:0 0 16px;font-size:15px;line-height:1.6;color:#525252\">Your sovereign memory cortex is awake and ready. Everything you capture becomes durable, recallable memory your AI agents can use across every session.</p><p style=\"margin:0 0 28px\"><a href=\"{{appUrl}}\" style=\"display:inline-block;background:#117dff;color:#fff;text-decoration:none;font-family:'Space Grotesk',Inter,sans-serif;font-weight:600;font-size:15px;padding:12px 22px;border-radius:999px\">Open HIVEMIND</a></p><p style=\"margin:0;font-size:13px;color:#a3a3a3\">Warmly, the HIVEMIND team</p>"
   },
-
   "welcome_signup": {
     "subject": "Welcome to HIVEMIND, {{name}} — let's get you set up",
     "preheader": "A brain that never forgets, now yours.",
     "text": "Hi {{name}},\n\nWelcome to HIVEMIND! You now have a sovereign, GDPR-compliant memory engine for you and your AI agents.\n\nStart by capturing a memory or connecting a tool:\n\n{{appUrl}}\n\nWe're glad you're here.\nThe HIVEMIND team\n\n© {{year}} Da'vinci Solutions",
     "html": "<h1 style=\"margin:0 0 12px;font-family:'Space Grotesk',Inter,sans-serif;font-size:24px;color:#0a0a0a\">Welcome to HIVEMIND, {{name}}</h1><p style=\"margin:0 0 16px;font-size:15px;line-height:1.6;color:#525252\">You now have a sovereign, GDPR-compliant memory engine for you and your AI agents — a brain that never forgets.</p><p style=\"margin:0 0 28px\"><a href=\"{{appUrl}}\" style=\"display:inline-block;background:#117dff;color:#fff;text-decoration:none;font-family:'Space Grotesk',Inter,sans-serif;font-weight:600;font-size:15px;padding:12px 22px;border-radius:999px\">Get started</a></p><p style=\"margin:0;font-size:13px;color:#a3a3a3\">We're glad you're here — the HIVEMIND team</p>"
   },
-
+  "team_invite": {
+    "subject": "{{orgName}} is on HIVEMIND — you're invited 🐝",
+    "preheader": "Your admin invited you to join {{orgName}} on HIVEMIND.",
+    "text": "Hi,\n\nYour organisation {{orgName}} is on HIVEMIND, and your admin {{inviterName}} has invited you to join.\n\nHIVEMIND is your team's sovereign memory cortex — everything you capture becomes durable, recallable memory your AI agents can use across every session.\n\nAccept your invitation:\n\n{{joinUrl}}\n\nThis invitation expires on {{expiresOn}}.\n\nWarmly,\nThe HIVEMIND team\n\n© {{year}} Da'vinci Solutions",
+    "html": "<h1 style=\"margin:0 0 12px;font-family:'Space Grotesk',Inter,sans-serif;font-size:24px;color:#0a0a0a\">{{orgName}} is on HIVEMIND 🐝</h1><p style=\"margin:0 0 16px;font-size:15px;line-height:1.6;color:#525252\">Your admin <strong>{{inviterName}}</strong> has invited you to join <strong>{{orgName}}</strong> on HIVEMIND — your team's sovereign memory cortex. Everything you capture becomes durable, recallable memory your AI agents can use across every session.</p><p style=\"margin:0 0 24px\"><a href=\"{{joinUrl}}\" style=\"display:inline-block;background:#117dff;color:#fff;text-decoration:none;font-family:'Space Grotesk',Inter,sans-serif;font-weight:600;font-size:15px;padding:12px 22px;border-radius:999px\">Join {{orgName}}</a></p><p style=\"margin:0;font-size:12px;color:#a3a3a3\">This invitation expires on {{expiresOn}}. Invitees join via OAuth and land directly in {{orgName}}.</p>"
+  },
   "announcement": {
     "subject": "{{subject}}",
     "preheader": "{{preheader}}",

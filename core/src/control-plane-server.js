@@ -2034,6 +2034,93 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
+  // POST /v1/orgs/:orgId/invites/bulk — invite MULTIPLE people in one go.
+  // Body: { emails: string[], role?: string }. Per email: create an orgInvite
+  // + send the branded `team_invite` system email ("{{orgName}} is on
+  // HIVEMIND, your admin has invited you") via the same email pipeline as
+  // the login welcome mails. Returns a per-email result array.
+  const inviteBulkMatch = pathname.match(/^\/v1\/orgs\/([^/]+)\/invites\/bulk$/);
+  if (inviteBulkMatch && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const orgId = inviteBulkMatch[1];
+    const membership = await requireOrgAdmin(req, res, current.session.userId, orgId);
+    if (!membership) return;
+
+    const body = await parseBody(req);
+    const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const rawEmails = Array.isArray(body.emails) ? body.emails : [];
+    const emails = Array.from(new Set(
+      rawEmails.map((e) => String(e || '').trim().toLowerCase()).filter((e) => EMAIL_RE.test(e)),
+    )).slice(0, 50); // sanity cap per batch
+    if (emails.length === 0) {
+      return jsonResponse(res, { error: 'no_valid_emails', message: 'Provide at least one valid email address.' }, 400);
+    }
+    const bulkRole = typeof body.role === 'string' && ['member', 'viewer', 'admin'].includes(body.role.trim().toLowerCase())
+      ? body.role.trim().toLowerCase()
+      : 'member';
+    const bulkRoles = bulkRole === 'admin' ? ['org_admin'] : [bulkRole];
+
+    const FRONTEND_BASE = (process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu').replace(/\/$/, '');
+    const inviter = await prisma.user.findUnique({
+      where: { id: current.session.userId },
+      select: { email: true, displayName: true },
+    }).catch(() => null);
+    const inviterName = inviter?.displayName || inviter?.email || 'your admin';
+    const orgName = membership.org.name || 'your team';
+    const expiresAt = new Date(Date.now() + 1000 * 60 * 60 * 24 * 7);
+    const expiresOn = expiresAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+
+    const results = [];
+    for (const email of emails) {
+      try {
+        // Skip people already in the org — the invite would be a no-op.
+        const existingUser = await prisma.user.findFirst({
+          where: { email: { equals: email, mode: 'insensitive' } }, select: { id: true },
+        }).catch(() => null);
+        if (existingUser) {
+          const already = await prisma.userOrganization.findUnique({
+            where: { userId_orgId: { userId: existingUser.id, orgId } }, select: { userId: true },
+          }).catch(() => null);
+          if (already) {
+            results.push({ email, status: 'already_member' });
+            continue;
+          }
+        }
+        const token = crypto.randomBytes(24).toString('hex');
+        const invite = await prisma.orgInvite.create({
+          data: {
+            orgId, email, role: bulkRole, roles: bulkRoles,
+            teamIds: [], projectIds: [], token, expiresAt,
+            createdBy: current.session.userId,
+          },
+        });
+        const joinUrl = `${FRONTEND_BASE}/hivemind/join/${membership.org.slug}/${invite.token}`;
+        let emailOk = false; let emailError = null;
+        try {
+          await sendSystemEmail({
+            templateId: 'team_invite',
+            to: email,
+            vars: { orgName, inviterName, joinUrl, expiresOn },
+          });
+          emailOk = true;
+        } catch (mailErr) { emailError = mailErr.message; }
+        results.push({ email, status: 'invited', invite_id: invite.id, join_url: joinUrl, email_sent: emailOk, ...(emailError ? { email_error: emailError } : {}) });
+        audit({
+          organizationId: orgId, userId: current.session.userId,
+          eventType: 'org.invite_created', eventCategory: 'org', action: 'create',
+          resourceType: 'org_invite', resourceId: invite.id,
+          newValue: { email, role: bulkRole, bulk: true },
+          ..._reqMeta(req),
+        });
+      } catch (rowErr) {
+        results.push({ email, status: 'failed', error: rowErr.message });
+      }
+    }
+    const sent = results.filter((r) => r.status === 'invited').length;
+    return jsonResponse(res, { ok: true, total: emails.length, invited: sent, results }, 201);
+  }
+
   const inviteCollectionMatch = pathname.match(/^\/v1\/orgs\/([^/]+)\/invites$/);
   if (inviteCollectionMatch && req.method === 'POST') {
     const current = await requireSession(req, res);

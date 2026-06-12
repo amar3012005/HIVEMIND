@@ -12,6 +12,8 @@
  * enforces this at the Prisma layer.
  */
 
+import { invalidateCognitionSettings } from './cognition-pilot.js';
+
 function ok(body, statusCode = 200) {
   return { handled: true, statusCode, body };
 }
@@ -26,6 +28,7 @@ export const GOVERNANCE_ROUTE_TEMPLATES = [
   '/api/governance/actions/:id/approve',
   '/api/governance/actions/:id/reject',
   '/api/governance/rollback/:batch_id',
+  '/api/governance/cognition-settings',
 ];
 
 export function createGovernanceRoutes({ prisma, memoryStore, logger = console } = {}) {
@@ -33,6 +36,74 @@ export function createGovernanceRoutes({ prisma, memoryStore, logger = console }
     async dispatch({ pathname, method, body = {}, query = {}, userId, orgId }) {
       if (!prisma) return ok({ error: 'governance disabled (no prisma client)' }, 503);
       if (!orgId) return ok({ error: 'orgId required (X-HM-Org-Id header)' }, 400);
+
+      // ── GET /api/governance/cognition-settings — toggle state for this org +
+      //    its active projects (workspace-admin settings + project cards).
+      if (pathname === '/api/governance/cognition-settings' && method === 'GET') {
+        let orgRow = null;
+        let projRows = [];
+        try {
+          const r = await prisma.$queryRawUnsafe(
+            `SELECT cognition_org_enabled, cognition_personal_enabled FROM hivemind.organizations WHERE id=$1::uuid`,
+            orgId,
+          );
+          orgRow = r?.[0] || null;
+          projRows = await prisma.$queryRawUnsafe(
+            `SELECT id, name, self_evolve_enabled FROM hivemind.projects WHERE org_id=$1::uuid AND status='active' ORDER BY name`,
+            orgId,
+          );
+        } catch (e) {
+          return ok({ error: `settings read failed: ${e.message}` }, 500);
+        }
+        return ok({
+          org_enabled: !!orgRow?.cognition_org_enabled,
+          personal_enabled: !!orgRow?.cognition_personal_enabled,
+          projects: (projRows || []).map((p) => ({
+            id: p.id, name: p.name, self_evolve_enabled: !!p.self_evolve_enabled,
+          })),
+        });
+      }
+
+      // ── POST /api/governance/cognition-settings — admin/owner sets the toggles.
+      //    Body: { org_enabled?, personal_enabled?, project_id?, self_evolve_enabled? }
+      if (pathname === '/api/governance/cognition-settings' && method === 'POST') {
+        const mem = await prisma.userOrganization.findUnique({
+          where: { userId_orgId: { userId, orgId } },
+          select: { role: true, roles: true },
+        }).catch(() => null);
+        const roles = new Set([
+          ...(mem?.role ? [mem.role] : []),
+          ...(Array.isArray(mem?.roles) ? mem.roles : []),
+        ]);
+        const isAdmin = ['admin', 'owner', 'org_admin', 'org_owner'].some((r) => roles.has(r));
+        if (!isAdmin) return ok({ error: 'admin/owner role required', roles_seen: [...roles] }, 403);
+
+        try {
+          if (typeof body.org_enabled === 'boolean') {
+            await prisma.$executeRawUnsafe(
+              `UPDATE hivemind.organizations SET cognition_org_enabled=$1 WHERE id=$2::uuid`,
+              body.org_enabled, orgId,
+            );
+          }
+          if (typeof body.personal_enabled === 'boolean') {
+            await prisma.$executeRawUnsafe(
+              `UPDATE hivemind.organizations SET cognition_personal_enabled=$1 WHERE id=$2::uuid`,
+              body.personal_enabled, orgId,
+            );
+          }
+          if (body.project_id && typeof body.self_evolve_enabled === 'boolean') {
+            if (!isUuid(body.project_id)) return ok({ error: 'invalid project_id' }, 400);
+            await prisma.$executeRawUnsafe(
+              `UPDATE hivemind.projects SET self_evolve_enabled=$1 WHERE id=$2::uuid AND org_id=$3::uuid`,
+              body.self_evolve_enabled, body.project_id, orgId,
+            );
+          }
+        } catch (e) {
+          return ok({ error: `settings write failed: ${e.message}` }, 500);
+        }
+        invalidateCognitionSettings(orgId);
+        return ok({ ok: true });
+      }
 
       // ── GET /api/governance/metrics?days=7
       if (pathname === '/api/governance/metrics' && method === 'GET') {

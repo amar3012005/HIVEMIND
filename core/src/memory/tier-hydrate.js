@@ -120,7 +120,7 @@ export async function hydrateMemory(deps, { memoryId, userId, orgId }) {
         created_at: memory.createdAt,
         document_date: memory.documentDate,
       };
-      const collectionName = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
+      const collectionName = 'HIVEMIND_PERSONAL';
       if (vector) {
         await qdrantClient.storeMemory(memShape, { collectionName, vector });
       } else {

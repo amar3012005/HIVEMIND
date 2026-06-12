@@ -177,10 +177,23 @@ export class SyncScheduler {
             adapter = new AdapterClass();
           }
 
+          // PlatformIntegration rows carry no org column — resolve the user's
+          // org membership so ingestion + Nango lookups are org-scoped instead
+          // of passing a null orgId downstream (null used to crash the
+          // NangoConnection lookup: "Argument orgId must not be null").
+          let connectorOrgId = null;
+          try {
+            const membership = await this.prisma.userOrganization?.findFirst({
+              where: { userId: connector.userId },
+              select: { orgId: true },
+            });
+            connectorOrgId = membership?.orgId || null;
+          } catch { /* org optional — personal-scope users have none */ }
+
           await this.syncEngine.runSync({
             adapter,
             userId: connector.userId,
-            orgId: null,
+            orgId: connectorOrgId,
             provider: connector.platformType,
             incremental: true,
             targetScope: connector.targetScope || 'personal',

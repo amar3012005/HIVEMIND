@@ -11,7 +11,90 @@
  */
 
 import crypto from 'crypto';
-import { resolveCollection, PER_TENANT } from '../vector/container-router.js';
+import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
+
+// ── KB content-quality gates (P3) ─────────────────────────────────────────
+// Magazines/brochures produce page furniture that Docling faithfully extracts:
+// imprints, mastheads, photo credits, page headers, tables of contents. None of
+// it is memory-worthy, and promoting it verbatim was the #1 source of "random
+// fragment" memories (hauspost case). Deterministic regex — no LLM cost.
+const BOILERPLATE_RES = [
+  /\bimpressum\b/i,
+  /\bherausgeber(?:in)?\b/i,
+  /\bv\.?\s?i\.?\s?s\.?\s?d\.?\s?p\.?\b/i,                  // V.i.S.d.P. (German press law)
+  /\b(?:redaktion|layout|gestaltung|satz|druck(?:erei)?|auflage|erscheinungsweise)\s*[:\n]/i,
+  /\bfotos?\s*\/?\s*grafiken\b/i,
+  /\b(?:bildnachweis|fotonachweis|titelbild|titelfoto)\b/i,
+  /\bmarkenagentur\b/i,
+  /\binhaltsverzeichnis\b|\btable of contents\b/i,
+  /\b(?:bilder|fotos?|kartendaten)\s*©/i,                          // map/photo credit lines
+  /©\s*\d{4}\s*(?:TerraMetrics|GeoBasis|GeoContent)/i,
+  /(?:\.{3,}\s*\d{1,3}\s*){2,}/,                                   // dotted ToC leaders "..... 12"
+  /^\s*\d+\s+\d+\s+[A-ZÄÖÜ //]+\s*$/m,                           // page-header rows "4 5 FLURFUNK //"
+];
+
+// Page-furniture headings ("5 4 FLURFUNK // hauspost 1/2021") are real article
+// containers — keep the SEGMENT, but never use the furniture as the TITLE.
+function isPageFurnitureHeading(heading) {
+  const h = (heading || '').trim();
+  if (!h) return false;
+  return /^\d+\s+\d+/.test(h) || /\/\/\s*hauspost/i.test(h) || /hauspost\s+\d\s*\/\s*\d{2,4}/i.test(h);
+}
+
+function isBoilerplateSegment(content, heading) {
+  const text = `${heading || ''}\n${content || ''}`;
+  if (BOILERPLATE_RES.some((re) => re.test(text))) return true;
+  // Page-furniture heading like "4 5 FLURFUNK // hauspost 2/2022"
+  if (/hauspost\s+\d\s*\/\s*\d{2,4}/i.test(heading || '') && (content || '').length < 400) return true;
+  return false;
+}
+
+// A promotable segment must read like prose, not a fragment / credit line /
+// number run. Cheap deterministic checks only.
+function isQualityContent(content) {
+  const text = (content || '').trim();
+  if (!text) return false;
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length < 15) return false;                                // fragments
+  const letters = (text.match(/[\p{L}]/gu) || []).length;
+  if (letters / Math.max(1, text.length) < 0.55) return false;        // number/symbol runs
+  // Sentence-like: at least one terminator mid-text, or long-enough flowing prose
+  if (!/[.!?…](\s|$)/.test(text) && text.length < 160) return false;
+  // SHOUTING headers / collage of uppercase display text
+  const upperTokens = words.filter((w) => w.length > 2 && w === w.toUpperCase() && /[A-ZÄÖÜ]/.test(w)).length;
+  if (upperTokens / words.length > 0.5) return false;
+  return true;
+}
+
+// First-sentence title that NEVER cuts mid-word (the old slice(0,80) produced
+// titles like "Um weiterhin attraktiven Wohnraum z").
+function cleanTitleFrom(text, max = 80) {
+  const first = ((text || '').trim().split(/(?<=[.!?])\s|\n/)[0] || '').trim();
+  if (first.length <= max) return first;
+  const cut = first.slice(0, max);
+  const atWord = cut.slice(0, cut.lastIndexOf(' ') > 40 ? cut.lastIndexOf(' ') : max);
+  return `${atWord.trim()}…`;
+}
+
+// Tolerant JSON-array extraction — gpt-oss models don't honor response_format,
+// so pull the first balanced [...] from the completion text.
+function extractJsonArray(text) {
+  if (!text) return [];
+  const start = text.indexOf('[');
+  if (start === -1) return [];
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < text.length; i++) {
+    const c = text[i];
+    if (esc) { esc = false; continue; }
+    if (c === '\\') { esc = true; continue; }
+    if (c === '"') inStr = !inStr;
+    if (inStr) continue;
+    if (c === '[') depth++;
+    else if (c === ']') { depth--; if (depth === 0) { try { return JSON.parse(text.slice(start, i + 1)); } catch { return []; } } }
+  }
+  return [];
+}
+
 
 export class DocumentFirstIngestionService {
   constructor({ db, smartIngestRouter, memoryGraphEngine, doclingAdapter, embeddingService, entityExtractor = null, topicStateWriter = null, logger = console }) {
@@ -52,6 +135,188 @@ export class DocumentFirstIngestionService {
       });
       await Promise.all(workers);
     })().catch(err => this.logger.warn(`[entity-extractor] batch failed: ${err.message}`));
+  }
+
+  /**
+   * Deferred KB fact-distillation (P6). Big documents (>=30 segments) used to
+   * SKIP fact extraction entirely for speed — so magazine/report uploads stored
+   * raw chunks labeled 'fact' and nothing distilled (the hauspost complaint).
+   * This runs the SAME MemoryProcessor LLM fact pass the inline path uses, but
+   * AFTER promotion commits: batched workers, off the critical path, graceful
+   * per-segment failure. Each distilled fact becomes its own memory with full
+   * provenance + a Derives edge back to its section memory.
+   *
+   * Returns the background promise (callers fire-and-forget; reprocess scripts
+   * can await it via service._distillPromise).
+   */
+  /**
+   * Combined, batched KB fact distillation (latency levers #2/#3/#5). ONE cheap
+   * LLM call per BATCH of sections returns facts + entities together (was one
+   * call per section, facts only) — ~BATCH× fewer calls and more accurate
+   * (shared context). Each fact → its own memory with provenance, a Derives edge
+   * to its section, CONTEXTUAL embedding (doc title + heading prepended), and
+   * entity:* tags from the same pass (no separate entity-link LLM on facts).
+   * Async, concurrency-bounded, off the critical path. Off-switch KB_FACT_DISTILL=false.
+   */
+  async _batchExtractFacts(sections, { maxFacts = 5 } = {}) {
+    const apiKey = process.env.GROQ_API_KEY;
+    const model = process.env.MEMORY_PROCESSOR_MODEL || 'openai/gpt-oss-20b';
+    // Heuristic fallback (no key): sentence-split — degraded but never blocks.
+    if (!apiKey) {
+      return sections.map((sec) => ({
+        facts: (sec.content || '').split(/(?<=[.!?])\s/).map((x) => x.trim()).filter((x) => x.length >= 25).slice(0, maxFacts),
+        entities: [],
+      }));
+    }
+    const numbered = sections.map((sec, i) =>
+      `SECTION ${i}${sec.heading ? ` [${sec.heading}]` : ''}:\n${(sec.content || '').slice(0, 2500)}`).join('\n\n---\n\n');
+    const sys = `You extract atomic, standalone FACTS from each numbered SECTION of a document.
+Return ONLY a JSON array — one object per section: {"i": <section number>, "facts": ["complete standalone sentence", ...], "entities": ["Name", ...]}.
+Rules:
+- Each fact is a complete sentence understandable on its own (include the subject — never "it"/"they").
+- Extract REAL information: names, roles, products, specs, numbers, dates, decisions, events. NOT meta-commentary about the document.
+- entities = people/companies/products/places mentioned in that section.
+- Max ${maxFacts} facts per section. If a section has no real facts, use "facts": [].
+- Output the JSON array and nothing else.`;
+    const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        temperature: 0.2,
+        max_tokens: 3500,
+        messages: [
+          { role: 'system', content: sys },
+          { role: 'user', content: numbered },
+        ],
+      }),
+    });
+    if (!resp.ok) throw new Error(`groq ${resp.status}`);
+    const json = await resp.json();
+    const arr = extractJsonArray(json?.choices?.[0]?.message?.content || '');
+    const byI = new Map();
+    arr.forEach((o, idx) => byI.set(typeof o?.i === 'number' ? o.i : idx, o));
+    return sections.map((_, i) => {
+      const o = byI.get(i) || {};
+      return { facts: Array.isArray(o.facts) ? o.facts : [], entities: Array.isArray(o.entities) ? o.entities : [] };
+    });
+  }
+
+  _distillFactsAsync({ targets, userId, orgId, metadata = {}, documentId }) {
+    if (!Array.isArray(targets) || targets.length === 0) return null;
+    if (process.env.KB_FACT_DISTILL === 'false') return null; // emergency off-switch
+    const BATCH = Number(process.env.KB_DISTILL_BATCH || 6);
+    const CONCURRENCY = Number(process.env.KB_DISTILL_CONCURRENCY || 3);
+    const MAX_FACTS_PER_SEGMENT = Number(process.env.KB_DISTILL_MAX_FACTS || 5);
+    const MAX_FACTS_PER_DOC = Number(process.env.KB_DISTILL_DOC_CAP || 120);
+    const docTitle = metadata.documentTitle || metadata.filename || `Document ${String(documentId).slice(0, 8)}`;
+
+    const run = (async () => {
+      // Only sections with enough prose to distill.
+      const eligible = targets.filter((t) => (t.content || '').split(/\s+/).filter(Boolean).length >= 25);
+      const batches = [];
+      for (let i = 0; i < eligible.length; i += BATCH) batches.push(eligible.slice(i, i + BATCH));
+      let created = 0, failed = 0, bidx = 0;
+
+      const ingestFact = async (t, fact, entityTags) => {
+        const res = await this.memoryGraphEngine.ingestMemory({
+          user_id: userId,
+          org_id: orgId,
+          scope: t.scope,
+          visibility: t.visibility || 'private',
+          primary_team_id: t.primary_team_id || null,
+          project_ids: Array.isArray(t.project_ids) ? t.project_ids : [],
+          content: fact.trim(),
+          title: cleanTitleFrom(fact),
+          memory_type: 'fact',
+          source_type: 'knowledge_fact',
+          tags: [
+            ...(metadata.tags || []),
+            'extracted-fact',
+            'distilled-from-kb',
+            ...entityTags,
+            ...(metadata.filename ? [`filename:${metadata.filename}`] : []),
+            ...(documentId ? [`doc-id:${documentId}`] : []),
+            ...(t.heading ? [`heading:${String(t.heading).toLowerCase().replace(/\s+/g, '-').slice(0, 50)}`] : []),
+            ...(t.page ? [`page:${t.page}`] : []),
+          ],
+          source_metadata: { source_platform: 'knowledge_base', source_type: 'knowledge_fact', document_id: documentId },
+          metadata: { document_id: documentId, segment_memory_id: t.memoryId, distill_agent: 'kb_distill_v2' },
+          skip_fact_extraction: true,
+          defer_entity_linking: true,   // entities already extracted in the batch pass
+          strict_contradictions: true,
+        });
+        const factId = res?.memoryId || res?.id || null;
+        if (!factId || (res?.operation || '').startsWith('skipped')) return false;
+        // Provenance: fact Derives-from its section.
+        try {
+          await this.memoryGraphEngine.store.createRelationship({
+            id: crypto.randomUUID(), from_id: factId, to_id: t.memoryId,
+            type: 'Derives', confidence: 0.9,
+            metadata: { created_by: 'kb_distill_v2', document_id: documentId },
+          });
+        } catch { /* best-effort */ }
+        // CONTEXTUAL embedding: prepend doc title + heading so the fact embeds
+        // with its provenance context (Anthropic contextual-retrieval). Also
+        // sidesteps storeMemory's extractFacts sync-regex by precomputing.
+        try {
+          const ctxInput = `${docTitle}${t.heading ? ` — ${t.heading}` : ''}\n${fact.trim()}`;
+          const vec = await this.memoryGraphEngine.vectorStore?.generateEmbedding?.(ctxInput);
+          await this.memoryGraphEngine.vectorStore?.storeMemory({
+            id: factId, user_id: userId, org_id: orgId, content: fact.trim(),
+            memory_type: 'fact', is_latest: true, tags: entityTags,
+            project_ids: Array.isArray(t.project_ids) ? t.project_ids : [],
+            primary_team_id: t.primary_team_id || null, visibility: t.visibility || 'private',
+            created_at: new Date().toISOString(),
+          }, vec ? { vector: vec } : {});
+        } catch (vecErr) {
+          this.logger.warn?.(`[kb-distill] vector index failed for ${factId}: ${vecErr.message}`);
+        }
+        return true;
+      };
+
+      const processBatch = async (batch) => {
+        if (created >= MAX_FACTS_PER_DOC) return;
+        let perSection;
+        try {
+          perSection = await this._batchExtractFacts(batch, { maxFacts: MAX_FACTS_PER_SEGMENT });
+        } catch (err) {
+          failed++;
+          this.logger.warn?.(`[kb-distill] batch LLM failed: ${err.message}`);
+          return;
+        }
+        for (let k = 0; k < batch.length; k++) {
+          if (created >= MAX_FACTS_PER_DOC) break;
+          const t = batch[k];
+          const ex = perSection[k] || { facts: [], entities: [] };
+          const facts = (ex.facts || []).filter((f) => typeof f === 'string' && f.trim().length >= 20).slice(0, MAX_FACTS_PER_SEGMENT);
+          const entityTags = (ex.entities || []).filter((e) => typeof e === 'string' && e.trim())
+            .slice(0, 8).map((e) => `entity:${e.trim().replace(/\s+/g, '_')}`);
+          for (const fact of facts) {
+            if (created >= MAX_FACTS_PER_DOC) break;
+            try { if (await ingestFact(t, fact, entityTags)) created++; }
+            catch (err) { failed++; this.logger.warn?.(`[kb-distill] fact ingest failed: ${err.message}`); }
+          }
+        }
+      };
+
+      const workers = Array.from({ length: Math.min(CONCURRENCY, batches.length) }, async () => {
+        while (true) {
+          const i = bidx++;
+          if (i >= batches.length) return;
+          await processBatch(batches[i]);
+        }
+      });
+      await Promise.all(workers);
+      this.logger.info?.(`[kb-distill] doc ${String(documentId).slice(0, 8)}: ${created} facts from ${eligible.length} sections in ${batches.length} LLM calls (failed=${failed})`);
+      return { created, failed };
+    })().catch((err) => {
+      this.logger.warn?.(`[kb-distill] batch failed: ${err.message}`);
+      return null;
+    });
+
+    this._distillPromise = run; // reprocess scripts can await this
+    return run;
   }
 
   /**
@@ -510,17 +775,44 @@ export class DocumentFirstIngestionService {
       if (segments.length) return segments;
     }
 
-    // Fallback: sliding window chunking
+    // Fallback chunking (only when Docling HybridChunker produced nothing — the
+    // primary path above is already structure-aware: respects headings/tables/
+    // lists, never splits mid-structure). Structural fallback: accumulate whole
+    // PARAGRAPHS up to a soft cap so we never cut mid-sentence/mid-structure;
+    // carry one trailing paragraph as overlap for context continuity.
     const segments = [];
     const text = parseResult.text;
-    const chunkSize = 1000;
-    const overlap = 200;
+    const SOFT_CAP = 1200;
+
+    const paragraphs = text.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean);
+    const chunks = [];
+    let buf = '';
+    for (const para of paragraphs) {
+      // A single oversized paragraph (e.g. a table block): flush buffer, emit it whole.
+      if (para.length >= SOFT_CAP) {
+        if (buf) { chunks.push(buf); buf = ''; }
+        chunks.push(para);
+        continue;
+      }
+      if (buf && (buf.length + para.length + 2) > SOFT_CAP) {
+        chunks.push(buf);
+        // overlap: keep the last paragraph of the flushed chunk for continuity
+        const prevParas = buf.split(/\n{2,}/);
+        buf = (prevParas[prevParas.length - 1] || '') + '\n\n' + para;
+      } else {
+        buf = buf ? `${buf}\n\n${para}` : para;
+      }
+    }
+    if (buf.trim()) chunks.push(buf);
+    // Last resort: if the text had no paragraph breaks at all, hard-split.
+    if (chunks.length === 0 && text.trim()) {
+      for (let i = 0; i < text.length; i += 1000) chunks.push(text.slice(i, i + 1000));
+    }
 
     let segmentIndex = 0;
     let previousSegmentId = null;
 
-    for (let i = 0; i < text.length; i += (chunkSize - overlap)) {
-      const chunk = text.slice(i, i + chunkSize);
+    for (const chunk of chunks) {
       if (chunk.trim().length === 0) continue;
 
       const contentHash = crypto.createHash('sha256').update(chunk).digest('hex');
@@ -536,10 +828,10 @@ export class DocumentFirstIngestionService {
           segmentIndex,
           previousSegmentId,
           depth: 0,
-          startOffset: i,
-          endOffset: Math.min(i + chunkSize, text.length),
+          startOffset: null,
+          endOffset: null,
           wordCount: chunk.split(/\s+/).length,
-          metadata: {}
+          metadata: { source: 'paragraph_fallback' }
         }
       });
 
@@ -577,7 +869,7 @@ export class DocumentFirstIngestionService {
         const embedding = await this.embeddingService.embed(segment.content);
 
         const collectionName = PER_TENANT
-          ? resolveCollection({ orgId: segment.orgId })
+          ? await resolveCollectionForOrg(segment.orgId)
           : legacyEvidence;
 
         // Store evidence vector. In per-tenant mode the org container holds both
@@ -615,6 +907,10 @@ export class DocumentFirstIngestionService {
   async _promoteMemories({ documentId, segments, userId, orgId, metadata, promotionStrategy = 'kb_default' }) {
     const candidates = [];
     const memories = [];
+    const entityLinkTargets = []; // collected during promote, entity-linked concurrently after commit
+    const distillTargets = [];    // big-doc deferred fact distillation (P6) — fed after commit
+    const evidenceLinkRows = []; // #6 — batched provenance inserts (was per-section)
+    const derivationRows = [];
 
     // Strategy: diversity-sampled promotion
     // 1. Always include first + last (document boundaries)
@@ -625,8 +921,19 @@ export class DocumentFirstIngestionService {
     const MIN_PROMOTE = Number(process.env.PHASE1_MIN_PROMOTE || 5);
     const promotableSegments = (() => {
       if (!Array.isArray(segments) || segments.length === 0) return [];
-      if (segments.length <= MIN_PROMOTE) return segments.slice();
+      // P3 quality gate FIRST: drop boilerplate (imprint/masthead/ToC/page
+      // furniture) and non-prose fragments BEFORE any selection, so boundary/
+      // heading/sampling picks come from the clean pool. Fallback to the raw
+      // list when the filter is too aggressive (tiny or unusual docs).
+      const cleanPool = segments.filter((s) =>
+        !isBoilerplateSegment(s.content, s.metadata?.heading) && isQualityContent(s.content));
+      const pool = cleanPool.length >= Math.min(MIN_PROMOTE, segments.length) ? cleanPool : segments;
+      if (pool.length !== segments.length) {
+        this.logger.info?.(`[kb-quality] ${documentId.slice(0, 8)}: ${segments.length - pool.length}/${segments.length} segments dropped as boilerplate/low-quality`);
+      }
+      if (pool.length <= MIN_PROMOTE) return pool.slice();
 
+      const segmentsForPick = pool;
       const picked = new Map(); // segmentId -> segment
       const dedupKeys = new Set();
       // Dedup by (heading + content-prefix) so single-H1 docs aren't squashed.
@@ -645,21 +952,21 @@ export class DocumentFirstIngestionService {
       };
 
       // Boundaries first
-      tryAdd(segments[0]);
-      tryAdd(segments[segments.length - 1]);
+      tryAdd(segmentsForPick[0]);
+      tryAdd(segmentsForPick[segmentsForPick.length - 1]);
 
       // All distinct-heading segments
-      for (const s of segments) {
+      for (const s of segmentsForPick) {
         if (picked.size >= MAX_PROMOTE) break;
         if (s.metadata?.heading) tryAdd(s);
       }
 
       // Even sampling to fill remaining
-      const target = Math.min(MAX_PROMOTE, Math.max(MIN_PROMOTE, Math.ceil(segments.length / 10)));
+      const target = Math.min(MAX_PROMOTE, Math.max(MIN_PROMOTE, Math.ceil(segmentsForPick.length / 10)));
       if (picked.size < target) {
-        const step = Math.max(1, Math.floor(segments.length / target));
-        for (let i = 0; i < segments.length && picked.size < target; i += step) {
-          tryAdd(segments[i]);
+        const step = Math.max(1, Math.floor(segmentsForPick.length / target));
+        for (let i = 0; i < segmentsForPick.length && picked.size < target; i += step) {
+          tryAdd(segmentsForPick[i]);
         }
       }
       return Array.from(picked.values());
@@ -679,19 +986,22 @@ export class DocumentFirstIngestionService {
           orgId,
           user_id: userId,
           org_id: orgId,
-          scope: Array.isArray(metadata.project_ids) && metadata.project_ids.length > 0
+          // Honor explicit scope (e.g. 'organization' from an org-targeted KB
+          // upload) before project/team inference; lift visibility to TOP level
+          // so graph-engine infers scope='organization' for org uploads.
+          scope: metadata.scope || (Array.isArray(metadata.project_ids) && metadata.project_ids.length > 0
             ? 'project'
-            : metadata.primary_team_id ? 'team' : undefined,
+            : metadata.primary_team_id ? 'team' : undefined),
+          visibility: metadata.visibility || 'private',
           primary_team_id: metadata.primary_team_id || null,
           project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
           content: segment.content,
           // Title: prefer the chunk heading; else first sentence/line of the
           // segment (meaningful + searchable) instead of the opaque
           // "Extracted from <hash>" fallback that produced unusable titles.
-          title: segment.metadata?.heading
+          title: (segment.metadata?.heading && !isPageFurnitureHeading(segment.metadata.heading))
             ? String(segment.metadata.heading).slice(0, 200)
-            : ((segment.content || '').trim().split(/(?<=[.!?])\s|\n/)[0] || '').trim().slice(0, 80)
-              || `Segment ${documentId.slice(0, 8)}`,
+            : cleanTitleFrom(segment.content) || `Segment ${documentId.slice(0, 8)}`,
           source_type: 'knowledge_segment',
           source_metadata: {
             segment_id: segment.id,
@@ -737,10 +1047,40 @@ export class DocumentFirstIngestionService {
           }
         };
 
-        const routedPayloads = await this.smartIngestRouter.route(payload);
+        // FAST-PATH (no per-section LLM/recall). smartIngestRouter.route() runs
+        // _enrichWithTripleOperator → a searchMemories RECALL per section, purely
+        // to infer Updates/Extends operators. For document chunks that's wasted
+        // work (sections don't supersede each other) AND it's the dominant bulk
+        // latency: N sections = N serialized recalls. We skip route() entirely
+        // and pass the already-complete payload straight to ingestMemory with
+        // smartIngest:false (engine won't re-route). _smart_routed belt-and-braces.
+        // Content is clean Docling text; ts:* stamping still happens in the engine.
+        const routedPayloads = [{ ...payload, _smart_routed: true }];
 
         for (const routed of routedPayloads) {
-          const result = await this.memoryGraphEngine.ingestMemory(routed);
+          // #7 — KB section promotion fast-path. Sections are document chunks:
+          // they do NOT supersede/contradict each other, so the per-section
+          // PredictCalibrate similarity search + conflict-detection +
+          // relationship-classification are pure waste (they dominated promote
+          // at ~3s/section). Skip them — the section is already routed by dfi's
+          // explicit route() above (smartIngest:false avoids a redundant second
+          // routing pass). Entity-linking stays deferred to the post-commit
+          // batch. Net: the per-user advisory lock is held ~100ms not ~3s, so
+          // the write queue drains fast — addresses the #6 serialization symptom
+          // WITHOUT unsafe lock removal.
+          const result = await this.memoryGraphEngine.ingestMemory({
+            ...routed,
+            defer_entity_linking: true,
+            smartIngest: false,
+            skipPredictCalibrate: true,
+            skip_contradiction_detection: true,
+            skip_relationship_classification: true,
+            // #6: with all dedup/classification skipped this is a pure insert —
+            // the per-user advisory lock guards nothing, so bypass it. Section
+            // writes no longer serialize; PartOf + deferred entity tags still
+            // attach. Facts (separate path) keep the full locked pipeline.
+            skipAdvisoryLock: true,
+          });
           // graph-engine returns { memoryId, operation, ... }
           // operation = 'skipped_*' means memory NOT persisted to DB -> FK would fail
           const memoryId = result?.memoryId || result?.id || null;
@@ -756,32 +1096,32 @@ export class DocumentFirstIngestionService {
             continue;
           }
           memories.push({ ...result, id: memoryId });
-
-          // Link memory to evidence
-          await this.db.memoryEvidenceLink.create({
-            data: {
-              memoryId,
-              segmentId: segment.id,
-              documentId,
-              linkType: 'supports',
-              confidence: 0.9,
-              excerpt: segment.content.slice(0, 500)
-            }
+          entityLinkTargets.push({
+            id: memoryId, user_id: routed.user_id, org_id: routed.org_id,
+            project: routed.project || null, content: routed.content,
+            tags: routed.tags || [], memory_type: routed.memory_type,
+          });
+          distillTargets.push({
+            memoryId,
+            content: segment.content,
+            heading: segment.metadata?.heading || null,
+            page: segment.metadata?.page || null,
+            scope: routed.scope,
+            visibility: routed.visibility,
+            primary_team_id: routed.primary_team_id || null,
+            project_ids: Array.isArray(routed.project_ids) ? routed.project_ids : [],
           });
 
-          // Record derivation
-          await this.db.memoryDerivation.create({
-            data: {
-              memoryId,
-              derivationMethod: 'promoted_from_segment',
-              derivationAgent: 'document_first_ingestion_v1',
-              confidence: 0.8,
-              metadata: {
-                segment_id: segment.id,
-                document_id: documentId,
-                promotion_strategy: promotionStrategy
-              }
-            }
+          // #6 — collect provenance rows; batch-insert after the loop (was 2
+          // synchronous round-trips per section).
+          evidenceLinkRows.push({
+            memoryId, segmentId: segment.id, documentId,
+            linkType: 'supports', confidence: 0.9, excerpt: segment.content.slice(0, 500),
+          });
+          derivationRows.push({
+            memoryId, derivationMethod: 'promoted_from_segment',
+            derivationAgent: 'document_first_ingestion_v1', confidence: 0.8,
+            metadata: { segment_id: segment.id, document_id: documentId, promotion_strategy: promotionStrategy },
           });
 
           // P1 #12 — entity-aware memory linking
@@ -803,7 +1143,7 @@ export class DocumentFirstIngestionService {
     // Prisma transaction whose timeout ticks during the wait, blowing it →
     // P2010 aborts under bulk ingest. Default 2 keeps a shallow pipeline (next
     // worker preps while one holds the lock) without a deep timeout-prone queue.
-    const PROMOTE_CONCURRENCY = Number(process.env.PHASE1_PROMOTE_CONCURRENCY || 2);
+    const PROMOTE_CONCURRENCY = Number(process.env.PHASE1_PROMOTE_CONCURRENCY || 4);
     let nextIdx = 0;
     const workers = Array.from({ length: Math.min(PROMOTE_CONCURRENCY, promotableSegments.length) }, async () => {
       while (true) {
@@ -813,6 +1153,38 @@ export class DocumentFirstIngestionService {
       }
     });
     await Promise.all(workers);
+
+    // #6 — batched provenance inserts (2 round-trips total vs 2×N). Append-only
+    // link rows, no advisory-lock semantics — safe + contained to the KB path.
+    if (evidenceLinkRows.length) {
+      await this.db.memoryEvidenceLink.createMany({ data: evidenceLinkRows, skipDuplicates: true })
+        .catch((e) => this.logger.warn?.(`[kb] evidence-link batch failed: ${e.message}`));
+    }
+    if (derivationRows.length) {
+      await this.db.memoryDerivation.createMany({ data: derivationRows, skipDuplicates: true })
+        .catch((e) => this.logger.warn?.(`[kb] derivation batch failed: ${e.message}`));
+    }
+
+    if (entityLinkTargets.length && typeof this.memoryGraphEngine.linkEntitiesForMemories === 'function') {
+      const linkConcurrency = Number(process.env.PHASE1_ENTITY_LINK_CONCURRENCY || 6);
+      this.memoryGraphEngine.linkEntitiesForMemories(entityLinkTargets, { concurrency: linkConcurrency })
+        .then(() => this.logger.info?.(`[entity-link:deferred] linked ${entityLinkTargets.length} promoted memories`))
+        .catch((err) => this.logger.warn?.(`[entity-link:deferred] batch failed: ${err.message}`));
+    }
+
+    // P6 — deferred fact distillation for big docs. The per-segment payloads set
+    // skip_fact_extraction for >=30-segment documents (speed guard); instead of
+    // losing distillation entirely (old behavior: raw chunks stored as 'facts'),
+    // run it NOW in the background over the promoted sections.
+    // Deferred distillation is now the ONLY fact source for KB docs (sections
+    // ingest as pure inserts with smartIngest:false — no inline processor), so
+    // it must fire for EVERY doc, not just >=30-segment ones. The old >=30 gate
+    // was inherited from the inline-skip logic and silently left small docs
+    // (e.g. an 11-segment pitch deck) with zero facts. Async + batched — an
+    // 11-section doc costs 2 background LLM calls.
+    if (distillTargets.length) {
+      this._distillFactsAsync({ targets: distillTargets, userId, orgId, metadata, documentId });
+    }
 
     // ── Canonical Document parent + PartOf edges (Supermemory-shape graph) ──
     // Per-segment promotion above wrote N standalone Memory rows but no
@@ -848,9 +1220,12 @@ export class DocumentFirstIngestionService {
         const parentRes = await this.memoryGraphEngine.ingestMemory({
           user_id: userId,
           org_id: orgId,
-          scope: Array.isArray(metadata.project_ids) && metadata.project_ids.length > 0
+          // Same scope/visibility fix as the segment payload — doc parent node
+          // must also become org-visible for org-targeted uploads.
+          scope: metadata.scope || (Array.isArray(metadata.project_ids) && metadata.project_ids.length > 0
             ? 'project'
-            : metadata.primary_team_id ? 'team' : undefined,
+            : metadata.primary_team_id ? 'team' : undefined),
+          visibility: metadata.visibility || 'private',
           primary_team_id: metadata.primary_team_id || null,
           project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
           content: docSummary,
@@ -877,6 +1252,14 @@ export class DocumentFirstIngestionService {
           },
           skip_fact_extraction: true,                // parent is itself a summary
           skipPredictCalibrate: true,                // never dedup the doc node
+          // Doc node is unique per document — nothing to supersede/contradict/
+          // classify; make it a pure lock-free insert too (#6/#7). PartOf edges
+          // to children + deferred entity tags still attach below.
+          skip_contradiction_detection: true,
+          skip_relationship_classification: true,
+          smartIngest: false,
+          skipAdvisoryLock: true,
+          defer_entity_linking: true,
         });
 
         docParentId = parentRes?.memoryId || parentRes?.id || null;

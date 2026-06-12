@@ -21,18 +21,33 @@ export class LiteLLMEmbedService {
     this.apiKey = apiKey;
     this.baseUrl = baseUrl.replace(/\/+$/, '');
     this.dimension = parseInt(process.env.EMBEDDING_DIMENSION || '1024', 10);
+    // Fail fast instead of hanging forever — an unbounded fetch on a stuck
+    // gateway connection froze a bulk job once. Tunable via EMBEDDING_TIMEOUT_MS.
+    this.timeoutMs = parseInt(process.env.EMBEDDING_TIMEOUT_MS || '30000', 10);
     this.cache = new Map();
   }
 
   async _post(texts) {
-    const res = await fetch(`${this.baseUrl}/embeddings`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
-      },
-      body: JSON.stringify({ model: this.model, input: texts }),
-    });
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), this.timeoutMs);
+    let res;
+    try {
+      res = await fetch(`${this.baseUrl}/embeddings`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
+        },
+        body: JSON.stringify({ model: this.model, input: texts }),
+        signal: ctrl.signal,
+      });
+    } catch (err) {
+      throw new Error(err.name === 'AbortError'
+        ? `LiteLLM embedding timeout after ${this.timeoutMs}ms`
+        : `LiteLLM embedding fetch failed: ${err.message}`);
+    } finally {
+      clearTimeout(timer);
+    }
     if (!res.ok) {
       const body = await res.text();
       throw new Error(`LiteLLM embedding error ${res.status}: ${body}`);

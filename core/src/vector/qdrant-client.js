@@ -10,11 +10,11 @@
 import fetch from 'node-fetch';
 import { getEmbedService } from '../embeddings/factory.js';
 import { getQdrantCollections } from './collections.js';
-import { resolveCollection, PER_TENANT } from './container-router.js';
+import { resolveCollectionForOrg, PER_TENANT } from './container-router.js';
 
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:9200';
 const API_KEY = process.env.QDRANT_API_KEY || 'dev_api_key_hivemind_2026';
-const COLLECTION_NAME = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
+const COLLECTION_NAME = 'HIVEMIND_PERSONAL';
 const DEFAULT_SCORE_THRESHOLD = parseFloat(process.env.HIVEMIND_VECTOR_SCORE_THRESHOLD || '0.15');
 // P4: search-time HNSW ef — THE recall/latency dial at scale (OpenSearch
 // benchmark: recall@1 0.56→0.97 across ef 10→640). Without an explicit
@@ -42,13 +42,26 @@ function filterMatchValue(filter, key) {
 }
 
 // Central tenant routing. When QDRANT_PER_TENANT is off this returns the legacy
-// collection (unchanged behavior). When on, org context → org_<id> container,
-// no org → HIVEMIND_PERSONAL. Derives org from the data the client already
-// receives (memory.org_id / filter org_id) so no call site needs changing.
-function routeCollection({ explicit, orgId } = {}) {
+// collection (unchanged behavior). When on, routes by org PLAN (looked up +
+// cached): enterprise org → org_<id>, free/personal/no-org → HIVEMIND_PERSONAL.
+// Derives org from the data the client already receives (memory.org_id /
+// filter org_id) so no call site needs changing.
+async function routeCollection({ explicit, orgId } = {}) {
+  // Per-tenant routing MUST win over a legacy default collection name. Many save
+  // sites pass collectionName = (QDRANT_COLLECTION || 'BUNDB AGENT') explicitly;
+  // under the old `if (explicit) return explicit` that silently wrote vectors to
+  // the legacy 'BUNDB AGENT' store while recall auto-routed reads to org_<id>.
+  // Net effect: every memory saved through those paths was invisible to vector
+  // recall → keyword-only fallback → "recall/KB not working". When per-tenant is
+  // on and the org is known, ignore a legacy/default explicit name and route to
+  // the org collection; honor only NON-legacy explicit names (e.g.
+  // evidence-retrieval's own collection, an explicit org_<id>/HIVEMIND_PERSONAL).
+  if (PER_TENANT && orgId && (!explicit || explicit === COLLECTION_NAME || explicit === 'BUNDB AGENT')) {
+    return resolveCollectionForOrg(orgId);
+  }
   if (explicit) return explicit;
   if (!PER_TENANT) return COLLECTION_NAME;
-  return resolveCollection({ orgId });
+  return resolveCollectionForOrg(orgId);
 }
 
 // Boost extracted-fact memories — they have precise, focused embeddings
@@ -99,15 +112,12 @@ export class QdrantClient {
         return false;
       }
 
-      // Lazy-create backstop. The default collection uses createMemoriesCollection
-      // (legacy config); any other name (org_<id>, HIVEMIND_PERSONAL) is an org
-      // container and must be created under its own name with the 1024 contract —
-      // createMemoriesCollection would otherwise create the WRONG (default) name.
-      if (resolvedCollectionName === COLLECTION_NAME) {
-        await collections.createMemoriesCollection();
-      } else {
-        await collections.createOrgContainer(resolvedCollectionName);
-      }
+      // Lazy-create backstop. ALL collections (org_<id>, HIVEMIND_PERSONAL, the
+      // personal/default fallback) are per-tenant org containers and must be
+      // created with the 1024 / m=32 / on_disk / int8-quant contract via
+      // createOrgContainer. The legacy createMemoriesCollection (m=16, no on_disk)
+      // is gone along with the BUNDB AGENT singleton.
+      await collections.createOrgContainer(resolvedCollectionName);
       await collections.ensureMemoriesCollectionIndexes(resolvedCollectionName);
       this.collectionReady = collectionName;
       return true;
@@ -164,7 +174,7 @@ export class QdrantClient {
       return memory.id;
     }
 
-    const collectionName = routeCollection({ explicit: options.collectionName, orgId: memory.org_id });
+    const collectionName = await routeCollection({ explicit: options.collectionName, orgId: memory.org_id });
     const collectionReady = await this.ensureCollection(collectionName);
     if (!collectionReady) {
       console.warn('⚠️  Qdrant collection unavailable, storing in-memory only');
@@ -278,7 +288,7 @@ export class QdrantClient {
     // Route to the org container (org_<id>) / HIVEMIND_PERSONAL when per-tenant
     // is on and no explicit collection was given — derive org from the filter.
     const autoResolved = !collectionName && PER_TENANT;
-    const resolvedCollection = routeCollection({
+    const resolvedCollection = await routeCollection({
       explicit: collectionName,
       orgId: filterMatchValue(filter, 'org_id')
     });
@@ -431,6 +441,7 @@ export class QdrantClient {
       filter,
       limit: filters.limit || 10,
       score_threshold: filters.score_threshold || 0.5,
+      hnsw_ef: filters.hnsw_ef, // PHASE-F: thread per-org ef_search; inert when undefined (searchMemories → EF_SEARCH_DEFAULT). Dark-safe for all other hybridSearch callers.
       collectionName: filters.collectionName
     });
   }

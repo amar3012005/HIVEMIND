@@ -131,7 +131,8 @@ export async function appendTurnEvent(prisma, turnId, event) {
     });
     if (!row) throw new Error(`HyperTurn not found: ${turnId}`);
     const lines = Array.isArray(row.lines) ? row.lines : [];
-    const stamped = { ts: Date.now(), ...event };
+    const now = Date.now();
+    const stamped = { ts: now, received_ts: now, ...event };
     lines.push(stamped);
     await tx.hyperTurn.update({
       where: { id: turnId },
@@ -145,14 +146,14 @@ export async function appendTurnEvent(prisma, turnId, event) {
  * Seal a turn — final status + cost roll-up + sealed_at timestamp.
  * Idempotent: re-sealing is a no-op.
  */
-export async function sealTurn(prisma, turnId, { status = 'complete', costTokens = 0 } = {}) {
+export async function sealTurn(prisma, turnId, { status = 'complete', costTokens = 0, event = null } = {}) {
   const cur = await prisma.hyperTurn.findUnique({
     where: { id: turnId },
     select: { sealedAt: true },
   });
   if (!cur) throw new Error(`HyperTurn not found: ${turnId}`);
   if (cur.sealedAt) return false; // already sealed
-  await appendTurnEvent(prisma, turnId, { t: 'seal', cost_tokens: costTokens, status });
+  await appendTurnEvent(prisma, turnId, event || { t: 'seal', cost_tokens: costTokens, status });
   await prisma.hyperTurn.update({
     where: { id: turnId },
     data: { status, costTokens, sealedAt: new Date() },

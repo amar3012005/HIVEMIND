@@ -162,15 +162,30 @@ export class MistralEmbedService {
             encoding_format: 'float'
           };
 
-      const response = await fetch(this.baseUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(this.apiKey ? { 'Authorization': `Bearer ${this.apiKey}` } : {})
-        },
-        body: JSON.stringify(requestBody),
-        ...(httpsAgent ? { agent: httpsAgent } : {})
-      });
+      // Bound the request — a stuck embed endpoint must fail fast, not hang
+      // (lets the fallback wrapper kick in). Tunable via EMBEDDING_TIMEOUT_MS.
+      const _timeoutMs = parseInt(process.env.EMBEDDING_TIMEOUT_MS || '30000', 10);
+      const _ctrl = new AbortController();
+      const _timer = setTimeout(() => _ctrl.abort(), _timeoutMs);
+      let response;
+      try {
+        response = await fetch(this.baseUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(this.apiKey ? { 'Authorization': `Bearer ${this.apiKey}` } : {})
+          },
+          body: JSON.stringify(requestBody),
+          signal: _ctrl.signal,
+          ...(httpsAgent ? { agent: httpsAgent } : {})
+        });
+      } catch (err) {
+        throw new Error(err.name === 'AbortError'
+          ? `Embedding API timeout after ${_timeoutMs}ms`
+          : `Embedding API fetch failed: ${err.message}`);
+      } finally {
+        clearTimeout(_timer);
+      }
 
       if (!response.ok) {
         const error = await response.json();

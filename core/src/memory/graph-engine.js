@@ -541,7 +541,19 @@ export class MemoryGraphEngine {
       }),
     };
 
-    return this.store.advisoryLock(baseMemory.user_id, async lockedStore => {
+    // Bulk-KB fast path (#6): the per-user advisory lock serializes a user's
+    // writes so concurrent supersede/dedup can't race. When dedup + relationship-
+    // classification + contradiction-detection are ALL skipped, this ingest is a
+    // PURE INSERT with nothing to serialize — honor skipAdvisoryLock only then.
+    const _pureInsert = input.skipAdvisoryLock === true
+      && input.skipPredictCalibrate === true
+      && (input.skip_relationship_classification === true || input.smartIngest === false)
+      && input.skip_contradiction_detection === true;
+    const _acquire = _pureInsert
+      ? (uid, fn) => fn(this.store)
+      : (uid, fn) => this.store.advisoryLock(uid, fn);
+
+    return _acquire(baseMemory.user_id, async lockedStore => {
       const transactionalStore = lockedStore || this.store;
       return transactionalStore.transaction(async store => {
         const latestMemories = await store.listLatestMemories(baseMemory);
@@ -1155,11 +1167,13 @@ export class MemoryGraphEngine {
         // 1 extra query per save. We accept that cost in exchange for
         // ALL ingest paths (chat, MCP, KB, connectors) producing
         // entity-rich graphs without per-callsite wiring.
-        try {
-          await this._attachEntityCoMentionEdges(baseMemory, store, recallSimilar);
-        } catch (entityErr) {
-          // Non-fatal — entity linking is best-effort enrichment.
-          console.warn('[entity-co-mention] failed:', entityErr.message);
+        if (!input.defer_entity_linking) {
+          try {
+            await this._attachEntityCoMentionEdges(baseMemory, store, recallSimilar);
+          } catch (entityErr) {
+            // Non-fatal — entity linking is best-effort enrichment.
+            console.warn('[entity-co-mention] failed:', entityErr.message);
+          }
         }
 
         const result = {
@@ -1740,6 +1754,7 @@ OUTPUT JSON only.`;
               temperature: 0.1,
               max_tokens: 1600,
             }),
+            signal: AbortSignal.timeout(Number(process.env.ENTITY_LINK_TIMEOUT_MS || 25000)),
           });
           if (!resp.ok) {
             const bodyText = await resp.text().catch(() => '');
@@ -1845,6 +1860,22 @@ OUTPUT JSON only.`;
       await recordError('persist_error', null, persistErr.message);
       return parsed;
     }
+  }
+
+  async linkEntitiesForMemories(memories, { concurrency = 6 } = {}) {
+    if (!Array.isArray(memories) || memories.length === 0) return;
+    if ((process.env.MEMORY_ENTITY_LINKING || 'true').toLowerCase() === 'false') return;
+    const queue = memories.filter(m => m && m.id);
+    let idx = 0;
+    const worker = async () => {
+      while (idx < queue.length) {
+        const m = queue[idx++];
+        try { await this._attachEntityCoMentionEdges(m, this.store, []); }
+        catch (err) { console.warn(`[entity-co-mention:deferred] ${String(m.id).slice(0, 8)} failed: ${err.message}`); }
+      }
+    };
+    const n = Math.max(1, Math.min(concurrency, queue.length));
+    await Promise.all(Array.from({ length: n }, worker));
   }
 
   async _attachEntityCoMentionEdges(baseMemory, store, similar = []) {
@@ -2085,6 +2116,7 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
           temperature: 0.1,
           max_tokens: 700,
         }),
+        signal: AbortSignal.timeout(Number(process.env.ENTITY_LINK_TIMEOUT_MS || 25000)),
       });
       if (!resp.ok) {
         const errBody = await resp.text();

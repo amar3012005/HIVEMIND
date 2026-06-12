@@ -241,6 +241,27 @@ export function classifyNoise(message, headers, body) {
     return { skip: true, reason: 'bounce/delivery-failure' };
   }
 
+  // Machine-generated platform notifications — CI runs, repo activity,
+  // build alerts. These arrive in bulk (every failed pipeline run emails
+  // every watcher) and carry zero durable knowledge; one bad CI week once
+  // ingested 157 "[repo] Run failed: …" memories into a user's brain.
+  const subject = headers['subject'] || '';
+  if (
+    /(?:notifications@github\.com|@noreply\.github\.com|builds@circleci\.com|notifications?@(?:gitlab|bitbucket|travis-ci|jenkins|vercel|netlify|render|sentry|pagerduty|datadoghq|atlassian)\.(?:com|io|net|org))/i.test(from) ||
+    /^\[[^\]]+\]\s*(?:Run failed|Run cancelled|Workflow run|Build (?:failed|fixed|passed)|Deployment (?:failed|ready))/i.test(subject)
+  ) {
+    return { skip: true, reason: 'platform-notification' };
+  }
+
+  // Mailing-list / bulk-precedence automated mail (List-Id + Precedence:bulk
+  // together = machine fan-out, not correspondence). Newsletters that people
+  // actually read usually lack Precedence or come through marketing platforms
+  // handled by the newsletter signal below.
+  const precedence = (headers['precedence'] || headers['x-precedence'] || '').toLowerCase();
+  if ((precedence === 'bulk' || precedence === 'auto') && headers['list-id'] && /noreply|no-reply|notifications?@/i.test(from)) {
+    return { skip: true, reason: 'bulk-list-notification' };
+  }
+
   // Calendar invite (.ics attachment) — skip body, but emit minimal event memory
   const contentType = (headers['content-type'] || '').toLowerCase();
   if (contentType.includes('text/calendar') || /method=(?:request|reply|cancel)/i.test(contentType)) {

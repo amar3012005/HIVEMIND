@@ -37,6 +37,68 @@ function percentile(sorted, p) {
   return sorted[idx];
 }
 
+/**
+ * Reusable self-retrieval Recall@K eval — the evolution loop's replay gate.
+ * Returns { recall_at_k, hits, misses, probes, latency_ms{p50,p95,max} } or
+ * { error }. No process.exit — safe to call in-process.
+ */
+export async function evalOrg({ orgId, userId, apiKey, baseUrl = BASE, n = N, k = K, prisma = null } = {}) {
+  if (!orgId || !userId || !apiKey) return { error: 'orgId, userId, apiKey required' };
+  const ownPrisma = !prisma;
+  const p = prisma || new PrismaClient();
+  try {
+    const pool = await p.memory.findMany({
+      where: { orgId, isLatest: true, deletedAt: null, title: { not: null } },
+      select: { id: true, title: true, content: true },
+      orderBy: { updatedAt: 'desc' },
+      take: Math.max(n * 5, 50),
+    });
+    if (pool.length === 0) return { error: 'no probe memories', org: orgId, recall_at_k: 0 };
+    const step = Math.max(1, Math.floor(pool.length / n));
+    const probes = [];
+    for (let i = 0; i < pool.length && probes.length < n; i += step) probes.push(pool[i]);
+    const headers = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+      'X-HM-User-Id': userId,
+      'X-HM-Org-Id': orgId,
+    };
+    let hits = 0;
+    const latencies = [];
+    for (const probe of probes) {
+      const q = (probe.title && probe.title.trim().length >= 4)
+        ? probe.title.trim()
+        : String(probe.content || '').split(/\s+/).slice(0, 12).join(' ');
+      if (!q) continue;
+      const t0 = Date.now();
+      try {
+        const resp = await fetch(`${baseUrl}/api/recall`, {
+          // /api/recall reads body.query_context (NOT body.query) and body.max_memories
+          // (NOT body.limit). Sending the wrong field names yields an empty query and
+          // a false 0% recall.
+          method: 'POST', headers, body: JSON.stringify({ query_context: q, max_memories: k }),
+        });
+        latencies.push(Date.now() - t0);
+        if (resp.ok) {
+          const j = await resp.json();
+          const ids = (j.memories || []).slice(0, k).map((m) => m.id);
+          if (ids.includes(probe.id)) hits++;
+        }
+      } catch { latencies.push(Date.now() - t0); }
+    }
+    const nn = probes.length;
+    latencies.sort((a, b) => a - b);
+    return {
+      org: orgId, probes: nn, top_k: k,
+      recall_at_k: nn > 0 ? Math.round((hits / nn) * 1000) / 10 : 0,
+      hits, misses: nn - hits,
+      latency_ms: { p50: percentile(latencies, 50), p95: percentile(latencies, 95), max: latencies[latencies.length - 1] || 0 },
+    };
+  } finally {
+    if (ownPrisma) await p.$disconnect();
+  }
+}
+
 async function main() {
   if (!KEY || !USER || !ORG) {
     console.error('ERROR: HM_API_KEY, HM_USER_ID, HM_ORG_ID are required');
@@ -79,7 +141,10 @@ async function main() {
       let found = false;
       try {
         const resp = await fetch(`${BASE}/api/recall`, {
-          method: 'POST', headers, body: JSON.stringify({ query: q, limit: K }),
+          // /api/recall reads body.query_context (NOT body.query) and body.max_memories
+          // (NOT body.limit). Sending the wrong field names yields an empty query and
+          // a false 0% recall.
+          method: 'POST', headers, body: JSON.stringify({ query_context: q, max_memories: K }),
         });
         const ms = Date.now() - t0;
         latencies.push(ms);
@@ -117,4 +182,8 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error(e); process.exit(1); });
+// CLI guard: only run main() when invoked directly, NOT when imported for evalOrg().
+const _invokedDirectly = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
+if (_invokedDirectly) {
+  main().catch((e) => { console.error(e); process.exit(1); });
+}

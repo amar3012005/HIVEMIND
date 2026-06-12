@@ -464,20 +464,28 @@ export function generateHostedServer(userId, orgId, apiKey) {
  */
 function generateToolsManifest(userId, orgId, options = {}) {
   const scopes = Array.isArray(options.scopes) ? options.scopes : [];
-  const hasAll = scopes.includes('*');
-  const hasWebSearch = hasAll || scopes.includes('web_search');
-  const hasWebCrawl = hasAll || scopes.includes('web_crawl');
+  const scopeSet = new Set(scopes);
+  // Full HIVEMIND-native toolset is exposed to every authenticated MCP client by
+  // default. The previous scope-gating silently hid 23 of 34 tools: the OAuth→
+  // internal scope map (server.js) emits names ('mcp', 'memory:read', 'web:search')
+  // that NEVER matched the gate's expected names ('coding', 'web_search',
+  // 'web_crawl', 'slack:act'), so every OAuth / Claude connection fell through to
+  // only the 10 always-on core tools — regardless of what the user consented to.
+  // These tools read/write HIVEMIND's OWN graph or server-side-keyed services
+  // (same trust level as the always-on memory tools), so they are on by default.
+  // Power users / restricted integrations can opt a group OUT with a negative
+  // scope: '!coding', '!web', '!slack'. '*' or an empty scope list = everything.
+  const hasAll = scopeSet.has('*') || scopes.length === 0;
+  const hasCoding = hasAll || !scopeSet.has('!coding');
+  const hasWebSearch = hasAll || !scopeSet.has('!web');
+  const hasWebCrawl = hasWebSearch;
   const hasAnyWeb = hasWebSearch || hasWebCrawl;
-
-  // Coding scope: explicit grant OR auto-grant via known coding-platform connectors.
-  // Power users can override by adding 'coding' to scopes (force on) or '!coding' (force off).
-  const CODING_PLATFORM_KEYWORDS = ['cursor', 'claude', 'vscode', 'copilot', 'continue', 'cody', 'zed', 'windsurf'];
-  const platform = (options.platform || '').toLowerCase();
-  const platformIsCoding = !!platform && CODING_PLATFORM_KEYWORDS.some(kw => platform.includes(kw));
-  const hasCoding =
-    hasAll ||
-    scopes.includes('coding') ||
-    (platformIsCoding && !scopes.includes('!coding'));
+  // Write gate for the "Default Access" (read-only) OAuth tier. The token's
+  // stored scopes are the INTERNAL scopes (server.js createOAuthAccessToken
+  // persists internalScopes): Full Access carries 'memory:write', the read-only
+  // tier does not. When write is not granted, mutating tools are filtered out of
+  // the manifest so a read-only consent is actually enforced, not just cosmetic.
+  const canWrite = hasAll || scopeSet.has('memory:write') || scopeSet.has('memory.write');
 
   const tools = [
     {
@@ -490,10 +498,11 @@ Every call writes a versioned snapshot. Past versions stay queryable via hivemin
 SELF-EVOLVING GRAPH:
 On every save the server runs semantic recall against past memories + a triple-operator detector. If the new content updates / extends / contradicts a prior memory the right edge type (Updates / Extends / Derives / Contradicts) is auto-added. No manual relationship needed for most cases.
 
-PROJECT SCOPING (IMPORTANT):
+PROJECT SCOPING (IMPORTANT — keeps the org knowledge structured):
 The org has ONE shared HIVEMIND by default. Admins can create sub-HIVEMINDs called projects (e.g. "SOLVIS", "Q2-Planning"). Rule:
+  • BEFORE saving, call hivemind_list_projects and match the content to the best-fitting project by name + description. If one clearly fits, save with its project_id so the memory lands in that project.
   • If the user names a project ("save this to SOLVIS"), pass project="<name>" or project_id="<uuid>".
-  • Otherwise: if the user has access to one or more projects, the server returns needs_project_choice with the list — ASK the user which project to save to (or org-wide), then re-call with the chosen project_id (omit project entirely for org-wide).
+  • If no project clearly fits and the user hasn't named one: if they have access to projects, the server returns needs_project_choice with the list — pick the obvious match or ASK which project (or org-wide), then re-call with project_id (omit for org-wide).
   • If the user has NO accessible projects, the save goes org-wide automatically — no need to ask.
   • Genuinely org-wide facts/preferences: omit project.`,
       inputSchema: {
@@ -526,6 +535,10 @@ The org has ONE shared HIVEMIND by default. Admins can create sub-HIVEMINDs call
             type: 'string',
             description: 'Project UUID. Use this only when you already have the canonical id (e.g. from hivemind_list_projects). Otherwise use the project field with the name.'
           },
+          org_id: {
+            type: 'string',
+            description: 'Optional org UUID. The connection defaults to one org; pass another org id (from hivemind_list_projects other_orgs) to operate there instead — membership-validated, your role in that org applies.',
+          },
           relationship: {
             type: 'string',
             enum: ['update', 'extend', 'derive'],
@@ -541,18 +554,61 @@ The org has ONE shared HIVEMIND by default. Admins can create sub-HIVEMINDs call
     },
     {
       name: 'hivemind_list_projects',
-      description: 'List all projects (sub-HIVEMINDs) in the current org. Use this before saving a memory if you need to know which project to scope to.',
+      description: 'List the projects (sub-HIVEMINDs) in the current org with rich metadata per project: name, description, status, created_at, last_updated, member_count, memory_count, and people (member names + roles). CALL THIS FIRST when working with HIVEMIND memory: if the user task clearly belongs to one project (match by name/description), pass that project_id to hivemind_recall (scopes recall to that project + org-wide facts, excluding other projects) and to hivemind_save_memory (files the memory in that project). If no project clearly fits, omit project for an org-wide search/save. This keeps the org knowledge structured and on-topic.',
       inputSchema: {
         type: 'object',
-        properties: {},
+        properties: {
+          org_id: {
+            type: 'string',
+            description: 'Optional org UUID. The connection defaults to one org; pass another org id (from hivemind_list_projects other_orgs) to operate there instead — membership-validated, your role in that org applies.',
+          },
+        },
+      },
+    },
+    {
+      name: 'hivemind_create_project',
+      description: `Create a new project (a sub-HIVEMIND) inside the current org. A project is a focused, named knowledge bucket (e.g. "SOLVIS", "Q3-Launch", "ACME-Account") that scopes memories so recall stays on-topic. The calling user becomes the project owner.
+
+WHEN TO USE:
+  • The user explicitly asks to create/start a project ("make a project for the SOLVIS account", "spin up a workspace for Q3 planning").
+  • You are about to save a cluster of related memories that clearly belong to a NEW initiative that does not yet exist in hivemind_list_projects.
+
+WORKFLOW (avoid duplicates):
+  1. Call hivemind_list_projects FIRST and check whether a project with the same name/topic already exists — if so, reuse its project_id instead of creating a duplicate.
+  2. Only call this when no fitting project exists.
+  3. A 'description' is REQUIRED and should be a 1–2 sentence summary of the project's purpose — it powers project matching in later hivemind_list_projects / save / recall calls, so make it specific.
+  4. After creation, use the returned project_id with hivemind_save_memory and hivemind_recall to file and retrieve that project's memories.
+
+Returns the created project: { id, name, slug, description, status, created_at }. The slug is auto-derived from the name and de-duplicated.`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: {
+            type: 'string',
+            description: 'Project name (human-readable, e.g. "SOLVIS Account"). The slug is auto-generated from this.',
+          },
+          description: {
+            type: 'string',
+            description: 'REQUIRED. 1–2 sentence summary of what this project is for. Drives project matching in list/save/recall, so be specific about scope and topic.',
+          },
+          team_id: {
+            type: 'string',
+            description: 'Optional team UUID to attach the project to a team workspace. Omit for an org-level project.',
+          },
+        },
+        required: ['name', 'description'],
       },
     },
     {
       name: 'hivemind_recall',
-      description: 'Search and retrieve relevant memories from HIVE-MIND. Use this to find previously stored information, code patterns, or context from past conversations.',
+      description: 'Search and retrieve relevant memories from HIVE-MIND. Use this to find previously stored information, code patterns, or context from past conversations. PROJECT WORKFLOW: for best results call hivemind_list_projects first; if the query clearly belongs to one project, pass its `project_id` to scope recall to that project + org-wide facts (other projects excluded); if it does not clearly fit a project, omit project_id for a whole-org recall. PERSON/TIME: pass `author` (member name/email/id) to return only that member memories, and `date_range` to bound time — together they answer "what did <person> update today / this week", optionally scoped to a project.',
       inputSchema: {
         type: 'object',
         properties: {
+          org_id: {
+            type: 'string',
+            description: 'Optional org UUID. The connection defaults to one org; pass another org id (from hivemind_list_projects other_orgs) to operate there instead — membership-validated, your role in that org applies.',
+          },
           query: {
             type: 'string',
             description: 'Search query - describe what you are looking for'
@@ -575,7 +631,7 @@ The org has ONE shared HIVEMIND by default. Admins can create sub-HIVEMINDs call
           },
           project_id: {
             type: 'string',
-            description: 'Optional HIVEMIND project ID for scoped recall. Omit for org-wide search.'
+            description: 'HIVEMIND project id (from hivemind_list_projects). When set, recall is scoped to that project PLUS org-wide/personal facts, and excludes other projects. Omit for a whole-org search.'
           },
           source_type: {
             type: 'string',
@@ -594,6 +650,15 @@ The org has ONE shared HIVEMIND by default. Admins can create sub-HIVEMINDs call
           transaction_at: {
             type: 'string',
             description: 'Bi-temporal filter: only return memories the system had learned by this ISO timestamp (excludes future writes that happened after the cutoff).'
+          },
+          author: {
+            type: 'string',
+            description: 'Person filter — a member name, email, or user id. Returns only memories owned by that person. Combine with date_range to answer "what did <person> update today" (e.g. author="Maya Ortiz", date_range={start:<today ISO>}). Omit for everyone.'
+          },
+          date_range: {
+            type: 'object',
+            description: 'Restrict to a time window: { start: ISO, end?: ISO }. Use with author for "what did X do today/this week".',
+            properties: { start: { type: 'string' }, end: { type: 'string' } }
           }
         },
         required: ['query']
@@ -619,6 +684,10 @@ The org has ONE shared HIVEMIND by default. Admins can create sub-HIVEMINDs call
       inputSchema: {
         type: 'object',
         properties: {
+          org_id: {
+            type: 'string',
+            description: 'Optional org UUID. The connection defaults to one org; pass another org id (from hivemind_list_projects other_orgs) to operate there instead — membership-validated, your role in that org applies.',
+          },
           project: {
             type: 'string',
             description: 'Filter by project'
@@ -1252,7 +1321,7 @@ ENTERPRISE EXAMPLES:
   }
 
   // ── Slack action tools (Digital Employee scope: slack:act) ──
-  const hasSlackAct = hasAll || scopes.includes('slack:act');
+  const hasSlackAct = hasAll || !scopeSet.has('!slack');
   if (hasSlackAct) {
     tools.push({
       name: 'hivemind_slack_post',
@@ -1305,6 +1374,20 @@ ENTERPRISE EXAMPLES:
         required: ['channel']
       }
     });
+  }
+
+  if (!canWrite) {
+    // Read-only ("Default Access") OAuth tier — drop every mutating tool so the
+    // consent is enforced, not decorative. Read / recall / time-travel / project
+    // listing / web-read tools remain available.
+    const WRITE_TOOLS = new Set([
+      'hivemind_save_memory', 'hivemind_update_memory', 'hivemind_delete_memory',
+      'hivemind_save_conversation', 'hivemind_create_project', 'hivemind_ingest_code',
+      'hivemind_log_decision', 'hivemind_track_refactor', 'hivemind_test_coverage',
+      'hivemind_set_assistant_name', 'hivemind_set_voice',
+      'hivemind_slack_post', 'hivemind_slack_react',
+    ]);
+    return tools.filter(t => !WRITE_TOOLS.has(t.name));
   }
 
   return tools;
@@ -2077,6 +2160,9 @@ export function handleGetPrompt(params, userId, orgId) {
 
 export function createHostedApiClient({ baseUrl, apiKey, userId, orgId }) {
   const normalizedBaseUrl = baseUrl.replace(/\/+$/, '');
+  // Retained so handleToolCall can rebuild the client against a different org
+  // when a tool call passes a validated org_id override (multi-org users).
+  const __config = { baseUrl: normalizedBaseUrl, apiKey, userId, orgId };
 
   async function request(method, endpoint, { params, body } = {}) {
     const url = new URL(`${normalizedBaseUrl}${endpoint}`);
@@ -2132,6 +2218,7 @@ export function createHostedApiClient({ baseUrl, apiKey, userId, orgId }) {
   }
 
   return {
+    __config,
     get(endpoint, options = {}) {
       return request('GET', endpoint, options);
     },
@@ -2209,12 +2296,44 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
   const { name, arguments: args } = params;
   const isMaster = options.isMaster === true;
 
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  // Cross-org targeting: a tool call may pass `org_id` to operate on ANOTHER
+  // org the user actively belongs to — membership-validated here, and the
+  // user's role IN THAT ORG governs everything downstream (guests stay
+  // project-scoped via buildAccessContext / role-aware listings). This removes
+  // the "switch org in the dashboard + reconnect the MCP" dance for multi-org
+  // users: one token, every org they're a member of.
+  const requestedOrgId = typeof args?.org_id === 'string' && UUID_RE.test(args.org_id.trim())
+    ? args.org_id.trim()
+    : null;
+  if (requestedOrgId && requestedOrgId !== orgId && userId) {
+    try {
+      const { getPrismaClient } = await import('../db/prisma.js');
+      const prisma = getPrismaClient();
+      const m = await prisma.userOrganization.findUnique({
+        where: { userId_orgId: { userId, orgId: requestedOrgId } },
+        select: { isActive: true, role: true },
+      });
+      if (!m || m.isActive === false) {
+        return formatToolContent({
+          error: `You are not an active member of org ${requestedOrgId} — org_id override rejected. Call hivemind_list_projects to see which orgs this account belongs to.`,
+        });
+      }
+      orgId = requestedOrgId;
+      if (apiClient?.__config) {
+        apiClient = createHostedApiClient({ ...apiClient.__config, orgId });
+      }
+    } catch (orgErr) {
+      return formatToolContent({ error: `org_id validation failed: ${orgErr.message}` });
+    }
+  }
+
   // Resolve optional project scope. Two modes:
   //   1. project_id (UUID) → validate membership
   //   2. project (name/slug) → look up by name in org, then validate
   // Either path → server-side mapping to validated scope fields. Falls back
   // to org-wide when neither is set or both fail.
-  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   let requestedProjectId = typeof args.project_id === 'string' && args.project_id.trim()
     ? args.project_id.trim()
     : null;
@@ -2251,6 +2370,7 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
   let resolvedProjectId = null;
   let resolvedProjectIds = [];
   let resolvedTeamId = null;
+  let projectAccessError = null;
   if (requestedProjectId && UUID_RE.test(requestedProjectId) && userId && orgId) {
     try {
       const { resolveScopedIngestPayload } = await import('../server.js');
@@ -2262,8 +2382,29 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
       resolvedProjectId = requestedProjectId;
       resolvedProjectIds = scoped.project_ids || [];
       resolvedTeamId = scoped.primary_team_id || null;
-    } catch (_ignored) {
-      // Membership validation failure — leave scope null, fall back to org-wide.
+    } catch (membershipErr) {
+      // Membership validation failed — most often a STALE access-context cache
+      // right after the project was just created (the owner ProjectMember row
+      // exists, but the cached context predates it). Do a direct DB check so an
+      // EXPLICIT project_id never silently degrades into the project-picker loop
+      // that blocked bootstrapping a freshly-created project.
+      try {
+        const { getPrismaClient } = await import('../db/prisma.js');
+        const prisma = getPrismaClient();
+        const proj = await prisma.project.findFirst({
+          where: { id: requestedProjectId, orgId, status: 'active' },
+          select: { id: true, teamId: true, members: { where: { userId }, select: { userId: true } } },
+        });
+        if (proj && (isMaster || proj.members.length > 0)) {
+          resolvedProjectId = requestedProjectId;
+          resolvedProjectIds = [requestedProjectId];
+          resolvedTeamId = proj.teamId || null;
+        } else if (proj) {
+          projectAccessError = `You are not a member of project ${requestedProjectId}. Ask an admin to add you, or omit project_id to save org-wide.`;
+        } else {
+          projectAccessError = `Project ${requestedProjectId} was not found (or is archived) in this org.`;
+        }
+      } catch { /* leave unresolved → falls through to org-wide save */ }
     }
   }
   const SCOPE_FIELDS = resolvedProjectId ? {
@@ -2287,13 +2428,22 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
           throw new Error('hivemind_save_memory requires non-empty content');
         }
 
+        // Explicit project_id that the caller cannot access → clear error, NOT
+        // a picker. Prevents the re-ask loop when an id was deliberately passed.
+        if (projectAccessError) {
+          return formatToolContent({ saved: false, error: projectAccessError });
+        }
+
         // Project-membership routing: if the user belongs to >=2 projects
         // and didn't specify one, return a structured clarification (does
         // NOT save) so the agent surfaces a picker to the user. Single
         // project → auto-attach. Zero → fall through to org-wide policy.
         let projectPolicyHint = null;
         let autoAttachedProjectId = null;
-        if (!resolvedProjectId && userId && orgId) {
+        // Only prompt for a project when the caller named NONE. An explicit
+        // project_id (resolved above, or rejected via projectAccessError) must
+        // never trigger the picker — that was the re-ask loop.
+        if (!requestedProjectId && !resolvedProjectId && userId && orgId) {
           try {
             const { getPrismaClient } = await import('../db/prisma.js');
             const prisma = getPrismaClient();
@@ -2318,9 +2468,14 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
             for (const p of viaTeam) byId.set(p.id, p);
             const accessible = [...byId.values()];
 
-            // Rule: if the user can access >=1 project and didn't name one,
-            // ASK which project (or org-wide). Zero projects → save org-wide.
-            if (accessible.length >= 1) {
+            // Rule: exactly ONE accessible project → auto-attach (the tools
+            // "recognize the project" without asking — single-project members
+            // never see a picker). Two or more → ASK which project (or
+            // org-wide). Zero → fall through: save org-wide.
+            if (accessible.length === 1) {
+              autoAttachedProjectId = accessible[0].id;
+              projectPolicyHint = `Auto-scoped to your project "${accessible[0].name}" (your only project). Pass project_id explicitly to override, or project_id omitted with scope:"organization" for an org-wide save.`;
+            } else if (accessible.length >= 2) {
               return formatToolContent({
                 needs_project_choice: true,
                 message: `This memory can be scoped to a project. Ask the user which of these ${accessible.length} project(s) to save it to — or org-wide. Then re-call hivemind_save_memory with project_id="<chosen id>" (omit project entirely for org-wide).`,
@@ -2329,7 +2484,6 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
                 saved: false,
               });
             }
-            // accessible.length === 0 → fall through: save org-wide (default).
           } catch { /* best-effort: fall through to org-wide save */ }
         }
 
@@ -2355,7 +2509,12 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
           smartIngest: true,
           sync: true,
           ...SCOPE_FIELDS,
-          ...(autoAttachedProjectId && !resolvedProjectId ? { project_id: autoAttachedProjectId } : {}),
+          // Auto-attach needs the same shape as explicit scoping: project_ids[]
+          // drives resolveScopedIngestPayload; bare project_id alone is ignored
+          // by the scope resolver and the save lands org-wide/personal.
+          ...(autoAttachedProjectId && !resolvedProjectId
+            ? { project_id: autoAttachedProjectId, project_ids: [autoAttachedProjectId], scope: 'project' }
+            : {}),
           __bypass_membership: isMaster && resolvedProjectId ? true : undefined,
         });
         return formatToolContent({
@@ -2369,35 +2528,163 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
         try {
           const { getPrismaClient } = await import('../db/prisma.js');
           const prisma = getPrismaClient();
-          const projects = await prisma.project.findMany({
-            where: { orgId },
-            orderBy: { updatedAt: 'desc' },
-            select: {
-              id: true,
-              name: true,
-              slug: true,
-              description: true,
-              status: true,
-              createdAt: true,
-            },
-            take: 50,
-          });
+          // Role-aware: this previously listed EVERY org project to ANY caller,
+          // leaking project names/descriptions to guests. Guests see only their
+          // own projects; members see accessible (member/team/org-level);
+          // owners/admins see all.
+          const membership = await prisma.userOrganization.findUnique({
+            where: { userId_orgId: { userId, orgId } },
+            select: { role: true },
+          }).catch(() => null);
+          // Real membership wins — master-key service calls only default to
+          // 'owner' when the emulated user has no membership row at all.
+          const callerRole = membership?.role || (isMaster ? 'owner' : 'member');
+          // Same policy-aware visibility engine as the dashboard (raw SQL —
+          // the policy column postdates the deployed Prisma client):
+          // guests → explicit memberships only; members → member ∪ org_visible
+          // ∪ (team_inherited ∧ own team); admins → all.
+          const { TeamStore } = await import('../teams/team-store.js');
+          const tstore = new TeamStore(prisma);
+          const visible = await tstore.listProjectsForUser({ userId, orgId, orgRole: callerRole });
+          const visibleIds = visible.slice(0, 50).map(p => p.id);
+          const memberRows = visibleIds.length
+            ? await prisma.projectMember.findMany({
+                where: { projectId: { in: visibleIds } },
+                select: { projectId: true, role: true, user: { select: { displayName: true, email: true } } },
+              }).catch(() => [])
+            : [];
+          const peopleByProject = {};
+          for (const m of memberRows) {
+            (peopleByProject[m.projectId] = peopleByProject[m.projectId] || []).push(m);
+          }
+          const projects = visible.slice(0, 50).map(p => ({
+            id: p.id,
+            name: p.name,
+            slug: p.slug,
+            description: p.description,
+            status: p.status,
+            policy: p.policy,
+            createdAt: p.createdAt,
+            updatedAt: p.updatedAt,
+            _count: p._count,
+            members: (peopleByProject[p.id] || []).slice(0, 8),
+          }));
+          // Multi-org awareness: the MCP token is bound to ONE org. When the
+          // user belongs to several, say so — "0 projects" usually means the
+          // token is bound to the wrong org, not that projects were deleted.
+          const otherOrgs = await prisma.userOrganization.findMany({
+            where: { userId, isActive: true, NOT: { orgId } },
+            select: { role: true, org: { select: { id: true, name: true } } },
+            take: 10,
+          }).catch(() => []);
+          const orgsNote = otherOrgs.length
+            ? ` NOTE: this connection defaults to org ${orgId}. The user ALSO belongs to: ${otherOrgs.map(o => `"${o.org?.name}" (${o.org?.id}, role ${o.role})`).join(', ')}. To work in one of those orgs, pass org_id:"<that org's id>" on any HIVEMIND tool call (hivemind_list_projects, hivemind_recall, hivemind_save_memory, …) — same connection, membership-validated, the user's role in that org applies.`
+            : '';
           return formatToolContent({
             org_id: orgId,
+            caller_role: callerRole,
             count: projects.length,
             projects: projects.map(p => ({
               id: p.id,
               name: p.name,
               slug: p.slug,
-              description: p.description,
+              description: p.description || null,
               status: p.status,
+              policy: p.policy || null,
+              created_at: p.createdAt,
+              last_updated: p.updatedAt,
+              member_count: p._count?.members ?? 0,
+              memory_count: p._count?.memories ?? 0,
+              people: (p.members || []).map(m => ({
+                name: m.user?.displayName || m.user?.email || 'member',
+                role: m.role,
+              })),
             })),
-            hint: projects.length === 0
-              ? 'No projects yet — memories save org-wide. Admin can create a project in the HIVEMIND web UI.'
-              : 'Pass the project name (case-insensitive) or id as the `project` / `project_id` arg on hivemind_save_memory.',
+            ...(otherOrgs.length ? { other_orgs: otherOrgs.map(o => ({ id: o.org?.id, name: o.org?.name, role: o.role })) } : {}),
+            hint: (projects.length === 0
+              ? 'No projects visible in this org for this user — memories save org-wide. Admin can create a project in the HIVEMIND web UI.'
+              : 'Each project is a sub-HIVEMIND. If the user task clearly belongs to one (match by name/description), pass its `project_id` to hivemind_recall (scopes recall to that project + org-wide) and hivemind_save_memory. If unclear, omit project for org-wide.') + orgsNote,
           });
         } catch (err) {
           return formatToolContent({ error: err.message, projects: [] });
+        }
+      }
+
+      case 'hivemind_create_project': {
+        try {
+          const name = (args.name || '').trim();
+          const description = (args.description || '').trim();
+          if (!name) {
+            return formatToolContent({ error: 'name is required to create a project.' });
+          }
+          if (!description) {
+            return formatToolContent({
+              error: 'description is required — provide a 1–2 sentence summary of the project purpose so it can be matched in future recall/save calls.',
+            });
+          }
+          const { getPrismaClient } = await import('../db/prisma.js');
+          const prisma = getPrismaClient();
+          const { TeamStore } = await import('../teams/team-store.js');
+          const store = new TeamStore(prisma);
+
+          // Guard against duplicate-by-name within the org (case-insensitive).
+          const existing = await prisma.project.findFirst({
+            where: { orgId, name: { equals: name, mode: 'insensitive' } },
+            select: { id: true, name: true, slug: true, description: true, status: true, createdAt: true },
+          });
+          if (existing) {
+            return formatToolContent({
+              created: false,
+              reason: 'project_already_exists',
+              project: {
+                id: existing.id,
+                name: existing.name,
+                slug: existing.slug,
+                description: existing.description || null,
+                status: existing.status,
+                created_at: existing.createdAt,
+              },
+              hint: 'A project with this name already exists — reuse its project_id with hivemind_save_memory / hivemind_recall instead of creating a duplicate.',
+            });
+          }
+
+          // Attach to a team so the project appears in the dashboard's
+          // team-scoped Projects tab (org-level teamId=null projects only show
+          // in the team view after the team-store visibility fix; defaulting to
+          // the org's Default Team keeps MCP-created projects alongside the rest).
+          let teamId = args.team_id || null;
+          if (!teamId) {
+            try {
+              const teams = await prisma.team.findMany({
+                where: { orgId },
+                select: { id: true, slug: true },
+                orderBy: { createdAt: 'asc' },
+              });
+              const def = teams.find(t => t.slug === 'default-team') || (teams.length === 1 ? teams[0] : null);
+              if (def) teamId = def.id;
+            } catch { /* leave org-level */ }
+          }
+          const project = await store.createProject({
+            orgId,
+            teamId,
+            name,
+            description,
+            createdBy: userId,
+          });
+          return formatToolContent({
+            created: true,
+            project: {
+              id: project.id,
+              name: project.name,
+              slug: project.slug,
+              description: project.description || null,
+              status: project.status,
+              created_at: project.createdAt,
+            },
+            hint: 'Project created. Use its `id` as project_id in hivemind_save_memory to file memories here, and in hivemind_recall to scope retrieval to this project + org-wide facts.',
+          });
+        } catch (err) {
+          return formatToolContent({ created: false, error: err.message });
         }
       }
 
@@ -2420,6 +2707,9 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
             ...(args.valid_at ? { valid_at: args.valid_at } : {}),
             ...(args.transaction_at ? { transaction_at: args.transaction_at } : {}),
             ...(resolvedProjectId ? { project_id: resolvedProjectId, project_ids: resolvedProjectIds } : {}),
+            // Person filter ("what did X update today"): server resolves name/email→userId.
+            ...(args.author ? { author: args.author } : {}),
+            ...(args.date_range ? { date_range: args.date_range } : {}),
           });
 
           // Polished memory shape only — drops semantic_*, vector_score, user_profile,

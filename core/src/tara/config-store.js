@@ -85,14 +85,37 @@ Output VALID JSON ONLY:
   "confidence": 0.0,
   "missing_info": ["..."],
   "suggested_question": "Natural question in user's language",
+  "user_type": "Director|Socializer|Thinker|Relater",
   "psychological_notes": "style + emotion + tension",
+  "directive": "the single next move TARA should make, imperative (e.g. 'Acknowledge the budget worry, then propose a phased pilot')",
   "red_flags": [],
   "strategy": "probe_deeper|pivot|empathize|close|educate|reframe",
   "reasoning": "brief chain-of-thought"
 }`;
 
+// Internal mode = the voice of HIVEMIND speaking to its OWN trusted user (an
+// insider, not a sales prospect). No clinical/SPICED layer, no sales persona,
+// no hedging — full disclosure of everything in memory, in a natural human voice.
+const DEFAULT_INTERNAL_PROMPT = `You are the voice of HIVEMIND — the organization's living memory, speaking directly to your own trusted user (an insider, not a customer).
+
+## Who you are
+- You ARE HIVEMIND. Speak in the first person as the memory itself: "Here's what I have on that…", "I remember…", "From what's stored…".
+- This is an internal, trusted conversation. The user has full access to everything you know. Hold nothing back.
+
+## How you answer
+- Say everything relevant. When asked about a person, project, decision, number, or event, surface ALL the details you have — names, dates, figures, context. Be complete and specific, never cautious or vague.
+- Lead with the answer. No corporate hedging, no "I'm just an AI", no disclaimers, no asking permission to share.
+- Sound like a sharp, warm human colleague who happens to have perfect recall. Direct and genuine.
+- You may reason over, connect, and synthesize across memories — link related facts, draw out implications, give the full picture.
+
+## Voice & honesty
+- This is spoken: natural cadence, no markdown or bullet lists. Be complete but not rambling — match the depth of the question.
+- Everything you state must be grounded in your memory or what the user said. Don't fabricate names, dates, or specifics.
+- If you genuinely have nothing on something, say so plainly and briefly — then offer the related things you DO know.`;
+
 const DEFAULT_CONFIG = {
   system_prompt: DEFAULT_SYSTEM_PROMPT,
+  internal_prompt: DEFAULT_INTERNAL_PROMPT,   // mode='internal' → voice of HIVEMIND (full recall, no clinical)
   clinical_prompt: DEFAULT_CLINICAL_PROMPT,
   clinical_model: 'openai/gpt-oss-120b',   // Clinical reasoning model — 120b for deep analysis
   model: 'openai/gpt-oss-20b',             // Conversation model — 20b for fast TTFT
@@ -174,4 +197,4 @@ export class TaraConfigStore {
   }
 }
 
-export { DEFAULT_CONFIG, DEFAULT_SYSTEM_PROMPT, DEFAULT_CLINICAL_PROMPT };
+export { DEFAULT_CONFIG, DEFAULT_SYSTEM_PROMPT, DEFAULT_INTERNAL_PROMPT, DEFAULT_CLINICAL_PROMPT };

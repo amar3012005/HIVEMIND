@@ -23,6 +23,11 @@
 
 import { recallPersistedMemories, crossClusterEntityBoost } from './persisted-retrieval.js';
 import { ClusterIndex } from './cluster-index.js';
+// Two-reranker contract: this `rerank` is the OPT-IN CROSS-ENCODER pass (external model,
+// gated RERANK_ENABLED) on the agent path. The ALGORITHMIC ResultReranker (search/result-reranker.js)
+// is the always-on, no-network ordering reranker used on delivery (and behind RECALL_TIERED_VIEW).
+import { rerank } from './reranker.js';
+import { getRetrievalConfig, logTaskOutcome } from './retrieval-config.js';
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -30,6 +35,11 @@ const HOP1_DEFAULT_LIMIT       = 12;
 const HOP2_DOC_LIMIT           = 8;
 const HOP2_UNFILTERED_LIMIT    = 6;
 const HOP3_LIVE_LIMIT          = 5;
+// Deliver-narrow: retrieve stays wide (HOP1 fetches up to 50, RRF/MMR-ranked),
+// but only the top-N ranked memories go to the answer model. 1024 bge-m3 +
+// algorithmic rerank shows a clean relevance cliff after ~5 (junk/redundancy
+// beyond), so default 5. Env-tunable (no redeploy to widen for summarize).
+const RECALL_DELIVER_LIMIT     = Number(process.env.RECALL_DELIVER_LIMIT || 5);
 
 const HOP1_TIMEOUT_MS          = 4000;
 const HOP2_TIMEOUT_MS          = 1500;
@@ -145,6 +155,7 @@ async function hop1Memory({ store, query, options, ctx }) {
       ? { date_range: explicitDateRange }
       : validAtDate ? { date_range: { end: validAtDate.toISOString() } } : {}),
   };
+  // PHASE-B TODO: surface spine from recallPersistedMemories result when TIERED_VIEW lands on router path
   const result = willOverride
     ? { memories: [] }
     : await recallPersistedMemories(store, recallArgs);
@@ -712,8 +723,29 @@ export class RecallRouter {
     if (hop2.items.length > 0) tiersFired.push(`evidence-${hop2.reason}`);
     if (hop3.items.length > 0) tiersFired.push('live');
 
+    // Phase 2 (B2): deliver-N comes from the per-org RetrievalConfig (the
+    // self-evolution action space), falling back to RECALL_DELIVER_LIMIT.
+    let deliverN = RECALL_DELIVER_LIMIT;
+    try {
+      const cfg = await getRetrievalConfig(ctx.orgId);
+      if (cfg?.deliver_limit) deliverN = cfg.deliver_limit;
+    } catch { /* default */ }
+
+    // Two-reranker contract: this is the OPT-IN CROSS-ENCODER precision pass (external
+    // model, gated RERANK_ENABLED) — no-op (returns first N) when disabled. The ALGORITHMIC
+    // ResultReranker (always-on, no network) handles ordering upstream / behind RECALL_TIERED_VIEW.
+    // Stage 4 / P1: optional cross-encoder rerank of the wide ranked pool → deliver top-N.
+    const deliverMemories = await rerank(query, rankedMemories, { topN: deliverN });
+
+    // Phase 2 (B3): fire-and-forget TaskOutcome signal for the evolution loop.
+    logTaskOutcome({
+      orgId: ctx.orgId, userId: ctx.userId, query,
+      returnedN: deliverMemories.length,
+      topScore: deliverMemories[0]?.score,
+    });
+
     return {
-      memories: rankedMemories.slice(0, 15).map((m) => ({
+      memories: deliverMemories.map((m) => ({
         id: m.id,
         title: m.title,
         content: typeof m.content === 'string' ? m.content.slice(0, 400) : '',

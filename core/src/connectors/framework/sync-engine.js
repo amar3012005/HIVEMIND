@@ -353,7 +353,7 @@ export class SyncEngine {
       try {
         const fullMemory = await this.memoryStore.getMemory(memoryId);
         if (fullMemory) {
-          const collectionName = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
+          const collectionName = 'HIVEMIND_PERSONAL';
           const entityNames = (fullMemory.tags || [])
             .filter((t) => typeof t === 'string' && (t.startsWith('entity:') || t.startsWith('person:')))
             .map((t) => t.replace(/^(entity|person):/, '').replace(/_/g, ' '));

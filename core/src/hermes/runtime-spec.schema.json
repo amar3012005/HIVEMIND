@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://hivemind/schemas/hermes-runtime-spec.json",
+  "title": "HermesRuntimeSpec",
+  "description": "One per-tenant Hermes runtime (a container on the single Docker host today; a K8s Deployment later). Managed by hm-hermes-manager (a Node module inside hm-control). 1 runtime = 1 tenant. Forward-compatible with multi-host/K8s via container_host.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tenant_id", "container_name", "image", "volume_name", "gateway_port", "networks", "status"],
+  "properties": {
+    "tenant_id": { "type": "string", "minLength": 1, "description": "org id — the isolation unit (1 runtime = 1 tenant)." },
+    "container_name": { "type": "string", "pattern": "^hm-hermes-[a-zA-Z0-9_-]+$", "description": "hm-hermes-<tenant>." },
+    "image": { "type": "string", "default": "nousresearch/hermes-agent:latest", "description": "same hm-hermes image for every tenant — no per-tenant rebuild." },
+    "volume_name": { "type": "string", "pattern": "^hermes-state-[a-zA-Z0-9_-]+$", "description": "hermes-state-<tenant> — isolated /opt/data (skills/sessions/config)." },
+    "gateway_port": { "type": "integer", "minimum": 1024, "maximum": 65535, "description": "host port → container 8642; allocated deterministically (base + hash(tenant) mod range)." },
+    "dashboard_port": { "type": ["integer", "null"], "minimum": 1024, "maximum": 65535, "description": "optional host port → container 9119." },
+    "networks": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string" },
+      "description": "EXISTING docker networks to attach (MVP: hmtest so hm-control resolves it; optionally s0k0_hivemind). No new per-tenant bridge networks in MVP."
+    },
+    "resource_limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cpus": { "type": "string", "description": "e.g. '2'." },
+        "memory": { "type": "string", "description": "e.g. '4G'." },
+        "shm_size": { "type": "string", "description": "e.g. '1g' (browser tools need shared memory)." }
+      }
+    },
+    "mcp_url": { "type": "string", "description": "HiveMind MCP endpoint wired into the tenant profile (system of record)." },
+    "api_key_ref": { "type": "string", "description": "env-var name holding the gateway API_SERVER_KEY (e.g. 'env:HERMES_API_SERVER_KEY') — NEVER a literal secret." },
+    "mcp_token_ref": { "type": ["string", "null"], "description": "env-var name for the per-tenant scoped MCP token (6g). Null in MVP (shared key)." },
+    "org_id": { "type": "string", "description": "HiveMind org id for X-HM-Org-Id scoping; usually == tenant_id." },
+    "status": { "type": "string", "enum": ["pending", "running", "stopped", "error", "deleted"] },
+    "container_host": { "type": ["string", "null"], "default": null, "description": "forward-compat: which host/node runs this runtime. null = the single MVP host. Enables multi-host / K8s migration without an API change." },
+    "created_at": { "type": ["string", "null"], "format": "date-time" },
+    "updated_at": { "type": ["string", "null"], "format": "date-time" }
+  }
+}

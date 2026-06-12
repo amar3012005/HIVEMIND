@@ -191,10 +191,35 @@ class EnterpriseUploadQueue extends EventEmitter {
 
 // ─── BullMQ-backed enterprise queue (persistent) ─────────────────
 
+// Prefer REDIS_URL (Coolify's authoritative host+password+db). REDIS_PASSWORD
+// is often UNSET while the password lives only in REDIS_URL — reading
+// REDIS_PASSWORD alone yields undefined → "NOAUTH" → silent fallback.
+function resolveRedisConn() {
+  let urlHost; let urlPort; let urlPassword; let urlUsername; let urlDb;
+  if (process.env.REDIS_URL) {
+    try {
+      const u = new URL(process.env.REDIS_URL);
+      urlHost = u.hostname;
+      urlPort = Number(u.port || 6379);
+      urlPassword = u.password ? decodeURIComponent(u.password) : undefined;
+      urlUsername = u.username ? decodeURIComponent(u.username) : undefined;
+      urlDb = (u.pathname && u.pathname.length > 1) ? (Number(u.pathname.slice(1)) || 0) : 0;
+    } catch { /* malformed — fall back to discrete vars */ }
+  }
+  const port = urlPort || Number(process.env.REDIS_PORT || 6379);
+  const password = urlPassword !== undefined ? urlPassword : (process.env.REDIS_PASSWORD || undefined);
+  const username = urlUsername;
+  const db = urlDb || 0;
+  const primary = urlHost || process.env.REDIS_HOST || 'localhost';
+  const alts = [
+    process.env.REDIS_HOST,
+    ...(process.env.REDIS_HOST_FALLBACKS || '').split(',').map((s) => s.trim()).filter(Boolean),
+  ].filter(Boolean).filter((h) => h !== primary);
+  return { candidates: [primary, ...alts], port, password, username, db };
+}
+
 async function probeRedisHost() {
-  const primary = process.env.REDIS_HOST || 'localhost';
-  const alts = (process.env.REDIS_HOST_FALLBACKS || '').split(',').map((s) => s.trim()).filter(Boolean);
-  const candidates = [primary, ...alts.filter((h) => h !== primary)];
+  const { candidates, port, password, username } = resolveRedisConn();
   let IORedis;
   try {
     IORedis = (await import('ioredis')).default;
@@ -204,8 +229,9 @@ async function probeRedisHost() {
   for (const host of candidates) {
     const probe = new IORedis({
       host,
-      port: Number(process.env.REDIS_PORT || 6379),
-      password: process.env.REDIS_PASSWORD || undefined,
+      port,
+      password,
+      username,
       maxRetriesPerRequest: 1,
       connectTimeout: 1500,
       lazyConnect: true,
@@ -242,10 +268,13 @@ class BullMQEnterpriseQueue extends EventEmitter {
       import('ioredis'),
     ]);
     const IORedis = IORedisMod.default;
+    const { port, password, username, db } = resolveRedisConn();
     const connection = new IORedis({
       host: this.host,
-      port: Number(process.env.REDIS_PORT || 6379),
-      password: process.env.REDIS_PASSWORD || undefined,
+      port,
+      password,
+      username,
+      db,
       maxRetriesPerRequest: null,
     });
     connection.on('error', (err) => {

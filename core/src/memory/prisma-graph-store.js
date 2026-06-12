@@ -75,9 +75,17 @@ function mapMemoryRecord(record) {
     language: record.codeMetadata.language
   } : {};
 
+  // Owner attribution — surface a human name when the User relation was joined
+  // (listMemories/getMemory include it). Falls back to displayName → email → null.
+  const ownerName = record.user
+    ? (record.user.displayName || record.user.email || null)
+    : null;
+
   return {
     id: record.id,
     user_id: record.userId,
+    owner: record.userId ? { id: record.userId, name: ownerName } : null,
+    owner_name: ownerName,
     org_id: record.orgId,
     project: record.project,
     // Phase P.2: surface formal Project FK when populated. project (string)
@@ -162,8 +170,12 @@ function scopedMemoryWhere({ user_id, org_id, project, scope = 'personal', acces
     const teamIds = Array.isArray(access_context.teamIds) ? access_context.teamIds : [];
     const tiers = [
       { userId: user_id, scope: 'personal' },
-      { scope: 'organization', orgId: org_id },
     ];
+    // Hierarchy: org GUESTS (project-scoped invitees, often from another org)
+    // see their own memories + their projects' memories — never the org-wide tier.
+    if (access_context.orgRole !== 'guest') {
+      tiers.push({ scope: 'organization', orgId: org_id });
+    }
     if (projectIds.length > 0) {
       tiers.push({ scope: 'project', memoryProjects: { some: { projectId: { in: projectIds } } } });
     }
@@ -424,7 +436,7 @@ export class PrismaGraphStore {
     return records.map(mapMemoryRecord);
   }
 
-  async listMemories({ user_id, org_id, project, project_id, memory_type, tags, is_latest, limit = 50, offset = 0, scope = 'personal', access_context = null }) {
+  async listMemories({ user_id, org_id, project, project_id, memory_type, tags, is_latest, include_children = false, limit = 50, offset = 0, scope = 'personal', access_context = null }) {
     // Phase P.3: prefer formal projectId FK when caller passes it; falls back
     // to legacy free-text `project` string.
     const baseWhere = scopedMemoryWhere({ user_id, org_id, project, scope, access_context });
@@ -452,22 +464,44 @@ export class PrismaGraphStore {
     // by default. Caller opts in via tags=['internal-audit'] or
     // tags=['room-decision']/['hyper-rooms'].
     const hiddenTags = [];
-    if (!callerWantsAudit) hiddenTags.push('internal-audit');
-    if (!callerWantsRoomDecisions) hiddenTags.push('room-decision', 'hyper-rooms');
+    // Governance audit-reflection noise — the cron's "Faraday scanned N memories"
+    // rows. All four tags co-occur; hide the whole class. Cognitive-layer OUTPUTS
+    // (canonical-summary / synthesis:* / principle / bridge) carry none of these,
+    // so they stay visible.
+    if (!callerWantsAudit) hiddenTags.push('internal-audit', 'governance', 'reflection');
+    if (!callerWantsRoomDecisions) hiddenTags.push('room-decision', 'hyper-rooms', 'hyper-room');
+    // TARA voice activity belongs in Call History, NOT the memory list — hide
+    // ALL of it including the per-call `tara-call-log` summary. Caller opts in
+    // by passing any tara-* tag.
+    // TARA voice activity + config/skills belong in /tara Call History, not the
+    // memory list. Exclude by TAG (tara-*) — NOT by `NOT project startsWith
+    // 'tara/'`, which drops every project=NULL memory (SQL NULL LIKE semantics).
+    const callerWantsTara = Array.isArray(tags) && tags.some((t) => typeof t === 'string' && t.startsWith('tara-'));
+    if (!callerWantsTara) hiddenTags.push('tara-turn', 'tara-insight', 'tara-session', 'tara-call-log', 'tara-config', 'tara-skill');
+    // Tree-ingest / KB children carry 'extracted-fact' — they are sub-units of
+    // a parent memory, not standalone entries. Hide from the default list +
+    // total so the count reconciles with the graph + overview (which already
+    // exclude them). Caller opts in via include_children=true.
+    if (!include_children) hiddenTags.push('extracted-fact');
     const auditExclusion = hiddenTags.length
       ? { NOT: { tags: { hasSome: hiddenTags } } }
       : {};
+    // Default to current memories only (is_latest=true) unless the caller
+    // explicitly asks for superseded versions. Was undefined → counted every
+    // historical version, inflating the list total vs the graph/overview.
+    const isLatestFilter = is_latest === false ? false : true;
     const records = await this.client.memory.findMany({
       where: {
         ...baseWhere,
         ...auditExclusion,
         memoryType: memory_type || undefined,
-        isLatest: typeof is_latest === 'boolean' ? is_latest : undefined,
+        isLatest: isLatestFilter,
         tags: tags?.length ? { hasEvery: tags } : undefined,
       },
       include: {
         sourceMetadata: true,
         codeMetadata: true,
+        user: { select: { id: true, displayName: true, email: true } },
         versions: {
           orderBy: { createdAt: 'desc' },
           take: 1
@@ -478,15 +512,21 @@ export class PrismaGraphStore {
       take: limit
     });
 
-    const countWhere = scopedMemoryWhere({ user_id, org_id, project });
-    if (project_id) countWhere.projectId = project_id;
+    // Count must use the SAME scope (scope + access_context + project join) as
+    // the findMany above — previously it dropped both, so the total counted a
+    // different set than the rows it returned.
+    const countWhere = scopedMemoryWhere({ user_id, org_id, project, scope, access_context });
+    if (project_id) {
+      if (baseWhere.memoryProjects) { delete countWhere.OR; delete countWhere.userId; countWhere.memoryProjects = { some: { projectId: project_id } }; }
+      else countWhere.projectId = project_id;
+    }
     const total = await this.client.memory.count({
       where: {
         ...countWhere,
         ...auditExclusion,
         memoryType: memory_type || undefined,
-        isLatest: typeof is_latest === 'boolean' ? is_latest : undefined,
-        tags: tags?.length ? { hasSome: tags } : undefined
+        isLatest: isLatestFilter,
+        tags: tags?.length ? { hasEvery: tags } : undefined
       }
     });
 
@@ -511,33 +551,82 @@ export class PrismaGraphStore {
           // Scope predicate: V2 multi-tier OR when access_context provided,
           // else legacy personal/org single-scope. Skips FTS only if neither
           // a usable access_context nor a single-scope param is available.
+          // Build parameterized WHERE fragments. $1=tsQuery, $2=limit are
+          // already fixed; additional bound values are appended here and
+          // referenced as $3, $4, … so NO user-supplied value is ever
+          // string-interpolated into the query.
+          const ftsParams = [tsQuery, n_results * 3];
+          // nextParam() is called AFTER pushing the value, so length already
+          // reflects the newly-added element — no +1 needed.
+          const nextParam = () => `$${ftsParams.length}`;
+
           let scopeWhere;
           if (access_context && (Array.isArray(access_context.projectIds) || Array.isArray(access_context.teamIds))) {
             const projectIds = Array.isArray(access_context.projectIds) ? access_context.projectIds : [];
             const teamIds = Array.isArray(access_context.teamIds) ? access_context.teamIds : [];
+
+            // personal tier — always present
+            ftsParams.push(user_id);
+            const userParam = `$${ftsParams.length}`;
             const tiers = [
-              `(m.user_id = '${user_id}'::uuid AND m.scope = 'personal')`,
-              `(m.scope = 'organization' AND m.org_id = '${org_id}'::uuid)`,
+              `(m.user_id = ${userParam}::uuid AND m.scope = 'personal')`,
             ];
+
+            // Guest gate mirrors scopedMemoryWhere: org guests (project-scoped
+            // invitees) never get the org-wide tier — keyword search included.
+            if (access_context.orgRole !== 'guest') {
+              ftsParams.push(org_id);
+              const orgTierParam = `$${ftsParams.length}`;
+              tiers.push(`(m.scope = 'organization' AND m.org_id = ${orgTierParam}::uuid)`);
+            }
+
             if (projectIds.length > 0) {
-              const idList = projectIds.map(id => `'${id}'::uuid`).join(',');
-              tiers.push(`(m.scope = 'project' AND EXISTS (SELECT 1 FROM memory_projects mp WHERE mp.memory_id = m.id AND mp.project_id IN (${idList})))`);
+              const placeholders = projectIds.map(id => {
+                ftsParams.push(id);
+                return `$${ftsParams.length}::uuid`;
+              }).join(',');
+              tiers.push(`(m.scope = 'project' AND EXISTS (SELECT 1 FROM memory_projects mp WHERE mp.memory_id = m.id AND mp.project_id IN (${placeholders})))`);
             }
+
             if (teamIds.length > 0) {
-              const idList = teamIds.map(id => `'${id}'::uuid`).join(',');
-              tiers.push(`(m.scope = 'team' AND m.primary_team_id IN (${idList}))`);
+              const placeholders = teamIds.map(id => {
+                ftsParams.push(id);
+                return `$${ftsParams.length}::uuid`;
+              }).join(',');
+              tiers.push(`(m.scope = 'team' AND m.primary_team_id IN (${placeholders}))`);
             }
+
             // Always require org scope match for safety
-            scopeWhere = `AND m.org_id = '${org_id}'::uuid AND (${tiers.join(' OR ')})`;
+            ftsParams.push(org_id);
+            const orgScopeParam = `$${ftsParams.length}`;
+            scopeWhere = `AND m.org_id = ${orgScopeParam}::uuid AND (${tiers.join(' OR ')})`;
           } else {
-            scopeWhere = scope === 'personal'
-              ? `AND m.user_id = '${user_id}'::uuid`
-              : `AND m.org_id = '${org_id}'::uuid`;
+            if (scope === 'personal') {
+              ftsParams.push(user_id);
+              const userParam = `$${ftsParams.length}`;
+              // LOW-1: also scope by org_id in personal branch (matches Prisma fallback)
+              ftsParams.push(org_id);
+              const orgParam = `$${ftsParams.length}`;
+              scopeWhere = `AND m.user_id = ${userParam}::uuid AND m.org_id = ${orgParam}::uuid`;
+            } else {
+              ftsParams.push(org_id);
+              const orgParam = `$${ftsParams.length}`;
+              scopeWhere = `AND m.org_id = ${orgParam}::uuid`;
+            }
           }
-          const projectWhere = project ? `AND m.project = '${project}'` : '';
-          const latestWhere = typeof is_latest === 'boolean' ? `AND m.is_latest = ${is_latest}` : '';
-          const dateAfterWhere = created_after ? `AND m.created_at >= '${new Date(created_after).toISOString()}'` : '';
-          const dateBeforeWhere = created_before ? `AND m.created_at <= '${new Date(created_before).toISOString()}'` : '';
+
+          const projectWhere = project
+            ? (ftsParams.push(project), `AND m.project = ${nextParam()}`)
+            : '';
+          const latestWhere = typeof is_latest === 'boolean'
+            ? (ftsParams.push(is_latest), `AND m.is_latest = ${nextParam()}`)
+            : '';
+          const dateAfterWhere = created_after
+            ? (ftsParams.push(new Date(created_after).toISOString()), `AND m.created_at >= ${nextParam()}`)
+            : '';
+          const dateBeforeWhere = created_before
+            ? (ftsParams.push(new Date(created_before).toISOString()), `AND m.created_at <= ${nextParam()}`)
+            : '';
 
           const ftsResults = await this.client.$queryRawUnsafe(`
             SELECT m.id, m.content, m.title, m.tags, m.memory_type, m.project,
@@ -554,7 +643,7 @@ export class PrismaGraphStore {
                   @@ to_tsquery('english', $1)
             ORDER BY fts_score DESC
             LIMIT $2
-          `, tsQuery, n_results * 3);
+          `, ...ftsParams);
 
           if (ftsResults.length > 0) {
             return ftsResults.map(r => ({

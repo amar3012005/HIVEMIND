@@ -406,12 +406,37 @@ async function planStep({ message, history, language, assistantName, orgName, ha
   //   relation queries (insight mode) → 3 queries
   //   recap / panorama → 4 queries
   //   default → 3 queries
+  // T1-5: date-anchored, no-entity queries ("what did we do around 2026-06-06")
+  // need ONE windowed recall — the date_range/valid_at filter already narrows
+  // it. Capping to 1 stops the planner emitting paraphrase duplicates.
+  const msgLower = (plan.user_message || '').toLowerCase();
+  const dateAnchored = /\b\d{4}-\d{1,2}-\d{1,2}\b/.test(msgLower)
+    || /\b(today|yesterday|this week|last week|this month|last month|around|earlier)\b/.test(msgLower);
   const subQueryCap =
+    plan.named_entities.length === 0 && dateAnchored && plan.recall_mode !== 'insight' ? 1 :
     plan.recall_mode === 'panorama' ? 4 :
     plan.recall_mode === 'insight'  ? 3 :
     plan.intent_kind === 'lookup' && plan.named_entities.length <= 1 ? 2 :
     3;
   plan.sub_queries = plan.sub_queries.slice(0, subQueryCap);
+
+  // T1-1: dedup near-identical sub_queries BEFORE gather. The planner often
+  // emits paraphrases of one intent ("activities on 2026-06-06" vs
+  // "2026-06-06 work") which fire two full recall passes over the same rows —
+  // wasted round-trips + duplicate evidence downstream. Normalize to a sorted
+  // content-token key (tiny entity-free stopword list so genuinely distinct
+  // queries never collapse) and keep the first of each key.
+  {
+    const SQ_STOP = new Set(['work', 'activities', 'activity', 'did', 'do', 'done', 'stuff', 'things', 'thing', 'on', 'around', 'about', 'the', 'a', 'an', 'of', 'for', 'our', 'we', 'us', 'my']);
+    const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').split(/\s+/).filter((w) => w && !SQ_STOP.has(w)).sort().join(' ');
+    const seen = new Set();
+    plan.sub_queries = plan.sub_queries.filter((q) => {
+      const k = norm(q);
+      if (!k || seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+  }
 
   onEvent?.({ type: 'plan_done', plan });
   return { plan, usage };
@@ -527,11 +552,16 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
   // Insight mode pulls synthesis_evidence_chains so the agent sees the
   // multi-source claim AND its source memories without a second call.
   const recallMode = plan.recall_mode || 'quick';
+  // T1-4: mode-aware candidate limit. Quick mode (common path) fetches 8, not
+  // 12 — render cap (evidenceTopK=6) is unchanged so zero answer-token / zero
+  // quality change, but the recall-router runs MMR + score-floor over a
+  // smaller set and downstream dedup carries less.
+  const recallLimit = recallMode === 'panorama' ? 14 : recallMode === 'insight' ? 12 : 8;
   if (plan.sub_queries.length > 0) {
     const recallResults = await Promise.all(
       plan.sub_queries.map(async (q) => {
         try {
-          const r = await dispatchTool('hivemind_recall', { query: q, mode: recallMode, limit: 12, ...recallExtras }, ctx);
+          const r = await dispatchTool('hivemind_recall', { query: q, mode: recallMode, limit: recallLimit, ...recallExtras }, ctx);
           const memCount = r?.memories?.length || 0;
           const liveCount = r?.live_count || 0;
           const evCount = r?.evidence_count || 0;
@@ -549,15 +579,26 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
         }
       })
     );
+    // T1-3: dedup evidence + live items by id across all recall passes so
+    // the render slices (.slice(0,8) DOC, .slice(0,10) LIVE) hold distinct
+    // rows instead of repeats — recovers prompt tokens AND improves coverage.
+    const evidenceSeen = new Set();
+    const liveSeen = new Set();
     for (const r of recallResults) {
       for (const m of (r?.memories || [])) {
         if (!m?.id) continue;
         if (!memoriesById.has(m.id)) memoriesById.set(m.id, m);
       }
       for (const li of (r?.live || [])) {
+        const k = li?.id || `${li?.source || '?'}|${li?.title || ''}`;
+        if (liveSeen.has(k)) continue;
+        liveSeen.add(k);
         liveItems.push(li);
       }
       for (const ev of (r?.evidence || [])) {
+        const k = ev?.id || `${ev?.document_title || '?'}|${ev?.page || ''}|${(ev?.content || ev?.snippet || '').slice(0, 40)}`;
+        if (evidenceSeen.has(k)) continue;
+        evidenceSeen.add(k);
         evidenceItems.push(ev);
       }
       // Synthesis evidence chains — pulled when recall_mode='insight'.
@@ -600,7 +641,11 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
     (plan.needs_time_travel && plan.time_travel && (plan.time_travel.transaction_time || plan.time_travel.valid_time))
     || (isTemporalQuery && hasConnectorTagged && !plan.time_travel?.valid_time)
     || (derivedValidAt && ASOF_RE.test(plan.user_message || ''));
-  if (wantTimeTravel) {
+  // T1-2: skip the dedicated hivemind_at snapshot when recall was ALREADY
+  // as-of-scoped (recallExtras.valid_at set from the same derived date) AND
+  // returned enough rows — it would re-fetch the same window. Keep it as a
+  // safety net when recall came back thin (<3) or wasn't date-scoped.
+  if (wantTimeTravel && (!recallExtras.valid_at || memoriesById.size < 3)) {
     try {
       // Derive valid_time: planner first, else "now" (latest snapshot).
       const validTime = plan.time_travel?.valid_time
@@ -628,7 +673,14 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
   // DeepMind 2026 pattern: always go one hop deeper because the related
   // memories often hold the answer the user actually wants (e.g. "X
   // decided to ship Y" only references X; the Y decision is the edge).
-  const shouldTraverse = memoriesById.size > 0;
+  // T1-6: traverse is for relation/entity questions. On pure temporal/history
+  // queries (no named entities, healthy recall) it adds round-trips that often
+  // return 0 edges. Gate on relational intent when the flag is on; otherwise
+  // preserve the original always-on behaviour for safe A/B rollout.
+  const traverseRelationalOnly = process.env.HIVEMIND_TRAVERSE_RELATIONAL_ONLY === 'true';
+  const isRelational = (plan.named_entities?.length || 0) > 0 || plan.recall_mode === 'insight';
+  const shouldTraverse = memoriesById.size > 0
+    && (!traverseRelationalOnly || (isRelational && memoriesById.size < 8));
   if (shouldTraverse) {
     // Smarter seed selection. Build a ranked candidate list:
     //   1. Memories matching ANY named_entity in title/content/tags
@@ -651,7 +703,9 @@ async function gatherEvidence({ plan, ctx, onEvent }) {
       .map(m => ({ m, s: scoreSeed(m) }))
       .sort((a, b) => b.s - a.s)
       .filter(x => x.s > 0 || memoriesById.size <= 4)
-      .slice(0, 2)
+      // T1-6: only widen to 2 seeds for genuinely multi-entity ("X and Y")
+      // questions; a single entity / history query needs just the top seed.
+      .slice(0, plan.named_entities.length >= 2 ? 2 : 1)
       .map(x => x.m);
     if (seeds.length === 0 && memoriesById.size > 0) seeds.push([...memoriesById.values()][0]);
     const traversedIds = new Set();
@@ -965,6 +1019,16 @@ async function answerStep({ message, history, evidence, plan, language, assistan
         select: { providerKey: true },
       });
       const providers = conns.map(c => c.providerKey);
+      // Slack moved to native OAuth (PlatformIntegration) — Nango rows no
+      // longer represent it. Include it when the native connector is active
+      // so the agent knows the slack tool group exists.
+      if (!providers.includes('slack') && ctx.prisma.platformIntegration) {
+        const nativeSlack = await ctx.prisma.platformIntegration.findUnique({
+          where: { userId_platformType: { userId: ctx.userId, platformType: 'slack' } },
+          select: { isActive: true },
+        }).catch(() => null);
+        if (nativeSlack?.isActive) providers.push('slack');
+      }
       if (providers.length > 0) {
         capabilityHint += `\n\nCONNECTED PROVIDERS (write available via draft-approval): ${providers.join(', ')}`;
       }
@@ -1002,8 +1066,50 @@ async function answerStep({ message, history, evidence, plan, language, assistan
   // Top-K bound: quick mode shows 6, insight 10. Was 12 — cut bloat to
   // halve prompt tokens. Recall-router already applied MMR + score-floor
   // + cluster-collapse so the trimmed set is the tight relevance core.
+  // ── Event-time ranking (gated EVENT_TIME_RANKING, default OFF) ──
+  // For temporal queries ("early June", "what happened in March"), recall
+  // returns a loose semantic tail (real in-window rows mixed with tangential
+  // ones), and the answer model then bails ("no notes on early June") rather
+  // than risk hallucinating off the noise. Here we REORDER evidence so
+  // memories whose DATE falls in the query window come first, and TRIM the
+  // delivered set to that in-window core — giving the model a tight, relevant
+  // set like an explicit-date query gets. SOFT: if no in-window memory exists,
+  // evidence is left untouched (never empties). Reorder/trim only, no recall
+  // re-query, no hard DB filter (that earlier broke working queries).
+  let _eventWindowHits = 0;
+  if (process.env.EVENT_TIME_RANKING !== 'false' && Array.isArray(evidence.memories) && evidence.memories.length > 1) {
+    try {
+      const { expandTemporalQuery } = await import('../search/time-aware-expander.js');
+      const te = expandTemporalQuery(message);
+      if (te?.hasTemporalFilter && te.dateRange?.start) {
+        const s = te.dateRange.start;
+        const e = te.dateRange.end || te.dateRange.start;
+        const inWindow = (m) => {
+          const dates = [];
+          for (const t of (m.tags || [])) {
+            const mm = /^(?:ts|time):(\d{4}-\d{2}-\d{2})/.exec(t);
+            if (mm) dates.push(mm[1]);
+          }
+          if (m.document_date) dates.push(String(m.document_date).slice(0, 10));
+          for (const d of (m.event_dates || [])) dates.push(String(d).slice(0, 10));
+          if (m.created_at) dates.push(String(m.created_at).slice(0, 10));
+          return dates.some((d) => d >= s && d <= e);
+        };
+        const hits = evidence.memories.filter(inWindow);
+        if (hits.length > 0) {
+          const hitSet = new Set(hits.map((m) => m.id));
+          const rest = evidence.memories.filter((m) => !hitSet.has(m.id));
+          evidence = { ...evidence, memories: [...hits, ...rest] };
+          _eventWindowHits = Math.min(hits.length, 5);
+        }
+      }
+    } catch { /* non-fatal — leave evidence as recalled */ }
+  }
+
   const recallMode = plan?.recall_mode || 'quick';
-  const evidenceTopK = recallMode === 'insight' ? 10 : (recallMode === 'panorama' ? 12 : 6);
+  const evidenceTopK = _eventWindowHits > 0
+    ? _eventWindowHits
+    : (recallMode === 'insight' ? 10 : (recallMode === 'panorama' ? 12 : 6));
   const evidenceLines = evidence.memories.slice(0, evidenceTopK).map((m, i) => {
     const id8 = (m.id || '').slice(0, 8);
     const title = (m.title || '').replace(/\n/g, ' ').slice(0, 80);
@@ -1046,9 +1152,10 @@ async function answerStep({ message, history, evidence, plan, language, assistan
     return `[DOC/${doc}${page}] ${body}`;
   }).join('\n');
 
-  const tail = (history || []).slice(-6)
-    .filter(h => h && (h.role === 'user' || h.role === 'assistant') && h.content)
-    .map(h => ({ role: h.role, content: typeof h.content === 'string' ? h.content : JSON.stringify(h.content) }));
+  // T2-1: distilled tail — depth 4 (or 6 on anaphora), assistant turns reduced
+  // to their `.response` prose, each turn start-capped. Biggest answer-prompt
+  // token saving with no accuracy loss for fresh queries.
+  const tail = distillHistoryTail(history, message);
 
   // GRAPH EDGES block — typed relationships between evidence memories.
   // These come from real Relationship table rows (Updates/Extends/Mentions
@@ -1080,8 +1187,17 @@ async function answerStep({ message, history, evidence, plan, language, assistan
     return `  ▶ ${head}\n${evRows}`;
   }).join('\n');
 
+  // When event-time ranking pre-filtered the evidence to the asked window,
+  // tell the model these rows ARE "what happened" — docs/decisions/notes count
+  // as activity. Stops the "no events" bail when in-window memories exist.
+  // Safe: only fires when _eventWindowHits>0 (EVENT_TIME_RANKING trimmed to
+  // genuinely in-window rows), so it can't force enumeration of off-window noise.
+  const windowNote = _eventWindowHits > 0
+    ? `\n\nTIME-WINDOW NOTE: the EVIDENCE above is pre-filtered to memories DATED in the period the user asked about. Treat every one of them as part of "what happened" / "what we worked on" in that period — documents, decisions, notes, and saved facts all count as activity. Enumerate them; do NOT reply "no events / no notes for that period" while these dated memories are listed.`
+    : '';
+
   const userBlock = `EVIDENCE (${Math.min(evidence.memories.length, evidenceTopK)} of ${evidence.memories.length} memories):
-${evidenceLines || '(none)'}${chainLines ? `\n\nSYNTHESIS CHAINS (${(evidence.synthesis_chains || []).length} curated claims + sources — cite the claim, support with the evidence rows):\n${chainLines}` : ''}${edgeLines ? `\n\nGRAPH EDGES (${filteredEdges.length} typed relationships between the memories above — ONLY trust these for relation claims):\n${edgeLines}` : ''}${liveLines ? `\n\nLIVE WORKSPACE (${(evidence.live || []).length} fresh items — Gmail / Drive / Calendar):\n${liveLines}` : ''}${evLines ? `\n\nDOCUMENT SEGMENTS (${(evidence.evidence || []).length} non-promoted KB chunks — full source text):\n${evLines}` : ''}${capabilityHint}
+${evidenceLines || '(none)'}${chainLines ? `\n\nSYNTHESIS CHAINS (${(evidence.synthesis_chains || []).length} curated claims + sources — cite the claim, support with the evidence rows):\n${chainLines}` : ''}${edgeLines ? `\n\nGRAPH EDGES (${filteredEdges.length} typed relationships between the memories above — ONLY trust these for relation claims):\n${edgeLines}` : ''}${liveLines ? `\n\nLIVE WORKSPACE (${(evidence.live || []).length} fresh items — Gmail / Drive / Calendar):\n${liveLines}` : ''}${evLines ? `\n\nDOCUMENT SEGMENTS (${(evidence.evidence || []).length} non-promoted KB chunks — full source text):\n${evLines}` : ''}${capabilityHint}${windowNote}
 
 PLANNER INTENT: ${(plan.intents || []).join(' / ') || '(unspecified)'}
 
@@ -1203,6 +1319,50 @@ function _isPronounPlaceholder(s) {
   if (!s) return false;
   const norm = s.trim().replace(/[.!?,;:]+$/, '').toLowerCase();
   return PRONOUN_PLACEHOLDERS.has(norm);
+}
+
+// T2-1: distill the answer-prompt history tail — the single biggest line item
+// (~59% of prompt tokens). Two levers, both accuracy-safe:
+//   (1) ASSISTANT turns are stored as the full {response, evidence_used,
+//       confidence, gaps} JSON blob. The model only needs the prose reply, so
+//       extract `.response` instead of JSON.stringify-ing the whole object.
+//   (2) Depth: 4 recent turns is plenty for a fresh factual/temporal question.
+//       Keep the FULL 6 only when the current message refers back ("save it",
+//       "what about that one", bare pronoun, or a tiny follow-up) — anaphora
+//       needs the older turn to resolve. When in doubt we keep more, never less.
+// Each turn is start-capped (not mid-truncated) so the model never parses a
+// severed JSON fragment.
+function _needsDeepHistory(message) {
+  const m = String(message || '').trim().toLowerCase();
+  if (!m) return true;                              // empty → don't risk it
+  if (m.length <= 24) return true;                  // terse follow-up
+  if (SAVE_IMPERATIVE_PHRASES.has(m.replace(/[.!?,;:]+$/, ''))) return true;
+  const tokens = m.replace(/[^a-z0-9 ]+/g, ' ').split(/\s+/).filter(Boolean);
+  if (tokens.some((t) => PRONOUN_PLACEHOLDERS.has(t))) return true;  // "...that one..."
+  if (/\b(above|previous|prior|earlier|last (one|time)|the same)\b/.test(m)) return true;
+  return false;
+}
+
+function distillHistoryTail(history, message, { perTurnCap = 600 } = {}) {
+  const depth = _needsDeepHistory(message) ? 6 : 4;
+  return (history || [])
+    .filter((h) => h && (h.role === 'user' || h.role === 'assistant') && h.content)
+    .slice(-depth)
+    .map((h) => {
+      let content = h.content;
+      if (typeof content !== 'string') {
+        // assistant turns are objects/JSON — keep only the prose reply
+        content = content?.response || content?.answer || content?.text || JSON.stringify(content);
+      } else if (h.role === 'assistant' && content.trim().startsWith('{')) {
+        try {
+          const parsed = JSON.parse(content);
+          content = parsed?.response || parsed?.answer || content;
+        } catch { /* not JSON — keep as-is */ }
+      }
+      content = String(content);
+      if (content.length > perTurnCap) content = `${content.slice(0, perTurnCap)} …`;
+      return { role: h.role, content };
+    });
 }
 
 // Returns true when the message is a bare imperative/confirmation that
@@ -1898,7 +2058,7 @@ export async function runReactAgentV2({
           onEvent?.({ type: 'reflect', extra_queries: reflect.extra_queries, reason: reflect.reason });
           const extras = await Promise.all(reflect.extra_queries.map(async (q) => {
             try {
-              const r = await dispatchTool('hivemind_recall', { query: q, mode: 'quick', limit: 12 }, ctx);
+              const r = await dispatchTool('hivemind_recall', { query: q, mode: 'quick', limit: 8 }, ctx);
               steps.push({ tool: 'hivemind_recall', args: { query: q }, result_summary: `${r?.memories?.length || 0} memories` });
               onEvent?.({ type: 'tool_call', name: 'hivemind_recall', arguments: JSON.stringify({ query: q }) });
               onEvent?.({ type: 'tool_result', name: 'hivemind_recall', summary: `${r?.memories?.length || 0} memories` });

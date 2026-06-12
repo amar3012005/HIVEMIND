@@ -187,6 +187,7 @@ const { createEnterpriseChatRoutes } = await import('./enterprise/chat/routes.js
 // TARA Voice Agent imports
 const { TaraStreamHandler } = await import('./tara/stream-handler.js');
 const { TaraConfigStore } = await import('./tara/config-store.js');
+const { TaraSkillsStore } = await import('./tara/skills-store.js');
 const { SessionManager } = await import('./tara/session-manager.js');
 const { SessionAnalytics } = await import('./tara/session-analytics.js');
 const { isTaraRoute } = await import('./tara/routes.js');
@@ -306,11 +307,27 @@ async function buildAccessContext(userId, orgId) {
   const ts = await getTeamStore();
   if (!ts) return null;
   try {
-    const [projectIds, teamIds] = await Promise.all([
+    const [projectIds, teamIds, membership] = await Promise.all([
       ts.accessibleProjectIds({ userId, orgId }),
       ts.accessibleTeamIds({ userId, orgId }),
+      prisma.userOrganization.findUnique({
+        where: { userId_orgId: { userId, orgId } },
+        select: { role: true },
+      }).catch(() => null),
     ]);
-    const value = { projectIds, teamIds };
+    // Hierarchy: org owners/admins sit above the project layer — their access
+    // context spans EVERY active project in the org, so admin MCP tokens and
+    // recall see cross-project without explicit membership rows.
+    const orgRole = membership?.role || null;
+    let effectiveProjectIds = projectIds;
+    if (orgRole === 'owner' || orgRole === 'admin') {
+      const all = await prisma.project.findMany({
+        where: { orgId, status: 'active' },
+        select: { id: true },
+      }).catch(() => []);
+      effectiveProjectIds = Array.from(new Set([...projectIds, ...all.map(p => p.id)]));
+    }
+    const value = { projectIds: effectiveProjectIds, teamIds, orgRole };
     _accessContextCache.set(key, { value, expiresAt: now + 60_000 });
     return value;
   } catch (err) {
@@ -397,6 +414,7 @@ let syncScheduler = null;
 // safe because ConnectorStore is stateless (all state lives in Prisma).
 // Hoisted Phase1 service handle (initialized lower, referenced by webhookProcessor)
 let documentFirstIngestion = null;
+let kbIngestQueue = null;
 
 // Hoisted Nango token resolver — used by syncScheduler + webhookProcessor
 const nangoTokenResolver = async ({ userId, orgId, providerKey }) => {
@@ -471,7 +489,7 @@ if (persistentMemoryEngine && persistentMemoryStore && prisma) {
 // (was opt-in; legacy ENABLE_COGNITION_LOOP=true still works).
 const COGNITION_LOOP_ENABLED = process.env.ENABLE_COGNITION_LOOP !== 'false';
 let cognitionLoop = null;
-if (COGNITION_LOOP_ENABLED && prisma) {
+if (prisma) {
   setImmediate(async () => {
     try {
       const { CognitionLoop } = await import('./memory/cognition-loop.js');
@@ -481,8 +499,17 @@ if (COGNITION_LOOP_ENABLED && prisma) {
         persistentMemoryStore,
         logger: console,
       });
-      cognitionLoop.start();
-      console.log('[cognition] loop started');
+      // Phase D: the standalone setInterval timer is the RETIRED cadence owner —
+      // the governance scheduler drives the hourly cycle now. Gate only the TIMER
+      // on ENABLE_COGNITION_LOOP, not the object: the manual trigger
+      // (/api/cognition/synthesize-now) needs a live loop regardless, otherwise it
+      // 503s ("cognition loop not running") on prod where the timer is disabled.
+      if (COGNITION_LOOP_ENABLED) {
+        cognitionLoop.start();
+        console.log('[cognition] loop started (standalone timer)');
+      } else {
+        console.log('[cognition] loop ready (manual trigger only; governance scheduler owns cadence)');
+      }
     } catch (err) {
       console.warn('[cognition] init failed:', err.message);
     }
@@ -1118,6 +1145,13 @@ const taraHandler = persistentMemoryStore ? new TaraStreamHandler({
   llmApiKey: process.env.GROQ_API_KEY || '',
   defaultModel: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
 }) : null;
+// TARA Skills store — named prompt presets; select copies prompts into config.
+if (taraHandler) {
+  taraHandler.skillsStore = new TaraSkillsStore({
+    memoryStore: persistentMemoryStore,
+    configStore: taraHandler.configStore,
+  });
+}
 const contextAutopilot = persistentMemoryStore ? new ContextAutopilot({
   store: persistentMemoryStore,
   maxContextTokens: 128_000,
@@ -1291,12 +1325,33 @@ if (process.env.DOCLING_URL) {
           }
         }
 
-        // ── Tier 1: pdf-parse (text-native PDFs, 1-2s) — skip when smart=true ──
-        if (ext === 'pdf' && !smart) {
+        // ── PDF tiering: probe content once, then route ──
+        // Image-heavy (scanned/designed) PDFs ALWAYS use Groq vision OCR (API)
+        // — NEVER Docling's local EasyOCR — in BOTH smart and non-smart mode.
+        // Text-native PDFs use fast pdf-parse (non-smart) or Docling (smart,
+        // for table/structure enrichment; the text layer means no OCR is run).
+        if (ext === 'pdf') {
           try {
             const { fastPdfExtract } = await import('./knowledge/enterprise/fast-pdf-parser.js');
             const fast = await fastPdfExtract(tempPath);
-            if (!fast.error && !fast.isImageHeavy && fast.text.length > 200) {
+            // ── Tier 3 (priority): Groq vision OCR for image-heavy PDFs ──
+            // Runs first + regardless of smart so a scanned/image PDF never
+            // falls to Docling's slow local OCR.
+            if (fast.isImageHeavy && process.env.GROQ_API_KEY) {
+              const { parsePdfWithGroqVision } = await import('./knowledge/enterprise/groq-vision-parser.js');
+              const vision = await parsePdfWithGroqVision(tempPath);
+              if (!vision.error && vision.text.length > 200) {
+                console.log(`[docling-adapter] tier=groq-vision file=${filename} smart=${smart} pages=${vision.pages} chars=${vision.text.length} ms=${Date.now() - tParse}`);
+                return {
+                  text: vision.text, markdown: vision.markdown, json: null,
+                  tables: [], pages: vision.pages, confidence: null, error: null,
+                  hybridChunks: [], chunkerError: null, engine: 'groq-vision',
+                };
+              }
+              console.warn(`[docling-adapter] groq-vision failed: ${vision.error || 'empty'} — falling back to Docling`);
+            }
+            // ── Tier 1: text-native PDF (non-smart) → fast pdf-parse, no OCR ──
+            if (!smart && !fast.error && !fast.isImageHeavy && fast.text.length > 200) {
               // Page-aware chunking: pdf-parse v2 inserts `-- N of M --` page markers.
               // Split by page → smaller mid-page chunks (~1500 chars) so segments
               // map cleanly to pages. Heading derived from first line of each page.
@@ -1352,20 +1407,6 @@ if (process.env.DOCLING_URL) {
                 tables: [], pages: fast.pages, confidence: null, error: null,
                 hybridChunks, chunkerError: null, engine: 'pdf-parse',
               };
-            }
-            // ── Tier 3: Groq vision OCR (image-heavy PDFs) ──
-            if (fast.isImageHeavy && process.env.GROQ_API_KEY && !smart) {
-              const { parsePdfWithGroqVision } = await import('./knowledge/enterprise/groq-vision-parser.js');
-              const vision = await parsePdfWithGroqVision(tempPath);
-              if (!vision.error && vision.text.length > 200) {
-                console.log(`[docling-adapter] tier=groq-vision file=${filename} pages=${vision.pages} chars=${vision.text.length} ms=${Date.now() - tParse}`);
-                return {
-                  text: vision.text, markdown: vision.markdown, json: null,
-                  tables: [], pages: vision.pages, confidence: null, error: null,
-                  hybridChunks: [], chunkerError: null, engine: 'groq-vision',
-                };
-              }
-              console.warn(`[docling-adapter] groq-vision failed: ${vision.error || 'empty'} — falling back to Docling`);
             }
           } catch (tierErr) {
             console.warn(`[docling-adapter] tier1/3 error: ${tierErr.message}`);
@@ -1468,6 +1509,25 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
     // plumbing in sync-engine.
     globalThis.__hivemindDocumentFirstIngestion = documentFirstIngestion;
     console.log('[Phase1] DocumentFirstIngestionService enabled (exposed via globalThis)');
+    // Durable KB ingestion queue (flag-gated, default off). Wraps the verified
+    // pipeline above — worker calls documentFirstIngestion unchanged.
+    try {
+      const { KbIngestQueue } = await import('./knowledge/kb-ingest-queue.js');
+      kbIngestQueue = new KbIngestQueue({
+        documentFirstIngestion,
+        ingestTracker,
+        recordUsage: (orgId, result) => {
+          if (planEnforcer && orgId) {
+            planEnforcer.recordUsage(orgId, 'kbPages', result.pages || result.segmentCount || 1);
+            planEnforcer.recordUsage(orgId, 'uploads', 1);
+          }
+        },
+        logger: console,
+      });
+      process.once('SIGTERM', () => { kbIngestQueue?.close().catch(() => {}); });
+    } catch (err) {
+      console.warn('[kb-queue] init failed (inline path unaffected):', err.message);
+    }
   } catch (err) {
     console.warn('[Phase1] DocumentFirstIngestionService failed to init:', err.message);
   }
@@ -2112,7 +2172,15 @@ async function buildProfileSummary({ userId, orgId, project = null }) {
     // Match /api/memories default — exclude all hidden-child tag families so
     // Overview counts reconcile with the list view (was 1012 vs visible 346).
     // Mirrors HIDDEN_CHILD_TAGS in prisma-graph-store.listMemories.
-    const HIDDEN_CHILD_TAGS = ['extracted-fact', 'tara-turn', 'tara-insight'];
+    // Full noise-tag set — MUST match the graph + list exclusion so all three
+    // dashboard counts reconcile (was only 4 tags → Overview counted governance
+    // / hyper-room / tara-call-log/config/skill that the graph hid).
+    const HIDDEN_CHILD_TAGS = [
+      'extracted-fact',
+      'tara-turn', 'tara-insight', 'tara-call-log', 'tara-session', 'tara-config', 'tara-skill',
+      'internal-audit', 'governance', 'reflection',
+      'hyper-rooms', 'hyper-room', 'room-decision',
+    ];
     const where = {
       userId,
       orgId,
@@ -2142,7 +2210,7 @@ async function buildProfileSummary({ userId, orgId, project = null }) {
          WHERE m."user_id" = $1::uuid
            AND m."deleted_at" IS NULL
            AND m."is_latest" = true
-           AND NOT (m."tags" && ARRAY['extracted-fact','tara-turn','tara-insight']::text[])`,
+           AND NOT (m."tags" && ARRAY['extracted-fact','tara-turn','tara-insight','tara-call-log','tara-session','tara-config','tara-skill','internal-audit','governance','reflection','hyper-rooms','hyper-room','room-decision']::text[])`,
         userId
       );
       relationships = relRows?.[0]?.c || 0;
@@ -2402,9 +2470,9 @@ function normalizeOAuthClientRecord(rawClient = {}) {
   };
 }
 
-async function loadOAuthClientRegistry() {
+async function loadOAuthClientRegistry({ force = false } = {}) {
   const now = Date.now();
-  if (oauthClientRegistryCache.expiresAt > now) {
+  if (!force && oauthClientRegistryCache.expiresAt > now) {
     return oauthClientRegistryCache.clients;
   }
 
@@ -2440,8 +2508,19 @@ async function loadOAuthClientRegistry() {
 }
 
 async function getOAuthClientById(clientId) {
-  const clients = await loadOAuthClientRegistry();
-  return clients.find(c => c.client_id === clientId && c.status === 'active') || null;
+  let clients = await loadOAuthClientRegistry();
+  let found = clients.find(c => c.client_id === clientId && c.status === 'active');
+  if (!found) {
+    // Cross-node staleness guard: a client just registered on a PEER node lands
+    // in the DB, but this node's 60s registry cache predates it. Force one fresh
+    // DB read before declaring the client unknown. Fixes the register→authorize
+    // race that surfaced as 'unauthorized_client' on multi-node deploys
+    // (hm-core + hm-core-2 are load-balanced; register and authorize can land on
+    // different nodes within the cache TTL).
+    clients = await loadOAuthClientRegistry({ force: true });
+    found = clients.find(c => c.client_id === clientId && c.status === 'active');
+  }
+  return found || null;
 }
 
 function normalizeRequestedScopes(scopeInput, fallbackScopes = ['memory.read']) {
@@ -4401,7 +4480,7 @@ exit \$RC
       });
 
       const scopeListHtml = requestedScopes.map(s => `
-      <div class="scope-chip">
+      <div class="scope-chip${s === 'memory.write' ? ' write' : ''}">
         <svg viewBox="0 0 20 20" fill="none" width="15" height="15" aria-hidden="true"><path d="M16.5 5.5 8 14l-4.5-4.5" stroke="#117dff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <span>${sanitizeHtml(s)}</span>
       </div>
@@ -4443,16 +4522,21 @@ exit \$RC
   .tier input{position:absolute;opacity:0;pointer-events:none}
   .dot{flex:0 0 auto;width:18px;height:18px;margin-top:1px;border-radius:50%;border:2px solid #cbd2dc;display:flex;align-items:center;justify-content:center;transition:border-color .18s}
   .dot::after{content:"";width:8px;height:8px;border-radius:50%;background:var(--blue);transform:scale(0);transition:transform .18s}
-  .tier .t-title{font-weight:600;font-size:.95rem;margin-bottom:.12rem}
-  .tier .t-desc{font-size:.82rem;color:var(--muted);line-height:1.45}
+  .tier .t-copy{display:flex;flex-direction:column;gap:.18rem}
+  .tier .t-title{display:block;font-weight:600;font-size:.95rem}
+  .tier .t-desc{display:block;font-size:.82rem;color:var(--muted);line-height:1.45}
   .tier:has(input:checked){border-color:var(--blue);background:linear-gradient(180deg,#f5f9ff,#fff);box-shadow:0 0 0 4px rgba(17,125,255,.08)}
   .tier:has(input:checked) .dot{border-color:var(--blue)}
   .tier:has(input:checked) .dot::after{transform:scale(1)}
   .tier:has(input:checked) .t-title{color:var(--blue)}
   .scopes{border:1px solid var(--line);border-radius:16px;padding:1rem;background:linear-gradient(180deg,#fcfbf9,#fff);margin-bottom:1.6rem}
   .scope-grid{display:grid;grid-template-columns:1fr 1fr;gap:.5rem}
-  .scope-chip{display:flex;align-items:center;gap:.5rem;padding:.5rem .65rem;background:#fff;border:1px solid var(--line);border-radius:10px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:.78rem;color:#3f4654}
+  .scope-chip{display:flex;align-items:center;gap:.5rem;padding:.5rem .65rem;background:#fff;border:1px solid var(--line);border-radius:10px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:.78rem;color:#3f4654;transition:opacity .18s}
   .scope-chip svg{flex:0 0 auto}
+  /* Read-only tier preview: dim + strike the write scope when Default selected */
+  form:has(.tier input[value="default"]:checked) .scope-chip.write{opacity:.45;text-decoration:line-through;text-decoration-color:#c0392b}
+  .scope-note{display:none;margin-top:.75rem;font-size:.75rem;color:#8a8578;line-height:1.45}
+  form:has(.tier input[value="default"]:checked) .scope-note{display:block}
   .actions{display:flex;gap:.7rem}
   button{flex:1;padding:.9rem 1rem;border:none;border-radius:13px;font-family:inherit;font-size:.95rem;font-weight:600;cursor:pointer;transition:transform .12s,box-shadow .18s,background .18s}
   button:active{transform:translateY(1px)}
@@ -4482,12 +4566,12 @@ exit \$RC
       <label class="tier">
         <input type="radio" name="access_tier" value="full" checked>
         <span class="dot"></span>
-        <span><span class="t-title">Full Access</span><span class="t-desc">Read, write, and execute memory operations. Recommended for full integration.</span></span>
+        <span class="t-copy"><span class="t-title">Full Access</span><span class="t-desc">Read, write, and execute memory operations. Recommended for full integration.</span></span>
       </label>
       <label class="tier">
         <input type="radio" name="access_tier" value="default">
         <span class="dot"></span>
-        <span><span class="t-title">Default Access</span><span class="t-desc">Read-only access to specific memory segments and limited tool execution.</span></span>
+        <span class="t-copy"><span class="t-title">Default Access</span><span class="t-desc">Read-only — recall, search, and time-travel. Write operations (saving &amp; editing memories) are disabled.</span></span>
       </label>
     </div>
 
@@ -4496,6 +4580,7 @@ exit \$RC
       <div class="scope-grid">
         ${scopeListHtml}
       </div>
+      <div class="scope-note">Default Access is read-only: <strong>memory.write</strong> is not granted, so ${sanitizeHtml(client.client_name)} cannot create or modify memories.</div>
     </div>
 
     <input type="hidden" name="oauth_state_id" value="${sanitizeHtml(consentStateId)}">
@@ -4685,11 +4770,20 @@ exit \$RC
       return;
     }
 
+    // Access-tier enforcement: "Default Access" (read-only) drops memory.write
+    // from the granted scopes so the token carries no write capability. The
+    // tools manifest gates mutating tools on memory:write, so this is enforced,
+    // not cosmetic. "Full Access" grants exactly what the client requested.
+    const accessTier = params.get('access_tier') === 'default' ? 'default' : 'full';
+    const grantedScopes = accessTier === 'default'
+      ? requestedScopes.filter(s => s !== 'memory.write')
+      : requestedScopes;
+
     const code = crypto.randomBytes(32).toString('hex');
     oauthCodeStore.set(code, {
       clientId,
       redirectUri,
-      scopes: requestedScopes,
+      scopes: grantedScopes,
       codeChallenge,
       codeChallengeMethod,
       userId: session.userId || DEFAULT_USER,
@@ -5062,6 +5156,16 @@ exit \$RC
           for await (const c of req) chunks.push(c);
           const audio = Buffer.concat(chunks);
           if (!audio.length) return jsonResponse(res, { error: 'empty_audio' }, 400);
+          // Groq Whisper hard file cap (25 MB free / 100 MB dev tier). Catch it
+          // HERE with a clear message instead of letting Groq 413 surface as an
+          // opaque "whisper model issue" — a long meeting is the #1 cause.
+          const maxMb = Number(process.env.GROQ_WHISPER_MAX_MB || 24);
+          if (audio.length > maxMb * 1024 * 1024) {
+            return jsonResponse(res, {
+              error: 'audio_too_large',
+              message: `Recording is ${(audio.length / 1048576).toFixed(1)} MB — over the ${maxMb} MB transcription limit. Record shorter segments or split the meeting.`,
+            }, 413);
+          }
           const ext = ((_ct.split('/')[1] || 'webm').split(';')[0]) || 'webm';
           const fd = new FormData();
           fd.append('file', new Blob([audio], { type: _ct || 'audio/webm' }), `meeting.${ext}`);
@@ -5073,13 +5177,53 @@ exit \$RC
           fd.append('model', process.env.GROQ_WHISPER_MODEL || 'whisper-large-v3');
           fd.append('response_format', 'verbose_json');
           fd.append('temperature', '0');
-          const wRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
-            body: fd,
-            signal: AbortSignal.timeout(300_000),
-          });
-          if (!wRes.ok) return jsonResponse(res, { error: 'whisper_failed', detail: (await wRes.text()).slice(0, 200) }, 502);
+          // Optional meeting context (?prompt=) — biases Whisper toward the
+          // correct spelling of names/companies/jargon the user typed before
+          // the meeting (Whisper prompt cap ~224 tokens → hard-slice).
+          const ctxPrompt = (url.searchParams.get('prompt') || '').toString().slice(0, 800);
+          if (ctxPrompt) fd.append('prompt', ctxPrompt);
+          // Resilient Groq call — retry transient failures (429 rate-limit,
+          // 5xx, network/timeout) with exponential backoff. A single un-retried
+          // call meant any momentary Groq blip surfaced as a user-facing 502
+          // ("whisper model issue"). Up to 3 attempts; honor Retry-After on 429.
+          let wRes = null;
+          let lastDetail = '';
+          let lastStatus = 0;
+          const maxAttempts = 3;
+          for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+              const r = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+                body: fd,
+                signal: AbortSignal.timeout(300_000),
+              });
+              if (r.ok) { wRes = r; break; }
+              lastStatus = r.status;
+              lastDetail = (await r.text().catch(() => '')).slice(0, 200);
+              // Retry only transient classes; client errors (400/413/415) are terminal.
+              const transient = r.status === 429 || r.status >= 500;
+              if (!transient || attempt === maxAttempts) break;
+              const retryAfter = Number(r.headers.get('retry-after')) || 0;
+              const backoffMs = retryAfter > 0 ? retryAfter * 1000 : Math.min(800 * 2 ** (attempt - 1), 4000);
+              await new Promise((rs) => setTimeout(rs, backoffMs));
+            } catch (netErr) {
+              lastStatus = 0;
+              lastDetail = netErr.name === 'TimeoutError' ? 'groq timeout (300s)' : netErr.message;
+              if (attempt === maxAttempts) break;
+              await new Promise((rs) => setTimeout(rs, Math.min(800 * 2 ** (attempt - 1), 4000)));
+            }
+          }
+          if (!wRes) {
+            // Specific, actionable errors instead of one opaque 502.
+            if (lastStatus === 429) {
+              return jsonResponse(res, { error: 'transcription_busy', message: 'Transcription service is busy right now — please try again in a moment.' }, 503);
+            }
+            if (lastStatus === 400 || lastStatus === 415) {
+              return jsonResponse(res, { error: 'audio_unsupported', message: 'Could not process this audio format. Try recording again.', detail: process.env.NODE_ENV === 'production' ? undefined : lastDetail }, 400);
+            }
+            return jsonResponse(res, { error: 'whisper_failed', message: 'Transcription failed after retries — please try again.', detail: process.env.NODE_ENV === 'production' ? undefined : `status=${lastStatus} ${lastDetail}` }, 502);
+          }
           const wJson = await wRes.json();
           const baseOut = { transcript: wJson.text || '', language: wJson.language || null, segments: wJson.segments || [], bytes: audio.length };
           // Opt-in multi-speaker diarization. Requires ?diarize=true AND the
@@ -5093,7 +5237,7 @@ exit \$RC
           }
           return jsonResponse(res, baseOut);
         } catch (e) {
-          return jsonResponse(res, { error: 'transcribe_error', message: e.message }, 500);
+          return jsonResponse(res, { error: 'transcribe_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
         }
       }
 
@@ -5104,7 +5248,7 @@ exit \$RC
         if (!transcript) return jsonResponse(res, { error: 'no_transcript' }, 400);
         const notes = (body.notes || '').toString().slice(0, 4000);
         try {
-          const sys = 'You are an expert meeting analyst. From the transcript (and optional user notes) produce STRICT JSON: {"title": string, "summary": string (3-6 sentences), "key_points": string[], "action_items": [{"task": string, "owner": string|null, "due": string|null}], "decisions": string[], "questions": string[], "topics": string[], "sentiment": string}. Be faithful — never invent facts. Use empty arrays when none.';
+          const sys = 'You are an expert meeting analyst. From the transcript (and optional user notes) produce STRICT JSON: {"title": string, "summary": string (3-6 sentences), "key_points": string[], "action_items": [{"task": string, "owner": string|null, "due": string|null}], "decisions": string[], "questions": string[], "topics": string[], "sentiment": string, "quotes": [{"quote": string, "speaker": string|null}] (up to 5 short verbatim notable quotes, in the transcript original language), "risks": string[] (risks, blockers, warnings or red flags raised), "next_steps": string[] (concrete follow-ups beyond action items, e.g. upcoming events or dates mentioned), "entities": {"people": string[], "organizations": string[], "dates": string[]}, "speaker_names": object}. speaker_names maps diarization labels to real participant names (e.g. {"SPEAKER_00": "Matthias"}) ONLY when the transcript contains SPEAKER_xx labels AND the user notes/context name the participants — infer who is who from how they speak; use {} when unsure. Be faithful — never invent facts. Use empty arrays/objects when none.';
           const usr = (notes ? `USER NOTES:\n${notes}\n\n` : '') + `TRANSCRIPT:\n${transcript.slice(0, 60000)}`;
           const resp = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
             method: 'POST',
@@ -5124,7 +5268,7 @@ exit \$RC
           catch { insights = { summary: '', raw: j.choices?.[0]?.message?.content || '' }; }
           return jsonResponse(res, { insights });
         } catch (e) {
-          return jsonResponse(res, { error: 'insights_error', message: e.message }, 500);
+          return jsonResponse(res, { error: 'insights_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
         }
       }
 
@@ -5150,7 +5294,7 @@ exit \$RC
           );
           return jsonResponse(res, { meetings: rows });
         } catch (e) {
-          return jsonResponse(res, { error: 'meetings_list_error', message: e.message }, 500);
+          return jsonResponse(res, { error: 'meetings_list_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
         }
       }
 
@@ -5168,9 +5312,9 @@ exit \$RC
             `INSERT INTO meetings
                (user_id, org_id, project_id, title, summary, transcript, language, duration_sec,
                 audio_bytes, multi_speaker, speaker_count, action_items, decisions, key_points,
-                questions, segments, topics, sentiment, source_memory_id)
+                questions, segments, topics, sentiment, source_memory_id, notes, insights)
              VALUES ($1::uuid,$2::uuid,$3::uuid,$4,$5,$6,$7,$8,$9,$10,$11,
-                     $12::jsonb,$13::jsonb,$14::jsonb,$15::jsonb,$16::jsonb,$17::text[],$18,$19::uuid)
+                     $12::jsonb,$13::jsonb,$14::jsonb,$15::jsonb,$16::jsonb,$17::text[],$18,$19::uuid,$20,$21::jsonb)
              RETURNING id, created_at`,
             mUser, mOrg, body.project_id || null, title, ins.summary || null, transcript,
             body.language || null, Number.isFinite(body.duration_sec) ? body.duration_sec : null,
@@ -5180,10 +5324,222 @@ exit \$RC
             body.segments ? JSON.stringify(body.segments) : null,
             Array.isArray(ins.topics) ? ins.topics.slice(0, 20) : [],
             ins.sentiment || null, body.source_memory_id || null,
+            (body.notes || '').toString().slice(0, 8000) || null,
+            JSON.stringify(ins != null && typeof ins === 'object' && !Array.isArray(ins) ? ins : {}),
           );
           return jsonResponse(res, { ok: true, id: rows?.[0]?.id, created_at: rows?.[0]?.created_at }, 201);
         } catch (e) {
-          return jsonResponse(res, { error: 'meetings_save_error', message: e.message }, 500);
+          return jsonResponse(res, { error: 'meetings_save_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
+        }
+      }
+
+      // GET /api/meetings/:id — full meeting detail (the list endpoint stays
+      // light and omits transcript/notes/insights; the Past-meetings detail
+      // view fetches this when a meeting is opened).
+      {
+        const mGet = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})$/);
+        if (mGet && req.method === 'GET') {
+          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+          const mOrg = req.headers['x-hm-org-id'] || DEFAULT_ORG;
+          try {
+            const rows = await prisma.$queryRawUnsafe(
+              `SELECT id, user_id, org_id, project_id, title, summary, transcript, language,
+                      duration_sec, multi_speaker, speaker_count, action_items, decisions,
+                      key_points, questions, segments, topics, sentiment, notes, insights,
+                      source_memory_id, created_at
+               FROM meetings
+               WHERE id = $1::uuid AND org_id = $2::uuid AND deleted_at IS NULL`,
+              mGet[1], mOrg,
+            );
+            if (!rows?.length) return jsonResponse(res, { error: 'not_found' }, 404);
+            return jsonResponse(res, { meeting: rows[0] });
+          } catch (e) {
+            return jsonResponse(res, { error: 'meeting_get_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
+          }
+        }
+      }
+
+      // PATCH /api/meetings/:id — link a saved memory (Save to HIVEMIND) or amend
+      // title/summary on an EXISTING row. Lets the meeting be persisted to Past
+      // meetings the moment it finishes (POST, no memory) and later linked to a
+      // HIVEMIND memory without creating a duplicate row.
+      {
+        const mPatch = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})$/);
+        if (mPatch && req.method === 'PATCH') {
+          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+          const mOrg = req.headers['x-hm-org-id'] || DEFAULT_ORG;
+          const id = mPatch[1];
+          const sets = [];
+          const vals = [];
+          let i = 1;
+          if (typeof body.source_memory_id === 'string' && body.source_memory_id) { sets.push(`source_memory_id = $${i++}::uuid`); vals.push(body.source_memory_id); }
+          if (typeof body.title === 'string' && body.title.trim()) { sets.push(`title = $${i++}`); vals.push(body.title.slice(0, 300)); }
+          if (typeof body.summary === 'string') { sets.push(`summary = $${i++}`); vals.push(body.summary); }
+          if (!sets.length) return jsonResponse(res, { error: 'no_fields' }, 400);
+          vals.push(id, mOrg);
+          try {
+            const rows = await prisma.$queryRawUnsafe(
+              `UPDATE meetings SET ${sets.join(', ')}
+               WHERE id = $${i++}::uuid AND org_id = $${i}::uuid AND deleted_at IS NULL
+               RETURNING id`,
+              ...vals,
+            );
+            if (!rows?.length) return jsonResponse(res, { error: 'not_found' }, 404);
+            return jsonResponse(res, { ok: true, id: rows[0].id });
+          } catch (e) {
+            return jsonResponse(res, { error: 'meetings_update_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
+          }
+        }
+      }
+
+      // POST /api/meetings/:id/ingest — "Save to HIVEMIND" the SMART way.
+      // Instead of one flat markdown blob, build an ingest TREE from the
+      // insights we already extracted: a parent `event` memory (summary +
+      // participant/org entity tags + meeting-date temporal anchor) plus
+      // first-class typed children — each decision → `decision`, each action
+      // item → `goal`, key points / risks → `fact`, next steps → `goal`, and
+      // the transcript as ONE low-priority grounding child. Every node runs
+      // the SAME canonical pipeline (smart-router → embed → Qdrant → relation
+      // classify) so a decision here auto-links (Updates/Contradicts) to prior
+      // decisions on the same topic, and entity tags connect it to existing
+      // people/org clusters. Idempotent via meetings.source_memory_id.
+      {
+        const mIngest = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})\/ingest$/);
+        if (mIngest && req.method === 'POST') {
+          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+          if (!persistentMemoryEngine) return jsonResponse(res, { error: 'memory_unavailable' }, 503);
+          const mOrg = req.headers['x-hm-org-id'] || DEFAULT_ORG;
+          const mUser = req.headers['x-hm-user-id'] || DEFAULT_USER;
+          const id = mIngest[1];
+          try {
+            const rows = await prisma.$queryRawUnsafe(
+              `SELECT id, title, summary, transcript, language, multi_speaker, speaker_count,
+                      action_items, decisions, key_points, questions, topics, insights,
+                      source_memory_id, created_at
+               FROM meetings WHERE id = $1::uuid AND org_id = $2::uuid AND deleted_at IS NULL`,
+              id, mOrg,
+            );
+            if (!rows?.length) return jsonResponse(res, { error: 'not_found' }, 404);
+            const m = rows[0];
+
+            // Idempotent — already ingested unless caller forces a re-ingest.
+            if (m.source_memory_id && !body?.force) {
+              return jsonResponse(res, { ok: true, already_ingested: true, parent_id: m.source_memory_id });
+            }
+
+            const ins = (m.insights && typeof m.insights === 'object') ? m.insights : {};
+            const arr = (v) => (Array.isArray(v) ? v : []);
+            // Prefer the dedicated columns, fall back to the insights blob.
+            const decisions = arr(m.decisions).length ? arr(m.decisions) : arr(ins.decisions);
+            const actionItems = arr(m.action_items).length ? arr(m.action_items) : arr(ins.action_items);
+            const keyPoints = arr(m.key_points).length ? arr(m.key_points) : arr(ins.key_points);
+            const risks = arr(ins.risks);
+            const nextSteps = arr(ins.next_steps);
+            const topics = (arr(m.topics).length ? arr(m.topics) : arr(ins.topics)).slice(0, 5);
+            const summary = (m.summary || ins.summary || '').toString();
+            const transcript = (m.transcript || '').toString();
+            const title = (m.title || 'Meeting').toString().slice(0, 200);
+            const meetingDate = m.created_at ? new Date(m.created_at).toISOString() : null;
+
+            if (!summary && !decisions.length && !transcript.trim()) {
+              return jsonResponse(res, { error: 'nothing_to_ingest' }, 400);
+            }
+
+            // Participants: real names from the speaker-name map + insight entities.
+            const speakerNames = (ins.speaker_names && typeof ins.speaker_names === 'object') ? Object.values(ins.speaker_names) : [];
+            const entPeople = arr(ins.entities?.people);
+            const entOrgs = arr(ins.entities?.organizations);
+            const people = Array.from(new Set([...speakerNames, ...entPeople].map((s) => String(s || '').trim()).filter(Boolean))).slice(0, 12);
+            const orgs = Array.from(new Set(entOrgs.map((s) => String(s || '').trim()).filter(Boolean))).slice(0, 8);
+            const entityTags = [...people.map((p) => `entity:${p}`), ...orgs.map((o) => `entity:${o}`)];
+            const meetingTag = `meeting:${id}`;
+
+            const baseMeta = { meeting_id: id, source: 'meeting-notes' };
+            const mkChild = (cTitle, content, memory_type, extraTags = []) => ({
+              user_id: mUser,
+              org_id: mOrg,
+              title: String(cTitle).slice(0, 200),
+              content: String(content),
+              memory_type,
+              tags: [meetingTag, ...extraTags].filter(Boolean),
+              ...(meetingDate ? { document_date: meetingDate } : {}),
+              metadata: { ...baseMeta },
+            });
+
+            const parent = {
+              user_id: mUser,
+              org_id: mOrg,
+              title,
+              content: summary
+                + (people.length ? `\n\nParticipants: ${people.join(', ')}` : '')
+                + (orgs.length ? `\nOrganizations: ${orgs.join(', ')}` : ''),
+              memory_type: 'event',
+              tags: ['meeting', 'ai-meeting-notes', meetingTag,
+                ...(m.multi_speaker ? ['multi-speaker'] : []),
+                ...topics, ...entityTags].filter(Boolean),
+              ...(meetingDate ? { document_date: meetingDate } : {}),
+              metadata: { ...baseMeta, force_entity_linking: true, participant_count: people.length },
+            };
+
+            const children = [];
+            for (const d of decisions.slice(0, 12)) {
+              const text = typeof d === 'string' ? d : (d?.text || JSON.stringify(d));
+              if (text?.trim()) children.push(mkChild(`Decision — ${text.slice(0, 60)}`, text, 'decision', ['decision', ...topics.slice(0, 2)]));
+            }
+            for (const a of actionItems.slice(0, 12)) {
+              const taskText = typeof a === 'string' ? a : (a?.task || JSON.stringify(a));
+              if (!taskText?.trim()) continue;
+              const owner = (typeof a === 'object' && a?.owner) ? a.owner : null;
+              const due = (typeof a === 'object' && a?.due) ? a.due : null;
+              const content = `${taskText}${owner ? ` (owner: ${owner})` : ''}${due ? ` (due: ${due})` : ''}`;
+              children.push(mkChild(`Action — ${taskText.slice(0, 60)}`, content, 'goal',
+                ['action-item', owner ? `owner:${String(owner).toLowerCase()}` : null]));
+            }
+            for (const k of keyPoints.slice(0, 8)) {
+              if (String(k || '').trim()) children.push(mkChild(`Key point — ${String(k).slice(0, 60)}`, String(k), 'fact', ['key-point']));
+            }
+            for (const r of risks.slice(0, 6)) {
+              if (String(r || '').trim()) children.push(mkChild(`Risk — ${String(r).slice(0, 60)}`, String(r), 'fact', ['risk']));
+            }
+            for (const n of nextSteps.slice(0, 6)) {
+              if (String(n || '').trim()) children.push(mkChild(`Next step — ${String(n).slice(0, 60)}`, String(n), 'goal', ['next-step']));
+            }
+            // Transcript as ONE grounding child — capped, low priority, hidden
+            // from default list (ingestMemoryTree auto-tags children 'extracted-fact').
+            if (transcript.trim()) {
+              children.push(mkChild(`Transcript — ${title}`, transcript.slice(0, 8000), 'event', ['transcript']));
+            }
+
+            const tree = await persistentMemoryEngine.ingestMemoryTree({ parent, children });
+            const parentId = tree?.parentId || null;
+
+            // Structured enrichment on the parent (fire-and-forget).
+            if (parentId && enrichmentQueue) {
+              enrichmentQueue.enqueue(parentId, { content: parent.content, title: parent.title, tags: parent.tags });
+            }
+            // Link the meeting row back to the parent memory (idempotent).
+            if (parentId) {
+              await prisma.$queryRawUnsafe(
+                `UPDATE meetings SET source_memory_id = $1::uuid WHERE id = $2::uuid AND org_id = $3::uuid`,
+                parentId, id, mOrg,
+              ).catch(() => { /* link best-effort */ });
+            }
+            return jsonResponse(res, {
+              ok: true,
+              parent_id: parentId,
+              child_ids: tree?.childIds || [],
+              counts: {
+                decisions: Math.min(decisions.length, 12),
+                action_items: Math.min(actionItems.length, 12),
+                key_points: Math.min(keyPoints.length, 8),
+                risks: Math.min(risks.length, 6),
+                next_steps: Math.min(nextSteps.length, 6),
+                transcript: transcript.trim() ? 1 : 0,
+              },
+            }, 201);
+          } catch (e) {
+            return jsonResponse(res, { error: 'meeting_ingest_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
+          }
         }
       }
 
@@ -5289,6 +5645,156 @@ exit \$RC
             && (checkpointOk === null ? true : checkpointOk);
           return jsonResponse(res, { org_id: vOrg, checked, signature_valid: sigOk, chain_intact: chainOk, payload_bound: bindOk, tamper_evident: tamperEvident, checkpoint, first_broken: firstBroken });
         } catch (e) { return jsonResponse(res, { error: 'audit_verify_error', message: e.message }, 500); }
+      }
+
+      // ── TARA call history / turns / insights / usage (org-scoped, real-time) ──
+      if (pathname.startsWith('/api/tara/calls')) {
+        const tOrg = req.headers['x-hm-org-id'] || DEFAULT_ORG;
+        const tUser = req.headers['x-hm-user-id'] || DEFAULT_USER;
+
+        if (pathname === '/api/tara/calls/start' && req.method === 'POST') {
+          if (!body.session_id) return jsonResponse(res, { error: 'session_id required' }, 400);
+          try {
+            const call = await prisma.taraCall.upsert({
+              where: { sessionId: String(body.session_id) },
+              update: { mode: body.mode || 'external', voiceId: body.voice_id || null, language: body.language || 'en', status: 'active' },
+              create: { orgId: tOrg, userId: tUser, sessionId: String(body.session_id), mode: body.mode || 'external', voiceId: body.voice_id || null, language: body.language || 'en' },
+            });
+            return jsonResponse(res, { call_id: call.id });
+          } catch (e) { return jsonResponse(res, { error: 'start_failed', message: e.message }, 500); }
+        }
+
+        if (pathname === '/api/tara/calls/turn' && req.method === 'POST') {
+          if (!body.session_id) return jsonResponse(res, { error: 'session_id required' }, 400);
+          try {
+            const call = await prisma.taraCall.findUnique({ where: { sessionId: String(body.session_id) } });
+            if (!call || call.orgId !== tOrg) return jsonResponse(res, { error: 'call_not_found' }, 404);
+            const pt = Number(body.prompt_tokens) || 0, ct = Number(body.completion_tokens) || 0;
+            await prisma.taraTurn.create({ data: {
+              callId: call.id, orgId: tOrg, userId: tUser, seq: Number(body.seq) || (call.turnCount + 1),
+              userText: body.user_text || null, agentText: body.agent_text || null,
+              sttEngine: body.stt_engine || null, sttMs: body.stt_ms ?? null,
+              llmTtfbMs: body.llm_ttfb_ms ?? null, ttsTtfbMs: body.tts_ttfb_ms ?? null,
+              recallCount: body.recall_count ?? null, promptTokens: pt || null, completionTokens: ct || null,
+            }});
+            await prisma.taraCall.update({ where: { id: call.id }, data: { turnCount: { increment: 1 }, promptTokens: { increment: pt }, completionTokens: { increment: ct } } });
+            return jsonResponse(res, { ok: true });
+          } catch (e) { return jsonResponse(res, { error: 'turn_failed', message: e.message }, 500); }
+        }
+
+        if (pathname === '/api/tara/calls/end' && req.method === 'POST') {
+          if (!body.session_id) return jsonResponse(res, { error: 'session_id required' }, 400);
+          try {
+            const call = await prisma.taraCall.findUnique({ where: { sessionId: String(body.session_id) } });
+            if (!call || call.orgId !== tOrg) return jsonResponse(res, { error: 'call_not_found' }, 404);
+            const durationMs = Math.max(0, Date.now() - new Date(call.startedAt).getTime());
+            await prisma.taraCall.update({ where: { id: call.id }, data: { status: 'completed', endedAt: new Date(), durationMs } });
+            const turns = await prisma.taraTurn.findMany({ where: { callId: call.id }, orderBy: { seq: 'asc' } });
+            const transcript = turns.map(t => `User: ${t.userText || ''}\nTARA: ${t.agentText || ''}`).join('\n');
+            if (transcript.trim() && process.env.GROQ_API_KEY) {
+              try {
+                const r = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
+                  method: 'POST', headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ model: 'openai/gpt-oss-120b', temperature: 0.2, response_format: { type: 'json_object' },
+                    messages: [
+                      { role: 'system', content: 'Summarize this voice conversation. STRICT JSON: {"summary": string (2-4 sentences), "key_points": string[], "action_items": [{"task": string, "owner": string|null}], "topics": string[], "questions": string[], "sentiment": string}. Empty arrays if none. Faithful — no invention.' },
+                      { role: 'user', content: transcript.slice(0, 40000) },
+                    ] }),
+                  signal: AbortSignal.timeout(60_000),
+                });
+                if (r.ok) {
+                  const j = await r.json();
+                  let parsed; try { parsed = JSON.parse(j.choices[0].message.content); } catch { parsed = {}; }
+                  await prisma.taraInsight.upsert({ where: { callId: call.id }, update: { summary: parsed.summary || null, data: parsed }, create: { callId: call.id, orgId: tOrg, userId: tUser, summary: parsed.summary || null, data: parsed } });
+
+                  // ONE call-log summary memory per call (replaces the old per-turn
+                  // + per-insight memory spam). Postgres-only via store.createMemory
+                  // (NO Qdrant embed, NO operator routing). Tagged tara-call-log +
+                  // project tara/* → excluded from recall + memory graph; shows in
+                  // the Memories list as a single collapsed entry per call.
+                  if (persistentMemoryStore && parsed.summary) {
+                    try {
+                      const kp = Array.isArray(parsed.key_points) && parsed.key_points.length
+                        ? `\n\nKey points:\n- ${parsed.key_points.slice(0, 8).join('\n- ')}` : '';
+                      const tp = Array.isArray(parsed.topics) && parsed.topics.length
+                        ? `\n\nTopics: ${parsed.topics.slice(0, 12).join(', ')}` : '';
+                      await persistentMemoryStore.createMemory({
+                        id: crypto.randomUUID(),
+                        user_id: tUser,
+                        org_id: tOrg,
+                        project: `tara/${call.tenantId || 'default'}`,
+                        content: `TARA call (${call.mode || 'external'}, ${turns.length} turns): ${parsed.summary}${kp}${tp}`,
+                        title: `TARA Call Log — ${new Date(call.startedAt).toISOString().slice(0, 10)} — ${String(body.session_id).slice(0, 16)}`,
+                        tags: ['tara-call-log', `sid:${body.session_id}`, `mode:${call.mode || 'external'}`],
+                        memory_type: 'event',
+                        document_date: new Date().toISOString(),
+                        metadata: { session_id: body.session_id, call_id: call.id, turns: turns.length, sentiment: parsed.sentiment || null, node_color: 'teal' },
+                      });
+                    } catch (e3) { console.warn('[tara/call-log] memory save failed:', e3.message); }
+                  }
+                }
+              } catch (e2) { console.warn('[tara/insights]', e2.message); }
+            }
+            return jsonResponse(res, { ok: true, duration_ms: durationMs, turns: turns.length });
+          } catch (e) { return jsonResponse(res, { error: 'end_failed', message: e.message }, 500); }
+        }
+
+        if (pathname === '/api/tara/calls' && req.method === 'GET') {
+          const limit = Math.min(100, Number(url.searchParams.get('limit')) || 30);
+          const calls = await prisma.taraCall.findMany({ where: { orgId: tOrg }, orderBy: { startedAt: 'desc' }, take: limit });
+          return jsonResponse(res, { calls });
+        }
+
+        const cm = pathname.match(/^\/api\/tara\/calls\/([0-9a-f-]{36})$/i);
+        if (cm && req.method === 'GET') {
+          const call = await prisma.taraCall.findUnique({ where: { id: cm[1] } });
+          if (!call || call.orgId !== tOrg) return jsonResponse(res, { error: 'not_found' }, 404);
+          const [turns, insight] = await Promise.all([
+            prisma.taraTurn.findMany({ where: { callId: call.id }, orderBy: { seq: 'asc' } }),
+            prisma.taraInsight.findUnique({ where: { callId: call.id } }),
+          ]);
+          return jsonResponse(res, { call, turns, insight });
+        }
+      }
+
+      // ── TARA Skills — named prompt presets (org-scoped). Select copies the
+      // skill's prompts into the live config; runtime is unchanged. ──
+      if (pathname.startsWith('/api/tara/skills')) {
+        if (!taraHandler?.skillsStore) return jsonResponse(res, { error: 'TARA not available' }, 503);
+        const sOrg = req.headers['x-hm-org-id'] || DEFAULT_ORG;
+        const sUser = req.headers['x-hm-user-id'] || DEFAULT_USER;
+        const ss = taraHandler.skillsStore;
+        const ctx = { userId: sUser, orgId: sOrg };
+        try {
+          if (pathname === '/api/tara/skills' && req.method === 'GET') {
+            return jsonResponse(res, await ss.list(ctx));
+          }
+          if (pathname === '/api/tara/skills' && req.method === 'POST') {
+            const skill = await ss.create({
+              kind: body.kind, name: body.name,
+              primary_prompt: body.primary_prompt, secondary_prompt: body.secondary_prompt,
+            }, ctx);
+            return jsonResponse(res, { skill });
+          }
+          if (pathname === '/api/tara/skills/select' && req.method === 'POST') {
+            if (!body.skill_id) return jsonResponse(res, { error: 'skill_id required' }, 400);
+            const out = await ss.select(String(body.skill_id), ctx);
+            taraHandler.invalidateConfigCache('default', 'default');
+            return jsonResponse(res, out);
+          }
+          const sm = pathname.match(/^\/api\/tara\/skills\/([0-9a-f-]{36})$/i);
+          if (sm && req.method === 'PUT') {
+            const skill = await ss.update(sm[1], {
+              name: body.name, primary_prompt: body.primary_prompt, secondary_prompt: body.secondary_prompt,
+            }, ctx);
+            return jsonResponse(res, { skill });
+          }
+          if (sm && req.method === 'DELETE') {
+            return jsonResponse(res, await ss.remove(sm[1], ctx));
+          }
+        } catch (e) {
+          return jsonResponse(res, { error: 'skill_error', message: e.message }, 400);
+        }
       }
 
       const hostedDescriptorMatch = pathname.match(/^\/api\/mcp\/servers\/([^\/]+)$/);
@@ -6485,7 +6991,7 @@ exit \$RC
               await persistentMemoryStore.hardDeleteMemories([memoryId]);
               try {
                 const qUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
-                const qColl = process.env.QDRANT_COLLECTION || 'hivemind_memories';
+                const qColl = (process.env.QDRANT_PER_TENANT === 'true' && (existing.org_id || existing.orgId || orgId)) ? `org_${existing.org_id || existing.orgId || orgId}` : 'HIVEMIND_PERSONAL';
                 const qKey = process.env.QDRANT_API_KEY || '';
                 if (qUrl) await fetch(`${qUrl}/collections/${encodeURIComponent(qColl)}/points/delete?wait=true`, {
                   method: 'POST', headers: { 'Content-Type': 'application/json', ...(qKey ? { 'api-key': qKey } : {}) },
@@ -6557,7 +7063,7 @@ exit \$RC
             // Embed updated memory in Qdrant
             if (qdrantClient && updated) {
               try {
-                await qdrantClient.storeMemory(updated, { collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT' });
+                await qdrantClient.storeMemory(updated, { collectionName: 'HIVEMIND_PERSONAL' });
               } catch {}
             }
             invalidateAggregateCache({ userId, orgId, project: existing.project || null });
@@ -7082,12 +7588,50 @@ exit \$RC
         if (!persistentMemoryEngine) {
           return jsonResponse(res, { error: 'memory engine unavailable' }, 503);
         }
-        const evUserId = body.user_id;
-        const evOrgId = body.org_id || orgId;
+        let evUserId = body.user_id;
+        let evOrgId = body.org_id || orgId;
         const teamId = body.team_id;
         const ev = body.event || {};
         const evType = body.event_type || ev.type || 'unknown';
         const subtype = body.event_subtype || ev.subtype || null;
+
+        // Socket-Mode bridge support: the employees-service Bolt gateway only
+        // knows the Slack team_id, not the HIVEMIND OAuth owner. Resolve the
+        // connector exactly like the control-plane events webhook does —
+        // team_id match first, most-recently-connected active Slack connector
+        // as fallback.
+        if (!evUserId && teamId && prisma?.platformIntegration) {
+          try {
+            let conn = await prisma.platformIntegration.findFirst({
+              where: {
+                platformType: 'slack',
+                isActive: true,
+                connectorMetadata: { path: ['provider_metadata', 'team_id'], equals: teamId },
+              },
+              select: { userId: true },
+            });
+            if (!conn) {
+              conn = await prisma.platformIntegration.findFirst({
+                where: { platformType: 'slack', isActive: true },
+                orderBy: { updatedAt: 'desc' },
+                select: { userId: true },
+              });
+            }
+            if (conn) {
+              evUserId = conn.userId;
+              if (!evOrgId) {
+                // PlatformIntegration has no org column — derive from membership.
+                const membership = await prisma.userOrganization?.findFirst({
+                  where: { userId: conn.userId },
+                  select: { orgId: true },
+                }).catch(() => null);
+                evOrgId = membership?.orgId || null;
+              }
+            }
+          } catch (resolveErr) {
+            console.warn('[slack-event-ingest] team_id user resolution failed:', resolveErr.message);
+          }
+        }
 
         if (!evUserId) return jsonResponse(res, { error: 'user_id required' }, 400);
 
@@ -8284,6 +8828,14 @@ exit \$RC
           break;
 
         // ── Async knowledge-upload status (job tracker + durable DB fallback) ──
+        case '/api/knowledge/queue-stats':
+          if (req.method === 'GET') {
+            if (!kbIngestQueue) return jsonResponse(res, { enabled: false, reason: 'not initialized' });
+            try { return jsonResponse(res, await kbIngestQueue.stats()); }
+            catch (err) { return jsonResponse(res, { error: err.message }, 500); }
+          }
+          break;
+
         case '/api/knowledge/status':
           if (req.method === 'GET') {
             const jobId = url.searchParams.get('job_id');
@@ -8293,6 +8845,43 @@ exit \$RC
             }
             // Live in-memory progress (per-stage counts) while the job runs.
             if (jobId) {
+              // ── Durable-queue jobs (kbq_*): Redis mirror is the cross-node
+              // source of truth, checked FIRST. The upload may be enqueued on
+              // node A (which writes a LOCAL 'queued' tracker stub) but
+              // processed by a worker on node B. Reading the local tracker
+              // first would return node A's stale 'queued' forever — the exact
+              // "stuck Processing" bug. The actual worker mirrors every stage
+              // (queued→processing→indexed) into shared Redis, so prefer it;
+              // fall back to the local tracker only when the mirror is empty.
+              if (kbIngestQueue && jobId.startsWith('kbq_')) {
+                const qs = await kbIngestQueue.getStatus(jobId).catch(() => null);
+                if (qs) {
+                  // Shape parity with the in-memory tracker path: the FE reads
+                  // doc fields from `metadata.*`. The queue mirror stores them
+                  // flat (document_id/segmentCount/promotedCount at top level),
+                  // so nest a `metadata` object too. Keep the flat keys for any
+                  // top-level reader. Without this, queued uploads resolve to
+                  // 'indexed' but return documentId=undefined → the new KB card
+                  // can't link until a manual refresh.
+                  return jsonResponse(res, {
+                    source: 'queue', job_id: jobId, ...qs,
+                    metadata: {
+                      ...(qs.metadata || {}),
+                      document_id: qs.document_id,
+                      segmentCount: qs.segmentCount,
+                      promotedCount: qs.promotedCount,
+                      candidateCount: qs.candidateCount,
+                      filename: qs.filename,
+                    },
+                  });
+                }
+                // Mirror empty — try the local tracker (live progress on the
+                // node that happens to be processing), else report 'queued'
+                // (race right after enqueue) so the FE keeps polling, never 404s.
+                const qjob = ingestTracker.getJob(jobId);
+                if (qjob) return jsonResponse(res, { source: 'tracker', ...qjob });
+                return jsonResponse(res, { source: 'queue', job_id: jobId, status: 'queued', progress: 0 });
+              }
               const job = ingestTracker.getJob(jobId);
               if (job) return jsonResponse(res, { source: 'tracker', ...job });
             }
@@ -8665,7 +9254,7 @@ exit \$RC
             let qdrantPoints = null;
             try {
               const qUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
-              const qColl = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
+              const qColl = 'HIVEMIND_PERSONAL';
               const qKey = process.env.QDRANT_API_KEY || '';
               if (qUrl && orgId) {
                 const qr = await fetch(`${qUrl}/collections/${encodeURIComponent(qColl)}/points/count`, {
@@ -10230,7 +10819,7 @@ exit \$RC
               let qdrantDeleted = 0;
               try {
                 const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
-                const qdrantCollection = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
+                const qdrantCollection = 'HIVEMIND_PERSONAL';
                 const qdrantKey = process.env.QDRANT_API_KEY || '';
                 if (qdrantUrl) {
                   // Chunk ids to keep the request payload small on big batches
@@ -10498,7 +11087,7 @@ exit \$RC
                           if (gmailResult?.memoryId && qdrantClient) {
                             try {
                               const gmailMem = await persistentMemoryStore.getMemory(gmailResult.memoryId);
-                              if (gmailMem) await qdrantClient.storeMemory(gmailMem, { collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT' });
+                              if (gmailMem) await qdrantClient.storeMemory(gmailMem, { collectionName: 'HIVEMIND_PERSONAL' });
                             } catch {}
                           }
                           // Embed fact-memories in Qdrant
@@ -10506,7 +11095,7 @@ exit \$RC
                             for (const factId of gmailResult.factMemoryIds) {
                               try {
                                 const factMem = await persistentMemoryStore.getMemory(factId);
-                                if (factMem) await qdrantClient.storeMemory(factMem, { collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT' });
+                                if (factMem) await qdrantClient.storeMemory(factMem, { collectionName: 'HIVEMIND_PERSONAL' });
                               } catch {}
                             }
                           }
@@ -11000,6 +11589,81 @@ exit \$RC
         // SLACK CONNECTOR — Status & Sync
         // ==========================================
 
+        case '/api/connectors/slack/bot-token':
+          // INTERNAL (master-key only): the employees-service Socket-Mode
+          // gateway fetches the workspace bot token from here instead of a
+          // static SLACK_BOT_TOKEN_<TEAM> env var. Slack bot tokens ROTATE
+          // (~12h xoxe tokens) — env copies go stale and then every inbound
+          // socket event fails authorize() silently. The PlatformIntegration
+          // row is the live, refreshed source of truth. Validates with
+          // auth.test and refreshes via oauth.v2.access when stale.
+          if (req.method === 'GET') {
+            try {
+              const presented = req.headers['x-api-key']
+                || (req.headers['authorization'] || '').replace(/^Bearer\s+/i, '');
+              const masterKey = process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY;
+              if (!masterKey || presented !== masterKey) {
+                return jsonResponse(res, { error: 'master key required' }, 403);
+              }
+              const teamId = url.searchParams.get('team_id');
+              const { ConnectorStore, decryptToken, encryptToken } = await import('./connectors/framework/connector-store.js');
+              let conn = teamId ? await prisma.platformIntegration.findFirst({
+                where: {
+                  platformType: 'slack',
+                  isActive: true,
+                  connectorMetadata: { path: ['provider_metadata', 'team_id'], equals: teamId },
+                },
+              }) : null;
+              if (!conn) {
+                conn = await prisma.platformIntegration.findFirst({
+                  where: { platformType: 'slack', isActive: true },
+                  orderBy: { updatedAt: 'desc' },
+                });
+              }
+              if (!conn) return jsonResponse(res, { error: 'no active slack connector' }, 404);
+
+              let token = decryptToken(conn.accessTokenEncrypted);
+              // Validate; refresh on stale (Slack token rotation).
+              const test = await fetch('https://slack.com/api/auth.test', {
+                headers: { Authorization: `Bearer ${token}` },
+              }).then(r => r.json()).catch(() => ({ ok: false }));
+              if (!test.ok && conn.refreshTokenEncrypted) {
+                const refreshToken = decryptToken(conn.refreshTokenEncrypted);
+                const resp = await fetch('https://slack.com/api/oauth.v2.access', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                  body: new URLSearchParams({
+                    client_id: process.env.SLACK_CLIENT_ID,
+                    client_secret: process.env.SLACK_CLIENT_SECRET,
+                    grant_type: 'refresh_token',
+                    refresh_token: refreshToken,
+                  }),
+                }).then(r => r.json()).catch(() => null);
+                if (resp?.ok && resp.access_token) {
+                  token = resp.access_token;
+                  await prisma.platformIntegration.update({
+                    where: { id: conn.id },
+                    data: {
+                      accessTokenEncrypted: encryptToken(resp.access_token),
+                      ...(resp.refresh_token ? { refreshTokenEncrypted: encryptToken(resp.refresh_token) } : {}),
+                      ...(resp.expires_in ? { tokenExpiresAt: new Date(Date.now() + resp.expires_in * 1000) } : {}),
+                      oauthLastRefreshed: new Date(),
+                    },
+                  }).catch(() => {});
+                  console.log(`[slack] bot token refreshed for connector ${conn.id}`);
+                } else {
+                  return jsonResponse(res, { error: `slack token invalid and refresh failed: ${resp?.error || 'unknown'}` }, 502);
+                }
+              } else if (!test.ok) {
+                return jsonResponse(res, { error: 'slack token invalid, no refresh token stored' }, 502);
+              }
+              return jsonResponse(res, { bot_token: token, user_id: conn.userId, team_id: teamId || null });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
         case '/api/connectors/slack/status':
           if (req.method === 'GET') {
             try {
@@ -11152,9 +11816,25 @@ exit \$RC
                     byType[t] = (byType[t] || 0) + c;
                     total += c;
                   }
-                  out[docId] = { total, byType, cluster_size: idArr.length };
+                  // Tier-2 enrichment surface: distilled facts for this doc.
+                  // FE passes the doc-parent MEMORY id — derive the knowledge-
+                  // document id from its doc-id:* tag or source metadata, since
+                  // _distillFactsAsync stamps facts with doc-id:<knowledgeDoc.id>.
+                  let factCount = 0;
+                  try {
+                    const docIdTag = (docMemory?.tags || []).find(t => typeof t === 'string' && t.startsWith('doc-id:'));
+                    const kdId = docIdTag ? docIdTag.slice('doc-id:'.length) : (docMeta?.document_id || null);
+                    if (kdId) {
+                      // orgId scope: required by the tenant-isolation prisma
+                      // guard (Memory.count without orgId/userId throws).
+                      factCount = await prisma.memory.count({
+                        where: { orgId, deletedAt: null, tags: { hasEvery: [`doc-id:${kdId}`, 'distilled-from-kb'] } },
+                      });
+                    }
+                  } catch { /* facts count best-effort */ }
+                  out[docId] = { total, byType, cluster_size: idArr.length, facts: factCount };
                 } catch (relErr) {
-                  out[docId] = { total: 0, byType: {}, cluster_size: idArr.length, error: relErr.message };
+                  out[docId] = { total: 0, byType: {}, cluster_size: idArr.length, facts: 0, error: relErr.message };
                 }
               }
 
@@ -11245,7 +11925,7 @@ exit \$RC
                 // memory_evidence_links cascade-delete with the memory (FK onDelete Cascade).
                 try {
                   const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
-                  const qdrantCollection = process.env.QDRANT_COLLECTION || 'hivemind_memories';
+                  const qdrantCollection = 'HIVEMIND_PERSONAL'; // per-tenant deletes by-id are best-effort; real per-tenant delete via store layer
                   const qdrantKey = process.env.QDRANT_API_KEY || '';
                   if (qdrantUrl) {
                     await fetch(`${qdrantUrl}/collections/${encodeURIComponent(qdrantCollection)}/points/delete?wait=true`, {
@@ -11489,7 +12169,35 @@ exit \$RC
                     console.warn(`[knowledge-delete] phase1 fallback failed: ${phase1Err.message}`);
                   }
                 }
-                return jsonResponse(res, { error: 'No memories found for this document' }, 404);
+                // Last resort: delete a knowledge_document for THIS user whose
+                // checksum/source_id ties back to the upload_id, covering
+                // failed/processing docs whose id the FE never learned.
+                try {
+                  const orphanDoc = deleteUploadId
+                    ? await prisma.knowledgeDocument.findFirst({
+                        where: { userId, orgId, OR: [{ sourceId: { contains: String(deleteUploadId) } }] },
+                        select: { id: true },
+                      })
+                    : null;
+                  if (orphanDoc) {
+                    await purgeKnowledgeDocs([orphanDoc.id]);
+                    invalidateAggregateCache({ userId, orgId, project: null });
+                    return jsonResponse(res, { success: true, mode: 'orphan_doc_delete', documentId: orphanDoc.id, deleted_memories: 0 });
+                  }
+                } catch (orphanErr) { console.warn('[knowledge-delete] orphan lookup failed:', orphanErr.message); }
+
+                // Best-effort: clear any lingering queue job + Redis status for a
+                // queued/processing id so its stuck FE card has no backing trace.
+                try {
+                  const qid = rawId || rawUploadId || rawMemoryId;
+                  if (qid && kbIngestQueue?.clearJob) await kbIngestQueue.clearJob(qid);
+                } catch { /* best-effort */ }
+
+                // IDEMPOTENT DELETE: nothing left to remove ⇒ the desired state
+                // (absent) already holds. Return success so the FE can always
+                // clear a card — stuck/failed/already-deleted included. Was a
+                // 404 that left phantom "Processing" cards undeletable.
+                return jsonResponse(res, { success: true, deleted: 0, note: 'nothing to delete (already absent)' });
               }
               // De-dup
               memoryIds = Array.from(new Set(memoryIds));
@@ -11822,7 +12530,7 @@ exit \$RC
               console.log(`[enterprise] Ingest job=${jobId} upload=${upload_id} type=${confirmed_type} sheets=${results.length}`);
 
               (async () => {
-                const collectionName = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
+                const collectionName = 'HIVEMIND_PERSONAL';
                 let ingested = 0;
                 let failed = 0;
 
@@ -12105,9 +12813,12 @@ exit \$RC
 
               // Extract optional form fields
               const containerTag = parts.find(p => p.name === 'containerTag')?.value || null;
-              const targetScope = parts.find(p => p.name === 'targetScope')?.value === 'organization'
-                ? 'organization'
-                : 'personal';
+              // KB uploads default to ORGANIZATION visibility (team knowledge is
+              // shared by default; users opt OUT to 'personal'). Was default
+              // 'personal', which siloed every upload to the uploader.
+              const targetScope = parts.find(p => p.name === 'targetScope')?.value === 'personal'
+                ? 'personal'
+                : 'organization';
               const customTags = parts.find(p => p.name === 'tags')?.value || '';
               const userTags = customTags ? customTags.split(',').map(t => t.trim()).filter(Boolean) : [];
               const projectId = parts.find(p => p.name === 'projectId')?.value || null;
@@ -12198,6 +12909,34 @@ exit \$RC
                 }
               }
 
+              // Upfront duplicate rejection: same bytes already uploaded by this
+              // user+org → 409 BEFORE any parse/queue work, so bulk batches show
+              // "duplicate" per file instantly and continue with the rest.
+              // Override with form field force=true (intentional re-ingest).
+              const uploadChecksum = crypto.createHash('sha256').update(filePart.data).digest('hex');
+              const forceDuplicate = (parts.find(p => p.name === 'force')?.value || '').toLowerCase() === 'true';
+              if (!forceDuplicate && prisma) {
+                const dupArtifact = await prisma.sourceArtifact.findUnique({
+                  where: { userId_orgId_checksum_sourcePlatform: { userId, orgId, checksum: uploadChecksum, sourcePlatform: 'knowledge_upload' } },
+                  select: { id: true, createdAt: true },
+                }).catch(() => null);
+                if (dupArtifact) {
+                  const dupDoc = await prisma.knowledgeDocument.findFirst({
+                    where: { userId, orgId, sourceArtifactId: dupArtifact.id },
+                    select: { id: true, title: true, createdAt: true },
+                  }).catch(() => null);
+                  return jsonResponse(res, {
+                    duplicate: true,
+                    error: 'duplicate_document',
+                    message: `Identical content already in your knowledge base${dupDoc?.title ? ` as "${dupDoc.title}"` : ''}`,
+                    existing_document_id: dupDoc?.id || null,
+                    existing_title: dupDoc?.title || null,
+                    uploaded_at: dupDoc?.createdAt || dupArtifact.createdAt,
+                    filename: filePart.filename,
+                  }, 409);
+                }
+              }
+
               // Async opt-in: return a job id immediately + process in the
               // background, so large multi-MB PDFs (150s+ sync pipeline) never
               // hit the proxy timeout / 502. Default stays sync for FE compat.
@@ -12215,9 +12954,40 @@ exit \$RC
                   project_ids: projectIds,
                   primary_team_id: primaryTeamId,
                   visibility: targetScope === 'organization' ? 'organization' : 'private',
+                  // Explicit org scope when org-targeted with no project/team — so
+                  // recall's organization tier (visible to ALL org members) matches.
+                  // project/team scopes are derived downstream from the ids.
+                  scope: (targetScope === 'organization' && projectIds.length === 0 && !primaryTeamId) ? 'organization' : undefined,
                   smart: smartFlag,
                   picture_descriptions: pictureDescFlag,
                 };
+
+                // Durable-queue path (flag-gated by org): accept → persist raw
+                // bytes → enqueue → return job_id. The request does NO heavy
+                // work; a bounded worker pool ingests via the same pipeline.
+                if (kbIngestQueue?.isEnabledFor(orgId)) {
+                  try {
+                    const checksum = uploadChecksum;
+                    const storedPath = kbIngestQueue.persistFile({ orgId, checksum, filename: filePart.filename, fileBuffer: filePart.data });
+                    const q = await kbIngestQueue.enqueue({
+                      userId, orgId,
+                      filename: filePart.filename,
+                      contentType: filePart.contentType || `text/${ext}`,
+                      checksum, filePath: storedPath,
+                      metadata: phase1Metadata,
+                    });
+                    if (q.backpressure) {
+                      res.setHeader('Retry-After', '30');
+                      return jsonResponse(res, { error: 'Ingestion queue saturated — retry shortly', queued_depth: q.depth }, 429);
+                    }
+                    res.setHeader('X-Job-Id', q.job_id);
+                    return jsonResponse(res, { success: true, job_id: q.job_id, status: 'queued', filename: filePart.filename, mode: 'queued' }, 202);
+                  } catch (qErr) {
+                    // Queue trouble must never block uploads — fall through to
+                    // the inline (async/sync) path below.
+                    console.warn('[kb-queue] enqueue failed, falling back inline:', qErr.message);
+                  }
+                }
 
                 if (asyncMode) {
                   const jobId = crypto.randomUUID();
@@ -12271,6 +13041,7 @@ exit \$RC
                       project_ids: projectIds,
                       primary_team_id: primaryTeamId,
                       visibility: targetScope === 'organization' ? 'organization' : 'private',
+                      scope: (targetScope === 'organization' && projectIds.length === 0 && !primaryTeamId) ? 'organization' : undefined,
                       smart: smartFlag,
                       picture_descriptions: pictureDescFlag,
                     }
@@ -12402,7 +13173,7 @@ exit \$RC
               (async () => {
                 let ingested = 0;
                 let failed = 0;
-                const collectionName = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
+                const collectionName = 'HIVEMIND_PERSONAL';
 
                 // ── Optimization 2: Pre-embed all chunks IN PARALLEL before
                 //   acquiring per-user advisory lock. Embedding is the slow part
@@ -13702,7 +14473,7 @@ exit \$RC
               const memory = await persistentMemoryStore.getMemory(result.memoryId);
               if (memory) {
                 await qdrantClient.storeMemory(memory, {
-                  collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT'
+                  collectionName: 'HIVEMIND_PERSONAL'
                 });
                 invalidateAggregateCache({ userId, orgId, project: memory.project || null });
                 invalidateAggregateCache({ userId, orgId, project: null });
@@ -13713,7 +14484,7 @@ exit \$RC
                 for (const factId of result.factMemoryIds) {
                   try {
                     const factMem = await persistentMemoryStore.getMemory(factId);
-                    if (factMem) await qdrantClient.storeMemory(factMem, { collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT' });
+                    if (factMem) await qdrantClient.storeMemory(factMem, { collectionName: 'HIVEMIND_PERSONAL' });
                   } catch (factErr) {
                     console.warn(`[webapp] Fact Qdrant embed failed for ${factId}:`, factErr.message);
                   }
@@ -13770,7 +14541,7 @@ exit \$RC
                 // Bulk Qdrant: delete all points by user_id filter (1 API call)
                 try {
                   const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
-                  const qdrantCollection = process.env.QDRANT_COLLECTION || 'hivemind_memories';
+                  const qdrantCollection = (process.env.QDRANT_PER_TENANT === 'true' && orgId) ? `org_${orgId}` : 'HIVEMIND_PERSONAL';
                   const qdrantKey = process.env.QDRANT_API_KEY || '';
                   if (qdrantUrl) {
                     const filter = { must: [{ key: 'user_id', match: { value: userId } }] };
@@ -13860,7 +14631,7 @@ exit \$RC
 
                   try {
                     const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
-                    const qdrantCollection = process.env.QDRANT_COLLECTION || 'hivemind_memories';
+                    const qdrantCollection = (process.env.QDRANT_PER_TENANT === 'true' && orgId) ? `org_${orgId}` : 'HIVEMIND_PERSONAL';
                     const qdrantKey = process.env.QDRANT_API_KEY || '';
                     if (qdrantUrl) {
                       await fetch(`${qdrantUrl}/collections/${qdrantCollection}/points/delete`, {
@@ -14306,7 +15077,7 @@ exit \$RC
                       const memory = await persistentMemoryStore.getMemory(result.memoryId);
                       if (memory) {
                         await qdrantClient.storeMemory(memory, {
-                          collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT'
+                          collectionName: 'HIVEMIND_PERSONAL'
                         });
                         invalidateAggregateCache({ userId, orgId, project: memory.project || null });
                         invalidateAggregateCache({ userId, orgId, project: null });
@@ -14340,7 +15111,7 @@ exit \$RC
                         for (const factId of result.factMemoryIds) {
                           try {
                             const factMem = await persistentMemoryStore.getMemory(factId);
-                            if (factMem) await qdrantClient.storeMemory(factMem, { collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT' });
+                            if (factMem) await qdrantClient.storeMemory(factMem, { collectionName: 'HIVEMIND_PERSONAL' });
                           } catch (factErr) {
                             console.warn(`[memories] Fact Qdrant embed failed for ${factId}:`, factErr.message);
                           }
@@ -14411,7 +15182,7 @@ exit \$RC
                     const m = await persistentMemoryStore.getMemory(r.memoryId);
                     if (m) {
                       await qdrantClient.storeMemory(m, {
-                        collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT'
+                        collectionName: 'HIVEMIND_PERSONAL'
                       });
                       invalidateAggregateCache({ userId, orgId, project: m.project || null });
                       invalidateAggregateCache({ userId, orgId, project: null });
@@ -14428,7 +15199,7 @@ exit \$RC
                 const memory = await persistentMemoryStore.getMemory(result.memoryId);
                 if (memory) {
                   await qdrantClient.storeMemory(memory, {
-                    collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT'
+                    collectionName: 'HIVEMIND_PERSONAL'
                   });
                   invalidateAggregateCache({ userId, orgId, project: memory.project || null });
                   invalidateAggregateCache({ userId, orgId, project: null });
@@ -14451,7 +15222,7 @@ exit \$RC
                   for (const factId of result.factMemoryIds) {
                     try {
                       const factMem = await persistentMemoryStore.getMemory(factId);
-                      if (factMem) await qdrantClient.storeMemory(factMem, { collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT' });
+                      if (factMem) await qdrantClient.storeMemory(factMem, { collectionName: 'HIVEMIND_PERSONAL' });
                     } catch (factErr) {
                       console.warn(`[memories] Fact Qdrant embed failed for ${factId}:`, factErr.message);
                     }
@@ -15525,7 +16296,42 @@ exit \$RC
               // containerTag → project mapping for recall
               const recallProject = body.project || effectiveContainerTag || null;
 
-              const recallAccessCtx = await buildAccessContext(userId, orgId);
+              let recallAccessCtx = await buildAccessContext(userId, orgId);
+              // Project-scoped recall: when a caller (e.g. a project-scoped HyperAgent
+              // room) passes project_id, FORCE the access context to that project. The
+              // store's tier OR clause + the vector filter then return the project's
+              // memories + org-wide + the caller's personal, and EXCLUDE other projects
+              // — regardless of the caller's project membership (the room/caller
+              // explicitly chose this project). Without project_id, behavior is unchanged.
+              if (body.project_id) {
+                // Spread-preserve the rest of the context (orgRole especially):
+                // rebuilding it bare dropped orgRole, which (a) re-granted the
+                // org-wide tier to guests on project recalls and (b) changed the
+                // keyword candidate pool composition.
+                recallAccessCtx = {
+                  ...(recallAccessCtx || {}),
+                  projectIds: [body.project_id],
+                  teamIds: (recallAccessCtx && recallAccessCtx.teamIds) || [],
+                };
+              }
+
+              // Person-filtered recall ("what did person X update today"): resolve an
+              // author by id, email, or display name (within this org) → userId, then
+              // post-filter results to that author. Combine with date_range for time.
+              let recallAuthorId = null;
+              if (body.author_id && typeof body.author_id === 'string') {
+                recallAuthorId = body.author_id;
+              } else if (body.author && typeof body.author === 'string' && prisma) {
+                const term = body.author.trim();
+                const a = await prisma.user.findFirst({
+                  where: {
+                    organizations: { some: { orgId } },
+                    OR: [{ email: term }, { displayName: { equals: term, mode: 'insensitive' } }],
+                  },
+                  select: { id: true },
+                }).catch(() => null);
+                recallAuthorId = a?.id || null;
+              }
 
               // Bi-temporal filter: when valid_at is set, return only memories
               // that were valid at that timestamp (valid_from <= valid_at AND
@@ -15582,6 +16388,54 @@ exit \$RC
                   transaction_at: bitemporalFilter.transaction_at?.toISOString() || null,
                   kept: filtered.length,
                 };
+              }
+
+              // Hydrate owner/scope/project_id for the delivered memories (recall paths
+              // can strip these) so attribution display + project/author post-filters are
+              // reliable. One batch query for the ≤N delivered ids.
+              if (Array.isArray(result?.memories) && result.memories.length && prisma) {
+                try {
+                  const ids = result.memories.map(m => m.id).filter(Boolean);
+                  if (ids.length) {
+                    const ph = ids.map((_, i) => `$${i + 2}::uuid`).join(',');
+                    const rows = await prisma.$queryRawUnsafe(
+                      `SELECT m.id, m.user_id, m.scope, m.project_id, u.display_name AS dn, u.email AS em
+                       FROM hivemind.memories m LEFT JOIN hivemind.users u ON u.id = m.user_id
+                       WHERE m.org_id = $1::uuid AND m.id IN (${ph})`,
+                      orgId, ...ids,
+                    );
+                    const byId = Object.fromEntries((rows || []).map(r => [r.id, r]));
+                    for (const m of result.memories) {
+                      const r = byId[m.id];
+                      if (!r) continue;
+                      if (!m.user_id) m.user_id = r.user_id;
+                      if (!m.scope) m.scope = r.scope;
+                      if (m.project_id == null) m.project_id = r.project_id || null;
+                      const nm = r.dn || r.em || null;
+                      if (!m.owner_name) m.owner_name = nm;
+                      if (!m.owner && r.user_id) m.owner = { id: r.user_id, name: nm };
+                    }
+                  }
+                } catch (e) { /* attribution best-effort */ }
+              }
+
+              // Project-scope post-filter (guarantee): when project_id is set, keep
+              // memories that are org-wide/personal/legacy (no project_id) OR belong to
+              // THIS project; drop memories that belong to a DIFFERENT project. Uses the
+              // reliably-present scalar project_id, independent of scope hydration.
+              if (body.project_id && Array.isArray(result?.memories)) {
+                const before = result.memories.length;
+                result.memories = result.memories.filter(
+                  m => !m.project_id || m.project_id === body.project_id,
+                );
+                result.project_scope_applied = { project_id: body.project_id, kept: result.memories.length, dropped: before - result.memories.length };
+              }
+
+              // Author/person post-filter: keep only memories owned by the resolved person.
+              if (recallAuthorId && Array.isArray(result?.memories)) {
+                const before = result.memories.length;
+                result.memories = result.memories.filter(m => m.user_id === recallAuthorId);
+                result.author_filter_applied = { author_id: recallAuthorId, kept: result.memories.length, dropped: before - result.memories.length };
               }
 
               // Apply memory type boosts from Operator Layer
@@ -15900,7 +16754,12 @@ exit \$RC
               const memWhere = {
                 userId, orgId, deletedAt: null, isLatest: true,
                 ...(memTypeFilter ? { memoryType: memTypeFilter } : {}),
-                ...(includeChildren ? {} : { NOT: { tags: { has: 'extracted-fact' } } }),
+                // Exclude TARA + governance + room noise by TAG only. (Do NOT use
+                // `NOT project startsWith 'tara/'`: NULL LIKE → NULL → drops every
+                // project=NULL personal memory.)
+                ...(includeChildren ? {} : { AND: [
+                  { NOT: { tags: { hasSome: ['extracted-fact', 'tara-turn', 'tara-insight', 'tara-call-log', 'tara-session', 'tara-config', 'tara-skill', 'internal-audit', 'governance', 'reflection', 'hyper-rooms', 'hyper-room', 'room-decision'] } } },
+                ] }),
                 ...(projScope ? { OR: [{ projectId: projScope.id }, { project: { in: [projScope.slug, projScope.name].filter(Boolean) } }] } : {}),
               };
               const memories = await prisma.memory.findMany({
@@ -16105,7 +16964,22 @@ exit \$RC
               const includeChildren =
                 url.searchParams.get('include_children') === 'true';
               // Mirrors HIDDEN_CHILD_TAGS in prisma-graph-store.listMemories.
-              const HIDDEN_CHILD_TAGS_GRAPH = ['extracted-fact', 'tara-turn', 'tara-insight'];
+              // TARA voice activity is fully skipped in the graph for now.
+              // Mirror listMemories suppression: extracted-fact + ALL TARA voice
+              // activity + governance audit-reflection noise + HyperAgents room
+              // decisions (those live in the room, not the memory graph). KEEP
+              // cognitive-layer outputs (canonical-summary / synthesis:* / principle
+              // / bridge) — those are real knowledge the user wants surfaced.
+              const HIDDEN_CHILD_TAGS_GRAPH = [
+                'extracted-fact',
+                'tara-turn', 'tara-insight', 'tara-call-log', 'tara-session', 'tara-config', 'tara-skill',
+                // governance audit-reflection noise. NOTE: do NOT add
+                // 'cognition-loop' — the GOOD synthesis/canonical outputs carry
+                // it too; 'internal-audit'/'governance'/'reflection' are the
+                // clean discriminators (0 on synthesis outputs).
+                'internal-audit', 'governance', 'reflection',
+                'hyper-rooms', 'hyper-room', 'room-decision',
+              ];
               // Resolve the project filter to match the formal projectId FK +
               // memory_projects join, NOT just the legacy `project` string —
               // uploads set projectId (string stays null), so a string-only
@@ -16134,6 +17008,10 @@ exit \$RC
                 deletedAt: null,
                 ...(includeSuperseded ? {} : { isLatest: true }),
                 ...(graphProjScope || {}),
+                // NOTE: exclude TARA by TAG (tara-* incl tara-config/tara-skill),
+                // NOT by `NOT project startsWith 'tara/'` — that clause nukes
+                // every project=NULL memory (SQL: NULL LIKE 'tara/%' → NULL →
+                // NOT NULL → row dropped), which is ~all personal memories.
                 ...(includeChildren ? {} : { AND: HIDDEN_CHILD_TAGS_GRAPH.map((t) => ({ NOT: { tags: { has: t } } })) }),
               };
               const scopeWhere = graphScope === 'team'
@@ -18136,15 +19014,18 @@ exit \$RC
                 // LLM-picked because it needs to gate the very first turn
                 // before the LLM ever runs.
                 let agentAssistantName = null;
+                let agentOnboardingIntro = null; // one-time greeting, attached to the real answer
                 let agentOrgName = 'your organisation';
                 try {
                   const {
-                    getAssistantName, extractNameFromReply, buildAssistantNamePayload, ASSISTANT_IDENTITY,
+                    getAssistantName, extractNameIfIntent, buildAssistantNamePayload, ASSISTANT_IDENTITY,
                     hasShownOnboardingIntro, markOnboardingShown,
                   } = await import('./services/assistant-identity.js');
+                  let agentNameMemoryId = null;
                   if (persistentMemoryStore) {
                     const lookup = await getAssistantName(persistentMemoryStore, { userId, orgId });
                     agentAssistantName = lookup.name;
+                    agentNameMemoryId = lookup.memoryId;
                   }
                   if (orgId && prisma) {
                     try {
@@ -18155,31 +19036,35 @@ exit \$RC
                   const introShown = persistentMemoryStore
                     ? await hasShownOnboardingIntro(persistentMemoryStore, { userId, orgId })
                     : false;
-                  if (!agentAssistantName && !introShown) {
-                    if (persistentMemoryStore) await markOnboardingShown(persistentMemoryStore, { userId, orgId });
-                    return jsonResponse(res, {
-                      response: `Hi — I'm ${agentOrgName}'s second brain. I store, connect, and recall everything you and your team tell me.\n\nGot a name for me? Pick something short (max 32 chars). Say "skip" to use the default ("${ASSISTANT_IDENTITY.DEFAULT_NAME}").`,
-                      sources: [], usage: null, assistant_name: null,
-                      onboarding: { step: 'ask_name', org_name: agentOrgName },
-                    });
-                  }
-                  if (!agentAssistantName && introShown) {
-                    const extracted = extractNameFromReply(message);
-                    const finalName = extracted || ASSISTANT_IDENTITY.DEFAULT_NAME;
+
+                  // Dynamic naming intent (ANY turn) — only (re)name when the user
+                  // EXPLICITLY asks ("call yourself X", "your name is X", quoted).
+                  // A normal question is NEVER consumed as a name. Works after a
+                  // name is set too → user can rename anytime.
+                  const intentName = extractNameIfIntent(message);
+                  if (intentName) {
                     try {
-                      const payload = buildAssistantNamePayload({ name: finalName, userId, orgId });
+                      const payload = buildAssistantNamePayload({ name: intentName, userId, orgId, prevMemoryId: agentNameMemoryId });
                       if (persistentMemoryEngine?.ingestMemory) {
                         await persistentMemoryEngine.ingestMemory({ ...payload, skipProcessing: true, smartIngest: false });
                       }
+                      if (persistentMemoryStore && !introShown) await markOnboardingShown(persistentMemoryStore, { userId, orgId });
                     } catch {}
-                    agentAssistantName = finalName;
                     return jsonResponse(res, {
-                      response: extracted
-                        ? `Got it — I'll go by **${finalName}** from now on. What can I help you with?`
-                        : `Going with the default — call me **${finalName}**. What can I help you with?`,
-                      sources: [], usage: null, assistant_name: finalName,
-                      onboarding: { step: 'name_saved', name: finalName, org_name: agentOrgName },
+                      response: `Got it — I'll go by **${intentName}** from now on. What can I help you with?`,
+                      sources: [], usage: null, assistant_name: intentName,
+                      onboarding: { step: 'name_saved', name: intentName, org_name: agentOrgName },
                     });
+                  }
+
+                  // One-time greeting (NON-blocking) — surfaced as the agent's
+                  // first message via `onboarding.intro`; the user's real query is
+                  // still answered below. Shown once, then the sentinel is set.
+                  if (!agentAssistantName && !introShown) {
+                    agentOnboardingIntro =
+                      `Hi — I'm ${agentOrgName}'s second brain. I store, connect, and recall everything you and your team tell me. ` +
+                      `Want to name me? Just say e.g. "call yourself Sage" anytime — otherwise I go by "${ASSISTANT_IDENTITY.DEFAULT_NAME}".`;
+                    if (persistentMemoryStore) await markOnboardingShown(persistentMemoryStore, { userId, orgId });
                   }
                 } catch {}
 
@@ -18221,6 +19106,9 @@ exit \$RC
                       },
                       onEvent: emit,
                     });
+                    if (agentOnboardingIntro && result && typeof result === 'object' && !result.onboarding) {
+                      result.onboarding = { step: 'greeting', intro: agentOnboardingIntro, org_name: agentOrgName };
+                    }
                     emit({ type: 'done', ...result });
                   } catch (agentErr) {
                     emit({ type: 'error', error: agentErr.message });
@@ -18255,6 +19143,9 @@ exit \$RC
                 // the graph with noisy "Chat turn — <date>" records. Event-
                 // driven save only. (Removed 2026-06-01.)
 
+                if (agentOnboardingIntro && result && typeof result === 'object' && !result.onboarding) {
+                  result.onboarding = { step: 'greeting', intro: agentOnboardingIntro, org_name: agentOrgName };
+                }
                 return jsonResponse(res, result);
               } catch (agentErr) {
                 console.warn('[chat:react-agent] failed, falling back to legacy:', agentErr.message);
@@ -18271,9 +19162,10 @@ exit \$RC
             let assistantName = null;
             let assistantNameMemoryId = null;
             let orgName = 'your organisation';
+            let onboardingIntro = null; // one-time greeting attached to the first real answer
             try {
               const {
-                getAssistantName, extractNameFromReply, buildAssistantNamePayload, ASSISTANT_IDENTITY,
+                getAssistantName, extractNameIfIntent, buildAssistantNamePayload, ASSISTANT_IDENTITY,
                 hasShownOnboardingIntro, markOnboardingShown,
               } = await import('./services/assistant-identity.js');
               if (persistentMemoryStore) {
@@ -18292,71 +19184,54 @@ exit \$RC
                 } catch {}
               }
 
-              // Onboarding state via PERSISTENT sentinel (not history regex):
-              //   • introShown=false, name=null  → STATE 1: ask once, mark shown
-              //   • introShown=true,  name=null  → STATE 2: parse this turn as name reply
-              //   • name=*                       → skip onboarding entirely
-              // Survives empty-history sessions / new tabs / API reconnects.
-              const introShown = persistentMemoryStore
+              // Persistent sentinel — has the one-time greeting already been shown?
+              const introShownEarly = persistentMemoryStore
                 ? await hasShownOnboardingIntro(persistentMemoryStore, { userId, orgId })
                 : false;
 
-              // STATE 1: no name set, intro never shown → ask now + persist sentinel.
-              if (!assistantName && !introShown) {
-                const intro =
-                  `Hi — I'm ${orgName}'s second brain. I store, connect, and recall everything you and your team tell me.\n\n` +
-                  `Got a name for me? Pick something short (max 32 chars). Say "skip" to use the default ("${ASSISTANT_IDENTITY.DEFAULT_NAME}").`;
-                // Persist the "intro shown" sentinel BEFORE responding so a
-                // racing follow-up turn can't re-trigger State 1.
-                if (persistentMemoryStore) {
-                  await markOnboardingShown(persistentMemoryStore, { userId, orgId });
-                }
-                return jsonResponse(res, {
-                  response: intro,
-                  sources: [],
-                  usage: null,
-                  assistant_name: null,
-                  onboarding: { step: 'ask_name', org_name: orgName },
-                });
-              }
-
-              // STATE 2: no name set, intro was shown → this turn is the name reply.
-              if (!assistantName && introShown) {
-                const extracted = extractNameFromReply(message);
-                const finalName = extracted || ASSISTANT_IDENTITY.DEFAULT_NAME;
-                // Save it via the standard ingest pipeline. Skip processing so
-                // the LLM fact-extraction doesn't misinterpret "User chose to
-                // name their HIVEMIND assistant 'Sage'" as "User's name is
-                // Sage" — that pollution caused false claims in later
-                // "what's my name" queries.
+              // ── Dynamic naming intent (ANY turn) ──
+              // Only (re)name when the user EXPLICITLY asks — "call yourself X",
+              // "your name is X", "rename yourself to X", quoted name, etc.
+              // A normal question is NEVER consumed as a name (the old STATE-2
+              // regex-grab is gone). Works even after a name is set → rename.
+              const intentName = extractNameIfIntent(message);
+              if (intentName) {
                 try {
                   const payload = buildAssistantNamePayload({
-                    name: finalName,
-                    userId,
-                    orgId,
-                    prevMemoryId: assistantNameMemoryId,
+                    name: intentName, userId, orgId, prevMemoryId: assistantNameMemoryId,
                   });
                   if (persistentMemoryEngine?.ingestMemory) {
                     await persistentMemoryEngine.ingestMemory({
-                      ...payload,
-                      skipProcessing: true,
-                      smartIngest: false, // identity config, not knowledge
+                      ...payload, skipProcessing: true, smartIngest: false, // identity config, not knowledge
                     });
+                  }
+                  // Mark intro shown so the one-time greeting never fires later.
+                  if (persistentMemoryStore && !introShownEarly) {
+                    await markOnboardingShown(persistentMemoryStore, { userId, orgId });
                   }
                 } catch (saveErr) {
                   console.warn('[chat:onboarding] save name failed:', saveErr.message);
                 }
-                assistantName = finalName;
-                const ack = extracted
-                  ? `Got it — I'll go by **${finalName}** from now on. What can I help you with?`
-                  : `Going with the default — call me **${finalName}**. What can I help you with?`;
                 return jsonResponse(res, {
-                  response: ack,
-                  sources: [],
-                  usage: null,
-                  assistant_name: finalName,
-                  onboarding: { step: 'name_saved', name: finalName, org_name: orgName },
+                  response: `Got it — I'll go by **${intentName}** from now on. What can I help you with?`,
+                  sources: [], usage: null,
+                  assistant_name: intentName,
+                  onboarding: { step: 'name_saved', name: intentName, org_name: orgName },
                 });
+              }
+
+              // ── One-time greeting (NON-blocking) ──
+              // Surfaced as the AGENT's first message (FE renders the intro as the
+              // opening agent bubble). It does NOT replace the user's answer — the
+              // real query is processed below; the intro just rides along once via
+              // the `onboarding.intro` field. Shown a single time, then sentinel set.
+              if (!assistantName && !introShownEarly) {
+                onboardingIntro =
+                  `Hi — I'm ${orgName}'s second brain. I store, connect, and recall everything you and your team tell me. ` +
+                  `Want to name me? Just say e.g. "call yourself Sage" anytime — otherwise I go by "${ASSISTANT_IDENTITY.DEFAULT_NAME}".`;
+                if (persistentMemoryStore) {
+                  await markOnboardingShown(persistentMemoryStore, { userId, orgId });
+                }
               }
             } catch (idErr) {
               console.warn('[chat:onboarding] identity load failed:', idErr.message);
@@ -19083,6 +19958,9 @@ ${injectionText}`;
                 },
                 assistant_name: assistantName || null,
                 org_name: orgName,
+                // One-time greeting — FE renders this as the agent's opening
+                // bubble. Non-blocking: the real answer is in `response` above.
+                onboarding: onboardingIntro ? { step: 'greeting', intro: onboardingIntro, org_name: orgName } : undefined,
               });
             } catch (chatErr) {
               console.error('[chat] Failed:', chatErr.message);

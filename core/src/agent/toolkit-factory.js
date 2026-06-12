@@ -16,9 +16,14 @@ import { createMemoryTapMiddleware } from './middleware/memory-tap.js';
 import { registerGmailTools } from './connector-toolkits/gmail-tools.js';
 import { registerGdocsTools } from './connector-toolkits/gdocs-tools.js';
 import { registerGeminiTools } from './connector-toolkits/gemini-tools.js';
+import { registerSlackTools } from './connector-toolkits/slack-tools.js';
 
 // MCP-backed groups (run via persistent client pool).
-const MCP_CONNECTOR_GROUPS = ['slack', 'notion', 'github', 'linear'];
+// 'slack' moved OUT of this list: Slack OAuth is native (PlatformIntegration
+// bot token) — the Nango-backed MCP pool failed token resolution on every
+// chat turn for natively-connected users. Slack tools are now registered as
+// a native group (registerSlackTools) below.
+const MCP_CONNECTOR_GROUPS = ['notion', 'github', 'linear'];
 
 // Nango-REST-backed groups (registered directly via tool functions).
 // Each entry: providerKey expected on nangoConnection, register function.
@@ -114,6 +119,32 @@ export async function buildToolkitForUser({ prisma, userId, orgId, hivemindTools
       }
     } catch (err) {
       console.warn(`[toolkit] connector enumeration failed: ${err.message}`);
+    }
+  }
+
+  // 5. Native Slack group — registered whenever the user has Slack connected
+  //    through EITHER auth generation: the native OAuth row
+  //    (platformIntegration) or a legacy Nango connection. Token resolution
+  //    happens lazily per tool call inside SlackBridge/ConnectorStore, so
+  //    registration is just two cheap indexed lookups.
+  if (prisma?.platformIntegration) {
+    try {
+      const [nativeRow, nangoRow] = await Promise.all([
+        prisma.platformIntegration.findUnique({
+          where: { userId_platformType: { userId, platformType: 'slack' } },
+          select: { isActive: true },
+        }).catch(() => null),
+        prisma.nangoConnection?.findFirst({
+          where: { userId, providerKey: 'slack', status: 'active' },
+          select: { id: true },
+        }).catch(() => null),
+      ]);
+      if (nativeRow?.isActive || nangoRow) {
+        const { ConnectorStore } = await import('../connectors/framework/connector-store.js');
+        registerSlackTools(tk, { connectorStore: new ConnectorStore(prisma), userId });
+      }
+    } catch (err) {
+      console.warn(`[toolkit] slack native register failed: ${err.message}`);
     }
   }
 

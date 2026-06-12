@@ -89,8 +89,15 @@ async function _nangoRequest(method, path, body, { retries = 2 } = {}) {
  * @param {{ db: any }} ctx — prisma client or compatible repository
  */
 export async function getConnectionId({ userId, orgId, providerKey }, { db }) {
+  // orgId is non-nullable in the NangoConnection schema, so passing
+  // `orgId: null` makes Prisma throw "Argument orgId must not be null" —
+  // which is exactly what the sync scheduler did on every tick (it has no
+  // org context) and what broke every scheduled Slack sync. Treat a falsy
+  // orgId as "any org for this user" instead of an invalid filter.
+  const where = { userId, providerKey, status: 'active' };
+  if (orgId) where.orgId = orgId;
   const row = await db.nangoConnection.findFirst({
-    where: { userId, orgId, providerKey, status: 'active' },
+    where,
     select: { connectionId: true },
   });
   return row?.connectionId ?? null;
@@ -145,7 +152,25 @@ export async function enrichEndpointWithToken(endpoint, { userId, orgId }, { db 
     );
   }
 
-  const bearer = await fetchBearerFromNango(endpoint.nango_provider, connectionId);
+  let bearer;
+  try {
+    bearer = await fetchBearerFromNango(endpoint.nango_provider, connectionId);
+  } catch (err) {
+    // Self-heal: a connection whose credentials are permanently dead
+    // ("refresh limit has been reached", invalid_credentials) never recovers.
+    // Flip it out of 'active' so getConnectionId stops returning it — this
+    // path (MCP status/inspect, polled by the Connectors page) was hammering
+    // Nango with the same dead gmail/gdocs connections on every poll.
+    if (/refresh limit|invalid_credentials|424/i.test(err.message || '')) {
+      db?.nangoConnection?.updateMany({
+        where: { connectionId, providerKey: endpoint.nango_provider, status: 'active' },
+        data: { status: 'error' },
+      }).then((r) => {
+        if (r?.count) console.warn(`[Nango] marked dead connection ${connectionId} (${endpoint.nango_provider}) status=error — user must reconnect`);
+      }).catch(() => {});
+    }
+    throw err;
+  }
 
   return {
     ...endpoint,

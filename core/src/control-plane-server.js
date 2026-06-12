@@ -13,7 +13,7 @@ import { buildAllClientDescriptors, buildClientDescriptor } from './control-plan
 import { ControlPlaneSessionStore, buildSessionCookie, verifySessionCookie } from './control-plane/session-store.js';
 import { ZitadelOidcClient } from './control-plane/zitadel.js';
 import { ConnectorStore } from './connectors/framework/connector-store.js';
-import { orgContainerName, provisionOrgContainer } from './vector/container-router.js';
+import { provisionForPlan } from './vector/container-router.js';
 import { PLANS } from './billing/plans.js';
 import {
   installConsoleCapture,
@@ -112,6 +112,73 @@ const CONFIG = {
 };
 
 const prisma = getPrismaClient();
+
+// ── Hyper-room stuck-turn sweeper ─────────────────────────────────────────
+// The room-turn kick to the employees sidecar is fire-and-forget and can be
+// dropped (the sidecar holds the connection open for the whole synchronous
+// turn). This sweeper re-kicks any turn still 'live' with 0 lines for ~2 ticks
+// (~30s), at most ONCE, so a dropped kick self-heals instead of leaving the FE
+// spinning forever. Real in-flight turns emit a line within seconds, so they
+// drop out of the watch set before the re-kick threshold.
+if (prisma) {
+  const _sweepSeen = new Map();   // turnId -> consecutive empty-tick count
+  const _sweepKicked = new Set(); // turnId -> already re-kicked once
+  const SWEEP_MS = 15_000;
+  const _hyperSidecar = () => process.env.EMPLOYEES_SIDECAR_URL || process.env.HIVEMIND_EMPLOYEES_URL || 'http://hm-employees:8060';
+  setInterval(async () => {
+    try {
+      const live = await prisma.hyperTurn.findMany({
+        where: { status: 'live' },
+        select: { id: true, roomId: true, userMessage: true, lines: true },
+        take: 50,
+      });
+      const liveIds = new Set(live.map((t) => t.id));
+      for (const k of [..._sweepSeen.keys()]) if (!liveIds.has(k)) { _sweepSeen.delete(k); _sweepKicked.delete(k); }
+      for (const t of live) {
+        const empty = !Array.isArray(t.lines) || t.lines.length === 0;
+        if (!empty) { _sweepSeen.delete(t.id); continue; }
+        const ticks = (_sweepSeen.get(t.id) || 0) + 1;
+        _sweepSeen.set(t.id, ticks);
+        if (ticks < 2 || _sweepKicked.has(t.id)) continue;
+        const room = await prisma.hyperRoom.findUnique({
+          where: { id: t.roomId },
+          select: { userId: true, orgId: true, participantIds: true },
+        });
+        if (!room) continue;
+        // projectId via raw SQL — the deployed Prisma client predates the column,
+        // so `select: { projectId: true }` throws "Unknown field projectId" and the
+        // catch below swallowed it, killing the re-kick. A turn whose kick dropped
+        // then stayed status=live with empty lines forever (FE spins, nothing renders).
+        let _sweepProjectId = null;
+        let _sweepGoal = '';
+        try {
+          const _pr = await prisma.$queryRawUnsafe('SELECT project_id, goal FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid', t.roomId);
+          _sweepProjectId = _pr?.[0]?.project_id || null;
+          _sweepGoal = _pr?.[0]?.goal || '';
+        } catch { /* org-wide re-kick is acceptable for recovery */ }
+        _sweepKicked.add(t.id);
+        console.warn('[hyper-sweeper] re-kicking stuck turn', t.id);
+        fetch(`${_hyperSidecar()}/internal/hyper/room-turn`, {
+          method: 'POST',
+          headers: {
+            'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            room_id: t.roomId, turn_id: t.id, user_id: room.userId, org_id: room.orgId,
+            user_message: t.userMessage || '(continue)', participant_ids: room.participantIds || [], project_id: _sweepProjectId,
+            room_goal: _sweepGoal,
+            callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
+          }),
+        }).catch((err) => console.warn('[hyper-sweeper] re-kick failed:', err.message));
+      }
+    } catch (err) {
+      console.warn('[hyper-sweeper] tick failed:', err.message);
+    }
+  }, SWEEP_MS);
+  console.log('[hyper-sweeper] stuck-turn re-kick sweeper active (15s)');
+}
+
 const sessionStore = new ControlPlaneSessionStore(CONFIG);
 const connectorStore = prisma ? new ConnectorStore(prisma) : null;
 const ADMIN_SECRET = process.env.HIVEMIND_ADMIN_SECRET || 'local-admin-secret-change-me';
@@ -751,34 +818,49 @@ async function buildBootstrapPayload(user) {
   };
 }
 
-async function purgeUserVectors(userId) {
+/**
+ * Per-tenant Qdrant cleanup on account deletion.
+ *  - Fully-deleted ENTERPRISE org (sole owner gone) → DROP its org_<id> collection.
+ *  - Surviving enterprise org the user was a member of → delete the user's points
+ *    by user_id (org keeps its data).
+ *  - Personal/free data → delete the user's points from the shared HIVEMIND_PERSONAL.
+ * @param {string} userId
+ * @param {Array<{orgId:string, plan:string}>} userOrgs  memberships captured BEFORE deletion
+ * @param {string[]} orgIdsToDelete  orgs being fully removed (sole owner)
+ */
+async function purgeUserVectors(userId, userOrgs = [], orgIdsToDelete = []) {
   try {
     const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
-    const qdrantCollection = process.env.QDRANT_COLLECTION || 'hivemind_memories';
     const qdrantKey = process.env.QDRANT_API_KEY || '';
     if (!qdrantUrl || !userId) {
       console.warn('[account-delete] ⚠ Qdrant purge skipped — no URL or userId:', { qdrantUrl: !!qdrantUrl, userId: !!userId });
       return;
     }
+    const { PERSONAL_COLLECTION, orgContainerName, isEnterprisePlan } = await import('./vector/container-router.js');
+    const qhdr = { 'Content-Type': 'application/json', ...(qdrantKey ? { 'api-key': qdrantKey } : {}) };
+    const delSet = new Set(orgIdsToDelete || []);
 
-    console.log('[account-delete] Purging Qdrant vectors for userId:', userId, 'collection:', qdrantCollection);
-    const resp = await fetch(`${qdrantUrl}/collections/${qdrantCollection}/points/delete`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(qdrantKey ? { 'api-key': qdrantKey } : {}),
-      },
-      body: JSON.stringify({
-        filter: {
-          must: [{ key: 'user_id', match: { value: userId } }],
-        },
-        wait: true,
-      }),
-    });
-    const respBody = await resp.text();
-    console.log('[account-delete] Qdrant response:', resp.status, respBody.slice(0, 200));
+    const toDrop = new Set();              // whole collections to remove
+    const toScrub = new Set([PERSONAL_COLLECTION]); // delete this user's points only
+    for (const { orgId, plan } of userOrgs) {
+      if (!isEnterprisePlan(plan)) continue;            // free → data lives in personal pool
+      if (delSet.has(orgId)) toDrop.add(orgContainerName(orgId));
+      else toScrub.add(orgContainerName(orgId));        // org survives → scrub user
+    }
+
+    for (const coll of toDrop) {
+      const r = await fetch(`${qdrantUrl}/collections/${coll}`, { method: 'DELETE', headers: qhdr });
+      console.log('[account-delete] dropped collection', coll, r.status);
+    }
+    for (const coll of toScrub) {
+      const r = await fetch(`${qdrantUrl}/collections/${coll}/points/delete`, {
+        method: 'POST', headers: qhdr,
+        body: JSON.stringify({ filter: { must: [{ key: 'user_id', match: { value: userId } }] }, wait: true }),
+      });
+      console.log('[account-delete] scrubbed user from', coll, r.status);
+    }
   } catch (error) {
-    console.warn('[account-delete] ⚠ Qdrant delete failed:', error.message);
+    console.warn('[account-delete] ⚠ Qdrant purge failed:', error.message);
   }
 }
 
@@ -806,6 +888,13 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [], onProgress 
 
   emit(0, 'Starting deletion...');
   try {
+    // Capture org memberships (with plan) BEFORE we delete userOrganization rows —
+    // needed by purgeUserVectors to know which Qdrant containers to drop/scrub.
+    const userOrgs = (await prisma.userOrganization.findMany({
+      where: { userId },
+      select: { orgId: true, org: { select: { plan: true } } },
+    })).map((m) => ({ orgId: m.orgId, plan: m.org?.plan }));
+
     const memoryIds = (
       await prisma.memory.findMany({
         where: { userId },
@@ -918,7 +1007,7 @@ async function performAccountDeletion({ userId, orgIdsToDelete = [], onProgress 
     await prisma.user.delete({ where: { id: userId } });
     emit(90, 'Deleted user record');
 
-    await purgeUserVectors(userId);
+    await purgeUserVectors(userId, userOrgs, orgIdsToDelete);
     emit(95, 'Purged vector embeddings');
 
     if (Array.isArray(orgIdsToDelete) && orgIdsToDelete.length) {
@@ -1904,23 +1993,18 @@ const server = http.createServer(async (req, res) => {
       }
     });
 
-    // Auto-provision the org's Qdrant container. Name is deterministic from the
-    // org id (org_<id>) so it can be persisted synchronously; the actual Qdrant
-    // collection is created fire-and-forget (provisionOrgContainer never throws,
-    // and QdrantClient.ensureCollection lazily creates on first write as backstop)
-    // — org signup must never block on or fail because of the vector box.
-    const vectorContainer = orgContainerName(org.id);
-    try {
-      await prisma.organization.update({
-        where: { id: org.id },
-        data: { vectorContainer }
-      });
-    } catch (err) {
-      console.error('[org-create] failed to persist vectorContainer', { orgId: org.id, error: err.message });
-    }
-    provisionOrgContainer(org.id).catch((err) => {
-      console.error('[org-create] container provisioning rejected', { orgId: org.id, error: err?.message });
-    });
+    // Route the org to its Qdrant home by PLAN:
+    //   enterprise (paid) → own container org_<id> (provisioned now, fire-and-forget)
+    //   free (personal)   → shared HIVEMIND_PERSONAL pool (no container created)
+    // Persist the decision on the org row so the hot path resolves without a plan
+    // lookup. Signup must never block/fail on the vector store.
+    provisionForPlan(org.id, requestedPlan)
+      .then((vectorContainer) =>
+        prisma.organization.update({ where: { id: org.id }, data: { vectorContainer } })
+      )
+      .catch((err) =>
+        console.error('[org-create] vector container provisioning failed', { orgId: org.id, plan: requestedPlan, error: err?.message })
+      );
 
     await prisma.userOrganization.create({
       data: {
@@ -2038,6 +2122,32 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    // Invitee status — tell the admin UP FRONT how this person will join:
+    //   already_member        → they're in this org already (invite is a no-op)
+    //   external_existing_user→ they belong to OTHER org(s); a project-scoped
+    //                           invite makes them a GUEST here (only those
+    //                           projects, no org-wide memories)
+    //   new_user              → fresh signup on accept
+    let inviteeStatus = 'new_user';
+    let inviteeJoinsAs = projectIds.length > 0 && legacyRoleReverse === 'member' ? 'guest' : legacyRoleReverse;
+    if (inviteEmail) {
+      try {
+        const existingUser = await prisma.user.findFirst({
+          where: { email: { equals: inviteEmail, mode: 'insensitive' } },
+          select: { id: true },
+        });
+        if (existingUser) {
+          const memberships = await prisma.userOrganization.findMany({
+            where: { userId: existingUser.id, isActive: true },
+            select: { orgId: true },
+          });
+          if (memberships.some((m) => m.orgId === orgId)) inviteeStatus = 'already_member';
+          else if (memberships.length > 0) inviteeStatus = 'external_existing_user';
+          else inviteeStatus = 'existing_user_no_org';
+        }
+      } catch { /* best-effort — default new_user */ }
+    }
+
     return jsonResponse(res, {
       success: true,
       invite: {
@@ -2052,6 +2162,8 @@ const server = http.createServer(async (req, res) => {
         created_at: invite.createdAt,
         join_url: joinUrl,
         email_dispatch: emailReport,
+        invitee_status: inviteeStatus,
+        joins_as: inviteeJoinsAs,
       },
     }, 201);
   }
@@ -2359,14 +2471,23 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { error: 'Invite email does not match current account' }, 403);
     }
 
-    const inviteRoles = Array.isArray(invite.roles) && invite.roles.length > 0
-      ? invite.roles
-      : [invite.role || 'member'];
+    // Hierarchy semantics: an invite scoped to specific PROJECT(s) with the
+    // default 'member' role makes the invitee an org GUEST — they belong to
+    // those projects only, never the whole org (no org-wide memories, no other
+    // projects, no default-team flood). Explicit elevated roles (admin/owner)
+    // on the invite are honored as before.
+    const projectIds = Array.isArray(invite.projectIds) ? invite.projectIds : [];
+    const isProjectScopedInvite = projectIds.length > 0
+      && (!invite.role || invite.role === 'member' || invite.role === 'guest');
+    const effectiveRole = isProjectScopedInvite ? 'guest' : (invite.role || 'member');
+    const inviteRoles = isProjectScopedInvite
+      ? ['guest']
+      : (Array.isArray(invite.roles) && invite.roles.length > 0 ? invite.roles : [effectiveRole]);
 
     await prisma.userOrganization.upsert({
       where: { userId_orgId: { userId: current.session.userId, orgId: invite.orgId } },
       update: {
-        role: invite.role,
+        role: effectiveRole,
         roles: inviteRoles,
         joinedAt: new Date(),
         isActive: true,
@@ -2375,7 +2496,7 @@ const server = http.createServer(async (req, res) => {
       create: {
         userId: current.session.userId,
         orgId: invite.orgId,
-        role: invite.role,
+        role: effectiveRole,
         roles: inviteRoles,
         invitedAt: invite.createdAt,
         joinedAt: new Date(),
@@ -2383,8 +2504,9 @@ const server = http.createServer(async (req, res) => {
       },
     });
 
-    // Auto-add to invited teams
-    const teamIds = Array.isArray(invite.teamIds) ? invite.teamIds : [];
+    // Auto-add to invited teams — never for guests (team membership grants
+    // visibility of every team project, which defeats project scoping).
+    const teamIds = isProjectScopedInvite ? [] : (Array.isArray(invite.teamIds) ? invite.teamIds : []);
     if (teamIds.length > 0) {
       for (const teamId of teamIds) {
         await prisma.teamMember.upsert({
@@ -2396,17 +2518,18 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Auto-add to invited projects (project_ids was previously silently dropped here)
-    const projectIds = Array.isArray(invite.projectIds) ? invite.projectIds : [];
     if (projectIds.length > 0) {
       for (const projectId of projectIds) {
-        // ProjectMember has composite PK (projectId, userId) — no `id` column
+        // ProjectMember has composite PK (projectId, userId) — no `id` column.
+        // 'contributor' is the valid PROJECT_ROLES grant ('member' is not a
+        // project role and broke role-gated checks downstream).
         await prisma.projectMember.upsert({
           where: { projectId_userId: { projectId, userId: current.session.userId } },
           update: {},
           create: {
             projectId,
             userId: current.session.userId,
-            role: 'member',
+            role: 'contributor',
             addedById: invite.createdBy,
           },
         }).catch(() => null);
@@ -2486,6 +2609,19 @@ const server = http.createServer(async (req, res) => {
       ],
     });
 
+    // Multi-org awareness: mark members who ALSO belong to other organizations
+    // (typical for project guests invited from a partner org). Boolean + count
+    // only — foreign org names are never leaked to this org's admins.
+    const memberIds = members.map((m) => m.userId);
+    const externalCounts = memberIds.length
+      ? await prisma.userOrganization.groupBy({
+          by: ['userId'],
+          where: { userId: { in: memberIds }, isActive: true, NOT: { orgId } },
+          _count: { _all: true },
+        }).catch(() => [])
+      : [];
+    const externalById = Object.fromEntries(externalCounts.map((r) => [r.userId, r._count._all]));
+
     return jsonResponse(res, {
       members: members.map((entry) => ({
         user_id: entry.userId,
@@ -2499,6 +2635,8 @@ const server = http.createServer(async (req, res) => {
         display_name: entry.user?.displayName || null,
         avatar_url: entry.user?.avatarUrl || null,
         last_active_at: entry.user?.lastActiveAt || null,
+        is_external: (externalById[entry.userId] || 0) > 0,
+        other_org_count: externalById[entry.userId] || 0,
       })),
     });
   }
@@ -2516,9 +2654,15 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { error: 'Projects require an enterprise workspace' }, 403);
     }
 
-    const projects = await prisma.project.findMany({
-      where: { orgId },
-      orderBy: { updatedAt: 'desc' },
+    // Role + policy aware: was an unfiltered findMany that listed EVERY org
+    // project to ANY member — including guests and other members' private
+    // projects. Now routes through the same visibility engine as /v1/projects.
+    const ts2 = await _getTeamStore();
+    if (!ts2) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const projects = await ts2.store.listProjectsForUser({
+      userId: current.session.userId,
+      orgId,
+      orgRole: membership.role || null,
     });
 
     return jsonResponse(res, {
@@ -2528,6 +2672,9 @@ const server = http.createServer(async (req, res) => {
         name: project.name,
         slug: project.slug,
         description: project.description,
+        policy: project.policy,
+        member_count: project._count?.members ?? 0,
+        memory_count: project._count?.memories ?? 0,
         created_by: project.createdBy,
         created_at: project.createdAt,
         updated_at: project.updatedAt,
@@ -2550,6 +2697,10 @@ const server = http.createServer(async (req, res) => {
     if (!name) {
       return jsonResponse(res, { error: 'name is required' }, 400);
     }
+    const description = typeof body.description === 'string' ? body.description.trim() : '';
+    if (!description) {
+      return jsonResponse(res, { error: 'description is required — every project needs a short description' }, 400);
+    }
     const slugBase = sanitizeSlug(body.slug || name);
     const existing = await prisma.project.findFirst({ where: { orgId, slug: slugBase } });
     const slug = existing ? `${slugBase}-${crypto.randomUUID().slice(0, 6)}` : slugBase;
@@ -2559,10 +2710,22 @@ const server = http.createServer(async (req, res) => {
         orgId,
         name,
         slug,
-        description: typeof body.description === 'string' && body.description.trim() ? body.description.trim() : null,
+        description,
         createdBy: current.session.userId,
       },
     });
+    // Creator becomes a member; policy persisted via raw SQL (column postdates
+    // the deployed Prisma client). Default 'private' — creator decides access.
+    const projPolicy = ['private', 'team_inherited', 'org_visible'].includes(body.policy) ? body.policy : 'private';
+    await prisma.projectMember.upsert({
+      where: { projectId_userId: { projectId: project.id, userId: current.session.userId } },
+      update: {},
+      create: { projectId: project.id, userId: current.session.userId, role: 'owner', addedById: current.session.userId },
+    }).catch(() => {});
+    await prisma.$executeRawUnsafe(
+      `UPDATE hivemind.projects SET policy = $1 WHERE id = $2::uuid`,
+      projPolicy, project.id,
+    ).catch(() => {});
 
     return jsonResponse(res, {
       success: true,
@@ -2572,6 +2735,7 @@ const server = http.createServer(async (req, res) => {
         name: project.name,
         slug: project.slug,
         description: project.description,
+        policy: projPolicy,
         created_by: project.createdBy,
         created_at: project.createdAt,
         updated_at: project.updatedAt,
@@ -3158,6 +3322,26 @@ const server = http.createServer(async (req, res) => {
             promoted++;
           }
         }
+        // Providers with an active Nango connection but NO PROVIDER_REGISTRY
+        // entry (google-docs, google-gemini, …) used to vanish here — the row
+        // existed, the loop above had no entry to promote, and the FE card
+        // stayed on "Connect" forever even after a successful OAuth. Append
+        // synthetic connected entries so the FE (which matches on
+        // entry.provider === card.id|nangoProvider) always sees them.
+        const knownProviders = new Set(result.map((e) => e.provider));
+        for (const [regId, row] of Object.entries(overlayByProvider)) {
+          if (knownProviders.has(regId)) continue;
+          result.push({
+            provider: regId,
+            label: regId,
+            status: 'connected',
+            is_active: true,
+            account_ref: row.connectionId,
+            created_at: row.connectedAt,
+            source: 'nango',
+          });
+          promoted++;
+        }
         console.log(`[v1/connectors] overlay promoted=${promoted} providers=${Object.keys(overlayByProvider).join(',')}`);
       }
     } catch (nangoErr) {
@@ -3677,9 +3861,11 @@ const server = http.createServer(async (req, res) => {
       // Bug fix: if user is an org member but has no team yet, lazy-create
       // (or join) the org's Default Team so they can immediately create
       // projects. Treats all org members as the implicit default team.
+      // GUESTS excluded: handing them the default team exposed every team
+      // project of the org they were invited into (cross-org leak).
       if (!teams.length) {
         const orgMem = await getOrgMembership(current.session.userId, current.session.orgId);
-        if (orgMem?.isActive !== false && orgMem) {
+        if (orgMem?.isActive !== false && orgMem && orgMem.role !== 'guest') {
           try {
             const def = await ts.store.ensureDefaultTeam({
               orgId: current.session.orgId,
@@ -3867,7 +4053,9 @@ const server = http.createServer(async (req, res) => {
     if (sub === 'projects' && req.method === 'GET') {
       try {
         await ts.assertTeamPermission(prisma, { teamId, userId, orgRole, level: 'member' });
-        const projects = await ts.store.listProjectsForUser({ userId, orgId, teamId });
+        // orgRole flows through so guests (project-scoped invitees) only ever
+        // get their explicit projects — even via the team-scoped listing.
+        const projects = await ts.store.listProjectsForUser({ userId, orgId, teamId, orgRole });
         return jsonResponse(res, { projects });
       } catch (err) {
         return jsonResponse(res, { error: err.message }, err.status || 500);
@@ -3879,11 +4067,15 @@ const server = http.createServer(async (req, res) => {
         await ts.assertTeamPermission(prisma, { teamId, userId, orgRole, level: 'member' });
         const body = await parseBody(req);
         if (!body.name) return jsonResponse(res, { error: 'name required' }, 400);
+        if (!body.description || !String(body.description).trim()) {
+          return jsonResponse(res, { error: 'description is required — every project needs a short description' }, 400);
+        }
         const p = await ts.store.createProject({
           orgId,
           teamId,
           name: body.name.trim(),
-          description: body.description || null,
+          description: String(body.description).trim(),
+          policy: typeof body.policy === 'string' ? body.policy : null,
           createdBy: userId,
         });
         audit({
@@ -3910,9 +4102,12 @@ const server = http.createServer(async (req, res) => {
     const ts = await _getTeamStore();
     if (!ts) return jsonResponse(res, { error: 'Database unavailable' }, 503);
     try {
+      // Hierarchy visibility: pass org role so owners/admins list ALL projects.
+      const membership = await getOrgMembership(current.session.userId, current.session.orgId);
       const projects = await ts.store.listProjectsForUser({
         userId: current.session.userId,
         orgId: current.session.orgId,
+        orgRole: membership?.role || null,
       });
       return jsonResponse(res, { projects });
     } catch (err) {
@@ -3972,7 +4167,31 @@ const server = http.createServer(async (req, res) => {
       try {
         await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'member' });
         const proj = await ts.store.getProject({ projectId, orgId });
-        return jsonResponse(res, { members: proj?.members || [] });
+        const rows = proj?.members || [];
+        // Enrich with the member's ORG role + external flag so the UI can show
+        // "Guest · external" distinctly from full org members.
+        const ids = rows.map((m) => m.userId || m.user_id).filter(Boolean);
+        const orgRows = ids.length
+          ? await prisma.userOrganization.findMany({
+              where: { userId: { in: ids }, orgId },
+              select: { userId: true, role: true },
+            }).catch(() => [])
+          : [];
+        const extRows = ids.length
+          ? await prisma.userOrganization.groupBy({
+              by: ['userId'],
+              where: { userId: { in: ids }, isActive: true, NOT: { orgId } },
+              _count: { _all: true },
+            }).catch(() => [])
+          : [];
+        const orgRoleById = Object.fromEntries(orgRows.map((r) => [r.userId, r.role]));
+        const extById = Object.fromEntries(extRows.map((r) => [r.userId, r._count._all]));
+        return jsonResponse(res, {
+          members: rows.map((m) => {
+            const uid = m.userId || m.user_id;
+            return { ...m, org_role: orgRoleById[uid] || null, is_external: (extById[uid] || 0) > 0 };
+          }),
+        });
       } catch (err) {
         return jsonResponse(res, { error: err.message }, err.status || 500);
       }
@@ -3990,7 +4209,11 @@ const server = http.createServer(async (req, res) => {
         const [recent, byUser, audits, totalMem] = await Promise.all([
           prisma.memory.findMany({ where: memWhere, select: { id: true, title: true, userId: true, createdAt: true, memoryType: true }, orderBy: { createdAt: 'desc' }, take: 15 }),
           prisma.memory.groupBy({ by: ['userId'], where: memWhere, _count: { _all: true }, _max: { createdAt: true } }),
-          prisma.auditLog.findMany({ where: { organizationId: orgId, OR: [{ resourceType: 'project', resourceId: projectId }, { resourceType: 'project_member', resourceId: { startsWith: projectId } }] }, select: { eventType: true, action: true, userId: true, createdAt: true }, orderBy: { createdAt: 'desc' }, take: 15 }).catch(() => []),
+          // resourceId is @db.Uuid - Prisma rejects string filters like
+          // startsWith on it ("Unknown argument"), which silently killed this
+          // whole activity feed. project_member rows store the plain project
+          // uuid anyway, so exact match covers both types.
+          prisma.auditLog.findMany({ where: { organizationId: orgId, resourceType: { in: ['project', 'project_member'] }, resourceId: projectId }, select: { eventType: true, action: true, userId: true, createdAt: true }, orderBy: { createdAt: 'desc' }, take: 15 }).catch(() => []),
           prisma.memory.count({ where: memWhere }),
         ]);
         const uids = Array.from(new Set([...recent.map(m => m.userId), ...byUser.map(u => u.userId), ...audits.map(a => a.userId)].filter(Boolean)));
@@ -4009,11 +4232,52 @@ const server = http.createServer(async (req, res) => {
         return jsonResponse(res, { error: err.message }, err.status || 500);
       }
     }
+    // GET /v1/projects/:id/export — full project memory export (data
+    // governance / enterprise offboarding). Project-owner or org-admin gated.
+    if (sub === 'export' && req.method === 'GET') {
+      try {
+        await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'owner' });
+        const memories = await prisma.memory.findMany({
+          where: {
+            orgId, deletedAt: null,
+            OR: [{ projectId }, { memoryProjects: { some: { projectId } } }],
+          },
+          select: {
+            id: true, title: true, content: true, memoryType: true, tags: true,
+            scope: true, userId: true, createdAt: true, updatedAt: true, isLatest: true,
+          },
+          orderBy: { createdAt: 'asc' },
+          take: 5000,
+        });
+        audit({
+          organizationId: orgId,
+          userId,
+          eventType: 'project.exported',
+          eventCategory: 'data',
+          action: 'read',
+          resourceType: 'project',
+          resourceId: projectId,
+          newValue: { memory_count: memories.length },
+          ..._reqMeta(req),
+        });
+        return jsonResponse(res, {
+          project_id: projectId,
+          project_name: project.name,
+          exported_at: new Date().toISOString(),
+          memory_count: memories.length,
+          memories,
+        });
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, err.status || 500);
+      }
+    }
     // POST /v1/projects/:id/members
     const PROJECT_ROLES = ['owner', 'contributor', 'viewer'];
     if (sub === 'members' && req.method === 'POST') {
       try {
-        await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'owner' });
+        // Any project member can bring in teammates (one-tap add / invite);
+        // role changes + removals stay owner/admin-gated below.
+        await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'member' });
         const body = await parseBody(req);
         if (!body.user_id) return jsonResponse(res, { error: 'user_id required' }, 400);
         const role = body.role || 'contributor';
@@ -4025,6 +4289,17 @@ const server = http.createServer(async (req, res) => {
           userId: body.user_id,
           role,
           addedById: userId,
+        });
+        audit({
+          organizationId: orgId,
+          userId,
+          eventType: 'project.member_added',
+          eventCategory: 'auth',
+          action: 'create',
+          resourceType: 'project_member',
+          resourceId: projectId,
+          newValue: { role, member_user_id: body.user_id },
+          ..._reqMeta(req),
         });
         return jsonResponse(res, { member: m }, 201);
       } catch (err) {
@@ -4052,8 +4327,8 @@ const server = http.createServer(async (req, res) => {
           eventCategory: 'auth',
           action: 'update',
           resourceType: 'project_member',
-          resourceId: `${projectId}:${targetUserId}`,
-          newValue: { role: body.role },
+          resourceId: projectId,
+          newValue: { role: body.role, member_user_id: targetUserId },
           ..._reqMeta(req),
         });
         return jsonResponse(res, { member: updated });
@@ -4067,6 +4342,17 @@ const server = http.createServer(async (req, res) => {
       try {
         await ts.assertProjectPermission(prisma, { projectId, userId, orgRole, level: 'owner' });
         await ts.store.removeProjectMember({ projectId, userId: projMemberDel[1] });
+        audit({
+          organizationId: orgId,
+          userId,
+          eventType: 'project.member_removed',
+          eventCategory: 'auth',
+          action: 'delete',
+          resourceType: 'project_member',
+          resourceId: projectId,
+          newValue: { member_user_id: projMemberDel[1] },
+          ..._reqMeta(req),
+        });
         return jsonResponse(res, { success: true });
       } catch (err) {
         return jsonResponse(res, { error: err.message }, err.status || 500);
@@ -5365,25 +5651,74 @@ Write the persona now.`;
           orderBy: [{ archivedAt: 'asc' }, { updatedAt: 'desc' }],
           take: 200,
         });
-        // Hydrate participants for the rail
+        // Stamp project_id via raw SQL — the deployed Prisma client predates the
+        // column, so findMany() omits it. Without this every room reads as org-wide.
+        try {
+          const rids = rooms.map(r => r.id);
+          if (rids.length) {
+            const ph = rids.map((_, i) => `$${i + 1}::uuid`).join(',');
+            const prows = await prisma.$queryRawUnsafe(
+              `SELECT id, project_id, goal FROM "hivemind"."hyper_rooms" WHERE id IN (${ph})`, ...rids,
+            );
+            const pmap = Object.fromEntries((prows || []).map(x => [x.id, x.project_id]));
+            const gmap = Object.fromEntries((prows || []).map(x => [x.id, x.goal]));
+            for (const r of rooms) {
+              r.projectId = pmap[r.id] || null;
+              r.goal = gmap[r.id] || '';
+            }
+          }
+        } catch { /* leave projectId undefined */ }
+        // Hydrate participants + project scope for the rail
         const allIds = Array.from(new Set(rooms.flatMap(r => r.participantIds || [])));
+        const projectIds = Array.from(new Set(rooms.map(r => r.projectId).filter(Boolean)));
         const employees = allIds.length
           ? await prisma.digitalEmployee.findMany({
               where: { id: { in: allIds } },
-              select: { id: true, slug: true, name: true, avatarUrl: true, roleArchetype: true, status: true },
+              select: {
+                id: true,
+                slug: true,
+                name: true,
+                avatarUrl: true,
+                roleArchetype: true,
+                peerReviewTargets: true,
+                policyRules: true,
+                scope: true,
+                persona: true,
+                model: true,
+                llmProvider: true,
+                status: true,
+              },
             })
           : [];
-        const empById = Object.fromEntries(employees.map(e => [e.id, { ...e, lane: deriveCsiLane(e) }]));
+        const projects = projectIds.length
+          ? await prisma.project.findMany({
+              where: { id: { in: projectIds }, orgId: current.session.orgId },
+              select: { id: true, name: true, slug: true },
+            })
+          : [];
+        const { enrichEmployeesWithHyperState } = await import('./employees/hyper-state.js');
+        const enrichedEmployees = await enrichEmployeesWithHyperState(employees);
+        const empById = Object.fromEntries(enrichedEmployees.map(e => [e.id, { ...e, lane: deriveCsiLane(e) }]));
+        const projectById = Object.fromEntries(projects.map(p => [p.id, p]));
         return jsonResponse(res, {
           rooms: rooms.map(r => ({
             id: r.id,
             name: r.name,
+            goal: r.goal || '',
             participant_ids: r.participantIds,
             participants: (r.participantIds || []).map(id => empById[id]).filter(Boolean),
             created_at: r.createdAt,
             updated_at: r.updatedAt,
             archived_at: r.archivedAt,
             summary_memory_id: r.summaryMemoryId,
+            project_id: r.projectId || null,
+            project: r.projectId && projectById[r.projectId]
+              ? {
+                  id: projectById[r.projectId].id,
+                  name: projectById[r.projectId].name,
+                  slug: projectById[r.projectId].slug,
+                }
+              : null,
           })),
         });
       } catch (err) {
@@ -5398,10 +5733,12 @@ Write the persona now.`;
       if (!current) return;
       const body = await parseBody(req);
       const name = typeof body.name === 'string' ? body.name.trim().slice(0, 120) : '';
+      const goal = typeof body.goal === 'string' ? body.goal.trim().slice(0, 2000) : '';
       const participantIds = Array.isArray(body.participant_ids)
         ? body.participant_ids.filter(s => typeof s === 'string')
         : [];
       if (!name) return jsonResponse(res, { error: 'name is required' }, 400);
+      if (!goal) return jsonResponse(res, { error: 'goal is required' }, 400);
       try {
         // Restrict participants to employees in this org
         const valid = participantIds.length
@@ -5412,14 +5749,31 @@ Write the persona now.`;
           : [];
         const validIds = valid.map(v => v.id);
         const ALLOWED_TEMPLATES = new Set([
-          'auto', 'debate', 'decision', 'swarm', 'brainstorm', 'council',
+          'auto', 'debate', 'decision', 'swarm', 'deep_sim', 'brainstorm', 'council',
           'lean_coffee', 'retrospective', 'review', 'standup',
         ]);
         const template = (typeof body.template === 'string' && ALLOWED_TEMPLATES.has(body.template))
           ? body.template : 'debate';
+        let permanentLeadId = null;
+        if (typeof body.permanent_lead_id === 'string' && validIds.includes(body.permanent_lead_id)) {
+          permanentLeadId = body.permanent_lead_id;
+        } else if (validIds.length > 0) {
+          permanentLeadId = validIds.slice().sort()[0];
+        }
         let permanentSkepticId = null;
         if (typeof body.permanent_skeptic_id === 'string' && validIds.includes(body.permanent_skeptic_id)) {
           permanentSkepticId = body.permanent_skeptic_id;
+        }
+        // Scope: optional project_id nests the room inside a project HIVEMIND.
+        // Validate it belongs to this org; ignore otherwise (falls back to org-wide).
+        let projectId = null;
+        if (typeof body.project_id === 'string' && body.project_id) {
+          const proj = await prisma.project.findFirst({
+            where: { id: body.project_id, orgId: current.session.orgId },
+            select: { id: true },
+          }).catch(() => null);
+          if (!proj) return jsonResponse(res, { error: 'project not found in this org' }, 400);
+          projectId = proj.id;
         }
         const room = await prisma.hyperRoom.create({
           data: {
@@ -5428,9 +5782,33 @@ Write the persona now.`;
             name,
             participantIds: validIds,
             template,
+            permanentLeadId,
             permanentSkepticId,
           },
         });
+        // Persist goal/scope via raw SQL — avoids requiring a regenerated Prisma
+        // client for newly-added columns during rolling deploys.
+        try {
+          await prisma.$executeRawUnsafe(
+            'UPDATE "hivemind"."hyper_rooms" SET "goal" = $1 WHERE "id" = $2::uuid',
+            goal, room.id,
+          );
+          room.goal = goal;
+        } catch (e) { console.warn('[hyper-rooms] goal set failed:', e.message); }
+        if (projectId) {
+          try {
+            await prisma.$executeRawUnsafe(
+              'UPDATE "hivemind"."hyper_rooms" SET "project_id" = $1::uuid WHERE "id" = $2::uuid',
+              projectId, room.id,
+            );
+            room.projectId = projectId;
+            const scopedProject = await prisma.project.findFirst({
+              where: { id: projectId, orgId: current.session.orgId },
+              select: { id: true, name: true, slug: true },
+            }).catch(() => null);
+            if (scopedProject) room.project = scopedProject;
+          } catch (e) { console.warn('[hyper-rooms] project scope set failed:', e.message); }
+        }
         return jsonResponse(res, { room }, 201);
       } catch (err) {
         console.warn('[hyper-rooms] create failed:', err.message);
@@ -5440,6 +5818,8 @@ Write the persona now.`;
 
     // /v1/hyper-rooms/:id/turns(/:turnId)(/stream)
     const roomTurnMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/turns(?:\/([0-9a-f-]{36})(\/stream)?)?$/);
+    const flybyDecisionMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/turns\/([0-9a-f-]{36})\/flyby-decision$/);
+    const flybyDecisionCompat = roomTurnMatch && roomTurnMatch[2] && !roomTurnMatch[3] && url.searchParams.get('action') === 'flyby-decision';
     const roomMetaMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})$/);
 
     // DELETE /v1/hyper-rooms/:id — permanent delete (?hard=true) or archive.
@@ -5501,7 +5881,28 @@ Write the persona now.`;
       const room = await prisma.hyperRoom.findFirst({
         where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId },
       });
+      if (room) {
+        try {
+          const gr = await prisma.$queryRawUnsafe(
+            'SELECT project_id, goal FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid',
+            roomId,
+          );
+          room.projectId = gr?.[0]?.project_id || null;
+          room.goal = gr?.[0]?.goal || '';
+        } catch {
+          room.goal = '';
+        }
+      }
       if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
+      // project_id/goal are read via raw SQL — deployed Prisma clients can lag
+      // additive columns, so prisma.hyperRoom.findFirst() may omit them.
+      try {
+        const pr = await prisma.$queryRawUnsafe(
+          'SELECT project_id, goal FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid', roomId,
+        );
+        room.projectId = pr?.[0]?.project_id || null;
+        room.goal = pr?.[0]?.goal || '';
+      } catch { /* leave undefined */ }
       const turns = await prisma.hyperTurn.findMany({
         where: { roomId },
         orderBy: { seq: 'asc' },
@@ -5510,13 +5911,28 @@ Write the persona now.`;
       const employees = (room.participantIds || []).length
         ? await prisma.digitalEmployee.findMany({
             where: { id: { in: room.participantIds } },
-            select: { id: true, slug: true, name: true, avatarUrl: true, roleArchetype: true, status: true },
+            select: {
+              id: true,
+              slug: true,
+              name: true,
+              avatarUrl: true,
+              roleArchetype: true,
+              peerReviewTargets: true,
+              policyRules: true,
+              scope: true,
+              persona: true,
+              model: true,
+              llmProvider: true,
+              status: true,
+            },
           })
         : [];
+      const { enrichEmployeesWithHyperState } = await import('./employees/hyper-state.js');
+      const enrichedParticipants = await enrichEmployeesWithHyperState(employees);
       return jsonResponse(res, {
         room: {
           ...room,
-          participants: employees.map(e => ({ ...e, lane: deriveCsiLane(e) })),
+          participants: enrichedParticipants.map(e => ({ ...e, lane: deriveCsiLane(e) })),
         },
         turns,
       });
@@ -5534,6 +5950,12 @@ Write the persona now.`;
       if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
       const data = {};
       if (typeof body.name === 'string' && body.name.trim()) data.name = body.name.trim().slice(0, 120);
+      const hasGoalPatch = Object.prototype.hasOwnProperty.call(body, 'goal');
+      let nextGoal = null;
+      if (hasGoalPatch) {
+        nextGoal = typeof body.goal === 'string' ? body.goal.trim().slice(0, 2000) : '';
+        if (!nextGoal) return jsonResponse(res, { error: 'goal is required' }, 400);
+      }
       if (Array.isArray(body.participant_ids)) {
         const valid = body.participant_ids.length
           ? await prisma.digitalEmployee.findMany({
@@ -5544,11 +5966,21 @@ Write the persona now.`;
         data.participantIds = valid.map(v => v.id);
       }
       const ALLOWED_TEMPLATES = new Set([
-        'auto', 'debate', 'decision', 'swarm', 'brainstorm', 'council',
+        'auto', 'debate', 'decision', 'swarm', 'deep_sim', 'brainstorm', 'council',
         'lean_coffee', 'retrospective', 'review', 'standup',
       ]);
       if (typeof body.template === 'string' && ALLOWED_TEMPLATES.has(body.template)) {
         data.template = body.template;
+      }
+      if (typeof body.permanent_lead_id === 'string' || body.permanent_lead_id === null) {
+        if (body.permanent_lead_id) {
+          const emp = await prisma.digitalEmployee.findFirst({
+            where: { id: body.permanent_lead_id, orgId: current.session.orgId },
+            select: { id: true },
+          });
+          if (!emp) return jsonResponse(res, { error: 'Lead employee not in org' }, 400);
+        }
+        data.permanentLeadId = body.permanent_lead_id || null;
       }
       if (typeof body.permanent_skeptic_id === 'string' || body.permanent_skeptic_id === null) {
         if (body.permanent_skeptic_id) {
@@ -5562,6 +5994,35 @@ Write the persona now.`;
         data.permanentSkepticId = body.permanent_skeptic_id || null;
       }
       const updated = await prisma.hyperRoom.update({ where: { id: roomId }, data });
+      if (hasGoalPatch) {
+        try {
+          await prisma.$executeRawUnsafe(
+            'UPDATE "hivemind"."hyper_rooms" SET "goal" = $1 WHERE "id" = $2::uuid',
+            nextGoal, roomId,
+          );
+          updated.goal = nextGoal;
+        } catch (e) { console.warn('[hyper-rooms] goal update failed:', e.message); }
+      }
+      // Scope change (Org ↔ Project) — persisted via raw SQL so it works without a
+      // regenerated Prisma client for the project_id column. null clears to org-wide.
+      if (Object.prototype.hasOwnProperty.call(body, 'project_id')) {
+        let nextProjectId = null;
+        if (typeof body.project_id === 'string' && body.project_id) {
+          const proj = await prisma.project.findFirst({
+            where: { id: body.project_id, orgId: current.session.orgId },
+            select: { id: true },
+          }).catch(() => null);
+          if (!proj) return jsonResponse(res, { error: 'project not found in this org' }, 400);
+          nextProjectId = proj.id;
+        }
+        try {
+          await prisma.$executeRawUnsafe(
+            'UPDATE "hivemind"."hyper_rooms" SET "project_id" = $1::uuid WHERE "id" = $2::uuid',
+            nextProjectId, roomId,
+          );
+          updated.projectId = nextProjectId;
+        } catch (e) { console.warn('[hyper-rooms] scope update failed:', e.message); }
+      }
       return jsonResponse(res, { room: updated });
     }
 
@@ -5635,6 +6096,77 @@ Write the persona now.`;
       return jsonResponse(res, { room: updated, summary_memory_id: summaryMemoryId });
     }
 
+    // POST /v1/hyper-rooms/:id/turns/:turnId/flyby-decision — continue a
+    // deep simulation after the user approves/rejects the temporary specialist.
+    if ((flybyDecisionMatch || flybyDecisionCompat) && req.method === 'POST') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const body = await parseBody(req);
+      const roomId = flybyDecisionMatch ? flybyDecisionMatch[1] : roomTurnMatch[1];
+      const turnId = flybyDecisionMatch ? flybyDecisionMatch[2] : roomTurnMatch[2];
+      const decision = String(body.decision || '').trim().toLowerCase();
+      if (!['agree', 'disagree'].includes(decision)) {
+        return jsonResponse(res, { error: 'decision must be agree or disagree' }, 400);
+      }
+      try {
+        const room = await prisma.hyperRoom.findFirst({
+          where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId },
+        });
+        if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
+        try {
+          const gr = await prisma.$queryRawUnsafe(
+            'SELECT project_id, goal FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid',
+            roomId,
+          );
+          room.projectId = gr?.[0]?.project_id || null;
+          room.goal = gr?.[0]?.goal || '';
+        } catch { room.goal = ''; }
+        const turn = await prisma.hyperTurn.findFirst({
+          where: { id: turnId, roomId },
+          select: { id: true, userMessage: true, lines: true, status: true, sealedAt: true },
+        });
+        if (!turn) return jsonResponse(res, { error: 'Turn not found' }, 404);
+        if (turn.sealedAt || turn.status !== 'live') {
+          return jsonResponse(res, { error: 'Turn is no longer live' }, 409);
+        }
+        const proposal = (turn.lines || []).find(ev => ev && ev.t === 'flyby_proposal');
+        const flybySpec = body.flyby_spec || proposal?.spec || null;
+        const { appendTurnEvent } = await import('./employees/hyper-rooms.js');
+        await appendTurnEvent(prisma, turnId, {
+          t: 'flyby_decision',
+          decision,
+          spec: flybySpec,
+          ts: Date.now(),
+        });
+
+        const sidecarBase = process.env.EMPLOYEES_SIDECAR_URL || 'http://hm-employees:8060';
+        fetch(`${sidecarBase}/internal/hyper/room-turn`, {
+          method: 'POST',
+          headers: {
+            'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            room_id: roomId,
+            turn_id: turnId,
+            user_id: current.session.userId,
+            org_id: current.session.orgId,
+            user_message: turn.userMessage,
+            participant_ids: room.participantIds || [], project_id: room.projectId || null,
+            room_goal: room.goal || '',
+            flyby_decision: decision,
+            flyby_spec: flybySpec,
+            callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
+          }),
+        }).catch(err => console.warn('[hyper-rooms] flyby continuation failed:', err.message));
+
+        return jsonResponse(res, { ok: true, status: 'continuing' }, 202);
+      } catch (err) {
+        console.warn('[hyper-rooms] flyby decision failed:', err.message);
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+
     // POST /v1/hyper-rooms/:id/turns — submit user message, kick a turn
     if (roomTurnMatch && roomTurnMatch[2] == null && req.method === 'POST') {
       const current = await requireSession(req, res);
@@ -5642,10 +6174,78 @@ Write the persona now.`;
       const body = await parseBody(req);
       const roomId = roomTurnMatch[1];
       const userMessage = typeof body.user_message === 'string' ? body.user_message : '';
+      const requestedTurnId = typeof body.turn_id === 'string'
+        && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(body.turn_id)
+          ? body.turn_id
+          : null;
 
       const room = await prisma.hyperRoom.findFirst({
         where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId },
       });
+      if (room) {
+        try {
+          const gr = await prisma.$queryRawUnsafe(
+            'SELECT project_id, goal FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid',
+            roomId,
+          );
+          room.projectId = gr?.[0]?.project_id || null;
+          room.goal = gr?.[0]?.goal || '';
+        } catch { room.goal = ''; }
+      }
+      if (body.action === 'flyby-decision') {
+        const turnId = typeof body.turn_id === 'string' ? body.turn_id : '';
+        const decision = String(body.decision || '').trim().toLowerCase();
+        if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
+        if (!turnId) return jsonResponse(res, { error: 'turn_id is required' }, 400);
+        if (!['agree', 'disagree'].includes(decision)) {
+          return jsonResponse(res, { error: 'decision must be agree or disagree' }, 400);
+        }
+        try {
+          const turn = await prisma.hyperTurn.findFirst({
+            where: { id: turnId, roomId },
+            select: { id: true, userMessage: true, lines: true, status: true, sealedAt: true },
+          });
+          if (!turn) return jsonResponse(res, { error: 'Turn not found' }, 404);
+          if (turn.sealedAt || turn.status !== 'live') {
+            return jsonResponse(res, { error: 'Turn is no longer live' }, 409);
+          }
+          const proposal = (turn.lines || []).find(ev => ev && ev.t === 'flyby_proposal');
+          const flybySpec = body.flyby_spec || proposal?.spec || null;
+          const { appendTurnEvent } = await import('./employees/hyper-rooms.js');
+          await appendTurnEvent(prisma, turnId, {
+            t: 'flyby_decision',
+            decision,
+            spec: flybySpec,
+            ts: Date.now(),
+          });
+
+          const sidecarBase = process.env.EMPLOYEES_SIDECAR_URL || 'http://hm-employees:8060';
+          fetch(`${sidecarBase}/internal/hyper/room-turn`, {
+            method: 'POST',
+            headers: {
+              'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              room_id: roomId,
+              turn_id: turnId,
+              user_id: current.session.userId,
+              org_id: current.session.orgId,
+              user_message: turn.userMessage,
+              participant_ids: room.participantIds || [], project_id: room.projectId || null,
+              room_goal: room.goal || '',
+              flyby_decision: decision,
+              flyby_spec: flybySpec,
+              callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
+            }),
+          }).catch(err => console.warn('[hyper-rooms] flyby continuation failed:', err.message));
+
+          return jsonResponse(res, { ok: true, status: 'continuing' }, 202);
+        } catch (err) {
+          console.warn('[hyper-rooms] flyby decision failed:', err.message);
+          return jsonResponse(res, { error: err.message }, 500);
+        }
+      }
       const pre = preflightTurn({ room, userMessage });
       if (pre) return jsonResponse(res, pre, 400);
 
@@ -5671,6 +6271,7 @@ Write the persona now.`;
 
           const created = await tx.hyperTurn.create({
             data: {
+              ...(requestedTurnId ? { id: requestedTurnId } : {}),
               roomId,
               seq: nextSeq,
               userMessage,
@@ -5686,9 +6287,61 @@ Write the persona now.`;
           return created;
         });
 
-        // Kick the sidecar to execute the turn. Fire-and-forget; the
-        // sidecar will write events back via the callback hook.
+        // Emit a bootstrap router event immediately so the UI can render the
+        // lead/reactor line before the sidecar finishes the heavier recall and
+        // simulation prep. The sidecar will emit the authoritative router event
+        // later; the frontend treats this as the same conversation state.
         try {
+          const { appendTurnEvent } = await import('./employees/hyper-rooms.js');
+          const participantRows = room.participantIds?.length
+            ? await prisma.digitalEmployee.findMany({
+                where: { id: { in: room.participantIds } },
+                select: {
+                  id: true,
+                  slug: true,
+                  roleArchetype: true,
+                  persona: true,
+                },
+              })
+            : [];
+          const participantById = Object.fromEntries(participantRows.map(p => [p.id, p]));
+          const leadId = room.permanentLeadId && participantById[room.permanentLeadId]
+            ? room.permanentLeadId
+            : (room.participantIds || [])[0] || null;
+          const lead = leadId ? participantById[leadId] : null;
+          const reactors = (room.participantIds || [])
+            .filter(pid => pid !== leadId)
+            .map(pid => participantById[pid]?.slug)
+            .filter(Boolean);
+          if (lead?.slug) {
+            await appendTurnEvent(prisma, turn.id, {
+              t: 'router_bootstrap',
+              id: `router:${turn.id}:bootstrap`,
+              lead: lead.slug,
+              reactors,
+              lanes: Object.fromEntries(
+                participantRows.map(p => [p.slug, deriveCsiLane({
+                  roleArchetype: p.roleArchetype,
+                  persona: p.persona,
+                  slug: p.slug,
+                  name: p.slug,
+                })]),
+              ),
+              template: room.template || 'debate',
+              turn_seq: turn.seq,
+              bootstrap: true,
+              received_ts: Date.now(),
+            });
+          }
+        } catch (err) {
+          console.warn('[hyper-rooms] bootstrap router append failed:', err.message);
+        }
+
+        // Kick the sidecar only after the 202 response has been flushed. This
+        // lets the frontend open SSE/poll immediately instead of waiting behind
+        // any sidecar connection/setup latency.
+        const dispatchSidecar = () => {
+          try {
           const sidecarBase = process.env.EMPLOYEES_SIDECAR_URL || 'http://hm-employees:8060';
           fetch(`${sidecarBase}/internal/hyper/room-turn`, {
             method: 'POST',
@@ -5702,13 +6355,16 @@ Write the persona now.`;
               user_id: current.session.userId,
               org_id: current.session.orgId,
               user_message: userMessage,
-              participant_ids: room.participantIds || [],
+              participant_ids: room.participantIds || [], project_id: room.projectId || null,
+              room_goal: room.goal || '',
               callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
             }),
           }).catch(err => console.warn('[hyper-rooms] sidecar kick failed:', err.message));
-        } catch (err) {
-          console.warn('[hyper-rooms] sidecar dispatch threw:', err.message);
-        }
+          } catch (err) {
+            console.warn('[hyper-rooms] sidecar dispatch threw:', err.message);
+          }
+        };
+        setImmediate(dispatchSidecar);
 
         return jsonResponse(res, { turn_id: turn.id, status: turn.status }, 202);
       } catch (err) {
@@ -5754,8 +6410,12 @@ Write the persona now.`;
 
       let cursor = 0;
       let alive = true;
-      const POLL_MS = 700;
+      let missingTicks = 0;
+      // Poll frequently so the first router/typing event reaches the FE
+      // quickly even though the stream is DB-backed, not a raw push pipe.
+      const POLL_MS = 250;
       const HEARTBEAT_MS = 15_000;
+      const MAX_MISSING_TICKS = 120;
 
       const flush = (lines) => {
         for (let i = cursor; i < lines.length; i++) {
@@ -5782,9 +6442,13 @@ Write the persona now.`;
             select: { lines: true, status: true, sealedAt: true },
           });
           if (!turn) {
-            res.write(`event: error\ndata: ${JSON.stringify({ message: 'Turn vanished' })}\n\n`);
-            alive = false;
+            missingTicks += 1;
+            if (missingTicks >= MAX_MISSING_TICKS) {
+              res.write(`event: error\ndata: ${JSON.stringify({ message: 'Turn vanished' })}\n\n`);
+              alive = false;
+            }
           } else {
+            missingTicks = 0;
             flush(Array.isArray(turn.lines) ? turn.lines : []);
             if (turn.sealedAt || ['complete', 'failed', 'cost_capped'].includes(turn.status)) {
               alive = false;
@@ -5828,9 +6492,13 @@ Write the persona now.`;
           await sealTurn(prisma, body.turn_id, {
             status: body.event.status || 'complete',
             costTokens: body.event.cost_tokens || 0,
+            event: body.event,
           });
         } else {
-          await appendTurnEvent(prisma, body.turn_id, body.event);
+          await appendTurnEvent(prisma, body.turn_id, {
+            ...body.event,
+            received_ts: Date.now(),
+          });
         }
 
         // ── CSI artifact persistence (best-effort, must never delay/break the append path) ──
@@ -6264,9 +6932,18 @@ Write the persona now.`;
   // Public endpoint (no session). Auth via HMAC signature over raw body.
   // Handles url_verification handshake + message/reaction/pin events.
   if (pathname === '/v1/connectors/slack/events' && req.method === 'POST') {
-    const signingSecret = process.env.SLACK_SIGNING_SECRET;
+    // Secret resolution: env first, then the gitignored on-disk fallback
+    // (/app/.slack-signing-secret) — running containers cannot gain new env
+    // vars without a recreate; a file in the bind-mounted core/ dir can.
+    let signingSecret = process.env.SLACK_SIGNING_SECRET || null;
     if (!signingSecret) {
-      console.error('[slack-events] SLACK_SIGNING_SECRET not configured');
+      try {
+        const fsMod = await import('node:fs');
+        signingSecret = fsMod.readFileSync('/app/.slack-signing-secret', 'utf8').trim() || null;
+      } catch { /* file absent */ }
+    }
+    if (!signingSecret) {
+      console.error('[slack-events] SLACK_SIGNING_SECRET not configured (env + /app/.slack-signing-secret both empty)');
       return jsonResponse(res, { error: 'webhook not configured' }, 503);
     }
 

@@ -423,5 +423,45 @@ export function expandTemporalQuery(query) {
     };
   }
 
+  // ----------------------------------------------------------------
+  // 7. Relative / bare month (NO year): "early June", "in June",
+  //    "late March", "during October". Year = most recent past
+  //    occurrence (this year if the month has already occurred, else
+  //    last year). A qualifier word is REQUIRED so the modal verb
+  //    "may" (and stray "march"/"may") isn't mistaken for a month.
+  //    early/beginning → days 1-10, mid/middle → 10-20, late/end → 20-EOM,
+  //    in/during/back in → whole month.
+  // ----------------------------------------------------------------
+  const relMonthRe = new RegExp(
+    `\\b(early|mid|middle|late|beginning of|start of|end of|in|during|back in)\\s+(${Object.keys(MONTH_MAP).join('|')})\\b`
+  );
+  const relMonthMatch = q.match(relMonthRe);
+  if (relMonthMatch) {
+    const qualifier = relMonthMatch[1];
+    const monthIdx = MONTH_MAP[relMonthMatch[2]];
+    const curMonth = now.getUTCMonth();
+    const curYear = now.getUTCFullYear();
+    const year = monthIdx <= curMonth ? curYear : curYear - 1;
+    let start, end;
+    if (/^(early|beginning of|start of)$/.test(qualifier)) {
+      start = new Date(Date.UTC(year, monthIdx, 1));
+      end = new Date(Date.UTC(year, monthIdx, 10, 23, 59, 59, 999));
+    } else if (/^(mid|middle)$/.test(qualifier)) {
+      start = new Date(Date.UTC(year, monthIdx, 10));
+      end = new Date(Date.UTC(year, monthIdx, 20, 23, 59, 59, 999));
+    } else if (/^(late|end of)$/.test(qualifier)) {
+      start = new Date(Date.UTC(year, monthIdx, 20));
+      end = endOfMonth(year, monthIdx);
+    } else {
+      start = new Date(Date.UTC(year, monthIdx, 1));
+      end = endOfMonth(year, monthIdx);
+    }
+    return {
+      hasTemporalFilter: true,
+      dateRange: range(start, end),
+      temporalHint: `${qualifier} ${relMonthMatch[2]} ${year}`,
+    };
+  }
+
   return { hasTemporalFilter: false };
 }

@@ -6,8 +6,9 @@ POST /v1/hyper-rooms/:id/turns; this endpoint runs the actual debate:
 
     1. Router picks a Lead (closest CSI lane to the user_message)
     2. Lead generates full response (reuses build_react_agent, so the
-       MCP tools — hivemind_recall, hivemind_web_research, etc — are
-       all available).
+       HIVEMIND MCP tools are available. Public web access is routed
+       through one dedicated web-intel worker per room turn, not every
+       agent.
     3. Up to 2 Reactors run a "quiet-check" pass; reactors in opposing
        lanes (Strategist↔Skeptic, Builder↔Skeptic, Communicator↔Skeptic)
        are biased toward speaking up.
@@ -47,6 +48,7 @@ from .agents.agentscope_factory import build_react_agent
 from .bootstrap_client import fetch_bootstrap, report_eval, report_metrics
 from .config import get_settings
 from .db import (
+    get_permanent_lead_id,
     get_permanent_skeptic_id,
     get_room_template,
     get_trust_scores,
@@ -71,7 +73,8 @@ MAX_REACTORS = 2
 ROUND_2_CHALLENGE_THRESHOLD = 0.45
 
 # Full toolkit for hyper-room agents — all HIVEMIND read paths + save
-# + time travel; web is gated by prompt ("only when info isn't here").
+# + time travel. Web access is reserved for one dedicated web-intel worker
+# inside the room orchestrator, not every employee.
 DEFAULT_HYPER_TOOLS = [
     "hivemind_recall",
     "hivemind_list_memories",
@@ -83,9 +86,25 @@ DEFAULT_HYPER_TOOLS = [
     "hivemind_at",
     "hivemind_list_projects",
     "hivemind_save_memory",
+]
+
+WEB_INTEL_TOOLS = [
     "hivemind_web_search",
     "hivemind_web_research",
 ]
+
+WEB_INTEL_HINTS = (
+    "latest", "current", "recent", "today", "now", "web", "internet", "browse",
+    "public", "website", "docs", "documentation", "news", "market", "benchmark",
+    "competitor", "competitors", "compare", "comparison", "external", "publicly",
+    "search", "source", "sources", "pricing", "review", "report", "regulation",
+    "law", "policy", "release", "version", "product page", "homepage",
+)
+
+WEB_INTEL_GROQ_TOOLS = ("web_search", "visit_website")
+
+HYPER_ROOM_AGENT_MAX_ITERS = int(os.environ.get("HYPER_ROOM_AGENT_MAX_ITERS", "3"))
+BLACKBOARD_MIN_SCORE = float(os.environ.get("HYPER_ROOM_BLACKBOARD_MIN_SCORE", "0.45"))
 
 ROLE_LANES = ("Strategist", "Builder", "Skeptic", "Researcher", "Communicator")
 
@@ -114,6 +133,7 @@ _ROOM_AGENTS: Dict[str, ReActAgent] = {}
 # the same risk every turn' anti-pattern.
 _ROOM_PRIOR_LINES: Dict[str, List[str]] = {}
 _REPEAT_GUARD_MAX = 80  # rolling window per room
+_WEB_INTEL_PAYLOADS: Dict[str, Dict[str, Any]] = {}
 
 # ─── A1 decision sink — explicit save-intent regex ───
 _SAVE_INTENT_RE = re.compile(
@@ -122,8 +142,134 @@ _SAVE_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_VALUE_FACT_RE = re.compile(
+    r"(?:€|\$|£|EUR|USD|GBP)\s?\d+(?:[.,]\d+)?(?:\s?[kKmMbB])?(?:\s*/\s?(?:mo|month|seat|user|yr|year))?|"
+    r"\b\d+(?:[.,]\d+)?\s?(?:%|percent|users?|seats?|GB|MB|TB|minutes?|hours?|days?|weeks?|months?|years?|ARR|MRR|revenue|customers?|partners?|tasks?|tickets?)\b|"
+    r"\b\d{1,4}(?:[/-]\d{1,2}){1,2}\b|"
+    r"\b\d+(?:[.,]\d+)?\b",
+    re.IGNORECASE,
+)
+_DATE_FACT_RE = re.compile(
+    r"\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|"
+    r"dec(?:ember)?)\s+\d{1,2}(?:,\s*\d{4})?|\b(?:q[1-4]|h[12])\s*\d{2,4}\b",
+    re.IGNORECASE,
+)
+_QUOTED_FACT_RE = re.compile(r"[\"“”']([^\"“”']{3,80})[\"“”']")
+_NAMED_FACT_RE = re.compile(r"\b[A-Z][A-Za-z0-9&.-]*(?:\s+[A-Z][A-Za-z0-9&.-]*){0,4}\b")
+_CONSTRAINT_RE = re.compile(
+    r"\b(?:must|should|need(?:s)?|only|do not|don't|cannot|can't|never|"
+    r"now|given|instead|because|so|therefore|make sure|fix|validate|compare)\b",
+    re.IGNORECASE,
+)
+_MISSING_CURRENT_FACT_PATTERNS = (
+    re.compile(r"\buser\b.{0,80}\b(?:did(?: not|n't)|has(?: not|n't)|does(?: not|n't)|never)\b.{0,80}\b(?:supply|provide|give|share|include)\b", re.IGNORECASE),
+    re.compile(r"\b(?:no|without|lacks?|missing)\b.{0,60}\b(?:concrete|exact|specific)?\s*(?:user\s+)?(?:details?|figures?|numbers?|values?|requirements?|constraints?|context|facts?)\b", re.IGNORECASE),
+    re.compile(r"\bneed(?:s|ed)?\b.{0,40}\b(?:exact|specific|concrete)\b.{0,50}\b(?:details?|figures?|numbers?|values?|requirements?|constraints?|facts?)\b", re.IGNORECASE),
+)
+_REAL_GAP_RE = re.compile(
+    r"\b(?:cost-to-serve|unit economics|margin|usage logs?|churn|elasticity|"
+    r"validation|evidence|memory evidence|pilot|survey|benchmark|customer data|"
+    r"legal|security|risk|implementation|owner|deadline)\b",
+    re.IGNORECASE,
+)
+
 # Decision-template flag — set via room metadata later. For now: any
 # turn that closes with verdict=resolved OR explicit save-intent.
+
+
+def _uniq_keep_order(values: List[str], limit: int = 12) -> List[str]:
+    out: List[str] = []
+    seen: Set[str] = set()
+    for raw in values:
+        value = re.sub(r"\s+", " ", str(raw or "")).strip(" \t\n\r.,;:")
+        key = value.lower()
+        if not value or key in seen:
+            continue
+        seen.add(key)
+        out.append(value)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _extract_current_user_facts(text: str) -> Dict[str, List[str]]:
+    """Extract topic-agnostic current-turn facts supplied by the user.
+
+    Inspired by AgentScope memory marks: keep the user's latest facts as
+    explicit state separate from long-term memory so employee agents do not
+    re-litigate missing details the user just provided.
+    """
+    source = text or ""
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", source) if s.strip()]
+    constraints = [s[:220] for s in sentences if _CONSTRAINT_RE.search(s)]
+    named = [
+        v for v in _NAMED_FACT_RE.findall(source)
+        if len(v) > 2 and v.lower() not in {"i", "the", "and", "for", "now"}
+    ]
+    return {
+        "values": _uniq_keep_order(_VALUE_FACT_RE.findall(source), 16),
+        "dates": _uniq_keep_order(_DATE_FACT_RE.findall(source), 8),
+        "quoted": _uniq_keep_order(_QUOTED_FACT_RE.findall(source), 8),
+        "names": _uniq_keep_order(named, 16),
+        "constraints": _uniq_keep_order(constraints, 8),
+    }
+
+
+def _has_current_user_facts(facts: Dict[str, List[str]]) -> bool:
+    return sum(len(v) for v in facts.values()) >= 2
+
+
+def _format_current_turn_state(user_message: str, blackboard: Optional[Dict[str, Any]] = None) -> str:
+    facts = _extract_current_user_facts(user_message)
+    memory_titles: List[str] = []
+    if blackboard:
+        for row in (blackboard.get("memory_hits") or [])[:8]:
+            title = str(row.get("title") or row.get("memory_title") or "").strip()
+            if title:
+                memory_titles.append(title)
+    if not _has_current_user_facts(facts) and not memory_titles:
+        return ""
+    lines = [
+        "CURRENT TURN STATE (AgentScope-style marked memory; authoritative for this turn):",
+        f"[user_message] {user_message[:1200]}",
+    ]
+    for key, label in (
+        ("values", "user_fact:value"),
+        ("dates", "user_fact:date"),
+        ("quoted", "user_fact:quoted"),
+        ("names", "user_fact:name"),
+        ("constraints", "user_fact:constraint"),
+    ):
+        vals = facts.get(key) or []
+        if vals:
+            lines.append(f"[{label}] " + "; ".join(vals[:10]))
+    if memory_titles:
+        lines.append("[memory:title] " + "; ".join(_uniq_keep_order(memory_titles, 8)))
+    lines.append(
+        "Employee rule: use [user_fact] values as current truth; use [memory] for durable context; "
+        "escalate only for a real remaining [gap], not for facts already listed here."
+    )
+    return "\n".join(lines)
+
+
+def _claims_missing_current_user_facts(text: str) -> bool:
+    candidate = text or ""
+    if _REAL_GAP_RE.search(candidate) and not re.search(r"\buser\b", candidate, re.IGNORECASE):
+        return False
+    return any(pattern.search(candidate) for pattern in _MISSING_CURRENT_FACT_PATTERNS)
+
+
+def _extract_jsonish_string(raw: str, field: str, limit: int = 2000) -> str:
+    m = re.search(rf'"{re.escape(field)}"\s*:\s*"([^"]*)"', raw or "")
+    return (m.group(1).strip()[:limit] if m else "")
+
+
+def _extract_jsonish_list(raw: str, field: str, limit: int = 8) -> List[str]:
+    m = re.search(rf'"{re.escape(field)}"\s*:\s*\[([^\]]*)\]', raw or "")
+    if not m:
+        return []
+    return [x.strip()[:300] for x in re.findall(r'"([^"]+)"', m.group(1))[:limit]]
 
 
 def _normalize_for_dedup(text: str) -> str:
@@ -253,6 +399,154 @@ async def _save_room_decision(
         return None
 
 
+def _extract_memory_rows(resp: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows = resp.get("memories") or resp.get("combined") or []
+    return rows if isinstance(rows, list) else []
+
+
+def _score_memory_row(row: Dict[str, Any]) -> float:
+    try:
+        return float(row.get("score", 0) or 0)
+    except Exception:
+        return 0.0
+
+
+def _format_memory_rows(rows: List[Dict[str, Any]], *, limit: int = 6, snippet_chars: int = 300) -> str:
+    lines_out: List[str] = []
+    for r in rows[:limit]:
+        title = (r.get("title") or "").strip()
+        content = (r.get("content") or "").replace("\n", " ").strip()
+        if not content:
+            continue
+        snippet = content[:snippet_chars] + ("..." if len(content) > snippet_chars else "")
+        prefix = f'"{title}" - ' if title else ""
+        mid = str(r.get("id") or r.get("memory_id") or "").strip()
+        suffix = f" [memory_id={mid}]" if mid else ""
+        lines_out.append(f"- {prefix}{snippet}{suffix}")
+    return "\n".join(lines_out)
+
+
+async def _build_turn_blackboard(
+    *,
+    query: str,
+    user_id: str,
+    org_id: str,
+    api_key: str = "",
+    project_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build one shared turn context that every room agent reads.
+
+    This is the HyperAgents version of MiroFish's blackboard: one bounded
+    memory fan-out before the debate, not one broad ReAct recall loop per
+    agent. Agents can still use tools for targeted gaps.
+    """
+    company_brief, recall_resp = await asyncio.gather(
+        _build_company_brief(query, user_id, org_id, api_key, project_id=project_id),
+        recall_emulated(
+            query,
+            user_id=user_id,
+            org_id=org_id,
+            api_key=api_key,
+            max_memories=8,
+            project_id=project_id,
+        ),
+        return_exceptions=True,
+    )
+    if isinstance(company_brief, Exception):
+        log.warning("[blackboard] company brief failed: %s", company_brief)
+        company_brief = ""
+    if isinstance(recall_resp, Exception):
+        log.warning("[blackboard] query recall failed: %s", recall_resp)
+        recall_resp = {}
+    rows = [
+        r for r in _extract_memory_rows(recall_resp)
+        if _score_memory_row(r) >= BLACKBOARD_MIN_SCORE
+    ]
+    rows.sort(key=_score_memory_row, reverse=True)
+    candidate_block = ""
+    formatted = _format_memory_rows(rows, limit=6, snippet_chars=300)
+    if formatted:
+        candidate_block = (
+            "CANDIDATE MEMORIES (most relevant to the user's question):\n"
+            + formatted
+            + "\n"
+        )
+    context_text = (str(company_brief or "") + candidate_block).strip()
+    if context_text:
+        context_text += "\n"
+    hit_count = len(rows)
+    confidence = min(1.0, hit_count / 3.0)
+    return {
+        "context_text": context_text,
+        "memory_hits": rows,
+        "hit_count": hit_count,
+        "confidence": confidence,
+        "memory_ids": [
+            str(r.get("id") or r.get("memory_id"))
+            for r in rows
+            if r.get("id") or r.get("memory_id")
+        ][:20],
+    }
+
+
+def _is_fast_decision_candidate(user_message: str, room_template: str) -> bool:
+    if room_template != "decision":
+        return False
+    msg = (user_message or "").strip().lower()
+    if len(msg) > 1200 or len(msg.split()) > 180:
+        return False
+    heavy_terms = (
+        "debate", "from every angle", "full analysis", "audit", "review all",
+        "brainstorm", "compare", "pros and cons", "risk register", "deep dive",
+    )
+    return not any(term in msg for term in heavy_terms)
+
+
+def _has_strong_challenge(reactions: List[Dict[str, Any]]) -> bool:
+    return any(
+        r.get("agreement") == "challenge"
+        and float(r.get("confidence", 0) or 0) >= ROUND_2_CHALLENGE_THRESHOLD
+        for r in reactions
+    )
+
+
+def _schedule_decision_save(
+    *,
+    callback_url: Optional[str],
+    user_id: str,
+    org_id: str,
+    room_id: str,
+    turn_id: str,
+    user_message: str,
+    decision_text: str,
+    trigger: str,
+) -> None:
+    async def _runner() -> None:
+        mid = await _save_room_decision(
+            user_id=user_id,
+            org_id=org_id,
+            room_id=room_id,
+            turn_id=turn_id,
+            user_message=user_message,
+            decision_text=decision_text,
+            trigger=trigger,
+        )
+        if mid:
+            await _emit_event(callback_url or "", turn_id, {
+                "t": "decision_saved",
+                "memory_id": mid,
+                "trigger": trigger,
+            })
+        else:
+            await _emit_event(callback_url or "", turn_id, {
+                "t": "warning",
+                "code": "decision_save_failed",
+                "trigger": trigger,
+            })
+
+    asyncio.create_task(_runner())
+
+
 def _require_master_key(token: Optional[str]) -> None:
     settings = get_settings()
     expected = settings.hivemind_master_api_key
@@ -356,6 +650,26 @@ def _pick_lead_rotating(
     return eligible[idx]
 
 
+def _pick_lead_fixed(
+    participants: List[Dict[str, Any]],
+    permanent_lead_id: Optional[str],
+    skeptic_id: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    """Resolve a fixed per-room lead, or fall back to the first eligible agent."""
+    if permanent_lead_id:
+        locked = next((p for p in participants if p["id"] == permanent_lead_id), None)
+        if locked is not None and locked["id"] != skeptic_id:
+            return locked
+        log.warning(
+            "[hyper] permanent_lead_id %s not among participants or collides with skeptic — falling back",
+            permanent_lead_id,
+        )
+    eligible = [p for p in participants if p["id"] != skeptic_id] or participants
+    if not eligible:
+        return None
+    return sorted(eligible, key=lambda p: p.get("slug", ""))[0]
+
+
 def _pick_skeptic_rotating(
     participants: List[Dict[str, Any]],
     permanent_skeptic_id: Optional[str],
@@ -433,11 +747,13 @@ async def _build_agent_for_room(
     emp: Dict[str, Any],
     user_id: Optional[str] = None,
     org_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    allow_web_tools: bool = False,
 ) -> ReActAgent:
     """Cache one agent per (room, employee) so memory carries across turns.
 
     Overrides the employee's `tools` list with the full HIVEMIND toolset
-    (read paths + save + time-travel + web) so swarm agents have the
+    (read paths + save + time-travel; web only for the dedicated intel worker) so swarm agents have the
     same reach as the MCP-driven Talk-to-HIVE assistant.
     """
     key = f"{room_id}:{emp['id']}"
@@ -461,22 +777,24 @@ async def _build_agent_for_room(
         # tool-less. Without this, agents fall back to "nothing on file".
         merged = {
             **emp,
-            "tools": DEFAULT_HYPER_TOOLS,
+            "tools": DEFAULT_HYPER_TOOLS + (WEB_INTEL_TOOLS if allow_web_tools else []),
+            "max_iters": HYPER_ROOM_AGENT_MAX_ITERS,
             "hyper": boot_emp.get("hyper"),
             "active_prompt_version": boot_emp.get("active_prompt_version"),
         }
-        agent = build_react_agent(merged, "", user_id=user_id, org_id=org_id)
+        agent = build_react_agent(merged, "", user_id=user_id, org_id=org_id, project_id=project_id)
         _ROOM_AGENTS[key] = agent
         return agent
     merged = {
         **emp,
         # Force the full hyper toolkit regardless of what's stored on the
         # employee row — gives every swarm participant equal reach.
-        "tools": DEFAULT_HYPER_TOOLS,
+        "tools": DEFAULT_HYPER_TOOLS + (WEB_INTEL_TOOLS if allow_web_tools else []),
+        "max_iters": HYPER_ROOM_AGENT_MAX_ITERS,
         "hyper": boot_emp.get("hyper"),
         "active_prompt_version": boot_emp.get("active_prompt_version"),
     }
-    agent = build_react_agent(merged, api_key, user_id=user_id, org_id=org_id)
+    agent = build_react_agent(merged, api_key, user_id=user_id, org_id=org_id, project_id=project_id)
     _ROOM_AGENTS[key] = agent
     return agent
 
@@ -503,6 +821,573 @@ def _msg_to_text(reply: Optional[Msg]) -> str:
         # Also nuke residual single-line variants
         text = re.sub(r"<function=[^\n>]+>", "", text).strip()
     return text
+
+
+def _web_intel_needed(user_message: str, blackboard: Dict[str, Any], room_template: str) -> bool:
+    """Decide whether the turn needs external/public evidence.
+
+    Prefer web whenever the room may benefit from current or public
+    evidence. This is intentionally broad: the dedicated web worker can
+    still return `needed=false` if it finds the turn is fully covered by
+    shared memory.
+    """
+    msg = (user_message or "").lower()
+    if not msg:
+        return False
+    external_signals = any(term in msg for term in WEB_INTEL_HINTS)
+    decision_signals = any(term in msg for term in (
+        "should", "best", "better", "compare", "comparison", "recommend",
+        "decide", "decision", "evaluate", "choose", "rename", "rebrand",
+        "brand", "legal", "law", "trademark", "domain", "pricing", "market",
+        "competitor", "current", "latest", "public", "evidence", "source",
+        "sources", "available", "availability", "release", "version", "docs",
+    ))
+    if room_template in ("deep_sim", "swarm", "decision"):
+        return True
+    if external_signals or decision_signals:
+        return True
+    if float(blackboard.get("confidence", 0) or 0) < 0.7:
+        return True
+    return int(blackboard.get("hit_count", 0) or 0) < 3
+
+
+async def _build_web_intel_agent_for_room(
+    room_id: str,
+    emp: Dict[str, Any],
+    user_id: str,
+    org_id: str,
+    project_id: Optional[str],
+) -> ReActAgent:
+    """Build the one web-enabled Hyper agent for this turn.
+
+    Fallback path when the direct Groq Compound web pass is unavailable.
+    This agent gets the Hivemind web MCP tools plus normal HIVEMIND read
+    tools, and it is the only agent allowed to browse on behalf of the room.
+    """
+    synthetic = {
+        **emp,
+        "id": f"{room_id}:web-intel",
+        "slug": emp.get("slug") or "web-intel",
+        "name": emp.get("name") or "Web Intel",
+        "role_archetype": "Researcher",
+        "persona": (
+            "You are the room's dedicated external-intelligence specialist. "
+            "Use web access only when the current room turn needs public or live "
+            "evidence. Prefer Hivemind memory first, browse only for gaps, and "
+            "return a concise evidence dossier with sources, caveats, and a clear POV."
+        ),
+        "llm_provider": os.environ.get("HYPER_WEB_INTEL_PROVIDER", "groq"),
+        "model": os.environ.get("HYPER_WEB_INTEL_MODEL", "gpt-oss-20b"),
+        "tools": DEFAULT_HYPER_TOOLS + WEB_INTEL_TOOLS,
+        "max_iters": int(os.environ.get("HYPER_WEB_INTEL_MAX_ITERS", "2")),
+    }
+    return await _build_agent_for_room(
+        room_id,
+        synthetic,
+        user_id=user_id,
+        org_id=org_id,
+        project_id=project_id,
+        allow_web_tools=True,
+    )
+
+
+def _format_web_intel_context(payload: Dict[str, Any]) -> str:
+    if not payload:
+        return ""
+    lines = ["WEB INTEL DOSSIER (dedicated HyperAgents web worker):"]
+    if payload.get("pov"):
+        lines.append(f"[pov] {payload['pov']}")
+    if payload.get("answer"):
+        lines.append(f"[answer] {payload['answer']}")
+    if payload.get("sources"):
+        src_lines = []
+        for src in payload["sources"][:6]:
+            if isinstance(src, dict):
+                title = (src.get("title") or src.get("url") or "source").strip()
+                url = (src.get("url") or "").strip()
+                snippet = (src.get("snippet") or "").strip()
+                src_lines.append(f"- {title}" + (f" ({url})" if url else "") + (f": {snippet}" if snippet else ""))
+            else:
+                src_lines.append(f"- {str(src)[:250]}")
+        if src_lines:
+            lines.append("[sources]")
+            lines.extend(src_lines)
+    if payload.get("gap"):
+        lines.append(f"[gap] {payload['gap']}")
+    if payload.get("confidence") is not None:
+        lines.append(f"[confidence] {payload['confidence']}")
+    lines.append(
+        "Use this dossier as the only external evidence in the room. Other agents should "
+        "consume it from shared context rather than browsing themselves."
+    )
+    return "\n".join(lines)
+
+
+def _web_sources_for_turn(turn_id: str) -> List[Dict[str, Any]]:
+    payload = _WEB_INTEL_PAYLOADS.get(turn_id) or {}
+    sources = payload.get("sources")
+    return sources if isinstance(sources, list) else []
+
+
+def _join_context(*parts: str) -> str:
+    return "\n".join(part.strip() for part in parts if part and part.strip())
+
+
+def _room_goal_context(goal: Optional[str]) -> str:
+    clean = re.sub(r"\s+", " ", str(goal or "")).strip()
+    if not clean:
+        return ""
+    return (
+        "ROOM GOAL — the standing objective for this room. Every agent should "
+        "optimize the discussion toward this outcome, not only answer the latest message:\n"
+        f"{clean}\n"
+    )
+
+
+def _compact_report_item(value: Any, limit: int = 260) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return ""
+    return text[:limit].rstrip() + ("..." if len(text) > limit else "")
+
+
+def _goal_terms(goal: str) -> List[str]:
+    stop = {
+        "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in",
+        "is", "it", "of", "on", "or", "our", "that", "the", "their", "this",
+        "to", "toward", "we", "with", "within",
+    }
+    terms: List[str] = []
+    for raw in re.findall(r"[a-z0-9][a-z0-9\-]{2,}", str(goal or "").lower()):
+        if raw not in stop and raw not in terms:
+            terms.append(raw)
+    return terms[:18]
+
+
+def _build_goal_progress(
+    *,
+    room_goal: str,
+    final_text: str,
+    action_items: Optional[List[Any]],
+    evidence_count: int,
+    source_count: int,
+    claims_count: int,
+    dissent_count: int,
+    status: str,
+) -> Dict[str, Any]:
+    goal = _compact_report_item(room_goal, 500)
+    if not goal:
+        return {
+            "status": "missing_goal",
+            "score": 0,
+            "label": "No room goal",
+            "summary": "This turn cannot be scored against a standing objective because the room has no goal.",
+            "signals": [],
+        }
+    terms = _goal_terms(goal)
+    body = f"{final_text or ''} {' '.join(_compact_report_item(a, 160) for a in (action_items or []))}".lower()
+    matched = [term for term in terms if term in body]
+    coverage = (len(matched) / max(len(terms), 1)) if terms else 0.35
+    score = 35
+    score += min(30, round(coverage * 30))
+    if final_text and len(final_text.strip()) >= 80:
+        score += 10
+    if action_items:
+        score += 10
+    if evidence_count:
+        score += 8
+    if source_count:
+        score += 4
+    if claims_count >= 2:
+        score += 5
+    if dissent_count:
+        score += 3
+    if status in ("failed", "escalated"):
+        score -= 15
+    score = max(0, min(100, int(score)))
+    if score >= 78:
+        label = "On track"
+        progress_status = "on_track"
+    elif score >= 55:
+        label = "Partially advanced"
+        progress_status = "partial"
+    else:
+        label = "Needs follow-up"
+        progress_status = "needs_followup"
+    signals = []
+    if matched:
+        signals.append(f"Goal terms reflected: {', '.join(matched[:6])}")
+    if action_items:
+        signals.append(f"{len(action_items[:8])} next action(s) captured")
+    if evidence_count:
+        signals.append(f"{evidence_count} memory evidence link(s)")
+    if source_count:
+        signals.append(f"{source_count} web source(s)")
+    if dissent_count:
+        signals.append(f"{dissent_count} dissent/risk signal(s) preserved")
+    if not signals:
+        signals.append("No strong progress signals detected")
+    summary = (
+        f"{label}: this turn moved the room goal forward with {evidence_count} memory link(s)"
+        f"{' and ' + str(source_count) + ' web source(s)' if source_count else ''}."
+    )
+    return {
+        "status": progress_status,
+        "score": score,
+        "label": label,
+        "summary": summary,
+        "matched_terms": matched[:8],
+        "signals": signals[:6],
+    }
+
+
+def _build_harness_quality_check(
+    *,
+    room_goal: str,
+    final_text: str,
+    evidence_count: int,
+    source_count: int,
+    claims_count: int = 0,
+    reviews_count: int = 0,
+    votes_count: int = 0,
+    web_intel_used: bool = False,
+) -> Dict[str, Any]:
+    checks = [
+        {"name": "room_goal", "ok": bool(_compact_report_item(room_goal, 20)), "detail": "standing objective present"},
+        {"name": "final_synthesis", "ok": bool(final_text and len(final_text.strip()) >= 60), "detail": "lead conclusion is substantive"},
+        {"name": "evidence_links", "ok": evidence_count > 0 or source_count > 0, "detail": f"{evidence_count} linked memories, {source_count} linked sources"},
+        {"name": "web_sources", "ok": (not web_intel_used) or source_count > 0, "detail": f"{source_count} linked sources"},
+        {"name": "perspective_trace", "ok": claims_count > 0 or reviews_count > 0 or votes_count > 0, "detail": f"{claims_count} claims, {reviews_count} reviews, {votes_count} votes"},
+    ]
+    failed = [c["name"] for c in checks if not c["ok"]]
+    return {
+        "t": "harness_check",
+        "status": "pass" if not failed else "warn",
+        "failed": failed,
+        "checks": checks,
+        "cleanup": {
+            "bounded_memory_links": min(evidence_count, 12),
+            "bounded_source_links": min(source_count, 8),
+            "report_sections": ["conclusion", "goal_progress", "actions", "perspectives", "risks", "evidence"],
+        },
+    }
+
+
+def _build_final_report(
+    *,
+    user_message: str,
+    final_text: str,
+    template: str,
+    room_goal: str = "",
+    status: str = "complete",
+    verdict: Optional[str] = None,
+    score: Optional[float] = None,
+    lead: Optional[Dict[str, Any]] = None,
+    action_items: Optional[List[Any]] = None,
+    evidence_ids: Optional[List[Any]] = None,
+    evidence: Optional[List[Dict[str, Any]]] = None,
+    sources: Optional[List[Dict[str, Any]]] = None,
+    claims: Optional[List[Dict[str, Any]]] = None,
+    reviews: Optional[List[Dict[str, Any]]] = None,
+    votes: Optional[List[Dict[str, Any]]] = None,
+    objections: Optional[List[Any]] = None,
+    web_intel_used: bool = False,
+) -> Dict[str, Any]:
+    """Build a readable report event from already-computed room artifacts.
+
+    This intentionally avoids a post-turn LLM call: the report should make the
+    transcript consumable without adding latency after the simulation finishes.
+    """
+    title = "Final report"
+    verdict_text = verdict or status or "complete"
+    lead_name = (lead or {}).get("name") or (lead or {}).get("slug") or "lead"
+    lines: List[str] = [
+        f"## {title}",
+        "",
+        f"**Question:** {_compact_report_item(user_message, 500)}",
+        f"**Room goal:** {_compact_report_item(room_goal, 500)}" if room_goal else "",
+        f"**Outcome:** {verdict_text}" + (f" · score {score}" if score is not None else ""),
+        f"**Lead:** {lead_name}",
+        "",
+        "### Conclusion",
+        _compact_report_item(final_text, 2400) or "No final synthesis was produced.",
+    ]
+
+    useful_actions = [_compact_report_item(a, 220) for a in (action_items or [])]
+    useful_actions = [a for a in useful_actions if a]
+    if useful_actions:
+        lines.extend(["", "### Next actions"])
+        lines.extend(f"- {a}" for a in useful_actions[:8])
+
+    if claims:
+        lines.extend(["", "### Strongest perspectives"])
+        for claim in claims[:6]:
+            who = claim.get("agent") or claim.get("agent_slug") or claim.get("agent_name") or "agent"
+            stance = claim.get("stance") or claim.get("lane") or "view"
+            body = claim.get("claim") or claim.get("hypothesis") or claim.get("refined_hypothesis") or ""
+            item = _compact_report_item(body, 260)
+            if item:
+                lines.append(f"- {who} ({stance}): {item}")
+
+    challenge_items: List[str] = []
+    for obj in objections or []:
+        if isinstance(obj, dict):
+            challenge_items.append(_compact_report_item(
+                obj.get("challenge") or obj.get("content") or obj.get("review") or obj.get("line") or obj,
+                260,
+            ))
+        else:
+            challenge_items.append(_compact_report_item(obj, 260))
+    if reviews:
+        for review in reviews:
+            if str(review.get("agreement", "")).lower() == "challenge":
+                challenge_items.append(_compact_report_item(review.get("content") or review.get("review"), 260))
+    challenge_items = [c for c in challenge_items if c]
+    if challenge_items:
+        lines.extend(["", "### Risks and dissent"])
+        lines.extend(f"- {c}" for c in challenge_items[:6])
+
+    if votes:
+        lines.extend(["", "### Vote snapshot"])
+        for vote in votes[:8]:
+            voter = vote.get("voter") or vote.get("agent") or "agent"
+            target = vote.get("vote_for_hypothesis_id") or vote.get("vote") or "none"
+            vote_score = vote.get("score")
+            reason = vote.get("reason") or vote.get("content") or ""
+            lines.append(f"- {voter}: {target}" + (f" · {vote_score}/5" if vote_score is not None else "") + (f" · {_compact_report_item(reason, 160)}" if reason else ""))
+
+    evidence_rows = []
+    for row in evidence or []:
+        if not isinstance(row, dict):
+            continue
+        mid = str(row.get("id") or row.get("memory_id") or "").strip()
+        if not mid:
+            continue
+        evidence_rows.append({
+            "id": mid,
+            "title": _compact_report_item(row.get("title") or row.get("content") or "Memory", 90),
+            "snippet": _compact_report_item(row.get("content") or "", 220),
+        })
+    known_ids = {row["id"] for row in evidence_rows}
+    for mid in [str(e) for e in (evidence_ids or []) if e]:
+        if mid not in known_ids:
+            evidence_rows.append({"id": mid, "title": "Memory evidence", "snippet": ""})
+            known_ids.add(mid)
+    source_rows = []
+    for src in sources or []:
+        if not isinstance(src, dict):
+            continue
+        url = str(src.get("url") or "").strip()
+        title = _compact_report_item(src.get("title") or url or "Source", 120)
+        if url or title:
+            source_rows.append({
+                "title": title,
+                "url": url,
+                "snippet": _compact_report_item(src.get("snippet") or "", 220),
+            })
+    dissent_count = len(challenge_items)
+    progress = _build_goal_progress(
+        room_goal=room_goal,
+        final_text=final_text,
+        action_items=action_items,
+        evidence_count=len(evidence_rows),
+        source_count=len(source_rows),
+        claims_count=len(claims or []),
+        dissent_count=dissent_count,
+        status=status,
+    )
+    lines.extend([
+        "",
+        "### Goal progress",
+        f"**{progress['label']} · {progress['score']}/100**",
+        progress["summary"],
+    ])
+    for signal in progress.get("signals", [])[:4]:
+        lines.append(f"- {signal}")
+    if evidence_rows or source_rows or web_intel_used:
+        lines.extend(["", "### Evidence"])
+        if evidence_rows:
+            lines.append(f"- {len(evidence_rows[:12])} relevant memories are linked below.")
+        if source_rows:
+            lines.append(f"- {len(source_rows[:8])} web sources are linked below.")
+        if web_intel_used:
+            lines.append("- External web-intel dossier was consulted for public/current evidence.")
+
+    return {
+        "t": "final_report",
+        "title": title,
+        "template": template,
+        "status": status,
+        "verdict": verdict_text,
+        "weighted_score": score,
+        "room_goal": room_goal or "",
+        "goal_progress": progress,
+        "evidence": evidence_rows[:12],
+        "sources": source_rows[:8],
+        "content": "\n".join(lines).strip(),
+    }
+
+
+async def _run_groq_compound_web_intel(
+    req: "RoomTurnRequest",
+    lead: Dict[str, Any],
+    blackboard: Dict[str, Any],
+    memory_context: str,
+    room_template: str,
+) -> Dict[str, Any]:
+    api_key = (
+        os.environ.get("HYPER_WEB_INTEL_GROQ_API_KEY")
+        or os.environ.get("GROQ_API_KEY")
+        or os.environ.get("LLM_API_KEY")
+        or ""
+    )
+    if not api_key:
+        raise RuntimeError("GROQ_API_KEY not configured for web intel")
+    model = os.environ.get("HYPER_WEB_INTEL_GROQ_MODEL", "groq/compound")
+    groq_version = os.environ.get("HYPER_WEB_INTEL_GROQ_VERSION", "latest")
+    prompt = (
+        "You are the dedicated web-intelligence worker for one HyperAgents room turn.\n"
+        "Use Hivemind memory first. If the answer is already covered by the shared room context, "
+        "do not browse. If the turn needs live public evidence, use the built-in Compound web tools.\n"
+        "Return STRICT JSON only with this schema:\n"
+        "{\"needed\": true|false, \"pov\": \"one sentence on the angle you chose\", "
+        "\"answer\": \"concise external evidence summary\", "
+        "\"sources\": [{\"title\":\"...\", \"url\":\"...\", \"snippet\":\"...\"}], "
+        "\"gap\": \"what remains unverified, if anything\", "
+        "\"confidence\": 0.0-1.0}\n\n"
+        f"Lead lane: {lead['_lane']}\n"
+        f"Room template: {room_template}\n"
+        f"User message:\n{req.user_message}\n\n"
+        f"Shared memory context:\n{memory_context or '(none)'}\n\n"
+        f"Blackboard confidence: {blackboard.get('confidence', 0)}\n"
+        f"Blackboard hits: {blackboard.get('hit_count', 0)}\n"
+    )
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "You are a precise web-intelligence analyst. Stay factual and concise."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.2,
+        "compound_custom": {"tools": {"enabled_tools": list(WEB_INTEL_GROQ_TOOLS)}},
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Groq-Model-Version": groq_version,
+    }
+    async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
+        resp = await client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+    choice = (data.get("choices") or [{}])[0]
+    message = choice.get("message") or {}
+    text = (message.get("content") or "").strip()
+    payload_out: Dict[str, Any] = {}
+    if text:
+        try:
+            m = re.search(r"\{[\s\S]+\}", text)
+            if m:
+                parsed = json.loads(m.group(0))
+                if isinstance(parsed, dict):
+                    payload_out = parsed
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[web-intel] groq parse failed turn=%s: %s", req.turn_id, exc)
+    if not payload_out:
+        payload_out = {
+            "needed": True,
+            "pov": "external evidence specialist",
+            "answer": text[:3000] if text else "",
+            "sources": [],
+            "gap": "",
+            "confidence": 0.5,
+        }
+    if not isinstance(payload_out.get("sources"), list):
+        payload_out["sources"] = []
+    return payload_out
+
+
+async def _run_web_intel_turn(
+    req: "RoomTurnRequest",
+    lead: Dict[str, Any],
+    blackboard: Dict[str, Any],
+    memory_context: str,
+    room_template: str,
+) -> str:
+    if not _web_intel_needed(req.user_message, blackboard, room_template):
+        return ""
+    await _emit_event(req.callback_url, req.turn_id, {
+        "t": "typing", "agent": "web-intel", "kind": "web_intel",
+    })
+    try:
+        payload = await _run_groq_compound_web_intel(
+            req=req,
+            lead=lead,
+            blackboard=blackboard,
+            memory_context=memory_context,
+            room_template=room_template,
+        )
+    except Exception as groq_exc:  # noqa: BLE001
+        log.warning("[web-intel] groq compound failed turn=%s: %s — falling back to Hivemind web tools",
+                    req.turn_id, groq_exc)
+        web_agent = await _build_web_intel_agent_for_room(
+            req.room_id,
+            lead,
+            user_id=req.user_id,
+            org_id=req.org_id,
+            project_id=req.project_id,
+        )
+        prompt = (
+            "[WEB INTEL — dedicated external evidence worker for this HyperAgents turn.]\n"
+            "Use Hivemind recall first, then browse only if needed. Do not browse if the answer is already in memory.\n"
+            f"Lead lane: {lead['_lane']}\n"
+            f"User message:\n{req.user_message}\n\n"
+            f"Shared memory context:\n{memory_context or '(none)'}\n\n"
+            "Return STRICT JSON only:\n"
+            "{\"needed\": true|false, \"pov\": \"one sentence on the angle you chose\", "
+            "\"answer\": \"concise external evidence summary\", "
+            "\"sources\": [{\"title\":\"...\", \"url\":\"...\", \"snippet\":\"...\"}], "
+            "\"gap\": \"what remains unverified, if anything\", "
+            "\"confidence\": 0.0-1.0}"
+        )
+        try:
+            reply = await web_agent(Msg(name="user", content=prompt, role="user"))
+            text = _msg_to_text(reply)
+            payload = {}
+            try:
+                m = re.search(r"\{[\s\S]+\}", text)
+                if m:
+                    parsed = json.loads(m.group(0))
+                    if isinstance(parsed, dict):
+                        payload = parsed
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[web-intel] parse failed turn=%s: %s", req.turn_id, exc)
+            if not payload:
+                payload = {
+                    "needed": True,
+                    "pov": "external evidence specialist",
+                    "answer": text[:3000],
+                    "sources": [],
+                    "gap": "",
+                    "confidence": 0.5,
+                }
+            if not isinstance(payload.get("sources"), list):
+                payload["sources"] = []
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[web-intel] turn=%s failed: %s", req.turn_id, exc)
+            return ""
+    dossier = _format_web_intel_context(payload)
+    if dossier:
+        _WEB_INTEL_PAYLOADS[req.turn_id] = payload
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "web_intel",
+            "agent": "web-intel",
+            "content": payload.get("answer") or "",
+            "sources": payload.get("sources") or [],
+            "gap": payload.get("gap") or "",
+            "confidence": float(payload.get("confidence") or 0.5),
+        })
+    return dossier
 
 
 def _report_turn(emp_id: str, query: str, reply: Optional[Msg]) -> None:
@@ -539,7 +1424,9 @@ Reply in STRICT JSON ONLY (no preamble, no code fence):
   "react": true | false,
   "agreement": "agree" | "extend" | "challenge",
   "confidence": 0.0 - 1.0,
-  "line": "..."   // ONE sentence, max ~25 words, Slack tone
+  "line": "...",  // ONE sentence, max ~25 words, Slack tone
+  "evidence": ["[user_fact:value] 20 users", "memory title"],  // optional, max 3
+  "gap": "the still-open risk or missing proof"                 // required when challenging
 }
 
 Hard rules:
@@ -549,6 +1436,8 @@ Hard rules:
   "let's also look at", "we need to check". If all you have is a process suggestion,
   stay silent: {"react": false}.
 - Cite concrete evidence when challenging — name the memory or person.
+- If challenging, compare the current [user_fact] state and [memory] state first.
+  Do not claim a detail is missing when the current user message already supplied it.
 - STICK TO THE USER'S TOPIC. Do not pivot to project management — no inventing
   owners, dates, deadlines, or sub-task assignments. If the memory doesn't name
   a person responsible, you don't either.
@@ -573,6 +1462,8 @@ async def _run_reactor(
     lead_name: str,
     reactor_lane: str,
     is_opposing: bool,
+    blackboard_context: str = "",
+    current_turn_state: str = "",
 ) -> Dict[str, Any]:
     """Returns a dict like
         {"react": bool, "agreement": str|None, "confidence": float, "line": str}
@@ -580,11 +1471,18 @@ async def _run_reactor(
     bias = " (Your lane is opposing the Lead's — speak up if you have a real challenge.)" if is_opposing else ""
     prompt = (
         f"{REACTOR_INSTRUCTIONS}\n"
-        f"User asked: {user_message}\n\n"
-        f"Lead ({lead_name}, lane {reactor_lane}'s opposite={is_opposing}) said:\n"
-        f"{lead_line}\n\n"
-        f"Your lane: {reactor_lane}.{bias}\n"
-        f"Reply with the JSON now."
+        + (
+            "SHARED BLACKBOARD — already recalled for this turn. Use this before tools; "
+            "only call tools for one targeted missing fact.\n"
+            f"{blackboard_context}\n"
+            if blackboard_context else ""
+        )
+        + (current_turn_state + "\n" if current_turn_state else "")
+        + f"User asked: {user_message}\n\n"
+        + f"Lead ({lead_name}, lane {reactor_lane}'s opposite={is_opposing}) said:\n"
+        + f"{lead_line}\n\n"
+        + f"Your lane: {reactor_lane}.{bias}\n"
+        + f"Reply with the JSON now."
     )
     try:
         reply = await agent(Msg(name="user", content=prompt, role="user"))
@@ -604,6 +1502,8 @@ async def _run_reactor(
             "agreement": parsed.get("agreement") or "extend",
             "confidence": float(parsed.get("confidence") or 0.5),
             "line": line[:2000],
+            "gap": str(parsed.get("gap") or "")[:500],
+            "evidence": [str(x)[:160] for x in (parsed.get("evidence") or [])[:6]] if isinstance(parsed.get("evidence"), list) else [],
         }
     except Exception as exc:  # noqa: BLE001
         log.warning("reactor failed: %s", exc)
@@ -621,6 +1521,12 @@ class RoomTurnRequest(BaseModel):
     user_message: str = Field(min_length=1, max_length=8000)
     participant_ids: List[str] = Field(default_factory=list)
     callback_url: Optional[str] = None
+    flyby_decision: Optional[str] = None
+    flyby_spec: Optional[Dict[str, Any]] = None
+    # Project scope: when set, every agent recall/save in this turn is scoped to
+    # the project HIVEMIND so the room stays about that project.
+    project_id: Optional[str] = None
+    room_goal: Optional[str] = None
 
 
 class RoomTurnResponse(BaseModel):
@@ -721,6 +1627,15 @@ TEMPLATE_OVERLAYS: Dict[str, Dict[str, str]] = {
             "YESTERDAY: ...\nTODAY: ...\nBLOCKERS: ..."
         ),
     },
+    "deep_sim": {
+        "label": "Deep Simulation",
+        "lead_hint": (
+            "MEETING MODE: Deep Simulation. Build a live Slack-style simulation: "
+            "ontology/capability check, specialist flyby if needed, then propose, "
+            "peer-review, revise, vote, and conclude."
+        ),
+        "synth_hint": "Output a decisive conclusion with assumptions, risks, and next decisions.",
+    },
 }
 
 
@@ -735,6 +1650,7 @@ _TEMPLATE_KEYWORDS: Dict[str, List[str]] = {
     "review": ["review", "evaluate", "score", "rate", "audit this", "check this"],
     "standup": ["status", "where are we", "what's the state", "standup", "stand-up"],
     "swarm": ["why", "what do you all think", "from every angle", "perspectives", "team analysis"],
+    "deep_sim": ["simulate", "simulation", "real life", "real-life", "2-5 years", "long term", "future scenario", "all perspectives"],
 }
 
 
@@ -754,8 +1670,508 @@ def recommend_template(user_message: str, default: str = "debate") -> str:
     return best
 
 
+def _is_deep_sim_prompt(user_message: str) -> bool:
+    msg = (user_message or "").lower()
+    triggers = (
+        "simulate", "simulation", "real life", "real-life", "long simulation",
+        "2-5 years", "2 to 5 years", "long term", "future scenario",
+        "all perspectives", "like mirofish", "mirofish",
+    )
+    return any(t in msg for t in triggers)
+
+
 def get_template_overlay(template: str) -> Dict[str, str]:
     return TEMPLATE_OVERLAYS.get(template, TEMPLATE_OVERLAYS.get("debate", {}))
+
+
+# ─── Deep simulation (MiroFish-style live room) ────────────────────────
+
+DEEP_SIM_ROLES: Dict[str, List[str]] = {
+    "strategist": ["strategy", "growth", "roadmap", "pricing", "gtm", "market", "profit", "moat"],
+    "finance": ["finance", "revenue", "arr", "margin", "profit", "cash", "runway", "unit economics", "pricing"],
+    "builder": ["build", "product", "engineering", "infra", "code", "platform", "scale", "technical"],
+    "skeptic": ["risk", "legal", "compliance", "security", "failure", "downside", "assumption", "audit"],
+    "researcher": ["research", "evidence", "data", "customer", "market", "competitive", "benchmark"],
+    "communicator": ["sales", "partner", "message", "brand", "customer", "story", "positioning"],
+}
+
+
+def _employee_role_text(emp: Dict[str, Any]) -> str:
+    return " ".join(
+        str(emp.get(k, "") or "")
+        for k in ("name", "slug", "persona", "roleArchetype", "_lane")
+    ).lower()
+
+
+def _build_task_ontology(user_message: str) -> Dict[str, Any]:
+    msg = (user_message or "").lower()
+    required = {"strategist", "skeptic", "researcher", "communicator"}
+    if any(k in msg for k in DEEP_SIM_ROLES["finance"]):
+        required.add("finance")
+    if any(k in msg for k in DEEP_SIM_ROLES["builder"]):
+        required.add("builder")
+    if len(user_message.split()) > 18 or any(k in msg for k in ("long term", "2-5", "future", "scenario", "simulate")):
+        required.update({"finance", "builder"})
+    entity_types = ["Question", "Organization", "Person", "Product", "Market", "Customer", "Risk", "Constraint", "Opportunity", "Decision"]
+    edge_types = ["supports", "contradicts", "depends_on", "owned_by", "impacts", "requires_review"]
+    return {
+        "mode": "deepresearch",
+        "entity_types": entity_types,
+        "edge_types": edge_types,
+        "required_roles": sorted(required),
+        "rounds": ["collect", "debate", "revise", "vote", "conclude"],
+        "gate_policy": {
+            "min_roles_covered": min(4, len(required)),
+            "reviewed_ratio": 0.75,
+            "requires_provenance": True,
+        },
+    }
+
+
+def _assess_workforce_coverage(participants: List[Dict[str, Any]], ontology: Dict[str, Any]) -> Dict[str, Any]:
+    coverage: Dict[str, List[str]] = {}
+    for role in ontology.get("required_roles", []):
+        hints = DEEP_SIM_ROLES.get(role, [])
+        matched: List[str] = []
+        for emp in participants:
+            text = _employee_role_text(emp)
+            lane = (emp.get("_lane") or "").lower()
+            if role == "strategist" and lane == "strategist":
+                matched.append(emp["slug"])
+            elif role == "builder" and lane == "builder":
+                matched.append(emp["slug"])
+            elif role == "skeptic" and lane == "skeptic":
+                matched.append(emp["slug"])
+            elif role == "researcher" and lane == "researcher":
+                matched.append(emp["slug"])
+            elif role == "communicator" and lane == "communicator":
+                matched.append(emp["slug"])
+            elif any(h in text for h in hints):
+                matched.append(emp["slug"])
+        coverage[role] = sorted(set(matched))
+    missing = [role for role, slugs in coverage.items() if not slugs]
+    critical_missing = [role for role in missing if role in ("finance", "builder", "skeptic", "researcher")]
+    return {
+        "coverage": coverage,
+        "missing_roles": missing,
+        "needs_flyby": bool(critical_missing),
+        "critical_missing": critical_missing,
+    }
+
+
+def _build_flyby_spec(req: "RoomTurnRequest", assessment: Dict[str, Any]) -> Dict[str, Any]:
+    candidates = assessment.get("critical_missing") or assessment.get("missing_roles") or ["finance"]
+    msg = (req.user_message or "").lower()
+    if "finance" in candidates and any(k in msg for k in DEEP_SIM_ROLES["finance"]):
+        role = "finance"
+    else:
+        priority = ["skeptic", "finance", "builder", "researcher", "strategist", "communicator"]
+        role = next((p for p in priority if p in candidates), candidates[0])
+    title = {
+        "finance": "Unit Economics CFO",
+        "builder": "Systems Builder",
+        "skeptic": "Red-Team Operator",
+        "researcher": "Market Evidence Analyst",
+    }.get(role, f"{role.title()} Specialist")
+    slug = f"flyby-{role}"
+    return {
+        "id": f"flyby:{req.turn_id}:{role}",
+        "name": title,
+        "slug": slug,
+        "role": role,
+        "roleArchetype": "Skeptic" if role == "skeptic" else ("Builder" if role == "builder" else "Researcher"),
+        "llm_provider": "groq",
+        "model": os.environ.get("GROQ_INFERENCE_MODEL", "openai/gpt-oss-20b"),
+        "persona": (
+            f"Temporary flyby employee for this room only. You are a high-conviction {title}. "
+            "Speak like an internal operator with a strong point of view. Challenge weak assumptions, "
+            "use company memory when available, and make enterprise-grade tradeoffs explicit."
+        ),
+        "reason": f"The current room does not visibly cover the {role} lens needed for this question.",
+    }
+
+
+def _participant_brief(participants: List[Dict[str, Any]]) -> str:
+    return "\n".join(
+        f"- {p.get('name', p.get('slug'))} ({p.get('slug')}, lane={p.get('_lane')}): "
+        f"{str(p.get('persona') or '')[:180]}"
+        + (
+            f" | contract={((p.get('hyper') or {}).get('persona_contract') or p.get('persona_contract') or {}).get('stance', '')}"
+            if ((p.get('hyper') or {}).get('persona_contract') or p.get('persona_contract'))
+            else ""
+        )
+        for p in participants
+    )
+
+
+async def _build_deep_sim_role_context(
+    *,
+    query: str,
+    participants: List[Dict[str, Any]],
+    user_id: str,
+    org_id: str,
+    api_key: str = "",
+    project_id: Optional[str] = None,
+) -> Dict[str, str]:
+    """Persona-specific recall packs for deep simulations.
+
+    MiroFish gives each spawned persona a world/profile slice. This gives each
+    existing HyperAgent an equivalent lens-specific evidence pack while still
+    sharing one blackboard.
+    """
+    async def _recall_for(emp: Dict[str, Any]) -> str:
+        lane = emp.get("_lane") or derive_lane(emp)
+        slug = emp.get("slug", "agent")
+        role_terms = " ".join(DEEP_SIM_ROLES.get(lane.lower(), [])) or lane
+        probes = [
+            f"{query} {lane} perspective {role_terms}",
+            f"{query} risks evidence constraints for {slug}",
+            f"{query} decisions revenue customers product roadmap",
+        ]
+        rows: List[Dict[str, Any]] = []
+        seen: Set[str] = set()
+        for probe in probes:
+            try:
+                resp = await recall_emulated(
+                    probe,
+                    user_id=user_id,
+                    org_id=org_id,
+                    api_key=api_key,
+                    max_memories=10,
+                    project_id=project_id,
+                )
+                for r in _extract_memory_rows(resp):
+                    mid = str(r.get("id") or r.get("memory_id") or r.get("title") or "")
+                    if not mid or mid in seen or _score_memory_row(r) < 0.35:
+                        continue
+                    seen.add(mid)
+                    rows.append(r)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[deep-sim] role recall failed slug=%s probe=%s err=%s", slug, probe[:50], exc)
+        rows.sort(key=_score_memory_row, reverse=True)
+        formatted = _format_memory_rows(rows, limit=8, snippet_chars=420)
+        if not formatted:
+            return ""
+        return (
+            f"PERSONA EVIDENCE PACK for {emp.get('name', slug)} ({lane}). "
+            "Use these facts through your own role lens; do not just repeat the shared blackboard:\n"
+            + formatted
+            + "\n"
+        )
+
+    packed = await asyncio.gather(*[_recall_for(emp) for emp in participants], return_exceptions=True)
+    out: Dict[str, str] = {}
+    for emp, value in zip(participants, packed):
+        if isinstance(value, Exception):
+            out[emp.get("slug", "")] = ""
+        else:
+            out[emp.get("slug", "")] = value or ""
+    return out
+
+
+async def _sim_agent_json(
+    *,
+    req: "RoomTurnRequest",
+    emp: Dict[str, Any],
+    prompt: str,
+    fallback: Dict[str, Any],
+) -> Dict[str, Any]:
+    try:
+        agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id, project_id=req.project_id)
+        reply = await agent(Msg(name="user", content=prompt, role="user"))
+        _report_turn(emp["id"], req.user_message, reply)
+        text = _msg_to_text(reply)
+        m = re.search(r"\{[\s\S]+\}", text)
+        parsed = json.loads(m.group(0)) if m else None
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[deep-sim] %s failed: %s", emp.get("slug"), exc)
+    return fallback
+
+
+async def _orchestrate_deep_sim(
+    req: "RoomTurnRequest",
+    participants: List[Dict[str, Any]],
+    lead: Dict[str, Any],
+    room_template: str,
+    started: float,
+) -> "RoomTurnResponse":
+    cost_tokens = 0
+    decision = (req.flyby_decision or "").strip().lower()
+    is_flyby_continuation = decision in ("agree", "disagree")
+    ontology = _build_task_ontology(req.user_message)
+    if not is_flyby_continuation:
+        await _emit_event(req.callback_url, req.turn_id, {"t": "ontology", **ontology})
+    assessment = _assess_workforce_coverage(participants, ontology)
+    if not is_flyby_continuation:
+        await _emit_event(req.callback_url, req.turn_id, {"t": "workforce_assessment", **assessment})
+
+    flyby_spec = req.flyby_spec or (_build_flyby_spec(req, assessment) if assessment.get("needs_flyby") else None)
+    if flyby_spec and assessment.get("needs_flyby") and decision not in ("agree", "disagree"):
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "flyby_proposal",
+            "spec": flyby_spec,
+            "missing_roles": assessment.get("missing_roles", []),
+            "reason": flyby_spec.get("reason"),
+        })
+        return RoomTurnResponse(ok=True, cost_tokens=0, status="awaiting_flyby")
+    if flyby_spec and decision == "agree":
+        flyby = {
+            **flyby_spec,
+            "org_id": req.org_id,
+            "_lane": derive_lane(flyby_spec),
+            "tools": DEFAULT_HYPER_TOOLS,
+        }
+        participants = participants + [flyby]
+        await _emit_event(req.callback_url, req.turn_id, {"t": "flyby_joined", "spec": flyby_spec})
+    elif flyby_spec and decision == "disagree":
+        await _emit_event(req.callback_url, req.turn_id, {"t": "flyby_skipped", "spec": flyby_spec})
+
+    await _emit_event(req.callback_url, req.turn_id, {"t": "typing", "agent": lead.get("slug"), "kind": "grounding"})
+    blackboard = await _build_turn_blackboard(
+        query=req.user_message,
+        user_id=req.user_id,
+        org_id=req.org_id,
+        api_key="",
+        project_id=req.project_id,
+    )
+    memory_context = blackboard.get("context_text") or ""
+    goal_context = _room_goal_context(req.room_goal)
+    if goal_context:
+        memory_context = _join_context(goal_context, memory_context)
+    await _emit_event(req.callback_url, req.turn_id, {
+        "t": "simulation_phase",
+        "phase": "role_grounding",
+        "label": "Role-specific recall",
+        "agents": [p.get("slug") for p in participants],
+    })
+    role_context = await _build_deep_sim_role_context(
+        query=req.user_message,
+        participants=participants,
+        user_id=req.user_id,
+        org_id=req.org_id,
+        api_key="",
+        project_id=req.project_id,
+    )
+    web_intel_context = ""
+    try:
+        web_intel_context = await _run_web_intel_turn(
+            req=req,
+            lead=lead,
+            blackboard=blackboard,
+            memory_context=memory_context,
+            room_template=room_template,
+        )
+        if web_intel_context:
+            memory_context = _join_context(memory_context, web_intel_context)
+            role_context = {
+                slug: _join_context(ctx, web_intel_context)
+                for slug, ctx in role_context.items()
+            }
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[deep-sim] web intel prefetch failed: %s", exc)
+    await _emit_event(req.callback_url, req.turn_id, {
+        "t": "simulation_phase",
+        "phase": "collect",
+        "label": "Private investigation",
+        "agents": [p.get("slug") for p in participants],
+        "blackboard": {"hit_count": blackboard.get("hit_count", 0), "confidence": blackboard.get("confidence", 0)},
+        "role_context_agents": [slug for slug, ctx in role_context.items() if ctx],
+    })
+
+    roster = _participant_brief(participants)
+    claims: List[Dict[str, Any]] = []
+
+    async def _collect(emp: Dict[str, Any]) -> Dict[str, Any]:
+        prompt = (
+            "[DEEP SIM COLLECT]\n"
+            "You are an employee in a live HIVEMIND simulation. Use your persona at full strength.\n"
+            f"Question: {req.user_message}\n\n"
+            f"Ontology: {json.dumps(ontology)[:2000]}\n\n"
+            f"Room roster:\n{roster}\n\n"
+            f"Shared blackboard:\n{memory_context or '(no recalled context)'}\n"
+            f"{role_context.get(emp.get('slug'), '')}\n"
+            "Return STRICT JSON: {\"stance\":\"...\",\"claim\":\"...\",\"evidence\":[\"memory title or id\"],\"risk\":\"...\",\"confidence\":0.0-1.0}."
+        )
+        return await _sim_agent_json(
+            req=req,
+            emp=emp,
+            prompt=prompt,
+            fallback={"stance": "conditional", "claim": "No clear claim returned.", "evidence": [], "risk": "low signal", "confidence": 0.3},
+        )
+
+    async def _collect_with_emp(emp: Dict[str, Any]) -> Dict[str, Any]:
+        return {"emp": emp, "result": await _collect(emp)}
+
+    tasks = [asyncio.create_task(_collect_with_emp(emp)) for emp in participants]
+    for task in asyncio.as_completed(tasks):
+        packed = await task
+        emp = packed["emp"]
+        c = packed["result"]
+        claim = {
+            "id": f"sim-{emp['slug']}",
+            "agent": emp["slug"],
+            "lane": emp.get("_lane"),
+            "stance": str(c.get("stance", "conditional"))[:80],
+            "claim": str(c.get("claim", ""))[:1800],
+            "evidence": [str(x)[:160] for x in (c.get("evidence") or [])][:6],
+            "risk": str(c.get("risk", ""))[:500],
+            "confidence": float(c.get("confidence") or 0.5),
+        }
+        claims.append(claim)
+        cost_tokens += max(120, len(claim["claim"]) // 4)
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "simulation_claim",
+            **claim,
+            "content": claim["claim"],
+            "round": 1,
+        })
+
+    await _emit_event(req.callback_url, req.turn_id, {"t": "simulation_phase", "phase": "debate", "label": "Peer review"})
+    reviews: List[Dict[str, Any]] = []
+
+    async def _review(emp: Dict[str, Any], target: Dict[str, Any]) -> Dict[str, Any]:
+        prompt = (
+            "[DEEP SIM PEER REVIEW]\n"
+            f"You are {emp.get('name', emp.get('slug'))}. Review this teammate claim hard but fairly.\n"
+            f"User question: {req.user_message}\n"
+            f"Target claim by {target['agent']}: {target['claim']}\n"
+            f"Shared blackboard:\n{memory_context or '(no recalled context)'}\n"
+            f"{role_context.get(emp.get('slug'), '')}\n"
+            "Return STRICT JSON: {\"agreement\":\"agree|extend|challenge\",\"review\":\"...\",\"condition\":\"...\",\"confidence\":0.0-1.0}."
+        )
+        return await _sim_agent_json(
+            req=req,
+            emp=emp,
+            prompt=prompt,
+            fallback={"agreement": "extend", "review": "No review returned.", "condition": "", "confidence": 0.4},
+        )
+
+    async def _review_with_emp_target(emp: Dict[str, Any], target: Dict[str, Any]) -> Dict[str, Any]:
+        return {"emp": emp, "target": target, "result": await _review(emp, target)}
+
+    review_tasks = []
+    for i, emp in enumerate(participants):
+        if not claims:
+            continue
+        target = claims[(i + 1) % len(claims)]
+        review_tasks.append(asyncio.create_task(_review_with_emp_target(emp, target)))
+    for task in asyncio.as_completed(review_tasks):
+        packed = await task
+        emp = packed["emp"]
+        target = packed["target"]
+        r = packed["result"]
+        agreement = str(r.get("agreement", "extend")).lower()
+        if agreement not in ("agree", "extend", "challenge"):
+            agreement = "extend"
+        review = {
+            "reviewer": emp["slug"],
+            "target_hypothesis_id": target["id"],
+            "target_author": target["agent"],
+            "agreement": agreement,
+            "content": str(r.get("review", ""))[:1200],
+            "condition": str(r.get("condition", ""))[:400],
+            "confidence": float(r.get("confidence") or 0.5),
+            "round": 2,
+        }
+        reviews.append(review)
+        cost_tokens += max(80, len(review["content"]) // 4)
+        await _emit_event(req.callback_url, req.turn_id, {"t": "peer_review", **review})
+
+    await _emit_event(req.callback_url, req.turn_id, {"t": "simulation_phase", "phase": "revise", "label": "Revision"})
+    lead_agent = await _build_agent_for_room(req.room_id, lead, user_id=req.user_id, org_id=req.org_id, project_id=req.project_id)
+    conclusion_prompt = (
+        "[DEEP SIM CONCLUSION]\n"
+        "You are the lead. Synthesize the simulated Slack session into a strong enterprise decision.\n"
+        f"Question: {req.user_message}\n\n"
+        f"Claims: {json.dumps(claims)[:6000]}\n\n"
+        f"Peer reviews: {json.dumps(reviews)[:6000]}\n\n"
+        f"Blackboard: {memory_context[:6000]}\n"
+        f"Lead evidence pack: {role_context.get(lead.get('slug'), '')[:4000]}\n"
+        "Write 5-8 concise bullets: decision, why, objections addressed, what to watch, next irreversible choice. "
+        "Do not soften strong POVs; preserve dissent where unresolved."
+    )
+    final_reply = await lead_agent(Msg(name="user", content=conclusion_prompt, role="user"))
+    _report_turn(lead["id"], req.user_message, final_reply)
+    final_text = _msg_to_text(final_reply) or "(lead synthesis failed)"
+    cost_tokens += max(250, len(final_text) // 4)
+    await _emit_event(req.callback_url, req.turn_id, {
+        "t": "line",
+        "agent": lead.get("slug"),
+        "round": 3,
+        "kind": "synthesis",
+        "content": final_text,
+        "tokens": max(250, len(final_text) // 4),
+    })
+
+    await _emit_event(req.callback_url, req.turn_id, {"t": "simulation_phase", "phase": "vote", "label": "Decision votes"})
+    vote_summary: List[Dict[str, Any]] = []
+    for claim in claims:
+        support = sum(1 for r in reviews if r["target_hypothesis_id"] == claim["id"] and r["agreement"] in ("agree", "extend"))
+        challenge = sum(1 for r in reviews if r["target_hypothesis_id"] == claim["id"] and r["agreement"] == "challenge")
+        score = max(1, min(5, 3 + support - challenge))
+        vote = {
+            "voter": claim["agent"],
+            "vote_for_hypothesis_id": claim["id"],
+            "score": score,
+            "conditions": [r["condition"] for r in reviews if r["target_hypothesis_id"] == claim["id"] and r.get("condition")][:3],
+            "content": f"{claim['agent']} backs its {claim['stance']} stance with score {score}/5.",
+            "round": 4,
+        }
+        vote_summary.append(vote)
+        await _emit_event(req.callback_url, req.turn_id, {"t": "vote", **vote})
+
+    verdict = "AGREED" if vote_summary and sum(v["score"] for v in vote_summary) / len(vote_summary) >= 3.5 else "CONDITIONAL"
+    await _emit_event(req.callback_url, req.turn_id, {
+        "t": "swarm_verdict",
+        "verdict": verdict,
+        "weighted_score": round(sum(v["score"] for v in vote_summary) / max(len(vote_summary), 1), 2),
+        "winning_hypothesis_id": max(vote_summary, key=lambda v: v["score"])["vote_for_hypothesis_id"] if vote_summary else None,
+        "action_items": [v["conditions"][0] for v in vote_summary if v.get("conditions")][:6],
+        "vote_count": len(vote_summary),
+    })
+    await _emit_event(req.callback_url, req.turn_id, _build_harness_quality_check(
+        room_goal=req.room_goal or "",
+        final_text=final_text,
+        evidence_count=len(blackboard.get("memory_hits", []) or blackboard.get("memory_ids", []) or []),
+        source_count=len(_web_sources_for_turn(req.turn_id)),
+        claims_count=len(claims),
+        reviews_count=len(reviews),
+        votes_count=len(vote_summary),
+        web_intel_used=bool(web_intel_context),
+    ))
+    await _emit_event(req.callback_url, req.turn_id, _build_final_report(
+        user_message=req.user_message,
+        final_text=final_text,
+        template=room_template,
+        room_goal=req.room_goal or "",
+        status="complete",
+        verdict=verdict,
+        score=round(sum(v["score"] for v in vote_summary) / max(len(vote_summary), 1), 2),
+        lead=lead,
+        action_items=[v["conditions"][0] for v in vote_summary if v.get("conditions")][:6],
+        evidence_ids=blackboard.get("memory_ids", []),
+        evidence=blackboard.get("memory_hits", []),
+        sources=_web_sources_for_turn(req.turn_id),
+        claims=claims,
+        reviews=reviews,
+        votes=vote_summary,
+        web_intel_used=bool(web_intel_context),
+    ))
+    await _emit_event(req.callback_url, req.turn_id, {
+        "t": "seal",
+        "cost_tokens": cost_tokens,
+        "status": "complete",
+        "duration_ms": int((time.time() - started) * 1000),
+        "template": room_template,
+        "blackboard": {"hit_count": blackboard.get("hit_count", 0), "confidence": blackboard.get("confidence", 0)},
+        "flyby": bool(flyby_spec and decision == "agree"),
+        "simulation_claims": len(claims),
+        "simulation_reviews": len(reviews),
+    })
+    _WEB_INTEL_PAYLOADS.pop(req.turn_id, None)
+    return RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status="complete")
 
 
 # ─── Swarm orchestrator (Phase 4) ──────────────────────────────────────
@@ -785,8 +2201,8 @@ LANE_PLAYBOOKS: Dict[str, str] = {
         "  1. silent: hivemind_recall(query)\n"
         "  2. silent: identify top entity:* tag from R1 hits, hivemind_recall(entity_name)\n"
         "  3. silent: hivemind_traverse_graph on top memory, depth=2\n"
-        "  4. silent: if memory thin, hivemind_web_research(focused query)\n"
-        "  5. write with at least 2 cited memory_ids + 1 fact from web if used\n"
+        "  4. consume the room's WEB INTEL DOSSIER if present; do not browse directly\n"
+        "  5. write with at least 2 cited memory_ids plus the dossier's source urls when available\n"
     ),
     "Builder": (
         "LANE PLAYBOOK (Builder — implementation + status reality):\n"
@@ -1030,8 +2446,10 @@ Vote tally (weighted by trust):
 
 Verdict computed by consensus formula: {verdict}
 Winning hypothesis id: {winning_id}
+Room goal: {room_goal}
 
 Your task: synthesise the final answer for the user.
+- Tie the answer back to the room goal; say whether the goal moved forward, stalled, or needs follow-up.
 - Quote the winning hypothesis (and the runner-up if CONDITIONAL).
 - Address the Skeptic's strongest challenge explicitly.
 - Cite memory_ids from the union of evidence used across all rounds.
@@ -1057,7 +2475,8 @@ _COMPANY_BRIEF_PROBES: List[str] = [
 
 
 async def _build_company_brief(query: str, user_id: str, org_id: str,
-                               api_key: str = "", max_memories: int = 25) -> str:
+                               api_key: str = "", max_memories: int = 25,
+                               project_id: Optional[str] = None) -> str:
     """Fan out orthogonal recalls (query + company/people/customers/goals),
     dedup by memory id/title, compress to ~25 snippets, return a standing
     COMPANY CONTEXT block. Recalls via master+emulation (recall_emulated) so
@@ -1071,7 +2490,8 @@ async def _build_company_brief(query: str, user_id: str, org_id: str,
     async def _probe(p: str) -> List[Dict[str, Any]]:
         try:
             resp = await recall_emulated(p, user_id=user_id, org_id=org_id,
-                                         api_key=api_key, max_memories=8)
+                                         api_key=api_key, max_memories=8,
+                                         project_id=project_id)
             return resp.get("memories") or resp.get("combined") or []
         except Exception as exc:  # noqa: BLE001 — one probe failing must not sink the brief
             log.warning("[brief] recall probe failed (%s): %s", p[:40], exc)
@@ -1232,7 +2652,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
     # ─── R1 — Independent Hypothesis ───────────────────────────────────
     async def _run_r1(emp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         try:
-            agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id)
+            agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id, project_id=req.project_id)
             prompt = R1_HYPOTHESIS_PROMPT.format(
                 persona_name=emp.get("name", emp.get("slug")),
                 lane=emp["_lane"],
@@ -1268,7 +2688,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
 
     # Stagger starts so 9-concurrent Groq calls don't 429.
     async def _staggered_r1(emp, idx):
-        await asyncio.sleep(1.5 * idx)
+        await asyncio.sleep(0.25 * idx)
         return await _run_r1(emp)
     r1_results = await asyncio.gather(*[_staggered_r1(emp, i) for i, emp in enumerate(speakers)], return_exceptions=False)
     hypotheses = [h for h in r1_results if h]
@@ -1375,7 +2795,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
             if not target_ids:
                 return []
             try:
-                agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id)
+                agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id, project_id=req.project_id)
                 prompt = R2_PEER_REVIEW_PROMPT.format(
                     persona_name=emp.get("name", emp.get("slug")),
                     lane=emp["_lane"],
@@ -1417,7 +2837,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
                 return []
 
         async def _staggered_r2(emp, idx):
-            await asyncio.sleep(1.5 * idx)
+            await asyncio.sleep(0.25 * idx)
             return await _run_r2(emp)
         if not cost_cap_hit:
             r2_lists = await asyncio.gather(*[_staggered_r2(emp, i) for i, emp in enumerate(speakers)], return_exceptions=False)
@@ -1463,7 +2883,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
                 for rv in own_reviews
             ) or "  (no peer reviews of your hypothesis)"
             try:
-                agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id)
+                agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id, project_id=req.project_id)
                 prompt = R3_DEEP_DIVE_PROMPT.format(
                     persona_name=emp.get("name", emp.get("slug")),
                     lane=emp["_lane"],
@@ -1499,7 +2919,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
                 return None
 
         async def _staggered_r3(emp, idx):
-            await asyncio.sleep(1.5 * idx)
+            await asyncio.sleep(0.25 * idx)
             return await _run_r3(emp)
         if not cost_cap_hit and _turn_tool_total() >= HYPER_ROOM_MAX_TOOL_CALLS:
             cost_cap_hit = True
@@ -1624,7 +3044,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
 
         async def _run_vote(emp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             try:
-                agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id)
+                agent = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id, project_id=req.project_id)
                 prompt = R5_VOTE_PROMPT.format(
                     persona_name=emp.get("name", emp.get("slug")),
                     lane=emp["_lane"],
@@ -1652,7 +3072,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
                 return None
 
         async def _staggered_vote(emp, idx):
-            await asyncio.sleep(1.5 * idx)
+            await asyncio.sleep(0.25 * idx)
             return await _run_vote(emp)
         if not cost_cap_hit and _turn_tool_total() >= HYPER_ROOM_MAX_TOOL_CALLS:
             cost_cap_hit = True
@@ -1768,7 +3188,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
                     req.turn_id, consensus["verdict"])
     else:
         try:
-            lead_agent = await _build_agent_for_room(req.room_id, lead, user_id=req.user_id, org_id=req.org_id)
+            lead_agent = await _build_agent_for_room(req.room_id, lead, user_id=req.user_id, org_id=req.org_id, project_id=req.project_id)
             vote_summary_lines = []
             for v in votes:
                 vote_summary_lines.append(
@@ -1782,6 +3202,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
                 vote_summary="\n".join(vote_summary_lines) or "(no votes)",
                 verdict=consensus["verdict"],
                 winning_id=consensus["winning_id"] or "none",
+                room_goal=req.room_goal or "",
             )
             synth_reply = await lead_agent(Msg(name="user", content=synth_prompt, role="user"))
             _report_turn(lead["id"], req.user_message, synth_reply)
@@ -1887,6 +3308,50 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
         req.turn_id, consensus["verdict"], sum(tool_call_counts.values()),
         tool_call_counts, len(evidence_pool),
     )
+    report_claims: List[Dict[str, Any]] = []
+    for r in refined or []:
+        report_claims.append({
+            "agent_slug": r.get("agent_slug"),
+            "agent_name": r.get("agent_name"),
+            "lane": r.get("lane"),
+            "refined_hypothesis": r.get("refined_hypothesis"),
+        })
+    if not report_claims:
+        for h in hypotheses or []:
+            report_claims.append({
+                "agent_slug": h.get("agent_slug"),
+                "agent_name": h.get("agent_name"),
+                "lane": h.get("lane"),
+                "hypothesis": h.get("hypothesis"),
+            })
+    await _emit_event(req.callback_url, req.turn_id, _build_harness_quality_check(
+        room_goal=req.room_goal or "",
+        final_text=final_text,
+        evidence_count=len(evidence_pool),
+        source_count=len(_web_sources_for_turn(req.turn_id)),
+        claims_count=len(report_claims),
+        reviews_count=len(peer_reviews),
+        votes_count=len(votes),
+        web_intel_used="WEB INTEL DOSSIER" in (memory_context or ""),
+    ))
+    await _emit_event(req.callback_url, req.turn_id, _build_final_report(
+        user_message=req.user_message,
+        final_text=final_text,
+        template=room_template,
+        room_goal=req.room_goal or "",
+        status=status,
+        verdict=consensus["verdict"],
+        score=consensus.get("weighted_score"),
+        lead=lead,
+        action_items=consensus.get("action_items") or [],
+        evidence_ids=sorted(evidence_pool)[:50],
+        sources=_web_sources_for_turn(req.turn_id),
+        claims=report_claims,
+        reviews=peer_reviews,
+        votes=votes,
+        objections=(skeptic_output.get("challenges") or []),
+        web_intel_used="WEB INTEL DOSSIER" in (memory_context or ""),
+    ))
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "seal",
         "cost_tokens": cost_tokens,
@@ -1902,6 +3367,7 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
         "vote_count": len(votes),
         "cost_cap_hit": cost_cap_hit,
     })
+    _WEB_INTEL_PAYLOADS.pop(req.turn_id, None)
     return RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status=status)
 
 
@@ -1913,6 +3379,12 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     the way, returns the final cost + status.
     """
     started = time.time()
+    perf_started = time.perf_counter()
+    timing: Dict[str, int] = {}
+
+    def _mark(label: str) -> None:
+        timing[label] = int((time.perf_counter() - perf_started) * 1000)
+
     cost_tokens = 0
     status = "complete"
 
@@ -1962,13 +3434,10 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     # (seq lives on hyper_turns, written by the control-plane). Resolve a
     # locked permanent skeptic first so lead rotation can exclude it.
     # All reads are org-scoped so a foreign room/turn id can't leak config.
+    permanent_skeptic_id = await get_permanent_skeptic_id(req.room_id, org_id=req.org_id)
+    permanent_lead_id = await get_permanent_lead_id(req.room_id, org_id=req.org_id)
     raw_seq = await get_turn_seq(req.turn_id, org_id=req.org_id)
     if raw_seq is None:
-        # No seq available (missing row / NULL / pre-migration column / DB
-        # error). Falling back to a fixed 0 would freeze rotation onto the
-        # alphabetically-first lead forever. Derive a deterministic-but-
-        # varying ordinal from the turn id so rotation still cycles, and
-        # surface the degraded path so it's observable.
         seq = (int(hashlib.sha1(req.turn_id.encode("utf-8")).hexdigest(), 16) % 997) + 1
         log.warning("[hyper] get_turn_seq returned None for turn=%s — using hashed ordinal %d",
                     req.turn_id, seq)
@@ -1977,12 +3446,11 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         })
     else:
         seq = raw_seq
-    permanent_skeptic_id = await get_permanent_skeptic_id(req.room_id, org_id=req.org_id)
-    # Lead: @mention override wins; otherwise rotate by seq, excluding a
-    # locked permanent skeptic so the skeptic is never auto-elected lead.
-    lead = forced or _pick_lead_rotating(
-        participants, req.user_message, seq, permanent_skeptic_id,
-    )
+    # Lead: @mention override wins; otherwise use the room's pinned lead.
+    # This avoids recomputing router selection on every turn.
+    lead = forced or _pick_lead_fixed(participants, permanent_lead_id, permanent_skeptic_id)
+    if lead is None:
+        raise RuntimeError("no eligible lead")
     reactors = _pick_reactors(participants, lead)
 
     # B1: per-room template (debate | decision | swarm | brainstorm | council
@@ -1994,6 +3462,9 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         if picked and picked != room_template:
             log.info("[template] auto-picked %s for room %s (was %s)", picked, req.room_id, room_template)
         room_template = picked
+    elif _is_deep_sim_prompt(req.user_message):
+        log.info("[template] promoted explicit simulation prompt to deep_sim room=%s previous=%s", req.room_id, room_template)
+        room_template = "deep_sim"
     # A4: pull trust scores for display only (no routing weight yet).
     trust_map = await get_trust_scores(req.org_id, [p["id"] for p in participants])
     trust_by_slug = {p.get("slug"): trust_map.get(p["id"], 0.5) for p in participants}
@@ -2029,31 +3500,42 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             "stand_in_skeptic": skeptic.get("slug") if skeptic else None,
         })
 
-    await _emit_event(req.callback_url, req.turn_id, {
-        "t": "router",
-        "lead": lead.get("slug"),
-        "reactors": [r.get("slug") for r in reactors],
-        "lanes": {p.get("slug"): p["_lane"] for p in participants},
-        "template": room_template,
-        "trust": trust_by_slug,
-        "skeptic": skeptic.get("slug") if skeptic else None,
-        "turn_seq": seq,
-    })
+    if (req.flyby_decision or "").strip().lower() not in ("agree", "disagree"):
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "router",
+            "id": f"router:{req.turn_id}:authoritative",
+            "lead": lead.get("slug"),
+            "reactors": [r.get("slug") for r in reactors],
+            "lanes": {p.get("slug"): p["_lane"] for p in participants},
+            "template": room_template,
+            "trust": trust_by_slug,
+            "skeptic": skeptic.get("slug") if skeptic else None,
+            "turn_seq": seq,
+        })
+    _mark("router_ms")
+
+    # ── Deep simulation template — MiroFish-style live room ───────────
+    if room_template == "deep_sim":
+        return await _orchestrate_deep_sim(
+            req, participants, lead, room_template, started,
+        )
 
     # ── Swarm template — branch into R1-R5 phase machine ──────────────
     if room_template == "swarm":
         # Best-effort pre-fetch memory context for R1 (shared across all agents).
         # Recall via master+emulation (req.user_id/org_id) so it reaches the
         # org brain regardless of whether bootstrap minted a lead key.
-        memory_context_swarm = ""
+        memory_context_swarm = _room_goal_context(req.room_goal)
+        swarm_blackboard: Dict[str, Any] = {"confidence": 0.0, "hit_count": 0}
         try:
             boot_map = {b["id"]: b for b in await fetch_bootstrap()}
             lead_api_key = (boot_map.get(lead["id"], {}) or {}).get("api_key", "") or ""
             company_brief = await _build_company_brief(
-                req.user_message, req.user_id, req.org_id, lead_api_key)
+                req.user_message, req.user_id, req.org_id, lead_api_key,
+                project_id=req.project_id)
             recall_resp = await recall_emulated(
                 req.user_message, user_id=req.user_id, org_id=req.org_id,
-                api_key=lead_api_key, max_memories=6)
+                api_key=lead_api_key, max_memories=6, project_id=req.project_id)
             rows = recall_resp.get("memories") or recall_resp.get("combined") or []
             rows = [r for r in rows if float(r.get("score", 0)) >= 0.45]
             candidate_block = ""
@@ -2072,73 +3554,93 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                         "CANDIDATE MEMORIES (most relevant to the user's question):\n"
                         + "\n".join(lines_out) + "\n"
                     )
-            memory_context_swarm = (company_brief + candidate_block).strip()
+            swarm_blackboard = {
+                "confidence": 0.55 if rows else 0.0,
+                "hit_count": len(rows),
+            }
+            memory_context_swarm = _join_context(memory_context_swarm, company_brief + candidate_block)
             if memory_context_swarm:
                 memory_context_swarm += "\n"
         except Exception as exc:  # noqa: BLE001
             log.warning("[swarm] pre-fetch failed: %s", exc)
+        try:
+            web_intel_swarm = await _run_web_intel_turn(
+                req=req,
+                lead=lead,
+                blackboard=swarm_blackboard,
+                memory_context=memory_context_swarm,
+                room_template=room_template,
+            )
+            if web_intel_swarm:
+                memory_context_swarm = _join_context(memory_context_swarm, web_intel_swarm)
+                memory_context_swarm += "\n"
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[swarm] web intel prefetch failed: %s", exc)
         return await _orchestrate_swarm(
             req, participants, lead, skeptic,
             memory_context_swarm, room_template,
             cost_tokens, started,
         )
 
-    # ── Pre-fetch HIVEMIND context (grounded RAG) ───────────────────
-    # Don't rely on the agent's tool calls — Groq/llama function-call
-    # reliability varies. Pull recall results server-side and inject
-    # them into the lead prompt so the agent ALWAYS sees relevant
-    # memories without needing to emit a tool call first.
+    # ── Shared blackboard (grounded RAG) ─────────────────────────────
+    # Build one evidence board for the turn, then inject it into every
+    # participant prompt. This avoids N broad ReAct recall loops while still
+    # letting agents run targeted tools if the board has a real gap.
+    await _emit_event(req.callback_url, req.turn_id, {
+        "t": "typing", "agent": lead.get("slug"), "kind": "grounding",
+    })
     memory_context = ""
+    blackboard: Dict[str, Any] = {
+        "context_text": "",
+        "memory_hits": [],
+        "hit_count": 0,
+        "confidence": 0.0,
+        "memory_ids": [],
+    }
     try:
         boot_map = {b["id"]: b for b in await fetch_bootstrap()}
         lead_api_key = (boot_map.get(lead["id"], {}) or {}).get("api_key", "") or ""
-        # Broad standing brief first (who/what/why), then the query-specific
-        # candidate memories on top. Recall via master+emulation so it reaches
-        # the org brain regardless of whether bootstrap minted a lead key.
-        company_brief = await _build_company_brief(
-            req.user_message, req.user_id, req.org_id, lead_api_key)
-        recall_resp = await recall_emulated(
-            req.user_message, user_id=req.user_id, org_id=req.org_id,
-            api_key=lead_api_key, max_memories=6)
-        rows = recall_resp.get("memories") or recall_resp.get("combined") or []
-        # Drop low-relevance hits so a single dominant memory (long
-        # AUDIT memo etc.) doesn't crowd out diverse signal.
-        MIN_SCORE = 0.45
-        rows = [r for r in rows if float(r.get("score", 0)) >= MIN_SCORE]
-        candidate_block = ""
-        if rows:
-            lines_out = []
-            for r in rows[:5]:
-                title = (r.get("title") or "").strip()
-                content = (r.get("content") or "").replace("\n", " ").strip()
-                if not content:
-                    continue
-                # Shorter snippet — was 1200, now 300. Lead can ask
-                # for full memory via recall tool if needed.
-                snippet = content[:300] + ("…" if len(content) > 300 else "")
-                prefix = f'"{title}" — ' if title else ""
-                lines_out.append(f"- {prefix}{snippet}")
-            if lines_out:
-                candidate_block = (
-                    "CANDIDATE MEMORIES (most relevant to the user's question):\n"
-                    + "\n".join(lines_out)
-                    + "\n"
-                )
-        memory_context = (company_brief + candidate_block).strip()
-        if memory_context:
-            memory_context += "\n"
+        blackboard = await _build_turn_blackboard(
+            query=req.user_message,
+            user_id=req.user_id,
+            org_id=req.org_id,
+            api_key=lead_api_key,
+            project_id=req.project_id,
+        )
+        memory_context = blackboard.get("context_text") or ""
     except Exception as exc:  # noqa: BLE001
-        log.warning("hyper-rooms pre-fetch recall failed: %s", exc)
+        log.warning("hyper-rooms blackboard build failed: %s", exc)
+    current_turn_state = _format_current_turn_state(req.user_message, blackboard)
+    goal_context = _room_goal_context(req.room_goal)
+    if goal_context:
+        memory_context = _join_context(goal_context, memory_context)
+        current_turn_state = _join_context(goal_context, current_turn_state)
+    try:
+        web_intel_context = await _run_web_intel_turn(
+            req=req,
+            lead=lead,
+            blackboard=blackboard,
+            memory_context=memory_context,
+            room_template=room_template,
+        )
+        if web_intel_context:
+            memory_context = _join_context(memory_context, web_intel_context)
+            current_turn_state = _join_context(current_turn_state, web_intel_context)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("hyper-rooms web intel prefetch failed: %s", exc)
+    _mark("blackboard_ms")
 
     # ── Lead generates full response ─────────────────────────────────
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "typing", "agent": lead.get("slug"), "kind": "lead",
     })
+    _mark("lead_start_ms")
+    fast_decision_candidate = _is_fast_decision_candidate(req.user_message, room_template)
     lead_text = ""
     lead_agent = None
     lead_prompt = ""
     try:
-        lead_agent = await _build_agent_for_room(req.room_id, lead, user_id=req.user_id, org_id=req.org_id)
+        lead_agent = await _build_agent_for_room(req.room_id, lead, user_id=req.user_id, org_id=req.org_id, project_id=req.project_id)
         # Provide CSI persona framing in the user-prompt wrapper so we
         # don't have to mutate the agent's underlying system prompt.
         # Chat-tone constraints — this is a Slack-style room, NOT a memo.
@@ -2146,6 +3648,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             grounding = (
                 "GROUNDING — you ALREADY have the relevant memories above.\n"
                 "- Answer NOW directly from them. Do NOT announce, narrate, or plan tool calls.\n"
+                "- Do NOT run broad recall again. Use tools only for one precise missing fact.\n"
                 "- BANNED phrases: 'we need to recall', 'let's recall', 'we should traverse', "
                 "'let me check', 'we'll review'. You already have the context — use it.\n"
                 "- When you state a fact, name its memory title inline: '<claim> — from \"<title>\"'.\n"
@@ -2177,6 +3680,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             f"[CSI swarm — you are an EMPLOYEE at the HIVEMIND organisation. "
             f"You're the LEAD speaking up this turn. Your lane: {lead['_lane']}.]\n\n"
             + template_hint
+            + (current_turn_state + "\n" if current_turn_state else "")
             + (memory_context + "\n" if memory_context else "")
             + f"WHO YOU ARE:\n"
             f"- You work AT HIVEMIND. The 'HIVEMIND' in this room = our org / our product.\n"
@@ -2188,6 +3692,8 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             f"explicitly asked for owners/dates.\n"
             f"- Pull facts from the memories above; persona-flavour them in YOUR voice "
             f"({lead['_lane']}).\n"
+            f"- Treat CURRENT TURN STATE as authoritative. If the user supplied a value, "
+            f"constraint, date, name, or requirement there, use it instead of asking for it again.\n"
             f"- NEVER invent owners, dates, deadlines, or assignments. If memory does not name a "
             f"person responsible, don't assign one.\n"
             f"- If the user adds a constraint mid-thread ('this is only about X'), narrow your "
@@ -2275,6 +3781,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         "content": lead_text,
         "tokens": lead_tokens,
     })
+    _mark("lead_line_ms")
 
 
     # ── Reactors (parallel) ──────────────────────────────────────────
@@ -2292,6 +3799,8 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             lead_name=lead.get("name", lead.get("slug", "lead")),
             reactor_lane=r["_lane"],
             is_opposing=is_opp,
+            blackboard_context=memory_context,
+            current_turn_state=current_turn_state,
         )))
 
     reactions: List[Dict[str, Any]] = []
@@ -2333,20 +3842,30 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 "agreement": result.get("agreement", "extend"),
                 "confidence": float(result.get("confidence", 0.5)),
                 "content": line,
+                "evidence": result.get("evidence", []),
+                "gap": result.get("gap", ""),
                 "tokens": r_tokens,
             }
             reactions.append({**event, "emp": r_emp})
             await _emit_event(req.callback_url, req.turn_id, event)
 
+    _mark("reactor_round1_ms")
 
-    # ── Synthesis round (always when reactors spoke) ────────────────
+    fast_decision_exit = (
+        fast_decision_candidate
+        and not _has_strong_challenge(reactions)
+        and _is_substantive_lead(lead_text, bool(memory_context))
+        and float(blackboard.get("confidence", 0) or 0) >= 0.34
+    )
+
+    # ── Synthesis round (always when reactors spoke, unless fast gate passed) ─
     # Reactors emit suggestion lines ("we should recall X", "what's the next
     # step"). Without a closer, the turn ends on those suggestions — the
     # user sees prompts to do work, not the work itself. Synthesis lets the
     # lead absorb the reactor lines + actually exercise tools (recall /
     # traverse) and produce one final actionable bubble.
     synth_text = ""
-    if reactions:
+    if reactions and not fast_decision_exit:
         await _emit_event(req.callback_url, req.turn_id, {
             "t": "typing", "agent": lead.get("slug"), "kind": "synthesis",
         })
@@ -2357,6 +3876,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             )
             synth_prompt = (
                 f"[CSI synthesis pass — you're still the HIVEMIND employee. Lane: {lead['_lane']}.]\n\n"
+                + (current_turn_state + "\n" if current_turn_state else "")
                 + (memory_context + "\n" if memory_context else "")
                 + f"USER'S ORIGINAL QUESTION:\n\"{req.user_message}\"\n\n"
                 f"YOUR EARLIER LEAD LINE:\n\"{lead_text}\"\n\n"
@@ -2365,8 +3885,11 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 f"project plan with owners/dates unless the user asked for one.\n"
                 f"  • If a reactor surfaced a NEW fact from memory → fold it in and cite the title.\n"
                 f"  • If a reactor challenged a claim → defend with a memory hit, or concede.\n"
+                f"  • If the user supplied a concrete fact in CURRENT TURN STATE → incorporate it; "
+                f"do not ask for it again.\n"
                 f"  • If a reactor's point is outside scope of the user's question → ignore it.\n"
-                f"  • Need more grounding? Call hivemind_recall / traverse_graph silently first.\n\n"
+                f"  • The shared blackboard is already above. Only call hivemind_recall / traverse_graph "
+                f"for one precise missing fact.\n\n"
                 f"OUTPUT: 3-5 short sentences. Stay on the user's question. Chat tone, 'we / our'.\n"
                 f"Quote memory titles inline. NEVER invent owners, dates, or deadlines. No 'happy to "
                 f"help' fluff.\n"
@@ -2390,6 +3913,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 })
         except Exception as exc:  # noqa: BLE001
             log.warning("synthesis failed: %s", exc)
+        _mark("synthesis_ms")
 
         # ── Post-synthesis reactor pass (MiroFish-style forward motion) ──
         # After the lead synthesises, reactors get one more turn to push back
@@ -2410,6 +3934,8 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 lead_name=lead.get("name", lead.get("slug", "lead")),
                 reactor_lane=r["_lane"],
                 is_opposing=is_opp2,
+                blackboard_context=memory_context,
+                current_turn_state=current_turn_state,
             )))
         post_synth_results = await asyncio.gather(*post_synth_tasks, return_exceptions=True)
         for r_emp, result in zip(reactors, post_synth_results):
@@ -2429,10 +3955,15 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 "agreement": result.get("agreement", "extend"),
                 "confidence": float(result.get("confidence", 0.5)),
                 "content": line,
+                "evidence": result.get("evidence", []),
+                "gap": result.get("gap", ""),
                 "tokens": r_tokens,
             }
             reactions.append({**event, "emp": r_emp})
             await _emit_event(req.callback_url, req.turn_id, event)
+        _mark("post_synthesis_ms")
+    elif fast_decision_exit:
+        _mark("fast_decision_exit_ms")
 
     # ── Round 2 challenger debate (only if reactor explicitly challenged) ──
     challenger_reaction = next(
@@ -2463,6 +3994,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     final_verdict: Optional[str] = None
     open_question: str = ""
     last_revise_text: str = ""
+    last_gap_signature: str = ""
 
     def _challenge_repeats(prev: str, nxt: str) -> bool:
         """True when the new challenge is essentially the prior one — same
@@ -2477,6 +4009,18 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         union = len(ag | bg) or 1
         return (inter / union) >= 0.6
 
+    def _gap_repeats(prev: str, nxt: str) -> bool:
+        """Structured remaining_gaps are short and often paraphrased. Token
+        overlap catches 'staffing/automation plan' repeats without requiring
+        identical 4-grams."""
+        a, b = _normalize_for_dedup(prev), _normalize_for_dedup(nxt)
+        if not a or not b:
+            return False
+        aw, bw = set(a.split()), set(b.split())
+        if not aw or not bw:
+            return False
+        return (len(aw & bw) / max(1, min(len(aw), len(bw)))) >= 0.6
+
     while challenger_reaction and debate_round <= MAX_DEBATE_ROUNDS:
         await _emit_event(req.callback_url, req.turn_id, {
             "t": "typing", "agent": lead.get("slug"), "kind": "revise",
@@ -2484,12 +4028,16 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         try:
             revise_prompt = (
                 f"[CSI revision pass round {debate_round} — HIVEMIND employee. Lane: {lead['_lane']}.]\n"
-                f"USER'S ORIGINAL QUESTION: \"{req.user_message}\"\n"
-                f"{challenger_reaction['emp'].get('name')} ({challenger_reaction['emp']['_lane']}) pushed back:\n"
-                f"\"{current_challenge_text}\"\n\n"
-                f"Reconsider. If right, concede + revise. If standing by, defend with a memory "
-                f"hit — quote the title. No invented owners / dates. Stay on the user's question. "
-                f"2-4 sentences, chat tone, 'we / our'."
+                + (current_turn_state + "\n" if current_turn_state else "")
+                + (memory_context + "\n" if memory_context else "")
+                + f"USER'S ORIGINAL QUESTION: \"{req.user_message}\"\n"
+                + f"{challenger_reaction['emp'].get('name')} ({challenger_reaction['emp']['_lane']}) pushed back:\n"
+                + f"\"{current_challenge_text}\"\n\n"
+                + f"Reconsider like a real employee: compare [user_fact], [memory], your prior claim, "
+                + f"and the challenger's [gap]. If the challenger is right, concede + revise. If standing "
+                + f"by, defend with a memory title or a current user fact. Do NOT ask again for any value, "
+                + f"date, name, constraint, or requirement already listed in CURRENT TURN STATE. "
+                + f"No invented owners / dates. Stay on the user's question. 2-4 sentences, chat tone, 'we / our'."
             )
             reply2 = await lead_agent(Msg(name="user", content=revise_prompt, role="user"))
             revise_text = _msg_to_text(reply2) or "(no revision)"
@@ -2510,12 +4058,25 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             ch_agent = await _build_agent_for_room(req.room_id, challenger_reaction["emp"], user_id=req.user_id, org_id=req.org_id)
             validate_prompt = (
                 f"[CSI validation pass round {debate_round} — lane: {challenger_reaction['emp']['_lane']}.]\n"
-                f"{lead.get('name')} responded to your challenge:\n"
-                f"\"{revise_text}\"\n\n"
-                f"Did the lead resolve your concern with concrete memory evidence, or is the gap "
-                f"still real?\n"
-                f"Reply in STRICT JSON:\n"
-                f'{{"verdict": "resolved" | "escalate", "line": "1-2 sentences (cite a memory if escalating)"}}'
+                + (current_turn_state + "\n" if current_turn_state else "")
+                + f"Current user message:\n\"{req.user_message}\"\n"
+                + f"Your original/current challenge was:\n\"{current_challenge_text}\"\n\n"
+                + f"{lead.get('name')} responded to your challenge:\n"
+                + f"\"{revise_text}\"\n\n"
+                + f"Validate using this schematic:\n"
+                + f"1. [user_fact] = facts supplied in CURRENT TURN STATE.\n"
+                + f"2. [memory] = recalled durable evidence above.\n"
+                + f"3. [employee_claim] = lead's revised answer.\n"
+                + f"4. [gap] = what remains unresolved after comparing 1-3.\n\n"
+                + f"Resolve if the lead used the current user facts or memory evidence well enough. "
+                + f"Escalate only if a real gap remains, such as missing validation evidence, unresolved "
+                + f"risk, contradictory memory, implementation feasibility, cost/margin proof, legal/security "
+                + f"risk, or unclear decision ownership. Never escalate by saying a user-supplied detail is "
+                + f"missing when it appears in CURRENT TURN STATE.\n"
+                + f"Reply in STRICT JSON:\n"
+                + f'{{"verdict": "resolved" | "escalate", "line": "1-2 sentences", '
+                + f'"resolved_facts": ["facts now handled"], "remaining_gaps": ["real unresolved gaps"], '
+                + f'"next_action": "one concrete action if escalating, else empty string"}}'
             )
             r3 = await ch_agent(Msg(name="user", content=validate_prompt, role="user"))
             validate_raw = _msg_to_text(r3)
@@ -2528,10 +4089,49 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                         verdict_obj = {
                             "verdict": parsed.get("verdict") or "resolved",
                             "line": (parsed.get("line") or "").strip()[:2000],
+                            "resolved_facts": (parsed.get("resolved_facts") or [])[:8],
+                            "remaining_gaps": (parsed.get("remaining_gaps") or [])[:8],
+                            "next_action": (parsed.get("next_action") or "").strip()[:500],
                         }
             except Exception as exc:  # noqa: BLE001
-                log.warning("validate JSON parse failed turn=%s: %s — defaulting to resolved",
-                            req.turn_id, exc)
+                raw_lower = (validate_raw or "").lower()
+                recovered_verdict = "escalate" if re.search(r'"?verdict"?\s*:\s*"?(?:escalate|escalated)', raw_lower) else "resolved"
+                verdict_obj = {
+                    "verdict": recovered_verdict,
+                    "line": _extract_jsonish_string(validate_raw, "line") or (validate_raw or "").strip()[:500],
+                    "resolved_facts": _extract_jsonish_list(validate_raw, "resolved_facts"),
+                    "remaining_gaps": _extract_jsonish_list(validate_raw, "remaining_gaps"),
+                    "next_action": _extract_jsonish_string(validate_raw, "next_action", 500),
+                }
+                log.warning(
+                    "validate JSON parse failed turn=%s: %s — recovered verdict=%s",
+                    req.turn_id, exc, recovered_verdict,
+                )
+            current_user_facts = _extract_current_user_facts(req.user_message)
+            stale_fact_escalation = (
+                verdict_obj.get("verdict") == "escalate"
+                and _has_current_user_facts(current_user_facts)
+                and (
+                    _claims_missing_current_user_facts(verdict_obj.get("line", ""))
+                    or _claims_missing_current_user_facts(current_challenge_text)
+                )
+            )
+            if stale_fact_escalation:
+                log.info(
+                    "[room] resolved stale current-fact escalation turn=%s round=%d",
+                    req.turn_id,
+                    debate_round,
+                )
+                verdict_obj = {
+                    "verdict": "resolved",
+                    "line": (
+                        "The requested details are present in the current user message; any follow-up "
+                        "should validate the remaining business or execution risk, not ask for them again."
+                    ),
+                    "resolved_facts": ["current user facts acknowledged"],
+                    "remaining_gaps": [],
+                    "next_action": "",
+                }
             v_tokens = max(80, len(verdict_obj.get("line", "")) // 4)
             cost_tokens += v_tokens
             await _emit_event(req.callback_url, req.turn_id, {
@@ -2540,6 +4140,9 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 "round": debate_round,
                 "verdict": verdict_obj["verdict"],
                 "content": verdict_obj["line"],
+                "resolved_facts": verdict_obj.get("resolved_facts", []),
+                "remaining_gaps": verdict_obj.get("remaining_gaps", []),
+                "next_action": verdict_obj.get("next_action", ""),
                 "tokens": v_tokens,
             })
 
@@ -2552,10 +4155,18 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             # point with no new angle, count it; after MAX_NO_PROGRESS such
             # rounds the debate is deadlocked — stop and escalate to a human.
             next_challenge = verdict_obj["line"] or current_challenge_text
-            if _challenge_repeats(current_challenge_text, next_challenge):
+            gap_signature = " ".join(str(g) for g in (verdict_obj.get("remaining_gaps") or []) if g)
+            if not gap_signature:
+                gap_signature = next_challenge
+            if last_gap_signature:
+                repeats = _gap_repeats(last_gap_signature, gap_signature)
+            else:
+                repeats = _challenge_repeats(current_challenge_text, gap_signature)
+            if repeats:
                 no_progress += 1
             else:
                 no_progress = 0
+            last_gap_signature = gap_signature
             current_challenge_text = next_challenge
             if no_progress >= MAX_NO_PROGRESS:
                 log.info("[room] debate deadlocked (no progress x%d) at round %d turn=%s",
@@ -2570,6 +4181,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     # Pick the most recent substantive lead-side output for grounding +
     # save eligibility. Order: revise > synth > lead.
     final_text = last_revise_text or synth_text or lead_text or ""
+    exit_reason = "fast_decision_consensus" if fast_decision_exit else "full_flow"
     quality_low = not _is_substantive_lead(final_text, bool(memory_context))
 
     if quality_low and final_text and lead_agent:
@@ -2628,9 +4240,12 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         or (is_decision_template and not quality_low)
     )
     saved_memory_id: Optional[str] = None
+    save_pending = False
     if should_save and final_text:
         trigger = "save-intent" if save_intent else "verdict-resolved"
-        saved_memory_id = await _save_room_decision(
+        save_pending = True
+        _schedule_decision_save(
+            callback_url=req.callback_url,
             user_id=req.user_id,
             org_id=req.org_id,
             room_id=req.room_id,
@@ -2639,12 +4254,6 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             decision_text=final_text,
             trigger=trigger,
         )
-        if saved_memory_id:
-            await _emit_event(req.callback_url, req.turn_id, {
-                "t": "decision_saved",
-                "memory_id": saved_memory_id,
-                "trigger": trigger,
-            })
 
     # ── A4 trust scoring (display-only, no routing impact yet) ──────
     # Lead: +0.05 on substantive seal; -0.05 on unresolved escalate.
@@ -2671,11 +4280,65 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     except Exception as exc:  # noqa: BLE001
         log.warning("trust update failed: %s", exc)
 
+    tool_call_counts: Dict[str, int] = {}
+    try:
+        for p in participants:
+            cache_key = f"{req.room_id}:{p['id']}"
+            cached_agent = _ROOM_AGENTS.get(cache_key)
+            if cached_agent is not None:
+                count = int(getattr(cached_agent, "tool_call_count", 0) or 0)
+                tool_call_counts[p.get("slug")] = count
+                try:
+                    setattr(cached_agent, "tool_call_count", 0)
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("tool_call_count reset failed slug=%s: %s", p.get("slug"), exc)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[room] tool_call_count collection failed: %s", exc)
+
     # ── Seal ─────────────────────────────────────────────────────────
+    _mark("seal_ms")
     log.info(
-        "[room] seal turn=%s status=%s template=%s cost=%d quality_low=%s",
+        "[room] seal turn=%s status=%s template=%s cost=%d quality_low=%s exit=%s tools=%d",
         req.turn_id, status, room_template, cost_tokens, quality_low,
+        exit_reason, sum(tool_call_counts.values()),
     )
+    report_objections = [
+        {
+            "content": r.get("content"),
+            "agreement": r.get("agreement"),
+            "reviewer": (r.get("emp") or {}).get("slug") or r.get("agent"),
+        }
+        for r in reactions
+        if r.get("agreement") == "challenge" or r.get("gap")
+    ]
+    report_actions = []
+    if status == "escalated" and open_question:
+        report_actions.append(open_question)
+    await _emit_event(req.callback_url, req.turn_id, _build_harness_quality_check(
+        room_goal=req.room_goal or "",
+        final_text=final_text,
+        evidence_count=len(blackboard.get("memory_hits", []) or blackboard.get("memory_ids", []) or []),
+        source_count=len(_web_sources_for_turn(req.turn_id)),
+        claims_count=1 if lead_text else 0,
+        reviews_count=len(reactions),
+        votes_count=0,
+        web_intel_used="WEB INTEL DOSSIER" in (memory_context or ""),
+    ))
+    await _emit_event(req.callback_url, req.turn_id, _build_final_report(
+        user_message=req.user_message,
+        final_text=final_text,
+        template=room_template,
+        room_goal=req.room_goal or "",
+        status=status,
+        verdict=(final_verdict or ("resolved" if status == "complete" else status)),
+        lead=lead,
+        action_items=report_actions,
+        evidence_ids=blackboard.get("memory_ids", [])[:10],
+        evidence=blackboard.get("memory_hits", []),
+        sources=_web_sources_for_turn(req.turn_id),
+        reviews=report_objections,
+        web_intel_used="WEB INTEL DOSSIER" in (memory_context or ""),
+    ))
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "seal",
         "cost_tokens": cost_tokens,
@@ -2683,9 +4346,20 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         "duration_ms": int((time.time() - started) * 1000),
         "quality_low": quality_low,
         "saved_memory_id": saved_memory_id,
+        "save_pending": save_pending,
         "trust": trust_deltas,
         "template": room_template,
+        "exit_reason": exit_reason,
+        "blackboard": {
+            "hit_count": int(blackboard.get("hit_count", 0) or 0),
+            "confidence": float(blackboard.get("confidence", 0) or 0),
+            "memory_ids": blackboard.get("memory_ids", [])[:10],
+        },
+        "timing": timing,
+        "tool_call_counts": tool_call_counts,
+        "tool_call_total": sum(tool_call_counts.values()),
     })
+    _WEB_INTEL_PAYLOADS.pop(req.turn_id, None)
     return RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status=status)
 
 

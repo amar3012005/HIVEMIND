@@ -44,7 +44,8 @@ def _emulated_headers(api_key: str, user_id: Optional[str], org_id: Optional[str
 
 
 async def recall_emulated(query: str, *, user_id: Optional[str], org_id: Optional[str],
-                          api_key: str = "", max_memories: int = 8) -> Dict[str, Any]:
+                          api_key: str = "", max_memories: int = 8,
+                          project_id: Optional[str] = None) -> Dict[str, Any]:
     """Async recall that works even when the employee has no minted key, via
     master + emulation headers. Returns the raw /api/recall JSON."""
     settings = get_settings()
@@ -54,7 +55,11 @@ async def recall_emulated(query: str, *, user_id: Optional[str], org_id: Optiona
         timeout=httpx.Timeout(30.0, connect=5.0),
         headers=headers,
     ) as c:
-        r = await c.post("/api/recall", json={"query_context": query, "max_memories": max_memories})
+        body: Dict[str, Any] = {"query_context": query, "max_memories": max_memories}
+        if project_id:
+            body["project"] = project_id
+            body["preferred_project"] = project_id
+        r = await c.post("/api/recall", json=body)
         r.raise_for_status()
         return r.json()
 

@@ -14908,6 +14908,35 @@ exit \$RC
           }
           break;
 
+        // ── Dashboard totals: ALL-tier memory + relationship counts ──
+        // ALL = the user's merged visible set (personal + org-wide + accessible
+        // projects + teams) — the same access_context tiers the Memories list,
+        // the Graph (scope=visible), and recall use, so every surface agrees.
+        case '/api/memory/stats':
+          if (req.method === 'GET') {
+            if (!ensurePersistedMemoryOrFail(res, '/api/memory/stats')) return;
+            try {
+              const statsCtx = await buildAccessContext(userId, orgId).catch(() => null);
+              const pIds = Array.isArray(statsCtx?.projectIds) ? statsCtx.projectIds : [];
+              const tIds = Array.isArray(statsCtx?.teamIds) ? statsCtx.teamIds : [];
+              const tiers = [{ userId, scope: 'personal' }];
+              if (statsCtx?.orgRole !== 'guest') tiers.push({ scope: 'organization', orgId });
+              if (pIds.length) tiers.push({ scope: 'project', memoryProjects: { some: { projectId: { in: pIds } } } });
+              if (tIds.length) tiers.push({ scope: 'team', primaryTeamId: { in: tIds } });
+              const memWhere = { orgId, deletedAt: null, isLatest: true, OR: tiers };
+              const relMemScope = { orgId, deletedAt: null, OR: tiers };
+              const [memTotal, relTotal] = await Promise.all([
+                prisma.memory.count({ where: memWhere }),
+                prisma.relationship.count({ where: { OR: [{ fromMemory: relMemScope }, { toMemory: relMemScope }] } }),
+              ]);
+              return jsonResponse(res, { memories: memTotal, relations: relTotal, scope: 'all' });
+            } catch (statsErr) {
+              console.warn('[memory/stats] failed:', statsErr.message);
+              return jsonResponse(res, { error: statsErr.message }, 500);
+            }
+          }
+          break;
+
         case '/api/memories':
           if (req.method === 'GET') {
             if (!ensurePersistedMemoryOrFail(res, '/api/memories')) {
@@ -14960,6 +14989,13 @@ exit \$RC
             // project/team IDs so project memories authored by OTHER members
             // surface (not just the caller's own rows).
             const listAccessCtx = await buildAccessContext(userId, orgId).catch(() => null);
+            // Tier switcher (ALL / Org / Project / Personal): an explicit
+            // tier:* scope narrows the list to ONE hierarchy tier; absent →
+            // the merged visible set (access_context) as before.
+            const tierScope = url.searchParams.get('scope');
+            const scopeArg = ['tier:personal', 'tier:organization', 'tier:project'].includes(tierScope)
+              ? tierScope
+              : undefined;
             const { memories, total } = await persistentMemoryStore.listMemories({
               user_id: userId,
               org_id: orgId,
@@ -14971,6 +15007,7 @@ exit \$RC
               offset,
               limit,
               include_children: includeChildren,
+              ...(scopeArg ? { scope: scopeArg } : {}),
               access_context: listAccessCtx,
             });
 
@@ -17116,7 +17153,24 @@ exit \$RC
                 // NOT NULL → row dropped), which is ~all personal memories.
                 ...(includeChildren ? {} : { AND: HIDDEN_CHILD_TAGS_GRAPH.map((t) => ({ NOT: { tags: { has: t } } })) }),
               };
-              const scopeWhere = graphScope === 'visible' && graphAccessTiers
+              // Single-tier filters for the FE scope switcher (ALL / Org /
+              // Project / Personal). Mirrors scopedMemoryWhere tier:* so the
+              // graph + memories list always agree per tier.
+              const graphTierWhere = (() => {
+                if (graphScope === 'tier:personal') return { userId, scope: 'personal' };
+                if (graphScope === 'tier:organization') return { scope: 'organization' };
+                if (graphScope === 'tier:project') {
+                  const pIds = Array.isArray(graphAccessCtx?.projectIds) ? graphAccessCtx.projectIds : [];
+                  return { scope: 'project', memoryProjects: { some: { projectId: { in: pIds.length ? pIds : ['00000000-0000-0000-0000-000000000000'] } } } };
+                }
+                return null;
+              })();
+              const scopeWhere = graphTierWhere
+                ? {
+                    ...baseWhere,
+                    ...graphTierWhere,
+                  }
+                : graphScope === 'visible' && graphAccessTiers
                 ? {
                     ...baseWhere,
                     OR: graphAccessTiers,
@@ -17160,7 +17214,9 @@ exit \$RC
               }
 
               // Layer 2: Connected nodes (have relationships) — show the graph structure
-              const relationshipScope = graphScope === 'visible' && graphAccessTiers
+              const relationshipScope = graphTierWhere
+                ? { orgId, deletedAt: null, ...graphTierWhere }
+                : graphScope === 'visible' && graphAccessTiers
                 ? { orgId, deletedAt: null, OR: graphAccessTiers }
                 : graphScope === 'all'
                 ? { orgId, deletedAt: null, OR: [{ userId, visibility: 'private' }, { visibility: 'organization' }] }

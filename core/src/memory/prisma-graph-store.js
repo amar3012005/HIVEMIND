@@ -163,6 +163,27 @@ function scopedMemoryWhere({ user_id, org_id, project, scope = 'personal', acces
     deletedAt: null,
   };
 
+  // Explicit single-tier scopes (FE scope switcher: ALL / Org / Project /
+  // Personal). These take precedence over access_context — the caller is
+  // asking for ONE tier of the hierarchy, not the merged visible set.
+  //   tier:personal     → the user's private memories only
+  //   tier:organization → org-wide memories (admin-published, all members see)
+  //   tier:project      → memories in projects the user can access
+  if (scope === 'tier:personal') {
+    return { ...base, userId: user_id, scope: 'personal' };
+  }
+  if (scope === 'tier:organization') {
+    return { ...base, scope: 'organization' };
+  }
+  if (scope === 'tier:project') {
+    const pIds = Array.isArray(access_context?.projectIds) ? access_context.projectIds : [];
+    return {
+      ...base,
+      scope: 'project',
+      memoryProjects: { some: { projectId: { in: pIds.length ? pIds : ['00000000-0000-0000-0000-000000000000'] } } },
+    };
+  }
+
   // V2 path: caller supplies the user's accessible team/project IDs from
   // TeamStore. Build a multi-tier OR clause that respects Memory.scope.
   if (access_context && (access_context.projectIds || access_context.teamIds)) {

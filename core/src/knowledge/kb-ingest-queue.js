@@ -272,13 +272,19 @@ export class KbIngestQueue {
     try { this.tracker?.createJob(trackerJobId, { userId, orgId, filename, kind: 'knowledge_upload', queued: true }); } catch { /* noop */ }
     this._setStatus(trackerJobId, { status: 'queued', filename, progress: 0 });
 
-    // jobId dedup: same org + same content → same job (BullMQ ignores re-adds
-    // while the original is pending/active; checksum dedup downstream covers
-    // re-uploads after completion).
+    // Unique jobId per accepted upload (trackerJobId = kbq_<checksum>_<ts>).
+    // Dedup is handled UPSTREAM — the upfront DB checksum check returns 409 for
+    // identical re-uploads before we ever enqueue, and the downstream
+    // sourceArtifact/knowledgeDocument upsert dedups at the data layer. Using
+    // <org>-<checksum> as the jobId (the old scheme) silently broke legitimate
+    // re-ingests: BullMQ retains completed ids (removeOnComplete:1000), so a
+    // delete-then-reupload or a forced re-ingest of the same bytes matched a
+    // stale completed id, `add` was IGNORED, the worker never ran, and the
+    // status mirror stuck at 'queued' forever (FE "Processing" hang).
     const job = await this.queue.add('ingest', {
       userId, orgId, filename, contentType, checksum, filePath, metadata, trackerJobId,
     }, {
-      jobId: `${orgId}-${checksum}`.replace(/[^a-zA-Z0-9_-]/g, ''),
+      jobId: trackerJobId,
       attempts: ATTEMPTS,
       backoff: { type: 'exponential', delay: 5000 },
       removeOnComplete: 1000,

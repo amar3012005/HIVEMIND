@@ -1066,8 +1066,50 @@ async function answerStep({ message, history, evidence, plan, language, assistan
   // Top-K bound: quick mode shows 6, insight 10. Was 12 — cut bloat to
   // halve prompt tokens. Recall-router already applied MMR + score-floor
   // + cluster-collapse so the trimmed set is the tight relevance core.
+  // ── Event-time ranking (gated EVENT_TIME_RANKING, default OFF) ──
+  // For temporal queries ("early June", "what happened in March"), recall
+  // returns a loose semantic tail (real in-window rows mixed with tangential
+  // ones), and the answer model then bails ("no notes on early June") rather
+  // than risk hallucinating off the noise. Here we REORDER evidence so
+  // memories whose DATE falls in the query window come first, and TRIM the
+  // delivered set to that in-window core — giving the model a tight, relevant
+  // set like an explicit-date query gets. SOFT: if no in-window memory exists,
+  // evidence is left untouched (never empties). Reorder/trim only, no recall
+  // re-query, no hard DB filter (that earlier broke working queries).
+  let _eventWindowHits = 0;
+  if (process.env.EVENT_TIME_RANKING === 'true' && Array.isArray(evidence.memories) && evidence.memories.length > 1) {
+    try {
+      const { expandTemporalQuery } = await import('../search/time-aware-expander.js');
+      const te = expandTemporalQuery(message);
+      if (te?.hasTemporalFilter && te.dateRange?.start) {
+        const s = te.dateRange.start;
+        const e = te.dateRange.end || te.dateRange.start;
+        const inWindow = (m) => {
+          const dates = [];
+          for (const t of (m.tags || [])) {
+            const mm = /^(?:ts|time):(\d{4}-\d{2}-\d{2})/.exec(t);
+            if (mm) dates.push(mm[1]);
+          }
+          if (m.document_date) dates.push(String(m.document_date).slice(0, 10));
+          for (const d of (m.event_dates || [])) dates.push(String(d).slice(0, 10));
+          if (m.created_at) dates.push(String(m.created_at).slice(0, 10));
+          return dates.some((d) => d >= s && d <= e);
+        };
+        const hits = evidence.memories.filter(inWindow);
+        if (hits.length > 0) {
+          const hitSet = new Set(hits.map((m) => m.id));
+          const rest = evidence.memories.filter((m) => !hitSet.has(m.id));
+          evidence = { ...evidence, memories: [...hits, ...rest] };
+          _eventWindowHits = Math.min(hits.length, 5);
+        }
+      }
+    } catch { /* non-fatal — leave evidence as recalled */ }
+  }
+
   const recallMode = plan?.recall_mode || 'quick';
-  const evidenceTopK = recallMode === 'insight' ? 10 : (recallMode === 'panorama' ? 12 : 6);
+  const evidenceTopK = _eventWindowHits > 0
+    ? _eventWindowHits
+    : (recallMode === 'insight' ? 10 : (recallMode === 'panorama' ? 12 : 6));
   const evidenceLines = evidence.memories.slice(0, evidenceTopK).map((m, i) => {
     const id8 = (m.id || '').slice(0, 8);
     const title = (m.title || '').replace(/\n/g, ' ').slice(0, 80);

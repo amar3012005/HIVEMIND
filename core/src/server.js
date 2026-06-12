@@ -8840,6 +8840,18 @@ exit \$RC
             if (jobId) {
               const job = ingestTracker.getJob(jobId);
               if (job) return jsonResponse(res, { source: 'tracker', ...job });
+              // Cross-node fallback: queued uploads (kbq_*) run on a worker that
+              // may be a DIFFERENT hm-core node than the one serving this poll;
+              // the in-memory tracker is per-process. The queue mirrors status
+              // into Redis (shared) — read it here so the FE never 404s on a
+              // valid queued job.
+              if (kbIngestQueue && jobId.startsWith('kbq_')) {
+                const qs = await kbIngestQueue.getStatus(jobId).catch(() => null);
+                if (qs) return jsonResponse(res, { source: 'queue', job_id: jobId, ...qs });
+                // Known queue job, status not yet mirrored (race right after
+                // enqueue) → report 'queued' rather than 404 so the FE keeps polling.
+                return jsonResponse(res, { source: 'queue', job_id: jobId, status: 'queued', progress: 0 });
+              }
             }
             // Durable fallback: the DB doc row survives restart + job expiry.
             if (docId && prisma?.knowledgeDocument) {

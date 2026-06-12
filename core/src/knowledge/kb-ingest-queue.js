@@ -89,23 +89,33 @@ export class KbIngestQueue {
     const primaryHost = process.env.REDIS_HOST || 'localhost';
     const altHosts = (process.env.REDIS_HOST_FALLBACKS || '').split(',').map(s => s.trim()).filter(Boolean);
     const candidates = [primaryHost, ...altHosts.filter(h => h !== primaryHost)];
+    // Retry the probe: at boot Redis can briefly be unready (container restart
+    // race / DNS warmup). A single failed pass used to PERMANENTLY disable the
+    // queue on that node — leaving one hm-core node queueing and the other
+    // serving uploads inline + unable to read cross-node status. Retry so the
+    // node self-heals within seconds instead of needing a manual restart.
     let host = null;
-    for (const h of candidates) {
-      const probe = new IORedis({
-        host: h,
-        port: Number(process.env.REDIS_PORT || 6379),
-        password: process.env.REDIS_PASSWORD || undefined,
-        maxRetriesPerRequest: 1, connectTimeout: 1500, lazyConnect: true,
-        enableOfflineQueue: false, retryStrategy: () => null,
-      });
-      probe.on('error', () => {});
-      try { await probe.connect(); await probe.ping(); host = h; probe.disconnect(); break; }
-      catch { try { probe.disconnect(); } catch { /* noop */ } }
+    const PROBE_ATTEMPTS = Number(process.env.KB_QUEUE_PROBE_ATTEMPTS || 10);
+    for (let attempt = 0; attempt < PROBE_ATTEMPTS && !host; attempt++) {
+      for (const h of candidates) {
+        const probe = new IORedis({
+          host: h,
+          port: Number(process.env.REDIS_PORT || 6379),
+          password: process.env.REDIS_PASSWORD || undefined,
+          maxRetriesPerRequest: 1, connectTimeout: 3000, lazyConnect: true,
+          enableOfflineQueue: false, retryStrategy: () => null,
+        });
+        probe.on('error', () => {});
+        try { await probe.connect(); await probe.ping(); host = h; probe.disconnect(); break; }
+        catch { try { probe.disconnect(); } catch { /* noop */ } }
+      }
+      if (!host && attempt < PROBE_ATTEMPTS - 1) await new Promise(r => setTimeout(r, 2000));
     }
     if (!host) {
-      this.logger.warn?.('[kb-queue] no reachable Redis — queue disabled (inline fallback)');
+      this.logger.warn?.(`[kb-queue] no reachable Redis after ${PROBE_ATTEMPTS} attempts — queue disabled (inline fallback)`);
       return;
     }
+    this._redisHost = host;
     const connection = {
       host,
       port: Number(process.env.REDIS_PORT || 6379),
@@ -123,10 +133,59 @@ export class KbIngestQueue {
         this._counters.dead++;
         this.logger.error?.(`[kb-queue] DLQ: job ${job?.id} (${job?.data?.filename}) dead after ${job?.attemptsMade} attempts: ${err?.message}`);
         try { this.tracker?.updateJob(job.data.trackerJobId, { status: 'dead', error: err?.message }); } catch { /* noop */ }
+        this._setStatus(job?.data?.trackerJobId, { status: 'dead', error: err?.message, filename: job?.data?.filename });
       }
     });
     this.worker.on('error', (err) => this.logger.warn?.(`[kb-queue] worker error: ${err.message}`));
+    // Shared status mirror: the worker can run on a DIFFERENT hm-core node than
+    // the one the FE polls /api/knowledge/status against (the in-memory
+    // ingestTracker is per-process). Mirror job status into Redis so status is
+    // readable cross-node. 24h TTL.
+    this.redis = new IORedis({ host, port: Number(process.env.REDIS_PORT || 6379), password: process.env.REDIS_PASSWORD || undefined, maxRetriesPerRequest: null });
+    this.redis.on('error', () => {});
     this.logger.info?.(`[kb-queue] ready on redis://${host} (concurrency=${CONCURRENCY}, org-cap=${ORG_CONCURRENCY})`);
+  }
+
+  async _setStatus(trackerJobId, obj) {
+    if (!this.redis || !trackerJobId) return;
+    try {
+      await this.redis.set(`kbq:status:${trackerJobId}`, JSON.stringify({ ...obj, updated_at: new Date().toISOString() }), 'EX', 86400);
+    } catch { /* status mirror best-effort */ }
+  }
+
+  /**
+   * Cross-node job status (Redis). Returns null on miss. Works even when THIS
+   * node's queue worker failed to init (transient boot Redis-unready) — it
+   * lazily opens a read client so status is readable on every node.
+   */
+  async getStatus(trackerJobId) {
+    await this._ready;
+    if (!trackerJobId) return null;
+    let client = this.redis;
+    if (!client) client = await this._lazyStatusRedis();
+    if (!client) return null;
+    try {
+      const raw = await client.get(`kbq:status:${trackerJobId}`);
+      return raw ? JSON.parse(raw) : null;
+    } catch { return null; }
+  }
+
+  async _lazyStatusRedis() {
+    if (this._statusRedis) return this._statusRedis;
+    const deps = tryLoadBullMQ();
+    if (!deps) return null;
+    const { IORedis } = deps;
+    const candidates = [process.env.REDIS_HOST || 'localhost', ...((process.env.REDIS_HOST_FALLBACKS || '').split(',').map(s => s.trim()).filter(Boolean))];
+    for (const h of candidates) {
+      try {
+        const c = new IORedis({ host: h, port: Number(process.env.REDIS_PORT || 6379), password: process.env.REDIS_PASSWORD || undefined, maxRetriesPerRequest: 1, connectTimeout: 3000, lazyConnect: true, retryStrategy: () => null });
+        c.on('error', () => {});
+        await c.connect(); await c.ping();
+        this._statusRedis = c;
+        return c;
+      } catch { /* try next host */ }
+    }
+    return null;
   }
 
   /** Rollout mode: env wins, else hot-reloaded mode file. 'off'|'all'|csv-org-ids */
@@ -180,6 +239,7 @@ export class KbIngestQueue {
 
     const trackerJobId = `kbq_${checksum.slice(0, 12)}_${Date.now().toString(36)}`;
     try { this.tracker?.createJob(trackerJobId, { userId, orgId, filename, kind: 'knowledge_upload', queued: true }); } catch { /* noop */ }
+    this._setStatus(trackerJobId, { status: 'queued', filename, progress: 0 });
 
     // jobId dedup: same org + same content → same job (BullMQ ignores re-adds
     // while the original is pending/active; checksum dedup downstream covers
@@ -222,6 +282,7 @@ export class KbIngestQueue {
             const prev = this.tracker?.getJob(trackerJobId)?.metadata || {};
             this.tracker?.updateJob(trackerJobId, { status: p.stage || 'processing', progress: p.progress ?? 0, metadata: { ...prev, ...p } });
           } catch { /* noop */ }
+          this._setStatus(trackerJobId, { status: p.stage || 'processing', progress: p.progress ?? 0, filename });
         },
       });
       // Hard timeout: poison-pill guard. The pipeline is idempotent (checksum
@@ -238,6 +299,7 @@ export class KbIngestQueue {
         });
       } catch { /* noop */ }
       try { this.recordUsage?.(orgId, result); } catch { /* quota accounting best-effort */ }
+      this._setStatus(trackerJobId, { status: 'indexed', progress: 100, document_id: result.documentId, segmentCount: result.segmentCount, promotedCount: result.promotedCount, filename });
       this._counters.processed++;
       this.logger.info?.(`[kb-queue] ✓ ${filename} org=${orgId.slice(0, 8)} doc=${result.documentId} segs=${result.segmentCount} promoted=${result.promotedCount}`);
       return { documentId: result.documentId, segmentCount: result.segmentCount, promotedCount: result.promotedCount };
@@ -267,5 +329,6 @@ export class KbIngestQueue {
   async close() {
     try { await this.worker?.close(); } catch { /* noop */ }
     try { await this.queue?.close(); } catch { /* noop */ }
+    try { this.redis?.disconnect(); } catch { /* noop */ }
   }
 }

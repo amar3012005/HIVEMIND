@@ -114,10 +114,23 @@ the query-param shape; the path-style `/connection/<key>/<id>` 404s.
 3. **Connected-but-FE-says-Connect** — `/v1/connectors` only promoted overlay
    rows whose provider existed in `PROVIDER_REGISTRY`; google-docs etc.
    vanished (`overlay rows=1, promoted=0`). Fixed: unmatched overlay rows are
-   appended as synthetic `connected` entries (commit `742cd76`).
+   appended as synthetic `connected` entries (commit `742cd76`). **Verified
+   live**: `overlay promoted=1 providers=google-docs`.
 4. **Provider key vs template name** — code must use the integration
    `unique_key` (what's in `_nango_configs.unique_key`), never the Nango
    template name (`google-mail` is the template; `gmail` is our key).
+5. **Connect-button 403 for non-admins** — the FE scope selector preloads
+   `target_scope` from EXISTING connector rows; if an admin connected a
+   provider org-wide, every viewer inherited `'organization'` and
+   `/v1/connectors/:provider/start` 403'd them (`assertPermission` →
+   `connector:manage` is `org_owner`/`org_admin` only, thrown as a bare
+   "Forbidden"). The FE now retries any `/start` 403 with
+   `target_scope:'personal'` + a toast (commits `9f3c90c`, `088c11e`). The
+   backend gate itself is correct and unchanged.
+6. **Brand logos** — connector cards use simple-icons CDN; OpenAI/Slack/
+   Salesforce were trademark-purged there (404) and come from iconify's
+   `logos` collection instead (`5daa04e`). Every URL in `BRAND_LOGOS`
+   (Connectors.jsx) must stay curl-verified 200.
 
 ## 7. Ops runbook
 

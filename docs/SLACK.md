@@ -7,7 +7,12 @@
 > bot user `U0B2LA6RSLB`) — powers all of it.
 >
 > Verified against prod 2026-06-12. Commits: `49991f1`, `2781528`,
-> `de1bd1e`, `03d9b96`.
+> `de1bd1e`, `03d9b96`, `fa979af`, `9f3c90c`, `088c11e`.
+>
+> **STATUS: mention-answering is LIVE.** `@HIVEMIND what do u know about
+> Uwe?` → real recall answer in-channel. The production event path is the
+> **HTTP Events API** (signing-secret verified); Socket Mode remains as a
+> redundant fallback. See §3.
 
 ---
 
@@ -53,15 +58,20 @@ GET /api/connectors/slack/bot-token?team_id=<T…>     (master-key only)
 | **Digital-employee actions** | `POST /api/employees/slack-action` (slack_post/react/search/history; persona via `chat:write.customize`) | installer's bot token |
 | **The bot ("@HIVEMIND … ?")** | Socket Mode → event-ingest → react agent (below) | live token via bot-token endpoint |
 
-## 3. The mention-answering pipeline (Socket Mode)
+## 3. The mention-answering pipeline (LIVE — HTTP Events API)
+
+The app turned out to be configured in **HTTP Events mode** (a Request URL in
+Event Subscriptions), NOT Socket Mode — which is why the socket gateway never
+received anything. This is now the production path:
 
 ```
 human posts "@HIVEMIND what do we know about X?"
-  → Slack delivers app_mention over Socket Mode WebSocket
-  → employees-service Bolt gateway (slack/gateway.py)
-      - authorize(): 10-min-cached LIVE bot token from core, refetch-on-fail
-      - dedup (Redis), route_event(): is a Digital Employee addressed?
-      - NO employee match + (app_mention | DM) → _forward_to_core()
+  → Slack POSTs the event to
+      https://api.hivemind.davinciai.eu:8040/v1/connectors/slack/events
+  → control-plane (control-plane-s0k0…)
+      - HMAC verify (X-Slack-Signature, timing-safe, 300 s skew window)
+      - url_verification handshake answered (this is what "Retry → Verified ✓" hits)
+      - ack 200 within 3 s, forward async →
   → core POST /api/connectors/slack/event-ingest   (master key)
       - resolves the OAuth owner from team_id (PlatformIntegration)
       - resolves the ASKING Slack user → HIVEMIND user via email (their recall scope)
@@ -73,24 +83,25 @@ human posts "@HIVEMIND what do we know about X?"
       - "save this" flows → Block-Kit project picker → /api/connectors/slack/interactivity
 ```
 
-There is also a public Events-API path (`/v1/connectors/slack/events` on the
-control-plane, HMAC-verified) — currently **dormant** because
-`SLACK_SIGNING_SECRET` is not set. Socket Mode makes it unnecessary.
+App config (Event Subscriptions page): Request URL as above (**Verified ✓**),
+bot events `app_mention`, `message.im`, `message.channels`.
 
-### ⚠️ The ONE remaining manual step (dashboard-only)
-The whole pipeline is deployed and proven (direct event injection produced a
-real bot answer in `#…C0AEN1R98BV`), but Slack only *delivers* events if the
-app subscribes to them. As of 2026-06-12 the app's **Event Subscriptions
-toggle is OFF**, so the socket receives nothing. Fix (app admin, 60 s):
+### The signing secret — where it lives
+`/v1/connectors/slack/events` verifies HMAC with the app's Signing Secret.
+Running containers cannot gain new env vars without a recreate, so the
+handler resolves it as `process.env.SLACK_SIGNING_SECRET` **falling back to
+the file `/opt/HIVEMIND/core/.slack-signing-secret`** (gitignored, `600`
+perms, read per-request — drop-in changes need no restart). Installed and
+handshake-verified 2026-06-12 (signed challenge echoed; forged signature →
+401).
 
-1. https://api.slack.com/apps → **DAVINCI AI** (`A0AQTN6JMRB`)
-2. **Event Subscriptions** → *Enable Events* ON (no Request URL needed —
-   Socket Mode is active)
-3. *Subscribe to bot events*: `app_mention`, `message.im`, `message.channels`
-4. Save (reinstall if prompted) → tag the bot.
-
-No code change is needed afterwards. (The bot posted these exact steps into
-the channel on 2026-06-12.)
+### Socket Mode (redundant fallback)
+The employees-service Bolt gateway (slack/gateway.py) stays fully wired:
+live-token `authorize()` (10-min cache, refetch-on-fail), Redis dedup,
+employee routing, and `_forward_to_core()` for unrouted mentions/DMs into the
+same event-ingest. If the app is ever flipped to Socket Mode, everything
+works without code changes. Note both paths converge on event-ingest, which
+dedups by `team_id:event_ts` — running both simultaneously is safe.
 
 ## 4. Ingestion quality guards
 
@@ -102,7 +113,7 @@ the channel on 2026-06-12.)
   why synthetic "post as bot mentioning the bot" tests cannot exercise the
   mention leg; only a human mention can.
 
-## 5. The eight bugs that made Slack "randomly broken" (all fixed)
+## 5. The ten bugs that made Slack "randomly broken" (all fixed)
 
 1. `sync-scheduler` passed `orgId:null` → Prisma threw on the
    NangoConnection lookup → **every scheduled sync failed** → FE Error/Retry.
@@ -124,11 +135,32 @@ the channel on 2026-06-12.)
    cache, force-refetch on auth failure.
 8. Mentions with no employee match were silently dropped → unrouted
    mentions/DMs now forward to core's event-ingest (the full agent).
+9. The app was actually in **HTTP Events mode** (Request URL configured)
+   while we debugged Socket Mode — the webhook 503'd for a missing signing
+   secret, so Slack's URL verification failed and delivery stayed off. Fixed
+   via the on-disk signing-secret fallback (`fa979af`) + dashboard "Retry".
+10. **Connect button 403 for non-admins**: the FE scope selector preloads
+   from existing connector rows, so an admin's org-wide Slack row made every
+   viewer send `target_scope:'organization'` → `assertPermission` threw a
+   bare 403 "Forbidden" dead-end. The FE now retries any `/start` 403 with
+   `target_scope:'personal'` + an explanatory toast (`9f3c90c`, `088c11e`) —
+   a personal start has no 403 path, so the retry is provably safe.
 
 ## 6. Ops runbook
 
 ```bash
-# Socket alive?
+# Events flowing? (the production signal)
+docker logs --since 10m control-plane-s0k0… 2>&1 | grep slack-events
+#   "[slack-events] inbound event_callback type=app_mention …" = healthy
+
+# Webhook handshake healthy? (signed exactly like Slack's Retry button)
+TS=$(date +%s); BODY='{"type":"url_verification","challenge":"probe"}'
+SIG="v0=$(printf 'v0:%s:%s' "$TS" "$BODY" | openssl dgst -sha256 -hmac "$(cat /opt/HIVEMIND/core/.slack-signing-secret)" -hex | awk '{print $NF}')"
+curl -sk -X POST https://api.hivemind.davinciai.eu:8040/v1/connectors/slack/events \
+  -H "content-type: application/json" -H "x-slack-request-timestamp: $TS" \
+  -H "x-slack-signature: $SIG" -d "$BODY"        # → {"challenge":"probe"}
+
+# Socket alive? (fallback path)
 docker logs hm-employees 2>&1 | grep -E "Bolt app is running|socket-mode started" | tail -2
 
 # Live bot token (also proves refresh path)

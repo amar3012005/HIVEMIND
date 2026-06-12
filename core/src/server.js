@@ -12784,6 +12784,34 @@ exit \$RC
                 }
               }
 
+              // Upfront duplicate rejection: same bytes already uploaded by this
+              // user+org → 409 BEFORE any parse/queue work, so bulk batches show
+              // "duplicate" per file instantly and continue with the rest.
+              // Override with form field force=true (intentional re-ingest).
+              const uploadChecksum = crypto.createHash('sha256').update(filePart.data).digest('hex');
+              const forceDuplicate = (parts.find(p => p.name === 'force')?.value || '').toLowerCase() === 'true';
+              if (!forceDuplicate && prisma) {
+                const dupArtifact = await prisma.sourceArtifact.findUnique({
+                  where: { userId_orgId_checksum_sourcePlatform: { userId, orgId, checksum: uploadChecksum, sourcePlatform: 'knowledge_upload' } },
+                  select: { id: true, createdAt: true },
+                }).catch(() => null);
+                if (dupArtifact) {
+                  const dupDoc = await prisma.knowledgeDocument.findFirst({
+                    where: { userId, orgId, sourceArtifactId: dupArtifact.id },
+                    select: { id: true, title: true, createdAt: true },
+                  }).catch(() => null);
+                  return jsonResponse(res, {
+                    duplicate: true,
+                    error: 'duplicate_document',
+                    message: `Identical content already in your knowledge base${dupDoc?.title ? ` as "${dupDoc.title}"` : ''}`,
+                    existing_document_id: dupDoc?.id || null,
+                    existing_title: dupDoc?.title || null,
+                    uploaded_at: dupDoc?.createdAt || dupArtifact.createdAt,
+                    filename: filePart.filename,
+                  }, 409);
+                }
+              }
+
               // Async opt-in: return a job id immediately + process in the
               // background, so large multi-MB PDFs (150s+ sync pipeline) never
               // hit the proxy timeout / 502. Default stays sync for FE compat.
@@ -12814,7 +12842,7 @@ exit \$RC
                 // work; a bounded worker pool ingests via the same pipeline.
                 if (kbIngestQueue?.isEnabledFor(orgId)) {
                   try {
-                    const checksum = crypto.createHash('sha256').update(filePart.data).digest('hex');
+                    const checksum = uploadChecksum;
                     const storedPath = kbIngestQueue.persistFile({ orgId, checksum, filename: filePart.filename, fileBuffer: filePart.data });
                     const q = await kbIngestQueue.enqueue({
                       userId, orgId,

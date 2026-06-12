@@ -11903,9 +11903,14 @@ exit \$RC
               // step broke instead of a generic 500.
               const cascade = async (label, fn) => {
                 try { await fn(); } catch (cErr) {
-                  const detail = cErr.code
-                    ? `${cErr.code} ${cErr.message || ''} ${cErr.meta ? JSON.stringify(cErr.meta) : ''}`
-                    : (cErr.message || cErr.toString() || 'unknown');
+                  // Prisma errors sometimes render an empty .message (getter on
+                  // the subclass) — fall through name/meta/stack so the log is
+                  // never the useless `cascade "memories" failed:` blank line.
+                  const detail = [
+                    cErr.code, cErr.name, cErr.message,
+                    cErr.meta ? JSON.stringify(cErr.meta) : '',
+                    (!cErr.message && cErr.stack) ? cErr.stack.split('\n')[0] : '',
+                  ].filter(Boolean).join(' ') || String(cErr) || 'unknown';
                   console.error(`[knowledge-delete] cascade "${label}" failed:`, detail);
                   throw new Error(`cascade ${label} failed: ${detail}`);
                 }
@@ -11925,9 +11930,25 @@ exit \$RC
                   prisma.relationship.deleteMany({ where: { OR: [{ fromId: { in: ids } }, { toId: { in: ids } }] } }));
                 await cascade('audit_log_refs', () =>
                   prisma.auditLog.updateMany({ where: { resourceId: { in: ids } }, data: { resourceId: null } }));
+                // Defensive child-row purge via raw SQL: the Prisma schema says
+                // onDelete:Cascade for these, but the LIVE DB constraints have
+                // drifted on some tables (memories deleteMany failed with an FK
+                // violation carrying an empty message). Explicitly clear every
+                // referencing row so the final delete can never be blocked.
+                const idArr = `ARRAY[${ids.map((i) => `'${i}'`).join(',')}]::uuid[]`;
+                for (const [label, sql] of [
+                  ['memory_evidence_links', `DELETE FROM hivemind.memory_evidence_links WHERE memory_id = ANY(${idArr})`],
+                  ['memory_projects', `DELETE FROM hivemind.memory_projects WHERE memory_id = ANY(${idArr})`],
+                  ['derivations', `DELETE FROM hivemind.derivations WHERE source_memory_id = ANY(${idArr}) OR target_memory_id = ANY(${idArr})`],
+                  ['memory_vector_embeddings', `DELETE FROM hivemind.memory_vector_embeddings WHERE memory_id = ANY(${idArr})`],
+                ]) {
+                  try { await prisma.$executeRawUnsafe(sql); } catch (rawErr) {
+                    // Table may not exist in this deployment — only warn on real failures.
+                    if (!/does not exist/i.test(rawErr.message || '')) console.warn(`[knowledge-delete] raw purge ${label}:`, rawErr.message);
+                  }
+                }
                 await cascade('memories', () =>
                   prisma.memory.deleteMany({ where: { id: { in: ids } } }));
-                // memory_evidence_links cascade-delete with the memory (FK onDelete Cascade).
                 try {
                   const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
                   const qdrantKey = process.env.QDRANT_API_KEY || '';
@@ -12248,6 +12269,56 @@ exit \$RC
               // Resolve any knowledge_document rows linked to these memories
               // BEFORE deleting (the link rows cascade away with the memory).
               const linkedDocIds = await docsForMemories(memoryIds);
+              // FALLBACK: KB cards are document-summary MEMORIES. Newer
+              // uploads' summary memories carry NO evidence link and NO
+              // doc-id/filename anchor tags, so linkedDocIds comes back empty
+              // — the summary memory deletes (card disappears) but the
+              // knowledge_document + segments + every derived/promoted memory
+              // survives ("deleted the doc but 149 memories remain" bug).
+              // Resolve the document by filename/title/source_id match from
+              // the target memories' metadata, then expand the purge set with
+              // that document's evidence-linked + doc-anchor-tagged memories.
+              if (linkedDocIds.length === 0) {
+                try {
+                  const targetMems = await prisma.memory.findMany({
+                    where: { id: { in: memoryIds } },
+                    select: { id: true, title: true, tags: true, sourceMetadata: { select: { sourceId: true, metadata: true } } },
+                  });
+                  const nameCandidates = new Set();
+                  for (const m of targetMems) {
+                    const meta = m.sourceMetadata?.metadata || {};
+                    for (const v of [meta.filename, meta.document_title, m.title]) {
+                      if (v && typeof v === 'string' && v.trim().length >= 4) nameCandidates.add(v.trim());
+                    }
+                    for (const tg of m.tags || []) if (tg.startsWith('filename:')) nameCandidates.add(tg.slice(9));
+                    const sid = m.sourceMetadata?.sourceId || '';
+                    if (sid.startsWith('doc:')) nameCandidates.add(sid.slice(4).split('#')[0]);
+                  }
+                  for (const name of nameCandidates) {
+                    const docs = await prisma.knowledgeDocument.findMany({
+                      where: { orgId, OR: [
+                        { title: name },
+                        { sourceId: { startsWith: name } },
+                        { title: { startsWith: `${name}.` } }, // memory title often drops the extension
+                      ] },
+                      select: { id: true },
+                    }).catch(() => []);
+                    docs.forEach((d) => linkedDocIds.push(d.id));
+                  }
+                  for (const dId of Array.from(new Set(linkedDocIds))) {
+                    memoryIds.push(...await memoriesForDoc(dId));
+                    const tagged = await safeFind('fallback-doc-anchor', () => prisma.memory.findMany({
+                      where: { orgId, deletedAt: null, tags: { hasSome: [`doc-id:${dId}`] } },
+                      select: { id: true },
+                    }));
+                    memoryIds.push(...tagged);
+                  }
+                  memoryIds = Array.from(new Set(memoryIds));
+                  if (linkedDocIds.length) {
+                    console.log(`[knowledge-delete] filename-fallback resolved docs=${linkedDocIds.length} memories=${memoryIds.length}`);
+                  }
+                } catch (fbErr) { console.warn('[knowledge-delete] filename doc-resolve fallback failed:', fbErr.message); }
+              }
               console.log(`[knowledge-delete] resolution=${resolutionStrategy} target=${deleteMemoryId || deleteUploadId} memories=${memoryIds.length} docs=${linkedDocIds.length}`);
 
               // Hard-delete memories (+ all FK refs + Qdrant), then the linked

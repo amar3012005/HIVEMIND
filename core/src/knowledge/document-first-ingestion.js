@@ -1021,7 +1021,24 @@ Rules:
         const routedPayloads = await this.smartIngestRouter.route(payload);
 
         for (const routed of routedPayloads) {
-          const result = await this.memoryGraphEngine.ingestMemory({ ...routed, defer_entity_linking: true });
+          // #7 — KB section promotion fast-path. Sections are document chunks:
+          // they do NOT supersede/contradict each other, so the per-section
+          // PredictCalibrate similarity search + conflict-detection +
+          // relationship-classification are pure waste (they dominated promote
+          // at ~3s/section). Skip them — the section is already routed by dfi's
+          // explicit route() above (smartIngest:false avoids a redundant second
+          // routing pass). Entity-linking stays deferred to the post-commit
+          // batch. Net: the per-user advisory lock is held ~100ms not ~3s, so
+          // the write queue drains fast — addresses the #6 serialization symptom
+          // WITHOUT unsafe lock removal.
+          const result = await this.memoryGraphEngine.ingestMemory({
+            ...routed,
+            defer_entity_linking: true,
+            smartIngest: false,
+            skipPredictCalibrate: true,
+            skip_contradiction_detection: true,
+            skip_relationship_classification: true,
+          });
           // graph-engine returns { memoryId, operation, ... }
           // operation = 'skipped_*' means memory NOT persisted to DB -> FK would fail
           const memoryId = result?.memoryId || result?.id || null;

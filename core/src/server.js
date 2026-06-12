@@ -7723,6 +7723,11 @@ exit \$RC
                     const form = new FormData();
                     form.append('file', new Blob([buf], { type: f.mimetype || 'application/octet-stream' }), fname);
                     form.append('tags', 'slack-upload');
+                    // Personal scope: a file dropped to the bot is the asking
+                    // user's document. Without this the missing targetScope
+                    // defaults to 'organization', which is now admin-only —
+                    // member Slack uploads would 403.
+                    form.append('targetScope', 'personal');
                     const up = await fetch('http://localhost:3000/api/knowledge/upload', {
                       method: 'POST',
                       headers: {
@@ -12754,6 +12759,23 @@ exit \$RC
             const targetScope = parts.find(p => p.name === 'targetScope')?.value === 'organization' ? 'organization' : 'personal';
             const smartFlag = (parts.find(p => p.name === 'smart')?.value || '').toLowerCase() === 'true';
 
+            // 3-tier enforcement (mirrors /api/knowledge/upload): org-wide
+            // (organization scope with NO project + NO team) is admin-only.
+            if (targetScope === 'organization' && !projectIdRaw && !containerTag && !primaryTeamId && prisma && orgId) {
+              const bulkMembership = await prisma.userOrganization.findUnique({
+                where: { userId_orgId: { userId, orgId } },
+                select: { role: true },
+              }).catch(() => null);
+              const bulkRole = bulkMembership?.role || null;
+              if (bulkRole !== 'owner' && bulkRole !== 'admin') {
+                return jsonResponse(res, {
+                  error: 'org_scope_admin_only',
+                  message: 'Organization-wide uploads are reserved for org admins. Pick a project or upload to your personal space.',
+                  role: bulkRole,
+                }, 403);
+              }
+            }
+
             const CONC = Number(process.env.BULK_INGEST_CONCURRENCY || 3);
             const results = new Array(fileParts.length);
             let i = 0;
@@ -12887,6 +12909,28 @@ exit \$RC
                   });
                   if (proj) projectIds.push(proj.id);
                 } catch (e) { console.warn('[knowledge] containerTag project resolve failed:', e.message); }
+              }
+
+              // ── 3-tier scope enforcement ──
+              // personal → anyone (private). project → anyone with access to
+              // that project (project list is already role-scoped in the FE +
+              // membership-checked at recall). organization-wide (org scope,
+              // NO project, NO team) → OWNER/ADMIN ONLY: one admin uploads
+              // once and every member sees it; members must file uploads
+              // under a project or their personal space instead.
+              if (targetScope === 'organization' && projectIds.length === 0 && !primaryTeamId && prisma && orgId) {
+                const uploaderMembership = await prisma.userOrganization.findUnique({
+                  where: { userId_orgId: { userId, orgId } },
+                  select: { role: true },
+                }).catch(() => null);
+                const uploaderRole = uploaderMembership?.role || null;
+                if (uploaderRole !== 'owner' && uploaderRole !== 'admin') {
+                  return jsonResponse(res, {
+                    error: 'org_scope_admin_only',
+                    message: 'Organization-wide uploads are reserved for org admins. Pick a project or upload to your personal space.',
+                    role: uploaderRole,
+                  }, 403);
+                }
               }
 
               // Validate file size (max 100MB)

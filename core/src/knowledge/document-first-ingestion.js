@@ -1241,6 +1241,14 @@ Rules:
           },
           skip_fact_extraction: true,                // parent is itself a summary
           skipPredictCalibrate: true,                // never dedup the doc node
+          // Doc node is unique per document — nothing to supersede/contradict/
+          // classify; make it a pure lock-free insert too (#6/#7). PartOf edges
+          // to children + deferred entity tags still attach below.
+          skip_contradiction_detection: true,
+          skip_relationship_classification: true,
+          smartIngest: false,
+          skipAdvisoryLock: true,
+          defer_entity_linking: true,
         });
 
         docParentId = parentRes?.memoryId || parentRes?.id || null;

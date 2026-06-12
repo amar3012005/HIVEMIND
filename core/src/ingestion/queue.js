@@ -141,10 +141,33 @@ function createIngestionQueue(options = {}) {
   // the configured REDIS_HOST=redis DNS alias can disappear on `docker
   // restart`. REDIS_HOST_FALLBACKS lets the runtime recover automatically
   // without env edits per rebuild.
-  const primaryHost = process.env.REDIS_HOST || 'localhost';
-  const altHosts = (process.env.REDIS_HOST_FALLBACKS || '')
-    .split(',').map((s) => s.trim()).filter(Boolean);
-  const candidateHosts = [primaryHost, ...altHosts.filter((h) => h !== primaryHost)];
+  // Prefer REDIS_URL (Coolify's authoritative host+password+db); discrete
+  // REDIS_HOST/PORT/PASSWORD are the fallback. REDIS_PASSWORD is frequently
+  // UNSET while the real password lives only inside REDIS_URL — reading
+  // REDIS_PASSWORD alone then yields undefined → "NOAUTH Authentication
+  // required" → this queue silently degraded to the in-memory fallback (no
+  // durability across restart).
+  let urlHost; let urlPort; let urlPassword; let urlUsername; let urlDb;
+  if (process.env.REDIS_URL) {
+    try {
+      const u = new URL(process.env.REDIS_URL);
+      urlHost = u.hostname;
+      urlPort = Number(u.port || 6379);
+      urlPassword = u.password ? decodeURIComponent(u.password) : undefined;
+      urlUsername = u.username ? decodeURIComponent(u.username) : undefined;
+      urlDb = (u.pathname && u.pathname.length > 1) ? (Number(u.pathname.slice(1)) || 0) : 0;
+    } catch { /* malformed URL — fall back to discrete vars */ }
+  }
+  const redisPort = urlPort || Number(process.env.REDIS_PORT || 6379);
+  const redisPassword = urlPassword !== undefined ? urlPassword : (process.env.REDIS_PASSWORD || undefined);
+  const redisUsername = urlUsername;
+  const redisDb = urlDb || 0;
+  const primaryHost = urlHost || process.env.REDIS_HOST || 'localhost';
+  const altHosts = [
+    process.env.REDIS_HOST,
+    ...(process.env.REDIS_HOST_FALLBACKS || '').split(',').map((s) => s.trim()).filter(Boolean),
+  ].filter(Boolean).filter((h) => h !== primaryHost);
+  const candidateHosts = [primaryHost, ...altHosts];
 
   let resolvedSystem = null;
   const inMemoryFallback = buildInMemoryQueueSystem(options);
@@ -154,8 +177,9 @@ function createIngestionQueue(options = {}) {
     for (const host of candidateHosts) {
       const probe = new IORedis({
         host,
-        port: Number(process.env.REDIS_PORT || 6379),
-        password: process.env.REDIS_PASSWORD || undefined,
+        port: redisPort,
+        password: redisPassword,
+        username: redisUsername,
         maxRetriesPerRequest: 1,
         connectTimeout: 1500,
         lazyConnect: true,
@@ -185,8 +209,10 @@ function createIngestionQueue(options = {}) {
     // on the host that actually answered.
     const connection = new IORedis({
       host: workingHost,
-      port: Number(process.env.REDIS_PORT || 6379),
-      password: process.env.REDIS_PASSWORD || undefined,
+      port: redisPort,
+      password: redisPassword,
+      username: redisUsername,
+      db: redisDb,
       maxRetriesPerRequest: null,
     });
     connection.on('error', (err) => {

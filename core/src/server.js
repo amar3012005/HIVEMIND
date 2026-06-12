@@ -14923,8 +14923,19 @@ exit \$RC
               if (statsCtx?.orgRole !== 'guest') tiers.push({ scope: 'organization', orgId });
               if (pIds.length) tiers.push({ scope: 'project', memoryProjects: { some: { projectId: { in: pIds } } } });
               if (tIds.length) tiers.push({ scope: 'team', primaryTeamId: { in: tIds } });
-              const memWhere = { orgId, deletedAt: null, isLatest: true, OR: tiers };
-              const relMemScope = { orgId, deletedAt: null, OR: tiers };
+              // Same noise exclusion as listMemories — canonical count is
+              // "latest + visible + no internal noise". Without it stats
+              // counted extracted-fact children + tara/governance rows and
+              // showed ~3× the Memories-page number.
+              const statsHiddenTags = [
+                'internal-audit', 'governance', 'reflection',
+                'room-decision', 'hyper-rooms', 'hyper-room',
+                'tara-turn', 'tara-insight', 'tara-session', 'tara-call-log', 'tara-config', 'tara-skill',
+                'extracted-fact',
+              ];
+              const statsNoise = { NOT: { tags: { hasSome: statsHiddenTags } } };
+              const memWhere = { orgId, deletedAt: null, isLatest: true, OR: tiers, ...statsNoise };
+              const relMemScope = { orgId, deletedAt: null, OR: tiers, ...statsNoise };
               const [memTotal, relTotal] = await Promise.all([
                 prisma.memory.count({ where: memWhere }),
                 prisma.relationship.count({ where: { OR: [{ fromMemory: relMemScope }, { toMemory: relMemScope }] } }),

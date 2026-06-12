@@ -473,12 +473,11 @@ export class PrismaGraphStore {
     // TARA voice activity belongs in Call History, NOT the memory list — hide
     // ALL of it including the per-call `tara-call-log` summary. Caller opts in
     // by passing any tara-* tag.
+    // TARA voice activity + config/skills belong in /tara Call History, not the
+    // memory list. Exclude by TAG (tara-*) — NOT by `NOT project startsWith
+    // 'tara/'`, which drops every project=NULL memory (SQL NULL LIKE semantics).
     const callerWantsTara = Array.isArray(tags) && tags.some((t) => typeof t === 'string' && t.startsWith('tara-'));
-    if (!callerWantsTara) hiddenTags.push('tara-turn', 'tara-insight', 'tara-session', 'tara-call-log');
-    // TARA config/skills/voice activity lives under project='tara/*' and belongs
-    // in the /tara Call History view, not the memory list. Exclude unless the
-    // caller explicitly asked for tara content.
-    const excludeTaraProject = !callerWantsTara ? { NOT: { project: { startsWith: 'tara/' } } } : {};
+    if (!callerWantsTara) hiddenTags.push('tara-turn', 'tara-insight', 'tara-session', 'tara-call-log', 'tara-config', 'tara-skill');
     const auditExclusion = hiddenTags.length
       ? { NOT: { tags: { hasSome: hiddenTags } } }
       : {};
@@ -486,7 +485,6 @@ export class PrismaGraphStore {
       where: {
         ...baseWhere,
         ...auditExclusion,
-        ...excludeTaraProject,
         memoryType: memory_type || undefined,
         isLatest: typeof is_latest === 'boolean' ? is_latest : undefined,
         tags: tags?.length ? { hasEvery: tags } : undefined,

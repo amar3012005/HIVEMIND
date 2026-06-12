@@ -16379,9 +16379,11 @@ exit \$RC
               const memWhere = {
                 userId, orgId, deletedAt: null, isLatest: true,
                 ...(memTypeFilter ? { memoryType: memTypeFilter } : {}),
+                // Exclude TARA + governance + room noise by TAG only. (Do NOT use
+                // `NOT project startsWith 'tara/'`: NULL LIKE → NULL → drops every
+                // project=NULL personal memory.)
                 ...(includeChildren ? {} : { AND: [
-                  { NOT: { tags: { hasSome: ['extracted-fact', 'tara-turn', 'tara-insight', 'tara-call-log', 'tara-session', 'internal-audit', 'governance', 'reflection', 'hyper-rooms', 'hyper-room', 'room-decision'] } } },
-                  { NOT: { project: { startsWith: 'tara/' } } },  // skip ALL TARA activity (turns/config/skills/call-logs)
+                  { NOT: { tags: { hasSome: ['extracted-fact', 'tara-turn', 'tara-insight', 'tara-call-log', 'tara-session', 'tara-config', 'tara-skill', 'internal-audit', 'governance', 'reflection', 'hyper-rooms', 'hyper-room', 'room-decision'] } } },
                 ] }),
                 ...(projScope ? { OR: [{ projectId: projScope.id }, { project: { in: [projScope.slug, projScope.name].filter(Boolean) } }] } : {}),
               };
@@ -16595,7 +16597,7 @@ exit \$RC
               // / bridge) — those are real knowledge the user wants surfaced.
               const HIDDEN_CHILD_TAGS_GRAPH = [
                 'extracted-fact',
-                'tara-turn', 'tara-insight', 'tara-call-log', 'tara-session',
+                'tara-turn', 'tara-insight', 'tara-call-log', 'tara-session', 'tara-config', 'tara-skill',
                 // governance audit-reflection noise. NOTE: do NOT add
                 // 'cognition-loop' — the GOOD synthesis/canonical outputs carry
                 // it too; 'internal-audit'/'governance'/'reflection' are the
@@ -16631,10 +16633,11 @@ exit \$RC
                 deletedAt: null,
                 ...(includeSuperseded ? {} : { isLatest: true }),
                 ...(graphProjScope || {}),
-                ...(includeChildren ? {} : { AND: [
-                  ...HIDDEN_CHILD_TAGS_GRAPH.map((t) => ({ NOT: { tags: { has: t } } })),
-                  { NOT: { project: { startsWith: 'tara/' } } }, // TARA config/skills/voice live in /tara, not the memory graph
-                ] }),
+                // NOTE: exclude TARA by TAG (tara-* incl tara-config/tara-skill),
+                // NOT by `NOT project startsWith 'tara/'` — that clause nukes
+                // every project=NULL memory (SQL: NULL LIKE 'tara/%' → NULL →
+                // NOT NULL → row dropped), which is ~all personal memories.
+                ...(includeChildren ? {} : { AND: HIDDEN_CHILD_TAGS_GRAPH.map((t) => ({ NOT: { tags: { has: t } } })) }),
               };
               const scopeWhere = graphScope === 'team'
                 ? {

@@ -142,6 +142,20 @@ async function hop1Memory({ store, query, options, ctx }) {
   const explicitDateRange = options.date_range && typeof options.date_range === 'object'
     ? options.date_range
     : null;
+  // Derive a TIGHT start+end window from the query text ("early June",
+  // "yesterday", "2026-06-06", "in March"). Without this the valid_at path
+  // below applies only an END cap (no start), so semantically-loose recall
+  // leaks in older tangential memories — e.g. "what happened in early June"
+  // returned May rows + undated docs and the answer step then bailed. A real
+  // start+end beats the end-only cap.
+  let derivedDateRange = null;
+  if (!explicitDateRange) {
+    try {
+      const { expandTemporalQuery } = await import('../search/time-aware-expander.js');
+      const te = expandTemporalQuery(query);
+      if (te?.hasTemporalFilter && te.dateRange?.start) derivedDateRange = te.dateRange;
+    } catch { /* non-fatal — fall back to valid_at cap */ }
+  }
   const recallArgs = {
     query_context: query,
     user_id: ctx.userId,
@@ -153,7 +167,9 @@ async function hop1Memory({ store, query, options, ctx }) {
     ...(ctx.projectId ? { project_id: ctx.projectId, project_ids: [ctx.projectId] } : {}),
     ...(explicitDateRange
       ? { date_range: explicitDateRange }
-      : validAtDate ? { date_range: { end: validAtDate.toISOString() } } : {}),
+      : derivedDateRange
+        ? { date_range: derivedDateRange }
+        : validAtDate ? { date_range: { end: validAtDate.toISOString() } } : {}),
   };
   // PHASE-B TODO: surface spine from recallPersistedMemories result when TIERED_VIEW lands on router path
   const result = willOverride

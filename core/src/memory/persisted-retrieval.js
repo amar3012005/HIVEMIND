@@ -990,6 +990,27 @@ export async function recallPersistedMemories(store, {
   const temporalExpansion = expandTemporalQuery(query_context);
   const effectiveDateRange = date_range || temporalExpansion.dateRange || null;
   const temporalComparison = temporalExpansion.hasTemporalFilter || isTemporalComparisonQuery(query_context);
+
+  // ── Event-time ranking BOOST (gated EVENT_TIME_RANKING, default off) ──
+  // SOFT additive score boost — NOT a filter — for candidates whose EVENT date
+  // (ts:/time: tags, document_date, event_dates) falls in the query's temporal
+  // window. Floats in-window memories to the top of the recalled set so they
+  // survive RRF/MMR downstream and reach the answer model, fixing vague
+  // temporal queries ("early June") that semantic recall alone ranked low.
+  // Uses temporalExpansion.dateRange (tight start+end from the query text),
+  // NOT effectiveDateRange (which may be a loose valid_at end-cap). Never drops.
+  const _EVENT_TIME_RANKING = process.env.EVENT_TIME_RANKING === 'true';
+  const _eventWin = (_EVENT_TIME_RANKING && temporalExpansion?.dateRange?.start)
+    ? { s: temporalExpansion.dateRange.start, e: temporalExpansion.dateRange.end || temporalExpansion.dateRange.start }
+    : null;
+  const _eventTimeBoost = (memory) => {
+    if (!_eventWin) return 0;
+    const dates = [];
+    for (const t of (memory.tags || [])) { const m = /^(?:ts|time):(\d{4}-\d{2}-\d{2})/.exec(t); if (m) dates.push(m[1]); }
+    if (memory.document_date) dates.push(String(memory.document_date).slice(0, 10));
+    for (const d of (memory.event_dates || [])) dates.push(String(d).slice(0, 10));
+    return dates.some((d) => d >= _eventWin.s && d <= _eventWin.e) ? 0.6 : 0;
+  };
   const candidatePoolSize = temporalComparison
     ? Math.max(max_memories * 8, 40)
     : Math.max(max_memories * 4, 20);
@@ -1234,7 +1255,7 @@ export async function recallPersistedMemories(store, {
         (_effectiveWeights.vector ?? 0.2) * vectorScore +
         (_effectiveWeights.graph ?? 0.05) * graphScore +
         (_effectiveWeights.policy ?? 0.05) * policyScore +
-        temporalBoost;
+        temporalBoost + _eventTimeBoost(memory);
     // Superseded memory penalty
     if (memory.is_latest === false) score *= 0.55;
     // Stale-superseded penalty: superseded AND >30 days old gets extra
@@ -1295,7 +1316,7 @@ export async function recallPersistedMemories(store, {
         (_effectiveWeights.vector ?? 0.2) * (candidate.vectorScore || 0) +
         (_effectiveWeights.graph ?? 0.05) * graphScore +
         (_effectiveWeights.policy ?? 0.05) * policyScore +
-        temporalBoost;
+        temporalBoost + _eventTimeBoost(candidate.memory);
     // Superseded memory penalty
     if (candidate.memory?.is_latest === false) score *= 0.55;
     // Stale-superseded penalty (>30d) + contradiction penalty.
@@ -1342,7 +1363,7 @@ export async function recallPersistedMemories(store, {
         (_effectiveWeights.importance ?? 0.1) * 1 +
         (_effectiveWeights.vector ?? 0.2) * (candidate.vectorScore || 0) +
         (_effectiveWeights.graph ?? 0.05) * graphScore +
-        (_effectiveWeights.policy ?? 0.05) * policyScore;
+        (_effectiveWeights.policy ?? 0.05) * policyScore + _eventTimeBoost(candidate.memory);
     if (candidate.memory?.is_latest === false) score *= 0.55;
     if (candidate.memory?.id && contradictedIds.has(candidate.memory.id)) score *= 0.40;
     return { ...candidate, keywordScore: candidate.similarityScore || 0, graphScore, policyScore, recencyScore, score };

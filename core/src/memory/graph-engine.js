@@ -541,7 +541,21 @@ export class MemoryGraphEngine {
       }),
     };
 
-    return this.store.advisoryLock(baseMemory.user_id, async lockedStore => {
+    // Bulk-KB fast path (#6): the per-user advisory lock exists to serialize a
+    // user's writes so concurrent supersede/dedup can't race. When the caller
+    // skips ALL of dedup (skipPredictCalibrate), relationship-classification,
+    // and contradiction-detection, this ingest is a PURE INSERT with nothing to
+    // serialize — the lock then only throttles throughput. Honor skipAdvisoryLock
+    // ONLY under that exact condition (provably safe); every other ingest keeps it.
+    const _pureInsert = input.skipAdvisoryLock === true
+      && input.skipPredictCalibrate === true
+      && (input.skip_relationship_classification === true || input.smartIngest === false)
+      && input.skip_contradiction_detection === true;
+    const _acquire = _pureInsert
+      ? (uid, fn) => fn(this.store)
+      : (uid, fn) => this.store.advisoryLock(uid, fn);
+
+    return _acquire(baseMemory.user_id, async lockedStore => {
       const transactionalStore = lockedStore || this.store;
       return transactionalStore.transaction(async store => {
         const latestMemories = await store.listLatestMemories(baseMemory);

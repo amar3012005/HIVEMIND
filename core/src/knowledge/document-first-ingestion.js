@@ -1067,6 +1067,11 @@ Rules:
             skipPredictCalibrate: true,
             skip_contradiction_detection: true,
             skip_relationship_classification: true,
+            // #6: with all dedup/classification skipped this is a pure insert —
+            // the per-user advisory lock guards nothing, so bypass it. Section
+            // writes no longer serialize; PartOf + deferred entity tags still
+            // attach. Facts (separate path) keep the full locked pipeline.
+            skipAdvisoryLock: true,
           });
           // graph-engine returns { memoryId, operation, ... }
           // operation = 'skipped_*' means memory NOT persisted to DB -> FK would fail

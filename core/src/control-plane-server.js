@@ -2184,31 +2184,29 @@ const server = http.createServer(async (req, res) => {
     const FRONTEND_BASE = (process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu').replace(/\/$/, '');
     const joinUrl = `${FRONTEND_BASE}/hivemind/join/${membership.org.slug}/${invite.token}`;
 
-    // Send invitation email if address provided AND a mail provider is wired.
+    // Send invitation email via the SYSTEM email pipeline (same Gmail-backed
+    // sendSystemEmail as the login welcome mails) with the branded
+    // `team_invite` template. The old ./services/email-sender.js path had no
+    // provider configured in prod → every invite showed "Email dispatch
+    // failed: no provider configured".
     let emailReport = { attempted: false };
     if (inviteEmail) {
       try {
-        const [{ sendEmail, buildInviteEmail }, projectRows, teamRows, inviter] = await Promise.all([
-          import('./services/email-sender.js'),
-          projectIds.length
-            ? prisma.project.findMany({ where: { id: { in: projectIds }, orgId }, select: { name: true } }).catch(() => [])
-            : Promise.resolve([]),
-          teamIds.length
-            ? prisma.team.findMany({ where: { id: { in: teamIds }, orgId }, select: { name: true } }).catch(() => [])
-            : Promise.resolve([]),
-          prisma.user.findUnique({ where: { id: current.session.userId }, select: { email: true } }).catch(() => null),
-        ]);
-        const tpl = buildInviteEmail({
-          orgName: membership.org.name || 'your team',
-          inviteUrl: joinUrl,
-          inviterEmail: inviter?.email || null,
-          projectNames: projectRows.map(p => p.name),
-          teamNames: teamRows.map(t => t.name),
-          role: legacyRoleReverse,
-          expiresAt,
+        const inviter = await prisma.user.findUnique({
+          where: { id: current.session.userId },
+          select: { email: true, displayName: true },
+        }).catch(() => null);
+        await sendSystemEmail({
+          templateId: 'team_invite',
+          to: inviteEmail,
+          vars: {
+            orgName: membership.org.name || 'your team',
+            inviterName: inviter?.displayName || inviter?.email || 'your admin',
+            joinUrl,
+            expiresOn: expiresAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+          },
         });
-        const result = await sendEmail({ to: inviteEmail, subject: tpl.subject, html: tpl.html, text: tpl.text });
-        emailReport = { attempted: true, ...result };
+        emailReport = { attempted: true, ok: true };
       } catch (mailErr) {
         emailReport = { attempted: true, ok: false, error: mailErr.message };
       }
@@ -2399,30 +2397,25 @@ const server = http.createServer(async (req, res) => {
     const FRONTEND_BASE = (process.env.HIVEMIND_FRONTEND_URL || CONFIG.publicBaseUrl).replace(/\/$/, '');
     const joinUrl = `${FRONTEND_BASE}/hivemind/join/${membership.org.slug}/${invite.token}`;
 
+    // Resend via the SYSTEM email pipeline (sendSystemEmail + team_invite
+    // template) — the old email-sender path had no provider configured.
     let dispatch = { attempted: true };
     try {
-      const [{ sendEmail, buildInviteEmail }, projectRows, teamRows, inviter] = await Promise.all([
-        import('./services/email-sender.js'),
-        invite.projectIds?.length
-          ? prisma.project.findMany({ where: { id: { in: invite.projectIds }, orgId }, select: { name: true } }).catch(() => [])
-          : Promise.resolve([]),
-        invite.teamIds?.length
-          ? prisma.team.findMany({ where: { id: { in: invite.teamIds }, orgId }, select: { name: true } }).catch(() => [])
-          : Promise.resolve([]),
-        prisma.user.findUnique({ where: { id: current.session.userId }, select: { email: true } }).catch(() => null),
-      ]);
-      const tpl = buildInviteEmail({
-        orgName: membership.org.name || 'your team',
-        inviteUrl: joinUrl,
-        inviterEmail: inviter?.email || null,
-        projectNames: projectRows.map(p => p.name),
-        teamNames: teamRows.map(t => t.name),
-        role: invite.role,
-        expiresAt: newExpiresAt,
-        resend: true,
+      const inviter = await prisma.user.findUnique({
+        where: { id: current.session.userId },
+        select: { email: true, displayName: true },
+      }).catch(() => null);
+      await sendSystemEmail({
+        templateId: 'team_invite',
+        to: invite.email,
+        vars: {
+          orgName: membership.org.name || 'your team',
+          inviterName: inviter?.displayName || inviter?.email || 'your admin',
+          joinUrl,
+          expiresOn: newExpiresAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        },
       });
-      const result = await sendEmail({ to: invite.email, subject: tpl.subject, html: tpl.html, text: tpl.text });
-      dispatch = { attempted: true, ...result };
+      dispatch = { attempted: true, ok: true };
     } catch (mailErr) {
       dispatch = { attempted: true, ok: false, error: mailErr.message };
     }

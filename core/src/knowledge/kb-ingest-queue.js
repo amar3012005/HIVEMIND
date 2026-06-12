@@ -326,6 +326,24 @@ export class KbIngestQueue {
     };
   }
 
+  /** Remove a queued/failed job + its status mirror by tracker job id or BullMQ
+   *  job id. Best-effort — used when the FE deletes a stuck/processing card. */
+  async clearJob(id) {
+    await this._ready;
+    try { if (this.redis && id) await this.redis.del(`kbq:status:${id}`); } catch { /* noop */ }
+    if (!this.queue) return;
+    try {
+      // id may be the tracker job id (kbq_*) — scan recent jobs for a match;
+      // or a BullMQ jobId (<org>-<checksum>) — try direct removal too.
+      const direct = await this.queue.getJob(id).catch(() => null);
+      if (direct) { await direct.remove().catch(() => {}); return; }
+      const jobs = await this.queue.getJobs(['waiting', 'delayed', 'failed', 'active'], 0, 500).catch(() => []);
+      for (const j of jobs) {
+        if (j?.data?.trackerJobId === id) { await j.remove().catch(() => {}); }
+      }
+    } catch { /* best-effort */ }
+  }
+
   async close() {
     try { await this.worker?.close(); } catch { /* noop */ }
     try { await this.queue?.close(); } catch { /* noop */ }

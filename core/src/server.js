@@ -12137,7 +12137,35 @@ exit \$RC
                     console.warn(`[knowledge-delete] phase1 fallback failed: ${phase1Err.message}`);
                   }
                 }
-                return jsonResponse(res, { error: 'No memories found for this document' }, 404);
+                // Last resort: delete a knowledge_document for THIS user whose
+                // checksum/source_id ties back to the upload_id, covering
+                // failed/processing docs whose id the FE never learned.
+                try {
+                  const orphanDoc = deleteUploadId
+                    ? await prisma.knowledgeDocument.findFirst({
+                        where: { userId, orgId, OR: [{ sourceId: { contains: String(deleteUploadId) } }] },
+                        select: { id: true },
+                      })
+                    : null;
+                  if (orphanDoc) {
+                    await purgeKnowledgeDocs([orphanDoc.id]);
+                    invalidateAggregateCache({ userId, orgId, project: null });
+                    return jsonResponse(res, { success: true, mode: 'orphan_doc_delete', documentId: orphanDoc.id, deleted_memories: 0 });
+                  }
+                } catch (orphanErr) { console.warn('[knowledge-delete] orphan lookup failed:', orphanErr.message); }
+
+                // Best-effort: clear any lingering queue job + Redis status for a
+                // queued/processing id so its stuck FE card has no backing trace.
+                try {
+                  const qid = rawId || rawUploadId || rawMemoryId;
+                  if (qid && kbIngestQueue?.clearJob) await kbIngestQueue.clearJob(qid);
+                } catch { /* best-effort */ }
+
+                // IDEMPOTENT DELETE: nothing left to remove ⇒ the desired state
+                // (absent) already holds. Return success so the FE can always
+                // clear a card — stuck/failed/already-deleted included. Was a
+                // 404 that left phantom "Processing" cards undeletable.
+                return jsonResponse(res, { success: true, deleted: 0, note: 'nothing to delete (already absent)' });
               }
               // De-dup
               memoryIds = Array.from(new Set(memoryIds));

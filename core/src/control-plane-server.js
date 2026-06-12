@@ -6111,9 +6111,10 @@ Write the persona now.`;
         if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
         try {
           const gr = await prisma.$queryRawUnsafe(
-            'SELECT goal FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid',
+            'SELECT project_id, goal FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid',
             roomId,
           );
+          room.projectId = gr?.[0]?.project_id || null;
           room.goal = gr?.[0]?.goal || '';
         } catch { room.goal = ''; }
         const turn = await prisma.hyperTurn.findFirst({
@@ -6177,6 +6178,16 @@ Write the persona now.`;
       const room = await prisma.hyperRoom.findFirst({
         where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId },
       });
+      if (room) {
+        try {
+          const gr = await prisma.$queryRawUnsafe(
+            'SELECT project_id, goal FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid',
+            roomId,
+          );
+          room.projectId = gr?.[0]?.project_id || null;
+          room.goal = gr?.[0]?.goal || '';
+        } catch { room.goal = ''; }
+      }
       if (body.action === 'flyby-decision') {
         const turnId = typeof body.turn_id === 'string' ? body.turn_id : '';
         const decision = String(body.decision || '').trim().toLowerCase();

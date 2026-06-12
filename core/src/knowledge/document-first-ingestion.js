@@ -76,6 +76,25 @@ function cleanTitleFrom(text, max = 80) {
   return `${atWord.trim()}…`;
 }
 
+// Tolerant JSON-array extraction — gpt-oss models don't honor response_format,
+// so pull the first balanced [...] from the completion text.
+function extractJsonArray(text) {
+  if (!text) return [];
+  const start = text.indexOf('[');
+  if (start === -1) return [];
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < text.length; i++) {
+    const c = text[i];
+    if (esc) { esc = false; continue; }
+    if (c === '\\') { esc = true; continue; }
+    if (c === '"') inStr = !inStr;
+    if (inStr) continue;
+    if (c === '[') depth++;
+    else if (c === ']') { depth--; if (depth === 0) { try { return JSON.parse(text.slice(start, i + 1)); } catch { return []; } } }
+  }
+  return [];
+}
+
 
 export class DocumentFirstIngestionService {
   constructor({ db, smartIngestRouter, memoryGraphEngine, doclingAdapter, embeddingService, entityExtractor = null, topicStateWriter = null, logger = console }) {
@@ -130,116 +149,166 @@ export class DocumentFirstIngestionService {
    * Returns the background promise (callers fire-and-forget; reprocess scripts
    * can await it via service._distillPromise).
    */
+  /**
+   * Combined, batched KB fact distillation (latency levers #2/#3/#5). ONE cheap
+   * LLM call per BATCH of sections returns facts + entities together (was one
+   * call per section, facts only) — ~BATCH× fewer calls and more accurate
+   * (shared context). Each fact → its own memory with provenance, a Derives edge
+   * to its section, CONTEXTUAL embedding (doc title + heading prepended), and
+   * entity:* tags from the same pass (no separate entity-link LLM on facts).
+   * Async, concurrency-bounded, off the critical path. Off-switch KB_FACT_DISTILL=false.
+   */
+  async _batchExtractFacts(sections, { maxFacts = 5 } = {}) {
+    const apiKey = process.env.GROQ_API_KEY;
+    const model = process.env.MEMORY_PROCESSOR_MODEL || 'openai/gpt-oss-20b';
+    // Heuristic fallback (no key): sentence-split — degraded but never blocks.
+    if (!apiKey) {
+      return sections.map((sec) => ({
+        facts: (sec.content || '').split(/(?<=[.!?])\s/).map((x) => x.trim()).filter((x) => x.length >= 25).slice(0, maxFacts),
+        entities: [],
+      }));
+    }
+    const numbered = sections.map((sec, i) =>
+      `SECTION ${i}${sec.heading ? ` [${sec.heading}]` : ''}:\n${(sec.content || '').slice(0, 2500)}`).join('\n\n---\n\n');
+    const sys = `You extract atomic, standalone FACTS from each numbered SECTION of a document.
+Return ONLY a JSON array — one object per section: {"i": <section number>, "facts": ["complete standalone sentence", ...], "entities": ["Name", ...]}.
+Rules:
+- Each fact is a complete sentence understandable on its own (include the subject — never "it"/"they").
+- Extract REAL information: names, roles, products, specs, numbers, dates, decisions, events. NOT meta-commentary about the document.
+- entities = people/companies/products/places mentioned in that section.
+- Max ${maxFacts} facts per section. If a section has no real facts, use "facts": [].
+- Output the JSON array and nothing else.`;
+    const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        temperature: 0.2,
+        max_tokens: 3500,
+        messages: [
+          { role: 'system', content: sys },
+          { role: 'user', content: numbered },
+        ],
+      }),
+    });
+    if (!resp.ok) throw new Error(`groq ${resp.status}`);
+    const json = await resp.json();
+    const arr = extractJsonArray(json?.choices?.[0]?.message?.content || '');
+    const byI = new Map();
+    arr.forEach((o, idx) => byI.set(typeof o?.i === 'number' ? o.i : idx, o));
+    return sections.map((_, i) => {
+      const o = byI.get(i) || {};
+      return { facts: Array.isArray(o.facts) ? o.facts : [], entities: Array.isArray(o.entities) ? o.entities : [] };
+    });
+  }
+
   _distillFactsAsync({ targets, userId, orgId, metadata = {}, documentId }) {
     if (!Array.isArray(targets) || targets.length === 0) return null;
     if (process.env.KB_FACT_DISTILL === 'false') return null; // emergency off-switch
+    const BATCH = Number(process.env.KB_DISTILL_BATCH || 6);
     const CONCURRENCY = Number(process.env.KB_DISTILL_CONCURRENCY || 3);
     const MAX_FACTS_PER_SEGMENT = Number(process.env.KB_DISTILL_MAX_FACTS || 5);
     const MAX_FACTS_PER_DOC = Number(process.env.KB_DISTILL_DOC_CAP || 120);
+    const docTitle = metadata.documentTitle || metadata.filename || `Document ${String(documentId).slice(0, 8)}`;
 
     const run = (async () => {
-      const { MemoryProcessor } = await import('../memory/memory-processor.js');
-      const processor = new MemoryProcessor();
-      let created = 0, failed = 0, idx = 0;
+      // Only sections with enough prose to distill.
+      const eligible = targets.filter((t) => (t.content || '').split(/\s+/).filter(Boolean).length >= 25);
+      const batches = [];
+      for (let i = 0; i < eligible.length; i += BATCH) batches.push(eligible.slice(i, i + BATCH));
+      let created = 0, failed = 0, bidx = 0;
 
-      const distillOne = async (t) => {
-        if (created >= MAX_FACTS_PER_DOC) return;
-        const words = (t.content || '').split(/\s+/).filter(Boolean).length;
-        if (words < 25) return; // nothing to distill
-        let factSentences = [];
+      const ingestFact = async (t, fact, entityTags) => {
+        const res = await this.memoryGraphEngine.ingestMemory({
+          user_id: userId,
+          org_id: orgId,
+          scope: t.scope,
+          visibility: t.visibility || 'private',
+          primary_team_id: t.primary_team_id || null,
+          project_ids: Array.isArray(t.project_ids) ? t.project_ids : [],
+          content: fact.trim(),
+          title: cleanTitleFrom(fact),
+          memory_type: 'fact',
+          source_type: 'knowledge_fact',
+          tags: [
+            ...(metadata.tags || []),
+            'extracted-fact',
+            'distilled-from-kb',
+            ...entityTags,
+            ...(metadata.filename ? [`filename:${metadata.filename}`] : []),
+            ...(documentId ? [`doc-id:${documentId}`] : []),
+            ...(t.heading ? [`heading:${String(t.heading).toLowerCase().replace(/\s+/g, '-').slice(0, 50)}`] : []),
+            ...(t.page ? [`page:${t.page}`] : []),
+          ],
+          source_metadata: { source_platform: 'knowledge_base', source_type: 'knowledge_fact', document_id: documentId },
+          metadata: { document_id: documentId, segment_memory_id: t.memoryId, distill_agent: 'kb_distill_v2' },
+          skip_fact_extraction: true,
+          defer_entity_linking: true,   // entities already extracted in the batch pass
+          strict_contradictions: true,
+        });
+        const factId = res?.memoryId || res?.id || null;
+        if (!factId || (res?.operation || '').startsWith('skipped')) return false;
+        // Provenance: fact Derives-from its section.
         try {
-          const result = await processor.process(
-            { content: t.content, memory_type: 'fact', user_id: userId, org_id: orgId },
-            [], // no similar-memory comparison — facts only
-          );
-          factSentences = (result?.factSentences || [])
-            .filter((f) => typeof f === 'string' && f.trim().length >= 20)
-            .slice(0, MAX_FACTS_PER_SEGMENT);
+          await this.memoryGraphEngine.store.createRelationship({
+            id: crypto.randomUUID(), from_id: factId, to_id: t.memoryId,
+            type: 'Derives', confidence: 0.9,
+            metadata: { created_by: 'kb_distill_v2', document_id: documentId },
+          });
+        } catch { /* best-effort */ }
+        // CONTEXTUAL embedding: prepend doc title + heading so the fact embeds
+        // with its provenance context (Anthropic contextual-retrieval). Also
+        // sidesteps storeMemory's extractFacts sync-regex by precomputing.
+        try {
+          const ctxInput = `${docTitle}${t.heading ? ` — ${t.heading}` : ''}\n${fact.trim()}`;
+          const vec = await this.memoryGraphEngine.vectorStore?.generateEmbedding?.(ctxInput);
+          await this.memoryGraphEngine.vectorStore?.storeMemory({
+            id: factId, user_id: userId, org_id: orgId, content: fact.trim(),
+            memory_type: 'fact', is_latest: true, tags: entityTags,
+            project_ids: Array.isArray(t.project_ids) ? t.project_ids : [],
+            primary_team_id: t.primary_team_id || null, visibility: t.visibility || 'private',
+            created_at: new Date().toISOString(),
+          }, vec ? { vector: vec } : {});
+        } catch (vecErr) {
+          this.logger.warn?.(`[kb-distill] vector index failed for ${factId}: ${vecErr.message}`);
+        }
+        return true;
+      };
+
+      const processBatch = async (batch) => {
+        if (created >= MAX_FACTS_PER_DOC) return;
+        let perSection;
+        try {
+          perSection = await this._batchExtractFacts(batch, { maxFacts: MAX_FACTS_PER_SEGMENT });
         } catch (err) {
           failed++;
-          this.logger.warn?.(`[kb-distill] LLM failed for segment-memory ${t.memoryId}: ${err.message}`);
+          this.logger.warn?.(`[kb-distill] batch LLM failed: ${err.message}`);
           return;
         }
-        for (const fact of factSentences) {
+        for (let k = 0; k < batch.length; k++) {
           if (created >= MAX_FACTS_PER_DOC) break;
-          try {
-            const res = await this.memoryGraphEngine.ingestMemory({
-              user_id: userId,
-              org_id: orgId,
-              scope: t.scope,
-              visibility: t.visibility || 'private',
-              primary_team_id: t.primary_team_id || null,
-              project_ids: Array.isArray(t.project_ids) ? t.project_ids : [],
-              content: fact.trim(),
-              title: cleanTitleFrom(fact),
-              memory_type: 'fact',
-              source_type: 'knowledge_fact',
-              tags: [
-                ...(metadata.tags || []),
-                'extracted-fact',
-                'distilled-from-kb',
-                ...(metadata.filename ? [`filename:${metadata.filename}`] : []),
-                ...(documentId ? [`doc-id:${documentId}`] : []),
-                ...(t.heading ? [`heading:${String(t.heading).toLowerCase().replace(/\s+/g, '-').slice(0, 50)}`] : []),
-                ...(t.page ? [`page:${t.page}`] : []),
-              ],
-              source_metadata: {
-                source_platform: 'knowledge_base',
-                source_type: 'knowledge_fact',
-                document_id: documentId,
-              },
-              metadata: { document_id: documentId, segment_memory_id: t.memoryId, distill_agent: 'kb_distill_v1' },
-              skip_fact_extraction: true,
-              defer_entity_linking: true,
-              strict_contradictions: true,
-            });
-            const factId = res?.memoryId || res?.id || null;
-            if (factId && !(res?.operation || '').startsWith('skipped')) {
-              created++;
-              // Provenance edge: fact Derives-from its section memory.
-              try {
-                await this.memoryGraphEngine.store.createRelationship({
-                  id: crypto.randomUUID(),
-                  from_id: factId,
-                  to_id: t.memoryId,
-                  type: 'Derives',
-                  confidence: 0.9,
-                  metadata: { created_by: 'kb_distill_v1', document_id: documentId },
-                });
-              } catch { /* edge is best-effort */ }
-              // Vector index: route-level code indexes upload-path memories, but
-              // distilled facts are created inside dfi — index them here or they
-              // stay invisible to vector recall (lexical-only).
-              try {
-                await this.memoryGraphEngine.vectorStore?.storeMemory({
-                  id: factId, user_id: userId, org_id: orgId,
-                  content: fact.trim(),
-                  memory_type: 'fact', is_latest: true,
-                  tags: [], project_ids: Array.isArray(t.project_ids) ? t.project_ids : [],
-                  primary_team_id: t.primary_team_id || null,
-                  visibility: t.visibility || 'private',
-                  created_at: new Date().toISOString(),
-                });
-              } catch (vecErr) {
-                this.logger.warn?.(`[kb-distill] vector index failed for ${factId}: ${vecErr.message}`);
-              }
-            }
-          } catch (err) {
-            failed++;
-            this.logger.warn?.(`[kb-distill] fact ingest failed: ${err.message}`);
+          const t = batch[k];
+          const ex = perSection[k] || { facts: [], entities: [] };
+          const facts = (ex.facts || []).filter((f) => typeof f === 'string' && f.trim().length >= 20).slice(0, MAX_FACTS_PER_SEGMENT);
+          const entityTags = (ex.entities || []).filter((e) => typeof e === 'string' && e.trim())
+            .slice(0, 8).map((e) => `entity:${e.trim().replace(/\s+/g, '_')}`);
+          for (const fact of facts) {
+            if (created >= MAX_FACTS_PER_DOC) break;
+            try { if (await ingestFact(t, fact, entityTags)) created++; }
+            catch (err) { failed++; this.logger.warn?.(`[kb-distill] fact ingest failed: ${err.message}`); }
           }
         }
       };
 
-      const workers = Array.from({ length: Math.min(CONCURRENCY, targets.length) }, async () => {
+      const workers = Array.from({ length: Math.min(CONCURRENCY, batches.length) }, async () => {
         while (true) {
-          const i = idx++;
-          if (i >= targets.length) return;
-          await distillOne(targets[i]);
+          const i = bidx++;
+          if (i >= batches.length) return;
+          await processBatch(batches[i]);
         }
       });
       await Promise.all(workers);
-      this.logger.info?.(`[kb-distill] doc ${String(documentId).slice(0, 8)}: ${created} facts distilled from ${targets.length} sections (failed=${failed})`);
+      this.logger.info?.(`[kb-distill] doc ${String(documentId).slice(0, 8)}: ${created} facts from ${eligible.length} sections in ${batches.length} LLM calls (failed=${failed})`);
       return { created, failed };
     })().catch((err) => {
       this.logger.warn?.(`[kb-distill] batch failed: ${err.message}`);

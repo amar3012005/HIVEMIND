@@ -5312,6 +5312,157 @@ exit \$RC
         }
       }
 
+      // POST /api/meetings/:id/ingest — "Save to HIVEMIND" the SMART way.
+      // Instead of one flat markdown blob, build an ingest TREE from the
+      // insights we already extracted: a parent `event` memory (summary +
+      // participant/org entity tags + meeting-date temporal anchor) plus
+      // first-class typed children — each decision → `decision`, each action
+      // item → `goal`, key points / risks → `fact`, next steps → `goal`, and
+      // the transcript as ONE low-priority grounding child. Every node runs
+      // the SAME canonical pipeline (smart-router → embed → Qdrant → relation
+      // classify) so a decision here auto-links (Updates/Contradicts) to prior
+      // decisions on the same topic, and entity tags connect it to existing
+      // people/org clusters. Idempotent via meetings.source_memory_id.
+      {
+        const mIngest = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})\/ingest$/);
+        if (mIngest && req.method === 'POST') {
+          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+          if (!persistentMemoryEngine) return jsonResponse(res, { error: 'memory_unavailable' }, 503);
+          const mOrg = req.headers['x-hm-org-id'] || DEFAULT_ORG;
+          const mUser = req.headers['x-hm-user-id'] || DEFAULT_USER;
+          const id = mIngest[1];
+          try {
+            const rows = await prisma.$queryRawUnsafe(
+              `SELECT id, title, summary, transcript, language, multi_speaker, speaker_count,
+                      action_items, decisions, key_points, questions, topics, insights,
+                      source_memory_id, created_at
+               FROM meetings WHERE id = $1::uuid AND org_id = $2::uuid AND deleted_at IS NULL`,
+              id, mOrg,
+            );
+            if (!rows?.length) return jsonResponse(res, { error: 'not_found' }, 404);
+            const m = rows[0];
+
+            // Idempotent — already ingested unless caller forces a re-ingest.
+            if (m.source_memory_id && !body?.force) {
+              return jsonResponse(res, { ok: true, already_ingested: true, parent_id: m.source_memory_id });
+            }
+
+            const ins = (m.insights && typeof m.insights === 'object') ? m.insights : {};
+            const arr = (v) => (Array.isArray(v) ? v : []);
+            // Prefer the dedicated columns, fall back to the insights blob.
+            const decisions = arr(m.decisions).length ? arr(m.decisions) : arr(ins.decisions);
+            const actionItems = arr(m.action_items).length ? arr(m.action_items) : arr(ins.action_items);
+            const keyPoints = arr(m.key_points).length ? arr(m.key_points) : arr(ins.key_points);
+            const risks = arr(ins.risks);
+            const nextSteps = arr(ins.next_steps);
+            const topics = (arr(m.topics).length ? arr(m.topics) : arr(ins.topics)).slice(0, 5);
+            const summary = (m.summary || ins.summary || '').toString();
+            const transcript = (m.transcript || '').toString();
+            const title = (m.title || 'Meeting').toString().slice(0, 200);
+            const meetingDate = m.created_at ? new Date(m.created_at).toISOString() : null;
+
+            if (!summary && !decisions.length && !transcript.trim()) {
+              return jsonResponse(res, { error: 'nothing_to_ingest' }, 400);
+            }
+
+            // Participants: real names from the speaker-name map + insight entities.
+            const speakerNames = (ins.speaker_names && typeof ins.speaker_names === 'object') ? Object.values(ins.speaker_names) : [];
+            const entPeople = arr(ins.entities?.people);
+            const entOrgs = arr(ins.entities?.organizations);
+            const people = Array.from(new Set([...speakerNames, ...entPeople].map((s) => String(s || '').trim()).filter(Boolean))).slice(0, 12);
+            const orgs = Array.from(new Set(entOrgs.map((s) => String(s || '').trim()).filter(Boolean))).slice(0, 8);
+            const entityTags = [...people.map((p) => `entity:${p}`), ...orgs.map((o) => `entity:${o}`)];
+            const meetingTag = `meeting:${id}`;
+
+            const baseMeta = { meeting_id: id, source: 'meeting-notes' };
+            const mkChild = (cTitle, content, memory_type, extraTags = []) => ({
+              user_id: mUser,
+              org_id: mOrg,
+              title: String(cTitle).slice(0, 200),
+              content: String(content),
+              memory_type,
+              tags: [meetingTag, ...extraTags].filter(Boolean),
+              ...(meetingDate ? { document_date: meetingDate } : {}),
+              metadata: { ...baseMeta },
+            });
+
+            const parent = {
+              user_id: mUser,
+              org_id: mOrg,
+              title,
+              content: summary
+                + (people.length ? `\n\nParticipants: ${people.join(', ')}` : '')
+                + (orgs.length ? `\nOrganizations: ${orgs.join(', ')}` : ''),
+              memory_type: 'event',
+              tags: ['meeting', 'ai-meeting-notes', meetingTag,
+                ...(m.multi_speaker ? ['multi-speaker'] : []),
+                ...topics, ...entityTags].filter(Boolean),
+              ...(meetingDate ? { document_date: meetingDate } : {}),
+              metadata: { ...baseMeta, force_entity_linking: true, participant_count: people.length },
+            };
+
+            const children = [];
+            for (const d of decisions.slice(0, 12)) {
+              const text = typeof d === 'string' ? d : (d?.text || JSON.stringify(d));
+              if (text?.trim()) children.push(mkChild(`Decision — ${text.slice(0, 60)}`, text, 'decision', ['decision', ...topics.slice(0, 2)]));
+            }
+            for (const a of actionItems.slice(0, 12)) {
+              const taskText = typeof a === 'string' ? a : (a?.task || JSON.stringify(a));
+              if (!taskText?.trim()) continue;
+              const owner = (typeof a === 'object' && a?.owner) ? a.owner : null;
+              const due = (typeof a === 'object' && a?.due) ? a.due : null;
+              const content = `${taskText}${owner ? ` (owner: ${owner})` : ''}${due ? ` (due: ${due})` : ''}`;
+              children.push(mkChild(`Action — ${taskText.slice(0, 60)}`, content, 'goal',
+                ['action-item', owner ? `owner:${String(owner).toLowerCase()}` : null]));
+            }
+            for (const k of keyPoints.slice(0, 8)) {
+              if (String(k || '').trim()) children.push(mkChild(`Key point — ${String(k).slice(0, 60)}`, String(k), 'fact', ['key-point']));
+            }
+            for (const r of risks.slice(0, 6)) {
+              if (String(r || '').trim()) children.push(mkChild(`Risk — ${String(r).slice(0, 60)}`, String(r), 'fact', ['risk']));
+            }
+            for (const n of nextSteps.slice(0, 6)) {
+              if (String(n || '').trim()) children.push(mkChild(`Next step — ${String(n).slice(0, 60)}`, String(n), 'goal', ['next-step']));
+            }
+            // Transcript as ONE grounding child — capped, low priority, hidden
+            // from default list (ingestMemoryTree auto-tags children 'extracted-fact').
+            if (transcript.trim()) {
+              children.push(mkChild(`Transcript — ${title}`, transcript.slice(0, 8000), 'event', ['transcript']));
+            }
+
+            const tree = await persistentMemoryEngine.ingestMemoryTree({ parent, children });
+            const parentId = tree?.parentId || null;
+
+            // Structured enrichment on the parent (fire-and-forget).
+            if (parentId && enrichmentQueue) {
+              enrichmentQueue.enqueue(parentId, { content: parent.content, title: parent.title, tags: parent.tags });
+            }
+            // Link the meeting row back to the parent memory (idempotent).
+            if (parentId) {
+              await prisma.$queryRawUnsafe(
+                `UPDATE meetings SET source_memory_id = $1::uuid WHERE id = $2::uuid AND org_id = $3::uuid`,
+                parentId, id, mOrg,
+              ).catch(() => { /* link best-effort */ });
+            }
+            return jsonResponse(res, {
+              ok: true,
+              parent_id: parentId,
+              child_ids: tree?.childIds || [],
+              counts: {
+                decisions: Math.min(decisions.length, 12),
+                action_items: Math.min(actionItems.length, 12),
+                key_points: Math.min(keyPoints.length, 8),
+                risks: Math.min(risks.length, 6),
+                next_steps: Math.min(nextSteps.length, 6),
+                transcript: transcript.trim() ? 1 : 0,
+              },
+            }, 201);
+          } catch (e) {
+            return jsonResponse(res, { error: 'meeting_ingest_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
+          }
+        }
+      }
+
       // ── Post-quantum security: status + public keys + verification ────────
       // All three routes require authentication and are scoped to the caller's
       // key-bound org. authenticateApiKey only folds x-hm-org-id into
@@ -11540,9 +11691,25 @@ exit \$RC
                     byType[t] = (byType[t] || 0) + c;
                     total += c;
                   }
-                  out[docId] = { total, byType, cluster_size: idArr.length };
+                  // Tier-2 enrichment surface: distilled facts for this doc.
+                  // FE passes the doc-parent MEMORY id — derive the knowledge-
+                  // document id from its doc-id:* tag or source metadata, since
+                  // _distillFactsAsync stamps facts with doc-id:<knowledgeDoc.id>.
+                  let factCount = 0;
+                  try {
+                    const docIdTag = (docMemory?.tags || []).find(t => typeof t === 'string' && t.startsWith('doc-id:'));
+                    const kdId = docIdTag ? docIdTag.slice('doc-id:'.length) : (docMeta?.document_id || null);
+                    if (kdId) {
+                      // orgId scope: required by the tenant-isolation prisma
+                      // guard (Memory.count without orgId/userId throws).
+                      factCount = await prisma.memory.count({
+                        where: { orgId, deletedAt: null, tags: { hasEvery: [`doc-id:${kdId}`, 'distilled-from-kb'] } },
+                      });
+                    }
+                  } catch { /* facts count best-effort */ }
+                  out[docId] = { total, byType, cluster_size: idArr.length, facts: factCount };
                 } catch (relErr) {
-                  out[docId] = { total: 0, byType: {}, cluster_size: idArr.length, error: relErr.message };
+                  out[docId] = { total: 0, byType: {}, cluster_size: idArr.length, facts: 0, error: relErr.message };
                 }
               }
 

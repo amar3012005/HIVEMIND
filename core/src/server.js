@@ -11925,14 +11925,23 @@ exit \$RC
                 // memory_evidence_links cascade-delete with the memory (FK onDelete Cascade).
                 try {
                   const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
-                  const qdrantCollection = 'HIVEMIND_PERSONAL'; // per-tenant deletes by-id are best-effort; real per-tenant delete via store layer
                   const qdrantKey = process.env.QDRANT_API_KEY || '';
+                  // In per-tenant mode memory vectors live in org_<orgId>, NOT
+                  // HIVEMIND_PERSONAL. Delete from BOTH so a memory vector never
+                  // orphans in the vector DB regardless of which collection holds
+                  // it (per-tenant primary + legacy fallback, best-effort).
+                  const memCollections = Array.from(new Set([
+                    ...(process.env.QDRANT_PER_TENANT === 'true' && orgId ? [`org_${orgId}`] : []),
+                    'HIVEMIND_PERSONAL',
+                  ]));
                   if (qdrantUrl) {
-                    await fetch(`${qdrantUrl}/collections/${encodeURIComponent(qdrantCollection)}/points/delete?wait=true`, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json', ...(qdrantKey ? { 'api-key': qdrantKey } : {}) },
-                      body: JSON.stringify({ points: ids }),
-                    }).catch(() => {});
+                    for (const coll of memCollections) {
+                      await fetch(`${qdrantUrl}/collections/${encodeURIComponent(coll)}/points/delete?wait=true`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', ...(qdrantKey ? { 'api-key': qdrantKey } : {}) },
+                        body: JSON.stringify({ points: ids }),
+                      }).catch(() => {});
+                    }
                   }
                 } catch (qErr) { console.warn('[knowledge-delete] Qdrant memory delete failed:', qErr.message); }
               };
@@ -11953,12 +11962,22 @@ exit \$RC
                       if (segs.length) {
                         const qUrl = process.env.QDRANT_URL || 'http://qdrant:6333';
                         const qKey = process.env.QDRANT_API_KEY || '';
-                        const coll = process.env.EVIDENCE_QDRANT_COLLECTION || 'hivemind_evidence';
-                        await fetch(`${qUrl}/collections/${encodeURIComponent(coll)}/points/delete?wait=true`, {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json', ...(qKey ? { 'api-key': qKey } : {}) },
-                          body: JSON.stringify({ points: segs.map(s => s.id) }),
-                        }).catch(() => {});
+                        // Per-tenant mode stores segment evidence vectors in
+                        // org_<orgId> (resolveCollectionForOrg at ingest), NOT
+                        // hivemind_evidence. Delete from BOTH so segment vectors
+                        // never orphan in the vector DB.
+                        const segCollections = Array.from(new Set([
+                          ...(process.env.QDRANT_PER_TENANT === 'true' && orgId ? [`org_${orgId}`] : []),
+                          process.env.EVIDENCE_QDRANT_COLLECTION || 'hivemind_evidence',
+                        ]));
+                        const pts = segs.map(s => s.id);
+                        for (const coll of segCollections) {
+                          await fetch(`${qUrl}/collections/${encodeURIComponent(coll)}/points/delete?wait=true`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', ...(qKey ? { 'api-key': qKey } : {}) },
+                            body: JSON.stringify({ points: pts }),
+                          }).catch(() => {});
+                        }
                       }
                     } catch { /* evidence qdrant best-effort */ }
                     await prisma.knowledgeDocument.delete({ where: { id: docRow.id } });

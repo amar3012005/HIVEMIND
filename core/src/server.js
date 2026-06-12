@@ -12163,8 +12163,15 @@ exit \$RC
                 const tryDocId = rawMemoryId || rawId;
                 if (tryDocId && UUID_RE.test(tryDocId)) {
                   try {
+                    // ORG-scoped (not userId): KB uploads default to
+                    // ORGANIZATION visibility, so any member of the org may
+                    // delete a shared doc. The over-strict userId match made
+                    // the delete a no-op ("nothing to delete") whenever a
+                    // DIFFERENT member clicked delete on a doc someone else
+                    // uploaded. orgId (from the authenticated principal) stays
+                    // the tenant boundary — never cross-org.
                     const doc = await prisma.knowledgeDocument.findFirst({
-                      where: { id: tryDocId, userId, orgId },
+                      where: { id: tryDocId, orgId },
                       select: { id: true, sourceArtifactId: true, title: true },
                     });
                     if (doc) {
@@ -12207,7 +12214,7 @@ exit \$RC
                 try {
                   const orphanDoc = deleteUploadId
                     ? await prisma.knowledgeDocument.findFirst({
-                        where: { userId, orgId, OR: [{ sourceId: { contains: String(deleteUploadId) } }] },
+                        where: { orgId, OR: [{ sourceId: { contains: String(deleteUploadId) } }] },
                         select: { id: true },
                       })
                     : null;

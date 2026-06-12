@@ -1325,12 +1325,33 @@ if (process.env.DOCLING_URL) {
           }
         }
 
-        // ── Tier 1: pdf-parse (text-native PDFs, 1-2s) — skip when smart=true ──
-        if (ext === 'pdf' && !smart) {
+        // ── PDF tiering: probe content once, then route ──
+        // Image-heavy (scanned/designed) PDFs ALWAYS use Groq vision OCR (API)
+        // — NEVER Docling's local EasyOCR — in BOTH smart and non-smart mode.
+        // Text-native PDFs use fast pdf-parse (non-smart) or Docling (smart,
+        // for table/structure enrichment; the text layer means no OCR is run).
+        if (ext === 'pdf') {
           try {
             const { fastPdfExtract } = await import('./knowledge/enterprise/fast-pdf-parser.js');
             const fast = await fastPdfExtract(tempPath);
-            if (!fast.error && !fast.isImageHeavy && fast.text.length > 200) {
+            // ── Tier 3 (priority): Groq vision OCR for image-heavy PDFs ──
+            // Runs first + regardless of smart so a scanned/image PDF never
+            // falls to Docling's slow local OCR.
+            if (fast.isImageHeavy && process.env.GROQ_API_KEY) {
+              const { parsePdfWithGroqVision } = await import('./knowledge/enterprise/groq-vision-parser.js');
+              const vision = await parsePdfWithGroqVision(tempPath);
+              if (!vision.error && vision.text.length > 200) {
+                console.log(`[docling-adapter] tier=groq-vision file=${filename} smart=${smart} pages=${vision.pages} chars=${vision.text.length} ms=${Date.now() - tParse}`);
+                return {
+                  text: vision.text, markdown: vision.markdown, json: null,
+                  tables: [], pages: vision.pages, confidence: null, error: null,
+                  hybridChunks: [], chunkerError: null, engine: 'groq-vision',
+                };
+              }
+              console.warn(`[docling-adapter] groq-vision failed: ${vision.error || 'empty'} — falling back to Docling`);
+            }
+            // ── Tier 1: text-native PDF (non-smart) → fast pdf-parse, no OCR ──
+            if (!smart && !fast.error && !fast.isImageHeavy && fast.text.length > 200) {
               // Page-aware chunking: pdf-parse v2 inserts `-- N of M --` page markers.
               // Split by page → smaller mid-page chunks (~1500 chars) so segments
               // map cleanly to pages. Heading derived from first line of each page.
@@ -1386,20 +1407,6 @@ if (process.env.DOCLING_URL) {
                 tables: [], pages: fast.pages, confidence: null, error: null,
                 hybridChunks, chunkerError: null, engine: 'pdf-parse',
               };
-            }
-            // ── Tier 3: Groq vision OCR (image-heavy PDFs) ──
-            if (fast.isImageHeavy && process.env.GROQ_API_KEY && !smart) {
-              const { parsePdfWithGroqVision } = await import('./knowledge/enterprise/groq-vision-parser.js');
-              const vision = await parsePdfWithGroqVision(tempPath);
-              if (!vision.error && vision.text.length > 200) {
-                console.log(`[docling-adapter] tier=groq-vision file=${filename} pages=${vision.pages} chars=${vision.text.length} ms=${Date.now() - tParse}`);
-                return {
-                  text: vision.text, markdown: vision.markdown, json: null,
-                  tables: [], pages: vision.pages, confidence: null, error: null,
-                  hybridChunks: [], chunkerError: null, engine: 'groq-vision',
-                };
-              }
-              console.warn(`[docling-adapter] groq-vision failed: ${vision.error || 'empty'} — falling back to Docling`);
             }
           } catch (tierErr) {
             console.warn(`[docling-adapter] tier1/3 error: ${tierErr.message}`);
@@ -8838,20 +8845,45 @@ exit \$RC
             }
             // Live in-memory progress (per-stage counts) while the job runs.
             if (jobId) {
-              const job = ingestTracker.getJob(jobId);
-              if (job) return jsonResponse(res, { source: 'tracker', ...job });
-              // Cross-node fallback: queued uploads (kbq_*) run on a worker that
-              // may be a DIFFERENT hm-core node than the one serving this poll;
-              // the in-memory tracker is per-process. The queue mirrors status
-              // into Redis (shared) — read it here so the FE never 404s on a
-              // valid queued job.
+              // ── Durable-queue jobs (kbq_*): Redis mirror is the cross-node
+              // source of truth, checked FIRST. The upload may be enqueued on
+              // node A (which writes a LOCAL 'queued' tracker stub) but
+              // processed by a worker on node B. Reading the local tracker
+              // first would return node A's stale 'queued' forever — the exact
+              // "stuck Processing" bug. The actual worker mirrors every stage
+              // (queued→processing→indexed) into shared Redis, so prefer it;
+              // fall back to the local tracker only when the mirror is empty.
               if (kbIngestQueue && jobId.startsWith('kbq_')) {
                 const qs = await kbIngestQueue.getStatus(jobId).catch(() => null);
-                if (qs) return jsonResponse(res, { source: 'queue', job_id: jobId, ...qs });
-                // Known queue job, status not yet mirrored (race right after
-                // enqueue) → report 'queued' rather than 404 so the FE keeps polling.
+                if (qs) {
+                  // Shape parity with the in-memory tracker path: the FE reads
+                  // doc fields from `metadata.*`. The queue mirror stores them
+                  // flat (document_id/segmentCount/promotedCount at top level),
+                  // so nest a `metadata` object too. Keep the flat keys for any
+                  // top-level reader. Without this, queued uploads resolve to
+                  // 'indexed' but return documentId=undefined → the new KB card
+                  // can't link until a manual refresh.
+                  return jsonResponse(res, {
+                    source: 'queue', job_id: jobId, ...qs,
+                    metadata: {
+                      ...(qs.metadata || {}),
+                      document_id: qs.document_id,
+                      segmentCount: qs.segmentCount,
+                      promotedCount: qs.promotedCount,
+                      candidateCount: qs.candidateCount,
+                      filename: qs.filename,
+                    },
+                  });
+                }
+                // Mirror empty — try the local tracker (live progress on the
+                // node that happens to be processing), else report 'queued'
+                // (race right after enqueue) so the FE keeps polling, never 404s.
+                const qjob = ingestTracker.getJob(jobId);
+                if (qjob) return jsonResponse(res, { source: 'tracker', ...qjob });
                 return jsonResponse(res, { source: 'queue', job_id: jobId, status: 'queued', progress: 0 });
               }
+              const job = ingestTracker.getJob(jobId);
+              if (job) return jsonResponse(res, { source: 'tracker', ...job });
             }
             // Durable fallback: the DB doc row survives restart + job expiry.
             if (docId && prisma?.knowledgeDocument) {

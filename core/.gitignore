@@ -66,3 +66,4 @@ qdrant_data/
 # Generated evaluation datasets (may contain real memory content/IDs)
 evaluation-reports/tenant-dataset.generated.json
 evaluation-reports/baseline.json
+.slack-signing-secret

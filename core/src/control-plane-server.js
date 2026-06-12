@@ -6928,9 +6928,19 @@ Write the persona now.`;
   // Public endpoint (no session). Auth via HMAC signature over raw body.
   // Handles url_verification handshake + message/reaction/pin events.
   if (pathname === '/v1/connectors/slack/events' && req.method === 'POST') {
-    const signingSecret = process.env.SLACK_SIGNING_SECRET;
+    // Secret resolution: env first, then the gitignored on-disk fallback
+    // (/app/.slack-signing-secret). The fallback exists because the running
+    // containers cannot gain new env vars without a recreate — dropping the
+    // secret file into the bind-mounted core/ dir + restart is enough.
+    let signingSecret = process.env.SLACK_SIGNING_SECRET || null;
     if (!signingSecret) {
-      console.error('[slack-events] SLACK_SIGNING_SECRET not configured');
+      try {
+        const fsMod = await import('node:fs');
+        signingSecret = fsMod.readFileSync('/app/.slack-signing-secret', 'utf8').trim() || null;
+      } catch { /* file absent */ }
+    }
+    if (!signingSecret) {
+      console.error('[slack-events] SLACK_SIGNING_SECRET not configured (env + /app/.slack-signing-secret both empty)');
       return jsonResponse(res, { error: 'webhook not configured' }, 503);
     }
 

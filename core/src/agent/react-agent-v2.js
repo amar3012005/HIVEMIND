@@ -1077,7 +1077,7 @@ async function answerStep({ message, history, evidence, plan, language, assistan
   // evidence is left untouched (never empties). Reorder/trim only, no recall
   // re-query, no hard DB filter (that earlier broke working queries).
   let _eventWindowHits = 0;
-  if (process.env.EVENT_TIME_RANKING === 'true' && Array.isArray(evidence.memories) && evidence.memories.length > 1) {
+  if (process.env.EVENT_TIME_RANKING !== 'false' && Array.isArray(evidence.memories) && evidence.memories.length > 1) {
     try {
       const { expandTemporalQuery } = await import('../search/time-aware-expander.js');
       const te = expandTemporalQuery(message);

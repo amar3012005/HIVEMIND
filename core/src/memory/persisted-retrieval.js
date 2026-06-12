@@ -999,7 +999,7 @@ export async function recallPersistedMemories(store, {
   // temporal queries ("early June") that semantic recall alone ranked low.
   // Uses temporalExpansion.dateRange (tight start+end from the query text),
   // NOT effectiveDateRange (which may be a loose valid_at end-cap). Never drops.
-  const _EVENT_TIME_RANKING = process.env.EVENT_TIME_RANKING === 'true';
+  const _EVENT_TIME_RANKING = process.env.EVENT_TIME_RANKING !== 'false'; // default ON (A/B verified); disable with EVENT_TIME_RANKING=false
   const _eventWin = (_EVENT_TIME_RANKING && temporalExpansion?.dateRange?.start)
     ? { s: temporalExpansion.dateRange.start, e: temporalExpansion.dateRange.end || temporalExpansion.dateRange.start }
     : null;

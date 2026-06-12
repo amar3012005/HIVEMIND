@@ -55,6 +55,43 @@ function tryLoadBullMQ() {
   }
 }
 
+/**
+ * Resolve Redis connection options. Coolify injects the authoritative
+ * connection string (host + password + db) into REDIS_URL but does NOT always
+ * set a discrete REDIS_PASSWORD — reading only process.env.REDIS_PASSWORD then
+ * yields `undefined` → "NOAUTH Authentication required" against a
+ * password-protected Redis (silently kills the worker → jobs stick at
+ * 'queued'). So prefer REDIS_URL, fall back to discrete REDIS_HOST/PORT/
+ * PASSWORD. REDIS_HOST + REDIS_HOST_FALLBACKS are still tried as alternate
+ * hosts (Coolify rebuilds the container under a hashed name; the `redis` alias
+ * may or may not resolve after a restart).
+ */
+function resolveRedisConn() {
+  let urlConn = null;
+  if (process.env.REDIS_URL) {
+    try {
+      const u = new URL(process.env.REDIS_URL);
+      urlConn = {
+        host: u.hostname,
+        port: Number(u.port || 6379),
+        password: u.password ? decodeURIComponent(u.password) : undefined,
+        username: u.username ? decodeURIComponent(u.username) : undefined,
+        db: u.pathname && u.pathname.length > 1 ? (Number(u.pathname.slice(1)) || 0) : 0,
+      };
+    } catch { /* malformed URL — fall back to discrete vars */ }
+  }
+  const port = urlConn?.port || Number(process.env.REDIS_PORT || 6379);
+  const password = urlConn?.password ?? (process.env.REDIS_PASSWORD || undefined);
+  const username = urlConn?.username;
+  const db = urlConn?.db || 0;
+  const primaryHost = urlConn?.host || process.env.REDIS_HOST || 'localhost';
+  const altHosts = [
+    process.env.REDIS_HOST,
+    ...((process.env.REDIS_HOST_FALLBACKS || '').split(',').map(s => s.trim()).filter(Boolean)),
+  ].filter(Boolean).filter(h => h !== primaryHost);
+  return { primaryHost, candidates: [primaryHost, ...altHosts], port, password, username, db };
+}
+
 export class KbIngestQueue {
   /**
    * @param {object} deps
@@ -86,9 +123,7 @@ export class KbIngestQueue {
     }
     const { bullmq, IORedis } = deps;
     this._bullmq = bullmq;
-    const primaryHost = process.env.REDIS_HOST || 'localhost';
-    const altHosts = (process.env.REDIS_HOST_FALLBACKS || '').split(',').map(s => s.trim()).filter(Boolean);
-    const candidates = [primaryHost, ...altHosts.filter(h => h !== primaryHost)];
+    const { candidates, port, password, username, db } = resolveRedisConn();
     // Retry the probe: at boot Redis can briefly be unready (container restart
     // race / DNS warmup). A single failed pass used to PERMANENTLY disable the
     // queue on that node — leaving one hm-core node queueing and the other
@@ -99,9 +134,7 @@ export class KbIngestQueue {
     for (let attempt = 0; attempt < PROBE_ATTEMPTS && !host; attempt++) {
       for (const h of candidates) {
         const probe = new IORedis({
-          host: h,
-          port: Number(process.env.REDIS_PORT || 6379),
-          password: process.env.REDIS_PASSWORD || undefined,
+          host: h, port, password, username,
           maxRetriesPerRequest: 1, connectTimeout: 3000, lazyConnect: true,
           enableOfflineQueue: false, retryStrategy: () => null,
         });
@@ -117,9 +150,7 @@ export class KbIngestQueue {
     }
     this._redisHost = host;
     const connection = {
-      host,
-      port: Number(process.env.REDIS_PORT || 6379),
-      password: process.env.REDIS_PASSWORD || undefined,
+      host, port, password, username, db,
       maxRetriesPerRequest: null,
     };
     this.queue = new bullmq.Queue(QUEUE_NAME, { connection });
@@ -141,9 +172,9 @@ export class KbIngestQueue {
     // the one the FE polls /api/knowledge/status against (the in-memory
     // ingestTracker is per-process). Mirror job status into Redis so status is
     // readable cross-node. 24h TTL.
-    this.redis = new IORedis({ host, port: Number(process.env.REDIS_PORT || 6379), password: process.env.REDIS_PASSWORD || undefined, maxRetriesPerRequest: null });
+    this.redis = new IORedis({ host, port, password, username, db, maxRetriesPerRequest: null });
     this.redis.on('error', () => {});
-    this.logger.info?.(`[kb-queue] ready on redis://${host} (concurrency=${CONCURRENCY}, org-cap=${ORG_CONCURRENCY})`);
+    this.logger.info?.(`[kb-queue] ready on redis://${host}:${port}/${db} (concurrency=${CONCURRENCY}, org-cap=${ORG_CONCURRENCY})`);
   }
 
   async _setStatus(trackerJobId, obj) {
@@ -175,10 +206,10 @@ export class KbIngestQueue {
     const deps = tryLoadBullMQ();
     if (!deps) return null;
     const { IORedis } = deps;
-    const candidates = [process.env.REDIS_HOST || 'localhost', ...((process.env.REDIS_HOST_FALLBACKS || '').split(',').map(s => s.trim()).filter(Boolean))];
+    const { candidates, port, password, username, db } = resolveRedisConn();
     for (const h of candidates) {
       try {
-        const c = new IORedis({ host: h, port: Number(process.env.REDIS_PORT || 6379), password: process.env.REDIS_PASSWORD || undefined, maxRetriesPerRequest: 1, connectTimeout: 3000, lazyConnect: true, retryStrategy: () => null });
+        const c = new IORedis({ host: h, port, password, username, db, maxRetriesPerRequest: 1, connectTimeout: 3000, lazyConnect: true, retryStrategy: () => null });
         c.on('error', () => {});
         await c.connect(); await c.ping();
         this._statusRedis = c;

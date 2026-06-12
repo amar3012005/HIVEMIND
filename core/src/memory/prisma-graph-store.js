@@ -436,7 +436,7 @@ export class PrismaGraphStore {
     return records.map(mapMemoryRecord);
   }
 
-  async listMemories({ user_id, org_id, project, project_id, memory_type, tags, is_latest, limit = 50, offset = 0, scope = 'personal', access_context = null }) {
+  async listMemories({ user_id, org_id, project, project_id, memory_type, tags, is_latest, include_children = false, limit = 50, offset = 0, scope = 'personal', access_context = null }) {
     // Phase P.3: prefer formal projectId FK when caller passes it; falls back
     // to legacy free-text `project` string.
     const baseWhere = scopedMemoryWhere({ user_id, org_id, project, scope, access_context });
@@ -478,15 +478,24 @@ export class PrismaGraphStore {
     // 'tara/'`, which drops every project=NULL memory (SQL NULL LIKE semantics).
     const callerWantsTara = Array.isArray(tags) && tags.some((t) => typeof t === 'string' && t.startsWith('tara-'));
     if (!callerWantsTara) hiddenTags.push('tara-turn', 'tara-insight', 'tara-session', 'tara-call-log', 'tara-config', 'tara-skill');
+    // Tree-ingest / KB children carry 'extracted-fact' — they are sub-units of
+    // a parent memory, not standalone entries. Hide from the default list +
+    // total so the count reconciles with the graph + overview (which already
+    // exclude them). Caller opts in via include_children=true.
+    if (!include_children) hiddenTags.push('extracted-fact');
     const auditExclusion = hiddenTags.length
       ? { NOT: { tags: { hasSome: hiddenTags } } }
       : {};
+    // Default to current memories only (is_latest=true) unless the caller
+    // explicitly asks for superseded versions. Was undefined → counted every
+    // historical version, inflating the list total vs the graph/overview.
+    const isLatestFilter = is_latest === false ? false : true;
     const records = await this.client.memory.findMany({
       where: {
         ...baseWhere,
         ...auditExclusion,
         memoryType: memory_type || undefined,
-        isLatest: typeof is_latest === 'boolean' ? is_latest : undefined,
+        isLatest: isLatestFilter,
         tags: tags?.length ? { hasEvery: tags } : undefined,
       },
       include: {
@@ -503,15 +512,21 @@ export class PrismaGraphStore {
       take: limit
     });
 
-    const countWhere = scopedMemoryWhere({ user_id, org_id, project });
-    if (project_id) countWhere.projectId = project_id;
+    // Count must use the SAME scope (scope + access_context + project join) as
+    // the findMany above — previously it dropped both, so the total counted a
+    // different set than the rows it returned.
+    const countWhere = scopedMemoryWhere({ user_id, org_id, project, scope, access_context });
+    if (project_id) {
+      if (baseWhere.memoryProjects) { delete countWhere.OR; delete countWhere.userId; countWhere.memoryProjects = { some: { projectId: project_id } }; }
+      else countWhere.projectId = project_id;
+    }
     const total = await this.client.memory.count({
       where: {
         ...countWhere,
         ...auditExclusion,
         memoryType: memory_type || undefined,
-        isLatest: typeof is_latest === 'boolean' ? is_latest : undefined,
-        tags: tags?.length ? { hasSome: tags } : undefined
+        isLatest: isLatestFilter,
+        tags: tags?.length ? { hasEvery: tags } : undefined
       }
     });
 

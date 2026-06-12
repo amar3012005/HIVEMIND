@@ -2165,7 +2165,15 @@ async function buildProfileSummary({ userId, orgId, project = null }) {
     // Match /api/memories default — exclude all hidden-child tag families so
     // Overview counts reconcile with the list view (was 1012 vs visible 346).
     // Mirrors HIDDEN_CHILD_TAGS in prisma-graph-store.listMemories.
-    const HIDDEN_CHILD_TAGS = ['extracted-fact', 'tara-turn', 'tara-insight', 'tara-session'];
+    // Full noise-tag set — MUST match the graph + list exclusion so all three
+    // dashboard counts reconcile (was only 4 tags → Overview counted governance
+    // / hyper-room / tara-call-log/config/skill that the graph hid).
+    const HIDDEN_CHILD_TAGS = [
+      'extracted-fact',
+      'tara-turn', 'tara-insight', 'tara-call-log', 'tara-session', 'tara-config', 'tara-skill',
+      'internal-audit', 'governance', 'reflection',
+      'hyper-rooms', 'hyper-room', 'room-decision',
+    ];
     const where = {
       userId,
       orgId,
@@ -2195,7 +2203,7 @@ async function buildProfileSummary({ userId, orgId, project = null }) {
          WHERE m."user_id" = $1::uuid
            AND m."deleted_at" IS NULL
            AND m."is_latest" = true
-           AND NOT (m."tags" && ARRAY['extracted-fact','tara-turn','tara-insight']::text[])`,
+           AND NOT (m."tags" && ARRAY['extracted-fact','tara-turn','tara-insight','tara-call-log','tara-session','tara-config','tara-skill','internal-audit','governance','reflection','hyper-rooms','hyper-room','room-decision']::text[])`,
         userId
       );
       relationships = relRows?.[0]?.c || 0;

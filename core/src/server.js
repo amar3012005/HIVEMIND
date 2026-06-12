@@ -12165,7 +12165,7 @@ exit \$RC
                   try {
                     const doc = await prisma.knowledgeDocument.findFirst({
                       where: { id: tryDocId, userId, orgId },
-                      select: { id: true, sourceArtifactId: true },
+                      select: { id: true, sourceArtifactId: true, title: true },
                     });
                     if (doc) {
                       // Purge derived memories FIRST. Deleting the document only
@@ -12174,14 +12174,27 @@ exit \$RC
                       // memories page (the remnant bug). Then purge the doc +
                       // segments + artifact + evidence vectors.
                       const linkedMems = await memoriesForDoc(doc.id);
-                      await purgeMemories(linkedMems);
+                      // Tier-2 distilled FACTS anchor to the doc via tags
+                      // (doc-id:/filename:), NOT memory_evidence_links — the FE
+                      // deletes by knowledge_document.id which lands on THIS
+                      // path, so without resolving the anchor tags the facts
+                      // survive ("deleted the doc but N memories linger" bug).
+                      const anchorTags = [`doc-id:${doc.id}`];
+                      if (doc.title) anchorTags.push(`filename:${doc.title}`);
+                      const taggedMems = await safeFind('phase1-doc-anchor-tags', () =>
+                        prisma.memory.findMany({
+                          where: { orgId, deletedAt: null, tags: { hasSome: anchorTags } },
+                          select: { id: true },
+                        }));
+                      const allMems = Array.from(new Set([...linkedMems, ...taggedMems]));
+                      await purgeMemories(allMems);
                       await purgeKnowledgeDocs([doc.id]);
                       invalidateAggregateCache({ userId, orgId, project: null });
                       return jsonResponse(res, {
                         success: true,
                         mode: 'phase1_document_delete',
                         documentId: doc.id,
-                        deleted_memories: linkedMems.length,
+                        deleted_memories: allMems.length,
                       });
                     }
                   } catch (phase1Err) {

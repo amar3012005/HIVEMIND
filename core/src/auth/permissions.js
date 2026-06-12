@@ -19,6 +19,11 @@ export const ROLES = new Set([
   'member',
   'viewer',
   'service_account',
+  // Project-scoped invitee (external collaborator): sees ONLY the projects
+  // they're explicitly a member of — never the org-wide tier. Created by
+  // project-scoped invites; was missing from this catalogue, which made the
+  // role editor 400 on any guest ("Invalid roles: guest").
+  'guest',
 ]);
 
 // ─── Permission map ────────────────────────────────────────────────────────────
@@ -27,7 +32,7 @@ export const ROLES = new Set([
 export const PERMISSIONS = {
   org: {
     manage: new Set(['org_owner', 'org_admin']),
-    read:   new Set(['org_owner', 'org_admin', 'compliance_admin', 'team_lead', 'member', 'viewer', 'service_account']),
+    read:   new Set(['org_owner', 'org_admin', 'compliance_admin', 'team_lead', 'member', 'viewer', 'service_account', 'guest']),
   },
   team: {
     manage: new Set(['org_owner', 'org_admin', 'team_lead']),
@@ -35,12 +40,14 @@ export const PERMISSIONS = {
   },
   project: {
     manage: new Set(['org_owner', 'org_admin', 'team_lead']),
-    read:   new Set(['org_owner', 'org_admin', 'team_lead', 'member', 'viewer', 'service_account']),
+    // Guests read only their explicit projects — the project-tier visibility
+    // engine (listProjectsForUser / scopedMemoryWhere) enforces the narrowing.
+    read:   new Set(['org_owner', 'org_admin', 'team_lead', 'member', 'viewer', 'service_account', 'guest']),
   },
   memory: {
     manage: new Set(['org_owner', 'org_admin']),
-    read:   new Set(['org_owner', 'org_admin', 'team_lead', 'member', 'viewer', 'service_account']),
-    write:  new Set(['org_owner', 'org_admin', 'team_lead', 'member', 'service_account']),
+    read:   new Set(['org_owner', 'org_admin', 'team_lead', 'member', 'viewer', 'service_account', 'guest']),
+    write:  new Set(['org_owner', 'org_admin', 'team_lead', 'member', 'service_account', 'guest']),
     delete: new Set(['org_owner', 'org_admin']),
   },
   connector: {

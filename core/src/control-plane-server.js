@@ -2060,6 +2060,11 @@ const server = http.createServer(async (req, res) => {
       ? body.role.trim().toLowerCase()
       : 'member';
     const bulkRoles = bulkRole === 'admin' ? ['org_admin'] : [bulkRole];
+    // Optional project scoping — invitees auto-join these projects on accept
+    // (project-scoped member invites become guests of just those projects).
+    const bulkProjectIds = Array.isArray(body.project_ids)
+      ? body.project_ids.filter((id) => typeof id === 'string' && id.length > 0).slice(0, 10)
+      : [];
 
     const FRONTEND_BASE = (process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu').replace(/\/$/, '');
     const inviter = await prisma.user.findUnique({
@@ -2091,7 +2096,7 @@ const server = http.createServer(async (req, res) => {
         const invite = await prisma.orgInvite.create({
           data: {
             orgId, email, role: bulkRole, roles: bulkRoles,
-            teamIds: [], projectIds: [], token, expiresAt,
+            teamIds: [], projectIds: bulkProjectIds, token, expiresAt,
             createdBy: current.session.userId,
           },
         });

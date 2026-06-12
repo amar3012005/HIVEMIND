@@ -16945,7 +16945,26 @@ exit \$RC
             let releaseSlot = null;
             try {
               const graphProject = url.searchParams.get('project') || null;
-              const graphScope = url.searchParams.get('scope') || 'personal';
+              // Default 'visible' = membership-based access_context — the SAME
+              // visible set /api/memories (listMemories) returns, so the graph
+              // node count matches the Memories/Overview headline. The graph
+              // previously defaulted to a `visibility`-field scope ('personal'),
+              // but that field is inconsistently populated (often null) so the
+              // counts diverged. Memory.scope (used by access_context) is
+              // reliable. Explicit personal/team/all still work as overrides.
+              const graphScope = url.searchParams.get('scope') || 'visible';
+              const graphAccessCtx = await buildAccessContext(userId, orgId).catch(() => null);
+              const graphAccessTiers = (graphAccessCtx && (graphAccessCtx.projectIds || graphAccessCtx.teamIds))
+                ? (() => {
+                    const pIds = Array.isArray(graphAccessCtx.projectIds) ? graphAccessCtx.projectIds : [];
+                    const tIds = Array.isArray(graphAccessCtx.teamIds) ? graphAccessCtx.teamIds : [];
+                    const tiers = [{ userId, scope: 'personal' }];
+                    if (graphAccessCtx.orgRole !== 'guest') tiers.push({ scope: 'organization', orgId });
+                    if (pIds.length) tiers.push({ scope: 'project', memoryProjects: { some: { projectId: { in: pIds } } } });
+                    if (tIds.length) tiers.push({ scope: 'team', primaryTeamId: { in: tIds } });
+                    return tiers;
+                  })()
+                : null;
               // Phase 7: in-process cache to absorb FE auto-refresh + repeat reads
               const { getGraphCache, setGraphCache } = await import('./memory/graph-cache.js');
               const cacheKey = {
@@ -17053,7 +17072,12 @@ exit \$RC
                 // NOT NULL → row dropped), which is ~all personal memories.
                 ...(includeChildren ? {} : { AND: HIDDEN_CHILD_TAGS_GRAPH.map((t) => ({ NOT: { tags: { has: t } } })) }),
               };
-              const scopeWhere = graphScope === 'team'
+              const scopeWhere = graphScope === 'visible' && graphAccessTiers
+                ? {
+                    ...baseWhere,
+                    OR: graphAccessTiers,
+                  }
+                : graphScope === 'team'
                 ? {
                     ...baseWhere,
                     visibility: 'organization',
@@ -17092,7 +17116,9 @@ exit \$RC
               }
 
               // Layer 2: Connected nodes (have relationships) — show the graph structure
-              const relationshipScope = graphScope === 'all'
+              const relationshipScope = graphScope === 'visible' && graphAccessTiers
+                ? { orgId, deletedAt: null, OR: graphAccessTiers }
+                : graphScope === 'all'
                 ? { orgId, deletedAt: null, OR: [{ userId, visibility: 'private' }, { visibility: 'organization' }] }
                 : graphScope === 'team'
                   ? { orgId, deletedAt: null, visibility: 'organization' }

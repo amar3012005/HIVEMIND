@@ -123,7 +123,7 @@ function buildCollectionName(userId, orgId) {
     if (orgId) return `org_${orgId}`;
     if (userId) return `user_${userId}`;
   }
-  return process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
+  return 'HIVEMIND_PERSONAL';
 }
 
 function contentHashPointId(content, scopeKey) {

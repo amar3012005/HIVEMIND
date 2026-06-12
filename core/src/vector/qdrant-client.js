@@ -14,7 +14,7 @@ import { resolveCollectionForOrg, PER_TENANT } from './container-router.js';
 
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:9200';
 const API_KEY = process.env.QDRANT_API_KEY || 'dev_api_key_hivemind_2026';
-const COLLECTION_NAME = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
+const COLLECTION_NAME = 'HIVEMIND_PERSONAL';
 const DEFAULT_SCORE_THRESHOLD = parseFloat(process.env.HIVEMIND_VECTOR_SCORE_THRESHOLD || '0.15');
 // P4: search-time HNSW ef — THE recall/latency dial at scale (OpenSearch
 // benchmark: recall@1 0.56→0.97 across ef 10→640). Without an explicit
@@ -112,15 +112,12 @@ export class QdrantClient {
         return false;
       }
 
-      // Lazy-create backstop. The default collection uses createMemoriesCollection
-      // (legacy config); any other name (org_<id>, HIVEMIND_PERSONAL) is an org
-      // container and must be created under its own name with the 1024 contract —
-      // createMemoriesCollection would otherwise create the WRONG (default) name.
-      if (resolvedCollectionName === COLLECTION_NAME) {
-        await collections.createMemoriesCollection();
-      } else {
-        await collections.createOrgContainer(resolvedCollectionName);
-      }
+      // Lazy-create backstop. ALL collections (org_<id>, HIVEMIND_PERSONAL, the
+      // personal/default fallback) are per-tenant org containers and must be
+      // created with the 1024 / m=32 / on_disk / int8-quant contract via
+      // createOrgContainer. The legacy createMemoriesCollection (m=16, no on_disk)
+      // is gone along with the BUNDB AGENT singleton.
+      await collections.createOrgContainer(resolvedCollectionName);
       await collections.ensureMemoriesCollectionIndexes(resolvedCollectionName);
       this.collectionReady = collectionName;
       return true;

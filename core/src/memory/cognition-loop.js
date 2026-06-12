@@ -134,7 +134,7 @@ async function purgeVectorsByMemoryIds(memoryIds, orgId = null, logger = console
   // Without this, drift-compaction supersession purges the wrong (empty)
   // collection → stale vectors re-accumulate in the live collection (ANN
   // re-pollution). Resolver is plan-aware + cached.
-  let qdrantCollection = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
+  let qdrantCollection = 'HIVEMIND_PERSONAL';
   try {
     const { resolveCollectionForOrg, PER_TENANT } = await import('../vector/container-router.js');
     if (PER_TENANT) qdrantCollection = await resolveCollectionForOrg(orgId);

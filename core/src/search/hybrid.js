@@ -62,7 +62,7 @@ const CONFIG = {
   }
 };
 
-const DEFAULT_COLLECTION = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
+const DEFAULT_COLLECTION = 'HIVEMIND_PERSONAL';
 let embedService = null;
 
 // ==========================================

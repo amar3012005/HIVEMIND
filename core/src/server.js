@@ -6984,7 +6984,7 @@ exit \$RC
               await persistentMemoryStore.hardDeleteMemories([memoryId]);
               try {
                 const qUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
-                const qColl = process.env.QDRANT_COLLECTION || 'hivemind_memories';
+                const qColl = (process.env.QDRANT_PER_TENANT === 'true' && (existing.org_id || existing.orgId || orgId)) ? `org_${existing.org_id || existing.orgId || orgId}` : 'HIVEMIND_PERSONAL';
                 const qKey = process.env.QDRANT_API_KEY || '';
                 if (qUrl) await fetch(`${qUrl}/collections/${encodeURIComponent(qColl)}/points/delete?wait=true`, {
                   method: 'POST', headers: { 'Content-Type': 'application/json', ...(qKey ? { 'api-key': qKey } : {}) },
@@ -7056,7 +7056,7 @@ exit \$RC
             // Embed updated memory in Qdrant
             if (qdrantClient && updated) {
               try {
-                await qdrantClient.storeMemory(updated, { collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT' });
+                await qdrantClient.storeMemory(updated, { collectionName: 'HIVEMIND_PERSONAL' });
               } catch {}
             }
             invalidateAggregateCache({ userId, orgId, project: existing.project || null });
@@ -9222,7 +9222,7 @@ exit \$RC
             let qdrantPoints = null;
             try {
               const qUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
-              const qColl = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
+              const qColl = 'HIVEMIND_PERSONAL';
               const qKey = process.env.QDRANT_API_KEY || '';
               if (qUrl && orgId) {
                 const qr = await fetch(`${qUrl}/collections/${encodeURIComponent(qColl)}/points/count`, {
@@ -10787,7 +10787,7 @@ exit \$RC
               let qdrantDeleted = 0;
               try {
                 const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
-                const qdrantCollection = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
+                const qdrantCollection = 'HIVEMIND_PERSONAL';
                 const qdrantKey = process.env.QDRANT_API_KEY || '';
                 if (qdrantUrl) {
                   // Chunk ids to keep the request payload small on big batches
@@ -11055,7 +11055,7 @@ exit \$RC
                           if (gmailResult?.memoryId && qdrantClient) {
                             try {
                               const gmailMem = await persistentMemoryStore.getMemory(gmailResult.memoryId);
-                              if (gmailMem) await qdrantClient.storeMemory(gmailMem, { collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT' });
+                              if (gmailMem) await qdrantClient.storeMemory(gmailMem, { collectionName: 'HIVEMIND_PERSONAL' });
                             } catch {}
                           }
                           // Embed fact-memories in Qdrant
@@ -11063,7 +11063,7 @@ exit \$RC
                             for (const factId of gmailResult.factMemoryIds) {
                               try {
                                 const factMem = await persistentMemoryStore.getMemory(factId);
-                                if (factMem) await qdrantClient.storeMemory(factMem, { collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT' });
+                                if (factMem) await qdrantClient.storeMemory(factMem, { collectionName: 'HIVEMIND_PERSONAL' });
                               } catch {}
                             }
                           }
@@ -11893,7 +11893,7 @@ exit \$RC
                 // memory_evidence_links cascade-delete with the memory (FK onDelete Cascade).
                 try {
                   const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
-                  const qdrantCollection = process.env.QDRANT_COLLECTION || 'hivemind_memories';
+                  const qdrantCollection = 'HIVEMIND_PERSONAL'; // per-tenant deletes by-id are best-effort; real per-tenant delete via store layer
                   const qdrantKey = process.env.QDRANT_API_KEY || '';
                   if (qdrantUrl) {
                     await fetch(`${qdrantUrl}/collections/${encodeURIComponent(qdrantCollection)}/points/delete?wait=true`, {
@@ -12498,7 +12498,7 @@ exit \$RC
               console.log(`[enterprise] Ingest job=${jobId} upload=${upload_id} type=${confirmed_type} sheets=${results.length}`);
 
               (async () => {
-                const collectionName = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
+                const collectionName = 'HIVEMIND_PERSONAL';
                 let ingested = 0;
                 let failed = 0;
 
@@ -13141,7 +13141,7 @@ exit \$RC
               (async () => {
                 let ingested = 0;
                 let failed = 0;
-                const collectionName = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
+                const collectionName = 'HIVEMIND_PERSONAL';
 
                 // ── Optimization 2: Pre-embed all chunks IN PARALLEL before
                 //   acquiring per-user advisory lock. Embedding is the slow part
@@ -14441,7 +14441,7 @@ exit \$RC
               const memory = await persistentMemoryStore.getMemory(result.memoryId);
               if (memory) {
                 await qdrantClient.storeMemory(memory, {
-                  collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT'
+                  collectionName: 'HIVEMIND_PERSONAL'
                 });
                 invalidateAggregateCache({ userId, orgId, project: memory.project || null });
                 invalidateAggregateCache({ userId, orgId, project: null });
@@ -14452,7 +14452,7 @@ exit \$RC
                 for (const factId of result.factMemoryIds) {
                   try {
                     const factMem = await persistentMemoryStore.getMemory(factId);
-                    if (factMem) await qdrantClient.storeMemory(factMem, { collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT' });
+                    if (factMem) await qdrantClient.storeMemory(factMem, { collectionName: 'HIVEMIND_PERSONAL' });
                   } catch (factErr) {
                     console.warn(`[webapp] Fact Qdrant embed failed for ${factId}:`, factErr.message);
                   }
@@ -14509,7 +14509,7 @@ exit \$RC
                 // Bulk Qdrant: delete all points by user_id filter (1 API call)
                 try {
                   const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
-                  const qdrantCollection = process.env.QDRANT_COLLECTION || 'hivemind_memories';
+                  const qdrantCollection = (process.env.QDRANT_PER_TENANT === 'true' && orgId) ? `org_${orgId}` : 'HIVEMIND_PERSONAL';
                   const qdrantKey = process.env.QDRANT_API_KEY || '';
                   if (qdrantUrl) {
                     const filter = { must: [{ key: 'user_id', match: { value: userId } }] };
@@ -14599,7 +14599,7 @@ exit \$RC
 
                   try {
                     const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
-                    const qdrantCollection = process.env.QDRANT_COLLECTION || 'hivemind_memories';
+                    const qdrantCollection = (process.env.QDRANT_PER_TENANT === 'true' && orgId) ? `org_${orgId}` : 'HIVEMIND_PERSONAL';
                     const qdrantKey = process.env.QDRANT_API_KEY || '';
                     if (qdrantUrl) {
                       await fetch(`${qdrantUrl}/collections/${qdrantCollection}/points/delete`, {
@@ -15045,7 +15045,7 @@ exit \$RC
                       const memory = await persistentMemoryStore.getMemory(result.memoryId);
                       if (memory) {
                         await qdrantClient.storeMemory(memory, {
-                          collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT'
+                          collectionName: 'HIVEMIND_PERSONAL'
                         });
                         invalidateAggregateCache({ userId, orgId, project: memory.project || null });
                         invalidateAggregateCache({ userId, orgId, project: null });
@@ -15079,7 +15079,7 @@ exit \$RC
                         for (const factId of result.factMemoryIds) {
                           try {
                             const factMem = await persistentMemoryStore.getMemory(factId);
-                            if (factMem) await qdrantClient.storeMemory(factMem, { collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT' });
+                            if (factMem) await qdrantClient.storeMemory(factMem, { collectionName: 'HIVEMIND_PERSONAL' });
                           } catch (factErr) {
                             console.warn(`[memories] Fact Qdrant embed failed for ${factId}:`, factErr.message);
                           }
@@ -15150,7 +15150,7 @@ exit \$RC
                     const m = await persistentMemoryStore.getMemory(r.memoryId);
                     if (m) {
                       await qdrantClient.storeMemory(m, {
-                        collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT'
+                        collectionName: 'HIVEMIND_PERSONAL'
                       });
                       invalidateAggregateCache({ userId, orgId, project: m.project || null });
                       invalidateAggregateCache({ userId, orgId, project: null });
@@ -15167,7 +15167,7 @@ exit \$RC
                 const memory = await persistentMemoryStore.getMemory(result.memoryId);
                 if (memory) {
                   await qdrantClient.storeMemory(memory, {
-                    collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT'
+                    collectionName: 'HIVEMIND_PERSONAL'
                   });
                   invalidateAggregateCache({ userId, orgId, project: memory.project || null });
                   invalidateAggregateCache({ userId, orgId, project: null });
@@ -15190,7 +15190,7 @@ exit \$RC
                   for (const factId of result.factMemoryIds) {
                     try {
                       const factMem = await persistentMemoryStore.getMemory(factId);
-                      if (factMem) await qdrantClient.storeMemory(factMem, { collectionName: process.env.QDRANT_COLLECTION || 'BUNDB AGENT' });
+                      if (factMem) await qdrantClient.storeMemory(factMem, { collectionName: 'HIVEMIND_PERSONAL' });
                     } catch (factErr) {
                       console.warn(`[memories] Fact Qdrant embed failed for ${factId}:`, factErr.message);
                     }

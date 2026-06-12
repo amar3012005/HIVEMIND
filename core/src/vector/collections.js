@@ -17,7 +17,7 @@ import { logger } from '../utils/logger.js';
 const CONFIG = {
   // Collection names
   collections: {
-    memories: process.env.QDRANT_COLLECTION || 'BUNDB AGENT',
+    memories: 'HIVEMIND_PERSONAL',
     sessions: process.env.QDRANT_SESSIONS_COLLECTION || 'hivemind_sessions'
   },
 
@@ -451,15 +451,12 @@ export class QdrantCollections {
    * Create all HIVE-MIND collections
    */
   async createAllCollections() {
-    logger.info('Creating HIVE-MIND collections', {
-      region: this.#config.region,
-      collections: [CONFIG.collections.memories, CONFIG.collections.sessions]
-    });
-
-    await this.createMemoriesCollection();
-    await this.createSessionsCollection();
-
-    logger.info('All HIVE-MIND collections created successfully');
+    // Per-tenant only: memory collections (org_<id> / HIVEMIND_PERSONAL) are
+    // created on demand by ensureCollection → createOrgContainer with the
+    // 1024 / m=32 / on_disk / int8-quant contract. The legacy 'BUNDB AGENT'
+    // memories singleton and the unused 'hivemind_sessions' collection are
+    // no longer bootstrapped (removed). Nothing to pre-create at boot.
+    logger.info('Per-tenant collections created on demand (no legacy bootstrap)');
   }
 
   /**

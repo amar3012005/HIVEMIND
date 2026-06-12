@@ -18,7 +18,7 @@ import { getQdrantCollections } from './collections.js';
 import { logger } from '../utils/logger.js';
 
 const PERSONAL_COLLECTION = process.env.QDRANT_PERSONAL_COLLECTION || 'HIVEMIND_PERSONAL';
-const LEGACY_COLLECTION = process.env.QDRANT_COLLECTION || 'BUNDB AGENT';
+const LEGACY_COLLECTION = 'HIVEMIND_PERSONAL';
 
 // Cutover gate. While false, everything resolves to the legacy collection so
 // un-migrated tenants keep working. Flip to 'true' only once all live orgs are

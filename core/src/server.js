@@ -414,6 +414,7 @@ let syncScheduler = null;
 // safe because ConnectorStore is stateless (all state lives in Prisma).
 // Hoisted Phase1 service handle (initialized lower, referenced by webhookProcessor)
 let documentFirstIngestion = null;
+let kbIngestQueue = null;
 
 // Hoisted Nango token resolver — used by syncScheduler + webhookProcessor
 const nangoTokenResolver = async ({ userId, orgId, providerKey }) => {
@@ -1501,6 +1502,25 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
     // plumbing in sync-engine.
     globalThis.__hivemindDocumentFirstIngestion = documentFirstIngestion;
     console.log('[Phase1] DocumentFirstIngestionService enabled (exposed via globalThis)');
+    // Durable KB ingestion queue (flag-gated, default off). Wraps the verified
+    // pipeline above — worker calls documentFirstIngestion unchanged.
+    try {
+      const { KbIngestQueue } = await import('./knowledge/kb-ingest-queue.js');
+      kbIngestQueue = new KbIngestQueue({
+        documentFirstIngestion,
+        ingestTracker,
+        recordUsage: (orgId, result) => {
+          if (planEnforcer && orgId) {
+            planEnforcer.recordUsage(orgId, 'kbPages', result.pages || result.segmentCount || 1);
+            planEnforcer.recordUsage(orgId, 'uploads', 1);
+          }
+        },
+        logger: console,
+      });
+      process.once('SIGTERM', () => { kbIngestQueue?.close().catch(() => {}); });
+    } catch (err) {
+      console.warn('[kb-queue] init failed (inline path unaffected):', err.message);
+    }
   } catch (err) {
     console.warn('[Phase1] DocumentFirstIngestionService failed to init:', err.message);
   }
@@ -8748,6 +8768,14 @@ exit \$RC
           break;
 
         // ── Async knowledge-upload status (job tracker + durable DB fallback) ──
+        case '/api/knowledge/queue-stats':
+          if (req.method === 'GET') {
+            if (!kbIngestQueue) return jsonResponse(res, { enabled: false, reason: 'not initialized' });
+            try { return jsonResponse(res, await kbIngestQueue.stats()); }
+            catch (err) { return jsonResponse(res, { error: err.message }, 500); }
+          }
+          break;
+
         case '/api/knowledge/status':
           if (req.method === 'GET') {
             const jobId = url.searchParams.get('job_id');
@@ -12780,6 +12808,33 @@ exit \$RC
                   smart: smartFlag,
                   picture_descriptions: pictureDescFlag,
                 };
+
+                // Durable-queue path (flag-gated by org): accept → persist raw
+                // bytes → enqueue → return job_id. The request does NO heavy
+                // work; a bounded worker pool ingests via the same pipeline.
+                if (kbIngestQueue?.isEnabledFor(orgId)) {
+                  try {
+                    const checksum = crypto.createHash('sha256').update(filePart.data).digest('hex');
+                    const storedPath = kbIngestQueue.persistFile({ orgId, checksum, filename: filePart.filename, fileBuffer: filePart.data });
+                    const q = await kbIngestQueue.enqueue({
+                      userId, orgId,
+                      filename: filePart.filename,
+                      contentType: filePart.contentType || `text/${ext}`,
+                      checksum, filePath: storedPath,
+                      metadata: phase1Metadata,
+                    });
+                    if (q.backpressure) {
+                      res.setHeader('Retry-After', '30');
+                      return jsonResponse(res, { error: 'Ingestion queue saturated — retry shortly', queued_depth: q.depth }, 429);
+                    }
+                    res.setHeader('X-Job-Id', q.job_id);
+                    return jsonResponse(res, { success: true, job_id: q.job_id, status: 'queued', filename: filePart.filename, mode: 'queued' }, 202);
+                  } catch (qErr) {
+                    // Queue trouble must never block uploads — fall through to
+                    // the inline (async/sync) path below.
+                    console.warn('[kb-queue] enqueue failed, falling back inline:', qErr.message);
+                  }
+                }
 
                 if (asyncMode) {
                   const jobId = crypto.randomUUID();

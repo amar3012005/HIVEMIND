@@ -1110,9 +1110,10 @@ async function answerStep({ message, history, evidence, plan, language, assistan
     return `[DOC/${doc}${page}] ${body}`;
   }).join('\n');
 
-  const tail = (history || []).slice(-6)
-    .filter(h => h && (h.role === 'user' || h.role === 'assistant') && h.content)
-    .map(h => ({ role: h.role, content: typeof h.content === 'string' ? h.content : JSON.stringify(h.content) }));
+  // T2-1: distilled tail — depth 4 (or 6 on anaphora), assistant turns reduced
+  // to their `.response` prose, each turn start-capped. Biggest answer-prompt
+  // token saving with no accuracy loss for fresh queries.
+  const tail = distillHistoryTail(history, message);
 
   // GRAPH EDGES block — typed relationships between evidence memories.
   // These come from real Relationship table rows (Updates/Extends/Mentions
@@ -1267,6 +1268,50 @@ function _isPronounPlaceholder(s) {
   if (!s) return false;
   const norm = s.trim().replace(/[.!?,;:]+$/, '').toLowerCase();
   return PRONOUN_PLACEHOLDERS.has(norm);
+}
+
+// T2-1: distill the answer-prompt history tail — the single biggest line item
+// (~59% of prompt tokens). Two levers, both accuracy-safe:
+//   (1) ASSISTANT turns are stored as the full {response, evidence_used,
+//       confidence, gaps} JSON blob. The model only needs the prose reply, so
+//       extract `.response` instead of JSON.stringify-ing the whole object.
+//   (2) Depth: 4 recent turns is plenty for a fresh factual/temporal question.
+//       Keep the FULL 6 only when the current message refers back ("save it",
+//       "what about that one", bare pronoun, or a tiny follow-up) — anaphora
+//       needs the older turn to resolve. When in doubt we keep more, never less.
+// Each turn is start-capped (not mid-truncated) so the model never parses a
+// severed JSON fragment.
+function _needsDeepHistory(message) {
+  const m = String(message || '').trim().toLowerCase();
+  if (!m) return true;                              // empty → don't risk it
+  if (m.length <= 24) return true;                  // terse follow-up
+  if (SAVE_IMPERATIVE_PHRASES.has(m.replace(/[.!?,;:]+$/, ''))) return true;
+  const tokens = m.replace(/[^a-z0-9 ]+/g, ' ').split(/\s+/).filter(Boolean);
+  if (tokens.some((t) => PRONOUN_PLACEHOLDERS.has(t))) return true;  // "...that one..."
+  if (/\b(above|previous|prior|earlier|last (one|time)|the same)\b/.test(m)) return true;
+  return false;
+}
+
+function distillHistoryTail(history, message, { perTurnCap = 600 } = {}) {
+  const depth = _needsDeepHistory(message) ? 6 : 4;
+  return (history || [])
+    .filter((h) => h && (h.role === 'user' || h.role === 'assistant') && h.content)
+    .slice(-depth)
+    .map((h) => {
+      let content = h.content;
+      if (typeof content !== 'string') {
+        // assistant turns are objects/JSON — keep only the prose reply
+        content = content?.response || content?.answer || content?.text || JSON.stringify(content);
+      } else if (h.role === 'assistant' && content.trim().startsWith('{')) {
+        try {
+          const parsed = JSON.parse(content);
+          content = parsed?.response || parsed?.answer || content;
+        } catch { /* not JSON — keep as-is */ }
+      }
+      content = String(content);
+      if (content.length > perTurnCap) content = `${content.slice(0, perTurnCap)} …`;
+      return { role: h.role, content };
+    });
 }
 
 // Returns true when the message is a bare imperative/confirmation that

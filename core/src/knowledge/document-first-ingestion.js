@@ -27,9 +27,19 @@ const BOILERPLATE_RES = [
   /\b(?:bildnachweis|fotonachweis|titelbild|titelfoto)\b/i,
   /\bmarkenagentur\b/i,
   /\binhaltsverzeichnis\b|\btable of contents\b/i,
+  /\b(?:bilder|fotos?|kartendaten)\s*©/i,                          // map/photo credit lines
+  /©\s*\d{4}\s*(?:TerraMetrics|GeoBasis|GeoContent)/i,
   /(?:\.{3,}\s*\d{1,3}\s*){2,}/,                                   // dotted ToC leaders "..... 12"
   /^\s*\d+\s+\d+\s+[A-ZÄÖÜ //]+\s*$/m,                           // page-header rows "4 5 FLURFUNK //"
 ];
+
+// Page-furniture headings ("5 4 FLURFUNK // hauspost 1/2021") are real article
+// containers — keep the SEGMENT, but never use the furniture as the TITLE.
+function isPageFurnitureHeading(heading) {
+  const h = (heading || '').trim();
+  if (!h) return false;
+  return /^\d+\s+\d+/.test(h) || /\/\/\s*hauspost/i.test(h) || /hauspost\s+\d\s*\/\s*\d{2,4}/i.test(h);
+}
 
 function isBoilerplateSegment(content, heading) {
   const text = `${heading || ''}\n${content || ''}`;
@@ -891,7 +901,7 @@ export class DocumentFirstIngestionService {
           // Title: prefer the chunk heading; else first sentence/line of the
           // segment (meaningful + searchable) instead of the opaque
           // "Extracted from <hash>" fallback that produced unusable titles.
-          title: segment.metadata?.heading
+          title: (segment.metadata?.heading && !isPageFurnitureHeading(segment.metadata.heading))
             ? String(segment.metadata.heading).slice(0, 200)
             : cleanTitleFrom(segment.content) || `Segment ${documentId.slice(0, 8)}`,
           source_type: 'knowledge_segment',

@@ -16631,7 +16631,10 @@ exit \$RC
                 deletedAt: null,
                 ...(includeSuperseded ? {} : { isLatest: true }),
                 ...(graphProjScope || {}),
-                ...(includeChildren ? {} : { AND: HIDDEN_CHILD_TAGS_GRAPH.map((t) => ({ NOT: { tags: { has: t } } })) }),
+                ...(includeChildren ? {} : { AND: [
+                  ...HIDDEN_CHILD_TAGS_GRAPH.map((t) => ({ NOT: { tags: { has: t } } })),
+                  { NOT: { project: { startsWith: 'tara/' } } }, // TARA config/skills/voice live in /tara, not the memory graph
+                ] }),
               };
               const scopeWhere = graphScope === 'team'
                 ? {

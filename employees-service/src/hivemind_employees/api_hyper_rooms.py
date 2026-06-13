@@ -458,16 +458,60 @@ async def _build_turn_blackboard(
     if isinstance(recall_resp, Exception):
         log.warning("[blackboard] query recall failed: %s", recall_resp)
         recall_resp = {}
-    rows = [
+    project_rows = [
         r for r in _extract_memory_rows(recall_resp)
         if _score_memory_row(r) >= BLACKBOARD_MIN_SCORE
     ]
+    project_rows.sort(key=_score_memory_row, reverse=True)
+    project_hit_count = len(project_rows)
+    if project_id and project_hit_count == 0:
+        try:
+            expanded_resp = await recall_emulated(
+                f"{query} product roadmap pricing revenue marketing strategy customers launch plan brand positioning",
+                user_id=user_id,
+                org_id=org_id,
+                api_key=api_key,
+                max_memories=10,
+                project_id=project_id,
+            )
+            project_rows = [
+                r for r in _extract_memory_rows(expanded_resp)
+                if _score_memory_row(r) >= 0.38
+            ]
+            project_rows.sort(key=_score_memory_row, reverse=True)
+            project_hit_count = len(project_rows)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[blackboard] expanded project recall failed: %s", exc)
+    org_fallback_rows: List[Dict[str, Any]] = []
+    org_fallback_used = False
+    if project_id and project_hit_count == 0:
+        try:
+            org_resp = await recall_emulated(
+                query,
+                user_id=user_id,
+                org_id=org_id,
+                api_key=api_key,
+                max_memories=6,
+                project_id=None,
+            )
+            org_fallback_rows = [
+                r for r in _extract_memory_rows(org_resp)
+                if _score_memory_row(r) >= BLACKBOARD_MIN_SCORE
+            ]
+            org_fallback_rows.sort(key=_score_memory_row, reverse=True)
+            org_fallback_used = bool(org_fallback_rows)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[blackboard] org fallback recall failed: %s", exc)
+    rows = project_rows + org_fallback_rows
     rows.sort(key=_score_memory_row, reverse=True)
     candidate_block = ""
     formatted = _format_memory_rows(rows, limit=6, snippet_chars=300)
     if formatted:
+        label = "PROJECT-SCOPED CANDIDATE MEMORIES" if project_id and project_hit_count else "CANDIDATE MEMORIES"
+        if project_id and project_hit_count == 0 and org_fallback_rows:
+            label = "ORG FALLBACK MEMORIES (project scope had no direct hits)"
         candidate_block = (
-            "CANDIDATE MEMORIES (most relevant to the user's question):\n"
+            f"{label} (most relevant to the user's question):\n"
             + formatted
             + "\n"
         )
@@ -481,6 +525,12 @@ async def _build_turn_blackboard(
         "memory_hits": rows,
         "hit_count": hit_count,
         "confidence": confidence,
+        "project_id": project_id or None,
+        "project_scoped": bool(project_id),
+        "project_hit_count": project_hit_count,
+        "project_confidence": min(1.0, project_hit_count / 3.0),
+        "org_fallback_used": org_fallback_used,
+        "org_fallback_hit_count": len(org_fallback_rows),
         "memory_ids": [
             str(r.get("id") or r.get("memory_id"))
             for r in rows
@@ -835,6 +885,11 @@ def _web_intel_needed(user_message: str, blackboard: Dict[str, Any], room_templa
     if not msg:
         return False
     external_signals = any(term in msg for term in WEB_INTEL_HINTS)
+    public_current_signals = any(term in msg for term in (
+        "trademark", "domain", "availability", "available", "current", "latest",
+        "today", "news", "public", "external", "competitor", "market size",
+        "law", "legal", "regulation", "docs", "release", "version",
+    ))
     decision_signals = any(term in msg for term in (
         "should", "best", "better", "compare", "comparison", "recommend",
         "decide", "decision", "evaluate", "choose", "rename", "rebrand",
@@ -842,6 +897,16 @@ def _web_intel_needed(user_message: str, blackboard: Dict[str, Any], room_templa
         "competitor", "current", "latest", "public", "evidence", "source",
         "sources", "available", "availability", "release", "version", "docs",
     ))
+    project_scoped = bool(blackboard.get("project_scoped"))
+    if project_scoped:
+        project_hits = int(blackboard.get("project_hit_count", 0) or 0)
+        internal_hits = int(blackboard.get("hit_count", 0) or 0)
+        internal_conf = float(blackboard.get("confidence", 0) or 0)
+        if project_hits > 0 and not (external_signals or public_current_signals):
+            return False
+        if internal_hits > 0 and internal_conf >= 0.55 and not (external_signals or public_current_signals):
+            return False
+        return bool(external_signals or public_current_signals or internal_hits == 0 or internal_conf < 0.35)
     if room_template in ("deep_sim", "swarm", "decision"):
         return True
     if external_signals or decision_signals:
@@ -849,6 +914,40 @@ def _web_intel_needed(user_message: str, blackboard: Dict[str, Any], room_templa
     if float(blackboard.get("confidence", 0) or 0) < 0.7:
         return True
     return int(blackboard.get("hit_count", 0) or 0) < 3
+
+
+def _build_memory_audit_event(
+    *,
+    blackboard: Dict[str, Any],
+    web_allowed: bool,
+    room_template: str,
+) -> Dict[str, Any]:
+    project_scoped = bool(blackboard.get("project_scoped"))
+    project_hit_count = int(blackboard.get("project_hit_count", 0) or 0)
+    hit_count = int(blackboard.get("hit_count", 0) or 0)
+    source = "project" if project_hit_count > 0 else ("org_fallback" if blackboard.get("org_fallback_used") else "none")
+    if not web_allowed:
+        reason = "project_memory_sufficient" if project_hit_count > 0 else "internal_memory_sufficient"
+    elif project_scoped and hit_count == 0:
+        reason = "project_and_org_memory_missing"
+    elif project_scoped and project_hit_count == 0:
+        reason = "project_memory_missing"
+    else:
+        reason = "public_or_current_evidence_needed"
+    return {
+        "t": "memory_audit",
+        "project_scoped": project_scoped,
+        "project_id": blackboard.get("project_id"),
+        "source": source,
+        "project_hits": project_hit_count,
+        "org_fallback_used": bool(blackboard.get("org_fallback_used")),
+        "org_fallback_hits": int(blackboard.get("org_fallback_hit_count", 0) or 0),
+        "memory_hits": hit_count,
+        "confidence": float(blackboard.get("confidence", 0) or 0),
+        "web_allowed": bool(web_allowed),
+        "web_reason": reason,
+        "template": room_template,
+    }
 
 
 async def _build_web_intel_agent_for_room(
@@ -1051,11 +1150,14 @@ def _build_harness_quality_check(
     reviews_count: int = 0,
     votes_count: int = 0,
     web_intel_used: bool = False,
+    project_scoped: bool = False,
+    project_memory_hits: int = 0,
 ) -> Dict[str, Any]:
     checks = [
         {"name": "room_goal", "ok": bool(_compact_report_item(room_goal, 20)), "detail": "standing objective present"},
         {"name": "final_synthesis", "ok": bool(final_text and len(final_text.strip()) >= 60), "detail": "lead conclusion is substantive"},
         {"name": "evidence_links", "ok": evidence_count > 0 or source_count > 0, "detail": f"{evidence_count} linked memories, {source_count} linked sources"},
+        {"name": "project_memory_first", "ok": (not project_scoped) or project_memory_hits > 0 or not web_intel_used, "detail": f"{project_memory_hits} project memory hits before web"},
         {"name": "web_sources", "ok": (not web_intel_used) or source_count > 0, "detail": f"{source_count} linked sources"},
         {"name": "perspective_trace", "ok": claims_count > 0 or reviews_count > 0 or votes_count > 0, "detail": f"{claims_count} claims, {reviews_count} reviews, {votes_count} votes"},
     ]
@@ -1092,6 +1194,8 @@ def _build_final_report(
     votes: Optional[List[Dict[str, Any]]] = None,
     objections: Optional[List[Any]] = None,
     web_intel_used: bool = False,
+    project_scoped: bool = False,
+    project_memory_hits: int = 0,
 ) -> Dict[str, Any]:
     """Build a readable report event from already-computed room artifacts.
 
@@ -1146,6 +1250,12 @@ def _build_final_report(
     if challenge_items:
         lines.extend(["", "### Risks and dissent"])
         lines.extend(f"- {c}" for c in challenge_items[:6])
+    if project_scoped and web_intel_used and project_memory_hits == 0:
+        lines.extend([
+            "",
+            "### Harness warning",
+            "- Project memory returned no direct hits before web-intel ran. Treat the answer as externally biased until Solvis/project memories are added or re-scoped.",
+        ])
 
     if votes:
         lines.extend(["", "### Vote snapshot"])
@@ -1222,6 +1332,8 @@ def _build_final_report(
         "weighted_score": score,
         "room_goal": room_goal or "",
         "goal_progress": progress,
+        "project_memory_hits": project_memory_hits,
+        "project_scoped": project_scoped,
         "evidence": evidence_rows[:12],
         "sources": source_rows[:8],
         "content": "\n".join(lines).strip(),
@@ -1956,6 +2068,12 @@ async def _orchestrate_deep_sim(
     )
     web_intel_context = ""
     try:
+        web_allowed = _web_intel_needed(req.user_message, blackboard, room_template)
+        await _emit_event(req.callback_url, req.turn_id, _build_memory_audit_event(
+            blackboard=blackboard,
+            web_allowed=web_allowed,
+            room_template=room_template,
+        ))
         web_intel_context = await _run_web_intel_turn(
             req=req,
             lead=lead,
@@ -2140,6 +2258,8 @@ async def _orchestrate_deep_sim(
         reviews_count=len(reviews),
         votes_count=len(vote_summary),
         web_intel_used=bool(web_intel_context),
+        project_scoped=bool(req.project_id),
+        project_memory_hits=int(blackboard.get("project_hit_count", 0) or 0),
     ))
     await _emit_event(req.callback_url, req.turn_id, _build_final_report(
         user_message=req.user_message,
@@ -2158,6 +2278,8 @@ async def _orchestrate_deep_sim(
         reviews=reviews,
         votes=vote_summary,
         web_intel_used=bool(web_intel_context),
+        project_scoped=bool(req.project_id),
+        project_memory_hits=int(blackboard.get("project_hit_count", 0) or 0),
     ))
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "seal",
@@ -2593,11 +2715,13 @@ def _consensus_verdict(votes: List[Dict[str, Any]], trust_map: Dict[str, float])
 async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str, Any]],
                               lead: Dict[str, Any], skeptic: Optional[Dict[str, Any]],
                               memory_context: str, room_template: str,
-                              cost_tokens_initial: int, started: float) -> "RoomTurnResponse":
+                              cost_tokens_initial: int, started: float,
+                              memory_audit: Optional[Dict[str, Any]] = None) -> "RoomTurnResponse":
     """Fixed R1-R5 phase machine. Returns RoomTurnResponse."""
     cost_tokens = cost_tokens_initial
     tool_call_counts: Dict[str, int] = {}
     evidence_pool: Set[str] = set()
+    memory_audit = memory_audit or {}
 
     def _turn_tool_total() -> int:
         """Running sum of tool calls across all cached agents this turn.
@@ -3333,6 +3457,8 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
         reviews_count=len(peer_reviews),
         votes_count=len(votes),
         web_intel_used="WEB INTEL DOSSIER" in (memory_context or ""),
+        project_scoped=bool(memory_audit.get("project_scoped")),
+        project_memory_hits=int(memory_audit.get("project_hits", 0) or 0),
     ))
     await _emit_event(req.callback_url, req.turn_id, _build_final_report(
         user_message=req.user_message,
@@ -3351,6 +3477,8 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
         votes=votes,
         objections=(skeptic_output.get("challenges") or []),
         web_intel_used="WEB INTEL DOSSIER" in (memory_context or ""),
+        project_scoped=bool(memory_audit.get("project_scoped")),
+        project_memory_hits=int(memory_audit.get("project_hits", 0) or 0),
     ))
     await _emit_event(req.callback_url, req.turn_id, {
         "t": "seal",
@@ -3526,7 +3654,16 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         # Recall via master+emulation (req.user_id/org_id) so it reaches the
         # org brain regardless of whether bootstrap minted a lead key.
         memory_context_swarm = _room_goal_context(req.room_goal)
-        swarm_blackboard: Dict[str, Any] = {"confidence": 0.0, "hit_count": 0}
+        swarm_blackboard: Dict[str, Any] = {
+            "confidence": 0.0,
+            "hit_count": 0,
+            "project_id": req.project_id or None,
+            "project_scoped": bool(req.project_id),
+            "project_hit_count": 0,
+            "project_confidence": 0.0,
+            "org_fallback_used": False,
+            "org_fallback_hit_count": 0,
+        }
         try:
             boot_map = {b["id"]: b for b in await fetch_bootstrap()}
             lead_api_key = (boot_map.get(lead["id"], {}) or {}).get("api_key", "") or ""
@@ -3538,6 +3675,25 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                 api_key=lead_api_key, max_memories=6, project_id=req.project_id)
             rows = recall_resp.get("memories") or recall_resp.get("combined") or []
             rows = [r for r in rows if float(r.get("score", 0)) >= 0.45]
+            project_hit_count = len(rows) if req.project_id else 0
+            if req.project_id and not rows:
+                expanded_resp = await recall_emulated(
+                    f"{req.user_message} product roadmap pricing revenue marketing strategy customers launch plan brand positioning",
+                    user_id=req.user_id, org_id=req.org_id,
+                    api_key=lead_api_key, max_memories=10, project_id=req.project_id)
+                rows = expanded_resp.get("memories") or expanded_resp.get("combined") or []
+                rows = [r for r in rows if float(r.get("score", 0)) >= 0.38]
+                project_hit_count = len(rows)
+            org_fallback_used = False
+            org_fallback_hit_count = 0
+            if req.project_id and not rows:
+                org_resp = await recall_emulated(
+                    req.user_message, user_id=req.user_id, org_id=req.org_id,
+                    api_key=lead_api_key, max_memories=6, project_id=None)
+                rows = org_resp.get("memories") or org_resp.get("combined") or []
+                rows = [r for r in rows if float(r.get("score", 0)) >= 0.45]
+                org_fallback_used = bool(rows)
+                org_fallback_hit_count = len(rows)
             candidate_block = ""
             if rows:
                 lines_out = []
@@ -3557,6 +3713,12 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             swarm_blackboard = {
                 "confidence": 0.55 if rows else 0.0,
                 "hit_count": len(rows),
+                "project_id": req.project_id or None,
+                "project_scoped": bool(req.project_id),
+                "project_hit_count": project_hit_count,
+                "project_confidence": min(1.0, project_hit_count / 3.0),
+                "org_fallback_used": org_fallback_used,
+                "org_fallback_hit_count": org_fallback_hit_count,
             }
             memory_context_swarm = _join_context(memory_context_swarm, company_brief + candidate_block)
             if memory_context_swarm:
@@ -3564,6 +3726,12 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         except Exception as exc:  # noqa: BLE001
             log.warning("[swarm] pre-fetch failed: %s", exc)
         try:
+            web_allowed_swarm = _web_intel_needed(req.user_message, swarm_blackboard, room_template)
+            await _emit_event(req.callback_url, req.turn_id, _build_memory_audit_event(
+                blackboard=swarm_blackboard,
+                web_allowed=web_allowed_swarm,
+                room_template=room_template,
+            ))
             web_intel_swarm = await _run_web_intel_turn(
                 req=req,
                 lead=lead,
@@ -3580,6 +3748,11 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             req, participants, lead, skeptic,
             memory_context_swarm, room_template,
             cost_tokens, started,
+            memory_audit=_build_memory_audit_event(
+                blackboard=swarm_blackboard,
+                web_allowed=_web_intel_needed(req.user_message, swarm_blackboard, room_template),
+                room_template=room_template,
+            ),
         )
 
     # ── Shared blackboard (grounded RAG) ─────────────────────────────
@@ -3616,6 +3789,12 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         memory_context = _join_context(goal_context, memory_context)
         current_turn_state = _join_context(goal_context, current_turn_state)
     try:
+        web_allowed = _web_intel_needed(req.user_message, blackboard, room_template)
+        await _emit_event(req.callback_url, req.turn_id, _build_memory_audit_event(
+            blackboard=blackboard,
+            web_allowed=web_allowed,
+            room_template=room_template,
+        ))
         web_intel_context = await _run_web_intel_turn(
             req=req,
             lead=lead,

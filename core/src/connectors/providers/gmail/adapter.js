@@ -26,55 +26,74 @@ export class GmailAdapter extends BaseProviderAdapter {
       requiredScopes: ['https://www.googleapis.com/auth/gmail.readonly'],
       defaultTags: ['gmail'],
     });
-    // Per-sync-run cumulative thread counter. The scheduler creates ONE adapter
-    // instance per runSync and loops fetchInitial across pages, so this persists
-    // for the whole run. A full backfill paginating unbounded (50/page) with
-    // per-thread LLM entity extraction pegged the 2-core box and starved the
-    // HTTP loop (→ 503). Cap each run; incremental ticks pick up the rest.
-    this._fetchedThisRun = 0;
   }
 
   /**
-   * Full backfill: list threads (filtered at q= time), then fetch each thread.
+   * Full backfill: list threads (filtered at q= time), fetch each thread.
+   *
+   * Paginates INTERNALLY up to the per-run cap, then returns the mailbox's
+   * CURRENT historyId as the resume cursor — NOT a list pageToken. This is the
+   * fix for "always full-scans": runSync persists this historyId, so the next
+   * sync calls fetchIncremental(historyId) and pulls only NEW mail. Returning a
+   * pageToken (the old behaviour) made fetchIncremental 404 every time → endless
+   * full re-scan. hasMore is always false: this method owns its own pagination.
+   *
    * @param {{ accessToken: string, cursor: string|null, context: object }} params
    */
   async fetchInitial({ accessToken, cursor, context }) {
-    const params = new URLSearchParams({ maxResults: String(MAX_RESULTS_PER_PAGE) });
-    if (cursor) params.set('pageToken', cursor);
+    // Snapshot the mailbox historyId up front so anything that arrives DURING
+    // the backfill is still caught by the next incremental tick (no gap).
+    const resumeHistoryId = await this._getCurrentHistoryId(accessToken);
 
-    // Enforce the user's sync config at FETCH time (Gmail q=). The adapter path
-    // passes folders as labelIds (below), so buildGmailQuery omits them here.
     const q = buildGmailQuery(context?.config || {});
-    if (q) params.set('q', q);
-
     const folders = context?.config?.folders || [];
-    if (Array.isArray(folders) && folders.length > 0) {
-      folders.forEach((f) => params.append('labelIds', String(f).toUpperCase()));
-    }
-
-    const response = await this._gmailFetch(`/threads?${params}`, accessToken);
-    const threads = response.threads || [];
-
-    const { records, auth401s } = await this._fetchThreads(threads.map((t) => t.id), accessToken);
-    this._escalateIfTokenDead(auth401s, threads.length, records.length, 'backfill');
-
-    // Per-run thread cap: stop paginating once this run yields max_emails
-    // threads. The cursor is still returned so a manual re-sync resumes; once
-    // an incremental historyId cursor exists each tick is tiny.
-    this._fetchedThisRun += records.length;
     const runCap = Number(context?.config?.max_emails) > 0
       ? Number(context.config.max_emails)
       : DEFAULT_RUN_CAP;
-    const capReached = this._fetchedThisRun >= runCap;
-    if (capReached) {
-      console.log(`[gmail-adapter] per-run cap reached (${this._fetchedThisRun}/${runCap}) — stopping pagination this tick`);
-    }
 
-    return {
-      records,
-      nextCursor: response.nextPageToken || null,
-      hasMore: !!response.nextPageToken && !capReached,
-    };
+    const records = [];
+    let auth401s = 0;
+    let listed = 0;
+    let pageToken = cursor || null;
+
+    do {
+      const params = new URLSearchParams({ maxResults: String(MAX_RESULTS_PER_PAGE) });
+      if (pageToken) params.set('pageToken', pageToken);
+      if (q) params.set('q', q);
+      if (Array.isArray(folders) && folders.length > 0) {
+        folders.forEach((f) => params.append('labelIds', String(f).toUpperCase()));
+      }
+
+      const response = await this._gmailFetch(`/threads?${params}`, accessToken);
+      const threads = response.threads || [];
+      listed += threads.length;
+
+      const page = await this._fetchThreads(threads.map((t) => t.id), accessToken);
+      auth401s += page.auth401s;
+      records.push(...page.records);
+
+      pageToken = response.nextPageToken || null;
+      if (records.length >= runCap) {
+        console.log(`[gmail-adapter] per-run cap reached (${records.length}/${runCap}) — stopping backfill pagination`);
+        break;
+      }
+    } while (pageToken);
+
+    this._escalateIfTokenDead(auth401s, listed, records.length, 'backfill');
+
+    // Resume cursor = current historyId → next sync is truly incremental.
+    return { records, nextCursor: resumeHistoryId || null, hasMore: false };
+  }
+
+  /** Current mailbox historyId (resume point for incremental sync). */
+  async _getCurrentHistoryId(accessToken) {
+    try {
+      const profile = await this._gmailFetch('/profile', accessToken);
+      return profile?.historyId || null;
+    } catch (err) {
+      console.warn(`[gmail-adapter] getProfile historyId failed (non-fatal): ${err.message}`);
+      return null;
+    }
   }
 
   /**

@@ -10755,10 +10755,13 @@ exit \$RC
                 ],
               };
 
-              // Hard-delete mode: ?hard=true query param OR body.hard=true.
-              // Purges Postgres rows, Qdrant vectors, and any pageindex /
-              // memory_versions / relationships referencing the targets.
-              const hard = url.searchParams.get('hard') === 'true' || body.hard === true;
+              // Flush is HARD by default now ("Flush all Gmail memories →
+              // Start fresh" is an explicit, confirmed, destructive action;
+              // soft-delete left rows that a re-sync resurrected, so users saw
+              // "still there"). Opt into the old recoverable soft path with
+              // ?soft=true or body.soft=true.
+              const soft = url.searchParams.get('soft') === 'true' || body.soft === true;
+              const hard = !soft;
 
               if (!hard) {
                 // ── Soft delete (default, recoverable) ──
@@ -10824,27 +10827,49 @@ exit \$RC
               let qdrantDeleted = 0;
               try {
                 const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
-                const qdrantCollection = 'HIVEMIND_PERSONAL';
+                // Per-tenant mode stores vectors in org_<orgId>, NOT
+                // HIVEMIND_PERSONAL — purge BOTH so nothing orphans (same bug
+                // that left KB-delete vectors behind).
+                const qdrantCollections = Array.from(new Set([
+                  ...(process.env.QDRANT_PER_TENANT === 'true' && orgId ? [`org_${orgId}`] : []),
+                  'HIVEMIND_PERSONAL',
+                ]));
                 const qdrantKey = process.env.QDRANT_API_KEY || '';
                 if (qdrantUrl) {
-                  // Chunk ids to keep the request payload small on big batches
                   const chunkSize = 500;
-                  for (let i = 0; i < ids.length; i += chunkSize) {
-                    const slice = ids.slice(i, i + chunkSize);
-                    const qresp = await fetch(`${qdrantUrl}/collections/${encodeURIComponent(qdrantCollection)}/points/delete?wait=true`, {
-                      method: 'POST',
-                      headers: {
-                        'Content-Type': 'application/json',
-                        ...(qdrantKey ? { 'api-key': qdrantKey } : {}),
-                      },
-                      body: JSON.stringify({ points: slice }),
-                    });
-                    if (qresp.ok) qdrantDeleted += slice.length;
-                    else console.warn(`[gmail-flush:hard] Qdrant purge HTTP ${qresp.status}: ${(await qresp.text()).slice(0, 160)}`);
+                  for (const coll of qdrantCollections) {
+                    for (let i = 0; i < ids.length; i += chunkSize) {
+                      const slice = ids.slice(i, i + chunkSize);
+                      const qresp = await fetch(`${qdrantUrl}/collections/${encodeURIComponent(coll)}/points/delete?wait=true`, {
+                        method: 'POST',
+                        headers: {
+                          'Content-Type': 'application/json',
+                          ...(qdrantKey ? { 'api-key': qdrantKey } : {}),
+                        },
+                        body: JSON.stringify({ points: slice }),
+                      });
+                      if (qresp.ok) qdrantDeleted += slice.length;
+                      else console.warn(`[gmail-flush:hard] Qdrant purge ${coll} HTTP ${qresp.status}: ${(await qresp.text()).slice(0, 160)}`);
+                    }
                   }
                 }
               } catch (qErr) {
                 console.warn('[gmail-flush:hard] Qdrant purge failed (non-fatal):', qErr.message);
+              }
+
+              // 3b. Reset the gmail sync cursor + history so "Start fresh"
+              // truly resets — otherwise the next incremental tick resumes
+              // from a stale historyId and the connector looks half-wiped.
+              try {
+                const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
+                const cs = new ConnectorStore(prisma);
+                await cs.updateMetadata(userId, 'gmail', { cursor: null, historyId: null });
+                await prisma.platformIntegration.update({
+                  where: { userId_platformType: { userId, platformType: 'gmail' } },
+                  data: { syncStatus: 'idle', lastSyncedAt: null },
+                }).catch(() => {});
+              } catch (curErr) {
+                console.warn('[gmail-flush:hard] cursor reset failed (non-fatal):', curErr.message);
               }
 
               // 4. Invalidate aggregate cache so /api/memories etc. don't serve stale counts

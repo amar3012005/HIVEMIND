@@ -96,6 +96,14 @@ export class SyncEngine {
         // cloud_id, Salesforce instance_url, Microsoft tenant_id, ...).
         // Adapters that need these fields read them from context.
         provider_metadata: existingConnector?.provider_metadata || {},
+        // Persisted sync filters (date_range, folders, exclude_categories,
+        // block_senders, max_emails). The adapter reads context.config to
+        // build its provider query — WITHOUT this, scheduled auto-syncs ran
+        // the firehose while manual syncs honored the user's noise filters.
+        // Now auto-sync === manual sync.
+        config: existingConnector?.connectorMetadata?.sync_config
+          || existingConnector?.connector_metadata?.sync_config
+          || {},
       };
       let hasMore = true;
       let currentCursor = cursor;

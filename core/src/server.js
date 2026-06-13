@@ -10943,6 +10943,42 @@ exit \$RC
 
               const gmailQuery = queryParts.join(' ');
 
+              // Persist the FULL sync config so scheduled auto-syncs replay
+              // the exact same filters (date range, folders, excludes, sender
+              // blocklist). Without this, auto-sync ignored the user's modal
+              // choices and ran the firehose. sync_config is read by
+              // sync-engine.runSync → adapter._buildGmailQuery on every tick.
+              try {
+                await syncStore.updateMetadata(userId, 'gmail', {
+                  sync_config: {
+                    date_range,
+                    folders,
+                    exclude_categories,
+                    block_senders: Array.isArray(body.block_senders) ? body.block_senders : [],
+                    max_emails,
+                    ...(body.disable_default_blocklist === true ? { disable_default_blocklist: true } : {}),
+                  },
+                });
+              } catch (cfgErr) {
+                console.warn('[gmail-sync] persist sync_config failed (non-fatal):', cfgErr.message);
+              }
+
+              // Optional: set/clear the auto-sync cadence in the same call so
+              // the modal's "auto-sync every N" toggle is one round-trip.
+              if (body.auto_sync_minutes !== undefined) {
+                try {
+                  const c = body.auto_sync_minutes === null ? null : parseInt(body.auto_sync_minutes, 10);
+                  if (c === null || (Number.isFinite(c) && c >= 15 && c <= 60 * 24 * 30)) {
+                    await prisma.platformIntegration.update({
+                      where: { userId_platformType: { userId, platformType: 'gmail' } },
+                      data: { syncIntervalMinutes: c },
+                    });
+                  }
+                } catch (cadErr) {
+                  console.warn('[gmail-sync] set auto_sync_minutes failed (non-fatal):', cadErr.message);
+                }
+              }
+
               // Store settings in connector metadata
               await syncStore.updateStatus(userId, 'gmail', {
                 status: 'syncing',

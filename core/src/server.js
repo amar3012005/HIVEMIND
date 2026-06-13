@@ -11076,128 +11076,35 @@ exit \$RC
               const syncId = crypto.randomUUID();
               console.log(`[gmail-sync] Starting configured sync id=${syncId} user=${userId} query="${gmailQuery}" maxEmails=${max_emails}`);
 
-              // Background sync
+              // Background sync — delegate to the canonical SyncEngine.
+              //
+              // incremental:true → resumes from the stored cursor (Gmail
+              // historyId). Each run pulls only NEW mail since last sync, not
+              // the whole date window again ("date wise, not all from start").
+              // runSync owns: native-token resolve, sync_config date/folder/
+              // blocklist filters (persisted above), source_id dedup (skips
+              // re-embedding already-synced threads), Qdrant embedding via
+              // _postIngestHooks (with the noise-tier embed skip), final_cursor
+              // persistence, and status transitions. First-ever sync (no
+              // cursor) falls back to a date-bounded fetchInitial + per-run cap.
               (async () => {
                 try {
-                  const accessToken = await syncStore.getAccessToken(userId, 'gmail');
-                  if (!accessToken) throw new Error('Gmail access token not found or expired. Please reconnect Gmail.');
-
-                  const GMAIL_API = 'https://gmail.googleapis.com/gmail/v1/users/me';
-                  // Canonical normalizer — manual sync uses the SAME adapter as the
-                  // scheduler/incremental path so payload shape, noise floor, and
-                  // source_id (gmail:thread:<id>) match and dedup across paths.
                   const { GmailAdapter } = await import('./connectors/providers/gmail/adapter.js');
-                  const gmailAdapter = new GmailAdapter();
-                  const userAccountRef = connector.account_ref || connector.metadata?.email || '';
-                  const params = new URLSearchParams({
-                    maxResults: String(Math.min(max_emails, 100)),
-                    q: gmailQuery,
+                  const adapter = new GmailAdapter();
+                  if (!schedulerSyncEngine) throw new Error('Sync engine unavailable');
+                  const result = await schedulerSyncEngine.runSync({
+                    adapter,
+                    userId,
+                    orgId,
+                    provider: 'gmail',
+                    incremental: true,
+                    targetScope,
                   });
-
-                  let totalImported = 0;
-                  let totalSkipped = 0;
-                  let pageToken = null;
-
-                  do {
-                    if (pageToken) params.set('pageToken', pageToken);
-                    const listResp = await fetch(`${GMAIL_API}/threads?${params}`, {
-                      headers: { Authorization: `Bearer ${accessToken}` },
-                    });
-                    if (!listResp.ok) throw new Error(`Gmail API ${listResp.status}: ${await listResp.text()}`);
-                    const listData = await listResp.json();
-
-                    const threads = listData.threads || [];
-                    for (const threadStub of threads) {
-                      if (totalImported + totalSkipped >= max_emails) break;
-
-                      try {
-                        const threadResp = await fetch(`${GMAIL_API}/threads/${threadStub.id}?format=full`, {
-                          headers: { Authorization: `Bearer ${accessToken}` },
-                        });
-                        if (!threadResp.ok) { totalSkipped++; continue; }
-                        const thread = await threadResp.json();
-
-                        // ── Thread-level ingestion (canonical adapter) ───────────────
-                        if (totalImported >= max_emails) break;
-
-                        // Normalize via the shared adapter — identical payload shape,
-                        // noise floor (noise-filter.js classifyNoise + newsletter /
-                        // low-signal gates + sent-mail bypass), tags, and
-                        // source_id (gmail:thread:<id>) as the scheduler path. This
-                        // makes manual + auto-sync dedup against each other; the old
-                        // inline build emitted source_id=thread:<id> and double-ingested.
-                        const gmailPayloads = gmailAdapter.normalize(thread, {
-                          user_id: userId,
-                          org_id: orgId,
-                          target_scope: targetScope,
-                          user_account_ref: userAccountRef,
-                        });
-                        if (!gmailPayloads || gmailPayloads.length === 0) { totalSkipped++; continue; }
-
-                        for (const basePayload of gmailPayloads) {
-                          if (totalImported >= max_emails) break;
-                          try {
-                            const gmailPayload = {
-                              ...basePayload,
-                              visibility: targetScope === 'organization' ? 'organization' : 'private',
-                              source: 'gmail',
-                              project: container_tag || basePayload.project || null,
-                            };
-                            const [routedGmailPayload] = await buildRoutedIngestPayloads(gmailPayload, { smartIngestRouter });
-                            const gmailResult = await persistentMemoryEngine.ingestMemory(routedGmailPayload);
-                            // Enterprise structured enrichment post-commit.
-                            if (gmailResult?.memoryId && enrichmentQueue) {
-                              enrichmentQueue.enqueue(gmailResult.memoryId, {
-                                content: routedGmailPayload.content,
-                                title: routedGmailPayload.title,
-                                tags: routedGmailPayload.tags,
-                              });
-                            }
-                            // Embed thread memory in Qdrant for vector search
-                            if (gmailResult?.memoryId && qdrantClient) {
-                              try {
-                                const gmailMem = await persistentMemoryStore.getMemory(gmailResult.memoryId);
-                                if (gmailMem) await qdrantClient.storeMemory(gmailMem, { collectionName: 'HIVEMIND_PERSONAL' });
-                              } catch {}
-                            }
-                            // Embed fact-memories in Qdrant
-                            if (gmailResult?.factMemoryIds?.length > 0 && qdrantClient) {
-                              for (const factId of gmailResult.factMemoryIds) {
-                                try {
-                                  const factMem = await persistentMemoryStore.getMemory(factId);
-                                  if (factMem) await qdrantClient.storeMemory(factMem, { collectionName: 'HIVEMIND_PERSONAL' });
-                                } catch {}
-                              }
-                            }
-                            totalImported++;
-                          } catch (ingestErr) {
-                            console.warn(`[gmail-sync] Ingest failed for thread ${thread.id}:`, ingestErr.message);
-                            totalSkipped++;
-                          }
-                        }
-                      } catch (threadErr) {
-                        console.warn(`[gmail-sync] Thread ${threadStub.id} failed:`, threadErr.message);
-                        totalSkipped++;
-                      }
-                    }
-
-                    pageToken = listData.nextPageToken;
-                  } while (pageToken && totalImported + totalSkipped < max_emails);
-
-                  // Update connector status
-                  await syncStore.updateStatus(userId, 'gmail', {
-                    status: 'idle',
-                    syncStats: { imported: totalImported, skipped: totalSkipped, query: gmailQuery },
-                  });
-
-                  console.log(`[gmail-sync] Complete: imported=${totalImported}, skipped=${totalSkipped}`);
+                  console.log(`[gmail-sync] Complete id=${syncId}: imported=${result?.imported ?? 0} skipped=${result?.skipped ?? 0} failed=${result?.failed ?? 0} status=${result?.status} cursor=${result?.final_cursor ? 'advanced' : 'none'}`);
                 } catch (syncErr) {
-                  console.error(`[gmail-sync] Failed:`, syncErr.message);
+                  console.error(`[gmail-sync] Failed id=${syncId}:`, syncErr.message);
                   try {
-                    await syncStore.updateStatus(userId, 'gmail', {
-                      status: 'idle',
-                      error: syncErr.message,
-                    });
+                    await syncStore.updateStatus(userId, 'gmail', { status: 'idle', error: syncErr.message });
                   } catch {}
                 }
               })();

@@ -389,26 +389,45 @@ export class SyncEngine {
       try {
         const fullMemory = await this.memoryStore.getMemory(memoryId);
         if (fullMemory) {
-          const collectionName = 'HIVEMIND_PERSONAL';
-          const entityNames = (fullMemory.tags || [])
-            .filter((t) => typeof t === 'string' && (t.startsWith('entity:') || t.startsWith('person:')))
-            .map((t) => t.replace(/^(entity|person):/, '').replace(/_/g, ' '));
-          const titleLine = fullMemory.title || '';
-          const augmented = [
-            titleLine,
-            entityNames.join(', '),
-            fullMemory.content || '',
-          ].filter(Boolean).join('\n\n').slice(0, 8000);
-          let vector = null;
-          try {
-            vector = await this.qdrantClient.generateEmbedding(augmented);
-          } catch (embedFailedErr) {
-            console.warn(`[sync-engine] augmented-embed failed, falling back: ${embedFailedErr.message}`);
-          }
-          if (vector) {
-            await this.qdrantClient.storeMemory(fullMemory, { collectionName, vector });
+          // Noise-tier embed skip: low-signal connector mail (promotions,
+          // updates, social, forums, notifications) is recallable by facet /
+          // FTS tags but adds no semantic value — and recall demotes it to
+          // ~0.15–0.40 anyway (persisted-retrieval). Skip the embedding to save
+          // cost + keep the vector index clean. The user's own outbound
+          // (sent-by-user / first-person) ALWAYS embeds — it is ground truth.
+          const NOISE_EMBED_TAGS = new Set([
+            'label:updates', 'label:promotions', 'label:social', 'label:forums',
+            'updates', 'promotions', 'social', 'forums',
+            'newsletter', 'notification', 'automated', 'no-reply',
+          ]);
+          const memTags = Array.isArray(fullMemory.tags) ? fullMemory.tags : [];
+          const isNoiseTier = memTags.some((t) => NOISE_EMBED_TAGS.has(t));
+          const isGroundTruth = memTags.includes('sent-by-user') || memTags.includes('first-person');
+          if (isNoiseTier && !isGroundTruth) {
+            // PG row + external_ref still written below — only the vector is skipped.
+            console.log(`[sync-engine] skip embed (noise-tier) ${memoryId.slice(0, 8)} — PG/FTS only`);
           } else {
-            await this.qdrantClient.storeMemory(fullMemory, { collectionName });
+            const collectionName = 'HIVEMIND_PERSONAL';
+            const entityNames = (fullMemory.tags || [])
+              .filter((t) => typeof t === 'string' && (t.startsWith('entity:') || t.startsWith('person:')))
+              .map((t) => t.replace(/^(entity|person):/, '').replace(/_/g, ' '));
+            const titleLine = fullMemory.title || '';
+            const augmented = [
+              titleLine,
+              entityNames.join(', '),
+              fullMemory.content || '',
+            ].filter(Boolean).join('\n\n').slice(0, 8000);
+            let vector = null;
+            try {
+              vector = await this.qdrantClient.generateEmbedding(augmented);
+            } catch (embedFailedErr) {
+              console.warn(`[sync-engine] augmented-embed failed, falling back: ${embedFailedErr.message}`);
+            }
+            if (vector) {
+              await this.qdrantClient.storeMemory(fullMemory, { collectionName, vector });
+            } else {
+              await this.qdrantClient.storeMemory(fullMemory, { collectionName });
+            }
           }
         }
       } catch (embedErr) {

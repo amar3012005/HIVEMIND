@@ -2437,6 +2437,10 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
       .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))
       .slice(0, EDGE_CAP);
 
+    if (links.length > 0 && sorted.length === 0) {
+      console.warn(`[entity-co-mention] ALL ${links.length} link(s) filtered out for ${String(baseMemory.id).slice(0, 8)}. newEntities=[${[...newEntitiesLower].join('|')}] common=[${[...commonEntities].join('|')}] linkDetail=${JSON.stringify(links.map((l) => ({ i: l.index, t: l.type, e: l.entity, c: l.confidence, candEnts: (candidates[l.index]?.tags || []).filter((t) => t.startsWith('entity:')).map((t) => t.slice(7).replace(/_/g, ' ').toLowerCase()) })).slice(0, 5))}`);
+    }
+
     const writeStore = store || this.store;
     // Pre-flight: drop links pointing at memory IDs that no longer exist
     // (candidate may have been deleted / superseded between recall and

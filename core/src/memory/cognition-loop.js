@@ -100,6 +100,10 @@ const STALE_REWEIGHT_DAYS         = Number(process.env.STALE_REWEIGHT_DAYS      
 const REWEIGHT_MAX_PER_TICK       = Number(process.env.REWEIGHT_MAX_PER_TICK       || 20);
 const REWEIGHT_TEMPER_PER_HIT     = Number(process.env.REWEIGHT_TEMPER_PER_HIT     || 0.15);
 const REWEIGHT_CONF_FLOOR         = Number(process.env.REWEIGHT_CONF_FLOOR         || 0.30);
+// Mechanism #2 — graph-neighborhood reach: how many OLD (beyond-window) memories
+// sharing an active cluster's entity/topic tag to pull into synthesis, so a dream
+// connects past + present across sources. Bounded per active cluster (cost guard).
+const NEIGHBOR_REACH_MAX          = Number(process.env.COGNITION_NEIGHBOR_REACH_MAX || 10);
 const DRIFT_COMPACT_THRESHOLD     = Number(process.env.DRIFT_COMPACT_THRESHOLD     || 12);
 // Hard cap on members folded into one canonical (stops 394-member pathology)
 const MAX_MEMBERS_PER_CANONICAL   = Number(process.env.DRIFT_MAX_MEMBERS_PER_CANONICAL || 10);
@@ -683,6 +687,51 @@ export class CognitionLoop {
           added += 1;
         }
       }
+    }
+
+    // ── Mechanism #2: graph-neighborhood reach into OLD memories ──────────────
+    // The rolling window makes a cluster see only recent members; an insight that
+    // connects "what you said months ago" with "what arrived today" needs the OLD
+    // members too. For each ACTIVE cluster (≥2 recent members on a real
+    // entity/topic tag — the cross-source join key), pull older memories sharing
+    // that exact tag from BEYOND the window, bounded by NEIGHBOR_REACH_MAX.
+    // Grounded (same real entity, not cosine coincidence), token-bounded (cap per
+    // active cluster; only active clusters expand → dead history never self-dreams),
+    // additive to the synthesis member set so canonicals span past + present.
+    if (process.env.COGNITION_NEIGHBORHOOD_REACH !== 'false') {
+      let reachedTotal = 0;
+      for (const [tag, members] of buckets.entries()) {
+        if (members.length < 2 || SYS_TAG_RE.test(tag)) continue;
+        if (!(tag.startsWith('entity:') || tag.startsWith('topic:'))) continue;
+        const have = new Set(members.map((m) => m.id));
+        let older = [];
+        try {
+          older = await this.prisma.memory.findMany({
+            where: {
+              orgId, deletedAt: null,
+              createdAt: { lt: since },               // the back-catalog, any age
+              tags: { has: tag },                     // the shared entity = grounding
+              memoryType: { in: ['fact', 'decision'] },
+              cognitiveLayerRole: null,
+              NOT: { tags: { hasSome: ['synthesis:canonical', 'synthesis:bridge', 'canonical-summary', 'synthesized', 'internal-audit', 'governance'] } },
+            },
+            orderBy: [{ importanceScore: 'desc' }, { createdAt: 'desc' }],
+            take: NEIGHBOR_REACH_MAX,
+            select: {
+              id: true, title: true, content: true, tags: true,
+              memoryType: true, userId: true, project: true, createdAt: true,
+              sourceMetadata: { select: { sourcePlatform: true } },
+            },
+          });
+        } catch { older = []; }
+        for (const m of older) {
+          if (have.has(m.id)) continue;
+          const sp = m.sourceMetadata?.sourcePlatform;
+          if (sp && STRUCTURED_SOURCES.includes(sp)) continue; // structured = self-canonical
+          members.push(m); have.add(m.id); reachedTotal += 1;
+        }
+      }
+      if (reachedTotal) this.logger.log(`[cognition] neighborhood reach: pulled ${reachedTotal} older memor${reachedTotal === 1 ? 'y' : 'ies'} into active clusters (past+present)`);
     }
 
     let writes = 0;

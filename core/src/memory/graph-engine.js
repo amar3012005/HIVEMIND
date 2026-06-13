@@ -2354,49 +2354,46 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
       Mentions: 0.55,
     };
 
-    // Owner-name filter. The memory owner's first name appears on almost
-    // every memory they save (entity:Amar on every "Amar's" memory).
-    // Counting it as shared-entity overlap produces noise edges between
-    // every pair of memories — defeats the purpose of overlap gating.
+    // Entity-overlap gating. Two principles, learned the hard way on the
+    // GTM/B&B memory (LLM found 3 links, all wrongly filtered → 0 edges):
     //
-    // The owner name is handled DEFINITIVELY by ALWAYS_COMMON below. The
-    // frequency heuristic here is only a backstop for OTHER ubiquitous
-    // tokens — and it must NOT fire on small, topically-homogeneous batches:
-    // a tightly-related business memory (GTM partner / German registration /
-    // DACH expansion) shares exactly the topical entities (Germany, DACH,
-    // Da'Vinci AI) that the old 40%-of-≥2-candidates rule wrongly stripped,
-    // zeroing the overlap and dropping a link the LLM had correctly found
-    // (observed: the GTM/B&B memory, links=1 → 0 edges). Require a larger
-    // batch and a higher fraction before frequency-stripping kicks in.
-    const candidateTagCounts = new Map(); // entity (lowercased) → count
-    let candidatesScanned = 0;
-    for (const c of candidates) {
-      candidatesScanned += 1;
-      const ents = (c?.tags || [])
-        .filter(t => typeof t === 'string' && t.startsWith('entity:'))
-        .map(t => t.slice('entity:'.length).replace(/_/g, ' ').toLowerCase());
-      for (const e of new Set(ents)) {
-        candidateTagCounts.set(e, (candidateTagCounts.get(e) || 0) + 1);
-      }
-    }
-    const COMMON_ENTITY_THRESHOLD = 0.60;       // was 0.40 — too aggressive
-    const COMMON_ENTITY_MIN_BATCH = 5;          // was 2 — don't strip in small topical clusters
-    const commonEntities = new Set();
-    if (candidatesScanned >= COMMON_ENTITY_MIN_BATCH) {
-      for (const [ent, n] of candidateTagCounts.entries()) {
-        if (n / candidatesScanned >= COMMON_ENTITY_THRESHOLD) commonEntities.add(ent);
-      }
-    }
-    // Hardcoded common entities — owner's own first name + common nouns
-    // sometimes captured as entities by the LLM. These never count as
-    // semantic overlap regardless of frequency.
-    const ALWAYS_COMMON = ['amar', 'amar sai gadde', 'user', 'me', 'i', 'the user'];
-    for (const e of ALWAYS_COMMON) commonEntities.add(e);
+    // 1. PUNCTUATION-INSENSITIVE matching. The same real-world entity is
+    //    tagged inconsistently — entity:Da'Vinci_AI here vs entity:Davinci_AI
+    //    on the candidate. Exact-string intersection missed it. normEntity()
+    //    strips apostrophes/punctuation and collapses spaces so the two match.
+    //
+    // 2. Only the OWNER NAME vetoes a link — NOT batch-frequency. The old
+    //    frequency-common rule marked "Germany" common (a German-business
+    //    cluster legitimately co-mentions it everywhere) and stripped it from
+    //    overlap, killing a Mentions edge the LLM had cited on "Germany" with
+    //    0.8 confidence + a reason. The LLM citing a specific shared entity is
+    //    a STRONGER signal than batch frequency, so we trust it: a link
+    //    survives if its cited entity (normalized) appears on both sides, or
+    //    if any non-owner entity overlaps. Frequency-common is gone.
+    const normEntity = (s) => String(s || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]+/g, ' ')   // apostrophes, &, dots, dashes → space
+      .replace(/\s+/g, ' ')
+      .trim();
 
-    // Pre-compute new memory's entity set for entity-overlap gating.
-    // Strip common entities (owner name etc) before overlap check.
+    // Owner name + pronouns: the ONLY hard veto. These appear on nearly every
+    // memory and co-mention of just the owner is not a real connection.
+    const OWNER_COMMON = new Set(['amar', 'amar sai gadde', 'user', 'me', 'i', 'the user'].map(normEntity));
+
+    const candEntsNorm = (cand) => new Set(
+      (cand?.tags || [])
+        .filter((t) => typeof t === 'string' && t.startsWith('entity:'))
+        .map((t) => normEntity(t.slice('entity:'.length).replace(/_/g, ' ')))
+        .filter((e) => e && !OWNER_COMMON.has(e)),
+    );
+
+    // New memory's entity set (LLM-extracted + own entity tags), normalized,
+    // owner stripped. Union both so a tag the LLM didn't re-emit still counts.
+    const baseTagEnts = (baseMemory.tags || [])
+      .filter((t) => typeof t === 'string' && t.startsWith('entity:'))
+      .map((t) => normEntity(t.slice('entity:'.length).replace(/_/g, ' ')));
     const newEntitiesLower = new Set(
-      entities.map((e) => String(e).toLowerCase()).filter(e => !commonEntities.has(e)),
+      [...entities.map(normEntity), ...baseTagEnts].filter((e) => e && !OWNER_COMMON.has(e)),
     );
 
     const sorted = links
@@ -2407,35 +2404,31 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
         const floor = MIN_CONFIDENCE_BY_TYPE[type] ?? 0.55;
         return typeof l.confidence === 'number' && l.confidence >= floor;
       })
-      // For Updates: require ≥2 shared NON-COMMON entities. One shared
-      // entity (often the owner's name) is too loose — produced edges
-      // between unrelated gmail threads. Demand at least 2 entities that
-      // are NOT in commonEntities AND appear in both sides.
+      // For Updates (destructive — flips target is_latest=false): demand
+      // ≥2 shared non-owner entities. Strong evidence required.
       .filter((l) => {
         const type = VALID_EDGE_TYPES.has(l.type) ? l.type : 'Mentions';
         if (type !== 'Updates') return true;
-        const cand = candidates[l.index];
-        const candEntities = (cand?.tags || [])
-          .filter((t) => typeof t === 'string' && t.startsWith('entity:'))
-          .map((t) => t.slice('entity:'.length).replace(/_/g, ' ').toLowerCase())
-          .filter((e) => !commonEntities.has(e));
-        const sharedCount = candEntities.filter((e) => newEntitiesLower.has(e)).length;
-        return sharedCount >= 2;
+        const cset = candEntsNorm(candidates[l.index]);
+        let shared = 0;
+        for (const e of cset) if (newEntitiesLower.has(e)) shared += 1;
+        return shared >= 2;
       })
-      // For Mentions: require at least ONE non-common shared entity.
-      // Co-mention of just the owner name is not a real connection.
+      // For Mentions/Extends/Contradicts: ≥1 shared non-owner entity, OR the
+      // LLM-cited entity itself is present on both sides (trust the model).
       .filter((l) => {
         const type = VALID_EDGE_TYPES.has(l.type) ? l.type : 'Mentions';
-        if (type !== 'Mentions') return true;
-        const cand = candidates[l.index];
-        const candEntities = (cand?.tags || [])
-          .filter((t) => typeof t === 'string' && t.startsWith('entity:'))
-          .map((t) => t.slice('entity:'.length).replace(/_/g, ' ').toLowerCase())
-          .filter((e) => !commonEntities.has(e));
-        return candEntities.some((e) => newEntitiesLower.has(e));
+        if (type === 'Updates') return true; // handled above
+        const cset = candEntsNorm(candidates[l.index]);
+        for (const e of cset) if (newEntitiesLower.has(e)) return true;
+        // LLM-cited entity bridge: cited entity present on both sides.
+        const cited = normEntity(l.entity);
+        if (cited && !OWNER_COMMON.has(cited) && newEntitiesLower.has(cited) && cset.has(cited)) return true;
+        return false;
       })
       .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))
       .slice(0, EDGE_CAP);
+    const commonEntities = OWNER_COMMON; // for the diagnostic log below
 
     if (links.length > 0 && sorted.length === 0) {
       console.warn(`[entity-co-mention] ALL ${links.length} link(s) filtered out for ${String(baseMemory.id).slice(0, 8)}. newEntities=[${[...newEntitiesLower].join('|')}] common=[${[...commonEntities].join('|')}] linkDetail=${JSON.stringify(links.map((l) => ({ i: l.index, t: l.type, e: l.entity, c: l.confidence, candEnts: (candidates[l.index]?.tags || []).filter((t) => t.startsWith('entity:')).map((t) => t.slice(7).replace(/_/g, ' ').toLowerCase()) })).slice(0, 5))}`);

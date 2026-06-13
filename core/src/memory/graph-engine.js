@@ -2430,8 +2430,17 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
       .slice(0, EDGE_CAP);
     const commonEntities = OWNER_COMMON; // for the diagnostic log below
 
+    // Telemetry: when the LLM proposed links but NONE survived the overlap
+    // gate, that's either correct (newsletter noise — no real shared entity)
+    // or a missed connection. Short line always; full detail only under
+    // ENTITY_LINK_DEBUG to keep prod logs clean (this fires on every noise
+    // email ingest).
     if (links.length > 0 && sorted.length === 0) {
-      console.warn(`[entity-co-mention] ALL ${links.length} link(s) filtered out for ${String(baseMemory.id).slice(0, 8)}. newEntities=[${[...newEntitiesLower].join('|')}] common=[${[...commonEntities].join('|')}] linkDetail=${JSON.stringify(links.map((l) => ({ i: l.index, t: l.type, e: l.entity, c: l.confidence, candEnts: (candidates[l.index]?.tags || []).filter((t) => t.startsWith('entity:')).map((t) => t.slice(7).replace(/_/g, ' ').toLowerCase()) })).slice(0, 5))}`);
+      if (process.env.ENTITY_LINK_DEBUG === 'true') {
+        console.warn(`[entity-co-mention] ALL ${links.length} link(s) filtered for ${String(baseMemory.id).slice(0, 8)}. newEntities=[${[...newEntitiesLower].join('|')}] linkDetail=${JSON.stringify(links.map((l) => ({ i: l.index, t: l.type, e: l.entity, c: l.confidence, candEnts: (candidates[l.index]?.tags || []).filter((t) => t.startsWith('entity:')).map((t) => t.slice(7).replace(/_/g, ' ').toLowerCase()) })).slice(0, 5))}`);
+      } else {
+        console.log(`[entity-co-mention] ${links.length} link(s) proposed, 0 survived overlap gate for ${String(baseMemory.id).slice(0, 8)} (no shared entity)`);
+      }
     }
 
     const writeStore = store || this.store;

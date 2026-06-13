@@ -539,7 +539,10 @@ export class PrismaGraphStore {
           take: 1
         }
       },
-      orderBy: { createdAt: 'desc' },
+      orderBy: [
+        { documentDate: 'desc' },
+        { createdAt: 'desc' }
+      ],
       skip: offset,
       take: limit
     });

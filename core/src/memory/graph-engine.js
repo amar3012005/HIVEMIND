@@ -504,7 +504,25 @@ export class MemoryGraphEngine {
     //     (which have _smart_routed=true) skip re-stamping by sniffing the
     //     marker tag.
     if (input && !input._ts_stamped) {
-      const stampNow = new Date();
+      // EVENT-TIME first: a connector record (gmail/slack/docs) carries the
+      // real-world date it HAPPENED (document_date / email Date header). Stamp
+      // ts: from that, not the ingest clock — otherwise a May-26 email and a
+      // June-12 email both get ts:<today> and the timeline looks unordered
+      // ("unstructured"). Falls back to now for chat/manual saves with no
+      // event date. Only accept sane past/near dates (not epoch/garbage).
+      let stampNow = new Date();
+      const _evRaw = input.document_date
+        || input.metadata?.document_date
+        || input.metadata?.email_date
+        || input.event_time
+        || null;
+      if (_evRaw) {
+        const _ev = new Date(_evRaw);
+        const _y = _ev.getUTCFullYear();
+        if (!Number.isNaN(_ev.getTime()) && _y >= 2000 && _ev.getTime() <= Date.now() + 86400000) {
+          stampNow = _ev;
+        }
+      }
       const day = stampNow.toISOString().slice(0, 10);                  // 2026-05-24
       const minute = stampNow.toISOString().slice(0, 16).replace(/:/g, '') + 'Z'; // 2026-05-24T1430Z (no colon — safer in tag string)
       const dispTs = stampNow.toISOString().slice(0, 16) + 'Z';         // 2026-05-24T14:30Z

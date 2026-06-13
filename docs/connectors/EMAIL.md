@@ -11,7 +11,7 @@
 > `gmail/connect` → Google consent → `gmail/callback` (token → `PlatformIntegration`)
 > → `gmail/sync` (manual, persists `sync_config`) **and** `sync-scheduler`
 > (auto, replays `sync_config`) **and** Pub/Sub `users.watch` (realtime)
-> → `GmailAdapter` (fetch + filter) → `toMemoryPayloads` → `sync-engine`
+> → `GmailAdapter` (fetch) → `normalizeThread` → `sync-engine`
 > ingest → memory + Qdrant.
 
 ---
@@ -24,16 +24,18 @@
 | Start auth | `core/src/server.js` | `case '/api/connectors/gmail/connect'` :9816 |
 | **Auth persist (after Google)** | `core/src/server.js` | `'/api/connectors/gmail/callback'` :6053 |
 | Token storage + crypto | `core/src/connectors/framework/connector-store.js` | `upsertConnector` :94, `getAccessToken`, `updateMetadata` :311 |
-| **Manual sync + filters** | `core/src/server.js` | `case '/api/connectors/gmail/sync'` :10899 |
-| Fetch + per-message filtering | `core/src/connectors/providers/gmail/adapter.js` | `GmailAdapter` :15, `fetchInitial` :34, `fetchIncremental` :111, `_buildGmailQuery` :550, `_buildRichTags` :658 |
-| Noise classifier | `core/src/connectors/providers/gmail/email-cleaner.js` | `classifyNoise` :218, called from adapter :218 (`cleanResult.noise?.skip`) |
-| Record → memory payload | `core/src/connectors/providers/gmail/adapter.js` | single-message payload built :322–:363, thread-parent :423, thread-child :465, `return payloads` :492 |
+| **Manual sync + filters** | `core/src/server.js` | `case '/api/connectors/gmail/sync'` :10899 (query via shared `buildGmailQuery`) |
+| Adapter (transport + fetch loop) | `core/src/connectors/providers/gmail/adapter.js` | `GmailAdapter` :19, `fetchInitial` :39, `fetchIncremental` :86, `normalize`→normalizer, `_fetchThreads` :158 |
+| **Query builder (SINGLE source)** | `core/src/connectors/providers/gmail/query-builder.js` | `buildGmailQuery`, `DEFAULT_BLOCK_SENDERS` — shared by adapter + manual sync + preview |
+| Record → memory payload | `core/src/connectors/providers/gmail/normalizer.js` | `normalizeThread`, `buildRichTags`, `extractBody`, `buildThreadSummary` |
+| Noise classifier / body clean | `core/src/connectors/providers/gmail/noise-filter.js` | `classifyNoise` :218, `cleanEmailBody` :326 (was `email-cleaner.js`) |
+| Config schema (zod) | `core/src/connectors/providers/gmail/schema.js` | `SyncConfigSchema`, `parseSyncConfig`, `MemoryPayloadSchema` |
 | **Sync orchestration** | `core/src/connectors/framework/sync-engine.js` | `runSync` :47, `_ingestWithRetry` def :299 (call :252), `_postIngestHooks` :370, reauth flip :86/:135, final-cursor write :143/:279 |
 | **Auto-sync scheduler** | `core/src/connectors/framework/sync-scheduler.js` | `_tick` :71, cadence math |
 | Cadence API | `core/src/server.js` | `case '/api/connectors/cadence'` :11357 |
 | **Realtime push** | `core/src/connectors/providers/gmail/gmail-watch.js` | `registerWatch` :30, `renewAllWatches` |
 | Pub/Sub webhook | `core/src/server.js` | `'/api/connectors/gmail/pubsub-webhook'` :11582 |
-| Normalizer | `core/src/memory/normalizers/gmail.js` | — |
+| Save-pipeline normalizer (different layer) | `core/src/memory/normalizers/gmail.js` | smart-ingest-router noise strip — NOT the connector normalizer above |
 | FE client | `frontend/Da-vinci/src/components/hivemind/app/shared/api-client.js` | `gmailConnect` :1332, `gmailSync` :1345, cadence :1357, `gmailPreview` :1385 |
 | Control-plane proxy | — | `/v1/proxy/connectors/gmail/*` → core `/api/connectors/gmail/*` |
 
@@ -90,11 +92,11 @@ token when `tokenExpiresAt` has passed).
 Filtering is applied in layers (see README §5). For Gmail the layers are:
 
 ### Layer 1 — Gmail `q=` query (cheapest; junk never leaves Google)
-Built two places that **mirror each other**:
-- `GmailAdapter._buildGmailQuery(config)` (adapter.js:550) — used by the
-  scheduler/engine path.
-- inline in `/api/connectors/gmail/sync` (server.js:10925+) — used by manual
-  sync.
+Built in ONE place — `buildGmailQuery(config, opts)` in
+`query-builder.js` — shared by all three paths:
+- adapter (scheduler/incremental): `buildGmailQuery(config)` + folders as `labelIds`.
+- manual sync (`/api/connectors/gmail/sync`): `buildGmailQuery(config, { includeFolders: true })`.
+- preview (`/api/connectors/gmail/preview`): `buildGmailQuery(config)` + labelIds.
 
 Honored `sync_config` keys → Gmail query:
 
@@ -109,17 +111,17 @@ Honored `sync_config` keys → Gmail query:
 | `exclude_chats` (default true) | `-in:chats` | drop Google Chat |
 | `block_senders` + `DEFAULT_BLOCK_SENDERS` | `-from:<addr/domain>` | sender blocklist |
 
-**`DEFAULT_BLOCK_SENDERS`** (adapter.js:612, mirrored server.js:10947) is a
+**`DEFAULT_BLOCK_SENDERS`** (`query-builder.js`, single source) is a
 built-in newsletter/notification blocklist applied to every sync unless
 `disable_default_blocklist: true`: `noreply@*`, `*@substack.com`,
 `*@notifications.*`, `*@mailer.*`, `*@newsletter.*`, `*@calendar.google.com`,
 `*@bounces.*`, etc. Wildcard `*@domain` → `-from:domain`. These threads never
 enter Postgres, never embed, never index.
 
-### Layer 2 — per-message noise classifier (`email-cleaner.js classifyNoise` :218)
+### Layer 2 — per-message noise classifier (`noise-filter.js classifyNoise` :218)
 Anything that slips through `q=` is re-checked per message and dropped if:
 
-| Reason (`email-cleaner.js`) | Line | Drops |
+| Reason (`noise-filter.js`) | Line | Drops |
 |---|---|---|
 | `auto-submitted: …` | :222 | `Auto-Submitted` header set |
 | `auto-reply header` | :227 | `X-Autoreply`/`X-Autorespond` |
@@ -131,14 +133,14 @@ Anything that slips through `q=` is re-checked per message and dropped if:
 | `calendar-invite` (kept, flagged) | :268 | `.ics` → minimal event memory |
 | `newsletter` (kept, flagged) | :278 | unsubscribe-only body |
 
-The adapter consults this at adapter.js:218 — `if (cleanResult.noise?.skip)`
+The normalizer consults this in `extractBody` — `if (cleanResult.noise?.skip)`
 → skip + log the reason (`[gmail-adapter] Skipping message <id>: <reason>`).
 
 > The `platform-notification` + `bulk-list-notification` rules were added
 > 2026-06-12 after a failing-CI week fanned **157 "Run failed" emails** into
 > one user's memories. See [`../NANGO.md`] / session history.
 
-### Layer 3 — ACL / scope gate (adapter.js:225–:232)
+### Layer 3 — ACL / scope gate (`normalizer.js normalizeThread`, org-scope branch)
 `sentByUser` is determined at :225 (`fromEmail === userEmail`). In org/team
 `targetScope` the org-scope skip fires at :232 — purely-personal outgoing
 mail (every message sent by the installer to a non-shared address) is dropped
@@ -171,7 +173,7 @@ scheduler reads it back on every tick.
    `container_tag`, `target_scope`, and `auto_sync_minutes` (set cadence in
    the same round-trip, server.js:10993).
 2. Loads the connector (`syncStore.getConnector`), resolves `targetScope`.
-3. Builds the Gmail `q=` (server.js:10925+, mirrors `_buildGmailQuery`).
+3. Builds the Gmail `q=` via shared `buildGmailQuery(config, { includeFolders: true })`.
 4. **Persists `sync_config`** (server.js:~10978) so auto-sync replays it.
 5. Flips status to `syncing`, returns a `syncId` immediately
    (server.js:11025), runs the fetch in the background (server.js:11028):
@@ -195,7 +197,7 @@ FE: `apiClient.gmailSync(settings)` (api-client.js:1345). Dry-run preview:
 - For each due connector it resolves the adapter (`adapter-registry`), then
   calls `syncEngine.runSync({ adapter, userId, orgId, provider, incremental,
   targetScope, … })` (sync-scheduler.js:193).
-- The adapter's `_buildGmailQuery` reads the persisted
+- The adapter's `buildGmailQuery(config)` reads the persisted
   `connectorMetadata.sync_config` → **same filters as the manual run**.
 - Stamps `lastSchedulerRunAt` on success (sync-scheduler.js:210) AND on
   failure (:226) so a broken connector isn't retried every minute.
@@ -231,9 +233,9 @@ Setup commands: [`../gmail-pubsub-setup.md`](../gmail-pubsub-setup.md).
 ## 6. Fetch → normalize → memory (the ingest core)
 
 ### 6a. Adapter produces payloads
-`fetchInitial`/`fetchIncremental` (adapter.js:34/:111) return raw threads
+`fetchInitial`/`fetchIncremental` (adapter.js:39/:86) return raw threads
 (filters already applied at `q=` time). For each surviving message
-`toMemoryPayloads` builds (shape at adapter.js:~309):
+`normalizeThread` (normalizer.js) builds (thread-mode payload shape):
 
 ```js
 {
@@ -325,9 +327,13 @@ curl -X POST http://localhost:3000/api/connectors/gmail/sync \
 - **Gmail has no Nango connection** — `getConnectionId` returning null for
   gmail is correct. Token lives in `PlatformIntegration`, fetched via
   `connector-store.getAccessToken`.
-- **Manual and scheduled paths build the query twice** (server.js inline vs
-  `_buildGmailQuery`). They must stay mirrored — change both or noise
-  diverges between the two modes.
+- **Query is now built in ONE place** (`query-builder.js buildGmailQuery`),
+  shared by the adapter (scheduled/incremental), manual sync, and preview.
+  This retired the old server.js inline copy that drifted (it lacked keyword /
+  sent-only / chat filters). Edit the query in query-builder.js only.
+  - Adapter path calls `buildGmailQuery(config)` (folders passed as `labelIds`).
+  - Manual path calls `buildGmailQuery(config, { includeFolders: true })`
+    (folders go inside `q=` because it runs its own `threads.list`).
 - **`sync_config` is the contract.** If auto-sync "ignores the user's
   choices", it's because the manual run didn't persist `sync_config` (or the
   scheduler isn't reading it).

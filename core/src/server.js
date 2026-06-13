@@ -10446,7 +10446,8 @@ exit \$RC
                 exclude_chats: body.exclude_chats !== false,
                 include_only_with_attachments: !!body.include_only_with_attachments,
               };
-              const q = adapter._buildGmailQuery(config);
+              const { buildGmailQuery } = await import('./connectors/providers/gmail/query-builder.js');
+              const q = buildGmailQuery(config);
               const maxResults = Math.min(parseInt(body.max_emails, 10) || 50, 200);
               const buildParams = (useQ) => {
                 const p = new URLSearchParams({ maxResults: String(maxResults) });
@@ -10922,57 +10923,30 @@ exit \$RC
                 ? 'organization'
                 : connector.target_scope || 'personal';
 
-              // Build Gmail API query from user settings
-              const queryParts = [];
-
-              // Date range filter
-              const dateRanges = { '7d': 7, '30d': 30, '90d': 90, '365d': 365 };
-              if (date_range !== 'all' && dateRanges[date_range]) {
-                const after = new Date(Date.now() - dateRanges[date_range] * 86400000);
-                queryParts.push(`after:${after.getFullYear()}/${after.getMonth() + 1}/${after.getDate()}`);
-              }
-
-              // Folder filter (label inclusion)
-              if (folders.length > 0 && !folders.includes('ALL')) {
-                queryParts.push(`in:${folders.map(f => f.toLowerCase()).join(' OR in:')}`);
-              }
-
-              // Exclude categories
-              for (const cat of exclude_categories) {
-                queryParts.push(`-category:${cat}`);
-              }
-
-              // Sender blocklist — built-in defaults + user-supplied. Mirrors
-              // _buildGmailQuery in gmail/adapter.js so manual sync gets the
-              // same noise floor as the scheduler-driven path.
-              const DEFAULT_BLOCK_SENDERS = [
-                'noreply@*', 'no-reply@*', 'do-not-reply@*', 'donotreply@*',
-                '*@*.substack.com', '*@substack.com',
-                '*@info.*', '*@notifications.*', '*@mailer.*', '*@email.*',
-                '*@*.newsletter.*', '*@newsletter.*',
-                '*@calendar.google.com', '*@accounts.google.com',
-                '*@notify.*', '*@updates.*', '*@bounces.*',
-              ];
-              const userBlock = Array.isArray(body.block_senders) ? body.block_senders : [];
-              const skipDefaults = body.disable_default_blocklist === true;
-              const allBlocks = Array.from(new Set([
-                ...(skipDefaults ? [] : DEFAULT_BLOCK_SENDERS),
-                ...userBlock.map((s) => String(s || '').trim().toLowerCase()).filter(Boolean),
-              ]));
-              for (const raw of allBlocks) {
-                let q = raw;
-                if (q.startsWith('*@')) q = q.slice(2);
-                if (q.includes(' ')) q = `"${q}"`;
-                queryParts.push(`-from:${q}`);
-              }
-
-              const gmailQuery = queryParts.join(' ');
+              // Build Gmail API query from user settings via the shared builder
+              // (core/src/connectors/providers/gmail/query-builder.js) — the
+              // SINGLE source of truth shared with the scheduler/incremental and
+              // preview paths. includeFolders:true puts folders inside q= because
+              // this manual path runs its own threads.list (no labelIds param).
+              const { buildGmailQuery } = await import('./connectors/providers/gmail/query-builder.js');
+              const gmailQuery = buildGmailQuery({
+                date_range,
+                folders,
+                exclude_categories,
+                block_senders: Array.isArray(body.block_senders) ? body.block_senders : [],
+                disable_default_blocklist: body.disable_default_blocklist === true,
+                include_keywords: Array.isArray(body.include_keywords) ? body.include_keywords : undefined,
+                exclude_keywords: Array.isArray(body.exclude_keywords) ? body.exclude_keywords : undefined,
+                include_only_sent: body.include_only_sent === true,
+                exclude_chats: body.exclude_chats,
+                include_only_with_attachments: body.include_only_with_attachments === true,
+              }, { includeFolders: true });
 
               // Persist the FULL sync config so scheduled auto-syncs replay
               // the exact same filters (date range, folders, excludes, sender
               // blocklist). Without this, auto-sync ignored the user's modal
               // choices and ran the firehose. sync_config is read by
-              // sync-engine.runSync → adapter._buildGmailQuery on every tick.
+              // sync-engine.runSync → buildGmailQuery (query-builder.js) per tick.
               try {
                 await syncStore.updateMetadata(userId, 'gmail', {
                   sync_config: {

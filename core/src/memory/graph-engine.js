@@ -2013,7 +2013,17 @@ OUTPUT JSON only.`;
       try {
         const prismaClient = (store && store.client) || this.store.client;
         if (prismaClient && prismaClient.memory) {
-          const tagHits = await prismaClient.memory.findMany({
+          // Pull a WIDE recent pool, then rank by SHARED-ENTITY SPECIFICITY —
+          // not recency. The old `orderBy createdAt desc, take 6` let a flood
+          // of freshly-ingested bulk docs sharing one GENERIC entity (e.g.
+          // 6 "photovoltaic in Germany" KB rows all tagged entity:Germany)
+          // crowd out the genuinely-related older memory sharing a RARE,
+          // specific entity (e.g. "German Registration" sharing entity:DACH).
+          // That starved real links: the GTM/B&B memory stayed edgeless
+          // because its only top-6 neighbours were Germany-energy docs the
+          // LLM (correctly) judged unrelated. Rank by count of shared tag
+          // signals, weighting rare entity:/person: tags above generic ones.
+          const tagPool = await prismaClient.memory.findMany({
             where: {
               userId: baseMemory.user_id,
               orgId: baseMemory.org_id,
@@ -2022,12 +2032,32 @@ OUTPUT JSON only.`;
               id: { not: baseMemory.id },
               tags: { hasSome: tagSignals },
             },
-            select: { id: true, title: true, content: true, tags: true },
+            select: { id: true, title: true, content: true, tags: true, createdAt: true },
             orderBy: { createdAt: 'desc' },
-            take: 6,
+            take: 60,
           });
+          // Generic geographic / temporal signals are weak links; specific
+          // org/person entities are strong. Weight accordingly.
+          const GENERIC = new Set(['entity:Germany', 'entity:Austria', 'entity:Switzerland', 'entity:USA', 'entity:Europe', 'entity:EU', 'entity:India']);
+          const signalSet = new Set(tagSignals);
+          const scoreOf = (r) => {
+            let s = 0;
+            for (const t of (r.tags || [])) {
+              if (!signalSet.has(t)) continue;
+              if (t.startsWith('time:')) s += 0.25;
+              else if (GENERIC.has(t)) s += 0.5;
+              else if (t.startsWith('entity:') || t.startsWith('person:')) s += 2; // specific entity = strong
+              else s += 1;
+            }
+            return s;
+          };
+          const ranked = tagPool
+            .map((r) => ({ r, s: scoreOf(r) }))
+            .filter((x) => x.s > 0)
+            .sort((a, b) => (b.s - a.s) || (new Date(b.r.createdAt) - new Date(a.r.createdAt)))
+            .map((x) => x.r);
           const existingIds = new Set(candidates.map(c => c.id));
-          for (const r of tagHits) {
+          for (const r of ranked) {
             if (existingIds.has(r.id) || candidates.length >= 8) continue;
             candidates.push({ id: r.id, title: r.title, content: r.content, tags: r.tags, _searchMethod: 'tag_overlap' });
             existingIds.add(r.id);

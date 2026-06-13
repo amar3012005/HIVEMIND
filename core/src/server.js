@@ -10917,6 +10917,30 @@ exit \$RC
                 queryParts.push(`-category:${cat}`);
               }
 
+              // Sender blocklist — built-in defaults + user-supplied. Mirrors
+              // _buildGmailQuery in gmail/adapter.js so manual sync gets the
+              // same noise floor as the scheduler-driven path.
+              const DEFAULT_BLOCK_SENDERS = [
+                'noreply@*', 'no-reply@*', 'do-not-reply@*', 'donotreply@*',
+                '*@*.substack.com', '*@substack.com',
+                '*@info.*', '*@notifications.*', '*@mailer.*', '*@email.*',
+                '*@*.newsletter.*', '*@newsletter.*',
+                '*@calendar.google.com', '*@accounts.google.com',
+                '*@notify.*', '*@updates.*', '*@bounces.*',
+              ];
+              const userBlock = Array.isArray(body.block_senders) ? body.block_senders : [];
+              const skipDefaults = body.disable_default_blocklist === true;
+              const allBlocks = Array.from(new Set([
+                ...(skipDefaults ? [] : DEFAULT_BLOCK_SENDERS),
+                ...userBlock.map((s) => String(s || '').trim().toLowerCase()).filter(Boolean),
+              ]));
+              for (const raw of allBlocks) {
+                let q = raw;
+                if (q.startsWith('*@')) q = q.slice(2);
+                if (q.includes(' ')) q = `"${q}"`;
+                queryParts.push(`-from:${q}`);
+              }
+
               const gmailQuery = queryParts.join(' ');
 
               // Store settings in connector metadata

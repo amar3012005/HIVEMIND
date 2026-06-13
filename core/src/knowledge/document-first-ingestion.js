@@ -371,16 +371,36 @@ Rules:
     emit('parsed', 35, { parse_ms: _msParse, pages: parseResult.pages, word_count: parseResult.wordCount });
 
     // Step 3: Create knowledge document
-    // sourceId scoped per checksum so identical re-uploads dedupe via source_artifact
-    // (checksum upsert above), while different content with same filename creates
-    // a new document row.
+    // sourceId scoped per checksum + UPLOAD SCOPE, so identical bytes in a
+    // different scope (personal / project / team / org-wide) become a
+    // SEPARATE document row — what the user wants when, say, an owner files
+    // org-wide and an employee files the same brochure under a project.
+    // Same scope + same checksum still upserts into the same row (idempotent).
+    //
+    // scopeKey derived from the same fields the upload-route gate uses:
+    //   team:<id>      when metadata.primary_team_id
+    //   project:<id>   when metadata.project_id / project_ids[0]
+    //   org:<orgId>    when metadata.scope === 'organization' and no project/team
+    //   personal:<uid> otherwise
+    const _scopeKey = metadata.primary_team_id
+      ? `team:${metadata.primary_team_id}`
+      : (metadata.project_id || (Array.isArray(metadata.project_ids) && metadata.project_ids[0]))
+        ? `project:${metadata.project_id || metadata.project_ids[0]}`
+        : (metadata.scope === 'organization')
+          ? `org:${orgId}`
+          : `personal:${userId}`;
+    const _scopedSourceId = `${filename}#${checksum.slice(0, 12)}#${_scopeKey}`;
+    // scope-key tag enables the upload route's per-scope dedup query without
+    // any schema change — gin-indexed tags[] is already there.
+    const _scopeTag = `scope-key:${_scopeKey}`;
+    const _docTags = Array.from(new Set([...(metadata.tags || []), _scopeTag]));
     const knowledgeDoc = await this.db.knowledgeDocument.upsert({
       where: {
         userId_orgId_sourcePlatform_sourceId: {
           userId,
           orgId,
           sourcePlatform: 'knowledge_upload',
-          sourceId: `${filename}#${checksum.slice(0, 12)}`,
+          sourceId: _scopedSourceId,
         }
       },
       create: {
@@ -390,16 +410,20 @@ Rules:
         documentType: 'file',
         title: filename,
         sourcePlatform: 'knowledge_upload',
-        sourceId: `${filename}#${checksum.slice(0, 12)}`,
+        sourceId: _scopedSourceId,
         documentDate: new Date(),
         wordCount: parseResult.wordCount,
         parseStatus: parseResult.success ? 'parsed' : 'failed',
         parseEngine: parseResult.engine,
         parseMetadata: parseResult.metadata || {},
         structureExtracted: parseResult.success,
-        tags: metadata.tags || []
+        tags: _docTags,
       },
-      update: {}
+      update: {
+        // Backfill scope-key tag on pre-existing rows so the dedup gate sees
+        // them in subsequent uploads. parseMetadata stays untouched.
+        tags: _docTags,
+      }
     });
 
     // Step 4: Create segments from parsed structure (idempotent — re-uploads

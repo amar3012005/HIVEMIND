@@ -13063,29 +13063,49 @@ exit \$RC
                 }
               }
 
-              // Upfront duplicate rejection: same bytes already uploaded by this
-              // user+org → 409 BEFORE any parse/queue work, so bulk batches show
-              // "duplicate" per file instantly and continue with the rest.
-              // Override with form field force=true (intentional re-ingest).
+              // SCOPE-AWARE duplicate rejection: identical bytes only collide
+              // WITHIN the same scope (personal / project / team / org-wide).
+              // Same file in different scopes is intentional — e.g. an owner
+              // shares a brochure org-wide AND an employee files their own
+              // copy under a project. Old global gate rejected those.
+              //
+              //   scopeKey =
+              //     team:<id>      when primaryTeamId set
+              //     project:<id>   when projectIds[0] set (no team)
+              //     org:<orgId>    when targetScope=organization, no project/team
+              //     personal:<uid> otherwise
+              //
+              // The gate looks for an existing knowledge_document in the same
+              // org that points to the same content (same checksum via the
+              // shared sourceArtifact) AND carries the matching scope-key tag.
+              // Force re-ingest with form field force=true.
               const uploadChecksum = crypto.createHash('sha256').update(filePart.data).digest('hex');
               const forceDuplicate = (parts.find(p => p.name === 'force')?.value || '').toLowerCase() === 'true';
+              const uploadScopeKey = primaryTeamId
+                ? `team:${primaryTeamId}`
+                : projectIds[0]
+                  ? `project:${projectIds[0]}`
+                  : (targetScope === 'organization' ? `org:${orgId}` : `personal:${userId}`);
               if (!forceDuplicate && prisma) {
-                const dupArtifact = await prisma.sourceArtifact.findUnique({
-                  where: { userId_orgId_checksum_sourcePlatform: { userId, orgId, checksum: uploadChecksum, sourcePlatform: 'knowledge_upload' } },
-                  select: { id: true, createdAt: true },
+                // Per-scope dup: same content already filed in THIS scope.
+                const dupDoc = await prisma.knowledgeDocument.findFirst({
+                  where: {
+                    orgId,
+                    sourcePlatform: 'knowledge_upload',
+                    sourceArtifact: { is: { checksum: uploadChecksum, sourcePlatform: 'knowledge_upload' } },
+                    tags: { has: `scope-key:${uploadScopeKey}` },
+                  },
+                  select: { id: true, title: true, createdAt: true },
                 }).catch(() => null);
-                if (dupArtifact) {
-                  const dupDoc = await prisma.knowledgeDocument.findFirst({
-                    where: { userId, orgId, sourceArtifactId: dupArtifact.id },
-                    select: { id: true, title: true, createdAt: true },
-                  }).catch(() => null);
+                if (dupDoc) {
                   return jsonResponse(res, {
                     duplicate: true,
                     error: 'duplicate_document',
-                    message: `Identical content already in your knowledge base${dupDoc?.title ? ` as "${dupDoc.title}"` : ''}`,
+                    message: `Identical content already in this scope${dupDoc?.title ? ` as "${dupDoc.title}"` : ''}. Same file in a different scope is allowed — pick another scope to upload again.`,
                     existing_document_id: dupDoc?.id || null,
                     existing_title: dupDoc?.title || null,
-                    uploaded_at: dupDoc?.createdAt || dupArtifact.createdAt,
+                    uploaded_at: dupDoc?.createdAt || null,
+                    scope_key: uploadScopeKey,
                     filename: filePart.filename,
                   }, 409);
                 }

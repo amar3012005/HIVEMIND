@@ -367,8 +367,11 @@ function buildRelationshipIndex(relationships) {
 // just said it). Background scanners carry scan-time, so a freshly-scanned old
 // contradiction must NOT be treated as "just corrected".
 const STATEMENT_TIME_CREATORS = new Set([
-  'memory_processor', 'conflict-detector', 'turing-reconciliation', 'ingest_tree',
+  'memory_processor', 'conflict-detector', 'turing-reconciliation', 'turing',
+  'entity_co_mention_llm', 'ingest_tree',
 ]);
+// NOTE: 'system' (default/legacy, unknown provenance) is deliberately EXCLUDED
+// → it gets the flat 0.60 fallback, not the fresh-statement hard demote/boost.
 const CORRECTION_HALFLIFE_DAYS = Number(process.env.CORRECTION_HALFLIFE_DAYS || 14);
 
 // Map<to_id, {createdBy, _ts}> — the NEWEST Contradicts edge targeting each

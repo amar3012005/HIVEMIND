@@ -19,6 +19,13 @@ export class GmailAdapter extends BaseProviderAdapter {
       requiredScopes: ['https://www.googleapis.com/auth/gmail.readonly'],
       defaultTags: ['gmail'],
     });
+    // Per-sync-run cumulative thread counter. The scheduler creates ONE
+    // adapter instance per runSync and loops fetchInitial across pages, so
+    // this persists for the whole run. A full backfill that paginates
+    // unbounded (50/page until exhausted), with per-thread LLM entity
+    // extraction, pegged the 2-core box and starved the HTTP loop (→ 503).
+    // Cap each run; incremental ticks (historyId cursor) pick up the rest.
+    this._fetchedThisRun = 0;
   }
 
   /**
@@ -76,10 +83,24 @@ export class GmailAdapter extends BaseProviderAdapter {
       throw e;
     }
 
+    // Per-run thread cap: stop paginating once this run has yielded
+    // max_emails threads (default 200). Prevents an unbounded backfill from
+    // monopolising the 2-core box for minutes. The cursor (pageToken) is
+    // still returned so a manual re-sync continues where this left off, and
+    // once an incremental historyId cursor is established each tick is tiny.
+    this._fetchedThisRun += records.length;
+    const runCap = Number(context?.config?.max_emails) > 0
+      ? Number(context.config.max_emails)
+      : 200;
+    const capReached = this._fetchedThisRun >= runCap;
+    if (capReached) {
+      console.log(`[gmail-adapter] per-run cap reached (${this._fetchedThisRun}/${runCap}) — stopping pagination this tick`);
+    }
+
     return {
       records,
       nextCursor: response.nextPageToken || null,
-      hasMore: !!response.nextPageToken,
+      hasMore: !!response.nextPageToken && !capReached,
     };
   }
 

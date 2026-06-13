@@ -15098,6 +15098,11 @@ exit \$RC
             const scopeArg = ['tier:personal', 'tier:organization', 'tier:project'].includes(tierScope)
               ? tierScope
               : undefined;
+            // hide_noise toggle: append connector noise tags (newsletters /
+            // promotions / social / forums / no-reply) to the hidden-tag list
+            // so the Memories list shows only signal. Recall-side demotion
+            // covers retrieval scoring; this is the visibility filter.
+            const hideNoiseQ = url.searchParams.get('hide_noise') === 'true';
             const { memories, total } = await persistentMemoryStore.listMemories({
               user_id: userId,
               org_id: orgId,
@@ -15110,6 +15115,7 @@ exit \$RC
               limit,
               include_children: includeChildren,
               ...(scopeArg ? { scope: scopeArg } : {}),
+              ...(hideNoiseQ ? { hide_noise: true } : {}),
               access_context: listAccessCtx,
             });
 

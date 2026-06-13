@@ -577,6 +577,35 @@ export class GmailAdapter extends BaseProviderAdapter {
       });
     }
 
+    // ── Sender blocklist (Gmail-side filter, never embeds) ────────────────
+    // User-supplied + a default newsletter/notification list applied to
+    // every gmail sync. Each entry becomes -from:<addr>. Wildcards like
+    // *@substack.com are translated to a domain rule (-from:substack.com).
+    // Killing noise at the Gmail query is the cheapest possible cleanup —
+    // these threads never enter Postgres, never embed, never index.
+    const DEFAULT_BLOCK_SENDERS = [
+      'noreply@*', 'no-reply@*', 'do-not-reply@*', 'donotreply@*',
+      '*@*.substack.com', '*@substack.com',
+      '*@info.*', '*@notifications.*', '*@mailer.*', '*@email.*',
+      '*@*.newsletter.*', '*@newsletter.*',
+      '*@calendar.google.com', '*@accounts.google.com',
+      '*@notify.*', '*@updates.*', '*@bounces.*',
+    ];
+    const userBlock = Array.isArray(config.block_senders) ? config.block_senders : [];
+    const skipDefaults = config.disable_default_blocklist === true;
+    const allBlocks = Array.from(new Set([
+      ...(skipDefaults ? [] : DEFAULT_BLOCK_SENDERS),
+      ...userBlock.map((s) => String(s || '').trim().toLowerCase()).filter(Boolean),
+    ]));
+    for (const raw of allBlocks) {
+      // *@domain.com → -from:domain.com  |  *@*.domain.com → -from:*.domain.com
+      // exact addr   → -from:addr
+      let q = raw;
+      if (q.startsWith('*@')) q = q.slice(2);
+      if (q.includes(' ')) q = `"${q}"`;
+      parts.push(`-from:${q}`);
+    }
+
     // Drop attachments-only filter
     if (config.include_only_with_attachments) {
       parts.push('has:attachment');

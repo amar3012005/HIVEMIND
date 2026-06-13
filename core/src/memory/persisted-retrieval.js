@@ -1269,6 +1269,16 @@ export async function recallPersistedMemories(store, {
     const attribution = memory.metadata?.content_attribution;
     if (attribution === 'newsletter') score *= 0.5;
     else if (attribution === 'third_party') score *= 0.8;
+    // Tag-based noise demotion: catches connector ingests that didn't get
+    // an explicit content_attribution. Each tag stacks multiplicatively but
+    // floors at 0.15 so noise can still surface when nothing better matches.
+    const _tagsForNoise = Array.isArray(memory.tags) ? memory.tags : [];
+    let _noiseMul = 1;
+    if (_tagsForNoise.some((t) => t === 'updates' || t === 'label:updates' || t === 'newsletter')) _noiseMul *= 0.40;
+    if (_tagsForNoise.some((t) => t === 'promotions' || t === 'label:promotions')) _noiseMul *= 0.30;
+    if (_tagsForNoise.some((t) => t === 'social' || t === 'label:social' || t === 'forums' || t === 'label:forums')) _noiseMul *= 0.50;
+    if (_tagsForNoise.some((t) => t === 'notification' || t === 'automated' || t === 'no-reply')) _noiseMul *= 0.35;
+    if (_noiseMul < 1) score *= Math.max(_noiseMul, 0.15);
     // Retroactive detection for untagged existing memories
     if (!attribution) {
       const c = (memory.content || '').toLowerCase();

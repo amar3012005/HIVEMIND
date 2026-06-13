@@ -2255,9 +2255,16 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
 
     // Edge cap. Chat-bucket saves with force_entity_linking get a higher
     // ceiling (6) since the user explicitly invoked the save and we want
-    // every relevant prior fact connected. Other paths stay at 3 to keep
-    // the graph noise-controlled.
-    const EDGE_CAP = (baseMemory.metadata?.force_entity_linking === true) ? 6 : 3;
+    // every relevant prior fact connected. Connector-tier noise sources
+    // (gmail digests/newsletters) cap at 2 — digest threads mention 10+
+    // entities, all junk: capping at 2 keeps the sender + one real topic.
+    // Other paths stay at 3.
+    const _tagsForCap = Array.isArray(baseMemory.tags) ? baseMemory.tags : [];
+    const _isGmailish = _tagsForCap.includes('gmail') || _tagsForCap.includes('gmail_thread');
+    const _isNoise = _tagsForCap.some((t) => t === 'updates' || t === 'promotions' || t === 'social' || t === 'forums' || t === 'newsletter' || t === 'label:updates' || t === 'label:promotions');
+    const EDGE_CAP = (baseMemory.metadata?.force_entity_linking === true)
+      ? 6
+      : (_isGmailish || _isNoise) ? 2 : 3;
     const VALID_EDGE_TYPES = new Set(['Updates', 'Extends', 'Mentions', 'Contradicts']);
 
     // Per-type confidence floor. Updates is destructive (flips

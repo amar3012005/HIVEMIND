@@ -457,7 +457,7 @@ export class PrismaGraphStore {
     return records.map(mapMemoryRecord);
   }
 
-  async listMemories({ user_id, org_id, project, project_id, memory_type, tags, is_latest, include_children = false, limit = 50, offset = 0, scope = 'personal', access_context = null }) {
+  async listMemories({ user_id, org_id, project, project_id, memory_type, tags, is_latest, include_children = false, hide_noise = false, limit = 50, offset = 0, scope = 'personal', access_context = null }) {
     // Phase P.3: prefer formal projectId FK when caller passes it; falls back
     // to legacy free-text `project` string.
     const baseWhere = scopedMemoryWhere({ user_id, org_id, project, scope, access_context });
@@ -504,6 +504,17 @@ export class PrismaGraphStore {
     // total so the count reconciles with the graph + overview (which already
     // exclude them). Caller opts in via include_children=true.
     if (!include_children) hiddenTags.push('extracted-fact');
+    // hide_noise — connector ingests the user has flagged as low-signal.
+    // Newsletters / promotions / social / forums / notifications get
+    // hidden from the default Memories list. Recall-side score demotion
+    // (persisted-retrieval) still applies regardless.
+    if (hide_noise) hiddenTags.push(
+      'updates', 'label:updates',
+      'promotions', 'label:promotions',
+      'social', 'label:social',
+      'forums', 'label:forums',
+      'newsletter', 'notification', 'automated', 'no-reply',
+    );
     const auditExclusion = hiddenTags.length
       ? { NOT: { tags: { hasSome: hiddenTags } } }
       : {};

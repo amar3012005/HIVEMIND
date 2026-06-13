@@ -2328,9 +2328,16 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
     // every memory they save (entity:Amar on every "Amar's" memory).
     // Counting it as shared-entity overlap produces noise edges between
     // every pair of memories — defeats the purpose of overlap gating.
-    // Detect by frequency: any entity tag that already covers >40% of
-    // recent latestMemories on the candidate's side is "common" and
-    // contributes ZERO to overlap.
+    //
+    // The owner name is handled DEFINITIVELY by ALWAYS_COMMON below. The
+    // frequency heuristic here is only a backstop for OTHER ubiquitous
+    // tokens — and it must NOT fire on small, topically-homogeneous batches:
+    // a tightly-related business memory (GTM partner / German registration /
+    // DACH expansion) shares exactly the topical entities (Germany, DACH,
+    // Da'Vinci AI) that the old 40%-of-≥2-candidates rule wrongly stripped,
+    // zeroing the overlap and dropping a link the LLM had correctly found
+    // (observed: the GTM/B&B memory, links=1 → 0 edges). Require a larger
+    // batch and a higher fraction before frequency-stripping kicks in.
     const candidateTagCounts = new Map(); // entity (lowercased) → count
     let candidatesScanned = 0;
     for (const c of candidates) {
@@ -2342,9 +2349,10 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
         candidateTagCounts.set(e, (candidateTagCounts.get(e) || 0) + 1);
       }
     }
-    const COMMON_ENTITY_THRESHOLD = 0.40;
+    const COMMON_ENTITY_THRESHOLD = 0.60;       // was 0.40 — too aggressive
+    const COMMON_ENTITY_MIN_BATCH = 5;          // was 2 — don't strip in small topical clusters
     const commonEntities = new Set();
-    if (candidatesScanned >= 2) {
+    if (candidatesScanned >= COMMON_ENTITY_MIN_BATCH) {
       for (const [ent, n] of candidateTagCounts.entries()) {
         if (n / candidatesScanned >= COMMON_ENTITY_THRESHOLD) commonEntities.add(ent);
       }

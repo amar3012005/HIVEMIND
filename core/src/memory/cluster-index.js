@@ -81,13 +81,43 @@ export class ClusterIndex {
     }
   }
 
-  // ─── Bump dirty count (atomic) ─────────────────────────────────────────────
-  // PHASE-X TODO: dirty counter is now write-only (getDirtyClusters/resetDirty removed);
-  // revisit whether bumpDirty bookkeeping is still needed.
+  // ─── Read hot (dirty) clusters ─────────────────────────────────────────────
   /**
-   * Increment dirty_count for a cluster. Called when cognition-loop discovers
-   * new source memories that have arrived since the last synthesis for this
-   * cluster hash. Creates a stub row if none exists yet.
+   * Return clusters whose dirty_count has reached the threshold — i.e. enough
+   * new source memories piled up since the last synthesis to warrant an early
+   * dream. Drives WS1 event-driven scheduling (scheduler._maybeEarlyDream).
+   *
+   * @param {{ organizationId: string, minDirty?: number, limit?: number }} opts
+   * @returns {Promise<Array<{ clusterHash: string, dirtyCount: number, clusterType: string }>>}
+   */
+  async getDirtyClusters({ organizationId, minDirty = 5, limit = 50 }) {
+    if (!organizationId || organizationId === 'undefined') return [];
+    try {
+      const rows = await this.prisma.clusterIndex.findMany({
+        where: { organizationId, dirtyCount: { gte: minDirty } },
+        orderBy: { dirtyCount: 'desc' },
+        take: limit,
+        select: { clusterHash: true, dirtyCount: true, clusterType: true },
+      });
+      return rows.map((r) => ({
+        clusterHash: r.clusterHash,
+        dirtyCount: r.dirtyCount,
+        clusterType: r.clusterType,
+      }));
+    } catch (err) {
+      console.warn(`[cluster-index] getDirtyClusters failed org=${organizationId}: ${err.message}`);
+      return [];
+    }
+  }
+
+  // ─── Bump dirty count (atomic) ─────────────────────────────────────────────
+  // Wired at ingest time from graph-engine._bumpClusterDirty (fire-and-forget)
+  // and read by getDirtyClusters for event-driven early dreams. upsertOnSynthesis
+  // resets dirty_count to 0 when a tick consumes the cluster.
+  /**
+   * Increment dirty_count for a cluster. Called when a new source memory arrives
+   * for this cluster hash (ingest) or when cognition-loop discovers new members.
+   * Creates a stub row if none exists yet.
    *
    * Uses raw SQL UPDATE for atomicity — Prisma's updateMany cannot do
    * `SET dirty_count = dirty_count + N` without a race.

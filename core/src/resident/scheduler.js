@@ -15,6 +15,7 @@
 
 import { isEvolutionEnabled, runEvolution } from '../memory/evolution-engine.js';
 import { isPoolEnabled, affordTier } from './budget-pool.js';
+import { ClusterIndex } from '../memory/cluster-index.js';
 
 export class ResidentAgentScheduler {
   // NOTE (Phase D): post-Phase-D this scheduler's setInterval (started below,
@@ -31,6 +32,19 @@ export class ResidentAgentScheduler {
     this.enabled = process.env.ENABLE_GOVERNANCE_SCHEDULER === 'true';
     this.tickInFlight = false;
     this.tickCount = 0;
+
+    // WS1 — event-driven early dream. A fast poll reads cluster_index for
+    // clusters whose dirty_count crossed a threshold (enough new evidence piled
+    // up since their last synthesis) and runs an out-of-band synthesis cycle
+    // instead of waiting for the next hourly tick. The hourly tick stays as a
+    // baseline floor. Per-org cooldown prevents storms during bulk sync.
+    this.clusterIndex = prisma ? new ClusterIndex({ prisma }) : null;
+    this.dirtyThreshold = Number(process.env.COGNITION_DIRTY_THRESHOLD || 5);
+    this.earlyPollMs = Number(process.env.COGNITION_DIRTY_POLL_MS || 5 * 60 * 1000);
+    this.earlyCooldownMs = Number(process.env.COGNITION_EARLY_COOLDOWN_MS || 10 * 60 * 1000);
+    this.earlyTimer = null;
+    this._lastEarlyDream = new Map(); // orgId -> epoch ms
+    this.earlyInFlight = false;
   }
 
   async _tickTier() {
@@ -69,11 +83,62 @@ export class ResidentAgentScheduler {
     const jitter = Math.floor(Math.random() * 60_000);
     setTimeout(() => this._safeTick(), jitter);
     this.timer = setInterval(() => this._safeTick(), this.intervalMs);
+
+    // WS1 early-dream poll (shares the scheduler's enable gate).
+    if (this.clusterIndex) {
+      this.logger?.log?.(`[gov-scheduler] early-dream poll every ${this.earlyPollMs}ms (dirty>=${this.dirtyThreshold})`);
+      this.earlyTimer = setInterval(() => this._maybeEarlyDream(), this.earlyPollMs);
+    }
   }
 
   stop() {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    if (this.earlyTimer) clearInterval(this.earlyTimer);
+    this.earlyTimer = null;
+  }
+
+  /**
+   * WS1 — event-driven early dream. For each active org with hot (dirty>=N)
+   * clusters, run an out-of-band synthesis cycle now instead of at the next
+   * hourly tick. Reuses runFullCycle (no duplicated synthesis path). Guards:
+   * never overlap the hourly tick, per-org cooldown, synthesis tier only.
+   */
+  async _maybeEarlyDream() {
+    if (!this.enabled || !this.clusterIndex || !this.runManager) return;
+    if (this.tickInFlight || this.earlyInFlight) return; // never overlap a cycle
+    if (typeof this.runManager.runFullCycle !== 'function') return;
+    this.earlyInFlight = true;
+    try {
+      const orgs = await this._listActiveOrgs();
+      const now = Date.now();
+      for (const o of orgs) {
+        const last = this._lastEarlyDream.get(o.id) || 0;
+        if (now - last < this.earlyCooldownMs) continue; // cooldown — no storm
+        let hot = [];
+        try {
+          hot = await this.clusterIndex.getDirtyClusters({ organizationId: o.id, minDirty: this.dirtyThreshold });
+        } catch { hot = []; }
+        if (!hot.length) continue;
+        this._lastEarlyDream.set(o.id, now);
+        this.logger?.log?.(`[gov-scheduler] early dream org=${o.id.slice(0,8)} — ${hot.length} hot cluster(s)`);
+        try {
+          await this.runManager.runFullCycle({
+            orgId: o.id,
+            scope: 'organization',
+            trigger: 'early_dream',
+            enabledCognitiveTools: ['canonical_synthesis'],
+            tierName: 'synthesis',
+          });
+        } catch (err) {
+          this.logger?.warn?.(`[gov-scheduler] early dream org=${o.id.slice(0,8)} failed: ${err?.message || err}`);
+        }
+      }
+    } catch (err) {
+      this.logger?.warn?.(`[gov-scheduler] early-dream poll failed: ${err?.message || err}`);
+    } finally {
+      this.earlyInFlight = false;
+    }
   }
 
   async _safeTick() {

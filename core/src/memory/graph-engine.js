@@ -13,6 +13,7 @@ import {
   normalizeRelationshipDescriptor,
   normalizeRelationshipType,
 } from './relationship-semantics.js';
+import { clusterHash } from './cluster-hash.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -416,12 +417,16 @@ export class MemoryGraphEngine {
     predictCalibrate = false,
     predictCalibrateOptions = {},
     smartIngestRouter = null,
+    clusterIndex = null,
   } = {}) {
     if (!store) {
       throw new Error('MemoryGraphEngine requires a store');
     }
 
     this.store = store;
+    // ClusterIndex (optional): when set, ingestMemory bumps a cluster's
+    // dirty_count fire-and-forget so the scheduler can dream early (WS1).
+    this.clusterIndex = clusterIndex;
     this.vectorStore = vectorStore; // Qdrant client for semantic similarity search
     this.conflictDetector = conflictDetector;
     this.relationshipClassifier = relationshipClassifier;
@@ -444,6 +449,51 @@ export class MemoryGraphEngine {
 
   setSmartIngestRouter(router) {
     this.smartIngestRouter = router;
+  }
+
+  setClusterIndex(clusterIndex) {
+    this.clusterIndex = clusterIndex;
+  }
+
+  /**
+   * WS1 — ingest-time dirty bump. For each entity:/topic: tag on a freshly
+   * saved (non-synthesis) memory, increment the matching cluster's dirty_count
+   * so the scheduler can trigger an early dream once enough new evidence piles
+   * up. Strictly fire-and-forget: a cluster_index failure must NEVER block or
+   * slow a save (this table is a perf optimisation, not a gate). Synthesis
+   * writes (cognitive_layer_role set) are skipped so dreams don't self-trigger.
+   *
+   * Cluster identity mirrors cognition-loop: clusterHash(`canonical:<tag>`).
+   *
+   * @param {{ id?: string, tags?: string[], org_id?: string, user_id?: string, cognitive_layer_role?: string }} memory
+   */
+  _bumpClusterDirty(memory) {
+    try {
+      if (!this.clusterIndex || !memory) return;
+      if (memory.cognitive_layer_role) return; // synthesis output — don't self-trigger
+      const orgId = memory.org_id;
+      const userId = memory.user_id;
+      if (!orgId || !userId) return; // bumpDirty needs both NOT-NULL uuids
+      const tags = Array.isArray(memory.tags) ? memory.tags : [];
+      // Cluster on entity:/topic: tags only — the same signal synthesis clusters
+      // on. Cap to the first 3 to avoid a single memory storming many clusters.
+      const clusterTags = tags
+        .filter((t) => typeof t === 'string' && (t.startsWith('entity:') || t.startsWith('topic:')))
+        .slice(0, 3);
+      for (const tag of clusterTags) {
+        // Fire-and-forget — never await, never throw into the caller.
+        this.clusterIndex
+          .bumpDirty({
+            organizationId: orgId,
+            userId,
+            clusterHash: clusterHash(`canonical:${tag}`),
+            clusterType: 'canonical',
+          })
+          .catch(() => {});
+      }
+    } catch {
+      /* never block a save */
+    }
   }
 
   async ingestMemory(input) {
@@ -1199,6 +1249,10 @@ export class MemoryGraphEngine {
             console.warn('[entity-co-mention] failed:', entityErr.message);
           }
         }
+
+        // WS1: mark this memory's clusters dirty so the scheduler can dream
+        // early. Fire-and-forget — entity tags are attached above by now.
+        this._bumpClusterDirty(baseMemory);
 
         const result = {
           memoryId: baseMemory.id,

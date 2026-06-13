@@ -1169,6 +1169,12 @@ if (taraHandler) taraHandler.qdrantClient = qdrantClient;
 // (triple operator detection: Updates/Extends/Derives need vector search, not just FTS)
 if (persistentMemoryEngine) persistentMemoryEngine.vectorStore = qdrantClient;
 
+// WS1: give the engine a ClusterIndex so ingestMemory can bump dirty_count
+// (fire-and-forget) — drives event-driven early dreams in the scheduler.
+if (persistentMemoryEngine && typeof persistentMemoryEngine.setClusterIndex === 'function') {
+  persistentMemoryEngine.setClusterIndex(new ClusterIndex({ prisma }));
+}
+
 // Inject qdrantClient into the scheduler-bound SyncEngine (constructed
 // before qdrantClient was initialized). Without this, scheduled connector
 // polls produce memories that never enter the vector store.

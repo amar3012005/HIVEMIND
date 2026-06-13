@@ -27,6 +27,7 @@
 import crypto from 'crypto';
 import { chatCompletion } from '../knowledge/enterprise/litellm-client.js';
 import { ClusterIndex } from './cluster-index.js';
+import { clusterHash } from './cluster-hash.js';
 import { getQdrantClient } from '../vector/qdrant-client.js';
 
 // ─── Model config ──────────────────────────────────────────────────────────────
@@ -267,9 +268,8 @@ function sharedEntityKeys(aMembers, bMembers) {
 }
 
 // ─── Cluster hash ─────────────────────────────────────────────────────────────
-function clusterHash(tagOrPair) {
-  return crypto.createHash('sha256').update(tagOrPair).digest('hex').slice(0, 48);
-}
+// clusterHash now imported from ./cluster-hash.js (shared with graph-engine's
+// ingest-time dirty bump so both sides agree on cluster identity).
 
 // ─── LLM call with primary→fallback retry ────────────────────────────────────
 async function llmWithFallback(params, logger) {

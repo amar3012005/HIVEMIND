@@ -10534,15 +10534,15 @@ exit \$RC
                 include_only_with_attachments: !!body.include_only_with_attachments,
               };
               const { buildGmailQuery } = await import('./connectors/providers/gmail/query-builder.js');
-              const q = buildGmailQuery(config);
+              // includeFolders:true → folders become `(in:a OR in:b)` INSIDE q=.
+              // NOT repeated labelIds params: Gmail ANDs multiple labelIds, so
+              // labelIds=INBOX&labelIds=SENT matches only threads in BOTH → ~0.
+              const q = buildGmailQuery(config, { includeFolders: true });
               const maxResults = Math.min(parseInt(body.max_emails, 10) || 50, 200);
               const buildParams = (useQ) => {
                 const p = new URLSearchParams({ maxResults: String(maxResults) });
                 if (useQ && q) p.set('q', q);
                 if (body.page_token) p.set('pageToken', body.page_token);
-                if (Array.isArray(config.folders)) {
-                  config.folders.forEach((f) => p.append('labelIds', String(f).toUpperCase()));
-                }
                 return p;
               };
               // List + metadata-only fetch for each thread (no full body).

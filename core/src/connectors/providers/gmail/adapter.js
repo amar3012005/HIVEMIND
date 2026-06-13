@@ -45,8 +45,12 @@ export class GmailAdapter extends BaseProviderAdapter {
     // the backfill is still caught by the next incremental tick (no gap).
     const resumeHistoryId = await this._getCurrentHistoryId(accessToken);
 
-    const q = buildGmailQuery(context?.config || {});
-    const folders = context?.config?.folders || [];
+    // Folders go INSIDE the query as `(in:a OR in:b)` — NOT as repeated
+    // `labelIds` params. Gmail treats multiple labelIds as AND (a thread must
+    // carry EVERY label), so labelIds=INBOX&labelIds=SENT matches only threads
+    // that are simultaneously in both → ~0 results. includeFolders:true emits
+    // OR semantics, which is what the user means by "INBOX + SENT".
+    const q = buildGmailQuery(context?.config || {}, { includeFolders: true });
     const runCap = Number(context?.config?.max_emails) > 0
       ? Number(context.config.max_emails)
       : DEFAULT_RUN_CAP;
@@ -60,9 +64,6 @@ export class GmailAdapter extends BaseProviderAdapter {
       const params = new URLSearchParams({ maxResults: String(MAX_RESULTS_PER_PAGE) });
       if (pageToken) params.set('pageToken', pageToken);
       if (q) params.set('q', q);
-      if (Array.isArray(folders) && folders.length > 0) {
-        folders.forEach((f) => params.append('labelIds', String(f).toUpperCase()));
-      }
 
       const response = await this._gmailFetch(`/threads?${params}`, accessToken);
       const threads = response.threads || [];

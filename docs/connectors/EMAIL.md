@@ -168,6 +168,21 @@ scheduler reads it back on every tick.
 
 ## 3. Manual sync (`/api/connectors/gmail/sync`, server.js:10899)
 
+> **Incremental by default (2026-06-13).** Manual sync persists `sync_config` +
+> cadence, then delegates to `schedulerSyncEngine.runSync({ incremental: true })`
+> — the SAME path as auto-sync. It resumes from the stored Gmail **historyId**
+> cursor and pulls only NEW mail since last sync (not the whole window). First
+> sync (no/stale cursor) → `fetchIncremental` 404 → `fetchInitial` full backfill
+> (date-bounded, per-run cap 200) which captures the mailbox's current historyId
+> via `GET /profile` and persists it → every subsequent sync is a tiny delta.
+> Verified live: sync#2 `imported=1, skipped=0`, no cap-reached, cursor advanced.
+>
+> Dedup: `runSync._ingestWithRetry` skips any thread whose `source_id`
+> (`gmail:thread:<id>`) already has a live memory — BEFORE embedding — so
+> re-syncs never double or re-embed. Noise-tier mail (label:updates/promotions/
+> social/forums, newsletter, notification) is stored PG/FTS-only and NOT embedded
+> (`_postIngestHooks` skip); `sent-by-user`/`first-person` always embeds.
+
 1. Body accepts `date_range`, `folders`, `exclude_categories`, `max_emails`
    (default 500, cap), `block_senders`, `disable_default_blocklist`,
    `container_tag`, `target_scope`, and `auto_sync_minutes` (set cadence in

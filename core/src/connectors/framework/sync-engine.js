@@ -290,6 +290,34 @@ export class SyncEngine {
 
   async _ingestWithRetry(payload, dedupeKey, userId, attempt = 0) {
     try {
+      // Source-id idempotency gate: connector re-syncs (cursor rewind, parallel
+      // worker, manual re-run) used to write a NEW memory per thread every
+      // time → 4 rows per gmail thread by the time the user noticed. Skip the
+      // ingest entirely when the same (user_id, source_platform, source_id)
+      // already has an active memory row. Caller's `force_save=true` opts in
+      // to the legacy create-anyway behavior; manual UI / chat ingest doesn't
+      // hit this path so it's unaffected.
+      const sourcePlatform = payload?.source_metadata?.source_platform || payload?.source_platform;
+      const sourceId = payload?.source_metadata?.source_id || payload?.source_id;
+      if (!payload?.force_save && this.prisma && userId && sourcePlatform && sourceId) {
+        try {
+          const existing = await this.prisma.sourceMetadata.findFirst({
+            where: {
+              sourcePlatform,
+              sourceId,
+              memory: { userId, deletedAt: null },
+            },
+            select: { memoryId: true },
+          });
+          if (existing?.memoryId) {
+            return { memoryId: existing.memoryId, skipped: 'duplicate_source_id' };
+          }
+        } catch (lookupErr) {
+          // Lookup is opportunistic — never block ingest on a failed dedup probe.
+          console.warn('[sync-engine] source-id dedup probe failed (non-fatal):', lookupErr.message);
+        }
+      }
+
       // P1 canonical contract: route through SmartIngestRouter so background
       // connector polls produce deterministic edges (thread/session/chunk),
       // same as manual UI ingest paths. Safe fallback to raw payload on error.

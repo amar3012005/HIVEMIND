@@ -25,10 +25,10 @@
 | **Auth persist (after Google)** | `core/src/server.js` | `'/api/connectors/gmail/callback'` :6053 |
 | Token storage + crypto | `core/src/connectors/framework/connector-store.js` | `upsertConnector` :94, `getAccessToken`, `updateMetadata` :311 |
 | **Manual sync + filters** | `core/src/server.js` | `case '/api/connectors/gmail/sync'` :10899 |
-| Fetch + per-message filtering | `core/src/connectors/providers/gmail/adapter.js` | `GmailAdapter` :15, `fetchInitial` :34, `fetchIncremental` :111, `_buildGmailQuery` :550 |
-| Noise classifier | `core/src/connectors/providers/gmail/email-cleaner.js` | `classifyNoise` :218, `cleanEmail` |
-| Record → memory payload | `core/src/connectors/providers/gmail/adapter.js` | `toMemoryPayloads` (payload shape ~:309) |
-| **Sync orchestration** | `core/src/connectors/framework/sync-engine.js` | `runSync` :47, `_ingestWithRetry`, `_postIngestHooks` |
+| Fetch + per-message filtering | `core/src/connectors/providers/gmail/adapter.js` | `GmailAdapter` :15, `fetchInitial` :34, `fetchIncremental` :111, `_buildGmailQuery` :550, `_buildRichTags` :658 |
+| Noise classifier | `core/src/connectors/providers/gmail/email-cleaner.js` | `classifyNoise` :218, called from adapter :218 (`cleanResult.noise?.skip`) |
+| Record → memory payload | `core/src/connectors/providers/gmail/adapter.js` | single-message payload built :322–:363, thread-parent :423, thread-child :465, `return payloads` :492 |
+| **Sync orchestration** | `core/src/connectors/framework/sync-engine.js` | `runSync` :47, `_ingestWithRetry` def :299 (call :252), `_postIngestHooks` :370, reauth flip :86/:135, final-cursor write :143/:279 |
 | **Auto-sync scheduler** | `core/src/connectors/framework/sync-scheduler.js` | `_tick` :71, cadence math |
 | Cadence API | `core/src/server.js` | `case '/api/connectors/cadence'` :11357 |
 | **Realtime push** | `core/src/connectors/providers/gmail/gmail-watch.js` | `registerWatch` :30, `renewAllWatches` |
@@ -109,7 +109,7 @@ Honored `sync_config` keys → Gmail query:
 | `exclude_chats` (default true) | `-in:chats` | drop Google Chat |
 | `block_senders` + `DEFAULT_BLOCK_SENDERS` | `-from:<addr/domain>` | sender blocklist |
 
-**`DEFAULT_BLOCK_SENDERS`** (adapter.js:~622, mirrored server.js:10947) is a
+**`DEFAULT_BLOCK_SENDERS`** (adapter.js:612, mirrored server.js:10947) is a
 built-in newsletter/notification blocklist applied to every sync unless
 `disable_default_blocklist: true`: `noreply@*`, `*@substack.com`,
 `*@notifications.*`, `*@mailer.*`, `*@newsletter.*`, `*@calendar.google.com`,
@@ -131,25 +131,33 @@ Anything that slips through `q=` is re-checked per message and dropped if:
 | `calendar-invite` (kept, flagged) | :268 | `.ics` → minimal event memory |
 | `newsletter` (kept, flagged) | :278 | unsubscribe-only body |
 
-The adapter consults this at adapter.js:217 — `if (cleanResult.noise?.skip)`
-→ skip + log the reason.
+The adapter consults this at adapter.js:218 — `if (cleanResult.noise?.skip)`
+→ skip + log the reason (`[gmail-adapter] Skipping message <id>: <reason>`).
 
 > The `platform-notification` + `bulk-list-notification` rules were added
 > 2026-06-12 after a failing-CI week fanned **157 "Run failed" emails** into
 > one user's memories. See [`../NANGO.md`] / session history.
 
-### Layer 3 — ACL / scope gate (adapter.js:~206)
-In org/team `targetScope`, purely-personal outgoing mail (every message sent
-by the installer to a non-shared address) is skipped to avoid org-wide
-exposure of private threads. Shared-mailbox traffic always passes.
+### Layer 3 — ACL / scope gate (adapter.js:225–:232)
+`sentByUser` is determined at :225 (`fromEmail === userEmail`). In org/team
+`targetScope` the org-scope skip fires at :232 — purely-personal outgoing
+mail (every message sent by the installer to a non-shared address) is dropped
+to avoid org-wide exposure of private threads. Shared-mailbox traffic always
+passes.
 
 ### The override: SENT mail always passes
-adapter.js:247 — the user's own outbound is ground truth and the biggest
-recall boost; it bypasses the personal-skip heuristics.
+- `sentByUser` bypasses the newsletter-only gate (:250) and the
+  short-body gate (:259).
+- Attribution stamp `'first_person'` set at :244.
+- `sent_by_user: true` propagated into payload metadata at :344 — read by
+  `persisted-retrieval` for the +25 % recall boost.
+The user's own outbound is ground truth and the biggest recall lever, so it
+bypasses the personal-skip heuristics.
 
 ### Where `sync_config` is persisted
 `/api/connectors/gmail/sync` writes it via `syncStore.updateMetadata(userId,
-'gmail', { sync_config: {...} })` (server.js:~10978) into
+'gmail', { sync_config: {...} })` (server.js:~10978; persist code path
+defined in `connector-store.updateMetadata` :314) into
 `connectorMetadata.sync_config`. **This is the contract that makes auto-sync
 honor the user's modal choices** instead of running the firehose — the
 scheduler reads it back on every tick.
@@ -189,8 +197,8 @@ FE: `apiClient.gmailSync(settings)` (api-client.js:1345). Dry-run preview:
   targetScope, … })` (sync-scheduler.js:193).
 - The adapter's `_buildGmailQuery` reads the persisted
   `connectorMetadata.sync_config` → **same filters as the manual run**.
-- Stamps `lastSchedulerRunAt` even on failure (sync-scheduler.js:217) so a
-  broken connector isn't retried every minute.
+- Stamps `lastSchedulerRunAt` on success (sync-scheduler.js:210) AND on
+  failure (:226) so a broken connector isn't retried every minute.
 
 ### Cadence API (`/api/connectors/cadence`, server.js:11357)
 - `GET` → per-connector cadences (`syncIntervalMinutes`,
@@ -249,12 +257,14 @@ Setup commands: [`../gmail-pubsub-setup.md`](../gmail-pubsub-setup.md).
 
 ### 6b. Sync-engine persists + post-processes (`sync-engine.js runSync` :47)
 - Calls the adapter fetch loop; on 401 attempts a token refresh, flips to
-  `reauth_required` if the token is truly dead (sync-engine.js:125).
-- `toMemoryPayloads` → for each payload `_ingestWithRetry(payload, sourceId,
-  userId)` (sync-engine.js:252) → `persistentMemoryEngine.ingest` writes the
-  Postgres memory row. `sourceId` (= `source_metadata.source_id`) makes
-  re-sync **idempotent** — the same email never doubles.
-- `_postIngestHooks` (sync-engine.js, after ingest):
+  `reauth_required` if the token is truly dead (sync-engine.js:86 initial
+  bearer-fetch path, :135 mid-loop refresh path).
+- Payloads from the adapter → for each `_ingestWithRetry(payload, sourceId,
+  userId)` (call at sync-engine.js:252, definition :299) →
+  `persistentMemoryEngine.ingest` writes the Postgres memory row. `sourceId`
+  (= `source_metadata.source_id`) makes re-sync **idempotent** — the same
+  email never doubles.
+- `_postIngestHooks` (sync-engine.js:370, fires after every ingest):
   - writes `external_ref` for re-sync dedupe,
   - runs the **canonical entity-resolver** (Updates/Extends/Mentions edges) —
     forced on by `metadata.force_entity_linking`,
@@ -263,7 +273,8 @@ Setup commands: [`../gmail-pubsub-setup.md`](../gmail-pubsub-setup.md).
     `HIVEMIND_PERSONAL` (or the per-org collection). Without this hook,
     connector memories would be FTS-only and invisible to vector recall.
 - On completion flips status to `idle` and persists the `final_cursor`
-  (sync-engine.js:278) for the next incremental run.
+  (sync-engine.js:143 mid-loop update, :279 final commit) for the next
+  incremental run.
 
 ### 6c. Result in HIVEMIND
 The email is now: a Postgres memory row (`memory_type:'event'`,

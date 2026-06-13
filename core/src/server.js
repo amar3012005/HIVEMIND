@@ -11083,6 +11083,12 @@ exit \$RC
                   if (!accessToken) throw new Error('Gmail access token not found or expired. Please reconnect Gmail.');
 
                   const GMAIL_API = 'https://gmail.googleapis.com/gmail/v1/users/me';
+                  // Canonical normalizer — manual sync uses the SAME adapter as the
+                  // scheduler/incremental path so payload shape, noise floor, and
+                  // source_id (gmail:thread:<id>) match and dedup across paths.
+                  const { GmailAdapter } = await import('./connectors/providers/gmail/adapter.js');
+                  const gmailAdapter = new GmailAdapter();
+                  const userAccountRef = connector.account_ref || connector.metadata?.email || '';
                   const params = new URLSearchParams({
                     maxResults: String(Math.min(max_emails, 100)),
                     q: gmailQuery,
@@ -11110,159 +11116,64 @@ exit \$RC
                         });
                         if (!threadResp.ok) { totalSkipped++; continue; }
                         const thread = await threadResp.json();
-                        const messages = thread.messages || [];
 
-                        // ── Thread-level ingestion ──────────────────────────────────
+                        // ── Thread-level ingestion (canonical adapter) ───────────────
                         if (totalImported >= max_emails) break;
 
-                        // MIME helpers (defined once per thread, cheap)
-                        const _decodeB64 = (d) => { try { return Buffer.from(d, 'base64url').toString('utf-8'); } catch { try { return Buffer.from(d, 'base64').toString('utf-8'); } catch { return ''; } } };
-                        const _stripHtml = (h) => h.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '').replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, ' ').trim();
-                        const _extractText = (part) => {
-                          if (!part) return '';
-                          if (part.mimeType === 'text/plain' && part.body?.data) return _decodeB64(part.body.data);
-                          if (part.mimeType === 'text/html' && part.body?.data) return _stripHtml(_decodeB64(part.body.data));
-                          if (part.parts) {
-                            const plain = part.parts.find(p => p.mimeType === 'text/plain');
-                            if (plain?.body?.data) return _decodeB64(plain.body.data);
-                            const html = part.parts.find(p => p.mimeType === 'text/html');
-                            if (html?.body?.data) return _stripHtml(_decodeB64(html.body.data));
-                            for (const sub of part.parts) {
-                              const result = _extractText(sub);
-                              if (result.length > 20) return result;
+                        // Normalize via the shared adapter — identical payload shape,
+                        // noise floor (noise-filter.js classifyNoise + newsletter /
+                        // low-signal gates + sent-mail bypass), tags, and
+                        // source_id (gmail:thread:<id>) as the scheduler path. This
+                        // makes manual + auto-sync dedup against each other; the old
+                        // inline build emitted source_id=thread:<id> and double-ingested.
+                        const gmailPayloads = gmailAdapter.normalize(thread, {
+                          user_id: userId,
+                          org_id: orgId,
+                          target_scope: targetScope,
+                          user_account_ref: userAccountRef,
+                        });
+                        if (!gmailPayloads || gmailPayloads.length === 0) { totalSkipped++; continue; }
+
+                        for (const basePayload of gmailPayloads) {
+                          if (totalImported >= max_emails) break;
+                          try {
+                            const gmailPayload = {
+                              ...basePayload,
+                              visibility: targetScope === 'organization' ? 'organization' : 'private',
+                              source: 'gmail',
+                              project: container_tag || basePayload.project || null,
+                            };
+                            const [routedGmailPayload] = await buildRoutedIngestPayloads(gmailPayload, { smartIngestRouter });
+                            const gmailResult = await persistentMemoryEngine.ingestMemory(routedGmailPayload);
+                            // Enterprise structured enrichment post-commit.
+                            if (gmailResult?.memoryId && enrichmentQueue) {
+                              enrichmentQueue.enqueue(gmailResult.memoryId, {
+                                content: routedGmailPayload.content,
+                                title: routedGmailPayload.title,
+                                tags: routedGmailPayload.tags,
+                              });
                             }
-                          }
-                          return '';
-                        };
-
-                        // Gather thread-level labels from all messages (union)
-                        const threadLabelSet = new Set();
-                        for (const msg of messages) {
-                          for (const lbl of (msg.labelIds || [])) {
-                            threadLabelSet.add(lbl.replace(/^CATEGORY_/, '').toLowerCase());
-                          }
-                        }
-                        const threadLabels = [...threadLabelSet];
-
-                        // Skip excluded categories (thread-level)
-                        if (exclude_categories.some(cat => threadLabels.includes(cat))) {
-                          totalSkipped++;
-                          continue;
-                        }
-
-                        // Build per-message content blocks and collect metadata
-                        const messageBlocks = [];
-                        const participants = new Set();
-                        for (const msg of messages) {
-                          const headers = msg.payload?.headers || [];
-                          const getH = (n) => headers.find(h => h.name.toLowerCase() === n.toLowerCase())?.value || '';
-                          const from = getH('From');
-                          const to = getH('To');
-                          const date = getH('Date');
-                          let bodyText = _extractText(msg.payload) || msg.snippet || '';
-                          bodyText = bodyText.replace(/\x00/g, '').replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
-                          messageBlocks.push(`[${from} — ${date}]\n${bodyText}`);
-                          if (from) participants.add(from);
-                          if (to) participants.add(to);
-                        }
-
-                        // Subject + dates from first/last message
-                        const firstMsg = messages[0];
-                        const lastMsg = messages[messages.length - 1];
-                        const firstHeaders = firstMsg?.payload?.headers || [];
-                        const getFirstH = (n) => firstHeaders.find(h => h.name.toLowerCase() === n.toLowerCase())?.value || '';
-                        const subject = getFirstH('Subject') || '(no subject)';
-                        const firstDate = getFirstH('Date');
-                        const lastHeaders = lastMsg?.payload?.headers || [];
-                        const lastDate = lastHeaders.find(h => h.name.toLowerCase() === 'date')?.value;
-
-                        // Build full thread content
-                        const threadContent = messageBlocks.join('\n\n---\n\n');
-
-                        // ── Noise filtering ──────────────────────────────────────────
-                        // SENT mails always pushed: if the user wrote ANY message in
-                        // this thread (thread carries the SENT label), bypass the
-                        // noise heuristic entirely. The user's own outbound mail is
-                        // ground truth — never drop it, even if the subject contains
-                        // words like "confirm your" or "verify your" that they wrote.
-                        const _isSentByUser = (threadLabels || []).some((l) => String(l).toLowerCase() === 'sent');
-                        const SKIP_PATTERNS = /\b(unsubscribe|opt[.\s-]?out|no[.\s-]?reply|noreply|do not reply|verify your|confirm your|reset your password|OTP|one[.\s-]?time passcode|one[.\s-]?time code|security alert|account alert|sign[.\s-]?in attempt|unusual sign|new sign[.\s-]?in|your receipt|order confirmation|payment confirmation|invoice #|your shipment|has been shipped|out of office|auto[.\s-]?reply|automatic reply)\b/i;
-                        if (!_isSentByUser && (SKIP_PATTERNS.test(subject) || SKIP_PATTERNS.test(threadContent.slice(0, 600)))) {
-                          console.log(`[gmail-sync] Skipping noise thread: "${subject}"`);
-                          totalSkipped++;
-                          continue;
-                        }
-
-                        // Build tags — sent-by-user adds the canonical attribution
-                        // tag so recall can BOOST it (mirrors what the scheduler-
-                        // driven adapter already attaches per-message).
-                        const tags = ['gmail', `gmail-thread:${thread.id}`, ...threadLabels.filter(l => !['unread', 'inbox'].includes(l))];
-                        if (_isSentByUser) tags.push('sent-by-user', 'first-person');
-                        for (const p of participants) {
-                          const emailMatch = p.match(/<([^>]+)>/);
-                          if (emailMatch) tags.push(`participant:${emailMatch[1].split('@')[0]}`);
-                        }
-
-                        // Assemble final content with header summary
-                        const content = `Email Thread: ${subject}\n\n${threadContent}`.slice(0, 8000);
-
-                        try {
-                          const gmailPayload = {
-                            content,
-                            title: subject,
-                            tags,
-                            memory_type: 'event',
-                            visibility: targetScope === 'organization' ? 'organization' : 'private',
-                            document_date: firstDate ? new Date(firstDate).toISOString() : null,
-                            source: 'gmail',
-                            source_metadata: {
-                              source_type: 'gmail',
-                              source_platform: 'gmail',
-                              source_id: `thread:${thread.id}`,
-                              thread_id: thread.id,
-                              message_count: messages.length,
-                              last_message_date: lastDate || null,
-                            },
-                            project: container_tag || null,
-                            user_id: userId,
-                            org_id: orgId,
-                            metadata: {
-                              // Canonical pipeline directive — every gmail
-                              // sync row gets entity + temporal + operator
-                              // LLM extraction, not just tag accumulation.
-                              force_entity_linking: true,
-                            },
-                          };
-                          const [routedGmailPayload] = await buildRoutedIngestPayloads(gmailPayload, { smartIngestRouter });
-                          const gmailResult = await persistentMemoryEngine.ingestMemory(routedGmailPayload);
-                          // Enterprise structured enrichment post-commit.
-                          if (gmailResult?.memoryId && enrichmentQueue) {
-                            enrichmentQueue.enqueue(gmailResult.memoryId, {
-                              content: routedGmailPayload.content,
-                              title: routedGmailPayload.title,
-                              tags: routedGmailPayload.tags,
-                            });
-                          }
-                          // Embed thread memory in Qdrant for vector search
-                          if (gmailResult?.memoryId && qdrantClient) {
-                            try {
-                              const gmailMem = await persistentMemoryStore.getMemory(gmailResult.memoryId);
-                              if (gmailMem) await qdrantClient.storeMemory(gmailMem, { collectionName: 'HIVEMIND_PERSONAL' });
-                            } catch {}
-                          }
-                          // Embed fact-memories in Qdrant
-                          if (gmailResult?.factMemoryIds?.length > 0 && qdrantClient) {
-                            for (const factId of gmailResult.factMemoryIds) {
+                            // Embed thread memory in Qdrant for vector search
+                            if (gmailResult?.memoryId && qdrantClient) {
                               try {
-                                const factMem = await persistentMemoryStore.getMemory(factId);
-                                if (factMem) await qdrantClient.storeMemory(factMem, { collectionName: 'HIVEMIND_PERSONAL' });
+                                const gmailMem = await persistentMemoryStore.getMemory(gmailResult.memoryId);
+                                if (gmailMem) await qdrantClient.storeMemory(gmailMem, { collectionName: 'HIVEMIND_PERSONAL' });
                               } catch {}
                             }
+                            // Embed fact-memories in Qdrant
+                            if (gmailResult?.factMemoryIds?.length > 0 && qdrantClient) {
+                              for (const factId of gmailResult.factMemoryIds) {
+                                try {
+                                  const factMem = await persistentMemoryStore.getMemory(factId);
+                                  if (factMem) await qdrantClient.storeMemory(factMem, { collectionName: 'HIVEMIND_PERSONAL' });
+                                } catch {}
+                              }
+                            }
+                            totalImported++;
+                          } catch (ingestErr) {
+                            console.warn(`[gmail-sync] Ingest failed for thread ${thread.id}:`, ingestErr.message);
+                            totalSkipped++;
                           }
-                          totalImported++;
-                        } catch (ingestErr) {
-                          console.warn(`[gmail-sync] Ingest failed for thread ${thread.id}:`, ingestErr.message);
-                          totalSkipped++;
                         }
                       } catch (threadErr) {
                         console.warn(`[gmail-sync] Thread ${threadStub.id} failed:`, threadErr.message);

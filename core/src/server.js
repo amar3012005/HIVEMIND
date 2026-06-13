@@ -9557,6 +9557,81 @@ exit \$RC
             return jsonResponse(res, { error: err.message }, 500);
           }
 
+        case '/api/cognition/derivation': {
+          // WS4 — "show its work". GET ?memory_id=<id> → the grounded proof tree
+          // for a synthesis: which prior syntheses it depends on (cross-synthesis
+          // Derives edges) and which raw source memories ground it, plus a
+          // grounding_status flag that flips to 'partial' when a cited source was
+          // deleted. Read-only; org-scoped to the caller.
+          if (req.method !== 'GET') break;
+          try {
+            const memoryId = url.searchParams.get('memory_id');
+            if (!memoryId) return jsonResponse(res, { error: 'memory_id required' }, 400);
+            const maxDepth = Math.min(parseInt(url.searchParams.get('depth'), 10) || 3, 6);
+
+            const root = await prisma.memory.findFirst({
+              where: { id: memoryId, orgId, deletedAt: null },
+              select: { id: true, title: true, content: true, cognitiveLayerRole: true, synthesisConfidence: true, synthesisEvidenceIds: true },
+            });
+            if (!root) return jsonResponse(res, { error: 'memory not found in your org' }, 404);
+
+            // BFS over outgoing Derives edges. Cross-synthesis edges
+            // (created_by='cross-synthesis') are dependency links; the rest are
+            // synth→raw-source grounding links.
+            const visited = new Set([memoryId]);
+            let frontier = [memoryId];
+            const dependsOn = [];
+            const groundedInIds = new Set();
+            for (let depth = 0; depth < maxDepth && frontier.length; depth++) {
+              const edges = await prisma.relationship.findMany({
+                where: { fromId: { in: frontier }, type: 'Derives' },
+                select: { fromId: true, toId: true, createdBy: true, metadata: true },
+                take: 500,
+              });
+              const next = [];
+              for (const e of edges) {
+                if (e.createdBy === 'cross-synthesis') {
+                  if (!visited.has(e.toId)) {
+                    visited.add(e.toId);
+                    next.push(e.toId);
+                    dependsOn.push({ id: e.toId, kind: e.metadata?.kind || 'depends_on', from: e.fromId });
+                  }
+                } else {
+                  groundedInIds.add(e.toId);
+                }
+              }
+              frontier = next;
+            }
+
+            // Grounding check — which cited sources still exist?
+            const allSourceIds = Array.from(new Set([
+              ...groundedInIds,
+              ...(Array.isArray(root.synthesisEvidenceIds) ? root.synthesisEvidenceIds : []),
+            ]));
+            let liveCount = 0;
+            if (allSourceIds.length) {
+              liveCount = await prisma.memory.count({ where: { id: { in: allSourceIds }, deletedAt: null } });
+            }
+            const groundingStatus = allSourceIds.length === 0
+              ? 'ungrounded'
+              : liveCount === allSourceIds.length ? 'grounded' : 'partial';
+
+            return jsonResponse(res, {
+              memory_id: root.id,
+              claim: root.title || (root.content || '').slice(0, 200),
+              role: root.cognitiveLayerRole,
+              confidence: root.synthesisConfidence,
+              depends_on: dependsOn,
+              grounded_in: allSourceIds,
+              grounding_status: groundingStatus,
+              sources_live: liveCount,
+              sources_total: allSourceIds.length,
+            });
+          } catch (err) {
+            return jsonResponse(res, { error: err.message }, 500);
+          }
+        }
+
         case '/api/synthesis': {
           // GET — browse synthesis memories for the calling user's org.
           // Query params: ?type=canonical-fact|synthesis-bridge|all (default all)

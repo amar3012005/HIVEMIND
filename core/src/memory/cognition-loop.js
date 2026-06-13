@@ -1976,6 +1976,56 @@ Output JSON only:
         });
       } catch { /* dup or FK race — skip */ }
     }
+    // WS4 — cross-synthesis derivation edges. When this synthesis shares source
+    // evidence with an EXISTING synthesis, the two are derivationally related:
+    // record synth --Derives--> priorSynth so "show its work" can walk a full
+    // chain (raw fact → canonical → bridge → principle), not just synth→source.
+    // Reuses the Derives type (no enum migration) — distinguished by
+    // created_by='cross-synthesis' + metadata.kind. Grounded: only links on
+    // real shared evidence, never centroid coincidence.
+    try {
+      await this._linkCrossSynthesisEdges(synthId, members.map((m) => m.id), sourceType, tag);
+    } catch { /* best-effort enrichment */ }
+  }
+
+  /**
+   * WS4 — link this synthesis to prior syntheses it depends on (shared evidence).
+   * @param {string} synthId
+   * @param {string[]} evidenceIds  source memory ids this synthesis was built on
+   * @param {string} sourceType     'canonical-fact' | 'bridge' | 'principle'
+   * @param {string} tag
+   */
+  async _linkCrossSynthesisEdges(synthId, evidenceIds, sourceType, tag) {
+    if (!Array.isArray(evidenceIds) || evidenceIds.length === 0) return;
+    // Find OTHER latest syntheses whose evidence overlaps ours.
+    const overlapping = await this.prisma.memory.findMany({
+      where: {
+        id: { not: synthId },
+        isLatest: true,
+        deletedAt: null,
+        cognitiveLayerRole: { in: ['canonical', 'bridge', 'principle'] },
+        synthesisEvidenceIds: { hasSome: evidenceIds },
+      },
+      select: { id: true, cognitiveLayerRole: true },
+      take: 5,
+    });
+    for (const other of overlapping) {
+      // principle generalizes canonicals → Implies; everything else → depends_on.
+      const kind = sourceType === 'principle' ? 'implies' : 'depends_on';
+      try {
+        await this.prisma.relationship.create({
+          data: {
+            id:         crypto.randomUUID(),
+            fromId:     synthId,
+            toId:       other.id,
+            type:       'Derives',
+            confidence: 0.75,
+            createdBy:  'cross-synthesis',
+            metadata:   { kind, reason: sourceType, topic: tag },
+          },
+        });
+      } catch { /* unique (from,to,Derives) dup — skip */ }
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════════════════

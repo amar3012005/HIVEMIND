@@ -11058,15 +11058,24 @@ exit \$RC
                         const threadContent = messageBlocks.join('\n\n---\n\n');
 
                         // ── Noise filtering ──────────────────────────────────────────
+                        // SENT mails always pushed: if the user wrote ANY message in
+                        // this thread (thread carries the SENT label), bypass the
+                        // noise heuristic entirely. The user's own outbound mail is
+                        // ground truth — never drop it, even if the subject contains
+                        // words like "confirm your" or "verify your" that they wrote.
+                        const _isSentByUser = (threadLabels || []).some((l) => String(l).toLowerCase() === 'sent');
                         const SKIP_PATTERNS = /\b(unsubscribe|opt[.\s-]?out|no[.\s-]?reply|noreply|do not reply|verify your|confirm your|reset your password|OTP|one[.\s-]?time passcode|one[.\s-]?time code|security alert|account alert|sign[.\s-]?in attempt|unusual sign|new sign[.\s-]?in|your receipt|order confirmation|payment confirmation|invoice #|your shipment|has been shipped|out of office|auto[.\s-]?reply|automatic reply)\b/i;
-                        if (SKIP_PATTERNS.test(subject) || SKIP_PATTERNS.test(threadContent.slice(0, 600))) {
+                        if (!_isSentByUser && (SKIP_PATTERNS.test(subject) || SKIP_PATTERNS.test(threadContent.slice(0, 600)))) {
                           console.log(`[gmail-sync] Skipping noise thread: "${subject}"`);
                           totalSkipped++;
                           continue;
                         }
 
-                        // Build tags
+                        // Build tags — sent-by-user adds the canonical attribution
+                        // tag so recall can BOOST it (mirrors what the scheduler-
+                        // driven adapter already attaches per-message).
                         const tags = ['gmail', `gmail-thread:${thread.id}`, ...threadLabels.filter(l => !['unread', 'inbox'].includes(l))];
+                        if (_isSentByUser) tags.push('sent-by-user', 'first-person');
                         for (const p of participants) {
                           const emailMatch = p.match(/<([^>]+)>/);
                           if (emailMatch) tags.push(`participant:${emailMatch[1].split('@')[0]}`);

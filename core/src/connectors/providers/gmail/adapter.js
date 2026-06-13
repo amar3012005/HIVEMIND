@@ -222,15 +222,20 @@ export class GmailAdapter extends BaseProviderAdapter {
       const isNewsletter = /\b(newsletter|noreply|no-reply|unsubscribe|marketing|digest|updates@|info@|hello@)\b/i.test(from + ' ' + body.slice(0, 200));
       const attribution = sentByUser ? 'first_person' : isNewsletter ? 'newsletter' : 'third_party';
 
-      // Newsletter opt-in gate: skip marketing unless explicitly enabled
-      if (isNewsletter && !ingestNewsletters) {
+      // Newsletter opt-in gate: skip marketing unless explicitly enabled.
+      // SENT MAIL ALWAYS PASSES — the user's own outbound is ground truth,
+      // never drop it even if the body happens to contain words like
+      // "newsletter" or "unsubscribe" (e.g. they wrote about it).
+      if (isNewsletter && !ingestNewsletters && !sentByUser) {
         console.log(`[gmail-adapter] Skipping newsletter ${msg.id}: from=${fromEmail}`);
         continue;
       }
 
-      // Quality gate: skip trivial content ("ok", "thanks", "got it")
+      // Quality gate: skip trivial content ("ok", "thanks", "got it") UNLESS
+      // it's sent by the user — short replies still record the relationship
+      // ("user replied to X at time T"), even if the content itself is brief.
       const bodyLen = body.replace(/\s+/g, ' ').trim().length;
-      if (bodyLen < 50) {
+      if (bodyLen < 50 && !sentByUser) {
         console.log(`[gmail-adapter] Skipping low-signal message ${msg.id}: body=${bodyLen} chars`);
         continue;
       }

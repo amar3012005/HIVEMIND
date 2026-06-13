@@ -1279,6 +1279,10 @@ export async function recallPersistedMemories(store, {
     if (_tagsForNoise.some((t) => t === 'social' || t === 'label:social' || t === 'forums' || t === 'label:forums')) _noiseMul *= 0.50;
     if (_tagsForNoise.some((t) => t === 'notification' || t === 'automated' || t === 'no-reply')) _noiseMul *= 0.35;
     if (_noiseMul < 1) score *= Math.max(_noiseMul, 0.15);
+    // First-person BOOST: mails the user actually wrote (sent-by-user) are
+    // ground truth — their own thoughts, decisions, replies. Lift the score
+    // so they always outrank received noise on tie-equivalent vectors.
+    if (_tagsForNoise.some((t) => t === 'sent-by-user' || t === 'first-person')) score *= 1.25;
     // Retroactive detection for untagged existing memories
     if (!attribution) {
       const c = (memory.content || '').toLowerCase();

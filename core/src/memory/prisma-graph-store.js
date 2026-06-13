@@ -152,6 +152,7 @@ function mapRelationshipRecord(record) {
     type: normalizeRelationshipType(record.type) || record.type,
     confidence: record.confidence,
     created_at: record.createdAt instanceof Date ? record.createdAt.toISOString() : record.createdAt,
+    created_by: record.createdBy || null,
     metadata: record.metadata || {}
   };
 }

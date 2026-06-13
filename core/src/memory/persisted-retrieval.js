@@ -361,15 +361,59 @@ function buildRelationshipIndex(relationships) {
   return counts;
 }
 
-// Build a set of memory ids that are TARGETS of any Contradicts edge.
-// Used by recall scoring to apply a relevance penalty — a memory the
-// graph flagged as contradicted should rarely beat its successor.
+// WS2 — late-evidence / poisoned-preference fix.
+//
+// Edge creators whose timestamp reflects WHEN THE STATEMENT WAS MADE (the user
+// just said it). Background scanners carry scan-time, so a freshly-scanned old
+// contradiction must NOT be treated as "just corrected".
+const STATEMENT_TIME_CREATORS = new Set([
+  'memory_processor', 'conflict-detector', 'turing-reconciliation', 'ingest_tree',
+]);
+const CORRECTION_HALFLIFE_DAYS = Number(process.env.CORRECTION_HALFLIFE_DAYS || 14);
+
+// Map<to_id, {createdBy, _ts}> — the NEWEST Contradicts edge targeting each
+// memory. A memory the graph flagged as contradicted should rarely beat its
+// successor; how hard we demote depends on how fresh the contradiction is.
 function buildContradictedIndex(relationships) {
-  const targets = new Set();
+  const map = new Map();
   for (const edge of relationships) {
-    if (edge.type === 'Contradicts' && edge.to_id) targets.add(edge.to_id);
+    if (edge.type !== 'Contradicts' || !edge.to_id) continue;
+    const ts = edge.created_at ? new Date(edge.created_at).getTime() : 0;
+    const prev = map.get(edge.to_id);
+    if (!prev || ts > prev._ts) map.set(edge.to_id, { createdBy: edge.created_by, _ts: ts });
   }
-  return targets;
+  return map;
+}
+
+// Map<from_id, _ts> — a memory that is the SOURCE of a recent statement-time
+// Contradicts/Updates edge is the later-stated ("winning") memory.
+function buildCorrectionWinnerIndex(relationships) {
+  const map = new Map();
+  for (const edge of relationships) {
+    if ((edge.type !== 'Contradicts' && edge.type !== 'Updates') || !edge.from_id) continue;
+    if (!STATEMENT_TIME_CREATORS.has(edge.created_by)) continue;
+    const ts = edge.created_at ? new Date(edge.created_at).getTime() : 0;
+    if (ts > (map.get(edge.from_id) || 0)) map.set(edge.from_id, ts);
+  }
+  return map;
+}
+
+// Temporal contradiction penalty. Fresh statement-time contradiction → 0.40
+// (hard demote); decays toward 0.90 (soft) as the edge ages past the halflife.
+// Non-statement (scanner/system) edges → flat 0.60 (moderate, not "just said").
+function contradictionPenalty(info, nowMs) {
+  if (!info) return 1;
+  if (!STATEMENT_TIME_CREATORS.has(info.createdBy)) return 0.60;
+  const ageDays = info._ts ? Math.max(0, (nowMs - info._ts) / 86400000) : 9999;
+  const frac = Math.min(ageDays / CORRECTION_HALFLIFE_DAYS, 1);
+  return Math.min(Math.max(0.40 + 0.50 * frac, 0.40), 0.90);
+}
+
+// Correction-winner boost: the later-stated memory floats up. 1.0→1.20 by recency.
+function correctionWinnerBoost(winnerTs, nowMs) {
+  if (!winnerTs) return 1;
+  const ageDays = Math.max(0, (nowMs - winnerTs) / 86400000);
+  return 1 + 0.20 * (1 - Math.min(ageDays / CORRECTION_HALFLIFE_DAYS, 1));
 }
 
 function policyBoost(memory, {
@@ -1203,7 +1247,9 @@ export async function recallPersistedMemories(store, {
 
   const relationships = await store.listRelationships({ user_id, org_id, project, limit: 1000 });
   const relationshipCounts = buildRelationshipIndex(relationships);
-  const contradictedIds    = buildContradictedIndex(relationships);
+  const contradictedIds    = buildContradictedIndex(relationships);       // Map<to_id,{createdBy,_ts}>
+  const correctionWinners  = buildCorrectionWinnerIndex(relationships);   // Map<from_id,_ts>
+  const _nowMs             = Date.now();
 
   // Graph Expansion: Discover related memories through graph traversal
   const expandedCandidates = await expandCandidatesViaGraph(store, {
@@ -1261,10 +1307,12 @@ export async function recallPersistedMemories(store, {
     // Stale-superseded penalty: superseded AND >30 days old gets extra
     // downweight. Catches old revisions that linger after drift compaction.
     if (memory.is_latest === false && daysAgo > 30) score *= 0.70;
-    // Contradiction penalty: memory was flagged as target of a Contradicts
-    // edge by the conflict-detector. Recall keeps it visible but should
-    // rarely promote it over a non-contradicted alternative.
-    if (contradictedIds.has(memory.id)) score *= 0.40;
+    // Contradiction penalty (WS2 temporal): a freshly-stated contradiction hard-
+    // demotes its target (poisoned-preference fix — the just-corrected fact sinks);
+    // an old one softens. The later-stated "winner" gets a recency boost so it
+    // floats to the top on the very next recall, no cron wait.
+    score *= contradictionPenalty(contradictedIds.get(memory.id), _nowMs);
+    score *= correctionWinnerBoost(correctionWinners.get(memory.id), _nowMs);
     // Content attribution: deprioritize third-party/noise content
     const attribution = memory.metadata?.content_attribution;
     if (attribution === 'newsletter') score *= 0.5;
@@ -1333,9 +1381,12 @@ export async function recallPersistedMemories(store, {
         temporalBoost + _eventTimeBoost(candidate.memory);
     // Superseded memory penalty
     if (candidate.memory?.is_latest === false) score *= 0.55;
-    // Stale-superseded penalty (>30d) + contradiction penalty.
+    // Stale-superseded penalty (>30d) + contradiction penalty (WS2 temporal).
     if (candidate.memory?.is_latest === false && daysAgo > 30) score *= 0.70;
-    if (candidate.memory?.id && contradictedIds.has(candidate.memory.id)) score *= 0.40;
+    if (candidate.memory?.id) {
+      score *= contradictionPenalty(contradictedIds.get(candidate.memory.id), _nowMs);
+      score *= correctionWinnerBoost(correctionWinners.get(candidate.memory.id), _nowMs);
+    }
     // Content attribution: deprioritize third-party/noise content
     const attribution = candidate.memory?.metadata?.content_attribution;
     if (attribution === 'newsletter') score *= 0.5;
@@ -1379,7 +1430,10 @@ export async function recallPersistedMemories(store, {
         (_effectiveWeights.graph ?? 0.05) * graphScore +
         (_effectiveWeights.policy ?? 0.05) * policyScore + _eventTimeBoost(candidate.memory);
     if (candidate.memory?.is_latest === false) score *= 0.55;
-    if (candidate.memory?.id && contradictedIds.has(candidate.memory.id)) score *= 0.40;
+    if (candidate.memory?.id) {
+      score *= contradictionPenalty(contradictedIds.get(candidate.memory.id), _nowMs);
+      score *= correctionWinnerBoost(correctionWinners.get(candidate.memory.id), _nowMs);
+    }
     return { ...candidate, keywordScore: candidate.similarityScore || 0, graphScore, policyScore, recencyScore, score };
   }).filter(c => c.memory?.id);
 

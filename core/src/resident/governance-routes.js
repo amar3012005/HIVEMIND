@@ -80,8 +80,20 @@ export function createGovernanceRoutes({ prisma, memoryStore, logger = console }
 
         try {
           if (typeof body.org_enabled === 'boolean') {
+            // Anchor the enable moment ONLY on a false→true transition, so the
+            // cognition loop starts from a 1-hour window at toggle-on time and
+            // NEVER backfills the org's historical memories. Re-saving an
+            // already-on toggle preserves the original anchor; turning it on
+            // after an off resets to now (fresh 1h window). Off leaves the
+            // anchor (harmless — the loop is gated by the flag itself).
             await prisma.$executeRawUnsafe(
-              `UPDATE hivemind.organizations SET cognition_org_enabled=$1 WHERE id=$2::uuid`,
+              `UPDATE hivemind.organizations
+                  SET cognition_org_enabled = $1,
+                      cognition_enabled_at = CASE
+                        WHEN $1 = true AND cognition_org_enabled = false THEN now()
+                        ELSE cognition_enabled_at
+                      END
+                WHERE id = $2::uuid`,
               body.org_enabled, orgId,
             );
           }

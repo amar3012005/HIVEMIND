@@ -40,6 +40,12 @@ const FALLBACK_SYNTHESIS_MODEL  = process.env.SYNTHESIS_FALLBACK_MODEL || 'opena
 
 // ─── Clustering / quality thresholds ──────────────────────────────────────────
 const DEFAULT_LOOKBACK_HOURS      = Number(process.env.SYNTHESIS_LOOKBACK_HOURS    || 24);
+// Rolling synthesis window once an org has cognition enabled. The loop only
+// ever looks at the LAST N hours of memory (default 1h) — never the full
+// history. Combined with the per-org cognition_enabled_at anchor, this means:
+// toggle ON → synthesize only the last hour from that moment forward, and
+// keep following a 1-hour rolling window each tick. No historical backfill.
+const ROLLING_WINDOW_HOURS        = Number(process.env.COGNITION_ROLLING_WINDOW_HOURS || 1);
 // Adaptive cluster floor: small orgs (≤50 fact+decision memories) can't
 // reach 6-member clusters. Scale floor with corpus density so sparse
 // tenants get synthesis too.
@@ -347,9 +353,44 @@ export class CognitionLoop {
    * cognition silently).
    * @returns {Promise<{run: boolean, reason: string|null}>}
    */
+  /**
+   * Per-org cognition enable state + the effective synthesis-window start.
+   * Returns { enabled, since }:
+   *   - enabled: false  → org never opted in (cognition_org_enabled=false).
+   *   - since: max(now - ROLLING_WINDOW_HOURS, cognition_enabled_at) — so the
+   *     loop sees ONLY the last hour AND never anything from before the org
+   *     toggled cognition on. No historical backfill, ever.
+   */
+  async _cognitionWindow(orgId) {
+    const rollingStart = Date.now() - ROLLING_WINDOW_HOURS * 3600 * 1000;
+    try {
+      const rows = await this.prisma.$queryRawUnsafe(
+        `SELECT cognition_org_enabled AS enabled, cognition_enabled_at AS enabled_at
+           FROM hivemind.organizations WHERE id = $1::uuid`,
+        orgId,
+      );
+      const row = rows?.[0];
+      if (!row || row.enabled !== true) return { enabled: false, since: new Date(rollingStart) };
+      const anchorMs = row.enabled_at ? new Date(row.enabled_at).getTime() : 0;
+      return { enabled: true, since: new Date(Math.max(rollingStart, anchorMs)) };
+    } catch (err) {
+      // On read failure, fall back to enabled + rolling window (don't wedge
+      // the loop), but stay bounded to 1h so we still never backfill.
+      this.logger.warn?.(`[cognition] window read failed org=${orgId}: ${err.message}`);
+      return { enabled: true, since: new Date(rollingStart) };
+    }
+  }
+
   async _shouldRunForOrg(orgId) {
     const MIN = Number(process.env.COGNITION_MIN_WINDOW_MEMORIES || 3);
-    const since = new Date(Date.now() - DEFAULT_LOOKBACK_HOURS * 3600 * 1000);
+    // Gate on the org toggle + clamp the window to max(now-1h, enabled_at).
+    // An org that never opted in is skipped entirely (no spend); an opted-in
+    // org only ever synthesizes its last-hour, post-enable activity.
+    const win = await this._cognitionWindow(orgId);
+    if (!win.enabled) {
+      return { run: false, reason: 'cognition_disabled_for_org' };
+    }
+    const since = win.since;
     const baseWhere = {
       orgId,
       deletedAt: null,
@@ -536,7 +577,9 @@ export class CognitionLoop {
     // high. Capped at the hard default.
     const clusterMin = await deriveClusterMin(this.prisma, orgId);
 
-    const since = new Date(Date.now() - DEFAULT_LOOKBACK_HOURS * 3600 * 1000);
+    // Rolling 1-hour window clamped to the org's cognition_enabled_at anchor —
+    // synthesis only ever sees recent, post-enable memory (no backfill).
+    const since = (await this._cognitionWindow(orgId)).since;
     // Structured connector sources: their schema IS already canonical.
     // Re-synthesizing produces tautological canonicals ("OrgFarm owns 16
     // accounts") and trivial bridges ("US contacts share country:usa with

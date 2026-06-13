@@ -93,6 +93,13 @@ const BRIDGE_GROUND_MIN          = Number(process.env.BRIDGE_GROUND_MIN         
 // Drop synthesis output if cosine(output, any source) > this (restatement guard)
 const RESTATEMENT_THRESHOLD       = Number(process.env.RESTATEMENT_THRESHOLD       || 0.92);
 const COOLDOWN_HOURS              = Number(process.env.SYNTHESIS_COOLDOWN_HOURS    || 6);
+// WS3 retroactive re-sweep: re-examine syntheses older than N days for
+// contradictions that arrived AFTER they were written, and temper confidence
+// down (the forward synthesis path only ratchets confidence UP).
+const STALE_REWEIGHT_DAYS         = Number(process.env.STALE_REWEIGHT_DAYS         || 7);
+const REWEIGHT_MAX_PER_TICK       = Number(process.env.REWEIGHT_MAX_PER_TICK       || 20);
+const REWEIGHT_TEMPER_PER_HIT     = Number(process.env.REWEIGHT_TEMPER_PER_HIT     || 0.15);
+const REWEIGHT_CONF_FLOOR         = Number(process.env.REWEIGHT_CONF_FLOOR         || 0.30);
 const DRIFT_COMPACT_THRESHOLD     = Number(process.env.DRIFT_COMPACT_THRESHOLD     || 12);
 // Hard cap on members folded into one canonical (stops 394-member pathology)
 const MAX_MEMBERS_PER_CANONICAL   = Number(process.env.DRIFT_MAX_MEMBERS_PER_CANONICAL || 10);
@@ -443,6 +450,12 @@ export class CognitionLoop {
       const compact = await this.compactDriftForOrg(orgId);
       // Pass 3 — L2 principle distillation (no-op unless PRINCIPLES_ENABLED)
       const principles = await this.distillPrinciplesForOrg(orgId);
+      // Pass 4 — WS3 retroactive re-sweep: temper stale syntheses on late
+      // contradictions (cheap, capped, no LLM). Non-fatal.
+      let reweighted = 0;
+      try { reweighted = await this.reweightStaleForOrg(orgId); }
+      catch (rwErr) { this.logger.warn(`[cognition][reweight] org=${orgId} failed: ${rwErr.message}`); }
+      if (reweighted) this.logger.log(`[cognition] reweight org=${orgId} tempered=${reweighted}`);
       _status.last_run_at           = new Date().toISOString();
       _status.last_run_ms           = Date.now() - tStart;
       _status.last_synthesis_count  = synth;
@@ -1147,6 +1160,89 @@ Output JSON only:
                : revision === 3 ? 0.94
                : 0.98;
     return Math.min(cap, rawConf);
+  }
+
+  // ─── WS3: retroactive re-sweep (temper stale syntheses on late contradictions) ─
+  /**
+   * Backward sweep — the piece the forward 1h-window synthesis can't do.
+   *
+   * Re-examines syntheses (canonical/bridge/principle) older than
+   * STALE_REWEIGHT_DAYS for Contradicts edges that arrived AFTER they were last
+   * updated, and tempers their confidence DOWN (forward synthesis only ratchets
+   * up). A synthesis that got contradicted weeks later no longer sits at 0.9
+   * forever. Deliberately reads beyond the 1h window — scoped ONLY to already-
+   * synthesized rows, never first-pass synthesis, so token cost stays bounded
+   * (no LLM call: this is a pure edge-count + confidence update).
+   *
+   * Idempotent + cheap: capped at REWEIGHT_MAX_PER_TICK, oldest-updated first,
+   * and touching updatedAt means a tempered row isn't re-picked until it goes
+   * stale again. Hysteresis: only tempers when NEW contradictions exist, so a
+   * row can't flap.
+   *
+   * @param {string} orgId
+   * @returns {Promise<number>} count tempered
+   */
+  async reweightStaleForOrg(orgId) {
+    if ((process.env.COGNITION_REWEIGHT_ENABLED || 'true').toLowerCase() === 'false') return 0;
+    if (!this.prisma?.memory) return 0;
+    const staleBefore = new Date(Date.now() - STALE_REWEIGHT_DAYS * 24 * 3600 * 1000);
+    let stale = [];
+    try {
+      stale = await this.prisma.memory.findMany({
+        where: {
+          orgId,
+          isLatest: true,
+          deletedAt: null,
+          cognitiveLayerRole: { in: ['canonical', 'bridge', 'principle'] },
+          updatedAt: { lt: staleBefore },
+        },
+        orderBy: { updatedAt: 'asc' },
+        take: REWEIGHT_MAX_PER_TICK,
+        select: { id: true, synthesisConfidence: true, synthesisRevision: true, updatedAt: true, title: true },
+      });
+    } catch (err) {
+      this.logger.warn(`[cognition][reweight] query failed org=${orgId}: ${err.message}`);
+      return 0;
+    }
+    if (!stale.length) return 0;
+
+    let tempered = 0;
+    for (const synth of stale) {
+      try {
+        // Count Contradicts edges that target this synthesis AND arrived after
+        // it was last reweighted/written. Those are the "discovered after the
+        // fact" contradictions the forward pass never saw.
+        const newContradictions = await this.prisma.relationship.count({
+          where: {
+            toId: synth.id,
+            type: 'Contradicts',
+            createdAt: { gt: synth.updatedAt },
+          },
+        });
+        if (newContradictions <= 0) continue; // hysteresis — only temper on new evidence
+
+        const prior = synth.synthesisConfidence != null ? synth.synthesisConfidence : 0.7;
+        const temperedConf = Math.max(
+          REWEIGHT_CONF_FLOOR,
+          prior * (1 - REWEIGHT_TEMPER_PER_HIT * newContradictions),
+        );
+        if (temperedConf >= prior) continue; // never raise here
+
+        await this.prisma.memory.update({
+          where: { id: synth.id },
+          data: {
+            synthesisConfidence: temperedConf,
+            synthesisRevision: (synth.synthesisRevision || 1) + 1,
+            updatedAt: new Date(),
+          },
+        });
+        tempered += 1;
+        this.logger.log(`[cognition][reweight] org=${orgId} tempered ${synth.id.slice(0, 8)} ${prior.toFixed(2)}→${temperedConf.toFixed(2)} (${newContradictions} late contradiction(s))`);
+      } catch (err) {
+        this.logger.warn(`[cognition][reweight] temper failed id=${synth.id?.slice(0, 8)}: ${err.message}`);
+      }
+    }
+    return tempered;
   }
 
   // ─── Phase 2: Delta-update existing synthesis with new evidence ───────────────

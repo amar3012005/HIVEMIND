@@ -1130,6 +1130,8 @@ const governanceRoutes = createGovernanceRoutes({
     prisma,
     intervalMs: Number(process.env.GOVERNANCE_INTERVAL_MS || process.env.GOVERNANCE_SCHEDULER_INTERVAL_MS || 30 * 60 * 1000),
     logger: console,
+    // WS3: live getter for the lazily-built CognitionLoop (drives retroactive re-sweep).
+    cognitionLoopRef: () => cognitionLoop,
   });
   governanceScheduler.start();
 }

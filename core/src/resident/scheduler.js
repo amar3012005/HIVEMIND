@@ -21,9 +21,13 @@ export class ResidentAgentScheduler {
   // NOTE (Phase D): post-Phase-D this scheduler's setInterval (started below,
   // gated by ENABLE_GOVERNANCE_SCHEDULER) is the SOLE owner of cognition cadence
   // — the standalone CognitionLoop timer is retired.
-  constructor({ runManager, prisma = null, intervalMs = 60 * 60 * 1000, logger = console } = {}) {
+  constructor({ runManager, prisma = null, intervalMs = 60 * 60 * 1000, logger = console, cognitionLoopRef = null } = {}) {
     this.runManager = runManager;
     this.prisma = prisma;
+    // WS3: getter for the live CognitionLoop (built lazily in server.js via
+    // setImmediate). A getter, not the instance, so we read the live binding
+    // at tick time rather than a null snapshot. Drives the retroactive re-sweep.
+    this.cognitionLoopRef = cognitionLoopRef;
     // Default tick = 1h (synthesis cadence). Compression / bridge fire on
     // multiples of 1h (4h / 12h) via tier flags in this._tickTier().
     this.intervalMs = intervalMs;
@@ -181,6 +185,21 @@ export class ResidentAgentScheduler {
           }
         } catch (err) {
           this.logger?.warn?.(`[gov-scheduler] org=${o.id.slice(0,8)} failed: ${err?.message || err}`);
+        }
+      }
+      // WS3: retroactive re-sweep on the slow (every-12-tick) cadence — temper
+      // stale syntheses against late contradictions. Cheap (no LLM), capped.
+      if (this.tickCount % 12 === 0) {
+        const loop = typeof this.cognitionLoopRef === 'function' ? this.cognitionLoopRef() : null;
+        if (loop && typeof loop.reweightStaleForOrg === 'function') {
+          for (const o of orgs) {
+            try {
+              const n = await loop.reweightStaleForOrg(o.id);
+              if (n) this.logger?.log?.(`[gov-scheduler] reweight org=${o.id.slice(0,8)} tempered=${n}`);
+            } catch (err) {
+              this.logger?.warn?.(`[gov-scheduler] reweight org=${o.id.slice(0,8)} failed: ${err?.message || err}`);
+            }
+          }
         }
       }
       await this._maybeEvolve(orgs);

@@ -435,7 +435,7 @@ export class CognitionLoop {
     }
   }
 
-  async runOnce(orgId) {
+  async runOnce(orgId, { skipCompaction = false } = {}) {
     if (_status.running) {
       return { skipped: true, reason: 'tick already in progress' };
     }
@@ -451,7 +451,12 @@ export class CognitionLoop {
         return { synth: 0, compact: 0, principles: 0, ms: Date.now() - tStart, skipped: true, reason: gate.reason };
       }
       const synth   = await this.synthesizeForOrg(orgId);
-      const compact = await this.compactDriftForOrg(orgId);
+      // Drift compaction folds large clusters and demotes+purges their members.
+      // On a MANUAL trigger that is a full-window blast over live user data
+      // (the §10 hazard that over-compacted a real org's KB). Skip it on manual
+      // runs; gentle compaction still happens on the scheduled every-12-tick
+      // cadence via the governance 'compression' tool.
+      const compact = skipCompaction ? 0 : await this.compactDriftForOrg(orgId);
       // Pass 3 — L2 principle distillation (no-op unless PRINCIPLES_ENABLED)
       const principles = await this.distillPrinciplesForOrg(orgId);
       // Pass 4 — WS3 retroactive re-sweep: temper stale syntheses on late

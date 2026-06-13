@@ -9539,7 +9539,10 @@ exit \$RC
             // look like a no-op when there were simply no eligible
             // memories — now FE can render "0 new" instead of guessing.
             try {
-              const result = await cognitionLoop.runOnce(orgId);
+              // skipCompaction: manual synthesize-now must NOT run the destructive
+              // full-window drift compaction (folds/demotes/purges live KB chunks —
+              // §10 hazard). Compaction stays on the scheduled cadence only.
+              const result = await cognitionLoop.runOnce(orgId, { skipCompaction: true });
               return jsonResponse(res, {
                 triggered: true,
                 org_id: orgId,

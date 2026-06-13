@@ -9101,6 +9101,93 @@ exit \$RC
           }
           break;
 
+        // POST /api/admin/relink-edgeless — heal memories that ended up with
+        // ZERO graph edges because their inline entity-co-mention pass failed
+        // transiently at save time (Groq 429/timeout, single-attempt, no
+        // backfill). Re-runs the SAME linker (linkEntitiesForMemories) over
+        // live, entity-tagged memories that currently have no relationship in
+        // either direction. Scoped to the caller's org by default.
+        // Body: { user_id?, org_id?, limit?, dry_run? }
+        case '/api/admin/relink-edgeless':
+          if (req.method === 'POST') {
+            try {
+              if (!persistentMemoryEngine || typeof persistentMemoryEngine.linkEntitiesForMemories !== 'function') {
+                return jsonResponse(res, { error: 'Memory engine unavailable' }, 503);
+              }
+              const targetUser = body.user_id || userId || null;
+              const targetOrg = body.org_id || orgId || null;
+              const limit = Math.min(Number(body.limit || 200), 1000);
+              const dryRun = body.dry_run === true;
+
+              // Edgeless = live, entity-tagged, and NOT referenced by any
+              // relationship row (from_id OR to_id). Raw SQL because Prisma
+              // can't express "NONE across two FK columns" cleanly.
+              const where = ['m.deleted_at IS NULL', 'm.is_latest = true'];
+              const params = [];
+              if (targetUser) { params.push(targetUser); where.push(`m.user_id = $${params.length}::uuid`); }
+              if (targetOrg)  { params.push(targetOrg);  where.push(`m.org_id  = $${params.length}::uuid`); }
+              params.push(limit);
+              const sql = `
+                SELECT m.id, m.user_id, m.org_id, m.content, m.title, m.tags, m.memory_type
+                FROM hivemind.memories m
+                WHERE ${where.join(' AND ')}
+                  AND array_to_string(m.tags, ',') LIKE '%entity:%'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM hivemind.relationships r
+                    WHERE r.from_id = m.id OR r.to_id = m.id
+                  )
+                ORDER BY m.created_at DESC
+                LIMIT $${params.length}`;
+              const rows = await prisma.$queryRawUnsafe(sql, ...params);
+
+              if (dryRun) {
+                return jsonResponse(res, {
+                  dry_run: true,
+                  edgeless_found: rows.length,
+                  sample: rows.slice(0, 10).map(r => ({ id: r.id, title: (r.title || '').slice(0, 60) })),
+                });
+              }
+
+              // Shape for linkEntitiesForMemories (reads snake_case fields).
+              const memories = rows.map(r => ({
+                id: r.id,
+                user_id: r.user_id,
+                org_id: r.org_id,
+                content: r.content,
+                title: r.title,
+                tags: Array.isArray(r.tags) ? r.tags : [],
+                memory_type: r.memory_type,
+              }));
+
+              await persistentMemoryEngine.linkEntitiesForMemories(memories, { concurrency: 4 });
+
+              // Count how many now have at least one edge (verification).
+              const ids = memories.map(m => m.id);
+              let linked = 0;
+              if (ids.length) {
+                const linkedRows = await prisma.$queryRawUnsafe(
+                  `SELECT count(DISTINCT mid) AS n FROM (
+                     SELECT m.id AS mid FROM hivemind.memories m
+                     WHERE m.id = ANY($1::uuid[])
+                       AND EXISTS (SELECT 1 FROM hivemind.relationships r WHERE r.from_id = m.id OR r.to_id = m.id)
+                   ) t`,
+                  ids,
+                );
+                linked = Number(linkedRows?.[0]?.n || 0);
+              }
+              return jsonResponse(res, {
+                success: true,
+                scanned: memories.length,
+                now_linked: linked,
+                still_edgeless: memories.length - linked,
+              });
+            } catch (err) {
+              console.error('[relink-edgeless] failed:', err.message);
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
         case '/api/admin/entities/merge':
           // P3 #22 — manual entity merge tool
           if (req.method === 'POST') {

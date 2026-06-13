@@ -2157,48 +2157,74 @@ Reason: ≤80 chars plain English.
 At most one link per candidate index.
 If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "links": [] }.`;
 
+    // Retry the Groq call on TRANSIENT failures (429 rate-limit, 5xx, and
+    // network/timeout aborts). A single-attempt best-effort call meant any
+    // transient Groq blip at save time silently produced ZERO edges and —
+    // with no backfill — orphaned the memory permanently (observed: ~10
+    // edgeless MCP saves, e.g. the GTM/B&B memory, despite 13 valid
+    // candidates). Up to 3 attempts with exponential backoff; only a
+    // genuine 4xx (bad request / auth) or exhausted retries gives up.
+    const LINK_MODEL = process.env.ENTITY_LINKER_MODEL || 'llama-3.3-70b-versatile';
+    const LINK_TIMEOUT_MS = Number(process.env.ENTITY_LINK_TIMEOUT_MS || 25000);
+    const LINK_MAX_ATTEMPTS = Number(process.env.ENTITY_LINK_MAX_ATTEMPTS || 3);
     let parsed;
-    try {
-      const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          // Entity extraction needs proper-noun recall, not just JSON
-          // shaping. gpt-oss-20b (the default MEMORY_INGEST_MODEL) returns
-          // entities=[] for short MCP saves with obvious proper nouns
-          // ("Amar Sai Gadde, Ceyda Sarioglu, Hannover") because the small
-          // model bails when it can't relate them to candidates. Pin to
-          // llama-3.3-70b-versatile by default — same model the memory
-          // processor already uses for relationship classification, so
-          // the entity-side reasoning matches that quality.
-          model: process.env.ENTITY_LINKER_MODEL || 'llama-3.3-70b-versatile',
-          messages: [{ role: 'user', content: prompt }],
-          // gpt-oss-20b fails Groq strict JSON-mode validation — skip
-          // response_format for that family, rely on extractJsonFromText.
-          ...(/gpt-oss/i.test(process.env.ENTITY_LINKER_MODEL || 'llama-3.3-70b-versatile') ? {} : { response_format: { type: 'json_object' } }),
-          temperature: 0.1,
-          max_tokens: 700,
-        }),
-        // Bounded — prevent a hung groq call from wedging ingestMemory's advisory lock.
-        signal: AbortSignal.timeout(Number(process.env.ENTITY_LINK_TIMEOUT_MS || 25000)),
-      });
-      if (!resp.ok) {
-        const errBody = await resp.text();
-        console.warn(`[entity-co-mention] LLM ${resp.status}: ${errBody.slice(0, 200)}`);
-        return;
-      }
-      const data = await resp.json();
-      const raw = data?.choices?.[0]?.message?.content || '{}';
+    let linkLastErr = null;
+    for (let attempt = 1; attempt <= LINK_MAX_ATTEMPTS; attempt++) {
       try {
-        parsed = JSON.parse(raw);
-      } catch (strictErr) {
-        parsed = extractJsonFromText(raw); // lenient fallback for gpt-oss
+        const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            // Entity extraction needs proper-noun recall, not just JSON
+            // shaping. gpt-oss-20b returns entities=[] for short MCP saves
+            // with obvious proper nouns, so pin to llama-3.3-70b-versatile.
+            model: LINK_MODEL,
+            messages: [{ role: 'user', content: prompt }],
+            // gpt-oss family fails Groq strict JSON-mode validation — skip
+            // response_format for it, rely on extractJsonFromText.
+            ...(/gpt-oss/i.test(LINK_MODEL) ? {} : { response_format: { type: 'json_object' } }),
+            temperature: 0.1,
+            max_tokens: 700,
+          }),
+          // Bounded — prevent a hung groq call from wedging the advisory lock.
+          signal: AbortSignal.timeout(LINK_TIMEOUT_MS),
+        });
+        if (!resp.ok) {
+          const errBody = await resp.text();
+          // 429 / 5xx are transient → retry. Other 4xx (400/401/403) are
+          // permanent (bad key/request) → give up immediately.
+          const transient = resp.status === 429 || resp.status >= 500;
+          console.warn(`[entity-co-mention] LLM ${resp.status} (attempt ${attempt}/${LINK_MAX_ATTEMPTS}${transient ? ', retrying' : ', fatal'}): ${errBody.slice(0, 160)}`);
+          if (transient && attempt < LINK_MAX_ATTEMPTS) {
+            await new Promise((r) => setTimeout(r, 400 * attempt * attempt)); // 400ms, 1.6s
+            continue;
+          }
+          return;
+        }
+        const data = await resp.json();
+        const raw = data?.choices?.[0]?.message?.content || '{}';
+        try {
+          parsed = JSON.parse(raw);
+        } catch (strictErr) {
+          parsed = extractJsonFromText(raw); // lenient fallback for gpt-oss
+        }
+        linkLastErr = null;
+        break; // success
+      } catch (llmErr) {
+        // Network error / AbortSignal timeout — transient, retry.
+        linkLastErr = llmErr;
+        console.warn(`[entity-co-mention] LLM failed (attempt ${attempt}/${LINK_MAX_ATTEMPTS}): ${llmErr.message}`);
+        if (attempt < LINK_MAX_ATTEMPTS) {
+          await new Promise((r) => setTimeout(r, 400 * attempt * attempt));
+          continue;
+        }
       }
-    } catch (llmErr) {
-      console.warn('[entity-co-mention] LLM failed:', llmErr.message);
+    }
+    if (!parsed) {
+      if (linkLastErr) console.warn('[entity-co-mention] LLM exhausted retries:', linkLastErr.message);
       return;
     }
 

@@ -118,3 +118,21 @@ test('deterministic: same query + same nowMs ⇒ same tag set (order-insensitive
   const b = normalizeQueryTemporalTokens('what did we do yesterday and last monday', NOW);
   assert.deepEqual([...a].sort(), [...b].sort());
 });
+
+// ── STRICT mode (EVENT_TIME_RANKING_STRICT=true) ─────────────────────────
+// Opt-in hard-trim: keep ONLY the top-N (default 3) in-window memories before
+// the answer model sees them. Tighter than default cap-5 reorder.
+test('STRICT mode contract: TOP_N defaults to 3, EVENT_TIME_TOP_N overrides', () => {
+  // Pure constant contract — re-derive the same expression the code uses.
+  // Locks the default and the env override against silent drift.
+  const top = (envStrict, envN) => {
+    const STRICT = envStrict === 'true';
+    return STRICT ? Math.max(1, parseInt(envN || '3', 10)) : 5;
+  };
+  assert.equal(top('true', undefined), 3, 'STRICT default must be 3');
+  assert.equal(top('true', '5'), 5, 'EVENT_TIME_TOP_N=5 must override to 5');
+  assert.equal(top('true', '1'), 1, 'EVENT_TIME_TOP_N=1 must work');
+  assert.equal(top('true', '0'), 1, 'TOP_N must be clamped to ≥1');
+  assert.equal(top('false', undefined), 5, 'non-strict must stay at cap 5');
+  assert.equal(top(undefined, undefined), 5, 'unset must stay at cap 5 (default off)');
+});

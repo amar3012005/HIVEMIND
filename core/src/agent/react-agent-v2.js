@@ -1100,7 +1100,18 @@ async function answerStep({ message, history, evidence, plan, language, assistan
           const hitSet = new Set(hits.map((m) => m.id));
           const rest = evidence.memories.filter((m) => !hitSet.has(m.id));
           evidence = { ...evidence, memories: [...hits, ...rest] };
-          _eventWindowHits = Math.min(hits.length, 5);
+          // STRICT mode (gated EVENT_TIME_RANKING_STRICT, default OFF — opt-in):
+          // boost ts:-tagged matches to the top + trim the tail HARD to top-N
+          // (default 3, env EVENT_TIME_TOP_N to override). Tighter set than the
+          // default cap-5 reorder. For A/B against the cap-5 reorder.
+          const STRICT = process.env.EVENT_TIME_RANKING_STRICT === 'true';
+          const TOP_N = STRICT ? Math.max(1, parseInt(process.env.EVENT_TIME_TOP_N || '3', 10)) : 5;
+          _eventWindowHits = Math.min(hits.length, TOP_N);
+          if (STRICT) {
+            // Hard trim — kill the tail entirely so the answer model sees ONLY
+            // in-window memories (the explicit-date-query feel for vague phrases).
+            evidence = { ...evidence, memories: hits.slice(0, TOP_N) };
+          }
         }
       }
     } catch { /* non-fatal — leave evidence as recalled */ }

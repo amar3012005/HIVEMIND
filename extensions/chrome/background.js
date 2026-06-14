@@ -512,7 +512,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['autofill.js'] });
         const scanRes = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => (window.__hmAutofill ? window.__hmAutofill.scan() : []) });
         const fields = (scanRes && scanRes[0] && scanRes[0].result) || [];
-        if (!fields.length) { sendResponse({ error: 'No fillable fields found on this page.' }); return; }
+
+        // No HTML form fields → spreadsheet/canvas grid. Build a grounded table
+        // from memory and copy it as TSV for the user to paste (Cmd+V).
+        if (!fields.length) {
+          try {
+            const tResp = await fetch(`${config.apiBase}/api/autofill/table`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'X-API-Key': config.apiKey },
+              body: JSON.stringify({ prompt: message.prompt || 'Fill this sheet with my information', url: tab.url || '', title: tab.title || '' }),
+            });
+            if (tResp.ok) {
+              const tbl = await tResp.json();
+              if ((tbl.columns || []).length && (tbl.rows || []).length) {
+                const copyRes = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: (c, r) => (window.__hmAutofill ? window.__hmAutofill.copyTSV(c, r) : null), args: [tbl.columns, tbl.rows] });
+                const cr = (copyRes && copyRes[0] && copyRes[0].result) || {};
+                sendResponse({ ok: true, mode: 'table', rows: tbl.rows.length, cols: tbl.columns.length, summary: tbl.summary || '', copied: !!cr.ok });
+                return;
+              }
+              sendResponse({ ok: true, mode: 'table', rows: 0, note: tbl.summary || 'No table could be built from your memory for this request.' });
+              return;
+            }
+          } catch (te) { /* fall through to error */ }
+          sendResponse({ error: 'No form fields here, and no table could be built from your memory.' });
+          return;
+        }
 
         // 4. plan: vision + grounded recall (one server run)
         const resp = await fetch(`${config.apiBase}/api/autofill/plan`, {

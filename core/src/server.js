@@ -5486,6 +5486,49 @@ exit \$RC
         }
       }
 
+      // POST /api/autofill/table — for spreadsheets/canvas grids (no DOM inputs):
+      // recall from the user's prompt → LLM structures a GROUNDED table
+      // {columns, rows} the extension copies as TSV to paste into the sheet.
+      // Never invents a row not supported by a recalled memory.
+      if (pathname === '/api/autofill/table' && req.method === 'POST') {
+        if (!process.env.GROQ_API_KEY) return jsonResponse(res, { error: 'llm_unavailable' }, 503);
+        try {
+          const auth = await authenticateApiKey(req).catch(() => null);
+          const tUser = auth?.principal?.userId || req.headers['x-hm-user-id'] || DEFAULT_USER;
+          const tOrg = auth?.principal?.orgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
+          const tPrompt = (body.prompt || '').toString().slice(0, 600);
+          if (!tPrompt.trim()) return jsonResponse(res, { error: 'no_prompt' }, 400);
+
+          // Recall a broad candidate pool from the request, drop synthesis/test
+          // artifacts (same filter as meeting intelligence).
+          const rr = await recallPersistedMemories(persistentMemoryStore, { query_context: tPrompt, user_id: tUser, org_id: tOrg, max_memories: 25 }).catch(() => null);
+          const SYNTH = /^(Bridge:|Canonical fact:|Canonical:|Principle:|Reflection:)/i;
+          const mems = ((rr?.memories || rr || []) || [])
+            .filter((m) => m && m.id && !m.cognitive_layer_role && !SYNTH.test(m.title || '') && !/\btest-md|entity-\d+b-test\b/i.test(m.title || ''))
+            .slice(0, 25)
+            .map((m) => ({ id: m.id, text: `${m.title || ''} ${m.content || ''}`.replace(/\s+/g, ' ').trim().slice(0, 280) }));
+          if (!mems.length) return jsonResponse(res, { columns: [], rows: [], summary: 'No relevant memories found.' });
+
+          const sys = 'You build a spreadsheet table from the user request, grounded ONLY in the provided memory snippets. Choose sensible COLUMN headers for the request. Each ROW must be supported by a memory — never invent rows or values not present in the snippets. Keep cells short. Max 10 columns, 50 rows. STRICT JSON {"summary":"<1 line>","columns":["<col>",...],"rows":[["<cell>",...],...]}.';
+          const usr = `REQUEST: ${tPrompt}\n\nMEMORIES:\n${JSON.stringify(mems)}`;
+          const lr = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: process.env.MEETING_INSIGHTS_MODEL || 'openai/gpt-oss-120b', temperature: 0.1, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: sys }, { role: 'user', content: usr }] }),
+            signal: AbortSignal.timeout(60_000),
+          });
+          if (!lr.ok) return jsonResponse(res, { error: 'table_failed' }, 502);
+          let out = {};
+          try { out = JSON.parse((await lr.json()).choices[0].message.content); } catch { out = {}; }
+          const columns = Array.isArray(out.columns) ? out.columns.map(String).slice(0, 10) : [];
+          const rows = Array.isArray(out.rows) ? out.rows.slice(0, 50).map((r) => (Array.isArray(r) ? r.map((c) => String(c == null ? '' : c)).slice(0, columns.length || 10) : [])) : [];
+          return jsonResponse(res, { summary: (out.summary || '').toString().slice(0, 200), columns, rows });
+        } catch (e) {
+          console.error('[autofill-table] failed:', e.message);
+          return jsonResponse(res, { error: 'table_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
+        }
+      }
+
       // PATCH /api/meetings/:id — link a saved memory (Save to HIVEMIND) or amend
       // title/summary on an EXISTING row. Lets the meeting be persisted to Past
       // meetings the moment it finishes (POST, no memory) and later linked to a

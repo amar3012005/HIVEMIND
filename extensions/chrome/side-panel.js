@@ -165,6 +165,15 @@ function wireEvents() {
         const res = await chrome.runtime.sendMessage({ action: 'autofillRun', prompt });
         if (!res || res.error) {
           showAutofillToast(`⚠ ${(res && res.error) || 'Autofill failed'}`);
+        } else if (res.mode === 'table') {
+          if (res.rows > 0) {
+            showAutofillToast(res.copied
+              ? `📋 ${res.rows}×${res.cols} table copied from your memory — click a cell + press Cmd/Ctrl+V`
+              : `Built a ${res.rows}×${res.cols} table but couldn't copy — try again`);
+            if (input) input.value = '';
+          } else {
+            showAutofillToast(res.note || 'No table could be built from your memory.');
+          }
         } else if (res.filled === 0) {
           showAutofillToast(res.note || 'Nothing to fill from your memory.');
         } else {

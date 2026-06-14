@@ -93,5 +93,29 @@
     return { filled: done };
   }
 
-  window.__hmAutofill = { scan, run };
+  // ─── Spreadsheet mode: copy a grounded table as TSV to paste into a grid ──
+  async function copyTSV(columns, rows) {
+    const esc = (c) => String(c == null ? '' : c).replace(/\t/g, ' ').replace(/\r?\n/g, ' ');
+    const tsv = [(columns || []).map(esc).join('\t'), ...(rows || []).map((r) => (r || []).map(esc).join('\t'))].join('\n');
+    let ok = false;
+    try { await navigator.clipboard.writeText(tsv); ok = true; } catch (e) {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = tsv; ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0;';
+        document.body.appendChild(ta); ta.focus(); ta.select();
+        ok = document.execCommand('copy'); ta.remove();
+      } catch (e2) { ok = false; }
+    }
+    // Ghost cursor points at the grid + a paste hint banner.
+    ensureCursor(); moveCursor(window.innerWidth / 2 - 13, 150);
+    const hint = document.createElement('div');
+    hint.style.cssText = 'position:fixed;top:120px;left:50%;transform:translateX(-50%);z-index:2147483647;background:#0a0a0a;color:#fff;font:600 13px/1.4 system-ui;padding:10px 16px;border-radius:10px;box-shadow:0 6px 20px rgba(0,0,0,.3);pointer-events:none;';
+    hint.textContent = ok ? `📋 ${rows.length} rows × ${columns.length} cols copied — click a cell and press Cmd/Ctrl+V` : 'Could not copy — try again';
+    document.documentElement.appendChild(hint);
+    setTimeout(() => { hint.style.transition = 'opacity .5s'; hint.style.opacity = '0'; }, 5000);
+    setTimeout(() => hint.remove(), 5600);
+    return { ok, rows: (rows || []).length, cols: (columns || []).length };
+  }
+
+  window.__hmAutofill = { scan, run, copyTSV };
 })();

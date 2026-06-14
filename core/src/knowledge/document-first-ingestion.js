@@ -377,7 +377,11 @@ Output the JSON object and nothing else.`;
             if (created >= MAX_FACTS_PER_DOC) break;
             try {
               const p = await ingestFact(t, fact, entityTags);
-              if (p) { pending.push(p); created++; }
+              // Re-check the cap in the same synchronous tick as the increment:
+              // `created` is shared across CONCURRENCY workers and the await above
+              // is a yield point, so the outer break alone lets the soft cap
+              // overshoot. This keeps MAX_FACTS_PER_DOC effectively binding.
+              if (p && created < MAX_FACTS_PER_DOC) { pending.push(p); created++; }
             } catch (err) { failed++; this.logger.warn?.(`[kb-distill] fact ingest failed: ${err.message}`); }
           }
         }

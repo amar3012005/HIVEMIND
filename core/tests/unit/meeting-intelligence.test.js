@@ -141,3 +141,24 @@ test('generateIntelligence: prior-meeting loops populate open_loops', async () =
   assert.equal(out.open_loops.length, 1);
   assert.equal(out.open_loops[0].text, 'Open thing');
 });
+
+import { resolveOpenLoops } from '../../src/knowledge/meeting-intelligence.js';
+
+test('resolveOpenLoops: drops done, keeps in_progress with progress note', async () => {
+  const recall = async () => ({ memories: [{ id: 'e1', title: 'sent the deck', content: 'pitch deck sent to angel', created_at: '2026-06-10T00:00:00Z' }] });
+  const judge = async ({ items }) => ({
+    results: items.map((it) => it.action.includes('deck')
+      ? { status: 'done', progress: '', evidence_index: 0 }
+      : { status: 'in_progress', progress: 'started drafting', evidence_index: 0 }),
+  });
+  const loops = [
+    { kind: 'action', text: 'Send pitch deck', source_meeting_id: 'm1', created_at: '2026-06-01T00:00:00Z', memory_id: 'm1' },
+    { kind: 'action', text: 'Write Berlin plan', source_meeting_id: 'm1', created_at: '2026-06-01T00:00:00Z', memory_id: 'm1' },
+  ];
+  const out = await resolveOpenLoops(loops, { recall, judge });
+  assert.equal(out.length, 1); // 'done' dropped
+  assert.equal(out[0].text, 'Write Berlin plan');
+  assert.equal(out[0].loop_status, 'in_progress');
+  assert.equal(out[0].progress, 'started drafting');
+  assert.equal(out[0].progress_memory_id, 'e1');
+});

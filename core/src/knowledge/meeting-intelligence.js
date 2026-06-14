@@ -163,6 +163,54 @@ export function priorMeetingLoops(priorItems, { nowIso, max = 6 } = {}) {
     });
 }
 
+/**
+ * Phase A — progress check: before showing a prior open loop, recall LATER
+ * evidence and have the judge decide if it's DONE / IN_PROGRESS / OPEN.
+ * DONE → dropped (no longer open). IN_PROGRESS → kept with a progress note +
+ * the evidence memory id. OPEN → kept as-is. Never assume done without
+ * explicit dated evidence.
+ */
+export async function resolveOpenLoops(loops, { recall, judge, max = 6 }) {
+  const picked = (loops || []).slice(0, max);
+  if (!picked.length) return [];
+  const withEv = [];
+  for (const l of picked) {
+    const res = await recall(l.text, { recencyFirst: true }).catch(() => ({ memories: [] }));
+    const ev = (res?.memories || [])
+      .filter((m) => m.id && m.id !== l.source_meeting_id)
+      // only evidence DATED AFTER the loop was raised counts toward resolution
+      .filter((m) => !l.created_at || !m.created_at || new Date(m.created_at) >= new Date(l.created_at))
+      .slice(0, 4)
+      .map((m) => ({ id: m.id, snippet: `${m.created_at ? `[${String(m.created_at).slice(0, 10)}] ` : ''}${`${m.title || ''} ${m.content || ''}`.trim()}`.slice(0, 200) }));
+    withEv.push({ ...l, _ev: ev });
+  }
+  const judged = await judge({
+    task: 'resolve_loops',
+    items: withEv.map((l) => ({ action: l.text, evidence: l._ev.map((e) => e.snippet) })),
+  }).then((r) => r?.results || []).catch(() => []);
+  const out = [];
+  withEv.forEach((l, i) => {
+    const j = judged[i] || {};
+    const status = ['done', 'in_progress', 'open'].includes(j.status) ? j.status : 'open';
+    if (status === 'done') return; // resolved → no longer an open loop
+    const evIdx = Number.isInteger(j.evidence_index) ? j.evidence_index : -1;
+    const ev = (evIdx >= 0 && evIdx < l._ev.length) ? l._ev[evIdx] : null;
+    out.push({
+      kind: l.kind,
+      text: l.text,
+      owner: l.owner,
+      source_meeting_id: l.source_meeting_id,
+      source_meeting_title: l.source_meeting_title,
+      age_days: l.age_days,
+      memory_id: l.memory_id,
+      loop_status: status,
+      progress: status === 'in_progress' ? String(j.progress || '').slice(0, 160) : null,
+      progress_memory_id: ev?.id || null,
+    });
+  });
+  return out;
+}
+
 // Cognition-synthesis + test artifacts that pollute recall — never show them
 // as "related memory" (they're machine exhaust, not real user content).
 const SYNTH_TITLE = /^(Bridge:|Canonical fact:|Canonical:|Principle:|Reflection:)/i;
@@ -224,11 +272,13 @@ export async function generateIntelligence(meeting, { recall, judge, nowIso, pri
     openLoops(topics, { recall }).catch(() => []),
     relatedMemories(relatedQueries, { recall }).catch(() => []),
   ]);
-  // Open loops = prior MEETINGS' unresolved action items/risks (precise) first,
-  // then any risk-tagged topical memories. Dedup by text, cap 8.
+  // Open loops = prior MEETINGS' action items/risks, each PROGRESS-CHECKED
+  // against later memory (done → dropped, in-progress → annotated), then any
+  // risk-tagged topical memories. Dedup by text, cap 8.
   const priorLoops = priorMeetingLoops(priorItems, { nowIso });
+  const resolvedLoops = await resolveOpenLoops(priorLoops, { recall, judge }).catch(() => priorLoops);
   const seenText = new Set();
-  const loops = [...priorLoops, ...topicLoops]
+  const loops = [...resolvedLoops, ...topicLoops]
     .filter((l) => { const k = (l.text || '').toLowerCase().slice(0, 80); if (!k || seenText.has(k)) return false; seenText.add(k); return true; })
     .slice(0, 8);
   const relatedCount = entities.reduce((s, e) => s + (e.memory_count || 0), 0) + cont.length + loops.length + related.length;

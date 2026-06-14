@@ -5517,9 +5517,14 @@ exit \$RC
             return { memories };
           };
           const judge = async (payload) => {
-            const sys = payload.task === 'entity_briefs'
-              ? 'You write one-line factual briefs about named entities, grounded ONLY in the provided dated snippets. Rules: (1) Use ONLY facts where the named entity is the EXPLICIT subject. (2) If NO snippet is clearly about that entity, output an EMPTY string "" for it — never guess, never infer a relationship that is not stated. (3) When snippets conflict or evolve over time, the MOST RECENT dated fact wins (snippets are prefixed [YYYY-MM-DD]). (4) One sentence, concrete, no fluff. Output STRICT JSON {"briefs":{"<name>":"<brief or empty string>"}}.'
-              : 'For each {decision,prior} pair, decide if the decision is NEW, UPDATES, or CONFLICTS relative to the prior memory. Be STRICT: only UPDATES if the decision clearly changes a value/state stated in the prior; only CONFLICTS if it directly contradicts the prior; otherwise NEW. When the prior is not clearly about the same thing, NEW with low confidence. Never invent a relationship. STRICT JSON {"results":[{"relation":"NEW|UPDATES|CONFLICTS","reason":"<short, cite the change>","confidence":0..1}]} in pair order.';
+            let sys;
+            if (payload.task === 'entity_briefs') {
+              sys = 'You write one-line factual briefs about named entities, grounded ONLY in the provided dated snippets. Rules: (1) Use ONLY facts where the named entity is the EXPLICIT subject. (2) If NO snippet is clearly about that entity, output an EMPTY string "" for it — never guess, never infer a relationship that is not stated. (3) When snippets conflict or evolve over time, the MOST RECENT dated fact wins (snippets are prefixed [YYYY-MM-DD]). (4) One sentence, concrete, no fluff. Output STRICT JSON {"briefs":{"<name>":"<brief or empty string>"}}.';
+            } else if (payload.task === 'resolve_loops') {
+              sys = 'For each {action, evidence[]} item, decide the action\'s current status using ONLY the dated evidence snippets (dated AFTER the action was raised). "done" ONLY if a snippet clearly shows the action was completed. "in_progress" if a snippet shows partial movement toward it. Otherwise "open". NEVER mark done without explicit completion evidence. For in_progress, write a one-line progress note citing the evidence and set evidence_index to the snippet index used (else -1). STRICT JSON {"results":[{"status":"done|in_progress|open","progress":"<one line or empty>","evidence_index":<int>}]} in item order.';
+            } else {
+              sys = 'For each {decision,prior} pair, decide if the decision is NEW, UPDATES, or CONFLICTS relative to the prior memory. Be STRICT: only UPDATES if the decision clearly changes a value/state stated in the prior; only CONFLICTS if it directly contradicts the prior; otherwise NEW. When the prior is not clearly about the same thing, NEW with low confidence. Never invent a relationship. STRICT JSON {"results":[{"relation":"NEW|UPDATES|CONFLICTS","reason":"<short, cite the change>","confidence":0..1}]} in pair order.';
+            }
             const resp = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
               method: 'POST',
               headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },

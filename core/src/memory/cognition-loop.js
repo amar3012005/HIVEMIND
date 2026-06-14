@@ -819,7 +819,17 @@ export class CognitionLoop {
           this.logger.log(`[cognition] canonical tag=${tag} restatement detected — dropped`);
           continue;
         }
-        const evidenceIds = (result.supporting_memory_ids || []).filter(id => id);
+        // Grounding = ALL members the synthesis was built from (including
+        // reached past/cross-source members), not just the LLM's self-reported
+        // subset. The LLM often omits ids whose facts it nonetheless folded into
+        // the canonical (e.g. "founded by X" pulled from an old memory it didn't
+        // cite). Under-citing breaks the proof tree (WS4) + retroactive reweight
+        // (WS3). Union the prompt set with the LLM hint.
+        const _llmEv = (result.supporting_memory_ids || []).filter(id => id);
+        const evidenceIds = Array.from(new Set([
+          ...promptMembers.map((m) => m.id).filter(Boolean),
+          ..._llmEv,
+        ]));
 
         // Duplicate-canonical guard: a memory carrying multiple topic tags
         // (e.g. [url:claude.ai, ai-chat-ingest, from-claude, source:from-claude])

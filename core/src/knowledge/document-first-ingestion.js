@@ -301,10 +301,11 @@ Output the JSON object and nothing else.`;
     // a typical doc's batches in one wave instead of two — the LLM calls were
     // serialized 3-at-a-time. Groq gpt-oss handles this concurrency comfortably.
     const CONCURRENCY = Number(process.env.KB_DISTILL_CONCURRENCY || 5);
-    // 3 facts/section (was 5): a section rarely holds 5 distinct atomic facts;
-    // 5 over-extracted near-duplicates → more per-fact ingestMemory DB writes
-    // (the residual latency cost) + recall noise. 3 keeps the high-signal facts.
-    const MAX_FACTS_PER_SEGMENT = Number(process.env.KB_DISTILL_MAX_FACTS || 3);
+    // 5 facts/section: 3 missed buried details (footnotes, names embedded in
+    // dense paragraphs — e.g. competitor names) → memory-layer coverage gaps.
+    // 5 captures them; the evidence layer still backs anything the distill skips.
+    // Pure-insert keeps the extra per-fact cost cheap. Env-overridable.
+    const MAX_FACTS_PER_SEGMENT = Number(process.env.KB_DISTILL_MAX_FACTS || 5);
     const MAX_FACTS_PER_DOC = Number(process.env.KB_DISTILL_DOC_CAP || 120);
     const docTitle = metadata.documentTitle || metadata.filename || `Document ${String(documentId).slice(0, 8)}`;
 

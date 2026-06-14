@@ -388,16 +388,29 @@ export class EvidenceRetrievalService {
    * @private
    */
   _extractSnippet(content, query, contextLength = 150) {
-    const queryLower = query.toLowerCase();
     const contentLower = content.toLowerCase();
-    const index = contentLower.indexOf(queryLower);
+    let index = contentLower.indexOf((query || '').toLowerCase());
+
+    // Full query rarely appears verbatim. Center the snippet on the most
+    // DISTINCTIVE query token present (longest match) so a buried matched term
+    // (e.g. "1KOMMA5", "Enpal") is shown — not the segment's header prefix,
+    // which hid the very evidence the answer model needs.
+    if (index === -1) {
+      const tokens = [...new Set(
+        String(query || '').split(/[^\p{L}\p{N}§°]+/u).map(t => t.trim()).filter(t => t.length >= 3)
+      )].sort((a, b) => b.length - a.length);
+      for (const t of tokens) {
+        const i = contentLower.indexOf(t.toLowerCase());
+        if (i !== -1) { index = i; break; }
+      }
+    }
 
     if (index === -1) {
       return content.slice(0, contextLength) + '...';
     }
 
-    const start = Math.max(0, index - contextLength / 2);
-    const end = Math.min(content.length, index + query.length + contextLength / 2);
+    const start = Math.max(0, index - Math.floor(contextLength / 2));
+    const end = Math.min(content.length, index + Math.floor(contextLength / 2));
 
     let snippet = content.slice(start, end);
     if (start > 0) snippet = '...' + snippet;

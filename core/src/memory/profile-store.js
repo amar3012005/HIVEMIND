@@ -57,43 +57,61 @@ export class ProfileStore {
   async upsertFact({ userId, orgId, category, key, value, confidence, sourceMemoryId }) {
     const normalizedKey = key.toLowerCase().trim();
 
-    // Check for existing fact to detect value change
-    const existing = await this.prisma.userProfile.findUnique({
-      where: { userId_key: { userId, key: normalizedKey } },
+    // WS5 step-2: serialize the read-modify-write PER USER. Profile writes race —
+    // ingest fires extractAndStore fire-and-forget on every save, and the dream
+    // pass (later) + manual triggers can hit the same (userId,key) concurrently.
+    // Two interleaved upserts both read the same `existing`, both decide
+    // "reset confirmedCount=1", and clobber each other. A transaction-scoped
+    // advisory lock (auto-released on commit, same connection — mirrors
+    // prisma-graph-store.advisoryLock) makes read→decide→upsert atomic per user.
+    // Logic is otherwise byte-identical to before (no behavior change).
+    const { result, isUpdate, isContradiction, previousValue } = await this.prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)', `profile:${userId}`);
+
+      const existing = await tx.userProfile.findUnique({
+        where: { userId_key: { userId, key: normalizedKey } },
+      });
+
+      const _isUpdate = existing && existing.value !== value && existing.deletedAt === null;
+      const _isContradiction = _isUpdate && this._isContradiction(existing.value, value);
+
+      const _result = await tx.userProfile.upsert({
+        where: { userId_key: { userId, key: normalizedKey } },
+        update: {
+          value,
+          category: category || existing?.category || 'static',
+          confidence: confidence || 1.0,
+          sourceMemoryId: sourceMemoryId || null,
+          confirmedCount: _isUpdate ? 1 : { increment: 1 }, // reset count on value change
+          lastConfirmedAt: new Date(),
+          deletedAt: null, // un-delete if previously deleted
+        },
+        create: {
+          userId,
+          orgId: orgId || null,
+          category: category || 'static',
+          key: normalizedKey,
+          value,
+          confidence: confidence || 1.0,
+          sourceMemoryId: sourceMemoryId || null,
+        },
+      });
+      return {
+        result: _result,
+        isUpdate: !!_isUpdate,
+        isContradiction: !!_isContradiction,
+        previousValue: _isUpdate ? existing.value : null,
+      };
     });
 
-    const isUpdate = existing && existing.value !== value && existing.deletedAt === null;
-    const isContradiction = isUpdate && this._isContradiction(existing.value, value);
-
-    const result = await this.prisma.userProfile.upsert({
-      where: { userId_key: { userId, key: normalizedKey } },
-      update: {
-        value,
-        category: category || existing?.category || 'static',
-        confidence: confidence || 1.0,
-        sourceMemoryId: sourceMemoryId || null,
-        confirmedCount: isUpdate ? 1 : { increment: 1 }, // reset count on value change
-        lastConfirmedAt: new Date(),
-        deletedAt: null, // un-delete if previously deleted
-      },
-      create: {
-        userId,
-        orgId: orgId || null,
-        category: category || 'static',
-        key: normalizedKey,
-        value,
-        confidence: confidence || 1.0,
-        sourceMemoryId: sourceMemoryId || null,
-      },
-    });
     // Invalidate cache
     this._cache.delete(`${userId}:${orgId || ''}`);
     this._cache.delete(`${userId}:`);
     return {
       ...result,
-      _previousValue: isUpdate ? existing.value : null,
-      _wasUpdate: !!isUpdate,
-      _wasContradiction: !!isContradiction,
+      _previousValue: previousValue,
+      _wasUpdate: isUpdate,
+      _wasContradiction: isContradiction,
     };
   }
 

@@ -5494,8 +5494,12 @@ exit \$RC
           );
           const { generateIntelligence } = await import('./knowledge/meeting-intelligence.js');
           const recall = async (query) => {
+            // Over-fetch: cognition-synthesis artifacts often rank above real
+            // user memories, so pull 15 candidates and let the lanes filter
+            // artifacts — otherwise the top-5 are all synthesis exhaust and
+            // nothing real survives.
             const r = await recallPersistedMemories(persistentMemoryStore, {
-              query, userId: mUser, orgId: mOrg, limit: 5,
+              query, userId: mUser, orgId: mOrg, limit: 15,
             }).catch(() => null);
             const list = (r?.memories || r || []);
             const memories = (Array.isArray(list) ? list : []).map((m) => ({

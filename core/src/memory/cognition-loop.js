@@ -706,8 +706,13 @@ export class CognitionLoop {
     if (process.env.COGNITION_NEIGHBORHOOD_REACH !== 'false') {
       let reachedTotal = 0;
       for (const [tag, members] of buckets.entries()) {
-        if (members.length < 2 || SYS_TAG_RE.test(tag)) continue;
-        if (!(tag.startsWith('entity:') || tag.startsWith('topic:'))) continue;
+        // Reach for the cluster's DEFINING tag (the bucket key) — it is already
+        // a non-SYS topic tag (clustering filters SYS_TAG_RE, which includes
+        // entity:/topic:, so bucket keys are filename:/custom/project tags). That
+        // shared tag IS the grounded cross-source join key. Skip only the
+        // project-fallback buckets (no real tag to match old against).
+        if (members.length < 2) continue;        // only active clusters
+        if (tag === 'untagged') continue;        // project-fallback, not a real tag
         const have = new Set(members.map((m) => m.id));
         let older = [];
         try {

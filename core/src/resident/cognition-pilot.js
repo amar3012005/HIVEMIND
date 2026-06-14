@@ -24,14 +24,14 @@ function globallyDisabled() {
 }
 
 async function readOrgSettings(prisma, orgId) {
-  if (!orgId || !prisma) return { org: false, personal: false };
+  if (!orgId || !prisma) return { org: false, personal: false, crossProject: false };
   const now = Date.now();
   const cached = _cache.get(orgId);
   if (cached && cached.expiresAt > now) return cached.value;
-  let value = { org: false, personal: false };
+  let value = { org: false, personal: false, crossProject: false };
   try {
     const rows = await prisma.$queryRawUnsafe(
-      `SELECT cognition_org_enabled, cognition_personal_enabled
+      `SELECT cognition_org_enabled, cognition_personal_enabled, cognition_cross_project_enabled
          FROM hivemind.organizations WHERE id = $1::uuid LIMIT 1`,
       orgId,
     );
@@ -39,6 +39,7 @@ async function readOrgSettings(prisma, orgId) {
       value = {
         org: !!rows[0].cognition_org_enabled,
         personal: !!rows[0].cognition_personal_enabled,
+        crossProject: !!rows[0].cognition_cross_project_enabled,
       };
     }
   } catch {
@@ -79,6 +80,12 @@ export async function cognitionEnabledForOrg(prisma, orgId) {
   } catch {
     return false;
   }
+}
+
+/** @returns {Promise<boolean>} cross-project dreaming (bridges may span projects) is on. */
+export async function crossProjectEnabledForOrg(prisma, orgId) {
+  if (globallyDisabled()) return false;
+  return (await readOrgSettings(prisma, orgId)).crossProject;
 }
 
 /** @returns {Promise<boolean>} self-evolve toggle for a single project. */

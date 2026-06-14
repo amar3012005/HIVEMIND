@@ -77,6 +77,17 @@ model Organization {
   // synthesis window to max(now-1h, this) so enabling NEVER backfills the
   // org's history — it starts from a 1h window at toggle-on and rolls forward.
   cognitionEnabledAt       DateTime?      @map("cognition_enabled_at") @db.Timestamptz(6)
+  // Dream SCHEDULING (replaces the 1h rolling-window-only cadence). A scheduled
+  // deep dream fires once/day with a wide lookback so it connects dots across the
+  // whole period. mode: 'nightmode' (default — fire at midnight), 'interval' (fire
+  // once inside [startHour,endHour)), or 'continuous' (legacy event-driven only).
+  cognitionScheduleMode    String         @default("nightmode") @map("cognition_schedule_mode") @db.VarChar(20)
+  cognitionWindowStartHour Int?           @map("cognition_window_start_hour")
+  cognitionWindowEndHour   Int?           @map("cognition_window_end_hour")
+  cognitionScheduleTz      String         @default("UTC") @map("cognition_schedule_tz") @db.VarChar(64)
+  // Cross-project dreaming: when true the loop may form bridges that span project
+  // boundaries (otherwise dreams stay within a single project scope). Default OFF.
+  cognitionCrossProjectEnabled Boolean    @default(false) @map("cognition_cross_project_enabled")
   // Qdrant container ("collection") that holds ALL memory+evidence for this org.
   // Set on org creation (org_<id>); members + projects share it (filtered by
   // user_id/project_id/layer). Null until provisioned.

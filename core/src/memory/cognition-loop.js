@@ -93,6 +93,13 @@ const BRIDGE_GROUND_MIN          = Number(process.env.BRIDGE_GROUND_MIN         
 // Drop synthesis output if cosine(output, any source) > this (restatement guard)
 const RESTATEMENT_THRESHOLD       = Number(process.env.RESTATEMENT_THRESHOLD       || 0.92);
 const COOLDOWN_HOURS              = Number(process.env.SYNTHESIS_COOLDOWN_HOURS    || 6);
+// Entity over-dream guard: even across DIFFERENT cluster hashes, do not re-dream
+// the same dominant entity/person within this window. Stops a hot entity (one that
+// shows up in many clusters) from being dreamed repeatedly each tick ("overdone").
+// The per-cluster_hash COOLDOWN_HOURS only stops re-dreaming the SAME cluster; this
+// adds a cross-cluster, per-entity "last dreamed" floor. 0 disables. Default 20h so
+// a nightly schedule refreshes once/day but never twice in the same night.
+const ENTITY_DREAM_COOLDOWN_HOURS = Number(process.env.ENTITY_DREAM_COOLDOWN_HOURS || 20);
 // WS3 retroactive re-sweep: re-examine syntheses older than N days for
 // contradictions that arrived AFTER they were written, and temper confidence
 // down (the forward synthesis path only ratchets confidence UP).
@@ -372,8 +379,12 @@ export class CognitionLoop {
    *     loop sees ONLY the last hour AND never anything from before the org
    *     toggled cognition on. No historical backfill, ever.
    */
-  async _cognitionWindow(orgId) {
-    const rollingStart = Date.now() - ROLLING_WINDOW_HOURS * 3600 * 1000;
+  async _cognitionWindow(orgId, opts = {}) {
+    // Scheduled (cron / night-mode) runs pass a WIDE lookback so a single nightly
+    // dream connects dots across the whole day/period — not just the last hour.
+    // Continuous early-dream ticks omit it and keep the tight 1h rolling window.
+    const lookbackHours = Number(opts.lookbackHours) > 0 ? Number(opts.lookbackHours) : ROLLING_WINDOW_HOURS;
+    const rollingStart = Date.now() - lookbackHours * 3600 * 1000;
     try {
       const rows = await this.prisma.$queryRawUnsafe(
         `SELECT cognition_org_enabled AS enabled, cognition_enabled_at AS enabled_at
@@ -392,12 +403,12 @@ export class CognitionLoop {
     }
   }
 
-  async _shouldRunForOrg(orgId) {
+  async _shouldRunForOrg(orgId, opts = {}) {
     const MIN = Number(process.env.COGNITION_MIN_WINDOW_MEMORIES || 3);
     // Gate on the org toggle + clamp the window to max(now-1h, enabled_at).
     // An org that never opted in is skipped entirely (no spend); an opted-in
     // org only ever synthesizes its last-hour, post-enable activity.
-    const win = await this._cognitionWindow(orgId);
+    const win = await this._cognitionWindow(orgId, opts);
     if (!win.enabled) {
       return { run: false, reason: 'cognition_disabled_for_org' };
     }
@@ -435,14 +446,15 @@ export class CognitionLoop {
     }
   }
 
-  async runOnce(orgId, { skipCompaction = false } = {}) {
+  async runOnce(orgId, { skipCompaction = false, lookbackHours } = {}) {
     if (_status.running) {
       return { skipped: true, reason: 'tick already in progress' };
     }
     _status.running = true;
     const tStart = Date.now();
+    const winOpts = Number(lookbackHours) > 0 ? { lookbackHours: Number(lookbackHours) } : {};
     try {
-      const gate = await this._shouldRunForOrg(orgId);
+      const gate = await this._shouldRunForOrg(orgId, winOpts);
       if (!gate.run) {
         this.logger.log(`[cognition] org=${orgId} skipped — ${gate.reason}`);
         // Do NOT persist status on skip: lastTickAt must stay anchored to the
@@ -450,7 +462,7 @@ export class CognitionLoop {
         // against it until new memories arrive.
         return { synth: 0, compact: 0, principles: 0, ms: Date.now() - tStart, skipped: true, reason: gate.reason };
       }
-      const synth   = await this.synthesizeForOrg(orgId);
+      const synth   = await this.synthesizeForOrg(orgId, winOpts);
       // Drift compaction folds large clusters and demotes+purges their members.
       // On a MANUAL trigger that is a full-window blast over live user data
       // (the §10 hazard that over-compacted a real org's KB). Skip it on manual
@@ -592,16 +604,18 @@ export class CognitionLoop {
    *   2. For each cluster ≥ CANONICAL_CLUSTER_MIN → try canonical-fact
    *   3. For top-K tag-pairs with cosine ∈ [SIM_LOW, SIM_HIGH] → try synthesis-bridge
    */
-  async synthesizeForOrg(orgId) {
+  async synthesizeForOrg(orgId, opts = {}) {
     // Adaptive floor per-org based on corpus density. Small tenants
     // (≤50 fact+decision memories) get floor=3 so they can build
     // synthesis at all; mature tenants stay at floor=6 to keep quality
     // high. Capped at the hard default.
     const clusterMin = await deriveClusterMin(this.prisma, orgId);
 
-    // Rolling 1-hour window clamped to the org's cognition_enabled_at anchor —
-    // synthesis only ever sees recent, post-enable memory (no backfill).
-    const since = (await this._cognitionWindow(orgId)).since;
+    // Window clamped to the org's cognition_enabled_at anchor — synthesis only
+    // ever sees post-enable memory (no backfill). Scheduled runs pass a wide
+    // lookbackHours so a nightly dream spans the whole day; continuous early
+    // ticks keep the tight 1h rolling window.
+    const since = (await this._cognitionWindow(orgId, opts)).since;
     // Structured connector sources: their schema IS already canonical.
     // Re-synthesizing produces tautological canonicals ("OrgFarm owns 16
     // accounts") and trivial bridges ("US contacts share country:usa with
@@ -806,6 +820,11 @@ export class CognitionLoop {
 
       // No existing synthesis — full cooldown check then fresh synthesis
       if (await this._onCooldown(orgId, hash)) continue;
+      // Over-dream guard: skip if this entity was already dreamed (any cluster) recently
+      if (await this._entityRecentlyDreamed(orgId, tag)) {
+        this.logger.log(`[cognition] canonical tag=${tag} — entity dreamed within ${ENTITY_DREAM_COOLDOWN_HOURS}h, skip (over-dream guard)`);
+        continue;
+      }
 
       try {
         const result = await this._llmCanonicalFact(tag, promptMembers);
@@ -1129,6 +1148,30 @@ export class CognitionLoop {
     // fire if new evidence has arrived since then, so we let synthesizeForOrg
     // call _maybeDeltaUpdate instead of returning true here.
     return existing.updatedAt >= cutoff;
+  }
+
+  // ─── Entity over-dream guard ─────────────────────────────────────────────────
+  // Returns true if the cluster's dominant entity/person was already dreamed
+  // (folded into ANY latest synthesis carrying that tag) within cooldownHours —
+  // even under a different cluster_hash. Prevents the same entity being re-dreamed
+  // repeatedly ("overdone"). Only gates entity:/person: tags; topic tags are too
+  // broad and would over-suppress legitimately distinct clusters.
+  async _entityRecentlyDreamed(orgId, tag, cooldownHours = ENTITY_DREAM_COOLDOWN_HOURS) {
+    if (!tag || cooldownHours <= 0) return false;
+    if (!/^(entity|person):/i.test(tag)) return false;
+    const cutoff = new Date(Date.now() - cooldownHours * 3600 * 1000);
+    const recent = await this.prisma.memory.findFirst({
+      where: {
+        orgId,
+        memoryType: 'synthesis',
+        isLatest: true,
+        deletedAt: null,
+        updatedAt: { gte: cutoff },
+        tags: { has: tag },
+      },
+      select: { id: true },
+    });
+    return !!recent;
   }
 
   // ─── Restatement guard ────────────────────────────────────────────────────────
@@ -2287,12 +2330,16 @@ Output JSON only:
 
 Below are ${promptMembers.length} memories sharing the tag "${tag}".
 
+LENS — favour insights that move the COMPANY forward: surface an opportunity to pursue, a risk to mitigate, or a concrete gap to close. The best insight is one a founder/operator would act on this week.
+
 PRODUCE the single strongest insight (choose the type that fits, ground it in the evidence):
 - emergent_connection: memory A + memory B together imply a concrete fact Z that neither states alone.
 - pattern: a recurring specific pattern across ≥3 memories (name the instances).
 - implication: a concrete consequence that follows from the facts but is never written down.
 - tension: a specific contradiction or unresolved conflict between memories.
 - gap: a specific missing piece the evidence reveals is absent or blocking.
+- opportunity: a specific, grounded chance to grow/improve the company the evidence reveals (name the lever).
+- risk: a specific, grounded threat or failure mode the evidence reveals (name what breaks and why).
 
 HARD RULES (violations are rejected):
 - SPECIFIC to THIS organization. Name the real entities exactly — people, orgs, products, projects, dates — as written. Reference the concrete facts, not abstractions.
@@ -2306,7 +2353,7 @@ Memories:
 ${facts}
 
 Output JSON only:
-{ "insight": "<2-4 specific, grounded sentences naming real entities — the emergent fact>", "insight_type": "emergent_connection|pattern|implication|tension|gap", "entities": ["<proper nouns referenced, verbatim>"], "supporting_memory_ids":[...], "confidence": 0.0-1.0 }`;
+{ "insight": "<2-4 specific, grounded sentences naming real entities — the emergent fact>", "insight_type": "emergent_connection|pattern|implication|tension|gap|opportunity|risk", "entities": ["<proper nouns referenced, verbatim>"], "supporting_memory_ids":[...], "confidence": 0.0-1.0 }`;
 
         const raw = await llmWithFallback({
           messages:    [{ role: 'user', content: prompt }],

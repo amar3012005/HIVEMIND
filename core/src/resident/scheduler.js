@@ -49,6 +49,107 @@ export class ResidentAgentScheduler {
     this.earlyTimer = null;
     this._lastEarlyDream = new Map(); // orgId -> epoch ms
     this.earlyInFlight = false;
+
+    // Scheduled deep dream (replaces the 1h-window-only cadence). When enabled,
+    // each org fires ONE wide-lookback dream per day inside its configured window
+    // (night-mode=midnight, or an interval). Default OFF → behaviour unchanged.
+    this.scheduleEnabled = process.env.COGNITION_SCHEDULE_ENABLED === 'true';
+    this.schedulePollMs = Number(process.env.COGNITION_SCHEDULE_POLL_MS || 15 * 60 * 1000);
+    this.scheduleLookbackHours = Number(process.env.COGNITION_SCHEDULE_LOOKBACK_HOURS || 24);
+    this.scheduleTimer = null;
+    this._lastScheduledDreamDate = new Map(); // orgId -> 'YYYY-MM-DD' (in org tz)
+    this.scheduleInFlight = false;
+  }
+
+  // Local hour (0-23) and YYYY-MM-DD for an IANA timezone, computed from now.
+  _localClock(tz) {
+    try {
+      const fmt = new Intl.DateTimeFormat('en-CA', {
+        timeZone: tz || 'UTC', hour12: false,
+        year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit',
+      });
+      const parts = Object.fromEntries(fmt.formatToParts(new Date()).map(p => [p.type, p.value]));
+      let hour = parseInt(parts.hour, 10);
+      if (hour === 24) hour = 0; // some engines emit '24' for midnight
+      return { hour, date: `${parts.year}-${parts.month}-${parts.day}` };
+    } catch {
+      const d = new Date();
+      return { hour: d.getUTCHours(), date: d.toISOString().slice(0, 10) };
+    }
+  }
+
+  // Is `hour` inside this org's dream window? night-mode → midnight hour (0).
+  // interval → [startHour, endHour) with wraparound (e.g. 22→6 spans midnight).
+  _withinDreamWindow(sched, hour) {
+    const mode = (sched.mode || 'nightmode').toLowerCase();
+    if (mode === 'continuous') return false; // event-driven only, no scheduled dream
+    if (mode === 'interval') {
+      const s = Number.isInteger(sched.startHour) ? sched.startHour : 0;
+      const e = Number.isInteger(sched.endHour) ? sched.endHour : 6;
+      if (s === e) return hour === s;
+      return s < e ? (hour >= s && hour < e) : (hour >= s || hour < e); // wraparound
+    }
+    // nightmode (default): fire at midnight, or a custom startHour if set.
+    const target = Number.isInteger(sched.startHour) ? sched.startHour : 0;
+    return hour === target;
+  }
+
+  /**
+   * Scheduled deep dream — once/day per org inside its window, wide lookback so
+   * the dream connects dots across the whole period (cross-time). Reuses the
+   * cognition loop's runOnce (skipCompaction:false here → scheduled cadence is
+   * the safe place for gentle compaction, unlike the manual one-shot).
+   */
+  async _maybeScheduledDream() {
+    if (!this.scheduleEnabled || this.scheduleInFlight || this.tickInFlight) return;
+    const loop = typeof this.cognitionLoopRef === 'function' ? this.cognitionLoopRef() : null;
+    if (!loop || typeof loop.runOnce !== 'function') return;
+    this.scheduleInFlight = true;
+    try {
+      const scheds = await this._orgSchedules();
+      for (const sched of scheds) {
+        const { hour, date } = this._localClock(sched.tz);
+        if (!this._withinDreamWindow(sched, hour)) continue;
+        if (this._lastScheduledDreamDate.get(sched.id) === date) continue; // already dreamt today
+        this._lastScheduledDreamDate.set(sched.id, date);
+        this.logger?.log?.(`[gov-scheduler] scheduled dream org=${sched.id.slice(0,8)} mode=${sched.mode} hour=${hour} lookback=${this.scheduleLookbackHours}h`);
+        try {
+          await loop.runOnce(sched.id, { lookbackHours: this.scheduleLookbackHours });
+        } catch (err) {
+          this.logger?.warn?.(`[gov-scheduler] scheduled dream org=${sched.id.slice(0,8)} failed: ${err?.message || err}`);
+        }
+      }
+    } catch (err) {
+      this.logger?.warn?.(`[gov-scheduler] scheduled-dream poll failed: ${err?.message || err}`);
+    } finally {
+      this.scheduleInFlight = false;
+    }
+  }
+
+  // Per-org dream schedule rows (only cognition-enabled, real orgs).
+  async _orgSchedules() {
+    if (!this.prisma) return [];
+    try {
+      const rows = await this.prisma.$queryRawUnsafe(
+        `SELECT o.id,
+                COALESCE(o.cognition_schedule_mode, 'nightmode') AS mode,
+                o.cognition_window_start_hour AS "startHour",
+                o.cognition_window_end_hour   AS "endHour",
+                COALESCE(o.cognition_schedule_tz, 'UTC') AS tz
+           FROM hivemind.organizations o
+          WHERE o.cognition_org_enabled = true
+            AND (o.slug IS NULL OR o.slug NOT LIKE 'local-org-%')
+          LIMIT 1000`
+      );
+      return Array.isArray(rows) ? rows.map(r => ({
+        ...r,
+        startHour: r.startHour == null ? null : Number(r.startHour),
+        endHour: r.endHour == null ? null : Number(r.endHour),
+      })) : [];
+    } catch (err) {
+      this.logger?.warn?.(`[gov-scheduler] schedule read failed: ${err.message}`);
+      return [];
+    }
   }
 
   async _tickTier() {
@@ -93,6 +194,13 @@ export class ResidentAgentScheduler {
       this.logger?.log?.(`[gov-scheduler] early-dream poll every ${this.earlyPollMs}ms (dirty>=${this.dirtyThreshold})`);
       this.earlyTimer = setInterval(() => this._maybeEarlyDream(), this.earlyPollMs);
     }
+
+    // Scheduled deep-dream poll (flag-gated). Checks each org's window every
+    // schedulePollMs and fires one wide-lookback dream/day inside it.
+    if (this.scheduleEnabled) {
+      this.logger?.log?.(`[gov-scheduler] scheduled-dream poll every ${this.schedulePollMs}ms (lookback=${this.scheduleLookbackHours}h)`);
+      this.scheduleTimer = setInterval(() => this._maybeScheduledDream(), this.schedulePollMs);
+    }
   }
 
   stop() {
@@ -100,6 +208,8 @@ export class ResidentAgentScheduler {
     this.timer = null;
     if (this.earlyTimer) clearInterval(this.earlyTimer);
     this.earlyTimer = null;
+    if (this.scheduleTimer) clearInterval(this.scheduleTimer);
+    this.scheduleTimer = null;
   }
 
   /**

@@ -44,7 +44,11 @@ export function createGovernanceRoutes({ prisma, memoryStore, logger = console }
         let projRows = [];
         try {
           const r = await prisma.$queryRawUnsafe(
-            `SELECT cognition_org_enabled, cognition_personal_enabled FROM hivemind.organizations WHERE id=$1::uuid`,
+            `SELECT cognition_org_enabled, cognition_personal_enabled,
+                    cognition_schedule_mode, cognition_window_start_hour,
+                    cognition_window_end_hour, cognition_schedule_tz,
+                    cognition_cross_project_enabled
+               FROM hivemind.organizations WHERE id=$1::uuid`,
             orgId,
           );
           orgRow = r?.[0] || null;
@@ -58,6 +62,13 @@ export function createGovernanceRoutes({ prisma, memoryStore, logger = console }
         return ok({
           org_enabled: !!orgRow?.cognition_org_enabled,
           personal_enabled: !!orgRow?.cognition_personal_enabled,
+          cross_project_enabled: !!orgRow?.cognition_cross_project_enabled,
+          schedule: {
+            mode: orgRow?.cognition_schedule_mode || 'nightmode',
+            window_start_hour: orgRow?.cognition_window_start_hour ?? null,
+            window_end_hour: orgRow?.cognition_window_end_hour ?? null,
+            tz: orgRow?.cognition_schedule_tz || 'UTC',
+          },
           projects: (projRows || []).map((p) => ({
             id: p.id, name: p.name, self_evolve_enabled: !!p.self_evolve_enabled,
           })),
@@ -102,6 +113,44 @@ export function createGovernanceRoutes({ prisma, memoryStore, logger = console }
               `UPDATE hivemind.organizations SET cognition_personal_enabled=$1 WHERE id=$2::uuid`,
               body.personal_enabled, orgId,
             );
+          }
+          if (typeof body.cross_project_enabled === 'boolean') {
+            await prisma.$executeRawUnsafe(
+              `UPDATE hivemind.organizations SET cognition_cross_project_enabled=$1 WHERE id=$2::uuid`,
+              body.cross_project_enabled, orgId,
+            );
+          }
+          if (body.schedule && typeof body.schedule === 'object') {
+            const s = body.schedule;
+            const mode = ['nightmode', 'interval', 'continuous'].includes(s.mode) ? s.mode : null;
+            const clampHour = (h) => (Number.isInteger(h) && h >= 0 && h <= 23 ? h : null);
+            const startH = s.window_start_hour === null ? null : clampHour(s.window_start_hour);
+            const endH = s.window_end_hour === null ? null : clampHour(s.window_end_hour);
+            const tz = typeof s.tz === 'string' && s.tz.length <= 64 ? s.tz : null;
+            if (mode) {
+              await prisma.$executeRawUnsafe(
+                `UPDATE hivemind.organizations SET cognition_schedule_mode=$1 WHERE id=$2::uuid`,
+                mode, orgId,
+              );
+            }
+            if (s.window_start_hour !== undefined) {
+              await prisma.$executeRawUnsafe(
+                `UPDATE hivemind.organizations SET cognition_window_start_hour=$1 WHERE id=$2::uuid`,
+                startH, orgId,
+              );
+            }
+            if (s.window_end_hour !== undefined) {
+              await prisma.$executeRawUnsafe(
+                `UPDATE hivemind.organizations SET cognition_window_end_hour=$1 WHERE id=$2::uuid`,
+                endH, orgId,
+              );
+            }
+            if (tz) {
+              await prisma.$executeRawUnsafe(
+                `UPDATE hivemind.organizations SET cognition_schedule_tz=$1 WHERE id=$2::uuid`,
+                tz, orgId,
+              );
+            }
           }
           if (body.project_id && typeof body.self_evolve_enabled === 'boolean') {
             if (!isUuid(body.project_id)) return ok({ error: 'invalid project_id' }, 400);

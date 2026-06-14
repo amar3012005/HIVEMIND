@@ -9553,7 +9553,11 @@ exit \$RC
               // skipCompaction: manual synthesize-now must NOT run the destructive
               // full-window drift compaction (folds/demotes/purges live KB chunks —
               // §10 hazard). Compaction stays on the scheduled cadence only.
-              const result = await cognitionLoop.runOnce(orgId, { skipCompaction: true });
+              // lookback_hours: optional wide lookback so a dev one-shot can dream
+              // across a whole period (cross-time), not just the 1h rolling window.
+              const lookbackHours = Number(body?.lookback_hours) > 0
+                ? Math.min(Number(body.lookback_hours), 24 * 30) : undefined;
+              const result = await cognitionLoop.runOnce(orgId, { skipCompaction: true, lookbackHours });
               return jsonResponse(res, {
                 triggered: true,
                 org_id: orgId,

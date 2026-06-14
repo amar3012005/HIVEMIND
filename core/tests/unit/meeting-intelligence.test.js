@@ -100,3 +100,17 @@ test('generateIntelligence: any populated lane → status ready + related_count'
   assert.ok(out.related_count >= 1);
   assert.ok(out.generated_at);
 });
+
+import { relatedMemories } from '../../src/knowledge/meeting-intelligence.js';
+
+test('relatedMemories: surfaces real memories, drops synthesis/test artifacts', async () => {
+  const recall = async () => ({ memories: [
+    { id: 'r1', title: 'We raised €200K angel round', content: 'fundraising note' },
+    { id: 's1', title: 'Bridge: entity-120b-test', content: 'junk', tags: ['synthesis:bridge'] },
+    { id: 's2', title: 'Canonical fact: test-md-hivemind', content: 'junk' },
+    { id: 's3', title: 'real', content: 'x', cognitive_layer_role: 'canonical' },
+    { id: 'r2', title: 'Wie denkt ein Business Angel', content: 'event' },
+  ] });
+  const out = await relatedMemories(['angel investing'], { recall, max: 5 });
+  assert.deepEqual(out.map((o) => o.memory_id), ['r1', 'r2']);
+});

@@ -5446,7 +5446,7 @@ exit \$RC
       async function runMeetingIntelligence(meetingId, mUser, mOrg) {
         try {
           const rows = await prisma.$queryRawUnsafe(
-            `SELECT id, insights, summary, topics, decisions, action_items, key_points
+            `SELECT id, title, insights, summary, topics, decisions, action_items, key_points
                FROM meetings WHERE id=$1::uuid AND org_id=$2::uuid AND deleted_at IS NULL`,
             meetingId, mOrg,
           );

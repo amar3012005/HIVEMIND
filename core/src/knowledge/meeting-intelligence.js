@@ -123,8 +123,48 @@ export async function openLoops(topics, { recall, maxTopics = 6 }) {
   return onlyGrounded(out);
 }
 
+// Cognition-synthesis + test artifacts that pollute recall — never show them
+// as "related memory" (they're machine exhaust, not real user content).
+const SYNTH_TITLE = /^(Bridge:|Canonical fact:|Canonical:|Principle:|Reflection:)/i;
+const TEST_TITLE = /\b(test-md|entity-\d+b-test|test fixture)\b/i;
+
+function isArtifact(m) {
+  const tags = Array.isArray(m?.tags) ? m.tags : [];
+  if (m?.cognitive_layer_role) return true;
+  if (tags.some((t) => typeof t === 'string' && (t.startsWith('synthesis:') || t === 'internal-audit' || t === 'governance'))) return true;
+  const title = String(m?.title || '');
+  return SYNTH_TITLE.test(title) || TEST_TITLE.test(title);
+}
+
 /**
- * Orchestrator — runs all three lanes within bounded cost and assembles the
+ * Lane 4 — the broadest, most intuitive lane: for the meeting's title + topics,
+ * surface the top related REAL memories (any kind), excluding cognition-
+ * synthesis + test artifacts. This is what makes the panel useful for generic
+ * meetings that have no named entities or decisions (e.g. a topic talk).
+ */
+export async function relatedMemories(queries, { recall, max = 5 }) {
+  const picked = (queries || []).filter((q) => typeof q === 'string' && q.trim()).slice(0, 6);
+  const seen = new Set();
+  const out = [];
+  for (const q of picked) {
+    const res = await recall(q).catch(() => ({ memories: [] }));
+    for (const m of (res?.memories || [])) {
+      if (!m?.id || seen.has(m.id) || isArtifact(m)) continue;
+      seen.add(m.id);
+      out.push({
+        title: String(m.title || '').slice(0, 90),
+        snippet: String(m.content || m.title || '').replace(/\s+/g, ' ').trim().slice(0, 160),
+        memory_id: m.id,
+      });
+      if (out.length >= max) break;
+    }
+    if (out.length >= max) break;
+  }
+  return onlyGrounded(out);
+}
+
+/**
+ * Orchestrator — runs all four lanes within bounded cost and assembles the
  * intelligence object. Never throws (best-effort enrichment); a failed lane
  * contributes nothing. Status: 'ready' if anything grounded, else 'empty'.
  */
@@ -136,19 +176,23 @@ export async function generateIntelligence(meeting, { recall, judge, nowIso }) {
     ...people.map((n) => ({ name: String(n), kind: 'person' })),
     ...orgs.map((n) => ({ name: String(n), kind: 'org' })),
   ];
-  const [entities, cont, loops] = await Promise.all([
+  const topics = Array.isArray(ins.topics) ? ins.topics : [];
+  const relatedQueries = [meeting?.title, ...topics].filter(Boolean);
+  const [entities, cont, loops, related] = await Promise.all([
     entityBriefs(ents, { recall, judge }).catch(() => []),
     continuity(Array.isArray(ins.decisions) ? ins.decisions : [], { recall, judge }).catch(() => []),
-    openLoops(Array.isArray(ins.topics) ? ins.topics : [], { recall }).catch(() => []),
+    openLoops(topics, { recall }).catch(() => []),
+    relatedMemories(relatedQueries, { recall }).catch(() => []),
   ]);
-  const related = entities.reduce((s, e) => s + (e.memory_count || 0), 0) + cont.length + loops.length;
-  const has = entities.length || cont.length || loops.length;
+  const relatedCount = entities.reduce((s, e) => s + (e.memory_count || 0), 0) + cont.length + loops.length + related.length;
+  const has = entities.length || cont.length || loops.length || related.length;
   return {
     generated_at: nowIso || new Date().toISOString(),
-    related_count: related,
+    related_count: relatedCount,
     entities,
     continuity: cont,
     open_loops: loops,
+    related,
     status: has ? 'ready' : 'empty',
   };
 }

@@ -39,3 +39,29 @@ test('entityBriefs caps the number of entities queried', async () => {
   await entityBriefs(ents, { recall, judge, maxEntities: 6 });
   assert.equal(calls, 6);
 });
+
+import { continuity } from '../../src/knowledge/meeting-intelligence.js';
+
+test('continuity: emits UPDATES/CONFLICTS above floor, drops NEW + low-confidence + ungrounded', async () => {
+  const recall = async (q) => {
+    if (q.includes('18%')) return { memories: [{ id: 'p1', content: '15% rev-share with B&B' }] };
+    if (q.includes('Austria')) return { memories: [{ id: 'p2', content: 'Germany-first, Austria phase 2' }] };
+    if (q.includes('Switzerland')) return { memories: [] };
+    return { memories: [] };
+  };
+  const judge = async ({ pairs }) => ({
+    results: pairs.map((p) => {
+      if (p.decision.includes('18%')) return { relation: 'UPDATES', reason: '15→18', confidence: 0.82 };
+      if (p.decision.includes('Austria')) return { relation: 'CONFLICTS', reason: 'order', confidence: 0.4 };
+      return { relation: 'NEW', confidence: 0.9 };
+    }),
+  });
+  const out = await continuity(
+    ['Raise B&B commission to 18%', 'Launch in Austria first', 'Add Switzerland'],
+    { recall, judge, maxDecisions: 8, minConfidence: 0.6 },
+  );
+  assert.equal(out.length, 1);
+  assert.equal(out[0].relation, 'UPDATES');
+  assert.equal(out[0].prior_memory_id, 'p1');
+  assert.equal(out[0].confidence, 0.82);
+});

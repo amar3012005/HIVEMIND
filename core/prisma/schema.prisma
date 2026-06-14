@@ -1238,6 +1238,11 @@ model UserProfile {
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at")
   deletedAt       DateTime? @map("deleted_at")
+  // WS5 (evolving profile / dreaming): per-fact grounding lineage (a profile line
+  // with zero evidence ids must NOT render — anti-hallucination) + when the
+  // profile-dreamer last re-synthesized this user. Both additive/backward-compat.
+  evidenceMemoryIds String[]  @default([]) @map("evidence_memory_ids") @db.Uuid
+  lastDreamedAt     DateTime? @map("last_dreamed_at")
 
   @@unique([userId, key])
   @@index([userId])

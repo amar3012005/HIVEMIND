@@ -833,6 +833,7 @@
       transition: all 0.15s;
     }
     .attach-btn:hover { color: var(--primary); border-color: var(--primary); background: rgba(17,125,255,0.06); }
+    .attach-btn.active { color: #fff; border-color: var(--primary); background: var(--primary); box-shadow: 0 0 0 3px rgba(17,125,255,0.18); }
 
     .upload-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
     .upload-row {
@@ -1040,7 +1041,7 @@
         </svg>
       </button>
       <input id="uploadInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,.txt,.md,.csv,.docx,.xlsx,.pptx" style="display:none" multiple />
-      <button id="autofillBtn" class="attach-btn" title="Autofill this page from your HIVEMIND memory (type a goal first, e.g. ‘fill with my company details’)">
+      <button id="autofillBtn" class="attach-btn" title="Autofill Copilot — click to enable, then type a goal and press Send to fill this page from your HIVEMIND memory">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16">
           <path d="M3 3l7 17 2-7 7-2L3 3z"/>
         </svg>

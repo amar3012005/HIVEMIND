@@ -5499,30 +5499,52 @@ exit \$RC
           const tPrompt = (body.prompt || '').toString().slice(0, 600);
           if (!tPrompt.trim()) return jsonResponse(res, { error: 'no_prompt' }, 400);
 
-          // Recall a broad candidate pool from the request, drop synthesis/test
-          // artifacts (same filter as meeting intelligence).
-          const rr = await recallPersistedMemories(persistentMemoryStore, { query_context: tPrompt, user_id: tUser, org_id: tOrg, max_memories: 25 }).catch(() => null);
           const SYNTH = /^(Bridge:|Canonical fact:|Canonical:|Principle:|Reflection:)/i;
-          const mems = ((rr?.memories || rr || []) || [])
-            .filter((m) => m && m.id && !m.cognitive_layer_role && !SYNTH.test(m.title || '') && !/\btest-md|entity-\d+b-test\b/i.test(m.title || ''))
-            .slice(0, 25)
-            .map((m) => ({ id: m.id, text: `${m.title || ''} ${m.content || ''}`.replace(/\s+/g, ' ').trim().slice(0, 280) }));
-          if (!mems.length) return jsonResponse(res, { columns: [], rows: [], summary: 'No relevant memories found.' });
+          const isJunk = (m) => !m || !m.id || m.cognitive_layer_role || SYNTH.test(m.title || '') || /\btest-md|entity-\d+b-test\b/i.test(m.title || '');
+          const recallClean = async (q, n) => {
+            const r = await recallPersistedMemories(persistentMemoryStore, { query_context: q, user_id: tUser, org_id: tOrg, max_memories: n }).catch(() => null);
+            return ((r?.memories || r || []) || []).filter((m) => !isJunk(m)).map((m) => ({ id: m.id, text: `${m.title || ''} ${m.content || ''}`.replace(/\s+/g, ' ').trim().slice(0, 280) }));
+          };
+          const groqJSON = async (sys, usr) => {
+            const lr = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ model: process.env.MEETING_INSIGHTS_MODEL || 'openai/gpt-oss-120b', temperature: 0.1, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: sys }, { role: 'user', content: usr }] }),
+              signal: AbortSignal.timeout(60_000),
+            });
+            if (!lr.ok) return {};
+            try { return JSON.parse((await lr.json()).choices[0].message.content); } catch { return {}; }
+          };
 
-          const sys = 'You build a spreadsheet table from the user request, grounded ONLY in the provided memory snippets. Choose sensible COLUMN headers for the request. Each ROW must be supported by a memory — never invent rows or values not present in the snippets. Keep cells short. Max 10 columns, 50 rows. STRICT JSON {"summary":"<1 line>","columns":["<col>",...],"rows":[["<cell>",...],...]}.';
-          const usr = `REQUEST: ${tPrompt}\n\nMEMORIES:\n${JSON.stringify(mems)}`;
-          const lr = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model: process.env.MEETING_INSIGHTS_MODEL || 'openai/gpt-oss-120b', temperature: 0.1, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: sys }, { role: 'user', content: usr }] }),
-            signal: AbortSignal.timeout(60_000),
-          });
-          if (!lr.ok) return jsonResponse(res, { error: 'table_failed' }, 502);
-          let out = {};
-          try { out = JSON.parse((await lr.json()).choices[0].message.content); } catch { out = {}; }
-          const columns = Array.isArray(out.columns) ? out.columns.map(String).slice(0, 10) : [];
-          const rows = Array.isArray(out.rows) ? out.rows.slice(0, 50).map((r) => (Array.isArray(r) ? r.map((c) => String(c == null ? '' : c)).slice(0, columns.length || 10) : [])) : [];
-          return jsonResponse(res, { summary: (out.summary || '').toString().slice(0, 200), columns, rows });
+          // PASS 1 — broad recall → pick COLUMNS + the ROW SUBJECTS (the entities/
+          // items each row is about). A flat recall ranks synthesis junk above the
+          // real people, so per-subject recall (pass 2) is what actually grounds
+          // each row — same pattern that makes meeting-intelligence work.
+          const broad = await recallClean(tPrompt, 20);
+          const planOut = await groqJSON(
+            'You plan a spreadsheet from the user request and memory snippets. Decide sensible COLUMN headers, and list the ROW SUBJECTS — the specific entities/people/items each row will be about (e.g. for "people involved" → the person names). Prefer subjects named in the request or snippets. Max 10 columns, 25 subjects. STRICT JSON {"columns":["<col>",...],"subjects":["<subject>",...]}.',
+            `REQUEST: ${tPrompt}\n\nMEMORIES:\n${JSON.stringify(broad)}`,
+          );
+          const columns = Array.isArray(planOut.columns) ? planOut.columns.map(String).slice(0, 10) : [];
+          const subjects = Array.isArray(planOut.subjects) ? planOut.subjects.map(String).filter(Boolean).slice(0, 25) : [];
+          if (!columns.length || !subjects.length) return jsonResponse(res, { columns, rows: [], summary: 'No table subjects could be grounded — try naming a subject (e.g. “my partners”, “my projects”).' });
+
+          // PASS 2 — recall PER subject (focused) so the real facts surface.
+          const perSubject = await Promise.all(subjects.map(async (s) => ({ subject: s, mems: await recallClean(s, 5) })));
+          const grounded = perSubject.filter((p) => p.mems.length); // drop subjects with no grounded memory
+          if (!grounded.length) return jsonResponse(res, { columns, rows: [], summary: 'No grounded data found for the subjects.' });
+
+          // PASS 3 — fill each row from its subject's memories, grounded.
+          const rowsOut = await groqJSON(
+            `You fill a spreadsheet. COLUMNS: ${JSON.stringify(columns)}. For each subject, produce ONE row of cells aligned to the columns, using ONLY that subject's memory snippets — never invent a value not in the snippets (use "" for unknown cells). STRICT JSON {"rows":[{"subject":"<subject>","cells":["<cell>",...]}]} in the given order.`,
+            JSON.stringify(grounded.map((g) => ({ subject: g.subject, memories: g.mems.map((m) => m.text) }))),
+          );
+          const rawRows = Array.isArray(rowsOut.rows) ? rowsOut.rows : [];
+          const rows = rawRows
+            .map((r) => (Array.isArray(r?.cells) ? r.cells.map((c) => String(c == null ? '' : c)).slice(0, columns.length) : []))
+            .filter((cells) => cells.some((c) => c && c.trim()))
+            .slice(0, 50);
+          return jsonResponse(res, { summary: `${rows.length} rows from your memory`, columns, rows });
         } catch (e) {
           console.error('[autofill-table] failed:', e.message);
           return jsonResponse(res, { error: 'table_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);

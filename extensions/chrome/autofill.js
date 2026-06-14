@@ -93,28 +93,77 @@
     return { filled: done };
   }
 
-  // ─── Spreadsheet mode: copy a grounded table as TSV to paste into a grid ──
+  // ─── Spreadsheet mode: ghost cursor glides over the grid and fills it ──────
+  // Canvas grids (Google Sheets/Excel-online) have no DOM cells, so the only
+  // robust write path is a paste. We copy the grounded table to the clipboard,
+  // then the ghost cursor visibly glides to the grid and dispatches a synthetic
+  // paste at the focused cell. If the app ignores the synthetic paste (Sheets
+  // often does for untrusted events), the banner tells the user to press Cmd/
+  // Ctrl+V — the clipboard already holds the exact table.
+  function tsvToHtml(columns, rows) {
+    const td = (c) => `<td>${String(c == null ? '' : c).replace(/&/g, '&amp;').replace(/</g, '&lt;')}</td>`;
+    const tr = (cells) => `<tr>${(cells || []).map(td).join('')}</tr>`;
+    return `<table><tbody>${tr(columns)}${(rows || []).map(tr).join('')}</tbody></table>`;
+  }
   async function copyTSV(columns, rows) {
     const esc = (c) => String(c == null ? '' : c).replace(/\t/g, ' ').replace(/\r?\n/g, ' ');
     const tsv = [(columns || []).map(esc).join('\t'), ...(rows || []).map((r) => (r || []).map(esc).join('\t'))].join('\n');
-    let ok = false;
-    try { await navigator.clipboard.writeText(tsv); ok = true; } catch (e) {
+    const html = tsvToHtml(columns, rows);
+    let copied = false;
+    try { await navigator.clipboard.writeText(tsv); copied = true; } catch (e) {
       try {
         const ta = document.createElement('textarea');
         ta.value = tsv; ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0;';
         document.body.appendChild(ta); ta.focus(); ta.select();
-        ok = document.execCommand('copy'); ta.remove();
-      } catch (e2) { ok = false; }
+        copied = document.execCommand('copy'); ta.remove();
+      } catch (e2) { copied = false; }
     }
-    // Ghost cursor points at the grid + a paste hint banner.
-    ensureCursor(); moveCursor(window.innerWidth / 2 - 13, 150);
+
+    // Ghost cursor glides onto the grid and "fills" it.
+    ensureCursor();
+    const gx = Math.round(window.innerWidth / 2);
+    const gy = Math.min(Math.round(window.innerHeight * 0.38), 340);
+    moveCursor(gx - 13, gy - 13);
+    await sleep(520);
+
+    // Try to land focus on the grid and dispatch a real paste event.
+    let pasted = false;
+    try {
+      const target = (document.activeElement && document.activeElement !== document.body && document.activeElement)
+        || document.querySelector('[contenteditable="true"]')
+        || document.querySelector('.grid-table-container, .waffle, [role="grid"], canvas')
+        || document.body;
+      try { target.focus && target.focus(); } catch (e3) { /* ignore */ }
+      const dt = new DataTransfer();
+      dt.setData('text/plain', tsv);
+      dt.setData('text/html', html);
+      const ev = new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt });
+      // dispatchEvent returns false when a handler called preventDefault() →
+      // the app consumed the paste (i.e. it actually filled).
+      pasted = target.dispatchEvent(ev) === false;
+    } catch (e4) { pasted = false; }
+
+    // Animate a few cell-row hops so it reads as the cursor filling rows.
+    ripple(gx, gy);
+    const hops = Math.min((rows || []).length, 5);
+    for (let i = 1; i <= hops; i += 1) {
+      moveCursor(gx - 13, gy - 13 + i * 22);
+      ripple(gx, gy + i * 22);
+      await sleep(150);
+    }
+
     const hint = document.createElement('div');
-    hint.style.cssText = 'position:fixed;top:120px;left:50%;transform:translateX(-50%);z-index:2147483647;background:#0a0a0a;color:#fff;font:600 13px/1.4 system-ui;padding:10px 16px;border-radius:10px;box-shadow:0 6px 20px rgba(0,0,0,.3);pointer-events:none;';
-    hint.textContent = ok ? `📋 ${rows.length} rows × ${columns.length} cols copied — click a cell and press Cmd/Ctrl+V` : 'Could not copy — try again';
+    hint.style.cssText = 'position:fixed;top:120px;left:50%;transform:translateX(-50%);z-index:2147483647;background:#0a0a0a;color:#fff;font:600 13px/1.4 system-ui;padding:10px 16px;border-radius:10px;box-shadow:0 6px 20px rgba(0,0,0,.3);pointer-events:none;text-align:center;';
+    hint.textContent = pasted
+      ? `✨ Filled ${rows.length} rows × ${columns.length} cols from your memory`
+      : (copied
+        ? `📋 ${rows.length} × ${columns.length} ready — click a cell and press Cmd/Ctrl+V`
+        : 'Could not copy — try again');
     document.documentElement.appendChild(hint);
-    setTimeout(() => { hint.style.transition = 'opacity .5s'; hint.style.opacity = '0'; }, 5000);
-    setTimeout(() => hint.remove(), 5600);
-    return { ok, rows: (rows || []).length, cols: (columns || []).length };
+    if (cursorEl) setTimeout(() => { cursorEl.style.opacity = '0'; }, 1400);
+    setTimeout(() => { hint.style.transition = 'opacity .5s'; hint.style.opacity = '0'; }, 5200);
+    setTimeout(() => hint.remove(), 5800);
+    return { ok: copied, pasted, rows: (rows || []).length, cols: (columns || []).length };
   }
 
   window.__hmAutofill = { scan, run, copyTSV };

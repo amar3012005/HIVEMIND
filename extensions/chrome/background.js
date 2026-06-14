@@ -526,7 +526,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               if ((tbl.columns || []).length && (tbl.rows || []).length) {
                 const copyRes = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: (c, r) => (window.__hmAutofill ? window.__hmAutofill.copyTSV(c, r) : null), args: [tbl.columns, tbl.rows] });
                 const cr = (copyRes && copyRes[0] && copyRes[0].result) || {};
-                return { ok: true, mode: 'table', rows: tbl.rows.length, cols: tbl.columns.length, summary: tbl.summary || '', copied: !!cr.ok };
+                return { ok: true, mode: 'table', rows: tbl.rows.length, cols: tbl.columns.length, summary: tbl.summary || '', copied: !!cr.ok, pasted: !!cr.pasted };
               }
               return { ok: true, mode: 'table', rows: 0, note: tbl.summary || 'No table could be built from your memory — try naming a subject (e.g. “my partners”, “my projects”).' };
             }

@@ -12,6 +12,7 @@ const state = {
   email: '',
   model: 'GPT-OSS 120B',
   context: null, // { mode: 'selection'|'section'|'page', text, heading?, url, title }
+  copilotEnabled: false, // Autofill Copilot toggle — Send runs page-fill when on
 };
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -153,38 +154,21 @@ function wireEvents() {
 
   $('sendBtn').addEventListener('click', send);
 
-  // ── Vision Autofill: use the composer text as the goal, fill the page ──
+  // ── Autofill Copilot: the button only TOGGLES copilot mode. Once enabled,
+  // the Send button (or Enter) runs the whole page-fill pipeline using the
+  // composer text as the goal, instead of chatting. ──
   const autofillBtn = $('autofillBtn');
   if (autofillBtn) {
-    autofillBtn.addEventListener('click', async () => {
+    autofillBtn.addEventListener('click', () => {
+      state.copilotEnabled = !state.copilotEnabled;
+      autofillBtn.classList.toggle('active', state.copilotEnabled);
       const input = $('input');
-      const prompt = (input && input.value || '').trim() || 'Fill this form with my information';
-      autofillBtn.disabled = true; autofillBtn.style.opacity = '0.5';
-      showAutofillToast('🖱 Reading the page + your memory…');
-      try {
-        const res = await chrome.runtime.sendMessage({ action: 'autofillRun', prompt });
-        if (!res || res.error) {
-          showAutofillToast(`⚠ ${(res && res.error) || 'Autofill failed'}`);
-        } else if (res.mode === 'table') {
-          if (res.rows > 0) {
-            showAutofillToast(res.copied
-              ? `📋 ${res.rows}×${res.cols} table copied from your memory — click a cell + press Cmd/Ctrl+V`
-              : `Built a ${res.rows}×${res.cols} table but couldn't copy — try again`);
-            if (input) input.value = '';
-          } else {
-            showAutofillToast(res.note || 'No table could be built from your memory.');
-          }
-        } else if (res.filled === 0) {
-          showAutofillToast(res.note || 'Nothing to fill from your memory.');
-        } else {
-          const skip = res.skipped && res.skipped.length ? `, ${res.skipped.length} skipped` : '';
-          showAutofillToast(`✅ Filled ${res.filled} field(s)${skip} · review + submit`);
-          if (input) input.value = '';
-        }
-      } catch (e) {
-        showAutofillToast(`⚠ ${e.message || 'Autofill failed'}`);
-      } finally {
-        autofillBtn.disabled = false; autofillBtn.style.opacity = '1';
+      if (state.copilotEnabled) {
+        if (input) input.placeholder = '🖱 Copilot on — type a goal (e.g. “fill with my company details”) then Send';
+        showAutofillToast('🖱 Autofill Copilot ON — type a goal, then press Send to fill this page');
+      } else {
+        if (input) input.placeholder = 'Ask HIVE anything…';
+        showAutofillToast('Autofill Copilot off');
       }
     });
   }
@@ -489,12 +473,56 @@ function flashHint(text) {
   setTimeout(() => el.remove(), 4000);
 }
 
+// Run the Vision Autofill pipeline against the active tab. The ghost cursor
+// fills HTML forms in place; spreadsheet grids get a grounded table pasted/
+// copied. Grounded only — never invents, never submits.
+async function runCopilotAutofill(prompt) {
+  if (state.sending) return;
+  state.sending = true;
+  const input = $('input');
+  const sendBtn = $('sendBtn');
+  if (sendBtn) sendBtn.disabled = true;
+  showAutofillToast('🖱 Reading the page + your memory…');
+  try {
+    const res = await chrome.runtime.sendMessage({ action: 'autofillRun', prompt });
+    if (!res || res.error) {
+      showAutofillToast(`⚠ ${(res && res.error) || 'Autofill failed'}`);
+    } else if (res.mode === 'table') {
+      if (res.rows > 0) {
+        showAutofillToast(res.pasted
+          ? `✨ Filled ${res.rows}×${res.cols} from your memory`
+          : (res.copied
+            ? `📋 ${res.rows}×${res.cols} ready — click a cell + press Cmd/Ctrl+V`
+            : `Built a ${res.rows}×${res.cols} table but couldn't copy — try again`));
+        if (input) input.value = '';
+      } else {
+        showAutofillToast(res.note || 'No table could be built from your memory.');
+      }
+    } else if (res.filled === 0) {
+      showAutofillToast(res.note || 'Nothing to fill from your memory.');
+    } else {
+      const skip = res.skipped && res.skipped.length ? `, ${res.skipped.length} skipped` : '';
+      showAutofillToast(`✅ Filled ${res.filled} field(s)${skip} · review + submit`);
+      if (input) input.value = '';
+    }
+  } catch (e) {
+    showAutofillToast(`⚠ ${e.message || 'Autofill failed'}`);
+  } finally {
+    state.sending = false;
+    if (sendBtn) sendBtn.disabled = false;
+    if (input) input.focus();
+  }
+}
+
 async function send() {
   if (state.sending) return;
   if (!state.signedIn) return;
   const input = $('input');
   const text = input.value.trim();
   if (!text) return;
+
+  // Copilot mode: Send runs the page-fill pipeline, not a chat turn.
+  if (state.copilotEnabled) { await runCopilotAutofill(text); return; }
 
   state.sending = true;
   input.value = '';

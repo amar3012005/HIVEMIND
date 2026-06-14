@@ -153,6 +153,33 @@ function wireEvents() {
 
   $('sendBtn').addEventListener('click', send);
 
+  // ── Vision Autofill: use the composer text as the goal, fill the page ──
+  const autofillBtn = $('autofillBtn');
+  if (autofillBtn) {
+    autofillBtn.addEventListener('click', async () => {
+      const input = $('input');
+      const prompt = (input && input.value || '').trim() || 'Fill this form with my information';
+      autofillBtn.disabled = true; autofillBtn.style.opacity = '0.5';
+      showAutofillToast('🖱 Reading the page + your memory…');
+      try {
+        const res = await chrome.runtime.sendMessage({ action: 'autofillRun', prompt });
+        if (!res || res.error) {
+          showAutofillToast(`⚠ ${(res && res.error) || 'Autofill failed'}`);
+        } else if (res.filled === 0) {
+          showAutofillToast(res.note || 'Nothing to fill from your memory.');
+        } else {
+          const skip = res.skipped && res.skipped.length ? `, ${res.skipped.length} skipped` : '';
+          showAutofillToast(`✅ Filled ${res.filled} field(s)${skip} · review + submit`);
+          if (input) input.value = '';
+        }
+      } catch (e) {
+        showAutofillToast(`⚠ ${e.message || 'Autofill failed'}`);
+      } finally {
+        autofillBtn.disabled = false; autofillBtn.style.opacity = '1';
+      }
+    });
+  }
+
   // ── Context controls ──
   $('selBtn').addEventListener('click', async () => {
     // Try a couple of times — first click also kicks off tracker injection,
@@ -1664,4 +1691,19 @@ function openCreateProjectModal() {
       createBtn.textContent = 'Create';
     }
   });
+}
+
+// ── Autofill toast (bottom of the side panel) ──────────────────────────────
+function showAutofillToast(msg) {
+  let t = document.getElementById('autofillToast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'autofillToast';
+    t.style.cssText = 'position:fixed;bottom:96px;left:12px;right:12px;background:#0a0a0a;color:#fff;font-size:12px;line-height:1.4;padding:9px 12px;border-radius:9px;z-index:99999;text-align:center;box-shadow:0 4px 16px rgba(0,0,0,.25);transition:opacity .35s;';
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  t.style.opacity = '1';
+  clearTimeout(t._hide);
+  t._hide = setTimeout(() => { t.style.opacity = '0'; }, 4500);
 }

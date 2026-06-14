@@ -20,7 +20,12 @@
   "host_permissions": [
     "https://core.hivemind.davinciai.eu:8050/*",
     "https://api.hivemind.davinciai.eu:8040/*",
-    "https://hivemind.davinciai.eu/*"
+    "https://hivemind.davinciai.eu/*",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "web_accessible_resources": [
+    { "resources": ["autofill.js"], "matches": ["<all_urls>"] }
   ],
   "optional_host_permissions": [
     "https://chatgpt.com/*",

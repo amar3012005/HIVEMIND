@@ -5410,6 +5410,82 @@ exit \$RC
         }
       }
 
+      // ── Vision Autofill ──────────────────────────────────────────────────
+      // POST /api/autofill/plan — ONE vision+recall pass: screenshot + user
+      // prompt + DOM fields → grounded fill plan. Step A: Groq vision decides
+      // WHICH fields to fill + a value_query each. Step B: recall the value per
+      // query (tenant-scoped). Step C: one grounded map call → literal values.
+      // Never invents — a field with no grounded value is returned in `skipped`.
+      if (pathname === '/api/autofill/plan' && req.method === 'POST') {
+        if (!process.env.GROQ_API_KEY) return jsonResponse(res, { error: 'vision_unavailable' }, 503);
+        try {
+          const auth = await authenticateApiKey(req).catch(() => null);
+          const afUser = auth?.principal?.userId || req.headers['x-hm-user-id'] || DEFAULT_USER;
+          const afOrg = auth?.principal?.orgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
+          const screenshot = (body.screenshot_b64 || '').toString();
+          const afPrompt = (body.prompt || '').toString().slice(0, 600);
+          const fields = Array.isArray(body.fields) ? body.fields.slice(0, 60) : [];
+          if (!fields.length) return jsonResponse(res, { error: 'no_fields' }, 400);
+          const byKey = new Map(fields.map((f, i) => [f.key || `f${i}`, f]));
+
+          // Step A — ONE vision call: which fields, value_query each.
+          const fieldList = fields.map((f, i) => ({ key: f.key || `f${i}`, label: (f.label || f.name || f.placeholder || '').toString().slice(0, 80), type: f.type || 'text' }));
+          const visionSys = 'You are a form-filling planner. Given a screenshot, the user goal, and the list of DOM form fields (key+label+type), decide which fields should be filled to accomplish the goal. For each, output value_query: a short natural-language description of WHAT value the field needs (e.g. "user\'s company legal name", "user\'s work email"). Only fields clearly relevant to the goal. Never invent fields not in the list. STRICT JSON {"page_summary":"<1 line>","targets":[{"key":"<dom key>","value_query":"<what to fill>","importance":1-3}]}.';
+          const visionContent = [{ type: 'text', text: `USER GOAL: ${afPrompt}\n\nDOM FIELDS: ${JSON.stringify(fieldList)}` }];
+          if (screenshot && screenshot.length > 100) {
+            visionContent.push({ type: 'image_url', image_url: { url: screenshot.startsWith('data:') ? screenshot : `data:image/jpeg;base64,${screenshot}` } });
+          }
+          let targets = []; let pageSummary = '';
+          try {
+            const vr = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ model: process.env.GROQ_VISION_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct', temperature: 0.1, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: visionSys }, { role: 'user', content: visionContent }] }),
+              signal: AbortSignal.timeout(45_000),
+            });
+            if (vr.ok) { const vj = JSON.parse((await vr.json()).choices[0].message.content); targets = Array.isArray(vj.targets) ? vj.targets.slice(0, 20) : []; pageSummary = (vj.page_summary || '').toString().slice(0, 200); }
+          } catch (ve) { console.warn('[autofill] vision failed:', ve.message); }
+          if (!targets.length) targets = fieldList.slice(0, 20).map((f) => ({ key: f.key, value_query: f.label || f.type, importance: 2 }));
+
+          // Step B — recall the value for each target.
+          const recalls = await Promise.all(targets.map(async (t) => {
+            const r = await recallPersistedMemories(persistentMemoryStore, { query_context: t.value_query, user_id: afUser, org_id: afOrg, max_memories: 5 }).catch(() => null);
+            const mems = ((r?.memories || r || []) || []).slice(0, 5).map((m) => ({ id: m.id, snippet: `${m.title || ''} ${m.content || ''}`.replace(/\s+/g, ' ').trim().slice(0, 220) }));
+            return { ...t, _mems: mems };
+          }));
+
+          // Step C — ONE grounded map call: literal value per field.
+          const mapSys = 'You extract the exact VALUE to type into each form field, grounded ONLY in the provided memory snippets. For each item return the literal value (a short string) ONLY if a snippet clearly contains it; otherwise value:"" (never guess). Cite the memory_id used. STRICT JSON {"fills":[{"key":"<key>","value":"<literal or empty>","source_memory_id":"<id or empty>","confidence":0..1}]} in item order.';
+          const mapUser = JSON.stringify(recalls.map((t) => ({ key: t.key, value_query: t.value_query, memories: t._mems })));
+          let fillMap = [];
+          try {
+            const mr = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ model: process.env.MEETING_INSIGHTS_MODEL || 'openai/gpt-oss-120b', temperature: 0, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: mapSys }, { role: 'user', content: mapUser }] }),
+              signal: AbortSignal.timeout(45_000),
+            });
+            if (mr.ok) { const mj = JSON.parse((await mr.json()).choices[0].message.content); fillMap = Array.isArray(mj.fills) ? mj.fills : []; }
+          } catch (me) { console.warn('[autofill] map failed:', me.message); }
+
+          const fills = []; const skipped = [];
+          for (const fm of fillMap) {
+            const f = byKey.get(fm.key);
+            const value = (fm.value || '').toString().trim();
+            if (!f) continue;
+            if (value && (fm.confidence == null || Number(fm.confidence) >= 0.45) && fm.source_memory_id) {
+              fills.push({ key: fm.key, selector: f.selector || null, bbox: f.bbox || null, value, confidence: Number(fm.confidence) || 0.6, source_memory_id: fm.source_memory_id });
+            } else {
+              skipped.push({ key: fm.key, label: (f.label || f.name || '').toString(), reason: value ? 'low_confidence_or_ungrounded' : 'no_value_in_memory' });
+            }
+          }
+          return jsonResponse(res, { page_summary: pageSummary, fills, skipped });
+        } catch (e) {
+          console.error('[autofill] failed:', e.message);
+          return jsonResponse(res, { error: 'autofill_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
+        }
+      }
+
       // PATCH /api/meetings/:id — link a saved memory (Save to HIVEMIND) or amend
       // title/summary on an EXISTING row. Lets the meeting be persisted to Past
       // meetings the moment it finishes (POST, no memory) and later linked to a
@@ -15725,6 +15801,16 @@ exit \$RC
                     // legacy ingestMemory() path unchanged.
                     const results = [];
                     for (const p of ingestPayloads) {
+                      // Defer the ~2s entity-link LLM OUT of the per-user advisory
+                      // lock — lock now holds only the DB write (~50ms). Tags are
+                      // attached post-commit via the global EntityLinkQueue (bounded
+                      // Groq concurrency). Fixes burst-ingest lock contention +
+                      // TPM saturation. See entity-link-queue.js.
+                      p.defer_entity_linking = true;
+                      if (p.__ingest_tree && p.tree) {
+                        if (p.tree.parent) p.tree.parent.defer_entity_linking = true;
+                        if (Array.isArray(p.tree.children)) p.tree.children.forEach((c) => { c.defer_entity_linking = true; });
+                      }
                       const result = await ingestRoutedPayload(p, persistentMemoryEngine);
 
                       // Handle predict-calibrate skipped memories
@@ -15749,6 +15835,10 @@ exit \$RC
                             tags: p.parent?.tags || p.tags,
                           });
                         }
+                        // Deferred entity-link → global bounded queue (parent + children).
+                        persistentMemoryEngine.linkEntitiesForMemories(
+                          [{ id: parentResult.memoryId }, ...(result.childResults || []).map((c) => ({ id: c.memoryId }))].filter((x) => x.id),
+                        );
                         continue;
                       }
 
@@ -15768,6 +15858,12 @@ exit \$RC
                         pageindexHook?.onMemoryIngested(memory, {
                           mutation: { operation: result.operation, deprecatedIds: result.deprecatedIds || [] }
                         }).catch(err => console.warn('[pageindex-hook] onMemoryIngested failed:', err.message));
+                      }
+
+                      // Deferred entity-link → global bounded queue (Groq-capped,
+                      // eventually-consistent). Replaces the in-lock LLM call.
+                      if (result.memoryId) {
+                        persistentMemoryEngine.linkEntitiesForMemories([memory || { id: result.memoryId }]);
                       }
 
                       // Enrichment queue — every save path enqueues for

@@ -494,6 +494,47 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
+  // ── Vision Autofill: screenshot + DOM scan → /api/autofill/plan → ghost-
+  // cursor fill. One run. Never submits. message.prompt = the user's goal.
+  if (message.action === 'autofillRun') {
+    (async () => {
+      try {
+        const config = await getConfig();
+        if (!config.apiKey) { sendResponse({ error: 'Not signed in to HIVEMIND' }); return; }
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab || !tab.id) { sendResponse({ error: 'No active tab' }); return; }
+
+        // 1. screenshot (jpeg, smaller). May fail on chrome:// / protected pages.
+        let screenshot = '';
+        try { screenshot = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 60 }); } catch (e) { /* continue without vision */ }
+
+        // 2. inject the autofill content script + 3. scan fields
+        await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['autofill.js'] });
+        const scanRes = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => (window.__hmAutofill ? window.__hmAutofill.scan() : []) });
+        const fields = (scanRes && scanRes[0] && scanRes[0].result) || [];
+        if (!fields.length) { sendResponse({ error: 'No fillable fields found on this page.' }); return; }
+
+        // 4. plan: vision + grounded recall (one server run)
+        const resp = await fetch(`${config.apiBase}/api/autofill/plan`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-API-Key': config.apiKey },
+          body: JSON.stringify({ screenshot_b64: screenshot, prompt: message.prompt || 'Fill this form with my information', fields, url: tab.url || '', title: tab.title || '' }),
+        });
+        if (!resp.ok) { sendResponse({ error: `Autofill plan failed (${resp.status})` }); return; }
+        const plan = await resp.json();
+        const fills = (plan && plan.fills) || [];
+        if (!fills.length) { sendResponse({ ok: true, filled: 0, skipped: plan.skipped || [], page_summary: plan.page_summary || '', note: 'Nothing could be grounded from your memory for this form.' }); return; }
+
+        // 5. ghost-cursor fill
+        await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: (f) => (window.__hmAutofill ? window.__hmAutofill.run(f) : null), args: [fills] });
+        sendResponse({ ok: true, filled: fills.length, skipped: plan.skipped || [], page_summary: plan.page_summary || '', fills });
+      } catch (e) {
+        sendResponse({ error: e.message || 'Autofill failed' });
+      }
+    })();
+    return true; // async
+  }
+
   if (message.action === 'getSelectionContext') {
     getSelectionContext().then(sendResponse).catch(() => sendResponse(null));
     return true;

@@ -223,7 +223,7 @@ FACT rules:
 
 ENTITY rules — emit ONE canonical name per real-world thing so the same entity never forks into variants:
 - TYPE + LENGTH: an entity is a SHORT noun — a specific person, organization, product/model, place, technology, or standard. 1–3 words. NEVER a phrase, clause, description, or generic concept. Reject anything that reads like a description (do NOT emit "modular system idea", "customer cluster", "key account photovoltaic cluster", "comfort scenario"). If unsure whether it is a real entity, OMIT it.
-- LANGUAGE: write EVERY entity in English — translate common-noun concepts even from German (Wärmepumpe→heat pump, Photovoltaik→photovoltaic, Batteriespeicher→battery storage, Stromspeicher→battery storage, Wallbox→wallbox, Stromtarif→electricity tariff). The ONLY tokens you keep non-English are proper brand/product/person/place names (SolvisMax, SunSpec, §14a EnWG, 1KOMMA5°, Enpal).
+- LANGUAGE — CONSISTENCY OVER TRANSLATION: use the entity's name in the SOURCE LANGUAGE exactly as written in the document. Do NOT translate (translating half the mentions forks one thing into two — Wärmepumpe vs heat-pump). Pick ONE surface form per real-world thing and reuse it identically everywhere. A German document yields German entity names; an English one yields English — never a mix for the same entity.
 - NUMBER: singular for a concept/category; never the plural.
 - ABBREVIATIONS: prefer the full widely-recognized term over an abbreviation/acronym, UNLESS the abbreviation IS the entity's established proper name (HEMS, SunSpec stay).
 - SUFFIXES: drop corporate/legal-form suffixes. FORM: the bare name only — no articles, quotes, or trailing qualifiers.

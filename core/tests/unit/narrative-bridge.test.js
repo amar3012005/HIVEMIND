@@ -35,7 +35,19 @@ function ctx() {
     logger: { log() {}, warn() {} },
   };
 }
-const run = (c, tagList) => CognitionLoop.prototype._narrativeBridgePass.call(c, 'org', tagList);
+const run = (c, tagList, crossProject = false) => CognitionLoop.prototype._narrativeBridgePass.call(c, 'org', tagList, crossProject);
+
+// cluster whose members live in a specific project (for cross-project tests).
+const projectCluster = (tag, entityTags, project, n = 2) => ({
+  tag,
+  members: Array.from({ length: n }, (_, i) => ({
+    id: `${tag}-m${i}`, userId: 'u1', project,
+    content: `content for ${tag} ${i}`, title: tag,
+    createdAt: new Date('2026-06-01').toISOString(),
+    tags: [tag, ...entityTags],
+  })),
+  centroid: tag,
+});
 
 test('narrative bridge fires for a hub entity spanning ≥3 clusters (drift-collapsed)', async () => {
   const c = ctx();
@@ -75,4 +87,26 @@ test('narrative bridge skips on confidence below floor', async () => {
   ];
   const writes = await run(c, tagList);
   assert.equal(writes, 0, 'low-confidence narrative dropped');
+});
+
+test('narrative bridge SKIPS a hub spanning >1 project when cross-project is OFF', async () => {
+  const c = ctx();
+  const tagList = [
+    projectCluster('topic:a', ['entity:Acme'], 'proj-1'),
+    projectCluster('topic:b', ['entity:acme'], 'proj-1'),
+    projectCluster('topic:c', ['entity:ACME'], 'proj-2'), // different project → spans
+  ];
+  const writes = await run(c, tagList, false); // cross-project OFF
+  assert.equal(writes, 0, 'cross-project narrative blocked when toggle off');
+});
+
+test('narrative bridge ALLOWS a cross-project hub when cross-project is ON', async () => {
+  const c = ctx();
+  const tagList = [
+    projectCluster('topic:a', ['entity:Acme'], 'proj-1'),
+    projectCluster('topic:b', ['entity:acme'], 'proj-1'),
+    projectCluster('topic:c', ['entity:ACME'], 'proj-2'),
+  ];
+  const writes = await run(c, tagList, true); // cross-project ON
+  assert.equal(writes, 1, 'cross-project narrative allowed when toggle on');
 });

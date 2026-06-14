@@ -30,6 +30,7 @@ import { ClusterIndex } from './cluster-index.js';
 import { clusterHash } from './cluster-hash.js';
 import { normalizeEntity } from './entity-normalize.js';
 import { getQdrantClient } from '../vector/qdrant-client.js';
+import { crossProjectEnabledForOrg } from '../resident/cognition-pilot.js';
 
 // ─── Model config ──────────────────────────────────────────────────────────────
 // Phase 0 cost cut: routine synthesis/compaction is high-volume, low-reasoning
@@ -309,6 +310,21 @@ function entityTagsOf(members) {
   }
   return s;
 }
+// Distinct non-null project values across one or more member lists. Used to
+// enforce cross_project scope: when an org has cross-project dreaming OFF, a
+// bridge/narrative may not connect clusters that live in DIFFERENT projects.
+// Project-less (personal/org-level) members don't count as a project boundary.
+function spansMultipleProjects(...memberLists) {
+  const projects = new Set();
+  for (const list of memberLists) {
+    for (const m of (list || [])) {
+      const p = m.project || m.projectId || null;
+      if (p) projects.add(String(p));
+    }
+  }
+  return projects.size >= 2;
+}
+
 // Count entities present in BOTH clusters — the real connective tissue of a bridge.
 function sharedEntityKeys(aMembers, bMembers) {
   const A = entityTagsOf(aMembers);
@@ -756,6 +772,10 @@ export class CognitionLoop {
     // high. Capped at the hard default.
     const clusterMin = await deriveClusterMin(this.prisma, orgId);
 
+    // Cross-project scope (workspace setting): when OFF, bridges/narratives may not
+    // connect clusters that span different projects (dreams stay project-local).
+    const crossProject = await crossProjectEnabledForOrg(this.prisma, orgId).catch(() => false);
+
     // Window clamped to the org's cognition_enabled_at anchor — synthesis only
     // ever sees post-enable memory (no backfill). Scheduled runs pass a wide
     // lookbackHours so a nightly dream spans the whole day; continuous early
@@ -1089,6 +1109,9 @@ export class CognitionLoop {
         const overlap = [...aIds].filter(id => bIds.has(id)).length;
         if (overlap > 0) continue; // clusters share members → not a bridge candidate
 
+        // Cross-project scope: when off, don't bridge clusters in different projects.
+        if (!crossProject && spansMultipleProjects(a.members, b.members)) continue;
+
         const sim = tokenCosine(a.centroid, b.centroid);
         if (sim < BRIDGE_SIM_LOW || sim > BRIDGE_SIM_HIGH) continue;
 
@@ -1274,7 +1297,7 @@ export class CognitionLoop {
     // that arrived over months" pattern). Drift-tolerant hub keys (normalized).
     if (NARRATIVE_BRIDGE_ENABLED && tagList.length >= NARRATIVE_MIN_CLUSTERS) {
       try {
-        writes += await this._narrativeBridgePass(orgId, tagList);
+        writes += await this._narrativeBridgePass(orgId, tagList, crossProject);
       } catch (err) {
         this.logger.warn(`[cognition] narrative pass failed: ${err.message}`);
       }
@@ -1286,7 +1309,9 @@ export class CognitionLoop {
   // ─── Sub-pass C: multi-cluster narrative bridge ──────────────────────────────
   // Groups clusters by a shared NORMALIZED hub entity; for each hub linking
   // ≥ NARRATIVE_MIN_CLUSTERS clusters, weaves them into one grounded narrative.
-  async _narrativeBridgePass(orgId, tagList) {
+  // crossProject=false → a hub whose clusters span >1 project is skipped (the
+  // emergent narrative stays project-local unless the org enabled cross-project).
+  async _narrativeBridgePass(orgId, tagList, crossProject = false) {
     let writes = 0;
 
     // hub (normalized entity/person key) → set of cluster indices it spans
@@ -1315,6 +1340,9 @@ export class CognitionLoop {
 
     for (const hub of hubs) {
       const clusters = hub.idxs.slice(0, NARRATIVE_MAX_CLUSTERS).map((i) => tagList[i]);
+      // Cross-project scope: when off, a narrative whose clusters span >1 project
+      // is skipped — the emergent story stays project-local.
+      if (!crossProject && spansMultipleProjects(...clusters.map((c) => c.members))) continue;
       const clusterTags = clusters.map((c) => c.tag).sort();
       const hash = clusterHash(`narrative:${hub.key}:${clusterTags.join('|')}`);
 

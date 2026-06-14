@@ -162,9 +162,13 @@ export class EvidenceRetrievalService {
             });
             for (const segment of lexSegments) {
               if (haveIds.has(segment.id)) continue;
-              // Lexical hits get a moderate score (below a strong vector match,
-              // above the noise floor) so they fill gaps without dominating.
-              results.push(fmt(segment, 0.55, true));
+              // Score by DISTINCT query-token overlap: a segment containing more
+              // of the query's distinctive tokens (e.g. both "1KOMMA5" AND "Enpal")
+              // is a stronger literal match → must outrank doc-scoped vector hits
+              // and survive the top-N slice. 1 token ≈ 0.6, scaling up to ~0.9.
+              const lc = String(segment.content || '').toLowerCase();
+              const matches = lexTokens.filter((t) => lc.includes(t.toLowerCase())).length;
+              results.push(fmt(segment, Math.min(0.9, 0.55 + 0.13 * matches), true));
               haveIds.add(segment.id);
             }
           } catch (lexErr) {

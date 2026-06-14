@@ -89,3 +89,66 @@ export async function continuity(decisions, { recall, judge, maxDecisions = 8, m
   });
   return out;
 }
+
+const LOOP_KINDS = ['risk', 'next-step', 'goal', 'action'];
+
+/**
+ * Lane 3 — recall prior risk/action/next-step memories on the meeting's
+ * topics/entities that look unresolved. Heuristic: the memory itself is a
+ * risk/action tag. (Exact resolution comes in Phase A via action-item status.)
+ */
+export async function openLoops(topics, { recall, maxTopics = 6 }) {
+  const picked = (topics || []).filter((tp) => typeof tp === 'string' && tp.trim()).slice(0, maxTopics);
+  const seen = new Set();
+  const out = [];
+  for (const tp of picked) {
+    const res = await recall(tp).catch(() => ({ memories: [] }));
+    for (const m of (res?.memories || [])) {
+      if (!m?.id || seen.has(m.id)) continue;
+      const tags = Array.isArray(m.tags) ? m.tags : [];
+      const kind = LOOP_KINDS.find((k) => tags.includes(k));
+      if (!kind) continue;
+      seen.add(m.id);
+      out.push({
+        kind,
+        text: (m.content || m.title || '').toString().slice(0, 200),
+        memory_id: m.id,
+        source_meeting_id: m.meeting_id || null,
+        created_at: m.created_at || null,
+      });
+      if (out.length >= 8) break;
+    }
+    if (out.length >= 8) break;
+  }
+  return onlyGrounded(out);
+}
+
+/**
+ * Orchestrator — runs all three lanes within bounded cost and assembles the
+ * intelligence object. Never throws (best-effort enrichment); a failed lane
+ * contributes nothing. Status: 'ready' if anything grounded, else 'empty'.
+ */
+export async function generateIntelligence(meeting, { recall, judge, nowIso }) {
+  const ins = (meeting?.insights && typeof meeting.insights === 'object') ? meeting.insights : {};
+  const people = Array.isArray(ins.entities?.people) ? ins.entities.people : [];
+  const orgs = Array.isArray(ins.entities?.organizations) ? ins.entities.organizations : [];
+  const ents = [
+    ...people.map((n) => ({ name: String(n), kind: 'person' })),
+    ...orgs.map((n) => ({ name: String(n), kind: 'org' })),
+  ];
+  const [entities, cont, loops] = await Promise.all([
+    entityBriefs(ents, { recall, judge }).catch(() => []),
+    continuity(Array.isArray(ins.decisions) ? ins.decisions : [], { recall, judge }).catch(() => []),
+    openLoops(Array.isArray(ins.topics) ? ins.topics : [], { recall }).catch(() => []),
+  ]);
+  const related = entities.reduce((s, e) => s + (e.memory_count || 0), 0) + cont.length + loops.length;
+  const has = entities.length || cont.length || loops.length;
+  return {
+    generated_at: nowIso || new Date().toISOString(),
+    related_count: related,
+    entities,
+    continuity: cont,
+    open_loops: loops,
+    status: has ? 'ready' : 'empty',
+  };
+}

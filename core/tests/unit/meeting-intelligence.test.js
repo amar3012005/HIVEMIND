@@ -65,3 +65,38 @@ test('continuity: emits UPDATES/CONFLICTS above floor, drops NEW + low-confidenc
   assert.equal(out[0].prior_memory_id, 'p1');
   assert.equal(out[0].confidence, 0.82);
 });
+
+import { openLoops, generateIntelligence } from '../../src/knowledge/meeting-intelligence.js';
+
+test('openLoops: surfaces unresolved risk/action memories, grounded', async () => {
+  const recall = async () => ({ memories: [
+    { id: 'r1', content: 'B&B contract not countersigned', tags: ['risk'], created_at: '2026-06-01T00:00:00Z', meeting_id: 'mtg-old' },
+    { id: 'd1', content: 'random doc', tags: ['fact'] },
+  ] });
+  const out = await openLoops(['B&B'], { recall, maxTopics: 6 });
+  assert.equal(out.length, 1);
+  assert.equal(out[0].memory_id, 'r1');
+  assert.equal(out[0].kind, 'risk');
+});
+
+test('generateIntelligence: all lanes empty → status empty', async () => {
+  const recall = async () => ({ memories: [] });
+  const judge = async () => ({ briefs: {}, results: [] });
+  const meeting = { insights: { entities: { people: ['X'], organizations: [] }, decisions: ['Y'], topics: ['Z'] } };
+  const out = await generateIntelligence(meeting, { recall, judge });
+  assert.equal(out.status, 'empty');
+  assert.equal(out.entities.length, 0);
+  assert.equal(out.continuity.length, 0);
+  assert.equal(out.open_loops.length, 0);
+});
+
+test('generateIntelligence: any populated lane → status ready + related_count', async () => {
+  const recall = async (q) => q === 'X' ? { memories: [{ id: 'm1', content: 'about X' }] } : { memories: [] };
+  const judge = async () => ({ briefs: { X: 'X is a person' }, results: [] });
+  const meeting = { insights: { entities: { people: ['X'], organizations: [] }, decisions: [], topics: [] } };
+  const out = await generateIntelligence(meeting, { recall, judge });
+  assert.equal(out.status, 'ready');
+  assert.equal(out.entities.length, 1);
+  assert.ok(out.related_count >= 1);
+  assert.ok(out.generated_at);
+});

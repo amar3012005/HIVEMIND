@@ -52,10 +52,17 @@ const RRF_K                    = 60;    // standard RRF constant
 const ANCHOR_BOOST             = 0.30;  // additive boost when memory tagged w/ doc anchor
 // Dreams-first: synthesis memories (the cognitive layer's dreams — canonical /
 // bridge / principle) are the distilled, cross-source view, so a matching dream
-// should outrank its raw inputs in recall. Additive boost in RRF so relevant
-// dreams float to the top AND survive the score-floor/MMR pruning. Default on.
+// should outrank its raw inputs in recall. The lift is MULTIPLICATIVE on the
+// dream's OWN rrf base (NOT a flat additive bonus): a flat +0.5 is ~30x the
+// entire base spread of 1/(RRF_K+rank), so it floated EVERY retrieved dream above
+// ALL raw memories — at scale (many dreams) recall degenerated to "dreams only".
+// Multiplying keeps the lift proportional to the dream's own relevance, so a
+// weakly-relevant dream cannot leapfrog a strongly-relevant raw memory. A hard
+// quota (MAX_DREAMS_IN_TOPN) then guarantees raw evidence still appears in the
+// delivered set. Default on.
 const DREAM_FIRST_ENABLED      = process.env.RECALL_DREAMS_FIRST !== 'false';
-const DREAM_RANK_BOOST         = Number(process.env.RECALL_DREAM_BOOST || 0.50);
+const DREAM_RANK_MULT          = Number(process.env.RECALL_DREAM_MULT || 1.6);
+const MAX_DREAMS_IN_TOPN       = Number(process.env.RECALL_MAX_DREAMS_IN_TOPN || 2);
 
 const WORKSPACE_PLATFORMS = new Set([
   'gmail', 'google_drive', 'google_calendar', 'google_docs', 'google_sheets',
@@ -562,17 +569,47 @@ function reciprocalRankFusionMemories(memories, docAnchors) {
         : 0;
       // Dreams-first: lift synthesis memories (cognitive_layer_role set, or
       // memory_type synthesis, or a synthesis:* tag) so the distilled dream
-      // ranks above its raw sources.
+      // ranks above its raw sources — but PROPORTIONALLY (multiplicative on its
+      // own base), never a flat bonus that lets a weak dream beat a strong raw.
       const role = m.cognitive_layer_role || m.cognitiveLayerRole;
-      const isDream = DREAM_FIRST_ENABLED && (
-        !!role ||
+      const isDream = !!(
+        role ||
         m.memory_type === 'synthesis' || m.memoryType === 'synthesis' ||
         (m.tags || []).some((t) => typeof t === 'string' && t.startsWith('synthesis:'))
       );
-      const dreamBoost = isDream ? DREAM_RANK_BOOST : 0;
-      return { ...m, _rank_score: base + tagMatchBoost + dreamBoost };
+      const dreamMult = (DREAM_FIRST_ENABLED && isDream) ? DREAM_RANK_MULT : 1;
+      return { ...m, _rank_score: (base + tagMatchBoost) * dreamMult, _is_dream: isDream };
     })
     .sort((a, b) => b._rank_score - a._rank_score);
+}
+
+// Cap how many dreams may occupy the delivered top-N so raw source evidence
+// always survives. Reorders so the first `topN` items contain ≤ maxDreams
+// synthesis memories; excess dreams are deferred just past the boundary
+// (still returned, just not crowding the delivered slots). Relative order is
+// otherwise preserved. Dreams only backfill the prefix if there isn't enough
+// raw to fill topN. No-op when dreams-first is disabled or maxDreams < 0.
+export function enforceDreamQuota(ranked, topN, maxDreams = MAX_DREAMS_IN_TOPN) {
+  if (!DREAM_FIRST_ENABLED || maxDreams < 0 || !Array.isArray(ranked) || ranked.length <= topN) {
+    return ranked;
+  }
+  const isDream = (m) => m._is_dream
+    || !!(m.cognitive_layer_role || m.cognitiveLayerRole)
+    || m.memory_type === 'synthesis' || m.memoryType === 'synthesis'
+    || (m.tags || []).some((t) => typeof t === 'string' && t.startsWith('synthesis:'));
+  const front = [];
+  const deferredDreams = [];
+  const rest = [];
+  let dreamsInFront = 0;
+  for (const m of ranked) {
+    if (front.length >= topN) { rest.push(m); continue; }
+    if (isDream(m) && dreamsInFront >= maxDreams) { deferredDreams.push(m); continue; }
+    front.push(m);
+    if (isDream(m)) dreamsInFront += 1;
+  }
+  // Not enough raw to fill the prefix → backfill with the deferred dreams.
+  while (front.length < topN && deferredDreams.length) front.push(deferredDreams.shift());
+  return [...front, ...deferredDreams, ...rest];
 }
 
 // ── Enhance helper for HTTP callers (e.g. /api/recall) that already ran
@@ -779,6 +816,11 @@ export class RecallRouter {
       const cfg = await getRetrievalConfig(ctx.orgId);
       if (cfg?.deliver_limit) deliverN = cfg.deliver_limit;
     } catch { /* default */ }
+
+    // Dreams-first quota: guarantee raw source evidence still appears in the
+    // delivered set (≤ MAX_DREAMS_IN_TOPN synthesis rows in the top-N), so a
+    // dream-heavy org never degenerates to "dreams only" recall.
+    rankedMemories = enforceDreamQuota(rankedMemories, deliverN, MAX_DREAMS_IN_TOPN);
 
     // Two-reranker contract: this is the OPT-IN CROSS-ENCODER precision pass (external
     // model, gated RERANK_ENABLED) — no-op (returns first N) when disabled. The ALGORITHMIC

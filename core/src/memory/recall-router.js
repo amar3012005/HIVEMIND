@@ -335,17 +335,49 @@ async function resolveDocIdsFromFilenames({ prisma, filenames, userId, orgId }) 
   }
 }
 
-// ── Hop 2 — Evidence segments ──────────────────────────────────────────────
+// All KB documents filed under a project (scope-key tag set at upload). Lets
+// hop-2 dig the WHOLE project corpus when hop-1 gave no doc anchors — so a
+// buried term in a project doc that hop-1 never surfaced still reaches evidence.
+async function resolveProjectDocIds({ prisma, projectId, orgId }) {
+  if (!prisma?.knowledgeDocument || !projectId) return [];
+  try {
+    const rows = await prisma.knowledgeDocument.findMany({
+      where: { orgId, tags: { has: `scope-key:project:${projectId}` } },
+      select: { id: true },
+      take: 50,
+    });
+    return rows.map((r) => r.id);
+  } catch {
+    return [];
+  }
+}
 
+// ── Hop 2 — Evidence segments ──────────────────────────────────────────────
+//
+// Escalating "dig deeper" fallback: the deeper we go, the lower-signal the
+// source, so evidence ranks BELOW hop-1 memories when handed to the LLM, and
+// within evidence retrieveEvidence orders by score (a literal lexical hit can
+// outrank a weak vector chunk — that's intentional, it's the stronger signal).
+// Scope ladder: hop-1 doc anchors → filenames → the project's whole corpus →
+// broad. We ALWAYS dig (no Case-C dead-end): evidence is the ground-truth
+// backstop, and hop-1 returning *some* memories doesn't mean it answered the
+// query (the competitor footnote case). retrieveEvidence runs vector + the
+// lexical fallback, so buried exact terms surface regardless of cosine rank.
 export async function hop2Evidence({ evidenceService, query, ctx, inspection, prisma }) {
   if (!evidenceService) return { items: [], reason: null };
 
-  // Case A: hop-1 memories carry doc anchors → doc-filtered search.
   let docIds = [...inspection.docIds];
+  let reason = 'doc-anchored';
   if (docIds.length === 0 && inspection.filenames.length > 0) {
     docIds = await resolveDocIdsFromFilenames({
       prisma, filenames: inspection.filenames, userId: ctx.userId, orgId: ctx.orgId,
     });
+  }
+  // Dig wider: no hop-1 anchors but a project is in scope → search the whole
+  // project corpus (keeps evidence project-isolated, not org-wide leakage).
+  if (docIds.length === 0 && ctx.projectId) {
+    docIds = await resolveProjectDocIds({ prisma, projectId: ctx.projectId, orgId: ctx.orgId });
+    if (docIds.length) reason = 'project-corpus';
   }
 
   if (docIds.length > 0) {
@@ -354,10 +386,12 @@ export async function hop2Evidence({ evidenceService, query, ctx, inspection, pr
       documentIds: docIds,
       limit: HOP2_DOC_LIMIT,
     });
-    return { items, reason: 'doc-anchored', docIds };
+    return { items, reason, docIds };
   }
 
-  // Case B: sparse hop-1 → broad evidence sweep as rescue.
+  // Deepest dig: no doc scope → broad org/user sweep, but ONLY when hop-1 was
+  // sparse. A non-sparse org-wide query that hop-1 already answered keeps the
+  // Case-C skip (no extra latency / noise — preserves current behavior).
   if (inspection.sparse) {
     const items = await evidenceService.retrieveEvidence({
       query, userId: ctx.userId, orgId: ctx.orgId,
@@ -366,7 +400,6 @@ export async function hop2Evidence({ evidenceService, query, ctx, inspection, pr
     return { items, reason: 'sparse-rescue' };
   }
 
-  // Case C: hop-1 covered it. No hop-2.
   return { items: [], reason: null };
 }
 

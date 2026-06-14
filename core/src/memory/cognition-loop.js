@@ -28,6 +28,7 @@ import crypto from 'crypto';
 import { chatCompletion } from '../knowledge/enterprise/litellm-client.js';
 import { ClusterIndex } from './cluster-index.js';
 import { clusterHash } from './cluster-hash.js';
+import { normalizeEntity } from './entity-normalize.js';
 import { getQdrantClient } from '../vector/qdrant-client.js';
 
 // ─── Model config ──────────────────────────────────────────────────────────────
@@ -1210,26 +1211,57 @@ export class CognitionLoop {
 
   // ─── Entity over-dream guard ─────────────────────────────────────────────────
   // Returns true if the cluster's dominant entity/person was already dreamed
-  // (folded into ANY latest synthesis carrying that tag) within cooldownHours —
+  // (folded into ANY latest synthesis carrying that entity) within cooldownHours —
   // even under a different cluster_hash. Prevents the same entity being re-dreamed
   // repeatedly ("overdone"). Only gates entity:/person: tags; topic tags are too
   // broad and would over-suppress legitimately distinct clusters.
+  //
+  // Drift-tolerant: the comparison is on the NORMALIZED entity key, not the raw
+  // tag string. Entity tags are LLM-generated with only prompt-level
+  // canonicalization, so the same real entity drifts across spellings ("Solvis",
+  // "Solvis GmbH", "solvis-gmbh"). A raw-string match would treat each alias as
+  // "never dreamed" and the guard would be silently bypassed. We normalize both
+  // sides via entity-normalize.js so aliases collapse to one coverage unit.
   async _entityRecentlyDreamed(orgId, tag, cooldownHours = ENTITY_DREAM_COOLDOWN_HOURS) {
     if (!tag || cooldownHours <= 0) return false;
-    if (!/^(entity|person):/i.test(tag)) return false;
+    const m = /^(entity|person):(.+)$/i.exec(tag);
+    if (!m) return false;
     const cutoff = new Date(Date.now() - cooldownHours * 3600 * 1000);
-    const recent = await this.prisma.memory.findFirst({
+
+    // Fast path: exact-tag match (GIN-indexed `tags @> ARRAY[tag]`). Catches the
+    // common no-drift case without scanning.
+    const exact = await this.prisma.memory.findFirst({
       where: {
-        orgId,
-        memoryType: 'synthesis',
-        isLatest: true,
-        deletedAt: null,
-        updatedAt: { gte: cutoff },
-        tags: { has: tag },
+        orgId, memoryType: 'synthesis', isLatest: true, deletedAt: null,
+        updatedAt: { gte: cutoff }, tags: { has: tag },
       },
       select: { id: true },
     });
-    return !!recent;
+    if (exact) return true;
+
+    // Drift path: normalize the entity key and compare against the normalized
+    // entity/person tags of recent syntheses (bounded — a window's worth of
+    // dreams is small). Catches alias spellings the exact match misses.
+    const wantKey = normalizeEntity(m[2]);
+    if (!wantKey) return false;
+    const prefix = m[1].toLowerCase();
+    const recent = await this.prisma.memory.findMany({
+      where: {
+        orgId, memoryType: 'synthesis', isLatest: true, deletedAt: null,
+        updatedAt: { gte: cutoff },
+      },
+      select: { tags: true },
+      take: 500,
+    });
+    const ENT_RE = /^(entity|person):(.+)$/i;
+    for (const r of recent) {
+      for (const t of (r.tags || [])) {
+        const mm = ENT_RE.exec(t);
+        if (!mm || mm[1].toLowerCase() !== prefix) continue;
+        if (normalizeEntity(mm[2]) === wantKey) return true;
+      }
+    }
+    return false;
   }
 
   // ─── Restatement guard ────────────────────────────────────────────────────────

@@ -51,6 +51,11 @@ export const memoryTypeEnum = z.preprocess(
     'goal',
     'event',
     'relationship',
+    // Cognition-loop outputs ("dreams") — written with these memory_types by the
+    // synthesis layer. They must be valid FILTER values so the Memories page
+    // "🌙 Dreams" filter (memory_type=synthesis) doesn't 400.
+    'synthesis',
+    'summary',
   ])
 );
 

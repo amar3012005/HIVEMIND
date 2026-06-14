@@ -262,8 +262,14 @@ Output the JSON object and nothing else.`;
     if (!Array.isArray(targets) || targets.length === 0) return null;
     if (process.env.KB_FACT_DISTILL === 'false') return null; // emergency off-switch
     const BATCH = Number(process.env.KB_DISTILL_BATCH || 6);
-    const CONCURRENCY = Number(process.env.KB_DISTILL_CONCURRENCY || 3);
-    const MAX_FACTS_PER_SEGMENT = Number(process.env.KB_DISTILL_MAX_FACTS || 5);
+    // Concurrency 5 (was 3): the distill LLM calls are independent, so run all of
+    // a typical doc's batches in one wave instead of two — the LLM calls were
+    // serialized 3-at-a-time. Groq gpt-oss handles this concurrency comfortably.
+    const CONCURRENCY = Number(process.env.KB_DISTILL_CONCURRENCY || 5);
+    // 3 facts/section (was 5): a section rarely holds 5 distinct atomic facts;
+    // 5 over-extracted near-duplicates → more per-fact ingestMemory DB writes
+    // (the residual latency cost) + recall noise. 3 keeps the high-signal facts.
+    const MAX_FACTS_PER_SEGMENT = Number(process.env.KB_DISTILL_MAX_FACTS || 3);
     const MAX_FACTS_PER_DOC = Number(process.env.KB_DISTILL_DOC_CAP || 120);
     const docTitle = metadata.documentTitle || metadata.filename || `Document ${String(documentId).slice(0, 8)}`;
 

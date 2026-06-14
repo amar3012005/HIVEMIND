@@ -2,14 +2,10 @@ const { tokenizeApprox } = require('./chunkers/text-chunker');
 
 const EMBEDDING_BATCH_SIZE = 32;
 const MAX_EMBED_TOKENS = 8192;
-// Match the existing Qdrant collection dimension. Env-driven so we can switch
-// between BGE-small (384), Mistral (1024), and OpenAI text-embedding-3-small
-// (1536) without re-creating the collection.
+// bge-m3 → 1024-dim. Env-driven so the target dim follows the configured embed
+// model + Qdrant collection without re-creating it. (Timeout/retry now live in
+// the bge-m3 factory client, not here.)
 const TARGET_VECTOR_DIM = Number(process.env.EMBEDDING_DIMENSION) || 1536;
-
-const EMBED_TIMEOUT_MS = 30_000;
-const EMBED_MAX_RETRIES = 3;
-const EMBED_BACKOFF_BASE_MS = 500;
 
 const PII_PATTERNS = [
   /\b\d{3}-\d{2}-\d{4}\b/g, // SSN
@@ -77,162 +73,48 @@ function makeDeterministicVector(text) {
   return vec;
 }
 
-// FIX H2: wraps a single POST to an embeddings endpoint with a hard timeout
-// and exponential-backoff retry on 429/5xx, honouring Retry-After.
-// FIX C3: baseURL + apiKey + model are explicit arguments; nothing is hardcoded.
-async function requestEmbeddingModel(model, inputs, apiKey, baseURL) {
-  const url = `${baseURL}/embeddings`;
+// (Legacy per-provider HTTP embed client removed — Mistral/OpenAI direct calls
+// are gone; all embedding now flows through the canonical bge-m3 factory below,
+// which has its own timeout + retry + fallback.)
 
-  // Mistral uses `inputs`; OpenAI uses `input`.  Both providers accept either
-  // key without error in practice, but send the idiomatic key for the endpoint.
-  const isMistral = baseURL.includes('mistral.ai');
-  const bodyKey = isMistral ? 'inputs' : 'input';
-
-  let attempt = 0;
-
-  while (attempt <= EMBED_MAX_RETRIES) {
-    // FIX H2: abort after EMBED_TIMEOUT_MS per attempt.
-    const signal =
-      typeof AbortSignal.timeout === 'function'
-        ? AbortSignal.timeout(EMBED_TIMEOUT_MS)
-        : (() => {
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), EMBED_TIMEOUT_MS);
-            // store timer reference on signal so caller can clearTimeout if needed
-            controller.signal._timer = timer;
-            return controller.signal;
-          })();
-
-    let response;
-    try {
-      response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model,
-          [bodyKey]: inputs,
-          encoding_format: 'float',
-        }),
-        signal,
-      });
-    } finally {
-      // clean up manual timer if we created one
-      if (signal._timer !== undefined) {
-        clearTimeout(signal._timer);
-      }
-    }
-
-    if (response.ok) {
-      const payload = await response.json();
-      return payload.data.sort((a, b) => a.index - b.index).map((item) => item.embedding);
-    }
-
-    // FIX H2: back off on 429 / 5xx; fail fast on 4xx auth/bad-request errors.
-    const retryable = response.status === 429 || response.status >= 500;
-    if (!retryable || attempt >= EMBED_MAX_RETRIES) {
-      const errorText = await response.text();
-      throw new Error(`Embedding request failed [${response.status}] (${model} @ ${baseURL}): ${errorText}`);
-    }
-
-    // Honour Retry-After if the provider sends it.
-    const retryAfterHeader = response.headers.get('retry-after');
-    const retryAfterSec = retryAfterHeader ? parseFloat(retryAfterHeader) : NaN;
-    const backoffBase = Number.isFinite(retryAfterSec)
-      ? retryAfterSec * 1000
-      : EMBED_BACKOFF_BASE_MS * 2 ** attempt;
-    const jitter = Math.random() * backoffBase * 0.25;
-    const delay = Math.round(backoffBase + jitter);
-
-    console.warn('[embedder] retryable error — backing off:', { model, baseURL, status: response.status, attempt, delayMs: delay });
-
-    await new Promise((resolve) => setTimeout(resolve, delay));
-    attempt += 1;
+// Unified embedding: delegates to the single canonical embed service (factory)
+// — litellm/self-hosted bge-m3 PRIMARY + OpenRouter bge-m3 FALLBACK — the same
+// 1024-dim vectors the recall + contextual-embed paths use. No api.mistral.ai,
+// no provider chain duplicated here. Mistral is fully removed from the ingestion
+// embed path (it had no key on prod → cold-start/failover latency + vectors that
+// didn't match the bge-m3 fact embeddings in the same collection).
+// (embedder.js is CommonJS; the factory is ESM → dynamic import.)
+// Returns { vectors, embeddingModel } so the caller can record the actual source.
+let _embedServicePromise = null;
+async function _getEmbedService() {
+  if (!_embedServicePromise) {
+    _embedServicePromise = import('../embeddings/factory.js').then((m) => m.getEmbedService());
   }
-
-  // Unreachable — while condition ensures we throw inside the loop above.
-  throw new Error(`Embedding retry loop exhausted for model ${model}`);
+  return _embedServicePromise;
 }
 
-// FIX C3: real two-provider fallback.  Primary = Mistral, real fallback =
-// OpenAI (only when OPENAI_API_KEY is set).  If both fail, THROW — do NOT emit
-// deterministic garbage vectors unless ALLOW_DETERMINISTIC_EMBEDDINGS is set.
-// Returns { vectors, embeddingModel } so the caller can record the actual source.
-async function embedBatchWithFallback(inputs, options = {}) {
-  const mistralKey = options.apiKey || process.env.MISTRAL_API_KEY;
-  const openaiKey = process.env.OPENAI_API_KEY;
-
-  let primaryError = null;
-
-  // Primary: Mistral
-  if (mistralKey) {
-    try {
-      const vectors = await requestEmbeddingModel(
-        'mistral-embed',
-        inputs,
-        mistralKey,
-        'https://api.mistral.ai/v1'
-      );
-      return {
-        vectors: vectors.map((v) => normalizeVectorDimension(v)),
-        embeddingModel: 'mistral-embed|normalized',
-      };
-    } catch (err) {
-      primaryError = err;
-      console.error('[embedder] primary provider (mistral) failed:', err.message);
-    }
-  }
-
-  // Real fallback: OpenAI — only when key is present.
-  if (openaiKey) {
-    try {
-      const vectors = await requestEmbeddingModel(
-        'text-embedding-3-small',
-        inputs,
-        openaiKey,
-        'https://api.openai.com/v1'
-      );
-      return {
-        vectors: vectors.map((v) => normalizeVectorDimension(v)),
-        embeddingModel: 'text-embedding-3-small|normalized',
-      };
-    } catch (fallbackErr) {
-      console.error('[embedder] fallback provider (openai) failed:', fallbackErr.message, '| primary:', primaryError ? primaryError.message : 'n/a');
-
-      // FIX C3: deterministic-vector escape hatch — explicit opt-in only.
-      if (process.env.ALLOW_DETERMINISTIC_EMBEDDINGS === 'true') {
-        console.warn('[embedder] both providers failed; deterministic fallback (ALLOW_DETERMINISTIC_EMBEDDINGS=true):', { inputs: inputs.length });
-        return {
-          vectors: inputs.map((input) => makeDeterministicVector(input)),
-          embeddingModel: 'deterministic-fallback',
-        };
-      }
-
-      const combined = new Error(
-        `All embedding providers failed. Primary: ${primaryError ? primaryError.message : 'no Mistral key'}. Fallback: ${fallbackErr.message}`
-      );
-      combined.primaryError = primaryError;
-      combined.fallbackError = fallbackErr;
-      throw combined;
-    }
-  }
-
-  // No keys at all: deterministic escape hatch (opt-in) or hard throw.
-  if (process.env.ALLOW_DETERMINISTIC_EMBEDDINGS === 'true') {
-    console.warn('[embedder] no API keys configured; deterministic fallback (ALLOW_DETERMINISTIC_EMBEDDINGS=true):', { inputs: inputs.length });
+async function embedBatchWithFallback(inputs, options = {}) { // eslint-disable-line no-unused-vars
+  try {
+    const svc = await _getEmbedService();
+    const vectors = await svc.embed(inputs);
+    const model = svc.getCacheStats?.()?.model
+      || process.env.LITELLM_EMBED_MODEL
+      || 'bge-m3';
     return {
-      vectors: inputs.map((input) => makeDeterministicVector(input)),
-      embeddingModel: 'deterministic-fallback',
+      vectors: vectors.map((v) => normalizeVectorDimension(v)),
+      embeddingModel: `${model}|normalized`,
     };
+  } catch (err) {
+    // Deterministic-vector escape hatch — explicit opt-in only, never silent.
+    if (process.env.ALLOW_DETERMINISTIC_EMBEDDINGS === 'true') {
+      console.warn('[embedder] bge-m3 embed service failed; deterministic fallback (ALLOW_DETERMINISTIC_EMBEDDINGS=true):', { inputs: inputs.length, err: err.message });
+      return {
+        vectors: inputs.map((input) => makeDeterministicVector(input)),
+        embeddingModel: 'deterministic-fallback',
+      };
+    }
+    throw err;
   }
-
-  const noKeyErr = new Error(
-    `No embedding API keys configured (MISTRAL_API_KEY / OPENAI_API_KEY) and ALLOW_DETERMINISTIC_EMBEDDINGS is not set. Primary error: ${primaryError ? primaryError.message : 'n/a'}`
-  );
-  noKeyErr.primaryError = primaryError;
-  throw noKeyErr;
 }
 
 async function embedChunks(chunks, context = {}, options = {}) {

@@ -5496,26 +5496,30 @@ exit \$RC
             `UPDATE meetings SET intelligence_status='pending' WHERE id=$1::uuid`, meetingId,
           );
           const { generateIntelligence } = await import('./knowledge/meeting-intelligence.js');
-          const recall = async (query) => {
+          const recall = async (query, opts = {}) => {
             // recallPersistedMemories takes SNAKE_CASE params (query_context,
-            // user_id, org_id, max_memories) — passing camelCase silently
-            // recalled with an empty query/tenant → every lane came back empty.
-            // Over-fetch 15 so real memories survive the synthesis-artifact filter.
+            // user_id, org_id, max_memories). Over-fetch 15 so real memories
+            // survive the synthesis-artifact filter.
             const r = await recallPersistedMemories(persistentMemoryStore, {
               query_context: query, user_id: mUser, org_id: mOrg, max_memories: 15,
             }).catch(() => null);
             const list = (r?.memories || r || []);
-            const memories = (Array.isArray(list) ? list : []).map((m) => ({
+            let memories = (Array.isArray(list) ? list : []).map((m) => ({
               id: m.id, title: m.title, content: m.content, tags: m.tags,
               created_at: m.created_at || m.createdAt,
               meeting_id: (Array.isArray(m.tags) ? m.tags.find((t) => typeof t === 'string' && t.startsWith('meeting:')) : null)?.slice(8) || null,
             })).filter((m) => !(Array.isArray(m.tags) && m.tags.includes(`meeting:${meetingId}`)));
+            // Time-aware: for entity briefs we want the LATEST state first, so
+            // the synthesized brief reflects current progress, not stale facts.
+            if (opts.recencyFirst) {
+              memories = memories.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+            }
             return { memories };
           };
           const judge = async (payload) => {
             const sys = payload.task === 'entity_briefs'
-              ? 'For each entity, write ONE factual sentence ("brief") summarizing the snippets. STRICT JSON {"briefs":{"<name>":"<brief>"}}. Never invent — only use the snippets.'
-              : 'For each {decision,prior} pair decide if the decision is NEW, UPDATES, or CONFLICTS vs the prior memory. STRICT JSON {"results":[{"relation":"NEW|UPDATES|CONFLICTS","reason":"<short>","confidence":0..1}]} in pair order. Be conservative; default NEW when unsure.';
+              ? 'You write one-line factual briefs about named entities, grounded ONLY in the provided dated snippets. Rules: (1) Use ONLY facts where the named entity is the EXPLICIT subject. (2) If NO snippet is clearly about that entity, output an EMPTY string "" for it — never guess, never infer a relationship that is not stated. (3) When snippets conflict or evolve over time, the MOST RECENT dated fact wins (snippets are prefixed [YYYY-MM-DD]). (4) One sentence, concrete, no fluff. Output STRICT JSON {"briefs":{"<name>":"<brief or empty string>"}}.'
+              : 'For each {decision,prior} pair, decide if the decision is NEW, UPDATES, or CONFLICTS relative to the prior memory. Be STRICT: only UPDATES if the decision clearly changes a value/state stated in the prior; only CONFLICTS if it directly contradicts the prior; otherwise NEW. When the prior is not clearly about the same thing, NEW with low confidence. Never invent a relationship. STRICT JSON {"results":[{"relation":"NEW|UPDATES|CONFLICTS","reason":"<short, cite the change>","confidence":0..1}]} in pair order.';
             const resp = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
               method: 'POST',
               headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },

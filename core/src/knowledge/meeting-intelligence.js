@@ -27,15 +27,22 @@ export async function entityBriefs(entities, { recall, judge, maxEntities = 6 })
   const picked = (entities || []).filter((e) => e?.name).slice(0, maxEntities);
   const found = [];
   for (const e of picked) {
-    const res = await recall(e.name).catch(() => ({ memories: [] }));
-    const mems = (res?.memories || []).slice(0, 5);
+    // entityScoped: tells the recall adapter to prefer memories actually about
+    // this entity (entity:* tags) and return them MOST-RECENT-FIRST, so the
+    // brief reflects the latest state, not a stale/loose match.
+    const res = await recall(e.name, { entityScoped: true, recencyFirst: true }).catch(() => ({ memories: [] }));
+    const mems = (res?.memories || []).slice(0, 6);
     if (!mems.length) continue; // zero-hit → dropped (grounding contract)
     found.push({
       name: e.name,
       kind: e.kind || 'entity',
       memory_count: mems.length,
       memory_ids: mems.map((m) => m.id).filter(Boolean),
-      _snippets: mems.map((m) => `${m.title || ''} ${m.content || ''}`.trim().slice(0, 240)),
+      // Tag each snippet with its date so the judge can prefer recent facts.
+      _snippets: mems.map((m) => {
+        const d = m.created_at ? String(m.created_at).slice(0, 10) : '';
+        return `${d ? `[${d}] ` : ''}${`${m.title || ''} ${m.content || ''}`.trim()}`.slice(0, 260);
+      }),
     });
   }
   if (!found.length) return [];
@@ -43,13 +50,18 @@ export async function entityBriefs(entities, { recall, judge, maxEntities = 6 })
     task: 'entity_briefs',
     entities: found.map((f) => ({ name: f.name, snippets: f._snippets })),
   }).then((r) => r?.briefs || {}).catch(() => ({}));
-  return onlyGrounded(found.map((f) => ({
-    name: f.name,
-    kind: f.kind,
-    memory_count: f.memory_count,
-    memory_ids: f.memory_ids,
-    brief: (briefs[f.name] || f._snippets[0] || '').toString().slice(0, 240),
-  })));
+  // Tightened prompt returns an EMPTY brief when the snippets aren't clearly
+  // about the entity — drop those instead of falling back to a raw snippet, so
+  // we never show a loose/hallucinated brief.
+  return onlyGrounded(found
+    .map((f) => ({
+      name: f.name,
+      kind: f.kind,
+      memory_count: f.memory_count,
+      memory_ids: f.memory_ids,
+      brief: (briefs[f.name] || '').toString().trim().slice(0, 260),
+    }))
+    .filter((f) => f.brief.length >= 8));
 }
 
 /**

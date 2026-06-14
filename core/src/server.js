@@ -9557,15 +9557,45 @@ exit \$RC
               // across a whole period (cross-time), not just the 1h rolling window.
               const lookbackHours = Number(body?.lookback_hours) > 0
                 ? Math.min(Number(body.lookback_hours), 24 * 30) : undefined;
-              const result = await cognitionLoop.runOnce(orgId, { skipCompaction: true, lookbackHours });
+              // A wide-lookback dream over a busy org runs many LLM clusters and can
+              // take minutes — far longer than the FE's 60s HTTP cap. Soft-race the
+              // run: if it finishes fast, return counts inline; otherwise return 202
+              // and let it complete in the BACKGROUND (the run still persists its own
+              // status via _persistOrgStatus, and errors are captured into _status).
+              // The FE polls /api/cognition/status for the final counts.
+              const runPromise = cognitionLoop
+                .runOnce(orgId, { skipCompaction: true, lookbackHours })
+                .catch((e) => {
+                  console.warn('[cognition] background run failed:', e.message);
+                  return { __error: e.message };
+                });
+              const SOFT_MS = Number(process.env.SYNTH_NOW_SOFT_MS || 25000);
+              let softTimer = null;
+              const softTimeout = new Promise((resolve) => {
+                softTimer = setTimeout(() => resolve('__timeout'), SOFT_MS);
+              });
+              const raced = await Promise.race([runPromise, softTimeout]);
+              if (softTimer) clearTimeout(softTimer);
+              if (raced === '__timeout') {
+                return jsonResponse(res, {
+                  triggered: true,
+                  async: true,
+                  org_id: orgId,
+                  message: 'Dream running in background — poll /api/cognition/status for counts.',
+                }, 202);
+              }
+              if (raced && raced.__error) {
+                return jsonResponse(res, { error: raced.__error }, 500);
+              }
               return jsonResponse(res, {
                 triggered: true,
+                async: false,
                 org_id: orgId,
-                synth: result?.synth ?? 0,
-                compact: result?.compact ?? 0,
-                ms: result?.ms ?? 0,
-                skipped: result?.skipped || false,
-                reason: result?.reason || null,
+                synth: raced?.synth ?? 0,
+                compact: raced?.compact ?? 0,
+                ms: raced?.ms ?? 0,
+                skipped: raced?.skipped || false,
+                reason: raced?.reason || null,
               });
             } catch (runErr) {
               console.warn('[cognition] manual run failed:', runErr.message);

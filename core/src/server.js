@@ -387,6 +387,9 @@ const byzantineConsensus = new ByzantineConsensus({ commitThreshold: 80 });
 // Profile store
 const { ProfileStore } = await import('./memory/profile-store.js');
 const profileStore = prisma ? new ProfileStore(prisma) : null;
+// WS5 profile dreamer (inert unless PROFILE_DREAM_ENABLED; dry-run unless PROFILE_DREAM_APPLY).
+const { ProfileDreamer } = await import('./memory/profile-dreamer.js');
+const profileDreamer = prisma ? new ProfileDreamer({ prisma, logger: console }) : null;
 
 // Smart ingest router (type-aware preprocessing + triple operator annotation)
 let smartIngestRouter = null;
@@ -14486,6 +14489,31 @@ exit \$RC
             }
           }
           break;
+
+        case '/api/profiles/dream':
+          // WS5 profile-dreamer trigger (admin). Dry-run by default — returns the
+          // grounded persona PROPOSALS without persisting. Persists only when BOTH
+          // the server flag PROFILE_DREAM_APPLY=true AND body.apply=true. Inert
+          // (skipped) unless PROFILE_DREAM_ENABLED=true. Iterates ALL active org
+          // members (employees == org members).
+          if (req.method !== 'POST') break;
+          try {
+            if (!profileDreamer) return jsonResponse(res, { error: 'profile dreamer unavailable' }, 503);
+            const mem = await prisma.userOrganization.findUnique({
+              where: { userId_orgId: { userId, orgId } },
+              select: { role: true, roles: true },
+            }).catch(() => null);
+            const rs = new Set([...(mem?.role ? [mem.role] : []), ...(Array.isArray(mem?.roles) ? mem.roles : [])]);
+            const adminOk = ['admin', 'owner', 'org_admin', 'org_owner'].some((r) => rs.has(r));
+            if (!adminOk && !principal.master) {
+              return jsonResponse(res, { error: 'admin/owner role required' }, 403);
+            }
+            const result = await profileDreamer.dreamProfilesForOrg(orgId, { apply: body?.apply === true });
+            return jsonResponse(res, result);
+          } catch (err) {
+            console.error('[profiles/dream] failed:', err.message);
+            return jsonResponse(res, { error: err.message }, 500);
+          }
 
         case '/api/profiles':
           if (req.method === 'GET') {

@@ -45,6 +45,9 @@ export class ProfileStore {
       confidence: r.confidence,
       confirmedCount: r.confirmedCount,
       lastConfirmedAt: r.lastConfirmedAt,
+      // WS5: dreamer provenance — used to render-gate ungrounded dreamed facts.
+      lastDreamedAt: r.lastDreamedAt,
+      evidenceMemoryIds: r.evidenceMemoryIds || [],
     }));
     this._cache.set(cacheKey, { facts, ts: Date.now() });
     return facts;
@@ -233,8 +236,13 @@ export class ProfileStore {
    * Build a context string for injection into LLM prompts / recall results.
    */
   async buildProfileContext(userId, orgId = null) {
-    const facts = await this.getProfile(userId, orgId);
-    if (!facts.length) return '';
+    const allFacts = await this.getProfile(userId, orgId);
+    if (!allFacts.length) return '';
+
+    // WS5 render-gate: a DREAMED fact (lastDreamedAt set) with NO evidence lineage
+    // is ungrounded → must NOT render (anti-hallucination). User-entered / regex
+    // facts (lastDreamedAt null) are unaffected.
+    const facts = allFacts.filter(f => !f.lastDreamedAt || (Array.isArray(f.evidenceMemoryIds) && f.evidenceMemoryIds.length > 0));
 
     const staticFacts = facts.filter(f => f.category === 'static' && f.confidence >= 0.5);
     const preferences = facts.filter(f => f.category === 'preference' && f.confidence >= 0.5);

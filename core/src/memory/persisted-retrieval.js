@@ -1,4 +1,5 @@
 import { computeTokenSimilarity } from './conflict-detector.js';
+import { normalizeEntity } from './entity-normalize.js';
 import { getQdrantClient } from '../vector/qdrant-client.js';
 import { getRetrievalConfig } from './retrieval-config.js';
 import { expandTemporalQuery } from '../search/time-aware-expander.js';
@@ -1486,7 +1487,7 @@ export async function recallPersistedMemories(store, {
     for (const t of tags) {
       if (typeof t !== 'string') continue;
       if (t.startsWith('entity:') || t.startsWith('person:')) {
-        entityNames.push(t.replace(/^(entity|person):/, '').replace(/_/g, ' ').toLowerCase());
+        { const raw = t.replace(/^(entity|person):/, ''); entityNames.push(normalizeEntity(raw) || raw.replace(/_/g, ' ').toLowerCase()); }
       }
     }
     if (entityNames.length === 0) return item;
@@ -1540,6 +1541,7 @@ export async function recallPersistedMemories(store, {
   // (or substring) match → ×1.8, which keeps named-entity recall sharp.
   const queryEntityTokens = _extractQueryEntityTokens(query_context);
   const applyEntityMatchBoost = (item) => {
+    if (item._entity_match) return item; // already boosted ×1.8 in _earlyEntityMatch — never double-boost
     if (queryEntityTokens.length === 0) return item;
     const tags = item.memory?.tags || item.tags || [];
     if (!Array.isArray(tags) || tags.length === 0) return item;
@@ -1547,7 +1549,7 @@ export async function recallPersistedMemories(store, {
     for (const t of tags) {
       if (typeof t !== 'string') continue;
       if (t.startsWith('entity:') || t.startsWith('person:')) {
-        entityNames.push(t.replace(/^(entity|person):/, '').replace(/_/g, ' ').toLowerCase());
+        { const raw = t.replace(/^(entity|person):/, ''); entityNames.push(normalizeEntity(raw) || raw.replace(/_/g, ' ').toLowerCase()); }
       }
     }
     if (entityNames.length === 0) return item;
@@ -2227,5 +2229,19 @@ function _extractQueryEntityTokens(query) {
     }
   }
 
-  return Array.from(out);
+  // Canonicalize query-derived entity tokens through the SAME normalizer used
+  // on stored entity: tags, so "SOLVIS" matches the canonical entity:solvis.
+  // Keep the raw form too (fallback) so the fuzzy substring path still fires.
+  const canon = new Set();
+  for (const t of out) {
+    canon.add(t);
+    const n = normalizeEntity(t);
+    if (n) {
+      canon.add(n);
+      // Also add hyphen-split parts so a multi-word query ("solvis portal" →
+      // "solvis-portal") still matches a single-word stored entity ("solvis").
+      if (n.includes('-')) for (const part of n.split('-')) if (part.length >= 3) canon.add(part);
+    }
+  }
+  return Array.from(canon);
 }

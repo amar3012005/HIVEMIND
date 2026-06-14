@@ -14,6 +14,7 @@ import {
   normalizeRelationshipType,
 } from './relationship-semantics.js';
 import { clusterHash } from './cluster-hash.js';
+import { normalizeEntity, normalizeTagsArray } from './entity-normalize.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -2361,12 +2362,18 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
       try {
         const cleanEntities = entities
           .filter(e => typeof e === 'string' && e.length > 0 && e.length < 60)
-          .map(e => `entity:${e.replace(/\s+/g, '_')}`);
-        const newTags = Array.from(new Set([
+          // Canonicalize: collapse case/dash/underscore/legal-suffix duplicates
+          // so SOLVIS / Solvis / SOLVIS_GmbH all become entity:solvis. Pure +
+          // deterministic (entity-normalize.js); applied symmetrically at recall.
+          .map(e => { const slug = normalizeEntity(e); return slug ? `entity:${slug}` : null; })
+          .filter(Boolean);
+        // Canonicalize existing tags too, so a pre-canonicalization
+        // entity:SOLVIS and the new entity:solvis don't coexist on the same row.
+        const newTags = normalizeTagsArray([
           ...(baseMemory.tags || []),
           ...cleanEntities,
           ...temporalTags,
-        ]));
+        ]);
         await store.updateMemory(baseMemory.id, { tags: newTags });
       } catch (tagErr) {
         console.warn('[entity-co-mention] tag update failed:', tagErr.message);

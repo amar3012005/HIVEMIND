@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { computeTokenSimilarity } from './conflict-detector.js';
 import { normalizeRelationshipType } from './relationship-semantics.js';
+import { normalizeTagsArray } from './entity-normalize.js';
 import { signMemory, sha256Hex, canonical as pqcCanonical } from '../security/pqc-signer.js';
 
 /**
@@ -280,7 +281,12 @@ export class PrismaGraphStore {
         projectId: memory.project_id
           || (Array.isArray(memory.project_ids) && memory.project_ids.length > 0 ? memory.project_ids[0] : null),
         content,
-        tags: memory.tags,
+        // Canonical chokepoint: EVERY ingest path (ingestMemory, MCP save, KB
+        // promote/tree, connectors, autopilot, governance, deep-research) lands
+        // here. Normalizing entity: tags at persist makes canonicalization
+        // universal + bypass-proof, regardless of source or whether the LLM
+        // entity-linker ran. Idempotent + only touches entity: tags.
+        tags: normalizeTagsArray(memory.tags),
         isLatest: memory.is_latest,
         sourcePlatform: memory.source_metadata?.source_platform || null,
         sourceSessionId: memory.source_metadata?.source_session_id || null,
@@ -360,7 +366,7 @@ export class PrismaGraphStore {
     if (patch.updated_at) data.updatedAt = new Date(patch.updated_at);
     if (patch.project !== undefined) data.project = patch.project;
     if (patch.content !== undefined) data.content = patch.content;
-    if (patch.tags !== undefined) data.tags = patch.tags;
+    if (patch.tags !== undefined) data.tags = normalizeTagsArray(patch.tags);
     if (patch.source_metadata?.source_platform) data.sourcePlatform = patch.source_metadata.source_platform;
     if (patch.source_metadata?.source_id) data.sourceMessageId = patch.source_metadata.source_id;
     if (patch.importanceScore !== undefined) data.importanceScore = patch.importanceScore;

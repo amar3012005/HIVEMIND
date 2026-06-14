@@ -190,7 +190,12 @@ export class DocumentFirstIngestionService {
    */
   async _batchExtractFacts(sections, { maxFacts = 5 } = {}) {
     const apiKey = process.env.GROQ_API_KEY;
-    const model = process.env.MEMORY_PROCESSOR_MODEL || 'openai/gpt-oss-20b';
+    // gpt-oss-120b (was 20b): the 20b model only half-followed the entity rules
+    // (forked Wärmepumpe/heat-pump, emitted phrase-'entities' + generic nouns).
+    // 120b follows the English-canonical + concise-noun rules far more reliably;
+    // still supports strict json_schema + reasoning_effort=low, and the distill
+    // is async (4 calls) so the extra per-call latency is acceptable for quality.
+    const model = process.env.MEMORY_PROCESSOR_MODEL || 'openai/gpt-oss-120b';
     // Heuristic fallback (no key): sentence-split — degraded but never blocks.
     if (!apiKey) {
       return sections.map((sec) => ({

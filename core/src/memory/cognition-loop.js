@@ -91,6 +91,16 @@ const BRIDGE_SIM_HIGH             = Number(process.env.BRIDGE_SIM_HIGH          
 // not just centroid cosine (which yields tautological/coincidental bridges like
 // "US contacts share country:usa with US accounts"). 0 disables the gate.
 const BRIDGE_GROUND_MIN          = Number(process.env.BRIDGE_GROUND_MIN          || 1);
+// Multi-cluster NARRATIVE bridge: pairwise bridges connect 2 clusters; a narrative
+// bridge weaves ≥ NARRATIVE_MIN_CLUSTERS clusters that all share ONE hub entity
+// (the connective thread) into a single emergent thought — the "facts that came in
+// over months across separate conversations, stitched into one narrative" pattern.
+// Heavily gated (hub must link ≥3 clusters, confidence floor, restatement + dedup
+// guards) and capped at NARRATIVE_TOP_K/run. Default ON; set =false to disable.
+const NARRATIVE_BRIDGE_ENABLED   = process.env.COGNITION_NARRATIVE_BRIDGE !== 'false';
+const NARRATIVE_MIN_CLUSTERS     = Number(process.env.NARRATIVE_MIN_CLUSTERS     || 3);
+const NARRATIVE_TOP_K            = Number(process.env.NARRATIVE_TOP_K            || 3);
+const NARRATIVE_MAX_CLUSTERS     = Number(process.env.NARRATIVE_MAX_CLUSTERS     || 6);
 // Drop synthesis output if cosine(output, any source) > this (restatement guard)
 const RESTATEMENT_THRESHOLD       = Number(process.env.RESTATEMENT_THRESHOLD       || 0.92);
 const COOLDOWN_HOURS              = Number(process.env.SYNTHESIS_COOLDOWN_HOURS    || 6);
@@ -1181,6 +1191,117 @@ export class CognitionLoop {
       }
     }
 
+    // ── Sub-pass C: multi-cluster NARRATIVE bridge ────────────────────────────
+    // A hub entity that appears across ≥ NARRATIVE_MIN_CLUSTERS otherwise-separate
+    // clusters is the connective thread of an emergent story. Weave those clusters
+    // into ONE narrative (the supermemory "stitched a single thought from facts
+    // that arrived over months" pattern). Drift-tolerant hub keys (normalized).
+    if (NARRATIVE_BRIDGE_ENABLED && tagList.length >= NARRATIVE_MIN_CLUSTERS) {
+      try {
+        writes += await this._narrativeBridgePass(orgId, tagList);
+      } catch (err) {
+        this.logger.warn(`[cognition] narrative pass failed: ${err.message}`);
+      }
+    }
+
+    return writes;
+  }
+
+  // ─── Sub-pass C: multi-cluster narrative bridge ──────────────────────────────
+  // Groups clusters by a shared NORMALIZED hub entity; for each hub linking
+  // ≥ NARRATIVE_MIN_CLUSTERS clusters, weaves them into one grounded narrative.
+  async _narrativeBridgePass(orgId, tagList) {
+    let writes = 0;
+
+    // hub (normalized entity/person key) → set of cluster indices it spans
+    const hubMap = new Map();
+    tagList.forEach((cl, idx) => {
+      const keys = new Set();
+      for (const m of cl.members) {
+        for (const t of (m.tags || [])) {
+          const mm = /^(entity|person):(.+)$/i.exec(t);
+          if (!mm) continue;
+          const nk = normalizeEntity(mm[2]);
+          if (nk) keys.add(`${mm[1].toLowerCase()}:${nk}`);
+        }
+      }
+      for (const k of keys) {
+        if (!hubMap.has(k)) hubMap.set(k, new Set());
+        hubMap.get(k).add(idx);
+      }
+    });
+
+    const hubs = [...hubMap.entries()]
+      .filter(([, set]) => set.size >= NARRATIVE_MIN_CLUSTERS)
+      .map(([key, set]) => ({ key, idxs: [...set] }))
+      .sort((x, y) => y.idxs.length - x.idxs.length)
+      .slice(0, NARRATIVE_TOP_K);
+
+    for (const hub of hubs) {
+      const clusters = hub.idxs.slice(0, NARRATIVE_MAX_CLUSTERS).map((i) => tagList[i]);
+      const clusterTags = clusters.map((c) => c.tag).sort();
+      const hash = clusterHash(`narrative:${hub.key}:${clusterTags.join('|')}`);
+
+      // Skip if a narrative already exists on this hub+clusters or on cooldown.
+      const existing = await this.prisma.memory.findFirst({
+        where: { orgId, synthesisClusterHash: hash, isLatest: true, deletedAt: null },
+        select: { id: true },
+      });
+      if (existing) continue;
+      if (await this._onCooldown(orgId, hash)) continue;
+
+      // Bounded member set across the spanned clusters.
+      const members = clusters.flatMap((c) => c.members.slice(0, 8));
+      if (members.length < NARRATIVE_MIN_CLUSTERS) continue;
+
+      try {
+        const result = await this._llmNarrativeBridge(hub.key, clusters);
+        if (!result || !result.narrative) continue;
+        if ((result.confidence || 0) < CONFIDENCE_FLOOR) {
+          this.logger.log(`[cognition] narrative hub=${hub.key} confidence=${result.confidence} < floor — dropped`);
+          continue;
+        }
+        if (this._isRestatement(result.narrative, members)) {
+          this.logger.log(`[cognition] narrative hub=${hub.key} restatement — dropped`);
+          continue;
+        }
+        const evidenceIds = (result.supporting_memory_ids || []).filter(Boolean);
+        const created = await this._writeSynthMemory({
+          orgId,
+          userId:  members[0].userId,
+          project: members[0].project || null,
+          sourceType: 'synthesis-bridge',
+          tag: `narrative:${hub.key}`,
+          members,
+          content: result.narrative,
+          confidence: result.confidence,
+          evidenceIds,
+          clusterHash: hash,
+          extraMeta: {
+            narrative: true,
+            hub_entity: hub.key,
+            cluster_tags: clusterTags,
+            bridge_type: result.bridge_type || 'narrative',
+            actionable_next_step: result.actionable_next_step || null,
+          },
+        });
+        if (created) {
+          writes++;
+          this.logger.log(`[cognition] narrative hub=${hub.key} clusters=${clusters.length} → ${String(created.id).slice(0, 8)}`);
+          try {
+            await this.clusterIndex.upsertOnSynthesis({
+              organizationId: orgId, userId: members[0].userId, clusterHash: hash,
+              clusterType: 'synthesis-bridge', topTags: clusterTags,
+              entityKeys: deriveEntityKeysFromTags(created.tags),
+              latestSynthesisId: created.id, latestRevision: 1,
+              latestConfidence: result.confidence, evidenceCountTotal: evidenceIds.length,
+            });
+          } catch { /* index upsert non-fatal */ }
+        }
+      } catch (err) {
+        this.logger.warn(`[cognition] narrative hub=${hub.key} failed: ${err.message}`);
+      }
+    }
     return writes;
   }
 
@@ -1350,6 +1471,48 @@ Output JSON only:
     if (!raw) return null;
     const parsed = safeParseJSON(raw);
     if (!parsed || !parsed.bridge_claim || parsed.bridge_claim.length < 20) return null;
+    return parsed;
+  }
+
+  // ─── Multi-cluster narrative bridge LLM ──────────────────────────────────────
+  // Weaves ≥3 clusters that all share `hubKey` into ONE emergent narrative. The
+  // hub entity is the connective thread; the clusters are events/facts that
+  // arrived separately. Output is a single thought, NOT a list or a summary.
+  async _llmNarrativeBridge(hubKey, clusters) {
+    const blocks = clusters.map((cl, ci) => {
+      const lines = cl.members.slice(0, 8).map((m) => {
+        const c  = (m.content || '').replace(/\s+/g, ' ').slice(0, 320);
+        const ts = m.createdAt ? new Date(m.createdAt).toISOString().slice(0, 10) : 'unknown-date';
+        return `    [${m.id}] (${ts}) ${m.title ? m.title + ' — ' : ''}${c}`;
+      }).join('\n');
+      return `  Cluster ${ci + 1} (tag "${cl.tag}"):\n${lines}`;
+    }).join('\n\n');
+
+    const prompt = `These ${clusters.length} clusters of memories all involve the same entity: "${hubKey}". They were recorded SEPARATELY, at different times, in no particular order, and do NOT otherwise co-occur.
+
+${blocks}
+
+Stitch them into a SINGLE emergent NARRATIVE — the one thought a sharp analyst forms after seeing all of these together, that no single cluster states on its own. This is dot-connecting across time, not a summary.
+
+STRICT GROUNDING (this becomes a trusted memory):
+- Use ONLY what the memories state. Do NOT invent facts, dates, numbers, or links. Name "${hubKey}" and every other proper noun + date EXACTLY as written.
+- The narrative must DEPEND on combining ≥2 of the clusters — it cannot be derivable from one alone.
+- One coherent thought (3–5 sentences), naming the specific events and how they connect through "${hubKey}".
+
+REJECT (output nothing rather than these): a bulleted list, a per-cluster recap, generic advice, platitudes, anything true for any company, single-cluster restatement.
+
+Output JSON only:
+{ "narrative":"<3-5 grounded sentences weaving the clusters into one emergent thought through ${hubKey}>", "bridge_type":"causal|temporal_arc|contradiction|enabling_gap|opportunity|risk", "supporting_memory_ids":["<ids from ≥2 different clusters>"], "confidence":0.0-1.0, "actionable_next_step":"<one concrete sentence>" }`;
+
+    const raw = await llmWithFallback({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.2,
+      max_tokens:  800,
+    }, this.logger);
+
+    if (!raw) return null;
+    const parsed = safeParseJSON(raw);
+    if (!parsed || !parsed.narrative || parsed.narrative.length < 30) return null;
     return parsed;
   }
 

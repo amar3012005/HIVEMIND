@@ -101,32 +101,75 @@ export class EvidenceRetrievalService {
       // Step 3: Merge with vector scores and format
       const segmentMap = new Map(segments.map(s => [s.id, s]));
       
+      const fmt = (segment, score, lexical = false) => ({
+        type: 'evidence_segment',
+        segmentId: segment.id,
+        documentId: segment.documentId,
+        content: segment.content,
+        snippet: this._extractSnippet(segment.content, query),
+        score,
+        ...(lexical ? { _lexical: true } : {}),
+        document: segment.document,
+        metadata: {
+          segmentType: segment.segmentType,
+          segmentIndex: segment.segmentIndex,
+          wordCount: segment.wordCount,
+          startPage: segment.startPage,
+          endPage: segment.endPage,
+        },
+      });
+
       const results = vectorResults
         .map(vr => {
           const segment = segmentMap.get(vr.payload.segment_id);
-          if (!segment) return null;
-
-          return {
-            type: 'evidence_segment',
-            segmentId: segment.id,
-            documentId: segment.documentId,
-            content: segment.content,
-            snippet: this._extractSnippet(segment.content, query),
-            score: vr.score,
-            document: segment.document,
-            metadata: {
-              segmentType: segment.segmentType,
-              segmentIndex: segment.segmentIndex,
-              wordCount: segment.wordCount,
-              startPage: segment.startPage,
-              endPage: segment.endPage
-            }
-          };
+          return segment ? fmt(segment, vr.score) : null;
         })
-        .filter(Boolean)
-        .slice(0, limit);
+        .filter(Boolean);
+      const haveIds = new Set(results.map(r => r.segmentId));
 
-      return results;
+      // LEXICAL FALLBACK — vector recall scores a segment by its DOMINANT topic,
+      // so a literal term buried mid-segment (a proper name / model code in a
+      // footnote or dense paragraph — e.g. "1KOMMA5", "Enpal", "§14a") never
+      // surfaces when the segment is semantically about something else. When the
+      // vector pass is sparse, run an additive keyword pass over the segment text
+      // for the query's DISTINCTIVE tokens (capitalized words, codes, numbers —
+      // not generic lowercase fillers). Tenant-/language-agnostic: no hardcoded
+      // terms. This guarantees exact-string hits the embedding cannot rank.
+      if (results.length < Math.max(2, Math.ceil(limit / 2))) {
+        const lexTokens = [...new Set(
+          String(query || '')
+            .split(/[^\p{L}\p{N}§°]+/u)
+            .map(t => t.trim())
+            .filter(t => t.length >= 4 && (/[0-9§°]/.test(t) || /^[A-ZÄÖÜ]/.test(t)))
+        )].slice(0, 8);
+        if (lexTokens.length) {
+          try {
+            const lexSegments = await this.db.knowledgeSegment.findMany({
+              where: {
+                userId,
+                orgId,
+                ...(docIdSet ? { documentId: { in: docIdSet } } : {}),
+                OR: lexTokens.map(t => ({ content: { contains: t, mode: 'insensitive' } })),
+              },
+              include: {
+                document: { select: { id: true, title: true, documentType: true, sourcePlatform: true, sourceUrl: true, documentDate: true } },
+              },
+              take: limit * 2,
+            });
+            for (const segment of lexSegments) {
+              if (haveIds.has(segment.id)) continue;
+              // Lexical hits get a moderate score (below a strong vector match,
+              // above the noise floor) so they fill gaps without dominating.
+              results.push(fmt(segment, 0.55, true));
+              haveIds.add(segment.id);
+            }
+          } catch (lexErr) {
+            console.warn('[EvidenceRetrieval] lexical fallback failed:', lexErr.message);
+          }
+        }
+      }
+
+      return results.sort((a, b) => b.score - a.score).slice(0, limit);
     } catch (error) {
       console.error('[EvidenceRetrieval] Retrieval failed:', error);
       return [];

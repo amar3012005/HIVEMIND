@@ -949,6 +949,20 @@ CORE RULES:
    should be combined into one coherent reply, not treated as separate
    silos. Spot patterns: who's involved, what was decided, what's
    pending, what changed.
+3b. **CONFLICTING EVIDENCE — resolve by priority, else surface. NEVER guess.**
+   When two memories DISAGREE about the same fact (a different value/state
+   for the same entity, or a Contradicts/Updates edge between them):
+   (a) prefer the memory with the more RECENT recorded date (the later fact
+       supersedes the earlier — dates are shown per memory);
+   (b) if one source is clearly higher-authority than the other (an official
+       document / decision outranks a passing chat mention or an inferred
+       synthesis), prefer the authoritative source;
+   (c) if you CANNOT confidently resolve it from recency or authority, DO NOT
+       pick one side silently. State the disagreement explicitly: name BOTH
+       claims, their sources/dates, and that they conflict — then give the
+       most-likely reading if there is one, flagged as uncertain.
+   When evidence genuinely conflicts, an honest "these disagree: X (older/Slack)
+   vs Y (newer/decision doc)" is ALWAYS better than confidently asserting one.
 4. NEVER paste a memory's content verbatim as the entire answer. NEVER
    reply with just a citation line or URL.
 5. NEVER claim a third-party brand mentioned in memories IS us. Use
@@ -1142,7 +1156,13 @@ async function answerStep({ message, history, evidence, plan, language, assistan
     const xClusterBoost = m._cross_cluster_boost && m._cross_cluster_boost > 1.0
       ? ` x-cluster=${Number(m._cross_cluster_boost).toFixed(2)}`
       : '';
-    return `${synthTag}[${id8}]${conf}${rev}${xClusterBoost} "${title}" — ${content}${tags ? ' :: ' + tags : ''}`;
+    // Conflict-resolution metadata (rule 3b): recorded date (recency) + source
+    // (authority). A raw decision/document outranks a chat mention or a SYNTH row;
+    // a more recent date supersedes an older one.
+    const rawDate = m.document_date || m.created_at || m.createdAt || m.valid_from;
+    const date = rawDate ? new Date(rawDate).toISOString().slice(0, 10) : '?';
+    const src = m.source_metadata?.source_platform || m.source_platform || m.memory_type || 'memory';
+    return `${synthTag}[${id8}]${conf}${rev}${xClusterBoost} (${date}·${src}) "${title}" — ${content}${tags ? ' :: ' + tags : ''}`;
   }).join('\n');
 
   // Live Workspace block — Gmail / Drive / Calendar fetched in this turn.

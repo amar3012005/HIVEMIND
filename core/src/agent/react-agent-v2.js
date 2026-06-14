@@ -1207,8 +1207,25 @@ async function answerStep({ message, history, evidence, plan, language, assistan
     ? `\n\nTIME-WINDOW NOTE: the EVIDENCE above is pre-filtered to memories DATED in the period the user asked about. Treat every one of them as part of "what happened" / "what we worked on" in that period — documents, decisions, notes, and saved facts all count as activity. Enumerate them; do NOT reply "no events / no notes for that period" while these dated memories are listed.`
     : '';
 
+  // WS5 step-6: persona injection. Routes user-about-self queries to the persona
+  // lane (profile_<org> vector + Postgres profile fallback) and injects a compact
+  // "who you're talking to" block. Flag-gated PERSONA_ROUTER_ENABLED → inert no-op
+  // by default; intent-gated so non-persona queries skip it; never fatal.
+  let personaNote = '';
+  try {
+    const { routePersona, isPersonaRouterEnabled } = await import('../memory/persona-router.js');
+    if (isPersonaRouterEnabled()) {
+      const { ProfileStore } = await import('../memory/profile-store.js');
+      const ps = ctx?.prisma ? new ProfileStore(ctx.prisma) : null;
+      const pr = await routePersona({ query: message, userId: ctx?.userId, orgId: ctx?.orgId, profileStore: ps });
+      if (pr.routed && pr.context) {
+        personaNote = `\n\nUSER PERSONA (who you're talking to — use for personalization; never contradict; never invent beyond it):\n${pr.context}`;
+      }
+    }
+  } catch (err) { console.warn('[agent] persona route failed (non-fatal):', err.message); }
+
   const userBlock = `EVIDENCE (${Math.min(evidence.memories.length, evidenceTopK)} of ${evidence.memories.length} memories):
-${evidenceLines || '(none)'}${chainLines ? `\n\nSYNTHESIS CHAINS (${(evidence.synthesis_chains || []).length} curated claims + sources — cite the claim, support with the evidence rows):\n${chainLines}` : ''}${edgeLines ? `\n\nGRAPH EDGES (${filteredEdges.length} typed relationships between the memories above — ONLY trust these for relation claims):\n${edgeLines}` : ''}${liveLines ? `\n\nLIVE WORKSPACE (${(evidence.live || []).length} fresh items — Gmail / Drive / Calendar):\n${liveLines}` : ''}${evLines ? `\n\nDOCUMENT SEGMENTS (${(evidence.evidence || []).length} non-promoted KB chunks — full source text):\n${evLines}` : ''}${capabilityHint}${windowNote}
+${evidenceLines || '(none)'}${chainLines ? `\n\nSYNTHESIS CHAINS (${(evidence.synthesis_chains || []).length} curated claims + sources — cite the claim, support with the evidence rows):\n${chainLines}` : ''}${edgeLines ? `\n\nGRAPH EDGES (${filteredEdges.length} typed relationships between the memories above — ONLY trust these for relation claims):\n${edgeLines}` : ''}${liveLines ? `\n\nLIVE WORKSPACE (${(evidence.live || []).length} fresh items — Gmail / Drive / Calendar):\n${liveLines}` : ''}${evLines ? `\n\nDOCUMENT SEGMENTS (${(evidence.evidence || []).length} non-promoted KB chunks — full source text):\n${evLines}` : ''}${capabilityHint}${windowNote}${personaNote}
 
 PLANNER INTENT: ${(plan.intents || []).join(' / ') || '(unspecified)'}
 

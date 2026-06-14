@@ -306,7 +306,20 @@ Output the JSON object and nothing else.`;
           metadata: { document_id: documentId, segment_memory_id: t.memoryId, distill_agent: 'kb_distill_v2' },
           skip_fact_extraction: true,
           defer_entity_linking: true,   // entities already extracted in the batch pass
-          strict_contradictions: true,
+          // KB distilled facts are append-only with explicit Derives-to-segment
+          // provenance — they don't supersede/contradict each other and don't need
+          // operator inference. Make each a PURE INSERT: skip the smart-router,
+          // per-fact recall, the relationship-classifier LLM call, contradiction
+          // detection, AND the per-user advisory lock that SERIALIZES every fact of
+          // a doc. That per-fact stack (LLM classify + router + lock) was ~1.5s/fact
+          // — the entire distill tail. ts: tags + entity-tag canonicalization still
+          // apply (stamped/normalized before the lock); graph connectivity is via
+          // shared entity: tags. Trades per-fact auto-edges for ~10x throughput.
+          skipSmartRouting: true,
+          skipPredictCalibrate: true,
+          skipAdvisoryLock: true,
+          skip_relationship_classification: true,
+          skip_contradiction_detection: true,
         });
         const factId = res?.memoryId || res?.id || null;
         if (!factId || (res?.operation || '').startsWith('skipped')) return null;

@@ -148,11 +148,15 @@ export class EvidenceRetrievalService {
         )].slice(0, 8);
         if (lexTokens.length) {
           try {
+            // NOTE: deliberately NOT constrained to docIdSet. The vector pass is
+            // doc-scoped (HOP2 passes HOP1's docIds), but the whole point of the
+            // lexical pass is to surface a literal term in a segment HOP1 never
+            // pointed at — scoping it to HOP1's docs would re-introduce the miss.
+            // Stays bounded by userId+orgId (the caller's access).
             const lexSegments = await this.db.knowledgeSegment.findMany({
               where: {
                 userId,
                 orgId,
-                ...(docIdSet ? { documentId: { in: docIdSet } } : {}),
                 OR: lexTokens.map(t => ({ content: { contains: t, mode: 'insensitive' } })),
               },
               include: {

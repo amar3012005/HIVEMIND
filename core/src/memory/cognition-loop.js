@@ -293,6 +293,21 @@ function tokenCosine(textA = '', textB = '') {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
+// Strip the ingest-time "(YYYY-MM-DDTHH:MMZ)" suffix graph-engine appends to
+// content. Without this the synthesis LLM treats the INGEST timestamp as a
+// real-world EVENT date and fabricates date facts / date-coincidence bridges
+// (e.g. "X copyrighted on 2026-06-14, the same day Y…" where the date is just
+// when both were saved). Eval caught this as a 0%-grounding failure mode.
+const INGEST_STAMP_RE = /\s*\((?:\d{4}-\d{2}-\d{2})(?:T\d{2}:\d{2}(?::\d{2})?Z?)?\)\s*$/;
+export function stripIngestStamp(text) {
+  let s = String(text || '');
+  // strip possibly-repeated trailing stamps
+  for (let i = 0; i < 3 && INGEST_STAMP_RE.test(s); i++) s = s.replace(INGEST_STAMP_RE, '');
+  return s.trim();
+}
+// Prompt note: tells the LLM the shown date is ingest metadata, not an event date.
+const RECORDED_DATE_NOTE = 'NOTE: the "(recorded YYYY-MM-DD)" prefix is when the memory was INGESTED, NOT a real-world event date. NEVER connect or bridge two facts merely because they share a recorded date, and never state a recorded date as if it were an event.';
+
 // ─── Centroid text (bag of all content in a cluster) ─────────────────────────
 function clusterCentroidText(members) {
   return members.map(m => `${m.title || ''} ${m.content || ''}`).join(' ').slice(0, 8000);
@@ -1502,15 +1517,16 @@ export class CognitionLoop {
   // ─── Canonical-fact LLM prompt ───────────────────────────────────────────────
   async _llmCanonicalFact(tag, members) {
     const facts = members.map((m, i) => {
-      const c  = (m.content || '').replace(/\s+/g, ' ').slice(0, 600);
+      const c  = stripIngestStamp((m.content || '').replace(/\s+/g, ' ')).slice(0, 600);
       const ts = m.createdAt ? new Date(m.createdAt).toISOString().slice(0, 10) : 'unknown-date';
-      return `[${m.id}] (${ts}) ${m.title ? m.title + ' — ' : ''}${c}`;
+      return `[${m.id}] (recorded ${ts}) ${m.title ? m.title + ' — ' : ''}${c}`;
     }).join('\n');
 
     const prompt = `You are distilling durable organizational knowledge into a CANONICAL FACT that the system will trust and recall later. Below are ${members.length} memories sharing the tag "${tag}".
 
 GROUNDING — strict (this becomes a trusted memory; hallucination poisons recall):
 - Use ONLY information stated in the memories below. Do NOT invent names, numbers, dates, roles, products, or events that are not present in the evidence.
+- ${RECORDED_DATE_NOTE}
 - Preserve every proper noun EXACTLY as written — people, organizations, products, projects, places, dates. Name the specific entity; NEVER replace a name with "the team", "a person", "the product", "the company".
 - If a detail is not supported by the evidence, omit it rather than guess. Every claim must trace to at least one cited [id].
 
@@ -1544,9 +1560,9 @@ Output JSON only:
   async _llmSynthesisBridge(tagA, membersA, tagB, membersB) {
     const formatCluster = (tag, members) =>
       members.map((m, i) => {
-        const c  = (m.content || '').replace(/\s+/g, ' ').slice(0, 400);
+        const c  = stripIngestStamp((m.content || '').replace(/\s+/g, ' ')).slice(0, 400);
         const ts = m.createdAt ? new Date(m.createdAt).toISOString().slice(0, 10) : 'unknown-date';
-        return `  [${m.id}] (${ts}) ${m.title ? m.title + ' — ' : ''}${c}`;
+        return `  [${m.id}] (recorded ${ts}) ${m.title ? m.title + ' — ' : ''}${c}`;
       }).join('\n');
 
     const prompt = `Cluster A (tag "${tagA}", ${membersA.length} memories):
@@ -1560,8 +1576,9 @@ These clusters never co-occur. Find the LATENT BRIDGE — causal | temporal_arc 
 GROUNDING — strict:
 - The bridge must be supported by the actual content of BOTH clusters. Do NOT invent a connection that the evidence does not show. If there is no real bridge, set confidence low.
 - Name the specific entities and dates on both sides EXACTLY as written (people, organizations, products, projects). Never use "the team" / "the project" when a name is available.
+- ${RECORDED_DATE_NOTE} A shared recorded date is NOT a bridge — reject "same day" links built on it.
 
-REJECT: restatement, "X and Y are connected through Z", generic summary, speculative links with no evidence.
+REJECT: restatement, "X and Y are connected through Z", generic summary, speculative links with no evidence, any link whose only basis is a shared recorded/ingest date.
 
 Output JSON only:
 { "bridge_type":"causal|temporal_arc|contradiction|enabling_gap", "bridge_claim":"<2-3 sentences naming the entities + dates on both sides, with the grounded mechanism of the link>", "entities":["<proper nouns from both clusters>"], "evidence_a":[{"id":"<uuid>","why":"<short reason grounded in that memory>"}], "evidence_b":[{"id":"<uuid>","why":"<short reason>"}], "confidence": 0.0-1.0, "actionable_next_step":"<one concrete sentence>" }`;
@@ -1585,9 +1602,9 @@ Output JSON only:
   async _llmNarrativeBridge(hubKey, clusters) {
     const blocks = clusters.map((cl, ci) => {
       const lines = cl.members.slice(0, 8).map((m) => {
-        const c  = (m.content || '').replace(/\s+/g, ' ').slice(0, 320);
+        const c  = stripIngestStamp((m.content || '').replace(/\s+/g, ' ')).slice(0, 320);
         const ts = m.createdAt ? new Date(m.createdAt).toISOString().slice(0, 10) : 'unknown-date';
-        return `    [${m.id}] (${ts}) ${m.title ? m.title + ' — ' : ''}${c}`;
+        return `    [${m.id}] (recorded ${ts}) ${m.title ? m.title + ' — ' : ''}${c}`;
       }).join('\n');
       return `  Cluster ${ci + 1} (tag "${cl.tag}"):\n${lines}`;
     }).join('\n\n');
@@ -1600,6 +1617,7 @@ Stitch them into a SINGLE emergent NARRATIVE — the one thought a sharp analyst
 
 STRICT GROUNDING (this becomes a trusted memory):
 - Use ONLY what the memories state. Do NOT invent facts, dates, numbers, or links. Name "${hubKey}" and every other proper noun + date EXACTLY as written.
+- ${RECORDED_DATE_NOTE}
 - The narrative must DEPEND on combining ≥2 of the clusters — it cannot be derivable from one alone.
 - One coherent thought (3–5 sentences), naming the specific events and how they connect through "${hubKey}".
 
@@ -1746,7 +1764,7 @@ Output JSON only:
 
     const newEvidenceText = newMemories.map(m => {
       const ts = m.createdAt ? new Date(m.createdAt).toISOString().slice(0, 10) : 'unknown';
-      const c  = (m.content || '').replace(/\s+/g, ' ').slice(0, 500);
+      const c  = stripIngestStamp((m.content || '').replace(/\s+/g, ' ')).slice(0, 500);
       return `[${m.id}] (${ts}) ${m.title ? m.title + ' — ' : ''}${c}`;
     }).join('\n');
 
@@ -2678,7 +2696,7 @@ Output JSON only:
 
       try {
         const facts = promptMembers.map((m) => {
-          const c  = (m.content || '').replace(/\s+/g, ' ').slice(0, 500);
+          const c  = stripIngestStamp((m.content || '').replace(/\s+/g, ' ')).slice(0, 500);
           const ts = m.createdAt ? new Date(m.createdAt).toISOString().slice(0, 10) : 'unknown-date';
           return `[${m.id}] (${ts}) ${m.title ? m.title + ' — ' : ''}${c}`;
         }).join('\n');
@@ -2783,7 +2801,7 @@ Output JSON only:
     let header = '';
     try {
       const peek = members.map((m, i) => {
-        const c = (m.content || '').replace(/\s+/g, ' ').slice(0, 200);
+        const c = stripIngestStamp((m.content || '').replace(/\s+/g, ' ')).slice(0, 200);
         return `[${i + 1}] ${m.title ? m.title + ' — ' : ''}${c}`;
       }).join('\n');
       const headerPrompt = `Write ONE sentence (max 30 words) describing what these ${members.length} memories on topic "${tag}" collectively cover. No preamble. No "Summary:" prefix. Plain prose.\n\nMemories:\n${peek}`;

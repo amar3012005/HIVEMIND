@@ -5293,13 +5293,21 @@ exit \$RC
 
       // ── Persistent org-level meetings (Postgres `meetings` table) ──────────
       // Raw SQL so it works without a Prisma client regen on the running image.
+      // Resolve the real tenant from the authenticated API key (the FE's
+      // apiClient.core sends only X-API-Key — no x-hm-* headers — so without
+      // this every meeting fell back to the placeholder DEFAULT tenant and
+      // meeting-intelligence recall hit an empty org. Named _mAuth to avoid
+      // the `principal` TDZ (a const principal is declared later in this scope).
+      const _mAuth = await authenticateApiKey(req).catch(() => null);
+      const _mUserId = _mAuth?.principal?.userId || null;
+      const _mOrgId = _mAuth?.principal?.orgId || null;
       // GET  /api/meetings        → list org's meetings (newest first)
       // POST /api/meetings        → persist a meeting + its insights
       if (pathname === '/api/meetings' && req.method === 'GET') {
         if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
         // userId/orgId from the control-plane-injected headers (principal is
         // initialized later in this handler — avoid the TDZ).
-        const mOrg = principal.orgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
+        const mOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
         try {
           const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') || '40', 10)));
           const rows = await prisma.$queryRawUnsafe(
@@ -5319,8 +5327,8 @@ exit \$RC
 
       if (pathname === '/api/meetings' && req.method === 'POST') {
         if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
-        const mUser = principal.userId || req.headers['x-hm-user-id'] || DEFAULT_USER;
-        const mOrg = principal.orgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
+        const mUser = _mUserId || req.headers['x-hm-user-id'] || DEFAULT_USER;
+        const mOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
         const ins = body.insights || {};
         const title = (body.title || ins.title || `Meeting ${new Date().toISOString().slice(0, 16)}`).toString().slice(0, 300);
         const transcript = (body.transcript || '').toString();
@@ -5361,7 +5369,7 @@ exit \$RC
         const mGet = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})$/);
         if (mGet && req.method === 'GET') {
           if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
-          const mOrg = principal.orgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
+          const mOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
           try {
             const rows = await prisma.$queryRawUnsafe(
               `SELECT id, user_id, org_id, project_id, title, summary, transcript, language,
@@ -5392,8 +5400,8 @@ exit \$RC
         const mIntel = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})\/intelligence$/);
         if (mIntel && req.method === 'POST') {
           if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
-          const mOrg = principal.orgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
-          const mUser = principal.userId || req.headers['x-hm-user-id'] || DEFAULT_USER;
+          const mOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
+          const mUser = _mUserId || req.headers['x-hm-user-id'] || DEFAULT_USER;
           runMeetingIntelligence(mIntel[1], mUser, mOrg).catch(() => {});
           return jsonResponse(res, { ok: true, status: 'pending' }, 202);
         }
@@ -5407,7 +5415,7 @@ exit \$RC
         const mPatch = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})$/);
         if (mPatch && req.method === 'PATCH') {
           if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
-          const mOrg = principal.orgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
+          const mOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
           const id = mPatch[1];
           const sets = [];
           const vals = [];
@@ -5503,8 +5511,8 @@ exit \$RC
         if (mIngest && req.method === 'POST') {
           if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
           if (!persistentMemoryEngine) return jsonResponse(res, { error: 'memory_unavailable' }, 503);
-          const mOrg = principal.orgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
-          const mUser = principal.userId || req.headers['x-hm-user-id'] || DEFAULT_USER;
+          const mOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
+          const mUser = _mUserId || req.headers['x-hm-user-id'] || DEFAULT_USER;
           const id = mIngest[1];
           try {
             const rows = await prisma.$queryRawUnsafe(
@@ -5744,8 +5752,8 @@ exit \$RC
 
       // ── TARA call history / turns / insights / usage (org-scoped, real-time) ──
       if (pathname.startsWith('/api/tara/calls')) {
-        const tOrg = principal.orgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
-        const tUser = principal.userId || req.headers['x-hm-user-id'] || DEFAULT_USER;
+        const tOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
+        const tUser = _mUserId || req.headers['x-hm-user-id'] || DEFAULT_USER;
 
         if (pathname === '/api/tara/calls/start' && req.method === 'POST') {
           if (!body.session_id) return jsonResponse(res, { error: 'session_id required' }, 400);
@@ -5856,8 +5864,8 @@ exit \$RC
       // skill's prompts into the live config; runtime is unchanged. ──
       if (pathname.startsWith('/api/tara/skills')) {
         if (!taraHandler?.skillsStore) return jsonResponse(res, { error: 'TARA not available' }, 503);
-        const sOrg = principal.orgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
-        const sUser = principal.userId || req.headers['x-hm-user-id'] || DEFAULT_USER;
+        const sOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
+        const sUser = _mUserId || req.headers['x-hm-user-id'] || DEFAULT_USER;
         const ss = taraHandler.skillsStore;
         const ctx = { userId: sUser, orgId: sOrg };
         try {

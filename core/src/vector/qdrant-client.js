@@ -162,6 +162,19 @@ export class QdrantClient {
   }
 
   /**
+   * Batch-embed many texts in one pass (the embed service chunks internally,
+   * e.g. 20/req for bge-m3). Returns vectors aligned to inputs; on failure the
+   * whole call throws so callers can degrade to no-vector upserts.
+   * @param {string[]} texts
+   * @returns {Promise<number[][]>} one vector per input, in order
+   */
+  async generateEmbeddings(texts) {
+    if (this._litellmReady) await this._litellmReady;
+    if (!this.embedService || !Array.isArray(texts) || texts.length === 0) return [];
+    return this.embedService.embed(texts);
+  }
+
+  /**
    * Store memory with vector embedding
    * @param {object} memory - Memory object with content and metadata
    * @returns {Promise<string>} Memory ID

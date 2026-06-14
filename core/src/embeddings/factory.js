@@ -8,9 +8,11 @@
  * vectors are interchangeable.
  *
  * Env:
- *   EMBEDDING_PROVIDER           primary: 'litellm' (blaiq) | else mistral/custom (/embed)
- *   EMBEDDING_FALLBACK_PROVIDER  optional: 'litellm' | 'mistral' — enables the wrapper
+ *   EMBEDDING_PROVIDER           primary: 'litellm' (blaiq) | 'openrouter' | else mistral/custom (/embed)
+ *   EMBEDDING_FALLBACK_PROVIDER  optional: 'litellm' | 'openrouter' | 'mistral' — enables the wrapper
  *   EMBEDDING_DIMENSION          vector dim (target 1024 for bge-m3)
+ *   OPENROUTER_API_KEY           required when (fallback)provider = 'openrouter'
+ *   OPENROUTER_EMBED_MODEL       default 'baai/bge-m3'; OPENROUTER_BASE_URL default openrouter.ai/api/v1
  *
  * When EMBEDDING_FALLBACK_PROVIDER is unset, returns the bare primary — identical
  * behavior to the pre-step-2 selection, so this is safe to ship dark.
@@ -81,8 +83,22 @@ export class FallbackEmbedService {
   }
 }
 
+// OpenRouter hosts bge-m3 (baai/bge-m3, 1024-dim) behind an OpenAI-compatible
+// /embeddings endpoint, so the LiteLLM client works verbatim — just repointed at
+// openrouter.ai with the OpenRouter key. Same 1024-dim contract → vectors are
+// interchangeable with the self-hosted / blaiq bge-m3 primary. Intended as a
+// managed FALLBACK (multi-provider uptime) when the primary box is unreachable.
+function makeOpenRouterService() {
+  return new LiteLLMEmbedService(
+    process.env.OPENROUTER_EMBED_MODEL || 'baai/bge-m3',
+    process.env.OPENROUTER_API_KEY || '',
+    process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1'
+  );
+}
+
 function buildService(provider) {
   if (provider === 'litellm') return getLiteLLMEmbedService();
+  if (provider === 'openrouter') return makeOpenRouterService();
   // 'mistral' / custom-endpoint / default
   return getMistralEmbedService();
 }
@@ -108,6 +124,8 @@ export function getEmbedService() {
     // litellm primary + mistral fallback don't collapse to one object.
     const fallback = fallbackProvider === 'litellm'
       ? new LiteLLMEmbedService()
+      : fallbackProvider === 'openrouter'
+      ? makeOpenRouterService()
       : new MistralEmbedService(
           process.env.MISTRAL_API_KEY || process.env.EMBEDDING_API_KEY,
           process.env.MISTRAL_EMBEDDING_MODEL || process.env.EMBEDDING_MODEL_NAME || 'mistral-embed',

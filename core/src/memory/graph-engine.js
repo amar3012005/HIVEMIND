@@ -2287,9 +2287,15 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
             // with obvious proper nouns, so pin to llama-3.3-70b-versatile.
             model: LINK_MODEL,
             messages: [{ role: 'user', content: prompt }],
-            // gpt-oss family fails Groq strict JSON-mode validation — skip
-            // response_format for it, rely on extractJsonFromText.
-            ...(/gpt-oss/i.test(LINK_MODEL) ? {} : { response_format: { type: 'json_object' } }),
+            // Pinned to llama-3.3-70b for proper-noun recall (gpt-oss-20b returns
+            // entities=[] for short MCP saves). If overridden to a gpt-oss model:
+            // it IS a reasoning model, so use low reasoning_effort to keep latency
+            // down (extraction needs no deep reasoning); gpt-oss now also supports
+            // strict json_schema, but extractJsonFromText already salvages its
+            // output, so we don't force a schema here. Non-gpt-oss → JSON-object.
+            ...(/gpt-oss/i.test(LINK_MODEL)
+              ? { reasoning_effort: process.env.ENTITY_LINK_REASONING_EFFORT || 'low' }
+              : { response_format: { type: 'json_object' } }),
             temperature: 0.1,
             max_tokens: 700,
           }),

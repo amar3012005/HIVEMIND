@@ -171,30 +171,85 @@ export class DocumentFirstIngestionService {
     }
     const numbered = sections.map((sec, i) =>
       `SECTION ${i}${sec.heading ? ` [${sec.heading}]` : ''}:\n${(sec.content || '').slice(0, 2500)}`).join('\n\n---\n\n');
-    const sys = `You extract atomic, standalone FACTS from each numbered SECTION of a document.
-Return ONLY a JSON array — one object per section: {"i": <section number>, "facts": ["complete standalone sentence", ...], "entities": ["Name", ...]}.
-Rules:
-- Each fact is a complete sentence understandable on its own (include the subject — never "it"/"they").
-- Extract REAL information: names, roles, products, specs, numbers, dates, decisions, events. NOT meta-commentary about the document.
-- entities = people/companies/products/places mentioned in that section.
-- Max ${maxFacts} facts per section. If a section has no real facts, use "facts": [].
-- Output the JSON array and nothing else.`;
+    // High-end extraction prompt. Two jobs, tenant- and domain-agnostic (works
+    // for any vertical/language): (1) atomic self-contained facts, (2) CANONICAL
+    // entities. The entity-naming rules mirror the co-mention linker so the same
+    // real-world thing never forks across language/number/abbreviation — the LLM
+    // does the semantic canon here; entity-normalize.js folds the mechanical noise
+    // downstream. NO domain examples → generalizes to every tenant.
+    const sys = `You are a precise information-extraction engine. From each numbered SECTION, extract atomic FACTS and the CANONICAL ENTITIES it mentions.
+
+Return ONLY a JSON object: {"sections":[{"i":<section number>,"facts":["complete standalone sentence", ...],"entities":["Canonical Name", ...]}]}.
+
+FACT rules:
+- Each fact is ONE complete, self-contained sentence — include the explicit subject, never a bare "it"/"they"/"this".
+- Extract only REAL information actually stated: names, roles, products, specs, numbers, dates, decisions, events, causal claims. NEVER meta-commentary about the document/section/layout.
+- Preserve specific values verbatim (numbers, units, model names, dates). Do not invent or generalize.
+- Max ${maxFacts} facts per section. A section with no real information → "facts":[].
+
+ENTITY rules — emit ONE canonical name per real-world thing so the same entity never forks into variants:
+- LANGUAGE: write every entity in English. Translate common-noun concepts and widely-known place names to their standard English name. EXCEPTION — never translate or alter the proper name of a specific person, company, brand, or product/model; keep those verbatim as written.
+- NUMBER: use the singular form for a concept or category; never the plural.
+- ABBREVIATIONS: prefer the full, widely-recognized term over an abbreviation/acronym, UNLESS the abbreviation IS the entity's established proper name.
+- SUFFIXES: drop corporate/legal-form suffixes from organization names. FORM: the bare name only — no articles, quotes, or trailing qualifiers.
+- The SAME thing mentioned twice (any language/case/number/abbreviation) MUST map to the SAME string.
+
+Output the JSON object and nothing else.`;
+    const isGptOss = /gpt-oss/i.test(model);
+    const SECTION_SCHEMA = {
+      type: 'object',
+      additionalProperties: false,
+      required: ['sections'],
+      properties: {
+        sections: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['i', 'facts', 'entities'],
+            properties: {
+              i: { type: 'integer' },
+              facts: { type: 'array', items: { type: 'string' } },
+              entities: { type: 'array', items: { type: 'string' } },
+            },
+          },
+        },
+      },
+    };
     const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model,
         temperature: 0.2,
-        max_tokens: 3500,
+        max_tokens: 4000,
         messages: [
           { role: 'system', content: sys },
           { role: 'user', content: numbered },
         ],
+        // gpt-oss is a reasoning model — default effort burns latency on a pure
+        // extraction task. 'low' keeps quality, cuts reasoning tokens (tunable).
+        ...(isGptOss ? { reasoning_effort: process.env.KB_DISTILL_REASONING_EFFORT || 'low' } : {}),
+        // Strict structured outputs (gpt-oss-20b/120b): constrained decoding =
+        // guaranteed valid JSON, no salvage parsing, no silently-dropped batches.
+        // Non-gpt-oss models fall back to JSON-object mode.
+        response_format: isGptOss
+          ? { type: 'json_schema', json_schema: { name: 'fact_extraction', strict: true, schema: SECTION_SCHEMA } }
+          : { type: 'json_object' },
       }),
     });
     if (!resp.ok) throw new Error(`groq ${resp.status}`);
     const json = await resp.json();
-    const arr = extractJsonArray(json?.choices?.[0]?.message?.content || '');
+    const content = json?.choices?.[0]?.message?.content || '';
+    // Strict mode guarantees parseable JSON; keep a salvage path for the
+    // non-gpt-oss / best-effort case so a stray prose wrapper never loses a batch.
+    let arr = [];
+    try {
+      const parsed = JSON.parse(content);
+      arr = Array.isArray(parsed?.sections) ? parsed.sections : (Array.isArray(parsed) ? parsed : []);
+    } catch {
+      arr = extractJsonArray(content);
+    }
     const byI = new Map();
     arr.forEach((o, idx) => byI.set(typeof o?.i === 'number' ? o.i : idx, o));
     return sections.map((_, i) => {
@@ -248,7 +303,7 @@ Rules:
           strict_contradictions: true,
         });
         const factId = res?.memoryId || res?.id || null;
-        if (!factId || (res?.operation || '').startsWith('skipped')) return false;
+        if (!factId || (res?.operation || '').startsWith('skipped')) return null;
         // Provenance: fact Derives-from its section.
         try {
           await this.memoryGraphEngine.store.createRelationship({
@@ -257,23 +312,40 @@ Rules:
             metadata: { created_by: 'kb_distill_v2', document_id: documentId },
           });
         } catch { /* best-effort */ }
-        // CONTEXTUAL embedding: prepend doc title + heading so the fact embeds
-        // with its provenance context (Anthropic contextual-retrieval). Also
-        // sidesteps storeMemory's extractFacts sync-regex by precomputing.
+        // Return a pending vector-index job. The CONTEXTUAL embedding (doc title +
+        // heading prefix, Anthropic contextual-retrieval) is BATCHED by the caller
+        // — one bge-m3 call per ≤20 facts instead of a network round-trip per fact,
+        // which was the dominant per-fact latency in distill.
+        const ctxInput = `${docTitle}${t.heading ? ` — ${t.heading}` : ''}\n${fact.trim()}`;
+        return { factId, ctxInput, fact: fact.trim(), entityTags, t };
+      };
+
+      // Batch the contextual embeds for a set of just-ingested facts: one embed
+      // call (the service internally chunks at 20) + parallel Qdrant upserts.
+      const flushEmbeds = async (pending) => {
+        if (!pending.length) return;
+        const vs = this.memoryGraphEngine.vectorStore;
+        let vectors = [];
         try {
-          const ctxInput = `${docTitle}${t.heading ? ` — ${t.heading}` : ''}\n${fact.trim()}`;
-          const vec = await this.memoryGraphEngine.vectorStore?.generateEmbedding?.(ctxInput);
-          await this.memoryGraphEngine.vectorStore?.storeMemory({
-            id: factId, user_id: userId, org_id: orgId, content: fact.trim(),
-            memory_type: 'fact', is_latest: true, tags: entityTags,
-            project_ids: Array.isArray(t.project_ids) ? t.project_ids : [],
-            primary_team_id: t.primary_team_id || null, visibility: t.visibility || 'private',
-            created_at: new Date().toISOString(),
-          }, vec ? { vector: vec } : {});
-        } catch (vecErr) {
-          this.logger.warn?.(`[kb-distill] vector index failed for ${factId}: ${vecErr.message}`);
+          vectors = (await vs?.generateEmbeddings?.(pending.map((p) => p.ctxInput))) || [];
+        } catch (e) {
+          this.logger.warn?.(`[kb-distill] batch embed failed (${pending.length} facts): ${e.message}`);
+          vectors = [];
         }
-        return true;
+        await Promise.all(pending.map(async (p, idx) => {
+          try {
+            const vec = vectors[idx];
+            await vs?.storeMemory({
+              id: p.factId, user_id: userId, org_id: orgId, content: p.fact,
+              memory_type: 'fact', is_latest: true, tags: p.entityTags,
+              project_ids: Array.isArray(p.t.project_ids) ? p.t.project_ids : [],
+              primary_team_id: p.t.primary_team_id || null, visibility: p.t.visibility || 'private',
+              created_at: new Date().toISOString(),
+            }, vec ? { vector: vec } : {});
+          } catch (vecErr) {
+            this.logger.warn?.(`[kb-distill] vector index failed for ${p.factId}: ${vecErr.message}`);
+          }
+        }));
       };
 
       const processBatch = async (batch) => {
@@ -286,6 +358,7 @@ Rules:
           this.logger.warn?.(`[kb-distill] batch LLM failed: ${err.message}`);
           return;
         }
+        const pending = [];
         for (let k = 0; k < batch.length; k++) {
           if (created >= MAX_FACTS_PER_DOC) break;
           const t = batch[k];
@@ -302,10 +375,14 @@ Rules:
             .filter(Boolean);
           for (const fact of facts) {
             if (created >= MAX_FACTS_PER_DOC) break;
-            try { if (await ingestFact(t, fact, entityTags)) created++; }
-            catch (err) { failed++; this.logger.warn?.(`[kb-distill] fact ingest failed: ${err.message}`); }
+            try {
+              const p = await ingestFact(t, fact, entityTags);
+              if (p) { pending.push(p); created++; }
+            } catch (err) { failed++; this.logger.warn?.(`[kb-distill] fact ingest failed: ${err.message}`); }
           }
         }
+        // One batched contextual-embed pass for every fact created in this batch.
+        await flushEmbeds(pending);
       };
 
       const workers = Array.from({ length: Math.min(CONCURRENCY, batches.length) }, async () => {

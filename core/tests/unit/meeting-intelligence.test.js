@@ -114,3 +114,30 @@ test('relatedMemories: surfaces real memories, drops synthesis/test artifacts', 
   const out = await relatedMemories(['angel investing'], { recall, max: 5 });
   assert.deepEqual(out.map((o) => o.memory_id), ['r1', 'r2']);
 });
+
+import { priorMeetingLoops, generateIntelligence as genI2 } from '../../src/knowledge/meeting-intelligence.js';
+
+test('priorMeetingLoops: surfaces prior unresolved actions/risks, drops done, computes age', () => {
+  const prior = [
+    { kind: 'action', text: 'Send Uwe the term sheet', owner: 'Amar', source_meeting_id: 'mtg-1', source_meeting_title: 'May Sync', created_at: '2026-06-01T00:00:00Z', status: 'open' },
+    { kind: 'risk', text: 'Contract not countersigned', source_meeting_id: 'mtg-1', created_at: '2026-06-01T00:00:00Z' },
+    { kind: 'action', text: 'Already done thing', source_meeting_id: 'mtg-1', created_at: '2026-06-01T00:00:00Z', status: 'done' },
+    { kind: 'action', text: 'no source', created_at: '2026-06-01T00:00:00Z' },
+  ];
+  const out = priorMeetingLoops(prior, { nowIso: '2026-06-11T00:00:00Z' });
+  assert.equal(out.length, 2);
+  assert.equal(out[0].text, 'Send Uwe the term sheet');
+  assert.equal(out[0].age_days, 10);
+  assert.equal(out[0].memory_id, 'mtg-1');
+});
+
+test('generateIntelligence: prior-meeting loops populate open_loops', async () => {
+  const recall = async () => ({ memories: [] });
+  const judge = async () => ({ briefs: {}, results: [] });
+  const meeting = { title: 'X', insights: { topics: ['t'] } };
+  const priorItems = [{ kind: 'action', text: 'Open thing', source_meeting_id: 'm9', created_at: '2026-06-01T00:00:00Z' }];
+  const out = await genI2(meeting, { recall, judge, priorItems, nowIso: '2026-06-05T00:00:00Z' });
+  assert.equal(out.status, 'ready');
+  assert.equal(out.open_loops.length, 1);
+  assert.equal(out.open_loops[0].text, 'Open thing');
+});

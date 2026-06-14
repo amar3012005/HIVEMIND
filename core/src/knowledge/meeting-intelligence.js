@@ -135,6 +135,34 @@ export async function openLoops(topics, { recall, maxTopics = 6 }) {
   return onlyGrounded(out);
 }
 
+/**
+ * Lane 3b (Phase A) — the PRECISE open-loop source: the user's OWN prior
+ * meetings' action items + risks that aren't yet marked done. Each carries the
+ * source meeting + age, grounded by the meeting id. This is what actually makes
+ * "still-open from before" populate (recall over risk-tagged memories rarely
+ * does, since meeting actions live in the meetings table, not as tagged
+ * memories). `priorItems` is pre-built by the caller (it has DB access).
+ */
+export function priorMeetingLoops(priorItems, { nowIso, max = 6 } = {}) {
+  const now = nowIso ? new Date(nowIso) : new Date();
+  return (priorItems || [])
+    .filter((it) => it && it.text && it.source_meeting_id && it.status !== 'done')
+    .slice(0, max)
+    .map((it) => {
+      const created = it.created_at ? new Date(it.created_at) : null;
+      const ageDays = created ? Math.max(0, Math.round((now - created) / 86400000)) : null;
+      return {
+        kind: it.kind === 'risk' ? 'risk' : 'action',
+        text: String(it.text).slice(0, 200),
+        owner: it.owner || null,
+        source_meeting_id: it.source_meeting_id,
+        source_meeting_title: it.source_meeting_title || null,
+        age_days: ageDays,
+        memory_id: it.source_meeting_id, // grounding: clickable to the meeting
+      };
+    });
+}
+
 // Cognition-synthesis + test artifacts that pollute recall — never show them
 // as "related memory" (they're machine exhaust, not real user content).
 const SYNTH_TITLE = /^(Bridge:|Canonical fact:|Canonical:|Principle:|Reflection:)/i;
@@ -180,7 +208,7 @@ export async function relatedMemories(queries, { recall, max = 5 }) {
  * intelligence object. Never throws (best-effort enrichment); a failed lane
  * contributes nothing. Status: 'ready' if anything grounded, else 'empty'.
  */
-export async function generateIntelligence(meeting, { recall, judge, nowIso }) {
+export async function generateIntelligence(meeting, { recall, judge, nowIso, priorItems = [] }) {
   const ins = (meeting?.insights && typeof meeting.insights === 'object') ? meeting.insights : {};
   const people = Array.isArray(ins.entities?.people) ? ins.entities.people : [];
   const orgs = Array.isArray(ins.entities?.organizations) ? ins.entities.organizations : [];
@@ -190,12 +218,19 @@ export async function generateIntelligence(meeting, { recall, judge, nowIso }) {
   ];
   const topics = Array.isArray(ins.topics) ? ins.topics : [];
   const relatedQueries = [meeting?.title, ...topics].filter(Boolean);
-  const [entities, cont, loops, related] = await Promise.all([
+  const [entities, cont, topicLoops, related] = await Promise.all([
     entityBriefs(ents, { recall, judge }).catch(() => []),
     continuity(Array.isArray(ins.decisions) ? ins.decisions : [], { recall, judge }).catch(() => []),
     openLoops(topics, { recall }).catch(() => []),
     relatedMemories(relatedQueries, { recall }).catch(() => []),
   ]);
+  // Open loops = prior MEETINGS' unresolved action items/risks (precise) first,
+  // then any risk-tagged topical memories. Dedup by text, cap 8.
+  const priorLoops = priorMeetingLoops(priorItems, { nowIso });
+  const seenText = new Set();
+  const loops = [...priorLoops, ...topicLoops]
+    .filter((l) => { const k = (l.text || '').toLowerCase().slice(0, 80); if (!k || seenText.has(k)) return false; seenText.add(k); return true; })
+    .slice(0, 8);
   const relatedCount = entities.reduce((s, e) => s + (e.memory_count || 0), 0) + cont.length + loops.length + related.length;
   const has = entities.length || cont.length || loops.length || related.length;
   return {

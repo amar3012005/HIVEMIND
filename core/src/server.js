@@ -5533,7 +5533,34 @@ exit \$RC
             if (!resp.ok) return {};
             try { return JSON.parse((await resp.json()).choices[0].message.content); } catch { return {}; }
           };
-          const intel = await generateIntelligence(meeting, { recall, judge });
+          // Phase A — prior open loops: this user's OTHER meetings' action
+          // items + risks become the precise "still-open from before" source.
+          let priorItems = [];
+          try {
+            const priorRows = await prisma.$queryRawUnsafe(
+              `SELECT id, title, created_at, action_items, insights
+                 FROM meetings
+                WHERE org_id=$1::uuid AND deleted_at IS NULL AND id <> $2::uuid
+                ORDER BY created_at DESC LIMIT 10`,
+              mOrg, meetingId,
+            );
+            for (const pr of (priorRows || [])) {
+              const ins = (pr.insights && typeof pr.insights === 'object') ? pr.insights : {};
+              const acts = Array.isArray(pr.action_items) && pr.action_items.length ? pr.action_items
+                : (Array.isArray(ins.action_items) ? ins.action_items : []);
+              for (const a of acts) {
+                const text = typeof a === 'string' ? a : (a?.task || a?.text || '');
+                if (text && a?.status !== 'done') priorItems.push({ kind: 'action', text, owner: a?.owner || null, status: a?.status || 'open', source_meeting_id: pr.id, source_meeting_title: pr.title, created_at: pr.created_at });
+              }
+              for (const r of (Array.isArray(ins.risks) ? ins.risks : [])) {
+                const text = typeof r === 'string' ? r : (r?.text || '');
+                if (text) priorItems.push({ kind: 'risk', text, source_meeting_id: pr.id, source_meeting_title: pr.title, created_at: pr.created_at });
+              }
+            }
+            priorItems = priorItems.slice(0, 30);
+          } catch (pe) { console.warn('[meeting-intel] prior-loops fetch failed:', pe.message); }
+
+          const intel = await generateIntelligence(meeting, { recall, judge, priorItems });
           await prisma.$executeRawUnsafe(
             `UPDATE meetings SET intelligence=$1::jsonb, intelligence_status=$2, intelligence_generated_at=now() WHERE id=$3::uuid`,
             JSON.stringify(intel), intel.status, meetingId,

@@ -14552,6 +14552,26 @@ exit \$RC
           }
           break;
 
+        case '/api/persona/query':
+          // WS5 step-6: cognitive-agent persona router. POST {query} → persona
+          // context for the caller (per-user). Inert unless PERSONA_ROUTER_ENABLED
+          // (pass {force:true} for a dry-run). Persona lane = profile_<org> vector +
+          // Postgres profile fallback.
+          if (req.method !== 'POST') break;
+          try {
+            const { routePersona } = await import('./memory/persona-router.js');
+            const result = await routePersona({
+              query: body?.query || '',
+              userId, orgId,
+              profileStore,
+              force: body?.force === true,
+            });
+            return jsonResponse(res, result);
+          } catch (err) {
+            console.error('[persona/query] failed:', err.message);
+            return jsonResponse(res, { error: err.message }, 500);
+          }
+
         case '/api/profiles/dream':
           // WS5 profile-dreamer trigger (admin). Dry-run by default — returns the
           // grounded persona PROPOSALS without persisting. Persists only when BOTH

@@ -31,6 +31,17 @@ const MIN_MEMORIES          = Number(process.env.PROFILE_DREAM_MIN_MEMORIES || 5
 const RAW_TAKE              = Number(process.env.PROFILE_DREAM_RAW_TAKE || 60);
 const CONFIDENCE_FLOOR      = Number(process.env.PROFILE_DREAM_CONFIDENCE_FLOOR || 0.55);
 const DECAY_FACTOR          = Number(process.env.PROFILE_DREAM_DECAY || 0.8);
+// WS5 step-4 — bounded read-only TRANSCRIPT REPLAY. When on, the dreamer ALSO reads
+// recent conversation transcripts as persona evidence (a lot of "who the user is"
+// signal lives in chat, not in extracted facts). STRICT rail: transcripts are READ
+// ONLY — never ingestMemory'd, never written back; they only feed the persona LLM
+// and serve as grounding ids. Bounded so a long chat history can't blow the prompt.
+const PROFILE_DREAM_TRANSCRIPTS = process.env.PROFILE_DREAM_TRANSCRIPTS === 'true';
+// WS5 step-5 — embed applied persona facts into the separate profile_<org> Qdrant
+// collection (persona recall lane). Flag-gated default OFF.
+const PROFILE_DREAM_EMBED   = process.env.PROFILE_DREAM_EMBED === 'true';
+const TRANSCRIPT_TAKE       = Number(process.env.PROFILE_DREAM_TRANSCRIPT_TAKE || 12);
+const TRANSCRIPT_CHARS      = Number(process.env.PROFILE_DREAM_TRANSCRIPT_CHARS || 1200);
 // Per-category confidence floor below which a decayed dreamed fact is dropped.
 const CATEGORY_FLOOR = { static: 0.5, preference: 0.3, goal: 0.25, dynamic: 0.2 };
 
@@ -91,8 +102,35 @@ export class ProfileDreamer {
     });
     if (raw.length < MIN_MEMORIES) return { userId, skipped: 'below_min_memories', count: raw.length };
 
-    const validIds = new Set(raw.map((r) => r.id));
-    const proposed = await this._llmPersona(raw);
+    // WS5 step-4: optionally fold in recent conversation transcripts as READ-ONLY
+    // persona evidence. Bounded + truncated. NEVER written back / ingested.
+    let evidence = raw;
+    let transcriptCount = 0;
+    if (PROFILE_DREAM_TRANSCRIPTS) {
+      try {
+        const tx = await this.prisma.memory.findMany({
+          where: {
+            userId, orgId, deletedAt: null, cognitiveLayerRole: null,
+            memoryType: 'conversation',
+          },
+          orderBy: { createdAt: 'desc' },
+          take: TRANSCRIPT_TAKE,
+          select: { id: true, content: true, title: true, createdAt: true },
+        });
+        // Truncate transcript content so a long chat can't dominate the prompt.
+        const trimmed = tx.map((t) => ({
+          ...t,
+          content: (t.content || '').split(/\bassistant:/i)[0].slice(0, TRANSCRIPT_CHARS),
+        }));
+        transcriptCount = trimmed.length;
+        evidence = [...raw, ...trimmed];
+      } catch (err) {
+        this.logger.warn?.(`[profile-dreamer] transcript read failed: ${err.message}`);
+      }
+    }
+
+    const validIds = new Set(evidence.map((r) => r.id));
+    const proposed = await this._llmPersona(evidence);
     // GROUNDING gate: keep only facts that cite ≥1 evidence id present in this
     // member's own fetched memory set, and clear the confidence floor.
     const grounded = (proposed || [])
@@ -103,17 +141,20 @@ export class ProfileDreamer {
       .filter((f) => f.value && f.key && f.evidence_memory_ids.length > 0 && (f.confidence || 0) >= CONFIDENCE_FLOOR);
 
     if (!apply) {
-      return { userId, dryRun: true, memories: raw.length, proposals: grounded };
+      return { userId, dryRun: true, memories: raw.length, transcripts: transcriptCount, proposals: grounded };
     }
 
     let applied = 0;
     let decayed = 0;
+    const appliedFacts = [];   // for persona-vector embed (after txn — no I/O under lock)
+    const removedKeys = [];     // decayed-out keys → remove their persona vectors
     await this.prisma.$transaction(async (tx) => {
       await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)', `profile:${userId}`);
       const proposedKeys = new Set(grounded.map((f) => f.key.toLowerCase().trim()));
 
       for (const f of grounded) {
         const key = f.key.toLowerCase().trim();
+        appliedFacts.push({ key, value: f.value, category: f.category || 'dynamic' });
         await tx.userProfile.upsert({
           where: { userId_key: { userId, key } },
           update: {
@@ -148,6 +189,7 @@ export class ProfileDreamer {
         const next = p.confidence * DECAY_FACTOR;
         if (next < floor) {
           await tx.userProfile.update({ where: { id: p.id }, data: { deletedAt: new Date() } });
+          removedKeys.push(p.key);
         } else {
           await tx.userProfile.update({ where: { id: p.id }, data: { confidence: next } });
         }
@@ -155,7 +197,26 @@ export class ProfileDreamer {
       }
     });
 
-    return { userId, memories: raw.length, applied, decayed };
+    // WS5 step-5: embed applied persona facts into the SEPARATE profile_<org>
+    // Qdrant collection (network I/O OUTSIDE the advisory lock). Flag-gated.
+    let embedded = 0;
+    if (PROFILE_DREAM_EMBED && (appliedFacts.length || removedKeys.length)) {
+      try {
+        const { upsertPersonaVector, deletePersonaVector } = await import('./persona-vector.js');
+        const { default: getEmbedService } = await import('../embeddings/factory.js');
+        const svc = getEmbedService();
+        for (const f of appliedFacts) {
+          if (await upsertPersonaVector({ orgId, userId, key: f.key, category: f.category, value: f.value, embedService: svc, logger: this.logger })) embedded++;
+        }
+        for (const key of removedKeys) {
+          await deletePersonaVector({ orgId, userId, key, logger: this.logger });
+        }
+      } catch (err) {
+        this.logger.warn?.(`[profile-dreamer] persona embed failed: ${err.message}`);
+      }
+    }
+
+    return { userId, memories: raw.length, transcripts: transcriptCount, applied, decayed, embedded };
   }
 
   async _llmPersona(memories) {

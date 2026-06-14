@@ -50,6 +50,12 @@ const SPARSE_TOP_SCORE         = 0.5;   // top hit below this ⇒ sparse
 
 const RRF_K                    = 60;    // standard RRF constant
 const ANCHOR_BOOST             = 0.30;  // additive boost when memory tagged w/ doc anchor
+// Dreams-first: synthesis memories (the cognitive layer's dreams — canonical /
+// bridge / principle) are the distilled, cross-source view, so a matching dream
+// should outrank its raw inputs in recall. Additive boost in RRF so relevant
+// dreams float to the top AND survive the score-floor/MMR pruning. Default on.
+const DREAM_FIRST_ENABLED      = process.env.RECALL_DREAMS_FIRST !== 'false';
+const DREAM_RANK_BOOST         = Number(process.env.RECALL_DREAM_BOOST || 0.50);
 
 const WORKSPACE_PLATFORMS = new Set([
   'gmail', 'google_drive', 'google_calendar', 'google_docs', 'google_sheets',
@@ -554,7 +560,17 @@ function reciprocalRankFusionMemories(memories, docAnchors) {
         (t.startsWith('doc-hash:') && docHashSet.has(t.slice(9))))
         ? ANCHOR_BOOST
         : 0;
-      return { ...m, _rank_score: base + tagMatchBoost };
+      // Dreams-first: lift synthesis memories (cognitive_layer_role set, or
+      // memory_type synthesis, or a synthesis:* tag) so the distilled dream
+      // ranks above its raw sources.
+      const role = m.cognitive_layer_role || m.cognitiveLayerRole;
+      const isDream = DREAM_FIRST_ENABLED && (
+        !!role ||
+        m.memory_type === 'synthesis' || m.memoryType === 'synthesis' ||
+        (m.tags || []).some((t) => typeof t === 'string' && t.startsWith('synthesis:'))
+      );
+      const dreamBoost = isDream ? DREAM_RANK_BOOST : 0;
+      return { ...m, _rank_score: base + tagMatchBoost + dreamBoost };
     })
     .sort((a, b) => b._rank_score - a._rank_score);
 }

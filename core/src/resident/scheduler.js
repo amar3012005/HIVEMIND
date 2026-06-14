@@ -114,7 +114,7 @@ export class ResidentAgentScheduler {
         this._lastScheduledDreamDate.set(sched.id, date);
         this.logger?.log?.(`[gov-scheduler] scheduled dream org=${sched.id.slice(0,8)} mode=${sched.mode} hour=${hour} lookback=${this.scheduleLookbackHours}h`);
         try {
-          await loop.runOnce(sched.id, { lookbackHours: this.scheduleLookbackHours });
+          await loop.runOnce(sched.id, { lookbackHours: this.scheduleLookbackHours, trigger: 'scheduled' });
         } catch (err) {
           this.logger?.warn?.(`[gov-scheduler] scheduled dream org=${sched.id.slice(0,8)} failed: ${err?.message || err}`);
         }

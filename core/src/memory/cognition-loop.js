@@ -446,17 +446,22 @@ export class CognitionLoop {
     }
   }
 
-  async runOnce(orgId, { skipCompaction = false, lookbackHours } = {}) {
+  async runOnce(orgId, { skipCompaction = false, lookbackHours, trigger = 'manual', triggeredBy = null } = {}) {
     if (_status.running) {
       return { skipped: true, reason: 'tick already in progress' };
     }
     _status.running = true;
     const tStart = Date.now();
+    const runStart = new Date(tStart);
     const winOpts = Number(lookbackHours) > 0 ? { lookbackHours: Number(lookbackHours) } : {};
+    // Audit row (best-effort — never block/break a run on audit failure or a
+    // pre-migration prisma client without the cognitionRun model).
+    const runRow = await this._auditRunStart({ orgId, trigger, triggeredBy, lookbackHours });
     try {
       const gate = await this._shouldRunForOrg(orgId, winOpts);
       if (!gate.run) {
         this.logger.log(`[cognition] org=${orgId} skipped — ${gate.reason}`);
+        await this._auditRunFinish(runRow, { status: 'skipped', skippedReason: gate.reason, runMs: Date.now() - tStart });
         // Do NOT persist status on skip: lastTickAt must stay anchored to the
         // last run that actually processed data, so gate A keeps comparing
         // against it until new memories arrive.
@@ -486,13 +491,66 @@ export class CognitionLoop {
       // PHASE-A TODO: surface principle count via a cognition_status counter
       // column (do NOT add the schema column in this stage).
       await this._persistOrgStatus(orgId, { synth, compact, runMs: Date.now() - tStart, error: null });
+      await this._auditRunFinish(runRow, {
+        status: 'completed', synthCount: synth, compactCount: compact,
+        principleCount: principles, reweightedCount: reweighted,
+        producedMemoryIds: await this._producedDreamIds(orgId, runStart),
+        runMs: Date.now() - tStart,
+      });
       return { synth, compact, principles, ms: _status.last_run_ms };
     } catch (err) {
       _status.errors = [..._status.errors.slice(-9), { org_id: orgId, error: err.message, at: new Date().toISOString() }];
       await this._persistOrgStatus(orgId, { synth: 0, compact: 0, runMs: Date.now() - tStart, error: err.message });
+      await this._auditRunFinish(runRow, { status: 'error', error: err.message, runMs: Date.now() - tStart });
       throw err;
     } finally {
       _status.running = false;
+    }
+  }
+
+  // ─── Run audit (cognition_run) — best-effort, never fatal ────────────────────
+  /** Create a 'running' audit row. Returns { id } or null if unavailable. */
+  async _auditRunStart({ orgId, trigger, triggeredBy, lookbackHours }) {
+    if (!this.prisma?.cognitionRun) return null;
+    try {
+      return await this.prisma.cognitionRun.create({
+        data: {
+          orgId, trigger: trigger || 'manual', status: 'running',
+          lookbackHours: Number(lookbackHours) > 0 ? Number(lookbackHours) : null,
+          triggeredBy: triggeredBy || null,
+        },
+        select: { id: true },
+      });
+    } catch (err) {
+      this.logger.warn?.(`[cognition][audit] start failed: ${err.message}`);
+      return null;
+    }
+  }
+
+  /** Finalize an audit row with counts + status. No-op if row is null. */
+  async _auditRunFinish(runRow, fields) {
+    if (!this.prisma?.cognitionRun || !runRow?.id) return;
+    try {
+      await this.prisma.cognitionRun.update({
+        where: { id: runRow.id },
+        data: { ...fields, finishedAt: new Date() },
+      });
+    } catch (err) {
+      this.logger.warn?.(`[cognition][audit] finish failed: ${err.message}`);
+    }
+  }
+
+  /** Dream memory IDs created during this run (synthesis rows since runStart). */
+  async _producedDreamIds(orgId, runStart) {
+    try {
+      const rows = await this.prisma.memory.findMany({
+        where: { orgId, memoryType: 'synthesis', deletedAt: null, createdAt: { gte: runStart } },
+        select: { id: true },
+        take: 200,
+      });
+      return rows.map((r) => r.id);
+    } catch {
+      return [];
     }
   }
 

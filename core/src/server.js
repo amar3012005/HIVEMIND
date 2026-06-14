@@ -9518,6 +9518,120 @@ exit \$RC
             }
           }
 
+        case '/api/cognition/runs':
+          // Audit history of dream runs for the caller's org (single-line stack).
+          if (req.method !== 'GET') break;
+          try {
+            if (!prisma?.cognitionRun) return jsonResponse(res, { runs: [] });
+            const limit = Math.min(50, Math.max(1, parseInt(url.searchParams.get('limit') || '20', 10)));
+            const runs = await prisma.cognitionRun.findMany({
+              where: { orgId },
+              orderBy: { startedAt: 'desc' },
+              take: limit,
+              select: {
+                id: true, trigger: true, status: true, skippedReason: true,
+                lookbackHours: true, synthCount: true, compactCount: true,
+                principleCount: true, reweightedCount: true, runMs: true,
+                error: true, startedAt: true, finishedAt: true, producedMemoryIds: true,
+              },
+            });
+            return jsonResponse(res, {
+              runs: runs.map((r) => ({
+                id: r.id, trigger: r.trigger, status: r.status,
+                skipped_reason: r.skippedReason, lookback_hours: r.lookbackHours,
+                synth_count: r.synthCount, compact_count: r.compactCount,
+                principle_count: r.principleCount, reweighted_count: r.reweightedCount,
+                dream_count: (r.producedMemoryIds || []).length,
+                run_ms: r.runMs, error: r.error,
+                started_at: r.startedAt, finished_at: r.finishedAt,
+              })),
+            });
+          } catch (err) {
+            console.error('[cognition/runs] failed:', err.message);
+            return jsonResponse(res, { error: 'Failed to load cognition runs' }, 500);
+          }
+
+        case '/api/cognition/run-dreams':
+          // The dreams a specific run produced (show-past-dreams). ?run_id=<uuid>
+          if (req.method !== 'GET') break;
+          try {
+            if (!prisma?.cognitionRun) return jsonResponse(res, { dreams: [] });
+            const runId = url.searchParams.get('run_id');
+            if (!runId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(runId)) return jsonResponse(res, { error: 'valid run_id required' }, 400);
+            const run = await prisma.cognitionRun.findFirst({
+              where: { id: runId, orgId },
+              select: { producedMemoryIds: true },
+            });
+            if (!run) return jsonResponse(res, { error: 'run not found' }, 404);
+            const ids = run.producedMemoryIds || [];
+            if (ids.length === 0) return jsonResponse(res, { dreams: [] });
+            const dreams = await prisma.memory.findMany({
+              where: { id: { in: ids }, orgId, deletedAt: null },
+              select: {
+                id: true, title: true, content: true, tags: true,
+                cognitiveLayerRole: true, synthesisConfidence: true, createdAt: true,
+              },
+            });
+            return jsonResponse(res, {
+              dreams: dreams.map((d) => ({
+                id: d.id, title: d.title,
+                content: (d.content || '').slice(0, 500),
+                role: d.cognitiveLayerRole,
+                confidence: d.synthesisConfidence,
+                tags: d.tags, created_at: d.createdAt,
+              })),
+            });
+          } catch (err) {
+            console.error('[cognition/run-dreams] failed:', err.message);
+            return jsonResponse(res, { error: 'Failed to load run dreams' }, 500);
+          }
+
+        case '/api/cognition/run-delete':
+          // Delete a run audit entry (admin). ?run_id=<uuid>&with_dreams=true also
+          // hard-deletes the dreams that run produced (cascades to vectors).
+          if (req.method !== 'POST' && req.method !== 'DELETE') break;
+          try {
+            const m = await prisma.userOrganization.findUnique({
+              where: { userId_orgId: { userId, orgId } },
+              select: { role: true, roles: true },
+            }).catch(() => null);
+            const rs = new Set([
+              ...(m?.role ? [m.role] : []),
+              ...(Array.isArray(m?.roles) ? m.roles : []),
+            ]);
+            const adminOk = ['admin', 'owner', 'org_admin', 'org_owner'].some((r) => rs.has(r));
+            if (!adminOk && !principal.master) {
+              return jsonResponse(res, { error: 'admin/owner role required' }, 403);
+            }
+            if (!prisma?.cognitionRun) return jsonResponse(res, { error: 'cognition runs unavailable' }, 503);
+            const runId = url.searchParams.get('run_id') || body?.run_id;
+            if (!runId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(runId)) return jsonResponse(res, { error: 'valid run_id required' }, 400);
+            const withDreams = url.searchParams.get('with_dreams') === 'true' || body?.with_dreams === true;
+            const run = await prisma.cognitionRun.findFirst({
+              where: { id: runId, orgId },
+              select: { id: true, producedMemoryIds: true },
+            });
+            if (!run) return jsonResponse(res, { error: 'run not found' }, 404);
+            let dreamsDeleted = 0;
+            if (withDreams && (run.producedMemoryIds || []).length > 0) {
+              const ids = run.producedMemoryIds;
+              if (typeof persistentMemoryStore?.hardDeleteMemories === 'function') {
+                await persistentMemoryStore.hardDeleteMemories(ids);
+                dreamsDeleted = ids.length;
+              } else {
+                const del = await prisma.memory.updateMany({
+                  where: { id: { in: ids }, orgId }, data: { deletedAt: new Date() },
+                });
+                dreamsDeleted = del.count;
+              }
+            }
+            await prisma.cognitionRun.delete({ where: { id: run.id } });
+            return jsonResponse(res, { deleted: true, run_id: runId, dreams_deleted: dreamsDeleted });
+          } catch (err) {
+            console.error('[cognition/run-delete] failed:', err.message);
+            return jsonResponse(res, { error: err.message }, 500);
+          }
+
         case '/api/cognition/synthesize-now':
           // Admin-gated manual trigger — runs one tick immediately.
           if (req.method !== 'POST') break;
@@ -9564,7 +9678,7 @@ exit \$RC
               // status via _persistOrgStatus, and errors are captured into _status).
               // The FE polls /api/cognition/status for the final counts.
               const runPromise = cognitionLoop
-                .runOnce(orgId, { skipCompaction: true, lookbackHours })
+                .runOnce(orgId, { skipCompaction: true, lookbackHours, trigger: 'manual', triggeredBy: userId })
                 .catch((e) => {
                   console.warn('[cognition] background run failed:', e.message);
                   return { __error: e.message };

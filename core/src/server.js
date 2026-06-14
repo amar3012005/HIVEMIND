@@ -5520,9 +5520,9 @@ exit \$RC
           // items each row is about). A flat recall ranks synthesis junk above the
           // real people, so per-subject recall (pass 2) is what actually grounds
           // each row — same pattern that makes meeting-intelligence work.
-          const broad = await recallClean(tPrompt, 20);
+          const broad = await recallClean(tPrompt, 35);
           const planOut = await groqJSON(
-            'You plan a spreadsheet from the user request and memory snippets. Decide sensible COLUMN headers, and list the ROW SUBJECTS — the specific entities/people/items each row will be about (e.g. for "people involved" → the person names). Prefer subjects named in the request or snippets. Max 10 columns, 25 subjects. STRICT JSON {"columns":["<col>",...],"subjects":["<subject>",...]}.',
+            'You plan a spreadsheet from the user request and memory snippets. Decide sensible COLUMN headers, and list the ROW SUBJECTS — the specific entities/people/items each row should be about (e.g. for "people involved" → the person names). Include EVERY plausible subject: names in the snippets, names in the request, AND obvious members of the named group even if absent from the snippets — a second pass verifies each subject against memory and silently drops any with no grounding, so over-list rather than under-list. Max 10 columns, 25 subjects. STRICT JSON {"columns":["<col>",...],"subjects":["<subject>",...]}.',
             `REQUEST: ${tPrompt}\n\nMEMORIES:\n${JSON.stringify(broad)}`,
           );
           const columns = Array.isArray(planOut.columns) ? planOut.columns.map(String).slice(0, 10) : [];
@@ -15817,6 +15817,16 @@ exit \$RC
                 factAugmentOnly: body.factAugmentOnly === true,
                 benchmarkEnrichment: body.benchmarkEnrichment === true,
                 smartIngest: body.smartIngest !== false,
+                // Burst-ingest opt-in flags — forward to graph-engine so callers
+                // (LongMemEval runner, KB bulk promotion) can reach the
+                // _pureInsert path (graph-engine.js:620) that bypasses the
+                // per-user advisory lock. ALL four are required to flip
+                // _pureInsert + smartIngest:false. defer_entity_linking moves
+                // the LLM out of the lock for the normal-lock path.
+                skipAdvisoryLock: body.skipAdvisoryLock === true,
+                skip_relationship_classification: body.skip_relationship_classification === true,
+                skip_contradiction_detection: body.skip_contradiction_detection === true,
+                defer_entity_linking: body.defer_entity_linking === true,
                 metadata: {
                   ...validation.data.metadata,
                   source_platform: validation.data.source_platform || null,

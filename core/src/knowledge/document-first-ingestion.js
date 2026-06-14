@@ -12,6 +12,7 @@
 
 import crypto from 'crypto';
 import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
+import { normalizeEntity, normalizeTagsArray } from '../memory/entity-normalize.js';
 
 // ── KB content-quality gates (P3) ─────────────────────────────────────────
 // Magazines/brochures produce page furniture that Docling faithfully extracts:
@@ -290,8 +291,15 @@ Rules:
           const t = batch[k];
           const ex = perSection[k] || { facts: [], entities: [] };
           const facts = (ex.facts || []).filter((f) => typeof f === 'string' && f.trim().length >= 20).slice(0, MAX_FACTS_PER_SEGMENT);
+          // Canonicalize at the SOURCE (normalizeEntity), not via a raw
+          // underscore-join. KB facts set defer_entity_linking=true so the
+          // co-mention linker never re-tags them, and they do NOT reach the
+          // createMemory chokepoint's tag-normalize — so writing raw here left
+          // entity:SOLVIS / entity:WP_storage un-canonicalized in the DB.
           const entityTags = (ex.entities || []).filter((e) => typeof e === 'string' && e.trim())
-            .slice(0, 8).map((e) => `entity:${e.trim().replace(/\s+/g, '_')}`);
+            .slice(0, 8)
+            .map((e) => { const slug = normalizeEntity(e); return slug ? `entity:${slug}` : null; })
+            .filter(Boolean);
           for (const fact of facts) {
             if (created >= MAX_FACTS_PER_DOC) break;
             try { if (await ingestFact(t, fact, entityTags)) created++; }
@@ -1364,8 +1372,13 @@ Rules:
             where: { id: { in: entityIds } },
             select: { canonicalName: true, entityType: true },
           });
+          // Canonicalize the entity NAME with the same deterministic slugger
+          // used everywhere else, preserving the entity-type prefix. This raw
+          // db.memory.update bypasses the createMemory chokepoint, so the tag
+          // must already be canonical before it lands.
           const newTags = entitiesForTags
-            .map(e => `${e.entityType}:${e.canonicalName.toLowerCase().replace(/\s+/g, '-').slice(0, 80)}`)
+            .map(e => { const slug = normalizeEntity(e.canonicalName); return slug ? `${e.entityType}:${slug}` : null; })
+            .filter(Boolean)
             .slice(0, 25);
           if (newTags.length) {
             const existing = await this.db.memory.findUnique({
@@ -1373,7 +1386,12 @@ Rules:
               select: { tags: true },
             });
             if (existing) {
-              const merged = Array.from(new Set([...(existing.tags || []), ...newTags])).slice(0, 80);
+              // normalizeTagsArray re-canonicalizes any legacy entity: tags on
+              // the row too, so a pre-fix entity:Foo can't coexist with the new
+              // canonical form (this update bypasses the chokepoint).
+              const merged = normalizeTagsArray(
+                Array.from(new Set([...(existing.tags || []), ...newTags])).slice(0, 80),
+              );
               await this.db.memory.update({
                 where: { id: memoryId },
                 data: { tags: merged },

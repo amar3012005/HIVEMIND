@@ -504,18 +504,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (!tab || !tab.id) { sendResponse({ error: 'No active tab' }); return; }
 
-        // 1. screenshot (jpeg, smaller). May fail on chrome:// / protected pages.
-        let screenshot = '';
-        try { screenshot = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 60 }); } catch (e) { /* continue without vision */ }
-
-        // 2. inject the autofill content script + 3. scan fields
+        // Inject the content script (scan/fill/copyTSV live in the page).
         await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['autofill.js'] });
-        const scanRes = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => (window.__hmAutofill ? window.__hmAutofill.scan() : []) });
-        const fields = (scanRes && scanRes[0] && scanRes[0].result) || [];
 
-        // No HTML form fields → spreadsheet/canvas grid. Build a grounded table
-        // from memory and copy it as TSV for the user to paste (Cmd+V).
-        if (!fields.length) {
+        // Spreadsheet / canvas grid apps render cells in <canvas>, but ALSO have
+        // hidden utility inputs (formula bar, name box, clipboard catcher) that
+        // a naive scan mistakes for a form. Detect grid apps by URL and go
+        // straight to TABLE mode (recall → TSV → paste), bypassing form scan.
+        const GRID_URL = /docs\.google\.com\/spreadsheets|officeapps\.live\.com|sharepoint\.com.*(xlviewer|_layouts)|onedrive\.live\.com.*excel|airtable\.com/i;
+        const isGrid = GRID_URL.test(tab.url || '');
+
+        async function runTableMode() {
           try {
             const tResp = await fetch(`${config.apiBase}/api/autofill/table`, {
               method: 'POST',
@@ -527,16 +526,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               if ((tbl.columns || []).length && (tbl.rows || []).length) {
                 const copyRes = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: (c, r) => (window.__hmAutofill ? window.__hmAutofill.copyTSV(c, r) : null), args: [tbl.columns, tbl.rows] });
                 const cr = (copyRes && copyRes[0] && copyRes[0].result) || {};
-                sendResponse({ ok: true, mode: 'table', rows: tbl.rows.length, cols: tbl.columns.length, summary: tbl.summary || '', copied: !!cr.ok });
-                return;
+                return { ok: true, mode: 'table', rows: tbl.rows.length, cols: tbl.columns.length, summary: tbl.summary || '', copied: !!cr.ok };
               }
-              sendResponse({ ok: true, mode: 'table', rows: 0, note: tbl.summary || 'No table could be built from your memory for this request.' });
-              return;
+              return { ok: true, mode: 'table', rows: 0, note: tbl.summary || 'No table could be built from your memory — try naming a subject (e.g. “my partners”, “my projects”).' };
             }
-          } catch (te) { /* fall through to error */ }
-          sendResponse({ error: 'No form fields here, and no table could be built from your memory.' });
-          return;
+          } catch (te) { /* fall through */ }
+          return { error: 'Could not build a table from your memory for this request.' };
         }
+
+        if (isGrid) { sendResponse(await runTableMode()); return; }
+
+        // ── Regular page: screenshot + form scan ──
+        let screenshot = '';
+        try { screenshot = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 60 }); } catch (e) { /* continue without vision */ }
+        const scanRes = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => (window.__hmAutofill ? window.__hmAutofill.scan() : []) });
+        const fields = (scanRes && scanRes[0] && scanRes[0].result) || [];
+
+        // No HTML form fields → fall back to table mode (canvas/SPA grid).
+        if (!fields.length) { sendResponse(await runTableMode()); return; }
 
         // 4. plan: vision + grounded recall (one server run)
         const resp = await fetch(`${config.apiBase}/api/autofill/plan`, {

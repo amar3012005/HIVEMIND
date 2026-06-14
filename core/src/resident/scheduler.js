@@ -16,6 +16,7 @@
 import { isEvolutionEnabled, runEvolution } from '../memory/evolution-engine.js';
 import { isPoolEnabled, affordTier } from './budget-pool.js';
 import { ClusterIndex } from '../memory/cluster-index.js';
+import { withGovernanceLock } from './advisory-lock.js';
 
 export class ResidentAgentScheduler {
   // NOTE (Phase D): post-Phase-D this scheduler's setInterval (started below,
@@ -52,8 +53,14 @@ export class ResidentAgentScheduler {
 
     // Scheduled deep dream (replaces the 1h-window-only cadence). When enabled,
     // each org fires ONE wide-lookback dream per day inside its configured window
-    // (night-mode=midnight, or an interval). Default OFF → behaviour unchanged.
-    this.scheduleEnabled = process.env.COGNITION_SCHEDULE_ENABLED === 'true';
+    // (night-mode=midnight, or an interval). GA: the PER-ORG cognition settings are
+    // the driver (only orgs with cognition_org_enabled=true + a non-continuous mode
+    // dream; users control it from the cognition tab). The env var is now a GLOBAL
+    // KILL-SWITCH (default ON) — set COGNITION_SCHEDULE_ENABLED=false to disable the
+    // scheduled-dream path platform-wide. Safe to default-on: blockers shipped
+    // alongside (skipCompaction:true on the scheduled path + cross-replica
+    // withGovernanceLock + cross-replica once/day dedup via cognition_run).
+    this.scheduleEnabled = process.env.COGNITION_SCHEDULE_ENABLED !== 'false';
     this.schedulePollMs = Number(process.env.COGNITION_SCHEDULE_POLL_MS || 15 * 60 * 1000);
     this.scheduleLookbackHours = Number(process.env.COGNITION_SCHEDULE_LOOKBACK_HOURS || 24);
     this.scheduleTimer = null;
@@ -97,8 +104,10 @@ export class ResidentAgentScheduler {
   /**
    * Scheduled deep dream — once/day per org inside its window, wide lookback so
    * the dream connects dots across the whole period (cross-time). Reuses the
-   * cognition loop's runOnce (skipCompaction:false here → scheduled cadence is
-   * the safe place for gentle compaction, unlike the manual one-shot).
+   * cognition loop's runOnce with skipCompaction:TRUE — a scheduled wide-lookback
+   * run must NOT trigger the destructive full-window drift-compaction over live org
+   * data (the §10 hazard that hard-removed KB chunks). Compaction stays on the
+   * separate governance-tick cadence, never the auto scheduled-dream path.
    */
   async _maybeScheduledDream() {
     if (!this.scheduleEnabled || this.scheduleInFlight || this.tickInFlight) return;
@@ -110,22 +119,46 @@ export class ResidentAgentScheduler {
       for (const sched of scheds) {
         const { hour, date } = this._localClock(sched.tz);
         if (!this._withinDreamWindow(sched, hour)) continue;
-        if (this._lastScheduledDreamDate.get(sched.id) === date) continue; // already dreamt today
-        this._lastScheduledDreamDate.set(sched.id, date);
-        this.logger?.log?.(`[gov-scheduler] scheduled dream org=${sched.id.slice(0,8)} mode=${sched.mode} hour=${hour} lookback=${this.scheduleLookbackHours}h`);
+        if (this._lastScheduledDreamDate.get(sched.id) === date) continue; // cheap per-process pre-filter
         try {
-          await loop.runOnce(sched.id, { lookbackHours: this.scheduleLookbackHours, trigger: 'scheduled' });
-          // Dream retention / fast-tier: after the nightly dream, evict dead dream
-          // vectors so the hot index stays lean. Flag-gated (default off).
-          if (process.env.DREAM_RETENTION_ENABLED === 'true' && typeof loop.dreamRetentionForOrg === 'function') {
-            try {
-              const r = await loop.dreamRetentionForOrg(sched.id, { apply: true });
-              if (r?.evicted || r?.hardDeleted) this.logger?.log?.(`[gov-scheduler] retention org=${sched.id.slice(0,8)} evicted=${r.evicted} hardDeleted=${r.hardDeleted}`);
-            } catch (rErr) {
-              this.logger?.warn?.(`[gov-scheduler] retention org=${sched.id.slice(0,8)} failed: ${rErr?.message || rErr}`);
-            }
-          }
+          // Cross-replica mutual exclusion. The advisory lock is SESSION-scoped, so
+          // (per advisory-lock.js) we hold it inside a $transaction — that pins ONE
+          // connection for acquire→run→release, otherwise the pool would release on
+          // a different connection and leak the lock. The for-loop is sequential
+          // (one dream at a time per replica), so at most one connection is parked.
+          // Backstop: even if the lock drops mid-dream, the once/20h cognition_run
+          // dedup below stops a second replica from re-dreaming (defense in depth).
+          await this.prisma.$transaction(async (tx) => {
+            await withGovernanceLock(tx, { orgId: sched.id, agentName: 'scheduled-dream' }, async () => {
+              // Cross-replica + cross-restart once/day guard: a scheduled run started
+              // in the last 20h means today's dream already happened (per-process
+              // date map only guards one process). 20h < 24h so tomorrow isn't blocked.
+              const recent = this.prisma.cognitionRun
+                ? await this.prisma.cognitionRun.findFirst({
+                    where: { orgId: sched.id, trigger: 'scheduled', startedAt: { gte: new Date(Date.now() - 20 * 3600 * 1000) } },
+                    select: { id: true },
+                  }).catch(() => null)
+                : null;
+              if (recent) return; // already dreamed today
+              this._lastScheduledDreamDate.set(sched.id, date);
+              this.logger?.log?.(`[gov-scheduler] scheduled dream org=${sched.id.slice(0,8)} mode=${sched.mode} hour=${hour} lookback=${this.scheduleLookbackHours}h`);
+              // skipCompaction:TRUE — never run destructive drift-compaction on the
+              // auto scheduled path (§10 hazard). runOnce uses its own (pooled) prisma,
+              // so the dream's writes don't block on the lock connection.
+              await loop.runOnce(sched.id, { lookbackHours: this.scheduleLookbackHours, trigger: 'scheduled', skipCompaction: true });
+              // Dream retention / fast-tier: evict dead dream vectors. Flag-gated off.
+              if (process.env.DREAM_RETENTION_ENABLED === 'true' && typeof loop.dreamRetentionForOrg === 'function') {
+                try {
+                  const r = await loop.dreamRetentionForOrg(sched.id, { apply: true });
+                  if (r?.evicted || r?.hardDeleted) this.logger?.log?.(`[gov-scheduler] retention org=${sched.id.slice(0,8)} evicted=${r.evicted} hardDeleted=${r.hardDeleted}`);
+                } catch (rErr) {
+                  this.logger?.warn?.(`[gov-scheduler] retention org=${sched.id.slice(0,8)} failed: ${rErr?.message || rErr}`);
+                }
+              }
+            });
+          }, { timeout: Number(process.env.COGNITION_SCHEDULE_TXN_TIMEOUT_MS || 35 * 60 * 1000), maxWait: 8000 });
         } catch (err) {
+          if (err?.code === 'GOVERNANCE_LOCK_BUSY') continue; // other replica owns this org's dream
           this.logger?.warn?.(`[gov-scheduler] scheduled dream org=${sched.id.slice(0,8)} failed: ${err?.message || err}`);
         }
       }

@@ -5346,6 +5346,8 @@ exit \$RC
             (body.notes || '').toString().slice(0, 8000) || null,
             JSON.stringify(ins != null && typeof ins === 'object' && !Array.isArray(ins) ? ins : {}),
           );
+          const _newId = rows?.[0]?.id;
+          if (_newId) { runMeetingIntelligence(_newId, mUser, mOrg).catch(() => {}); }
           return jsonResponse(res, { ok: true, id: rows?.[0]?.id, created_at: rows?.[0]?.created_at }, 201);
         } catch (e) {
           return jsonResponse(res, { error: 'meetings_save_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
@@ -5365,16 +5367,35 @@ exit \$RC
               `SELECT id, user_id, org_id, project_id, title, summary, transcript, language,
                       duration_sec, multi_speaker, speaker_count, action_items, decisions,
                       key_points, questions, segments, topics, sentiment, notes, insights,
+                      intelligence, intelligence_status, intelligence_generated_at,
                       source_memory_id, created_at
                FROM meetings
                WHERE id = $1::uuid AND org_id = $2::uuid AND deleted_at IS NULL`,
               mGet[1], mOrg,
             );
             if (!rows?.length) return jsonResponse(res, { error: 'not_found' }, 404);
-            return jsonResponse(res, { meeting: rows[0] });
+            const row = rows[0];
+            return jsonResponse(res, { meeting: {
+              ...row,
+              intelligence: row.intelligence || null,
+              intelligence_status: row.intelligence_status || 'none',
+              intelligence_generated_at: row.intelligence_generated_at || null,
+            } });
           } catch (e) {
             return jsonResponse(res, { error: 'meeting_get_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
           }
+        }
+      }
+
+      // POST /api/meetings/:id/intelligence — (re)generate the intelligence panel.
+      {
+        const mIntel = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})\/intelligence$/);
+        if (mIntel && req.method === 'POST') {
+          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+          const mOrg = req.headers['x-hm-org-id'] || DEFAULT_ORG;
+          const mUser = req.headers['x-hm-user-id'] || DEFAULT_USER;
+          runMeetingIntelligence(mIntel[1], mUser, mOrg).catch(() => {});
+          return jsonResponse(res, { ok: true, status: 'pending' }, 202);
         }
       }
 
@@ -5408,6 +5429,61 @@ exit \$RC
           } catch (e) {
             return jsonResponse(res, { error: 'meetings_update_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
           }
+        }
+      }
+
+      // ── Meeting Intelligence runner ──────────────────────────────────────
+      // Wires the pure generator to real recall + a Groq judge, runs it, and
+      // persists the result to the meeting row. Best-effort, never throws.
+      async function runMeetingIntelligence(meetingId, mUser, mOrg) {
+        try {
+          const rows = await prisma.$queryRawUnsafe(
+            `SELECT id, insights FROM meetings WHERE id=$1::uuid AND org_id=$2::uuid AND deleted_at IS NULL`,
+            meetingId, mOrg,
+          );
+          const meeting = rows?.[0];
+          if (!meeting) return;
+          await prisma.$executeRawUnsafe(
+            `UPDATE meetings SET intelligence_status='pending' WHERE id=$1::uuid`, meetingId,
+          );
+          const { generateIntelligence } = await import('./knowledge/meeting-intelligence.js');
+          const recall = async (query) => {
+            const r = await recallPersistedMemories(persistentMemoryStore, {
+              query, userId: mUser, orgId: mOrg, limit: 5,
+            }).catch(() => null);
+            const list = (r?.memories || r || []);
+            const memories = (Array.isArray(list) ? list : []).map((m) => ({
+              id: m.id, title: m.title, content: m.content, tags: m.tags,
+              created_at: m.created_at || m.createdAt,
+              meeting_id: (Array.isArray(m.tags) ? m.tags.find((t) => typeof t === 'string' && t.startsWith('meeting:')) : null)?.slice(8) || null,
+            })).filter((m) => !(Array.isArray(m.tags) && m.tags.includes(`meeting:${meetingId}`)));
+            return { memories };
+          };
+          const judge = async (payload) => {
+            const sys = payload.task === 'entity_briefs'
+              ? 'For each entity, write ONE factual sentence ("brief") summarizing the snippets. STRICT JSON {"briefs":{"<name>":"<brief>"}}. Never invent — only use the snippets.'
+              : 'For each {decision,prior} pair decide if the decision is NEW, UPDATES, or CONFLICTS vs the prior memory. STRICT JSON {"results":[{"relation":"NEW|UPDATES|CONFLICTS","reason":"<short>","confidence":0..1}]} in pair order. Be conservative; default NEW when unsure.';
+            const resp = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                model: process.env.MEETING_INSIGHTS_MODEL || 'openai/gpt-oss-120b',
+                temperature: 0.1, response_format: { type: 'json_object' },
+                messages: [{ role: 'system', content: sys }, { role: 'user', content: JSON.stringify(payload) }],
+              }),
+              signal: AbortSignal.timeout(60_000),
+            });
+            if (!resp.ok) return {};
+            try { return JSON.parse((await resp.json()).choices[0].message.content); } catch { return {}; }
+          };
+          const intel = await generateIntelligence(meeting, { recall, judge });
+          await prisma.$executeRawUnsafe(
+            `UPDATE meetings SET intelligence=$1::jsonb, intelligence_status=$2, intelligence_generated_at=now() WHERE id=$3::uuid`,
+            JSON.stringify(intel), intel.status, meetingId,
+          );
+        } catch (e) {
+          console.warn('[meeting-intel] generate failed:', e.message);
+          try { await prisma.$executeRawUnsafe(`UPDATE meetings SET intelligence_status='error' WHERE id=$1::uuid`, meetingId); } catch { /* ignore */ }
         }
       }
 

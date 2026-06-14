@@ -42,6 +42,35 @@ function isPageFurnitureHeading(heading) {
   return /^\d+\s+\d+/.test(h) || /\/\/\s*hauspost/i.test(h) || /hauspost\s+\d\s*\/\s*\d{2,4}/i.test(h);
 }
 
+// Strip repeated running headers/footers (page furniture) that recur across
+// many segments — e.g. a logo/slogan line or the doc title printed on every
+// page. Frequency-based + language/tenant-agnostic (NO hardcoded strings): a
+// short line appearing in >=40% of segments (min 3) is furniture. Mutates the
+// IN-MEMORY segments used for the MEMORY layer (titles/distill/embeddings) only
+// — the persisted evidence segments stay verbatim. Without this, the running
+// header becomes line 1 of every segment → identical titles + polluted vectors.
+function stripRepeatedFurniture(segments) {
+  if (!Array.isArray(segments) || segments.length < 4) return;
+  const norm = (l) => l.normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase();
+  const freq = new Map();
+  for (const s of segments) {
+    const seen = new Set(
+      String(s.content || '').split(/\r?\n/).map(norm).filter((l) => l && l.length <= 120)
+    );
+    for (const l of seen) freq.set(l, (freq.get(l) || 0) + 1);
+  }
+  const floor = Math.max(3, Math.ceil(segments.length * 0.4));
+  const furniture = new Set([...freq.entries()].filter(([, c]) => c >= floor).map(([l]) => l));
+  if (furniture.size === 0) return;
+  for (const s of segments) {
+    const kept = String(s.content || '').split(/\r?\n/).filter((l) => !furniture.has(norm(l)));
+    s.content = kept.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+    if (s.metadata?.heading && furniture.has(norm(s.metadata.heading))) {
+      s.metadata = { ...s.metadata, heading: null };
+    }
+  }
+}
+
 function isBoilerplateSegment(content, heading) {
   const text = `${heading || ''}\n${content || ''}`;
   if (BOILERPLATE_RES.some((re) => re.test(text))) return true;
@@ -188,11 +217,12 @@ FACT rules:
 - Max ${maxFacts} facts per section. A section with no real information → "facts":[].
 
 ENTITY rules — emit ONE canonical name per real-world thing so the same entity never forks into variants:
-- LANGUAGE: write every entity in English. Translate common-noun concepts and widely-known place names to their standard English name. EXCEPTION — never translate or alter the proper name of a specific person, company, brand, or product/model; keep those verbatim as written.
-- NUMBER: use the singular form for a concept or category; never the plural.
-- ABBREVIATIONS: prefer the full, widely-recognized term over an abbreviation/acronym, UNLESS the abbreviation IS the entity's established proper name.
-- SUFFIXES: drop corporate/legal-form suffixes from organization names. FORM: the bare name only — no articles, quotes, or trailing qualifiers.
-- The SAME thing mentioned twice (any language/case/number/abbreviation) MUST map to the SAME string.
+- TYPE + LENGTH: an entity is a SHORT noun — a specific person, organization, product/model, place, technology, or standard. 1–3 words. NEVER a phrase, clause, description, or generic concept. Reject anything that reads like a description (do NOT emit "modular system idea", "customer cluster", "key account photovoltaic cluster", "comfort scenario"). If unsure whether it is a real entity, OMIT it.
+- LANGUAGE: write EVERY entity in English — translate common-noun concepts even from German (Wärmepumpe→heat pump, Photovoltaik→photovoltaic, Batteriespeicher→battery storage, Stromspeicher→battery storage, Wallbox→wallbox, Stromtarif→electricity tariff). The ONLY tokens you keep non-English are proper brand/product/person/place names (SolvisMax, SunSpec, §14a EnWG, 1KOMMA5°, Enpal).
+- NUMBER: singular for a concept/category; never the plural.
+- ABBREVIATIONS: prefer the full widely-recognized term over an abbreviation/acronym, UNLESS the abbreviation IS the entity's established proper name (HEMS, SunSpec stay).
+- SUFFIXES: drop corporate/legal-form suffixes. FORM: the bare name only — no articles, quotes, or trailing qualifiers.
+- The SAME thing mentioned twice (any language/case/number/abbreviation) MUST map to the SAME string. Prefer 3–7 high-signal entities per section over many noisy ones.
 
 Output the JSON object and nothing else.`;
     const isGptOss = /gpt-oss/i.test(model);
@@ -1051,6 +1081,10 @@ Output the JSON object and nothing else.`;
     // 4. Dedup by heading + content-prefix hash
     const MAX_PROMOTE = Number(process.env.PHASE1_MAX_PROMOTE || 20);
     const MIN_PROMOTE = Number(process.env.PHASE1_MIN_PROMOTE || 5);
+    // Remove repeated page furniture (running header/footer) from the in-memory
+    // segments BEFORE titling/promotion/distill — evidence (already persisted) is
+    // untouched. Fixes identical "page-header" titles + header-polluted embeddings.
+    stripRepeatedFurniture(segments);
     const promotableSegments = (() => {
       if (!Array.isArray(segments) || segments.length === 0) return [];
       // P3 quality gate FIRST: drop boilerplate (imprint/masthead/ToC/page

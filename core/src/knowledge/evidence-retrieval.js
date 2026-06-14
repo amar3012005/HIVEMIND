@@ -135,7 +135,11 @@ export class EvidenceRetrievalService {
       // for the query's DISTINCTIVE tokens (capitalized words, codes, numbers —
       // not generic lowercase fillers). Tenant-/language-agnostic: no hardcoded
       // terms. This guarantees exact-string hits the embedding cannot rank.
-      if (results.length < Math.max(2, Math.ceil(limit / 2))) {
+      // ALWAYS additive (not only when vector is sparse): the buried term lives
+      // in a segment whose dominant topic differs, so vector recall happily fills
+      // its slots with OTHER segments — the count is fine, the right segment is
+      // just missing. Lexical hits merge in, get re-ranked, and slice keeps top-N.
+      {
         const lexTokens = [...new Set(
           String(query || '')
             .split(/[^\p{L}\p{N}§°]+/u)

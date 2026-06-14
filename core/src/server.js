@@ -5446,11 +5446,49 @@ exit \$RC
       async function runMeetingIntelligence(meetingId, mUser, mOrg) {
         try {
           const rows = await prisma.$queryRawUnsafe(
-            `SELECT id, insights FROM meetings WHERE id=$1::uuid AND org_id=$2::uuid AND deleted_at IS NULL`,
+            `SELECT id, insights, summary, topics, decisions, action_items, key_points
+               FROM meetings WHERE id=$1::uuid AND org_id=$2::uuid AND deleted_at IS NULL`,
             meetingId, mOrg,
           );
           const meeting = rows?.[0];
           if (!meeting) return;
+          // Normalize: many meetings store structure in the dedicated COLUMNS
+          // (topics/decisions/...) with an EMPTY insights blob. Merge columns
+          // into the shape the generator reads (insights.{entities,decisions,
+          // topics}), preferring the blob when present.
+          {
+            const baseIns = (meeting.insights && typeof meeting.insights === 'object') ? meeting.insights : {};
+            const arr = (v) => (Array.isArray(v) ? v : []);
+            const topics = arr(baseIns.topics).length ? arr(baseIns.topics) : arr(meeting.topics);
+            const decisions = arr(baseIns.decisions).length ? arr(baseIns.decisions) : arr(meeting.decisions).map((d) => (typeof d === 'string' ? d : d?.text || d?.decision || '')).filter(Boolean);
+            let entities = baseIns.entities && typeof baseIns.entities === 'object' ? baseIns.entities : null;
+            const hasNamed = entities && (arr(entities.people).length || arr(entities.organizations).length);
+            // No named entities on the blob → extract them from summary + key
+            // points (one bounded LLM call) so entity briefs work for
+            // column-stored / older meetings too.
+            if (!hasNamed) {
+              const text = [meeting.summary, ...arr(meeting.key_points).map(String)].filter(Boolean).join('\n').slice(0, 4000);
+              if (text.trim()) {
+                try {
+                  const er = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
+                    method: 'POST',
+                    headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      model: process.env.MEETING_INSIGHTS_MODEL || 'openai/gpt-oss-120b',
+                      temperature: 0, response_format: { type: 'json_object' },
+                      messages: [
+                        { role: 'system', content: 'Extract named people and organizations actually mentioned. STRICT JSON {"people":[],"organizations":[]}. Proper nouns only — no generic roles/topics. Empty arrays if none.' },
+                        { role: 'user', content: text },
+                      ],
+                    }),
+                    signal: AbortSignal.timeout(30_000),
+                  });
+                  if (er.ok) { const ej = JSON.parse((await er.json()).choices[0].message.content); entities = { people: arr(ej.people), organizations: arr(ej.organizations) }; }
+                } catch { /* best-effort */ }
+              }
+            }
+            meeting.insights = { ...baseIns, topics, decisions, entities: entities || { people: [], organizations: [] } };
+          }
           await prisma.$executeRawUnsafe(
             `UPDATE meetings SET intelligence_status='pending' WHERE id=$1::uuid`, meetingId,
           );

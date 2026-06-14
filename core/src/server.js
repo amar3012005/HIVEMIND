@@ -2194,7 +2194,18 @@ async function buildProfileSummary({ userId, orgId, project = null }) {
       orgId,
       deletedAt: null,
       isLatest: true,
-      AND: HIDDEN_CHILD_TAGS.map((t) => ({ NOT: { tags: { has: t } } })),
+      // Exempt cognitive-layer DREAMS (canonical/bridge/principle) from the
+      // hidden-child exclusion — they inherit 'extracted-fact' from their cluster
+      // but are first-class memories. Mirrors prisma-graph-store.listMemories so
+      // Overview/List/Graph counts stay reconciled now that dreams are surfaced.
+      AND: [
+        {
+          OR: [
+            { cognitiveLayerRole: { in: ['canonical', 'bridge', 'principle'] } },
+            { AND: HIDDEN_CHILD_TAGS.map((t) => ({ NOT: { tags: { has: t } } })) },
+          ],
+        },
+      ],
     };
     if (project) where.project = project;
 

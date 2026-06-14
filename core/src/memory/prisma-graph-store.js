@@ -522,8 +522,19 @@ export class PrismaGraphStore {
       'forums', 'label:forums',
       'newsletter', 'notification', 'automated', 'no-reply',
     );
+    // Cognitive-layer DREAMS (canonical/bridge/principle syntheses) inherit ALL
+    // their cluster members' tags — including 'extracted-fact' — but they are NOT
+    // child sub-units; they're first-class synthesized memories the user should
+    // see (the 🌙 Dream badge marks them). Exempt the dream roles from the
+    // hidden-tag exclusion so they surface in the list. Governance reflection /
+    // compression roles get NO exemption (stay hidden as before — count-reconciled).
     const auditExclusion = hiddenTags.length
-      ? { NOT: { tags: { hasSome: hiddenTags } } }
+      ? {
+          OR: [
+            { cognitiveLayerRole: { in: ['canonical', 'bridge', 'principle'] } },
+            { NOT: { tags: { hasSome: hiddenTags } } },
+          ],
+        }
       : {};
     // Default to current memories only (is_latest=true) unless the caller
     // explicitly asks for superseded versions. Was undefined → counted every

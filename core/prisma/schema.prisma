@@ -88,6 +88,10 @@ model Organization {
   // Cross-project dreaming: when true the loop may form bridges that span project
   // boundaries (otherwise dreams stay within a single project scope). Default OFF.
   cognitionCrossProjectEnabled Boolean    @default(false) @map("cognition_cross_project_enabled")
+  // Per-tenant canonical clusterMin override (NULL = adaptive by corpus size).
+  // Lets a sparse-entity enterprise lower the floor so its entities still
+  // canonicalize, or a dense one raise it. Read by deriveClusterMin.
+  cognitionClusterMin      Int?           @map("cognition_cluster_min")
   // Qdrant container ("collection") that holds ALL memory+evidence for this org.
   // Set on org creation (org_<id>); members + projects share it (filtered by
   // user_id/project_id/layer). Null until provisioned.

@@ -56,6 +56,17 @@ const ROLLING_WINDOW_HOURS        = Number(process.env.COGNITION_ROLLING_WINDOW_
 // Env override CANONICAL_CLUSTER_MIN still wins when explicitly set.
 const CANONICAL_CLUSTER_MIN_HARD  = Number(process.env.CANONICAL_CLUSTER_MIN_HARD  || 6);
 const CANONICAL_CLUSTER_MIN_SOFT  = Number(process.env.CANONICAL_CLUSTER_MIN_SOFT  || 3);
+// Adaptive clusterMin = floor(corpus / DIVISOR), clamped [SOFT, HARD]. Env-tunable.
+const CLUSTER_MIN_DIVISOR         = Number(process.env.COGNITION_CLUSTER_MIN_DIVISOR || 50);
+// Dream retention / fast-tier: evict DEAD dream (synthesis) vectors from the hot
+// per-tenant Qdrant collection so ANN cost stays bounded as dreams accrue (the
+// supermemory "keep only dream-processed memories in the fast index" cost win).
+// Targets ONLY synthesis rows already dead in Postgres (superseded isLatest=false
+// OR soft-deleted) past a grace window — never raw user memories, never live
+// recallable dreams. Flag-gated default OFF.
+const DREAM_RETENTION_ENABLED     = process.env.DREAM_RETENTION_ENABLED === 'true';
+const RETENTION_GRACE_DAYS        = Number(process.env.DREAM_RETENTION_GRACE_DAYS || 7);
+const RETENTION_MAX_PER_RUN       = Number(process.env.DREAM_RETENTION_MAX_PER_RUN || 500);
 const CANONICAL_CLUSTER_MIN_ENV   = process.env.CANONICAL_CLUSTER_MIN != null
   ? Number(process.env.CANONICAL_CLUSTER_MIN)
   : null;
@@ -66,6 +77,14 @@ async function deriveClusterMin(prisma, orgId) {
   // specific floor for benchmarks. Skip the DB lookup.
   if (CANONICAL_CLUSTER_MIN_ENV != null) return CANONICAL_CLUSTER_MIN_ENV;
   try {
+    // Per-tenant override (organizations.cognition_cluster_min) wins over the
+    // adaptive default — lets a sparse-entity enterprise lower the floor.
+    const o = await prisma.$queryRawUnsafe(
+      `SELECT cognition_cluster_min AS m FROM hivemind.organizations WHERE id = $1::uuid`, orgId,
+    ).catch(() => null);
+    const override = o?.[0]?.m;
+    if (Number.isInteger(override) && override > 0) return override;
+
     const cnt = await prisma.memory.count({
       where: {
         orgId,
@@ -74,7 +93,7 @@ async function deriveClusterMin(prisma, orgId) {
         memoryType: { in: ['fact', 'decision'] },
       },
     });
-    const adaptive = Math.floor(cnt / 50);
+    const adaptive = Math.floor(cnt / CLUSTER_MIN_DIVISOR);
     return Math.max(CANONICAL_CLUSTER_MIN_SOFT, Math.min(CANONICAL_CLUSTER_MIN_HARD, adaptive));
   } catch (err) {
     return CANONICAL_CLUSTER_MIN_HARD;
@@ -141,6 +160,9 @@ const PRINCIPLE_COOLDOWN_HOURS    = Number(process.env.PRINCIPLE_COOLDOWN_HOURS 
 
 /** @returns {boolean} whether the L2 principle tier is enabled */
 export function isPrinciplesEnabled() { return PRINCIPLES_ENABLED; }
+
+/** @returns {boolean} whether the dream-retention/fast-tier pass auto-runs */
+export function isDreamRetentionEnabled() { return DREAM_RETENTION_ENABLED; }
 
 // Slugify a topic tag into a stable principle:<slug> tag fragment.
 /** @param {string} s @returns {string} */
@@ -563,6 +585,60 @@ export class CognitionLoop {
     } catch {
       return [];
     }
+  }
+
+  // ─── Dream retention / fast-tier ─────────────────────────────────────────────
+  // Evict DEAD dream vectors from the hot per-tenant Qdrant collection so ANN
+  // retrieval cost stays bounded as dreams accumulate. SAFE by construction:
+  //  - ONLY synthesis rows (the cognition layer's OWN output) — never raw user
+  //    memories / ground truth.
+  //  - ONLY rows already dead in Postgres: superseded (isLatest=false) OR
+  //    soft-deleted (deletedAt set) — these NEVER surface in recall, so purging
+  //    their vectors has zero recall impact, pure cost win.
+  //  - Past a grace window (rollback safety). Bounded per run.
+  // Soft-deleted synthesis rows older than grace are also hard-deleted (reclaim);
+  // superseded rows keep their Postgres row for lineage, vector only is purged.
+  // @param {{ apply?: boolean }} [opts] apply=false → dry-run count, no mutation.
+  async dreamRetentionForOrg(orgId, opts = {}) {
+    if (!this.prisma?.memory) return { skipped: 'no_prisma' };
+    const apply = opts.apply !== false;
+    const grace = new Date(Date.now() - RETENTION_GRACE_DAYS * 24 * 3600 * 1000);
+    const dead = await this.prisma.memory.findMany({
+      where: {
+        orgId,
+        memoryType: 'synthesis',
+        updatedAt: { lt: grace },
+        OR: [{ isLatest: false }, { deletedAt: { not: null } }],
+      },
+      select: { id: true, deletedAt: true },
+      orderBy: { updatedAt: 'asc' },
+      take: RETENTION_MAX_PER_RUN,
+    });
+    if (dead.length === 0) return { deadDreams: 0, evicted: 0, hardDeleted: 0, apply };
+
+    if (!apply) return { deadDreams: dead.length, evicted: 0, hardDeleted: 0, apply: false };
+
+    const ids = dead.map((d) => d.id);
+    let evicted = 0;
+    try { evicted = await purgeVectorsByMemoryIds(ids, orgId, this.logger); }
+    catch (err) { this.logger.warn?.(`[cognition] retention purge failed: ${err.message}`); }
+
+    // Reclaim soft-deleted synthesis rows (superseded rows keep lineage).
+    let hardDeleted = 0;
+    const softIds = dead.filter((d) => d.deletedAt).map((d) => d.id);
+    if (softIds.length) {
+      try {
+        await this.prisma.relationship.deleteMany({
+          where: { OR: [{ fromId: { in: softIds } }, { toId: { in: softIds } }] },
+        }).catch(() => {});
+        const del = await this.prisma.memory.deleteMany({ where: { id: { in: softIds } } });
+        hardDeleted = del.count;
+      } catch (err) {
+        this.logger.warn?.(`[cognition] retention hard-delete failed: ${err.message}`);
+      }
+    }
+    this.logger.log(`[cognition] retention org=${orgId} deadDreams=${dead.length} vectorsPurged=${evicted} rowsHardDeleted=${hardDeleted}`);
+    return { deadDreams: dead.length, evicted, hardDeleted, apply: true };
   }
 
   /**

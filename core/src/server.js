@@ -9678,6 +9678,32 @@ exit \$RC
             }
           }
 
+        case '/api/cognition/retention':
+          // Dream retention / fast-tier (admin). Evicts DEAD dream vectors from the
+          // hot per-tenant index. Dry-run by default (returns dead-dream count);
+          // pass {apply:true} to actually purge. Only touches synthesis rows already
+          // dead in Postgres (superseded/soft-deleted) past the grace window.
+          if (req.method !== 'POST') break;
+          try {
+            if (!cognitionLoop || typeof cognitionLoop.dreamRetentionForOrg !== 'function') {
+              return jsonResponse(res, { error: 'cognition loop unavailable' }, 503);
+            }
+            const m = await prisma.userOrganization.findUnique({
+              where: { userId_orgId: { userId, orgId } },
+              select: { role: true, roles: true },
+            }).catch(() => null);
+            const rs = new Set([...(m?.role ? [m.role] : []), ...(Array.isArray(m?.roles) ? m.roles : [])]);
+            const adminOk = ['admin', 'owner', 'org_admin', 'org_owner'].some((r) => rs.has(r));
+            if (!adminOk && !principal.master) {
+              return jsonResponse(res, { error: 'admin/owner role required' }, 403);
+            }
+            const result = await cognitionLoop.dreamRetentionForOrg(orgId, { apply: body?.apply === true });
+            return jsonResponse(res, result);
+          } catch (err) {
+            console.error('[cognition/retention] failed:', err.message);
+            return jsonResponse(res, { error: err.message }, 500);
+          }
+
         case '/api/cognition/runs':
           // Audit history of dream runs for the caller's org (single-line stack).
           if (req.method !== 'GET') break;

@@ -115,6 +115,16 @@ export class ResidentAgentScheduler {
         this.logger?.log?.(`[gov-scheduler] scheduled dream org=${sched.id.slice(0,8)} mode=${sched.mode} hour=${hour} lookback=${this.scheduleLookbackHours}h`);
         try {
           await loop.runOnce(sched.id, { lookbackHours: this.scheduleLookbackHours, trigger: 'scheduled' });
+          // Dream retention / fast-tier: after the nightly dream, evict dead dream
+          // vectors so the hot index stays lean. Flag-gated (default off).
+          if (process.env.DREAM_RETENTION_ENABLED === 'true' && typeof loop.dreamRetentionForOrg === 'function') {
+            try {
+              const r = await loop.dreamRetentionForOrg(sched.id, { apply: true });
+              if (r?.evicted || r?.hardDeleted) this.logger?.log?.(`[gov-scheduler] retention org=${sched.id.slice(0,8)} evicted=${r.evicted} hardDeleted=${r.hardDeleted}`);
+            } catch (rErr) {
+              this.logger?.warn?.(`[gov-scheduler] retention org=${sched.id.slice(0,8)} failed: ${rErr?.message || rErr}`);
+            }
+          }
         } catch (err) {
           this.logger?.warn?.(`[gov-scheduler] scheduled dream org=${sched.id.slice(0,8)} failed: ${err?.message || err}`);
         }

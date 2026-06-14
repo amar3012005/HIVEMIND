@@ -35,10 +35,14 @@ test('distinct entities are NOT merged', () => {
   assert.notEqual(normalizeEntity('Markus Kube'), normalizeEntity('Gabriele Münzer'));
 });
 
-test('curated cross-lingual synonyms', () => {
-  assert.equal(normalizeEntity('Wärmepumpe'), 'heat-pump');
-  assert.equal(normalizeEntity('heat_pump'), 'heat-pump');
-  assert.equal(normalizeEntity('Photovoltaik'), 'photovoltaic');
+test('mechanical only — NO hardcoded cross-lingual/semantic merge', () => {
+  // Cross-lingual + singular/plural + abbreviation canonicalization is the
+  // LLM extractor's job (strict prompt rules), NOT a curated dictionary here.
+  // This layer must NOT translate or remap — only fold surface-form noise.
+  assert.equal(normalizeEntity('Wärmepumpe'), 'wärmepumpe');      // umlaut preserved, NOT → heat-pump
+  assert.equal(normalizeEntity('heat_pump'), 'heat-pump');         // underscore→space→slug (mechanical)
+  assert.equal(normalizeEntity('Photovoltaik'), 'photovoltaik');   // NOT → photovoltaic
+  assert.equal(normalizeEntity('heat pumps'), 'heat-pumps');       // plural NOT singularized here
 });
 
 test('umlauts preserved in non-synonym names', () => {

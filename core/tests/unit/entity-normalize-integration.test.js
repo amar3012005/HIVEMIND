@@ -99,21 +99,20 @@ test('SKU variants with different power ratings remain distinct canonical entity
 });
 
 // ---------------------------------------------------------------------------
-// Class 4 — cross-lingual synonym: Wärmepumpe ↔ heat_pump → entity:heat-pump
+// Class 4 — cross-lingual is NOT merged mechanically (it's the LLM's job).
+// The deterministic layer must keep distinct surface forms distinct; only the
+// extractor LLM (strict prompt) emits one canonical name per concept. Encoding
+// DE↔EN pairs here would be domain-specific hardcoding that never generalizes.
 // ---------------------------------------------------------------------------
-test('Wärmepumpe and heat_pump both canonicalize to entity:heat-pump', () => {
-  const inputs = ['Wärmepumpe', 'heat_pump'];
-  const canonical = tagSet(inputs);
-
+test('cross-lingual variants are NOT merged by the mechanical layer', () => {
+  const canonical = tagSet(['Wärmepumpe', 'heat pump']);
   assert.equal(
     canonical.size,
-    1,
-    `expected 1 canonical tag for heat-pump synonym pair, got ${canonical.size}: ${[...canonical].join(', ')}`,
+    2,
+    `mechanical layer must not translate; expected 2 distinct tags, got ${[...canonical].join(', ')}`,
   );
-  assert.ok(
-    canonical.has('entity:heat-pump'),
-    `canonical set should contain entity:heat-pump, got: ${[...canonical].join(', ')}`,
-  );
+  assert.ok(canonical.has('entity:wärmepumpe'));
+  assert.ok(canonical.has('entity:heat-pump'));
 });
 
 // ---------------------------------------------------------------------------
@@ -188,26 +187,17 @@ test('non-entity tag prefixes pass through normalizeEntityTag unchanged', () => 
 });
 
 // ---------------------------------------------------------------------------
-// Class 8 — additional synonym cross-lingual pairs
-// Verify other entries in the SYNONYMS map (integration smoke)
+// Class 8 — abbreviation / synonym expansion is NOT done mechanically either.
+// The LLM extractor prefers the full canonical term ("photovoltaic" over "PV");
+// the deterministic layer just slugs whatever surface form it is given.
 // ---------------------------------------------------------------------------
-test('Photovoltaik synonym collapses to entity:photovoltaic', () => {
-  const canonical = tagSet(['Photovoltaik', 'photovoltaic']);
-  assert.equal(
-    canonical.size,
-    1,
-    `expected 1 canonical tag, got ${canonical.size}: ${[...canonical].join(', ')}`,
-  );
+test('abbreviation and full term stay distinct in the mechanical layer', () => {
+  const canonical = tagSet(['PV', 'Photovoltaik', 'photovoltaic']);
+  // PV → 'pv', Photovoltaik → 'photovoltaik', photovoltaic → 'photovoltaic' — all distinct.
+  assert.equal(canonical.size, 3, `expected 3 distinct tags, got ${[...canonical].join(', ')}`);
+  assert.ok(canonical.has('entity:pv'));
+  assert.ok(canonical.has('entity:photovoltaik'));
   assert.ok(canonical.has('entity:photovoltaic'));
-});
-
-test('Pelletkessel synonym collapses to entity:pellet-boiler', () => {
-  const canonical = tagSet(['Pelletkessel', 'pellet-boiler', 'Pellet_Kessel']);
-  // 'Pellet_Kessel' → 'pellet-kessel' (not in synonym map), so stays distinct.
-  // Only 'Pelletkessel' and 'pellet-boiler' should collapse.
-  const pelletBoiler = tagSet(['Pelletkessel', 'pellet-boiler']);
-  assert.equal(pelletBoiler.size, 1);
-  assert.ok(pelletBoiler.has('entity:pellet-boiler'));
 });
 
 // ---------------------------------------------------------------------------

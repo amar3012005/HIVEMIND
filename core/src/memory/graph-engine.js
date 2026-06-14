@@ -2091,17 +2091,28 @@ OUTPUT JSON only.`;
             orderBy: { createdAt: 'desc' },
             take: 60,
           });
-          // Generic geographic / temporal signals are weak links; specific
-          // org/person entities are strong. Weight accordingly.
-          const GENERIC = new Set(['entity:Germany', 'entity:Austria', 'entity:Switzerland', 'entity:USA', 'entity:Europe', 'entity:EU', 'entity:India']);
+          // Generic vs specific is DERIVED from the pool, not a hardcoded
+          // stoplist of countries/brands (which never generalizes across
+          // tenants/domains and silently dies once tags are canonical-cased).
+          // An entity tag shared across a LARGE fraction of the candidate pool
+          // is a weak (generic) link; one shared by only a few memories is a
+          // strong (specific) link.
           const signalSet = new Set(tagSignals);
+          const poolFreq = new Map();
+          for (const r of tagPool) {
+            for (const t of (r.tags || [])) {
+              if (signalSet.has(t)) poolFreq.set(t, (poolFreq.get(t) || 0) + 1);
+            }
+          }
+          const genericFloor = Math.max(3, Math.ceil(tagPool.length * 0.4));
           const scoreOf = (r) => {
             let s = 0;
             for (const t of (r.tags || [])) {
               if (!signalSet.has(t)) continue;
+              const isEntity = t.startsWith('entity:') || t.startsWith('person:');
               if (t.startsWith('time:')) s += 0.25;
-              else if (GENERIC.has(t)) s += 0.5;
-              else if (t.startsWith('entity:') || t.startsWith('person:')) s += 2; // specific entity = strong
+              else if (isEntity && (poolFreq.get(t) || 0) < genericFloor) s += 2; // rare/specific = strong
+              else if (isEntity) s += 0.5; // shared by many = generic = weak
               else s += 1;
             }
             return s;
@@ -2175,7 +2186,7 @@ OUTPUT JSON only.`;
 
     const prompt = `You are a multilingual memory graph linker. Given a NEW MEMORY and CANDIDATE memories, do FIVE things in ONE pass:
 
-  1. extract proper-noun entities from the new memory (people, orgs, products, projects, places). Work in ANY language — Spanish, Hindi, Tamil, German, etc. — return entities in their original form.
+  1. extract the salient entities from the new memory (people, organizations, products, projects, places, and the key concepts it is about). Read the memory in WHATEVER language it is written, but EMIT every entity in CANONICAL form per the ENTITY NAMING rules below — never two surface forms for the same real-world thing.
   2. extract TEMPORAL anchors (day-of-week, time-of-day, relative refs like "tomorrow"/"mañana"/"morgen", absolute dates, recurring patterns). Resolve relatives against today=${todayIso}.
   3. classify the new memory's TYPE (decision | preference | fact | event | goal | lesson | relationship)
   4. for EACH candidate that shares an entity OR temporal anchor OR clear semantic continuity, emit ONE typed edge.
@@ -2187,6 +2198,14 @@ OUTPUT JSON only.`;
      co-mention (those are Mentions).
 
 Use coreference: pronouns and possessives ("she", "my partner", "it", "they", "elle", "उसने") can resolve to a named entity from earlier turns.
+
+ENTITY NAMING — emit ONE canonical name per real-world thing so the same entity never forks into variants:
+  • LANGUAGE: write every entity in English. Translate common-noun concepts and widely-known place names to their standard English name. EXCEPTION — never translate or alter the proper name of a specific person, company, brand, or product/model; keep those verbatim as written in the source.
+  • NUMBER: use the singular form for a concept or category; never the plural.
+  • ABBREVIATIONS: prefer the full, widely-recognized term over an abbreviation or acronym — UNLESS the abbreviation IS the entity's established proper name.
+  • SUFFIXES: drop corporate / legal-form suffixes from organization names.
+  • FORM: the bare name only — no leading articles, quotes, trailing qualifiers, or punctuation.
+  The SAME thing mentioned twice (in any language, case, number, or abbreviation) MUST map to the SAME canonical string both times.
 
 PICK THE OPERATOR FROM SEMANTICS, NOT WORD OVERLAP:
   • "I prefer X" then later "switching to Y" → Updates the earlier preference.

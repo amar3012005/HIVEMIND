@@ -1701,6 +1701,55 @@ async function maybeSaveOrUpdate({ plan, ctx, onEvent, message, history }) {
   return null;
 }
 
+// ── Save-classifier rescue ──────────────────────────────────────────────
+// The planner (INTERNAL_MODEL, gpt-oss-20b) reliably catches first-person
+// narration but misses THIRD-PERSON declarative facts the user teaches
+// ("X is now the parent of Y", "we rebranded Z") — a buried field in a
+// 20-field JSON is too subtle for a small model, so the agent just recalls
+// "no record" instead of SAVING. This is a focused, single-purpose binary
+// classifier on the STRONG model, gated by a cheap declarative heuristic so it
+// only fires when the planner emitted no save on a statement (not a question).
+const QUESTION_LEAD_RE = /^(what|who|whom|whose|when|where|why|how|which|is|are|am|was|were|do|does|did|can|could|would|should|will|shall|tell|show|list|find|search|get|fetch|explain|describe|summari[sz]e|recall|give|look|lookup|any|please)\b/i;
+export function looksDeclarativeFact(message) {
+  const m = String(message || '').trim();
+  if (!m || m.endsWith('?')) return false;          // question
+  if (QUESTION_LEAD_RE.test(m)) return false;        // interrogative / recall-command lead
+  if (m.split(/\s+/).length < 4) return false;       // too short (bare entity/filename)
+  return true;
+}
+
+// Mutates plan.auto_save_intent in place when a declarative fact is detected
+// that the planner did not already flag for save. Non-fatal + best-effort.
+async function rescueAutoSaveIntent({ message, plan, model, apiKey, signal, onEvent }) {
+  if (!plan || plan.save_intent || plan.auto_save_intent) return plan; // planner caught it
+  if (!looksDeclarativeFact(message)) return plan;
+  const prompt = `The user said: "${message}"
+
+Decide ONE thing: is the user TEACHING a new durable fact about THEIR OWN world (their company, org structure, people, products, projects, plans, preferences, events, decisions) that should be remembered — as opposed to (a) asking a question, (b) a recall request, or (c) stating general/external/encyclopedic knowledge unrelated to them?
+
+If YES, extract a self-contained THIRD-PERSON note. If NO, return {"save": false}.
+Output JSON only:
+{"save": true, "title": "<short noun phrase, NOT 'user said …'>", "content": "<self-contained third-person fact naming the real entities + any dates>", "tags": ["entity:<Name>", "topic:<t>"], "memory_type": "fact|decision|preference|event|goal|lesson|relationship", "confidence": 0.0-1.0}
+OR {"save": false}`;
+  try {
+    const { parsed, usage } = await callJsonLLM({ messages: [{ role: 'user', content: prompt }], model, apiKey, maxTokens: 400, signal });
+    if (parsed && parsed.save === true && parsed.title && parsed.content && Number(parsed.confidence || 0) >= 0.7) {
+      plan.auto_save_intent = {
+        title: String(parsed.title).slice(0, 200),
+        content: String(parsed.content).slice(0, 2000),
+        tags: Array.isArray(parsed.tags) ? parsed.tags.slice(0, 12) : [],
+        memory_type: ['fact', 'decision', 'preference', 'event', 'goal', 'lesson', 'relationship'].includes(parsed.memory_type) ? parsed.memory_type : 'fact',
+        confidence: Number(parsed.confidence),
+        _rescued: true,
+      };
+      onEvent?.({ type: 'tool_call', name: 'save_classifier', arguments: JSON.stringify({ rescued: true, title: plan.auto_save_intent.title }) });
+    }
+    return { plan, usage };
+  } catch {
+    return { plan };
+  }
+}
+
 // ── Public entry — same signature as v1 ────────────────────────────────
 
 export async function runReactAgentV2({
@@ -1789,6 +1838,15 @@ export async function runReactAgentV2({
     });
     if (planResult.usage) usages.push(planResult.usage);
     const plan = planResult.plan;
+
+    // Save-classifier rescue: catch declarative facts the small planner missed
+    // (3rd-person "X is now Y" teachings). Runs on the strong answer model, only
+    // when no save was already flagged AND the message is a statement (not a
+    // question). Populates plan.auto_save_intent for the downstream save path.
+    try {
+      const rescue = await rescueAutoSaveIntent({ message, plan, model, apiKey, signal: abortCtrl.signal, onEvent });
+      if (rescue?.usage) usages.push(rescue.usage);
+    } catch { /* non-fatal */ }
 
     // Write-intent branch (post/send/draft slack message, etc).
     // Runs BEFORE the evidence/recall flow because the user wants to act,

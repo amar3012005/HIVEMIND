@@ -77,11 +77,21 @@ async function main() {
           const mem = await store.getMemory(id);
           if (!mem) { skipped++; continue; }
           if (!mem.content || !mem.content.trim()) { skipped++; continue; }
-          await qc.storeMemory(mem); // embeds + routes per-tenant + upserts (id == memory id)
+          // Pre-embed RAW content and pass {vector} so storeMemory SKIPS its
+          // contextual-retrieval fact-augmentation (extractFacts in fact-extractor.js
+          // is a synchronous regex that catastrophically backtracks on some content
+          // → 99% CPU event-loop spin that hung the prior run). generateEmbedding is
+          // an async network call, so the timeout backstop actually fires here.
+          const vec = await Promise.race([
+            qc.generateEmbedding(mem.content),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('embed timeout 20s')), 20000)),
+          ]);
+          if (!vec) { failed++; continue; }
+          await qc.storeMemory(mem, { vector: vec }); // precomputed → no fact-extract; routes per-tenant + upserts (id == memory id)
           embedded++;
         } catch (err) {
           failed++;
-          if (failed <= 20) console.warn(`  [fail] ${id}: ${err.message}`);
+          if (failed <= 40) console.warn(`  [fail] ${id}: ${err.message}`);
         } finally {
           done++;
           if (done % 100 === 0) console.log(`  …${done}/${total} (embedded=${embedded} skipped=${skipped} failed=${failed})`);

@@ -15,6 +15,7 @@ import {
 } from './relationship-semantics.js';
 import { clusterHash } from './cluster-hash.js';
 import { normalizeEntity, normalizeTagsArray } from './entity-normalize.js';
+import { getEntityLinkQueue } from './entity-link-queue.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -1980,23 +1981,19 @@ OUTPUT JSON only.`;
    * @param {Array<object>} memories - persisted memory objects (need id, user_id, org_id, content, tags, memory_type)
    * @param {{concurrency?: number}} opts
    */
-  async linkEntitiesForMemories(memories, { concurrency = 6 } = {}) {
+  // Route deferred entity-linking through ONE global bounded queue so Groq
+  // pressure is capped regardless of how many ingests fire concurrently. Was
+  // a per-call worker pool (concurrency 6) — N concurrent callers each spun
+  // their own pool → N×6 simultaneous Groq calls → TPM saturation → 429 →
+  // untagged rows. The shared queue (EntityLinkQueue, default cap 4) is the
+  // single chokepoint; enqueue returns immediately (best-effort, eventually
+  // consistent — tags land seconds later as the queue drains).
+  async linkEntitiesForMemories(memories, _opts = {}) {
     if (!Array.isArray(memories) || memories.length === 0) return;
     if ((process.env.MEMORY_ENTITY_LINKING || 'true').toLowerCase() === 'false') return;
-    const queue = memories.filter(m => m && m.id);
-    let idx = 0;
-    const worker = async () => {
-      while (idx < queue.length) {
-        const m = queue[idx++];
-        try {
-          await this._attachEntityCoMentionEdges(m, this.store, []);
-        } catch (err) {
-          console.warn(`[entity-co-mention:deferred] ${String(m.id).slice(0, 8)} failed: ${err.message}`);
-        }
-      }
-    };
-    const n = Math.max(1, Math.min(concurrency, queue.length));
-    await Promise.all(Array.from({ length: n }, worker));
+    const q = getEntityLinkQueue(this);
+    if (!q) return;
+    q.enqueueBatch(memories.filter((m) => m && m.id));
   }
 
   async _attachEntityCoMentionEdges(baseMemory, store, similar = []) {

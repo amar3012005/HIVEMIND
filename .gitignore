@@ -79,3 +79,4 @@ benchmarks/results/*.md
 hivemind-v*.zip
 extensions/hivemind-v*.zip
 core/src/tara/hivemind-agent/
+.superpowers/

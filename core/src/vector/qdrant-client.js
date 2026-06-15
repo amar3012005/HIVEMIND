@@ -24,11 +24,13 @@ const DEFAULT_SCORE_THRESHOLD = parseFloat(process.env.HIVEMIND_VECTOR_SCORE_THR
 // more. Tune via QDRANT_HNSW_EF without redeploy; raise toward 256–400 at very
 // large scale.
 const EF_SEARCH_DEFAULT = Number(process.env.QDRANT_HNSW_EF || 200);
-// int8 quant rescore — re-rank the quantized ANN candidates against full-
-// precision vectors at search time (oversample, then rescore). Kills the
-// quantization tail-rank noise. Default ON; QDRANT_QUANT_RESCORE=false disables.
-const QUANT_RESCORE = process.env.QDRANT_QUANT_RESCORE !== 'false';
-const QUANT_OVERSAMPLING = Number(process.env.QDRANT_QUANT_OVERSAMPLING || 2.0);
+// int8 quant rescore — re-rank quantized ANN candidates against full-precision
+// vectors at search time. ACCURATE but reads full-precision vectors from
+// on_disk storage: at pool 150 × oversampling 2 = 300 disk reads/search ≈ 4s.
+// Default OFF (the adversarial's call — eval-gate on a ≥200k corpus before
+// enabling); QDRANT_QUANT_RESCORE=true to turn on per deployment.
+const QUANT_RESCORE = process.env.QDRANT_QUANT_RESCORE === 'true';
+const QUANT_OVERSAMPLING = Number(process.env.QDRANT_QUANT_OVERSAMPLING || 1.5);
 
 const headers = {
   'Content-Type': 'application/json',

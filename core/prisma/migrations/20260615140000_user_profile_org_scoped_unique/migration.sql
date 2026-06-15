@@ -3,6 +3,7 @@
 -- org-A write overwrote the org-B fact for the same key (cross-org identity bleed).
 -- The new key is strictly more permissive, so no existing row can collide.
 -- org_id is populated on every current row (0 NULLs).
-DROP INDEX IF EXISTS hivemind.user_profiles_user_id_key_key;
+-- The old uniqueness is a CONSTRAINT (not a bare index), so drop the constraint.
+ALTER TABLE hivemind.user_profiles DROP CONSTRAINT IF EXISTS user_profiles_user_id_key_key;
 CREATE UNIQUE INDEX IF NOT EXISTS user_profiles_user_id_org_id_key_key
   ON hivemind.user_profiles (user_id, org_id, key);

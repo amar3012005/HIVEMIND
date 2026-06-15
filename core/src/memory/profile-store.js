@@ -69,17 +69,17 @@ export class ProfileStore {
     // prisma-graph-store.advisoryLock) makes read→decide→upsert atomic per user.
     // Logic is otherwise byte-identical to before (no behavior change).
     const { result, isUpdate, isContradiction, previousValue } = await this.prisma.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)', `profile:${userId}`);
+      await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)', `profile:${orgId}:${userId}`);
 
       const existing = await tx.userProfile.findUnique({
-        where: { userId_key: { userId, key: normalizedKey } },
+        where: { userId_orgId_key: { userId, orgId: orgId || null, key: normalizedKey } },
       });
 
       const _isUpdate = existing && existing.value !== value && existing.deletedAt === null;
       const _isContradiction = _isUpdate && this._isContradiction(existing.value, value);
 
       const _result = await tx.userProfile.upsert({
-        where: { userId_key: { userId, key: normalizedKey } },
+        where: { userId_orgId_key: { userId, orgId: orgId || null, key: normalizedKey } },
         update: {
           value,
           category: category || existing?.category || 'static',
@@ -105,7 +105,7 @@ export class ProfileStore {
         isContradiction: !!_isContradiction,
         previousValue: _isUpdate ? existing.value : null,
       };
-    });
+    }, { timeout: Number(process.env.PROFILE_TXN_TIMEOUT_MS || 15000), maxWait: 8000 });
 
     // Invalidate cache
     this._cache.delete(`${userId}:${orgId || ''}`);

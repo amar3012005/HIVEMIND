@@ -149,14 +149,14 @@ export class ProfileDreamer {
     const appliedFacts = [];   // for persona-vector embed (after txn — no I/O under lock)
     const removedKeys = [];     // decayed-out keys → remove their persona vectors
     await this.prisma.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)', `profile:${userId}`);
+      await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)', `profile:${orgId}:${userId}`);
       const proposedKeys = new Set(grounded.map((f) => f.key.toLowerCase().trim()));
 
       for (const f of grounded) {
         const key = f.key.toLowerCase().trim();
         appliedFacts.push({ key, value: f.value, category: f.category || 'dynamic' });
         await tx.userProfile.upsert({
-          where: { userId_key: { userId, key } },
+          where: { userId_orgId_key: { userId, orgId: orgId || null, key } },
           update: {
             value: f.value,
             category: f.category || 'dynamic',
@@ -195,7 +195,7 @@ export class ProfileDreamer {
         }
         decayed++;
       }
-    });
+    }, { timeout: Number(process.env.PROFILE_TXN_TIMEOUT_MS || 15000), maxWait: 8000 });
 
     // WS5 step-5: embed applied persona facts into the SEPARATE profile_<org>
     // Qdrant collection (network I/O OUTSIDE the advisory lock). Flag-gated.

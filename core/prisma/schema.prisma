@@ -1263,7 +1263,11 @@ model UserProfile {
   evidenceMemoryIds String[]  @default([]) @map("evidence_memory_ids") @db.Uuid
   lastDreamedAt     DateTime? @map("last_dreamed_at")
 
-  @@unique([userId, key])
+  // M6: scoped per (user, org). The old (userId,key) unique allowed only ONE
+  // fact per key across ALL of a user's orgs, so an org-A write overwrote the
+  // org-B fact for the same key (cross-org identity bleed). org_id is populated
+  // on every row; the lock key is also org-scoped (profile:<org>:<user>).
+  @@unique([userId, orgId, key])
   @@index([userId])
   @@index([userId, category])
   @@map("user_profiles")

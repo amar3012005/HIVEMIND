@@ -738,7 +738,12 @@ export class CognitionLoop {
             continue; // no spend, no status update — stay anchored to last real run
           }
           const synthN   = await this.synthesizeForOrg(org.id);
-          const compactN = await this.compactDriftForOrg(org.id);
+          // Governance scheduler owns compaction cadence; the standalone timer
+          // must NOT run destructive compaction (vector purge + isLatest=false)
+          // by default to prevent the §10 KB-corruption hazard.
+          const compactN = (process.env.COGNITION_TIMER_ALLOW_COMPACTION === 'true')
+            ? await this.compactDriftForOrg(org.id)
+            : 0;
           // Pass 3 — L2 principle distillation (no-op unless PRINCIPLES_ENABLED)
           const principleN = await this.distillPrinciplesForOrg(org.id);
           totalSynth      += synthN;
@@ -2315,6 +2320,11 @@ Output JSON only:
     unionedTags.add('cognition-loop');
     unionedTags.add(synthTag);
     unionedTags.add(`topic:${tag.slice(0, 80)}`);
+    // M2: mark cross-project syntheses so recall can filter them when the org
+    // later disables cross-project dreaming (tag persisted, no migration needed).
+    if (spansMultipleProjects(members)) {
+      unionedTags.add('scope:cross-project');
+    }
     if (sourceType === 'principle') {
       unionedTags.add(`principle:${slugify(tag)}`);
     }
@@ -2793,10 +2803,15 @@ Output JSON only:
       }
     }
 
+    // Cross-project scope: mirror the bridge/narrative path — when cross-project
+    // dreaming is OFF, skip principle buckets whose members span multiple projects.
+    const crossProject = await crossProjectEnabledForOrg(this.prisma, orgId).catch(() => false);
+
     let writes = 0;
     for (const [tag, members] of buckets.entries()) {
       if (writes >= PRINCIPLE_TOP_K) break;                 // cap writes per tick
       if (members.length < PRINCIPLE_CLUSTER_MIN) continue;
+      if (!crossProject && spansMultipleProjects(members)) continue;
 
       const hash = clusterHash(`principle:${tag}`);
 

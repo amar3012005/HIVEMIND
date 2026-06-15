@@ -27,7 +27,15 @@ import { ClusterIndex } from './cluster-index.js';
 // gated RERANK_ENABLED) on the agent path. The ALGORITHMIC ResultReranker (search/result-reranker.js)
 // is the always-on, no-network ordering reranker used on delivery (and behind RECALL_TIERED_VIEW).
 import { rerank } from './reranker.js';
+import { ResultReranker } from '../search/result-reranker.js';
 import { getRetrievalConfig, logTaskOutcome } from './retrieval-config.js';
+
+// Same algorithmic term-overlap reranker the DIRECT path (recallPersistedMemories)
+// ends with. Applied as the agent path's final ordering step so chat and Tara
+// agree on memory order (the router's RRF+MMR re-pass scrambles the upstream
+// tiered order — the PHASE-B TODO). Default ON; RECALL_TIERED_VIEW=false to opt out.
+const ROUTER_TIERED_VIEW = process.env.RECALL_TIERED_VIEW !== 'false';
+let _routerReranker = null;
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -883,9 +891,22 @@ export class RecallRouter {
     // dream-heavy org never degenerates to "dreams only" recall.
     rankedMemories = enforceDreamQuota(rankedMemories, deliverN, MAX_DREAMS_IN_TOPN);
 
+    // PATH UNIFICATION (PHASE-B TODO): the router's RRF+MMR re-pass scrambled the
+    // upstream tiered order, so chat and Tara diverged. Re-apply the SAME
+    // algorithmic term-overlap reranker the direct path ends with, over the wide
+    // ranked pool BEFORE the deliver slice → both surfaces agree on order.
+    if (ROUTER_TIERED_VIEW && rankedMemories.length > 1) {
+      if (!_routerReranker) _routerReranker = new ResultReranker();
+      const rq = typeof query === 'string' ? query : String(query);
+      rankedMemories = _routerReranker.rerank(rq, rankedMemories.map((m) => ({
+        ...m,
+        content: m.memory?.content ?? m.content,
+        created_at: m.memory?.created_at ?? m.created_at,
+      })));
+    }
+
     // Two-reranker contract: this is the OPT-IN CROSS-ENCODER precision pass (external
-    // model, gated RERANK_ENABLED) — no-op (returns first N) when disabled. The ALGORITHMIC
-    // ResultReranker (always-on, no network) handles ordering upstream / behind RECALL_TIERED_VIEW.
+    // model, gated RERANK_ENABLED) — no-op (returns first N) when disabled.
     // Stage 4 / P1: optional cross-encoder rerank of the wide ranked pool → deliver top-N.
     const deliverMemories = await rerank(query, rankedMemories, { topN: deliverN });
 

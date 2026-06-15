@@ -17820,8 +17820,16 @@ exit \$RC
               // but that field is inconsistently populated (often null) so the
               // counts diverged. Memory.scope (used by access_context) is
               // reliable. Explicit personal/team/all still work as overrides.
-              const graphScope = url.searchParams.get('scope') || 'visible';
+              let graphScope = url.searchParams.get('scope') || 'visible';
               const graphAccessCtx = await buildAccessContext(userId, orgId).catch(() => null);
+              // Guests (project-scoped external invitees) cannot select an org-wide
+              // graph tier — collapse any org-exposing scope to their membership-scoped
+              // 'visible' set (personal + their projects only). Matches the recall +
+              // FTS guest gates in prisma-graph-store / persisted-retrieval.
+              if (graphAccessCtx?.orgRole === 'guest'
+                  && ['organization', 'tier:organization', 'all', 'team'].includes(graphScope)) {
+                graphScope = 'visible';
+              }
               const graphAccessTiers = (graphAccessCtx && (graphAccessCtx.projectIds || graphAccessCtx.teamIds))
                 ? (() => {
                     const pIds = Array.isArray(graphAccessCtx.projectIds) ? graphAccessCtx.projectIds : [];

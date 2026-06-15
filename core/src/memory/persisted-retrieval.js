@@ -533,9 +533,16 @@ async function vectorCandidatesForRecall(store, {
     // V2 scope filtering: enforce after hydrate (vector index doesn't carry scope)
     if (access_context) {
       const m = memory;
+      // Guests are project-scoped external invitees. Two hard rules:
+      //  (1) they NEVER see the org-wide tier (was leaking here — the FTS/store
+      //      paths in prisma-graph-store already gate it on orgRole!=='guest');
+      //  (2) M2b: they NEVER see a cross-project synthesis (tag scope:cross-project)
+      //      — by definition it aggregates projects beyond their single invite.
+      const isGuest = access_context.orgRole === 'guest';
+      if (isGuest && Array.isArray(m.tags) && m.tags.includes('scope:cross-project')) return null;
       const ok =
         (m.scope === 'personal' && m.user_id === user_id) ||
-        (m.scope === 'organization' && m.org_id === org_id) ||
+        (m.scope === 'organization' && m.org_id === org_id && !isGuest) ||
         (m.scope === 'team' && (access_context.teamIds || []).includes(m.primary_team_id)) ||
         (m.scope === 'project' && Array.isArray(m.project_ids) &&
            m.project_ids.some(pid => (access_context.projectIds || []).includes(pid)));

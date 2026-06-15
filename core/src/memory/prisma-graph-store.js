@@ -158,7 +158,7 @@ function mapRelationshipRecord(record) {
   };
 }
 
-function scopedMemoryWhere({ user_id, org_id, project, scope = 'personal', access_context = null }) {
+export function scopedMemoryWhere({ user_id, org_id, project, scope = 'personal', access_context = null }) {
   const base = {
     orgId: org_id,
     project: project || undefined,
@@ -204,6 +204,12 @@ function scopedMemoryWhere({ user_id, org_id, project, scope = 'personal', acces
     }
     if (teamIds.length > 0) {
       tiers.push({ scope: 'team', primaryTeamId: { in: teamIds } });
+    }
+    // M2b: a guest must not see cross-project syntheses even via the project tier
+    // (a cross-project bridge can carry one of their projects' ids). Exclude the
+    // scope:cross-project tag for guests.
+    if (access_context.orgRole === 'guest') {
+      return { ...base, OR: tiers, NOT: { tags: { has: 'scope:cross-project' } } };
     }
     return { ...base, OR: tiers };
   }
@@ -653,6 +659,11 @@ export class PrismaGraphStore {
             ftsParams.push(org_id);
             const orgScopeParam = `$${ftsParams.length}`;
             scopeWhere = `AND m.org_id = ${orgScopeParam}::uuid AND (${tiers.join(' OR ')})`;
+            // M2b: guests never see cross-project syntheses (parameterized, no interpolation).
+            if (access_context.orgRole === 'guest') {
+              ftsParams.push('scope:cross-project');
+              scopeWhere += ` AND NOT (${'$' + ftsParams.length} = ANY(m.tags))`;
+            }
           } else {
             if (scope === 'personal') {
               ftsParams.push(user_id);

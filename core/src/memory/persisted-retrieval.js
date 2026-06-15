@@ -14,7 +14,11 @@ let _algorithmicReranker = null;
 // PHASE-B: tiered "recall spine" view (l2_principles / l1_summaries / supporting_facts /
 // evidence / bridges) is additive and dark by default. When OFF the result object is
 // byte-identical to the legacy shape (no `spine` key, no algorithmic rerank of `top`).
-const TIERED_VIEW_ENABLED = process.env.RECALL_TIERED_VIEW === 'true';
+// Default ON (opt-out via RECALL_TIERED_VIEW=false): the wide-window term-
+// overlap ResultReranker lifts Solvis fine-detail recall@8 0.80→0.90 + MRR
+// 0.51→0.78 with NO network call. The cross-encoder (cross_rerank) stays
+// opt-IN — it only adds ~0.02 MRR here, costs 1.5s, and dropped evidence recall.
+const TIERED_VIEW_ENABLED = process.env.RECALL_TIERED_VIEW !== 'false';
 
 // PHASE-A: principle-layer recall boost. OFF by default — when unset the `principle`
 // role/tag branches below are never taken, so output is byte-identical to legacy.

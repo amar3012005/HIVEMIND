@@ -21,6 +21,7 @@ import {
   getLogSummary,
 } from './admin/live-log-store.js';
 import { ROLES, effectiveRoles, hasPermission, assertPermission } from './auth/permissions.js';
+import { handleHermesRoutes } from './hermes/control-routes.js';
 import { attachSsoContext, resolveSsoConfig } from './auth/sso-resolver.js';
 import { handleScimRequest } from './scim/scim-router.js';
 import { sendSystemEmail, sendSystemEmailBatch } from './email/email-service.js';
@@ -7497,6 +7498,14 @@ Write the persona now.`;
   // This is integrated inline in the Zitadel callback handler above.
   // The _jitProvision helper is called at the bottom of /auth/callback.
   // Defined here as a module-level helper for reuse.
+
+  // ─── Hermes agents control plane ─────────────────────────────
+  // Flag-gated (HERMES_MANAGER_ENABLED!=='true' → 404), session-auth'd,
+  // org-scoped inside the handler. Raw-SQL persistence (hermes_agents/jobs),
+  // no schema.prisma drift. See core/src/hermes/control-routes.js.
+  if (await handleHermesRoutes(req, res, { pathname, method: req.method, prisma, jsonResponse, parseBody, requireSession })) {
+    return;
+  }
 
   return jsonResponse(res, { error: 'Not found' }, 404);
 });

@@ -487,6 +487,11 @@ model Memory {
   @@index([version])
   // Partial index: only index memories that have a cluster hash (synthesis outputs only)
   @@index([synthesisClusterHash], map: "memories_synthesis_cluster_hash_idx")
+  // C1 backstop (migration 20260615150000): a partial UNIQUE index
+  // memories_one_latest_synthesis_per_cluster on (org_id, synthesis_cluster_hash)
+  // WHERE is_latest AND deleted_at IS NULL AND synthesis_cluster_hash IS NOT NULL
+  // enforces one live synthesis per cluster. Partial WHERE isn't expressible in
+  // the Prisma DSL, so it is migration-only and intentionally absent here.
   @@index([tier], map: "memories_tier_idx")
   @@index([userId, tier, lastAccessedAt(sort: Desc)], map: "memories_user_tier_lastaccess_idx")
   @@index([cognitiveLayerRole], map: "memories_cognitive_layer_role_idx")

@@ -28,7 +28,7 @@ export function isPersonaQuery(query) {
  * @param {{ query, userId, orgId, profileStore?, logger?, force?: boolean }} args
  * @returns {Promise<{ routed: boolean, reason?: string, source?: string, context: string, facts: any[] }>}
  */
-export async function routePersona({ query, userId, orgId, profileStore = null, logger = console, force = false }) {
+export async function routePersona({ query, userId, orgId, projectId = null, profileStore = null, logger = console, force = false }) {
   if (!PERSONA_ROUTER_ENABLED && !force) return { routed: false, reason: 'disabled', context: '', facts: [] };
   if (!query || !userId) return { routed: false, reason: 'missing_args', context: '', facts: [] };
   if (!force && !isPersonaQuery(query)) return { routed: false, reason: 'not_persona_intent', context: '', facts: [] };
@@ -44,7 +44,9 @@ export async function routePersona({ query, userId, orgId, profileStore = null, 
   // Fallback: Postgres profile context when the vector lane is empty/unavailable.
   if ((!facts || facts.length === 0) && profileStore) {
     try {
-      const ctx = await profileStore.buildProfileContext(userId, orgId);
+      // M7: pass projectId so a project-scoped turn sees org-level identity facts
+      // + that project's facts only — never other projects' identity insights.
+      const ctx = await profileStore.buildProfileContext(userId, orgId, projectId);
       return { routed: true, source: 'postgres', context: ctx || '', facts: [] };
     } catch (err) {
       logger.warn?.(`[persona-router] postgres fallback failed: ${err.message}`);

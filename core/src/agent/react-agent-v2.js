@@ -1242,7 +1242,7 @@ async function answerStep({ message, history, evidence, plan, language, assistan
     if (isPersonaRouterEnabled()) {
       const { ProfileStore } = await import('../memory/profile-store.js');
       const ps = ctx?.prisma ? new ProfileStore(ctx.prisma) : null;
-      const pr = await routePersona({ query: message, userId: ctx?.userId, orgId: ctx?.orgId, profileStore: ps });
+      const pr = await routePersona({ query: message, userId: ctx?.userId, orgId: ctx?.orgId, projectId: ctx?.projectId || null, profileStore: ps });
       if (pr.routed && pr.context) {
         personaNote = `\n\nUSER PERSONA (who you're talking to — use for personalization; never contradict; never invent beyond it):\n${pr.context}`;
       }

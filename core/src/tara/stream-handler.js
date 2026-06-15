@@ -352,7 +352,7 @@ export class TaraStreamHandler {
           query_context: query,
           user_id: userId,
           org_id: orgId,
-          max_memories: 6,
+          max_memories: 8,
           // Multi-tier scope (projectIds/teamIds) so project/team/org-shared
           // memories surface — parity with /api/recall + Talk-to-HIVE chat.
           access_context: accessContext,

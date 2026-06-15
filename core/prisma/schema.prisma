@@ -1307,6 +1307,28 @@ model OrgUsage {
   @@index([webIntelDay], map: "idx_org_usage_webIntelDay")
 }
 
+/// High-level per-DAY usage counters per org (powers the Usage page daily graphs).
+/// OrgUsage holds the monthly rollup; this holds one row per (org, day) so the FE
+/// can draw per-day time series. Wide (one column per metric), high-level only —
+/// no per-model/per-user/cost breakdown (that's the granular gateway).
+model OrgUsageDaily {
+  id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId                String   @db.Uuid
+  day                  DateTime @db.Date
+  tokensProcessed      BigInt   @default(0)
+  searchQueries        BigInt   @default(0)
+  knowledgeBaseUploads Int      @default(0)
+  memoriesIngested     Int      @default(0)
+  deepResearchJobs     Int      @default(0)
+  webIntelJobs         Int      @default(0)
+  graphQueries         Int      @default(0)
+  taraUsage            Int      @default(0)
+  updatedAt            DateTime @default(now()) @db.Timestamptz(6)
+
+  @@unique([orgId, day])
+  @@index([orgId, day], map: "idx_org_usage_daily_org_day")
+}
+
 /// Per-org SSO configuration: Zitadel project mapping, SAML IdP metadata, SCIM token.
 /// Supports subdomain-based org routing for enterprise IdP-initiated login.
 model OrgSsoConfig {

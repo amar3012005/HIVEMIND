@@ -19537,6 +19537,15 @@ exit \$RC
           }
           break;
 
+        case '/api/billing/usage/daily':
+          if (req.method === 'GET') {
+            if (!usageTracker) return jsonResponse(res, { error: 'Billing not available' }, 503);
+            const days = Math.max(1, Math.min(120, parseInt(url.searchParams.get('days'), 10) || 30));
+            const series = await usageTracker.getDailyUsage(orgId, days);
+            return jsonResponse(res, { days, series });
+          }
+          break;
+
         case '/api/billing/plans':
           if (req.method === 'GET') {
             const { getAllPlans } = await import('./billing/plans.js');

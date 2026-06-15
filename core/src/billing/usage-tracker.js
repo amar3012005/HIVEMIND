@@ -199,6 +199,70 @@ export class UsageTracker {
     }
   }
 
+  // type → OrgUsageDaily column. (Internal constant — safe to interpolate.)
+  static _DAILY_COL = {
+    tokens: 'tokensProcessed', searches: 'searchQueries', uploads: 'knowledgeBaseUploads',
+    memories: 'memoriesIngested', deepResearch: 'deepResearchJobs', webIntel: 'webIntelJobs',
+    graphQueries: 'graphQueries', tara: 'taraUsage',
+  };
+
+  /**
+   * Record one day's usage for an org (powers the Usage page daily graphs).
+   * Wide upsert into OrgUsageDaily keyed by (orgId, day). Same type vocabulary
+   * as PlanEnforcer.recordUsage so it can be called right alongside it.
+   */
+  async recordDaily(orgId, type, amount = 1) {
+    const col = UsageTracker._DAILY_COL[type];
+    if (!this.prisma || !orgId || !col || amount <= 0) return;
+    const day = this._currentDay();
+    try {
+      await this.prisma.$executeRawUnsafe(
+        `INSERT INTO "OrgUsageDaily" ("orgId", "day", "${col}", "updatedAt")
+         VALUES ($1::uuid, $2::date, $3, NOW())
+         ON CONFLICT ("orgId", "day")
+         DO UPDATE SET "${col}" = "OrgUsageDaily"."${col}" + $3, "updatedAt" = NOW()`,
+        orgId, day, amount
+      );
+    } catch (err) {
+      console.warn('[usage-tracker] Record daily failed:', err.message);
+    }
+  }
+
+  /**
+   * Get the last N days of usage for an org (for the daily graphs).
+   * Returns rows ascending by day with all metrics; gaps are NOT filled here
+   * (the FE fills missing days with zero against its date axis).
+   */
+  async getDailyUsage(orgId, days = 30) {
+    if (!this.prisma || !orgId) return [];
+    const n = Math.max(1, Math.min(120, Number(days) || 30));
+    try {
+      const rows = await this.prisma.$queryRawUnsafe(
+        `SELECT to_char("day", 'YYYY-MM-DD') AS day,
+                "tokensProcessed", "searchQueries", "knowledgeBaseUploads", "memoriesIngested",
+                "deepResearchJobs", "webIntelJobs", "graphQueries", "taraUsage"
+           FROM "OrgUsageDaily"
+          WHERE "orgId" = $1::uuid AND "day" >= (CURRENT_DATE - ($2 || ' days')::interval)
+          ORDER BY "day" ASC`,
+        orgId, String(n)
+      );
+      return (rows || []).map(r => ({
+        day: r.day,
+        tokens: Number(r.tokensProcessed || 0),
+        searches: Number(r.searchQueries || 0),
+        uploads: Number(r.knowledgeBaseUploads || 0),
+        memories: Number(r.memoriesIngested || 0),
+        deepResearch: Number(r.deepResearchJobs || 0),
+        webIntel: Number(r.webIntelJobs || 0),
+        graphQueries: Number(r.graphQueries || 0),
+        tara: Number(r.taraUsage || 0),
+      }));
+    } catch (err) {
+      console.warn('[usage-tracker] Get daily usage failed:', err.message);
+      return [];
+    }
+  }
+
   /**
    * Get current usage for an org this month.
    */

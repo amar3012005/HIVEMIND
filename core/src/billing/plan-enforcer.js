@@ -282,6 +282,8 @@ export class PlanEnforcer {
       if (type === 'webIntel') this.usageTracker.recordWebIntel(orgId).catch(() => {});
       if (type === 'graphQueries') this.usageTracker.recordGraphQuery(orgId).catch(() => {});
       if (type === 'tara') this.usageTracker.recordTara(orgId).catch(() => {});
+      // Per-day rollup (powers the Usage page daily graphs) — same type vocab.
+      this.usageTracker.recordDaily?.(orgId, type, amount).catch(() => {});
     }
   }
 
@@ -291,22 +293,36 @@ export class PlanEnforcer {
   async getUsageSummary(orgId) {
     const planDef = await this.planStore.getOrgPlan(orgId);
     const limits = planDef?.limits || {};
-    const counters = await this._getCounters(orgId);
+    // Read the DURABLE OrgUsage row (DB) for display — NOT the per-replica
+    // in-memory counters. With two cores, the in-memory map only re-seeds on
+    // month-rollover, so it drifts and the displayed number depended on which
+    // replica answered. The DB row is the single source of truth (60s cache).
+    const dbUsage = (this.usageTracker
+      ? await this.usageTracker.getUsage(orgId).catch(() => null)
+      : null) || {};
+    const month = dbUsage.month || this._currentMonth();
+    const webIntelToday = this.usageTracker
+      ? await this.usageTracker.getWebIntelToday(orgId).catch(() => 0)
+      : 0;
 
     return {
       plan: planDef?.id || 'free',
       planName: planDef?.name || 'Free',
-      period: { month: counters.month },
-      tokens: { used: counters.tokens, limit: limits.llmTokensPerMonth ?? -1 },
-      searches: { used: counters.searches, limit: limits.searchQueriesPerMonth ?? -1 },
-      uploads: { used: counters.uploads, limit: limits.knowledgeBaseUploadsPerMonth ?? -1 },
-      memories: { used: counters.memories, limit: limits.maxMemories ?? -1 },
-      deepResearch: { used: counters.deepResearch, limit: limits.deepResearchPerMonth ?? -1 },
-      webIntel: { used: counters.webIntel, limit: limits.webIntelPerDay ?? -1, isDaily: true },
-      graphQueries: { used: counters.graphQueries, limit: limits.searchQueriesPerMonth ?? -1 },
-      tara: { used: counters.tara, limit: -1 }, // Not limited, tracked for analytics
+      period: { month },
+      tokens: { used: Number(dbUsage.tokensProcessed) || 0, limit: limits.llmTokensPerMonth ?? -1 },
+      searches: { used: Number(dbUsage.searchQueries) || 0, limit: limits.searchQueriesPerMonth ?? -1 },
+      uploads: { used: Number(dbUsage.knowledgeBaseUploads) || 0, limit: limits.knowledgeBaseUploadsPerMonth ?? -1 },
+      memories: { used: Number(dbUsage.memoriesIngested) || 0, limit: limits.maxMemories ?? -1 },
+      deepResearch: { used: Number(dbUsage.deepResearchJobs) || 0, limit: limits.deepResearchPerMonth ?? -1 },
+      webIntel: { used: Number(webIntelToday) || 0, limit: limits.webIntelPerDay ?? -1, isDaily: true },
+      graphQueries: { used: Number(dbUsage.graphQueries) || 0, limit: limits.searchQueriesPerMonth ?? -1 },
+      tara: { used: Number(dbUsage.taraUsage) || 0, limit: -1 }, // tracked, not limited
       connectors: { limit: limits.maxConnectors ?? -1 },
       users: { limit: limits.maxUsers ?? -1 },
+      // honest scope: tokens are metered at chat + TARA today (full coverage =
+      // the granular gateway). FE surfaces this so the number isn't mistaken
+      // for total platform spend.
+      tokensScope: 'chat+tara',
     };
   }
 }

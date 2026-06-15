@@ -35,6 +35,23 @@ test('guest is denied cross-project syntheses (M2b)', () => {
   assert.deepEqual(w.NOT, { tags: { has: 'scope:cross-project' } }, 'guest excludes cross-project tag');
 });
 
+test('member with org cross_project OFF: org tier kept, cross-project excluded (M2b)', () => {
+  const w = scopedMemoryWhere({
+    user_id: USER, org_id: ORG,
+    access_context: { projectIds: [PROJ], teamIds: [], orgRole: 'member', crossProject: false },
+  });
+  assert.ok(tierScopes(w).includes('organization'), 'member still sees org tier');
+  assert.deepEqual(w.NOT, { tags: { has: 'scope:cross-project' } }, 'cross-project excluded when org disabled it');
+});
+
+test('member with cross_project ON sees cross-project (no NOT filter)', () => {
+  const w = scopedMemoryWhere({
+    user_id: USER, org_id: ORG,
+    access_context: { projectIds: [PROJ], teamIds: [], orgRole: 'member', crossProject: true },
+  });
+  assert.equal(w.NOT, undefined, 'no cross-project exclusion when enabled');
+});
+
 test('guest with no projects sees only personal', () => {
   const w = scopedMemoryWhere({
     user_id: USER, org_id: ORG,

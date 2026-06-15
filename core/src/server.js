@@ -307,13 +307,15 @@ async function buildAccessContext(userId, orgId) {
   const ts = await getTeamStore();
   if (!ts) return null;
   try {
-    const [projectIds, teamIds, membership] = await Promise.all([
+    const { crossProjectEnabledForOrg } = await import('./resident/cognition-pilot.js');
+    const [projectIds, teamIds, membership, crossProject] = await Promise.all([
       ts.accessibleProjectIds({ userId, orgId }),
       ts.accessibleTeamIds({ userId, orgId }),
       prisma.userOrganization.findUnique({
         where: { userId_orgId: { userId, orgId } },
         select: { role: true },
       }).catch(() => null),
+      crossProjectEnabledForOrg(prisma, orgId).catch(() => true), // fail-open: don't over-filter on a lookup error
     ]);
     // Hierarchy: org owners/admins sit above the project layer — their access
     // context spans EVERY active project in the org, so admin MCP tokens and
@@ -327,7 +329,7 @@ async function buildAccessContext(userId, orgId) {
       }).catch(() => []);
       effectiveProjectIds = Array.from(new Set([...projectIds, ...all.map(p => p.id)]));
     }
-    const value = { projectIds: effectiveProjectIds, teamIds, orgRole };
+    const value = { projectIds: effectiveProjectIds, teamIds, orgRole, crossProject: crossProject !== false };
     _accessContextCache.set(key, { value, expiresAt: now + 60_000 });
     return value;
   } catch (err) {

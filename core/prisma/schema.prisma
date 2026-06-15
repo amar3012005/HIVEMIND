@@ -1262,6 +1262,12 @@ model UserProfile {
   // profile-dreamer last re-synthesized this user. Both additive/backward-compat.
   evidenceMemoryIds String[]  @default([]) @map("evidence_memory_ids") @db.Uuid
   lastDreamedAt     DateTime? @map("last_dreamed_at")
+  // M7: source-project provenance. NULL = org-level identity fact (evidence spans
+  // multiple projects or none); a project id = the fact was synthesized purely
+  // from that project's memories. buildProfileContext(…, projectId) returns
+  // project_id IS NULL OR project_id = :projectId so a project-scoped caller never
+  // sees identity facts derived from OTHER projects' memories.
+  projectId         String?   @map("project_id") @db.Uuid
 
   // M6: scoped per (user, org). The old (userId,key) unique allowed only ONE
   // fact per key across ALL of a user's orgs, so an org-A write overwrote the
@@ -1270,6 +1276,7 @@ model UserProfile {
   @@unique([userId, orgId, key])
   @@index([userId])
   @@index([userId, category])
+  @@index([userId, orgId, projectId], map: "user_profiles_user_org_project_idx")
   @@map("user_profiles")
 }
 

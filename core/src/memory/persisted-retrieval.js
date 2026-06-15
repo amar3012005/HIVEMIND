@@ -539,7 +539,13 @@ async function vectorCandidatesForRecall(store, {
       //  (2) M2b: they NEVER see a cross-project synthesis (tag scope:cross-project)
       //      — by definition it aggregates projects beyond their single invite.
       const isGuest = access_context.orgRole === 'guest';
-      if (isGuest && Array.isArray(m.tags) && m.tags.includes('scope:cross-project')) return null;
+      // Cross-project syntheses (tag scope:cross-project) are dropped for: (a) guests
+      // always; (b) ALL users when the org has cross_project disabled (M2b members) —
+      // a synthesis that bridges projects must not surface once the org turns the
+      // feature off. crossProject defaults true (fail-open) so members are unaffected
+      // when enabled or when the flag is unknown.
+      const dropCrossProject = isGuest || access_context.crossProject === false;
+      if (dropCrossProject && Array.isArray(m.tags) && m.tags.includes('scope:cross-project')) return null;
       const ok =
         (m.scope === 'personal' && m.user_id === user_id) ||
         (m.scope === 'organization' && m.org_id === org_id && !isGuest) ||

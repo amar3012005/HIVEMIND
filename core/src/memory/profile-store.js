@@ -26,8 +26,8 @@ export class ProfileStore {
   /**
    * Get all profile facts for a user, with caching.
    */
-  async getProfile(userId, orgId = null) {
-    const cacheKey = `${userId}:${orgId || ''}`;
+  async getProfile(userId, orgId = null, projectId = null) {
+    const cacheKey = `${userId}:${orgId || ''}:${projectId || ''}`;
     const cached = this._cache.get(cacheKey);
     if (cached && Date.now() - cached.ts < this._cacheTTL) {
       return cached.facts;
@@ -35,6 +35,10 @@ export class ProfileStore {
 
     const where = { userId, deletedAt: null };
     if (orgId) where.orgId = orgId;
+    // M7: project-scoped read — org-level identity facts (project_id NULL) PLUS
+    // this project's facts; never another project's. projectId omitted = all facts
+    // (backward-compatible; the org-wide view is unchanged).
+    if (projectId) where.OR = [{ projectId: null }, { projectId }];
 
     const rows = await this.prisma.userProfile.findMany({ where, orderBy: { lastConfirmedAt: 'desc' } });
     const facts = rows.map(r => ({
@@ -57,7 +61,7 @@ export class ProfileStore {
    * Upsert a profile fact (insert or update if same key exists).
    * Detects value changes and contradictions, returning version metadata.
    */
-  async upsertFact({ userId, orgId, category, key, value, confidence, sourceMemoryId }) {
+  async upsertFact({ userId, orgId, category, key, value, confidence, sourceMemoryId, projectId = null }) {
     const normalizedKey = key.toLowerCase().trim();
 
     // WS5 step-2: serialize the read-modify-write PER USER. Profile writes race —
@@ -88,6 +92,9 @@ export class ProfileStore {
           confirmedCount: _isUpdate ? 1 : { increment: 1 }, // reset count on value change
           lastConfirmedAt: new Date(),
           deletedAt: null, // un-delete if previously deleted
+          // M7: refresh provenance only when the caller supplies one (don't wipe a
+          // known project on a generic re-confirm).
+          ...(projectId !== null ? { projectId } : {}),
         },
         create: {
           userId,
@@ -97,6 +104,7 @@ export class ProfileStore {
           value,
           confidence: confidence || 1.0,
           sourceMemoryId: sourceMemoryId || null,
+          projectId: projectId || null,
         },
       });
       return {
@@ -107,9 +115,11 @@ export class ProfileStore {
       };
     }, { timeout: Number(process.env.PROFILE_TXN_TIMEOUT_MS || 15000), maxWait: 8000 });
 
-    // Invalidate cache
-    this._cache.delete(`${userId}:${orgId || ''}`);
-    this._cache.delete(`${userId}:`);
+    // Invalidate cache — keys are now `${userId}:${orgId}:${projectId}`, so clear
+    // every cached projection for this user (prefix match).
+    for (const k of this._cache.keys()) {
+      if (k.startsWith(`${userId}:`)) this._cache.delete(k);
+    }
     return {
       ...result,
       _previousValue: previousValue,
@@ -235,8 +245,8 @@ export class ProfileStore {
   /**
    * Build a context string for injection into LLM prompts / recall results.
    */
-  async buildProfileContext(userId, orgId = null) {
-    const allFacts = await this.getProfile(userId, orgId);
+  async buildProfileContext(userId, orgId = null, projectId = null) {
+    const allFacts = await this.getProfile(userId, orgId, projectId);
     if (!allFacts.length) return '';
 
     // WS5 render-gate: a DREAMED fact (lastDreamedAt set) with NO evidence lineage

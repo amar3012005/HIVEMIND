@@ -205,10 +205,10 @@ export function scopedMemoryWhere({ user_id, org_id, project, scope = 'personal'
     if (teamIds.length > 0) {
       tiers.push({ scope: 'team', primaryTeamId: { in: teamIds } });
     }
-    // M2b: a guest must not see cross-project syntheses even via the project tier
-    // (a cross-project bridge can carry one of their projects' ids). Exclude the
-    // scope:cross-project tag for guests.
-    if (access_context.orgRole === 'guest') {
+    // M2b: exclude cross-project syntheses for guests (always — a cross-project
+    // bridge can carry one of their projects' ids), and for ALL users when the org
+    // has cross_project disabled. crossProject defaults true (fail-open).
+    if (access_context.orgRole === 'guest' || access_context.crossProject === false) {
       return { ...base, OR: tiers, NOT: { tags: { has: 'scope:cross-project' } } };
     }
     return { ...base, OR: tiers };
@@ -659,8 +659,9 @@ export class PrismaGraphStore {
             ftsParams.push(org_id);
             const orgScopeParam = `$${ftsParams.length}`;
             scopeWhere = `AND m.org_id = ${orgScopeParam}::uuid AND (${tiers.join(' OR ')})`;
-            // M2b: guests never see cross-project syntheses (parameterized, no interpolation).
-            if (access_context.orgRole === 'guest') {
+            // M2b: drop cross-project syntheses for guests (always) and for all users
+            // when the org disabled cross_project (parameterized, no interpolation).
+            if (access_context.orgRole === 'guest' || access_context.crossProject === false) {
               ftsParams.push('scope:cross-project');
               scopeWhere += ` AND NOT (${'$' + ftsParams.length} = ANY(m.tags))`;
             }

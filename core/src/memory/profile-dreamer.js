@@ -144,6 +144,28 @@ export class ProfileDreamer {
       return { userId, dryRun: true, memories: raw.length, transcripts: transcriptCount, proposals: grounded };
     }
 
+    // M7: derive each fact's source project. A persona fact built purely from ONE
+    // project's memories is scoped to that project; evidence spanning multiple
+    // projects (or none) → null = org-level identity (visible in every project).
+    const memProj = new Map();
+    try {
+      const mp = await this.prisma.memoryProject.findMany({
+        where: { memoryId: { in: Array.from(validIds) } },
+        select: { memoryId: true, projectId: true },
+      });
+      for (const r of mp) {
+        if (!memProj.has(r.memoryId)) memProj.set(r.memoryId, new Set());
+        memProj.get(r.memoryId).add(r.projectId);
+      }
+    } catch (err) {
+      this.logger.warn?.(`[profile-dreamer] project map failed: ${err.message}`);
+    }
+    for (const f of grounded) {
+      const projs = new Set();
+      for (const id of f.evidence_memory_ids) for (const p of (memProj.get(id) || [])) projs.add(p);
+      f._projectId = projs.size === 1 ? [...projs][0] : null;
+    }
+
     let applied = 0;
     let decayed = 0;
     const appliedFacts = [];   // for persona-vector embed (after txn — no I/O under lock)
@@ -166,6 +188,7 @@ export class ProfileDreamer {
             lastDreamedAt: new Date(),
             evidenceMemoryIds: f.evidence_memory_ids,
             deletedAt: null,
+            projectId: f._projectId ?? null, // M7: refresh provenance each dream
           },
           create: {
             userId, orgId, key, value: f.value,
@@ -173,6 +196,7 @@ export class ProfileDreamer {
             confidence: Math.min(0.95, f.confidence),
             lastDreamedAt: new Date(),
             evidenceMemoryIds: f.evidence_memory_ids,
+            projectId: f._projectId ?? null,
           },
         });
         applied++;

@@ -46,7 +46,7 @@ export class TaraStreamHandler {
     this._sessionMemoryStats = new Map();  // session_id → { chunks_saved, chunks_candidates, chunks_skipped, turns }
   }
 
-  async handleStream(params, { userId, orgId, res }) {
+  async handleStream(params, { userId, orgId, accessContext = null, res }) {
     const {
       session_id: sessionId,
       tenant_id: tenantId,
@@ -89,7 +89,7 @@ export class TaraStreamHandler {
       // Voice needs speed (<100ms), not exhaustive search
       const recallPromise = greetingMode
         ? Promise.resolve([])
-        : this._fastKBRecall(query, { userId, orgId }).catch(() => []);
+        : this._fastKBRecall(query, { userId, orgId, accessContext }).catch(() => []);
 
       const sessionPromise = this.sessionManager.load(sessionId, { tenantId, userId, orgId, language });
 
@@ -328,7 +328,7 @@ export class TaraStreamHandler {
   // Set TARA_FAST_RECALL=true to fall back to the legacy KB-only path
   // for latency-critical deployments.
 
-  async _fastKBRecall(query, { userId, orgId }) {
+  async _fastKBRecall(query, { userId, orgId, accessContext = null }) {
     if (!query || query.length < 5) return [];
 
     // Skip recall ONLY when the WHOLE utterance is a bare greeting / filler.
@@ -353,6 +353,9 @@ export class TaraStreamHandler {
           user_id: userId,
           org_id: orgId,
           max_memories: 6,
+          // Multi-tier scope (projectIds/teamIds) so project/team/org-shared
+          // memories surface — parity with /api/recall + Talk-to-HIVE chat.
+          access_context: accessContext,
         });
         const rows = recall?.combined || recall?.memories || recall || [];
         return rows.slice(0, 8).map(r => ({

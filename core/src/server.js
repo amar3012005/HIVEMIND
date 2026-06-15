@@ -19629,8 +19629,12 @@ exit \$RC
         case '/api/tara/stream':
           if (req.method === 'POST') {
             if (!taraHandler) return jsonResponse(res, { error: 'TARA not available' }, 503);
-            // Don't use jsonResponse — stream handler writes NDJSON directly
-            await taraHandler.handleStream(body, { userId, orgId, res });
+            // Don't use jsonResponse — stream handler writes NDJSON directly.
+            // Build the multi-tier access context (projectIds/teamIds) so Tara's
+            // recall sees project/team/org-shared memories, not just personal —
+            // without it Tara missed facts that live in a project scope.
+            const taraAccessCtx = await buildAccessContext(userId, orgId).catch(() => null);
+            await taraHandler.handleStream(body, { userId, orgId, accessContext: taraAccessCtx, res });
             return; // Response already ended by stream handler
           }
           break;

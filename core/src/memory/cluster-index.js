@@ -76,8 +76,9 @@ export class ClusterIndex {
         },
       });
     } catch (err) {
-      // Non-fatal: cluster_index is a performance optimisation, not a gate
-      console.warn(`[cluster-index] upsertOnSynthesis failed hash=${clusterHash}: ${err.message}`);
+      // H14: log clearly and rethrow so callers can retry/warn rather than silently orphaning the synthesis.
+      console.error(`[cluster-index] upsertOnSynthesis FAILED hash=${clusterHash} latestSynthesisId=${latestSynthesisId}: ${err.message}`);
+      throw err;
     }
   }
 

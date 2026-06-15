@@ -1282,9 +1282,10 @@ export class MemoryGraphEngine {
           const updatesTargetId = classification.relationship?.targetId ?? semanticRelationship?.targetId;
           const updateConf = classification.relationship?.confidence ?? semanticRelationship?.confidence ?? 0;
           let entityOverlapOk = false;
+          let targetMem = null; // hoisted: also read by the H1 synthesis-guard below
           if (Number(updateConf) >= 0.85 && updatesTargetId) {
             try {
-              const targetMem = await store.getMemory(updatesTargetId);
+              targetMem = await store.getMemory(updatesTargetId);
               if (targetMem) {
                 const newEntsArr = (baseMemory.tags || [])
                   .filter(t => typeof t === 'string' && t.startsWith('entity:'))
@@ -1316,7 +1317,14 @@ export class MemoryGraphEngine {
               console.warn('[graph-engine] entity-overlap check failed:', overlapErr.message);
             }
           }
-          if (Number(updateConf) >= 0.85 && entityOverlapOk && updatesTargetId) {
+          // H1: never let a synthesis supersede another synthesis via smart-ingest.
+          // Syntheses are demoted only by cognition-loop's own revision path.
+          if (
+            baseMemory.memory_type === 'synthesis'
+            && (targetMem?.memory_type === 'synthesis' || targetMem?.memoryType === 'synthesis')
+          ) {
+            console.log(`[graph-engine] H1: synthesis→synthesis Updates SKIPPED: ${baseMemory.id.slice(0,8)} → ${updatesTargetId.slice(0,8)} (cognition-loop owns synthesis demotion)`);
+          } else if (Number(updateConf) >= 0.85 && entityOverlapOk && updatesTargetId) {
             Object.assign(result, await this.applyUpdate(baseMemory.id, updatesTargetId, {
               store,
               user_id: baseMemory.user_id,
@@ -1480,8 +1488,13 @@ export class MemoryGraphEngine {
               } catch { /* Edge already exists — skip duplicate */ }
 
               // If reconciled to Updates: mark old memory as superseded
+              // H2: skip demotion if the target is a synthesis — only cognition-loop demotes syntheses.
               if (edgeType === 'Updates') {
-                try { await store.updateMemory(c.memory.id, { is_latest: false }); } catch {}
+                if (c.memory.memory_type === 'synthesis' || c.memory.memoryType === 'synthesis') {
+                  console.log(`[conflict-reconciliation] H2: synthesis demotion SKIPPED for ${c.memory.id.slice(0,8)} — cognition-loop owns synthesis demotion`);
+                } else {
+                  try { await store.updateMemory(c.memory.id, { is_latest: false }); } catch {}
+                }
               }
 
               if (isReconciled) {
@@ -2624,12 +2637,17 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
       // flag so retrieval + the graph view treat it as superseded.
       // Same canonical behaviour as the regex-based supersede path in
       // graph-engine, just driven by LLM intent instead.
+      // H2: never demote a synthesis via entity-co-mention — only cognition-loop may do that.
       if (isSupersede) {
-        try {
-          await writeStore.updateMemory(cand.id, { is_latest: false });
-          console.log(`[entity-co-mention] supersede: ${cand.id.slice(0, 8)} → is_latest=false (by ${baseMemory.id.slice(0, 8)})`);
-        } catch (supErr) {
-          console.warn('[entity-co-mention] supersede update failed:', supErr.message);
+        if (cand.memory_type === 'synthesis' || cand.memoryType === 'synthesis') {
+          console.log(`[entity-co-mention] H2: synthesis supersede SKIPPED for ${cand.id.slice(0, 8)} — cognition-loop owns synthesis demotion`);
+        } else {
+          try {
+            await writeStore.updateMemory(cand.id, { is_latest: false });
+            console.log(`[entity-co-mention] supersede: ${cand.id.slice(0, 8)} → is_latest=false (by ${baseMemory.id.slice(0, 8)})`);
+          } catch (supErr) {
+            console.warn('[entity-co-mention] supersede update failed:', supErr.message);
+          }
         }
       }
     }

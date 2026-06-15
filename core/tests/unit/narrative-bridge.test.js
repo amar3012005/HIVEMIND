@@ -18,9 +18,20 @@ const cluster = (tag, entityTags, n = 2) => ({
 // returns a usable narrative, writes captured.
 function ctx() {
   const writeCalls = [];
+  // Mock tx passed to withGovernanceLock — provide $queryRawUnsafe returning lock-acquired.
+  const mockTx = {
+    $queryRawUnsafe: async (sql) => {
+      if (sql.includes('hashtext')) return [{ h: 1 }];
+      if (sql.includes('pg_try_advisory_xact_lock')) return [{ got: true }];
+      return [];
+    },
+  };
   return {
     writeCalls,
-    prisma: { memory: { findFirst: async () => null } },
+    prisma: {
+      memory: { findFirst: async () => null },
+      $transaction: async (fn) => fn(mockTx),
+    },
     _onCooldown: async () => false,
     _isRestatement: () => false,
     _llmNarrativeBridge: async (hubKey, clusters) => ({
@@ -32,6 +43,7 @@ function ctx() {
     }),
     _writeSynthMemory: async (args) => { writeCalls.push(args); return { id: `synth-${writeCalls.length}`, tags: ['synthesis:bridge', args.tag] }; },
     clusterIndex: { upsertOnSynthesis: async () => {} },
+    _upsertClusterIndexWithRetry: async () => {},
     logger: { log() {}, warn() {} },
   };
 }

@@ -31,6 +31,7 @@ import { clusterHash } from './cluster-hash.js';
 import { normalizeEntity } from './entity-normalize.js';
 import { getQdrantClient } from '../vector/qdrant-client.js';
 import { crossProjectEnabledForOrg } from '../resident/cognition-pilot.js';
+import { withGovernanceLock } from '../resident/advisory-lock.js';
 
 // ─── Model config ──────────────────────────────────────────────────────────────
 // Phase 0 cost cut: routine synthesis/compaction is high-volume, low-reasoning
@@ -1068,27 +1069,48 @@ export class CognitionLoop {
           }
         }
 
-        const created = await this._writeSynthMemory({
-          orgId,
-          userId:    members[0].userId,
-          project:   members[0].project,
-          sourceType: 'canonical-fact',
-          tag,
-          members,
-          content:   result.canonical_fact,
-          confidence: result.confidence,
-          evidenceIds,
-          clusterHash: hash,
-          extraMeta: {
-            valid_from:      result.valid_from || null,
-            expected_decay:  result.expected_decay || null,
-            supporting_ids:  result.supporting_memory_ids || [],
-          },
-        });
+        // C1: serialize per (orgId, clusterHash) so two replicas cannot create the same hash.
+        let created;
+        try {
+          await this.prisma.$transaction(async (tx) => {
+            await withGovernanceLock(tx, { orgId, agentName: `synth:${hash}` }, async () => {
+              // Re-check under the lock — other replica may have committed by now.
+              const alreadyExists = await this.prisma.memory.findFirst({
+                where: { orgId, synthesisClusterHash: hash, isLatest: true, deletedAt: null },
+                select: { id: true },
+              });
+              if (alreadyExists) return; // other replica won the race — skip
+              created = await this._writeSynthMemory({
+                orgId,
+                userId:    members[0].userId,
+                project:   members[0].project,
+                sourceType: 'canonical-fact',
+                tag,
+                members,
+                content:   result.canonical_fact,
+                confidence: result.confidence,
+                evidenceIds,
+                clusterHash: hash,
+                extraMeta: {
+                  valid_from:      result.valid_from || null,
+                  expected_decay:  result.expected_decay || null,
+                  supporting_ids:  result.supporting_memory_ids || [],
+                },
+              });
+            });
+          }, { timeout: Number(process.env.COGNITION_SYNTH_TXN_TIMEOUT_MS || 10 * 60 * 1000), maxWait: 8000 });
+        } catch (lockErr) {
+          if (lockErr?.code === 'GOVERNANCE_LOCK_BUSY') {
+            this.logger.log?.(`[cognition] synth hash ${hash.slice(0,8)} busy on other replica — skip`);
+            continue;
+          }
+          this.logger.warn(`[cognition] synth hash ${hash.slice(0,8)} failed: ${lockErr?.message || lockErr}`);
+          continue;
+        }
         if (created) {
           writes++;
           // Register new cluster in cluster_index (Option A: dirty_count=0, tick just created it)
-          await this.clusterIndex.upsertOnSynthesis({
+          await this._upsertClusterIndexWithRetry({
             organizationId:    orgId,
             userId:            members[0].userId,
             clusterHash:       hash,
@@ -1262,32 +1284,51 @@ export class CognitionLoop {
           }
         }
 
-        const created = await this._writeSynthMemory({
-          orgId,
-          userId:    a.members[0].userId,
-          project:   a.members[0].project || b.members[0].project || null,
-          sourceType: 'synthesis-bridge',
-          tag:        pairKey,
-          members:    allBridgeMembers,
-          content:    result.bridge_claim,
-          confidence: result.confidence,
-          evidenceIds,
-          clusterHash: hash,
-          extraMeta: {
-            bridge_type:          result.bridge_type || null,
-            actionable_next_step: result.actionable_next_step || null,
-            tag_a: a.tag,
-            tag_b: b.tag,
-            evidence_a: result.evidence_a || [],
-            evidence_b: result.evidence_b || [],
-            // A2 provenance: the real entities this bridge is grounded on
-            grounded_on_entities: sharedEntities || [],
-          },
-        });
+        // C1: serialize per (orgId, clusterHash) so two replicas cannot create the same hash.
+        let created;
+        try {
+          await this.prisma.$transaction(async (tx) => {
+            await withGovernanceLock(tx, { orgId, agentName: `synth:${hash}` }, async () => {
+              const alreadyExists = await this.prisma.memory.findFirst({
+                where: { orgId, synthesisClusterHash: hash, isLatest: true, deletedAt: null },
+                select: { id: true },
+              });
+              if (alreadyExists) return;
+              created = await this._writeSynthMemory({
+                orgId,
+                userId:    a.members[0].userId,
+                project:   a.members[0].project || b.members[0].project || null,
+                sourceType: 'synthesis-bridge',
+                tag:        pairKey,
+                members:    allBridgeMembers,
+                content:    result.bridge_claim,
+                confidence: result.confidence,
+                evidenceIds,
+                clusterHash: hash,
+                extraMeta: {
+                  bridge_type:          result.bridge_type || null,
+                  actionable_next_step: result.actionable_next_step || null,
+                  tag_a: a.tag,
+                  tag_b: b.tag,
+                  evidence_a: result.evidence_a || [],
+                  evidence_b: result.evidence_b || [],
+                  grounded_on_entities: sharedEntities || [],
+                },
+              });
+            });
+          }, { timeout: Number(process.env.COGNITION_SYNTH_TXN_TIMEOUT_MS || 10 * 60 * 1000), maxWait: 8000 });
+        } catch (lockErr) {
+          if (lockErr?.code === 'GOVERNANCE_LOCK_BUSY') {
+            this.logger.log?.(`[cognition] synth hash ${hash.slice(0,8)} busy on other replica — skip`);
+            continue;
+          }
+          this.logger.warn(`[cognition] synth hash ${hash.slice(0,8)} failed: ${lockErr?.message || lockErr}`);
+          continue;
+        }
         if (created) {
           writes++;
           // Register bridge cluster in cluster_index
-          await this.clusterIndex.upsertOnSynthesis({
+          await this._upsertClusterIndexWithRetry({
             organizationId:    orgId,
             userId:            a.members[0].userId,
             clusterHash:       hash,
@@ -1385,37 +1426,55 @@ export class CognitionLoop {
           continue;
         }
         const evidenceIds = (result.supporting_memory_ids || []).filter(Boolean);
-        const created = await this._writeSynthMemory({
-          orgId,
-          userId:  members[0].userId,
-          project: members[0].project || null,
-          sourceType: 'synthesis-bridge',
-          tag: `narrative:${hub.key}`,
-          members,
-          content: result.narrative,
-          confidence: result.confidence,
-          evidenceIds,
-          clusterHash: hash,
-          extraMeta: {
-            narrative: true,
-            hub_entity: hub.key,
-            cluster_tags: clusterTags,
-            bridge_type: result.bridge_type || 'narrative',
-            actionable_next_step: result.actionable_next_step || null,
-          },
-        });
+        // C1: serialize narrative create per (orgId, clusterHash).
+        let created;
+        try {
+          await this.prisma.$transaction(async (tx) => {
+            await withGovernanceLock(tx, { orgId, agentName: `synth:${hash}` }, async () => {
+              const alreadyExists = await this.prisma.memory.findFirst({
+                where: { orgId, synthesisClusterHash: hash, isLatest: true, deletedAt: null },
+                select: { id: true },
+              });
+              if (alreadyExists) return;
+              created = await this._writeSynthMemory({
+                orgId,
+                userId:  members[0].userId,
+                project: members[0].project || null,
+                sourceType: 'synthesis-bridge',
+                tag: `narrative:${hub.key}`,
+                members,
+                content: result.narrative,
+                confidence: result.confidence,
+                evidenceIds,
+                clusterHash: hash,
+                extraMeta: {
+                  narrative: true,
+                  hub_entity: hub.key,
+                  cluster_tags: clusterTags,
+                  bridge_type: result.bridge_type || 'narrative',
+                  actionable_next_step: result.actionable_next_step || null,
+                },
+              });
+            });
+          }, { timeout: Number(process.env.COGNITION_SYNTH_TXN_TIMEOUT_MS || 10 * 60 * 1000), maxWait: 8000 });
+        } catch (lockErr) {
+          if (lockErr?.code === 'GOVERNANCE_LOCK_BUSY') {
+            this.logger.log?.(`[cognition] synth hash ${hash.slice(0,8)} busy on other replica — skip`);
+            continue;
+          }
+          this.logger.warn(`[cognition] synth hash ${hash.slice(0,8)} failed: ${lockErr?.message || lockErr}`);
+          continue;
+        }
         if (created) {
           writes++;
           this.logger.log(`[cognition] narrative hub=${hub.key} clusters=${clusters.length} → ${String(created.id).slice(0, 8)}`);
-          try {
-            await this.clusterIndex.upsertOnSynthesis({
-              organizationId: orgId, userId: members[0].userId, clusterHash: hash,
-              clusterType: 'synthesis-bridge', topTags: clusterTags,
-              entityKeys: deriveEntityKeysFromTags(created.tags),
-              latestSynthesisId: created.id, latestRevision: 1,
-              latestConfidence: result.confidence, evidenceCountTotal: evidenceIds.length,
-            });
-          } catch { /* index upsert non-fatal */ }
+          await this._upsertClusterIndexWithRetry({
+            organizationId: orgId, userId: members[0].userId, clusterHash: hash,
+            clusterType: 'synthesis-bridge', topTags: clusterTags,
+            entityKeys: deriveEntityKeysFromTags(created.tags),
+            latestSynthesisId: created.id, latestRevision: 1,
+            latestConfidence: result.confidence, evidenceCountTotal: evidenceIds.length,
+          });
         }
       } catch (err) {
         this.logger.warn(`[cognition] narrative hub=${hub.key} failed: ${err.message}`);
@@ -1427,6 +1486,24 @@ export class CognitionLoop {
   // ─── Cooldown check ──────────────────────────────────────────────────────────
   // Returns true if we should SKIP this cluster entirely.
   // Phase 2: we no longer skip if new evidence exists — delta-update path takes
+  /**
+   * H14: wrap clusterIndex.upsertOnSynthesis with one retry.
+   * On failure after both attempts, logs a warn-level message (does NOT crash the tick).
+   */
+  async _upsertClusterIndexWithRetry(opts) {
+    try {
+      await this.clusterIndex.upsertOnSynthesis(opts);
+    } catch (firstErr) {
+      try {
+        await this.clusterIndex.upsertOnSynthesis(opts);
+      } catch (secondErr) {
+        this.logger.warn(
+          `[cognition] cluster_index upsert failed for synthesis ${opts.latestSynthesisId} hash ${opts.clusterHash} — will self-heal next full tick: ${secondErr.message}`
+        );
+      }
+    }
+  }
+
   // over instead. Cooldown only skips if updatedAt is within the window AND
   // no source memories are newer than the existing synthesis.
   // cooldownHours defaults to COOLDOWN_HOURS so existing 1-arg callers are
@@ -1873,7 +1950,7 @@ Output JSON only:
 
       // Update cluster-index with latest revision state
       const reaffirmTags = (await this.prisma.memory.findUnique({ where: { id: existing.id }, select: { tags: true } }))?.tags || [];
-      await this.clusterIndex.upsertOnSynthesis({
+      await this._upsertClusterIndexWithRetry({
         organizationId:    orgId,
         userId,
         clusterHash:       hash,
@@ -1918,6 +1995,13 @@ Output JSON only:
       const title = sourceType === 'canonical-fact'
         ? `Canonical fact (ext): ${tag.slice(0, 55)} rev${newRev}`
         : `Bridge (ext): ${tag.slice(0, 75)} rev${newRev} [conf=${finalConf.toFixed(2)}]`;
+
+      // H13: demote prior BEFORE creating new revision to prevent transient two-is_latest-true window.
+      await this.prisma.memory.update({
+        where: { id: existing.id },
+        data:  { isLatest: false },
+      }).catch(err => this.logger.warn(`[cognition] EXTEND: demote prior isLatest failed: ${err.message}`));
+      this.logger.log(`[cognition-loop] EXTEND: demoted prior ${existing.id.slice(0, 8)} isLatest=false (rev ${priorRev} → ${newRev})`);
 
       try {
         const result = await this.engine.ingestMemory({
@@ -1986,15 +2070,6 @@ Output JSON only:
           }
           const extendTags = (await this.prisma.memory.findUnique({ where: { id: newId }, select: { tags: true } }))?.tags || [];
 
-          // Move 2: demote prior revision so recall doesn't double-surface.
-          // Extends edge is preserved for time-travel; isLatest=false removes it
-          // from the default recall set which filters isLatest=true only.
-          await this.prisma.memory.update({
-            where: { id: existing.id },
-            data:  { isLatest: false },
-          }).catch(err => this.logger.warn(`[cognition] EXTEND: demote prior isLatest failed: ${err.message}`));
-          this.logger.log(`[cognition-loop] EXTEND: demoted prior ${existing.id.slice(0, 8)} isLatest=false (rev ${priorRev} → ${newRev})`);
-
           // Extends edge: new → existing (new extends the prior)
           await this.prisma.relationship.create({
             data: {
@@ -2009,7 +2084,7 @@ Output JSON only:
           }).catch(() => {});
 
           // Update cluster-index with new synthesis id and revision
-          await this.clusterIndex.upsertOnSynthesis({
+          await this._upsertClusterIndexWithRetry({
             organizationId:    orgId,
             userId,
             clusterHash:       hash,
@@ -2020,9 +2095,22 @@ Output JSON only:
             latestConfidence:  finalConf,
             evidenceCountTotal,
           });
+        } else {
+          // H13 safety: prior was demoted BEFORE create; create produced no row.
+          // Re-promote prior so the cluster is never left with zero is_latest.
+          await this.prisma.memory.update({
+            where: { id: existing.id },
+            data:  { isLatest: true },
+          }).catch(err => this.logger.warn(`[cognition] EXTEND: re-promote prior after failed create: ${err.message}`));
+          this.logger.warn(`[cognition-loop] EXTEND: create returned no id — re-promoted prior ${existing.id.slice(0, 8)}`);
         }
       } catch (err) {
         this.logger.warn(`[cognition] extend engine.ingestMemory failed: ${err.message}`);
+        // Demote happened pre-create; restore prior to is_latest on failure.
+        await this.prisma.memory.update({
+          where: { id: existing.id },
+          data:  { isLatest: true },
+        }).catch(() => {});
       }
 
       return 'extend';
@@ -2061,6 +2149,13 @@ Output JSON only:
       const title = sourceType === 'canonical-fact'
         ? `Canonical fact: ${tag.slice(0, 60)} (superseded rev1)`
         : `Bridge: ${tag.slice(0, 80)} (superseded rev1) [conf=${finalConf.toFixed(2)}]`;
+
+      // H13: demote prior BEFORE creating new revision so two is_latest=true rows
+      // never exist simultaneously for the same synthesisClusterHash.
+      await this.prisma.memory.update({
+        where: { id: existing.id },
+        data:  { isLatest: false },
+      }).catch(err => this.logger.warn(`[cognition] contradict flip isLatest failed: ${err.message}`));
 
       try {
         const result = await this.engine.ingestMemory({
@@ -2127,12 +2222,6 @@ Output JSON only:
           }
           const contradictTags = (await this.prisma.memory.findUnique({ where: { id: newId }, select: { tags: true } }))?.tags || [];
 
-          // Force-flip old synthesis to isLatest=false (belt-and-suspenders over smart-router)
-          await this.prisma.memory.update({
-            where: { id: existing.id },
-            data:  { isLatest: false },
-          }).catch(err => this.logger.warn(`[cognition] contradict flip isLatest failed: ${err.message}`));
-
           // Explicit Updates edge
           await this.prisma.relationship.create({
             data: {
@@ -2147,7 +2236,7 @@ Output JSON only:
           }).catch(() => {});
 
           // Update cluster-index: new synthesis row, revision reset to 1
-          await this.clusterIndex.upsertOnSynthesis({
+          await this._upsertClusterIndexWithRetry({
             organizationId:    orgId,
             userId,
             clusterHash:       hash,
@@ -2158,9 +2247,20 @@ Output JSON only:
             latestConfidence:  finalConf,
             evidenceCountTotal: contrEvidenceCountTotal,
           });
+        } else {
+          // H13 safety: prior demoted pre-create, create produced no row — re-promote.
+          await this.prisma.memory.update({
+            where: { id: existing.id },
+            data:  { isLatest: true },
+          }).catch(err => this.logger.warn(`[cognition] CONTRADICT: re-promote prior after failed create: ${err.message}`));
+          this.logger.warn(`[cognition-loop] CONTRADICT: create returned no id — re-promoted prior ${existing.id.slice(0, 8)}`);
         }
       } catch (err) {
         this.logger.warn(`[cognition] contradict engine.ingestMemory failed: ${err.message}`);
+        await this.prisma.memory.update({
+          where: { id: existing.id },
+          data:  { isLatest: true },
+        }).catch(() => {});
       }
 
       return 'contradict';
@@ -2755,18 +2855,38 @@ Output JSON only:
         }
 
         const evidenceIds = promptMembers.map(m => m.id).filter(Boolean);
-        const created = await this._writeSynthMemory({
-          orgId,
-          userId:     members[0].userId,
-          project:    members[0].project,
-          sourceType: 'principle',
-          tag,
-          members:    promptMembers,
-          content:    principleText,
-          confidence,
-          evidenceIds,
-          clusterHash: hash,
-        });
+        // C1: serialize principle create per (orgId, clusterHash).
+        let created;
+        try {
+          await this.prisma.$transaction(async (tx) => {
+            await withGovernanceLock(tx, { orgId, agentName: `synth:${hash}` }, async () => {
+              const alreadyExists = await this.prisma.memory.findFirst({
+                where: { orgId, synthesisClusterHash: hash, isLatest: true, deletedAt: null },
+                select: { id: true },
+              });
+              if (alreadyExists) return;
+              created = await this._writeSynthMemory({
+                orgId,
+                userId:     members[0].userId,
+                project:    members[0].project,
+                sourceType: 'principle',
+                tag,
+                members:    promptMembers,
+                content:    principleText,
+                confidence,
+                evidenceIds,
+                clusterHash: hash,
+              });
+            });
+          }, { timeout: Number(process.env.COGNITION_SYNTH_TXN_TIMEOUT_MS || 10 * 60 * 1000), maxWait: 8000 });
+        } catch (lockErr) {
+          if (lockErr?.code === 'GOVERNANCE_LOCK_BUSY') {
+            this.logger.log?.(`[cognition] synth hash ${hash.slice(0,8)} busy on other replica — skip`);
+            continue;
+          }
+          this.logger.warn(`[cognition] synth hash ${hash.slice(0,8)} failed: ${lockErr?.message || lockErr}`);
+          continue;
+        }
         if (created) {
           writes++;
           this.logger.log(`[cognition] principle tag=${tag} conf=${confidence.toFixed(2)} → ${String(created.id).slice(0, 8)}`);

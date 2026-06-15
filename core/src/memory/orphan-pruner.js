@@ -63,6 +63,35 @@ export async function collectDerivedCandidates(prisma, rootIds) {
   return Array.from(candidates);
 }
 
+/**
+ * Periodic safety sweep: scan an org's cognition outputs and prune any that are
+ * orphaned (no live upstream). Catches orphans from delete paths that don't call
+ * the event-driven prune (direct DB deletes, unwired endpoints). Bounded by
+ * `limit` cognition rows scanned per call.
+ * @returns {Promise<{ scanned: number, prunedIds: string[] }>}
+ */
+export async function sweepOrphanedCognition({ prisma, orgId, limit = 2000, logger = console, qdrantUrl, qdrantKey }) {
+  if (!prisma || !orgId) return { scanned: 0, prunedIds: [] };
+  let cog = [];
+  try {
+    cog = await prisma.memory.findMany({
+      where: {
+        orgId, deletedAt: null,
+        OR: [{ memoryType: 'synthesis' }, { tags: { has: 'cognition-loop' } }, { tags: { has: 'distilled-from-kb' } }],
+      },
+      select: { id: true },
+      take: limit,
+    });
+  } catch (e) { logger?.warn?.(`[orphan-pruner] sweep scan failed org=${String(orgId).slice(0, 8)}: ${e.message}`); return { scanned: 0, prunedIds: [] }; }
+  // Reuse the same orphan test + recursion via pruneOrphanedCognition; every
+  // cognition row is a candidate.
+  const { prunedIds } = await pruneOrphanedCognition({
+    prisma, orgId, candidateIds: cog.map((m) => m.id), logger, qdrantUrl, qdrantKey,
+  });
+  if (prunedIds.length) logger?.log?.(`[orphan-pruner] sweep org=${String(orgId).slice(0, 8)} scanned=${cog.length} pruned=${prunedIds.length}`);
+  return { scanned: cog.length, prunedIds };
+}
+
 /** True when `id` is a cognition output whose every upstream is now dead. */
 async function isOrphanedDerived(prisma, id) {
   const m = await prisma.memory.findUnique({

@@ -395,6 +395,20 @@ export class ResidentAgentScheduler {
             }
           }
         }
+        // Orphaned-cognition safety sweep (same slow cadence). The delete handlers
+        // prune event-driven, but this catches orphans left by direct DB deletes
+        // or any unwired delete path — a self-healing backstop.
+        if (this.prisma && process.env.ORPHAN_SWEEP_ENABLED !== 'false') {
+          try {
+            const { sweepOrphanedCognition } = await import('../memory/orphan-pruner.js');
+            for (const o of orgs) {
+              const r = await sweepOrphanedCognition({ prisma: this.prisma, orgId: o.id, logger: this.logger });
+              if (r.prunedIds?.length) this.logger?.log?.(`[gov-scheduler] orphan-sweep org=${o.id.slice(0,8)} pruned=${r.prunedIds.length}`);
+            }
+          } catch (err) {
+            this.logger?.warn?.(`[gov-scheduler] orphan-sweep failed: ${err?.message || err}`);
+          }
+        }
       }
       await this._maybeEvolve(orgs);
     } catch (err) {

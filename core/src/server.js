@@ -12523,16 +12523,27 @@ exit \$RC
               // to delete it". Without this the userId-scoped resolution below just
               // finds nothing and silently no-ops, which reads as a broken button.
               const isAdminDel = principal?.scopes?.includes('admin') || principal?.master;
-              if (deleteMemoryId && !isAdminDel) {
-                const ownerRow = await prisma.memory.findFirst({
-                  where: { id: deleteMemoryId, orgId, deletedAt: null },
-                  select: { userId: true },
+              const candidateId = deleteMemoryId || (UUID_RE.test(rawId || '') ? rawId : null);
+              if (candidateId && !isAdminDel) {
+                // The id may be a memory OR a knowledge_document — check both.
+                // Creator-only: this overrides the older "any org member may delete
+                // a shared doc" behaviour below, per the creator-only requirement.
+                let ownerUserId = null;
+                const memRow = await prisma.memory.findFirst({
+                  where: { id: candidateId, orgId, deletedAt: null }, select: { userId: true },
                 }).catch(() => null);
-                if (ownerRow && ownerRow.userId !== userId) {
+                if (memRow) ownerUserId = memRow.userId;
+                if (!ownerUserId) {
+                  const docRow = await prisma.knowledgeDocument.findFirst({
+                    where: { id: candidateId, orgId }, select: { userId: true },
+                  }).catch(() => null);
+                  if (docRow) ownerUserId = docRow.userId;
+                }
+                if (ownerUserId && ownerUserId !== userId) {
                   let owner = null;
                   try {
                     const u = await prisma.user.findUnique({
-                      where: { id: ownerRow.userId },
+                      where: { id: ownerUserId },
                       select: { displayName: true, email: true },
                     });
                     if (u) owner = { name: u.displayName || null, email: u.email || null };
@@ -12878,14 +12889,28 @@ exit \$RC
                           select: { id: true },
                         }));
                       const allMems = Array.from(new Set([...linkedMems, ...taggedMems]));
+                      let docOrphanCands = [];
+                      try {
+                        const { collectDerivedCandidates } = await import('./memory/orphan-pruner.js');
+                        docOrphanCands = await collectDerivedCandidates(prisma, allMems);
+                      } catch { /* best-effort */ }
                       await purgeMemories(allMems);
                       await purgeKnowledgeDocs([doc.id]);
+                      let docPruned = [];
+                      if (docOrphanCands.length) {
+                        try {
+                          const { pruneOrphanedCognition } = await import('./memory/orphan-pruner.js');
+                          const r = await pruneOrphanedCognition({ prisma, orgId, candidateIds: docOrphanCands.filter((id) => !allMems.includes(id)), logger: console });
+                          docPruned = r.prunedIds || [];
+                        } catch { /* best-effort */ }
+                      }
                       invalidateAggregateCache({ userId, orgId, project: null });
                       return jsonResponse(res, {
                         success: true,
                         mode: 'phase1_document_delete',
                         documentId: doc.id,
                         deleted_memories: allMems.length,
+                        pruned_orphaned_cognition: docPruned.length,
                       });
                     }
                   } catch (phase1Err) {

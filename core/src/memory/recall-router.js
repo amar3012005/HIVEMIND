@@ -21,7 +21,7 @@
  *   - Cognition-loop canonicals propagate substantive source tags.
  */
 
-import { recallPersistedMemories, crossClusterEntityBoost } from './persisted-retrieval.js';
+import { recallPersistedMemories, crossClusterEntityBoost, normalizeQueryTemporalTokens } from './persisted-retrieval.js';
 import { ClusterIndex } from './cluster-index.js';
 // Two-reranker contract: this `rerank` is the OPT-IN CROSS-ENCODER pass (external model,
 // gated RERANK_ENABLED) on the agent path. The ALGORITHMIC ResultReranker (search/result-reranker.js)
@@ -40,6 +40,62 @@ const HOP3_LIVE_LIMIT          = 5;
 // algorithmic rerank shows a clean relevance cliff after ~5 (junk/redundancy
 // beyond), so default 5. Env-tunable (no redeploy to widen for summarize).
 const RECALL_DELIVER_LIMIT     = Number(process.env.RECALL_DELIVER_LIMIT || 5);
+
+// Event-time ranking boost: when the query carries a temporal token
+// (today/yesterday/last week/ISO date/month-name), multiplicatively lift
+// candidates whose `ts:YYYY-MM-DD` / `time:*` tags fall in the window.
+// Gated, off by default — flip per-org via env after shadow A/B.
+const EVENT_TIME_RANKING_BOOST = String(process.env.EVENT_TIME_RANKING_BOOST || 'false') === 'true';
+const EVENT_TIME_BOOST_ALPHA   = Number(process.env.EVENT_TIME_BOOST_ALPHA || 0.30);
+const EVENT_TIME_TOPK          = Number(process.env.EVENT_TIME_TOPK || 3);
+
+const _MONTHS = ['january','february','march','april','may','june','july','august','september','october','november','december'];
+function _monthWindowTags(query, nowMs) {
+  if (!query) return [];
+  const q = query.toLowerCase();
+  const tags = new Set();
+  for (let mi = 0; mi < 12; mi++) {
+    const name = _MONTHS[mi];
+    if (!new RegExp(`\\b${name}\\b`).test(q)) continue;
+    const yMatch = q.match(new RegExp(`${name}\\s+(\\d{4})`));
+    const year = yMatch ? Number(yMatch[1]) : new Date(nowMs).getUTCFullYear();
+    let startDay = 1, endDay = 31;
+    if (/\bearly\b/.test(q)) { startDay = 1;  endDay = 10; }
+    else if (/\bmid(?:-|\s)?\b/.test(q)) { startDay = 11; endDay = 20; }
+    else if (/\b(late|end of)\b/.test(q)) { startDay = 21; endDay = 31; }
+    for (let d = startDay; d <= endDay; d++) {
+      const ms = Date.UTC(year, mi, d);
+      if (Number.isFinite(ms) && new Date(ms).getUTCMonth() === mi) {
+        const iso = new Date(ms).toISOString().slice(0, 10);
+        tags.add(`ts:${iso}`);
+        tags.add(`time:${iso}`);
+      }
+    }
+  }
+  return Array.from(tags);
+}
+
+function applyEventTimeBoost(memories, query) {
+  if (!EVENT_TIME_RANKING_BOOST || !memories?.length || !query) return memories;
+  const now = Date.now();
+  const window = new Set([
+    ...normalizeQueryTemporalTokens(query, now),
+    ..._monthWindowTags(query, now),
+  ]);
+  if (window.size === 0) return memories;
+  let boosted = 0;
+  const out = memories.map((m) => {
+    const hit = (m.tags || []).some((t) => window.has(t));
+    if (!hit) return m;
+    boosted++;
+    const base = Number(m._rank_score) || Number(m.score) || 0;
+    return { ...m, _rank_score: base * (1 + EVENT_TIME_BOOST_ALPHA), _event_time_boosted: true };
+  }).sort((a, b) => (Number(b._rank_score) || 0) - (Number(a._rank_score) || 0));
+  if (boosted > 0) {
+    console.log(`[recall-router] event-time-boost: window=${window.size} tags, boosted=${boosted}/${memories.length}`);
+  }
+  return out;
+}
 
 const HOP1_TIMEOUT_MS          = 4000;
 const HOP2_TIMEOUT_MS          = 1500;
@@ -704,8 +760,12 @@ export class RecallRouter {
     // back empty, the relevant memories may live outside that project (e.g.
     // personal-scope or org-wide). Retry once without projectId so chat
     // doesn't hallucinate "I don't have any notes" when memories exist.
+    // Single capped retry — at 10M an empty-project query re-running a full
+    // pool-150 org recall is a 2× scan; gate it (RECALL_PROJECT_FALLBACK=false
+    // to disable per deployment) so high-volume tenants can opt out.
     let projectFallbackFired = false;
-    if (memories.length === 0 && ctx.projectId) {
+    const _projectFallbackEnabled = process.env.RECALL_PROJECT_FALLBACK !== 'false';
+    if (_projectFallbackEnabled && memories.length === 0 && ctx.projectId) {
       const ctxBroad = { ...ctx, projectId: null };
       memories = await withTimeout(
         hop1Memory({ store: this.store, query, options, ctx: ctxBroad }),
@@ -778,6 +838,7 @@ export class RecallRouter {
     }
 
     rankedMemories = applyScoreFloor(rankedMemories, 0.40);
+    rankedMemories = applyEventTimeBoost(rankedMemories, query);
     rankedMemories = applyMMRDiversity(rankedMemories, 0.70);
     rankedMemories = collapseClusterDuplicates(rankedMemories);
 

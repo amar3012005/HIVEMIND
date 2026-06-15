@@ -7357,16 +7357,33 @@ exit \$RC
             }
             const hardDelete = url.searchParams.get('hard') === 'true';
             if (hardDelete && typeof persistentMemoryStore.hardDeleteMemories === 'function') {
+              const memOrg = existing.org_id || existing.orgId || orgId;
+              // Capture derived cognition outputs BEFORE the hard delete (it removes
+              // the Derives edges we use to find them), then prune any orphaned by
+              // this delete — so deleting a source memory cascades to the summaries
+              // built on it instead of leaving them stranded.
+              let orphanCandidates = [];
+              try {
+                const { collectDerivedCandidates } = await import('./memory/orphan-pruner.js');
+                orphanCandidates = await collectDerivedCandidates(prisma, [memoryId]);
+              } catch { /* best-effort */ }
               await persistentMemoryStore.hardDeleteMemories([memoryId]);
               try {
                 const qUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
-                const qColl = (process.env.QDRANT_PER_TENANT === 'true' && (existing.org_id || existing.orgId || orgId)) ? `org_${existing.org_id || existing.orgId || orgId}` : 'HIVEMIND_PERSONAL';
+                const qColl = (process.env.QDRANT_PER_TENANT === 'true' && memOrg) ? `org_${memOrg}` : 'HIVEMIND_PERSONAL';
                 const qKey = process.env.QDRANT_API_KEY || '';
                 if (qUrl) await fetch(`${qUrl}/collections/${encodeURIComponent(qColl)}/points/delete?wait=true`, {
                   method: 'POST', headers: { 'Content-Type': 'application/json', ...(qKey ? { 'api-key': qKey } : {}) },
                   body: JSON.stringify({ points: [memoryId] }),
                 }).catch(() => {});
               } catch { /* qdrant best-effort */ }
+              if (orphanCandidates.length) {
+                try {
+                  const { pruneOrphanedCognition } = await import('./memory/orphan-pruner.js');
+                  const r = await pruneOrphanedCognition({ prisma, orgId: memOrg, candidateIds: orphanCandidates.filter((id) => id !== memoryId), logger: console });
+                  if (r.prunedIds?.length) console.log(`[memory-delete] pruned ${r.prunedIds.length} orphaned cognition output(s)`);
+                } catch (pErr) { console.warn('[memory-delete] orphan prune failed:', pErr.message); }
+              }
             } else {
               await persistentMemoryStore.deleteMemory(memoryId);
             }
@@ -12915,20 +12932,55 @@ exit \$RC
               }
               console.log(`[knowledge-delete] resolution=${resolutionStrategy} target=${deleteMemoryId || deleteUploadId} memories=${memoryIds.length} docs=${linkedDocIds.length}`);
 
+              // Capture derived cognition outputs (syntheses / distilled facts)
+              // that reference the about-to-be-deleted sources BEFORE we purge —
+              // purge deletes their Derives edges + evidence links, after which
+              // we'd no longer be able to find the parents. (orphan-pruner fix:
+              // deleting source memories must cascade to the summaries built on
+              // them, else stale cognition outputs linger — the Solvis bug.)
+              let orphanCandidates = [];
+              try {
+                const { collectDerivedCandidates } = await import('./memory/orphan-pruner.js');
+                orphanCandidates = await collectDerivedCandidates(prisma, memoryIds);
+                // distilled-from-kb facts linked to a deleted doc via evidence links
+                if (linkedDocIds.length) {
+                  const docLinks = await prisma.memoryEvidenceLink.findMany({
+                    where: { documentId: { in: linkedDocIds } }, select: { memoryId: true },
+                  }).catch(() => []);
+                  orphanCandidates.push(...docLinks.map((l) => l.memoryId).filter(Boolean));
+                }
+              } catch (capErr) { console.warn('[knowledge-delete] orphan-candidate capture failed:', capErr.message); }
+
               // Hard-delete memories (+ all FK refs + Qdrant), then the linked
               // knowledge_document rows (+ segments + artifact + evidence) so
               // nothing remains on either the memories or knowledge page.
               await purgeMemories(memoryIds);
               await purgeKnowledgeDocs(linkedDocIds);
 
+              // Cascade: remove cognition outputs orphaned by the deletes above.
+              let prunedOrphans = [];
+              if (orphanCandidates.length) {
+                try {
+                  const { pruneOrphanedCognition } = await import('./memory/orphan-pruner.js');
+                  const r = await pruneOrphanedCognition({
+                    prisma, orgId,
+                    candidateIds: Array.from(new Set(orphanCandidates.filter((id) => !memoryIds.includes(id)))),
+                    logger: console,
+                  });
+                  prunedOrphans = r.prunedIds || [];
+                  if (prunedOrphans.length) console.log(`[knowledge-delete] pruned ${prunedOrphans.length} orphaned cognition output(s)`);
+                } catch (pErr) { console.warn('[knowledge-delete] orphan prune failed:', pErr.message); }
+              }
+
               invalidateAggregateCache({ userId, orgId, project: null });
 
-              console.log(`[knowledge-delete] Deleted ${memoryIds.length} memories + ${linkedDocIds.length} docs for ${deleteMemoryId || deleteUploadId}`);
+              console.log(`[knowledge-delete] Deleted ${memoryIds.length} memories + ${linkedDocIds.length} docs (+ ${prunedOrphans.length} orphaned cognition) for ${deleteMemoryId || deleteUploadId}`);
 
               return jsonResponse(res, {
                 success: true,
                 deleted: memoryIds.length,
                 deleted_docs: linkedDocIds.length,
+                pruned_orphaned_cognition: prunedOrphans.length,
                 memory_ids: memoryIds,
               });
             } catch (err) {

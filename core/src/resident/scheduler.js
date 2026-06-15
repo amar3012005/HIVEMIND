@@ -133,8 +133,11 @@ export class ResidentAgentScheduler {
               // Cross-replica + cross-restart once/day guard: a scheduled run started
               // in the last 20h means today's dream already happened (per-process
               // date map only guards one process). 20h < 24h so tomorrow isn't blocked.
-              const recent = this.prisma.cognitionRun
-                ? await this.prisma.cognitionRun.findFirst({
+              // H7: read the dedup row on the LOCKED tx connection, not the pooled
+              // client — otherwise the once/20h check isn't serialized with the
+              // advisory lock and a second replica can miss a just-committed run.
+              const recent = tx.cognitionRun
+                ? await tx.cognitionRun.findFirst({
                     where: { orgId: sched.id, trigger: 'scheduled', startedAt: { gte: new Date(Date.now() - 20 * 3600 * 1000) } },
                     select: { id: true },
                   }).catch(() => null)
@@ -271,13 +274,20 @@ export class ResidentAgentScheduler {
       const now = Date.now();
       for (const o of orgs) {
         const last = this._lastEarlyDream.get(o.id) || 0;
-        if (now - last < this.earlyCooldownMs) continue; // cooldown — no storm
+        if (now - last < this.earlyCooldownMs) continue; // cheap per-process pre-filter
         let hot = [];
         try {
           hot = await this.clusterIndex.getDirtyClusters({ organizationId: o.id, minDirty: this.dirtyThreshold });
         } catch { hot = []; }
         if (!hot.length) continue;
+        // H4: cross-replica cooldown is the AUTHORITATIVE gate — the per-process
+        // Map above only saves a DB round-trip. Without this, each replica has its
+        // own Map and both fire the same hot org (duplicate synthesis, wasted
+        // tokens). Atomic claim via governance_agent_state (same idiom as the
+        // run-manager cycle lock): only the replica that wins the row fires.
+        const claimed = await this._claimEarlyDream(o.id);
         this._lastEarlyDream.set(o.id, now);
+        if (!claimed) continue; // another replica already fired within the window
         this.logger?.log?.(`[gov-scheduler] early dream org=${o.id.slice(0,8)} — ${hot.length} hot cluster(s)`);
         try {
           await this.runManager.runFullCycle({
@@ -295,6 +305,37 @@ export class ResidentAgentScheduler {
       this.logger?.warn?.(`[gov-scheduler] early-dream poll failed: ${err?.message || err}`);
     } finally {
       this.earlyInFlight = false;
+    }
+  }
+
+  /**
+   * H4: atomically claim the early-dream cooldown window for an org across
+   * replicas. Reuses the governance_agent_state row idiom (agent_name keyed,
+   * circuit_breaker_until as the cooldown expiry). The conditional ON CONFLICT
+   * UPDATE only fires when no live claim exists, so exactly one replica wins.
+   * @returns {Promise<boolean>} true if THIS replica won the window (should fire).
+   */
+  async _claimEarlyDream(orgId) {
+    if (!this.prisma) return true; // no DB to coordinate (dev) → allow
+    try {
+      const until = new Date(Date.now() + this.earlyCooldownMs).toISOString();
+      const affected = await this.prisma.$executeRawUnsafe(
+        `INSERT INTO hivemind.governance_agent_state
+           (agent_name, circuit_breaker_until, updated_at)
+         VALUES ($1, $2::timestamptz, now())
+         ON CONFLICT (agent_name) DO UPDATE
+           SET circuit_breaker_until = EXCLUDED.circuit_breaker_until,
+               updated_at = now()
+           WHERE governance_agent_state.circuit_breaker_until IS NULL
+              OR governance_agent_state.circuit_breaker_until < now()`,
+        `early-dream:${orgId}`,
+        until,
+      );
+      return affected === 1;
+    } catch (err) {
+      // Fail OPEN — a stalled claim must not block dreaming entirely.
+      this.logger?.warn?.(`[gov-scheduler] early-dream claim failed org=${orgId.slice(0,8)}: ${err.message}`);
+      return true;
     }
   }
 

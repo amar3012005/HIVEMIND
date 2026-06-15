@@ -828,51 +828,11 @@ export class ResidentRunManager {
     let lockAcquired = false;
     const LOCK_HOLD_MS = 10 * 60 * 1000; // 10 min cycle ceiling
 
-    // Token-budget circuit breaker: reset day, check spend, refuse if exhausted.
-    // PHASE E: when the shared pool is enabled, the pool is the authoritative
-    // cap and the per-agent breaker becomes advisory. Otherwise the original
-    // per-agent block runs byte-identically.
-    if (this.prisma && isPoolEnabled()) {
-      try {
-        await ensurePoolRow(this.prisma);
-        const { spent, budget, exhausted } = await resetAndReadPool(this.prisma);
-        if (exhausted) {
-          this.logger?.warn?.(`[gov-cycle] shared token pool exhausted (spent=${spent}/${budget})`);
-          return {
-            batch_id: batchId,
-            status: 'skipped_budget_exhausted',
-            pool: { spent, budget },
-          };
-        }
-      } catch (err) {
-        this.logger?.warn?.(`[gov-cycle] pool-budget check failed: ${err.message}`);
-      }
-    } else if (this.prisma) {
-      try {
-        await this.prisma.$executeRawUnsafe(
-          `UPDATE hivemind.governance_agent_state
-             SET tokens_spent_today = 0,
-                 token_budget_reset_at = CURRENT_DATE
-           WHERE token_budget_reset_at < CURRENT_DATE`
-        );
-        const exhausted = await this.prisma.$queryRawUnsafe(
-          `SELECT agent_name, tokens_spent_today, daily_token_budget
-             FROM hivemind.governance_agent_state
-            WHERE agent_name IN ('faraday','feynman','turing')
-              AND tokens_spent_today >= daily_token_budget`
-        );
-        if (Array.isArray(exhausted) && exhausted.length > 0) {
-          this.logger?.warn?.(`[gov-cycle] token budget exhausted for: ${exhausted.map(e => e.agent_name).join(',')}`);
-          return {
-            batch_id: batchId,
-            status: 'skipped_budget_exhausted',
-            agents_over_budget: exhausted.map((e) => e.agent_name),
-          };
-        }
-      } catch (err) {
-        this.logger?.warn?.(`[gov-cycle] token-budget check failed: ${err.message}`);
-      }
-    }
+    // H3: the token-budget circuit breaker MOVED to AFTER cycle-lock acquisition
+    // (just below). Reading spend before the lock let two replicas both pass the
+    // exhausted-check, and although only the lock-holder spends (so a true 2x
+    // burn was already prevented by the lock), keeping check+spend under the same
+    // lock makes the gate authoritative and TOCTOU-free.
 
     // Row-level cycle lock. Single atomic INSERT ... ON CONFLICT DO UPDATE
     // so we acquire on first-ever cycle AND steal an expired lock — without
@@ -898,6 +858,64 @@ export class ResidentRunManager {
         lockAcquired = true;
       } catch (err) {
         this.logger?.warn?.(`[gov-cycle] row-lock acquire failed: ${err.message}`);
+      }
+    }
+
+    // H3: token-budget circuit breaker — now AFTER the cycle lock so the
+    // exhausted-check and the post-cycle spendPool() are serialized by the same
+    // lock (only the lock-holder reaches here). PHASE E: when the shared pool is
+    // enabled it is the authoritative cap; otherwise the per-agent breaker runs.
+    if (this.prisma && isPoolEnabled()) {
+      try {
+        await ensurePoolRow(this.prisma);
+        const { spent, budget, exhausted } = await resetAndReadPool(this.prisma);
+        if (exhausted) {
+          this.logger?.warn?.(`[gov-cycle] shared token pool exhausted (spent=${spent}/${budget})`);
+          // Release the cycle lock we just acquired before the early return,
+          // otherwise it would stay held until LOCK_HOLD_MS expires.
+          if (lockAcquired && this.prisma) {
+            await this.prisma.$executeRawUnsafe(
+              `UPDATE hivemind.governance_agent_state SET circuit_breaker_until = NULL WHERE agent_name = 'governance-cycle'`
+            ).catch(() => {});
+          }
+          return {
+            batch_id: batchId,
+            status: 'skipped_budget_exhausted',
+            pool: { spent, budget },
+          };
+        }
+      } catch (err) {
+        this.logger?.warn?.(`[gov-cycle] pool-budget check failed: ${err.message}`);
+      }
+    } else if (this.prisma) {
+      try {
+        await this.prisma.$executeRawUnsafe(
+          `UPDATE hivemind.governance_agent_state
+             SET tokens_spent_today = 0,
+                 token_budget_reset_at = CURRENT_DATE
+           WHERE token_budget_reset_at < CURRENT_DATE`
+        );
+        const exhausted = await this.prisma.$queryRawUnsafe(
+          `SELECT agent_name, tokens_spent_today, daily_token_budget
+             FROM hivemind.governance_agent_state
+            WHERE agent_name IN ('faraday','feynman','turing')
+              AND tokens_spent_today >= daily_token_budget`
+        );
+        if (Array.isArray(exhausted) && exhausted.length > 0) {
+          this.logger?.warn?.(`[gov-cycle] token budget exhausted for: ${exhausted.map(e => e.agent_name).join(',')}`);
+          if (lockAcquired && this.prisma) {
+            await this.prisma.$executeRawUnsafe(
+              `UPDATE hivemind.governance_agent_state SET circuit_breaker_until = NULL WHERE agent_name = 'governance-cycle'`
+            ).catch(() => {});
+          }
+          return {
+            batch_id: batchId,
+            status: 'skipped_budget_exhausted',
+            agents_over_budget: exhausted.map((e) => e.agent_name),
+          };
+        }
+      } catch (err) {
+        this.logger?.warn?.(`[gov-cycle] token-budget check failed: ${err.message}`);
       }
     }
 

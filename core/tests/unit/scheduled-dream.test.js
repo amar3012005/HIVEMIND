@@ -14,6 +14,9 @@ const txStub = {
 
 function ctx(recentRun) {
   const calls = { runOnce: [] };
+  // H7: the once/20h dedup now reads tx.cognitionRun (on the locked tx), so the
+  // tx handed to the $transaction callback must expose cognitionRun.findFirst.
+  const tx = { ...txStub, cognitionRun: { findFirst: async () => recentRun } };
   return {
     calls,
     scheduleEnabled: true, scheduleInFlight: false, tickInFlight: false,
@@ -21,7 +24,7 @@ function ctx(recentRun) {
     _lastScheduledDreamDate: new Map(),
     logger: { log() {}, warn() {} },
     prisma: {
-      $transaction: async (fn) => fn(txStub),
+      $transaction: async (fn) => fn(tx),
       cognitionRun: { findFirst: async () => recentRun },
     },
     cognitionLoopRef: () => ({

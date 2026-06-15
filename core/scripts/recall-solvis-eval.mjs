@@ -23,6 +23,7 @@ const K = Number(process.env.EVAL_K || 8);
 const VARIANTS = [
   { mode: 'base', extra: {} },
   { mode: 'tiered', extra: { tiered_view: true } },
+  { mode: 'tier+x', extra: { tiered_view: true, cross_rerank: true } },
 ];
 const MODES = VARIANTS.map((v) => v.mode);
 if (!MK) { console.error('HIVEMIND_MASTER_API_KEY required'); process.exit(2); }

@@ -4,6 +4,7 @@ import { getQdrantClient } from '../vector/qdrant-client.js';
 import { getRetrievalConfig } from './retrieval-config.js';
 import { expandTemporalQuery } from '../search/time-aware-expander.js';
 import { ResultReranker } from '../search/result-reranker.js';
+import { rerank as crossEncoderRerank } from './reranker.js';
 
 // PHASE-B: single canonical ALGORITHMIC reranker, shared with three-tier-retrieval.js.
 // Lazily constructed inside the RECALL_TIERED_VIEW=true branch so the dark-by-default
@@ -1061,6 +1062,9 @@ export async function recallPersistedMemories(store, {
   tiered_view = null,        // per-call override of RECALL_TIERED_VIEW — turns on the algorithmic
                              // term-overlap ResultReranker at delivery (surfaces exact lexical
                              // matches over boosted-but-off-topic rows). null = env default.
+  cross_rerank = null,       // when true, run the multilingual cross-encoder (Cohere v3.5) over the
+                             // wide rerank window before delivery — recovers semantically-best rows
+                             // (esp. cross-lingual) the bi-encoder ranks low. null = off.
 }) {
   const temporalExpansion = expandTemporalQuery(query_context);
   const effectiveDateRange = date_range || temporalExpansion.dateRange || null;
@@ -1851,7 +1855,12 @@ export async function recallPersistedMemories(store, {
       }
       return b.score - a.score; // default: score descending
     })
-    .slice(0, max_memories);
+    // RERANK WINDOW — keep a wide window (not just the delivered top-N) so the
+    // rerankers below can surface a relevant row buried by score (e.g. a cross-
+    // lingual exact match the bi-encoder ranks ~16th). Sliced to max_memories
+    // AFTER reranking. This was the structural bug: old code sliced to
+    // max_memories here, so rerankers only reordered the already-cut top-N.
+    .slice(0, Math.min(finalItems.length, Math.max(max_memories * 6, 50)));
 
   // PHASE-B: tiered-view delivery reranking via the canonical algorithmic
   // ResultReranker (shared with three-tier-retrieval.js). Dark by default —
@@ -1880,6 +1889,29 @@ export async function recallPersistedMemories(store, {
       }))
     );
   }
+
+  // Cross-encoder rerank (Cohere v3.5, multilingual) over the wide window —
+  // gated. Recovers semantically-best rows the bi-encoder + term-overlap rank
+  // low, especially cross-lingual (English query vs German fact). Reads
+  // title/content (surfaced from the wrapper); graceful — keeps order on any
+  // failure/timeout. Fires only when cross_rerank is on AND reranker env is set.
+  if ((cross_rerank === true) && top.length > 1) {
+    try {
+      const crq = typeof query_context === 'string'
+        ? query_context
+        : (query_context?.text ?? query_context?.query ?? String(query_context));
+      const reranked = await crossEncoderRerank(
+        crq,
+        top.map((item) => ({ ...item, title: item.memory?.title ?? item.title, content: item.memory?.content ?? item.content })),
+        { topN: top.length },
+      );
+      if (Array.isArray(reranked) && reranked.length) top = reranked;
+    } catch (e) { /* graceful degrade — keep current order */ }
+  }
+
+  // Deliver-narrow: slice the reranked WINDOW down to the requested count now
+  // (the window was kept wide above so the rerankers could surface buried rows).
+  top = top.slice(0, max_memories);
 
   // ── Head-slot: guarantee top synthesis candidate is first ─────────────────
   // When mode !== 'date_asc/date_desc' and the top synthesis candidate has a

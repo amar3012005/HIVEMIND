@@ -17408,6 +17408,7 @@ exit \$RC
                 scope_filter: body.scope_filter || null,
                 entity_filter_mode: body.entity_filter_mode || null, // A/B override for the entity lane
                 tiered_view: body.tiered_view ?? null,                // A/B override for the term-overlap reranker
+                cross_rerank: body.cross_rerank ?? null,              // A/B override for the multilingual cross-encoder
                 bitemporal: bitemporalFilter,
               });
 

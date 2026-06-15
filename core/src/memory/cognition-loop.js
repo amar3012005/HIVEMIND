@@ -1723,11 +1723,26 @@ Output JSON only:
   // ─── Phase 2: Confidence cap per revision ────────────────────────────────────
   // Prevents overconfidence early in a synthesis's life. The cap loosens as
   // the same claim is reaffirmed across multiple ticks.
-  _capConfidence(rawConf, revision) {
-    const cap = revision === 1 ? 0.85
+  _capConfidence(rawConf, revision, evidenceCount = null) {
+    const revCap = revision === 1 ? 0.85
                : revision === 2 ? 0.90
                : revision === 3 ? 0.94
                : 0.98;
+    // H12: confidence must be bounded by ACTUAL SUPPORT, not just how many times
+    // the synthesis was re-touched. Without this, a synthesis REAFFIRMed 4× on the
+    // same 2 sources climbs to 0.98 — false confidence on thin support. The
+    // support cap rises with the TRUE evidence total (evidenceCountTotal, which is
+    // tracked even though synthesisEvidenceIds is capped at 20 hot ids). The
+    // effective cap is the tighter of the two. evidenceCount=null → revision-only
+    // (backward compatible).
+    let cap = revCap;
+    if (Number.isFinite(evidenceCount) && evidenceCount !== null) {
+      const supportCap = evidenceCount >= 12 ? 0.98
+                       : evidenceCount >= 6 ? 0.94
+                       : evidenceCount >= 3 ? 0.90
+                       : 0.85;
+      cap = Math.min(revCap, supportCap);
+    }
     return Math.min(cap, rawConf);
   }
 
@@ -1901,20 +1916,18 @@ Output JSON only:
 
     if (decision === 'REAFFIRM') {
       const newRev    = (existing.synthesisRevision || 1) + 1;
-      // Confidence: take the higher of prior and LLM output, then add 0.05 bump,
-      // then apply the per-revision cap.
-      const rawConf   = Math.min(0.98, Math.max(existing.synthesisConfidence || 0, llmConf) + 0.05);
-      const finalConf = this._capConfidence(rawConf, newRev);
-
-      // Cap evidence IDs at MAX_HOT_EVIDENCE (Move 2) + track total
+      // Evidence first — the support total bounds the confidence cap (H12).
       const MAX_HOT_EVIDENCE = 20;
       const merged    = [...(existing.synthesisEvidenceIds || []), ...(parsed.evidence_to_add || [])];
       const dedupe    = [...new Set(merged)];
       const hot       = dedupe.slice(-MAX_HOT_EVIDENCE);
       const evidenceCountTotal = dedupe.length;
-      // H12: the hot window drops the oldest ids silently — surface it. The full
-      // count is preserved in evidenceCountTotal (→ cluster_index) so grounding
-      // decisions can use the true support size, not just the 20 hot ids.
+      // Confidence: take the higher of prior and LLM output, then add 0.05 bump,
+      // then apply the per-revision cap bounded by actual support (evidenceCountTotal).
+      const rawConf   = Math.min(0.98, Math.max(existing.synthesisConfidence || 0, llmConf) + 0.05);
+      const finalConf = this._capConfidence(rawConf, newRev, evidenceCountTotal);
+      // H12: the hot window drops the oldest ids silently — surface it. Full count
+      // stays in evidenceCountTotal (→ cluster_index) + now bounds confidence above.
       if (dedupe.length > MAX_HOT_EVIDENCE) {
         this.logger.log?.(`[cognition] REAFFIRM evidence truncated ${dedupe.length}→${MAX_HOT_EVIDENCE} hot (total tracked=${evidenceCountTotal}) ${existing.id.slice(0,8)}`);
       }
@@ -1978,18 +1991,18 @@ Output JSON only:
 
     if (decision === 'EXTEND') {
       const newRev    = (existing.synthesisRevision || 1) + 1;
-      const finalConf = this._capConfidence(llmConf, newRev);
       const claim     = (parsed.new_claim && parsed.new_claim.length > 20)
         ? parsed.new_claim
         : (existing.content || '');
 
-      // Cap evidence IDs at MAX_HOT_EVIDENCE (Move 2)
+      // Evidence first — support total bounds the confidence cap (H12).
       const MAX_HOT_EVIDENCE = 20;
       const rawEvidenceIds = (parsed.evidence_to_add || []).filter(Boolean);
       const mergedEv = [...(existing.synthesisEvidenceIds || []), ...rawEvidenceIds];
       const dedupeEv = [...new Set(mergedEv)];
       const evidenceIds      = dedupeEv.slice(-MAX_HOT_EVIDENCE);
       const evidenceCountTotal = dedupeEv.length;
+      const finalConf = this._capConfidence(llmConf, newRev, evidenceCountTotal);
       if (dedupeEv.length > MAX_HOT_EVIDENCE) {
         this.logger.log?.(`[cognition] EXTEND evidence truncated ${dedupeEv.length}→${MAX_HOT_EVIDENCE} hot (total tracked=${evidenceCountTotal}) ${existing.id.slice(0,8)}`);
       }
@@ -2138,16 +2151,15 @@ Output JSON only:
       const claim     = (parsed.new_claim && parsed.new_claim.length > 20)
         ? parsed.new_claim
         : (existing.content || '');
-      // CONTRADICT resets revision to 1, confidence capped at 0.85 (revision-1 cap)
-      const finalConf = this._capConfidence(llmConf, 1);
-
-      // Cap evidence IDs (Move 2)
+      // Evidence first — support total bounds the confidence cap (H12).
       const MAX_HOT_EVIDENCE = 20;
       const rawContrEv = (parsed.evidence_to_add || []).filter(Boolean);
       const mergedContr = [...(existing.synthesisEvidenceIds || []), ...rawContrEv];
       const dedupeContr = [...new Set(mergedContr)];
       const evidenceIds = dedupeContr.slice(-MAX_HOT_EVIDENCE);
       const contrEvidenceCountTotal = dedupeContr.length;
+      // CONTRADICT resets revision to 1, capped at 0.85 (rev-1) AND by support.
+      const finalConf = this._capConfidence(llmConf, 1, contrEvidenceCountTotal);
       if (dedupeContr.length > MAX_HOT_EVIDENCE) {
         this.logger.log?.(`[cognition] CONTRADICT evidence truncated ${dedupeContr.length}→${MAX_HOT_EVIDENCE} hot (total tracked=${contrEvidenceCountTotal}) ${existing.id.slice(0,8)}`);
       }

@@ -2750,8 +2750,29 @@ const server = http.createServer(async (req, res) => {
       orgRole: membership.role || null,
     });
 
+    // The card "N memories" must reconcile with the Memories page + graph,
+    // which hide KB-child facts (extracted-fact) and governance/audit noise by
+    // default. project._count.memories is the RAW join (counts every KB child)
+    // → for a KB-heavy project it overstated ~4.6x (e.g. 2123 vs the 454 the
+    // page shows). Recount with the same visible filter (dreams stay visible).
+    const HIDDEN_TAGS = ['extracted-fact', 'internal-audit', 'governance', 'reflection'];
+    const visibleCounts = prisma
+      ? await Promise.all(projects.map((p) => prisma.memory.count({
+          where: {
+            orgId,
+            isLatest: true,
+            deletedAt: null,
+            memoryProjects: { some: { projectId: p.id } },
+            OR: [
+              { cognitiveLayerRole: { in: ['canonical', 'bridge', 'principle'] } },
+              { NOT: { tags: { hasSome: HIDDEN_TAGS } } },
+            ],
+          },
+        }).catch(() => null)))
+      : projects.map(() => null);
+
     return jsonResponse(res, {
-      projects: projects.map((project) => ({
+      projects: projects.map((project, i) => ({
         id: project.id,
         org_id: project.orgId,
         name: project.name,
@@ -2759,7 +2780,8 @@ const server = http.createServer(async (req, res) => {
         description: project.description,
         policy: project.policy,
         member_count: project._count?.members ?? 0,
-        memory_count: project._count?.memories ?? 0,
+        memory_count: visibleCounts[i] ?? project._count?.memories ?? 0,
+        memory_count_raw: project._count?.memories ?? 0, // raw join incl KB children (debug/insight)
         created_by: project.createdBy,
         created_at: project.createdAt,
         updated_at: project.updatedAt,

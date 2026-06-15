@@ -19066,7 +19066,6 @@ exit \$RC
                 query_context: query,
                 user_id: userId,
                 org_id: orgId,
-                project: searchProject,
                 ...(searchProject ? { project_id: searchProject } : {}),
                 tags: Array.isArray(tags) ? tags : (tags ? String(tags).split(',').map((t) => t.trim()).filter(Boolean) : []),
                 source_platforms: source_platform ? [source_platform] : [],

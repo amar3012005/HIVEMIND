@@ -473,6 +473,15 @@ function isMemoryInDateRange(memory, dateRange) {
   });
 }
 
+// Retrieve-wide → deliver-narrow. The candidate pool must stay WIDE regardless
+// of how many rows the caller wants delivered — otherwise asking for 8 fetches
+// only ~32 candidates, and a relevant row that ranks (say) 40th in a wide pool
+// is never even fetched, so MMR/score-floor can't recover it. This starved the
+// pool for every small-deliver caller (Tara max=6-8, chat max=8) and was the
+// real cause of "exact fact missed at k=8 but rank-1 at k=50". Floor is env-
+// tunable; default 150 captures the cross-lingual / long-tail matches.
+const RECALL_POOL_FLOOR = Math.max(Number(process.env.RECALL_CANDIDATE_POOL || 150), 50);
+
 async function vectorCandidatesForRecall(store, {
   query_context,
   user_id,
@@ -484,7 +493,7 @@ async function vectorCandidatesForRecall(store, {
   dateRange = null,
   scoreThreshold = 0.25,
   hnswEf = undefined, // PHASE-F: per-org HNSW ef_search; undefined → searchMemories falls back to EF_SEARCH_DEFAULT
-  candidatePoolSize = Math.max(max_memories * 4, 20),
+  candidatePoolSize = Math.max(max_memories * 4, RECALL_POOL_FLOOR),
   is_latest = true,
   access_context = null,
   scope_filter = null,
@@ -1075,8 +1084,8 @@ export async function recallPersistedMemories(store, {
     return dates.some((d) => d >= _eventWin.s && d <= _eventWin.e) ? 0.6 : 0;
   };
   const candidatePoolSize = temporalComparison
-    ? Math.max(max_memories * 8, 40)
-    : Math.max(max_memories * 4, 20);
+    ? Math.max(max_memories * 8, RECALL_POOL_FLOOR)
+    : Math.max(max_memories * 4, RECALL_POOL_FLOOR);
   // Phase 2 (B2): non-temporal score threshold comes from the per-org
   // RetrievalConfig (the self-evolution loop's primary Recall@K knob), falling
   // back to 0.20. Temporal queries keep the looser 0.15 floor for recall.

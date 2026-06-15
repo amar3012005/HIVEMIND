@@ -487,6 +487,54 @@ function isMemoryInDateRange(memory, dateRange) {
 // tunable; default 150 captures the cross-lingual / long-tail matches.
 const RECALL_POOL_FLOOR = Math.max(Number(process.env.RECALL_CANDIDATE_POOL || 150), 50);
 
+// ── Cross-lingual / sparse-recall query expansion ─────────────────────────
+// When the primary vector recall is THIN (few candidates clear the score
+// floor — the classic signature of a cross-lingual query: an English question
+// over a German corpus scores every row low), a fast LLM proposes alternative
+// phrasings / translations that preserve entities + numbers, then we re-fetch
+// on those with a relaxed floor and merge. Gated on thin-recall so the rich-
+// corpus happy path never pays the LLM cost. Cached, timeout-bounded, graceful.
+const QUERY_EXPANSION_ENABLED = process.env.RECALL_QUERY_EXPANSION !== 'false';
+const EXPAND_MIN_CANDIDATES = Number(process.env.RECALL_EXPAND_MIN || 12);
+const _expansionCache = new Map(); // queryKey → string[] variants (bounded)
+
+async function expandQueryMultilingual(query) {
+  if (!query || typeof query !== 'string' || query.trim().length < 4) return [];
+  const key = query.trim().toLowerCase();
+  if (_expansionCache.has(key)) return _expansionCache.get(key);
+  if (!process.env.GROQ_API_KEY) return [];
+  let variants = [];
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 2500);
+    const r = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: process.env.RECALL_EXPANSION_MODEL || 'openai/gpt-oss-20b',
+        temperature: 0.1,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: 'A search query may be in a different language than the stored documents (e.g. an English question over German documents). Output STRICT JSON {"variants":["…"]} with up to 2 alternative phrasings that would match documents in the likely corpus language(s): translate the query to German (and, if plausible, the original language), keeping domain terms, product names, entities and numbers verbatim. If the query is already plainly in the corpus language, return {"variants":[]}.' },
+          { role: 'user', content: query.slice(0, 300) },
+        ],
+      }),
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+    if (r.ok) {
+      const j = await r.json();
+      const parsed = JSON.parse(j.choices?.[0]?.message?.content || '{}');
+      variants = (Array.isArray(parsed.variants) ? parsed.variants : [])
+        .filter((v) => typeof v === 'string' && v.trim() && v.trim().toLowerCase() !== key)
+        .slice(0, 2);
+    }
+  } catch (e) { variants = []; }
+  if (_expansionCache.size > 2000) _expansionCache.clear();
+  _expansionCache.set(key, variants);
+  return variants;
+}
+
 async function vectorCandidatesForRecall(store, {
   query_context,
   user_id,
@@ -1069,6 +1117,9 @@ export async function recallPersistedMemories(store, {
   cross_rerank = null,       // when true, run the multilingual cross-encoder (Cohere v3.5) over the
                              // wide rerank window before delivery — recovers semantically-best rows
                              // (esp. cross-lingual) the bi-encoder ranks low. null = off.
+  query_expansion = null,    // per-call override of RECALL_QUERY_EXPANSION — cross-lingual / sparse
+                             // rescue: when the primary recall is THIN, translate/rephrase the query
+                             // and merge extra candidates. null = env default.
 }) {
   const temporalExpansion = expandTemporalQuery(query_context);
   const effectiveDateRange = date_range || temporalExpansion.dateRange || null;
@@ -1243,6 +1294,33 @@ export async function recallPersistedMemories(store, {
     // Drop old TARA turn/insight vectors still living in Qdrant from past calls.
     .then((cands) => cands.filter((c) => !isTaraActivity(c?.memory) && !isRecallNoise(c?.memory)));
 
+  // Cross-lingual / sparse rescue: a THIN primary recall is the signature of a
+  // cross-lingual query (English question over German docs → every row low-
+  // cosine, few clear the floor). Translate/rephrase the query and merge extra
+  // candidates with a relaxed floor. Gated + thin-only → the rich-corpus happy
+  // path stays LLM-free and fast.
+  let crosslingualCandidates = [];
+  const _doExpand = query_expansion != null ? !!query_expansion : QUERY_EXPANSION_ENABLED;
+  if (_doExpand && vectorCandidates.length < EXPAND_MIN_CANDIDATES) {
+    const _variants = await expandQueryMultilingual(query_context);
+    if (_variants.length) {
+      const _fetched = await Promise.all(_variants.map((v) => vectorCandidatesForRecall(store, {
+        query_context: v, user_id, org_id, project, source_platforms,
+        tags: _effectiveTags, max_memories, dateRange: effectiveDateRange,
+        scoreThreshold: Math.min(vectorScoreThreshold ?? 0.25, 0.12), // relax for cross-lingual low-cosine
+        hnswEf: _wireCfg ? _cfg?.hnsw_ef : undefined,
+        candidatePoolSize, is_latest: effectiveIsLatest, access_context, scope_filter,
+      }).then((cands) => cands.filter((c) => !isTaraActivity(c?.memory) && !isRecallNoise(c?.memory))).catch(() => [])));
+      const _seen = new Set(vectorCandidates.map((c) => c?.memory?.id).filter(Boolean));
+      for (const arr of _fetched) {
+        for (const c of arr) {
+          const id = c?.memory?.id;
+          if (id && !_seen.has(id)) { _seen.add(id); crosslingualCandidates.push(c); }
+        }
+      }
+    }
+  }
+
   // SHOULD mode: ADDITIVE entity-filtered precision pass. The unfiltered passes
   // above are the recall FLOOR (protects legacy/untagged memories); this only
   // ADDS entity-tag matches, tagged _entity_filtered for the exact-match scoring
@@ -1292,7 +1370,7 @@ export async function recallPersistedMemories(store, {
 
   // Graph Expansion: Discover related memories through graph traversal
   const expandedCandidates = await expandCandidatesViaGraph(store, {
-    initialCandidates: [...filteredLexical.map(m => ({ memory: m, score: 0 })), ...vectorCandidates, ...entityFilteredCandidates, ...temporalFilteredCandidates],
+    initialCandidates: [...filteredLexical.map(m => ({ memory: m, score: 0 })), ...vectorCandidates, ...crosslingualCandidates, ...entityFilteredCandidates, ...temporalFilteredCandidates],
     relationships,
     relationshipCounts,
     query_context,

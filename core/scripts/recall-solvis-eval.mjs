@@ -21,9 +21,8 @@ const K = Number(process.env.EVAL_K || 8);
 // Variants: term-overlap reranker (tiered_view) OFF vs ON. Entity lane proven
 // dead on two corpora, dropped. Each variant is {label, body-extra}.
 const VARIANTS = [
-  { mode: 'base', extra: {} },
-  { mode: 'tiered', extra: { tiered_view: true } },
-  { mode: 'tier+x', extra: { tiered_view: true, cross_rerank: true } },
+  { mode: 'base', extra: {} },                            // tiered reranker now default-on
+  { mode: 'expand', extra: { query_expansion: true } },   // + cross-lingual query expansion
 ];
 const MODES = VARIANTS.map((v) => v.mode);
 if (!MK) { console.error('HIVEMIND_MASTER_API_KEY required'); process.exit(2); }

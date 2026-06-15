@@ -517,11 +517,11 @@ export class PrismaGraphStore {
     // 'tara/'`, which drops every project=NULL memory (SQL NULL LIKE semantics).
     const callerWantsTara = Array.isArray(tags) && tags.some((t) => typeof t === 'string' && t.startsWith('tara-'));
     if (!callerWantsTara) hiddenTags.push('tara-turn', 'tara-insight', 'tara-session', 'tara-call-log', 'tara-config', 'tara-skill');
-    // Tree-ingest / KB children carry 'extracted-fact' — they are sub-units of
-    // a parent memory, not standalone entries. Hide from the default list +
-    // total so the count reconciles with the graph + overview (which already
-    // exclude them). Caller opts in via include_children=true.
-    if (!include_children) hiddenTags.push('extracted-fact');
+    // Distilled KB facts (extracted-fact) are first-class memories — counted +
+    // listed everywhere, never hidden as "children". Only genuine noise
+    // (audit/governance/tara/room) is hidden above. (include_children retained
+    // for API compatibility; no longer gates the KB facts.)
+    void include_children;
     // hide_noise — connector ingests the user has flagged as low-signal.
     // Newsletters / promotions / social / forums / notifications get
     // hidden from the default Memories list. Recall-side score demotion

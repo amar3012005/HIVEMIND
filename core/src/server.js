@@ -2211,7 +2211,6 @@ async function buildProfileSummary({ userId, orgId, project = null }) {
     // dashboard counts reconcile (was only 4 tags → Overview counted governance
     // / hyper-room / tara-call-log/config/skill that the graph hid).
     const HIDDEN_CHILD_TAGS = [
-      'extracted-fact',
       'tara-turn', 'tara-insight', 'tara-call-log', 'tara-session', 'tara-config', 'tara-skill',
       'internal-audit', 'governance', 'reflection',
       'hyper-rooms', 'hyper-room', 'room-decision',
@@ -2256,7 +2255,7 @@ async function buildProfileSummary({ userId, orgId, project = null }) {
          WHERE m."user_id" = $1::uuid
            AND m."deleted_at" IS NULL
            AND m."is_latest" = true
-           AND NOT (m."tags" && ARRAY['extracted-fact','tara-turn','tara-insight','tara-call-log','tara-session','tara-config','tara-skill','internal-audit','governance','reflection','hyper-rooms','hyper-room','room-decision']::text[])`,
+           AND NOT (m."tags" && ARRAY['tara-turn','tara-insight','tara-call-log','tara-session','tara-config','tara-skill','internal-audit','governance','reflection','hyper-rooms','hyper-room','room-decision']::text[])`,
         userId
       );
       relationships = relRows?.[0]?.c || 0;
@@ -15785,7 +15784,6 @@ exit \$RC
                 'internal-audit', 'governance', 'reflection',
                 'room-decision', 'hyper-rooms', 'hyper-room',
                 'tara-turn', 'tara-insight', 'tara-session', 'tara-call-log', 'tara-config', 'tara-skill',
-                'extracted-fact',
               ];
               const statsNoise = { NOT: { tags: { hasSome: statsHiddenTags } } };
               const memWhere = { orgId, deletedAt: null, isLatest: true, OR: tiers, ...statsNoise };
@@ -17796,7 +17794,7 @@ exit \$RC
                 // `NOT project startsWith 'tara/'`: NULL LIKE → NULL → drops every
                 // project=NULL personal memory.)
                 ...(includeChildren ? {} : { AND: [
-                  { NOT: { tags: { hasSome: ['extracted-fact', 'tara-turn', 'tara-insight', 'tara-call-log', 'tara-session', 'tara-config', 'tara-skill', 'internal-audit', 'governance', 'reflection', 'hyper-rooms', 'hyper-room', 'room-decision'] } } },
+                  { NOT: { tags: { hasSome: ['tara-turn', 'tara-insight', 'tara-call-log', 'tara-session', 'tara-config', 'tara-skill', 'internal-audit', 'governance', 'reflection', 'hyper-rooms', 'hyper-room', 'room-decision'] } } },
                 ] }),
                 ...(projScope ? { OR: [{ projectId: projScope.id }, { project: { in: [projScope.slug, projScope.name].filter(Boolean) } }] } : {}),
               };
@@ -18036,7 +18034,6 @@ exit \$RC
               // cognitive-layer outputs (canonical-summary / synthesis:* / principle
               // / bridge) — those are real knowledge the user wants surfaced.
               const HIDDEN_CHILD_TAGS_GRAPH = [
-                'extracted-fact',
                 'tara-turn', 'tara-insight', 'tara-call-log', 'tara-session', 'tara-config', 'tara-skill',
                 // governance audit-reflection noise. NOTE: do NOT add
                 // 'cognition-loop' — the GOOD synthesis/canonical outputs carry

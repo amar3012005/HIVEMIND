@@ -2750,12 +2750,12 @@ const server = http.createServer(async (req, res) => {
       orgRole: membership.role || null,
     });
 
-    // The card "N memories" must reconcile with the Memories page + graph,
-    // which hide KB-child facts (extracted-fact) and governance/audit noise by
-    // default. project._count.memories is the RAW join (counts every KB child)
-    // → for a KB-heavy project it overstated ~4.6x (e.g. 2123 vs the 454 the
-    // page shows). Recount with the same visible filter (dreams stay visible).
-    const HIDDEN_TAGS = ['extracted-fact', 'internal-audit', 'governance', 'reflection'];
+    // The card "N memories" must reconcile with the Memories page + graph.
+    // project._count.memories is the RAW join (also counts superseded/deleted/
+    // governance rows). Recount with the canonical visible filter. NOTE:
+    // distilled KB facts (extracted-fact) ARE first-class memories now and are
+    // COUNTED everywhere — only genuine noise stays hidden.
+    const HIDDEN_TAGS = ['internal-audit', 'governance', 'reflection'];
     const visibleCounts = prisma
       ? await Promise.all(projects.map((p) => prisma.memory.count({
           where: {

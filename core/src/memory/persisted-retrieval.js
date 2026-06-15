@@ -515,7 +515,7 @@ async function expandQueryMultilingual(query) {
         temperature: 0.1,
         response_format: { type: 'json_object' },
         messages: [
-          { role: 'system', content: 'A search query may be in a different language than the stored documents (e.g. an English question over German documents). Output STRICT JSON {"variants":["…"]} with up to 2 alternative phrasings that would match documents in the likely corpus language(s): translate the query to German (and, if plausible, the original language), keeping domain terms, product names, entities and numbers verbatim. If the query is already plainly in the corpus language, return {"variants":[]}.' },
+          { role: 'system', content: 'A search query may be in a different language than the stored documents (often English query over German technical docs). Output STRICT JSON {"variants":["…"]} with up to 2 query rewrites that maximise lexical+semantic overlap with the documents. Rules: (1) FULLY translate EVERY word INCLUDING domain/technical nouns into German — e.g. "chimney sweep"→"Kaminkehrer/Schornsteinfeger", "button"→"Taste", "heat pump"→"Wärmepumpe", "manual mode"→"Handbetrieb"; do NOT leave English domain terms. (2) Keep numbers, units and product names verbatim (SolvisLea, 5). (3) One variant may be a terse keyword list of the translated key nouns. If the query is already plainly in the corpus language, return {"variants":[]}.' },
           { role: 'user', content: query.slice(0, 300) },
         ],
       }),

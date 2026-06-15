@@ -331,10 +331,17 @@ export class TaraStreamHandler {
   async _fastKBRecall(query, { userId, orgId }) {
     if (!query || query.length < 5) return [];
 
-    // Skip recall entirely for greetings / trivial turns — these waste
-    // budget and the prompt builder already handles cold-start phrasing.
-    const trivial = /^(hi|hey|hello|thanks|ok|yes|no|sure|bye|good|great)\b/i.test(query.trim());
+    // Skip recall ONLY when the WHOLE utterance is a bare greeting / filler.
+    // The check is end-anchored so a greeting PREFIX on a real question
+    // ("Hey, hi! So I want to know about Amar") still recalls — the old
+    // `^(hey)\b` matched that and wrongly skipped recall, so Tara answered
+    // "no record" on questions that merely opened with a hello.
+    const trivial = /^(hi+|hey+|hello|hi there|hey there|thanks|thank you|ok(ay)?|yes|no|sure|bye|good|great|cool|nice)[\s.!,'-]*$/i.test(query.trim());
     if (trivial) return [];
+
+    // Strip a leading greeting/filler prefix so the semantic recall query is
+    // the substantive ask ("I want to know about Amar"), not the hello noise.
+    query = query.replace(/^((hi+|hey+|hello|thanks|thank you|ok(ay)?|sure|so|well|um|uh)[\s,!.]+)+/i, '').trim() || query;
 
     const useFastPath = String(process.env.TARA_FAST_RECALL || '').toLowerCase() === 'true';
 

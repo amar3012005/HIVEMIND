@@ -52,6 +52,23 @@ test('member with cross_project ON sees cross-project (no NOT filter)', () => {
   assert.equal(w.NOT, undefined, 'no cross-project exclusion when enabled');
 });
 
+test('owner_only restricts to the caller\'s own rows (KB past-docs)', () => {
+  const w = scopedMemoryWhere({
+    user_id: USER, org_id: ORG, owner_only: true,
+    access_context: { projectIds: [PROJ], teamIds: [], orgRole: 'member' },
+  });
+  assert.equal(w.userId, USER, 'owner_only pins userId on the base');
+  assert.ok((w.OR || []).length > 0, 'still intersects with visible tiers');
+});
+
+test('without owner_only the base does not pin userId', () => {
+  const w = scopedMemoryWhere({
+    user_id: USER, org_id: ORG,
+    access_context: { projectIds: [PROJ], teamIds: [], orgRole: 'member' },
+  });
+  assert.equal(w.userId, undefined, 'no userId pin by default');
+});
+
 test('guest with no projects sees only personal', () => {
   const w = scopedMemoryWhere({
     user_id: USER, org_id: ORG,

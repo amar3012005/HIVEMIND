@@ -7352,8 +7352,27 @@ exit \$RC
             const isAdmin = principal.scopes?.includes('admin') || principal.master;
             const memOrg = existing.org_id || existing.orgId || null;
             const sameOrg = !memOrg || memOrg === orgId;
-            if ((existing.user_id !== userId || !sameOrg) && !isAdmin) {
+            // Cross-org → hide existence (404). Same-org but not the creator →
+            // creator-only delete: surface a 403 with the owner's identity so the
+            // UI can prompt "ask <owner> to delete it" instead of silently failing.
+            // org owners/admins may still delete anything in their org.
+            if (!sameOrg && !isAdmin) {
               return jsonResponse(res, { error: 'Not found' }, 404);
+            }
+            if (existing.user_id !== userId && !isAdmin) {
+              let owner = null;
+              try {
+                const u = await prisma.user.findUnique({
+                  where: { id: existing.user_id },
+                  select: { displayName: true, email: true },
+                });
+                if (u) owner = { name: u.displayName || null, email: u.email || null };
+              } catch { /* best-effort owner lookup */ }
+              return jsonResponse(res, {
+                error: 'Only the person who created this memory can delete it. Ask the owner to remove it.',
+                code: 'not_owner',
+                owner,
+              }, 403);
             }
             const hardDelete = url.searchParams.get('hard') === 'true';
             if (hardDelete && typeof persistentMemoryStore.hardDeleteMemories === 'function') {
@@ -12498,6 +12517,34 @@ exit \$RC
               let memoryIds = [];
               let resolutionStrategy = null;
 
+              // Creator-only delete: if this document exists in the org but was
+              // uploaded by a DIFFERENT user (and the caller isn't an org admin),
+              // refuse with the owner's identity so the UI can prompt "ask <owner>
+              // to delete it". Without this the userId-scoped resolution below just
+              // finds nothing and silently no-ops, which reads as a broken button.
+              const isAdminDel = principal?.scopes?.includes('admin') || principal?.master;
+              if (deleteMemoryId && !isAdminDel) {
+                const ownerRow = await prisma.memory.findFirst({
+                  where: { id: deleteMemoryId, orgId, deletedAt: null },
+                  select: { userId: true },
+                }).catch(() => null);
+                if (ownerRow && ownerRow.userId !== userId) {
+                  let owner = null;
+                  try {
+                    const u = await prisma.user.findUnique({
+                      where: { id: ownerRow.userId },
+                      select: { displayName: true, email: true },
+                    });
+                    if (u) owner = { name: u.displayName || null, email: u.email || null };
+                  } catch { /* best-effort owner lookup */ }
+                  return jsonResponse(res, {
+                    error: 'Only the person who uploaded this document can delete it. Ask the owner to remove it.',
+                    code: 'not_owner',
+                    owner,
+                  }, 403);
+                }
+              }
+
               // Helper: run a Prisma query but never let it bubble — log and
               // return [] so the next strategy can run.
               const safeFind = async (label, queryFn) => {
@@ -15794,6 +15841,9 @@ exit \$RC
             // so the Memories list shows only signal. Recall-side demotion
             // covers retrieval scoring; this is the visibility filter.
             const hideNoiseQ = url.searchParams.get('hide_noise') === 'true';
+            // owner_only: restrict to the caller's OWN memories (KB "past docs"
+            // must show only what THIS user uploaded, not every member's shared docs).
+            const ownerOnlyQ = url.searchParams.get('owner_only') === 'true';
             const { memories, total } = await persistentMemoryStore.listMemories({
               user_id: userId,
               org_id: orgId,
@@ -15807,6 +15857,7 @@ exit \$RC
               include_children: includeChildren,
               ...(scopeArg ? { scope: scopeArg } : {}),
               ...(hideNoiseQ ? { hide_noise: true } : {}),
+              ...(ownerOnlyQ ? { owner_only: true } : {}),
               access_context: listAccessCtx,
             });
 

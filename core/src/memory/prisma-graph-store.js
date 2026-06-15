@@ -158,11 +158,16 @@ function mapRelationshipRecord(record) {
   };
 }
 
-export function scopedMemoryWhere({ user_id, org_id, project, scope = 'personal', access_context = null }) {
+export function scopedMemoryWhere({ user_id, org_id, project, scope = 'personal', access_context = null, owner_only = false }) {
   const base = {
     orgId: org_id,
     project: project || undefined,
     deletedAt: null,
+    // owner_only: restrict to the caller's OWN rows across whatever tiers are
+    // visible. KB doc-summaries are scope='organization' but user-owned, so the
+    // Documents "past docs" list must show only what THIS user uploaded — not
+    // every org member's shared docs. Intersects with the tier OR below.
+    ...(owner_only ? { userId: user_id } : {}),
   };
 
   // Explicit single-tier scopes (FE scope switcher: ALL / Org / Project /
@@ -470,10 +475,10 @@ export class PrismaGraphStore {
     return records.map(mapMemoryRecord);
   }
 
-  async listMemories({ user_id, org_id, project, project_id, memory_type, tags, is_latest, include_children = false, hide_noise = false, limit = 50, offset = 0, scope = 'personal', access_context = null }) {
+  async listMemories({ user_id, org_id, project, project_id, memory_type, tags, is_latest, include_children = false, hide_noise = false, limit = 50, offset = 0, scope = 'personal', access_context = null, owner_only = false }) {
     // Phase P.3: prefer formal projectId FK when caller passes it; falls back
     // to legacy free-text `project` string.
-    const baseWhere = scopedMemoryWhere({ user_id, org_id, project, scope, access_context });
+    const baseWhere = scopedMemoryWhere({ user_id, org_id, project, scope, access_context, owner_only });
     if (project_id) {
       // Narrow to a single project the caller can access. Use the M:N
       // memory_projects join so memories authored by OTHER project members
@@ -574,7 +579,7 @@ export class PrismaGraphStore {
     // Count must use the SAME scope (scope + access_context + project join) as
     // the findMany above — previously it dropped both, so the total counted a
     // different set than the rows it returned.
-    const countWhere = scopedMemoryWhere({ user_id, org_id, project, scope, access_context });
+    const countWhere = scopedMemoryWhere({ user_id, org_id, project, scope, access_context, owner_only });
     if (project_id) {
       if (baseWhere.memoryProjects) { delete countWhere.OR; delete countWhere.userId; countWhere.memoryProjects = { some: { projectId: project_id } }; }
       else countWhere.projectId = project_id;

@@ -18,7 +18,13 @@ const ORG = process.env.EVAL_ORG_ID || 'f5e2418b-61ef-4271-83a4-5623050b8402';
 const USER = process.env.EVAL_USER_ID || '3b12845a-8cef-4174-ad89-16010810e90b';
 const PROJ = process.env.EVAL_PROJECT_ID || '0d8279b3-f7b0-46c6-9415-cebb52f7cc7c';
 const K = Number(process.env.EVAL_K || 8);
-const MODES = ['off', 'should', 'must'];
+// Variants: term-overlap reranker (tiered_view) OFF vs ON. Entity lane proven
+// dead on two corpora, dropped. Each variant is {label, body-extra}.
+const VARIANTS = [
+  { mode: 'base', extra: {} },
+  { mode: 'tiered', extra: { tiered_view: true } },
+];
+const MODES = VARIANTS.map((v) => v.mode);
 if (!MK) { console.error('HIVEMIND_MASTER_API_KEY required'); process.exit(2); }
 
 // Fine-grained details pulled from the actual Solvis corpus. `require`: ALL
@@ -37,10 +43,11 @@ const CASES = [
 ];
 
 async function recall(q, mode) {
+  const variant = VARIANTS.find((v) => v.mode === mode) || VARIANTS[0];
   const res = await fetch(`${URL}/api/recall`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${MK}`, 'Content-Type': 'application/json', 'X-HM-User-Id': USER, 'X-HM-Org-Id': ORG },
-    body: JSON.stringify({ query_context: q, max_memories: K, project_id: PROJ, entity_filter_mode: mode }),
+    body: JSON.stringify({ query_context: q, max_memories: K, project_id: PROJ, ...variant.extra }),
   });
   if (!res.ok) return { memories: [], evidence: [], ms: null };
   const j = await res.json();

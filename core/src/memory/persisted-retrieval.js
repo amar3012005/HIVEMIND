@@ -1058,6 +1058,9 @@ export async function recallPersistedMemories(store, {
                          // limits to memories whose scope === this value (in addition to access_context)
   entity_filter_mode = null, // per-call override of ENTITY_FILTER_MODE env (off|should|must)
                              // — lets the recall A/B eval toggle the entity lane without a restart
+  tiered_view = null,        // per-call override of RECALL_TIERED_VIEW — turns on the algorithmic
+                             // term-overlap ResultReranker at delivery (surfaces exact lexical
+                             // matches over boosted-but-off-topic rows). null = env default.
 }) {
   const temporalExpansion = expandTemporalQuery(query_context);
   const effectiveDateRange = date_range || temporalExpansion.dateRange || null;
@@ -1855,7 +1858,8 @@ export async function recallPersistedMemories(store, {
   // when RECALL_TIERED_VIEW is unset the inline score-sort above is the final
   // ordering and `top` is untouched. Re-ordering only; head-slot splice below
   // still runs afterwards so the canonical/bridge guarantee is preserved.
-  if (TIERED_VIEW_ENABLED && top.length > 1) {
+  const _tieredView = tiered_view != null ? !!tiered_view : TIERED_VIEW_ENABLED;
+  if (_tieredView && top.length > 1) {
     // Normalize query_context to a string: the JSDoc types it as {string} but
     // callers can pass an object. ResultReranker._tokenize would coerce an
     // object to '[object Object]', nulling the BM25-like term-overlap signal.

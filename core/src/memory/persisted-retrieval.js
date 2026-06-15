@@ -552,7 +552,7 @@ async function expandQueryMultilingual(query, orgId) {
 // singular, full term) → `entity:<name>` tags that actually match the corpus.
 // Gated by ENTITY_LLM_EXTRACT; cached + metered + graceful.
 async function extractQueryEntitiesLLM(query, orgId) {
-  if (process.env.ENTITY_LLM_EXTRACT !== 'true') return [];
+  if (process.env.ENTITY_LLM_EXTRACT === 'false') return []; // global default ON (opt-out)
   if (!query || typeof query !== 'string' || query.trim().length < 3) return [];
   const key = query.trim().toLowerCase();
   if (_entityLlmCache.has(key)) return _entityLlmCache.get(key);
@@ -1238,16 +1238,23 @@ export async function recallPersistedMemories(store, {
   // must  → hard-require an entity-tag match on the primary passes (DROPS
   //         untagged memories — only safe after the G1 symmetry test proves
   //         ≥80% extraction recall; default off).
-  const ENTITY_FILTER_MODE = (entity_filter_mode || process.env.ENTITY_FILTER_MODE || 'off').toLowerCase();
-  // Entity-filter tags: regex extraction + (when ENTITY_LLM_EXTRACT=true) the
-  // llama-8b LLM entities that actually match the ingest-side canonical entity
-  // tags. LLM call is metered + cached + only runs when the lane is on.
+  // GLOBAL entity recall (all tenants, no per-tenant config): always run BOTH
+  // paths — the unfiltered wide search AND an entity-tag-filtered wide search —
+  // then fuse + rerank down to the delivered set ("search wide, rank narrow").
+  // Default 'should' (additive, never narrows the main set). LLM entity
+  // extraction runs IN PARALLEL with the main vector fetch so latency stays low.
+  const ENTITY_FILTER_MODE = (entity_filter_mode || process.env.ENTITY_FILTER_MODE || 'should').toLowerCase();
+  const _entityTagsPromise = ENTITY_FILTER_MODE !== 'off'
+    ? (async () => {
+        const _regex = normalizeQueryEntityTokens(query_context);
+        const _llm = await extractQueryEntitiesLLM(query_context, org_id);
+        return _llm.length ? [...new Set([..._regex, ..._llm])] : _regex;
+      })()
+    : Promise.resolve([]);
+  // 'must' (hard filter) needs the tags before the main fetch; 'should' (global
+  // default) does not — main fetch runs unfiltered while extraction overlaps it.
   let _entityFilterTags = [];
-  if (ENTITY_FILTER_MODE !== 'off') {
-    _entityFilterTags = normalizeQueryEntityTokens(query_context);
-    const _llmEntities = await extractQueryEntitiesLLM(query_context, org_id);
-    if (_llmEntities.length) _entityFilterTags = [...new Set([..._entityFilterTags, ..._llmEntities])];
-  }
+  if (ENTITY_FILTER_MODE === 'must') _entityFilterTags = await _entityTagsPromise;
   const _effectiveTags = (ENTITY_FILTER_MODE === 'must' && _entityFilterTags.length)
     ? [...tags, ..._entityFilterTags]
     : tags;
@@ -1371,6 +1378,10 @@ export async function recallPersistedMemories(store, {
   // ADDS entity-tag matches, tagged _entity_filtered for the exact-match scoring
   // term, and is folded into the same MAX-dedup merge downstream. Never removes.
   let entityFilteredCandidates = [];
+  if (ENTITY_FILTER_MODE === 'should') {
+    // Resolve the parallel entity extraction now (it overlapped the main fetch).
+    _entityFilterTags = await _entityTagsPromise;
+  }
   if (ENTITY_FILTER_MODE === 'should' && _entityFilterTags.length) {
     entityFilteredCandidates = await vectorCandidatesForRecall(store, {
       query_context, user_id, org_id, project, source_platforms,

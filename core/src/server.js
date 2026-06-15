@@ -21530,6 +21530,28 @@ async function ensureQdrantSearchIndexes() {
   }
 }
 
+// Cold-start fix: the embedding service (bge-m3 via LiteLLM) inits ASYNC after
+// boot — until it's ready, generateEmbedding returns null → query vector is
+// empty → recall returns 0 for the first ~25-30s after every restart. Force the
+// init + retry until a valid 1024-d vector comes back, THEN the pool is warm. A
+// dummy hybridSearch also warms the qdrant client + collection routing cache.
+async function warmUpRecall() {
+  if (process.env.RECALL_WARMUP === 'false') return;
+  try {
+    const qc = getQdrantClient();
+    const deadline = Date.now() + 30000;
+    let warm = false;
+    while (Date.now() < deadline && !warm) {
+      const v = await qc.generateEmbedding('warmup recall query').catch(() => null);
+      if (Array.isArray(v) && v.length >= 64) { warm = true; break; }
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    // Warm the search path (collection routing + Qdrant connection) too.
+    if (warm) { await qc.generateEmbedding('Solvis Wärmepumpe').catch(() => {}); }
+    console.log(warm ? '✅ Recall warm-up complete (embedding service ready)' : '⚠️  Recall warm-up timed out — embedding service still cold');
+  } catch (e) { console.warn('recall warm-up skipped:', e.message); }
+}
+
 const PORT = process.env.PORT || 3000;
 
 server.listen(PORT, () => {
@@ -21567,6 +21589,7 @@ server.listen(PORT, () => {
 `);
 
   ensureQdrantSearchIndexes();
+  warmUpRecall(); // fire-and-forget: warms the embedding service so recall isn't empty during cold-start
 
   // Start DR server in same process — shared memoryStore, prisma, recallFn
   (async () => {

@@ -3,7 +3,19 @@
 }
 
 https://core.hivemind.davinciai.eu:443 {
-    reverse_proxy hivemind-api:3000
+    # Health gate: Caddy actively polls /health and stops sending requests to an
+    # unhealthy upstream (bad deploy, mid-restart, DB unreachable) — a request is
+    # never routed to a dead container. For blue-green, list both upstreams here
+    # (e.g. add `hivemind-api-green:3000`) and remove the old one once the new
+    # one passes health — see docs/DEPLOY_RUNBOOK.md.
+    reverse_proxy hivemind-api:3000 {
+        health_uri /health
+        health_port 3000
+        health_interval 10s
+        health_timeout 3s
+        health_status 200
+        fail_duration 30s
+    }
     tls /etc/letsencrypt/live/core.hivemind.davinciai.eu/fullchain.pem /etc/letsencrypt/live/core.hivemind.davinciai.eu/privkey.pem {
         # Hybrid post-quantum key exchange (NIST FIPS 203 ML-KEM-768 + X25519).
         curves x25519mlkem768 x25519

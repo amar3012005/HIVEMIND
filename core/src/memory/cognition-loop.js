@@ -1907,6 +1907,12 @@ Output JSON only:
       const dedupe    = [...new Set(merged)];
       const hot       = dedupe.slice(-MAX_HOT_EVIDENCE);
       const evidenceCountTotal = dedupe.length;
+      // H12: the hot window drops the oldest ids silently — surface it. The full
+      // count is preserved in evidenceCountTotal (→ cluster_index) so grounding
+      // decisions can use the true support size, not just the 20 hot ids.
+      if (dedupe.length > MAX_HOT_EVIDENCE) {
+        this.logger.log?.(`[cognition] REAFFIRM evidence truncated ${dedupe.length}→${MAX_HOT_EVIDENCE} hot (total tracked=${evidenceCountTotal}) ${existing.id.slice(0,8)}`);
+      }
 
       await this.prisma.memory.update({
         where: { id: existing.id },
@@ -1979,6 +1985,9 @@ Output JSON only:
       const dedupeEv = [...new Set(mergedEv)];
       const evidenceIds      = dedupeEv.slice(-MAX_HOT_EVIDENCE);
       const evidenceCountTotal = dedupeEv.length;
+      if (dedupeEv.length > MAX_HOT_EVIDENCE) {
+        this.logger.log?.(`[cognition] EXTEND evidence truncated ${dedupeEv.length}→${MAX_HOT_EVIDENCE} hot (total tracked=${evidenceCountTotal}) ${existing.id.slice(0,8)}`);
+      }
 
       // Route new memory through engine with Extends relationship to existing
       const synthTag = sourceType === 'canonical-fact' ? 'synthesis:canonical' : 'synthesis:bridge';
@@ -2134,6 +2143,9 @@ Output JSON only:
       const dedupeContr = [...new Set(mergedContr)];
       const evidenceIds = dedupeContr.slice(-MAX_HOT_EVIDENCE);
       const contrEvidenceCountTotal = dedupeContr.length;
+      if (dedupeContr.length > MAX_HOT_EVIDENCE) {
+        this.logger.log?.(`[cognition] CONTRADICT evidence truncated ${dedupeContr.length}→${MAX_HOT_EVIDENCE} hot (total tracked=${contrEvidenceCountTotal}) ${existing.id.slice(0,8)}`);
+      }
 
       const synthTag = sourceType === 'canonical-fact' ? 'synthesis:canonical' : 'synthesis:bridge';
       const unionedTags = new Set();
@@ -2548,20 +2560,33 @@ Output JSON only:
 
   // Derives edges to all source members
   async _linkDerivesEdges(synthId, members, sourceType, tag) {
-    for (const src of members) {
+    // H9: one batched insert instead of N serial create() round-trips. Canonical
+    // clusters can have 30-300 members; per-row inserts serialized relationship
+    // writes and cost ~3s+/tick at scale. createMany + skipDuplicates collapses it
+    // to a single statement. (Members are real memory ids → FK-valid; a rare bad
+    // row would fail the batch, so we fall back to per-row on batch error.)
+    const confidence = sourceType === 'canonical-fact' ? 0.88 : 0.82;
+    const rows = members
+      .filter(src => src?.id)
+      .map(src => ({
+        id:         crypto.randomUUID(),
+        fromId:     synthId,
+        toId:       src.id,
+        type:       'Derives',
+        confidence,
+        createdBy:  'cognition-loop',
+        metadata:   { reason: sourceType, topic: tag, source_count: members.length },
+      }));
+    if (rows.length) {
       try {
-        await this.prisma.relationship.create({
-          data: {
-            id:         crypto.randomUUID(),
-            fromId:     synthId,
-            toId:       src.id,
-            type:       'Derives',
-            confidence: sourceType === 'canonical-fact' ? 0.88 : 0.82,
-            createdBy:  'cognition-loop',
-            metadata:   { reason: sourceType, topic: tag, source_count: members.length },
-          },
-        });
-      } catch { /* dup or FK race — skip */ }
+        await this.prisma.relationship.createMany({ data: rows, skipDuplicates: true });
+      } catch (batchErr) {
+        // Fall back to per-row so one bad FK/dup doesn't drop every Derives edge.
+        this.logger.warn?.(`[cognition] Derives createMany failed (${batchErr.message}) — per-row fallback`);
+        for (const data of rows) {
+          await this.prisma.relationship.create({ data }).catch(() => {});
+        }
+      }
     }
     // WS4 — cross-synthesis derivation edges. When this synthesis shares source
     // evidence with an EXISTING synthesis, the two are derivationally related:

@@ -480,6 +480,10 @@ model Memory {
   @@index([documentDate(sort: Desc)])
   @@index([strength(sort: Desc)])
   @@index([tags], type: Gin)
+  // H8: GIN index so `synthesisEvidenceIds: { hasSome: [...] }` (the duplicate-
+  // canonical evidence-overlap check, runs once per new synthesis) uses an index
+  // instead of a per-row executor-level array scan over all latest syntheses.
+  @@index([synthesisEvidenceIds], type: Gin, map: "memories_synthesis_evidence_ids_gin")
   @@index([version])
   // Partial index: only index memories that have a cluster hash (synthesis outputs only)
   @@index([synthesisClusterHash], map: "memories_synthesis_cluster_hash_idx")

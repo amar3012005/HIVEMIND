@@ -19,9 +19,16 @@ const DEFAULT_SCORE_THRESHOLD = parseFloat(process.env.HIVEMIND_VECTOR_SCORE_THR
 // P4: search-time HNSW ef — THE recall/latency dial at scale (OpenSearch
 // benchmark: recall@1 0.56→0.97 across ef 10→640). Without an explicit
 // params.hnsw_ef, Qdrant uses an untuned internal default with no control.
-// 128 is a balanced default; callers can pass a higher value for accurate
-// tiers. Tune via QDRANT_HNSW_EF without a redeploy.
-const EF_SEARCH_DEFAULT = Number(process.env.QDRANT_HNSW_EF || 128);
+// 128 explores ~1% of the HNSW graph at 10M vectors → recall@150 collapses with
+// int8 quant. 200 recovers buried hits in the wide candidate pool for a few ms
+// more. Tune via QDRANT_HNSW_EF without redeploy; raise toward 256–400 at very
+// large scale.
+const EF_SEARCH_DEFAULT = Number(process.env.QDRANT_HNSW_EF || 200);
+// int8 quant rescore — re-rank the quantized ANN candidates against full-
+// precision vectors at search time (oversample, then rescore). Kills the
+// quantization tail-rank noise. Default ON; QDRANT_QUANT_RESCORE=false disables.
+const QUANT_RESCORE = process.env.QDRANT_QUANT_RESCORE !== 'false';
+const QUANT_OVERSAMPLING = Number(process.env.QDRANT_QUANT_OVERSAMPLING || 2.0);
 
 const headers = {
   'Content-Type': 'application/json',
@@ -348,6 +355,13 @@ export class QdrantClient {
     const effEf = Number.isFinite(hnsw_ef) ? hnsw_ef : EF_SEARCH_DEFAULT;
     if (effEf > 0) {
       searchRequest.params = { hnsw_ef: effEf };
+    }
+    // int8 quant rescore — search-time (NOT collection-creation): oversample the
+    // quantized candidates, then re-score against full-precision vectors so the
+    // delivered ranks aren't poisoned by int8 error. Graceful: Qdrant ignores
+    // these on collections without quantization.
+    if (QUANT_RESCORE) {
+      searchRequest.params = { ...(searchRequest.params || {}), quantization: { rescore: true, oversampling: QUANT_OVERSAMPLING } };
     }
 
     // Add user/org filter for multi-tenancy

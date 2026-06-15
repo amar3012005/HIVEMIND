@@ -32,19 +32,21 @@ const CONFIG = {
     m: 16,
     ef_construct: 100,
     full_scan_threshold: 10000,
-    max_indexing_threads: 2
+    max_indexing_threads: 8     // parallelize per-segment HNSW builds (was 2)
   },
 
-  // Optimization configuration
+  // Optimization configuration — tuned for 10M-scale ingest. NOTE: applies at
+  // collection CREATION; existing collections need an update_collection
+  // migration to pick these up.
   optimizers: {
-    deleted_threshold: 0.2,
+    deleted_threshold: 0.1,        // tighter vacuum (was 0.2) → less bloat at 10M
     vacuum_min_vector_number: 1000,
     default_segment_number: 10,
     max_segment_size: 100000,
-    memmap_threshold: 10000,
-    indexing_threshold: 10000,
-    flush_interval_sec: 60,
-    max_optimization_threads: 2
+    memmap_threshold: 50000,       // keep more vectors in RAM (was 10000)
+    indexing_threshold: 100000,    // re-index every ~100k inserts (was 10k → every ~6 min at 10M throughput)
+    flush_interval_sec: 120,       // was 60
+    max_optimization_threads: 4    // was 2
   },
 
   // WAL configuration
@@ -159,7 +161,7 @@ const MEMORIES_PAYLOAD_INDEXES = [
 // Single shard/replica — the prometheus box is single-node; shard_number>1 or
 // replication_factor>1 only adds fd pressure with no failover benefit.
 const ORG_CONTAINER_CONFIG = {
-  hnsw: { m: 32, ef_construct: 256, full_scan_threshold: 10000, max_indexing_threads: 2 },
+  hnsw: { m: 32, ef_construct: 256, full_scan_threshold: 10000, max_indexing_threads: 8 },
   shard_number: 1,
   replication_factor: 1,
   write_consistency_factor: 1

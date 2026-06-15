@@ -371,6 +371,28 @@ if (enrichmentQueue) {
   console.log(`[boot] EnrichmentQueue ready (concurrency=${enrichmentQueue.concurrency})`);
 }
 
+// Bounded ingest concurrency. REQUIRED: without it, a burst of unbounded
+// background ingest jobs (100+ writes to one user) saturates the event loop +
+// connection pool so the HTTP listener refuses/resets new connections, and the
+// advisory-lock $transactions starve the pool (limit 20) → 180s timeout →
+// P2010 → dropped rows. This global semaphore caps simultaneous ingest jobs
+// per core. A per-job SAFETY TIMER guarantees a slot can never be held forever
+// (deadlock-proof) — if anything in the job hangs, the slot frees after
+// INGEST_JOB_TIMEOUT_MS and the queue keeps draining.
+const INGEST_MAX_CONCURRENCY = Math.max(1, Number(process.env.INGEST_MAX_CONCURRENCY || 6));
+const INGEST_JOB_TIMEOUT_MS = Math.max(10000, Number(process.env.INGEST_JOB_TIMEOUT_MS || 90000));
+const _ingestSem = { active: 0, waiters: [] };
+function ingestAcquire() {
+  if (_ingestSem.active < INGEST_MAX_CONCURRENCY) { _ingestSem.active += 1; return Promise.resolve(); }
+  return new Promise((resolve) => { _ingestSem.waiters.push(resolve); });
+}
+function ingestRelease() {
+  const next = _ingestSem.waiters.shift();
+  if (next) next();                              // hand slot to next waiter (active unchanged)
+  else _ingestSem.active = Math.max(0, _ingestSem.active - 1);
+}
+console.log(`[boot] Ingest concurrency cap=${INGEST_MAX_CONCURRENCY} jobTimeout=${INGEST_JOB_TIMEOUT_MS}ms`);
+
 // External-ref store + entity resolver — Salesforce / cross-system memory.
 const { ExternalRefStore } = await import('./memory/external-ref-store.js');
 const { EntityResolver } = await import('./memory/entity-resolver.js');
@@ -15879,6 +15901,15 @@ exit \$RC
                 // saves stay sub-second while still auto-building
                 // Update/Extend/Derive edges against existing memories.
                 (async () => {
+                  await ingestAcquire();
+                  // Deadlock-proof: release the slot exactly once, and force it
+                  // free after INGEST_JOB_TIMEOUT_MS so a hung job (qdrant/pool/
+                  // lock stall) can never wedge the bounded queue.
+                  let _slotFreed = false;
+                  const _freeSlot = () => { if (!_slotFreed) { _slotFreed = true; ingestRelease(); } };
+                  const _slotSafety = setTimeout(() => {
+                    if (!_slotFreed) { console.warn(`[async-ingest] slot safety-release (job ${jobId} > ${INGEST_JOB_TIMEOUT_MS}ms)`); _freeSlot(); }
+                  }, INGEST_JOB_TIMEOUT_MS);
                   try {
                     ingestTracker.updateJob(jobId, { status: 'processing', progress: 5 });
 
@@ -16020,6 +16051,9 @@ exit \$RC
                   } catch (err) {
                     console.error('[async-ingest] Job failed:', jobId, err);
                     ingestTracker.updateJob(jobId, { status: 'failed', error: err.message });
+                  } finally {
+                    clearTimeout(_slotSafety);
+                    _freeSlot();
                   }
                 })();
 

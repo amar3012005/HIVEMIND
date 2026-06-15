@@ -1047,6 +1047,8 @@ export async function recallPersistedMemories(store, {
   access_context = null, // { projectIds, teamIds } for V2 multi-tier scope filter
   scope_filter = null,   // optional MemoryScope filter: 'personal'|'project'|'team'|'organization'
                          // limits to memories whose scope === this value (in addition to access_context)
+  entity_filter_mode = null, // per-call override of ENTITY_FILTER_MODE env (off|should|must)
+                             // — lets the recall A/B eval toggle the entity lane without a restart
 }) {
   const temporalExpansion = expandTemporalQuery(query_context);
   const effectiveDateRange = date_range || temporalExpansion.dateRange || null;
@@ -1128,7 +1130,7 @@ export async function recallPersistedMemories(store, {
   // must  → hard-require an entity-tag match on the primary passes (DROPS
   //         untagged memories — only safe after the G1 symmetry test proves
   //         ≥80% extraction recall; default off).
-  const ENTITY_FILTER_MODE = (process.env.ENTITY_FILTER_MODE || 'off').toLowerCase();
+  const ENTITY_FILTER_MODE = (entity_filter_mode || process.env.ENTITY_FILTER_MODE || 'off').toLowerCase();
   const _entityFilterTags = ENTITY_FILTER_MODE === 'off' ? [] : normalizeQueryEntityTokens(query_context);
   const _effectiveTags = (ENTITY_FILTER_MODE === 'must' && _entityFilterTags.length)
     ? [...tags, ..._entityFilterTags]

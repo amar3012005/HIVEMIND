@@ -17401,6 +17401,7 @@ exit \$RC
                 include_superseded: body.include_superseded,  // boolean — traverse Updates chain for version history
                 access_context: recallAccessCtx,
                 scope_filter: body.scope_filter || null,
+                entity_filter_mode: body.entity_filter_mode || null, // A/B override for the entity lane
                 bitemporal: bitemporalFilter,
               });
 

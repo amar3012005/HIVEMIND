@@ -5,13 +5,12 @@
  * org concurrently. Lock key is derived from (orgId, agentName) via hashtext
  * so it fits the 64-bit signed int that pg_try_advisory_lock requires.
  *
- * Session-scoped — released when the Prisma connection is returned to pool
- * or on explicit release(). For long agent runs the holder must keep the
- * same Prisma session active; we use $transaction with a 30-minute timeout
- * for that reason.
+ * Transaction-scoped (pg_try_advisory_xact_lock) — released AUTOMATICALLY by
+ * Postgres on COMMIT/ROLLBACK. Callers MUST pass an interactive-transaction
+ * client (`$transaction(async (tx) => ...)`); the lock lives for that tx only.
+ * This removes the session-lock leak (swallowed unlock errors / pooled-conn
+ * mismatch left a connection parked holding the lock forever).
  */
-
-import { randomUUID } from 'node:crypto';
 
 const LOCK_NAMESPACE = 0x6776; // 'gv' — disambiguates from other advisory lock users.
 
@@ -22,26 +21,33 @@ function clampInt32(value) {
 }
 
 /**
- * Try to acquire a session-scoped advisory lock.
- * Resolves to { acquired: boolean, releaseKey?: string, key1, key2 }.
+ * Try to acquire a TRANSACTION-scoped advisory lock.
+ * Resolves to { acquired: boolean, key1, key2 }.
  *
- * IMPORTANT: caller MUST call release(prisma, releaseKey) when done, or wrap
- * in a transaction (the lock is released when the session ends).
+ * H5 fix: this uses pg_try_advisory_xact_lock (NOT pg_try_advisory_lock).
+ * Transaction-scoped locks are released AUTOMATICALLY by Postgres on COMMIT or
+ * ROLLBACK — there is no manual unlock and therefore no leak path. The previous
+ * session-scoped lock leaked two ways: (1) pg_advisory_unlock errors were
+ * swallowed and the connection returned to the pool still holding the lock, and
+ * (2) on a pooled client the unlock could target a DIFFERENT physical connection
+ * than the one that acquired it, so it never actually released. xact locks fix
+ * both — but REQUIRE the `prisma` arg to be an interactive-transaction client
+ * (`$transaction(async (tx) => ...)`); the lock lives only for that tx.
  */
-export async function tryAcquireGovernanceLock(prisma, { orgId, agentName }) {
-  if (!prisma || !orgId || !agentName) {
+export async function tryAcquireGovernanceLock(tx, { orgId, agentName }) {
+  if (!tx || !orgId || !agentName) {
     return { acquired: false, reason: 'missing_args' };
   }
   const key1 = LOCK_NAMESPACE;
   // Postgres hashtext(text) -> int4. We hash org+agent for collision safety.
-  const rows = await prisma.$queryRawUnsafe(
+  const rows = await tx.$queryRawUnsafe(
     'SELECT hashtext($1::text) AS h',
     `${orgId}:${agentName}`
   );
   const key2 = clampInt32(rows?.[0]?.h ?? 0);
 
-  const lockRows = await prisma.$queryRawUnsafe(
-    'SELECT pg_try_advisory_lock($1::int, $2::int) AS got',
+  const lockRows = await tx.$queryRawUnsafe(
+    'SELECT pg_try_advisory_xact_lock($1::int, $2::int) AS got',
     key1,
     key2
   );
@@ -49,42 +55,38 @@ export async function tryAcquireGovernanceLock(prisma, { orgId, agentName }) {
   if (!got) {
     return { acquired: false, key1, key2, reason: 'busy' };
   }
-  return {
-    acquired: true,
-    key1,
-    key2,
-    releaseKey: randomUUID(),
-  };
-}
-
-export async function releaseGovernanceLock(prisma, { key1, key2 }) {
-  if (!prisma || key1 == null || key2 == null) return false;
-  try {
-    const rows = await prisma.$queryRawUnsafe(
-      'SELECT pg_advisory_unlock($1::int, $2::int) AS released',
-      key1,
-      key2
-    );
-    return rows?.[0]?.released === true;
-  } catch {
-    return false;
-  }
+  return { acquired: true, key1, key2 };
 }
 
 /**
- * High-level wrapper: acquire lock, run fn, release lock.
+ * No-op for transaction-scoped locks (kept for call-site compatibility).
+ * pg_try_advisory_xact_lock auto-releases on COMMIT/ROLLBACK, so there is
+ * nothing to unlock. Returns true.
+ */
+export async function releaseGovernanceLock(/* tx, lock */) {
+  return true;
+}
+
+/**
+ * High-level wrapper: acquire a transaction-scoped lock, run fn.
+ * MUST be called with an interactive-transaction client (tx) so the xact lock
+ * is bound to — and auto-released with — that transaction.
  * Throws { code: 'GOVERNANCE_LOCK_BUSY' } if another instance holds it.
  */
-export async function withGovernanceLock(prisma, { orgId, agentName }, fn) {
-  const lock = await tryAcquireGovernanceLock(prisma, { orgId, agentName });
+export async function withGovernanceLock(tx, { orgId, agentName }, fn) {
+  if (tx && typeof tx.$transaction === 'function') {
+    // A non-transaction client was passed — the xact lock would be acquired on
+    // a pooled connection and released immediately (next statement runs on a
+    // possibly different connection), giving NO mutual exclusion. Fail loud
+    // rather than silently providing a useless lock.
+    throw new Error('withGovernanceLock requires an interactive-transaction client (tx), not a pooled PrismaClient');
+  }
+  const lock = await tryAcquireGovernanceLock(tx, { orgId, agentName });
   if (!lock.acquired) {
     const err = new Error(`Governance lock busy for ${agentName}@${orgId}`);
     err.code = 'GOVERNANCE_LOCK_BUSY';
     throw err;
   }
-  try {
-    return await fn();
-  } finally {
-    await releaseGovernanceLock(prisma, lock);
-  }
+  // No release needed — xact lock drops when the surrounding $transaction ends.
+  return await fn();
 }

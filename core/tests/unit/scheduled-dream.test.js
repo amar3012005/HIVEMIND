@@ -6,8 +6,8 @@ import { ResidentAgentScheduler } from '../../src/resident/scheduler.js';
 const txStub = {
   $queryRawUnsafe: async (sql) => {
     if (/hashtext/.test(sql)) return [{ h: 1 }];
-    if (/pg_try_advisory_lock/.test(sql)) return [{ got: true }];
-    if (/pg_advisory_unlock/.test(sql)) return [{ released: true }];
+    // H5: transaction-scoped lock (auto-released on commit/rollback, no unlock).
+    if (/pg_try_advisory_xact_lock/.test(sql)) return [{ got: true }];
     return [];
   },
 };

@@ -1876,6 +1876,13 @@ export async function recallPersistedMemories(store, {
       }
       const conf = typeof mem.synthesis_confidence === 'number' ? mem.synthesis_confidence
         : (typeof mem.synthesisConfidence === 'number' ? mem.synthesisConfidence : null);
+      // C2: never promote a SUPERSEDED synthesis to slot[0]. A demoted synthesis
+      // (is_latest=false) re-entering the pool (e.g. via traverseUpdateChain under
+      // include_superseded) can out-score its fresh replacement on the
+      // revision/recall boost; without this guard it buries the current head.
+      // (camelCase isLatest / snake_case is_latest both surface depending on path.)
+      const isLatest = mem.is_latest !== undefined ? mem.is_latest : mem.isLatest;
+      if (isLatest === false) return false;
       return (srcType === 'canonical-fact' || srcType === 'synthesis-bridge' || srcType === 'principle')
         && conf !== null && conf >= 0.70
         && (item.score || 0) > 0.6;

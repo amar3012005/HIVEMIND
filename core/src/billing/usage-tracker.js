@@ -11,6 +11,26 @@
 
 import { getPlan } from './plans.js';
 
+// ── Module singleton + fire-and-forget meters ───────────────────────────────
+// The UsageTracker is constructed once in server.js with prisma, but the LLM /
+// ingest / recall chokepoints live in deep modules that don't have it in scope.
+// server.js calls setUsageTracker(t) at boot; chokepoints import the meter*
+// helpers and call them fire-and-forget (a metering failure never affects the
+// request — matches "never let metering break a call").
+let _tracker = null;
+export function setUsageTracker(t) { _tracker = t; }
+export function getUsageTrackerInstance() { return _tracker; }
+
+const _safe = (p) => { try { p?.catch?.(() => {}); } catch { /* ignore */ } };
+export function meterTokens(orgId, n) { if (_tracker && orgId && n > 0) _safe(_tracker.recordTokens(orgId, n)); }
+export function meterQuery(orgId)      { if (_tracker && orgId) _safe(_tracker.recordQuery(orgId)); }
+export function meterUpload(orgId)     { if (_tracker && orgId) _safe(_tracker.recordUpload(orgId)); }
+export function meterMemory(orgId)     { if (_tracker && orgId) _safe(_tracker.recordMemory(orgId)); }
+export function meterDeepResearch(orgId) { if (_tracker && orgId) _safe(_tracker.recordDeepResearch(orgId)); }
+export function meterWebIntel(orgId)   { if (_tracker && orgId) _safe(_tracker.recordWebIntel(orgId)); }
+export function meterGraphQuery(orgId) { if (_tracker && orgId) _safe(_tracker.recordGraphQuery(orgId)); }
+export function meterTara(orgId)       { if (_tracker && orgId) _safe(_tracker.recordTara(orgId)); }
+
 export class UsageTracker {
   constructor(prisma) {
     this.prisma = prisma;

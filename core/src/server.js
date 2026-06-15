@@ -123,7 +123,7 @@ const {
 const { renderAdminLogsPage } = await import('./admin/logs-dashboard.js');
 
 // Billing / usage tracking
-const { UsageTracker } = await import('./billing/usage-tracker.js');
+const { UsageTracker, setUsageTracker } = await import('./billing/usage-tracker.js');
 const { PlanStore } = await import('./billing/plan-store.js');
 const { PlanEnforcer } = await import('./billing/plan-enforcer.js');
 
@@ -264,6 +264,7 @@ installConsoleCapture('core');
 const engine = new MemoryEngine('./hivemind.db');
 const prisma = getPrismaClient();
 const usageTracker = prisma ? new UsageTracker(prisma) : null;
+if (usageTracker) setUsageTracker(usageTracker); // expose to deep chokepoints via meter* helpers
 const planStore = prisma ? new PlanStore(prisma) : null;
 const planEnforcer = (prisma && planStore && usageTracker) ? new PlanEnforcer(prisma, planStore, usageTracker) : null;
 const auditLogger = prisma ? new AuditLogger(prisma) : null;
@@ -6038,6 +6039,7 @@ exit \$RC
             const call = await prisma.taraCall.findUnique({ where: { sessionId: String(body.session_id) } });
             if (!call || call.orgId !== tOrg) return jsonResponse(res, { error: 'call_not_found' }, 404);
             const pt = Number(body.prompt_tokens) || 0, ct = Number(body.completion_tokens) || 0;
+            try { planEnforcer?.recordUsage(tOrg, 'tara', 1); if (pt + ct > 0) planEnforcer?.recordUsage(tOrg, 'tokens', pt + ct); } catch { /* meter */ }
             await prisma.taraTurn.create({ data: {
               callId: call.id, orgId: tOrg, userId: tUser, seq: Number(body.seq) || (call.turnCount + 1),
               userText: body.user_text || null, agentText: body.agent_text || null,
@@ -13628,6 +13630,7 @@ exit \$RC
             if (!persistentMemoryEngine) {
               return jsonResponse(res, { error: 'Memory engine unavailable' }, 503);
             }
+            try { planEnforcer?.recordUsage(orgId, 'uploads', 1); } catch { /* meter */ }
 
             try {
               // Parse multipart form data manually (no external dep)
@@ -14190,6 +14193,7 @@ exit \$RC
           if (req.method === 'POST') {
             // Web search open to all authenticated users (entitlement gate removed — all keys get access)
             try {
+              try { planEnforcer?.recordUsage(orgId, 'webIntel', 1); } catch { /* meter */ }
               // Rate limit check
               const rlCheck = webRateLimiter.check(userId);
               if (!rlCheck.allowed) {
@@ -14279,6 +14283,7 @@ exit \$RC
         case '/api/web/research/jobs':
           if (req.method === 'POST') {
             try {
+              try { planEnforcer?.recordUsage(orgId, 'deepResearch', 1); } catch { /* meter */ }
               const rlCheck = webRateLimiter.check(userId);
               if (!rlCheck.allowed) {
                 return jsonResponse(res, { error: 'Rate limit exceeded', code: 'rate_limited', retry_after_ms: rlCheck.retryAfterMs }, 429);
@@ -14452,6 +14457,7 @@ exit \$RC
           if (req.method === 'POST') {
             // Web crawl open to all authenticated users (entitlement gate removed — all keys get access)
             try {
+              try { planEnforcer?.recordUsage(orgId, 'webIntel', 1); } catch { /* meter */ }
               // Rate limit check
               const rlCheck = webRateLimiter.check(userId);
               if (!rlCheck.allowed) {
@@ -16022,6 +16028,7 @@ exit \$RC
                 ingestTracker.createJob(jobId, { userId, orgId, title: validation.data.title });
 
                 res.setHeader('X-Job-Id', jobId);
+                try { planEnforcer?.recordUsage(orgId, 'memories', 1); } catch { /* meter */ }
                 jsonResponse(res, { success: true, job_id: jobId, status: 'queued' }, 202);
 
                 // Process in background — smart routing (semantic recall +
@@ -17939,6 +17946,7 @@ exit \$RC
             if (!ensurePersistedMemoryOrFail(res, '/api/graph')) {
               return;
             }
+            try { planEnforcer?.recordUsage(orgId, 'graphQueries', 1); } catch { /* meter */ }
             let releaseSlot = null;
             try {
               const graphProject = url.searchParams.get('project') || null;
@@ -20201,6 +20209,11 @@ exit \$RC
                     if (agentOnboardingIntro && result && typeof result === 'object' && !result.onboarding) {
                       result.onboarding = { step: 'greeting', intro: agentOnboardingIntro, org_name: agentOrgName };
                     }
+                    try {
+                      planEnforcer?.recordUsage(orgId, 'searches', 1);
+                      const tot = Number(result?.usage?.total_tokens) || 0;
+                      if (tot > 0) planEnforcer?.recordUsage(orgId, 'tokens', tot);
+                    } catch { /* metering never breaks the stream */ }
                     emit({ type: 'done', ...result });
                   } catch (agentErr) {
                     emit({ type: 'error', error: agentErr.message });
@@ -20225,6 +20238,16 @@ exit \$RC
                     webIntelligence: globalThis.webIntelligence || null,
                   },
                 });
+
+                // Usage metering: one chat = one search query; tokens from the
+                // agent's aggregated usage (planner+answer+reflect). recordUsage
+                // updates both the in-memory counters (checkLimit + the usage page
+                // read these) and durable OrgUsage. Fire-and-forget.
+                try {
+                  planEnforcer?.recordUsage(orgId, 'searches', 1);
+                  const tot = Number(result?.usage?.total_tokens) || 0;
+                  if (tot > 0) planEnforcer?.recordUsage(orgId, 'tokens', tot);
+                } catch { /* metering never breaks the response */ }
 
                 // Saving is LLM-decided in the FIRST loop (the planner), not
                 // here. planStep emits `save_intent` (user explicitly said

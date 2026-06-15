@@ -14,7 +14,9 @@ function makePrisma({ memories = {}, relationships = [], evidenceLinks = [], liv
         const ids = where.synthesisEvidenceIds?.hasSome || [];
         return Object.values(memories).filter(m => m.deletedAt == null && (m.synthesisEvidenceIds || []).some(e => ids.includes(e)));
       },
-      count: async ({ where }) => (where.id?.in || []).filter(id => alive(id)).length,
+      // Existence-based (matches the pruner's deletedAt-agnostic count): a row
+      // that EXISTS — even soft-deleted — keeps its derived synthesis alive.
+      count: async ({ where }) => (where.id?.in || []).filter(id => !!memories[id]).length,
       deleteMany: async ({ where }) => {
         const ids = where.id?.in || [];
         for (const id of ids) { delete memories[id]; }
@@ -77,6 +79,18 @@ test('never prunes a non-cognition (source) memory even if dangling', async () =
   });
   const { prunedIds } = await pruneOrphanedCognition({ prisma, orgId: 'o', candidateIds: ['raw'], logger: { log() {}, warn() {} } });
   assert.deepEqual(prunedIds, []);
+});
+
+test('keeps a synthesis whose source is only SOFT-deleted (reversible, no cascade)', async () => {
+  const prisma = makePrisma({
+    memories: {
+      synthA: { id: 'synthA', deletedAt: null, memoryType: 'synthesis', tags: [], synthesisEvidenceIds: ['srcSoft'] },
+      srcSoft: { id: 'srcSoft', deletedAt: new Date(), memoryType: 'fact', tags: [] },
+    },
+    relationships: [{ fromId: 'synthA', toId: 'srcSoft', type: 'Derives' }],
+  });
+  const { prunedIds } = await pruneOrphanedCognition({ prisma, orgId: 'o', candidateIds: ['synthA'], logger: { log() {}, warn() {} } });
+  assert.deepEqual(prunedIds, [], 'soft-deleted source row still exists → synthesis kept');
 });
 
 test('keeps a distilled-from-kb fact whose KB doc is still live', async () => {

@@ -100,16 +100,21 @@ async function isOrphanedDerived(prisma, id) {
   }).catch(() => null);
   if (!m || !isCognitionOutput(m)) return false;
 
+  // A source counts as "still there" if its ROW EXISTS — even soft-deleted
+  // (deletedAt set). Soft delete is reversible, so a synthesis whose sources are
+  // merely soft-deleted must NOT be pruned (only HARD-deleted, row-gone sources
+  // orphan it). This is what keeps the scheduled sweep from nuking syntheses for
+  // recoverable sources, and is why soft delete intentionally does not cascade.
   const ev = m.synthesisEvidenceIds || [];
   const liveEv = ev.length
-    ? await prisma.memory.count({ where: { id: { in: ev }, deletedAt: null } })
+    ? await prisma.memory.count({ where: { id: { in: ev } } })
     : 0;
 
   const der = await prisma.relationship.findMany({
     where: { fromId: id, type: 'Derives' }, select: { toId: true },
   }).catch(() => []);
   const liveSrc = der.length
-    ? await prisma.memory.count({ where: { id: { in: der.map((d) => d.toId) }, deletedAt: null } })
+    ? await prisma.memory.count({ where: { id: { in: der.map((d) => d.toId) } } })
     : 0;
 
   let links = [];

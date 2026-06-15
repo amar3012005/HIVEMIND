@@ -4801,8 +4801,15 @@ exit \$RC
       ? requestedScopes.filter(s => s !== 'memory.write')
       : requestedScopes;
 
-    const code = crypto.randomBytes(32).toString('hex');
-    oauthCodeStore.set(code, {
+    // Authorization code MUST live in the Redis-shared session store, NOT an
+    // in-memory Map. With two core replicas behind the LB, /oauth/authorize
+    // (consent) and /oauth/token routinely land on different replicas; a
+    // per-process Map means the token-exchanging replica can't find the code
+    // issued by the authorizing replica → invalid_grant → Claude shows
+    // "Authorization with the MCP server failed". createAuthState writes to
+    // Redis (cross-replica) with a TTL, falling back to in-memory only when
+    // Redis is down. The returned stateId IS the opaque code we hand back.
+    const codeEntry = {
       clientId,
       redirectUri,
       scopes: grantedScopes,
@@ -4814,7 +4821,10 @@ exit \$RC
       resource,
       state,
       expiresAt: Date.now() + OAUTH_CODE_TTL_MS
-    });
+    };
+    const code = await oauthSessionStore.createAuthState({ kind: 'oauth_code', payload: codeEntry });
+    // Keep an in-memory mirror as a same-replica fast path / Redis-down safety net.
+    oauthCodeStore.set(code, codeEntry);
 
     const callbackUrl = new URL(redirectUri);
     callbackUrl.searchParams.set('code', code);
@@ -4879,11 +4889,21 @@ exit \$RC
       const redirectUri = tokenParams.redirect_uri || '';
       const codeVerifier = tokenParams.code_verifier || '';
 
-      const entry = oauthCodeStore.get(code);
+      // Read from the Redis-shared store first so any replica can redeem a
+      // code issued by any other replica. Fall back to the in-memory mirror
+      // (same-replica fast path / Redis-down). consumeAuthState deletes on
+      // read (single-use); also clear the local mirror.
+      let entry = null;
+      const sharedCode = await oauthSessionStore.consumeAuthState(code);
+      if (sharedCode && sharedCode.kind === 'oauth_code' && sharedCode.payload) {
+        entry = sharedCode.payload;
+      } else {
+        entry = oauthCodeStore.get(code) || null;
+      }
+      oauthCodeStore.delete(code);
       if (!entry) {
         return jsonResponse(res, { error: 'invalid_grant', error_description: 'Authorization code is invalid or expired.' }, 400);
       }
-      oauthCodeStore.delete(code);
 
       if (Date.now() > entry.expiresAt) {
         return jsonResponse(res, { error: 'invalid_grant', error_description: 'Authorization code has expired.' }, 400);

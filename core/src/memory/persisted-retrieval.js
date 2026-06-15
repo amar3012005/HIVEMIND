@@ -5,6 +5,7 @@ import { getRetrievalConfig } from './retrieval-config.js';
 import { expandTemporalQuery } from '../search/time-aware-expander.js';
 import { ResultReranker } from '../search/result-reranker.js';
 import { rerank as crossEncoderRerank } from './reranker.js';
+import { meterTokens } from '../billing/usage-tracker.js';
 
 // PHASE-B: single canonical ALGORITHMIC reranker, shared with three-tier-retrieval.js.
 // Lazily constructed inside the RECALL_TIERED_VIEW=true branch so the dark-by-default
@@ -497,42 +498,78 @@ const RECALL_POOL_FLOOR = Math.max(Number(process.env.RECALL_CANDIDATE_POOL || 1
 const QUERY_EXPANSION_ENABLED = process.env.RECALL_QUERY_EXPANSION !== 'false';
 const EXPAND_MIN_CANDIDATES = Number(process.env.RECALL_EXPAND_MIN || 12);
 const _expansionCache = new Map(); // queryKey → string[] variants (bounded)
+const _entityLlmCache = new Map(); // queryKey → string[] entity tags (bounded)
+// Single fast model for ALL recall-time query understanding (cross-lingual
+// rewrite + entity extraction) — llama-3.1-8b-instant on Groq. Token usage is
+// metered through the SAME usage-tracker chokepoint as the rest of the system.
+const QUERY_LLM_MODEL = process.env.RECALL_EXPANSION_MODEL || 'llama-3.1-8b-instant';
 
-async function expandQueryMultilingual(query) {
-  if (!query || typeof query !== 'string' || query.trim().length < 4) return [];
-  const key = query.trim().toLowerCase();
-  if (_expansionCache.has(key)) return _expansionCache.get(key);
-  if (!process.env.GROQ_API_KEY) return [];
-  let variants = [];
+// Shared Groq JSON call with usage metering. Returns parsed object or {}.
+async function _groqQueryLLM(systemPrompt, userText, orgId, timeoutMs = 2500) {
+  if (!process.env.GROQ_API_KEY) return {};
   try {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 2500);
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     const r = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: process.env.RECALL_EXPANSION_MODEL || 'openai/gpt-oss-20b',
+        model: QUERY_LLM_MODEL,
         temperature: 0.1,
         response_format: { type: 'json_object' },
-        messages: [
-          { role: 'system', content: 'A search query may be in a different language than the stored documents (often English query over German technical docs). Output STRICT JSON {"variants":["…"]} with up to 2 query rewrites that maximise lexical+semantic overlap with the documents. Rules: (1) FULLY translate EVERY word INCLUDING domain/technical nouns into German — e.g. "chimney sweep"→"Kaminkehrer/Schornsteinfeger", "button"→"Taste", "heat pump"→"Wärmepumpe", "manual mode"→"Handbetrieb"; do NOT leave English domain terms. (2) Keep numbers, units and product names verbatim (SolvisLea, 5). (3) One variant may be a terse keyword list of the translated key nouns. If the query is already plainly in the corpus language, return {"variants":[]}.' },
-          { role: 'user', content: query.slice(0, 300) },
-        ],
+        messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: String(userText).slice(0, 300) }],
       }),
       signal: ctrl.signal,
     });
     clearTimeout(timer);
-    if (r.ok) {
-      const j = await r.json();
-      const parsed = JSON.parse(j.choices?.[0]?.message?.content || '{}');
-      variants = (Array.isArray(parsed.variants) ? parsed.variants : [])
-        .filter((v) => typeof v === 'string' && v.trim() && v.trim().toLowerCase() !== key)
-        .slice(0, 2);
-    }
-  } catch (e) { variants = []; }
+    if (!r.ok) return {};
+    const j = await r.json();
+    if (orgId && j.usage?.total_tokens) meterTokens(orgId, j.usage.total_tokens); // same usage-tracker pipeline
+    return JSON.parse(j.choices?.[0]?.message?.content || '{}');
+  } catch (e) { return {}; }
+}
+
+async function expandQueryMultilingual(query, orgId) {
+  if (!query || typeof query !== 'string' || query.trim().length < 4) return [];
+  const key = query.trim().toLowerCase();
+  if (_expansionCache.has(key)) return _expansionCache.get(key);
+  const parsed = await _groqQueryLLM(
+    'A search query may be in a different language than the stored documents (often English query over German technical docs). Output STRICT JSON {"variants":["…"]} with up to 2 query rewrites that maximise lexical+semantic overlap with the documents. Rules: (1) FULLY translate EVERY word INCLUDING domain/technical nouns into German — e.g. "chimney sweep"→"Kaminkehrer/Schornsteinfeger", "button"→"Taste", "heat pump"→"Wärmepumpe", "manual mode"→"Handbetrieb"; do NOT leave English domain terms. (2) Keep numbers, units and product names verbatim (SolvisLea, 5). (3) One variant may be a terse keyword list of the translated key nouns. If the query is already plainly in the corpus language, return {"variants":[]}.',
+    query, orgId,
+  );
+  const variants = (Array.isArray(parsed.variants) ? parsed.variants : [])
+    .filter((v) => typeof v === 'string' && v.trim() && v.trim().toLowerCase() !== key)
+    .slice(0, 2);
   if (_expansionCache.size > 2000) _expansionCache.clear();
   _expansionCache.set(key, variants);
   return variants;
+}
+
+// LLM entity extraction (llama-3.1-8b-instant, metered) for the entity-filter
+// lane. The regex normalizeQueryEntityTokens misses lowercase / multi-word /
+// canonical entity forms, which is why the entity lane measured 0 lift. The LLM
+// extracts the canonical entities the way the INGEST side tags them (English,
+// singular, full term) → `entity:<name>` tags that actually match the corpus.
+// Gated by ENTITY_LLM_EXTRACT; cached + metered + graceful.
+async function extractQueryEntitiesLLM(query, orgId) {
+  if (process.env.ENTITY_LLM_EXTRACT !== 'true') return [];
+  if (!query || typeof query !== 'string' || query.trim().length < 3) return [];
+  const key = query.trim().toLowerCase();
+  if (_entityLlmCache.has(key)) return _entityLlmCache.get(key);
+  const parsed = await _groqQueryLLM(
+    'Extract the named entities (people, products, companies, projects, places) a memory search should filter on. Canonical form: English, singular, full term, no honorifics. Output STRICT JSON {"entities":["Amar Sai Gadde","SolvisLea Pro"]}. Empty array if none.',
+    query, orgId,
+  );
+  const out = new Set();
+  for (const e of (Array.isArray(parsed.entities) ? parsed.entities : [])) {
+    if (typeof e !== 'string' || !e.trim()) continue;
+    const us = e.trim().replace(/\s+/g, '_');
+    out.add(`entity:${us}`); out.add(`entity:${us.toLowerCase()}`); out.add(`person:${us}`);
+  }
+  const tags = Array.from(out);
+  if (_entityLlmCache.size > 2000) _entityLlmCache.clear();
+  _entityLlmCache.set(key, tags);
+  return tags;
 }
 
 async function vectorCandidatesForRecall(store, {
@@ -1202,7 +1239,15 @@ export async function recallPersistedMemories(store, {
   //         untagged memories — only safe after the G1 symmetry test proves
   //         ≥80% extraction recall; default off).
   const ENTITY_FILTER_MODE = (entity_filter_mode || process.env.ENTITY_FILTER_MODE || 'off').toLowerCase();
-  const _entityFilterTags = ENTITY_FILTER_MODE === 'off' ? [] : normalizeQueryEntityTokens(query_context);
+  // Entity-filter tags: regex extraction + (when ENTITY_LLM_EXTRACT=true) the
+  // llama-8b LLM entities that actually match the ingest-side canonical entity
+  // tags. LLM call is metered + cached + only runs when the lane is on.
+  let _entityFilterTags = [];
+  if (ENTITY_FILTER_MODE !== 'off') {
+    _entityFilterTags = normalizeQueryEntityTokens(query_context);
+    const _llmEntities = await extractQueryEntitiesLLM(query_context, org_id);
+    if (_llmEntities.length) _entityFilterTags = [...new Set([..._entityFilterTags, ..._llmEntities])];
+  }
   const _effectiveTags = (ENTITY_FILTER_MODE === 'must' && _entityFilterTags.length)
     ? [...tags, ..._entityFilterTags]
     : tags;
@@ -1302,7 +1347,7 @@ export async function recallPersistedMemories(store, {
   let crosslingualCandidates = [];
   const _doExpand = query_expansion != null ? !!query_expansion : QUERY_EXPANSION_ENABLED;
   if (_doExpand && vectorCandidates.length < EXPAND_MIN_CANDIDATES) {
-    const _variants = await expandQueryMultilingual(query_context);
+    const _variants = await expandQueryMultilingual(query_context, org_id);
     if (_variants.length) {
       const _fetched = await Promise.all(_variants.map((v) => vectorCandidatesForRecall(store, {
         query_context: v, user_id, org_id, project, source_platforms,

@@ -19056,45 +19056,34 @@ exit \$RC
               // containerTag → project mapping for search
               const searchProject = project || effectiveContainerTag || null;
 
-              // Use PageIndex first if available (complete topic retrieval), then fall back to three-tier
-              if (pageindexSearcher) {
-                const results = await pageindexSearcher.search(query, {
-                  userId,
-                  orgId,
-                  limit: limit || 10,
-                  project: searchProject,
-                });
+              // UNIFIED RECALL: route quick-search through the SAME improved core
+              // (recallPersistedMemories) every other surface uses — pool floor
+              // 150, wide-window tiered reranker, cross-lingual expansion, quant
+              // rescore. Previously this used ThreeTierRetrieval/PageIndex, a
+              // divergent path that did NOT reflect recall accuracy upgrades.
+              const sAccessCtx = await buildAccessContext(userId, orgId).catch(() => null);
+              const sRecall = await recallPersistedMemories(persistentMemoryStore, {
+                query_context: query,
+                user_id: userId,
+                org_id: orgId,
+                project: searchProject,
+                ...(searchProject ? { project_id: searchProject } : {}),
+                tags: Array.isArray(tags) ? tags : (tags ? String(tags).split(',').map((t) => t.trim()).filter(Boolean) : []),
+                source_platforms: source_platform ? [source_platform] : [],
+                memory_type: memory_type || undefined,
+                max_memories: limit || 10,
+                access_context: sAccessCtx,
+              }).catch((e) => { console.warn('[search/quick] unified recall failed:', e.message); return { memories: [], evidence: [] }; });
 
-                // Record search usage
-                if (planEnforcer && orgId) {
-                  planEnforcer.recordUsage(orgId, 'searches', 1);
-                }
+              if (planEnforcer && orgId) planEnforcer.recordUsage(orgId, 'searches', 1);
 
-                jsonResponse(res, {
-                  results,
-                  source: 'pageindex-hybrid',
-                  count: results.length,
-                });
-              } else {
-                // Fallback to three-tier quick search
-                const result = await threeTierRetrieval.quickSearch(query, {
-                  userId,
-                  orgId,
-                  project: searchProject,
-                  memoryType: memory_type,
-                  tags,
-                  sourcePlatform: source_platform,
-                  limit: limit || 10,
-                  scoreThreshold: score_threshold ?? parseFloat(process.env.HIVEMIND_VECTOR_SCORE_THRESHOLD || '0.15')
-                });
-
-                // Record search usage after successful quick search
-                if (planEnforcer && orgId) {
-                  planEnforcer.recordUsage(orgId, 'searches', 1);
-                }
-
-                jsonResponse(res, result);
-              }
+              jsonResponse(res, {
+                results: sRecall.memories || [],
+                memories: sRecall.memories || [],
+                evidence: sRecall.evidence || [],
+                count: (sRecall.memories || []).length,
+                source: 'unified-recall',
+              });
             } catch (error) {
               console.error('QuickSearch failed:', error);
               return jsonResponse(res, {

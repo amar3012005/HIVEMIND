@@ -17,7 +17,18 @@ Get a verified change to production **durably and safely**. The box (`myserver`,
 - **Never** `git push --force`, `git reset --hard origin`, or destructive infra ops without explicit user confirm.
 - **Never** hardcode the master key in a committed file; read it from env / the hivemind-apex skill.
 
-## Backend flow (core/* → hm-core)
+## Automated path — `hm` (preferred)
+`.claude/scripts/hm` wraps every prod action below with the hazard-handling + gates baked in. Use it instead of raw `ssh` when you can:
+```bash
+.claude/scripts/hm sync                 # box HEAD vs origin + box-patch hazard scan (read-only)
+.claude/scripts/hm deploy               # DRY-RUN: prints the plan, mutates nothing
+.claude/scripts/hm deploy --confirm     # pull (handles hazards) → migrate gate → restart → smoke + eval
+.claude/scripts/hm deploy --confirm --force-clean   # also discard box-local blockers (backed up to .pull-bak)
+.claude/scripts/hm status | logs | smoke | eval | psql "SELECT …"   # read-only, run freely
+```
+`hm deploy --confirm` does steps 2–5 below for you (incl. the pull-hazard recovery + the migrate-before-node gate + post-deploy smoke/eval). `smoke` needs `HM_MASTER_KEY` in env (never commit it). Mutating subcommands are DRY-RUN unless `--confirm`. The manual flow below is the under-the-hood reference / for when you need a step in isolation.
+
+## Backend flow (core/* → hm-core) — manual reference
 
 ```bash
 # 1. Commit only your files (correct author)

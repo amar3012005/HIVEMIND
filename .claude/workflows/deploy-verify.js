@@ -1,7 +1,7 @@
 export const meta = {
   name: 'deploy-verify',
   description: 'Post-deploy verification for HIVEMIND prod: box-vs-origin sync + box-patch-hazard scan, hm-core health, parallel endpoint smoke, recall-eval gate. READ-ONLY — does not pull or restart (the ship skill does that).',
-  whenToUse: 'Run right after deploying hm-core to confirm the box is in sync, healthy, and recall has not regressed. Surfaces the staged/untracked-file pull hazards before they bite.',
+  whenToUse: 'Run right after deploying hm-core to confirm the box is in sync, healthy, and recall has not regressed. Surfaces the staged/untracked-file pull hazards before they bite. Mirrors the `.claude/scripts/hm sync | status | smoke | eval` read-only commands as a parallel fan-out.',
   phases: [{ title: 'Verify' }],
 }
 

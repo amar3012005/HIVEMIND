@@ -11,6 +11,7 @@ This `.claude/` is tuned to run Claude Code at high speed on HIVEMIND: **recon b
 ## Curated assets
 - **Skills** (`.claude/skills/`): `feature-recon`, `hivemind-dev`, `ship`, `hetzner-ops`, `qdrant-ops`, `mcp-integration`, `debug-issue`, `refactor-safely`, `review-changes`, `explore-codebase`. Global also: `hivemind-apex` (full repo manual + fix playbook), `hivemind-frontend`, `hermes-agents-builder`.
 - **Workflows** (`.claude/workflows/`, invoke via the Workflow tool by `name`): `feature-recon`, `review-changes`, `deploy-verify`.
+- **`.claude/scripts/hm`** (maintainer-only): prod ops dispatcher — `hm status|logs|sync|smoke|eval|psql` (read-only) and `hm deploy|restart|migrate` (DRY-RUN unless `--confirm`; `deploy` bakes in the box-patch hazard handling + migrate gate + post-deploy smoke/eval). Needs the `myserver` SSH alias + `HM_MASTER_KEY`. Contributors don't use this — it drives production.
 - **Agents** (`.claude/agents/`): `HIVEMIND-APEX` (surgical fixer), `cartographer` (blast radius), `historian` (why is it like this), `implementer-backend|frontend|infra`, `code-reviewer`, `security-reviewer`, `db-reviewer`, `deploy-operator`, `e2e-runner`, `mcp-specialist`, `nango-specialist`, `memory-curator`, … fan out for parallel independent work.
 - **CLAUDE.md** (repo root) — graph-first + HIVEMIND memory-discipline rules, loaded every session.
 

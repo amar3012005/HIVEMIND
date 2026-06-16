@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# hm — HIVEMIND prod ops dispatcher (maintainer-only).
+#
+# Codifies the recurring `ssh myserver` actions so they're deterministic, safe,
+# and don't re-derive the box-patch hazards every time. Read-only subcommands run
+# freely; MUTATING ones (deploy/restart/migrate) are DRY-RUN unless --confirm.
+#
+# Requires (maintainer machine only — NOT for contributors):
+#   • SSH alias `myserver` → the Hetzner prod box (override: HM_SSH="ssh user@host")
+#   • HM_MASTER_KEY in env for `smoke` (a HIVEMIND API key; never commit it)
+# Optional env: HM_REPO (default /opt/HIVEMIND), HM_CONTAINER (default hm-core),
+#   HM_USER / HM_ORG (test IDs for smoke), HM_CONFIRM=1, HM_FORCE_CLEAN=1.
+#
+# Used by the `ship` skill + `deploy-verify` workflow. `hm help` lists everything.
+set -euo pipefail
+
+SSH="${HM_SSH:-ssh myserver}"
+REPO="${HM_REPO:-/opt/HIVEMIND}"
+C="${HM_CONTAINER:-hm-core}"
+TEST_USER="${HM_USER:-54f5568b-4d6a-4ae1-9a33-48cb2909d59b}"
+TEST_ORG="${HM_ORG:-67503d34-97e9-49a8-8c52-8ee30cc7603e}"
+NOISE='redis|getaddr|ENOTFOUND|^\s*at\s|errno:|code:|syscall:|hostname:|^}\s*$'
+
+c_red(){ printf '\033[31m%s\033[0m\n' "$*"; }
+c_grn(){ printf '\033[32m%s\033[0m\n' "$*"; }
+die(){ c_red "[hm] $*"; exit 1; }
+# Mutating gate: returns 0 when allowed to proceed, else prints dry-run notice.
+confirmed(){ [ "${HM_CONFIRM:-0}" = "1" ] || [[ " $* " == *" --confirm "* ]]; }
+forced(){ [ "${HM_FORCE_CLEAN:-0}" = "1" ] || [[ " $* " == *" --force-clean "* ]]; }
+
+cmd_status(){
+  $SSH "docker ps --filter name=^${C}\$ --format 'state: {{.Status}}'; \
+        echo '--- recent (filtered) ---'; \
+        docker logs ${C} --since ${1:-60s} 2>&1 | grep -ivE '${NOISE}' | grep -iE 'listening|started|ready|error|SyntaxError|cannot find' | tail -15"
+}
+
+cmd_logs(){
+  local since="${1:-2m}" pat="${2:-}"
+  if [ -n "$pat" ]; then
+    $SSH "docker logs ${C} --since ${since} 2>&1 | grep -ivE '${NOISE}' | grep -iE '${pat}' | tail -60"
+  else
+    $SSH "docker logs ${C} --since ${since} 2>&1 | grep -ivE '${NOISE}' | tail -60"
+  fi
+}
+
+cmd_sync(){
+  $SSH "cd ${REPO} && \
+    LOCAL=\$(git rev-parse --short HEAD); \
+    REMOTE=\$(git ls-remote origin main 2>/dev/null | cut -c1-7); \
+    echo \"box HEAD=\$LOCAL  origin/main=\$REMOTE\"; \
+    [ \"\$LOCAL\" = \"\$REMOTE\" ] && echo 'SYNCED' || echo 'DRIFTED (box behind/ahead of origin)'; \
+    echo '--- box-patch hazards (tracked-modified/staged — these block git pull) ---'; \
+    git status --porcelain | grep -vE '^\?\?' || echo '(none)'"
+}
+
+cmd_smoke(){
+  [ -n "${HM_MASTER_KEY:-}" ] || die "smoke needs HM_MASTER_KEY in env (a HIVEMIND API key)"
+  local q="${1:-what do you know about the project}"
+  # Key passed to the in-container curl; reads from env, never committed.
+  $SSH "docker exec -e MK='${HM_MASTER_KEY}' ${C} sh -c '
+    for ep in chat recall; do
+      printf \"/api/%s -> \" \"\$ep\";
+      curl -sS -o /dev/null -w \"%{http_code}\\n\" -X POST http://localhost:3000/api/\$ep \
+        -H \"Authorization: Bearer \$MK\" -H \"Content-Type: application/json\" \
+        -H \"X-HM-User-Id: ${TEST_USER}\" -H \"X-HM-Org-Id: ${TEST_ORG}\" \
+        -d \"{\\\"message\\\":\\\"${q}\\\",\\\"query\\\":\\\"${q}\\\"}\";
+    done'"
+}
+
+cmd_eval(){
+  $SSH "docker exec ${C} sh -c 'node /app/scripts/eval-harness.mjs 2>&1 | tail -20' || echo '[hm] eval-harness not found under /app/scripts'"
+}
+
+cmd_psql(){
+  local sql="${1:-}"
+  [ -n "$sql" ] || die "usage: hm psql \"SELECT ...\"  (read-only — SELECT/EXPLAIN/WITH only)"
+  echo "$sql" | grep -iqE '^[[:space:]]*(select|explain|with|table)[[:space:]]' \
+    || die "refused: psql is read-only (got: ${sql:0:40}...)"
+  echo "$sql" | grep -iqE '\b(insert|update|delete|drop|alter|truncate|create|grant|copy)\b' \
+    && die "refused: write/DDL keyword detected — psql is read-only"
+  # SQL passed base64 (no quoting hell) into the postgres container; the DB
+  # session is forced read-only (PGOPTIONS) as defense beyond the keyword guard.
+  local b64; b64=$(printf '%s' "$sql" | base64 | tr -d '\n')
+  $SSH "PG=\$(docker ps --filter name=postgres-s0k0 --format '{{.Names}}' | head -1); \
+    [ -n \"\$PG\" ] || { echo '[hm] postgres container not found'; exit 1; }; \
+    SQL=\$(printf '%s' '${b64}' | base64 -d); \
+    docker exec -e PGOPTIONS='-c default_transaction_read_only=on -c search_path=hivemind,public' \"\$PG\" \
+      psql -U hivemind_user -d hivemind -c \"\$SQL\""
+}
+
+cmd_restart(){
+  if ! confirmed "$@"; then echo "[hm] DRY-RUN — would: docker restart ${C}. Re-run with --confirm."; return 0; fi
+  $SSH "docker restart ${C} >/dev/null 2>&1 && echo restarted"
+  _wait_ready
+}
+
+cmd_migrate(){
+  if ! confirmed "$@"; then echo "[hm] DRY-RUN — would: docker exec ${C} npx prisma migrate deploy. Re-run with --confirm."; return 0; fi
+  $SSH "docker exec ${C} npx prisma migrate deploy 2>&1 | tail -15"
+}
+
+_wait_ready(){
+  echo "[hm] waiting for ${C} ready..."
+  $SSH "for i in \$(seq 1 30); do docker exec ${C} node -e 'process.exit(0)' 2>/dev/null && { echo ready; break; }; sleep 2; done"
+}
+
+cmd_deploy(){
+  # 1. Always show the plan (sync + hazards).
+  echo "[hm] pre-deploy state:"; cmd_sync
+  if ! confirmed "$@"; then
+    echo "[hm] DRY-RUN — would: (handle box-patch hazards) → git pull origin main → migrate deploy (if needed) → restart ${C} → smoke + eval."
+    echo "[hm] Re-run with --confirm. Add --force-clean to discard box-local tracked edits that block the pull (backed up to ${REPO}/.pull-bak first)."
+    return 0
+  fi
+  # 2. Handle box-patch hazards (the recurring pull blocker).
+  local blockers
+  blockers=$($SSH "cd ${REPO} && git status --porcelain | grep -vE '^\?\?' | awk '{print \$2}'" || true)
+  if [ -n "$blockers" ]; then
+    c_red "[hm] box has local tracked changes that will block the pull:"; echo "$blockers"
+    if ! forced "$@"; then
+      die "refusing to discard them. Inspect with 'hm psql'/ssh, then re-run with --force-clean (they'll be backed up to ${REPO}/.pull-bak)."
+    fi
+    echo "[hm] --force-clean: backing up + discarding box-local edits..."
+    $SSH "cd ${REPO} && mkdir -p .pull-bak && git diff > .pull-bak/box-local-\$(date +%s).patch 2>&1 || true; \
+          for f in ${blockers}; do git checkout HEAD -- \"\$f\" 2>/dev/null || true; done"
+  fi
+  # 3. Pull (retry once moving any untracked file that collides).
+  local pullout
+  pullout=$($SSH "cd ${REPO} && git pull origin main 2>&1" || true)
+  echo "$pullout" | tail -6
+  if echo "$pullout" | grep -q 'untracked working tree files would be overwritten'; then
+    local utf
+    utf=$(echo "$pullout" | grep -E '^\s' | sed 's/^[[:space:]]*//' | grep -vE 'Please|Aborting' || true)
+    c_red "[hm] untracked files block the pull:"; echo "$utf"
+    forced "$@" || die "re-run with --force-clean to move them to .pull-bak and retry."
+    $SSH "cd ${REPO} && mkdir -p .pull-bak && for f in ${utf}; do mv \"\$f\" .pull-bak/ 2>/dev/null || true; done && git pull origin main 2>&1 | tail -4"
+  fi
+  # 4. Migrate gate (runs BEFORE restart — a failed migrate must not reach node).
+  echo "[hm] applying migrations (gate)..."
+  $SSH "docker exec ${C} npx prisma migrate deploy 2>&1 | tail -6" || die "migrate deploy FAILED — not restarting. Fix the migration first."
+  # 5. Restart + wait.
+  $SSH "docker restart ${C} >/dev/null 2>&1 && echo restarted"; _wait_ready
+  # 6. Verify (smoke + eval), flag regression.
+  echo "[hm] boot:"; cmd_status 60s
+  if [ -n "${HM_MASTER_KEY:-}" ]; then echo "[hm] smoke:"; cmd_smoke || true; else echo "[hm] (set HM_MASTER_KEY to smoke endpoints)"; fi
+  echo "[hm] recall eval:"; cmd_eval || true
+  c_grn "[hm] deploy done — verify combo@8≈1.00 / MRR≈0.87 above; investigate if regressed."
+}
+
+cmd_help(){
+  cat <<'H'
+hm — HIVEMIND prod ops (maintainer-only; needs SSH alias `myserver`)
+
+READ-ONLY (safe, run freely):
+  hm status [since]            container state + filtered recent logs (default 60s)
+  hm logs [since] [grep]       filtered docker logs (default 2m)
+  hm sync                      box HEAD vs origin/main + box-patch hazard scan
+  hm smoke [query]             in-container /api/chat + /api/recall http codes (needs HM_MASTER_KEY)
+  hm eval                      recall eval harness (combo@8 / MRR)
+  hm psql "SELECT ..."         read-only query in-container (SELECT/EXPLAIN/WITH only; rejects writes)
+
+MUTATING (DRY-RUN unless --confirm or HM_CONFIRM=1):
+  hm restart [--confirm]       restart hm-core + wait ready
+  hm migrate [--confirm]       prisma migrate deploy
+  hm deploy  [--confirm] [--force-clean]
+                               pull (handles box-patch hazards) → migrate gate →
+                               restart → smoke + eval. --force-clean discards box-local
+                               tracked/untracked blockers (backed up to .pull-bak first).
+
+Env: HM_SSH, HM_REPO(/opt/HIVEMIND), HM_CONTAINER(hm-core), HM_MASTER_KEY, HM_USER, HM_ORG,
+     HM_CONFIRM=1, HM_FORCE_CLEAN=1.
+NOT for contributors — this drives production. Contributors use the local dev stack.
+H
+}
+
+main(){
+  local sub="${1:-help}"; shift || true
+  case "$sub" in
+    status)  cmd_status "${1:-60s}" ;;
+    logs)    cmd_logs "${1:-2m}" "${2:-}" ;;
+    sync)    cmd_sync ;;
+    smoke)   cmd_smoke "${1:-}" ;;
+    eval)    cmd_eval ;;
+    psql)    cmd_psql "${1:-}" ;;
+    restart) cmd_restart "$@" ;;
+    migrate) cmd_migrate "$@" ;;
+    deploy)  cmd_deploy "$@" ;;
+    help|-h|--help) cmd_help ;;
+    *) die "unknown subcommand '$sub' — run 'hm help'" ;;
+  esac
+}
+main "$@"

@@ -1168,6 +1168,7 @@ export async function recallPersistedMemories(store, {
   sort,                // 'score' | 'date_asc' | 'date_desc'
   preference_boost,    // boolean — boost preference/personal/opinion memories
   include_superseded,  // boolean — include older update-chain versions via traverseUpdateChain
+  raw_query = null,     // original user phrasing (pre-rewrite) for time-travel intent detection
   access_context = null, // { projectIds, teamIds } for V2 multi-tier scope filter
   scope_filter = null,   // optional MemoryScope filter: 'personal'|'project'|'team'|'organization'
                          // limits to memories whose scope === this value (in addition to access_context)
@@ -1189,7 +1190,10 @@ export async function recallPersistedMemories(store, {
   // Time-travel / bi-temporal lane: auto-open the Updates version-chain when the
   // query asks about change/history/as-of (or the caller explicitly requested
   // superseded). Gated → no-op + zero latency for ordinary queries.
-  const _timeTravelIntent = detectTimeTravelIntent(query_context);
+  // Detect on the ORIGINAL user phrasing (raw_query) when provided — the
+  // /api/recall handler rewrites/expands query_context for retrieval, which
+  // strips the "how has X changed / as of …" signal the detector needs.
+  const _timeTravelIntent = detectTimeTravelIntent(raw_query || query_context);
   const _wantVersionHistory = include_superseded === true || _timeTravelIntent;
 
   // ── Event-time ranking BOOST (gated EVENT_TIME_RANKING, default off) ──

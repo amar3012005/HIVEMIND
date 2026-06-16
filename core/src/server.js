@@ -17402,6 +17402,7 @@ exit \$RC
 
               const result = await recallPersistedMemories(persistentMemoryStore, {
                 query_context: effectiveRecallQuery,
+                raw_query: body.query_context || body.context || '', // pre-rewrite phrasing for time-travel intent
                 user_id: userId,
                 org_id: orgId,
                 project: recallProject,

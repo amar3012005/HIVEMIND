@@ -6123,6 +6123,7 @@ exit \$RC
               sections: emitted,
             }, 201);
           } catch (e) {
+            console.error('[meeting-ingest] failed:', e && (e.stack || e.message || JSON.stringify(e)));
             return jsonResponse(res, { error: 'meeting_ingest_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
           }
         }

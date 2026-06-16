@@ -2062,27 +2062,35 @@ export async function recallPersistedMemories(store, {
     }
     // Build a chronological version timeline so time-travel questions ("what did
     // X used to be / how did it change") can be answered directly from recall.
+    // Source the chain from store.getRelatedMemories (the SAME Updates source
+    // traverseUpdateChain uses) rather than the scoped `relationships` array,
+    // which is user/limit-bounded and can miss the edges. Batched + bounded.
     if (_timeTravelIntent) {
       try {
-        const byId = new Map();
-        for (const it of finalItems) { const m = it.memory || it; if (m?.id) byId.set(m.id, m); }
+        const topForTimeline = boostedItems.slice(0, 8).map(it => it.memory || it).filter(m => m && m.id);
         const claimed = new Set();
-        for (const it of boostedItems.slice(0, 8)) {
-          const m = it.memory || it;
-          if (!m?.id || claimed.has(m.id)) continue;
-          const lineage = timelineFor(m, byId, relationships); // oldest → newest
-          if (Array.isArray(lineage) && lineage.length > 1) {
-            lineage.forEach(v => claimed.add(v.id));
-            _versionTimeline.push({
-              memory_id: m.id,
-              versions: lineage.map(v => ({
-                id: v.id,
-                content: v.content,
-                created_at: v.created_at,
-                is_latest: v.is_latest !== false,
-              })),
-            });
-          }
+        const chains = await Promise.all(topForTimeline.map(async (m) => {
+          try {
+            const older = await store.getRelatedMemories?.(m.id, { type: 'Updates', depth: 3 });
+            if (!Array.isArray(older) || !older.length) return null;
+            const versions = [m, ...older]
+              .filter((v, i, arr) => v && v.id && arr.findIndex(x => x.id === v.id) === i)
+              .sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0)); // oldest → newest
+            return { base: m.id, versions };
+          } catch { return null; }
+        }));
+        for (const c of chains) {
+          if (!c || c.versions.length <= 1 || claimed.has(c.base)) continue;
+          c.versions.forEach(v => claimed.add(v.id));
+          _versionTimeline.push({
+            memory_id: c.base,
+            versions: c.versions.map(v => ({
+              id: v.id,
+              content: v.content,
+              created_at: v.created_at,
+              is_latest: v.id === c.base,
+            })),
+          });
         }
       } catch (_) { /* timeline is additive — never fail recall on it */ }
     }

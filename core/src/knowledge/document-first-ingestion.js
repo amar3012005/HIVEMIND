@@ -188,7 +188,7 @@ export class DocumentFirstIngestionService {
    * entity:* tags from the same pass (no separate entity-link LLM on facts).
    * Async, concurrency-bounded, off the critical path. Off-switch KB_FACT_DISTILL=false.
    */
-  async _batchExtractFacts(sections, { maxFacts = 5 } = {}) {
+  async _batchExtractFacts(sections, { maxFacts = 5, entityContext = '' } = {}) {
     const apiKey = process.env.GROQ_API_KEY;
     // gpt-oss-120b (was 20b): the 20b model only half-followed the entity rules
     // (forked Wärmepumpe/heat-pump, emitted phrase-'entities' + generic nouns).
@@ -263,6 +263,9 @@ Output the JSON object and nothing else.`;
         max_tokens: 4000,
         messages: [
           { role: 'system', content: sys },
+          ...(entityContext
+            ? [{ role: 'system', content: `KNOWN CANONICAL ENTITIES already in this workspace — when the SAME real-world thing appears in the text, reuse these EXACT spellings instead of inventing a variant:\n${entityContext}` }]
+            : []),
           { role: 'user', content: numbered },
         ],
         // gpt-oss is a reasoning model — default effort burns latency on a pure
@@ -292,9 +295,9 @@ Output the JSON object and nothing else.`;
     arr.forEach((o, idx) => byI.set(typeof o?.i === 'number' ? o.i : idx, o));
     return sections.map((_, i) => {
       const o = byI.get(i) || {};
-      // Normalize every fact to {t,f}. New strict-schema shape is already
-      // {t,f}; coerce any bare string (legacy / non-gpt-oss salvage) to one,
-      // and backfill a missing title from the sentence.
+      // Normalize every fact to {t,f}. Strict-schema shape is already {t,f};
+      // coerce any bare string (legacy / non-gpt-oss salvage) and backfill a
+      // missing title from the sentence.
       const facts = (Array.isArray(o.facts) ? o.facts : []).map((x) => {
         if (typeof x === 'string') return { t: cleanTitleFrom(x, 48), f: x };
         if (x && typeof x === 'object' && typeof x.f === 'string') {
@@ -326,6 +329,25 @@ Output the JSON object and nothing else.`;
     const docTitle = metadata.documentTitle || metadata.filename || `Document ${String(documentId).slice(0, 8)}`;
 
     const run = (async () => {
+      // entityContext: the org's existing canonical entities (ONE cheap query,
+      // off the per-fact hot path) injected into the distill prompt so new facts
+      // reuse canonical spellings instead of forking variants. Best-effort.
+      let entityContext = '';
+      try {
+        const rows = await this.db.$queryRawUnsafe(
+          `SELECT replace(tag, 'entity:', '') e
+             FROM (SELECT unnest(tags) tag FROM memories WHERE org_id = $1::uuid AND deleted_at IS NULL) s
+            WHERE tag LIKE 'entity:%'
+            GROUP BY tag ORDER BY count(*) DESC LIMIT 40`,
+          orgId,
+        );
+        entityContext = (rows || []).map((r) => r.e).filter(Boolean).join(', ');
+      } catch (e) { this.logger.warn?.(`[kb-distill] entityContext fetch failed: ${e.message}`); }
+
+      // Phase 2: collect {factId, vec} for the OFF-HOT-PATH async enrichment pass
+      // (cross-doc dedup + relationship edges). Populated in flushEmbeds.
+      const enrichRecs = [];
+
       // Only sections with enough prose to distill.
       const eligible = targets.filter((t) => (t.content || '').split(/\s+/).filter(Boolean).length >= 25);
       const batches = [];
@@ -408,6 +430,7 @@ Output the JSON object and nothing else.`;
         await Promise.all(pending.map(async (p, idx) => {
           try {
             const vec = vectors[idx];
+            if (vec) enrichRecs.push({ factId: p.factId, vec });
             await vs?.storeMemory({
               id: p.factId, user_id: userId, org_id: orgId, content: p.fact,
               memory_type: 'fact', is_latest: true, tags: p.entityTags,
@@ -425,7 +448,7 @@ Output the JSON object and nothing else.`;
         if (created >= MAX_FACTS_PER_DOC) return;
         let perSection;
         try {
-          perSection = await this._batchExtractFacts(batch, { maxFacts: MAX_FACTS_PER_SEGMENT });
+          perSection = await this._batchExtractFacts(batch, { maxFacts: MAX_FACTS_PER_SEGMENT, entityContext });
         } catch (err) {
           failed++;
           this.logger.warn?.(`[kb-distill] batch LLM failed: ${err.message}`);
@@ -471,6 +494,12 @@ Output the JSON object and nothing else.`;
       });
       await Promise.all(workers);
       this.logger.info?.(`[kb-distill] doc ${String(documentId).slice(0, 8)}: ${created} facts from ${eligible.length} sections in ${batches.length} LLM calls (failed=${failed})`);
+      // Phase 2 enrichment — OFF the hot path, flag-gated (default off). Cross-doc
+      // dedup + relationship edges, using vectors already computed during embed.
+      if (process.env.KB_ENRICH_ENABLED === '1' && enrichRecs.length) {
+        this._enrichDocAsync({ enrichRecs, orgId, documentId })
+          .catch((e) => this.logger.warn?.(`[kb-enrich] ${e.message}`));
+      }
       return { created, failed };
     })().catch((err) => {
       this.logger.warn?.(`[kb-distill] batch failed: ${err.message}`);
@@ -479,6 +508,55 @@ Output the JSON object and nothing else.`;
 
     this._distillPromise = run; // reprocess scripts can await this
     return run;
+  }
+
+  /**
+   * Phase 2 — async enrichment pass (OFF the ingest hot path, flag-gated).
+   * For each just-created fact, find its nearest existing same-org memory:
+   *   • sim >= SUPPRESS  → the fact is a near-duplicate of an ALREADY-stored
+   *     (different-doc) memory → soft-delete the NEW fact (keep the established
+   *     one). True cross-doc dedup the salience prompt can't catch.
+   *   • RELATE_MIN..SUPPRESS → attach a 'Related' edge for graph connectivity
+   *     beyond shared entity: tags (the relationship-aware traversal goal).
+   * Uses vectors already computed at embed time, so NO extra embedding calls.
+   */
+  async _enrichDocAsync({ enrichRecs, orgId, documentId }) {
+    const vs = this.memoryGraphEngine?.vectorStore;
+    if (!vs || typeof vs.searchMemories !== 'function') return;
+    const SUPPRESS = Number(process.env.KB_ENRICH_SUPPRESS_SIM || 0.93);
+    const RELATE_MIN = Number(process.env.KB_ENRICH_RELATE_MIN || 0.80);
+    const docFactIds = new Set(enrichRecs.map((r) => r.factId));
+    let suppressed = 0, related = 0;
+    for (const rec of enrichRecs) {
+      if (!Array.isArray(rec.vec)) continue;
+      let hits = [];
+      try {
+        hits = await vs.searchMemories({
+          vector: rec.vec, limit: 5, score_threshold: RELATE_MIN,
+          filter: { must: [{ key: 'org_id', match: { value: orgId } }] },
+        });
+      } catch { continue; }
+      // Nearest neighbour that is NOT this fact and NOT from this same doc
+      // (intra-doc redundancy is already handled by the salience prompt).
+      const ext = (hits || [])
+        .map((h) => ({ id: h.id || h.payload?.memory_id, score: h.score ?? h.similarity ?? 0 }))
+        .filter((h) => h.id && h.id !== rec.factId && !docFactIds.has(h.id));
+      const top = ext[0];
+      if (!top) continue;
+      if (top.score >= SUPPRESS) {
+        // Redundant with an established memory → drop the new duplicate.
+        await this.db.memory.update({ where: { id: rec.factId }, data: { deletedAt: new Date() } }).catch(() => {});
+        suppressed++;
+      } else if (top.score >= RELATE_MIN && this.memoryGraphEngine.store?.createRelationship) {
+        await this.memoryGraphEngine.store.createRelationship({
+          id: crypto.randomUUID(), from_id: rec.factId, to_id: top.id,
+          type: 'Mentions', confidence: Number(top.score.toFixed(2)),
+          metadata: { created_by: 'kb_enrich', kind: 'semantic_related', document_id: documentId },
+        }).catch(() => {});
+        related++;
+      }
+    }
+    this.logger.info?.(`[kb-enrich] doc ${String(documentId).slice(0, 8)}: suppressed=${suppressed} related=${related} of ${enrichRecs.length}`);
   }
 
   /**

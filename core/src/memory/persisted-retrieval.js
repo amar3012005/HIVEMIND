@@ -2068,22 +2068,26 @@ export async function recallPersistedMemories(store, {
     if (_timeTravelIntent) {
       try {
         const MAX_CHAINS = 5;       // timelines surfaced
-        const MAX_VERSIONS = 8;     // versions per fact (most recent)
-        const _isAggregation = (m) => Array.isArray(m?.tags)
-          && m.tags.some(t => t === 'canonical-summary' || t === 'synthesis:canonical' || t === 'synthesis:bridge');
-        // Skip aggregation bases (canonical/bridge): their Updates set is the
-        // many memories they COMPACTED, not a linear version history.
+        const MAX_VERSIONS = 8;     // versions per fact (most recent) — bounds canonical aggregations
         const topForTimeline = boostedItems.slice(0, 8)
           .map(it => it.memory || it)
-          .filter(m => m && m.id && !_isAggregation(m));
+          .filter(m => m && m.id);
         const claimed = new Set();
         const chains = await Promise.all(topForTimeline.map(async (m) => {
           try {
             const older = await store.getRelatedMemories?.(m.id, { type: 'Updates', depth: 2 });
             if (!Array.isArray(older) || !older.length) return null;
-            // Linear version history: the base + its non-aggregation predecessors,
-            // newest first, capped — not the full Updates neighbourhood.
-            const versions = [m, ...older.filter(v => !_isAggregation(v))]
+            // getRelatedMemories returns lightweight stubs (id/created_at, no
+            // content). Pick the most-recent MAX_VERSIONS predecessors by date,
+            // then hydrate those for content so the timeline is answerable.
+            const olderIds = older
+              .map(o => ({ id: o.id || o.memory_id, created_at: o.created_at }))
+              .filter(o => o.id && o.id !== m.id)
+              .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))
+              .slice(0, MAX_VERSIONS)
+              .map(o => o.id);
+            const hydrated = (await Promise.all(olderIds.map(id => store.getMemory(id).catch(() => null)))).filter(Boolean);
+            const versions = [m, ...hydrated]
               .filter((v, i, arr) => v && v.id && v.content && arr.findIndex(x => x.id === v.id) === i)
               .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0)) // newest → oldest
               .slice(0, MAX_VERSIONS);

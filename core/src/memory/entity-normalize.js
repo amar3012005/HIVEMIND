@@ -27,6 +27,31 @@ const LEGAL_SUFFIX_RE = /\b(gmbh|ag|kg|inc|llc|ltd|corp|corporation|company|co|s
 // All unicode dash/hyphen variants → ASCII hyphen (fixes "‑" vs "-").
 const DASH_RE = /[‐-―−﹘﹣－]/g;
 
+// Junk guard — slugs that are NEVER real entities. This is mechanical noise
+// removal (universal, not domain-specific): generic descriptors that the LLM
+// occasionally over-extracts, plus this codebase's own test/smoke sentinels
+// that leaked into entity: tags. Roles/titles and bare geographies are NOT
+// listed here on purpose — a hardcoded list of those would false-drop real
+// proper names ("Project Berlin"); they are excluded CONTEXTUALLY by the
+// extraction-LLM prompt instead. Returning null here drops the tag at the
+// write filter (graph-engine) and on every tag re-normalization.
+const GENERIC_NON_ENTITY = new Set([
+  'the', 'a', 'an', 'it', 'this', 'that', 'they', 'we', 'i', 'you',
+  'project', 'the-project', 'team', 'the-team', 'company', 'the-company',
+  'organization', 'org', 'meeting', 'document', 'doc', 'file', 'user',
+  'assistant', 'system', 'everyone', 'someone', 'anyone', 'thing', 'stuff',
+  'data', 'info', 'information', 'details', 'overview', 'summary', 'note',
+]);
+// Test/smoke sentinels this codebase emits (and that leaked into entity tags).
+const TEST_NOISE_RE = /^(ws\d+|embedtest|recallsmoke|routefix\d*|s1probe|s1async|abtest|deploy-smoke|smoketest|smoke-test|kbtest|foo|bar|baz|test|placeholder)(-|$)/i;
+
+function isJunkEntity(slug) {
+  if (!slug || slug.length < 2) return true;
+  if (GENERIC_NON_ENTITY.has(slug)) return true;
+  if (TEST_NOISE_RE.test(slug)) return true;
+  return false;
+}
+
 /**
  * Canonicalize a raw entity NAME (no `entity:` prefix) to a stable slug.
  * Returns null for empty/garbage input.
@@ -52,6 +77,9 @@ export function normalizeEntity(raw) {
   s = s.replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '').replace(/-+/g, '-');
   if (!s) return null;
 
+  // Drop generic descriptors + test/smoke sentinels — never real entities.
+  if (isJunkEntity(s)) return null;
+
   return s;
 }
 
@@ -64,7 +92,9 @@ export function normalizeEntity(raw) {
 export function normalizeEntityTag(tag) {
   if (typeof tag !== 'string' || !tag.startsWith('entity:')) return tag;
   const n = normalizeEntity(tag.slice('entity:'.length));
-  return n ? `entity:${n}` : tag;
+  // Junk/unnormalizable entity tag → null so the array normalizer drops it
+  // (was: keep the original, which let generic/test entity tags survive).
+  return n ? `entity:${n}` : null;
 }
 
 /**
@@ -79,6 +109,7 @@ export function normalizeTagsArray(tags) {
   const out = [];
   for (const t of tags) {
     const nt = normalizeEntityTag(t);
+    if (nt == null) continue;        // dropped junk/unnormalizable entity tag
     if (seen.has(nt)) continue;
     seen.add(nt);
     out.push(nt);

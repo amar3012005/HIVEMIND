@@ -2196,7 +2196,7 @@ OUTPUT JSON only.`;
 
     const prompt = `You are a multilingual memory graph linker. Given a NEW MEMORY and CANDIDATE memories, do FIVE things in ONE pass:
 
-  1. extract the salient entities from the new memory (people, organizations, products, projects, places, and the key concepts it is about). Read the memory in WHATEVER language it is written, but EMIT every entity in CANONICAL form per the ENTITY NAMING rules below — never two surface forms for the same real-world thing.
+  1. extract the salient NAMED entities from the new memory — specific people, organizations / brands, products / models, and named projects or initiatives. Read the memory in WHATEVER language it is written, but EMIT every entity in CANONICAL form per the ENTITY NAMING rules below — never two surface forms for the same real-world thing. See EXCLUDE below for what is NOT an entity.
   2. extract TEMPORAL anchors (day-of-week, time-of-day, relative refs like "tomorrow"/"mañana"/"morgen", absolute dates, recurring patterns). Resolve relatives against today=${todayIso}.
   3. classify the new memory's TYPE (decision | preference | fact | event | goal | lesson | relationship)
   4. for EACH candidate that shares an entity OR temporal anchor OR clear semantic continuity, emit ONE typed edge.
@@ -2216,6 +2216,13 @@ ENTITY NAMING — emit ONE canonical name per real-world thing so the same entit
   • SUFFIXES: drop corporate / legal-form suffixes from organization names.
   • FORM: the bare name only — no leading articles, quotes, trailing qualifiers, or punctuation.
   The SAME thing mentioned twice (in any language, case, number, or abbreviation) MUST map to the SAME canonical string both times.
+
+EXCLUDE — never emit these as entities:
+  • job titles, roles, or functions (CTO, Chief Scientist, manager, engineer) — emit the PERSON'S name, not their title.
+  • bare geographies or nationalities (Berlin, Germany, German) UNLESS part of a proper name (e.g. "Bank of America", "Project Berlin").
+  • generic descriptors (the project, the team, the company, the document, the meeting, data, stuff).
+  • standalone dates, times, numbers, or money amounts (captured under TEMPORAL / not entities).
+  • placeholder or test tokens (foo, bar, test, smoke, alpha/bravo-style fillers).
 
 PICK THE OPERATOR FROM SEMANTICS, NOT WORD OVERLAP:
   • "I prefer X" then later "switching to Y" → Updates the earlier preference.

@@ -329,6 +329,19 @@ async function buildAccessContext(userId, orgId) {
         select: { id: true },
       }).catch(() => []);
       effectiveProjectIds = Array.from(new Set([...projectIds, ...all.map(p => p.id)]));
+    } else if (orgRole === 'guest') {
+      // SECURITY (tenant isolation): guests are project-scoped external invitees
+      // and must be locked to the projects they were EXPLICITLY added to. The
+      // default accessibleProjectIds union also grants projects inherited via
+      // team membership — but every project is auto-linked to the org's
+      // "all-members"/Default Team, and guests sit on it, so the team lane would
+      // otherwise hand a guest the ENTIRE org (the cross-project recall leak).
+      // Restrict guests to explicit projectMember rows only.
+      const explicit = await prisma.projectMember.findMany({
+        where: { userId, project: { orgId, status: 'active' } },
+        select: { projectId: true },
+      }).catch(() => []);
+      effectiveProjectIds = explicit.map(p => p.projectId);
     }
     const value = { projectIds: effectiveProjectIds, teamIds, orgRole, crossProject: crossProject !== false };
     _accessContextCache.set(key, { value, expiresAt: now + 60_000 });
@@ -17346,15 +17359,17 @@ exit \$RC
               // — regardless of the caller's project membership (the room/caller
               // explicitly chose this project). Without project_id, behavior is unchanged.
               if (body.project_id) {
-                // Spread-preserve the rest of the context (orgRole especially):
-                // rebuilding it bare dropped orgRole, which (a) re-granted the
-                // org-wide tier to guests on project recalls and (b) changed the
-                // keyword candidate pool composition.
-                recallAccessCtx = {
-                  ...(recallAccessCtx || {}),
-                  projectIds: [body.project_id],
-                  teamIds: (recallAccessCtx && recallAccessCtx.teamIds) || [],
-                };
+                // SECURITY: only honor a caller-supplied project_id if the caller
+                // can actually access it (member, or owner/admin via buildAccessContext
+                // expansion). Otherwise a guest could recall any project by id.
+                const _baseCtx = recallAccessCtx || {};
+                const _canAccessProject = Array.isArray(_baseCtx.projectIds)
+                  && _baseCtx.projectIds.includes(body.project_id);
+                if (_canAccessProject) {
+                  recallAccessCtx = { ..._baseCtx, projectIds: [body.project_id], teamIds: _baseCtx.teamIds || [] };
+                } else {
+                  recallAccessCtx = _baseCtx;
+                }
               }
 
               // Person-filtered recall ("what did person X update today"): resolve an

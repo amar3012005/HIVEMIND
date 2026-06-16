@@ -46,14 +46,15 @@ run_replica() {
 }
 
 target="${1:-all}"
+# SINGLE-REPLICA topology (2026-06-16): hm-core-2 retired to eliminate the
+# recurring two-replica drift class (split-brain QDRANT_URL, RERANK-off-on-one,
+# restart-one-stale, BullMQ double-processing, singleton placement). hm-core now
+# owns HTTP + BullMQ + all singletons (Hermes manager, governance scheduler,
+# Slack bridge — merged into sing-hm-core.env). Re-introduce a 2nd replica only
+# with real orchestration, not hand-run containers.
 case "$target" in
-  hm-core)   run_replica hm-core   3001 /opt/HIVEMIND/sing-hm-core.env ;;
-  hm-core-2) run_replica hm-core-2 3011 /opt/HIVEMIND/sing-hm-core-2.env ;;
-  all)
-    run_replica hm-core   3001 /opt/HIVEMIND/sing-hm-core.env
-    run_replica hm-core-2 3011 /opt/HIVEMIND/sing-hm-core-2.env
-    ;;
-  *) die "unknown target '$target' (use: hm-core | hm-core-2 | all)" ;;
+  hm-core|all) run_replica hm-core 3001 /opt/HIVEMIND/sing-hm-core.env ;;
+  *) die "unknown target '$target' (single-replica topology; use: hm-core | all)" ;;
 esac
 
 echo "[hm-core-start] done ($target)"

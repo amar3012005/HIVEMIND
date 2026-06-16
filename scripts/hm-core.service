@@ -7,7 +7,7 @@ Requires=docker.service
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/opt/HIVEMIND/scripts/hm-core-start.sh
-ExecStop=/usr/bin/docker stop hm-core hm-core-2
+ExecStop=/usr/bin/docker stop hm-core
 
 [Install]
 WantedBy=multi-user.target

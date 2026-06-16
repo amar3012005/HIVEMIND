@@ -423,6 +423,33 @@ export class PrismaGraphStore {
     return mapMemoryRecord(record);
   }
 
+  // Batch hydrate by ids — ONE findMany instead of N concurrent getMemory()
+  // findUnique calls. The vector lane fans out ~150 ids; doing them as a
+  // Promise.all of findUnique slams the Prisma pool (under full-pipeline
+  // concurrency most returned null → the vector lane silently collapsed to ~1
+  // candidate). Returns Map<id, mappedMemory>; ids absent from PG are simply
+  // omitted (same as getMemory→null). Includes memoryProjects so project_ids
+  // populate (getMemory omitted it).
+  async getMemories(ids) {
+    if (!Array.isArray(ids) || ids.length === 0) return new Map();
+    const uniq = [...new Set(ids.filter(Boolean))];
+    const records = await this.client.memory.findMany({
+      where: { id: { in: uniq } },
+      include: {
+        sourceMetadata: true,
+        codeMetadata: true,
+        memoryProjects: true,
+        versions: { orderBy: { createdAt: 'desc' }, take: 1 },
+      },
+    });
+    const out = new Map();
+    for (const r of records) {
+      const mapped = mapMemoryRecord(r);
+      if (mapped && mapped.id) out.set(mapped.id, mapped);
+    }
+    return out;
+  }
+
   async deleteMemory(id) {
     const deleted = await this.client.memory.update({
       where: { id },

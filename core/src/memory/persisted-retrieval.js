@@ -629,14 +629,21 @@ async function vectorCandidatesForRecall(store, {
     collectionName: undefined
   });
 
-  const hydrated = await Promise.all((results || []).map(async result => {
+  // Batch-hydrate every candidate id in ONE findMany. Previously this fanned out
+  // N concurrent store.getMemory() (findUnique) calls inside Promise.all — under
+  // the full recall pipeline's concurrency that slammed the Prisma pool and most
+  // returned null, silently collapsing the vector lane from ~150 hits to ~1. The
+  // batch is a single query (no contention) and also populates project_ids.
+  const _vecIds = (results || []).map(r => r.payload?.memory_id || r.id).filter(Boolean);
+  const _vecMemById = store.getMemories ? await store.getMemories(_vecIds) : new Map();
+  const hydrated = (results || []).map(result => {
     const sourcePlatform = result.payload?.source_platform || result.payload?.source || null;
     if (source_platforms.length > 0 && !source_platforms.includes(sourcePlatform)) {
       return null;
     }
 
     const memoryId = result.payload?.memory_id || result.id;
-    const memory = await store.getMemory(memoryId);
+    const memory = _vecMemById.get(memoryId);
     if (!memory) return null;
     if (!isMemoryInDateRange(memory, dateRange)) return null;
     // V2 scope filtering: enforce after hydrate (vector index doesn't carry scope)
@@ -675,9 +682,9 @@ async function vectorCandidatesForRecall(store, {
       recencyScore: 0,
       score: result.score || 0
     };
-  }));
+  });
 
-  return hydrated.filter(item => {
+  const _vfReturn = hydrated.filter(item => {
     if (!item) return false;
     const mt = item.memory?.tags || [];
     // Exclude benchmark data from production recall when no specific project is set
@@ -694,6 +701,10 @@ async function vectorCandidatesForRecall(store, {
     ) return false;
     return true;
   });
+  if (process.env.RECALL_LAP === 'true') {
+    console.log('[vec-funnel]', JSON.stringify({ qdrant_hits: (results || []).length, hydrated_nonnull: hydrated.filter(Boolean).length, after_filter: _vfReturn.length }));
+  }
+  return _vfReturn;
 }
 
 function timelineFor(memory, memoryById, relationships) {
@@ -2136,12 +2147,15 @@ export async function recallPersistedMemories(store, {
     );
   }
 
-  // Cross-encoder rerank (Cohere v3.5, multilingual) over the wide window —
-  // gated. Recovers semantically-best rows the bi-encoder + term-overlap rank
-  // low, especially cross-lingual (English query vs German fact). Reads
-  // title/content (surfaced from the wrapper); graceful — keeps order on any
-  // failure/timeout. Fires only when cross_rerank is on AND reranker env is set.
-  if ((cross_rerank === true) && top.length > 1) {
+  // Cross-encoder rerank (Cohere v3.5, multilingual) over the wide window.
+  // Recovers semantically-best rows the bi-encoder + term-overlap rank low,
+  // especially cross-lingual (English query vs German fact). Graceful — keeps
+  // order on any failure/timeout. Default-ON via RERANK_ENABLED (the env was
+  // previously a no-op — the gate only honoured an explicit cross_rerank param,
+  // so the Cohere reranker never fired on chat/recall/MCP despite the flag).
+  // A per-call cross_rerank still overrides (true/false).
+  const _crossRerank = cross_rerank != null ? !!cross_rerank : (process.env.RERANK_ENABLED === 'true');
+  if (_crossRerank && top.length > 1) {
     try {
       const crq = typeof query_context === 'string'
         ? query_context

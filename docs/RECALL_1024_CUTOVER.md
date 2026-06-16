@@ -119,16 +119,35 @@ Measured via env-gated stage laps (since reverted). Entire cost is **inside
 | `expandCandidatesViaGraph` | 690 | graph neighbour blow-up |
 | **sync tail** (merge/score/dedup/rerank/synthesis over the expanded pool) | **~1400** | pure JS, no awaits — the prize |
 
-## 7. Final pieces left (not yet done)
+## 7. Final pieces
 
-1. **Latency cuts** (the remaining "lowest latency" work — accuracy-sensitive core changes):
-   - Parallelize the independent retrieval lanes (lexical ‖ base-vector ‖ expansion) → ~–400ms.
-   - **Cap the graph-expanded candidate pool** before the ~1.4s synchronous merge/score/rerank tail
-     → potentially ~–1s. Needs an A/B against the Solvis eval to confirm combo@8 stays 1.00.
+### Done (2026-06-16 hardening pass — production)
+- ✅ **Durable launch.** systemd `hm-core.service` → in-repo `scripts/hm-core-start.sh` (both
+  replicas from one canonical `.env` + overlay; refuses to start on a non-`hm-qdrant` `QDRANT_URL`).
+  Reboot-safety proven (`systemctl restart` → both back @ hm-qdrant/1024). Stale Cloud/384 launcher
+  env (`.runtime/hm-core.env`) neutralized. *(Was the real prod risk: the cutover lived only in
+  running-container memory and would have reverted on the next restart/reboot.)*
+- ✅ **Accuracy independently re-verified** — Solvis `recall-solvis-eval.mjs`: combo@8 **1.00**,
+  fact 0.90, MRR 0.79.
+- ✅ **Fresh-ingest path proven** — a new `/api/memories` write embeds @1024 and lands in its
+  `org_<id>` container (count +1; 1024 enforced by Qdrant) and is immediately recallable. Ongoing
+  writes use the new lane, not just the one-time backfill.
+- ✅ **All cutover artifacts version-controlled** — `reembed-pg-to-qdrant.mjs`,
+  `reembed-segments-to-qdrant.mjs` (was box-only), `recall-solvis-eval.mjs`, this doc, the launcher,
+  the systemd unit.
+- ✅ **Latency safe-win** — parallelized the independent lexical ‖ base-vector lanes
+  (`persisted-retrieval.js`). Warm `/api/chat` **~5.0s → ~3.1s**. Eval-gated: combo@8 stayed **1.00**.
+
+### Deliberately deferred (need supervision / consent — NOT auto-run)
+1. **Cap the graph-expanded candidate pool** before the ~1.4s synchronous merge/score/rerank tail
+   (~–1s). This changes *what* gets scored → accuracy-sensitive. The 10-query Solvis eval is too
+   coarse to clear it alone; needs a supervised A/B across more queries/tenants. Do NOT ship blind.
 2. **Legacy Cloud 384 cleanup** — the disconnected Cloud Qdrant still holds the old 384 collections.
-   Out of the active path; PG is the source of truth. Optional destructive delete for "zero 384 trace."
-3. **Verify FE surfaces** end-to-end (Tara UI, Overview chat, search) now that the vector lane is live
-   — backend is unified; FE just needs a live click-through.
+   Already out of the active path (no replica references it; launcher guards against repointing) and
+   PG is the source of truth, so it costs only money + "384 trace." Deleting an external data store
+   is destructive → requires explicit owner sign-off + a snapshot first. Not auto-executed.
+3. **FE surfaces click-through** — backend is unified and verified (live `/api/chat` returns grounded
+   1024 recall); the Tara/Overview/search UIs call the same core. Just needs a human live click.
 
 ## 8. Operational notes
 

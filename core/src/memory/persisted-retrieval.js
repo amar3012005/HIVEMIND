@@ -1305,6 +1305,50 @@ export async function recallPersistedMemories(store, {
   // further down still propagates any vector error (semantics preserved).
   _vectorCandidatesPromise.catch(() => {});
 
+  // More independent I/O lanes kicked off CONCURRENTLY here (overlapping the
+  // lexical FTS lane + the synchronous lexical filter below + each other),
+  // instead of running one-after-another after the base vector resolves:
+  //   • relationships graph fetch (needed by scoring + graph expansion)
+  //   • the SHOULD-mode temporal additive vector pass (its tags are sync-ready)
+  //   • the SHOULD-mode entity additive vector pass (chained off the entity-tag
+  //     LLM extraction that was already running in parallel)
+  // All are ADDITIVE / order-independent (folded into the same MAX-dedup merge)
+  // and read-only, so output is unchanged — only the wall-clock collapses from
+  // sum-of-lanes to max-of-lanes. Consumed at the Promise.all further down.
+  const _relationshipsPromise = store.listRelationships({ user_id, org_id, project, limit: 1000 });
+  _relationshipsPromise.catch(() => {});
+
+  const _temporalCandidatesPromise = (TEMPORAL_FILTER_MODE === 'should' && _temporalFilterTags.length)
+    ? vectorCandidatesForRecall(store, {
+        query_context, user_id, org_id, project, source_platforms,
+        tags: _temporalFilterTags, max_memories,
+        dateRange: null, scoreThreshold: vectorScoreThreshold,
+        hnswEf: _wireCfg ? _cfg?.hnsw_ef : undefined,
+        candidatePoolSize, is_latest: effectiveIsLatest, access_context, scope_filter,
+      })
+        .then((cands) => cands.filter((c) => !isTaraActivity(c?.memory) && !isRecallNoise(c?.memory)).map((c) => ({ ...c, _temporal_filtered: true })))
+        .catch(() => [])
+    : Promise.resolve([]);
+  _temporalCandidatesPromise.catch(() => {});
+
+  // Entity additive pass overlaps too — it waits only on the entity-tag LLM
+  // extraction (already in flight), not on the main fetch. SHOULD mode only;
+  // 'must' mode resolved its tags into _effectiveTags above (hard filter).
+  const _entityCandidatesPromise = (ENTITY_FILTER_MODE === 'should')
+    ? _entityTagsPromise.then((entityTags) => {
+        if (!entityTags || !entityTags.length) return [];
+        return vectorCandidatesForRecall(store, {
+          query_context, user_id, org_id, project, source_platforms,
+          tags: entityTags, max_memories,
+          dateRange: effectiveDateRange, scoreThreshold: vectorScoreThreshold,
+          hnswEf: _wireCfg ? _cfg?.hnsw_ef : undefined,
+          candidatePoolSize, is_latest: effectiveIsLatest, access_context, scope_filter,
+        })
+          .then((cands) => cands.filter((c) => !isTaraActivity(c?.memory) && !isRecallNoise(c?.memory)).map((c) => ({ ...c, _entity_filtered: true })));
+      }).catch(() => [])
+    : Promise.resolve([]);
+  _entityCandidatesPromise.catch(() => {});
+
   const lexicalCandidates = await store.searchMemories({
     query: query_context,
     user_id,
@@ -1388,52 +1432,27 @@ export async function recallPersistedMemories(store, {
     }
   }
 
-  // SHOULD mode: ADDITIVE entity-filtered precision pass. The unfiltered passes
-  // above are the recall FLOOR (protects legacy/untagged memories); this only
-  // ADDS entity-tag matches, tagged _entity_filtered for the exact-match scoring
-  // term, and is folded into the same MAX-dedup merge downstream. Never removes.
-  let entityFilteredCandidates = [];
+  // ADDITIVE entity + temporal passes (SHOULD mode) and the relationships graph
+  // were all kicked off CONCURRENTLY at the top of this function (overlapping the
+  // base vector + lexical lanes). Resolve them together in one barrier here.
+  // Both additive passes are folded into the same MAX-dedup merge downstream and
+  // never remove (the unfiltered passes remain the recall floor), so output is
+  // identical to the previous serial form — only wall-clock collapses.
+  //   • entity pass: _entity_filtered tag set inside the promise
+  //   • temporal pass: COMPLEMENTARY to effectiveDateRange — it any-matches the
+  //     ingest ts:/time: EVENT-time tags (dateRange:null), surfacing memories a
+  //     record-time window misses. _temporal_filtered tag set inside the promise.
+  const [entityFilteredCandidates, temporalFilteredCandidates, relationships] = await Promise.all([
+    _entityCandidatesPromise,
+    _temporalCandidatesPromise,
+    _relationshipsPromise,
+  ]);
+  // Keep _entityFilterTags populated for any downstream reference. The extraction
+  // promise is already settled (the entity pass above awaited it); this is a
+  // no-op await that just surfaces the resolved tags. 'must' mode set it earlier.
   if (ENTITY_FILTER_MODE === 'should') {
-    // Resolve the parallel entity extraction now (it overlapped the main fetch).
-    _entityFilterTags = await _entityTagsPromise;
+    try { _entityFilterTags = await _entityTagsPromise; } catch { _entityFilterTags = []; }
   }
-  if (ENTITY_FILTER_MODE === 'should' && _entityFilterTags.length) {
-    entityFilteredCandidates = await vectorCandidatesForRecall(store, {
-      query_context, user_id, org_id, project, source_platforms,
-      tags: _entityFilterTags, max_memories,
-      dateRange: effectiveDateRange, scoreThreshold: vectorScoreThreshold,
-      hnswEf: _wireCfg ? _cfg?.hnsw_ef : undefined,
-      candidatePoolSize, is_latest: effectiveIsLatest, access_context, scope_filter,
-    })
-      .then((cands) => cands.filter((c) => !isTaraActivity(c?.memory) && !isRecallNoise(c?.memory)).map((c) => ({ ...c, _entity_filtered: true })))
-      .catch(() => []);
-  }
-
-  // SHOULD mode (temporal): ADDITIVE event-time tag pass. This is COMPLEMENTARY
-  // to (not a duplicate of) the existing `effectiveDateRange` filter:
-  //   • effectiveDateRange (expandTemporalQuery) filters on RECORD time
-  //     (created_at / document_date) — when the memory was written.
-  //   • This pass any-matches the ingest `ts:`/`time:` TAGS — which encode
-  //     EVENT time (e.g. a memory written today tagged `time:2026-07-01`
-  //     about a future deadline). created_at-range can never surface those.
-  // Hence we DELIBERATELY pass dateRange:null here — the tag match is the only
-  // temporal constraint, so event-dated memories aren't re-clipped by the
-  // record-time window. Marked _temporal_filtered, folded into MAX-dedup merge.
-  // Never removes (the unfiltered passes remain the recall floor).
-  let temporalFilteredCandidates = [];
-  if (TEMPORAL_FILTER_MODE === 'should' && _temporalFilterTags.length) {
-    temporalFilteredCandidates = await vectorCandidatesForRecall(store, {
-      query_context, user_id, org_id, project, source_platforms,
-      tags: _temporalFilterTags, max_memories,
-      dateRange: null, scoreThreshold: vectorScoreThreshold,
-      hnswEf: _wireCfg ? _cfg?.hnsw_ef : undefined,
-      candidatePoolSize, is_latest: effectiveIsLatest, access_context, scope_filter,
-    })
-      .then((cands) => cands.filter((c) => !isTaraActivity(c?.memory) && !isRecallNoise(c?.memory)).map((c) => ({ ...c, _temporal_filtered: true })))
-      .catch(() => []);
-  }
-
-  const relationships = await store.listRelationships({ user_id, org_id, project, limit: 1000 });
   const relationshipCounts = buildRelationshipIndex(relationships);
   const contradictedIds    = buildContradictedIndex(relationships);       // Map<to_id,{createdBy,_ts}>
   const correctionWinners  = buildCorrectionWinnerIndex(relationships);   // Map<from_id,_ts>

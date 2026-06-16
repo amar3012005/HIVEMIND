@@ -2088,8 +2088,11 @@ export async function recallPersistedMemories(store, {
               .slice(0, 24);
             let rows = [];
             if (olderIds.length && prisma?.memory?.findMany) {
+              // NO deletedAt filter: superseded versions are frequently
+              // soft-deleted on supersession/compaction — those ARE the history
+              // we want to surface. Bi-temporal: show what the fact used to be.
               rows = await prisma.memory.findMany({
-                where: { id: { in: olderIds }, deletedAt: null },
+                where: { id: { in: olderIds } },
                 select: { id: true, content: true, createdAt: true },
               }).catch(() => []);
             }

@@ -2067,19 +2067,31 @@ export async function recallPersistedMemories(store, {
     // which is user/limit-bounded and can miss the edges. Batched + bounded.
     if (_timeTravelIntent) {
       try {
-        const topForTimeline = boostedItems.slice(0, 8).map(it => it.memory || it).filter(m => m && m.id);
+        const MAX_CHAINS = 5;       // timelines surfaced
+        const MAX_VERSIONS = 8;     // versions per fact (most recent)
+        const _isAggregation = (m) => Array.isArray(m?.tags)
+          && m.tags.some(t => t === 'canonical-summary' || t === 'synthesis:canonical' || t === 'synthesis:bridge');
+        // Skip aggregation bases (canonical/bridge): their Updates set is the
+        // many memories they COMPACTED, not a linear version history.
+        const topForTimeline = boostedItems.slice(0, 8)
+          .map(it => it.memory || it)
+          .filter(m => m && m.id && !_isAggregation(m));
         const claimed = new Set();
         const chains = await Promise.all(topForTimeline.map(async (m) => {
           try {
-            const older = await store.getRelatedMemories?.(m.id, { type: 'Updates', depth: 3 });
+            const older = await store.getRelatedMemories?.(m.id, { type: 'Updates', depth: 2 });
             if (!Array.isArray(older) || !older.length) return null;
-            const versions = [m, ...older]
-              .filter((v, i, arr) => v && v.id && arr.findIndex(x => x.id === v.id) === i)
-              .sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0)); // oldest → newest
+            // Linear version history: the base + its non-aggregation predecessors,
+            // newest first, capped — not the full Updates neighbourhood.
+            const versions = [m, ...older.filter(v => !_isAggregation(v))]
+              .filter((v, i, arr) => v && v.id && v.content && arr.findIndex(x => x.id === v.id) === i)
+              .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0)) // newest → oldest
+              .slice(0, MAX_VERSIONS);
             return { base: m.id, versions };
           } catch { return null; }
         }));
         for (const c of chains) {
+          if (_versionTimeline.length >= MAX_CHAINS) break;
           if (!c || c.versions.length <= 1 || claimed.has(c.base)) continue;
           c.versions.forEach(v => claimed.add(v.id));
           _versionTimeline.push({

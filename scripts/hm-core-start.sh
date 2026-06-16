@@ -18,7 +18,10 @@ SA=/data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/google-workspace-sa.json
 CODE=/opt/HIVEMIND/core
 NET=hmtest
 IMG=node:20
-START_CMD='npx prisma generate 2>/dev/null && npx prisma migrate deploy && node src/server.js'
+# Ghostscript + IM PDF policy: required for scanned-PDF vision OCR (convert
+# rasterizes PDF→PNG for Groq vision). node:20 base lacks gs and IM denies the
+# PDF coder by default → installed/relaxed at boot, idempotent + best-effort.
+START_CMD='command -v gs >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq --no-install-recommends ghostscript >/dev/null 2>&1; }; sed -i '"'"'s#rights="none" pattern="PDF"#rights="read|write" pattern="PDF"#'"'"' /etc/ImageMagick-6/policy.xml 2>/dev/null || true; npx prisma generate 2>/dev/null && npx prisma migrate deploy && node src/server.js'
 
 die() { echo "[hm-core-start] FATAL: $*" >&2; exit 1; }
 

@@ -11,6 +11,7 @@
  */
 
 import { recallPersistedMemories } from '../memory/persisted-retrieval.js';
+import { resolveProjectForSave } from '../memory/project-classifier.js';
 
 // ── Tool schemas (LLM-visible) ───────────────────────────────────────────────
 
@@ -496,33 +497,56 @@ const TOOL_HANDLERS = {
       }
     }
 
-    const hasProject = Boolean(resolvedProjectId);
-    const scope = ['personal', 'project', 'team', 'organization'].includes(explicitScope)
-      ? explicitScope
-      : (hasProject ? 'project' : 'personal');
-
-    // Project-choice gate: when the user can access >=1 project but neither a
-    // project nor an explicit org/personal scope was chosen, DEFER the save and
-    // return the choice + a draft so the chat UI renders project buttons
-    // (Org + each project). The FE completes the save silently on click.
-    if (!hasProject && !explicitScope && ctx.persistentMemoryStore?.client?.project) {
+    // Auto-classify the project from name+description when the caller gave no
+    // project and no explicit scope. Confident match → assign silently;
+    // ambiguous → return needs_project_choice (with a pre-selected suggestion)
+    // so the UI asks; nothing fits → personal. Honors the org memory_save_policy
+    // ('org-wide' → org scope; 'ask' → always ask; else → semantic classify).
+    let autoScope = null; // set to 'organization' when policy routes org-wide
+    if (!resolvedProjectId && !explicitScope && ctx.persistentMemoryStore?.client?.project) {
       const accessProjectIds = (ctx.accessContext?.projectIds) || [];
       if (accessProjectIds.length > 0) {
         const projs = await ctx.persistentMemoryStore.client.project.findMany({
           where: { id: { in: accessProjectIds }, orgId: ctx.orgId, status: 'active' },
-          select: { id: true, name: true, slug: true },
+          select: { id: true, name: true, slug: true, description: true },
         }).catch(() => []);
         if (projs.length > 0) {
-          return {
-            saved: false,
-            needs_project_choice: true,
-            message: 'Ask the user which project to save this to (buttons are shown). Do not retry the save yourself.',
-            projects: projs.map(p => ({ id: p.id, name: p.name, slug: p.slug })),
-            draft: { title: args.title, content: args.content, tags: args.tags || [], memory_type: memType },
-          };
+          let policy = 'private';
+          try {
+            const org = await ctx.persistentMemoryStore.client.organization.findUnique({
+              where: { id: ctx.orgId }, select: { memorySavePolicy: true },
+            });
+            policy = org?.memorySavePolicy || 'private';
+          } catch { /* default private → classify */ }
+          const res = await resolveProjectForSave({
+            text: `${args.title || ''}\n${args.content || ''}\n${(args.tags || []).join(' ')}`,
+            projects: projs,
+            policy,
+          });
+          if (res.decision === 'auto' && res.projectId) {
+            resolvedProjectId = res.projectId;
+            resolvedProjectName = res.projectName || null;
+          } else if (res.decision === 'org') {
+            autoScope = 'organization';
+          } else if (res.decision === 'ask') {
+            return {
+              saved: false,
+              needs_project_choice: true,
+              message: 'Ambiguous which project this belongs to. Ask the user (buttons shown); the suggested project is pre-selected. Do not retry the save yourself.',
+              suggested_project_id: res.suggestedId || null,
+              projects: projs.map(p => ({ id: p.id, name: p.name, slug: p.slug })),
+              draft: { title: args.title, content: args.content, tags: args.tags || [], memory_type: memType },
+            };
+          }
+          // 'personal' → fall through (resolvedProjectId stays null)
         }
       }
     }
+
+    const hasProject = Boolean(resolvedProjectId);
+    const scope = ['personal', 'project', 'team', 'organization'].includes(explicitScope)
+      ? explicitScope
+      : (hasProject ? 'project' : (autoScope || 'personal'));
 
     const payload = {
       title: args.title,

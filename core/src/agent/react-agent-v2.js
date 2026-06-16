@@ -29,6 +29,7 @@
  */
 
 import { TOOL_SCHEMAS, dispatchTool as _dispatchTool } from './tool-registry.js';
+import { resolveProjectForSave } from '../memory/project-classifier.js';
 
 // Retry router: transient failures (TIMEOUT/RATE_LIMIT) get ONE auto-retry
 // with exponential backoff. AUTH_ERROR / INVALID_ARGS / UNKNOWN_TOOL pass
@@ -2033,37 +2034,49 @@ export async function runReactAgentV2({
     // by "Which project?" question even for totally unrelated facts.
     if (plan.intent_kind === 'save' && plan.save_intent && (plan.ask_for_project || (!plan.save_intent.project_hint && !ctx.projectId))) {
       const accessProjectIds = (ctx.accessContext?.projectIds) || [];
-      if (!plan.save_intent.project_hint && !ctx.projectId && accessProjectIds.length > 1) {
+      if (!plan.save_intent.project_hint && !ctx.projectId && accessProjectIds.length >= 1) {
         let projects = [];
         try {
           if (ctx.persistentMemoryStore?.client?.project) {
             projects = await ctx.persistentMemoryStore.client.project.findMany({
-              where: { id: { in: accessProjectIds }, orgId: ctx.orgId },
-              select: { id: true, name: true },
-              take: 12,
+              where: { id: { in: accessProjectIds }, orgId: ctx.orgId, status: 'active' },
+              select: { id: true, name: true, slug: true, description: true },
+              take: 24,
             });
           }
         } catch {}
 
-        // Topic-match heuristic: any project name appears in the save
-        // content / title / message OR the planner asked.
-        const haystack = `${plan.save_intent.title || ''} ${plan.save_intent.content || ''} ${message || ''}`.toLowerCase();
-        const topicMatches = projects.filter(p => {
-          const n = (p.name || '').toLowerCase().trim();
-          if (!n || n.length < 3) return false;
-          return haystack.includes(n);
+        // Org memory_save_policy: 'org-wide' | 'ask' | 'private'(auto-classify).
+        let policy = 'private';
+        try {
+          const org = await ctx.persistentMemoryStore?.client?.organization?.findUnique({
+            where: { id: ctx.orgId }, select: { memorySavePolicy: true },
+          });
+          policy = org?.memorySavePolicy || 'private';
+        } catch {}
+
+        // Semantic classify against project name + DESCRIPTION (replaces the
+        // old name-substring heuristic that ignored descriptions). Confident
+        // match → assign silently; ambiguous → ask (suggested floated to top);
+        // nothing fits → personal.
+        const decision = await resolveProjectForSave({
+          text: `${plan.save_intent.title || ''}\n${plan.save_intent.content || ''}\n${message || ''}`,
+          projects,
+          policy,
         });
 
-        // Only ask when content TOPICALLY MATCHES a project name. Planner's
-        // ask_for_project flag is too eager (defaults to true on every chat
-        // save lacking explicit scope) — without topic match we'd block
-        // every save with the same question. Default-personal is the right
-        // safe behavior; user can move the memory later if needed.
-        const shouldAsk = topicMatches.length >= 1;
-
-        if (shouldAsk) {
+        if (decision.decision === 'auto' && decision.projectName) {
+          plan.save_intent.project_hint = decision.projectName;
+          plan.ask_for_project = false;
+          // fall through to the save branch (acks "(project: X)").
+        } else if (decision.decision === 'ask') {
           const lang = languageName(language);
-          const list = projects.map(p => `• ${p.name}`).join('\n') || '(no projects found)';
+          const ordered = decision.suggestedId
+            ? [...projects].sort((a, b) => (a.id === decision.suggestedId ? -1 : b.id === decision.suggestedId ? 1 : 0))
+            : projects;
+          const list = ordered
+            .map(p => `• ${p.name}${p.id === decision.suggestedId ? ' (suggested)' : ''}`)
+            .join('\n') || '(no projects found)';
           const ask = lang === 'German'
             ? `In welches Projekt soll ich das speichern?\n${list}\n\nOder sag "org" für die ganze Organisation.`
             : lang === 'Spanish'
@@ -2080,7 +2093,8 @@ export async function runReactAgentV2({
             assistant_name: assistantName || null,
           };
         }
-        // No topic match — fall through to save with personal scope.
+        // 'personal' / 'org' → fall through to save (personal scope unless a
+        // project_hint was just set above).
       }
     }
 

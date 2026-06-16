@@ -12,6 +12,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { allowOrgRequest as rateLimitAllowOrgRequest, getRateLimitStats as getRateLimitStatsImpl } from './middleware/rate-limit.js';
+import { resolveProjectForSave } from './memory/project-classifier.js';
 import { createRequire } from 'module';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -8408,9 +8409,34 @@ exit \$RC
                 let projs = [];
                 try {
                   projs = await persistentMemoryStore.client.project.findMany({
-                    where: { orgId: runOrgId, status: 'active' }, select: { id: true, name: true }, take: 20,
+                    where: { orgId: runOrgId, status: 'active' }, select: { id: true, name: true, slug: true, description: true }, take: 20,
                   });
                 } catch (e) { /* none */ }
+                // Auto-classify from project name+description. Confident match →
+                // save now; nothing fits → personal now; ambiguous (or org policy
+                // says 'ask'/'org-wide') → fall through to the project buttons.
+                try {
+                  let policy = 'private';
+                  try {
+                    const org = await persistentMemoryStore.client.organization.findUnique({ where: { id: runOrgId }, select: { memorySavePolicy: true } });
+                    policy = org?.memorySavePolicy || 'private';
+                  } catch { /* default private → classify */ }
+                  const decision = await resolveProjectForSave({ text: `${title}\n${summary}`, projects: projs, policy });
+                  if (decision.decision === 'auto' && decision.projectId) {
+                    await canonicalSave({ title, content: summary, projectId: decision.projectId });
+                    const lbl = (projs.find((p) => p.id === decision.projectId) || {}).name || 'project';
+                    await postSlack(`Saved to *${lbl}* ✓ _(auto-detected)_\n${summary}`);
+                    return;
+                  }
+                  if (decision.decision === 'personal') {
+                    await canonicalSave({ title, content: summary, projectId: null });
+                    await postSlack(`Saved to *personal* ✓\n${summary}`);
+                    return;
+                  }
+                  // 'ask' / 'org' → fall through to the project buttons below.
+                } catch (e) {
+                  console.warn('[slack-save] auto-classify failed:', e && e.message);
+                }
                 globalThis._slackPendingSave.set(saveConvKey, { title, summary });
                 const mkVal = (pid) => JSON.stringify({
                   t: String(title).slice(0, 120),
@@ -10491,11 +10517,12 @@ exit \$RC
                 },
                 // Memory-save policy: where MCP save_memory routes when caller omits project.
                 memory_save_policy: org.memorySavePolicy,
-                memory_save_policy_allowed: ['private', 'org-wide', 'ask'],
+                memory_save_policy_allowed: ['auto', 'private', 'org-wide', 'ask'],
                 memory_save_policy_description: {
-                  'private': 'Save to caller default project; falls through to org-wide if none.',
+                  'auto': 'Auto-classify the project from each project\'s name + description; assign silently when one is a clear match, ask only when ambiguous, default personal when nothing fits. (Same behavior as the default \'private\'.)',
+                  'private': 'Auto-classify from project name + description when the caller passes no project; ask only on doubt, else personal. (Default.)',
                   'org-wide': 'Always saves org-wide unless caller explicitly passes a project.',
-                  'ask': 'Server returns a hint asking Claude to pick a project on every save.',
+                  'ask': 'Always ask which project on every save — no auto-classify.',
                 },
               });
             } catch (err) {
@@ -10519,7 +10546,7 @@ exit \$RC
                 return jsonResponse(res, { error: 'admin/owner role required' }, 403);
               }
               const PROJ_ALLOWED = ['private', 'team_inherited', 'org_visible'];
-              const MEM_ALLOWED  = ['private', 'org-wide', 'ask'];
+              const MEM_ALLOWED  = ['auto', 'private', 'org-wide', 'ask'];
               const data = {};
               if (body?.default_project_policy !== undefined) {
                 const v = String(body.default_project_policy).toLowerCase().trim();

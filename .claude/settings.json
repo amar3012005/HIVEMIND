@@ -15,6 +15,12 @@
       "mcp__magic__logo_search",
       "mcp__code-review-graph__detect_changes_tool",
       "mcp__code-review-graph__get_affected_flows_tool",
+      "mcp__code-review-graph__semantic_search_nodes_tool",
+      "mcp__code-review-graph__query_graph_tool",
+      "mcp__code-review-graph__get_impact_radius_tool",
+      "mcp__code-review-graph__get_review_context_tool",
+      "mcp__code-review-graph__get_architecture_overview_tool",
+      "mcp__code-review-graph__list_communities_tool",
       "mcp__plugin_claude-mem_mcp-search____IMPORTANT"
     ],
     "deny": [
@@ -63,5 +69,36 @@
   "enabledPlugins": {
     "github@claude-plugins-official": true,
     "claude-hivemind@hivemind-plugins": true
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "git rev-parse --git-dir >/dev/null 2>&1 && code-review-graph update --skip-flows --repo \"/Users/amar/HIVE-MIND\" || true",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "git rev-parse --git-dir >/dev/null 2>&1 && code-review-graph status --repo \"/Users/amar/HIVE-MIND\" || echo 'Not a git repo, skipping'",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "echo 'HIVEMIND fast-dev: recon BEFORE building (feature-recon skill/workflow) -> reuse over rebuild. review-changes workflow on the diff before commit. ship skill to deploy (commit/push/pull/migrate/restart/smoke/recall-eval). deploy-verify workflow after. See .claude/ONBOARDING.md.'",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
   }
 }

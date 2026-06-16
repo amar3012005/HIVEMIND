@@ -41,7 +41,12 @@ function isTaraActivity(memory) {
 // 'reflection' are the clean discriminators (0 on synthesis outputs).
 function isRecallNoise(memory) {
   if (!memory) return false;
+  // Evidence-only rows (e.g. meeting transcripts) ground by id but must NOT
+  // compete in semantic top-k. Honoured via explicit metadata flag set at
+  // ingest, plus the meeting 'transcript' tag as a belt-and-braces guard.
+  if (memory.metadata?.recall_exclude === true) return true;
   const t = memory.tags || [];
+  if (t.includes('transcript')) return true;
   return t.some((x) => typeof x === 'string' && (
     x === 'internal-audit' || x === 'governance' || x === 'reflection' ||
     x === 'hyper-rooms' || x === 'hyper-room' || x === 'room-decision'

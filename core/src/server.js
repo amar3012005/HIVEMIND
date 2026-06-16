@@ -5326,26 +5326,86 @@ exit \$RC
         const transcript = (body.transcript || '').toString().trim();
         if (!transcript) return jsonResponse(res, { error: 'no_transcript' }, 400);
         const notes = (body.notes || '').toString().slice(0, 4000);
-        try {
-          const sys = 'You are an expert meeting analyst. From the transcript (and optional user notes) produce STRICT JSON: {"title": string, "summary": string (3-6 sentences), "key_points": string[], "action_items": [{"task": string, "owner": string|null, "due": string|null}], "decisions": string[], "questions": string[], "topics": string[], "sentiment": string, "quotes": [{"quote": string, "speaker": string|null}] (up to 5 short verbatim notable quotes, in the transcript original language), "risks": string[] (risks, blockers, warnings or red flags raised), "next_steps": string[] (concrete follow-ups beyond action items, e.g. upcoming events or dates mentioned), "entities": {"people": string[], "organizations": string[], "dates": string[]}, "speaker_names": object}. speaker_names maps diarization labels to real participant names (e.g. {"SPEAKER_00": "Matthias"}) ONLY when the transcript contains SPEAKER_xx labels AND the user notes/context name the participants — infer who is who from how they speak; use {} when unsure. Be faithful — never invent facts. Use empty arrays/objects when none.';
-          const usr = (notes ? `USER NOTES:\n${notes}\n\n` : '') + `TRANSCRIPT:\n${transcript.slice(0, 60000)}`;
-          const resp = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
+        const sys = 'You are an expert meeting analyst. From the transcript (and optional user notes) produce STRICT JSON: {"title": string, "summary": string (3-6 sentences), "key_points": string[], "action_items": [{"task": string, "owner": string|null, "due": string|null}], "decisions": string[], "questions": string[], "topics": string[], "sentiment": string, "quotes": [{"quote": string, "speaker": string|null}] (up to 5 short verbatim notable quotes, in the transcript original language), "risks": string[] (risks, blockers, warnings or red flags raised), "next_steps": string[] (concrete follow-ups beyond action items, e.g. upcoming events or dates mentioned), "entities": {"people": string[], "organizations": string[], "dates": string[]}, "speaker_names": object}. speaker_names maps diarization labels to real participant names (e.g. {"SPEAKER_00": "Matthias"}) ONLY when the transcript contains SPEAKER_xx labels AND the user notes/context name the participants — infer who is who from how they speak; use {} when unsure. Be faithful — never invent facts. Use empty arrays/objects when none.';
+        const MODEL = process.env.MEETING_INSIGHTS_MODEL || 'openai/gpt-oss-120b';
+        const GROQ = `${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`;
+        const callLLM = async (messages, ms = 120_000) => {
+          const resp = await fetch(GROQ, {
             method: 'POST',
             headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              model: process.env.MEETING_INSIGHTS_MODEL || 'openai/gpt-oss-120b',
-              temperature: 0.2,
-              response_format: { type: 'json_object' },
-              messages: [{ role: 'system', content: sys }, { role: 'user', content: usr }],
-            }),
-            signal: AbortSignal.timeout(120_000),
+            body: JSON.stringify({ model: MODEL, temperature: 0.2, response_format: { type: 'json_object' }, messages }),
+            signal: AbortSignal.timeout(ms),
           });
-          if (!resp.ok) return jsonResponse(res, { error: 'insights_failed', detail: (await resp.text()).slice(0, 200) }, 502);
+          if (!resp.ok) throw new Error(`llm ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
           const j = await resp.json();
-          let insights;
-          try { insights = JSON.parse(j.choices[0].message.content); }
-          catch { insights = { summary: '', raw: j.choices?.[0]?.message?.content || '' }; }
-          return jsonResponse(res, { insights });
+          try { return JSON.parse(j.choices[0].message.content); }
+          catch { return { summary: '', raw: j.choices?.[0]?.message?.content || '' }; }
+        };
+        // Long meetings (1-2 hr ≈ 120k+ chars) exceed a single context window, so
+        // the old slice(0,60000) silently dropped the back half of the meeting.
+        // Map-reduce: split into windows, extract each in PARALLEL, then merge
+        // arrays (deduped) and re-summarize the per-window summaries into one.
+        const WINDOW = 48000;
+        try {
+          if (transcript.length <= WINDOW) {
+            const usr = (notes ? `USER NOTES:\n${notes}\n\n` : '') + `TRANSCRIPT:\n${transcript}`;
+            const insights = await callLLM([{ role: 'system', content: sys }, { role: 'user', content: usr }]);
+            return jsonResponse(res, { insights });
+          }
+          // Split on paragraph/sentence boundaries near each window edge.
+          const windows = [];
+          for (let i = 0; i < transcript.length; i += WINDOW) {
+            let end = Math.min(i + WINDOW, transcript.length);
+            if (end < transcript.length) {
+              const nl = transcript.lastIndexOf('\n', end);
+              if (nl > i + WINDOW * 0.6) end = nl;
+            }
+            windows.push(transcript.slice(i, end));
+            i = end - WINDOW; // align next start to the (possibly shifted) boundary
+          }
+          const parts = await Promise.all(windows.map((w, idx) => callLLM([
+            { role: 'system', content: sys },
+            { role: 'user', content: `${notes ? `USER NOTES:\n${notes}\n\n` : ''}TRANSCRIPT (part ${idx + 1}/${windows.length}):\n${w}` },
+          ]).catch(() => null)));
+          const ok = parts.filter(Boolean);
+          if (!ok.length) return jsonResponse(res, { error: 'insights_failed' }, 502);
+          // Merge: union + dedup arrays; keep last non-empty scalars.
+          const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 90);
+          const mergeArr = (key, getText) => {
+            const seen = new Set(); const out = [];
+            for (const p of ok) for (const it of (Array.isArray(p[key]) ? p[key] : [])) {
+              const k = norm(getText(it)); if (k.length < 4 || seen.has(k)) continue; seen.add(k); out.push(it);
+            }
+            return out;
+          };
+          const merged = {
+            title: ok.find((p) => p.title)?.title || 'Meeting',
+            key_points: mergeArr('key_points', (x) => x).slice(0, 24),
+            action_items: mergeArr('action_items', (x) => (typeof x === 'string' ? x : x?.task)).slice(0, 24),
+            decisions: mergeArr('decisions', (x) => x).slice(0, 16),
+            questions: mergeArr('questions', (x) => (typeof x === 'string' ? x : x?.question || x?.text)).slice(0, 16),
+            risks: mergeArr('risks', (x) => x).slice(0, 16),
+            next_steps: mergeArr('next_steps', (x) => x).slice(0, 16),
+            quotes: mergeArr('quotes', (x) => (typeof x === 'string' ? x : x?.quote)).slice(0, 6),
+            topics: Array.from(new Set(ok.flatMap((p) => Array.isArray(p.topics) ? p.topics : []))).slice(0, 20),
+            sentiment: ok.find((p) => p.sentiment)?.sentiment || null,
+            entities: {
+              people: Array.from(new Set(ok.flatMap((p) => p.entities?.people || []))).slice(0, 30),
+              organizations: Array.from(new Set(ok.flatMap((p) => p.entities?.organizations || []))).slice(0, 20),
+              dates: Array.from(new Set(ok.flatMap((p) => p.entities?.dates || []))).slice(0, 20),
+            },
+            speaker_names: Object.assign({}, ...ok.map((p) => (p.speaker_names && typeof p.speaker_names === 'object') ? p.speaker_names : {})),
+          };
+          // Reduce the per-window summaries into one coherent meeting summary.
+          try {
+            const sumsJoined = ok.map((p, i) => `Part ${i + 1}: ${p.summary || ''}`).join('\n');
+            const red = await callLLM([
+              { role: 'system', content: 'Merge these sequential meeting-part summaries into ONE coherent meeting summary. STRICT JSON {"summary": string (4-7 sentences)}.' },
+              { role: 'user', content: sumsJoined },
+            ], 60_000);
+            merged.summary = red.summary || ok.map((p) => p.summary).filter(Boolean).join(' ');
+          } catch { merged.summary = ok.map((p) => p.summary).filter(Boolean).join(' '); }
+          return jsonResponse(res, { insights: merged, windows: windows.length });
         } catch (e) {
           return jsonResponse(res, { error: 'insights_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
         }
@@ -5836,27 +5896,84 @@ exit \$RC
             const entityTags = [...people.map((p) => `entity:${p}`), ...orgs.map((o) => `entity:${o}`)];
             const meetingTag = `meeting:${id}`;
 
-            const baseMeta = { meeting_id: id, source: 'meeting-notes' };
-            const mkChild = (cTitle, content, memory_type, extraTags = []) => ({
+            // ── Meeting context stamp — "<title> @ <YYYY-MM-DD HH:MM> — <topic>"
+            // Prefixed onto EVERY memory title so a recalled meeting memory is
+            // self-identifying (which meeting, when) without a graph walk.
+            const _d = meetingDate ? new Date(meetingDate) : new Date();
+            const pad = (n) => String(n).padStart(2, '0');
+            const stamp = `${_d.getUTCFullYear()}-${pad(_d.getUTCMonth() + 1)}-${pad(_d.getUTCDate())} ${pad(_d.getUTCHours())}:${pad(_d.getUTCMinutes())}`;
+            const topicName = (topics[0] || title).toString().slice(0, 60);
+            const ctxPrefix = `${title} @ ${stamp} — ${topicName}`;
+            // Provenance: these are MEETING INSIGHTS — claims made in a meeting,
+            // NOT verified ground truth. Tagged + metadata-flagged so recall and
+            // conflict-resolution rank them BELOW authoritative facts and surface
+            // them as "stated in meeting X" rather than as truth.
+            const provLine = `From meeting "${title}" on ${stamp}. These are meeting insights (claims stated in the meeting) — not verified facts.`;
+            const baseMeta = {
+              meeting_id: id, source: 'meeting-notes',
+              provenance: 'meeting', authority_level: 'claimed', meeting_stamp: stamp,
+            };
+            const INSIGHT_TAGS = ['meeting-insight', 'unverified', meetingTag];
+
+            // ── Cross-section dedup (within the cluster) ──────────────────────
+            const seenClaims = new Set();
+            const claimKey = (s) => String(s || '')
+              .toLowerCase().normalize('NFKD')
+              .replace(/[^a-z0-9\s]/g, ' ')
+              .replace(/\s+/g, ' ')
+              .trim()
+              .slice(0, 90);
+            const dedupeBullets = (items, toText) => {
+              const out = [];
+              for (const it of items) {
+                const text = toText(it);
+                if (!text || !text.trim()) continue;
+                const k = claimKey(text);
+                if (k.length < 6 || seenClaims.has(k)) continue;
+                seenClaims.add(k);
+                out.push(text.trim());
+              }
+              return out;
+            };
+            const bulletBlock = (lines) => lines.map((l) => `• ${l}`).join('\n');
+
+            // ── SECTION CLUSTER: parent + ≤4 section memories ─────────────────
+            // Instead of ~20 atomic children (recall noise + dreaming hairball),
+            // each meeting becomes a SMALL cluster: one parent (overview) plus a
+            // memory per section that holds the WHOLE deduped list. This keeps
+            // recall list-coherent ("what did we decide" → one hit, full list)
+            // and the noise floor low, while the rich parent still anchors
+            // cross-meeting dreaming links. Knowledge that needs claim-grain
+            // belongs in standalone notes, not meeting minutes.
+            const openQuestions = arr(m.questions).length ? arr(m.questions) : arr(ins.open_questions || ins.questions);
+            const quotes = arr(ins.quotes);
+
+            const mkSection = (label, memory_type, lines, extraTags = []) => ({
               user_id: mUser,
               org_id: mOrg,
-              title: String(cTitle).slice(0, 200),
-              content: String(content),
+              title: `${ctxPrefix} — ${label}`.slice(0, 200),
+              content: `${provLine}\n\n${label}:\n${bulletBlock(lines)}`,
               memory_type,
-              tags: [meetingTag, ...extraTags].filter(Boolean),
+              tags: [...INSIGHT_TAGS, ...extraTags].filter(Boolean),
               ...(meetingDate ? { document_date: meetingDate } : {}),
-              metadata: { ...baseMeta },
+              metadata: { ...baseMeta, section: label },
             });
 
+            // Parent (event) — summary/overview + participants + notable quotes.
+            // Quotes ride along as grounding here (not a separate recall row).
+            const quoteBlock = quotes.length
+              ? `\n\nNotable quotes:\n${quotes.slice(0, 6).map((q) => `“${(typeof q === 'string' ? q : (q?.quote || '')).toString().trim()}”${(q?.speaker ? ` — ${q.speaker}` : '')}`).filter((s) => s.length > 3).join('\n')}`
+              : '';
             const parent = {
               user_id: mUser,
               org_id: mOrg,
-              title,
-              content: summary
+              title: `${ctxPrefix} — Overview`.slice(0, 200),
+              content: provLine + '\n\n' + summary
                 + (people.length ? `\n\nParticipants: ${people.join(', ')}` : '')
-                + (orgs.length ? `\nOrganizations: ${orgs.join(', ')}` : ''),
+                + (orgs.length ? `\nOrganizations: ${orgs.join(', ')}` : '')
+                + quoteBlock,
               memory_type: 'event',
-              tags: ['meeting', 'ai-meeting-notes', meetingTag,
+              tags: ['meeting', 'ai-meeting-notes', 'meeting-insight', meetingTag,
                 ...(m.multi_speaker ? ['multi-speaker'] : []),
                 ...topics, ...entityTags].filter(Boolean),
               ...(meetingDate ? { document_date: meetingDate } : {}),
@@ -5864,32 +5981,39 @@ exit \$RC
             };
 
             const children = [];
-            for (const d of decisions.slice(0, 12)) {
-              const text = typeof d === 'string' ? d : (d?.text || JSON.stringify(d));
-              if (text?.trim()) children.push(mkChild(`Decision — ${text.slice(0, 60)}`, text, 'decision', ['decision', ...topics.slice(0, 2)]));
-            }
-            for (const a of actionItems.slice(0, 12)) {
-              const taskText = typeof a === 'string' ? a : (a?.task || JSON.stringify(a));
-              if (!taskText?.trim()) continue;
+            // 1) Decisions
+            const decisionLines = dedupeBullets(decisions.slice(0, 12), (d) => (typeof d === 'string' ? d : (d?.text || '')));
+            if (decisionLines.length) children.push(mkSection('Decisions', 'decision', decisionLines, ['decision', ...topics.slice(0, 2)]));
+            // 2) Action items + Next steps (one actionable list)
+            const actionLines = dedupeBullets(actionItems.slice(0, 12), (a) => {
+              const taskText = typeof a === 'string' ? a : (a?.task || '');
+              if (!taskText) return '';
               const owner = (typeof a === 'object' && a?.owner) ? a.owner : null;
               const due = (typeof a === 'object' && a?.due) ? a.due : null;
-              const content = `${taskText}${owner ? ` (owner: ${owner})` : ''}${due ? ` (due: ${due})` : ''}`;
-              children.push(mkChild(`Action — ${taskText.slice(0, 60)}`, content, 'goal',
-                ['action-item', owner ? `owner:${String(owner).toLowerCase()}` : null]));
-            }
-            for (const k of keyPoints.slice(0, 8)) {
-              if (String(k || '').trim()) children.push(mkChild(`Key point — ${String(k).slice(0, 60)}`, String(k), 'fact', ['key-point']));
-            }
-            for (const r of risks.slice(0, 6)) {
-              if (String(r || '').trim()) children.push(mkChild(`Risk — ${String(r).slice(0, 60)}`, String(r), 'fact', ['risk']));
-            }
-            for (const n of nextSteps.slice(0, 6)) {
-              if (String(n || '').trim()) children.push(mkChild(`Next step — ${String(n).slice(0, 60)}`, String(n), 'goal', ['next-step']));
-            }
-            // Transcript as ONE grounding child — capped, low priority, hidden
-            // from default list (ingestMemoryTree auto-tags children 'extracted-fact').
+              return `${taskText}${owner ? ` (owner: ${owner})` : ''}${due ? ` (due: ${due})` : ''}`;
+            }).concat(dedupeBullets(nextSteps.slice(0, 8), (n) => String(n || '')));
+            if (actionLines.length) children.push(mkSection('Action items & next steps', 'goal', actionLines, ['action-item', 'open-loop']));
+            // 3) Key points + Risks (the substantive discussion)
+            const knowledgeLines = dedupeBullets(keyPoints.slice(0, 10), (k) => String(k || ''))
+              .concat(dedupeBullets(risks.slice(0, 8), (r) => `Risk: ${String(r || '')}`));
+            if (knowledgeLines.length) children.push(mkSection('Key points & risks', 'fact', knowledgeLines, ['key-point', 'risk']));
+            // 4) Open questions → open-loop lane (dreaming + meeting-intel)
+            const questionLines = dedupeBullets(openQuestions.slice(0, 8), (q) => (typeof q === 'string' ? q : (q?.text || q?.question || '')));
+            if (questionLines.length) children.push(mkSection('Open questions', 'fact', questionLines, ['open-loop', 'question']));
+
+            // Transcript — EVIDENCE only, recall-excluded, grounds by meeting id.
             if (transcript.trim()) {
-              children.push(mkChild(`Transcript — ${title}`, transcript.slice(0, 8000), 'event', ['transcript']));
+              children.push({
+                user_id: mUser,
+                org_id: mOrg,
+                title: `${ctxPrefix} — Transcript`.slice(0, 200),
+                content: transcript.slice(0, 16000),
+                memory_type: 'event',
+                tags: [meetingTag, 'transcript', 'evidence'],
+                ...(meetingDate ? { document_date: meetingDate } : {}),
+                metadata: { ...baseMeta, recall_exclude: true, evidence_only: true },
+                skip_fact_extraction: true,
+              });
             }
 
             const tree = await persistentMemoryEngine.ingestMemoryTree({ parent, children });
@@ -5906,18 +6030,15 @@ exit \$RC
                 parentId, id, mOrg,
               ).catch(() => { /* link best-effort */ });
             }
+            // Sectioned cluster: 1 parent (Overview) + ≤4 section memories +
+            // optional transcript-evidence. Report the section labels emitted.
+            const emitted = children.map((c) => (c.metadata?.section || (c.tags?.includes('transcript') ? 'transcript' : 'other')));
             return jsonResponse(res, {
               ok: true,
               parent_id: parentId,
               child_ids: tree?.childIds || [],
-              counts: {
-                decisions: Math.min(decisions.length, 12),
-                action_items: Math.min(actionItems.length, 12),
-                key_points: Math.min(keyPoints.length, 8),
-                risks: Math.min(risks.length, 6),
-                next_steps: Math.min(nextSteps.length, 6),
-                transcript: transcript.trim() ? 1 : 0,
-              },
+              memory_count: 1 + children.length,
+              sections: emitted,
             }, 201);
           } catch (e) {
             return jsonResponse(res, { error: 'meeting_ingest_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);

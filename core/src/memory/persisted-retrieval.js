@@ -1276,6 +1276,35 @@ export async function recallPersistedMemories(store, {
     ? normalizeQueryTemporalTokens(query_context, Date.now())
     : [];
 
+  // Independent retrieval lanes run CONCURRENTLY: the base vector fetch (embed +
+  // Qdrant, ~400ms) is kicked off here so it overlaps the lexical FTS lane
+  // (~500ms) + the synchronous lexical filter below, instead of running after
+  // it. Output is byte-identical — same inputs, same filter, just no longer
+  // serialized — so accuracy is unchanged (Solvis combo@8 eval-gated). The
+  // result is consumed at `await _vectorCandidatesPromise` further down.
+  const _vectorCandidatesPromise = vectorCandidatesForRecall(store, {
+    query_context,
+    user_id,
+    org_id,
+    project,
+    source_platforms,
+    tags: _effectiveTags,
+    max_memories,
+    dateRange: effectiveDateRange,
+    scoreThreshold: vectorScoreThreshold,
+    hnswEf: _wireCfg ? _cfg?.hnsw_ef : undefined, // PHASE-F: per-org ef_search when wired; undefined otherwise (dark-safe)
+    candidatePoolSize,
+    is_latest: effectiveIsLatest,
+    access_context,
+    scope_filter,
+  })
+    // Drop old TARA turn/insight vectors still living in Qdrant from past calls.
+    .then((cands) => cands.filter((c) => !isTaraActivity(c?.memory) && !isRecallNoise(c?.memory)));
+  // Mark handled so that if the lexical lane below throws first, the in-flight
+  // vector promise doesn't surface as an unhandledRejection. The real `await`
+  // further down still propagates any vector error (semantics preserved).
+  _vectorCandidatesPromise.catch(() => {});
+
   const lexicalCandidates = await store.searchMemories({
     query: query_context,
     user_id,
@@ -1327,24 +1356,10 @@ export async function recallPersistedMemories(store, {
     return source_platforms.includes(sourcePlatform);
   });
 
-  const vectorCandidates = await vectorCandidatesForRecall(store, {
-    query_context,
-    user_id,
-    org_id,
-    project,
-    source_platforms,
-    tags: _effectiveTags,
-    max_memories,
-    dateRange: effectiveDateRange,
-    scoreThreshold: vectorScoreThreshold,
-    hnswEf: _wireCfg ? _cfg?.hnsw_ef : undefined, // PHASE-F: per-org ef_search when wired; undefined otherwise (dark-safe)
-    candidatePoolSize,
-    is_latest: effectiveIsLatest,
-    access_context,
-    scope_filter,
-  })
-    // Drop old TARA turn/insight vectors still living in Qdrant from past calls.
-    .then((cands) => cands.filter((c) => !isTaraActivity(c?.memory) && !isRecallNoise(c?.memory)));
+  // Consume the base vector lane started concurrently with the lexical fetch
+  // above (overlapped, not serialized). Any vector-fetch error propagates here
+  // exactly as it did when this was a direct `await`.
+  const vectorCandidates = await _vectorCandidatesPromise;
 
   // Cross-lingual / sparse rescue: a THIN primary recall is the signature of a
   // cross-lingual query (English question over German docs → every row low-

@@ -1,0 +1,13 @@
+[Unit]
+Description=HIVEMIND Core service launcher (both replicas, single canonical env)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/HIVEMIND/scripts/hm-core-start.sh
+ExecStop=/usr/bin/docker stop hm-core hm-core-2
+
+[Install]
+WantedBy=multi-user.target

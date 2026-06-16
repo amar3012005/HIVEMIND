@@ -132,9 +132,20 @@ Measured via env-gated stage laps (since reverted). Entire cost is **inside
 
 ## 8. Operational notes
 
-- Deploy = `docker run` per replica from `…/.env` + the matching `…/sing-*` overlay (bind-mount
-  `/opt/HIVEMIND/core` → `/app`; no image rebuild). `docker restart` reloads bind-mounted code but
-  **not** `--env-file` changes — env changes require recreate.
+- **Launch is now durable (systemd + version-controlled script).** `hm-core.service`
+  (`/etc/systemd/system/hm-core.service`, enabled) → `ExecStart=/opt/HIVEMIND/scripts/hm-core-start.sh`
+  (in-repo, survives `git pull`). The script recreates BOTH replicas via
+  `docker run --env-file <canonical .env> --env-file <per-replica overlay>` and **refuses to launch
+  if the canonical `QDRANT_URL` isn't `hm-qdrant`** (guards against re-introducing the Cloud/384
+  split-brain). Reboot / `systemctl restart hm-core` reproduces the exact verified config.
+  - Rolling restart one replica: `/opt/HIVEMIND/scripts/hm-core-start.sh hm-core-2`.
+  - Canonical env: `/data/coolify/applications/s0k0s0k40wo44w4w8gcs8ow0/.env`.
+    Overlays: `/opt/HIVEMIND/sing-hm-core.env`, `/opt/HIVEMIND/sing-hm-core-2.env`.
+  - The OLD stale launcher env (`/opt/HIVEMIND/.runtime/hm-core.env`, which still held
+    `QDRANT_URL=Cloud` + `EMBEDDING_DIMENSION=384` + mistral) was renamed
+    `…hm-core.env.STALE-CLOUD384-DONOTUSE` so nothing can source it.
+- `docker restart` reloads bind-mounted code but **not** `--env-file` changes — env changes require
+  recreate (use the launcher).
 - hm-qdrant is persistent (`/opt/HIVEMIND/qdrant-data`). It is the canonical vector store. Do **not**
   repoint `QDRANT_URL` back at Cloud.
 - Backfill scripts are idempotent (point id == memory/segment id). Safe to re-run.

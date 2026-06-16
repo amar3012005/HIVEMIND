@@ -5596,6 +5596,122 @@ exit \$RC
         }
       }
 
+      // GET /api/meetings/:id/delete-preview — what a delete would remove: the
+      // meeting row + its HIVEMIND memory cluster (parent + section children).
+      // Powers the delete modal's preview. Creator/admin only (can_delete flag).
+      {
+        const mPrev = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})\/delete-preview$/);
+        if (mPrev && req.method === 'GET') {
+          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+          const mOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
+          const mUser = _mUserId || req.headers['x-hm-user-id'] || DEFAULT_USER;
+          try {
+            const rows = await prisma.$queryRawUnsafe(
+              `SELECT id, user_id, title, source_memory_id FROM meetings WHERE id = $1::uuid AND org_id = $2::uuid AND deleted_at IS NULL`,
+              mPrev[1], mOrg,
+            );
+            if (!rows?.length) return jsonResponse(res, { error: 'not_found' }, 404);
+            const m = rows[0];
+            const isAdmin = _mAuth?.principal?.master || _mAuth?.principal?.scopes?.includes('admin');
+            let memories = [];
+            if (m.source_memory_id) {
+              memories = await prisma.$queryRawUnsafe(
+                `SELECT id, title FROM memories
+                 WHERE (id = $1::uuid OR (metadata->>'parent_memory_id') = $1) AND org_id = $2::uuid AND deleted_at IS NULL
+                 ORDER BY (id = $1::uuid) DESC`,
+                m.source_memory_id, mOrg,
+              );
+            }
+            return jsonResponse(res, {
+              meeting: { id: m.id, title: m.title },
+              can_delete: (m.user_id === mUser) || !!isAdmin,
+              ingested: !!m.source_memory_id,
+              memory_count: memories.length,
+              memories: memories.map((x) => ({ id: x.id, title: x.title })),
+            });
+          } catch (e) {
+            return jsonResponse(res, { error: 'preview_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
+          }
+        }
+      }
+
+      // DELETE /api/meetings/:id?scope=memories|both&hard=true|false
+      //   scope=memories → remove only the HIVEMIND memory cluster (keep the
+      //                    Past-meetings row; clears source_memory_id so it
+      //                    reads as un-ingested and can be re-saved).
+      //   scope=both (default) → remove the cluster AND the meeting row.
+      //   hard=true → permanent: hardDeleteMemories + Qdrant purge for memories,
+      //               hard row delete for the meeting. Otherwise soft.
+      //   Creator-only (org admins/owners too); 404 cross-org, 403 not-owner.
+      {
+        const mDel = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})$/);
+        if (mDel && req.method === 'DELETE') {
+          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+          const mOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
+          const mUser = _mUserId || req.headers['x-hm-user-id'] || DEFAULT_USER;
+          const id = mDel[1];
+          const scope = (url.searchParams.get('scope') || 'both').toLowerCase();
+          const hard = url.searchParams.get('hard') === 'true';
+          try {
+            const rows = await prisma.$queryRawUnsafe(
+              `SELECT id, user_id, org_id, title, source_memory_id FROM meetings WHERE id = $1::uuid AND org_id = $2::uuid`,
+              id, mOrg,
+            );
+            if (!rows?.length) return jsonResponse(res, { error: 'not_found' }, 404);
+            const m = rows[0];
+            const isAdmin = _mAuth?.principal?.master || _mAuth?.principal?.scopes?.includes('admin');
+            if (m.user_id !== mUser && !isAdmin) {
+              let owner = null;
+              try { const u = await prisma.user.findUnique({ where: { id: m.user_id }, select: { displayName: true, email: true } }); if (u) owner = { name: u.displayName || null, email: u.email || null }; } catch { /* best-effort */ }
+              return jsonResponse(res, { error: 'Only the meeting owner can delete it.', code: 'not_owner', owner }, 403);
+            }
+            // Collect the memory cluster (parent + section children).
+            let clusterIds = [];
+            if (m.source_memory_id) {
+              const cl = await prisma.$queryRawUnsafe(
+                `SELECT id FROM memories WHERE id = $1::uuid OR (metadata->>'parent_memory_id') = $1`,
+                m.source_memory_id,
+              );
+              clusterIds = cl.map((r) => r.id);
+            }
+            let deletedMemories = 0;
+            if (clusterIds.length) {
+              if (hard && typeof persistentMemoryStore.hardDeleteMemories === 'function') {
+                await persistentMemoryStore.hardDeleteMemories(clusterIds);
+                try {
+                  const qUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
+                  const qColl = (process.env.QDRANT_PER_TENANT === 'true' && mOrg) ? `org_${mOrg}` : 'HIVEMIND_PERSONAL';
+                  const qKey = process.env.QDRANT_API_KEY || '';
+                  if (qUrl) await fetch(`${qUrl}/collections/${encodeURIComponent(qColl)}/points/delete?wait=true`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json', ...(qKey ? { 'api-key': qKey } : {}) },
+                    body: JSON.stringify({ points: clusterIds }),
+                  }).catch(() => {});
+                } catch { /* qdrant best-effort */ }
+              } else {
+                for (const cid of clusterIds) { try { await persistentMemoryStore.deleteMemory(cid); } catch { /* continue */ } }
+              }
+              deletedMemories = clusterIds.length;
+            }
+            let meetingDeleted = false;
+            if (scope === 'both') {
+              if (hard) await prisma.$queryRawUnsafe(`DELETE FROM meetings WHERE id = $1::uuid AND org_id = $2::uuid`, id, mOrg);
+              else await prisma.$queryRawUnsafe(`UPDATE meetings SET deleted_at = now() WHERE id = $1::uuid AND org_id = $2::uuid`, id, mOrg);
+              meetingDeleted = true;
+            } else {
+              // memories-only → keep the row, clear the cluster link.
+              await prisma.$queryRawUnsafe(`UPDATE meetings SET source_memory_id = NULL WHERE id = $1::uuid AND org_id = $2::uuid`, id, mOrg);
+            }
+            try {
+              auditLog?.({ userId: mUser, organizationId: mOrg, eventType: 'meeting.delete', eventCategory: 'data_modification', action: 'delete', resourceType: 'meeting', resourceId: id, metadata: { scope, hard, deleted_memories: deletedMemories } });
+            } catch { /* audit best-effort */ }
+            return jsonResponse(res, { ok: true, scope, hard, deleted_memories: deletedMemories, meeting_deleted: meetingDeleted });
+          } catch (e) {
+            console.error('[meeting-delete] failed:', e && (e.stack || e.message));
+            return jsonResponse(res, { error: 'meeting_delete_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
+          }
+        }
+      }
+
       // POST /api/meetings/:id/intelligence — (re)generate the intelligence panel.
       {
         const mIntel = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})\/intelligence$/);

@@ -5439,14 +5439,31 @@ exit \$RC
         const mOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
         try {
           const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') || '40', 10)));
+          const mUser = _mUserId || req.headers['x-hm-user-id'] || DEFAULT_USER;
+          // Scope-aware Past list: a meeting shows for a user if they are the
+          // creator, a selected participant (member id in participants jsonb),
+          // or the scope grants access (organization/team → all org members;
+          // project → the user's project memberships; personal → creator only).
+          // Legacy rows (scope NULL, participants []) stay org-visible.
+          let myProjectIds = [];
+          try {
+            const pm = await prisma.projectMember.findMany({ where: { userId: mUser }, select: { projectId: true } });
+            myProjectIds = pm.map((r) => r.projectId);
+          } catch { /* none */ }
           const rows = await prisma.$queryRawUnsafe(
             `SELECT id, user_id, org_id, project_id, title, summary, language, duration_sec,
                     multi_speaker, speaker_count, action_items, decisions, key_points, questions,
                     segments, topics, sentiment, source_memory_id, created_at
              FROM meetings
-             WHERE org_id = $1::uuid AND deleted_at IS NULL
+             WHERE org_id = $1::uuid AND deleted_at IS NULL AND (
+                     user_id = $3::uuid
+                  OR participants @> $4::jsonb
+                  OR scope IS NULL
+                  OR scope IN ('organization', 'team')
+                  OR (scope = 'project' AND project_id = ANY($5::uuid[]))
+             )
              ORDER BY created_at DESC LIMIT $2`,
-            mOrg, limit,
+            mOrg, limit, mUser, JSON.stringify([{ id: mUser }]), myProjectIds,
           );
           return jsonResponse(res, { meetings: rows });
         } catch (e) {
@@ -5540,7 +5557,14 @@ exit \$RC
         if (mGet && req.method === 'GET') {
           if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
           const mOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
+          const mUser = _mUserId || req.headers['x-hm-user-id'] || DEFAULT_USER;
           try {
+            // Same access predicate as the list: creator / participant / scope.
+            let myProjectIds = [];
+            try {
+              const pm = await prisma.projectMember.findMany({ where: { userId: mUser }, select: { projectId: true } });
+              myProjectIds = pm.map((r) => r.projectId);
+            } catch { /* none */ }
             const rows = await prisma.$queryRawUnsafe(
               `SELECT id, user_id, org_id, project_id, title, summary, transcript, language,
                       duration_sec, multi_speaker, speaker_count, action_items, decisions,
@@ -5549,8 +5573,14 @@ exit \$RC
                       intelligence, intelligence_status, intelligence_generated_at,
                       source_memory_id, created_at
                FROM meetings
-               WHERE id = $1::uuid AND org_id = $2::uuid AND deleted_at IS NULL`,
-              mGet[1], mOrg,
+               WHERE id = $1::uuid AND org_id = $2::uuid AND deleted_at IS NULL AND (
+                       user_id = $3::uuid
+                    OR participants @> $4::jsonb
+                    OR scope IS NULL
+                    OR scope IN ('organization', 'team')
+                    OR (scope = 'project' AND project_id = ANY($5::uuid[]))
+               )`,
+              mGet[1], mOrg, mUser, JSON.stringify([{ id: mUser }]), myProjectIds,
             );
             if (!rows?.length) return jsonResponse(res, { error: 'not_found' }, 404);
             const row = rows[0];

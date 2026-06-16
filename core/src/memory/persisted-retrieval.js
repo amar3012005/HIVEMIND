@@ -178,6 +178,16 @@ function isTemporalComparisonQuery(query = '') {
   return /\b(first|earlier|earliest|before|after|later|last|how many days|which .* first|which .* came first)\b/i.test(query);
 }
 
+// Bi-temporal / time-travel intent: questions about how a fact CHANGED, what it
+// USED TO be, its version history, or its state AS OF a past point. When matched,
+// recall opens the version-chain (Updates / bi-temporal) lane so the answer can
+// reflect history + supersession, not just the current value. Gated → for normal
+// queries this returns false and the lane never runs (zero added latency).
+function detectTimeTravelIntent(query = '') {
+  if (typeof query !== 'string' || !query) return false;
+  return /\b(used to be|previously|earlier version|prior version|history of|change[ds]? over time|how (?:has|did|have) .*(?:change|evolve|differ)|evolution of|back (?:in|then)|at the time|as of\b|what (?:was|were|did) .*(?:before|then|originally|used to)|no longer|originally|version history|over the years|timeline of|track .* over time|when did .* change)\b/i.test(query);
+}
+
 function normalizedQueryTokens(query = '') {
   return normalizeForDedup(query)
     .split(' ')
@@ -886,24 +896,23 @@ async function traverseUpdateChain(memories, store, { maxDepth = 3 } = {}) {
   const expanded = [...memories];
   const seen = new Set(memories.map(m => m.id || m.memory_id));
 
-  for (const mem of memories) {
-    try {
-      const memId = mem.id || mem.memory_id;
-      if (!memId) continue;
-
-      // Find memories linked via Updates relationship (older versions)
-      const related = await store.getRelatedMemories?.(memId, { type: 'Updates', depth: maxDepth });
-      if (!related?.length) continue;
-
-      for (const rel of related) {
-        const relId = rel.id || rel.memory_id;
-        if (relId && !seen.has(relId)) {
-          seen.add(relId);
-          expanded.push({ ...rel, score: (rel.score || 0) * 0.7 }); // lower score for old versions
-        }
+  // Batch the per-memory Updates-chain lookups CONCURRENTLY (was a serial N+1
+  // await loop). Keeps the time-travel lane cheap enough to run by default on
+  // history queries without adding serial latency.
+  const ids = memories.map(m => m.id || m.memory_id).filter(Boolean);
+  const relatedLists = await Promise.all(ids.map(id =>
+    Promise.resolve()
+      .then(() => store.getRelatedMemories?.(id, { type: 'Updates', depth: maxDepth }))
+      .catch(() => [])
+  ));
+  for (const related of relatedLists) {
+    if (!related?.length) continue;
+    for (const rel of related) {
+      const relId = rel.id || rel.memory_id;
+      if (relId && !seen.has(relId)) {
+        seen.add(relId);
+        expanded.push({ ...rel, score: (rel.score || 0) * 0.7 }); // lower score for old versions
       }
-    } catch (_) {
-      // skip on error
     }
   }
 
@@ -1177,6 +1186,11 @@ export async function recallPersistedMemories(store, {
   const temporalExpansion = expandTemporalQuery(query_context);
   const effectiveDateRange = date_range || temporalExpansion.dateRange || null;
   const temporalComparison = temporalExpansion.hasTemporalFilter || isTemporalComparisonQuery(query_context);
+  // Time-travel / bi-temporal lane: auto-open the Updates version-chain when the
+  // query asks about change/history/as-of (or the caller explicitly requested
+  // superseded). Gated → no-op + zero latency for ordinary queries.
+  const _timeTravelIntent = detectTimeTravelIntent(query_context);
+  const _wantVersionHistory = include_superseded === true || _timeTravelIntent;
 
   // ── Event-time ranking BOOST (gated EVENT_TIME_RANKING, default off) ──
   // SOFT additive score boost — NOT a filter — for candidates whose EVENT date
@@ -2030,9 +2044,13 @@ export async function recallPersistedMemories(store, {
   const boostedItems = applySynthesisBoost(applyItemBoosts(deduped));
   if (_RLAP) _lap.score = Date.now() - _t0;
 
-  // Update chain traversal: include older versions when include_superseded is requested
+  // Update chain traversal: include older versions when superseded history is
+  // wanted — either the caller asked (include_superseded) OR the query carries
+  // time-travel / bi-temporal intent (auto-detected). traverseUpdateChain batches
+  // its Updates lookups concurrently, so this lane stays cheap.
   let finalItems = boostedItems;
-  if (include_superseded) {
+  let _versionTimeline = [];
+  if (_wantVersionHistory) {
     const rawMemories = boostedItems.map(item => item.memory || item);
     const withSuperseded = await traverseUpdateChain(rawMemories, store);
     // Merge any newly added superseded memories back as scored items
@@ -2041,6 +2059,32 @@ export async function recallPersistedMemories(store, {
       if (!existingIds.has(mem.id || mem.memory_id)) {
         finalItems = [...finalItems, { memory: mem, score: mem.score || 0 }];
       }
+    }
+    // Build a chronological version timeline so time-travel questions ("what did
+    // X used to be / how did it change") can be answered directly from recall.
+    if (_timeTravelIntent) {
+      try {
+        const byId = new Map();
+        for (const it of finalItems) { const m = it.memory || it; if (m?.id) byId.set(m.id, m); }
+        const claimed = new Set();
+        for (const it of boostedItems.slice(0, 8)) {
+          const m = it.memory || it;
+          if (!m?.id || claimed.has(m.id)) continue;
+          const lineage = timelineFor(m, byId, relationships); // oldest → newest
+          if (Array.isArray(lineage) && lineage.length > 1) {
+            lineage.forEach(v => claimed.add(v.id));
+            _versionTimeline.push({
+              memory_id: m.id,
+              versions: lineage.map(v => ({
+                id: v.id,
+                content: v.content,
+                created_at: v.created_at,
+                is_latest: v.is_latest !== false,
+              })),
+            });
+          }
+        }
+      } catch (_) { /* timeline is additive — never fail recall on it */ }
     }
   }
 
@@ -2337,6 +2381,11 @@ export async function recallPersistedMemories(store, {
     // absent entirely unless RECALL_TIERED_VIEW=true, so legacy clients see the
     // byte-identical shape. memories/synthesized/raw kept for backcompat.
     ...(TIERED_VIEW_ENABLED ? { spine: buildRecallSpine(flatMemories, synthesized) } : {}),
+    // Time-travel / bi-temporal lane output: present only when the query had
+    // history/as-of intent AND a versioned chain was found. Each entry is one
+    // fact's chronological version history (oldest→newest) so the answer can
+    // state how it changed. Absent for ordinary queries (byte-identical shape).
+    ...(_versionTimeline.length ? { timeline: _versionTimeline, time_travel: true } : {}),
   };
 }
 

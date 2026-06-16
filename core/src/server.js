@@ -5968,7 +5968,8 @@ exit \$RC
             }
             const saveProjectIds = (saveScope === 'project' && mProjectId) ? [mProjectId] : [];
             const scopeFields = {
-              ...scopeFields,
+              scope: saveScope,
+              project_ids: saveProjectIds,
               ...(savePrimaryTeamId ? { primary_team_id: savePrimaryTeamId } : {}),
             };
             const orgs = Array.from(new Set(entOrgs.map((s) => String(s || '').trim()).filter(Boolean))).slice(0, 8);

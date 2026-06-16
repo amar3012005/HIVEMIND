@@ -1385,6 +1385,17 @@ export async function recallPersistedMemories(store, {
   })();
   _observationPrefixPromise.catch(() => {});
 
+  // User-profile injection (static facts) also depends only on (user, org) and
+  // was awaited serially in the tail — hoist it to overlap the pipeline too.
+  const _userProfilePromise = (async () => {
+    try {
+      if (!store) return { profile: '' };
+      const { UserProfile } = await import('./user-profile.js');
+      return await new UserProfile(store).getProfile(user_id, org_id);
+    } catch { return { profile: '' }; }
+  })();
+  _userProfilePromise.catch(() => {});
+
   const lexicalCandidates = await store.searchMemories({
     query: query_context,
     user_id,
@@ -2177,6 +2188,7 @@ export async function recallPersistedMemories(store, {
   } catch {
     // Observation prefix not available — fall through to standard retrieval
   }
+  if (_RLAP) _lap.obs = Date.now() - _t0;
 
   let injectionText;
   try {
@@ -2200,17 +2212,17 @@ export async function recallPersistedMemories(store, {
     injectionText = observationPrefix + supplement + '\n\n' + injectionText;
   }
 
-  // Inject user profile (static facts, ~50ms)
+  // Inject user profile (static facts) — kicked off at the top, parallel with
+  // the pipeline; resolve it here.
   try {
-    const { UserProfile } = await import('./user-profile.js');
-    const userProfileManager = new UserProfile(store);
-    const { profile: userProfileText } = await userProfileManager.getProfile(user_id, org_id);
+    const { profile: userProfileText } = await _userProfilePromise;
     if (userProfileText) {
       injectionText = userProfileText + '\n\n' + injectionText;
     }
   } catch {
     // User profile not available
   }
+  if (_RLAP) _lap.profile = Date.now() - _t0;
 
   // ── Build flat memories[] (backwards-compat) + synthesized[]/raw[] (new) ──
   const flatMemories = top.map(item => ({
@@ -2301,6 +2313,9 @@ export async function recallPersistedMemories(store, {
       ..._lap,
       d_expand: (_lap.expand ?? 0) - (_lap.fetch ?? 0),
       d_score: (_lap.score ?? 0) - (_lap.expand ?? 0),
+      d_deliver: (_lap.obs ?? _lap.score ?? 0) - (_lap.score ?? 0), // rerank/headslot/format + obs-await
+      d_profile: (_lap.profile ?? _lap.obs ?? 0) - (_lap.obs ?? 0),
+      d_synth: (_lap.total ?? 0) - (_lap.profile ?? _lap.obs ?? _lap.score ?? 0),
       d_tail: (_lap.total ?? 0) - (_lap.score ?? 0),
     }));
   }

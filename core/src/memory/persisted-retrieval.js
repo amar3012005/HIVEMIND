@@ -1349,6 +1349,21 @@ export async function recallPersistedMemories(store, {
     : Promise.resolve([]);
   _entityCandidatesPromise.catch(() => {});
 
+  // Observation-prefix (Mastra-style stable context) depends ONLY on
+  // (user, org, project) — NOT on the recall results — yet was assembled at the
+  // very END, serialized after all scoring/dedup. It does a listLatestMemories
+  // DB scan, so on a large org it's a few hundred ms of dead serial time. Kick
+  // it off here so it overlaps the entire recall pipeline; consumed right before
+  // delivery. Identical output (same prefix), wall-clock only.
+  const _observationPrefixPromise = (async () => {
+    try {
+      if (!store) return { prefix: '', observationCount: 0 };
+      const { CognitiveOperator } = await import('./operator-layer.js');
+      return await new CognitiveOperator({ store }).assembleObservationPrefix(user_id, org_id, { project, maxTokens: 4000 });
+    } catch { return { prefix: '', observationCount: 0 }; }
+  })();
+  _observationPrefixPromise.catch(() => {});
+
   const lexicalCandidates = await store.searchMemories({
     query: query_context,
     user_id,
@@ -2124,20 +2139,16 @@ export async function recallPersistedMemories(store, {
       top.unshift(synth);
     }
   }
-  // Try observation prefix first (Mastra-style stable context)
+  // Observation prefix (Mastra-style stable context) — kicked off at the top of
+  // this function (parallel with the whole pipeline) since it depends only on
+  // (user, org, project). Resolve it now; already settled in the common case.
   let observationPrefix = '';
   let hasObservations = false;
   try {
-    const { CognitiveOperator } = await import('./operator-layer.js');
-    if (store) {
-      const operator = new CognitiveOperator({ store });
-      const { prefix, observationCount } = await operator.assembleObservationPrefix(
-        user_id, org_id, { project, maxTokens: 4000 }
-      );
-      if (observationCount >= 3) {
-        observationPrefix = prefix;
-        hasObservations = true;
-      }
+    const { prefix, observationCount } = await _observationPrefixPromise;
+    if (observationCount >= 3) {
+      observationPrefix = prefix;
+      hasObservations = true;
     }
   } catch {
     // Observation prefix not available — fall through to standard retrieval

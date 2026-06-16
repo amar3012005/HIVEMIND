@@ -9560,7 +9560,7 @@ exit \$RC
                 usage,
               });
             } catch (err) {
-              console.warn('[/api/ingest/image] failed:', err.message);
+              console.warn('[/api/ingest/image] failed:', err.stack || err.message, '| meta:', JSON.stringify(err?.meta || {}), '| cause:', err?.cause?.message || '');
               return jsonResponse(res, { error: err.message }, 500);
             }
           }

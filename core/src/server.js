@@ -16375,6 +16375,10 @@ exit \$RC
                 content: validation.data.content,
                 tags: validation.data.tags,
                 memory_type: validation.data.memory_type,
+                // Pass visibility through so org-scoped saves are actually
+                // org-visible (was dropped → scope=organization rows stayed
+                // visibility=private and never surfaced org-wide in recall).
+                visibility: validation.data.visibility || undefined,
                 title: validation.data.title,
                 document_date: validation.data.document_date,
                 event_dates: validation.data.event_dates,

@@ -2073,23 +2073,34 @@ export async function recallPersistedMemories(store, {
           .map(it => it.memory || it)
           .filter(m => m && m.id);
         const claimed = new Set();
+        const prisma = store.client || store.prisma;
         const chains = await Promise.all(topForTimeline.map(async (m) => {
           try {
             const older = await store.getRelatedMemories?.(m.id, { type: 'Updates', depth: 2 });
             if (!Array.isArray(older) || !older.length) return null;
-            // Older versions come back as superseded rows (is_latest=false), which
-            // getMemory() filters out — so use the rows returned here directly.
-            // content may live under content/text/title depending on the store row.
-            const norm = (v) => ({
-              id: v.id || v.memory_id,
-              content: v.content || v.text || v.title || '',
-              created_at: v.created_at || v.createdAt || null,
-            });
-            const versions = [norm(m), ...older.map(norm)]
+            // getRelatedMemories returns contentless stubs, and getMemory() filters
+            // out superseded (is_latest=false) rows — so hydrate the predecessors'
+            // CONTENT with a direct findMany (no is_latest filter). Bounded by a
+            // pre-slice on the stub ids so a canonical's huge Updates set is capped.
+            const olderIds = older
+              .map(o => o.id || o.memory_id)
+              .filter(id => id && id !== m.id)
+              .slice(0, 24);
+            let rows = [];
+            if (olderIds.length && prisma?.memory?.findMany) {
+              rows = await prisma.memory.findMany({
+                where: { id: { in: olderIds }, deletedAt: null },
+                select: { id: true, content: true, createdAt: true },
+              }).catch(() => []);
+            }
+            const versions = [
+              { id: m.id, content: m.content, created_at: m.created_at },
+              ...rows.map(r => ({ id: r.id, content: r.content, created_at: r.createdAt })),
+            ]
               .filter((v, i, arr) => v.id && v.content && arr.findIndex(x => x.id === v.id) === i)
               .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0)) // newest → oldest
               .slice(0, MAX_VERSIONS);
-            return { base: m.id, baseId: m.id, versions };
+            return { base: m.id, versions };
           } catch { return null; }
         }));
         for (const c of chains) {

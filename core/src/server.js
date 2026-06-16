@@ -17708,6 +17708,7 @@ exit \$RC
 
         case '/api/recall':
           if (req.method === 'POST') {
+            const _recallT0 = Date.now(); // DX: server-side recall latency surfaced in the response
             if (!ensurePersistedMemoryOrFail(res, '/api/recall')) {
               return;
             }
@@ -18153,6 +18154,7 @@ exit \$RC
                 console.warn('[recall] tier hydration tap failed:', hydrateErr.message);
               }
 
+              try { if (result && typeof result === 'object' && !Array.isArray(result)) result.timing_ms = Date.now() - _recallT0; } catch { /* additive only */ }
               jsonResponse(res, result);
             } catch (error) {
               console.error('Auto recall failed:', error);

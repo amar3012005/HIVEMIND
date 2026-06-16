@@ -2151,6 +2151,8 @@ model Meeting {
   audioBytes     Int?      @map("audio_bytes")
   multiSpeaker   Boolean   @default(false) @map("multi_speaker")
   speakerCount   Int?      @map("speaker_count")
+  participants   Json      @default("[]") @map("participants")
+  scope          String?   @map("scope") @db.VarChar(20)
   actionItems    Json      @default("[]") @map("action_items")
   decisions      Json      @default("[]") @map("decisions")
   keyPoints      Json      @default("[]") @map("key_points")

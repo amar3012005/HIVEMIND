@@ -5327,6 +5327,14 @@ exit \$RC
         const transcript = (body.transcript || '').toString().trim();
         if (!transcript) return jsonResponse(res, { error: 'no_transcript' }, 400);
         const notes = (body.notes || '').toString().slice(0, 4000);
+        // Participants captured at meeting start — names feed speaker_names
+        // reconciliation (map SPEAKER_xx → real participant).
+        const participantNames = Array.isArray(body.participants)
+          ? body.participants.map((p) => (typeof p === 'string' ? p : (p?.name || ''))).map((s) => String(s).trim()).filter(Boolean).slice(0, 30)
+          : [];
+        const participantsBlock = participantNames.length
+          ? `PARTICIPANTS (real names of attendees — use these to map SPEAKER_xx diarization labels to real people in speaker_names):\n${participantNames.join(', ')}\n\n`
+          : '';
         const sys = 'You are an expert meeting analyst. From the transcript (and optional user notes) produce STRICT JSON: {"title": string, "summary": string (3-6 sentences), "key_points": string[], "action_items": [{"task": string, "owner": string|null, "due": string|null}], "decisions": string[], "questions": string[], "topics": string[], "sentiment": string, "quotes": [{"quote": string, "speaker": string|null}] (up to 5 short verbatim notable quotes, in the transcript original language), "risks": string[] (risks, blockers, warnings or red flags raised), "next_steps": string[] (concrete follow-ups beyond action items, e.g. upcoming events or dates mentioned), "entities": {"people": string[], "organizations": string[], "dates": string[]}, "speaker_names": object}. speaker_names maps diarization labels to real participant names (e.g. {"SPEAKER_00": "Matthias"}) ONLY when the transcript contains SPEAKER_xx labels AND the user notes/context name the participants — infer who is who from how they speak; use {} when unsure. Be faithful — never invent facts. Use empty arrays/objects when none.';
         const MODEL = process.env.MEETING_INSIGHTS_MODEL || 'openai/gpt-oss-120b';
         const GROQ = `${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`;
@@ -5349,7 +5357,7 @@ exit \$RC
         const WINDOW = 48000;
         try {
           if (transcript.length <= WINDOW) {
-            const usr = (notes ? `USER NOTES:\n${notes}\n\n` : '') + `TRANSCRIPT:\n${transcript}`;
+            const usr = participantsBlock + (notes ? `USER NOTES:\n${notes}\n\n` : '') + `TRANSCRIPT:\n${transcript}`;
             const insights = await callLLM([{ role: 'system', content: sys }, { role: 'user', content: usr }]);
             return jsonResponse(res, { insights });
           }
@@ -5366,7 +5374,7 @@ exit \$RC
           }
           const parts = await Promise.all(windows.map((w, idx) => callLLM([
             { role: 'system', content: sys },
-            { role: 'user', content: `${notes ? `USER NOTES:\n${notes}\n\n` : ''}TRANSCRIPT (part ${idx + 1}/${windows.length}):\n${w}` },
+            { role: 'user', content: `${participantsBlock}${notes ? `USER NOTES:\n${notes}\n\n` : ''}TRANSCRIPT (part ${idx + 1}/${windows.length}):\n${w}` },
           ]).catch(() => null)));
           const ok = parts.filter(Boolean);
           if (!ok.length) return jsonResponse(res, { error: 'insights_failed' }, 502);
@@ -5456,13 +5464,17 @@ exit \$RC
         if (!transcript.trim() && !ins.summary) return jsonResponse(res, { error: 'empty_meeting' }, 400);
         const J = (v) => JSON.stringify(Array.isArray(v) ? v : (v || []));
         try {
+          const SCOPES = ['personal', 'project', 'team', 'organization'];
+          const mScope = SCOPES.includes(String(body.scope || '').toLowerCase()) ? String(body.scope).toLowerCase() : null;
           const rows = await prisma.$queryRawUnsafe(
             `INSERT INTO meetings
                (user_id, org_id, project_id, title, summary, transcript, language, duration_sec,
                 audio_bytes, multi_speaker, speaker_count, action_items, decisions, key_points,
-                questions, segments, topics, sentiment, source_memory_id, notes, insights)
+                questions, segments, topics, sentiment, source_memory_id, notes, insights,
+                participants, scope)
              VALUES ($1::uuid,$2::uuid,$3::uuid,$4,$5,$6,$7,$8,$9,$10,$11,
-                     $12::jsonb,$13::jsonb,$14::jsonb,$15::jsonb,$16::jsonb,$17::text[],$18,$19::uuid,$20,$21::jsonb)
+                     $12::jsonb,$13::jsonb,$14::jsonb,$15::jsonb,$16::jsonb,$17::text[],$18,$19::uuid,$20,$21::jsonb,
+                     $22::jsonb,$23)
              RETURNING id, created_at`,
             mUser, mOrg, body.project_id || null, title, ins.summary || null, transcript,
             body.language || null, Number.isFinite(body.duration_sec) ? body.duration_sec : null,
@@ -5474,6 +5486,8 @@ exit \$RC
             ins.sentiment || null, body.source_memory_id || null,
             (body.notes || '').toString().slice(0, 8000) || null,
             JSON.stringify(ins != null && typeof ins === 'object' && !Array.isArray(ins) ? ins : {}),
+            JSON.stringify(Array.isArray(body.participants) ? body.participants.slice(0, 50) : []),
+            mScope,
           );
           const _newId = rows?.[0]?.id;
           if (_newId) { runMeetingIntelligence(_newId, mUser, mOrg).catch(() => {}); }
@@ -5481,6 +5495,41 @@ exit \$RC
         } catch (e) {
           return jsonResponse(res, { error: 'meetings_save_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
         }
+      }
+
+      // POST /api/meetings/invite — email external participants that an org
+      // member added at meeting start. Best-effort, capped, user-initiated
+      // (fires when the organizer clicks Start with externals entered). Org
+      // members are NOT emailed — only externals with a valid email address.
+      if (pathname === '/api/meetings/invite' && req.method === 'POST') {
+        const mOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
+        const externals = Array.isArray(body.participants)
+          ? body.participants
+              .filter((p) => p && p.email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(p.email)))
+              .slice(0, 25)
+          : [];
+        if (!externals.length) return jsonResponse(res, { ok: true, sent: 0 });
+        const mtitle = (body.title || 'a meeting').toString().slice(0, 140);
+        let orgName = 'HIVEMIND';
+        try {
+          const org = await prisma?.organization.findUnique({ where: { id: mOrg }, select: { name: true } });
+          if (org?.name) orgName = org.name;
+        } catch { /* default name */ }
+        let sent = 0;
+        try {
+          const { sendEmail } = await import('./services/email-sender.js');
+          await Promise.all(externals.map(async (p) => {
+            const safeName = String(p.name || 'there').slice(0, 80);
+            const subject = `You've been added to a meeting: ${mtitle}`;
+            const text = `Hi ${safeName},\n\nYou've been added as a participant in "${mtitle}" on ${orgName} (HIVEMIND).\nThe meeting notes and action items will be shared with you afterwards.\n\n— ${orgName}`;
+            const html = `<p>Hi ${safeName},</p><p>You've been added as a participant in <b>${mtitle}</b> on ${orgName} (HIVEMIND).</p><p>The meeting notes and action items will be shared with you afterwards.</p><p>— ${orgName}</p>`;
+            try { await sendEmail({ to: p.email, subject, text, html }); sent += 1; }
+            catch (e) { console.warn('[meeting-invite] send failed:', p.email, e.message); }
+          }));
+        } catch (e) {
+          return jsonResponse(res, { ok: false, error: 'email_unavailable', message: e.message }, 200);
+        }
+        return jsonResponse(res, { ok: true, sent, externals: externals.length });
       }
 
       // GET /api/meetings/:id — full meeting detail (the list endpoint stays
@@ -5496,6 +5545,7 @@ exit \$RC
               `SELECT id, user_id, org_id, project_id, title, summary, transcript, language,
                       duration_sec, multi_speaker, speaker_count, action_items, decisions,
                       key_points, questions, segments, topics, sentiment, notes, insights,
+                      participants, scope,
                       intelligence, intelligence_status, intelligence_generated_at,
                       source_memory_id, created_at
                FROM meetings
@@ -5858,6 +5908,7 @@ exit \$RC
             const rows = await prisma.$queryRawUnsafe(
               `SELECT id, title, summary, transcript, language, multi_speaker, speaker_count,
                       action_items, decisions, key_points, questions, topics, insights,
+                      participants, scope, project_id,
                       source_memory_id, created_at
                FROM meetings WHERE id = $1::uuid AND org_id = $2::uuid AND deleted_at IS NULL`,
               id, mOrg,
@@ -5888,11 +5939,38 @@ exit \$RC
               return jsonResponse(res, { error: 'nothing_to_ingest' }, 400);
             }
 
-            // Participants: real names from the speaker-name map + insight entities.
+            // Participants: declared attendees (captured at meeting start) first,
+            // then reconciled speaker names + insight entities.
+            const declaredParticipants = Array.isArray(m.participants)
+              ? m.participants.map((p) => (typeof p === 'string' ? p : (p?.name || ''))).map((s) => String(s).trim()).filter(Boolean)
+              : [];
             const speakerNames = (ins.speaker_names && typeof ins.speaker_names === 'object') ? Object.values(ins.speaker_names) : [];
             const entPeople = arr(ins.entities?.people);
             const entOrgs = arr(ins.entities?.organizations);
-            const people = Array.from(new Set([...speakerNames, ...entPeople].map((s) => String(s || '').trim()).filter(Boolean))).slice(0, 12);
+            const people = Array.from(new Set([...declaredParticipants, ...speakerNames, ...entPeople].map((s) => String(s || '').trim()).filter(Boolean))).slice(0, 12);
+
+            // Scope the saved cluster: explicit meeting.scope, else project when a
+            // project_id is set, else personal. The engine REQUIRES project_ids
+            // for project scope and primary_team_id for team scope (else it
+            // throws) — so degrade gracefully when those aren't resolvable.
+            const SCOPES = ['personal', 'project', 'team', 'organization'];
+            const mProjectId = m.project_id || null;
+            let saveScope = SCOPES.includes(String(m.scope || '').toLowerCase()) ? String(m.scope).toLowerCase() : null;
+            if (!saveScope) saveScope = mProjectId ? 'project' : 'personal';
+            if (saveScope === 'project' && !mProjectId) saveScope = 'personal';
+            let savePrimaryTeamId = null;
+            if (saveScope === 'team') {
+              try {
+                const t = await prisma.team.findFirst({ where: { orgId: mOrg }, select: { id: true }, orderBy: { createdAt: 'asc' } });
+                savePrimaryTeamId = t?.id || null;
+              } catch { /* no team model / none */ }
+              if (!savePrimaryTeamId) saveScope = 'organization';
+            }
+            const saveProjectIds = (saveScope === 'project' && mProjectId) ? [mProjectId] : [];
+            const scopeFields = {
+              ...scopeFields,
+              ...(savePrimaryTeamId ? { primary_team_id: savePrimaryTeamId } : {}),
+            };
             const orgs = Array.from(new Set(entOrgs.map((s) => String(s || '').trim()).filter(Boolean))).slice(0, 8);
             const entityTags = [...people.map((p) => `entity:${p}`), ...orgs.map((o) => `entity:${o}`)];
             const meetingTag = `meeting:${id}`;
@@ -5952,6 +6030,7 @@ exit \$RC
             const mkSection = (label, memory_type, lines, extraTags = []) => ({
               user_id: mUser,
               org_id: mOrg,
+              ...scopeFields,
               title: `${ctxPrefix} — ${label}`.slice(0, 200),
               content: `${provLine}\n\n${label}:\n${bulletBlock(lines)}`,
               memory_type,
@@ -5968,6 +6047,7 @@ exit \$RC
             const parent = {
               user_id: mUser,
               org_id: mOrg,
+              ...scopeFields,
               title: `${ctxPrefix} — Overview`.slice(0, 200),
               content: provLine + '\n\n' + summary
                 + (people.length ? `\n\nParticipants: ${people.join(', ')}` : '')
@@ -6007,6 +6087,7 @@ exit \$RC
               children.push({
                 user_id: mUser,
                 org_id: mOrg,
+                ...scopeFields,
                 title: `${ctxPrefix} — Transcript`.slice(0, 200),
                 content: transcript.slice(0, 16000),
                 memory_type: 'event',

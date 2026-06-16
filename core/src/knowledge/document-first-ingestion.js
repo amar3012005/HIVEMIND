@@ -199,7 +199,8 @@ export class DocumentFirstIngestionService {
     // Heuristic fallback (no key): sentence-split — degraded but never blocks.
     if (!apiKey) {
       return sections.map((sec) => ({
-        facts: (sec.content || '').split(/(?<=[.!?])\s/).map((x) => x.trim()).filter((x) => x.length >= 25).slice(0, maxFacts),
+        facts: (sec.content || '').split(/(?<=[.!?])\s/).map((x) => x.trim()).filter((x) => x.length >= 25).slice(0, maxFacts)
+          .map((f) => ({ t: cleanTitleFrom(f, 48), f })),
         entities: [],
       }));
     }
@@ -213,13 +214,15 @@ export class DocumentFirstIngestionService {
     // downstream. NO domain examples → generalizes to every tenant.
     const sys = `You are a precise information-extraction engine. From each numbered SECTION, extract atomic FACTS and the CANONICAL ENTITIES it mentions.
 
-Return ONLY a JSON object: {"sections":[{"i":<section number>,"facts":["complete standalone sentence", ...],"entities":["Canonical Name", ...]}]}.
+Return ONLY a JSON object: {"sections":[{"i":<section number>,"facts":[{"t":"<short title>","f":"complete standalone sentence"}, ...],"entities":["Canonical Name", ...]}]}.
 
-FACT rules:
-- Each fact is ONE complete, self-contained sentence — include the explicit subject, never a bare "it"/"they"/"this".
-- Extract only REAL information actually stated: names, roles, products, specs, numbers, dates, decisions, events, causal claims. NEVER meta-commentary about the document/section/layout.
+FACT rules — extract the FEWEST, HIGHEST-SIGNAL facts (quality over coverage):
+- Each fact is an OBJECT {"t","f"}: "f" = ONE complete, self-contained sentence (explicit subject, never a bare "it"/"they"/"this"); "t" = a SHORT 3–6 word title naming what the fact is ABOUT — its subject/topic, in Title Case, NO trailing punctuation, and NOT a restatement of the whole sentence. Good titles: "RAG grounding without retraining", "O-ring failure cause", "Q2 revenue target". Bad titles: the full sentence, "Company Info", "Fact".
+- Extract ONLY the most important, decision-relevant information actually stated: names, roles, products, specs, numbers, dates, decisions, events, causal claims. A reader skimming ONLY your facts should grasp the section's essence — capture that, nothing more.
+- NON-REDUNDANT: never restate the same point in different words. If two candidate facts overlap, keep the single most specific one and drop the rest.
+- NEVER meta-commentary about the document/section/layout, filler, marketing fluff, or boilerplate.
 - Preserve specific values verbatim (numbers, units, model names, dates). Do not invent or generalize.
-- Max ${maxFacts} facts per section. A section with no real information → "facts":[].
+- At MOST ${maxFacts} facts per section — FEWER is better. A thin or purely decorative section → "facts":[].
 
 ENTITY rules — emit ONE canonical name per real-world thing so the same entity never forks into variants:
 - TYPE + LENGTH: an entity is a SHORT noun — a specific person, organization, product/model, place, technology, or standard. 1–3 words. NEVER a phrase, clause, description, or generic concept. Reject anything that reads like a description (do NOT emit "modular system idea", "customer cluster", "key account photovoltaic cluster", "comfort scenario"). If unsure whether it is a real entity, OMIT it.
@@ -244,7 +247,7 @@ Output the JSON object and nothing else.`;
             required: ['i', 'facts', 'entities'],
             properties: {
               i: { type: 'integer' },
-              facts: { type: 'array', items: { type: 'string' } },
+              facts: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['t', 'f'], properties: { t: { type: 'string' }, f: { type: 'string' } } } },
               entities: { type: 'array', items: { type: 'string' } },
             },
           },
@@ -289,7 +292,17 @@ Output the JSON object and nothing else.`;
     arr.forEach((o, idx) => byI.set(typeof o?.i === 'number' ? o.i : idx, o));
     return sections.map((_, i) => {
       const o = byI.get(i) || {};
-      return { facts: Array.isArray(o.facts) ? o.facts : [], entities: Array.isArray(o.entities) ? o.entities : [] };
+      // Normalize every fact to {t,f}. New strict-schema shape is already
+      // {t,f}; coerce any bare string (legacy / non-gpt-oss salvage) to one,
+      // and backfill a missing title from the sentence.
+      const facts = (Array.isArray(o.facts) ? o.facts : []).map((x) => {
+        if (typeof x === 'string') return { t: cleanTitleFrom(x, 48), f: x };
+        if (x && typeof x === 'object' && typeof x.f === 'string') {
+          return { t: (typeof x.t === 'string' && x.t.trim()) ? x.t.trim() : cleanTitleFrom(x.f, 48), f: x.f };
+        }
+        return null;
+      }).filter(Boolean);
+      return { facts, entities: Array.isArray(o.entities) ? o.entities : [] };
     });
   }
 
@@ -305,8 +318,11 @@ Output the JSON object and nothing else.`;
     // dense paragraphs — e.g. competitor names) → memory-layer coverage gaps.
     // 5 captures them; the evidence layer still backs anything the distill skips.
     // Pure-insert keeps the extra per-fact cost cheap. Env-overridable.
-    const MAX_FACTS_PER_SEGMENT = Number(process.env.KB_DISTILL_MAX_FACTS || 5);
-    const MAX_FACTS_PER_DOC = Number(process.env.KB_DISTILL_DOC_CAP || 120);
+    // Curated density (was 5 / 120 → avg ~26 facts/doc, p90 60: noise floor +
+    // recall dilution + per-fact latency). Salience prompt + these tighter caps
+    // target a few high-signal facts per section and a sane doc ceiling.
+    const MAX_FACTS_PER_SEGMENT = Number(process.env.KB_DISTILL_MAX_FACTS || 3);
+    const MAX_FACTS_PER_DOC = Number(process.env.KB_DISTILL_DOC_CAP || 40);
     const docTitle = metadata.documentTitle || metadata.filename || `Document ${String(documentId).slice(0, 8)}`;
 
     const run = (async () => {
@@ -316,7 +332,7 @@ Output the JSON object and nothing else.`;
       for (let i = 0; i < eligible.length; i += BATCH) batches.push(eligible.slice(i, i + BATCH));
       let created = 0, failed = 0, bidx = 0;
 
-      const ingestFact = async (t, fact, entityTags) => {
+      const ingestFact = async (t, fact, entityTags, factTitle) => {
         const res = await this.memoryGraphEngine.ingestMemory({
           user_id: userId,
           org_id: orgId,
@@ -325,7 +341,9 @@ Output the JSON object and nothing else.`;
           primary_team_id: t.primary_team_id || null,
           project_ids: Array.isArray(t.project_ids) ? t.project_ids : [],
           content: fact.trim(),
-          title: cleanTitleFrom(fact),
+          // LLM-emitted concise title (its subject/topic), not the whole
+          // sentence. Falls back to the first-clause heuristic if absent.
+          title: (factTitle && factTitle.trim()) ? factTitle.trim().slice(0, 80) : cleanTitleFrom(fact),
           memory_type: 'fact',
           source_type: 'knowledge_fact',
           tags: [
@@ -418,7 +436,7 @@ Output the JSON object and nothing else.`;
           if (created >= MAX_FACTS_PER_DOC) break;
           const t = batch[k];
           const ex = perSection[k] || { facts: [], entities: [] };
-          const facts = (ex.facts || []).filter((f) => typeof f === 'string' && f.trim().length >= 20).slice(0, MAX_FACTS_PER_SEGMENT);
+          const facts = (ex.facts || []).filter((f) => f && typeof f.f === 'string' && f.f.trim().length >= 20).slice(0, MAX_FACTS_PER_SEGMENT);
           // Canonicalize at the SOURCE (normalizeEntity), not via a raw
           // underscore-join. KB facts set defer_entity_linking=true so the
           // co-mention linker never re-tags them, and they do NOT reach the
@@ -431,7 +449,7 @@ Output the JSON object and nothing else.`;
           for (const fact of facts) {
             if (created >= MAX_FACTS_PER_DOC) break;
             try {
-              const p = await ingestFact(t, fact, entityTags);
+              const p = await ingestFact(t, fact.f, entityTags, fact.t);
               // Re-check the cap in the same synchronous tick as the increment:
               // `created` is shared across CONCURRENCY workers and the await above
               // is a yield point, so the outer break alone lets the soft cap

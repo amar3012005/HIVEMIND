@@ -106,18 +106,32 @@ All surfaces (Tara, `/chat`, Overview, search, MCP) flow through the same
 | HNSW ef_search 200 | `QDRANT_HNSW_EF` | ON |
 | int8 quant **rescore** | `QDRANT_QUANT_RESCORE` | OFF — intentional (was a 4s killer; quant still used for storage) |
 
-## 6. Latency characterization (warm `/api/recall`, ~2.6s)
+## 6. Latency — parallelized 2.6s → ~0.9s warm (2026-06-16, eval held combo@8=1.00)
 
-Measured via env-gated stage laps (since reverted). Entire cost is **inside
-`recallPersistedMemories`** (enhance/evidence/live = ~40ms, access = cached):
+Stage laps are now **env-gated and retained** (`RECALL_LAP=true` → `[recall-lap]`
+JSON line; zero cost when off). Five parallelizations, each eval-gated:
 
-| Stage | ~ms | Note |
+| # | Change | Effect |
 |---|---|---|
-| lexical (Postgres FTS lane) | 500 | sequential, independent of vector |
-| base vector fetch | 400 | embed 130 + qdrant 70 + overhead |
-| query expansion + variant fetches | 120 | |
-| `expandCandidatesViaGraph` | 690 | graph neighbour blow-up |
-| **sync tail** (merge/score/dedup/rerank/synthesis over the expanded pool) | **~1400** | pure JS, no awaits — the prize |
+| 1 | lexical FTS ‖ base-vector (were serial) | front lanes overlap |
+| 2 | relationships + entity + temporal passes ‖ vector/lexical | one Promise.all barrier, sum→max |
+| 3 | `assembleObservationPrefix` hoisted to start (depends only on user/org/project) | overlaps whole pipeline |
+| 4 | **`expandCandidatesViaGraph` getMemory: serial N+1 → one concurrent batch** | **910ms → ~150ms** (biggest win) |
+| 5 | `UserProfile.getProfile` hoisted to start (serial tail await, ~370ms real) | tail 518ms → ~139ms |
+
+Measured per-stage (warm, RECALL_LAP), total ~0.92s:
+`fetch 434` (parallel front lanes — entity-extract LLM + embed + qdrant + PG +
+relationships, the slowest lane gates) · `expand 150` · `score 150` · `deliver/
+tail 139`. All output byte-identical (same memories/scores/order); only fetches
+parallelize. `fetch` is now the floor — mostly one llama-8b entity extraction +
+the embed, both genuine work (cutting further = disabling the entity lane, an
+accuracy call, not done). The old "sync tail ~1400ms" was dominated by the two
+serial independent awaits (#3, #5) — now parallel.
+
+Result: `/api/recall` warm **~0.9s both replicas** (was ~2.6s); `/api/chat`
+end-to-end **~3.5s** (was ~5.08s; remainder is LLM generation, not recall).
+The earlier "cap the graph-expanded pool" idea is now moot — `score` is only
+~150ms after batching, so there's no large sync pool left to cap.
 
 ## 7. Final pieces
 

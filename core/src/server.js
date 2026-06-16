@@ -17346,15 +17346,33 @@ exit \$RC
               // — regardless of the caller's project membership (the room/caller
               // explicitly chose this project). Without project_id, behavior is unchanged.
               if (body.project_id) {
-                // Spread-preserve the rest of the context (orgRole especially):
-                // rebuilding it bare dropped orgRole, which (a) re-granted the
-                // org-wide tier to guests on project recalls and (b) changed the
-                // keyword candidate pool composition.
-                recallAccessCtx = {
-                  ...(recallAccessCtx || {}),
-                  projectIds: [body.project_id],
-                  teamIds: (recallAccessCtx && recallAccessCtx.teamIds) || [],
-                };
+                // SECURITY (tenant isolation): only HONOR a caller-supplied
+                // project_id if the caller can actually access that project.
+                // buildAccessContext already expands owner/admin to every org
+                // project and members to their memberships, so an accessible
+                // project is one already present in projectIds. A guest / non-
+                // member passing someone else's project_id must NOT gain scope
+                // (previously this forced projectIds=[project_id] unconditionally
+                // → any org user could recall any project's memories by id).
+                const _baseCtx = recallAccessCtx || {};
+                const _canAccessProject = Array.isArray(_baseCtx.projectIds)
+                  && _baseCtx.projectIds.includes(body.project_id);
+                if (_canAccessProject) {
+                  // Spread-preserve the rest of the context (orgRole especially):
+                  // rebuilding it bare dropped orgRole, which (a) re-granted the
+                  // org-wide tier to guests on project recalls and (b) changed the
+                  // keyword candidate pool composition.
+                  recallAccessCtx = {
+                    ..._baseCtx,
+                    projectIds: [body.project_id],
+                    teamIds: _baseCtx.teamIds || [],
+                  };
+                } else {
+                  // Not a member of the requested project → no privilege grant.
+                  // Keep the caller's real access context; scoping the query to a
+                  // project they cannot see simply yields nothing from it.
+                  recallAccessCtx = _baseCtx;
+                }
               }
 
               // Person-filtered recall ("what did person X update today"): resolve an

@@ -2405,6 +2405,22 @@ export async function recallPersistedMemories(store, {
       d_synth: (_lap.total ?? 0) - (_lap.profile ?? _lap.obs ?? _lap.score ?? 0),
       d_tail: (_lap.total ?? 0) - (_lap.score ?? 0),
     }));
+    // Wide-memory funnel: how many candidates each parallel lane fetched →
+    // merged pool → final delivered. Shows "search wide, rank narrow".
+    console.log('[recall-funnel]', JSON.stringify({
+      lanes: {
+        lexical: Array.isArray(filteredLexical) ? filteredLexical.length : 0,
+        vector: Array.isArray(vectorCandidates) ? vectorCandidates.length : 0,
+        crosslingual: Array.isArray(crosslingualCandidates) ? crosslingualCandidates.length : 0,
+        entity: Array.isArray(entityFilteredCandidates) ? entityFilteredCandidates.length : 0,
+        temporal: Array.isArray(temporalFilteredCandidates) ? temporalFilteredCandidates.length : 0,
+        graph_expanded: Array.isArray(expandedCandidates) ? expandedCandidates.length : 0,
+      },
+      merged_pool: Array.isArray(boostedItems) ? boostedItems.length : 0,
+      delivered: Array.isArray(flatMemories) ? flatMemories.length : 0,
+      synthesized: Array.isArray(synthesized) ? synthesized.length : 0,
+      timeline_chains: _versionTimeline.length,
+    }));
   }
 
   return {

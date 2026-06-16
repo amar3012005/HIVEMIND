@@ -490,21 +490,10 @@ function generateToolsManifest(userId, orgId, options = {}) {
   const tools = [
     {
       name: 'hivemind_save_memory',
-      description: `Save information to HIVE-MIND persistent memory.
-
-BI-TEMPORAL VERSIONING (every save = a new version row):
-Every call writes a versioned snapshot. Past versions stay queryable via hivemind_at / hivemind_diff / hivemind_timeline. When relationship="update" the prior version is marked superseded but stays in the ledger — you can still answer "what did we believe on date X". Treat saves like git commits on a fact, not destructive updates.
-
-SELF-EVOLVING GRAPH:
-On every save the server runs semantic recall against past memories + a triple-operator detector. If the new content updates / extends / contradicts a prior memory the right edge type (Updates / Extends / Derives / Contradicts) is auto-added. No manual relationship needed for most cases.
-
-PROJECT SCOPING (IMPORTANT — keeps the org knowledge structured):
-The org has ONE shared HIVEMIND by default. Admins can create sub-HIVEMINDs called projects (e.g. "SOLVIS", "Q2-Planning"). Rule:
-  • BEFORE saving, call hivemind_list_projects and match the content to the best-fitting project by name + description. If one clearly fits, save with its project_id so the memory lands in that project.
-  • If the user names a project ("save this to SOLVIS"), pass project="<name>" or project_id="<uuid>".
-  • If no project clearly fits and the user hasn't named one: if they have access to projects, the server returns needs_project_choice with the list — pick the obvious match or ASK which project (or org-wide), then re-call with project_id (omit for org-wide).
-  • If the user has NO accessible projects, the save goes org-wide automatically — no need to ask.
-  • Genuinely org-wide facts/preferences: omit project.`,
+      description: `Persist a durable fact, preference, decision, or synthesis to HIVE-MIND memory.
+Use whenever the user shares something that will matter in a future session: names, plans, decisions, opinions, facts, or anything you'd wish you remembered. NOT for ephemeral chat or greetings — use hivemind_save_conversation for full dialogue transcripts; use hivemind_log_decision for formal technical decisions; use hivemind_ingest_code for source files.
+Every save is a versioned snapshot; old versions stay queryable via hivemind_at / hivemind_diff / hivemind_timeline. Pass relationship="update" + related_to=<id> when correcting a prior fact — the server marks the old version superseded.
+PROJECT SCOPING: pass project_id ONLY when the user explicitly names a project. Otherwise omit it — the server auto-classifies the best-fitting project from each project's name+description and files it there when confident; it falls back to personal/org-wide when ambiguous. You do NOT need to call hivemind_list_projects before every save. Pair with hivemind_traverse_graph to explore connected context after saving.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -554,7 +543,9 @@ The org has ONE shared HIVEMIND by default. Admins can create sub-HIVEMINDs call
     },
     {
       name: 'hivemind_list_projects',
-      description: 'List the projects (sub-HIVEMINDs) in the current org with rich metadata per project: name, description, status, created_at, last_updated, member_count, memory_count, and people (member names + roles). CALL THIS FIRST when working with HIVEMIND memory: if the user task clearly belongs to one project (match by name/description), pass that project_id to hivemind_recall (scopes recall to that project + org-wide facts, excluding other projects) and to hivemind_save_memory (files the memory in that project). If no project clearly fits, omit project for an org-wide search/save. This keeps the org knowledge structured and on-topic.',
+      description: `List all projects (sub-HIVEMINDs) in the current org with metadata: name, description, status, member_count, memory_count, and member names+roles.
+Use when the user names a project you don't recognise, when you need the project_id to pass to hivemind_recall or hivemind_save_memory, or when exploring what focused knowledge buckets exist. NOT required before every save — the server auto-classifies saves by project; call this only when you need an explicit project_id or want to inspect membership/metadata.
+Returns org projects plus other_orgs the user belongs to. Pass org_id to switch org context.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -567,19 +558,10 @@ The org has ONE shared HIVEMIND by default. Admins can create sub-HIVEMINDs call
     },
     {
       name: 'hivemind_create_project',
-      description: `Create a new project (a sub-HIVEMIND) inside the current org. A project is a focused, named knowledge bucket (e.g. "SOLVIS", "Q3-Launch", "ACME-Account") that scopes memories so recall stays on-topic. The calling user becomes the project owner.
-
-WHEN TO USE:
-  • The user explicitly asks to create/start a project ("make a project for the SOLVIS account", "spin up a workspace for Q3 planning").
-  • You are about to save a cluster of related memories that clearly belong to a NEW initiative that does not yet exist in hivemind_list_projects.
-
-WORKFLOW (avoid duplicates):
-  1. Call hivemind_list_projects FIRST and check whether a project with the same name/topic already exists — if so, reuse its project_id instead of creating a duplicate.
-  2. Only call this when no fitting project exists.
-  3. A 'description' is REQUIRED and should be a 1–2 sentence summary of the project's purpose — it powers project matching in later hivemind_list_projects / save / recall calls, so make it specific.
-  4. After creation, use the returned project_id with hivemind_save_memory and hivemind_recall to file and retrieve that project's memories.
-
-Returns the created project: { id, name, slug, description, status, created_at }. The slug is auto-derived from the name and de-duplicated.`,
+      description: `Create a new project (sub-HIVEMIND) inside the current org — a focused knowledge bucket that scopes saves and recall to a specific initiative (e.g. "SOLVIS", "Q3-Launch", "ACME-Account").
+Use ONLY when the user explicitly asks to start a project, or when you are saving memories that clearly belong to a brand-new initiative not yet in hivemind_list_projects. NOT for saving memories into an existing project — use hivemind_save_memory with project_id instead.
+DUPLICATE GUARD: call hivemind_list_projects first; reuse an existing project_id rather than creating a duplicate. description is required (1–2 sentences, specific) — it drives auto-classification in future saves.
+Returns { id, name, slug, description, status, created_at }; pass the returned id to hivemind_save_memory and hivemind_recall.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -601,7 +583,9 @@ Returns the created project: { id, name, slug, description, status, created_at }
     },
     {
       name: 'hivemind_recall',
-      description: 'Search and retrieve relevant memories from HIVE-MIND. Use this to find previously stored information, code patterns, or context from past conversations. PROJECT WORKFLOW: for best results call hivemind_list_projects first; if the query clearly belongs to one project, pass its `project_id` to scope recall to that project + org-wide facts (other projects excluded); if it does not clearly fit a project, omit project_id for a whole-org recall. PERSON/TIME: pass `author` (member name/email/id) to return only that member memories, and `date_range` to bound time — together they answer "what did <person> update today / this week", optionally scoped to a project.',
+      description: `Semantic search across all stored memories — your primary retrieval reflex. Use on every non-trivial user turn to surface relevant past facts, decisions, or context before composing a response.
+NOT for fetching a single known memory by ID (use hivemind_get_memory); NOT for browsing/listing without a query (use hivemind_list_memories); NOT for AI-synthesized answers (use hivemind_query_with_ai); NOT for code-history reasons (use hivemind_why_code); NOT for bug patterns (use hivemind_recall_bugs).
+Mode guide: quick = fast semantic (default); panorama = temporal/historical sweep; insight = AI sub-queries for complex questions. Pass project_id to scope to one project + org-wide facts; omit for whole-org. Combine author + date_range to answer "what did <person> do this week". Pair top results with hivemind_traverse_graph to pull connected context. HARD RULE: never use hivemind_web_search for facts about the user / their org / their people — recall here first; only go to web if this returns nothing on external topics.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -666,7 +650,8 @@ Returns the created project: { id, name, slug, description, status, created_at }
     },
     {
       name: 'hivemind_get_memory',
-      description: 'Get a specific memory by its ID. Use when you have a memory ID and need the full details.',
+      description: `Fetch a single memory by its exact UUID and return full details including content, tags, timestamps, and version metadata.
+Use when you already have a memory_id (e.g. from a recall result or traverse_graph) and need the complete record. NOT for searching — use hivemind_recall; NOT for version history — use hivemind_timeline; NOT for graph neighbours — use hivemind_traverse_graph. Requires the exact memory_id; no fuzzy matching.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -680,7 +665,8 @@ Returns the created project: { id, name, slug, description, status, created_at }
     },
     {
       name: 'hivemind_list_memories',
-      description: 'List all memories with filtering and pagination. Use for browsing or when you need an overview.',
+      description: `Browse and paginate stored memories with tag/type/project filters. Returns a flat list with titles and short previews.
+Use when the user wants to see what is stored ("show me all decisions", "list code memories for SOLVIS"), or when you need to scan a category without a specific query. NOT for semantic search — use hivemind_recall with a query; NOT for a single record — use hivemind_get_memory; NOT for AI synthesis — use hivemind_query_with_ai. Combine tags + source_type + project_id to narrow results; use page/limit for pagination.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -723,7 +709,8 @@ Returns the created project: { id, name, slug, description, status, created_at }
     },
     {
       name: 'hivemind_update_memory',
-      description: 'Update an existing memory. Use when you need to correct or modify previously stored information.',
+      description: `Overwrite specific fields (title, content, tags) of an existing memory by its ID. Use when the user explicitly edits or corrects a stored record you already have the ID for.
+NOT for versioned supersession of a fact — use hivemind_save_memory with relationship="update" + related_to instead (preserves version history); NOT for bulk changes — update each memory individually. Requires the exact memory_id; fetch it first via hivemind_recall or hivemind_get_memory if you don't have it. Only the fields you pass are changed; omitted fields are left as-is.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -750,7 +737,8 @@ Returns the created project: { id, name, slug, description, status, created_at }
     },
     {
       name: 'hivemind_delete_memory',
-      description: 'Delete a memory by ID. Use with caution - deletion is permanent.',
+      description: `Permanently delete a memory by ID. Use only when the user explicitly requests removal of a stored record, or when the record is confidential/erroneous and must not remain.
+Deletion is irreversible — version history is also removed. NOT for outdating a fact — use hivemind_save_memory with relationship="update" to supersede while keeping the ledger intact. Always pass a reason for the audit log. Fetch the memory_id via hivemind_recall first if you don't have it.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -768,7 +756,8 @@ Returns the created project: { id, name, slug, description, status, created_at }
     },
     {
       name: 'hivemind_save_conversation',
-      description: 'Save the current conversation to HIVE-MIND for future reference. Use at the end of meaningful conversations.',
+      description: `Store a full conversation transcript as a single durable memory (REFLEX 7). Use at the end of sessions that produced meaningful exchanges — decisions made, facts shared, plans agreed — so future sessions can recall the whole dialogue.
+NOT for individual facts from a conversation — use hivemind_save_memory for those; NOT for code edits — use hivemind_ingest_code; NOT for architectural decisions — use hivemind_log_decision. Pass a compact messages array (summarise long turns rather than copy verbatim). Tag with platform and any project or entity tags so future recall can find it. Pair with project_id when the conversation was scoped to a project.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -811,7 +800,8 @@ Returns the created project: { id, name, slug, description, status, created_at }
     },
     {
       name: 'hivemind_traverse_graph',
-      description: 'Traverse the memory graph to find connected memories. Use for discovering related context and knowledge connections.',
+      description: `Walk the knowledge graph from a known memory node and return connected memories up to N hops away, following typed edges (Updates / Extends / Derives / Contradicts / PartOf / Mentions).
+Use AFTER hivemind_recall returns a relevant memory and you need richer connected context — e.g. to find the chain of decisions that led to a choice, or memories that were extended by later facts. NOT for searching without a starting ID — use hivemind_recall; NOT for a single memory's version history — use hivemind_timeline. Start from the memory_id of your most relevant recall result; set depth=2 for broad context, depth=1 for immediate neighbours only.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -837,7 +827,8 @@ Returns the created project: { id, name, slug, description, status, created_at }
     },
     {
       name: 'hivemind_query_with_ai',
-      description: 'Ask a natural language question that HIVE-MIND answers using AI-powered retrieval. Best for complex questions requiring synthesis.',
+      description: `Ask a natural-language question and receive an AI-synthesized answer grounded in stored memories — HIVEMIND retrieves relevant context and composes a direct response.
+Use for complex multi-part questions that require synthesizing across several memories, or when you want a narrative answer rather than a list of raw memories. NOT for simple lookups — use hivemind_recall for those (faster, cheaper); NOT for a single known record — use hivemind_get_memory. Increase context_limit for questions spanning many facts. Results are grounded in memory; not suitable for live external data (use hivemind_web_search for that).`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -861,7 +852,8 @@ Returns the created project: { id, name, slug, description, status, created_at }
     tools.push(
     {
       name: 'hivemind_ingest_code',
-      description: 'Save a code file or snippet to HIVE-MIND memory with auto-detected language and structural metadata. Use after editing files so future sessions can recall the codebase context. The AI coding assistant should call this after writing or significantly modifying any file.',
+      description: `Store a source file or code snippet as a versioned memory, with auto-detected language and structural metadata. Triggers AFTER every Edit/Write to a real file so future sessions can recall codebase context without re-reading the file.
+NOT for architectural decisions — use hivemind_log_decision; NOT for test coverage records — use hivemind_test_coverage; NOT for renames/moves — use hivemind_track_refactor; NOT for generic text — use hivemind_save_memory. Pass the full content so Smart Ingest can detect changes and auto-deduplicate against prior versions. Pair with related_to=<prior_memory_id> to chain versions explicitly. Include a concise summary (1-3 sentences) so recall surfaces it without reading full content.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -900,7 +892,8 @@ Returns the created project: { id, name, slug, description, status, created_at }
     },
     {
       name: 'hivemind_recall_bugs',
-      description: 'Recall past bug patterns, fixes, and gotchas related to the current code context. Use before writing code in an area to avoid repeating known bugs. Returns relevant bug memories with fix context.',
+      description: `Surface stored bug patterns, past fixes, and known gotchas relevant to what you are about to write. Fire BEFORE touching any known-buggy area to avoid repeating history.
+NOT for general code context — use hivemind_why_code; NOT for test coverage — use hivemind_test_coverage; NOT for architectural reasons — use hivemind_log_decision recall. Describe what you are implementing (context) as specifically as possible, and pass the file_path being edited to narrow the search. Returns memories tagged bug | fix | gotcha with fix context. Combine with hivemind_why_code for a full picture before modifying unfamiliar code.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -933,7 +926,8 @@ Returns the created project: { id, name, slug, description, status, created_at }
     },
     {
       name: 'hivemind_set_assistant_name',
-      description: 'Per-user setting: choose what HIVEMIND should call itself in Talk to HIVE chats (e.g. "Sage", "Brain", "Iris"). Stored as a personal memory tagged assistant-name. Re-running with a different name updates via Smart Ingest UPDATE relationship. Pass empty string or "default" to reset.',
+      description: `Personalization: set the display name HIVEMIND uses for itself in Talk-to-HIVE chats (e.g. "Sage", "Brain", "Iris"). Stored as a personal memory; re-running with a different name updates it automatically.
+Use only when the user explicitly asks to rename the assistant. NOT for setting voice/tone — use hivemind_set_voice. Pass empty string or "default" to reset to "HIVE". One name per user; there is no project scope for this setting.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -947,7 +941,8 @@ Returns the created project: { id, name, slug, description, status, created_at }
     },
     {
       name: 'hivemind_set_voice',
-      description: 'Save the voice profile that "Talk to HIVE" uses when answering. This is how the user / organisation actually speaks — tone, terminology, do/don\'t rules, signature phrases, example outputs. Loaded into every chat system prompt. Use scope="organization" for company-wide voice (visible to every member), scope="personal" for individual voice. Re-running with the same scope updates the profile via Smart Ingest.',
+      description: `Define how HIVEMIND speaks — tone, terminology, do/don't rules, signature phrases. Loaded into every Talk-to-HIVE system prompt. Re-calling with the same scope updates the profile.
+Use when the user wants to calibrate HIVEMIND's communication style for themselves (scope="personal") or for the whole org (scope="organization"). NOT for renaming the assistant — use hivemind_set_assistant_name. Organization scope overrides personal scope for shared members; personal scope applies only to the calling user. Content should be in freeform markdown (see parameter description for examples).`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -970,7 +965,8 @@ Returns the created project: { id, name, slug, description, status, created_at }
     },
     {
       name: 'hivemind_log_decision',
-      description: 'Save an architectural or technical decision to HIVE-MIND. Use when you choose between options (e.g., library choice, algorithm, API design). This creates a permanent decision record that future sessions can recall with hivemind_why_code.',
+      description: `Record a formal architectural or technical decision with rationale and alternatives considered — the permanent "why" ledger that future sessions recall via hivemind_why_code.
+Use whenever a meaningful engineering choice is made: library selection, algorithm pick, API design tradeoff, infrastructure decision. NOT for general facts — use hivemind_save_memory; NOT for code file snapshots — use hivemind_ingest_code; NOT for rename/move history — use hivemind_track_refactor. Always include rationale and alternatives so the decision is auditable. Pair with affected_files and tags so hivemind_why_code can surface it when the relevant file is later modified.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -1019,7 +1015,8 @@ Returns the created project: { id, name, slug, description, status, created_at }
     },
     {
       name: 'hivemind_track_refactor',
-      description: 'Record a code refactoring or rename so future sessions understand how code evolved. Creates a DERIVE relationship between old and new versions. Use after renames, moves, splits, or significant restructuring.',
+      description: `Record a rename, move, split, merge, or structural restructure so future sessions know how code evolved. Creates a DERIVE edge from old identity to new.
+Fire after any rename/move/extract of a function, file, module, or schema. NOT for saving code content — use hivemind_ingest_code; NOT for why a design was chosen — use hivemind_log_decision; NOT for bug fixes — use hivemind_save_memory tagged "fix". Pass related_to=<old memory_id> if you have it — the server links old and new. The reason field is required and should explain the motivation, not just describe the change.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -1059,7 +1056,8 @@ Returns the created project: { id, name, slug, description, status, created_at }
     },
     {
       name: 'hivemind_test_coverage',
-      description: 'Save or recall test coverage information for functions/modules. Use to record which functions have tests (and what those tests cover), or to recall coverage before modifying code.',
+      description: `Save or recall which tests cover a function or module, including test case descriptions and coverage percentage.
+action="save": fire after writing/updating tests to record coverage — NOT for code content (use hivemind_ingest_code); action="recall": fire BEFORE modifying a function to see what tests exist — NOT for general code history (use hivemind_why_code) or bug history (use hivemind_recall_bugs). Requires function_name; add file_path to narrow to one module. Coverage data is per-function/class granularity, not line-level.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -1099,7 +1097,8 @@ Returns the created project: { id, name, slug, description, status, created_at }
     },
     {
       name: 'hivemind_why_code',
-      description: 'Ask "why does this code exist/work this way?" — returns relevant decisions, bug fixes, and historical context for a piece of code. Use before modifying code you did not write or do not remember the context for.',
+      description: `Answer "why does this code exist / work this way?" by retrieving decisions, bug-fix rationale, and historical context associated with a file or function.
+Fire BEFORE modifying unfamiliar code or when you need the rationale behind a design choice. NOT for active bug patterns (use hivemind_recall_bugs); NOT for test coverage (use hivemind_test_coverage action="recall"); NOT for file content snapshots (use hivemind_ingest_code recall or hivemind_at). Pass file_path and/or function_name to narrow retrieval; combine with hivemind_recall_bugs for full pre-change context. Returns decisions + fix memories ranked by relevance to the query.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -1136,14 +1135,9 @@ Returns the created project: { id, name, slug, description, status, created_at }
     },
     {
       name: 'hivemind_at',
-      description: `Bi-temporal time-travel: return any memory (contracts, catalogs, SOPs, code, decisions, meeting notes) as the system knew it at a given timestamp.
-
-ENTERPRISE EXAMPLES:
-  • "What did our supplier contract say on Nov 1?" → hivemind_at({transaction_time:"2025-11-01T00:00:00Z", memory_query:"supplier contract"})
-  • "Price of SolvisLea Pro in Q2 2025?" → hivemind_at({valid_time:"2025-06-30T00:00:00Z", memory_query:"SolvisLea Pro price"})
-  • "Incident response SOP before March update?" → hivemind_at({transaction_time:"2026-02-28T00:00:00Z", memory_query:"incident response"})
-
-transaction_time = when WE learned it. valid_time = when it was TRUE in the world.`,
+      description: `Bi-temporal point-in-time snapshot: return memories exactly as HIVEMIND knew them at a given timestamp (contracts, prices, SOPs, code, decisions).
+Use on temporal questions: "what did the contract say on Nov 1?", "what was the policy before the March update?". NOT for a delta between two dates — use hivemind_diff; NOT for one memory's full revision chain — use hivemind_timeline; NOT for a live semantic search — use hivemind_recall.
+transaction_time = when the system LEARNED the fact (system clock); valid_time = when it was TRUE in the world (business date). Pass memory_query to filter the time-traveled set semantically.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -1158,12 +1152,8 @@ transaction_time = when WE learned it. valid_time = when it was TRUE in the worl
     },
     {
       name: 'hivemind_diff',
-      description: `Bi-temporal diff: what changed between two timestamps across any memory class.
-
-ENTERPRISE EXAMPLES:
-  • "What changed in our vendor agreement Oct 2024 → Oct 2025?" → hivemind_diff({time_a:"2024-10-01", time_b:"2025-10-01", tags:["vendor","agreement"]})
-  • "Catalog price delta PL Neuheiten 2024 vs 2025?" → hivemind_diff({time_a:"2024-12-31", time_b:"2025-12-31", tags:["catalog"]})
-  • "What policy clauses were added in the new HR handbook?" → hivemind_diff({time_a:"2025-01-01", time_b:"2026-01-01", tags:["hr","policy"]})`,
+      description: `Bi-temporal diff: return what changed between time_a and time_b across any set of memories (contracts, catalogs, SOPs, code decisions).
+Use on "what changed between X and Y?" questions: vendor agreement evolution, policy additions, price deltas across catalog cycles. NOT for a single point-in-time snapshot — use hivemind_at; NOT for one memory's full version chain — use hivemind_timeline; NOT for a current search — use hivemind_recall. Narrow with tags (tag intersection) or file_path. Both time_a and time_b are required; use ISO timestamps.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -1177,12 +1167,8 @@ ENTERPRISE EXAMPLES:
     },
     {
       name: 'hivemind_timeline',
-      description: `Full version chain for a single memory — every revision with valid_from / valid_to / superseded_by / reason.
-
-ENTERPRISE EXAMPLES:
-  • "Show every revision of the SolvisLea Pro datasheet from launch → today"
-  • "Meeting decision chain for the Q2 architecture pivot"
-  • "Contract amendment chain for vendor X"`,
+      description: `Return the full version chain for a single memory — every revision with valid_from, valid_to, superseded_by, and reason. Use when the user wants the complete amendment/edit history of one specific item.
+NOT for a point-in-time snapshot across many memories — use hivemind_at; NOT for a delta between two dates — use hivemind_diff; NOT for graph neighbours — use hivemind_traverse_graph. Identify the memory via memory_id (from recall) or via file_path tag (code use). Examples: "show every revision of the SolvisLea Pro datasheet", "contract amendment chain for vendor X".`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -1193,7 +1179,7 @@ ENTERPRISE EXAMPLES:
     },
     {
       name: 'hivemind_code_at',
-      description: '[ALIAS of hivemind_at — kept for back-compat] Bi-temporal time-travel query.',
+      description: 'ALIAS of hivemind_at — kept for back-compat. Prefer hivemind_at for new calls. Returns memories as HIVEMIND knew them at a given transaction_time or valid_time. Use hivemind_diff for deltas; hivemind_timeline for one memory\'s version chain.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1222,7 +1208,7 @@ ENTERPRISE EXAMPLES:
     },
     {
       name: 'hivemind_code_diff',
-      description: '[ALIAS of hivemind_diff — kept for back-compat] Bi-temporal diff between two timestamps.',
+      description: 'ALIAS of hivemind_diff — kept for back-compat. Prefer hivemind_diff for new calls. Returns what changed between time_a and time_b. Use hivemind_at for point-in-time snapshots; hivemind_timeline for one memory\'s full revision chain.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1249,7 +1235,7 @@ ENTERPRISE EXAMPLES:
     },
     {
       name: 'hivemind_code_timeline',
-      description: '[ALIAS of hivemind_timeline — kept for back-compat] Full MemoryVersion ledger.',
+      description: 'ALIAS of hivemind_timeline — kept for back-compat. Prefer hivemind_timeline for new calls. Returns every revision of one memory. Use hivemind_at for point-in-time across many memories; hivemind_diff for cross-memory deltas.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1271,7 +1257,8 @@ ENTERPRISE EXAMPLES:
   if (hasWebSearch) {
     tools.push({
       name: 'hivemind_web_search',
-      description: 'Search the web and return structured results. Requires web_search entitlement. Returns async job receipt.',
+      description: `Search the live web and return structured results (async). Use ONLY for facts that are external to the org and require up-to-date public information: today's news, current prices of public goods, competitor pages, recent events after your knowledge cutoff.
+HARD RULE: NEVER use for facts about the user, their org, their people, their projects, or their decisions — those live in HIVEMIND; use hivemind_recall instead. NOT for crawling a specific URL — use hivemind_web_crawl; NOT for checking job progress — use hivemind_web_job_status. Returns a job_id; poll with hivemind_web_job_status every 3-5s. Save useful findings back to HIVEMIND via hivemind_save_memory with source URL in tags.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -1286,7 +1273,8 @@ ENTERPRISE EXAMPLES:
   if (hasWebCrawl) {
     tools.push({
       name: 'hivemind_web_crawl',
-      description: 'Crawl web pages and extract content. Requires web_crawl entitlement. Returns async job receipt.',
+      description: `Crawl one or more specific URLs and extract page content (async). Use when you have exact URLs to read — documentation pages, public product pages, linked references.
+NOT for keyword-based web search — use hivemind_web_search; NOT for org/user/project facts — use hivemind_recall. HARD RULE: never crawl internal/private URLs or substitute web crawl for HIVEMIND recall. Returns a job_id; poll with hivemind_web_job_status. depth controls link-following (max 3); page_limit caps total pages (max 50). Save extracted content back to HIVEMIND when it's valuable for future sessions.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -1301,7 +1289,8 @@ ENTERPRISE EXAMPLES:
   if (hasAnyWeb) {
     tools.push({
       name: 'hivemind_web_job_status',
-      description: 'Check status of a web search or crawl job.',
+      description: `Poll the status and results of an async web search or crawl job started by hivemind_web_search or hivemind_web_crawl.
+Use after submitting a web job — call every 3-5 seconds until status is "done" or "error". NOT for HIVEMIND memory operations — use hivemind_recall for those. Requires the job_id returned by the originating search/crawl call.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -1312,7 +1301,7 @@ ENTERPRISE EXAMPLES:
     });
     tools.push({
       name: 'hivemind_web_usage',
-      description: 'Check web intelligence quota and usage.',
+      description: `Return current web intelligence quota and usage (searches used, crawl pages consumed, limits remaining). Use before submitting large web jobs to avoid hitting quota mid-task, or when a web job is rejected with a quota error. No parameters required.`,
       inputSchema: {
         type: 'object',
         properties: {}
@@ -1325,7 +1314,8 @@ ENTERPRISE EXAMPLES:
   if (hasSlackAct) {
     tools.push({
       name: 'hivemind_slack_post',
-      description: 'Post a message to a Slack channel or thread. Routes through HIVEMIND policy gate (channel allowlist, rate limit, work hours). Use when a Digital Employee needs to reply or broadcast in Slack.',
+      description: `Post a message to a Slack channel or reply in a thread, routed through HIVEMIND's policy gate (channel allowlist, rate limits, work-hours check). Use when a Digital Employee must broadcast or reply in Slack.
+NOT for reading messages — use hivemind_slack_history or hivemind_slack_search; NOT for emoji reactions — use hivemind_slack_react. Requires channel (Slack channel ID, e.g. C01ABCDEF) and text (mrkdwn supported). Pass thread_ts to reply in-thread rather than posting to channel root.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -1338,7 +1328,8 @@ ENTERPRISE EXAMPLES:
     });
     tools.push({
       name: 'hivemind_slack_react',
-      description: 'Add an emoji reaction to a Slack message. Policy-gated like slack_post.',
+      description: `Add an emoji reaction to a specific Slack message. Policy-gated like hivemind_slack_post. Use for lightweight acknowledgment or status signals without posting a full message.
+NOT for posting text — use hivemind_slack_post. Requires channel ID, message timestamp (ts), and emoji name without colons (e.g. "thumbsup"). The ts comes from a Slack event or hivemind_slack_history result.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -1351,7 +1342,8 @@ ENTERPRISE EXAMPLES:
     });
     tools.push({
       name: 'hivemind_slack_search',
-      description: 'Search messages across the employee\'s Slack workspace. Read-only.',
+      description: `Full-text search across the connected Slack workspace and return matching messages with metadata. Read-only.
+Use when you need to find specific past messages by keyword or topic. NOT for reading recent channel history — use hivemind_slack_history for that; NOT for posting — use hivemind_slack_post. Supports Slack search syntax (e.g. "from:user", "in:#channel"). Returns up to count results (default 10, max 50).`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -1363,7 +1355,8 @@ ENTERPRISE EXAMPLES:
     });
     tools.push({
       name: 'hivemind_slack_history',
-      description: 'Fetch recent messages from a Slack channel. Read-only.',
+      description: `Fetch the most recent messages from a specific Slack channel in chronological order. Read-only.
+Use when you need what was posted in a known channel recently (e.g. monitoring a support channel, checking standup posts). NOT for keyword search across workspace — use hivemind_slack_search; NOT for posting — use hivemind_slack_post. Requires channel ID; pass since (ISO timestamp) to bound the look-back window. Limit defaults to 50, max 200.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -1533,9 +1526,13 @@ REFLEX 3 — SAVE WHATEVER IS DURABLE
            - content:  the durable claim in 1-3 sentences
            - tags:     2-5 specific tags incl. entity:<Name>, project:<x>,
                        decision | preference | fact | goal | event
-           - project_id: pass if user clearly named a project; otherwise
-                         omit (defaults to personal scope). Call
-                         hivemind_list_projects first if unsure which.
+           - project_id: pass ONLY when the user explicitly names a
+                         project. Otherwise OMIT — the server now
+                         AUTO-CLASSIFIES the best-fitting project from
+                         each project's name+description and files it
+                         there when confident; it falls back to personal/
+                         org-wide when ambiguous. You do NOT need to call
+                         hivemind_list_projects before every save.
   Do NOT save: greetings, thanks, trivial chat, sensitive credentials.
   Do NOT ask "should I save this?" — save and move on.
 
@@ -1602,7 +1599,7 @@ hivemind_traverse_graph  { memory_id, depth, relationship: all|Updates|Extends|D
 hivemind_query_with_ai   { question, context_limit }
 hivemind_recall_bugs     { context, file_path?, project_id? }
 hivemind_why_code        { query, file_path?, function_name?, project_id? }
-hivemind_list_projects   { query? }   ← call when user names a project you don't recognise
+hivemind_list_projects   { query? }   ← call when user names a project you don't recognise; NOT required before every save (server auto-classifies)
 
 ## TIME-TRAVEL (use on every temporal question)
 hivemind_at        { transaction_time | valid_time, memory_query? }

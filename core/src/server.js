@@ -5617,7 +5617,8 @@ exit \$RC
             if (m.source_memory_id) {
               memories = await prisma.$queryRawUnsafe(
                 `SELECT id, title FROM memories
-                 WHERE (id = $1::uuid OR (metadata->>'parent_memory_id') = $1) AND org_id = $2::uuid AND deleted_at IS NULL
+                 WHERE (id = $1::uuid OR id IN (SELECT from_id FROM relationships WHERE to_id = $1::uuid AND type = 'PartOf'))
+                   AND org_id = $2::uuid AND deleted_at IS NULL
                  ORDER BY (id = $1::uuid) DESC`,
                 m.source_memory_id, mOrg,
               );
@@ -5669,7 +5670,7 @@ exit \$RC
             let clusterIds = [];
             if (m.source_memory_id) {
               const cl = await prisma.$queryRawUnsafe(
-                `SELECT id FROM memories WHERE id = $1::uuid OR (metadata->>'parent_memory_id') = $1`,
+                `SELECT id FROM memories WHERE id = $1::uuid OR id IN (SELECT from_id FROM relationships WHERE to_id = $1::uuid AND type = 'PartOf')`,
                 m.source_memory_id,
               );
               clusterIds = cl.map((r) => r.id);

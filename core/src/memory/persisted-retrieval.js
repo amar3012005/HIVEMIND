@@ -1182,6 +1182,11 @@ export async function recallPersistedMemories(store, {
     for (const d of (memory.event_dates || [])) dates.push(String(d).slice(0, 10));
     return dates.some((d) => d >= _eventWin.s && d <= _eventWin.e) ? 0.6 : 0;
   };
+  // Env-gated stage timing (RECALL_LAP=true). Zero cost when off. Used to find
+  // the latency hotspot inside the recall pipeline without per-stage tracing.
+  const _RLAP = process.env.RECALL_LAP === 'true';
+  const _t0 = _RLAP ? Date.now() : 0;
+  const _lap = {};
   const candidatePoolSize = temporalComparison
     ? Math.max(max_memories * 8, RECALL_POOL_FLOOR)
     : Math.max(max_memories * 4, RECALL_POOL_FLOOR);
@@ -1472,6 +1477,7 @@ export async function recallPersistedMemories(store, {
   const contradictedIds    = buildContradictedIndex(relationships);       // Map<to_id,{createdBy,_ts}>
   const correctionWinners  = buildCorrectionWinnerIndex(relationships);   // Map<from_id,_ts>
   const _nowMs             = Date.now();
+  if (_RLAP) _lap.fetch = Date.now() - _t0;
 
   // Graph Expansion: Discover related memories through graph traversal
   const expandedCandidates = await expandCandidatesViaGraph(store, {
@@ -1485,6 +1491,7 @@ export async function recallPersistedMemories(store, {
     preferred_tags,
     depth: graph_expansion_depth
   });
+  if (_RLAP) _lap.expand = Date.now() - _t0;
 
   const scoredLexical = filteredLexical.map(memory => {
     if (!isMemoryInDateRange(memory, effectiveDateRange)) {
@@ -1994,6 +2001,7 @@ export async function recallPersistedMemories(store, {
   const SYNTHESIS_CONF_BOOST_FLOOR = 0.70; // must match CONFIDENCE_FLOOR in cognition-loop.js
 
   const boostedItems = applySynthesisBoost(applyItemBoosts(deduped));
+  if (_RLAP) _lap.score = Date.now() - _t0;
 
   // Update chain traversal: include older versions when include_superseded is requested
   let finalItems = boostedItems;
@@ -2269,6 +2277,17 @@ export async function recallPersistedMemories(store, {
       created_at: m.created_at,
     };
   }));
+
+  if (_RLAP) {
+    _lap.total = Date.now() - _t0;
+    // Derived per-stage: front-fetch | expand | sync-score | tail(rerank/operator/format)
+    console.log('[recall-lap]', JSON.stringify({
+      ..._lap,
+      d_expand: (_lap.expand ?? 0) - (_lap.fetch ?? 0),
+      d_score: (_lap.score ?? 0) - (_lap.expand ?? 0),
+      d_tail: (_lap.total ?? 0) - (_lap.score ?? 0),
+    }));
+  }
 
   return {
     // Backwards-compat flat array (synthesized first, then raw so existing clients work)

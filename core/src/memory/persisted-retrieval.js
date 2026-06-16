@@ -2064,58 +2064,8 @@ export async function recallPersistedMemories(store, {
         finalItems = [...finalItems, { memory: mem, score: mem.score || 0 }];
       }
     }
-    // Build a chronological version timeline so time-travel questions ("what did
-    // X used to be / how did it change") can be answered directly from recall.
-    // Discover the lineage via the Updates edges already loaded in `relationships`
-    // (timelineFor walks them) — then hydrate each version's CONTENT with a
-    // direct findMany (NO deletedAt filter: superseded rows are soft-deleted on
-    // supersession/compaction, and those ARE the history we want).
-    if (_timeTravelIntent) {
-      try {
-        const MAX_CHAINS = 5, MAX_VERSIONS = 8;
-        const prisma = store.client || store.prisma;
-        const byId = new Map();
-        for (const it of finalItems) { const mm = it.memory || it; if (mm && mm.id) byId.set(mm.id, mm); }
-        const claimed = new Set();
-        const lineages = [];
-        for (const it of boostedItems.slice(0, 8)) {
-          const m = it.memory || it;
-          if (!m || !m.id || claimed.has(m.id)) continue;
-          const lineage = timelineFor(m, byId, relationships); // oldest → newest
-          if (Array.isArray(lineage) && lineage.length > 1) {
-            lineage.forEach(v => claimed.add(v.id));
-            lineages.push({ base: m.id, lineage });
-            if (lineages.length >= MAX_CHAINS) break;
-          }
-        }
-        // One batched content hydration across all lineage ids.
-        const allIds = [...new Set(lineages.flatMap(l => l.lineage.map(v => v.id)))];
-        let contentById = new Map();
-        if (allIds.length && prisma?.memory?.findMany) {
-          const rows = await prisma.memory.findMany({
-            where: { id: { in: allIds } },
-            select: { id: true, content: true, createdAt: true },
-          }).catch(() => []);
-          contentById = new Map(rows.map(r => [r.id, r]));
-        }
-        for (const { base, lineage } of lineages) {
-          const versions = lineage
-            .map(v => {
-              const row = contentById.get(v.id);
-              return {
-                id: v.id,
-                content: (row && row.content) || v.content || '',
-                created_at: (row && row.createdAt) || v.created_at || null,
-                is_latest: v.id === base,
-              };
-            })
-            .filter(v => v.content)
-            .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0)) // newest → oldest
-            .slice(0, MAX_VERSIONS);
-          if (versions.length > 1) _versionTimeline.push({ memory_id: base, versions });
-        }
-      } catch (_) { /* timeline is additive — never fail recall on it */ }
-    }
+    // (Time-travel version timeline is built later from the DELIVERED memories —
+    // after rerank/head-slot/slice — since the reranker reorders the set.)
   }
 
   // Caller-opts-in audit pass-through (e.g. /v1/governance UI). Else drop.
@@ -2313,6 +2263,69 @@ export async function recallPersistedMemories(store, {
     ...(item._entity_match ? { _entity_match: true } : {}),
     ...(typeof item._ws_match === 'boolean' ? { _ws_match: item._ws_match } : {}),
   }));
+
+  // ── Time-travel / bi-temporal version timeline ────────────────────────────
+  // Built from the DELIVERED memories (post rerank/head-slot/slice) since the
+  // reranker reorders vs the pre-slice pool. Walk each delivered fact's Updates
+  // chain straight from the DB (authoritative; from=newer → to=older), then
+  // batch-hydrate content (NO deletedAt filter — superseded rows are soft-deleted
+  // and are exactly the history we want). Gated on _timeTravelIntent → for normal
+  // queries this whole block is skipped (zero added latency, shape unchanged).
+  if (_timeTravelIntent) {
+    try {
+      const MAX_CHAINS = 5, MAX_VERSIONS = 8;
+      const _p = store.client || store.prisma;
+      const baseIds = flatMemories.slice(0, 8).map(m => m && m.id).filter(Boolean);
+      if (baseIds.length && _p?.relationship?.findMany && _p?.memory?.findMany) {
+        const updatesFrom = new Map();
+        const allIds = new Set(baseIds);
+        let frontier = baseIds;
+        for (let hop = 0; hop < 3 && frontier.length; hop++) {
+          const edges = await _p.relationship.findMany({
+            where: { fromId: { in: frontier }, type: 'Updates' },
+            select: { fromId: true, toId: true },
+          }).catch(() => []);
+          const next = [];
+          for (const e of edges) {
+            if (!updatesFrom.has(e.fromId)) updatesFrom.set(e.fromId, []);
+            updatesFrom.get(e.fromId).push(e.toId);
+            if (!allIds.has(e.toId)) { allIds.add(e.toId); next.push(e.toId); }
+          }
+          frontier = next;
+        }
+        const vrows = await _p.memory.findMany({
+          where: { id: { in: [...allIds] } },
+          select: { id: true, content: true, createdAt: true },
+        }).catch(() => []);
+        const vById = new Map(vrows.map(r => [r.id, r]));
+        const walk = (start) => {
+          const ids = [start]; const seen = new Set([start]); let cur = start;
+          while (ids.length < MAX_VERSIONS + 6) {
+            const nx = (updatesFrom.get(cur) || []).find(x => !seen.has(x));
+            if (!nx) break;
+            seen.add(nx); ids.push(nx); cur = nx;
+          }
+          return ids;
+        };
+        const claimed = new Set();
+        for (const base of baseIds) {
+          if (claimed.has(base)) continue;
+          const ids = walk(base);
+          if (ids.length <= 1) continue;
+          const versions = ids
+            .map(id => { const r = vById.get(id); return r && r.content ? { id, content: r.content, created_at: r.createdAt, is_latest: id === base } : null; })
+            .filter(Boolean)
+            .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0)) // newest → oldest
+            .slice(0, MAX_VERSIONS);
+          if (versions.length > 1) {
+            ids.forEach(x => claimed.add(x));
+            _versionTimeline.push({ memory_id: base, versions });
+            if (_versionTimeline.length >= MAX_CHAINS) break;
+          }
+        }
+      }
+    } catch (_) { /* timeline is additive — never fail recall on it */ }
+  }
 
   // Synthesized array: rich rendering for canonical-fact and synthesis-bridge outputs.
   // In quick mode: top synthesis entry + top-2 of its synthesisEvidenceIds (3–4 total).

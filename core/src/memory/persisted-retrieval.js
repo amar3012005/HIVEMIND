@@ -939,6 +939,11 @@ async function expandCandidatesViaGraph(store, {
   // Track relationship paths for scoring
   const relationshipPaths = new Map();
 
+  // PASS 1 (sync): walk the graph and collect the unique neighbour ids to fetch
+  // plus their connecting edge + source candidate. Dedup (expandedMemoryIds) and
+  // path tracking happen here exactly as before — only the per-id DB fetch is
+  // deferred to the batch below.
+  const _toExpand = []; // [{ relatedId, edge, candidateId }] in encounter order
   for (const candidate of initialCandidates) {
     const candidateId = candidate.memory?.id;
     if (!candidateId) continue;
@@ -965,69 +970,80 @@ async function expandCandidatesViaGraph(store, {
       });
 
       expandedMemoryIds.add(relatedId);
-
-      // Fetch memory details
-      try {
-        const relatedMemory = await store.getMemory(relatedId);
-        if (!relatedMemory) continue;
-
-        // Calculate scores for expanded memory
-        const similarityScore = computeTokenSimilarity(query_context || '', relatedMemory.content || '');
-        const now = Date.now();
-        const created = new Date(relatedMemory.created_at).getTime();
-        const daysAgo = Number.isFinite(created) ? (now - created) / (1000 * 60 * 60 * 24) : 365;
-        const recencyScore = Math.exp(-daysAgo / 30);
-        const importanceScore = 1;
-        const vectorScore = 0;
-
-        // Graph score with base boost for being graph-discovered
-        const baseGraphScore = Math.min((relationshipCounts.get(relatedId) || 0) * 0.03, 0.12);
-        const expansionBoost = 0.08; // Base boost for graph-expanded memories
-        const graphScore = baseGraphScore + expansionBoost;
-
-        const policyScore = policyBoost(relatedMemory, {
-          preferred_project,
-          preferred_source_platforms,
-          preferred_tags
-        });
-
-        // Calculate final score with penalty based on relationship type
-        const edgeType = edge?.type || 'Unknown';
-        const expansionPenalty = edgeType === 'Updates' ? 0.05
-          : edgeType === 'Extends' ? 0.10
-          : edgeType === 'Derives' ? 0.15
-          : 0.15; // Default for unknown types
-        const score = (
-          (weights.similarity ?? 0.45) * similarityScore +
-          (weights.recency ?? 0.15) * recencyScore +
-          (weights.importance ?? 0.1) * importanceScore +
-          (weights.vector ?? 0.2) * vectorScore +
-          (weights.graph ?? 0.05) * graphScore +
-          (weights.policy ?? 0.05) * policyScore
-        ) * (1 - expansionPenalty);
-
-        expandedCandidates.push({
-          memory: relatedMemory,
-          vectorScore,
-          keywordScore: similarityScore,
-          graphScore,
-          policyScore,
-          similarityScore,
-          recencyScore,
-          score,
-          graph_expanded: true,
-          expansion_metadata: {
-            source_candidate_id: candidateId,
-            relationship_type: edge?.type || 'Unknown',
-            relationship_confidence: edge?.confidence || 0.5,
-            traversal_depth: 1 // Track depth for future multi-depth scoring
-          }
-        });
-      } catch (error) {
-        // Silently skip memories that can't be fetched
-        continue;
-      }
+      _toExpand.push({ relatedId, edge, candidateId });
     }
+  }
+
+  // PASS 2 (concurrent): batch-fetch every neighbour memory at once instead of
+  // one-await-at-a-time inside the double loop. This was the dominant recall
+  // latency stage (serial N+1 getMemory). Same set of memories, fetched in
+  // parallel (bounded by the Prisma pool). Unfetchable ids are skipped, exactly
+  // like the old per-item try/catch.
+  const _fetchedById = new Map();
+  await Promise.all(_toExpand.map(async ({ relatedId }) => {
+    try { const m = await store.getMemory(relatedId); if (m) _fetchedById.set(relatedId, m); }
+    catch { /* skip — mirrors old silent per-item catch */ }
+  }));
+
+  // PASS 3 (sync): score + push in the SAME encounter order the serial loop
+  // produced, so the output array (and the downstream MAX-dedup/merge) is
+  // byte-identical to the pre-batch behaviour.
+  for (const { relatedId, edge, candidateId } of _toExpand) {
+    const relatedMemory = _fetchedById.get(relatedId);
+    if (!relatedMemory) continue;
+
+    // Calculate scores for expanded memory
+    const similarityScore = computeTokenSimilarity(query_context || '', relatedMemory.content || '');
+    const now = Date.now();
+    const created = new Date(relatedMemory.created_at).getTime();
+    const daysAgo = Number.isFinite(created) ? (now - created) / (1000 * 60 * 60 * 24) : 365;
+    const recencyScore = Math.exp(-daysAgo / 30);
+    const importanceScore = 1;
+    const vectorScore = 0;
+
+    // Graph score with base boost for being graph-discovered
+    const baseGraphScore = Math.min((relationshipCounts.get(relatedId) || 0) * 0.03, 0.12);
+    const expansionBoost = 0.08; // Base boost for graph-expanded memories
+    const graphScore = baseGraphScore + expansionBoost;
+
+    const policyScore = policyBoost(relatedMemory, {
+      preferred_project,
+      preferred_source_platforms,
+      preferred_tags
+    });
+
+    // Calculate final score with penalty based on relationship type
+    const edgeType = edge?.type || 'Unknown';
+    const expansionPenalty = edgeType === 'Updates' ? 0.05
+      : edgeType === 'Extends' ? 0.10
+      : edgeType === 'Derives' ? 0.15
+      : 0.15; // Default for unknown types
+    const score = (
+      (weights.similarity ?? 0.45) * similarityScore +
+      (weights.recency ?? 0.15) * recencyScore +
+      (weights.importance ?? 0.1) * importanceScore +
+      (weights.vector ?? 0.2) * vectorScore +
+      (weights.graph ?? 0.05) * graphScore +
+      (weights.policy ?? 0.05) * policyScore
+    ) * (1 - expansionPenalty);
+
+    expandedCandidates.push({
+      memory: relatedMemory,
+      vectorScore,
+      keywordScore: similarityScore,
+      graphScore,
+      policyScore,
+      similarityScore,
+      recencyScore,
+      score,
+      graph_expanded: true,
+      expansion_metadata: {
+        source_candidate_id: candidateId,
+        relationship_type: edge?.type || 'Unknown',
+        relationship_confidence: edge?.confidence || 0.5,
+        traversal_depth: 1 // Track depth for future multi-depth scoring
+      }
+    });
   }
 
   return expandedCandidates;

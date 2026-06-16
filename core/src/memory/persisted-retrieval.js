@@ -2077,21 +2077,19 @@ export async function recallPersistedMemories(store, {
           try {
             const older = await store.getRelatedMemories?.(m.id, { type: 'Updates', depth: 2 });
             if (!Array.isArray(older) || !older.length) return null;
-            // getRelatedMemories returns lightweight stubs (id/created_at, no
-            // content). Pick the most-recent MAX_VERSIONS predecessors by date,
-            // then hydrate those for content so the timeline is answerable.
-            const olderIds = older
-              .map(o => ({ id: o.id || o.memory_id, created_at: o.created_at }))
-              .filter(o => o.id && o.id !== m.id)
-              .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))
-              .slice(0, MAX_VERSIONS)
-              .map(o => o.id);
-            const hydrated = (await Promise.all(olderIds.map(id => store.getMemory(id).catch(() => null)))).filter(Boolean);
-            const versions = [m, ...hydrated]
-              .filter((v, i, arr) => v && v.id && v.content && arr.findIndex(x => x.id === v.id) === i)
+            // Older versions come back as superseded rows (is_latest=false), which
+            // getMemory() filters out — so use the rows returned here directly.
+            // content may live under content/text/title depending on the store row.
+            const norm = (v) => ({
+              id: v.id || v.memory_id,
+              content: v.content || v.text || v.title || '',
+              created_at: v.created_at || v.createdAt || null,
+            });
+            const versions = [norm(m), ...older.map(norm)]
+              .filter((v, i, arr) => v.id && v.content && arr.findIndex(x => x.id === v.id) === i)
               .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0)) // newest → oldest
               .slice(0, MAX_VERSIONS);
-            return { base: m.id, versions };
+            return { base: m.id, baseId: m.id, versions };
           } catch { return null; }
         }));
         for (const c of chains) {

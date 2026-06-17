@@ -1,0 +1,11 @@
+-- P2 (HyperAgents×Connectors): per-character connector grants on a room.
+-- Shape: { "<employeeId>": ["github","notion",...] }. When a connector is
+-- granted to an agent, that agent's AgentScope toolkit gains the connector's
+-- live MCP tools for this room.
+--
+-- Additive + back-compat: NOT NULL DEFAULT '{}' → existing rows get an empty
+-- grant map (no agent gets any connector until explicitly granted).
+--
+-- Rollback (down):
+--   ALTER TABLE "hyper_rooms" DROP COLUMN "agent_connectors";
+ALTER TABLE "hyper_rooms" ADD COLUMN "agent_connectors" JSONB NOT NULL DEFAULT '{}';

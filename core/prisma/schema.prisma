@@ -1461,6 +1461,10 @@ model HyperRoom {
   template           String       @default("debate") @db.VarChar(40)
   permanentLeadId    String?      @map("permanent_lead_id") @db.Uuid
   permanentSkepticId String?      @map("permanent_skeptic_id") @db.Uuid
+  /// Per-character connector grants: { "<employeeId>": ["github","notion",...] }.
+  /// When a connector is granted to an agent, that agent's AgentScope toolkit
+  /// gains the connector's live MCP tools for this room (P2 of HyperAgents×Connectors).
+  agentConnectors    Json         @default("{}") @map("agent_connectors")
   createdAt          DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt          DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   archivedAt         DateTime?    @map("archived_at") @db.Timestamptz(6)

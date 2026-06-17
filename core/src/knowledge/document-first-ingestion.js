@@ -98,8 +98,28 @@ function isQualityContent(content) {
 
 // First-sentence title that NEVER cuts mid-word (the old slice(0,80) produced
 // titles like "Um weiterhin attraktiven Wohnraum z").
+// Detect letter-spaced OCR garbage ("S O L V I S G E M E I N W O H L") — the
+// page-header furniture scanned PDFs emit on every page. When an LLM picks one
+// as a fact title it pollutes recall (matches on the spaced glyphs, outranks
+// real facts). True when most whitespace tokens are single glyphs.
+function isGarbageTitle(t) {
+  if (!t || typeof t !== 'string') return true;
+  const s = t.trim();
+  if (s.length < 2) return true;
+  const toks = s.split(/\s+/).filter(Boolean);
+  if (toks.length >= 5) {
+    const singles = toks.filter((w) => w.replace(/[^A-Za-zÀ-ÿ0-9]/g, '').length <= 1).length;
+    if (singles / toks.length >= 0.6) return true;
+  }
+  return false;
+}
+
 function cleanTitleFrom(text, max = 80) {
-  const first = ((text || '').trim().split(/(?<=[.!?])\s|\n/)[0] || '').trim();
+  const raw = (text || '').trim();
+  // Skip leading OCR page-furniture lines — use the first line/sentence that is
+  // real prose, not letter-spaced glyphs, so the fallback title is meaningful.
+  const segments = raw.split(/\n|(?<=[.!?])\s/).map((s) => s.trim()).filter(Boolean);
+  const first = segments.find((s) => !isGarbageTitle(s)) || segments[0] || '';
   if (first.length <= max) return first;
   const cut = first.slice(0, max);
   const atWord = cut.slice(0, cut.lastIndexOf(' ') > 40 ? cut.lastIndexOf(' ') : max);
@@ -301,7 +321,7 @@ Output the JSON object and nothing else.`;
       const facts = (Array.isArray(o.facts) ? o.facts : []).map((x) => {
         if (typeof x === 'string') return { t: cleanTitleFrom(x, 48), f: x };
         if (x && typeof x === 'object' && typeof x.f === 'string') {
-          return { t: (typeof x.t === 'string' && x.t.trim()) ? x.t.trim() : cleanTitleFrom(x.f, 48), f: x.f };
+          return { t: (typeof x.t === 'string' && x.t.trim() && !isGarbageTitle(x.t)) ? x.t.trim() : cleanTitleFrom(x.f, 48), f: x.f };
         }
         return null;
       }).filter(Boolean);
@@ -365,7 +385,7 @@ Output the JSON object and nothing else.`;
           content: fact.trim(),
           // LLM-emitted concise title (its subject/topic), not the whole
           // sentence. Falls back to the first-clause heuristic if absent.
-          title: (factTitle && factTitle.trim()) ? factTitle.trim().slice(0, 80) : cleanTitleFrom(fact),
+          title: (factTitle && factTitle.trim() && !isGarbageTitle(factTitle)) ? factTitle.trim().slice(0, 80) : cleanTitleFrom(fact),
           memory_type: 'fact',
           source_type: 'knowledge_fact',
           tags: [

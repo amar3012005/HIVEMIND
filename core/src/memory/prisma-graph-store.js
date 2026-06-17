@@ -107,6 +107,7 @@ function mapMemoryRecord(record) {
     created_at: record.createdAt instanceof Date ? record.createdAt.toISOString() : record.createdAt,
     updated_at: record.updatedAt instanceof Date ? record.updatedAt.toISOString() : record.updatedAt,
     document_date: record.documentDate instanceof Date ? record.documentDate.toISOString() : record.documentDate,
+    valid_from: record.validFrom instanceof Date ? record.validFrom.toISOString() : (record.validFrom || null),
     event_dates: (record.eventDates || []).map(value => value instanceof Date ? value.toISOString() : value),
     memory_type: record.memoryType,
     title: record.title,
@@ -304,6 +305,10 @@ export class PrismaGraphStore {
         sourceMessageId: memory.source_metadata?.source_id || null,
         sourceUrl: memory.source_metadata?.source_url || null,
         documentDate: memory.document_date ? new Date(memory.document_date) : null,
+        // Bi-temporal lower bound — when the fact became TRUE in the world.
+        // Default to document_date (KB facts carry it 100%) so time-travel
+        // (valid_at) has a real inception instead of a dead NULL column.
+        validFrom: memory.valid_from ? new Date(memory.valid_from) : (memory.document_date ? new Date(memory.document_date) : null),
         eventDates: (memory.event_dates || []).map(value => new Date(value)),
         memoryType: memory.memory_type || 'fact',
         title,

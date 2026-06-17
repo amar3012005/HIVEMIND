@@ -16995,9 +16995,15 @@ exit \$RC
                 return jsonResponse(res, { error: 'start_id required' }, 400);
               }
               const maxDepth = Math.min(Math.max(parseInt(body.depth) || 2, 1), 5);
+              // Default to ALL meaningful edge types. PartOf (fact→source-doc
+              // provenance, conf ~1.0) and Mentions (entity co-mention) are the
+              // highest-quality edges in the KB graph; the old default
+              // (Updates/Extends/Derives only) silently skipped them, so traversals
+              // missed provenance + entity-linked context. Caller can still narrow
+              // via body.relationship_types.
               const allowedTypes = (Array.isArray(body.relationship_types) && body.relationship_types.length > 0)
                 ? body.relationship_types
-                : ['Updates', 'Extends', 'Derives'];
+                : ['Updates', 'Extends', 'Derives', 'PartOf', 'Mentions'];
 
               const startMem = await prisma.memory.findFirst({
                 where: { id: startId, userId, orgId, deletedAt: null },
@@ -17840,8 +17846,13 @@ exit \$RC
               if (bitemporalFilter && Array.isArray(result?.memories)) {
                 const filtered = result.memories.filter(m => {
                   const created = m.created_at ? new Date(m.created_at) : null;
-                  const validFrom = m.metadata?.valid_from ? new Date(m.metadata.valid_from) : created;
-                  const validTo = m.metadata?.valid_to ? new Date(m.metadata.valid_to) : null;
+                  // Read the REAL bi-temporal columns. memories has NO json
+                  // `metadata` column — the old m.metadata?.valid_from path was
+                  // always undefined, silently collapsing valid_from to created_at
+                  // so the validity lower bound never actually applied.
+                  const validFrom = m.valid_from ? new Date(m.valid_from)
+                    : (m.document_date ? new Date(m.document_date) : created);
+                  const validTo = m.valid_to ? new Date(m.valid_to) : null;
                   if (bitemporalFilter.transaction_at && created && created > bitemporalFilter.transaction_at) return false;
                   if (bitemporalFilter.valid_at) {
                     if (validFrom && validFrom > bitemporalFilter.valid_at) return false;

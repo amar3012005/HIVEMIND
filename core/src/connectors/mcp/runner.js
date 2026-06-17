@@ -3,13 +3,42 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 
+// Render a resolved bearer token into the shape a given upstream MCP server
+// expects. Driven by `endpoint.token_inject` (data, not hardcoded per provider)
+// so adding a connector is a registry entry, never a runner edit.
+//   format: 'raw'              → "<token>"
+//           'bearer'           → "Bearer <token>"
+//           'json_auth_header' → '{"Authorization":"Bearer <token>", ...extra}'
+function formatToken(token, format, extra) {
+  if (format === 'bearer') return `Bearer ${token}`;
+  if (format === 'json_auth_header') {
+    return JSON.stringify({ Authorization: `Bearer ${token}`, ...(extra || {}) });
+  }
+  return token; // 'raw' (default)
+}
+
+// stdio servers receive their credential through an env var (the var name +
+// encoding differ per server — declared in endpoint.token_inject).
+function buildEnv(endpoint) {
+  const env = { ...(endpoint.env || {}) };
+  const inj = endpoint.token_inject;
+  if (endpoint.bearer_token && inj && inj.kind === 'env' && inj.var) {
+    env[inj.var] = formatToken(endpoint.bearer_token, inj.format, inj.extra);
+  }
+  return env;
+}
+
 function buildHeaders(endpoint) {
   const headers = new Headers(endpoint.headers || {});
-
+  const inj = endpoint.token_inject;
   if (endpoint.bearer_token) {
-    headers.set('Authorization', `Bearer ${endpoint.bearer_token}`);
+    if (inj && inj.kind === 'header' && inj.name) {
+      headers.set(inj.name, formatToken(endpoint.bearer_token, inj.format || 'bearer', inj.extra));
+    } else {
+      // Default: standard Authorization: Bearer (back-compat — most http MCPs).
+      headers.set('Authorization', `Bearer ${endpoint.bearer_token}`);
+    }
   }
-
   return headers;
 }
 
@@ -18,7 +47,7 @@ function buildTransport(endpoint) {
     return new StdioClientTransport({
       command: endpoint.command,
       args: endpoint.args || [],
-      env: endpoint.env || {},
+      env: buildEnv(endpoint),
       cwd: endpoint.cwd || process.cwd(),
     });
   }

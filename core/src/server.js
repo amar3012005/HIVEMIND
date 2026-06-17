@@ -1852,6 +1852,15 @@ function applyCorsHeaders(req, res) {
 
 const ingestionPipeline = loadIngestionPipeline();
 const mcpIngestionService = new MCPIngestionService({ ingestionPipeline, db: prisma });
+// Seed the global 3rd-party MCP catalog (github/notion/hubspot/slack/airtable/
+// linear). Idempotent upsert keyed by name; per-tenant entries untouched.
+try {
+  const { seedMcpCatalog } = await import('./connectors/mcp/catalog-seed.js');
+  const seeded = seedMcpCatalog(mcpIngestionService);
+  console.log(`[MCP] seeded ${seeded.length} catalog connectors: ${seeded.join(', ')}`);
+} catch (err) {
+  console.warn('[MCP] catalog seed failed (non-fatal):', err.message);
+}
 
 async function getIngestionJobStatus(jobId) {
   if (!ingestionPipeline || !jobId) {

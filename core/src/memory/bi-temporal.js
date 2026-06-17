@@ -95,8 +95,19 @@ export class BiTemporalEngine {
    * @param {Date|string} validTime
    * @returns {Promise<Array>}
    */
-  async asOfValid(userId, orgId, validTime) {
+  async asOfValid(userId, orgId, validTime, projectId = null) {
     const vTime = new Date(validTime);
+    // Project scope (optional): restrict to the project's member memories so a
+    // project-scoped caller's time-travel returns ITS facts, not org-wide. The
+    // MCP hivemind_at path forwards project_id; without it, behaviour is unchanged.
+    let projectIds = null;
+    if (projectId && this.prisma) {
+      try {
+        const rows = await this.prisma.$queryRawUnsafe(
+          'SELECT memory_id FROM hivemind.memory_projects WHERE project_id = $1::uuid', projectId);
+        projectIds = new Set((rows || []).map((r) => r.memory_id));
+      } catch { projectIds = null; }
+    }
 
     if (!this.prisma) {
       // Use all memories (not just isLatest) to include superseded historical records.
@@ -106,6 +117,7 @@ export class BiTemporalEngine {
           )
         : await this.store.listLatestMemories({ user_id: userId, org_id: orgId });
       return allMemories.filter(m => {
+        if (projectIds && !projectIds.has(m.id)) return false;
         const docDate = m.document_date ? new Date(m.document_date) : new Date(m.created_at);
         const validTo = m.metadata?.valid_to ? new Date(m.metadata.valid_to) : null;
         return docDate <= vTime && (!validTo || validTo >= vTime);
@@ -128,6 +140,7 @@ export class BiTemporalEngine {
 
     return memories
       .filter(m => {
+        if (projectIds && !projectIds.has(m.id)) return false;
         const validTo = (m.versions?.[0]?.metadata || m.sourceMetadata?.metadata || {}).valid_to;
         return !validTo || new Date(validTo) >= vTime;
       })

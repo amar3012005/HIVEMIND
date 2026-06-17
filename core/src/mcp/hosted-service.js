@@ -3400,7 +3400,8 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
         const validTime = args.valid_time || null;
         const res = await apiClient.post('/api/temporal/as-of', {
           transaction_time: txTime,
-          valid_time: validTime
+          valid_time: validTime,
+          project_id: args.project_id || null,
         });
         let memories = res.memories || [];
         if (args.file_path) {

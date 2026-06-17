@@ -17144,7 +17144,7 @@ exit \$RC
               } else if (txTime) {
                 result = await biTemporalEngine.asOfTransaction(userId, orgId, txTime);
               } else if (validTime) {
-                result = await biTemporalEngine.asOfValid(userId, orgId, validTime);
+                result = await biTemporalEngine.asOfValid(userId, orgId, validTime, body.project_id || null);
               } else {
                 return jsonResponse(res, { error: 'Provide transaction_time and/or valid_time' }, 400);
               }

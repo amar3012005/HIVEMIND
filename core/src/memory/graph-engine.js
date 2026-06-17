@@ -2009,6 +2009,95 @@ OUTPUT JSON only.`;
     q.enqueueBatch(memories.filter((m) => m && m.id));
   }
 
+  /**
+   * PHASE-3 (KB relationship intelligence): run the SAME contradiction detection +
+   * reconciliation the hot-path save uses (Contradicts / Updates / Extends + the
+   * is_latest supersession flip), on an already-stored memory against a set of
+   * candidate memories. KB ingest pure-inserts (skip_contradiction_detection) for
+   * latency; this runs that skipped pass OFF the hot path (kb-enrich) so KB facts
+   * gain real typed relationships, not just entity co-mention.
+   *
+   * SAFE BY CONSTRUCTION — cannot re-introduce the edge-explosion class:
+   *   • entity-overlap pre-filter (≥1 shared entity: tag) before any work
+   *   • conflictDetector's hardened thresholds (minSim 0.65, both-side signal)
+   *   • strictMode default true (high bar — KB docs rarely truly contradict)
+   *   • maxResults cap (5)
+   * detectContradictions is ALGORITHMIC (token-sim + regex), not an LLM call —
+   * cheap enough to run per-fact. Returns {contradicts, updates, extends} counts.
+   *
+   * @param {object} baseMemory  persisted memory (needs id, content, tags, memory_type)
+   * @param {Array<object>} candidates  cross-doc same-org candidate memories (need id, content, tags)
+   * @param {{store?: object, strictMode?: boolean, maxResults?: number}} opts
+   */
+  async detectAndLinkContradictionsFor(baseMemory, candidates = [], opts = {}) {
+    const out = { contradicts: 0, updates: 0, extends: 0 };
+    const store = opts.store || this.store;
+    const strictMode = opts.strictMode !== false; // default strict
+    const maxResults = typeof opts.maxResults === 'number' ? opts.maxResults : 5;
+    if (!this.conflictDetector || !store?.createRelationship || !baseMemory?.id) return out;
+    if (!Array.isArray(candidates) || candidates.length === 0) return out;
+
+    const EVOLUTION_RE = /\b(now|switched|changed|moved to|migrating|replaced|updated|corrected|actually|no longer|stopped|used to|formerly|previously|instead)\b/i;
+    const ADDITIVE_RE = /\b(also|additionally|furthermore|plus|as well|on top of|in addition|moreover|and also)\b/i;
+
+    // Entity-overlap pre-filter — the only signal that matters; everything else spams edges.
+    const baseEntityTags = new Set((baseMemory.tags || []).filter((t) => typeof t === 'string' && t.startsWith('entity:')));
+    const filtered = baseEntityTags.size > 0
+      ? candidates.filter((m) => (m.tags || []).some((t) => typeof t === 'string' && t.startsWith('entity:') && baseEntityTags.has(t)))
+      : candidates.slice(0, 20);
+    if (filtered.length === 0) return out;
+
+    let contradictions = [];
+    try {
+      contradictions = this.conflictDetector.detectContradictions(baseMemory, filtered, { strictMode, maxResults });
+    } catch (e) {
+      console.warn('[kb-rel] detectContradictions failed:', e.message);
+      return out;
+    }
+
+    for (const c of contradictions) {
+      if (!c?.memory?.id) continue;
+      const newContent = (baseMemory.content || '').toLowerCase();
+      let edgeType = 'Contradicts';
+      let reasoning = '';
+      if (EVOLUTION_RE.test(newContent) && (c.contradictionType === 'temporal_shift' || c.contradictionType === 'change' || c.contradictionType === 'explicit_correction')) {
+        edgeType = 'Updates'; reasoning = `Belief evolved: ${c.contradictionType}`;
+      } else if (EVOLUTION_RE.test(newContent) && c.contradictionType === 'negation') {
+        edgeType = 'Updates'; reasoning = 'Negation + evolution language';
+      } else if (ADDITIVE_RE.test(newContent)) {
+        edgeType = 'Extends'; reasoning = 'Additive language: adds nuance';
+      } else if (c.confidence >= 0.7 && baseMemory.memory_type === c.memory.memory_type && c.contradictionType === 'value_divergence') {
+        edgeType = 'Updates'; reasoning = 'Same type, divergent values: factual update';
+      }
+      const isReconciled = edgeType !== 'Contradicts';
+      try {
+        await store.createRelationship({
+          id: crypto.randomUUID ? crypto.randomUUID() : `kbrel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          from_id: baseMemory.id,
+          to_id: c.memory.id,
+          type: edgeType,
+          confidence: c.confidence,
+          metadata: {
+            semanticRole: 'relationship',
+            kind: 'kb_relationship',
+            contradictionType: c.contradictionType,
+            reason: reasoning || 'contradiction_detection',
+          },
+          created_by: isReconciled ? 'turing-reconciliation' : 'conflict-detector',
+        });
+        if (edgeType === 'Contradicts') out.contradicts++;
+        else if (edgeType === 'Updates') out.updates++;
+        else out.extends++;
+      } catch { /* edge already exists — skip duplicate */ }
+
+      // Reconciled-to-Updates supersedes the older memory (skip syntheses — cognition owns those).
+      if (edgeType === 'Updates' && !(c.memory.memory_type === 'synthesis' || c.memory.memoryType === 'synthesis')) {
+        try { await store.updateMemory(c.memory.id, { is_latest: false }); } catch { /* best-effort */ }
+      }
+    }
+    return out;
+  }
+
   async _attachEntityCoMentionEdges(baseMemory, store, similar = []) {
     if ((process.env.MEMORY_ENTITY_LINKING || 'true').toLowerCase() === 'false') return;
     if (!process.env.GROQ_API_KEY) {

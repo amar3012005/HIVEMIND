@@ -546,7 +546,7 @@ Output the JSON object and nothing else.`;
     const SUPPRESS = Number(process.env.KB_ENRICH_SUPPRESS_SIM || 0.93);
     const RELATE_MIN = Number(process.env.KB_ENRICH_RELATE_MIN || 0.80);
     const docFactIds = new Set(enrichRecs.map((r) => r.factId));
-    let suppressed = 0, related = 0;
+    let suppressed = 0, related = 0, contradicts = 0, updates = 0, extendsN = 0;
     for (const rec of enrichRecs) {
       if (!Array.isArray(rec.vec)) continue;
       let hits = [];
@@ -567,7 +567,29 @@ Output the JSON object and nothing else.`;
         // Redundant with an established memory → drop the new duplicate.
         await this.db.memory.update({ where: { id: rec.factId }, data: { deletedAt: new Date() } }).catch(() => {});
         suppressed++;
-      } else if (top.score >= RELATE_MIN && this.memoryGraphEngine.store?.createRelationship) {
+        continue;
+      }
+      // PHASE-3 relationship intelligence: run the (algorithmic) contradiction
+      // detector + reconciliation on this fact vs its cross-doc entity-overlapping
+      // neighbours → mints Contradicts/Updates/Extends + supersession that the
+      // pure-insert KB path skips. Hydrate fresh so any deferred entity: tags that
+      // have landed are seen (the detector is entity-overlap-gated + strict).
+      try {
+        const candIds = ext.slice(0, 6).map((e) => e.id);
+        const mems = this.memoryGraphEngine.store?.getMemories
+          ? await this.memoryGraphEngine.store.getMemories([rec.factId, ...candIds])
+          : null;
+        const fact = mems?.get?.(rec.factId);
+        const cands = mems ? candIds.map((id) => mems.get?.(id)).filter(Boolean) : [];
+        if (fact && cands.length && this.memoryGraphEngine.detectAndLinkContradictionsFor) {
+          const r = await this.memoryGraphEngine.detectAndLinkContradictionsFor(fact, cands, {
+            store: this.memoryGraphEngine.store, strictMode: true, maxResults: 5,
+          });
+          contradicts += r.contradicts; updates += r.updates; extendsN += r.extends;
+        }
+      } catch (relErr) { this.logger.warn?.(`[kb-enrich] rel-detect ${String(rec.factId).slice(0, 8)}: ${relErr.message}`); }
+      // Connectivity fallback: a Mentions edge to the nearest neighbour (cheap graph link).
+      if (top.score >= RELATE_MIN && this.memoryGraphEngine.store?.createRelationship) {
         await this.memoryGraphEngine.store.createRelationship({
           id: crypto.randomUUID(), from_id: rec.factId, to_id: top.id,
           type: 'Mentions', confidence: Number(top.score.toFixed(2)),
@@ -576,7 +598,7 @@ Output the JSON object and nothing else.`;
         related++;
       }
     }
-    this.logger.info?.(`[kb-enrich] doc ${String(documentId).slice(0, 8)}: suppressed=${suppressed} related=${related} of ${enrichRecs.length}`);
+    this.logger.info?.(`[kb-enrich] doc ${String(documentId).slice(0, 8)}: suppressed=${suppressed} related=${related} contradicts=${contradicts} updates=${updates} extends=${extendsN} of ${enrichRecs.length}`);
   }
 
   /**

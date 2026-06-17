@@ -137,6 +137,28 @@ export class MCPIngestionService {
     };
   }
 
+  /**
+   * Execute a single live tool/resource call on an endpoint (P3 bridge for
+   * HyperAgents). Resolves the per-tenant Nango token, then runs it through
+   * the transport runner. NOT for ingestion — that's ingestFromEndpoint.
+   *
+   * @param {string} name — endpoint name (e.g. "github", "notion")
+   * @param {{ type:'tool'|'resource', name?:string, arguments?:object, uri?:string }} operation
+   * @param {{ user_id?:string, org_id?:string }} scope
+   * @returns {Promise<object>} raw MCP tool/resource result
+   */
+  async executeTool(name, operation, scope = {}) {
+    if (!operation || !operation.type) {
+      throw new Error('operation.type is required');
+    }
+    const endpoint = this.getEndpoint(name, scope);
+    if (endpoint.transport === 'internal') {
+      throw new Error(`Endpoint ${name} is internal (native toolkit) — not callable via exec`);
+    }
+    const authed = await this._resolveAuthenticatedEndpoint(endpoint, scope);
+    return this.runner.execute(authed, operation);
+  }
+
   async listEndpointStatuses(scope) {
     const endpoints = this.listEndpoints(scope);
     const jobs = this.jobStore.list(scope, { limit: 500 });

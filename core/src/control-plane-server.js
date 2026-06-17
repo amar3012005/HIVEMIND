@@ -5927,6 +5927,51 @@ Write the persona now.`;
       }
     }
 
+    // GET/PATCH /v1/hyper-rooms/:id/connectors — per-character connector grants
+    // (P2 of HyperAgents×Connectors). { "<employeeId>": ["github","notion",...] }.
+    // Owner-only. Keys restricted to room participants; values to catalog names.
+    const roomConnMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/connectors$/);
+    if (roomConnMatch) {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const roomId = roomConnMatch[1];
+      const room = await prisma.hyperRoom.findFirst({
+        where: { id: roomId, userId: current.session.userId },
+        select: { id: true, participantIds: true },
+      }).catch(() => null);
+      if (!room) return jsonResponse(res, { error: 'room not found' }, 404);
+
+      if (req.method === 'GET') {
+        const rows = await prisma.$queryRawUnsafe(
+          'SELECT agent_connectors FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid', roomId,
+        ).catch(() => null);
+        return jsonResponse(res, { agent_connectors: rows?.[0]?.agent_connectors || {} });
+      }
+
+      if (req.method === 'PATCH' || req.method === 'PUT') {
+        const body = await parseBody(req);
+        const grants = body.agent_connectors;
+        if (!grants || typeof grants !== 'object' || Array.isArray(grants)) {
+          return jsonResponse(res, { error: 'agent_connectors object required' }, 400);
+        }
+        // Catalog connector names (mirrors core/src/connectors/mcp/catalog-seed.js).
+        const ALLOWED = new Set(['github', 'notion', 'hubspot', 'slack', 'airtable', 'linear']);
+        const partSet = new Set(room.participantIds || []);
+        const clean = {};
+        for (const [emp, conns] of Object.entries(grants)) {
+          if (!partSet.has(emp) || !Array.isArray(conns)) continue;
+          const filtered = [...new Set(conns.filter(c => typeof c === 'string' && ALLOWED.has(c)))];
+          if (filtered.length) clean[emp] = filtered;
+        }
+        await prisma.$executeRawUnsafe(
+          'UPDATE "hivemind"."hyper_rooms" SET agent_connectors = $1::jsonb WHERE id = $2::uuid',
+          JSON.stringify(clean), roomId,
+        );
+        return jsonResponse(res, { ok: true, agent_connectors: clean });
+      }
+      return jsonResponse(res, { error: 'method not allowed' }, 405);
+    }
+
     // /v1/hyper-rooms/:id/turns(/:turnId)(/stream)
     const roomTurnMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/turns(?:\/([0-9a-f-]{36})(\/stream)?)?$/);
     const flybyDecisionMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/turns\/([0-9a-f-]{36})\/flyby-decision$/);

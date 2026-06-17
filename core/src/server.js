@@ -9878,6 +9878,27 @@ exit \$RC
           }
           break;
 
+        case '/api/connectors/mcp/exec':
+          // P3 bridge (HyperAgents×Connectors): execute one live tool call on a
+          // granted connector, scoped to the caller's tenant (Nango token
+          // resolved server-side, never exposed). The AgentScope per-connector
+          // toolkit in the swarm sidecar POSTs here.
+          if (req.method === 'POST') {
+            try {
+              if (!body?.name || !body?.operation?.type) {
+                return jsonResponse(res, { error: 'name + operation.type are required' }, 400);
+              }
+              const result = await mcpIngestionService.executeTool(body.name, body.operation, {
+                user_id: userId,
+                org_id: orgId
+              });
+              return jsonResponse(res, { success: true, result });
+            } catch (error) {
+              return jsonResponse(res, { error: error.message }, 400);
+            }
+          }
+          break;
+
         case '/api/admin/backfill':
           // P3 #20 — re-process historical segments through current pipeline
           if (req.method === 'POST') {

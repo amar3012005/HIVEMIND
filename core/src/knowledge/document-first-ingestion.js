@@ -244,6 +244,12 @@ FACT rules — extract the FEWEST, HIGHEST-SIGNAL facts (quality over coverage):
 - Preserve specific values verbatim (numbers, units, model names, dates). Do not invent or generalize.
 - At MOST ${maxFacts} facts per section — FEWER is better. A thin or purely decorative section → "facts":[].
 
+DO NOT EXTRACT — these are NOT facts, skip them entirely (a section that is ONLY these → "facts":[]):
+- Page furniture: headers, footers, page numbers, document/article/part numbers (e.g. "33567-3", "Art.-Nr. 30792", "Dokument-Nr."), "Technische Änderungen vorbehalten"/copyright/legal-disclaimer lines, and table-of-contents or chapter-number lines.
+- Contact/company blocks: postal addresses, phone/fax numbers, email addresses, company registration or legal-form lines (e.g. "SOLVIS GmbH, Grotrian-Steinweg-Straße 12, Telefon 0531 28904-0").
+- Raw tabular number dumps with no prose: a run of bare numbers, axis labels, or dimensions with no stated claim is NOT a fact (e.g. "0 0,5 1 1,5 2 2,5 ..."). Only extract a measurement when you can state it as a complete sentence naming WHAT the value is and for WHICH thing (e.g. "The SolvisBruno 10 kW has a fuel heat output of 3.1–10.7 kW") — otherwise skip it.
+- Garbled/unreadable text: if a passage is OCR garbage, mojibake, or non-language glyph soup (e.g. "ĞŝƐƚƵŶŐ ΀Ŭt΁"), SKIP it — never reconstruct or extract from it.
+
 ENTITY rules — emit ONE canonical name per real-world thing so the same entity never forks into variants:
 - TYPE + LENGTH: an entity is a SHORT noun — a specific person, organization, product/model, place, technology, or standard. 1–3 words. NEVER a phrase, clause, description, or generic concept. Reject anything that reads like a description (do NOT emit "modular system idea", "customer cluster", "key account photovoltaic cluster", "comfort scenario"). If unsure whether it is a real entity, OMIT it.
 - LANGUAGE — CONSISTENCY OVER TRANSLATION: use the entity's name in the SOURCE LANGUAGE exactly as written in the document. Do NOT translate (translating half the mentions forks one thing into two — Wärmepumpe vs heat-pump). Pick ONE surface form per real-world thing and reuse it identically everywhere. A German document yields German entity names; an English one yields English — never a mix for the same entity.

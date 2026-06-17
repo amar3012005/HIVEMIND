@@ -22006,6 +22006,25 @@ async function ensureQdrantSearchIndexes() {
 // dummy hybridSearch also warms the qdrant client + collection routing cache.
 async function warmUpRecall() {
   if (process.env.RECALL_WARMUP === 'false') return;
+  // FULL-PIPELINE warm: a real synthetic recall warms EVERYTHING a live recall
+  // touches — embed gateway + Qdrant routing + Postgres pool + query-plan cache
+  // + the cross-encoder reranker connection. The old embed-only ping left the
+  // reranker/lanes/pool cold, so the first real recall after idle still paid the
+  // full ~4s cold cliff. Probe org defaults to the canonical test tenant (read
+  // only; never writes). Falls back to an embed ping if recall is unavailable.
+  const warmOrg = process.env.RECALL_WARMUP_ORG || '67503d34-97e9-49a8-8c52-8ee30cc7603e';
+  const warmUser = process.env.RECALL_WARMUP_USER || '54f5568b-4d6a-4ae1-9a33-48cb2909d59b';
+  const synthRecall = async () => {
+    try {
+      if (typeof recallPersistedMemories === 'function' && persistentMemoryStore) {
+        await recallPersistedMemories(persistentMemoryStore, {
+          query_context: 'system keep-warm probe', user_id: warmUser, org_id: warmOrg, max_memories: 3,
+        });
+        return;
+      }
+    } catch { /* fall through to embed-only warm */ }
+    try { await getQdrantClient().generateEmbedding('keep-warm ping'); } catch { /* best-effort */ }
+  };
   try {
     const qc = getQdrantClient();
     const deadline = Date.now() + 30000;
@@ -22015,21 +22034,17 @@ async function warmUpRecall() {
       if (Array.isArray(v) && v.length >= 64) { warm = true; break; }
       await new Promise((r) => setTimeout(r, 1500));
     }
-    // Warm the search path (collection routing + Qdrant connection) too.
-    if (warm) { await qc.generateEmbedding('Solvis Wärmepumpe').catch(() => {}); }
-    console.log(warm ? '✅ Recall warm-up complete (embedding service ready)' : '⚠️  Recall warm-up timed out — embedding service still cold');
-    // KEEP-WARM: the bge-m3 embed gateway (blaiq LiteLLM) scales to zero on
-    // idle, so a low-traffic tenant's FIRST recall after a lull pays the full
-    // ~1.6s embed cold-start (measured: cold 1.58s vs warm 0.18s). The boot
-    // warm-up above only fires once. A light periodic ping keeps the embed
-    // service hot so users never hit the cold path. Default 4min (under the
-    // typical idle-to-zero window); RECALL_KEEPWARM_MS=0 disables. Idempotent +
-    // unref'd so it never blocks shutdown.
+    // Full-pipeline warm at boot (not just embed) so the FIRST real recall after
+    // a restart is already warm across the reranker + lanes + pool.
+    if (warm) { await synthRecall(); }
+    console.log(warm ? '✅ Recall warm-up complete (full pipeline ready)' : '⚠️  Recall warm-up timed out — embedding service still cold');
+    // KEEP-WARM: a full synthetic recall every N min keeps the WHOLE pipeline hot
+    // (embed gateway scale-to-zero + reranker connection + Qdrant + PG pool +
+    // query-plan cache) — not just the embedder. Default 4min (under the typical
+    // idle-to-zero window); RECALL_KEEPWARM_MS=0 disables. Idempotent + unref'd.
     const keepWarmMs = Number(process.env.RECALL_KEEPWARM_MS || 240000);
     if (keepWarmMs > 0 && !warmUpRecall._keepWarm) {
-      warmUpRecall._keepWarm = setInterval(() => {
-        try { getQdrantClient().generateEmbedding('keep-warm ping').catch(() => {}); } catch { /* best-effort */ }
-      }, keepWarmMs);
+      warmUpRecall._keepWarm = setInterval(() => { synthRecall(); }, keepWarmMs);
       warmUpRecall._keepWarm.unref?.();
     }
   } catch (e) { console.warn('recall warm-up skipped:', e.message); }

@@ -850,6 +850,7 @@ async def _build_agent_for_room(
         # Force the full hyper toolkit regardless of what's stored on the
         # employee row — gives every swarm participant equal reach.
         "tools": DEFAULT_HYPER_TOOLS + (WEB_INTEL_TOOLS if allow_web_tools else []),
+        "connectors": emp_connectors,
         "max_iters": HYPER_ROOM_AGENT_MAX_ITERS,
         "hyper": boot_emp.get("hyper"),
         "active_prompt_version": boot_emp.get("active_prompt_version"),

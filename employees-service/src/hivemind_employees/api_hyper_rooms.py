@@ -51,6 +51,7 @@ from .db import (
     get_permanent_lead_id,
     get_permanent_skeptic_id,
     get_room_connector_grants,
+    get_room_enabled_connectors,
     get_room_template,
     get_trust_scores,
     get_turn_seq,
@@ -813,12 +814,12 @@ async def _build_agent_for_room(
     boot = {b["id"]: b for b in await fetch_bootstrap()}
     boot_emp = boot.get(emp["id"], {}) or {}
     api_key = boot_emp.get("api_key")
-    # Per-character connector grants for this room (P3 HyperAgents×Connectors).
-    # Only connectors the user granted THIS agent become live MCP tools.
+    # Room-level connector toggles (like the web tool): every agent in the room
+    # gets the enabled connectors' tools for the run. Decided by the room owner
+    # via the Room Tools toggle; agents choose at runtime whether/when to use.
     try:
-        _grants = await get_room_connector_grants(room_id, org_id=org_id)
-        emp_connectors = _grants.get(emp["id"], [])
-    except Exception:  # noqa: BLE001 — never fail a turn over grants
+        emp_connectors = await get_room_enabled_connectors(room_id, org_id=org_id)
+    except Exception:  # noqa: BLE001 — never fail a turn over connectors
         emp_connectors = []
     # When the employee has no scoped HIVEMIND key (legacy rows where the
     # mint failed at create-time), don't fail the turn — strip tools so the

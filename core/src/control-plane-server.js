@@ -5927,9 +5927,9 @@ Write the persona now.`;
       }
     }
 
-    // GET/PATCH /v1/hyper-rooms/:id/connectors — per-character connector grants
-    // (P2 of HyperAgents×Connectors). { "<employeeId>": ["github","notion",...] }.
-    // Owner-only. Keys restricted to room participants; values to catalog names.
+    // GET/PATCH /v1/hyper-rooms/:id/connectors — room-level connector toggles.
+    // One switch per connector (like the web tool): when on, every agent in the
+    // room can use it during the run. Owner-only. Values from the catalog.
     const roomConnMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/connectors$/);
     if (roomConnMatch) {
       const current = await requireSession(req, res);
@@ -5937,37 +5937,32 @@ Write the persona now.`;
       const roomId = roomConnMatch[1];
       const room = await prisma.hyperRoom.findFirst({
         where: { id: roomId, userId: current.session.userId },
-        select: { id: true, participantIds: true },
+        select: { id: true },
       }).catch(() => null);
       if (!room) return jsonResponse(res, { error: 'room not found' }, 404);
 
+      // Catalog: 6 MCP connectors + native Google (gmail, google_docs).
+      const ALLOWED = new Set(['github', 'notion', 'slack', 'hubspot', 'airtable', 'linear', 'gmail', 'google_docs']);
+
       if (req.method === 'GET') {
         const rows = await prisma.$queryRawUnsafe(
-          'SELECT agent_connectors FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid', roomId,
+          'SELECT enabled_connectors FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid', roomId,
         ).catch(() => null);
-        return jsonResponse(res, { agent_connectors: rows?.[0]?.agent_connectors || {} });
+        return jsonResponse(res, { enabled_connectors: rows?.[0]?.enabled_connectors || [] });
       }
 
       if (req.method === 'PATCH' || req.method === 'PUT') {
         const body = await parseBody(req);
-        const grants = body.agent_connectors;
-        if (!grants || typeof grants !== 'object' || Array.isArray(grants)) {
-          return jsonResponse(res, { error: 'agent_connectors object required' }, 400);
+        const list = body.enabled_connectors;
+        if (!Array.isArray(list)) {
+          return jsonResponse(res, { error: 'enabled_connectors array required' }, 400);
         }
-        // Catalog connector names (mirrors core/src/connectors/mcp/catalog-seed.js).
-        const ALLOWED = new Set(['github', 'notion', 'hubspot', 'slack', 'airtable', 'linear']);
-        const partSet = new Set(room.participantIds || []);
-        const clean = {};
-        for (const [emp, conns] of Object.entries(grants)) {
-          if (!partSet.has(emp) || !Array.isArray(conns)) continue;
-          const filtered = [...new Set(conns.filter(c => typeof c === 'string' && ALLOWED.has(c)))];
-          if (filtered.length) clean[emp] = filtered;
-        }
+        const clean = [...new Set(list.filter(c => typeof c === 'string' && ALLOWED.has(c)))];
         await prisma.$executeRawUnsafe(
-          'UPDATE "hivemind"."hyper_rooms" SET agent_connectors = $1::jsonb WHERE id = $2::uuid',
-          JSON.stringify(clean), roomId,
+          'UPDATE "hivemind"."hyper_rooms" SET enabled_connectors = $1::text[] WHERE id = $2::uuid',
+          clean, roomId,
         );
-        return jsonResponse(res, { ok: true, agent_connectors: clean });
+        return jsonResponse(res, { ok: true, enabled_connectors: clean });
       }
       return jsonResponse(res, { error: 'method not allowed' }, 405);
     }

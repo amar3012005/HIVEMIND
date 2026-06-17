@@ -325,6 +325,29 @@ async def get_room_connector_grants(room_id: str, org_id: Optional[str] = None) 
     return {}
 
 
+async def get_room_enabled_connectors(room_id: str, org_id: Optional[str] = None) -> list:
+    """Room-level connector toggles — the connectors enabled for this room
+    (every agent may use them in the run). Empty list if none/pre-migration."""
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        try:
+            if org_id is not None:
+                row = await conn.fetchrow(
+                    "SELECT enabled_connectors FROM hivemind.hyper_rooms WHERE id = $1 AND org_id = $2::uuid",
+                    room_id, org_id,
+                )
+            else:
+                row = await conn.fetchrow(
+                    "SELECT enabled_connectors FROM hivemind.hyper_rooms WHERE id = $1",
+                    room_id,
+                )
+            if row and row["enabled_connectors"]:
+                return [str(c) for c in row["enabled_connectors"] if isinstance(c, str)]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_room_enabled_connectors fallback: %s", exc)
+    return []
+
+
 async def get_trust_scores(org_id: str, employee_ids: List[str]) -> Dict[str, float]:
     """A4: return {employee_id: trust_score} for given ids. Missing rows = 0.5."""
     if not employee_ids:

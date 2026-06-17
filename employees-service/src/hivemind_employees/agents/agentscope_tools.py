@@ -105,9 +105,39 @@ def _register_connector_tools(
     which resolves the room owner's Nango token server-side. The agent only
     sees connectors the user GRANTED it for this room.
     """
+    def _register_google(tk2, kind: str):
+        """Native Google tools (gmail / google_docs) — call the core Google
+        bridge (/api/connectors/google/exec), token resolved server-side."""
+        def _google(tool_name: str, arguments: Optional[dict] = None) -> ToolResponse:
+            with _client(api_key, user_id, org_id) as c:
+                r = c.post("/api/connectors/google/exec", json={"tool": tool_name, "arguments": arguments or {}})
+                r.raise_for_status()
+                return _tool_response(r.json())
+        if kind == "gmail":
+            def gmail_search(query: str = "", max: int = 5) -> ToolResponse:
+                return _google("gmail_search", {"query": query, "max": max})
+            gmail_search.__doc__ = "Search the room owner's Gmail. query = Gmail search syntax (e.g. 'from:acme newer_than:30d'); max ≤ 20. Returns id/subject/from/date/snippet. Use gmail_get for a full body."
+            def gmail_get(id: str) -> ToolResponse:
+                return _google("gmail_get", {"id": id})
+            gmail_get.__doc__ = "Fetch one Gmail message in full by id (from gmail_search). Returns subject/from/to/date/body."
+            tk2.register_tool_function(gmail_search)
+            tk2.register_tool_function(gmail_get)
+        elif kind == "google_docs":
+            def docs_create(title: str, content: str = "") -> ToolResponse:
+                return _google("docs_create", {"title": title, "content": content})
+            docs_create.__doc__ = "Create a new Google Doc. title = doc title; content = initial text (the report). Returns documentId + shareable url. Use this to write the final report."
+            def docs_append(documentId: str, text: str) -> ToolResponse:
+                return _google("docs_append", {"documentId": documentId, "text": text})
+            docs_append.__doc__ = "Append text to an existing Google Doc by documentId (from docs_create)."
+            tk2.register_tool_function(docs_create)
+            tk2.register_tool_function(docs_append)
+
     for raw in connectors or []:
         conn = str(raw or "").strip()
         if not conn:
+            continue
+        if conn in ("gmail", "google_docs"):
+            _register_google(tk, conn)
             continue
         safe = conn.replace("-", "_")
 

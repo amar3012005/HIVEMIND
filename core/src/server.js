@@ -21971,6 +21971,20 @@ async function warmUpRecall() {
     // Warm the search path (collection routing + Qdrant connection) too.
     if (warm) { await qc.generateEmbedding('Solvis Wärmepumpe').catch(() => {}); }
     console.log(warm ? '✅ Recall warm-up complete (embedding service ready)' : '⚠️  Recall warm-up timed out — embedding service still cold');
+    // KEEP-WARM: the bge-m3 embed gateway (blaiq LiteLLM) scales to zero on
+    // idle, so a low-traffic tenant's FIRST recall after a lull pays the full
+    // ~1.6s embed cold-start (measured: cold 1.58s vs warm 0.18s). The boot
+    // warm-up above only fires once. A light periodic ping keeps the embed
+    // service hot so users never hit the cold path. Default 4min (under the
+    // typical idle-to-zero window); RECALL_KEEPWARM_MS=0 disables. Idempotent +
+    // unref'd so it never blocks shutdown.
+    const keepWarmMs = Number(process.env.RECALL_KEEPWARM_MS || 240000);
+    if (keepWarmMs > 0 && !warmUpRecall._keepWarm) {
+      warmUpRecall._keepWarm = setInterval(() => {
+        try { getQdrantClient().generateEmbedding('keep-warm ping').catch(() => {}); } catch { /* best-effort */ }
+      }, keepWarmMs);
+      warmUpRecall._keepWarm.unref?.();
+    }
   } catch (e) { console.warn('recall warm-up skipped:', e.message); }
 }
 

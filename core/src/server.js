@@ -12963,23 +12963,45 @@ exit \$RC
               // Each cascade step is wrapped so a partial failure names WHICH
               // step broke instead of a generic 500.
               const cascade = async (label, fn) => {
-                try { await fn(); } catch (cErr) {
-                  // Prisma errors sometimes render an empty .message (getter on
-                  // the subclass) — fall through name/meta/stack so the log is
-                  // never the useless `cascade "memories" failed:` blank line.
-                  const detail = [
-                    cErr.code, cErr.name, cErr.message,
-                    cErr.meta ? JSON.stringify(cErr.meta) : '',
-                    (!cErr.message && cErr.stack) ? cErr.stack.split('\n')[0] : '',
-                  ].filter(Boolean).join(' ') || String(cErr) || 'unknown';
-                  console.error(`[knowledge-delete] cascade "${label}" failed:`, detail);
-                  throw new Error(`cascade ${label} failed: ${detail}`);
+                // Deadlock (40P01) / serialization (40001) are TRANSIENT: two
+                // concurrent KB-doc deletes cross-lock on the relationships FK
+                // (fromId/toId both reference memories), so each txn ends up
+                // waiting on the other. Postgres rolls back one victim — the
+                // individual deleteMany steps are idempotent, so retry the
+                // victim a few times with jittered backoff before surfacing.
+                const MAX_ATTEMPTS = 4;
+                for (let attempt = 1; ; attempt++) {
+                  try { await fn(); return; } catch (cErr) {
+                    const code = cErr.code || (cErr.meta && cErr.meta.code) || '';
+                    const blob = `${cErr.message || ''} ${cErr.meta ? JSON.stringify(cErr.meta) : ''}`;
+                    const transient = code === '40P01' || code === '40001'
+                      || /deadlock detected|could not serialize/i.test(blob);
+                    if (transient && attempt < MAX_ATTEMPTS) {
+                      const backoff = 60 * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 50);
+                      console.warn(`[knowledge-delete] cascade "${label}" transient lock conflict (attempt ${attempt}/${MAX_ATTEMPTS}), retrying in ${backoff}ms`);
+                      await new Promise((r) => setTimeout(r, backoff));
+                      continue;
+                    }
+                    // Prisma errors sometimes render an empty .message (getter on
+                    // the subclass) — fall through name/meta/stack so the log is
+                    // never the useless `cascade "memories" failed:` blank line.
+                    const detail = [
+                      cErr.code, cErr.name, cErr.message,
+                      cErr.meta ? JSON.stringify(cErr.meta) : '',
+                      (!cErr.message && cErr.stack) ? cErr.stack.split('\n')[0] : '',
+                    ].filter(Boolean).join(' ') || String(cErr) || 'unknown';
+                    console.error(`[knowledge-delete] cascade "${label}" failed:`, detail);
+                    throw new Error(`cascade ${label} failed: ${detail}`);
+                  }
                 }
               };
 
               // Hard-purge memories + every FK ref + their Qdrant vectors.
               const purgeMemories = async (ids) => {
-                ids = Array.from(new Set((ids || []).filter(Boolean)));
+                // Sort the id set so concurrent deletes acquire row locks in a
+                // consistent order (lock-ordering discipline) — removes most of
+                // the cross-lock deadlock surface; cascade() retries the rest.
+                ids = Array.from(new Set((ids || []).filter(Boolean))).sort();
                 if (ids.length === 0) return;
                 await cascade('source_metadata', () =>
                   prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: ids } } }));

@@ -374,6 +374,8 @@ def build_react_agent(
             user_id=user_id,
             org_id=org_id,
             project_id=project_id,
+            # Per-character connector grants for this room (P3 HyperAgents×Connectors).
+            connectors=employee_row.get("connectors") or [],
         )
 
     model = _resolve_model(employee_row)

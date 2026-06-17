@@ -50,6 +50,7 @@ from .config import get_settings
 from .db import (
     get_permanent_lead_id,
     get_permanent_skeptic_id,
+    get_room_connector_grants,
     get_room_template,
     get_trust_scores,
     get_turn_seq,
@@ -812,6 +813,13 @@ async def _build_agent_for_room(
     boot = {b["id"]: b for b in await fetch_bootstrap()}
     boot_emp = boot.get(emp["id"], {}) or {}
     api_key = boot_emp.get("api_key")
+    # Per-character connector grants for this room (P3 HyperAgents×Connectors).
+    # Only connectors the user granted THIS agent become live MCP tools.
+    try:
+        _grants = await get_room_connector_grants(room_id, org_id=org_id)
+        emp_connectors = _grants.get(emp["id"], [])
+    except Exception:  # noqa: BLE001 — never fail a turn over grants
+        emp_connectors = []
     # When the employee has no scoped HIVEMIND key (legacy rows where the
     # mint failed at create-time), don't fail the turn — strip tools so the
     # agent still produces a chat reply with no recall/save reach. Caller
@@ -828,6 +836,7 @@ async def _build_agent_for_room(
         merged = {
             **emp,
             "tools": DEFAULT_HYPER_TOOLS + (WEB_INTEL_TOOLS if allow_web_tools else []),
+            "connectors": emp_connectors,
             "max_iters": HYPER_ROOM_AGENT_MAX_ITERS,
             "hyper": boot_emp.get("hyper"),
             "active_prompt_version": boot_emp.get("active_prompt_version"),

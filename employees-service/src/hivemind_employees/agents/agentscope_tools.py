@@ -91,12 +91,69 @@ def _post_slack_action(
         return r.json()
 
 
+def _register_connector_tools(
+    tk: Toolkit,
+    connectors: List[str],
+    api_key: str,
+    user_id: Optional[str],
+    org_id: Optional[str],
+) -> None:
+    """Register a live-MCP toolkit for each granted 3rd-party connector
+    (P3 of HyperAgents×Connectors). For connector "github" the agent gets
+    `github_list_tools()` (discover) + `github_call(tool_name, arguments)`
+    (invoke). Both POST the core bridge /api/connectors/mcp/exec|inspect,
+    which resolves the room owner's Nango token server-side. The agent only
+    sees connectors the user GRANTED it for this room.
+    """
+    for raw in connectors or []:
+        conn = str(raw or "").strip()
+        if not conn:
+            continue
+        safe = conn.replace("-", "_")
+
+        def _make(conn_name: str, safe_name: str):
+            def _list() -> ToolResponse:
+                with _client(api_key, user_id, org_id) as c:
+                    r = c.post("/api/connectors/mcp/inspect", json={"name": conn_name})
+                    r.raise_for_status()
+                    return _tool_response(r.json())
+
+            def _call(tool_name: str, arguments: Optional[dict] = None) -> ToolResponse:
+                with _client(api_key, user_id, org_id) as c:
+                    r = c.post("/api/connectors/mcp/exec", json={
+                        "name": conn_name,
+                        "operation": {"type": "tool", "name": tool_name, "arguments": arguments or {}},
+                    })
+                    r.raise_for_status()
+                    return _tool_response(r.json())
+
+            _list.__name__ = f"{safe_name}_list_tools"
+            _list.__doc__ = (
+                f"List the tools available on the {conn_name} connector (a 3rd-party "
+                f"MCP integration the user granted this room). Call this FIRST to see "
+                f"what {conn_name} tool_name values {safe_name}_call accepts."
+            )
+            _call.__name__ = f"{safe_name}_call"
+            _call.__doc__ = (
+                f"Invoke a tool on the {conn_name} connector. tool_name must be one "
+                f"returned by {safe_name}_list_tools; arguments is that tool's input "
+                f"object. Use only when the room task needs live {conn_name} data/action; "
+                f"cite what you pull."
+            )
+            return _list, _call
+
+        lst, cll = _make(conn, safe)
+        tk.register_tool_function(lst)
+        tk.register_tool_function(cll)
+
+
 def build_hivemind_toolkit(
     api_key: str,
     enabled_tool_names: List[str],
     user_id: Optional[str] = None,
     org_id: Optional[str] = None,
     project_id: Optional[str] = None,
+    connectors: Optional[List[str]] = None,
 ) -> Toolkit:
     """Return an AgentScope Toolkit populated with HIVEMIND tools.
 
@@ -294,6 +351,10 @@ def build_hivemind_toolkit(
                 r.raise_for_status()
                 return _tool_response(r.json())
         tk.register_tool_function(why_code)
+
+    # Per-connector live-MCP toolkits (granted to this agent for this room).
+    if connectors:
+        _register_connector_tools(tk, connectors, api_key, user_id, org_id)
 
     if "hivemind_at" in enabled_tool_names:
         def hivemind_at(transaction_time: Optional[str] = None, valid_time: Optional[str] = None, memory_query: Optional[str] = None) -> ToolResponse:

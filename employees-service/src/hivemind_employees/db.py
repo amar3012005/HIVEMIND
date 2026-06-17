@@ -292,6 +292,39 @@ async def get_room_template(room_id: str, org_id: Optional[str] = None) -> str:
     return "debate"
 
 
+async def get_room_connector_grants(room_id: str, org_id: Optional[str] = None) -> Dict[str, list]:
+    """P2 (HyperAgents×Connectors): return the room's per-character connector
+    grants { employee_id: [connector,...] }. Empty dict if missing/pre-migration.
+    org_id, when passed, scopes the read so a foreign room_id cannot leak grants."""
+    import json as _json
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        try:
+            if org_id is not None:
+                row = await conn.fetchrow(
+                    "SELECT agent_connectors FROM hivemind.hyper_rooms WHERE id = $1 AND org_id = $2::uuid",
+                    room_id, org_id,
+                )
+            else:
+                row = await conn.fetchrow(
+                    "SELECT agent_connectors FROM hivemind.hyper_rooms WHERE id = $1",
+                    room_id,
+                )
+            if row and row["agent_connectors"]:
+                raw = row["agent_connectors"]
+                grants = _json.loads(raw) if isinstance(raw, str) else dict(raw)
+                if isinstance(grants, dict):
+                    # normalize: values must be lists of connector-name strings
+                    return {
+                        str(k): [str(c) for c in v if isinstance(c, str)]
+                        for k, v in grants.items()
+                        if isinstance(v, list)
+                    }
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_room_connector_grants fallback: %s", exc)
+    return {}
+
+
 async def get_trust_scores(org_id: str, employee_ids: List[str]) -> Dict[str, float]:
     """A4: return {employee_id: trust_score} for given ids. Missing rows = 0.5."""
     if not employee_ids:

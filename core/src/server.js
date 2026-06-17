@@ -9899,6 +9899,33 @@ exit \$RC
           }
           break;
 
+        case '/api/connectors/google/tools':
+          // Native Google Workspace tool catalog (gmail_*, docs_*).
+          if (req.method === 'GET') {
+            const { listGoogleTools } = await import('./connectors/google-native.js');
+            return jsonResponse(res, { tools: listGoogleTools() });
+          }
+          break;
+
+        case '/api/connectors/google/exec':
+          // Native Google bridge (HyperAgents): run a gmail_*/docs_* tool with
+          // the caller's Nango token, resolved server-side. The swarm sidecar's
+          // Google toolkit POSTs here.
+          if (req.method === 'POST') {
+            try {
+              if (!body?.tool) return jsonResponse(res, { error: 'tool is required' }, 400);
+              const { runGoogleTool } = await import('./connectors/google-native.js');
+              const result = await runGoogleTool(body.tool, body.arguments || {}, {
+                user_id: userId,
+                org_id: orgId,
+              }, prisma);
+              return jsonResponse(res, { success: true, result });
+            } catch (error) {
+              return jsonResponse(res, { error: error.message }, 400);
+            }
+          }
+          break;
+
         case '/api/admin/backfill':
           // P3 #20 — re-process historical segments through current pipeline
           if (req.method === 'POST') {

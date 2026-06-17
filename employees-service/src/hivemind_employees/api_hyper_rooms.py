@@ -816,6 +816,7 @@ async def _build_agent_for_room(
         emp_connectors = await get_room_enabled_connectors(room_id, org_id=org_id)
     except Exception:  # noqa: BLE001 — never fail a turn over connectors
         emp_connectors = []
+    log.info("[connectors] build room=%s emp=%s connectors=%s", room_id, emp.get("slug"), emp_connectors)
     key = f"{room_id}:{emp['id']}:{','.join(sorted(emp_connectors))}"
     if key in _ROOM_AGENTS:
         return _ROOM_AGENTS[key]

@@ -7712,8 +7712,14 @@ exit \$RC
             const existing = await persistentMemoryStore.getMemory(memoryId);
             // SECURITY: ownership check before destructive op. Without this,
             // any authenticated user could delete arbitrary memories by ID.
+            // IDEMPOTENT DELETE: when the memory is already gone (never existed,
+            // or already soft-deleted), the caller's intent — "this must not
+            // exist" — is already satisfied. Return 200 so the UI clears a
+            // stale/phantom card instead of getting a 404 → "Delete failed" on
+            // a card whose backing row was already removed. No info leak: a
+            // non-existent id reveals nothing about other tenants.
             if (!existing || existing.deleted_at) {
-              return jsonResponse(res, { error: 'Not found' }, 404);
+              return jsonResponse(res, { ok: true, deleted: false, already_absent: true, id: memoryId }, 200);
             }
             const isAdmin = principal.scopes?.includes('admin') || principal.master;
             const memOrg = existing.org_id || existing.orgId || null;

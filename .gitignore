@@ -80,3 +80,8 @@ hivemind-v*.zip
 extensions/hivemind-v*.zip
 core/src/tara/hivemind-agent/
 .superpowers/
+# Added by code-review-graph
+.code-review-graph/
+
+# ship-feature pipeline scratch bus (durable record = HIVEMIND memory + JOURNAL)
+.pipeline/

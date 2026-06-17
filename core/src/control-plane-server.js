@@ -5754,8 +5754,11 @@ Write the persona now.`;
       const current = await requireSession(req, res);
       if (!current) return;
       try {
+        // Org-shared rooms: any member of the room's org sees the org's rooms
+        // (Digital-Employees rooms are collaborative; rooms carry org_id). Org
+        // isolation preserved — a member never sees another org's rooms.
         const rooms = await prisma.hyperRoom.findMany({
-          where: { userId: current.session.userId, orgId: current.session.orgId },
+          where: { orgId: current.session.orgId },
           orderBy: [{ archivedAt: 'asc' }, { updatedAt: 'desc' }],
           take: 200,
         });
@@ -5986,8 +5989,9 @@ Write the persona now.`;
       const current = await requireSession(req, res);
       if (!current) return;
       const roomId = roomMetaMatch[1];
+      // Org-shared read: any org member can view a room's metadata + turns.
       const room = await prisma.hyperRoom.findFirst({
-        where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId },
+        where: { id: roomId, orgId: current.session.orgId },
       });
       if (room) {
         try {
@@ -6217,8 +6221,9 @@ Write the persona now.`;
         return jsonResponse(res, { error: 'decision must be agree or disagree' }, 400);
       }
       try {
+        // Org-shared participate: any org member can continue a flyby decision.
         const room = await prisma.hyperRoom.findFirst({
-          where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId },
+          where: { id: roomId, orgId: current.session.orgId },
         });
         if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
         try {
@@ -6287,8 +6292,9 @@ Write the persona now.`;
           ? body.turn_id
           : null;
 
+      // Org-shared participate: any org member can submit a turn to an org room.
       const room = await prisma.hyperRoom.findFirst({
-        where: { id: roomId, userId: current.session.userId, orgId: current.session.orgId },
+        where: { id: roomId, orgId: current.session.orgId },
       });
       if (room) {
         try {
@@ -6487,7 +6493,7 @@ Write the persona now.`;
       if (!current) return;
       const [_, roomId, turnId] = roomTurnMatch;
       const room = await prisma.hyperRoom.findFirst({
-        where: { id: roomId, userId: current.session.userId },
+        where: { id: roomId, orgId: current.session.orgId },
       });
       if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
       const turn = await prisma.hyperTurn.findFirst({ where: { id: turnId, roomId } });
@@ -6501,7 +6507,7 @@ Write the persona now.`;
       if (!current) return;
       const [_, roomId, turnId] = roomTurnMatch;
       const room = await prisma.hyperRoom.findFirst({
-        where: { id: roomId, userId: current.session.userId },
+        where: { id: roomId, orgId: current.session.orgId },
       });
       if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
 

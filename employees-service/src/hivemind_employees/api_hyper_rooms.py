@@ -808,19 +808,20 @@ async def _build_agent_for_room(
     (read paths + save + time-travel; web only for the dedicated intel worker) so swarm agents have the
     same reach as the MCP-driven Talk-to-HIVE assistant.
     """
-    key = f"{room_id}:{emp['id']}"
+    # Room-level connector toggles (like the web tool): every agent in the room
+    # gets the enabled connectors' tools for the run. Fetch BEFORE the cache key
+    # so toggling a connector on/off rebuilds the agent (else a cached tool-less
+    # agent is served and the connectors never attach).
+    try:
+        emp_connectors = await get_room_enabled_connectors(room_id, org_id=org_id)
+    except Exception:  # noqa: BLE001 — never fail a turn over connectors
+        emp_connectors = []
+    key = f"{room_id}:{emp['id']}:{','.join(sorted(emp_connectors))}"
     if key in _ROOM_AGENTS:
         return _ROOM_AGENTS[key]
     boot = {b["id"]: b for b in await fetch_bootstrap()}
     boot_emp = boot.get(emp["id"], {}) or {}
     api_key = boot_emp.get("api_key")
-    # Room-level connector toggles (like the web tool): every agent in the room
-    # gets the enabled connectors' tools for the run. Decided by the room owner
-    # via the Room Tools toggle; agents choose at runtime whether/when to use.
-    try:
-        emp_connectors = await get_room_enabled_connectors(room_id, org_id=org_id)
-    except Exception:  # noqa: BLE001 — never fail a turn over connectors
-        emp_connectors = []
     # When the employee has no scoped HIVEMIND key (legacy rows where the
     # mint failed at create-time), don't fail the turn — strip tools so the
     # agent still produces a chat reply with no recall/save reach. Caller
@@ -838,7 +839,7 @@ async def _build_agent_for_room(
             **emp,
             "tools": DEFAULT_HYPER_TOOLS + (WEB_INTEL_TOOLS if allow_web_tools else []),
             "connectors": emp_connectors,
-            "max_iters": HYPER_ROOM_AGENT_MAX_ITERS,
+            "max_iters": (8 if emp_connectors else HYPER_ROOM_AGENT_MAX_ITERS),
             "hyper": boot_emp.get("hyper"),
             "active_prompt_version": boot_emp.get("active_prompt_version"),
         }

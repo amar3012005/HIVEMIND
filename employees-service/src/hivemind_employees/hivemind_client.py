@@ -85,6 +85,28 @@ async def org_members_emulated(
         return {}
 
 
+async def google_exec_emulated(
+    tool: str, arguments: Dict[str, Any], *, user_id: Optional[str], org_id: Optional[str], api_key: str = ""
+) -> Dict[str, Any]:
+    """Run a native Google tool (gmail_search / gmail_get / ...) via the core
+    bridge with master + emulation headers. Used by the orchestrator to pre-fetch
+    prior correspondence for voice/style grounding. Returns {} on failure."""
+    settings = get_settings()
+    headers = _emulated_headers(api_key, user_id, org_id)
+    try:
+        async with httpx.AsyncClient(
+            base_url=settings.hivemind_core_url,
+            timeout=httpx.Timeout(25.0, connect=5.0),
+            headers=headers,
+        ) as c:
+            r = await c.post("/api/connectors/google/exec", json={"tool": tool, "arguments": arguments})
+            r.raise_for_status()
+            j = r.json()
+            return j.get("result") if isinstance(j.get("result"), dict) else j
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 class HivemindClient:
     """Per-employee HTTP client. One instance per WorkflowAgent.
     Carries the employee's scoped API key."""

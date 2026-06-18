@@ -67,7 +67,7 @@ from .db import (
     list_running_employees,
     update_trust,
 )
-from .hivemind_client import org_members_emulated, recall_emulated
+from .hivemind_client import google_exec_emulated, org_members_emulated, recall_emulated
 
 log = logging.getLogger(__name__)
 
@@ -3879,6 +3879,36 @@ _RECIPIENT_RE = re.compile(
 )
 
 
+async def _fetch_correspondence(req: "RoomTurnRequest", name: str, email: str) -> List[Dict[str, Any]]:
+    """Pull a few prior emails involving a contact (by name/email) so the agents
+    can MATCH the real voice/style/patterns and ground facts — instead of writing
+    a generic template. Best-effort; returns [] if Gmail isn't connected."""
+    query = (name or email or "").strip()
+    if not query:
+        return []
+    res = await google_exec_emulated(
+        "gmail_search", {"query": query, "max": 8}, user_id=req.user_id, org_id=req.org_id)
+    msgs = (res or {}).get("messages") or []
+    excerpts: List[Dict[str, Any]] = []
+    for m in msgs:
+        mid = m.get("id")
+        if not mid:
+            continue
+        full = await google_exec_emulated(
+            "gmail_get", {"id": mid}, user_id=req.user_id, org_id=req.org_id)
+        body = ((full or {}).get("body") or m.get("snippet") or "").strip()
+        if not body:
+            continue
+        excerpts.append({
+            "from": (full or {}).get("from") or m.get("from") or "",
+            "subject": (full or {}).get("subject") or m.get("subject") or "",
+            "body": body[:700],
+        })
+        if len(excerpts) >= 3:
+            break
+    return excerpts
+
+
 async def _resolve_recipients(req: "RoomTurnRequest") -> List[Dict[str, Any]]:
     """Extract recipient names from the turn and resolve each to a REAL email via
     the org directory (which also checks Gmail). Returns [{name, email, source}].
@@ -3949,9 +3979,24 @@ def _output_production_directive(turn_id: str) -> str:
                 "address, call org_directory('<name>') — it checks the org directory AND "
                 "Gmail — and use what it returns.)\n"
             )
+        corr = plan.get("correspondence") or []
+        if corr:
+            style_block = (
+                "\nPRIOR EMAILS — the REAL voice & facts. MATCH this tone, phrasing, and "
+                "patterns; ground the email in these (this answers 'follow their style'):\n"
+                + "\n---\n".join(f"From {c.get('from','')} | {c.get('subject','')}\n{c.get('body','')}" for c in corr)
+                + "\nWrite in THIS voice, not a generic template.\n"
+            )
+        else:
+            style_block = (
+                "\n(If the task says to follow someone's style, call gmail_search for their "
+                "past emails and gmail_get to read them, then match that voice — do not "
+                "write a generic template.)\n"
+            )
         return (
             "\n\n── PRODUCE THE DELIVERABLE NOW ──\n"
             "The team has reached consensus.\n"
+            "0) VOICE/STYLE: " + style_block +
             "1) RECIPIENT ADDRESS — CRITICAL: " + contact_block +
             "   NEVER fabricate an address. Do NOT invent patterns like "
             "firstname@company.com / c.surname@brand.com. Use ONLY a VERIFIED CONTACT "
@@ -4166,6 +4211,15 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             except Exception as exc:  # noqa: BLE001
                 log.warning("[recipients] resolve failed: %s", exc)
                 _plan["verified_contacts"] = []
+            # Pull prior emails with the recipient so the team writes in the real
+            # voice/style (the room goal often says "follow X's style/patterns").
+            try:
+                _c0 = (_plan["verified_contacts"] or [{}])[0]
+                _plan["correspondence"] = await _fetch_correspondence(
+                    req, _c0.get("name", ""), _c0.get("email", ""))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[correspondence] fetch failed: %s", exc)
+                _plan["correspondence"] = []
         _PLAN_BY_TURN[req.turn_id] = _plan
         await _emit_event(req.callback_url, req.turn_id, {
             "t": "plan",

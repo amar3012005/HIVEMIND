@@ -180,6 +180,10 @@ async def _register_and_emit_approvals(
             "label": rec.get("label"),
             "summary": rec.get("summary"),
             "bridge": rec.get("bridge"),
+            # descriptor is persisted server-side in turn.lines so the
+            # control-plane can resolve + execute the approval durably (survives
+            # sidecar restarts / replicas). The FE ignores it.
+            "descriptor": rec.get("descriptor"),
         })
     log.info("[approval] room=%s queued=%d writes for approval",
              req.room_id, len(pending))

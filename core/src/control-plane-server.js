@@ -6328,29 +6328,76 @@ Write the persona now.`;
     if (roomApproveMatch && req.method === 'POST') {
       const current = await requireSession(req, res);
       if (!current) return true;
+      const roomId = roomApproveMatch[1];
       const body = await parseBody(req).catch(() => ({}));
       const approvalId = String(body.approval_id || '').trim();
       const decision = String(body.decision || '').trim().toLowerCase();
       if (!approvalId || !['approve', 'deny'].includes(decision)) {
         return jsonResponse(res, { error: 'approval_id and decision (approve|deny) required' }, 400);
       }
-      const sidecarBase = process.env.EMPLOYEES_SIDECAR_URL || process.env.HIVEMIND_EMPLOYEES_URL || 'http://hm-employees:8060';
+      const MASTER = process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811';
       try {
-        const resp = await fetch(`${sidecarBase}/internal/hyper/approve`, {
-          method: 'POST',
-          headers: {
-            'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ approval_id: approvalId, decision }),
-          signal: AbortSignal.timeout(60000),
+        const room = await prisma.hyperRoom.findFirst({ where: { id: roomId, orgId: current.session.orgId } });
+        if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
+        // DURABLE resolve: the approval_request event (with its descriptor) is
+        // persisted in the turn's lines, so this survives sidecar restarts and
+        // works across replicas — unlike the old in-memory store on the sidecar.
+        const turns = await prisma.hyperTurn.findMany({
+          where: { roomId }, orderBy: { seq: 'desc' }, take: 30, select: { id: true, lines: true },
         });
-        const text = await resp.text();
-        let payload; try { payload = JSON.parse(text); } catch { payload = { raw: text }; }
-        return jsonResponse(res, payload, resp.status);
+        let rec = null; let turnId = null; let alreadyResolved = false;
+        for (const t of turns) {
+          const lines = Array.isArray(t.lines) ? t.lines : [];
+          const ev = lines.find((l) => l && l.t === 'approval_request' && l.approval_id === approvalId);
+          if (ev) {
+            rec = ev; turnId = t.id;
+            alreadyResolved = lines.some((l) => l && l.t === 'approval_resolved' && l.approval_id === approvalId);
+            break;
+          }
+        }
+        const { appendTurnEvent } = await import('./employees/hyper-rooms.js');
+        if (!rec || !rec.descriptor) {
+          // Legacy fallback: older approvals still live in the sidecar's memory.
+          const sidecarBase = process.env.EMPLOYEES_SIDECAR_URL || process.env.HIVEMIND_EMPLOYEES_URL || 'http://hm-employees:8060';
+          const resp = await fetch(`${sidecarBase}/internal/hyper/approve`, {
+            method: 'POST',
+            headers: { 'X-API-Key': MASTER, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ approval_id: approvalId, decision }),
+            signal: AbortSignal.timeout(60000),
+          }).catch(() => null);
+          if (!resp) return jsonResponse(res, { error: 'approval not found (it may have expired — re-run the turn)' }, 404);
+          const text = await resp.text();
+          let payload; try { payload = JSON.parse(text); } catch { payload = { raw: text }; }
+          return jsonResponse(res, payload, resp.status);
+        }
+        if (alreadyResolved) {
+          return jsonResponse(res, { ok: true, approval_id: approvalId, decision: 'already_resolved' }, 200);
+        }
+        let result = null;
+        if (decision === 'approve') {
+          const path = rec.bridge === 'mcp' ? '/api/connectors/mcp/exec' : '/api/connectors/google/exec';
+          const r = await fetch(`${CONFIG.coreApiBaseUrl}${path}`, {
+            method: 'POST',
+            headers: {
+              'X-API-Key': MASTER,
+              'X-HM-User-Id': room.userId,
+              'X-HM-Org-Id': room.orgId,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(rec.descriptor),
+            signal: AbortSignal.timeout(60000),
+          });
+          const tx = await r.text();
+          try { result = JSON.parse(tx); } catch { result = { raw: tx }; }
+          if (!r.ok) return jsonResponse(res, { error: `bridge ${r.status}`, result }, 502);
+        }
+        await appendTurnEvent(prisma, turnId, {
+          t: 'approval_resolved', approval_id: approvalId, decision, label: rec.label, result, ts: Date.now(),
+        });
+        return jsonResponse(res, { ok: true, approval_id: approvalId, decision, result }, 200);
       } catch (err) {
-        console.warn('[hyper-rooms] approve proxy failed:', err.message);
-        return jsonResponse(res, { error: `sidecar unreachable: ${err.message}` }, 502);
+        console.warn('[hyper-rooms] approve failed:', err.message);
+        return jsonResponse(res, { error: err.message }, 500);
       }
     }
 

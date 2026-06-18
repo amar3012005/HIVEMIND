@@ -606,7 +606,11 @@ def build_hivemind_toolkit(
             "note": ("Use a member email if present, else a gmail_candidate. If BOTH are "
                      "empty, ask the user for the address — do NOT invent one."),
         })
-    tk.register_tool_function(org_directory)
+    # Gate registration so the TOOL-LESS planner (enabled_tool_names=['_plan_noop'])
+    # gets an EMPTY toolkit — an unconditional tool reintroduces the fake-`JSON`
+    # tool-call 400 that breaks planning. Room agents get it via DEFAULT_HYPER_TOOLS.
+    if "org_directory" in enabled_tool_names:
+        tk.register_tool_function(org_directory)
 
     if "hivemind_slack_post" in enabled_tool_names:
         def slack_post(channel: str, text: str, thread_ts: Optional[str] = None) -> ToolResponse:

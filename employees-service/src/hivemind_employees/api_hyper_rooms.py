@@ -96,6 +96,7 @@ DEFAULT_HYPER_TOOLS = [
     "hivemind_at",
     "hivemind_list_projects",
     "hivemind_save_memory",
+    "org_directory",
 ]
 
 WEB_INTEL_TOOLS = [
@@ -946,6 +947,19 @@ def _web_intel_needed(user_message: str, blackboard: Dict[str, Any], room_templa
     """
     msg = (user_message or "").lower()
     if not msg:
+        return False
+    # PERSONAL COMMUNICATION → never hit the public web. A relationship/voice task
+    # ("email Rama, in Amar's style, expressing his love") must ground in the org's
+    # OWN Gmail + memory, not the internet — web search on a personal name returns
+    # random strangers (e.g. 'Amar Stewart, Visual Artist') that pollute the
+    # recipient AND the style.
+    _personal_signals = (
+        "love", "romantic", "romance", "feelings", "heart", "miss you", "dear ",
+        "on behalf of", "in his own", "in her own", "his style", "her style",
+        "his writing", "her writing", "his voice", "her voice", "my love",
+        "relationship", "babe", "darling", "sweetheart", "xoxo",
+    )
+    if any(t in msg for t in _personal_signals):
         return False
     external_signals = any(term in msg for term in WEB_INTEL_HINTS)
     public_current_signals = any(term in msg for term in (

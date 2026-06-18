@@ -51,6 +51,7 @@ from .agents.agentscope_tools import (
     drain_artifacts,
     drain_pending_writes,
     execute_pending_write,
+    queue_email_approval,
     unlock_output,
 )
 from .bootstrap_client import fetch_bootstrap, report_eval, report_metrics
@@ -3836,6 +3837,39 @@ async def _verify_turn(
     return verdict
 
 
+async def _ensure_email_deliverable(req: "RoomTurnRequest", final_text: str) -> None:
+    """Deterministic fallback: when the turn's output is an email but the agents
+    composed it in chat WITHOUT firing gmail_send, the orchestrator creates the
+    Gmail draft itself (from the synthesized text → the verified recipient) and
+    queues it for approval. Guarantees an email turn always yields a draft +
+    approval card. No-ops if a deliverable was already produced/queued."""
+    plan = _PLAN_BY_TURN.get(req.turn_id)
+    if not isinstance(plan, dict) or plan.get("intended_output") != "email":
+        return
+    if drain_pending_writes() or drain_artifacts():
+        return  # an agent already produced or queued the deliverable
+    contacts = plan.get("verified_contacts") or []
+    to = (contacts[0].get("email") if contacts else "") or ""
+    if not to:
+        return
+    body = final_text or ""
+    if not body.strip():
+        return
+    m = re.search(r"subject\s*:\s*(.+)", body, re.IGNORECASE)
+    subject = (m.group(1).splitlines()[0].strip() if m else "") or (req.room_goal or "A message")[:90]
+    body_clean = re.sub(r"^\s*subject\s*:.*$", "", body, count=1, flags=re.IGNORECASE | re.MULTILINE).strip() or body
+    try:
+        res = await google_exec_emulated(
+            "gmail_create_draft", {"to": to, "subject": subject, "body": body_clean},
+            user_id=req.user_id, org_id=req.org_id)
+        draft_id = (res or {}).get("draftId")
+        if draft_id:
+            queue_email_approval(to, subject, draft_id, (res or {}).get("url") or "")
+            log.info("[email] orchestrator fallback draft → %s", to)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[email] fallback draft failed: %s", exc)
+
+
 async def _verify_and_emit(
     req: "RoomTurnRequest",
     lead: Dict[str, Any],
@@ -3846,6 +3880,8 @@ async def _verify_and_emit(
 ) -> Optional[Dict[str, Any]]:
     """Run the verify pass, emit a `verify` event, stash the verdict on the
     plan (so the handler/P6 goalkeeper can read it), and return it."""
+    # Guarantee the email deliverable exists before we verify against it.
+    await _ensure_email_deliverable(req, final_text)
     verdict = await _verify_turn(
         req, lead, final_text=final_text,
         tool_call_counts=tool_call_counts, blackboard=blackboard,

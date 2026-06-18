@@ -121,6 +121,27 @@ def drain_artifacts() -> List[Dict[str, Any]]:
     return list(arts) if isinstance(arts, list) else []
 
 
+def queue_email_approval(to: str, subject: str, draft_id: str, url: str = "") -> str:
+    """Orchestrator-side: record a produced draft as an artifact AND queue its
+    send for the user's approval. Used as a deterministic fallback when the
+    agents composed an email but did not fire gmail_send themselves — so an
+    email turn ALWAYS yields a draft + approval card. Returns the approval_id."""
+    _record_artifact("gmail", url or "https://mail.google.com/mail/u/0/#drafts",
+                     title=subject or "Draft", label="Review draft")
+    approval_id = uuid.uuid4().hex[:12]
+    rec = {
+        "approval_id": approval_id,
+        "label": "gmail_send",
+        "summary": f"Send email to {to} — “{subject}”",
+        "bridge": "google",
+        "descriptor": {"tool": "gmail_send_draft", "arguments": {"draftId": draft_id}},
+    }
+    pend = _PENDING_WRITES.get()
+    if isinstance(pend, list):
+        pend.append(rec)
+    return approval_id
+
+
 def _consensus_gate(label: str) -> Optional[ToolResponse]:
     """Hold an output-producing tool until the swarm has reached consensus.
     Returns a 'hold' ToolResponse while locked, else None (proceed)."""

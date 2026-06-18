@@ -3848,12 +3848,22 @@ async def _ensure_email_deliverable(req: "RoomTurnRequest", final_text: str) -> 
         return
     if drain_pending_writes() or drain_artifacts():
         return  # an agent already produced or queued the deliverable
-    contacts = plan.get("verified_contacts") or []
-    to = (contacts[0].get("email") if contacts else "") or ""
-    if not to:
-        return
     body = final_text or ""
     if not body.strip():
+        return
+    contacts = plan.get("verified_contacts") or []
+    to = (contacts[0].get("email") if contacts else "") or ""
+    # Fallback: if pre-resolution missed, take a real address the agents surfaced
+    # in the synthesized text (e.g. "To: ramasantoshi1206@gmail.com"). Skip the
+    # connected/sender account so we don't email the user themselves.
+    if not to:
+        for addr in re.findall(r"[\w.+-]+@[\w.-]+\.\w+", body):
+            al = addr.lower()
+            if "noreply" in al or "no-reply" in al:
+                continue
+            to = addr
+            break
+    if not to:
         return
     m = re.search(r"subject\s*:\s*(.+)", body, re.IGNORECASE)
     subject = (m.group(1).splitlines()[0].strip() if m else "") or (req.room_goal or "A message")[:90]
@@ -3970,11 +3980,12 @@ async def _fetch_correspondence(req: "RoomTurnRequest", name: str, email: str) -
     return out
 
 
-async def _resolve_recipients(req: "RoomTurnRequest") -> List[Dict[str, Any]]:
+async def _resolve_recipients(req: "RoomTurnRequest", message: str = "") -> List[Dict[str, Any]]:
     """Extract recipient names from the turn and resolve each to a REAL email via
     the org directory (which also checks Gmail). Returns [{name, email, source}].
-    Hands the agents verified addresses so they never fabricate one."""
-    msg = req.user_message or ""
+    Hands the agents verified addresses so they never fabricate one. `message`
+    should be the CLEAN user request (no injected preambles)."""
+    msg = message or req.user_message or ""
     cands: List[str] = []
     for m in _RECIPIENT_RE.finditer(msg):
         nm = re.sub(r"^(Dr|Mr|Ms|Mrs)\.?\s+", "", m.group(1).strip(), flags=re.IGNORECASE).strip()
@@ -4246,6 +4257,10 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         "refuse a clear, legitimate, user-authorized task for lack of such a gate. Help "
         "complete it.\n\n"
     )
+    # Keep the CLEAN user request (pre-preamble) for recipient/name extraction —
+    # the identity preamble contains words like 'for BUSINESS' that would pollute
+    # the name regex and push the real recipient past the cap.
+    _clean_user_request = req.user_message
     req.user_message = f"{_identity}{req.user_message}"
 
     # ── Phase 1: lead plans the turn IN PERSONA (keystone) ──────────────
@@ -4268,7 +4283,7 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         # they can't fabricate firstname@company.com.
         if _plan.get("intended_output") == "email":
             try:
-                _plan["verified_contacts"] = await _resolve_recipients(req)
+                _plan["verified_contacts"] = await _resolve_recipients(req, _clean_user_request)
             except Exception as exc:  # noqa: BLE001
                 log.warning("[recipients] resolve failed: %s", exc)
                 _plan["verified_contacts"] = []

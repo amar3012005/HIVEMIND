@@ -136,6 +136,9 @@ _ROOM_AGENTS: Dict[str, ReActAgent] = {}
 _ROOM_PRIOR_LINES: Dict[str, List[str]] = {}
 _REPEAT_GUARD_MAX = 80  # rolling window per room
 _WEB_INTEL_PAYLOADS: Dict[str, Dict[str, Any]] = {}
+# Phase 1 — the lead's turn plan, keyed by turn_id. Consumed by later phases
+# (assignment-driven execution, goalkeeper) and surfaced to the FE.
+_PLAN_BY_TURN: Dict[str, Dict[str, Any]] = {}
 
 # ─── A1 decision sink — explicit save-intent regex ───
 _SAVE_INTENT_RE = re.compile(
@@ -3514,6 +3517,81 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
 # ─── Main orchestrator ─────────────────────────────────────────────────
 
 
+# Phase 1 — output types the lead may pick from user intent.
+_PLAN_OUTPUTS = {"email", "doc", "sheet", "slack", "ticket", "crm", "decision", "answer"}
+
+
+async def _plan_turn(
+    req: "RoomTurnRequest",
+    lead: Dict[str, Any],
+    participants: List[Dict[str, Any]],
+    enabled_connectors: List[str],
+) -> Optional[Dict[str, Any]]:
+    """Phase 1 — the lead, IN PERSONA, plans the turn before the team acts.
+
+    Returns {intended_output, done_criterion, steps[], assignments{}, connectors_needed[]}
+    or None on failure (caller falls through to the normal flow). Persona is
+    untouched: the lead plans as its own character via its built agent.
+    """
+    roster = ", ".join(
+        f"{p.get('name') or p.get('slug')} [{p.get('_lane') or p.get('role_archetype') or 'Communicator'}]"
+        for p in participants
+    )
+    conns = ", ".join(enabled_connectors) if enabled_connectors else "none"
+    prompt = (
+        f"User request: {req.user_message}\n"
+        f"Standing room goal: {req.room_goal or '(none)'}\n"
+        f"Your team: {roster}\n"
+        f"Connectors enabled this room: {conns} "
+        f"(gmail→gmail_search/gmail_get, google_docs→docs_create/docs_append; others via their tools)\n\n"
+        "Before the team acts, lay out a SHORT plan. Decide the right OUTPUT from the user's intent "
+        "— it is NOT always a document. Reply with STRICT JSON only (no prose, no markdown), exactly these keys:\n"
+        '{\n'
+        '  "intended_output": one of ["email","doc","sheet","slack","ticket","crm","decision","answer"],\n'
+        '  "done_criterion": "<one sentence: how we know the task is fully finished and verified>",\n'
+        '  "steps": ["<3-6 ordered steps the team will take>"],\n'
+        '  "assignments": {"<agent name or slug from the team>": "<their concrete sub-task>"},\n'
+        '  "connectors_needed": ["<subset of the enabled connectors actually needed, [] if none>"]\n'
+        '}\n'
+        'Intent → output examples: "email them"→email, "message/ping in slack"→slack, '
+        '"write a report/brief"→doc, "build a tracker/table"→sheet, "should we…/which option"→decision, '
+        'a plain question→answer. Only assign agents that are on the team. Output JSON only.'
+    )
+    try:
+        agent = await _build_agent_for_room(
+            req.room_id, lead, user_id=req.user_id, org_id=req.org_id, project_id=req.project_id,
+        )
+        reply = await agent(Msg(name="user", content=prompt, role="user"))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[plan] lead planning failed: %s", exc)
+        return None
+    text = _msg_to_text(reply) or ""
+    plan: Optional[Dict[str, Any]] = None
+    try:
+        m = re.search(r"\{[\s\S]+\}", text)
+        if m:
+            plan = json.loads(m.group(0))
+    except Exception:  # noqa: BLE001 — salvage below
+        plan = None
+    if not isinstance(plan, dict):
+        # Heuristic salvage so the turn still gets a usable output type.
+        plan = {}
+    out = str(plan.get("intended_output") or "answer").strip().lower()
+    if out not in _PLAN_OUTPUTS:
+        out = "answer"
+    valid_names = {(p.get("slug") or "") for p in participants} | {(p.get("name") or "") for p in participants}
+    raw_assign = plan.get("assignments") if isinstance(plan.get("assignments"), dict) else {}
+    assignments = {str(k): str(v)[:400] for k, v in raw_assign.items() if str(k) in valid_names}
+    return {
+        "intended_output": out,
+        "done_criterion": str(plan.get("done_criterion") or "")[:500],
+        "steps": [str(s)[:300] for s in (plan.get("steps") or []) if isinstance(s, str)][:6],
+        "assignments": assignments,
+        "connectors_needed": [c for c in (plan.get("connectors_needed") or [])
+                              if isinstance(c, str) and c in (enabled_connectors or [])],
+    }
+
+
 async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     """Run one room turn. Emits JSONL events to the control-plane along
     the way, returns the final cost + status.
@@ -3653,6 +3731,34 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             "turn_seq": seq,
         })
     _mark("router_ms")
+
+    # ── Phase 1: lead plans the turn IN PERSONA (keystone) ──────────────
+    # Before the team acts, the lead lays out steps, assignments, the
+    # connectors needed, and — from the user's intent — the right OUTPUT
+    # (not always a doc). Surfaced to the FE + stashed for later phases
+    # (assignment-driven execution, goalkeeper). Persona untouched.
+    try:
+        _plan_conns = await get_room_enabled_connectors(req.room_id, org_id=req.org_id)
+    except Exception:  # noqa: BLE001
+        _plan_conns = []
+    try:
+        _plan = await _plan_turn(req, lead, participants, _plan_conns)
+    except Exception as exc:  # noqa: BLE001 — never fail a turn over planning
+        log.warning("[plan] skipped: %s", exc)
+        _plan = None
+    if _plan:
+        _PLAN_BY_TURN[req.turn_id] = _plan
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "plan",
+            "agent": lead.get("slug"),
+            "intended_output": _plan["intended_output"],
+            "done_criterion": _plan["done_criterion"],
+            "steps": _plan["steps"],
+            "assignments": _plan["assignments"],
+            "connectors_needed": _plan["connectors_needed"],
+        })
+        log.info("[plan] room=%s output=%s steps=%d assignments=%d",
+                 req.room_id, _plan["intended_output"], len(_plan["steps"]), len(_plan["assignments"]))
 
     # ── Deep simulation template — MiroFish-style live room ───────────
     if room_template == "deep_sim":

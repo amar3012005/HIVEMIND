@@ -48,8 +48,10 @@ from pydantic import BaseModel, Field
 from .agents.agentscope_factory import build_react_agent
 from .agents.agentscope_tools import (
     begin_turn_write_gate,
+    drain_artifacts,
     drain_pending_writes,
     execute_pending_write,
+    unlock_output,
 )
 from .bootstrap_client import fetch_bootstrap, report_eval, report_metrics
 from .config import get_settings
@@ -1712,6 +1714,9 @@ class RoomTurnResponse(BaseModel):
     # Phase 5 — recon/verify verdict vs the lead's done_criterion
     # {met, artifact_ok, assignments_ok, grounded_ok, gaps[], note}.
     verification: Optional[Dict[str, Any]] = None
+    # Artifacts the swarm produced this turn (docs/sheets) — each {connector,
+    # url, title, label}; the FE renders a connector-logo "view in new tab" button.
+    artifacts: Optional[List[Dict[str, Any]]] = None
 
 
 class ApprovalDecisionRequest(BaseModel):
@@ -2282,6 +2287,8 @@ async def _orchestrate_deep_sim(
         "Write 5-8 concise bullets: decision, why, objections addressed, what to watch, next irreversible choice. "
         "Do not soften strong POVs; preserve dissent where unresolved."
     )
+    unlock_output()  # consensus reached → the synthesis may now produce the deliverable
+    conclusion_prompt = conclusion_prompt + _output_production_directive(req.turn_id)
     final_reply = await lead_agent(Msg(name="user", content=conclusion_prompt, role="user"))
     _report_turn(lead["id"], req.user_message, final_reply)
     final_text = _msg_to_text(final_reply) or "(lead synthesis failed)"
@@ -3402,6 +3409,8 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
                 winning_id=consensus["winning_id"] or "none",
                 room_goal=req.room_goal or "",
             )
+            unlock_output()  # consensus reached → synthesis may now produce the deliverable
+            synth_prompt = synth_prompt + _output_production_directive(req.turn_id)
             synth_reply = await lead_agent(Msg(name="user", content=synth_prompt, role="user"))
             _report_turn(lead["id"], req.user_message, synth_reply)
             final_text = _msg_to_text(synth_reply) or ""
@@ -3812,6 +3821,40 @@ async def _verify_and_emit(
              req.room_id, verdict["met"], verdict["artifact_ok"],
              verdict["assignments_ok"], verdict["grounded_ok"], len(verdict["gaps"]))
     return verdict
+
+
+def _output_production_directive(turn_id: str) -> str:
+    """The synthesis-time instruction that turns the agreed result into the real
+    deliverable. Output tools are consensus-locked during the debate and only
+    unlocked here, so the artifact is produced ONCE, after the swarm aligns."""
+    plan = _PLAN_BY_TURN.get(turn_id)
+    if not isinstance(plan, dict):
+        return ""
+    out = plan.get("intended_output")
+    if out == "doc":
+        return (
+            "\n\n── PRODUCE THE DELIVERABLE NOW ──\n"
+            "The team has reached consensus. Activate the google_docs group and call "
+            "docs_create(title, content) with the COMPLETE, high-quality document — full "
+            "sections with real substance grounded in recalled company facts, NOT a summary "
+            "or a description. The document IS the deliverable. It runs without approval."
+        )
+    if out == "sheet":
+        return (
+            "\n\n── PRODUCE THE DELIVERABLE NOW ──\n"
+            "The team has reached consensus. Activate the google_sheets group and call "
+            "sheets_create(title, rows_json) with a DETAILED table as a JSON 2-D array string "
+            "(first row = headers), grounded in recalled company numbers. The sheet IS the "
+            "deliverable. It runs without approval."
+        )
+    if out == "email":
+        return (
+            "\n\n── PRODUCE THE DELIVERABLE NOW ──\n"
+            "The team has reached consensus. Activate the gmail group and call "
+            "gmail_send(to, subject, body) with the final email. It will be held for the "
+            "user's one-click approval before it actually sends."
+        )
+    return ""
 
 
 async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
@@ -4441,6 +4484,8 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                    f"{get_template_overlay(room_template).get('synth_hint', '')}\n"
                    if get_template_overlay(room_template).get('synth_hint') else "")
             )
+            unlock_output()  # consensus reached → synthesis may now produce the deliverable
+            synth_prompt = synth_prompt + _output_production_directive(req.turn_id)
             synth_reply = await lead_agent(Msg(name="user", content=synth_prompt, role="user"))
             _report_turn(lead["id"], req.user_message, synth_reply)
             synth_text = _msg_to_text(synth_reply) or ""
@@ -4978,6 +5023,11 @@ async def post_room_turn(
         total_cost += int(resp.cost_tokens or 0)
         plan = _PLAN_BY_TURN.get(req.turn_id)
         verdict = plan.get("verification") if isinstance(plan, dict) else None
+        # If the swarm already produced the deliverable — an artifact (doc/sheet)
+        # or an outward send queued for approval — stop. Don't re-loop on nitpick
+        # gaps and pile up near-duplicate drafts.
+        if drain_artifacts() or drain_pending_writes():
+            break
         if not _goalkeeper_should_continue(verdict) or rnd >= max_rounds:
             break
         gaps = list((verdict or {}).get("gaps") or [])
@@ -5013,6 +5063,28 @@ async def post_room_turn(
                 {k: v for k, v in rec.items() if k != "descriptor"}
                 for rec in pending
             ]
+    # Surface produced artifacts (docs/sheets) as connector_logo "view in new
+    # tab" buttons in the FE — produced post-consensus, no HITL.
+    artifacts = drain_artifacts()
+    if artifacts:
+        # Keep the LAST artifact per connector — the final refined deliverable,
+        # not the intermediate drafts (defensive against parallel races).
+        by_conn: Dict[str, Dict[str, Any]] = {}
+        for a in artifacts:
+            if a.get("url"):
+                by_conn[str(a.get("connector"))] = a
+        final_artifacts = list(by_conn.values())
+        for art in final_artifacts:
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "connector_logo",
+                "connector": art.get("connector"),
+                "url": art.get("url"),
+                "title": art.get("title"),
+                "label": art.get("label") or "Open",
+            })
+        resp.artifacts = final_artifacts
+        log.info("[artifacts] room=%s produced=%d", req.room_id, len(final_artifacts))
+
     # Phase 5 — surface the recon/verify verdict (stashed on the plan).
     _vplan = _PLAN_BY_TURN.get(req.turn_id)
     if isinstance(_vplan, dict) and isinstance(_vplan.get("verification"), dict):

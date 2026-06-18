@@ -351,11 +351,13 @@ def build_react_agent(
     if _conns:
         _conn_lines = []
         if "gmail" in _conns:
-            _conn_lines.append("- group `gmail` → gmail_search(query, max), gmail_get(id) — read the team's email for live context.")
+            _conn_lines.append("- group `gmail` → gmail_search(query, max), gmail_get(id) read the team's email (free); gmail_send(to, subject, body) sends mail — outward, needs the user's approval.")
         if "google_docs" in _conns:
-            _conn_lines.append("- group `google_docs` → docs_create(title, content), docs_append(documentId, text) — write a real doc when the output is a document.")
+            _conn_lines.append("- group `google_docs` → docs_create(title, content), docs_append(documentId, text) — produce a real document (report, pitch deck). Internal artifact, no approval.")
+        if "google_sheets" in _conns:
+            _conn_lines.append("- group `google_sheets` → sheets_create(title, rows_json), sheets_append(spreadsheetId, rows_json) — produce a real spreadsheet (financial plan, tracker). rows_json is a JSON 2-D array string, first row = headers. Internal artifact, no approval.")
         for _c in _conns:
-            if _c not in ("gmail", "google_docs"):
+            if _c not in ("gmail", "google_docs", "google_sheets"):
                 _g = _c.replace("-", "_")
                 _conn_lines.append(f"- group `{_g}` → {_g}_list_tools() then {_g}_call(tool_name, arguments).")
         persona = (
@@ -363,10 +365,13 @@ def build_react_agent(
             + "\n\nLIVE CONNECTOR GROUPS (enabled for this room — activate before use):\n"
             + "\n".join(_conn_lines)
             + "\nThese groups are INACTIVE by default. When the task needs one, FIRST call "
-              "reset_equipped_tools(['<group>']) to equip it (e.g. reset_equipped_tools(['gmail'])), "
-              "then call its tools. Use them the same way you use memory recall and web search — pull "
-              "real third-party context, or produce the output (doc/sheet/etc). Don't just talk about "
-              "them; activate and call. No need to ask permission or for IDs."
+              "reset_equipped_tools(['<group>']) to equip it (e.g. reset_equipped_tools(['google_docs'])), "
+              "then call its tools. Use reads (gmail_search, *_list_tools) freely for live context. "
+              "But DO NOT produce the OUTPUT (docs_create/sheets_create/gmail_send) until the team has "
+              "debated and AGREED — the room only unlocks output at the synthesis step. When it's time, "
+              "produce the agreed deliverable ONCE, grounded in recalled facts. Docs/sheets run without "
+              "approval; an outward send (gmail_send) is held for the user's one-click approval. "
+              "No need to ask for IDs."
         )
     # Default fallback is wider than before — gives a fresh employee
     # the full HIVEMIND reach. Hyper-room agents override via merged_emp.

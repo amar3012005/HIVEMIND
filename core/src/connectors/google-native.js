@@ -135,6 +135,41 @@ export const GOOGLE_TOOLS = {
       return { documentId: a.documentId, appended: String(a.text).length, url: `https://docs.google.com/document/d/${a.documentId}/edit` };
     },
   },
+  sheets_create: {
+    provider: 'google-sheets',
+    description: 'Create a new Google Sheet. args: { title, rows (2-D array; first row = headers) }. Returns spreadsheetId + url.',
+    run: async (token, a) => {
+      const sheet = await g('https://sheets.googleapis.com/v4/spreadsheets', token, {
+        method: 'POST',
+        body: JSON.stringify({ properties: { title: a.title || 'Untitled' } }),
+      });
+      const rows = Array.isArray(a.rows) ? a.rows : [];
+      if (rows.length) {
+        const values = rows.map(r => (Array.isArray(r) ? r.map(c => (c == null ? '' : String(c))) : [String(r)]));
+        await g(`https://sheets.googleapis.com/v4/spreadsheets/${sheet.spreadsheetId}/values/A1:append?valueInputOption=USER_ENTERED`, token, {
+          method: 'POST', body: JSON.stringify({ values }),
+        });
+      }
+      return {
+        spreadsheetId: sheet.spreadsheetId,
+        title: sheet.properties?.title || a.title,
+        rows: rows.length,
+        url: sheet.spreadsheetUrl || `https://docs.google.com/spreadsheets/d/${sheet.spreadsheetId}/edit`,
+      };
+    },
+  },
+  sheets_append: {
+    provider: 'google-sheets',
+    description: 'Append rows to an existing Google Sheet. args: { spreadsheetId, rows (2-D array) }.',
+    run: async (token, a) => {
+      if (!a.spreadsheetId || !Array.isArray(a.rows)) throw new Error('sheets_append requires { spreadsheetId, rows[] }');
+      const values = a.rows.map(r => (Array.isArray(r) ? r.map(c => (c == null ? '' : String(c))) : [String(r)]));
+      await g(`https://sheets.googleapis.com/v4/spreadsheets/${a.spreadsheetId}/values/A1:append?valueInputOption=USER_ENTERED`, token, {
+        method: 'POST', body: JSON.stringify({ values }),
+      });
+      return { spreadsheetId: a.spreadsheetId, appended: values.length, url: `https://docs.google.com/spreadsheets/d/${a.spreadsheetId}/edit` };
+    },
+  },
 };
 
 export function listGoogleTools() {
@@ -145,9 +180,26 @@ export function listGoogleTools() {
  * Execute a native Google tool. scope = { user_id, org_id }.
  * Resolves the right Nango provider token, runs the REST call.
  */
+// Provider fallback per primary: same Google account is connected under one of
+// these Nango keys, and a broad-scope grant carries Docs/Sheets/Gmail. So if the
+// exact product key isn't connected, reuse a sibling Google token (the REST call
+// still 403s if that *API* is disabled in GCP — an ops step, not a token issue).
+const GOOGLE_PROVIDER_FALLBACKS = {
+  'google-sheets': ['google-sheets', 'google-docs', 'gmail'],
+  'google-docs': ['google-docs', 'gmail'],
+  'gmail': ['gmail'],
+};
+
 export async function runGoogleTool(tool, args, scope, db) {
   const def = GOOGLE_TOOLS[tool];
   if (!def) throw new Error(`unknown google tool: ${tool}`);
-  const token = await resolveToken(def.provider, scope || {}, db);
+  const chain = GOOGLE_PROVIDER_FALLBACKS[def.provider] || [def.provider];
+  let token = null;
+  let lastErr = null;
+  for (const provider of chain) {
+    try { token = await resolveToken(provider, scope || {}, db); break; }
+    catch (e) { lastErr = e; }
+  }
+  if (!token) throw lastErr || new Error(`no connected Google provider for ${def.provider}`);
   return def.run(token, args || {});
 }

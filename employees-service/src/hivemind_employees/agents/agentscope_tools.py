@@ -61,6 +61,26 @@ _PENDING_WRITES: "contextvars.ContextVar[Optional[list]]" = contextvars.ContextV
     "hyper_pending_writes", default=None
 )
 
+# ─── Consensus gate: produce the OUTPUT only after the swarm agrees ─────
+# The user rule: "before touching anything to do output, make sure the swarm
+# has approved the swarm intelligence so far and then decided to move forward."
+# Output-producing tools (docs/sheets create+append, gmail_send) are HELD while
+# the room is still debating; the orchestrator calls unlock_output() at the
+# synthesis step (consensus reached), after which the agreed artifact is
+# produced once. Default True so non-room toolkits are unaffected.
+_OUTPUT_UNLOCKED: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
+    "hyper_output_unlocked", default=True
+)
+# Artifacts produced this turn (docs/sheets/etc.) — drained by the orchestrator
+# to emit `connector_logo` "view in new tab" events to the FE.
+_TURN_ARTIFACTS: "contextvars.ContextVar[Optional[list]]" = contextvars.ContextVar(
+    "hyper_turn_artifacts", default=None
+)
+# Outward sends that ALWAYS need HITL approval even after consensus (they leave
+# the org). Internal artifacts (docs/sheets) run without HITL once consensus is
+# reached. gmail_send + MCP non-read calls are outward.
+_OUTWARD_SENDS = ("gmail_send",)
+
 # Read-intent name hints — MCP tools whose name matches are treated as reads
 # (free); everything else on a connector is a potential write (gated).
 _READ_HINTS = (
@@ -75,15 +95,62 @@ def _looks_like_read(name: str) -> bool:
 
 
 def begin_turn_write_gate(policy: str) -> None:
-    """Arm the write gate for the current turn. policy ∈ {"ask","auto"}."""
+    """Arm the write/consensus gates for the current turn. policy ∈ {"ask","auto"}.
+    Output stays LOCKED until the orchestrator reaches consensus (synthesis)."""
     _WRITE_POLICY.set(policy if policy in ("ask", "auto") else "auto")
     _PENDING_WRITES.set([])
+    _OUTPUT_UNLOCKED.set(False)
+    _TURN_ARTIFACTS.set([])
+
+
+def unlock_output() -> None:
+    """Consensus reached — let the synthesis step produce the agreed output."""
+    _OUTPUT_UNLOCKED.set(True)
 
 
 def drain_pending_writes() -> List[Dict[str, Any]]:
     """Return (a copy of) the writes queued for approval this turn."""
     pend = _PENDING_WRITES.get()
     return list(pend) if isinstance(pend, list) else []
+
+
+def drain_artifacts() -> List[Dict[str, Any]]:
+    """Return (a copy of) the artifacts (docs/sheets/...) produced this turn."""
+    arts = _TURN_ARTIFACTS.get()
+    return list(arts) if isinstance(arts, list) else []
+
+
+def _consensus_gate(label: str) -> Optional[ToolResponse]:
+    """Hold an output-producing tool until the swarm has reached consensus.
+    Returns a 'hold' ToolResponse while locked, else None (proceed)."""
+    if _OUTPUT_UNLOCKED.get():
+        return None
+    return _tool_response_text(
+        f"⏸ HOLD — '{label}' was NOT run. The team has not finished reaching "
+        f"consensus yet. Do NOT produce the output now: keep contributing, "
+        f"challenging, and peer-reviewing. The agreed result is produced ONCE at "
+        f"the synthesis step, after the swarm aligns.",
+        metadata={"status": "awaiting_consensus", "label": label},
+    )
+
+
+def _record_artifact(connector: str, url: str, title: str = "", label: str = "") -> None:
+    """Record a produced artifact (doc/sheet) so the orchestrator can emit a
+    `connector_logo` 'view in new tab' event to the FE. After the FIRST artifact
+    lands, RE-LOCK output so the turn produces ONE high-quality deliverable
+    rather than a pile of near-duplicate drafts from racing agents/retries."""
+    arts = _TURN_ARTIFACTS.get()
+    if isinstance(arts, list) and url:
+        arts.append({"connector": connector, "url": url, "title": title, "label": label})
+        _OUTPUT_UNLOCKED.set(False)
+
+
+def _artifact_url(payload: object) -> str:
+    """Pull a doc/sheet URL out of a bridge ToolResponse's underlying json."""
+    if not isinstance(payload, dict):
+        return ""
+    res = payload.get("result") if isinstance(payload.get("result"), dict) else payload
+    return str((res or {}).get("url") or "") if isinstance(res, dict) else ""
 
 
 def _gate_write(
@@ -211,16 +278,18 @@ def _register_connector_tools(
     """
     def _register_google(kind: str):
         def _google(tool_name: str, arguments: Optional[dict] = None) -> ToolResponse:
+            return _tool_response(_google_json(tool_name, arguments))
+        def _google_json(tool_name: str, arguments: Optional[dict] = None) -> dict:
             with _client(api_key, user_id, org_id) as c:
                 r = c.post("/api/connectors/google/exec", json={"tool": tool_name, "arguments": arguments or {}})
                 r.raise_for_status()
-                return _tool_response(r.json())
+                return r.json()
         if kind == "gmail":
             tk.create_tool_group(
                 group_name="gmail",
-                description="Read the room owner's Gmail, and send mail (send is a gated WRITE).",
+                description="Read the room owner's Gmail, and send mail (send needs approval).",
                 active=False,
-                notes="gmail_search(query, max≤20) → id/subject/from/date/snippet; gmail_get(id) → full body (both read-only, free). gmail_send(to, subject, body, cc) → sends mail — side-effectful WRITE, may require the user's approval.",
+                notes="gmail_search(query, max≤20) and gmail_get(id) are read-only (free). gmail_send(to, subject, body, cc) SENDS mail — it leaves the org, so it is produced only after the team agrees and then requires the user's one-click approval.",
             )
             def gmail_search(query: str = "", max: int = 5) -> ToolResponse:
                 return _google("gmail_search", {"query": query, "max": max})
@@ -229,6 +298,9 @@ def _register_connector_tools(
                 return _google("gmail_get", {"id": id})
             gmail_get.__doc__ = "Fetch one Gmail message in full by id (from gmail_search). Returns subject/from/to/date/body."
             def gmail_send(to: str, subject: str, body: str = "", cc: str = "") -> ToolResponse:
+                held = _consensus_gate("gmail_send")
+                if held is not None:
+                    return held
                 gated = _gate_write(
                     "gmail_send",
                     f"Send email to {to} — “{subject}”",
@@ -238,47 +310,74 @@ def _register_connector_tools(
                 if gated is not None:
                     return gated
                 return _google("gmail_send", {"to": to, "subject": subject, "body": body, "cc": cc})
-            gmail_send.__doc__ = "Send an email from the room owner's Gmail. to = recipient address; subject; body = plain text; cc optional. WRITE — may require the user's approval before it sends."
+            gmail_send.__doc__ = "Send an email from the room owner's Gmail when the task is to message someone. to = recipient; subject; body = plain text; cc optional. Outward send — runs only after the team agrees, then needs the user's approval."
             tk.register_tool_function(gmail_search, group_name="gmail")
             tk.register_tool_function(gmail_get, group_name="gmail")
             tk.register_tool_function(gmail_send, group_name="gmail")
         elif kind == "google_docs":
             tk.create_tool_group(
                 group_name="google_docs",
-                description="Create or extend Google Docs (write).",
+                description="Create or extend Google Docs (internal artifact — no approval needed).",
                 active=False,
-                notes="docs_create(title, content) → new doc + shareable url; docs_append(documentId, text). Side-effectful WRITE — use when the task's output is a document.",
+                notes="docs_create(title, content) → new doc + shareable url; docs_append(documentId, text). Use when the agreed output is a document (report, pitch deck, brief). Produced once the team reaches consensus; runs WITHOUT the user's approval (it's an internal artifact).",
             )
             def docs_create(title: str, content: str = "") -> ToolResponse:
-                gated = _gate_write(
-                    "docs_create",
-                    f"Create Google Doc “{title}” ({len(content or '')} chars)",
-                    "google",
-                    {"tool": "docs_create", "arguments": {"title": title, "content": content}},
-                )
-                if gated is not None:
-                    return gated
-                return _google("docs_create", {"title": title, "content": content})
-            docs_create.__doc__ = "Create a new Google Doc. title = doc title; content = initial text (the report). Returns documentId + shareable url. WRITE — may require the user's approval before it runs."
+                held = _consensus_gate("docs_create")
+                if held is not None:
+                    return held
+                j = _google_json("docs_create", {"title": title, "content": content})
+                _record_artifact("google-docs", _artifact_url(j), title=title, label=f"Open “{title}”")
+                return _tool_response(j)
+            docs_create.__doc__ = "Create a new Google Doc (e.g. a pitch deck or report). title = doc title; content = the full written body. Returns documentId + shareable url. Produced after the team agrees; no approval needed."
             def docs_append(documentId: str, text: str) -> ToolResponse:
-                gated = _gate_write(
-                    "docs_append",
-                    f"Append {len(text or '')} chars to Google Doc {documentId}",
-                    "google",
-                    {"tool": "docs_append", "arguments": {"documentId": documentId, "text": text}},
-                )
-                if gated is not None:
-                    return gated
-                return _google("docs_append", {"documentId": documentId, "text": text})
-            docs_append.__doc__ = "Append text to an existing Google Doc by documentId (from docs_create). WRITE — may require the user's approval before it runs."
+                held = _consensus_gate("docs_append")
+                if held is not None:
+                    return held
+                j = _google_json("docs_append", {"documentId": documentId, "text": text})
+                _record_artifact("google-docs", _artifact_url(j), label="Open document")
+                return _tool_response(j)
+            docs_append.__doc__ = "Append text to an existing Google Doc by documentId (from docs_create). No approval needed."
             tk.register_tool_function(docs_create, group_name="google_docs")
             tk.register_tool_function(docs_append, group_name="google_docs")
+        elif kind == "google_sheets":
+            tk.create_tool_group(
+                group_name="google_sheets",
+                description="Create or extend Google Sheets (internal artifact — no approval needed).",
+                active=False,
+                notes="sheets_create(title, rows_json) builds a spreadsheet — rows_json is a JSON 2-D array string, e.g. '[[\"Year\",\"Revenue\"],[\"2026\",\"100000\"]]' (first row = headers). sheets_append(spreadsheetId, rows_json) adds rows. Use when the agreed output is a table/financial plan. Produced after consensus; no approval needed.",
+            )
+            def sheets_create(title: str, rows_json: str = "") -> ToolResponse:
+                held = _consensus_gate("sheets_create")
+                if held is not None:
+                    return held
+                try:
+                    rows = json.loads(rows_json) if rows_json else []
+                except Exception:  # noqa: BLE001 — bad JSON → empty sheet, agent retries
+                    rows = []
+                j = _google_json("sheets_create", {"title": title, "rows": rows})
+                _record_artifact("google-sheets", _artifact_url(j), title=title, label=f"Open “{title}”")
+                return _tool_response(j)
+            sheets_create.__doc__ = "Create a new Google Sheet (e.g. a financial plan). title = sheet title; rows_json = a JSON 2-D array string of rows (first row = headers), e.g. '[[\"Year\",\"ARR\"],[\"2026\",\"120000\"]]'. Returns spreadsheetId + url. Produced after the team agrees; no approval needed."
+            def sheets_append(spreadsheetId: str, rows_json: str = "") -> ToolResponse:
+                held = _consensus_gate("sheets_append")
+                if held is not None:
+                    return held
+                try:
+                    rows = json.loads(rows_json) if rows_json else []
+                except Exception:  # noqa: BLE001
+                    rows = []
+                j = _google_json("sheets_append", {"spreadsheetId": spreadsheetId, "rows": rows})
+                _record_artifact("google-sheets", _artifact_url(j), label="Open sheet")
+                return _tool_response(j)
+            sheets_append.__doc__ = "Append rows to an existing Google Sheet by spreadsheetId (from sheets_create). rows_json = JSON 2-D array string. No approval needed."
+            tk.register_tool_function(sheets_create, group_name="google_sheets")
+            tk.register_tool_function(sheets_append, group_name="google_sheets")
 
     for raw in connectors or []:
         conn = str(raw or "").strip()
         if not conn:
             continue
-        if conn in ("gmail", "google_docs"):
+        if conn in ("gmail", "google_docs", "google_sheets"):
             _register_google(conn)
             continue
         safe = conn.replace("-", "_")
@@ -302,8 +401,12 @@ def _register_connector_tools(
                     "operation": {"type": "tool", "name": tool_name, "arguments": arguments or {}},
                 }
                 # Reads (search/list/get/...) run free; anything else on the
-                # connector is a potential side effect → gate it for approval.
+                # connector is a potential outward side effect → hold for
+                # consensus first, then require the user's approval.
                 if not _looks_like_read(tool_name):
+                    held = _consensus_gate(f"{conn_name}.{tool_name}")
+                    if held is not None:
+                        return held
                     gated = _gate_write(
                         f"{conn_name}.{tool_name}",
                         f"Call {conn_name} tool '{tool_name}'",

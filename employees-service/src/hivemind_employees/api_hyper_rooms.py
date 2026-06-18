@@ -36,6 +36,7 @@ import logging
 import os
 import re
 import time
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Set
 
 import httpx
@@ -45,6 +46,11 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from .agents.agentscope_factory import build_react_agent
+from .agents.agentscope_tools import (
+    begin_turn_write_gate,
+    drain_pending_writes,
+    execute_pending_write,
+)
 from .bootstrap_client import fetch_bootstrap, report_eval, report_metrics
 from .config import get_settings
 from .db import (
@@ -139,6 +145,42 @@ _WEB_INTEL_PAYLOADS: Dict[str, Dict[str, Any]] = {}
 # Phase 1 — the lead's turn plan, keyed by turn_id. Consumed by later phases
 # (assignment-driven execution, goalkeeper) and surfaced to the FE.
 _PLAN_BY_TURN: Dict[str, Dict[str, Any]] = {}
+
+# Phase 4 — writes held for the user's approval, keyed by approval_id. Each
+# record carries the bridge descriptor + creds needed to replay the call once
+# approved (via /internal/hyper/approve). Bounded to avoid unbounded growth.
+_PENDING_APPROVALS: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+_PENDING_APPROVALS_CAP = 500
+
+
+async def _register_and_emit_approvals(
+    req: "RoomTurnRequest", pending: List[Dict[str, Any]]
+) -> None:
+    """Stash each queued write (with creds for replay) and surface an approval
+    card to the FE. The side effect has NOT fired — it runs only on approve."""
+    for rec in pending:
+        approval_id = rec.get("approval_id")
+        if not approval_id:
+            continue
+        _PENDING_APPROVALS[approval_id] = {
+            **rec,
+            "user_id": req.user_id,
+            "org_id": req.org_id,
+            "room_id": req.room_id,
+            "turn_id": req.turn_id,
+            "callback_url": req.callback_url,
+        }
+        while len(_PENDING_APPROVALS) > _PENDING_APPROVALS_CAP:
+            _PENDING_APPROVALS.popitem(last=False)
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "approval_request",
+            "approval_id": approval_id,
+            "label": rec.get("label"),
+            "summary": rec.get("summary"),
+            "bridge": rec.get("bridge"),
+        })
+    log.info("[approval] room=%s queued=%d writes for approval",
+             req.room_id, len(pending))
 
 # ─── A1 decision sink — explicit save-intent regex ───
 _SAVE_INTENT_RE = re.compile(
@@ -1654,12 +1696,24 @@ class RoomTurnRequest(BaseModel):
     # the project HIVEMIND so the room stays about that project.
     project_id: Optional[str] = None
     room_goal: Optional[str] = None
+    # Phase 4 — write-approval policy: "ask" holds side-effectful connector
+    # writes for the user's approval; "auto" lets them fire. When unset, the
+    # gate defaults to "ask" if the room has connectors enabled, else "auto".
+    write_policy: Optional[str] = None
 
 
 class RoomTurnResponse(BaseModel):
     ok: bool
     cost_tokens: int
     status: str
+    # Phase 4 — writes the team queued for the user's approval this turn (each
+    # carries approval_id/label/summary; the side effect has NOT fired yet).
+    pending_approvals: Optional[List[Dict[str, Any]]] = None
+
+
+class ApprovalDecisionRequest(BaseModel):
+    approval_id: str
+    decision: str  # "approve" | "deny"
 
 
 # ─── Meeting-template overlays (Phase 4 PR-3) ──────────────────────────
@@ -4718,10 +4772,72 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     return RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status=status)
 
 
+async def _resolve_write_policy(req: "RoomTurnRequest") -> str:
+    """Phase 4 — pick the write-approval policy for this turn. Explicit
+    req.write_policy wins; otherwise gate ("ask") when the room has connectors
+    enabled, else "auto" (no side-effectful tools in play)."""
+    explicit = (req.write_policy or "").strip().lower()
+    if explicit in ("ask", "auto"):
+        return explicit
+    try:
+        conns = await get_room_enabled_connectors(req.room_id, org_id=req.org_id)
+    except Exception:  # noqa: BLE001 — never fail a turn over policy resolution
+        conns = []
+    return "ask" if conns else "auto"
+
+
 @router.post("/room-turn", response_model=RoomTurnResponse)
 async def post_room_turn(
     req: RoomTurnRequest,
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
 ) -> RoomTurnResponse:
     _require_master_key(x_api_key)
-    return await _orchestrate(req)
+    # Phase 4 — arm the write-approval gate in THIS handler's context so every
+    # fanned-out agent task (which copies the context) appends to the same
+    # pending list. Sync connector tools read the policy at call time.
+    policy = await _resolve_write_policy(req)
+    begin_turn_write_gate(policy)
+    resp = await _orchestrate(req)
+    if policy == "ask":
+        pending = drain_pending_writes()
+        if pending:
+            await _register_and_emit_approvals(req, pending)
+            # Strip the replay descriptor from the client-facing payload —
+            # creds/args stay server-side in _PENDING_APPROVALS.
+            resp.pending_approvals = [
+                {k: v for k, v in rec.items() if k != "descriptor"}
+                for rec in pending
+            ]
+    return resp
+
+
+@router.post("/approve")
+async def post_approve(
+    body: ApprovalDecisionRequest,
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+) -> Dict[str, Any]:
+    """Phase 4 — resolve a queued write. "approve" replays the bridge call;
+    "deny" drops it. Either way the pending record is removed."""
+    _require_master_key(x_api_key)
+    rec = _PENDING_APPROVALS.pop(body.approval_id, None)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="unknown or already-resolved approval_id")
+    decision = (body.decision or "").strip().lower()
+    if decision not in ("approve", "deny"):
+        raise HTTPException(status_code=400, detail="decision must be 'approve' or 'deny'")
+    result: Optional[dict] = None
+    if decision == "approve":
+        try:
+            result = execute_pending_write(rec, rec.get("user_id"), rec.get("org_id"))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[approval] replay failed id=%s: %s", body.approval_id, exc)
+            raise HTTPException(status_code=502, detail=f"write replay failed: {exc}") from exc
+    await _emit_event(rec.get("callback_url") or "", rec.get("turn_id") or "", {
+        "t": "approval_resolved",
+        "approval_id": body.approval_id,
+        "decision": decision,
+        "label": rec.get("label"),
+        "result": result,
+    })
+    log.info("[approval] id=%s decision=%s label=%s", body.approval_id, decision, rec.get("label"))
+    return {"ok": True, "approval_id": body.approval_id, "decision": decision, "result": result}

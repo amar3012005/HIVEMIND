@@ -11,10 +11,12 @@ Tools route through HIVEMIND core's `/api/employees/slack-action`,
 audit + auto-ingest pipeline stays centralized.
 """
 
+import contextvars
 import json
 import logging
 import os
-from typing import List, Optional
+import uuid
+from typing import Any, Dict, List, Optional
 
 import httpx
 from agentscope.message._message_block import TextBlock
@@ -31,6 +33,106 @@ def _tool_response(payload: object) -> ToolResponse:
         content=[TextBlock(type="text", text=text)],
         metadata=payload if isinstance(payload, dict) else {"value": payload},
     )
+
+
+def _tool_response_text(text: str, metadata: Optional[dict] = None) -> ToolResponse:
+    return ToolResponse(
+        content=[TextBlock(type="text", text=text)],
+        metadata=metadata or {},
+    )
+
+
+# ─── Phase 4 — pre-acting write-approval gate ──────────────────────────
+# Side-effectful connector writes (docs_create/append, MCP non-read calls,
+# and any future gmail.send/slack/CRM/PR) are HELD when the turn's policy is
+# "ask": the tool records the proposed action and returns a "pending" result
+# WITHOUT firing the side effect. Reads stay free. The orchestrator drains the
+# queued writes after the turn and surfaces an approval card; the user approves
+# via /internal/hyper/approve, which replays the bridge call.
+#
+# The orchestrator arms these contextvars per turn (begin_turn_write_gate).
+# AgentScope calls sync tool functions directly in the turn coroutine, and the
+# pending list is set once up-front as a shared mutable object, so appends from
+# fanned-out child tasks (which copy the context) still land in the same list.
+_WRITE_POLICY: "contextvars.ContextVar[str]" = contextvars.ContextVar(
+    "hyper_write_policy", default="auto"
+)
+_PENDING_WRITES: "contextvars.ContextVar[Optional[list]]" = contextvars.ContextVar(
+    "hyper_pending_writes", default=None
+)
+
+# Read-intent name hints — MCP tools whose name matches are treated as reads
+# (free); everything else on a connector is a potential write (gated).
+_READ_HINTS = (
+    "search", "list", "get", "read", "fetch", "query", "find", "inspect",
+    "lookup", "describe", "view", "show", "preview", "summar", "count", "stat",
+)
+
+
+def _looks_like_read(name: str) -> bool:
+    n = (name or "").lower()
+    return any(h in n for h in _READ_HINTS)
+
+
+def begin_turn_write_gate(policy: str) -> None:
+    """Arm the write gate for the current turn. policy ∈ {"ask","auto"}."""
+    _WRITE_POLICY.set(policy if policy in ("ask", "auto") else "auto")
+    _PENDING_WRITES.set([])
+
+
+def drain_pending_writes() -> List[Dict[str, Any]]:
+    """Return (a copy of) the writes queued for approval this turn."""
+    pend = _PENDING_WRITES.get()
+    return list(pend) if isinstance(pend, list) else []
+
+
+def _gate_write(
+    label: str, summary: str, bridge: str, descriptor: dict
+) -> Optional[ToolResponse]:
+    """When policy is "ask", queue the write for approval and return a
+    "pending" ToolResponse WITHOUT executing. Returns None when the write may
+    run now (policy "auto"). `descriptor` carries everything the approve
+    endpoint needs to replay the bridge call."""
+    if _WRITE_POLICY.get() != "ask":
+        return None
+    approval_id = uuid.uuid4().hex[:12]
+    rec = {
+        "approval_id": approval_id,
+        "label": label,
+        "summary": summary,
+        "bridge": bridge,
+        "descriptor": descriptor,
+    }
+    pend = _PENDING_WRITES.get()
+    if isinstance(pend, list):
+        pend.append(rec)
+    return _tool_response_text(
+        f"⏸ APPROVAL REQUIRED — '{label}' was NOT executed. "
+        f"Proposed action: {summary}. An approval card has been surfaced to the "
+        f"user; this write runs only after they approve. Do NOT retry it — "
+        f"continue with the rest of the plan and report this action as pending "
+        f"the user's approval.",
+        metadata={"status": "pending_approval", "approval_id": approval_id, "label": label},
+    )
+
+
+def execute_pending_write(
+    rec: Dict[str, Any], user_id: Optional[str], org_id: Optional[str]
+) -> dict:
+    """Replay an approved write through the core bridge. Uses the master key +
+    emulation headers (the room owner's Nango token is resolved server-side)."""
+    bridge = rec.get("bridge")
+    descriptor = rec.get("descriptor") or {}
+    if bridge == "google":
+        path = "/api/connectors/google/exec"
+    elif bridge == "mcp":
+        path = "/api/connectors/mcp/exec"
+    else:
+        raise ValueError(f"unknown bridge: {bridge}")
+    with _client("", user_id, org_id) as c:
+        r = c.post(path, json=descriptor)
+        r.raise_for_status()
+        return r.json()
 
 
 def _client(
@@ -136,11 +238,27 @@ def _register_connector_tools(
                 notes="docs_create(title, content) → new doc + shareable url; docs_append(documentId, text). Side-effectful WRITE — use when the task's output is a document.",
             )
             def docs_create(title: str, content: str = "") -> ToolResponse:
+                gated = _gate_write(
+                    "docs_create",
+                    f"Create Google Doc “{title}” ({len(content or '')} chars)",
+                    "google",
+                    {"tool": "docs_create", "arguments": {"title": title, "content": content}},
+                )
+                if gated is not None:
+                    return gated
                 return _google("docs_create", {"title": title, "content": content})
-            docs_create.__doc__ = "Create a new Google Doc. title = doc title; content = initial text (the report). Returns documentId + shareable url."
+            docs_create.__doc__ = "Create a new Google Doc. title = doc title; content = initial text (the report). Returns documentId + shareable url. WRITE — may require the user's approval before it runs."
             def docs_append(documentId: str, text: str) -> ToolResponse:
+                gated = _gate_write(
+                    "docs_append",
+                    f"Append {len(text or '')} chars to Google Doc {documentId}",
+                    "google",
+                    {"tool": "docs_append", "arguments": {"documentId": documentId, "text": text}},
+                )
+                if gated is not None:
+                    return gated
                 return _google("docs_append", {"documentId": documentId, "text": text})
-            docs_append.__doc__ = "Append text to an existing Google Doc by documentId (from docs_create)."
+            docs_append.__doc__ = "Append text to an existing Google Doc by documentId (from docs_create). WRITE — may require the user's approval before it runs."
             tk.register_tool_function(docs_create, group_name="google_docs")
             tk.register_tool_function(docs_append, group_name="google_docs")
 
@@ -167,11 +285,23 @@ def _register_connector_tools(
                     return _tool_response(r.json())
 
             def _call(tool_name: str, arguments: Optional[dict] = None) -> ToolResponse:
+                descriptor = {
+                    "name": conn_name,
+                    "operation": {"type": "tool", "name": tool_name, "arguments": arguments or {}},
+                }
+                # Reads (search/list/get/...) run free; anything else on the
+                # connector is a potential side effect → gate it for approval.
+                if not _looks_like_read(tool_name):
+                    gated = _gate_write(
+                        f"{conn_name}.{tool_name}",
+                        f"Call {conn_name} tool '{tool_name}'",
+                        "mcp",
+                        descriptor,
+                    )
+                    if gated is not None:
+                        return gated
                 with _client(api_key, user_id, org_id) as c:
-                    r = c.post("/api/connectors/mcp/exec", json={
-                        "name": conn_name,
-                        "operation": {"type": "tool", "name": tool_name, "arguments": arguments or {}},
-                    })
+                    r = c.post("/api/connectors/mcp/exec", json=descriptor)
                     r.raise_for_status()
                     return _tool_response(r.json())
 

@@ -351,19 +351,22 @@ def build_react_agent(
     if _conns:
         _conn_lines = []
         if "gmail" in _conns:
-            _conn_lines.append("- Gmail: gmail_search(query, max), gmail_get(id) — read the team's email for live context.")
+            _conn_lines.append("- group `gmail` → gmail_search(query, max), gmail_get(id) — read the team's email for live context.")
         if "google_docs" in _conns:
-            _conn_lines.append("- Google Docs: docs_create(title, content), docs_append(documentId, text) — write/extend a real doc when the task asks for a document.")
+            _conn_lines.append("- group `google_docs` → docs_create(title, content), docs_append(documentId, text) — write a real doc when the output is a document.")
         for _c in _conns:
             if _c not in ("gmail", "google_docs"):
-                _conn_lines.append(f"- {_c}: <connector>_list_tools() then <connector>_call(tool_name, arguments).")
+                _g = _c.replace("-", "_")
+                _conn_lines.append(f"- group `{_g}` → {_g}_list_tools() then {_g}_call(tool_name, arguments).")
         persona = (
             persona
-            + "\n\nLIVE CONNECTOR TOOLS (enabled for this room):\n"
+            + "\n\nLIVE CONNECTOR GROUPS (enabled for this room — activate before use):\n"
             + "\n".join(_conn_lines)
-            + "\nUse these the same way you use memory recall and web search: when the task needs "
-              "real third-party context, pull it; when it asks for a document/sheet, create it. "
-              "Don't just talk about them — call them. No need to ask permission or for IDs."
+            + "\nThese groups are INACTIVE by default. When the task needs one, FIRST call "
+              "reset_equipped_tools(['<group>']) to equip it (e.g. reset_equipped_tools(['gmail'])), "
+              "then call its tools. Use them the same way you use memory recall and web search — pull "
+              "real third-party context, or produce the output (doc/sheet/etc). Don't just talk about "
+              "them; activate and call. No need to ask permission or for IDs."
         )
     # Default fallback is wider than before — gives a fresh employee
     # the full HIVEMIND reach. Hyper-room agents override via merged_emp.
@@ -426,6 +429,10 @@ def build_react_agent(
         toolkit=toolkit,
         memory=InMemoryMemory(),
         max_iters=max_iters,
+        # Phase 2: enable the reset_equipped_tools meta-tool ONLY when this agent
+        # has connector groups to activate (AgentScope-native MCPActivate). Off
+        # for tool-less agents (e.g. the planner) so they stay clean text.
+        enable_meta_tool=bool(_conns),
         # Sequential tool calls keep transcripts deterministic for
         # multi-agent reasoning. Parallel tool calls can be re-enabled
         # per-employee later if we want speedups for trusted roles.

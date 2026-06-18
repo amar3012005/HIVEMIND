@@ -98,48 +98,66 @@ def _register_connector_tools(
     user_id: Optional[str],
     org_id: Optional[str],
 ) -> None:
-    """Register a live-MCP toolkit for each granted 3rd-party connector
-    (P3 of HyperAgents×Connectors). For connector "github" the agent gets
-    `github_list_tools()` (discover) + `github_call(tool_name, arguments)`
-    (invoke). Both POST the core bridge /api/connectors/mcp/exec|inspect,
-    which resolves the room owner's Nango token server-side. The agent only
-    sees connectors the user GRANTED it for this room.
+    """Register each granted 3rd-party connector as an INACTIVE tool GROUP
+    (Phase 2). The connector's tools are NOT in the action space until the
+    agent activates the group via the `reset_equipped_tools` meta-tool
+    (AgentScope-native MCPActivate). This keeps the default action space small
+    — so pure reasoning / react-verdict steps see fewer tools and stop wrapping
+    plain output as a fake `JSON` tool-call — and the agent only equips a
+    connector when its task actually needs it. All calls POST the core bridge,
+    which resolves the room owner's Nango token server-side.
     """
-    def _register_google(tk2, kind: str):
-        """Native Google tools (gmail / google_docs) — call the core Google
-        bridge (/api/connectors/google/exec), token resolved server-side."""
+    def _register_google(kind: str):
         def _google(tool_name: str, arguments: Optional[dict] = None) -> ToolResponse:
             with _client(api_key, user_id, org_id) as c:
                 r = c.post("/api/connectors/google/exec", json={"tool": tool_name, "arguments": arguments or {}})
                 r.raise_for_status()
                 return _tool_response(r.json())
         if kind == "gmail":
+            tk.create_tool_group(
+                group_name="gmail",
+                description="Read the room owner's Gmail (read-only).",
+                active=False,
+                notes="gmail_search(query, max≤20) → id/subject/from/date/snippet; gmail_get(id) → full body. Read-only, safe to use freely.",
+            )
             def gmail_search(query: str = "", max: int = 5) -> ToolResponse:
                 return _google("gmail_search", {"query": query, "max": max})
             gmail_search.__doc__ = "Search the room owner's Gmail. query = Gmail search syntax (e.g. 'from:acme newer_than:30d'); max ≤ 20. Returns id/subject/from/date/snippet. Use gmail_get for a full body."
             def gmail_get(id: str) -> ToolResponse:
                 return _google("gmail_get", {"id": id})
             gmail_get.__doc__ = "Fetch one Gmail message in full by id (from gmail_search). Returns subject/from/to/date/body."
-            tk2.register_tool_function(gmail_search)
-            tk2.register_tool_function(gmail_get)
+            tk.register_tool_function(gmail_search, group_name="gmail")
+            tk.register_tool_function(gmail_get, group_name="gmail")
         elif kind == "google_docs":
+            tk.create_tool_group(
+                group_name="google_docs",
+                description="Create or extend Google Docs (write).",
+                active=False,
+                notes="docs_create(title, content) → new doc + shareable url; docs_append(documentId, text). Side-effectful WRITE — use when the task's output is a document.",
+            )
             def docs_create(title: str, content: str = "") -> ToolResponse:
                 return _google("docs_create", {"title": title, "content": content})
-            docs_create.__doc__ = "Create a new Google Doc. title = doc title; content = initial text (the report). Returns documentId + shareable url. Use this to write the final report."
+            docs_create.__doc__ = "Create a new Google Doc. title = doc title; content = initial text (the report). Returns documentId + shareable url."
             def docs_append(documentId: str, text: str) -> ToolResponse:
                 return _google("docs_append", {"documentId": documentId, "text": text})
             docs_append.__doc__ = "Append text to an existing Google Doc by documentId (from docs_create)."
-            tk2.register_tool_function(docs_create)
-            tk2.register_tool_function(docs_append)
+            tk.register_tool_function(docs_create, group_name="google_docs")
+            tk.register_tool_function(docs_append, group_name="google_docs")
 
     for raw in connectors or []:
         conn = str(raw or "").strip()
         if not conn:
             continue
         if conn in ("gmail", "google_docs"):
-            _register_google(tk, conn)
+            _register_google(conn)
             continue
         safe = conn.replace("-", "_")
+        tk.create_tool_group(
+            group_name=safe,
+            description=f"{conn} connector (3rd-party MCP).",
+            active=False,
+            notes=f"{safe}_list_tools() to discover available tools, then {safe}_call(tool_name, arguments) to invoke.",
+        )
 
         def _make(conn_name: str, safe_name: str):
             def _list() -> ToolResponse:
@@ -159,22 +177,19 @@ def _register_connector_tools(
 
             _list.__name__ = f"{safe_name}_list_tools"
             _list.__doc__ = (
-                f"List the tools available on the {conn_name} connector (a 3rd-party "
-                f"MCP integration the user granted this room). Call this FIRST to see "
-                f"what {conn_name} tool_name values {safe_name}_call accepts."
+                f"List the tools available on the {conn_name} connector. Call this "
+                f"FIRST to see what {conn_name} tool_name values {safe_name}_call accepts."
             )
             _call.__name__ = f"{safe_name}_call"
             _call.__doc__ = (
                 f"Invoke a tool on the {conn_name} connector. tool_name must be one "
-                f"returned by {safe_name}_list_tools; arguments is that tool's input "
-                f"object. Use only when the room task needs live {conn_name} data/action; "
-                f"cite what you pull."
+                f"returned by {safe_name}_list_tools; arguments is that tool's input object."
             )
             return _list, _call
 
         lst, cll = _make(conn, safe)
-        tk.register_tool_function(lst)
-        tk.register_tool_function(cll)
+        tk.register_tool_function(lst, group_name=safe)
+        tk.register_tool_function(cll, group_name=safe)
 
 
 def build_hivemind_toolkit(

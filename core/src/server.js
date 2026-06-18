@@ -9926,6 +9926,43 @@ exit \$RC
           }
           break;
 
+        case '/api/org/members':
+          // Org directory for HyperAgents: the lead resolves a person (by name)
+          // to their email/role/projects so "send to <name>" works. Scoped to
+          // the caller's org (from auth principal / X-HM-Org-Id). Read-only.
+          if (req.method === 'POST' || req.method === 'GET') {
+            try {
+              const q = String(body?.query || '').trim().toLowerCase();
+              const rows = await prisma.$queryRawUnsafe(
+                `SELECT u.id, u.display_name, u.email, uo.role, uo.roles,
+                        COALESCE(array_agg(DISTINCT p.name) FILTER (WHERE p.name IS NOT NULL), '{}') AS projects
+                 FROM hivemind.user_organizations uo
+                 JOIN hivemind.users u ON u.id = uo.user_id
+                 LEFT JOIN hivemind.project_members pm ON pm.user_id = u.id
+                 LEFT JOIN hivemind.projects p ON p.id = pm.project_id AND p.org_id = uo.org_id
+                 WHERE uo.org_id = $1::uuid AND uo.is_active = true AND u.deleted_at IS NULL
+                 GROUP BY u.id, u.display_name, u.email, uo.role, uo.roles
+                 ORDER BY u.display_name NULLS LAST`,
+                orgId,
+              );
+              let members = (rows || []).map((r) => ({
+                name: r.display_name || (r.email || '').split('@')[0],
+                email: r.email,
+                roles: (r.roles && r.roles.length ? r.roles : [r.role]).filter(Boolean),
+                projects: Array.isArray(r.projects) ? r.projects : [],
+              }));
+              if (q) {
+                const f = members.filter((m) =>
+                  (m.name || '').toLowerCase().includes(q) || (m.email || '').toLowerCase().includes(q));
+                if (f.length) members = f; // fall back to full list if no name match
+              }
+              return jsonResponse(res, { count: members.length, members });
+            } catch (error) {
+              return jsonResponse(res, { error: error.message }, 500);
+            }
+          }
+          break;
+
         case '/api/admin/backfill':
           // P3 #20 — re-process historical segments through current pipeline
           if (req.method === 'POST') {

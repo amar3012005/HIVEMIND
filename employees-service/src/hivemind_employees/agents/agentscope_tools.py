@@ -513,6 +513,21 @@ def build_hivemind_toolkit(
     """
     tk = Toolkit()
 
+    # Org directory — ALWAYS available (internal). Lets the lead resolve a person
+    # by name to their email/role/projects, so "send to <name>" works without the
+    # user spelling out an address.
+    def org_directory(query: str = "") -> ToolResponse:
+        """Look up the organization's members — names, emails, roles, and the
+        projects each is on. Pass a name (or part of one) to find a specific
+        person — e.g. to get the email to send to when the user only gave a first
+        name. Empty query lists everyone. Use this BEFORE gmail_send when the
+        recipient is named but no address was given."""
+        with _client(api_key, user_id, org_id) as c:
+            r = c.post("/api/org/members", json={"query": query})
+            r.raise_for_status()
+            return _tool_response(r.json())
+    tk.register_tool_function(org_directory)
+
     if "hivemind_slack_post" in enabled_tool_names:
         def slack_post(channel: str, text: str, thread_ts: Optional[str] = None) -> ToolResponse:
             """Post a message to a Slack channel or thread.

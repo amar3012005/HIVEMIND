@@ -3881,9 +3881,11 @@ def _output_production_directive(turn_id: str) -> str:
     if out == "email":
         return (
             "\n\n── PRODUCE THE DELIVERABLE NOW ──\n"
-            "The team has reached consensus. Activate the gmail group and call "
-            "gmail_send(to, subject, body) with the final email. It will be held for the "
-            "user's one-click approval before it actually sends."
+            "The team has reached consensus. If the recipient was named but no email "
+            "address was given (e.g. 'send to Rama'), FIRST call org_directory('Rama') "
+            "to resolve their address from the org directory. Then activate the gmail "
+            "group and call gmail_send(to, subject, body) with the final email. It is "
+            "saved as a draft and held for the user's one-click approval before it sends."
         )
     return ""
 

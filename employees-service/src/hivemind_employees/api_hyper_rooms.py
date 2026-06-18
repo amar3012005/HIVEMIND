@@ -1709,6 +1709,9 @@ class RoomTurnResponse(BaseModel):
     # Phase 4 — writes the team queued for the user's approval this turn (each
     # carries approval_id/label/summary; the side effect has NOT fired yet).
     pending_approvals: Optional[List[Dict[str, Any]]] = None
+    # Phase 5 — recon/verify verdict vs the lead's done_criterion
+    # {met, artifact_ok, assignments_ok, grounded_ok, gaps[], note}.
+    verification: Optional[Dict[str, Any]] = None
 
 
 class ApprovalDecisionRequest(BaseModel):
@@ -2330,6 +2333,8 @@ async def _orchestrate_deep_sim(
         project_scoped=bool(req.project_id),
         project_memory_hits=int(blackboard.get("project_hit_count", 0) or 0),
     ))
+    # Phase 5 — recon/verify the result against the lead's done-criterion.
+    await _verify_and_emit(req, lead, final_text=final_text, blackboard=blackboard)
     await _emit_event(req.callback_url, req.turn_id, _build_final_report(
         user_message=req.user_message,
         final_text=final_text,
@@ -3529,6 +3534,12 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
         project_scoped=bool(memory_audit.get("project_scoped")),
         project_memory_hits=int(memory_audit.get("project_hits", 0) or 0),
     ))
+    # Phase 5 — recon/verify the result against the lead's done-criterion.
+    await _verify_and_emit(
+        req, lead, final_text=final_text,
+        tool_call_counts=tool_call_counts,
+        blackboard={"hit_count": len(evidence_pool)},
+    )
     await _emit_event(req.callback_url, req.turn_id, _build_final_report(
         user_message=req.user_message,
         final_text=final_text,
@@ -3677,6 +3688,123 @@ async def _plan_turn(
         "connectors_needed": [c for c in (plan.get("connectors_needed") or [])
                               if isinstance(c, str) and c in (enabled_connectors or [])],
     }
+
+
+# Artifacts a turn may produce (links the verifier treats as real output).
+_ARTIFACT_URL_RE = re.compile(
+    r"https?://(?:docs\.google\.com|drive\.google\.com|sheets\.google\.com)/\S+",
+    re.IGNORECASE,
+)
+
+
+async def _verify_turn(
+    req: "RoomTurnRequest",
+    lead: Dict[str, Any],
+    *,
+    final_text: str,
+    tool_call_counts: Optional[Dict[str, int]] = None,
+    blackboard: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Phase 5 — recon/verify pass. Before the turn seals, cross-check the
+    produced evidence against the lead's `done_criterion`: artifact exists (or
+    is queued for approval)? assignments covered? claims grounded? Returns a
+    verdict {met, artifact_ok, assignments_ok, grounded_ok, gaps[], note} or
+    None when there is no plan to verify against. Sets up P6 (goalkeeper loops
+    while met is False). Tool-less single-shot LLM, like the planner."""
+    plan = _PLAN_BY_TURN.get(req.turn_id)
+    if not plan:
+        return None
+    pending = drain_pending_writes()  # non-destructive snapshot of queued writes
+    produced = sorted(set(_ARTIFACT_URL_RE.findall(final_text or "")))
+    evidence = {
+        "intended_output": plan.get("intended_output"),
+        "done_criterion": plan.get("done_criterion"),
+        "assignments": list((plan.get("assignments") or {}).keys()),
+        "tools_used": {str(k): int(v) for k, v in (tool_call_counts or {}).items()},
+        "writes_pending_approval": [p.get("label") for p in pending],
+        "produced_artifacts": produced,
+        "memory_hits": int((blackboard or {}).get("hit_count", 0) or 0),
+        "final_excerpt": (final_text or "")[:1600],
+    }
+    prompt = (
+        "You are the room's recon/verifier. Cross-check the team's result against the "
+        "done-criterion and report gaps. Be strict and evidence-based.\n\n"
+        f"EVIDENCE:\n{json.dumps(evidence, ensure_ascii=False)}\n\n"
+        "Reply with STRICT JSON only (no prose, no markdown), exactly these keys:\n"
+        '{\n'
+        '  "met": <true only if the done-criterion is fully satisfied by real evidence>,\n'
+        '  "artifact_ok": <intended output was produced OR is queued pending the user\'s approval>,\n'
+        '  "assignments_ok": <the assigned sub-tasks appear covered by the result>,\n'
+        '  "grounded_ok": <specific factual claims are backed by tools/memory, not invented>,\n'
+        '  "gaps": ["<concrete missing/unverified item>", "..."],\n'
+        '  "note": "<one sentence>"\n'
+        '}\n'
+        "Rules: a WRITE that is PENDING APPROVAL counts as done-pending → artifact_ok=true, "
+        "and met may be true (work is complete, awaiting the human). grounded_ok=false if the "
+        "result asserts specific facts with memory_hits=0 and no tools used. If nothing is "
+        "missing, gaps must be []. Output JSON only."
+    )
+    try:
+        boot = {b["id"]: b for b in await fetch_bootstrap()}
+        boot_emp = boot.get(lead["id"], {}) or {}
+        verifier_emp = {
+            **lead,
+            "tools": ["_verify_noop"],   # truthy, matches no real tool → empty toolkit
+            "connectors": [],
+            "hyper": boot_emp.get("hyper"),
+            "active_prompt_version": boot_emp.get("active_prompt_version"),
+            "max_iters": 1,
+        }
+        agent = build_react_agent(
+            verifier_emp, boot_emp.get("api_key") or "",
+            user_id=req.user_id, org_id=req.org_id, project_id=req.project_id,
+        )
+        reply = await agent(Msg(name="user", content=prompt, role="user"))
+    except Exception as exc:  # noqa: BLE001 — never fail a turn over verification
+        log.warning("[verify] pass failed: %s", exc)
+        return None
+    obj = _first_json_object(_msg_to_text(reply) or "")
+    if not isinstance(obj, dict):
+        return None
+    verdict = {
+        "met": bool(obj.get("met")),
+        "artifact_ok": bool(obj.get("artifact_ok")),
+        "assignments_ok": bool(obj.get("assignments_ok")),
+        "grounded_ok": bool(obj.get("grounded_ok")),
+        "gaps": [str(g)[:200] for g in (obj.get("gaps") or []) if str(g).strip()][:8],
+        "note": str(obj.get("note") or "")[:300],
+        "produced_artifacts": produced,
+        "pending_writes": [p.get("label") for p in pending],
+        "intended_output": plan.get("intended_output"),
+        "done_criterion": plan.get("done_criterion"),
+    }
+    return verdict
+
+
+async def _verify_and_emit(
+    req: "RoomTurnRequest",
+    lead: Dict[str, Any],
+    *,
+    final_text: str,
+    tool_call_counts: Optional[Dict[str, int]] = None,
+    blackboard: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Run the verify pass, emit a `verify` event, stash the verdict on the
+    plan (so the handler/P6 goalkeeper can read it), and return it."""
+    verdict = await _verify_turn(
+        req, lead, final_text=final_text,
+        tool_call_counts=tool_call_counts, blackboard=blackboard,
+    )
+    if verdict is None:
+        return None
+    plan = _PLAN_BY_TURN.get(req.turn_id)
+    if isinstance(plan, dict):
+        plan["verification"] = verdict
+    await _emit_event(req.callback_url, req.turn_id, {"t": "verify", **verdict})
+    log.info("[verify] room=%s met=%s artifact=%s assign=%s grounded=%s gaps=%d",
+             req.room_id, verdict["met"], verdict["artifact_ok"],
+             verdict["assignments_ok"], verdict["grounded_ok"], len(verdict["gaps"]))
+    return verdict
 
 
 async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
@@ -4733,6 +4861,11 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         votes_count=0,
         web_intel_used="WEB INTEL DOSSIER" in (memory_context or ""),
     ))
+    # Phase 5 — recon/verify the result against the lead's done-criterion.
+    await _verify_and_emit(
+        req, lead, final_text=final_text,
+        tool_call_counts=tool_call_counts, blackboard=blackboard,
+    )
     await _emit_event(req.callback_url, req.turn_id, _build_final_report(
         user_message=req.user_message,
         final_text=final_text,
@@ -4808,6 +4941,10 @@ async def post_room_turn(
                 {k: v for k, v in rec.items() if k != "descriptor"}
                 for rec in pending
             ]
+    # Phase 5 — surface the recon/verify verdict (stashed on the plan).
+    _vplan = _PLAN_BY_TURN.get(req.turn_id)
+    if isinstance(_vplan, dict) and isinstance(_vplan.get("verification"), dict):
+        resp.verification = _vplan["verification"]
     return resp
 
 

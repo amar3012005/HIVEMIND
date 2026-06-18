@@ -3671,10 +3671,10 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             await _emit_event(req.callback_url, req.turn_id, {"t": "typing", "agent": emp.get("slug"), "kind": "gathering"})
             gather_prompt = (
                 f"Team task: {req.user_message}\n\n"
-                f"You have LIVE tools enabled: {_tools_hint}. Do YOUR part now on FRESH data — "
-                f"call the read tools (e.g. gmail_search/gmail_get) and contribute concrete findings "
-                f"(real senders, subjects, key content). Do NOT rely on prior reports or memory, do NOT "
-                f"ask for permission. Be concise — a few bullet findings the team can build on."
+                f"Use ONLY the READ tools (gmail_search, gmail_get) to gather FRESH data and contribute "
+                f"concrete findings (real senders, subjects, key content). Do NOT create or write documents "
+                f"— the lead will write the final doc from everyone's findings. Do NOT rely on prior reports "
+                f"or memory, do NOT ask for permission. Be concise — a few bullet findings the team builds on."
             )
             try:
                 _ga = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id, project_id=req.project_id)

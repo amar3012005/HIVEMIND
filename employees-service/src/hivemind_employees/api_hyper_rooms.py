@@ -3792,6 +3792,31 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         })
         log.info("[plan] room=%s output=%s steps=%d assignments=%d",
                  req.room_id, _plan["intended_output"], len(_plan["steps"]), len(_plan["assignments"]))
+        # Phase 3 — drive execution from the plan. The lead's plan is folded
+        # into the turn input so every template (debate/swarm/deep_sim) and
+        # every agent acts on it: target output, done-criterion, ordered steps,
+        # and each agent's assigned sub-task. Cache-safe — this is turn input,
+        # not baked into the (room,emp,connectors)-cached agent, so a fresh plan
+        # each turn reaches the same cached agents without a rebuild.
+        _assign_lines = "\n".join(
+            f"  - {k}: {v}" for k, v in _plan["assignments"].items()
+        )
+        _steps_str = " → ".join(str(s) for s in _plan["steps"]) if _plan["steps"] else ""
+        _preamble_parts = [
+            f"[TEAM PLAN — set by {lead.get('name') or lead.get('slug')}]",
+            f"Target output: {_plan['intended_output']}.",
+            f"Done when: {_plan['done_criterion']}." if _plan.get("done_criterion") else "",
+            f"Plan: {_steps_str}." if _steps_str else "",
+            (f"Assignments:\n{_assign_lines}" if _assign_lines else ""),
+            (
+                "Each of you: do YOUR assigned part using your tools (activate the "
+                "connector group first if needed), build on each other with healthy "
+                "skepticism and peer-review, and drive together to the target output. "
+                "Do not stop at discussion — produce the actual output."
+            ),
+        ]
+        _plan_preamble = "\n".join(p for p in _preamble_parts if p)
+        req.user_message = f"{_plan_preamble}\n\n---\nUSER REQUEST:\n{req.user_message}"
 
     # ── Deep simulation template — MiroFish-style live room ───────────
     if room_template == "deep_sim":

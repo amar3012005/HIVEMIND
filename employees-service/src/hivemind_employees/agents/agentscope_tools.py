@@ -218,9 +218,9 @@ def _register_connector_tools(
         if kind == "gmail":
             tk.create_tool_group(
                 group_name="gmail",
-                description="Read the room owner's Gmail (read-only).",
+                description="Read the room owner's Gmail, and send mail (send is a gated WRITE).",
                 active=False,
-                notes="gmail_search(query, max≤20) → id/subject/from/date/snippet; gmail_get(id) → full body. Read-only, safe to use freely.",
+                notes="gmail_search(query, max≤20) → id/subject/from/date/snippet; gmail_get(id) → full body (both read-only, free). gmail_send(to, subject, body, cc) → sends mail — side-effectful WRITE, may require the user's approval.",
             )
             def gmail_search(query: str = "", max: int = 5) -> ToolResponse:
                 return _google("gmail_search", {"query": query, "max": max})
@@ -228,8 +228,20 @@ def _register_connector_tools(
             def gmail_get(id: str) -> ToolResponse:
                 return _google("gmail_get", {"id": id})
             gmail_get.__doc__ = "Fetch one Gmail message in full by id (from gmail_search). Returns subject/from/to/date/body."
+            def gmail_send(to: str, subject: str, body: str = "", cc: str = "") -> ToolResponse:
+                gated = _gate_write(
+                    "gmail_send",
+                    f"Send email to {to} — “{subject}”",
+                    "google",
+                    {"tool": "gmail_send", "arguments": {"to": to, "subject": subject, "body": body, "cc": cc}},
+                )
+                if gated is not None:
+                    return gated
+                return _google("gmail_send", {"to": to, "subject": subject, "body": body, "cc": cc})
+            gmail_send.__doc__ = "Send an email from the room owner's Gmail. to = recipient address; subject; body = plain text; cc optional. WRITE — may require the user's approval before it sends."
             tk.register_tool_function(gmail_search, group_name="gmail")
             tk.register_tool_function(gmail_get, group_name="gmail")
+            tk.register_tool_function(gmail_send, group_name="gmail")
         elif kind == "google_docs":
             tk.create_tool_group(
                 group_name="google_docs",

@@ -84,6 +84,27 @@ export const GOOGLE_TOOLS = {
       };
     },
   },
+  gmail_send: {
+    provider: 'gmail',
+    description: 'Send an email from the connected Gmail account. args: { to, subject, body, cc (optional) }. Side-effectful WRITE — gated for the user\'s approval in HyperAgents rooms.',
+    run: async (token, a) => {
+      if (!a.to || !a.subject) throw new Error('gmail_send requires { to, subject, body }');
+      const headers = [
+        `To: ${a.to}`,
+        a.cc ? `Cc: ${a.cc}` : null,
+        `Subject: ${a.subject}`,
+        'MIME-Version: 1.0',
+        'Content-Type: text/plain; charset="UTF-8"',
+      ].filter(Boolean).join('\r\n');
+      const mime = `${headers}\r\n\r\n${a.body || ''}`;
+      const raw = Buffer.from(mime, 'utf8').toString('base64')
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+      const res = await g('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', token, {
+        method: 'POST', body: JSON.stringify({ raw }),
+      });
+      return { id: res.id, threadId: res.threadId, to: a.to, subject: a.subject, sent: true };
+    },
+  },
   docs_create: {
     provider: 'google-docs',
     description: 'Create a new Google Doc. args: { title, content (optional initial text) }. Returns documentId + shareable url.',

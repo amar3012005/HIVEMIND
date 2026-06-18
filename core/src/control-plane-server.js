@@ -5971,6 +5971,8 @@ Write the persona now.`;
     const roomTurnMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/turns(?:\/([0-9a-f-]{36})(\/stream)?)?$/);
     const flybyDecisionMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/turns\/([0-9a-f-]{36})\/flyby-decision$/);
     const flybyDecisionCompat = roomTurnMatch && roomTurnMatch[2] && !roomTurnMatch[3] && url.searchParams.get('action') === 'flyby-decision';
+    // Phase 7 — resolve a queued connector write (approval card action).
+    const roomApproveMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/approve$/);
     const roomMetaMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})$/);
 
     // DELETE /v1/hyper-rooms/:id — permanent delete (?hard=true) or archive.
@@ -6317,6 +6319,38 @@ Write the persona now.`;
       } catch (err) {
         console.warn('[hyper-rooms] flyby decision failed:', err.message);
         return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+
+    // POST /v1/hyper-rooms/:id/approve — resolve a queued connector write
+    // (Phase 7 approval card). Body: { approval_id, decision: "approve"|"deny" }.
+    // Proxies to the sidecar with the master key (sidecar reads X-API-Key).
+    if (roomApproveMatch && req.method === 'POST') {
+      const current = await requireSession(req, res);
+      if (!current) return true;
+      const body = await parseBody(req).catch(() => ({}));
+      const approvalId = String(body.approval_id || '').trim();
+      const decision = String(body.decision || '').trim().toLowerCase();
+      if (!approvalId || !['approve', 'deny'].includes(decision)) {
+        return jsonResponse(res, { error: 'approval_id and decision (approve|deny) required' }, 400);
+      }
+      const sidecarBase = process.env.EMPLOYEES_SIDECAR_URL || process.env.HIVEMIND_EMPLOYEES_URL || 'http://hm-employees:8060';
+      try {
+        const resp = await fetch(`${sidecarBase}/internal/hyper/approve`, {
+          method: 'POST',
+          headers: {
+            'X-API-Key': process.env.HIVEMIND_MASTER_API_KEY || process.env.API_MASTER_KEY || 'hm_master_key_99228811',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ approval_id: approvalId, decision }),
+          signal: AbortSignal.timeout(60000),
+        });
+        const text = await resp.text();
+        let payload; try { payload = JSON.parse(text); } catch { payload = { raw: text }; }
+        return jsonResponse(res, payload, resp.status);
+      } catch (err) {
+        console.warn('[hyper-rooms] approve proxy failed:', err.message);
+        return jsonResponse(res, { error: `sidecar unreachable: ${err.message}` }, 502);
       }
     }
 

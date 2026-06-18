@@ -3521,6 +3521,31 @@ async def _orchestrate_swarm(req: "RoomTurnRequest", participants: List[Dict[str
 _PLAN_OUTPUTS = {"email", "doc", "sheet", "slack", "ticket", "crm", "decision", "answer"}
 
 
+def _first_json_object(text: str) -> Optional[Dict[str, Any]]:
+    """Extract the FIRST balanced {...} object and json.loads it. Robust to a
+    model emitting trailing/extra braces after a valid object (greedy regex
+    grabbed too much)."""
+    if not text:
+        return None
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    for i in range(start, len(text)):
+        c = text[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    obj = json.loads(text[start:i + 1])
+                    return obj if isinstance(obj, dict) else None
+                except Exception:  # noqa: BLE001
+                    return None
+    return None
+
+
 async def _plan_turn(
     req: "RoomTurnRequest",
     lead: Dict[str, Any],
@@ -3557,22 +3582,30 @@ async def _plan_turn(
         '"write a report/brief"→doc, "build a tracker/table"→sheet, "should we…/which option"→decision, '
         'a plain question→answer. Only assign agents that are on the team. Output JSON only.'
     )
+    # Build a TOOL-LESS in-persona planner: no tools in the action space means
+    # the model can't emit a fake `JSON` tool-call (the llama-3.3 quirk that 400s)
+    # — it just returns the plan as text. Persona preserved (active_prompt_version
+    # + persona_contract flow through build_react_agent). Single-shot.
     try:
-        agent = await _build_agent_for_room(
-            req.room_id, lead, user_id=req.user_id, org_id=req.org_id, project_id=req.project_id,
+        boot = {b["id"]: b for b in await fetch_bootstrap()}
+        boot_emp = boot.get(lead["id"], {}) or {}
+        planner_emp = {
+            **lead,
+            "tools": ["_plan_noop"],   # truthy but matches no real tool → empty toolkit
+            "connectors": [],
+            "hyper": boot_emp.get("hyper"),
+            "active_prompt_version": boot_emp.get("active_prompt_version"),
+            "max_iters": 1,
+        }
+        agent = build_react_agent(
+            planner_emp, boot_emp.get("api_key") or "",
+            user_id=req.user_id, org_id=req.org_id, project_id=req.project_id,
         )
         reply = await agent(Msg(name="user", content=prompt, role="user"))
     except Exception as exc:  # noqa: BLE001
         log.warning("[plan] lead planning failed: %s", exc)
         return None
-    text = _msg_to_text(reply) or ""
-    plan: Optional[Dict[str, Any]] = None
-    try:
-        m = re.search(r"\{[\s\S]+\}", text)
-        if m:
-            plan = json.loads(m.group(0))
-    except Exception:  # noqa: BLE001 — salvage below
-        plan = None
+    plan = _first_json_object(_msg_to_text(reply) or "")
     if not isinstance(plan, dict):
         # Heuristic salvage so the turn still gets a usable output type.
         plan = {}

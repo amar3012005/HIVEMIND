@@ -4033,6 +4033,31 @@ async def _gather_evidence(
     return plan["evidence"]
 
 
+async def _recon_pre(req: "RoomTurnRequest", plan: Dict[str, Any], clean_msg: str) -> Dict[str, Any]:
+    """RECON-PRE phase — verify the gathered evidence is SUFFICIENT to produce the
+    output BEFORE the team writes it. Flags gaps (e.g. no verified recipient, no
+    voice samples for a style task) so the production step resolves/flags them
+    instead of fabricating. Deterministic + fast. Emits a `recon_pre` event and
+    stashes plan['evidence_gaps']."""
+    out = plan.get("intended_output")
+    ev = plan.get("evidence") or {}
+    contacts = ev.get("contacts") or []
+    correspondence = ev.get("correspondence") or []
+    style_signal = any(t in (clean_msg or "").lower() for t in _STYLE_SIGNALS)
+    missing: List[str] = []
+    if out in ("email", "slack") and not contacts:
+        missing.append("a verified recipient address — resolve via org_directory (org + Gmail) or ask the user; do NOT guess one")
+    if (out == "email" or style_signal) and not correspondence:
+        missing.append("the sender's prior messages to match their real voice — read them via gmail_search/gmail_get before writing")
+    verdict = {"sufficient": not missing, "missing": missing}
+    plan["evidence_gaps"] = missing
+    await _emit_event(req.callback_url, req.turn_id, {
+        "t": "recon_pre", "sufficient": verdict["sufficient"], "missing": missing,
+    })
+    log.info("[recon-pre] room=%s sufficient=%s gaps=%d", req.room_id, verdict["sufficient"], len(missing))
+    return verdict
+
+
 async def _resolve_recipients(req: "RoomTurnRequest", message: str = "") -> List[Dict[str, Any]]:
     """Extract recipient names from the turn and resolve each to a REAL email via
     the org directory (which also checks Gmail). Returns [{name, email, source}].
@@ -4072,6 +4097,13 @@ def _output_production_directive(turn_id: str) -> str:
     if not isinstance(plan, dict):
         return ""
     out = plan.get("intended_output")
+    # RECON-PRE gaps: evidence the produce step must resolve or flag, not fabricate.
+    _gaps = plan.get("evidence_gaps") or []
+    _gap_prefix = (
+        ("\n\n⚠ EVIDENCE GAPS (resolve these BEFORE producing, or flag them — do NOT "
+         "fabricate to fill them):\n" + "\n".join(f"  - {g}" for g in _gaps))
+        if _gaps else ""
+    )
     if out == "doc":
         return (
             "\n\n── PRODUCE THE DELIVERABLE NOW ──\n"
@@ -4119,6 +4151,7 @@ def _output_production_directive(turn_id: str) -> str:
                 "write a generic template.)\n"
             )
         return (
+            _gap_prefix +
             "\n\n── PRODUCE THE DELIVERABLE NOW ──\n"
             "The team has reached consensus.\n"
             "0) VOICE/STYLE: " + style_block +
@@ -4351,6 +4384,12 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             await _gather_evidence(req, _plan, _clean_user_request)
         except Exception as exc:  # noqa: BLE001 — never fail a turn over gathering
             log.warning("[gather] failed: %s", exc)
+        # ── RECON-PRE phase ── verify the evidence is sufficient BEFORE writing;
+        # surfaces gaps the production step must resolve/flag (not fabricate).
+        try:
+            await _recon_pre(req, _plan, _clean_user_request)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[recon-pre] failed: %s", exc)
         # Phase 3 — drive execution from the plan. The lead's plan is folded
         # into the turn input so every template (debate/swarm/deep_sim) and
         # every agent acts on it: target output, done-criterion, ordered steps,

@@ -3606,16 +3606,6 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
     elif _is_deep_sim_prompt(req.user_message):
         log.info("[template] promoted explicit simulation prompt to deep_sim room=%s previous=%s", req.room_id, room_template)
         room_template = "deep_sim"
-    # Connector-enabled rooms collaborate WITH tools: in swarm, every non-lead
-    # agent runs its OWN tool-capable ReAct loop (read/act) and the lead
-    # synthesizes — so agents interact AND each uses gmail/docs, instead of the
-    # debate just arguing. Promote a plain debate room to swarm when connectors
-    # are on. (Explicit deep_sim/decision/etc. picks are respected.)
-    _conns_for_template = await get_room_enabled_connectors(req.room_id, org_id=req.org_id)
-    if _conns_for_template and room_template == "debate":
-        log.info("[template] connectors=%s → promoting debate→swarm for collaborative tool use room=%s",
-                 _conns_for_template, req.room_id)
-        room_template = "swarm"
     # A4: pull trust scores for display only (no routing weight yet).
     trust_map = await get_trust_scores(req.org_id, [p["id"] for p in participants])
     trust_by_slug = {p.get("slug"): trust_map.get(p["id"], 0.5) for p in participants}
@@ -3664,6 +3654,82 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             "turn_seq": seq,
         })
     _mark("router_ms")
+
+    # ── Collaborative execution — connector-enabled rooms WORK TOGETHER + use tools ──
+    # The agents don't just debate: each contributor takes a tool-using ReAct
+    # turn on fresh data (read Gmail, etc.) — that's the interaction + every
+    # agent using the tools — then the lead synthesizes the team's findings and
+    # uses the write tool (docs_create) to produce the artifact. Falls through
+    # to the normal templates when no connectors are enabled.
+    _room_conns = await get_room_enabled_connectors(req.room_id, org_id=req.org_id)
+    if _room_conns and (req.flyby_decision or "").strip().lower() not in ("agree", "disagree"):
+        _tools_hint = ", ".join(_room_conns) + " (gmail_search, gmail_get, docs_create, docs_append)"
+        contributors = ([lead] + [r for r in reactors if r["id"] != lead["id"]])[:3]
+        findings: List[str] = []
+        await _emit_event(req.callback_url, req.turn_id, {"t": "simulation_phase", "phase": "gather", "label": "Agents gather live data"})
+        for emp in contributors:
+            await _emit_event(req.callback_url, req.turn_id, {"t": "typing", "agent": emp.get("slug"), "kind": "gathering"})
+            gather_prompt = (
+                f"Team task: {req.user_message}\n\n"
+                f"You have LIVE tools enabled: {_tools_hint}. Do YOUR part now on FRESH data — "
+                f"call the read tools (e.g. gmail_search/gmail_get) and contribute concrete findings "
+                f"(real senders, subjects, key content). Do NOT rely on prior reports or memory, do NOT "
+                f"ask for permission. Be concise — a few bullet findings the team can build on."
+            )
+            try:
+                _ga = await _build_agent_for_room(req.room_id, emp, user_id=req.user_id, org_id=req.org_id, project_id=req.project_id)
+                _gr = await _ga(Msg(name="user", content=gather_prompt, role="user"))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[collab-exec] gather failed for %s: %s", emp.get("slug"), exc)
+                _gr = None
+            _gt = _msg_to_text(_gr) if _gr else ""
+            if _gt:
+                findings.append(f"{emp.get('name') or emp.get('slug')}: {_gt}")
+                _tk = max(200, len(_gt) // 4)
+                cost_tokens += _tk
+                await _emit_event(req.callback_url, req.turn_id, {
+                    "t": "line", "agent": emp.get("slug"), "round": 1,
+                    "kind": "investigate", "content": _gt, "tokens": _tk,
+                })
+        # Lead synthesizes the team's findings and writes the artifact.
+        await _emit_event(req.callback_url, req.turn_id, {"t": "typing", "agent": lead.get("slug"), "kind": "producing"})
+        synth_prompt = (
+            "Team findings:\n\n" + ("\n\n".join(findings) if findings else "(no findings gathered)") +
+            f"\n\nNow COMPLETE the task: {req.user_message}\n"
+            f"Use docs_create to write a NEW Google Doc containing the full detailed report built from the "
+            f"team's findings (do not ask for a document id — docs_create makes a new one). Then reply with "
+            f"the document URL."
+        )
+        try:
+            _la = await _build_agent_for_room(req.room_id, lead, user_id=req.user_id, org_id=req.org_id, project_id=req.project_id)
+            _fr = await _la(Msg(name="user", content=synth_prompt, role="user"))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[collab-exec] synthesis failed: %s", exc)
+            _fr = None
+        _ftext = _msg_to_text(_fr) if _fr else ""
+        if _ftext:
+            _report_turn(lead["id"], req.user_message, _fr)
+            _tk = max(300, len(_ftext) // 4)
+            cost_tokens += _tk
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "line", "agent": lead.get("slug"), "round": 2,
+                "kind": "synthesis", "content": _ftext, "tokens": _tk,
+            })
+            await _emit_event(req.callback_url, req.turn_id, _build_final_report(
+                user_message=req.user_message, final_text=_ftext, template=room_template,
+                room_goal=req.room_goal or "", status="complete", verdict="DONE", score=5.0,
+                lead=lead, action_items=[], evidence_ids=[], evidence=[],
+                sources=_web_sources_for_turn(req.turn_id), claims=[], reviews=[], votes=[],
+                web_intel_used=False, project_scoped=bool(req.project_id), project_memory_hits=0,
+            ))
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "seal", "cost_tokens": cost_tokens, "status": "complete",
+                "duration_ms": int((time.time() - started) * 1000),
+                "template": "collab_execute", "tools": 1 + len(findings),
+            })
+            _WEB_INTEL_PAYLOADS.pop(req.turn_id, None)
+            return RoomTurnResponse(ok=True, cost_tokens=cost_tokens, status="complete")
+        log.info("[collab-exec] empty synthesis — falling through to %s", room_template)
 
     # ── Deep simulation template — MiroFish-style live room ───────────
     if room_template == "deep_sim":

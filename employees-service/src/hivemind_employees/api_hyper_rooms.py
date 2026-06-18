@@ -4919,6 +4919,33 @@ async def _resolve_write_policy(req: "RoomTurnRequest") -> str:
     return "ask" if conns else "auto"
 
 
+def _goalkeeper_max_rounds() -> int:
+    """Phase 6 — hard cap on goalkeeper rounds (1 initial + retries). Small by
+    default: only genuinely-incomplete turns loop, and a misconfigured task
+    can't loop forever."""
+    try:
+        return max(1, min(5, int(os.environ.get("HYPER_ROOM_GOALKEEPER_MAX_ROUNDS", "3"))))
+    except Exception:  # noqa: BLE001
+        return 3
+
+
+def _goalkeeper_should_continue(verdict: Optional[Dict[str, Any]]) -> bool:
+    """Phase 6 — decide whether to run another round. Loop ONLY when the
+    done-criterion is unmet AND the gap is re-plannable: the artifact was never
+    produced, or claims are ungrounded. A write that is PENDING the user's
+    approval is terminal (the work is done — it's the human's turn, not the
+    goalkeeper's), as is a "met" verdict or a missing/empty plan."""
+    if not isinstance(verdict, dict):
+        return False
+    if verdict.get("met"):
+        return False
+    # Awaiting human approval — artifact is done-pending, not the loop's job.
+    if verdict.get("pending_writes") and verdict.get("artifact_ok"):
+        return False
+    # Re-plannable iff the actual output is missing or the claims aren't grounded.
+    return (not verdict.get("artifact_ok")) or (not verdict.get("grounded_ok"))
+
+
 @router.post("/room-turn", response_model=RoomTurnResponse)
 async def post_room_turn(
     req: RoomTurnRequest,
@@ -4930,7 +4957,45 @@ async def post_room_turn(
     # pending list. Sync connector tools read the policy at call time.
     policy = await _resolve_write_policy(req)
     begin_turn_write_gate(policy)
-    resp = await _orchestrate(req)
+
+    # Phase 6 — goalkeeper loop. Run the full round (plan → simulate → verify);
+    # while the verdict is unmet AND the gap is re-plannable, feed the gaps back
+    # into the turn message and re-plan, up to a round cap. Same shape as the
+    # Claude `/goal` keep-working-toward-the-goal loop.
+    max_rounds = _goalkeeper_max_rounds()
+    orig_msg = req.user_message
+    total_cost = 0
+    resp: Optional[RoomTurnResponse] = None
+    for rnd in range(1, max_rounds + 1):
+        resp = await _orchestrate(req)
+        total_cost += int(resp.cost_tokens or 0)
+        plan = _PLAN_BY_TURN.get(req.turn_id)
+        verdict = plan.get("verification") if isinstance(plan, dict) else None
+        if not _goalkeeper_should_continue(verdict) or rnd >= max_rounds:
+            break
+        gaps = list((verdict or {}).get("gaps") or [])
+        gap_str = "; ".join(gaps) or "the result did not meet the done-criterion"
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "goalkeeper_round",
+            "round": rnd,
+            "next_round": rnd + 1,
+            "met": False,
+            "gaps": gaps,
+        })
+        log.info("[goalkeeper] room=%s round=%d unmet → re-plan; gaps=%s",
+                 req.room_id, rnd, gap_str)
+        # Re-base off the ORIGINAL message (not the prior round's plan-preamble)
+        # so preambles don't stack; the planner re-plans against the gaps.
+        req.user_message = (
+            f"{orig_msg}\n\n[GOALKEEPER round {rnd + 1}] The previous attempt did NOT "
+            f"finish. Done criterion: {(verdict or {}).get('done_criterion') or '(see goal)'}. "
+            f"Address these gaps and COMPLETE the task this round: {gap_str}."
+        )
+
+    if resp is None:  # defensive — loop always runs ≥1
+        resp = RoomTurnResponse(ok=False, cost_tokens=0, status="failed")
+    resp.cost_tokens = total_cost
+
     if policy == "ask":
         pending = drain_pending_writes()
         if pending:

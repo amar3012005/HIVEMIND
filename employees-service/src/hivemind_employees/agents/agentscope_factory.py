@@ -351,7 +351,7 @@ def build_react_agent(
     if _conns:
         _conn_lines = []
         if "gmail" in _conns:
-            _conn_lines.append("- group `gmail` → gmail_search(query, max), gmail_get(id) read the team's email (free); gmail_send(to, subject, body) sends mail — outward, needs the user's approval.")
+            _conn_lines.append("- group `gmail` (full): read free — gmail_search, gmail_get, gmail_get_thread, gmail_list_drafts, gmail_list_labels; organize (no approval) — gmail_create_draft, gmail_modify (mark-read/archive/label); outward — gmail_send, gmail_reply, gmail_trash are SAVED AS A DRAFT then need the user's approval to actually go.")
         if "google_docs" in _conns:
             _conn_lines.append("- group `google_docs` → docs_create(title, content), docs_append(documentId, text) — produce a real document (report, pitch deck). Internal artifact, no approval.")
         if "google_sheets" in _conns:

@@ -5084,16 +5084,18 @@ async def post_room_turn(
         resp = RoomTurnResponse(ok=False, cost_tokens=0, status="failed")
     resp.cost_tokens = total_cost
 
-    if policy == "ask":
-        pending = drain_pending_writes()
-        if pending:
-            await _register_and_emit_approvals(req, pending)
-            # Strip the replay descriptor from the client-facing payload —
-            # creds/args stay server-side in _PENDING_APPROVALS.
-            resp.pending_approvals = [
-                {k: v for k, v in rec.items() if k != "descriptor"}
-                for rec in pending
-            ]
+    # Always surface queued approvals — outward SENDS (gmail send/reply, trash)
+    # are force-queued regardless of policy, so they must appear even under
+    # "auto". docs/sheets never queue (no HITL), so this only carries real sends.
+    pending = drain_pending_writes()
+    if pending:
+        await _register_and_emit_approvals(req, pending)
+        # Strip the replay descriptor from the client-facing payload —
+        # creds/args stay server-side in _PENDING_APPROVALS.
+        resp.pending_approvals = [
+            {k: v for k, v in rec.items() if k != "descriptor"}
+            for rec in pending
+        ]
     # Surface produced artifacts (docs/sheets) as connector_logo "view in new
     # tab" buttons in the FE — produced post-consensus, no HITL.
     artifacts = drain_artifacts()

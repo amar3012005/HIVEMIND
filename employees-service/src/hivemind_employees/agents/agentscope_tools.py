@@ -154,13 +154,14 @@ def _artifact_url(payload: object) -> str:
 
 
 def _gate_write(
-    label: str, summary: str, bridge: str, descriptor: dict
+    label: str, summary: str, bridge: str, descriptor: dict, force: bool = False
 ) -> Optional[ToolResponse]:
-    """When policy is "ask", queue the write for approval and return a
-    "pending" ToolResponse WITHOUT executing. Returns None when the write may
-    run now (policy "auto"). `descriptor` carries everything the approve
-    endpoint needs to replay the bridge call."""
-    if _WRITE_POLICY.get() != "ask":
+    """When policy is "ask" (or force=True), queue the write for approval and
+    return a "pending" ToolResponse WITHOUT executing. Returns None when the
+    write may run now. `force` is for outward SENDS (gmail send/reply, trash),
+    which ALWAYS require the user's approval regardless of policy. `descriptor`
+    carries everything the approve endpoint needs to replay the bridge call."""
+    if not force and _WRITE_POLICY.get() != "ask":
         return None
     approval_id = uuid.uuid4().hex[:12]
     rec = {
@@ -287,33 +288,92 @@ def _register_connector_tools(
         if kind == "gmail":
             tk.create_tool_group(
                 group_name="gmail",
-                description="Read the room owner's Gmail, and send mail (send needs approval).",
+                description="Full Gmail for the room owner: search/read/threads (free), drafts + labels, and send/reply (saved as a draft, then user-approved).",
                 active=False,
-                notes="gmail_search(query, max≤20) and gmail_get(id) are read-only (free). gmail_send(to, subject, body, cc) SENDS mail — it leaves the org, so it is produced only after the team agrees and then requires the user's one-click approval.",
+                notes=(
+                    "READ (free): gmail_search(query,max), gmail_get(id), gmail_get_thread(threadId), "
+                    "gmail_list_drafts(max), gmail_list_labels(). "
+                    "DRAFT (no approval): gmail_create_draft(to,subject,body,cc,threadId). "
+                    "ORGANIZE (no approval): gmail_modify(id, addLabelIds, removeLabelIds) — mark read = remove 'UNREAD', archive = remove 'INBOX'. "
+                    "OUTWARD (always saved as a draft, then needs the user's approval to actually go): "
+                    "gmail_send(to,subject,body,cc), gmail_reply(threadId,to,subject,body), gmail_trash(id)."
+                ),
             )
-            def gmail_search(query: str = "", max: int = 5) -> ToolResponse:
-                return _google("gmail_search", {"query": query, "max": max})
-            gmail_search.__doc__ = "Search the room owner's Gmail. query = Gmail search syntax (e.g. 'from:acme newer_than:30d'); max ≤ 20. Returns id/subject/from/date/snippet. Use gmail_get for a full body."
-            def gmail_get(id: str) -> ToolResponse:
-                return _google("gmail_get", {"id": id})
-            gmail_get.__doc__ = "Fetch one Gmail message in full by id (from gmail_search). Returns subject/from/to/date/body."
-            def gmail_send(to: str, subject: str, body: str = "", cc: str = "") -> ToolResponse:
-                held = _consensus_gate("gmail_send")
+
+            def _send_via_draft(label, summary, draft_args):
+                """Save a real Gmail DRAFT now (reviewable), then queue approval
+                to SEND that draft. The draft is the preview; approve = it goes."""
+                held = _consensus_gate(label)
                 if held is not None:
                     return held
+                draft = _google_json("gmail_create_draft", draft_args)
+                res = draft.get("result") if isinstance(draft.get("result"), dict) else draft
+                draft_id = (res or {}).get("draftId")
+                url = (res or {}).get("url") or "https://mail.google.com/mail/u/0/#drafts"
+                if draft_id:
+                    _record_artifact("gmail", url, title=draft_args.get("subject") or "Draft", label="Review draft")
                 gated = _gate_write(
-                    "gmail_send",
-                    f"Send email to {to} — “{subject}”",
-                    "google",
-                    {"tool": "gmail_send", "arguments": {"to": to, "subject": subject, "body": body, "cc": cc}},
+                    label, summary, "google",
+                    {"tool": "gmail_send_draft", "arguments": {"draftId": draft_id}},
+                    force=True,  # outward sends ALWAYS need approval
                 )
                 if gated is not None:
                     return gated
-                return _google("gmail_send", {"to": to, "subject": subject, "body": body, "cc": cc})
-            gmail_send.__doc__ = "Send an email from the room owner's Gmail when the task is to message someone. to = recipient; subject; body = plain text; cc optional. Outward send — runs only after the team agrees, then needs the user's approval."
-            tk.register_tool_function(gmail_search, group_name="gmail")
-            tk.register_tool_function(gmail_get, group_name="gmail")
-            tk.register_tool_function(gmail_send, group_name="gmail")
+                return _google("gmail_send_draft", {"draftId": draft_id})
+
+            def gmail_search(query: str = "", max: int = 5) -> ToolResponse:
+                return _google("gmail_search", {"query": query, "max": max})
+            gmail_search.__doc__ = "Search the room owner's Gmail. query = Gmail search syntax (e.g. 'from:acme newer_than:30d'); max ≤ 20. Returns id/threadId/subject/from/date/snippet."
+            def gmail_get(id: str) -> ToolResponse:
+                return _google("gmail_get", {"id": id})
+            gmail_get.__doc__ = "Fetch one Gmail message in full by id. Returns subject/from/to/date/body."
+            def gmail_get_thread(threadId: str) -> ToolResponse:
+                return _google("gmail_get_thread", {"threadId": threadId})
+            gmail_get_thread.__doc__ = "Fetch a full Gmail thread (all messages) by threadId. Use to read a whole conversation before replying."
+            def gmail_list_drafts(max: int = 10) -> ToolResponse:
+                return _google("gmail_list_drafts", {"max": max})
+            gmail_list_drafts.__doc__ = "List saved Gmail drafts (draftId/subject/to/snippet)."
+            def gmail_list_labels() -> ToolResponse:
+                return _google("gmail_list_labels", {})
+            gmail_list_labels.__doc__ = "List Gmail labels (id + name) — needed for gmail_modify."
+            def gmail_create_draft(to: str = "", subject: str = "", body: str = "", cc: str = "", threadId: str = "") -> ToolResponse:
+                held = _consensus_gate("gmail_create_draft")
+                if held is not None:
+                    return held
+                j = _google_json("gmail_create_draft", {"to": to, "subject": subject, "body": body, "cc": cc, "threadId": threadId})
+                _record_artifact("gmail", _artifact_url(j), title=subject or "Draft", label="Review draft")
+                return _tool_response(j)
+            gmail_create_draft.__doc__ = "Save an email as a Gmail DRAFT (not sent, no approval needed). to/subject/body/cc; threadId for a reply draft. Returns draftId."
+            def gmail_modify(id: str, addLabelIds: str = "", removeLabelIds: str = "") -> ToolResponse:
+                held = _consensus_gate("gmail_modify")
+                if held is not None:
+                    return held
+                add = [x.strip() for x in (addLabelIds or "").split(",") if x.strip()]
+                rem = [x.strip() for x in (removeLabelIds or "").split(",") if x.strip()]
+                return _google("gmail_modify", {"id": id, "addLabelIds": add, "removeLabelIds": rem})
+            gmail_modify.__doc__ = "Organize a message (no approval). id; addLabelIds/removeLabelIds = comma-separated label ids. Mark read = removeLabelIds='UNREAD'; archive = removeLabelIds='INBOX'."
+            def gmail_send(to: str, subject: str, body: str = "", cc: str = "") -> ToolResponse:
+                return _send_via_draft("gmail_send", f"Send email to {to} — “{subject}”",
+                                       {"to": to, "subject": subject, "body": body, "cc": cc})
+            gmail_send.__doc__ = "Send an email. to/subject/body/cc. It is SAVED AS A DRAFT and surfaced for the user's approval — on approve it sends. Runs only after the team agrees."
+            def gmail_reply(threadId: str, to: str = "", subject: str = "", body: str = "") -> ToolResponse:
+                subj = subject if subject.lower().startswith("re:") else (f"Re: {subject}" if subject else "Re:")
+                return _send_via_draft("gmail_reply", f"Reply in thread {threadId} to {to} — “{subj}”",
+                                       {"to": to, "subject": subj, "body": body, "threadId": threadId})
+            gmail_reply.__doc__ = "Reply within an existing thread. threadId (from search/get); to = recipient; body. Saved as a draft reply + surfaced for approval; on approve it sends."
+            def gmail_trash(id: str) -> ToolResponse:
+                held = _consensus_gate("gmail_trash")
+                if held is not None:
+                    return held
+                gated = _gate_write("gmail_trash", f"Move message {id} to Trash (reversible)", "google",
+                                    {"tool": "gmail_trash", "arguments": {"id": id}}, force=True)
+                if gated is not None:
+                    return gated
+                return _google("gmail_trash", {"id": id})
+            gmail_trash.__doc__ = "Move a message to Trash (reversible). id. Needs the user's approval."
+            for _fn in (gmail_search, gmail_get, gmail_get_thread, gmail_list_drafts, gmail_list_labels,
+                        gmail_create_draft, gmail_modify, gmail_send, gmail_reply, gmail_trash):
+                tk.register_tool_function(_fn, group_name="gmail")
         elif kind == "google_docs":
             tk.create_tool_group(
                 group_name="google_docs",

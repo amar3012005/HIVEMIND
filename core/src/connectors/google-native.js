@@ -52,6 +52,21 @@ function extractBody(payload) {
   return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+// RFC-2822 MIME → base64url for Gmail send/draft. threadId/inReplyTo optional.
+function _gmailRaw({ to, subject, body, cc, inReplyTo, references }) {
+  const headers = [
+    to ? `To: ${to}` : null,
+    cc ? `Cc: ${cc}` : null,
+    `Subject: ${subject || ''}`,
+    inReplyTo ? `In-Reply-To: ${inReplyTo}` : null,
+    references ? `References: ${references}` : null,
+    'MIME-Version: 1.0',
+    'Content-Type: text/plain; charset="UTF-8"',
+  ].filter(Boolean).join('\r\n');
+  return Buffer.from(`${headers}\r\n\r\n${body || ''}`, 'utf8').toString('base64')
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
 // ─── Markdown → polished Google Doc renderer (in-tool, with NATIVE tables) ───
 // Agents write the doc body in markdown; this renders headings, bold, bullet +
 // numbered lists, AND real drawn Google Docs tables (insertTable + populated
@@ -229,23 +244,102 @@ export const GOOGLE_TOOLS = {
   },
   gmail_send: {
     provider: 'gmail',
-    description: 'Send an email from the connected Gmail account. args: { to, subject, body, cc (optional) }. Side-effectful WRITE — gated for the user\'s approval in HyperAgents rooms.',
+    description: 'Send an email directly. args: { to, subject, body, cc }. (In HyperAgents the agent path saves a draft + approval; this is the raw send used as a fallback.)',
     run: async (token, a) => {
       if (!a.to || !a.subject) throw new Error('gmail_send requires { to, subject, body }');
-      const headers = [
-        `To: ${a.to}`,
-        a.cc ? `Cc: ${a.cc}` : null,
-        `Subject: ${a.subject}`,
-        'MIME-Version: 1.0',
-        'Content-Type: text/plain; charset="UTF-8"',
-      ].filter(Boolean).join('\r\n');
-      const mime = `${headers}\r\n\r\n${a.body || ''}`;
-      const raw = Buffer.from(mime, 'utf8').toString('base64')
-        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+      const raw = _gmailRaw(a);
       const res = await g('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', token, {
-        method: 'POST', body: JSON.stringify({ raw }),
+        method: 'POST', body: JSON.stringify({ raw, threadId: a.threadId || undefined }),
       });
       return { id: res.id, threadId: res.threadId, to: a.to, subject: a.subject, sent: true };
+    },
+  },
+  gmail_create_draft: {
+    provider: 'gmail',
+    description: 'Save an email as a Gmail DRAFT (not sent). args: { to, subject, body, cc, threadId (for replies) }. Returns draftId + a Drafts link.',
+    run: async (token, a) => {
+      if (!a.to && !a.threadId) throw new Error('gmail_create_draft requires { to } (or threadId for a reply)');
+      const raw = _gmailRaw(a);
+      const message = { raw };
+      if (a.threadId) message.threadId = a.threadId;
+      const res = await g('https://gmail.googleapis.com/gmail/v1/users/me/drafts', token, {
+        method: 'POST', body: JSON.stringify({ message }),
+      });
+      return {
+        draftId: res.id,
+        messageId: res.message?.id,
+        threadId: res.message?.threadId,
+        to: a.to, subject: a.subject,
+        url: 'https://mail.google.com/mail/u/0/#drafts',
+      };
+    },
+  },
+  gmail_send_draft: {
+    provider: 'gmail',
+    description: 'Send an existing Gmail draft. args: { draftId }.',
+    run: async (token, a) => {
+      if (!a.draftId) throw new Error('gmail_send_draft requires { draftId }');
+      const res = await g('https://gmail.googleapis.com/gmail/v1/users/me/drafts/send', token, {
+        method: 'POST', body: JSON.stringify({ id: a.draftId }),
+      });
+      return { id: res.id, threadId: res.threadId, sent: true };
+    },
+  },
+  gmail_list_drafts: {
+    provider: 'gmail',
+    description: 'List saved Gmail drafts. args: { max (default 10) }.',
+    run: async (token, a) => {
+      const max = Math.min(Math.max(parseInt(a.max, 10) || 10, 1), 30);
+      const list = await g(`https://gmail.googleapis.com/gmail/v1/users/me/drafts?maxResults=${max}`, token);
+      const drafts = [];
+      for (const d of (list.drafts || []).slice(0, max)) {
+        const full = await g(`https://gmail.googleapis.com/gmail/v1/users/me/drafts/${d.id}?format=metadata`, token);
+        const h = Object.fromEntries((full.message?.payload?.headers || []).map(x => [x.name, x.value]));
+        drafts.push({ draftId: d.id, subject: h.Subject || '', to: h.To || '', snippet: full.message?.snippet || '' });
+      }
+      return { count: drafts.length, drafts };
+    },
+  },
+  gmail_get_thread: {
+    provider: 'gmail',
+    description: 'Fetch a full Gmail thread (all messages). args: { threadId }.',
+    run: async (token, a) => {
+      if (!a.threadId) throw new Error('gmail_get_thread requires { threadId }');
+      const t = await g(`https://gmail.googleapis.com/gmail/v1/users/me/threads/${a.threadId}?format=full`, token);
+      const messages = (t.messages || []).map(m => {
+        const h = Object.fromEntries((m.payload?.headers || []).map(x => [x.name, x.value]));
+        return { id: m.id, from: h.From || '', to: h.To || '', date: h.Date || '', subject: h.Subject || '', body: extractBody(m.payload).slice(0, 6000) };
+      });
+      return { threadId: a.threadId, count: messages.length, messages };
+    },
+  },
+  gmail_list_labels: {
+    provider: 'gmail',
+    description: 'List Gmail labels (id + name). No args.',
+    run: async (token) => {
+      const r = await g('https://gmail.googleapis.com/gmail/v1/users/me/labels', token);
+      return { labels: (r.labels || []).map(l => ({ id: l.id, name: l.name, type: l.type })) };
+    },
+  },
+  gmail_modify: {
+    provider: 'gmail',
+    description: 'Modify a message: add/remove labels, mark read (remove UNREAD), archive (remove INBOX). args: { id, addLabelIds[], removeLabelIds[] }.',
+    run: async (token, a) => {
+      if (!a.id) throw new Error('gmail_modify requires { id }');
+      const r = await g(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${a.id}/modify`, token, {
+        method: 'POST',
+        body: JSON.stringify({ addLabelIds: a.addLabelIds || [], removeLabelIds: a.removeLabelIds || [] }),
+      });
+      return { id: r.id, labelIds: r.labelIds || [] };
+    },
+  },
+  gmail_trash: {
+    provider: 'gmail',
+    description: 'Move a message to Trash (reversible). args: { id }.',
+    run: async (token, a) => {
+      if (!a.id) throw new Error('gmail_trash requires { id }');
+      const r = await g(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${a.id}/trash`, token, { method: 'POST', body: '{}' });
+      return { id: r.id, trashed: true };
     },
   },
   docs_create: {

@@ -3733,16 +3733,23 @@ async def _verify_turn(
         "Reply with STRICT JSON only (no prose, no markdown), exactly these keys:\n"
         '{\n'
         '  "met": <true only if the done-criterion is fully satisfied by real evidence>,\n'
-        '  "artifact_ok": <intended output was produced OR is queued pending the user\'s approval>,\n'
+        '  "artifact_ok": <the intended output was actually produced or is queued for approval — see the strict rule below>,\n'
         '  "assignments_ok": <the assigned sub-tasks appear covered by the result>,\n'
         '  "grounded_ok": <specific factual claims are backed by tools/memory, not invented>,\n'
         '  "gaps": ["<concrete missing/unverified item>", "..."],\n'
         '  "note": "<one sentence>"\n'
         '}\n'
-        "Rules: a WRITE that is PENDING APPROVAL counts as done-pending → artifact_ok=true, "
-        "and met may be true (work is complete, awaiting the human). grounded_ok=false if the "
-        "result asserts specific facts with memory_hits=0 and no tools used. If nothing is "
-        "missing, gaps must be []. Output JSON only."
+        "Rules:\n"
+        "- artifact_ok is true ONLY with OBJECTIVE evidence the output was produced or queued: "
+        "produced_artifacts is non-empty, OR writes_pending_approval lists a write matching the "
+        "intended_output, OR tools_used shows the relevant WRITE tool fired (e.g. gmail_send for "
+        "an email, docs_create for a doc). Content merely drafted, quoted, or described in the "
+        "discussion does NOT count — e.g. a fully written-out email body with no actual send is "
+        "artifact_ok=false. When artifact_ok is false, say so in gaps.\n"
+        "- A WRITE that is PENDING APPROVAL counts as done-pending → artifact_ok=true, and met may "
+        "be true (work is complete, awaiting the human).\n"
+        "- grounded_ok=false if the result asserts specific facts with memory_hits=0 and no tools "
+        "used. If nothing is missing, gaps must be []. Output JSON only."
     )
     try:
         boot = {b["id"]: b for b in await fetch_bootstrap()}

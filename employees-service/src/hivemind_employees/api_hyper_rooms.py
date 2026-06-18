@@ -67,7 +67,7 @@ from .db import (
     list_running_employees,
     update_trust,
 )
-from .hivemind_client import recall_emulated
+from .hivemind_client import org_members_emulated, recall_emulated
 
 log = logging.getLogger(__name__)
 
@@ -3689,9 +3689,19 @@ async def _plan_turn(
     valid_names = {(p.get("slug") or "") for p in participants} | {(p.get("name") or "") for p in participants}
     raw_assign = plan.get("assignments") if isinstance(plan.get("assignments"), dict) else {}
     assignments = {str(k): str(v)[:400] for k, v in raw_assign.items() if str(k) in valid_names}
+    done_criterion = str(plan.get("done_criterion") or "")[:500]
+    # An outward email is NEVER "sent" within the turn — it is saved as a draft and
+    # surfaced for the user's approval. Override any "sent / in Sent folder" wording
+    # so the team doesn't hallucinate completion (and the verifier judges honestly).
+    if out == "email":
+        done_criterion = (
+            "A complete, correctly-addressed email is drafted (saved as a Gmail draft) "
+            "and surfaced for the user's one-click approval. It is NOT sent until the "
+            "user approves — do not claim it was sent or is in the Sent folder."
+        )
     return {
         "intended_output": out,
-        "done_criterion": str(plan.get("done_criterion") or "")[:500],
+        "done_criterion": done_criterion,
         "steps": [str(s)[:300] for s in (plan.get("steps") or []) if isinstance(s, str)][:6],
         "assignments": assignments,
         "connectors_needed": [c for c in (plan.get("connectors_needed") or [])
@@ -3881,11 +3891,18 @@ def _output_production_directive(turn_id: str) -> str:
     if out == "email":
         return (
             "\n\n── PRODUCE THE DELIVERABLE NOW ──\n"
-            "The team has reached consensus. If the recipient was named but no email "
-            "address was given (e.g. 'send to Rama'), FIRST call org_directory('Rama') "
-            "to resolve their address from the org directory. Then activate the gmail "
-            "group and call gmail_send(to, subject, body) with the final email. It is "
-            "saved as a draft and held for the user's one-click approval before it sends."
+            "The team has reached consensus.\n"
+            "1) RESOLVE THE RECIPIENT: if a person is named without an address (e.g. "
+            "'send to Rama'/'send to Ceyda'), call org_directory('<name>') — it checks "
+            "the org directory AND Gmail. Use the returned member/gmail address. If "
+            "neither has it, ask the user — NEVER invent an address.\n"
+            "2) GROUND WHO THEY ARE: recall the recipient's real role and relationship "
+            "(e.g. Ceyda Sarioglu is COO of Davinci AI) and write to them in that "
+            "context — and sign as YOUR organisation, never as a client/partner.\n"
+            "3) Activate the gmail group and call gmail_send(to, subject, body). It is "
+            "SAVED AS A DRAFT and surfaced for the user's one-click approval.\n"
+            "Do NOT claim the email was sent or is in the Sent folder — it is a draft "
+            "pending the user's approval. Report it as such."
         )
     return ""
 
@@ -4029,6 +4046,27 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             "turn_seq": seq,
         })
     _mark("router_ms")
+
+    # ── Org identity grounding (kills the "we work for Solvis" hallucination) ──
+    # The agents are the digital workforce of THIS org. Names that appear in
+    # memory/email as clients/partners/projects (e.g. Solvis) are NOT their
+    # employer. Inject before planning so the planner + every agent are anchored.
+    try:
+        _org_dir = await org_members_emulated(
+            "", user_id=req.user_id, org_id=req.org_id)
+        _org_name = (_org_dir or {}).get("org_name") or ""
+    except Exception:  # noqa: BLE001
+        _org_name = ""
+    _identity = (
+        f"[YOUR ORGANISATION{(' — ' + _org_name) if _org_name else ''}]\n"
+        "You are the digital workforce of THIS organisation. Represent it and its own "
+        "company/brand in everything you produce and sign. Recall who the org's company, "
+        "products, founders and executives are (they are in memory) and use their REAL "
+        "names, roles, and contacts. Other company names that appear in memory or email "
+        "(clients, partners, portfolio, e.g. Solvis) are NOT your employer — never sign as "
+        "them or claim to work for them.\n\n"
+    )
+    req.user_message = f"{_identity}{req.user_message}"
 
     # ── Phase 1: lead plans the turn IN PERSONA (keystone) ──────────────
     # Before the team acts, the lead lays out steps, assignments, the

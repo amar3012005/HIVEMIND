@@ -64,6 +64,27 @@ async def recall_emulated(query: str, *, user_id: Optional[str], org_id: Optiona
         return r.json()
 
 
+async def org_members_emulated(
+    query: str = "", *, user_id: Optional[str], org_id: Optional[str], api_key: str = ""
+) -> Dict[str, Any]:
+    """Fetch the org directory (org_name + members with email/role/projects),
+    via master + emulation headers. Used for org-identity grounding + contact
+    resolution. Never raises into the turn — returns {} on failure."""
+    settings = get_settings()
+    headers = _emulated_headers(api_key, user_id, org_id)
+    try:
+        async with httpx.AsyncClient(
+            base_url=settings.hivemind_core_url,
+            timeout=httpx.Timeout(15.0, connect=5.0),
+            headers=headers,
+        ) as c:
+            r = await c.post("/api/org/members", json={"query": query})
+            r.raise_for_status()
+            return r.json()
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 class HivemindClient:
     """Per-employee HTTP client. One instance per WorkflowAgent.
     Carries the employee's scoped API key."""

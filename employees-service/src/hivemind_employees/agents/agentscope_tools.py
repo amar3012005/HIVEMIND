@@ -15,6 +15,7 @@ import contextvars
 import json
 import logging
 import os
+import re
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -517,15 +518,46 @@ def build_hivemind_toolkit(
     # by name to their email/role/projects, so "send to <name>" works without the
     # user spelling out an address.
     def org_directory(query: str = "") -> ToolResponse:
-        """Look up the organization's members — names, emails, roles, and the
-        projects each is on. Pass a name (or part of one) to find a specific
-        person — e.g. to get the email to send to when the user only gave a first
-        name. Empty query lists everyone. Use this BEFORE gmail_send when the
-        recipient is named but no address was given."""
+        """Resolve a person to their real email/role/projects. Searches the org
+        directory AND, if the org has no match, Gmail in parallel — so you find a
+        REAL address instead of inventing one. Pass a name (or part); empty lists
+        everyone. Use this BEFORE gmail_send when a recipient is named but no
+        address was given. If neither source has them, ASK — never fabricate."""
         with _client(api_key, user_id, org_id) as c:
             r = c.post("/api/org/members", json={"query": query})
             r.raise_for_status()
-            return _tool_response(r.json())
+            data = r.json()
+        members = data.get("members") or []
+        gmail_candidates = []
+        # No org hit for a named person → search Gmail for a real address.
+        if query and not members:
+            try:
+                with _client(api_key, user_id, org_id) as c:
+                    gr = c.post("/api/connectors/google/exec", json={
+                        "tool": "gmail_search", "arguments": {"query": query, "max": 8}})
+                    gr.raise_for_status()
+                    gmsgs = ((gr.json().get("result") or {}).get("messages")) or []
+                seen = set()
+                ql = query.lower()
+                for msg in gmsgs:
+                    for field in (msg.get("from", ""), msg.get("to", "")):
+                        if ql not in (field or "").lower():
+                            continue
+                        for addr in re.findall(r"[\w.+-]+@[\w.-]+\.\w+", field or ""):
+                            al = addr.lower()
+                            if addr in seen or "noreply" in al or "no-reply" in al or "notifications@" in al:
+                                continue
+                            seen.add(addr)
+                            gmail_candidates.append({"email": addr, "seen_in": str(msg.get("subject", ""))[:60]})
+            except Exception:  # noqa: BLE001 — gmail may be off; org result still stands
+                pass
+        return _tool_response({
+            "org_name": data.get("org_name"),
+            "members": members,
+            "gmail_candidates": gmail_candidates,
+            "note": ("Use a member email if present, else a gmail_candidate. If BOTH are "
+                     "empty, ask the user for the address — do NOT invent one."),
+        })
     tk.register_tool_function(org_directory)
 
     if "hivemind_slack_post" in enabled_tool_names:

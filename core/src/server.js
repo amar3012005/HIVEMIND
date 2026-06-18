@@ -9952,11 +9952,19 @@ exit \$RC
                 projects: Array.isArray(r.projects) ? r.projects : [],
               }));
               if (q) {
-                const f = members.filter((m) =>
+                // Filter to matches ONLY (even if empty) — an empty result signals
+                // the caller to fall back to Gmail rather than mistaking the full
+                // roster for a match and never searching.
+                members = members.filter((m) =>
                   (m.name || '').toLowerCase().includes(q) || (m.email || '').toLowerCase().includes(q));
-                if (f.length) members = f; // fall back to full list if no name match
               }
-              return jsonResponse(res, { count: members.length, members });
+              let orgName = '';
+              try {
+                const o = await prisma.$queryRawUnsafe(
+                  'SELECT name FROM hivemind.organizations WHERE id = $1::uuid', orgId);
+                orgName = o?.[0]?.name || '';
+              } catch { /* org name is best-effort */ }
+              return jsonResponse(res, { org_name: orgName, count: members.length, members });
             } catch (error) {
               return jsonResponse(res, { error: error.message }, 500);
             }

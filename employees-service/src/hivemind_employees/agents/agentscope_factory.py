@@ -344,6 +344,27 @@ def build_react_agent(
         "or scope discipline.\n\n"
         f"BASE PERSONA\n{persona}"
     ).strip()
+    # Surface enabled connectors so the agent reaches for them naturally — the
+    # same way it uses memory recall and web. They're just more tools in the
+    # action space, used WITHIN the normal room interaction (openswarm style).
+    _conns = employee_row.get("connectors") or []
+    if _conns:
+        _conn_lines = []
+        if "gmail" in _conns:
+            _conn_lines.append("- Gmail: gmail_search(query, max), gmail_get(id) — read the team's email for live context.")
+        if "google_docs" in _conns:
+            _conn_lines.append("- Google Docs: docs_create(title, content), docs_append(documentId, text) — write/extend a real doc when the task asks for a document.")
+        for _c in _conns:
+            if _c not in ("gmail", "google_docs"):
+                _conn_lines.append(f"- {_c}: <connector>_list_tools() then <connector>_call(tool_name, arguments).")
+        persona = (
+            persona
+            + "\n\nLIVE CONNECTOR TOOLS (enabled for this room):\n"
+            + "\n".join(_conn_lines)
+            + "\nUse these the same way you use memory recall and web search: when the task needs "
+              "real third-party context, pull it; when it asks for a document/sheet, create it. "
+              "Don't just talk about them — call them. No need to ask permission or for IDs."
+        )
     # Default fallback is wider than before — gives a fresh employee
     # the full HIVEMIND reach. Hyper-room agents override via merged_emp.
     requested_tools = employee_row.get("tools") or [
